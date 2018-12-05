@@ -12,26 +12,30 @@ catch (e) {
     document.write("<pre>" + e.stack + "</pre>");
 }
 document.write("<h1>test</h1>");
-var state = "search query";
+var state = {
+    list: ["result1", "result2", "result3"]
+};
 var view = function (state) { return (apprun_1.default.createElement("div", null,
-    apprun_1.default.createElement("h1", null, state),
-    apprun_1.default.createElement("input", { type: "text", onkeypress: function (e) { return apprun_1.default.run("keypress", e); } }))); };
+    apprun_1.default.createElement("h1", null, "type something"),
+    apprun_1.default.createElement("input", { type: "text", onkeypress: function (e) { return apprun_1.default.run("keypress", e); } }),
+    apprun_1.default.createElement("ul", null, state.list.map(function (item, key) { return (apprun_1.default.createElement("li", { key: key }, item)); })))); };
 var update = {
     keypress: function (_, e) {
         e.keyCode === 13 && apprun_1.default.run("update-query");
     },
     "update-query": function (state) {
         var input = document.querySelector("input");
-        var response = "";
+        var response = [];
         try {
-            response = fragment.query(input.value) || "";
+            response = fragment.query(input.value) || [];
         }
         catch (e) {
             console.log(e);
         }
         console.log(response);
-        return "";
+        return { list: response };
     }
 };
+;
 apprun_1.default.start("my-app", state, view, update);
 //# sourceMappingURL=renderer.js.map

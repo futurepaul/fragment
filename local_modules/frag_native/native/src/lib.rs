@@ -1,3 +1,4 @@
+
 #[macro_use]
 extern crate neon;
 
@@ -6,7 +7,16 @@ use std::io::prelude::*;
 
 use neon::prelude::*;
 
+//builds were failing on linux so we found this workaround
+//https://users.rust-lang.org/t/neon-electron-undefined-symbol-cxa-pure-virtual/21223/2
+#[no_mangle]
+pub extern fn __cxa_pure_virtual() {
+    loop{};
+}
+
 fn run_query(query: &String) -> Vec<String> {
+
+    let query = query.clone();
 
      let vec: Vec<String> = vec![query; 10];
      vec

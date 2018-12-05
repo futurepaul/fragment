@@ -12,11 +12,18 @@ try {
 
 document.write(`<h1>test</h1>`);
 
-const state = "search query";
+const state = {
+  list: ["result1", "result2", "result3"]
+};
 const view = state => (
   <div>
-    <h1>{state}</h1>
+    <h1>type something</h1>
     <input type="text" onkeypress={e => app.run("keypress", e)} />
+    <ul>
+      {state.list.map((item, key) => (
+        <li key={key}>{item}</li>
+      ))}
+    </ul>
   </div>
 );
 
@@ -26,14 +33,17 @@ const update = {
   },
   "update-query": state => {
     const input = document.querySelector("input");
-    let response = "";
+    let response = [];
     try {
-      response = fragment.query(input.value) || "";
+      response = fragment.query(input.value) || [];
     } catch (e) {
       console.log(e);
     }
     console.log(response);
-    return "";
+    return { list: response };
+  }
+  }
+  }
   }
 };
 app.start("my-app", state, view, update);
