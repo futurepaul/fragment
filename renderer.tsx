@@ -42,8 +42,5 @@ const update = {
     console.log(response);
     return { list: response };
   }
-  }
-  }
-  }
 };
 app.start("my-app", state, view, update);

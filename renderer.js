@@ -36,6 +36,5 @@ var update = {
         return { list: response };
     }
 };
-;
 apprun_1.default.start("my-app", state, view, update);
 //# sourceMappingURL=renderer.js.map
