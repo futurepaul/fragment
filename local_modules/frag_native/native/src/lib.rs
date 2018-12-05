@@ -6,16 +6,22 @@ use std::io::prelude::*;
 
 use neon::prelude::*;
 
+fn run_query(query: &String) -> Vec<String> {
+
+     let vec: Vec<String> = vec![query; 10];
+     vec
+}
+
 fn query(mut cx: FunctionContext) -> JsResult<JsArray> {
     let query = cx.argument::<JsString>(0)?.value();
-     let vec: Vec<String> = Vec::with_capacity(10);
+    let vec = run_query(&query);
 
     // Create the JS array
     let js_array = JsArray::new(&mut cx, vec.len() as u32);
 
     // Iterate over the rust Vec and map each value in the Vec to the JS array
-    for (i, _obj) in vec.iter().enumerate() {
-        let js_string = cx.string(&query);
+    for (i, obj) in vec.iter().enumerate() {
+        let js_string = cx.string(obj);
         js_array.set(&mut cx, i as u32, js_string).unwrap();
     }
 

@@ -29,10 +29,10 @@ const update = {
     let response = "";
     try {
       response = fragment.query(input.value) || "";
-      console.log(response);
     } catch (e) {
       console.log(e);
     }
+    console.log(response);
     return "";
   }
 };
