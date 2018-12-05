@@ -22,11 +22,15 @@ var update = {
     },
     "update-query": function (state) {
         var input = document.querySelector("input");
-        console.log("updating...");
-        console.log(input.value);
-        var response = fragment.greeting(input.value);
-        console.log(response);
-        return response;
+        var response = "";
+        try {
+            response = fragment.query(input.value) || "";
+            console.log(response);
+        }
+        catch (e) {
+            console.log(e);
+        }
+        return "";
     }
 };
 apprun_1.default.start("my-app", state, view, update);

@@ -6,6 +6,22 @@ use std::io::prelude::*;
 
 use neon::prelude::*;
 
+fn query(mut cx: FunctionContext) -> JsResult<JsArray> {
+    let query = cx.argument::<JsString>(0)?.value();
+     let vec: Vec<String> = Vec::with_capacity(10);
+
+    // Create the JS array
+    let js_array = JsArray::new(&mut cx, vec.len() as u32);
+
+    // Iterate over the rust Vec and map each value in the Vec to the JS array
+    for (i, _obj) in vec.iter().enumerate() {
+        let js_string = cx.string(&query);
+        js_array.set(&mut cx, i as u32, js_string).unwrap();
+    }
+
+    Ok(js_array) 
+}
+
 fn hello(mut cx: FunctionContext) -> JsResult<JsString> {
     let mut file = File::open("package.json").unwrap();
     let mut contents = String::new();
@@ -22,5 +38,6 @@ fn greeting(mut cx: FunctionContext) -> JsResult<JsString> {
 register_module!(mut cx, {
     cx.export_function("hello", hello)?;
     cx.export_function("greeting", greeting)?;
+    cx.export_function("query", query)?;
     Ok(())
 });
