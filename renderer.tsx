@@ -18,7 +18,11 @@ const state = {
 const view = state => (
   <div>
     <h1>type something</h1>
-    <input type="text" onkeypress={e => app.run("keypress", e)} />
+    <input
+      type="text"
+      oninput={_e => app.run("update-query", _e)}
+      onkeypress={e => app.run("keypress", e)}
+    />
     <ul>
       {state.list.map((item, key) => (
         <li key={key}>{item}</li>
@@ -29,18 +33,19 @@ const view = state => (
 
 const update = {
   keypress: (_, e) => {
-    e.keyCode === 13 && app.run("update-query");
+    e.keyCode === 13 && app.run("update-query", e);
   },
-  "update-query": state => {
-    const input = document.querySelector("input");
+  "update-query": (state, e) => {
+    const input = e.target.value;
     let response = [];
     try {
-      response = fragment.query(input.value) || [];
+      response = fragment.query(input) || [];
     } catch (e) {
       console.log(e);
     }
     console.log(response);
     return { list: response };
   }
+};
 };
 app.start("my-app", state, view, update);

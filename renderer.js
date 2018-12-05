@@ -17,17 +17,17 @@ var state = {
 };
 var view = function (state) { return (apprun_1.default.createElement("div", null,
     apprun_1.default.createElement("h1", null, "type something"),
-    apprun_1.default.createElement("input", { type: "text", onkeypress: function (e) { return apprun_1.default.run("keypress", e); } }),
+    apprun_1.default.createElement("input", { type: "text", oninput: function (_e) { return apprun_1.default.run("update-query", _e); }, onkeypress: function (e) { return apprun_1.default.run("keypress", e); } }),
     apprun_1.default.createElement("ul", null, state.list.map(function (item, key) { return (apprun_1.default.createElement("li", { key: key }, item)); })))); };
 var update = {
     keypress: function (_, e) {
-        e.keyCode === 13 && apprun_1.default.run("update-query");
+        e.keyCode === 13 && apprun_1.default.run("update-query", e);
     },
-    "update-query": function (state) {
-        var input = document.querySelector("input");
+    "update-query": function (state, e) {
+        var input = e.target.value;
         var response = [];
         try {
-            response = fragment.query(input.value) || [];
+            response = fragment.query(input) || [];
         }
         catch (e) {
             console.log(e);
@@ -36,5 +36,6 @@ var update = {
         return { list: response };
     }
 };
+;
 apprun_1.default.start("my-app", state, view, update);
 //# sourceMappingURL=renderer.js.map
