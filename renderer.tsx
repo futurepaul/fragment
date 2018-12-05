@@ -23,11 +23,9 @@ const view = state => (
       oninput={_e => app.run("update-query", _e)}
       onkeypress={e => app.run("keypress", e)}
     />
-    <ul>
-      {state.list.map((item, key) => (
-        <li key={key}>{item}</li>
-      ))}
-    </ul>
+    {state.list.map((item, key) => (
+      <div key={key}>{item}</div>
+    ))}
   </div>
 );
 
@@ -40,12 +38,12 @@ const update = {
     let response = [];
     try {
       response = fragment.query(input) || [];
+      console.log(response);
     } catch (e) {
       console.log(e);
     }
     console.log(response);
     return { list: response };
   }
-};
 };
 app.start("my-app", state, view, update);
