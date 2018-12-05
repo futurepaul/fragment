@@ -5,22 +5,22 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "build": "electron-build-env neon build frag_native --release"
+    "parcel": "parcel build index.html -t electron -d ./",
+    "build": "tsc && electron-build-env neon build frag_native --release"
   },
-  "repository": "https://github.com/electron/electron-quick-start",
+  "repository": "https://github.com/futurepaul/fragment",
   "keywords": [
-    "Electron",
-    "quick",
-    "start",
-    "tutorial",
-    "demo"
+    "Electron"
   ],
-  "author": "GitHub",
-  "license": "CC0-1.0",
+  "author": "Paul Miller",
+  "license": "MIT",
   "dependencies": {
-    "frag_native": "file:./local_modules/frag_native"
+    "frag_native": "file:./local_modules/frag_native",
+    "apprun": "^1.15.2"
   },
   "devDependencies": {
+    "parcel-bundler": "^1.9.7",
+    "typescript": "^2.9.2",
     "electron": "^3.0.7",
     "electron-build-env": "^0.2.0",
     "neon-cli": "^0.2.0"

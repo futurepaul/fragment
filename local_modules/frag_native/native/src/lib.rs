@@ -13,6 +13,14 @@ fn hello(mut cx: FunctionContext) -> JsResult<JsString> {
     Ok(cx.string(contents))
 }
 
+fn greeting(mut cx: FunctionContext) -> JsResult<JsString> {
+  let name = cx.argument::<JsString>(0)?.value();
+  Ok(cx.string(format!("hello, {}", name)))
+
+}
+
 register_module!(mut cx, {
-    cx.export_function("hello", hello)
+    cx.export_function("hello", hello)?;
+    cx.export_function("greeting", greeting)?;
+    Ok(())
 });
