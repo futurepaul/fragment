@@ -19,6 +19,7 @@ const view = state => (
     <div className="search-box">
       <input
         type="text"
+        autofocus="true"
         oninput={e => app.run("update-query", e)}
         onkeypress={e => app.run("keypress", e)}
       />
