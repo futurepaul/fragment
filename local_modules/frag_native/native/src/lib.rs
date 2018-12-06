@@ -37,8 +37,14 @@ pub extern "C" fn __cxa_pure_virtual() {
   loop {}
 }
 
-fn grep_life(pattern: &String) -> Result<Vec<String>, Box<Error>> {
-  let mut matches: Vec<String> = vec![];
+struct ListItem {
+  pub path: String,
+  pub line: String,
+  pub line_num: u64,
+}
+
+fn grep_life(pattern: &String) -> Result<Vec<ListItem>, Box<Error>> {
+  let mut matches: Vec<ListItem> = vec![];
   let matcher = RegexMatcher::new(&pattern)?;
   // let path = Path::new("./node_modules/");
   let dir = OsString::from("./node_modules/");
@@ -70,13 +76,15 @@ fn grep_life(pattern: &String) -> Result<Vec<String>, Box<Error>> {
       &matcher,
       dent.path(),
       UTF8(|lnum, line| {
-        // let mymatch = matcher.find(line.as_bytes())?.unwrap();
-        matches.push(format!(
-          "file: {:?} line#: {} - {}",
-          dent.path(),
-          lnum.to_string(),
-          line.to_string()
-        ));
+        //TODO: this is a hacky way to convert the path to the string
+        // and get rid of the extra quotation marks that :? adds
+        let path = format!("{:?}", dent.path());
+        let trimmed_path = path.trim_start_matches('"').trim_end_matches('"');
+        matches.push(ListItem {
+          path: trimmed_path.to_string(),
+          line: line.to_string(),
+          line_num: lnum,
+        });
         Ok(true)
       }),
     );
@@ -91,25 +99,27 @@ fn grep_life(pattern: &String) -> Result<Vec<String>, Box<Error>> {
   Ok(matches)
 }
 
-fn run_query(query: &String) -> Vec<String> {
-  let query = query.clone();
-
-  // let vec: Vec<String> = vec![query; 10];
-  let vec = grep_life(&query).unwrap();
-  vec
-}
-
 fn query(mut cx: FunctionContext) -> JsResult<JsArray> {
   let query = cx.argument::<JsString>(0)?.value();
-  let vec = run_query(&query);
+
+  //TODO: fix this unwrap
+  let vec = grep_life(&query).unwrap();
 
   // Create the JS array
   let js_array = JsArray::new(&mut cx, vec.len() as u32);
 
   // Iterate over the rust Vec and map each value in the Vec to the JS array
   for (i, obj) in vec.iter().enumerate() {
-    let js_string = cx.string(obj);
-    js_array.set(&mut cx, i as u32, js_string).unwrap();
+    let list_item_object = JsObject::new(&mut cx);
+    let js_path = cx.string(&obj.path);
+    let js_line = cx.string(&obj.line);
+    let js_line_num = cx.number(obj.line_num as f64);
+    list_item_object.set(&mut cx, "path", js_path).unwrap();
+    list_item_object.set(&mut cx, "line", js_line).unwrap();
+    list_item_object
+      .set(&mut cx, "line_num", js_line_num)
+      .unwrap();
+    js_array.set(&mut cx, i as u32, list_item_object).unwrap();
   }
 
   Ok(js_array)
@@ -127,9 +137,18 @@ fn greeting(mut cx: FunctionContext) -> JsResult<JsString> {
   Ok(cx.string(format!("hello, {}", name)))
 }
 
+fn get_note(mut cx: FunctionContext) -> JsResult<JsString> {
+  let path = cx.argument::<JsString>(0)?.value();
+  let mut file = File::open(OsString::from(path)).unwrap();
+  let mut contents = String::new();
+  file.read_to_string(&mut contents).unwrap();
+  Ok(cx.string(contents))
+}
+
 register_module!(mut cx, {
   cx.export_function("hello", hello)?;
   cx.export_function("greeting", greeting)?;
   cx.export_function("query", query)?;
+  cx.export_function("get_note", get_note)?;
   Ok(())
 });

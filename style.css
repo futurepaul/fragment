@@ -13,7 +13,9 @@ input {
   border-bottom: 2px solid black;
   outline: none;
   font-size: 1em;
+  -webkit-app-region: no-drag;
 }
+
 .wrapper {
   display: grid;
   width: 100vw;
@@ -41,6 +43,7 @@ input {
   padding-top: 10px;
   padding-right: 10px;
   overflow-y: auto;
+  -webkit-app-region: no-drag;
 }
 
 .list-item {
@@ -59,4 +62,5 @@ input {
   grid-area: note;
   overflow-y: auto;
   white-space: pre-line;
+  -webkit-app-region: no-drag;
 }
