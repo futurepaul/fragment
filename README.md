@@ -3,7 +3,9 @@
 todo:
 
 - [x] integrate electron quickstart and neon
-- [ ] write some rust code
+- [x] write some rust code
+- [ ] fix problem div classes being stripped off
+- [ ] add some features
 
 howto:
 
