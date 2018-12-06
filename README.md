@@ -13,6 +13,6 @@ you're probably going to at least need to `npm install electron-build-env neon-c
 
 ### how it was made
 
-[![Part one](//img.youtube.com/vi/fB559YA-FNQ.jpg)](//www.youtube.com/watch?v=fB559YA-FNQ "Part one")
+[![Part one](//img.youtube.com/vi/fB559YA-FNQ/0.jpg)](//www.youtube.com/watch?v=fB559YA-FNQ "Part one")
 
-[![Part two](//img.youtube.com/vi/ZXVfMJngcJI.jpg)](//www.youtube.com/watch?v=ZXVfMJngcJI "Part one")
+[![Part two](//img.youtube.com/vi/ZXVfMJngcJI/0.jpg)](//www.youtube.com/watch?v=ZXVfMJngcJI "Part one")
