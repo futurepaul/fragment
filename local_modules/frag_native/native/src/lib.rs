@@ -3,15 +3,12 @@ extern crate grep;
 extern crate neon;
 extern crate walkdir;
 
-use grep::matcher::Matcher;
 use grep::regex::RegexMatcher;
 use grep::searcher::sinks::UTF8;
-use grep::searcher::Searcher;
 use grep::searcher::{BinaryDetection, SearcherBuilder};
 
 use std::fs::File;
 use std::io::prelude::*;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use std::ffi::OsString;
@@ -91,6 +88,8 @@ fn grep_life(pattern: &String) -> Result<Vec<ListItem>, Box<Error>> {
     if let Err(err) = result {
       eprintln!("{}: {}", dent.path().display(), err);
     }
+    //TODO: convert this to a "take" and somehow add more as
+    //the user scrolls
     if matches.len() >= 10 {
       break;
     }
@@ -125,18 +124,8 @@ fn query(mut cx: FunctionContext) -> JsResult<JsArray> {
   Ok(js_array)
 }
 
-fn hello(mut cx: FunctionContext) -> JsResult<JsString> {
-  let mut file = File::open("package.json").unwrap();
-  let mut contents = String::new();
-  file.read_to_string(&mut contents).unwrap();
-  Ok(cx.string(contents))
-}
-
-fn greeting(mut cx: FunctionContext) -> JsResult<JsString> {
-  let name = cx.argument::<JsString>(0)?.value();
-  Ok(cx.string(format!("hello, {}", name)))
-}
-
+//TODO: for really long notes consider only providing some
+// of the note at a time
 fn get_note(mut cx: FunctionContext) -> JsResult<JsString> {
   let path = cx.argument::<JsString>(0)?.value();
   let mut file = File::open(OsString::from(path)).unwrap();
@@ -146,8 +135,6 @@ fn get_note(mut cx: FunctionContext) -> JsResult<JsString> {
 }
 
 register_module!(mut cx, {
-  cx.export_function("hello", hello)?;
-  cx.export_function("greeting", greeting)?;
   cx.export_function("query", query)?;
   cx.export_function("get_note", get_note)?;
   Ok(())
