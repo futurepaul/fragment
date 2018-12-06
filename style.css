@@ -1,0 +1,30 @@
+button {
+  -webkit-app-region: no-drag;
+}
+.wrapper {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  grid-template-columns: 1fr;
+  grid-template-rows: 100px 100px 1fr 1fr;
+  grid-template-areas: "title" "box" "list" "note";
+}
+.title-bar {
+  background-color: pink;
+  grid-area: title;
+  -webkit-app-region: drag;
+}
+.search-box {
+  background-color: white;
+  grid-area: box;
+}
+
+.list {
+  background-color: grey;
+  grid-area: list;
+}
+
+.area-note {
+  background-color: peachpuff;
+  grid-area: note;
+}

@@ -71,7 +71,12 @@ fn grep_life(pattern: &String) -> Result<Vec<String>, Box<Error>> {
       dent.path(),
       UTF8(|lnum, line| {
         // let mymatch = matcher.find(line.as_bytes())?.unwrap();
-        matches.push(format!("{}: {}", lnum.to_string(), line.to_string()));
+        matches.push(format!(
+          "file: {:?} line#: {} - {}",
+          dent.path(),
+          lnum.to_string(),
+          line.to_string()
+        ));
         Ok(true)
       }),
     );

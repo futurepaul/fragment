@@ -2,30 +2,29 @@
 // be executed in the renderer process for that window.
 // All of the Node.js APIs are available in this process.
 const fragment = require("frag_native");
-
-import app, { Component } from "apprun";
-try {
-  document.write(`<pre>${fragment.hello()}</pre>`);
-} catch (e) {
-  document.write(`<pre>${e.stack}</pre>`);
-}
-
-document.write(`<h1>test</h1>`);
+const app = require("apprun");
 
 const state = {
   list: ["result1", "result2", "result3"]
 };
 const view = state => (
-  <div>
-    <h1>type something</h1>
-    <input
-      type="text"
-      oninput={_e => app.run("update-query", _e)}
-      onkeypress={e => app.run("keypress", e)}
-    />
-    {state.list.map((item, key) => (
-      <div key={key}>{item}</div>
-    ))}
+  <div className="wrapper">
+    <div className="title-bar">heyyy</div>
+    <div className="search-box">
+      <input
+        type="text"
+        oninput={e => app.run("update-query", e)}
+        onkeypress={e => app.run("keypress", e)}
+      />
+    </div>
+    <div className="list">
+      {state.list.map((item, key) => (
+        <div key={key}>{item}</div>
+      ))}
+    </div>
+    <div className="note">
+      <p>this is a note</p>
+    </div>
   </div>
 );
 
@@ -38,12 +37,11 @@ const update = {
     let response = [];
     try {
       response = fragment.query(input) || [];
-      console.log(response);
     } catch (e) {
       console.log(e);
     }
-    console.log(response);
     return { list: response };
   }
 };
-app.start("my-app", state, view, update);
+
+app.start("app", state, view, update);
