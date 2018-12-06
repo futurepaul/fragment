@@ -3,13 +3,14 @@
 // All of the Node.js APIs are available in this process.
 import * as fragment from "frag_native";
 import app from "apprun";
+import { note } from "./demo_note";
 
 const state = {
-  list: ["result1", "result2", "result3"]
+  list: []
 };
 const view = state => (
   <div className="wrapper">
-    <div className="title-bar">heyyy</div>
+    <div className="title-bar" />
     <div className="search-box">
       <input
         type="text"
@@ -19,11 +20,13 @@ const view = state => (
     </div>
     <div className="list">
       {state.list.map((item, key) => (
-        <div key={key}>{item}</div>
+        <div className="list-item" key={key}>
+          {item}
+        </div>
       ))}
     </div>
     <div className="note">
-      <p>this is a note</p>
+      <p>{note}</p>
     </div>
   </div>
 );
