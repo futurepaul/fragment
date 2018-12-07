@@ -6,7 +6,7 @@ import app from "apprun";
 import { note } from "./demo_note";
 
 const state = {
-  // list items are objects with path, line, and line_num
+  // list items are objects with path, file_name, line, and line_num
   list: [],
   current_note: {
     path: "",
@@ -31,7 +31,7 @@ const view = state => (
           onclick={_e => app.run("get-note", _e, item.path)}
           key={key}
         >
-          <strong>{item.path}</strong>
+          <strong>{item.file_name}</strong>
           <p>
             {item.line_num} - {item.line}
           </p>

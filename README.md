@@ -6,6 +6,7 @@
 - [x] write some rust code
 - [x] fix problem div classes being stripped off
 - [x] make it look nice-ish
+- [x] return file name also
 - [ ] modularise a bit
 - [ ] only return one line per file
 - [ ] sort by date modified or file name
@@ -13,6 +14,8 @@
 - [ ] search by file name first, then search inside
 - [ ] make the search path user configurable
 - [ ] create better instructions for installing dependencies
+- [ ] show a list of files, sorted by date, as default
+- [ ] do some stuff asynchronously
 
 ### how to install:
 

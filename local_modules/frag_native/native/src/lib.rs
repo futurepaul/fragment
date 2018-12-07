@@ -1,7 +1,5 @@
-extern crate grep;
 #[macro_use]
 extern crate neon;
-extern crate walkdir;
 
 use grep::regex::RegexMatcher;
 use grep::searcher::sinks::UTF8;
@@ -23,7 +21,7 @@ fn is_hidden(entry: &DirEntry) -> bool {
   entry
     .file_name()
     .to_str()
-    .map(|s| s.starts_with("."))
+    .map(|s| s.starts_with('.'))
     .unwrap_or(false)
 }
 
@@ -36,11 +34,12 @@ pub extern "C" fn __cxa_pure_virtual() {
 
 struct ListItem {
   pub path: String,
+  pub file_name: String,
   pub line: String,
   pub line_num: u64,
 }
 
-fn grep_life(pattern: &String) -> Result<Vec<ListItem>, Box<Error>> {
+fn grep_life(pattern: &str) -> Result<Vec<ListItem>, Box<Error>> {
   let mut matches: Vec<ListItem> = vec![];
   let matcher = RegexMatcher::new(&pattern)?;
   let dir = OsString::from("./node_modules/");
@@ -75,10 +74,11 @@ fn grep_life(pattern: &String) -> Result<Vec<ListItem>, Box<Error>> {
       UTF8(|lnum, line| {
         //TODO: this is a hacky way to convert the path to the string
         // and get rid of the extra quotation marks that :? adds
-        let path = format!("{:?}", dent.path());
-        let trimmed_path = path.trim_start_matches('"').trim_end_matches('"');
+        let path = dent.path().display();
+        // let trimmed_path = path.trim_start_matches('"').trim_end_matches('"');
         matches.push(ListItem {
-          path: trimmed_path.to_string(),
+          path: path.to_string(),
+          file_name: dent.file_name().to_os_string().into_string().unwrap(),
           line: line.to_string(),
           line_num: lnum,
         });
@@ -111,9 +111,13 @@ fn query(mut cx: FunctionContext) -> JsResult<JsArray> {
   for (i, obj) in vec.iter().enumerate() {
     let list_item_object = JsObject::new(&mut cx);
     let js_path = cx.string(&obj.path);
+    let js_file_name = cx.string(&obj.file_name);
     let js_line = cx.string(&obj.line);
     let js_line_num = cx.number(obj.line_num as f64);
     list_item_object.set(&mut cx, "path", js_path).unwrap();
+    list_item_object
+      .set(&mut cx, "file_name", js_file_name)
+      .unwrap();
     list_item_object.set(&mut cx, "line", js_line).unwrap();
     list_item_object
       .set(&mut cx, "line_num", js_line_num)

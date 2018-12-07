@@ -5,6 +5,7 @@ authors = ["Paul Miller <paul@pauljmiller.com>"]
 license = "MIT"
 build = "build.rs"
 exclude = ["artifacts.json", "index.node"]
+edition = "2018"
 
 [lib]
 name = "frag_native"
