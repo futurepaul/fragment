@@ -1,6 +1,6 @@
 # fragment
 
-todo:
+### todo:
 
 - [x] integrate electron quickstart and neon
 - [x] write some rust code
@@ -14,6 +14,16 @@ todo:
 - [ ] make the search path user configurable
 - [ ] create better instructions for installing dependencies
 
-howto:
+### how to install:
 
 you're probably going to at least need to `npm install electron-build-env neon-cli --save-dev`
+
+### how it was made:
+
+Part one:
+
+[![Part one](https://img.youtube.com/vi/fB559YA-FNQ/0.jpg)](https://www.youtube.com/watch?v=fB559YA-FNQ "Part one")
+
+Part two:
+
+[![Part two](https://img.youtube.com/vi/ZXVfMJngcJI/0.jpg)](https://www.youtube.com/watch?v=ZXVfMJngcJI "Part one")
