@@ -43,8 +43,8 @@ struct ListItem {
 fn grep_life(pattern: &String) -> Result<Vec<ListItem>, Box<Error>> {
   let mut matches: Vec<ListItem> = vec![];
   let matcher = RegexMatcher::new(&pattern)?;
-  // let path = Path::new("./node_modules/");
   let dir = OsString::from("./node_modules/");
+  // let dir = OsString::from("../notes_grep_test/");
   let mut searcher = SearcherBuilder::new()
     .binary_detection(BinaryDetection::quit(b'\x00'))
     .build();
@@ -128,6 +128,7 @@ fn query(mut cx: FunctionContext) -> JsResult<JsArray> {
 // of the note at a time
 fn get_note(mut cx: FunctionContext) -> JsResult<JsString> {
   let path = cx.argument::<JsString>(0)?.value();
+  //TODO: handle this unwrap better
   let mut file = File::open(OsString::from(path)).unwrap();
   let mut contents = String::new();
   file.read_to_string(&mut contents).unwrap();

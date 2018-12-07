@@ -28,7 +28,7 @@ const view = state => (
       {state.list.map((item, key) => (
         <div
           className="list-item"
-          onclick={e => app.run("get-note", e, item.path)}
+          onclick={_e => app.run("get-note", _e, item.path)}
           key={key}
         >
           <strong>{item.path}</strong>
@@ -58,11 +58,8 @@ const update = {
   },
   "get-note": (state, e, path) => {
     let note = "";
-    // let path = "./node_modules/pend/test.js";
-    console.log(path);
     try {
       note = fragment.get_note(path);
-      console.log(note);
     } catch (e) {
       console.log(e);
     }
