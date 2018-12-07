@@ -16,6 +16,7 @@
 - [ ] create better instructions for installing dependencies
 - [ ] show a list of files, sorted by date, as default
 - [ ] do some stuff asynchronously
+- [ ] add a button / command to open a note in an external editor
 
 ### how to install:
 
