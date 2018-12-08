@@ -5,19 +5,15 @@ use walkdir::{DirEntry, WalkDir};
 
 use std::error::Error;
 use std::ffi::OsString;
+use std::fs;
 use std::time::{Duration, Instant, SystemTime};
 
 pub struct ListItem {
   pub path: String,
   pub file_name: String,
-  pub line: String,
-  pub line_num: u64,
-}
-
-struct FileItem {
-  dent: DirEntry,
-  modified: SystemTime,
-  first_line: String,
+  pub modified: SystemTime,
+  pub line: Option<String>,
+  pub line_num: Option<u64>,
 }
 
 // impl Iterator for ListItem {
@@ -48,7 +44,7 @@ pub fn search_king(pattern: &str) -> Result<Vec<ListItem>, Box<Error>> {
   grep_life(pattern, files)
 }
 
-fn list_of_all_files(root: &str, sort_by: SortMethod) -> Vec<FileItem> {
+fn list_of_all_files(root: &str, sort_by: SortMethod) -> Vec<ListItem> {
   let list_start = Instant::now();
   let dir = OsString::from(root);
 
@@ -62,23 +58,21 @@ fn list_of_all_files(root: &str, sort_by: SortMethod) -> Vec<FileItem> {
     })
     .filter_map(Result::ok)
     .filter(|dent| dent.file_type().is_file())
-    .map(|dent| FileItem {
-      dent: dent.clone(),
+    .map(|dent| ListItem {
+      path: dent.path().display().to_string(),
+      file_name: dent.file_name().to_os_string().into_string().unwrap(),
       modified: get_modified_time(&dent),
-      //need to upgrade this to actually reading the first line of the file
-      first_line: "".to_string(),
+      //can we read the first line of each file here without crying?
+      line: None,
+      line_num: None,
     })
-    .collect::<Vec<FileItem>>();
+    .collect::<Vec<ListItem>>();
 
   match sort_by {
     SortMethod::DateNewest => list.sort_unstable_by(|a, b| b.modified.cmp(&a.modified)),
     SortMethod::DateOldest => list.sort_unstable_by(|a, b| a.modified.cmp(&b.modified)),
-    SortMethod::TitleAZ => {
-      list.sort_unstable_by(|a, b| a.dent.file_name().cmp(&b.dent.file_name()))
-    }
-    SortMethod::TitleZA => {
-      list.sort_unstable_by(|a, b| b.dent.file_name().cmp(&a.dent.file_name()))
-    }
+    SortMethod::TitleAZ => list.sort_unstable_by(|a, b| a.file_name.cmp(&b.file_name)),
+    SortMethod::TitleZA => list.sort_unstable_by(|a, b| b.file_name.cmp(&a.file_name)),
     SortMethod::NoSort => {}
   }
 
@@ -99,33 +93,44 @@ fn get_modified_time(dent: &DirEntry) -> SystemTime {
 
 // fn grep_iter(patter: &str) -> Result
 
-fn grep_life(pattern: &str, files: Vec<FileItem>) -> Result<Vec<ListItem>, Box<Error>> {
+fn grep_life(pattern: &str, files: Vec<ListItem>) -> Result<Vec<ListItem>, Box<Error>> {
   let grep_start = Instant::now();
+
+  //let's just bail if it's a super short search
+  if pattern.len() < 2 {
+    let grep_end = Instant::now();
+    println!(
+      "skipping grep took: {}ms",
+      (grep_end - grep_start).as_millis()
+    );
+    return Ok(files);
+  }
+
   let mut matches: Vec<ListItem> = vec![];
   let matcher = RegexMatcher::new(&pattern)?;
   let mut searcher = SearcherBuilder::new()
     .binary_detection(BinaryDetection::quit(b'\x00'))
     .build();
 
-  for item in files {
+  for file in files {
     let result = searcher.search_path(
       &matcher,
-      item.dent.path(),
+      &file.path,
       UTF8(|lnum, line| {
-        let path = item.dent.path().display();
         matches.push(ListItem {
-          path: path.to_string(),
-          file_name: item.dent.file_name().to_os_string().into_string().unwrap(),
+          path: file.path.clone(),
+          file_name: file.file_name.clone(),
+          modified: file.modified,
           //we don't need the whole line, so this helps
-          line: line.chars().take(100).collect(),
-          line_num: lnum,
+          line: Some(line.chars().take(100).collect()),
+          line_num: Some(lnum),
         });
         //we stop searching after our first find by returning false
         Ok(false)
       }),
     );
     if let Err(err) = result {
-      eprintln!("{}: {}", item.dent.path().display(), err);
+      eprintln!("{}: {}", file.path, err);
     }
   }
 

@@ -33,8 +33,14 @@ fn query(mut cx: FunctionContext) -> JsResult<JsArray> {
     let list_item_object = JsObject::new(&mut cx);
     let js_path = cx.string(&obj.path);
     let js_file_name = cx.string(&obj.file_name);
-    let js_line = cx.string(&obj.line);
-    let js_line_num = cx.number(obj.line_num as f64);
+    let js_line = cx.string(match &obj.line {
+      Some(line) => line,
+      None => "",
+    });
+    let js_line_num = cx.number(match obj.line_num {
+      Some(line_num) => line_num as f64,
+      None => 0 as f64,
+    });
     list_item_object.set(&mut cx, "path", js_path).unwrap();
     list_item_object
       .set(&mut cx, "file_name", js_file_name)
