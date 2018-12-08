@@ -21,7 +21,7 @@ fn query(mut cx: FunctionContext) -> JsResult<JsArray> {
   let query = cx.argument::<JsString>(0)?.value();
 
   //TODO: fix this unwrap
-  let vec = search::grep_life(&query).unwrap();
+  let vec = search::search_king(&query).unwrap();
 
   // Create the JS array
   let js_array = JsArray::new(&mut cx, vec.len() as u32);
