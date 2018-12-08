@@ -49,6 +49,7 @@ pub fn search_king(pattern: &str) -> Result<Vec<ListItem>, Box<Error>> {
 }
 
 fn list_of_all_files(root: &str, sort_by: SortMethod) -> Vec<FileItem> {
+  let list_start = Instant::now();
   let dir = OsString::from(root);
 
   let mut list = WalkDir::new(dir)
@@ -81,6 +82,9 @@ fn list_of_all_files(root: &str, sort_by: SortMethod) -> Vec<FileItem> {
     SortMethod::NoSort => {}
   }
 
+  let list_end = Instant::now();
+  println!("list files took: {}ms", (list_end - list_start).as_millis());
+
   list
 }
 
@@ -96,6 +100,7 @@ fn get_modified_time(dent: &DirEntry) -> SystemTime {
 // fn grep_iter(patter: &str) -> Result
 
 fn grep_life(pattern: &str, files: Vec<FileItem>) -> Result<Vec<ListItem>, Box<Error>> {
+  let grep_start = Instant::now();
   let mut matches: Vec<ListItem> = vec![];
   let matcher = RegexMatcher::new(&pattern)?;
   let mut searcher = SearcherBuilder::new()
@@ -124,5 +129,7 @@ fn grep_life(pattern: &str, files: Vec<FileItem>) -> Result<Vec<ListItem>, Box<E
     }
   }
 
+  let grep_end = Instant::now();
+  println!("grep took: {}ms", (grep_end - grep_start).as_millis());
   Ok(matches)
 }

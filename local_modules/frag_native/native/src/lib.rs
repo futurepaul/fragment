@@ -1,3 +1,5 @@
+#![feature(duration_as_u128)]
+
 #[macro_use]
 extern crate neon;
 
