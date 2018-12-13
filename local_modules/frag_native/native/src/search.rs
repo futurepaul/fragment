@@ -16,10 +16,6 @@ pub struct ListItem {
   pub line_num: Option<u64>,
 }
 
-// impl Iterator for ListItem {
-//   type Item =
-// }
-
 fn is_hidden(entry: &DirEntry) -> bool {
   entry
     .file_name()

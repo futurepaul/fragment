@@ -42,6 +42,12 @@ const view = state => (
   </div>
 );
 
+function query_async(query: string): Promise<Array<string>> {
+  return new Promise<Array<string>>(resolve => {
+    resolve(fragment.query(query));
+  });
+}
+
 const update = {
   keypress: (_, e) => {
     e.keyCode === 13 && app.run("update-query", e);
@@ -49,11 +55,26 @@ const update = {
   "update-query": (state, e, path) => {
     const input = e.target.value;
     let response = [];
+    // query_async(input)
+    //   .then(result => (response = result))
+    //   .catch(() => {
+    //     console.log("async went wrong");
+    //   });
     try {
       response = fragment.query(input) || [];
     } catch (e) {
       console.log(e);
     }
+    return { list: response, current_note: { ...state.current_note } };
+  },
+  "update-query-async": (state, e, path) => {
+    const input = e.target.value;
+
+    let response = fragment.query_async((err, value) => {
+      if (err) throw err;
+      return value;
+    });
+
     return { list: response, current_note: { ...state.current_note } };
   },
   "get-note": (state, e, path) => {
