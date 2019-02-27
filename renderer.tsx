@@ -5,6 +5,9 @@ import * as fragment from "frag_native";
 import app from "apprun";
 import { note } from "./demo_note";
 
+const filelist = new fragment.FileList("../notes_grep_test");
+filelist.first();
+
 const state = {
   // list items are objects with path, file_name, line, and line_num
   list: [],
@@ -42,12 +45,6 @@ const view = state => (
   </div>
 );
 
-function query_async(query: string): Promise<Array<string>> {
-  return new Promise<Array<string>>(resolve => {
-    resolve(fragment.query(query));
-  });
-}
-
 const update = {
   keypress: (_, e) => {
     e.keyCode === 13 && app.run("update-query", e);
@@ -55,28 +52,16 @@ const update = {
   "update-query": (state, e, path) => {
     const input = e.target.value;
     let response = [];
-    // query_async(input)
-    //   .then(result => (response = result))
-    //   .catch(() => {
-    //     console.log("async went wrong");
-    //   });
+
     try {
-      response = fragment.query(input) || [];
+      response = filelist.search(input) || [];
     } catch (e) {
       console.log(e);
     }
-    return { list: response, current_note: { ...state.current_note } };
-  },
-  "update-query-async": (state, e, path) => {
-    const input = e.target.value;
-
-    let response = fragment.query_async((err, value) => {
-      if (err) throw err;
-      return value;
-    });
 
     return { list: response, current_note: { ...state.current_note } };
   },
+
   "get-note": (state, e, path) => {
     let note = "";
     try {
