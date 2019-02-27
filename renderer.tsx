@@ -5,8 +5,8 @@ import * as fragment from "frag_native";
 import app from "apprun";
 import { note } from "./demo_note";
 
-const filelist = new fragment.FileList("../notes_grep_test");
-filelist.first();
+// const filelist = new fragment.FileList("../notes_grep_test");
+// filelist.first();
 
 const state = {
   // list items are objects with path, file_name, line, and line_num
@@ -54,7 +54,7 @@ const update = {
     let response = [];
 
     try {
-      response = filelist.search(input) || [];
+      response = fragment.query(input) || [];
     } catch (e) {
       console.log(e);
     }

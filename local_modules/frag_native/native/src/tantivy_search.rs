@@ -1,12 +1,16 @@
 use std::fs;
-use std::path::PathBuf;
 use std::path::Path;
+use std::path::PathBuf;
+use std::time::SystemTime;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::{Schema, STORED, TEXT};
 use tantivy::Document;
 use tantivy::Index;
 
+use walkdir::{DirEntry, WalkDir};
+
+use std::ffi::OsString;
 
 // fn main() {
 //   let index_storage_path = PathBuf::from("test/.index_storage");
@@ -14,6 +18,63 @@ use tantivy::Index;
 //   println!("indexed {} documents!", how_many_indexed);
 //   search(index, "hey").expect("search didn't work hmm");
 // }
+
+#[derive(Clone)]
+pub struct ListItem {
+  pub path: String,
+  pub file_name: String,
+  pub modified: SystemTime,
+}
+
+fn list_of_all_files(root: &str) -> Vec<ListItem> {
+  println!("gathering list of files from {}", &root);
+  let dir = OsString::from(root);
+
+  WalkDir::new(dir)
+    .into_iter()
+    //TODO: skipping dotfiles because I don't like
+    //searching all the tantivy garbage
+    .filter_entry(|e| !is_hidden(e))
+    .inspect(|result| {
+      if let Err(ref e) = *result {
+        eprintln!("{}", e);
+      }
+    })
+    .filter_map(Result::ok)
+    .filter(|dent| dent.file_type().is_file())
+    .map(|dent| ListItem {
+      path: dent.path().display().to_string(),
+      file_name: dent.file_name().to_os_string().into_string().unwrap(),
+      modified: get_modified_time(&dent),
+    })
+    .collect::<Vec<ListItem>>()
+}
+
+fn get_modified_time(dent: &DirEntry) -> SystemTime {
+  match dent.metadata() {
+    Ok(metadata) => metadata
+      .modified()
+      .expect("What to do if this doesn't work?"),
+    Err(_e) => panic!("I don't know what to do if we don't have metadata"),
+  }
+}
+
+fn get_modified_time_from_path(path: &str) -> SystemTime {
+  match Path::new(path).metadata() {
+    Ok(metadata) => metadata
+      .modified()
+      .expect("What to do if this doesn't work?"),
+    Err(_e) => panic!("I don't know what to do if we don't have metadata"),
+  }
+}
+
+fn is_hidden(entry: &DirEntry) -> bool {
+  entry
+    .file_name()
+    .to_str()
+    .map(|s| s.starts_with('.'))
+    .unwrap_or(false)
+}
 
 pub fn create_schema() -> Schema {
   let mut schema_builder = Schema::builder();
@@ -37,7 +98,7 @@ pub fn build_index(search_path: &str, index_path: PathBuf) -> tantivy::Result<(I
     }
   };
 
-  let files = list_files::list_of_all_files(search_path);
+  let files = list_of_all_files(search_path);
 
   let schema = create_schema();
 
@@ -75,7 +136,7 @@ pub fn build_index(search_path: &str, index_path: PathBuf) -> tantivy::Result<(I
   }
 }
 
-pub fn search(index: Index, query: &str) -> tantivy::Result<Vec<list_files::ListItem>> {
+pub fn search(index: Index, query: &str) -> tantivy::Result<Vec<ListItem>> {
   index.load_searchers()?;
   let searcher = index.searcher();
 
@@ -96,24 +157,19 @@ pub fn search(index: Index, query: &str) -> tantivy::Result<Vec<list_files::List
   for (_score, doc_address) in top_docs {
     let retrieved_doc = searcher.doc(doc_address)?;
     //second unwrap is because text returns a Some
-    let path = retrieved_doc.get_first(title).unwrap().text().unwrap(); 
-    matches.push(ListItem { 
-      path: path,
-      file_name: Path::new(path).file_name(),
-      modified: get_modified_time(path)
-
+    let path = retrieved_doc.get_first(title).unwrap().text().unwrap();
+    matches.push(ListItem {
+      path: path.to_string(),
+      //lol this is so gross TODO
+      file_name: Path::new(path)
+        .file_name()
+        .unwrap()
+        .to_os_string()
+        .into_string()
+        .unwrap(),
+      modified: get_modified_time_from_path(path),
     })
-
   }
 
-  Ok((matches))
-}
-
-fn get_modified_time(path: &str) -> SystemTime {
-  match fs::metadata(path) {
-    Ok(metadata) => metadata
-      .modified()
-      .expect("What to do if this doesn't work?"),
-    Err(_e) => panic!("I don't know what to do if we don't have metadata"),
-  }
+  Ok(matches)
 }
