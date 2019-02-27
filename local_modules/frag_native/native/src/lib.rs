@@ -10,7 +10,8 @@ use std::ffi::OsString;
 
 use neon::prelude::*;
 
-mod search;
+mod tantivy_search;
+mod list_files;
 
 //builds were failing on linux so we found this workaround
 //https://users.rust-lang.org/t/neon-electron-undefined-symbol-cxa-pure-virtual/21223/2
@@ -18,6 +19,52 @@ mod search;
 pub extern "C" fn __cxa_pure_virtual() {
   loop {}
 }
+
+
+
+  
+  search(index, "hey").expect("search didn't work hmm");
+
+fn query(mut cx: FunctionContext) -> JsResult<JsArray> {
+  let query = cx.argument::<JsString>(0)?.value();
+
+  //TODO: fix this unwrap
+  let index_storage_path = PathBuf::from("test/.index_storage");
+  let (index, how_many_indexed) = tantivy_search::build_index("test", index_storage_path).unwrap();
+  println!("indexed {} documents!", how_many_indexed);
+  let vec = tantivy_search::search(index, &query).unwrap();
+
+  // Create the JS array
+  let js_array = JsArray::new(&mut cx, vec.len() as u32);
+
+  // Iterate over the rust Vec and map each value in the Vec to the JS array
+  for (i, obj) in vec.iter().enumerate() {
+    let list_item_object = JsObject::new(&mut cx);
+    let js_path = cx.string(&obj.path);
+    let js_file_name = cx.string(&obj.file_name);
+    let js_line = cx.string(match &obj.line {
+      Some(line) => line,
+      None => "",
+    });
+    let js_line_num = cx.number(match obj.line_num {
+      Some(line_num) => line_num as f64,
+      None => 0 as f64,
+    });
+    list_item_object.set(&mut cx, "path", js_path).unwrap();
+    list_item_object
+      .set(&mut cx, "file_name", js_file_name)
+      .unwrap();
+    list_item_object.set(&mut cx, "line", js_line).unwrap();
+    list_item_object
+      .set(&mut cx, "line_num", js_line_num)
+      .unwrap();
+    js_array.set(&mut cx, i as u32, list_item_object).unwrap();
+  }
+
+  Ok(js_array)
+}
+
+
 
 pub type FileList = Vec<search::ListItem>;
 
