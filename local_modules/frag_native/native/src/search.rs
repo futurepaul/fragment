@@ -8,6 +8,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::time::{Duration, Instant, SystemTime};
 
+#[derive(Clone)]
 pub struct ListItem {
   pub path: String,
   pub file_name: String,
@@ -24,7 +25,7 @@ fn is_hidden(entry: &DirEntry) -> bool {
     .unwrap_or(false)
 }
 
-enum SortMethod {
+pub enum SortMethod {
   DateNewest,
   DateOldest,
   TitleAZ,
@@ -37,10 +38,10 @@ pub fn search_king(pattern: &str) -> Result<Vec<ListItem>, Box<Error>> {
   let root = "../notes_grep_test";
   let files = list_of_all_files(root, SortMethod::DateNewest);
 
-  grep_life(pattern, files)
+  grep_life(pattern, &files)
 }
 
-fn list_of_all_files(root: &str, sort_by: SortMethod) -> Vec<ListItem> {
+pub fn list_of_all_files(root: &str, sort_by: SortMethod) -> Vec<ListItem> {
   let list_start = Instant::now();
   let dir = OsString::from(root);
 
@@ -89,18 +90,18 @@ fn get_modified_time(dent: &DirEntry) -> SystemTime {
 
 // fn grep_iter(patter: &str) -> Result
 
-fn grep_life(pattern: &str, files: Vec<ListItem>) -> Result<Vec<ListItem>, Box<Error>> {
+pub fn grep_life(pattern: &str, files: &Vec<ListItem>) -> Result<Vec<ListItem>, Box<Error>> {
   let grep_start = Instant::now();
 
   //let's just bail if it's a super short search
-  if pattern.len() < 2 {
-    let grep_end = Instant::now();
-    println!(
-      "skipping grep took: {}ms",
-      (grep_end - grep_start).as_millis()
-    );
-    return Ok(files);
-  }
+  // if pattern.len() < 2 {
+  //     let grep_end = Instant::now();
+  //     println!(
+  //         "skipping grep took: {}ms",
+  //         (grep_end - grep_start).as_millis()
+  //     );
+  //     return Ok(files.to_vec());
+  // }
 
   let mut matches: Vec<ListItem> = vec![];
   let matcher = RegexMatcher::new(&pattern)?;
