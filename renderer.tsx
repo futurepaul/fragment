@@ -36,7 +36,7 @@ const view = state => (
         >
           <strong>{item.file_name}</strong>
           <p>
-            {item.line_num} - {item.line}
+            {item.line_num} - {item.first_line}
           </p>
         </div>
       ))}

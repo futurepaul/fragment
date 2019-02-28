@@ -1,17 +1,14 @@
-#![feature(duration_as_u128)]
-
-#[macro_use]
-extern crate neon;
-
-use std::fs::File;
-use std::io::prelude::*;
-use std::path::PathBuf;
-
 use std::ffi::OsString;
+use std::fs::File;
+use std::io::Read;
 
-use neon::prelude::*;
+use neon::context::{Context, FunctionContext};
+use neon::object::Object;
+use neon::register_module;
+use neon::result::JsResult;
+use neon::types::{JsArray, JsObject, JsString};
 
-use fragment_search::{build_index, search};
+use fragment_search::{index, search};
 
 //builds were failing on linux so we found this workaround
 //https://users.rust-lang.org/t/neon-electron-undefined-symbol-cxa-pure-virtual/21223/2
@@ -24,9 +21,11 @@ fn query(mut cx: FunctionContext) -> JsResult<JsArray> {
   let query = cx.argument::<JsString>(0)?.value();
 
   //TODO: fix this unwrap
-  let index_storage_path = PathBuf::from("../notes_grep_test/.index_storage");
-  let (index, how_many_indexed) = build_index("../notes_grep_test", index_storage_path).unwrap();
-  println!("indexed {} documents!", how_many_indexed);
+  let index_storage_path = "../notes_grep_test/.index_storage";
+  let notes_path = "../notes_grep_test";
+  let (index, how_many_indexed) =
+    index(notes_path, index_storage_path, true).expect("index failed");
+  // println!("indexed {} documents!", how_many_indexed);
   let vec = search(index, &query).expect("search didn't work");
 
   // Create the JS array
@@ -37,10 +36,14 @@ fn query(mut cx: FunctionContext) -> JsResult<JsArray> {
     let list_item_object = JsObject::new(&mut cx);
     let js_path = cx.string(&obj.path);
     let js_file_name = cx.string(&obj.file_name);
+    let js_first_line = cx.string(&obj.first_line);
 
     list_item_object.set(&mut cx, "path", js_path).unwrap();
     list_item_object
       .set(&mut cx, "file_name", js_file_name)
+      .unwrap();
+    list_item_object
+      .set(&mut cx, "first_line", js_first_line)
       .unwrap();
 
     js_array.set(&mut cx, i as u32, list_item_object).unwrap();
