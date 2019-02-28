@@ -12,13 +12,6 @@ use walkdir::{DirEntry, WalkDir};
 
 use std::ffi::OsString;
 
-// fn main() {
-//   let index_storage_path = PathBuf::from("test/.index_storage");
-//   let (index, how_many_indexed) = build_index("test", index_storage_path).unwrap();
-//   println!("indexed {} documents!", how_many_indexed);
-//   search(index, "hey").expect("search didn't work hmm");
-// }
-
 #[derive(Clone)]
 pub struct ListItem {
   pub path: String,
@@ -76,7 +69,7 @@ fn is_hidden(entry: &DirEntry) -> bool {
     .unwrap_or(false)
 }
 
-pub fn create_schema() -> Schema {
+fn create_schema() -> Schema {
   let mut schema_builder = Schema::builder();
   schema_builder.add_text_field("title", TEXT | STORED);
   schema_builder.add_text_field("body", TEXT);
@@ -172,4 +165,13 @@ pub fn search(index: Index, query: &str) -> tantivy::Result<Vec<ListItem>> {
   }
 
   Ok(matches)
+}
+
+#[cfg(test)]
+
+mod tests {
+  #[test]
+  fn it_works() {
+    assert_eq!(2 + 2, 4);
+  }
 }

@@ -11,7 +11,7 @@ use std::ffi::OsString;
 
 use neon::prelude::*;
 
-mod tantivy_search;
+use fragment_search::{build_index, search};
 
 //builds were failing on linux so we found this workaround
 //https://users.rust-lang.org/t/neon-electron-undefined-symbol-cxa-pure-virtual/21223/2
@@ -25,10 +25,9 @@ fn query(mut cx: FunctionContext) -> JsResult<JsArray> {
 
   //TODO: fix this unwrap
   let index_storage_path = PathBuf::from("../notes_grep_test/.index_storage");
-  let (index, how_many_indexed) =
-    tantivy_search::build_index("../notes_grep_test", index_storage_path).unwrap();
+  let (index, how_many_indexed) = build_index("../notes_grep_test", index_storage_path).unwrap();
   println!("indexed {} documents!", how_many_indexed);
-  let vec = tantivy_search::search(index, &query).expect("search didn't work");
+  let vec = search(index, &query).expect("search didn't work");
 
   // Create the JS array
   let js_array = JsArray::new(&mut cx, vec.len() as u32);
