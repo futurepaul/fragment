@@ -1,4 +1,6 @@
 use std::fs;
+use std::io::BufRead;
+use std::io::BufReader;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -12,18 +14,12 @@ use walkdir::{DirEntry, WalkDir};
 
 use std::ffi::OsString;
 
-// fn main() {
-//   let index_storage_path = PathBuf::from("test/.index_storage");
-//   let (index, how_many_indexed) = build_index("test", index_storage_path).unwrap();
-//   println!("indexed {} documents!", how_many_indexed);
-//   search(index, "hey").expect("search didn't work hmm");
-// }
-
 #[derive(Clone)]
 pub struct ListItem {
   pub path: String,
   pub file_name: String,
   pub modified: SystemTime,
+  pub first_line: String,
 }
 
 fn list_of_all_files(root: &str) -> Vec<ListItem> {
@@ -42,10 +38,23 @@ fn list_of_all_files(root: &str) -> Vec<ListItem> {
     })
     .filter_map(Result::ok)
     .filter(|dent| dent.file_type().is_file())
-    .map(|dent| ListItem {
-      path: dent.path().display().to_string(),
-      file_name: dent.file_name().to_os_string().into_string().unwrap(),
-      modified: get_modified_time(&dent),
+    .map(|dent| {
+      let f = match fs::File::open(dent.path()) {
+        Ok(file) => file,
+        Err(_) => panic!("Couldn't open {}", dent.path().display()),
+      };
+      let mut reader = BufReader::new(f);
+      let mut first_line = String::new();
+      reader
+        .read_line(&mut first_line)
+        .expect("unable to read line");
+
+      ListItem {
+        path: dent.path().display().to_string(),
+        file_name: dent.file_name().to_os_string().into_string().unwrap(),
+        modified: get_modified_time(&dent),
+        first_line: first_line,
+      }
     })
     .collect::<Vec<ListItem>>()
 }
@@ -76,25 +85,31 @@ fn is_hidden(entry: &DirEntry) -> bool {
     .unwrap_or(false)
 }
 
-pub fn create_schema() -> Schema {
+fn create_schema() -> Schema {
   let mut schema_builder = Schema::builder();
   schema_builder.add_text_field("title", TEXT | STORED);
   schema_builder.add_text_field("body", TEXT);
   schema_builder.build()
 }
 
-pub fn build_index(search_path: &str, index_path: PathBuf) -> tantivy::Result<(Index, u64)> {
+///`index` takes two &str paths:
+/// 1. `search_path` for where you want to search
+/// 2. `index_path` for where you want to store the index
+///
+/// The "force" bool should force a reindex, but...
+/// I don't know how to force a reindex
+pub fn index(search_path: &str, index_path: &str, force: bool) -> tantivy::Result<(Index, u64)> {
   let schema = create_schema();
 
   //return early if we already have an index
   let index = match Index::open_in_dir(&index_path) {
     Ok(index) => {
-      println!("opening index...");
       return Ok((index, 0));
     }
+    //otherwise create the index
     Err(_) => {
       println!("creating index...");
-      Index::create_in_dir(&index_path, schema.clone())?
+      Index::create_in_dir(PathBuf::from(&index_path), schema.clone())?
     }
   };
 
@@ -108,7 +123,6 @@ pub fn build_index(search_path: &str, index_path: PathBuf) -> tantivy::Result<(I
   let body = schema.get_field("body").unwrap();
 
   for file in files {
-    // println!("{}", file.path);
     let mut doc = Document::default();
     doc.add_text(title, &file.path);
     //TODO: this might be slower than a buffer? idk.
@@ -125,7 +139,7 @@ pub fn build_index(search_path: &str, index_path: PathBuf) -> tantivy::Result<(I
 
   match index_writer.commit() {
     Ok(how_many) => {
-      println!("got to the ok branch of index_writer.commit");
+      //It's important that this happens after index writes
       index_writer.wait_merging_threads()?;
       Ok((index, how_many))
     }
@@ -168,8 +182,18 @@ pub fn search(index: Index, query: &str) -> tantivy::Result<Vec<ListItem>> {
         .into_string()
         .unwrap(),
       modified: get_modified_time_from_path(path),
+      first_line: "haven't done this yet".to_string(),
     })
   }
 
   Ok(matches)
+}
+
+#[cfg(test)]
+
+mod tests {
+  #[test]
+  fn it_works() {
+    assert_eq!(2 + 2, 4);
+  }
 }
