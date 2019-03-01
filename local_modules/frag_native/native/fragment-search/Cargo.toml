@@ -6,4 +6,4 @@ edition = "2018"
 
 [dependencies]
 walkdir = "2.2.7"
-tantivy = "0.8.2"
+tantivy = { git = "https://github.com/tantivy-search/tantivy" }
