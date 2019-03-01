@@ -21,7 +21,7 @@
 
 ### how to install:
 
-you're probably going to at least need to `npm install electron-build-env neon-cli --save-dev`
+you're probably going to at least need to `yarn install && yarn build && yarn start`
 
 ### how it was made:
 
