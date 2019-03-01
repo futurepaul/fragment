@@ -3,7 +3,6 @@
 // All of the Node.js APIs are available in this process.
 import * as fragment from "frag_native";
 import app from "apprun";
-import { note } from "./demo_note";
 
 // const filelist = new fragment.FileList("../notes_grep_test");
 // filelist.first();
@@ -13,7 +12,7 @@ const state = {
   list: [],
   current_note: {
     path: "",
-    content: note
+    content: ""
   }
 };
 const view = state => (
