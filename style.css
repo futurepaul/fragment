@@ -8,7 +8,7 @@ button {
   -webkit-app-region: no-drag;
 }
 input {
-  width: 95%;
+  width: 85vw;
   border: none;
   border-bottom: 2px solid black;
   outline: none;
@@ -35,6 +35,10 @@ input {
   grid-area: box;
   display: flex;
   justify-content: center;
+}
+
+.search-box button {
+  width: 10vw;
 }
 
 .list {

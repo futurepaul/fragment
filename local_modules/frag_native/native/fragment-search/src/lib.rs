@@ -161,7 +161,9 @@ pub fn search(index: Index, query: &str) -> tantivy::Result<Vec<ListItem>> {
 
   let query_parser = QueryParser::for_index(&index, vec![title, body]);
 
-  let query = query_parser.parse_query(query)?;
+  let query_trimmed = query.trim();
+
+  let query = query_parser.parse_query(query_trimmed)?;
 
   //TODO: next version of tantivy has a TopCollector instead
   let top_docs = searcher.search(&*query, &TopDocs::with_limit(100))?;

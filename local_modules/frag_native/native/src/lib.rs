@@ -1,12 +1,14 @@
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::Read;
+use std::path::PathBuf;
 
 use neon::context::{Context, FunctionContext};
 use neon::object::Object;
 use neon::register_module;
 use neon::result::JsResult;
-use neon::types::{JsArray, JsObject, JsString};
+use neon::types::{JsArray, JsBoolean, JsObject, JsString};
+use open;
 
 use fragment_search::{index, search};
 
@@ -63,8 +65,53 @@ fn get_note(mut cx: FunctionContext) -> JsResult<JsString> {
   Ok(cx.string(contents))
 }
 
+fn open_note_in_editor(mut cx: FunctionContext) -> JsResult<JsBoolean> {
+  let path = cx.argument::<JsString>(0)?.value();
+  match open::that(path) {
+    Ok(exit_status) => {
+      if exit_status.success() {
+        println!("Check out your default editor!");
+        Ok(cx.boolean(true))
+      } else {
+        if let Some(code) = exit_status.code() {
+          println!("Command returned non-zero exit status {}!", code);
+          Ok(cx.boolean(true))
+        } else {
+          println!("Command returned with unknown exit status!");
+          Ok(cx.boolean(true))
+        }
+      }
+    }
+    Err(why) => {
+      println!("Failure to execute command: {}", why);
+      Ok(cx.boolean(false))
+    }
+  }
+}
+
+fn create_file(mut cx: FunctionContext) -> JsResult<JsBoolean> {
+  let filename = cx.argument::<JsString>(0)?.value();
+  let mut full_path = PathBuf::from("../notes_grep_test");
+
+  full_path.push(filename);
+  full_path.set_extension("md");
+
+  match File::create(full_path) {
+    Ok(_) => {
+      println!("Made a file! Good luck finding it.");
+      Ok(cx.boolean(true))
+    }
+    Err(why) => {
+      println!("Didn't make a file: {}", why);
+      Ok(cx.boolean(false))
+    }
+  }
+}
+
 register_module!(mut cx, {
   cx.export_function("get_note", get_note)?;
   cx.export_function("query", query)?;
+  cx.export_function("open_note", open_note_in_editor)?;
+  cx.export_function("create_file", create_file)?;
   Ok(())
 });

@@ -9,11 +9,13 @@ import app from "apprun";
 
 const state = {
   // list items are objects with path, file_name, line, and line_num
+
   list: [],
   current_note: {
     path: "",
     content: ""
-  }
+  },
+  current_query: ""
 };
 const view = state => (
   <div className="wrapper">
@@ -23,8 +25,11 @@ const view = state => (
         type="text"
         autofocus="true"
         oninput={e => app.run("update-query", e)}
-        onkeypress={e => app.run("keypress", e)}
+        // onkeypress={e => app.run("keypress", e)}
       />
+      <button onclick={_e => app.run("new-note", _e, state.current_query)}>
+        New note
+      </button>
     </div>
     <div className="list">
       {state.list.map((item, key) => (
@@ -41,13 +46,16 @@ const view = state => (
       ))}
     </div>
     <div className="note">{state.current_note.content}</div>
+    <button onclick={_e => app.run("open-note", _e, state.current_note.path)}>
+      Open note
+    </button>
   </div>
 );
 
 const update = {
-  keypress: (_, e) => {
-    e.keyCode === 13 && app.run("update-query", e);
-  },
+  // keypress: (_, e) => {
+  //   e.keyCode === 13 && app.run("update-query", e);
+  // },
   "update-query": (state, e, path) => {
     const input = e.target.value;
     let response = [];
@@ -58,7 +66,11 @@ const update = {
       console.log(e);
     }
 
-    return { list: response, current_note: { ...state.current_note } };
+    return {
+      list: response,
+      current_note: { ...state.current_note },
+      current_query: input
+    };
   },
 
   "get-note": (state, e, path) => {
@@ -69,6 +81,25 @@ const update = {
       console.log(e);
     }
     return { ...state, current_note: { path: path, content: note } };
+  },
+
+  "open-note": (state, e, path) => {
+    let success = false;
+    try {
+      success = fragment.open_note(path);
+    } catch (e) {
+      console.log(e);
+    }
+  },
+
+  "new-note": (state, e, query) => {
+    let success = false;
+    try {
+      //we use the query string as the filename
+      success = fragment.create_file(query);
+    } catch (e) {
+      console.log(e);
+    }
   }
 };
 
