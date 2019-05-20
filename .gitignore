@@ -3,3 +3,4 @@ node_modules
 .cache
 renderer.js
 *.js.map
+notes_grep_test
