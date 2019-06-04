@@ -1,5 +1,5 @@
 [package]
-name = "frag_native"
+name = "fragment-backend"
 version = "0.1.0"
 authors = ["Paul Miller <paul@pauljmiller.com>"]
 license = "MIT"
@@ -8,7 +8,7 @@ exclude = ["artifacts.json", "index.node"]
 edition = "2018"
 
 [lib]
-name = "frag_native"
+name = "fragment_backend"
 crate-type = ["dylib"]
 
 [build-dependencies]
@@ -16,5 +16,5 @@ neon-build = "0.2.0"
 
 [dependencies]
 neon = "0.2.0"
-fragment-search = { path = "fragment-search", version = "0.1" }
+fragment-search = { path = "../../fragment-search", version = "0.1" }
 open = "1.2.2"

@@ -1,16 +1,16 @@
+    
+#[macro_use]
+extern crate neon;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 
-use neon::context::{Context, FunctionContext};
-use neon::object::Object;
-use neon::register_module;
-use neon::result::JsResult;
-use neon::types::{JsArray, JsBoolean, JsObject, JsString};
+use neon::prelude::*;
+
 use open;
 
-use fragment_search::{index, search};
+use fragment_search::{search, ListItem};
 
 //builds were failing on linux so we found this workaround
 //https://users.rust-lang.org/t/neon-electron-undefined-symbol-cxa-pure-virtual/21223/2
@@ -19,22 +19,42 @@ pub extern "C" fn __cxa_pure_virtual() {
   loop {}
 }
 
-fn query(mut cx: FunctionContext) -> JsResult<JsArray> {
-  let query = cx.argument::<JsString>(0)?.value();
+struct BackgroundSearch {
+  argument: String 
+}
 
-  //TODO: fix this unwrap
-  let index_storage_path = "../notes_grep_test/.index_storage";
-  let notes_path = "../notes_grep_test";
-  let (index, how_many_indexed) =
-    index(notes_path, index_storage_path, true).expect("index failed");
-  // println!("indexed {} documents!", how_many_indexed);
-  let vec = search(index, &query).expect("search didn't work");
+impl Task for BackgroundSearch {
+  type Output = Vec<ListItem>;
+  type Error = String;
+  type JsEvent = JsArray;
 
-  // Create the JS array
-  let js_array = JsArray::new(&mut cx, vec.len() as u32);
+  fn perform(&self) -> Result<Vec<ListItem>, String> {
+    let result = "pass";
+
+    if result != "pass" {
+      return Err("Did not pass lol".to_string());
+    }
+    
+    let query = &self.argument;
+    let notes_path = "../notes_grep_test";
+    let vec = search(&query, notes_path).expect("search didn't work");
+
+    Ok(vec)
+  }
+
+  fn complete<'a>(
+    self,
+    mut cx: TaskContext<'a>,
+    result: Result<Vec<ListItem>, String>
+  ) -> JsResult<JsArray> {
+
+    let list = result.unwrap();
+
+      // Create the JS array
+  let js_array = JsArray::new(&mut cx, list.len() as u32);
 
   // Iterate over the rust Vec and map each value in the Vec to the JS array
-  for (i, obj) in vec.iter().enumerate() {
+  for (i, obj) in list.iter().enumerate() {
     let list_item_object = JsObject::new(&mut cx);
     let js_path = cx.string(&obj.path);
     let js_file_name = cx.string(&obj.file_name);
@@ -52,6 +72,53 @@ fn query(mut cx: FunctionContext) -> JsResult<JsArray> {
   }
 
   Ok(js_array)
+  }
+    
+}
+
+fn query_async(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+  let query = cx.argument::<JsString>(0)?.value();
+  let callback = cx.argument::<JsFunction>(1)?;
+
+  println!("{}", query);
+
+  let task = BackgroundSearch { argument: String::from(query) };
+  task.schedule(callback);
+
+  Ok(cx.undefined())
+
+}
+
+fn query(mut cx: FunctionContext) -> JsResult<JsArray> {
+  let query = cx.argument::<JsString>(0)?.value();
+
+  let index_storage_path = "../notes_grep_test/.index_storage";
+  let notes_path = "../notes_grep_test";
+  let list = search(&query, notes_path).expect("search didn't work");
+
+    // Create the JS array
+  let js_array = JsArray::new(&mut cx, list.len() as u32);
+
+  // Iterate over the rust Vec and map each value in the Vec to the JS array
+  for (i, obj) in list.iter().enumerate() {
+    let list_item_object = JsObject::new(&mut cx);
+    let js_path = cx.string(&obj.path);
+    let js_file_name = cx.string(&obj.file_name);
+    let js_first_line = cx.string(&obj.first_line);
+
+    list_item_object.set(&mut cx, "path", js_path).unwrap();
+    list_item_object
+      .set(&mut cx, "file_name", js_file_name)
+      .unwrap();
+    list_item_object
+      .set(&mut cx, "first_line", js_first_line)
+      .unwrap();
+
+    js_array.set(&mut cx, i as u32, list_item_object).unwrap();
+  }
+
+  Ok(js_array)
+
 }
 
 //TODO: for really long notes consider only providing some
@@ -113,5 +180,6 @@ register_module!(mut cx, {
   cx.export_function("query", query)?;
   cx.export_function("open_note", open_note_in_editor)?;
   cx.export_function("create_file", create_file)?;
+  cx.export_function("query_async", query_async)?;
   Ok(())
 });
