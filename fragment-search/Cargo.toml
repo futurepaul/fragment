@@ -6,4 +6,5 @@ edition = "2018"
 
 [dependencies]
 walkdir = "2.2.7"
-tantivy = { git = "https://github.com/tantivy-search/tantivy" }
+grep = "0.2"
+ignore = "0.4"

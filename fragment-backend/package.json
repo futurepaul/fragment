@@ -1,5 +1,5 @@
 {
-  "name": "frag_native",
+  "name": "fragment-backend",
   "version": "0.1.0",
   "description": "",
   "main": "lib/index.js",
