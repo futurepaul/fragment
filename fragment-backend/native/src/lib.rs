@@ -20,7 +20,8 @@ pub extern "C" fn __cxa_pure_virtual() {
 }
 
 struct BackgroundSearch {
-  argument: String 
+  argument: String,
+  path: String,
 }
 
 impl Task for BackgroundSearch {
@@ -36,7 +37,7 @@ impl Task for BackgroundSearch {
     }
     
     let query = &self.argument;
-    let notes_path = "../notes_grep_test";
+    let notes_path = &self.path;
     let vec = search(&query, notes_path).expect("search didn't work");
 
     Ok(vec)
@@ -78,11 +79,12 @@ impl Task for BackgroundSearch {
 
 fn query_async(mut cx: FunctionContext) -> JsResult<JsUndefined> {
   let query = cx.argument::<JsString>(0)?.value();
-  let callback = cx.argument::<JsFunction>(1)?;
+  let notes_path = cx.argument::<JsString>(1)?.value();
+  let callback = cx.argument::<JsFunction>(2)?;
 
   println!("{}", query);
 
-  let task = BackgroundSearch { argument: String::from(query) };
+  let task = BackgroundSearch { argument: String::from(query), path: String::from(notes_path) };
   task.schedule(callback);
 
   Ok(cx.undefined())
@@ -91,10 +93,10 @@ fn query_async(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
 fn query(mut cx: FunctionContext) -> JsResult<JsArray> {
   let query = cx.argument::<JsString>(0)?.value();
+  let notes_path = cx.argument::<JsString>(1)?.value();
 
-  let index_storage_path = "../notes_grep_test/.index_storage";
-  let notes_path = "../notes_grep_test";
-  let list = search(&query, notes_path).expect("search didn't work");
+  // let notes_path = "../notes_grep_test";
+  let list = search(&query, &notes_path).expect("search didn't work");
 
     // Create the JS array
   let js_array = JsArray::new(&mut cx, list.len() as u32);
