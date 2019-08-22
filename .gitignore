@@ -4,3 +4,4 @@ node_modules
 renderer.js
 *.js.map
 notes_grep_test
+notes/
