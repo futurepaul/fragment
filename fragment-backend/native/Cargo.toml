@@ -15,6 +15,6 @@ crate-type = ["dylib"]
 neon-build = "0.2.0"
 
 [dependencies]
-neon = "0.2.0"
+neon = "0.10.1"
 fragment-search = { path = "../../fragment-search", version = "0.1" }
 open = "1.2.2"
