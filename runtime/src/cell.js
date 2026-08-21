@@ -353,7 +353,7 @@ export class FragmentCell {
       const newRev = parseInt(this.getMeta("rev") || "0", 10) + 1;
       this.setMeta("rev", String(newRev));
       this.sql.exec("INSERT INTO files (path, content, rev, sha256, updated_at, deleted) VALUES (?, X'', ?, ?, ?, 1) ON CONFLICT(path) DO UPDATE SET content = X'', rev = excluded.rev, sha256 = NULL, updated_at = excluded.updated_at, deleted = 1",
-        path, newRev, Date.now());
+        path, newRev, null, Date.now());
       await this.scheduleSyncTrigger(path);
       return json({ ok: true, rev: newRev });
     }
