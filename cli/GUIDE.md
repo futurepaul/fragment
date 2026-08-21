@@ -97,13 +97,21 @@ replaces it. Shape:
 ```
 
 - **visibility**: `public` (anyone), `token` (anyone with the `?view=<token>`
-  link — the default, good for "send a human a link"), `viewers` (listed npubs
+  link — the default, good for "send a human a link"; a valid token also
+  mints a scoped cookie so subresources load), `viewers` (listed npubs
   only — agents authenticate; browsers can't).
 - **workflows**: `cron` is 5-field UTC (`*` lists ranges steps, month/day
   names OK; day-of-week 1=Sunday..7=Saturday, 0 is refused). `trigger:
-  "inbox"` runs when a message lands. Neither = manual only
-  (`fragment run`). The fragment sleeps between runs; the host's durable
-  alarms fire crons — they survive restarts and sleep.
+  "inbox"` runs when a message lands; `trigger: "sync"` runs when files
+  change on the editor plane (sync pushes, CLI writes — coalesced a few
+  seconds; workflow writes never re-trigger, so outputs are loop-safe).
+  Neither = manual only (`fragment run`). The fragment sleeps between
+  runs; the host's durable alarms fire crons — they survive restarts and
+  sleep.
+- **liveFiles**: `true` makes a served `app.mjs` read the live working copy
+  instead of its draft snapshot. Code stays frozen in whatever draft you
+  blessed; only the data it reads flows live. This is what makes a folder
+  a live vault (see Recipes).
 - **secrets**: declare names here, set values with `fragment secret set`.
 
 Grants: `fragment grant my-thing --editor npub1… --viewer npub1…`
@@ -178,7 +186,9 @@ Dynamic: if the folder has `app.mjs`, every request to the fragment goes to it:
 // app.mjs
 export default {
   async fetch(req, ctx) {
-    // same ctx as workflows (files are read-only here: the draft snapshot)
+    // same ctx as workflows (files are read-only here; normally the draft
+    // snapshot — set "liveFiles": true in the manifest to read the live
+    // working copy instead)
     return new Response("hello " + new URL(req.url).pathname);
   },
 };
@@ -240,6 +250,44 @@ Debugging: if `rooms.mjs` throws or returns `{error}`, the event log shows
 `room-error`; a drop shows `room-drop` (with `reason` if given). Read
 `fragment events <name>` when realtime misbehaves.
 
+## Recipes
+
+Two scaffolds ship in the CLI (`fragment new --list`): they are ordinary
+fragments — code you can read, edit, and re-bless — not special modes.
+
+**Vault** — turn any folder of text files into a live, URL-bearing,
+Obsidian-like site:
+
+```
+fragment new my-vault --template vault
+cd my-vault
+fragment create my-vault
+fragment manifest-set my-vault fragment.json
+fragment publish my-vault --dir . --bless
+fragment sync my-vault --dir . --watch 2     # leave running; edits go live
+```
+
+The viewer (`app.mjs` + `assets/`) is frozen in the blessed draft; the notes
+flow through the working copy (`liveFiles: true`), so a synced edit appears
+on reload without republishing. `[[wikilinks]]` resolve by filename; code
+files render with syntax highlighting; `_index.md`/`README.md` are folder
+landings.
+
+**Dropzone** — drop a file in a folder, get live workflow output on the
+webview (and back in your folder):
+
+```
+fragment new my-drop --template dropzone
+cd my-drop            # same create/manifest-set/publish --bless as above
+fragment sync my-drop --dir . --watch 2
+echo "hi" > drop/note.txt        # → output/note-*.md within seconds
+```
+
+Arrivals under `drop/` fire the `ingest` workflow (`trigger: "sync"`); it
+summarizes with `ctx.ai` when the host has an inference key, else writes a
+plain digest. Outputs land in `output/`, visible on the webview and pulled
+back into your folder by the next sync.
+
 ## Rules of the road
 
 1. **The event log is truth.** Before and after claiming anything about a
@@ -259,16 +307,17 @@ Debugging: if `rooms.mjs` throws or returns `{error}`, the event log shows
 ```
 fragment login [--force]            fragment secret set <name> <KEY>
 fragment whoami                     fragment secret list <name>
-fragment create <name>              fragment secret rm <name> <KEY>
-fragment list                       fragment grant <name> --editor/--viewer <npub>
-fragment status <name>              fragment revoke <name> --editor/--viewer <npub>
-fragment events <name> [--since N]  fragment inbox <name> --token T --payload JSON
-fragment manifest <name>            fragment open <name>
-fragment manifest-set <name> FILE   fragment guide
+fragment host [<url>]               fragment secret rm <name> <KEY>
+fragment new <dir> [--template T]   fragment grant <name> --editor/--viewer <npub|name@dom>
+fragment create <name>              fragment revoke <name> --editor/--viewer <npub|name@dom>
+fragment list                       fragment inbox <name> --token T --payload JSON
+fragment status <name>              fragment run <name> <wf> [--input JSON]
+fragment events <name> [--since N]  fragment open <name>
+fragment manifest <name>            fragment guide
+fragment manifest-set <name> FILE
 fragment sync <name> [--dir D] [--watch N]
-fragment publish <name> [--dir D] [--note N]
+fragment publish <name> [--dir D] [--note N] [--bless]
 fragment drafts <name>              fragment bless <name> <slug>
-fragment run <name> <workflow> [--input JSON]
 ```
 
 Global flags: `--host <url>` (or `FRAGMENT_HOST`), `--json`. Set a sticky

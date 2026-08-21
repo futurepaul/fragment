@@ -50,12 +50,13 @@ visibility=viewers).
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor+ | → `{ok}` |
 | `GET /api/f/{name}/events?since={id}` | viewer+ | → `{events:[{id, at, kind, summary, data?}]}` |
 | `POST /api/f/{name}/inbox?t={inboxToken}` | token only | `{source?, payload}` → `{ok, id}`; enqueues + runs `trigger:"inbox"` workflows |
+| `PUT /api/f/{name}/file?path=&base_rev=` | editor+ | raw body; stale `base_rev` → 409. Successful writes schedule `trigger:"sync"` workflows (coalesced; workflow-plane writes don't) |
 
 ## Serving (no NIP-98)
 
 | path | behavior |
 | --- | --- |
-| `GET /f/{name}/...` | blessed draft of `{name}`. If draft contains `app.mjs`, requests go to its `fetch(req, ctx)`; else static files from `site/` (index.html default, 404 otherwise). |
+| `GET /f/{name}/...` | blessed draft of `{name}`. If draft contains `app.mjs`, requests go to its `fetch(req, ctx)`; else static files from `site/` (index.html default, 404 otherwise). Manifest `"liveFiles": true` switches the app's `ctx.files` reads from the draft snapshot to the live working copy (code frozen, data live). Token visibility: a valid `?view=` mints a `fragview_{name}` cookie so subresources (module imports, css, images) pass the gate. |
 | `GET /d/{slug}/...` | same, for one draft snapshot. |
 | `GET /f/{name}/__rt.js` | browser client for rooms (see below). |
 | `WS  /f/{name}/__room/{room}` (also `/d/{slug}/__room/{room}`) | realtime room. |

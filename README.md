@@ -10,6 +10,22 @@ wrapped around exactly one problem. This repo holds two things:
   their state in a bucket you own. Every fragment is one cell with its own
   SQLite; cells sleep when idle and cost nothing asleep.
 
+## Vaults and dropzones (recipes, not modes)
+
+`fragment new --template` scaffolds two compositions from ordinary parts:
+
+- **vault** — any folder of text files becomes a live, URL-bearing,
+  Obsidian-like site: file tree, `[[wikilinks]]`, syntax-highlighted code
+  (via [@pierre/diffs](https://diffs.com)), a recent rail. The viewer is
+  code (frozen in the blessed draft); notes are data (live via
+  `"liveFiles": true` — synced edits appear on reload, no republish).
+- **dropzone** — the vault plus a `drop/` folder and an `ingest` workflow
+  (`trigger: "sync"`): drop a file, watch `output/` appear on the webview
+  and sync back into your folder seconds later.
+
+Both are just folders — read the scaffolded code, edit it, re-bless. See
+the Recipes section of `fragment guide`.
+
 Read [ARCHITECTURE.md](ARCHITECTURE.md) for the design and
 [docs/api.md](docs/api.md) for the wire contract. MIT licensed — see
 [LICENSE](LICENSE).
