@@ -27,8 +27,8 @@ fragment guide                        # the full manual — start here
 Or build from source (Rust 1.75+):
 
 ```
-git clone https://github.com/futurepaul/fragment-rs
-cd fragment-rs/cli && cargo install --path .
+git clone https://github.com/futurepaul/fragment
+cd cli && cargo install --path .
 ```
 
 ## Quickstart (local, no cloud account, no docker)

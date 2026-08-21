@@ -2,9 +2,9 @@
 
 A fragment is a folder of files, a SQLite database, some URLs, and an inbox —
 wrapped around exactly one problem. This repo is the second implementation of
-the idea (the first, a Cloudflare prototype, lives at `../fragment`). This one
-is built on [celld](https://celld.dev): self-hosted Durable Objects that keep
-their state in a bucket you own.
+the idea (the first was a throwaway Cloudflare prototype, never published).
+This one is built on [celld](https://celld.dev): self-hosted Durable Objects
+that keep their state in a bucket you own.
 
 There is no agent inside a fragment. A fragment is a *place*: agents and
 people use the `fragment` CLI to put files, code, workflows, and permissions
