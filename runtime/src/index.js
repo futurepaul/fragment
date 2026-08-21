@@ -17,6 +17,20 @@ function stripAuth(headers) {
 
 export default {
   async fetch(request, env) {
+    // Behind an ingress (Caddy in production) rebuild request.url from the
+    // forwarded headers so NIP-98 u-tags and generated URLs carry the public
+    // origin, not the loopback listener. celld's listener only accepts
+    // Caddy's traffic, so these headers can't arrive spoofed from outside.
+    const xfProto = request.headers.get("x-forwarded-proto");
+    const xfHost = request.headers.get("x-forwarded-host");
+    if (xfProto || xfHost) {
+      const orig = new URL(request.url);
+      const proto = (xfProto || orig.protocol.replace(":", "")).split(",")[0].trim();
+      const host = (xfHost || request.headers.get("host") || orig.host).split(",")[0].trim();
+      if (`${proto}://${host}` !== orig.origin) {
+        request = new Request(`${proto}://${host}${orig.pathname}${orig.search}`, request);
+      }
+    }
     const url = new URL(request.url);
     const path = url.pathname;
     const registry = () => env.FRAGMENT.getByName("_registry");
