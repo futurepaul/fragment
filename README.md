@@ -13,6 +13,24 @@ wrapped around exactly one problem. This repo holds two things:
 Read [ARCHITECTURE.md](ARCHITECTURE.md) for the design and
 [docs/api.md](docs/api.md) for the wire contract.
 
+## Install
+
+Grab a prebuilt binary from the [releases page](../../releases)
+(macOS arm64, Linux x86_64), put it on your `PATH`, then:
+
+```
+fragment host https://fragment.club   # point at a host (once)
+fragment login                        # generate your nostr keypair (once)
+fragment guide                        # the full manual — start here
+```
+
+Or build from source (Rust 1.75+):
+
+```
+git clone https://github.com/futurepaul/fragment-rs
+cd fragment-rs/cli && cargo install --path .
+```
+
 ## Quickstart (local, no cloud account, no docker)
 
 ```
