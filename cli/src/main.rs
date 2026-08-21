@@ -81,8 +81,9 @@ enum Cmd {
         sub: SecretCmd,
     },
     /// Grant a role to an npub
+    /// Grant a role to an npub or NIP-05 name (name@domain)
     Grant { name: String, #[arg(long)] editor: Vec<String>, #[arg(long)] viewer: Vec<String> },
-    /// Revoke a role from an npub
+    /// Revoke a role from an npub or NIP-05 name
     Revoke { name: String, #[arg(long)] editor: Vec<String>, #[arg(long)] viewer: Vec<String> },
     /// Post to a fragment's inbox (webhook-style, token auth)
     Inbox {
@@ -389,6 +390,9 @@ fn edit_roles(c: &api::Client, name: &str, editors: Vec<String>, viewers: Vec<St
                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
                 .collect();
             for npub in list {
+                // npubs or NIP-05 names (name@domain); resolved to canonical
+                // npubs via the well-known path before touching the manifest.
+                let npub = auth::resolve_npub(&npub)?;
                 if add {
                     if !cur.contains(&npub) {
                         cur.push(npub);

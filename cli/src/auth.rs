@@ -1,7 +1,8 @@
 // Nostr keys and NIP-98 HTTP auth (kind 27235), matching runtime/src/auth.js.
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use secp256k1::{Keypair, Message, Secp256k1, XOnlyPublicKey};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub struct Identity {
@@ -93,6 +94,53 @@ pub fn npub_decode(npub: &str) -> Result<String> {
     }
     let bytes = Vec::<u8>::from_base32(&data).context("bad npub data")?;
     Ok(hex::encode(bytes))
+}
+
+/// Resolve an identifier to its canonical npub form.
+///
+/// Plain npubs are validated and canonicalised. NIP-05 names (`local@domain`)
+/// resolve via the standard well-known path
+/// `https://<domain>/.well-known/nostr.json?name=<local>` — the same lookup
+/// the other finite CLIs (fbrain, fsite) use — so finite identities like
+/// `paul@finite.vip` work anywhere an npub does.
+pub fn resolve_npub(input: &str) -> Result<String> {
+    let s = input.trim();
+    if s.contains('@') {
+        let (local, domain) = s
+            .split_once('@')
+            .ok_or_else(|| anyhow!("'{s}' is not a valid NIP-05 name"))?;
+        if local.is_empty() || domain.is_empty() || domain.contains('@') {
+            bail!("'{s}' is not a valid NIP-05 name");
+        }
+        let url = format!("https://{domain}/.well-known/nostr.json?name={local}");
+        let http = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none()) // NIP-05 forbids redirects
+            .timeout(std::time::Duration::from_secs(10))
+            .build()?;
+        let resp = http
+            .get(&url)
+            .send()
+            .with_context(|| format!("NIP-05 lookup failed for '{s}'"))?;
+        if !resp.status().is_success() {
+            bail!("NIP-05 lookup for '{s}' returned HTTP {}", resp.status());
+        }
+        let body = resp
+            .text()
+            .with_context(|| format!("NIP-05 lookup for '{s}' failed"))?;
+        let doc: Value = serde_json::from_str(&body)
+            .with_context(|| format!("NIP-05 document at {domain} is not valid JSON"))?;
+        let published = doc["names"][local]
+            .as_str()
+            .ok_or_else(|| anyhow!("no npub published for '{s}'"))?;
+        let hex = if published.starts_with("npub1") {
+            npub_decode(published)?
+        } else {
+            published.to_ascii_lowercase()
+        };
+        return npub_encode(&hex).with_context(|| format!("'{s}' published an invalid pubkey"));
+    }
+    let hex = npub_decode(s)?;
+    npub_encode(&hex)
 }
 
 #[cfg(test)]

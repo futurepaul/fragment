@@ -107,8 +107,11 @@ replaces it. Shape:
 - **secrets**: declare names here, set values with `fragment secret set`.
 
 Grants: `fragment grant my-thing --editor npub1… --viewer npub1…`
-(revoke with `fragment revoke …`). Editors can do everything except transfer
-ownership; viewers can read files/events/manifest and view restricted sites.
+(revoke with `fragment revoke …`). Identifiers may also be NIP-05 names
+(`name@domain`) — resolved via the domain's `/.well-known/nostr.json`, the
+same lookup the other finite CLIs use. Editors can do everything except
+transfer ownership; viewers can read files/events/manifest and view
+restricted sites.
 
 ## Workflows
 
