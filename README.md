@@ -11,7 +11,8 @@ wrapped around exactly one problem. This repo holds two things:
   SQLite; cells sleep when idle and cost nothing asleep.
 
 Read [ARCHITECTURE.md](ARCHITECTURE.md) for the design and
-[docs/api.md](docs/api.md) for the wire contract.
+[docs/api.md](docs/api.md) for the wire contract. MIT licensed — see
+[LICENSE](LICENSE).
 
 ## Install
 
