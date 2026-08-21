@@ -12,7 +12,17 @@ export async function makeCtx(env) {
     if (!r.ok) throw new Error("fragment ctx " + path + " -> " + r.status + ": " + (await r.text()));
     return r;
   };
-  const secretsAll = await call("/secrets/all").then((r) => r.json()).catch(() => ({}));
+  // Secrets: workflow runs (scope "run") need them synchronously, so they
+  // await the fetch. Served apps (scope "draft") almost never touch secrets,
+  // and every request through the app used to pay a loopback for them — so
+  // for draft scope the fetch runs in the background and fills the object
+  // in when it lands.
+  const secretsAll = {};
+  if (scope === "run") {
+    Object.assign(secretsAll, await call("/secrets/all").then((r) => r.json()).catch(() => ({})));
+  } else {
+    call("/secrets/all").then((r) => r.json()).then((s) => Object.assign(secretsAll, s)).catch(() => {});
+  }
   const ctx = {
     http: (url, init) => fetch(url, init),
     files: {

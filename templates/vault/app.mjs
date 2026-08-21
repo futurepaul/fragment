@@ -31,6 +31,18 @@ const junk = (p) =>
 const resp = (body, type, cache) =>
   new Response(body, { headers: { "content-type": type, "cache-control": cache || "no-store" } });
 
+// content-hash ETags: the browser already knows the hash from api/tree, so
+// revisits validate with If-None-Match and get empty 304s
+const etagOf = async (data) => {
+  const buf = typeof data === "string" ? new TextEncoder().encode(data) : new Uint8Array(data);
+  const h = await crypto.subtle.digest("SHA-256", buf);
+  return '"' + [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, "0")).join("") + '"';
+};
+const maybe304 = (req, etag, cache) =>
+  req.headers.get("if-none-match") === etag
+    ? new Response(null, { status: 304, headers: { etag, "cache-control": cache } })
+    : null;
+
 const SHELL = `<!doctype html>
 <html lang="en">
 <head>
@@ -59,20 +71,26 @@ export default {
 
     if (path === "api/tree") {
       const files = await ctx.files.index();
-      return resp(JSON.stringify({ files: files.filter((f) => !junk(f.path)) }), "application/json");
+      const body = JSON.stringify({ files: files.filter((f) => !junk(f.path)) });
+      const cache = "private, max-age=15";
+      const etag = await etagOf(body);
+      return maybe304(req, etag, cache) || new Response(body, { headers: { "content-type": "application/json", "cache-control": cache, etag } });
     }
 
     if (path === "api/file") {
       const p = url.searchParams.get("path") || "";
       if (!p || p.includes("..") || p.startsWith("/")) return new Response('{"error":"bad path"}', { status: 400 });
       const ext = (p.match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase() || "";
+      const cache = "private, max-age=60";
       try {
         if (["png", "jpg", "jpeg", "gif", "webp", "ico", "pdf", "woff2", "woff"].includes(ext)) {
           const b = await ctx.files.readBytes(p);
-          return resp(b, MIME[ext] || "application/octet-stream");
+          const etag = await etagOf(b);
+          return maybe304(req, etag, cache) || new Response(b, { headers: { "content-type": MIME[ext] || "application/octet-stream", "cache-control": cache, etag } });
         }
         const t = await ctx.files.read(p);
-        return resp(t, MIME[ext] || "text/plain; charset=utf-8");
+        const etag = await etagOf(t);
+        return maybe304(req, etag, cache) || new Response(t, { headers: { "content-type": MIME[ext] || "text/plain; charset=utf-8", "cache-control": cache, etag } });
       } catch {
         return new Response(JSON.stringify({ error: "no such file" }), { status: 404 });
       }

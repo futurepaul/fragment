@@ -232,6 +232,19 @@ function route() {
   open(decodeURIComponent(location.hash.replace(/^#\/?/, "")));
 }
 
+// hover prefetch: warm the HTTP cache before the click lands (responses
+// carry cache-control, so the later navigation is instant)
+const prefetched = new Set();
+document.addEventListener("pointerover", (e) => {
+  const a = e.target.closest && e.target.closest('a[href^="#/"]');
+  if (!a) return;
+  const p = decodeURIComponent(a.getAttribute("href").slice(2));
+  if (p && !prefetched.has(p)) {
+    prefetched.add(p);
+    fetch(withView("api/file?path=" + encodeURIComponent(p))).catch(() => {});
+  }
+}, { passive: true });
+
 async function boot() {
   try {
     const r = await fetch(withView("api/tree"));

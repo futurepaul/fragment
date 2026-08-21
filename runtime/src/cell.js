@@ -388,6 +388,15 @@ export class FragmentCell {
       this.sql.exec("UPDATE drafts SET blessed = 0");
       this.sql.exec("UPDATE drafts SET blessed = 1 WHERE slug = ?", slug);
       this.setMeta("blessed", slug);
+      // a new blessing supersedes the old canonical app's token
+      for (const r of this.sql.exec("SELECT token, scope FROM run_tokens").toArray()) {
+        try {
+          const s = JSON.parse(r.scope);
+          if (s.kind === "draft" && s.blessed && s.slug !== slug) {
+            this.sql.exec("DELETE FROM run_tokens WHERE token = ?", r.token);
+          }
+        } catch {}
+      }
       this.addEvent("bless", `blessed ${slug}`);
       return json({ ok: true, url: `/f/${m.name}/` });
     }
@@ -546,14 +555,32 @@ export class FragmentCell {
   // ---------- workflow execution (Worker Loader) ----------
   makeToken(scope) {
     const token = randHex(16);
-    this.sql.exec("INSERT INTO run_tokens (token, scope, expires) VALUES (?, ?, ?)", token, JSON.stringify(scope), Date.now() + 3600_000);
+    // token lifetime = the lifetime of the thing it authenticates:
+    // workflow runs are short (1h is a safety net for wedged runs), draft
+    // previews are rehearsals (1h), a blessed app lives until superseded
+    // (null expiry; revoked at rebless, swept on restart re-mint).
+    const ttl = scope.kind === "run" || scope.kind === "draft" ? (scope.blessed ? null : 3600_000) : 3600_000;
+    this.sql.exec("DELETE FROM run_tokens WHERE expires < ?", Date.now() - 24 * 3600_000);
+    if (scope.kind === "draft") {
+      // one live token per (slug, blessed-ness): re-mints sweep their predecessor
+      for (const r of this.sql.exec("SELECT token, scope FROM run_tokens").toArray()) {
+        try {
+          const s = JSON.parse(r.scope);
+          if (s.kind === "draft" && s.slug === scope.slug && !!s.blessed === !!scope.blessed) {
+            this.sql.exec("DELETE FROM run_tokens WHERE token = ?", r.token);
+          }
+        } catch {}
+      }
+    }
+    this.sql.exec("INSERT INTO run_tokens (token, scope, expires) VALUES (?, ?, ?)", token, JSON.stringify(scope), ttl);
     return token;
   }
 
   checkToken(request, url) {
     const token = request.headers.get("x-fragment-token") || url.searchParams.get("t") || "";
     const row = this.sql.exec("SELECT scope, expires FROM run_tokens WHERE token = ?", token).toArray()[0];
-    if (!row || row.expires < Date.now()) return null;
+    if (!row) return null;
+    if (row.expires !== null && row.expires !== undefined && row.expires < Date.now()) return null;
     return JSON.parse(row.scope);
   }
 
@@ -563,22 +590,26 @@ export class FragmentCell {
   }
 
   async loadCode(id, mainSource, modules, scope) {
-    const token = this.makeToken(scope);
-    const raw = { "main.mjs": mainSource, "fragment-ctx.mjs": CTX_SHIM_SOURCE, ...modules };
+    // raw = { "main.mjs": mainSource, "fragment-ctx.mjs": CTX_SHIM_SOURCE, ...modules };
     // Host divergence: celld's loader wants plain-string modules (and accepts
     // .mjs names); CF's loader requires .js/.py names for strings, so on CF
     // we wrap every module as {js: source} to keep our .mjs names legal.
     const wrapped = {};
-    for (const [k, v] of Object.entries(raw)) {
+    for (const [k, v] of Object.entries({ "main.mjs": mainSource, "fragment-ctx.mjs": CTX_SHIM_SOURCE, ...modules })) {
       wrapped[k] = this.env.FRAGMENT_HOST_KIND === "cf" ? { js: v } : v;
     }
+    // the token is minted ONLY when the worker is actually created: the
+    // loader caches workers by id, and a cached worker keeps whatever token
+    // its env was born with. Minting per-request (as this used to) orphaned
+    // the live worker's token — every ctx call 403'd once the original
+    // expired (or was swept).
     const worker = await this.env.LOADER.get(id, async () => ({
       compatibilityDate: "2026-01-01",
       mainModule: "main.mjs",
       modules: wrapped,
       env: {
         FRAGMENT_INTERNAL_URL: this.internalBase(),
-        FRAGMENT_RUN_TOKEN: token,
+        FRAGMENT_RUN_TOKEN: this.makeToken(scope),
         FRAGMENT_SCOPE: scope.kind,
       },
     }));
@@ -776,7 +807,7 @@ export class FragmentCell {
       const libRows = this.sql.exec("SELECT path, content FROM draft_files WHERE slug = ? AND path LIKE 'applib/%'", slug).toArray();
       for (const r of libRows) modules[r.path] = new TextDecoder().decode(toAB(r.content));
       modules["app.mjs"] = new TextDecoder().decode(toAB(appRow.content));
-      const ep = await this.loadCode(`app:${slug}`, APP_MAIN, modules, { kind: "draft", slug });
+      const ep = await this.loadCode(`app:${slug}`, APP_MAIN, modules, { kind: "draft", slug, blessed: mode === "b" });
       const appUrl = new URL(request.url);
       return stamp(await ep.fetch(new Request(appUrl.origin + "/" + rest + appUrl.search, request)));
     }
