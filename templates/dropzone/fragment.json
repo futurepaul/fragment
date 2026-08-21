@@ -1,0 +1,11 @@
+{
+  "name": "CHANGE-ME",
+  "visibility": "token",
+  "liveFiles": true,
+  "editors": [],
+  "viewers": [],
+  "workflows": [
+    { "name": "ingest", "file": "workflows/ingest.mjs", "trigger": "sync" }
+  ],
+  "secrets": []
+}

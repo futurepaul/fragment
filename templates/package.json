@@ -1,0 +1,13 @@
+{
+  "name": "fragment-templates",
+  "private": true,
+  "type": "module",
+  "description": "build deps for template bundles (assets/ are committed)",
+  "dependencies": {
+    "@pierre/diffs": "1.2.2",
+    "marked": "^18.0.4"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

@@ -343,6 +343,7 @@ export class FragmentCell {
       const sha = await sha256Hex(body);
       this.sql.exec("INSERT INTO files (path, content, rev, sha256, updated_at, deleted) VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT(path) DO UPDATE SET content = excluded.content, rev = excluded.rev, sha256 = excluded.sha256, updated_at = excluded.updated_at, deleted = 0",
         path, body, newRev, sha, Date.now());
+      await this.scheduleSyncTrigger(path);
       return json({ path, rev: newRev });
     }
 
@@ -353,6 +354,7 @@ export class FragmentCell {
       this.setMeta("rev", String(newRev));
       this.sql.exec("INSERT INTO files (path, content, rev, sha256, updated_at, deleted) VALUES (?, X'', ?, ?, ?, 1) ON CONFLICT(path) DO UPDATE SET content = X'', rev = excluded.rev, sha256 = NULL, updated_at = excluded.updated_at, deleted = 1",
         path, newRev, Date.now());
+      await this.scheduleSyncTrigger(path);
       return json({ ok: true, rev: newRev });
     }
 
@@ -451,7 +453,7 @@ export class FragmentCell {
       if (!wf.name || !wf.file) return "each workflow needs name + file";
       // neither cron nor trigger = manual-only workflow (fragment run)
       if (wf.cron) { try { parseCron(wf.cron); } catch (e) { return `workflow ${wf.name}: ${e.message}`; } }
-      if (wf.trigger && wf.trigger !== "inbox") return `workflow ${wf.name}: unknown trigger ${wf.trigger}`;
+      if (wf.trigger && wf.trigger !== "inbox" && wf.trigger !== "sync") return `workflow ${wf.name}: unknown trigger ${wf.trigger}`;
     }
     if (!Array.isArray(m.secrets)) return "secrets must be an array of names";
     return null;
@@ -479,6 +481,9 @@ export class FragmentCell {
         if (t !== null && (next === null || t < next)) next = t;
       } catch {}
     }
+    // the pending sync trigger (if any) competes with cron for the one alarm
+    const syncAt = parseInt(this.getMeta("sync_trigger_at") || "0", 10);
+    if (syncAt && (next === null || syncAt < next)) next = syncAt;
     if (next !== null) await this.state.storage.setAlarm(next);
     else await this.state.storage.deleteAlarm();
   }
@@ -486,6 +491,7 @@ export class FragmentCell {
   async alarm() {
     const m = this.manifest();
     if (!m) return;
+    await this.fireSyncTriggers(m);
     const cronState = JSON.parse(this.getMeta("cron_state") || "{}");
     const now = Date.now();
     for (const wf of m.workflows || []) {
@@ -507,6 +513,34 @@ export class FragmentCell {
       }
     }
     await this.rearmAlarm();
+  }
+
+  // A file changed on the editor plane (sync push, CLI write). Coalesces a
+  // burst of writes into one trigger run a few seconds out, using the same
+  // single alarm slot cron uses. Workflow-plane writes (run scope) do NOT
+  // schedule triggers — an ingest workflow's output must not re-trigger it.
+  async scheduleSyncTrigger(path) {
+    const m = this.manifest();
+    if (!m || !(m.workflows || []).some((wf) => wf.trigger === "sync")) return;
+    const dirty = new Set(JSON.parse(this.getMeta("sync_dirty_paths") || "[]"));
+    dirty.add(path);
+    this.setMeta("sync_dirty_paths", JSON.stringify([...dirty].slice(-500)));
+    if (!parseInt(this.getMeta("sync_trigger_at") || "0", 10)) {
+      this.setMeta("sync_trigger_at", String(Date.now() + 4000));
+      await this.rearmAlarm();
+    }
+  }
+
+  async fireSyncTriggers(m) {
+    const at = parseInt(this.getMeta("sync_trigger_at") || "0", 10);
+    if (!at) return;
+    this.setMeta("sync_trigger_at", "");
+    const paths = JSON.parse(this.getMeta("sync_dirty_paths") || "[]");
+    this.setMeta("sync_dirty_paths", "[]");
+    for (const wf of m.workflows || []) {
+      if (wf.trigger !== "sync") continue;
+      await this.runWorkflow(wf, { sync: { paths, at } });
+    }
   }
 
   // ---------- workflow execution (Worker Loader) ----------
@@ -572,7 +606,8 @@ export class FragmentCell {
         modules,
         { kind: "run", workflow: wf.name },
       );
-      const resp = await ep.fetch("http://loaded/run", { method: "POST", body: JSON.stringify({ input: input ?? null }) });
+      // body IS the workflow input (WORKFLOW_MAIN passes req.json() to run)
+      const resp = await ep.fetch("http://loaded/run", { method: "POST", body: JSON.stringify(input ?? null) });
       const out = await resp.json();
       if (out.ok) this.addEvent("workflow-ok", `${wf.name}`, out.output !== null && out.output !== undefined ? { output: out.output } : undefined);
       else this.addEvent("workflow-error", `${wf.name}: ${out.error}`);
@@ -603,7 +638,9 @@ export class FragmentCell {
 
     if (rest === "files/read") {
       const path = url.searchParams.get("path") || "";
-      if (isRun) {
+      // run scope, or a served app on a liveFiles fragment, reads the working
+      // copy: code stays frozen in the blessed draft, data flows live.
+      if (isRun || this.manifest()?.liveFiles === true) {
         const row = this.getFileRow(path);
         if (!row) return json({ error: "no such file" }, 404);
         return new Response(toAB(row.content));
@@ -629,10 +666,14 @@ export class FragmentCell {
 
     if (rest === "files/list") {
       const prefix = url.searchParams.get("prefix") || "";
-      let rows;
-      if (isRun) rows = this.sql.exec("SELECT path FROM files WHERE path LIKE ? AND deleted = 0 ORDER BY path", prefix + "%").toArray();
-      else rows = this.sql.exec("SELECT path FROM draft_files WHERE slug = ? AND path LIKE ? ORDER BY path", scope.slug, prefix + "%").toArray();
-      return json({ paths: rows.map((r) => r.path) });
+      const live = isRun || this.manifest()?.liveFiles === true;
+      const rows = live
+        ? this.sql.exec("SELECT path, length(content) AS size, updated_at, rev FROM files WHERE path LIKE ? AND deleted = 0 ORDER BY path", prefix + "%").toArray()
+        : this.sql.exec("SELECT path, length(content) AS size, 0 AS updated_at, 0 AS rev FROM draft_files WHERE slug = ? AND path LIKE ? ORDER BY path", scope.slug, prefix + "%").toArray();
+      return json({
+        paths: rows.map((r) => r.path),
+        files: rows.map((r) => ({ path: r.path, size: r.size, updatedAt: r.updated_at || null, rev: r.rev || 0 })),
+      });
     }
 
     if (rest === "inbox/pending") {
@@ -707,15 +748,23 @@ export class FragmentCell {
     const parts = url.pathname.slice("/__serve/".length).split("/");
     const mode = parts.shift();
     let slug;
+    let setCookie = null;
     if (mode === "b") {
       const m = this.manifest();
       slug = this.getMeta("blessed");
       if (!slug) return new Response(`fragment "${m?.name}" has no blessed draft yet — publish and bless one first.\n`, { status: 404 });
       const vis = this.checkVisibility(request, url);
       if (!vis.ok) return new Response(vis.error + "\n", { status: vis.status });
+      setCookie = vis.setCookie;
     } else {
       slug = parts.shift(); // drafts are unguessable-slug public
     }
+    const stamp = (r) => {
+      if (!setCookie) return r;
+      const h = new Headers(r.headers);
+      h.append("set-cookie", setCookie);
+      return new Response(r.body, { status: r.status, headers: h });
+    };
     const rest = parts.join("/");
     const draft = this.sql.exec("SELECT slug FROM drafts WHERE slug = ?", slug).toArray()[0];
     if (!draft) return new Response("no such draft\n", { status: 404 });
@@ -729,24 +778,38 @@ export class FragmentCell {
       modules["app.mjs"] = new TextDecoder().decode(toAB(appRow.content));
       const ep = await this.loadCode(`app:${slug}`, APP_MAIN, modules, { kind: "draft", slug });
       const appUrl = new URL(request.url);
-      return ep.fetch(new Request(appUrl.origin + "/" + rest + appUrl.search, request));
+      return stamp(await ep.fetch(new Request(appUrl.origin + "/" + rest + appUrl.search, request)));
     }
 
     // static from site/
     let rel = rest === "" ? "index.html" : rest;
     let row = this.sql.exec("SELECT content FROM draft_files WHERE slug = ? AND path = ?", slug, "site/" + rel).toArray()[0];
     if (!row && !rel.endsWith("/")) row = this.sql.exec("SELECT content FROM draft_files WHERE slug = ? AND path = ?", slug, "site/" + rel + "/index.html").toArray()[0];
-    if (!row) return new Response("not found\n", { status: 404 });
+    if (!row) return new Response("not found", { status: 404 });
     const ext = (rel.match(/\.([a-z0-9]+)$/) || [])[1] || "";
     const cache = mode === "b" ? "no-store" : "public, max-age=3600, immutable";
-    return new Response(toAB(row.content), { headers: { "content-type": MIME[ext] || "application/octet-stream", "cache-control": cache } });
+    return stamp(new Response(toAB(row.content), { headers: { "content-type": MIME[ext] || "application/octet-stream", "cache-control": cache } }));
   }
 
   checkVisibility(request, url) {
     const m = this.manifest();
     if (m.visibility === "public") return { ok: true };
+    // a valid ?view= upgrade: browsers don't attach query strings to
+    // subresource fetches (module imports, css, img), so mint a scoped
+    // cookie on the first token hit and accept it thereafter.
+    const token = this.getMeta("view_token");
+    const ck = `fragview_${m.name}`;
+    const cookies = Object.fromEntries(
+      (request.headers.get("cookie") || "").split(";").map((c) => c.split("=").map((s) => s.trim())).filter((p) => p.length === 2)
+    );
+    const viaUrl = url.searchParams.get("view") === token;
+    const viaCookie = cookies[ck] === token;
+    const okToken = viaUrl || viaCookie;
+    const setCookie = viaUrl
+      ? `${ck}=${token}; Path=/; Max-Age=604800; HttpOnly; SameSite=Lax`
+      : null;
     if (m.visibility === "token") {
-      if (url.searchParams.get("view") === this.getMeta("view_token")) return { ok: true };
+      if (okToken) return { ok: true, setCookie };
       const role = this.roleOf(request.headers.get("x-fragment-pubkey"));
       if (FragmentCell.rank(role) >= 1) return { ok: true };
       return { ok: false, status: 403, error: "this fragment needs its ?view= link token" };

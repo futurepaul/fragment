@@ -1,0 +1,95 @@
+/* fragment vault viewer — minimal, two panes, system fonts, auto dark/light */
+:root {
+  --bg: #ffffff; --bg2: #f6f6f7; --fg: #1c1c1e; --fg2: #6e6e73;
+  --line: #e5e5ea; --accent: #2d6cdf; --code-bg: #f6f6f7;
+  --wl: #2d6cdf; --wl-missing: #c0392b;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141416; --bg2: #1c1c1f; --fg: #e8e8ea; --fg2: #8e8e93;
+    --line: #2a2a2e; --accent: #6ea8ff; --code-bg: #1c1c1f;
+    --wl: #6ea8ff; --wl-missing: #e5735f;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  display: grid; grid-template-columns: 280px 1fr;
+  font: 15px/1.6 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg); color: var(--fg);
+}
+
+/* ---------- sidebar ---------- */
+#side {
+  border-right: 1px solid var(--line); background: var(--bg2);
+  display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+  padding: 14px 0; position: sticky; top: 0;
+}
+#brand { font-weight: 650; font-size: 13px; letter-spacing: 0.04em; padding: 0 16px 10px; color: var(--fg2); }
+#filter {
+  margin: 0 12px 10px; padding: 6px 10px; font-size: 13px; color: var(--fg);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 7px; outline: none;
+}
+#filter:focus { border-color: var(--accent); }
+#tree { flex: 1; overflow-y: auto; padding-bottom: 10px; }
+#recent-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg2); padding: 10px 16px 4px; border-top: 1px solid var(--line); }
+#recent { overflow-y: auto; max-height: 26vh; }
+#tree a.file, #recent a.file {
+  display: block; padding: 3px 16px 3px 22px; font-size: 13.5px; color: var(--fg);
+  text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#tree a.file:hover, #recent a.file:hover { background: var(--line); }
+#tree a.file.active, #recent a.file.active { color: var(--accent); font-weight: 600; }
+#tree details.dir > summary {
+  cursor: pointer; font-size: 13px; font-weight: 650; color: var(--fg2);
+  padding: 5px 10px 3px; user-select: none; list-style: none;
+}
+#tree details.dir > summary::before { content: "▸ "; font-size: 10px; }
+#tree details.dir[open] > summary::before { content: "▾ "; }
+.empty { color: var(--fg2); font-size: 13px; padding: 8px 16px; }
+.recent-item { display: flex !important; justify-content: space-between; gap: 8px; }
+.recent-item .when { color: var(--fg2); font-size: 11px; flex: none; padding-top: 2px; }
+
+/* ---------- content ---------- */
+#main { height: 100vh; overflow-y: auto; }
+.note { max-width: 780px; margin: 0 auto; padding: 48px 32px 120px; }
+.pathhead {
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--fg2);
+  padding: 10px 14px; background: var(--bg2); border: 1px solid var(--line);
+  border-radius: 8px; margin-bottom: 16px; word-break: break-all;
+}
+.note h1 { font-size: 30px; line-height: 1.25; margin: 0 0 20px; }
+.note h2 { font-size: 22px; margin-top: 36px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+.note h3 { font-size: 17px; margin-top: 28px; }
+.note p { margin: 12px 0; }
+.note a { color: var(--wl); text-decoration: none; }
+.note a:hover { text-decoration: underline; }
+.wl.missing { color: var(--wl-missing); border-bottom: 1px dashed var(--wl-missing); }
+.note code {
+  font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--code-bg); padding: 2px 5px; border-radius: 5px;
+}
+.note pre {
+  background: var(--code-bg); border: 1px solid var(--line); border-radius: 10px;
+  padding: 14px 16px; overflow-x: auto;
+}
+.note pre code { background: none; padding: 0; }
+.note blockquote { border-left: 3px solid var(--line); margin: 14px 0; padding: 2px 18px; color: var(--fg2); }
+.note img, .imgview { max-width: 100%; border-radius: 10px; border: 1px solid var(--line); }
+.note table { border-collapse: collapse; margin: 14px 0; }
+.note th, .note td { border: 1px solid var(--line); padding: 6px 12px; font-size: 14px; }
+.note hr { border: none; border-top: 1px solid var(--line); margin: 28px 0; }
+.note ul, .note ol { padding-left: 26px; }
+.hint { color: var(--fg2); }
+.codefile { border-radius: 10px; overflow: hidden; }
+.plaincode {
+  font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--code-bg); border: 1px solid var(--line); border-radius: 10px;
+  padding: 14px 16px; overflow-x: auto; margin: 0; white-space: pre;
+}
+
+@media (max-width: 760px) {
+  body { grid-template-columns: 1fr; }
+  #side { position: static; height: auto; max-height: 42vh; }
+  #main { height: auto; overflow: visible; }
+}

@@ -2,6 +2,8 @@ mod api;
 mod auth;
 mod sync;
 
+include!(concat!(env!("OUT_DIR"), "/templates.rs"));
+
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
@@ -73,6 +75,9 @@ enum Cmd {
         dir: Option<PathBuf>,
         #[arg(long)]
         note: Option<String>,
+        /// Bless the draft immediately (continuous-publish style)
+        #[arg(long)]
+        bless: bool,
     },
     /// List drafts
     Drafts { name: String },
@@ -104,6 +109,17 @@ enum Cmd {
     Open { name: String },
     /// Print the agent guide (start here if you are an agent)
     Guide,
+    /// Scaffold a fragment folder from a template
+    New {
+        /// Target directory (created if missing)
+        dir: Option<PathBuf>,
+        /// Template name (basic | vault | dropzone)
+        #[arg(long)]
+        template: Option<String>,
+        /// List available templates
+        #[arg(long)]
+        list: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -236,6 +252,45 @@ fn main() -> Result<()> {
             print!("{GUIDE}");
             return Ok(());
         }
+        Cmd::New { dir, template, list } => {
+            if list {
+                for (name, files) in TEMPLATES {
+                    println!("{name} ({} files)", files.len());
+                }
+                return Ok(());
+            }
+            let dir = dir.ok_or_else(|| anyhow!("usage: fragment new <dir> [--template <name>]"))?;
+            let tpl_name = template.as_deref().unwrap_or("basic");
+            let tpl = TEMPLATES
+                .iter()
+                .find(|(n, _)| *n == tpl_name)
+                .ok_or_else(|| anyhow!("unknown template '{tpl_name}' (use --list)"))?;
+            if dir.exists() && !dir.is_dir() {
+                anyhow::bail!("{} exists and is not a directory", dir.display());
+            }
+            std::fs::create_dir_all(&dir)?;
+            let mut created = 0usize;
+            let mut skipped = 0usize;
+            for (rel, bytes) in tpl.1 {
+                let target = dir.join(rel);
+                if target.exists() {
+                    skipped += 1; // never clobber existing files
+                    continue;
+                }
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&target, bytes)?;
+                println!("  {}", rel);
+                created += 1;
+            }
+            println!("scaffolded '{tpl_name}' into {} ({created} files{})", dir.display(), if skipped > 0 { format!(", {skipped} existing left alone") } else { String::new() });
+            println!("next:");
+            println!("  fragment create <name>");
+            println!("  fragment manifest-set <name> fragment.json");
+            println!("  fragment publish <name> --dir . --bless");
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -308,18 +363,29 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Publish { name, dir, note } => {
+        Cmd::Publish { name, dir, note, bless } => {
             if let Some(dir) = dir {
                 let report = sync::sync_once(&c, &name, &dir)?;
                 report.print();
             }
             let v = c.call(c.post_json(&format!("/api/f/{name}/drafts"), &json!({ "note": note }))?)?;
-            if j {
-                return out(&c, v, true);
+            let slug = v["slug"].as_str().unwrap_or("").to_string();
+            if bless && !slug.is_empty() {
+                let b = c.call(c.post_json(&format!("/api/f/{name}/bless"), &json!({ "slug": slug }))?)?;
+                if j {
+                    let mut vv = v;
+                    vv["blessed"] = b["url"].clone();
+                    return out(&c, vv, true);
+                }
+                println!("draft published: {}/d/{}/", c.host, slug);
+                println!("blessed: {}{}", c.host, b["url"].as_str().unwrap_or(""));
+            } else {
+                if j {
+                    return out(&c, v, true);
+                }
+                println!("draft published: {}/d/{}/", c.host, slug);
+                println!("bless with: fragment bless {} {}", name, slug);
             }
-            let slug = v["slug"].as_str().unwrap_or("");
-            println!("draft published: {}/d/{}/", c.host, slug);
-            println!("bless with: fragment bless {} {}", name, slug);
         }
         Cmd::Drafts { name } => {
             let v = c.call(c.get(&format!("/api/f/{name}/drafts"))?)?;
@@ -413,7 +479,7 @@ fn main() -> Result<()> {
             println!("inbox:      {}/api/f/{}/inbox?t={}", c.host, name, inbox);
             println!("rooms:      {}/f/{}/__room/<room>{}{}", c.host, name, suffix, view_part);
         }
-        Cmd::Login { .. } | Cmd::Whoami | Cmd::Host { .. } | Cmd::Guide => unreachable!(),
+        Cmd::Login { .. } | Cmd::Whoami | Cmd::Host { .. } | Cmd::Guide | Cmd::New { .. } => unreachable!(),
     }
     Ok(())
 }
