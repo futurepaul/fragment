@@ -32,6 +32,11 @@ enum Cmd {
     },
     /// Print your npub and host
     Whoami,
+    /// Set the default host (or show it, with no argument)
+    Host {
+        /// Base URL, e.g. https://fragment.club
+        url: Option<String>,
+    },
     /// Create a fragment
     Create { name: String },
     /// List fragments you have a role on
@@ -190,6 +195,41 @@ fn main() -> Result<()> {
             let c = require_client(&cli.host)?;
             println!("npub: {}", c.id.npub());
             println!("host: {}", c.host);
+            return Ok(());
+        }
+        Cmd::Host { url } => {
+            let cfg = load_config();
+            match url {
+                Some(url) => {
+                    let url = url.trim_end_matches('/').to_string();
+                    if !url.starts_with("https://") && !url.starts_with("http://") {
+                        anyhow::bail!("host must be an http(s) URL, e.g. https://fragment.club");
+                    }
+                    let p = config_path();
+                    std::fs::create_dir_all(p.parent().unwrap())?;
+                    let mut obj = json!({ "host": url });
+                    if let Some(sk) = &cfg.secret_key {
+                        obj["secret_key"] = json!(sk);
+                    }
+                    // the file holds the secret key: keep it 0600
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        let mut f = std::fs::OpenOptions::new()
+                            .write(true).create(true).truncate(true).mode(0o600)
+                            .open(&p)?;
+                        serde_json::to_writer_pretty(&mut f, &obj)?;
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let f = std::fs::File::create(&p)?;
+                        serde_json::to_writer_pretty(f, &obj)?;
+                    }
+                    println!("default host set: {url}");
+                    println!("config: {}", p.display());
+                }
+                None => println!("host: {}", resolve_host(&cli.host, &cfg)),
+            }
             return Ok(());
         }
         Cmd::Guide => {
@@ -373,7 +413,7 @@ fn main() -> Result<()> {
             println!("inbox:      {}/api/f/{}/inbox?t={}", c.host, name, inbox);
             println!("rooms:      {}/f/{}/__room/<room>{}{}", c.host, name, suffix, view_part);
         }
-        Cmd::Login { .. } | Cmd::Whoami | Cmd::Guide => unreachable!(),
+        Cmd::Login { .. } | Cmd::Whoami | Cmd::Host { .. } | Cmd::Guide => unreachable!(),
     }
     Ok(())
 }

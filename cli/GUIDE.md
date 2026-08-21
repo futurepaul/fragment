@@ -271,4 +271,5 @@ fragment drafts <name>              fragment bless <name> <slug>
 fragment run <name> <workflow> [--input JSON]
 ```
 
-Global flags: `--host <url>` (or `FRAGMENT_HOST`), `--json`.
+Global flags: `--host <url>` (or `FRAGMENT_HOST`), `--json`. Set a sticky
+default with `fragment host <url>` (e.g. `fragment host https://fragment.club`).
