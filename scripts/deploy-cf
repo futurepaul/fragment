@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Deploy the fragment runtime to Cloudflare Workers (paid plan; Dynamic Workers beta).
+# Auth: CLOUDFLARE_API_TOKEN (+ CLOUDFLARE_ACCOUNT_ID) in env or .env, or `wrangler login`.
+# verbs: deploy | secret | tail | url
+set -euo pipefail
+cd "$(dirname "$0")/../runtime"
+DEV="../.dev"
+
+if [ -f ../.env ]; then set -a; . ../.env; set +a; fi
+
+W=(npx wrangler --config wrangler.cf.jsonc)
+
+worker_url() {
+  # fragment.<subdomain>.workers.dev — captured from deploy output
+  if [ -f "$DEV/cf-worker-url" ]; then cat "$DEV/cf-worker-url"; return; fi
+  echo "unknown (deploy first)" >&2; return 1
+}
+
+case "${1:-}" in
+  deploy)
+    mkdir -p "$DEV"
+    out="$("${W[@]}" deploy 2>&1)"
+    echo "$out"
+    url=$(echo "$out" | grep -oE "https://[a-z0-9.-]+\.workers\.dev" | head -1 || true)
+    if [ -z "$url" ] && [ -f "$DEV/cf-worker-url" ]; then url=$(cat "$DEV/cf-worker-url"); fi
+    if [ -z "$url" ]; then
+      echo "could not determine workers.dev URL from deploy output" >&2
+      exit 1
+    fi
+    echo "$url" > "$DEV/cf-worker-url"
+    current=$( "${W[@]}" deployments list 2>/dev/null || true )
+    # (Re)deploy with the loopback URL baked in, so workflow/app ctx calls reach the cell.
+    "${W[@]}" deploy --var "FRAGMENT_INTERNAL_URL:$url"
+    echo "deployed: $url"
+    ;;
+  secret)
+    # Pipe the platform inference key: OPENROUTER_API_KEY=... scripts/deploy-cf secret
+    if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+      echo "set OPENROUTER_API_KEY in env or .env first" >&2; exit 1
+    fi
+    printf '%s' "$OPENROUTER_API_KEY" | "${W[@]}" secret put OPENROUTER_API_KEY
+    echo "secret set."
+    ;;
+  tail) "${W[@]}" tail ;;
+  url) worker_url ;;
+  *) echo "usage: scripts/deploy-cf deploy|secret|tail|url" >&2; exit 1 ;;
+esac

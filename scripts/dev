@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# fragment dev environment: azurite (bucket) + celld (host).
+# verbs: up | down | deploy | status | logs
+set -euo pipefail
+cd "$(dirname "$0")/.."
+DEV=.dev
+TOOLS="$DEV/tools"
+AZURITE_PORT=10000
+CELLD_PORT=8789
+BUCKET=az://fragment-dev
+
+# Well-known Azurite emulator credentials (public, development-only).
+export AZURE_STORAGE_ACCOUNT_NAME=devstoreaccount1
+export AZURE_STORAGE_ACCOUNT_KEY='Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=='
+export AZURE_STORAGE_USE_EMULATOR=true
+export CELLD_ESBUILD="$PWD/$TOOLS/node_modules/.bin/esbuild"
+export PATH="$HOME/.local/bin:$PATH"
+
+mkdir -p "$DEV"
+
+# Optional project .env: OPENROUTER_API_KEY=... (never committed)
+if [ -f .env ]; then set -a; . ./.env; set +a; fi
+
+tools() {
+  if [ ! -x "$TOOLS/node_modules/.bin/esbuild" ]; then
+    mkdir -p "$TOOLS"
+    (cd "$TOOLS" && [ -f package.json ] || npm init -y >/dev/null; npm install azurite esbuild >/dev/null)
+  fi
+}
+
+azurite_running() { curl -s -o /dev/null "http://127.0.0.1:$AZURITE_PORT/devstoreaccount1?comp=list" && [ $? -eq 0 ]; }
+celld_running() { curl -s -o /dev/null -m 2 "http://127.0.0.1:$CELLD_PORT/__internal/ping"; }
+
+start_azurite() {
+  if azurite_running; then
+    echo "azurite: already running on :$AZURITE_PORT"
+    if [ ! -d "$DEV/azdata" ]; then
+      echo "WARNING: azurite on :$AZURITE_PORT was not started by this project (no $DEV/azdata)." >&2
+      echo "         Its bucket data is NOT paired with this project's celld watch dir — a fresh" >&2
+      echo "         bucket behind an old watch dir resurrects zombie cells. Kill it and re-run" >&2
+      echo "         scripts/dev up for a clean, project-local world." >&2
+    fi
+    return
+  fi
+  if [ ! -d "$DEV/azdata" ]; then
+    # Fresh bucket: the celld watch dir (local cell state) must be born with it,
+    # otherwise stale local state can shadow the empty bucket (zombie cells).
+    rm -rf "$DEV/watch"
+  fi
+  nohup "$TOOLS/node_modules/.bin/azurite-blob" --silent --location "$DEV/azdata" > "$DEV/azurite.log" 2>&1 &
+  echo $! > "$DEV/azurite.pid"
+  sleep 2
+  echo "azurite: started (pid $(cat "$DEV/azurite.pid"))"
+}
+
+start_celld() {
+  if celld_running; then echo "celld: already running on :$CELLD_PORT"; return; fi
+  CELLD_WORKER_LOADER=LOADER \
+  CELLD_WATCH="$PWD/$DEV/watch" \
+  CELLD_VAR_FRAGMENT_INTERNAL_URL="http://127.0.0.1:$CELLD_PORT" \
+  ${OPENROUTER_API_KEY:+CELLD_VAR_OPENROUTER_API_KEY="$OPENROUTER_API_KEY"} \
+  nohup celld --bucket "$BUCKET" --listen "127.0.0.1:$CELLD_PORT" > "$DEV/celld.log" 2>&1 &
+  echo $! > "$DEV/celld.pid"
+  sleep 3
+  echo "celld: started (pid $(cat "$DEV/celld.pid")) on :$CELLD_PORT"
+}
+
+stop_celld() {
+  local pids
+  pids=$(pgrep -f "celld --bucket" || true)
+  if [ -n "$pids" ]; then
+    kill $pids 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      pids=$(pgrep -f "celld --bucket" || true)
+      [ -z "$pids" ] && break
+      sleep 0.5
+    done
+    pids=$(pgrep -f "celld --bucket" || true)
+    if [ -n "$pids" ]; then
+      echo "celld: graceful stop stalled (drain), forcing" >&2
+      kill -9 $pids 2>/dev/null || true
+      sleep 1
+    fi
+  fi
+  rm -f "$DEV/celld.pid"
+}
+
+case "${1:-}" in
+  up)
+    tools
+    start_azurite
+    node scripts/mkcontainer.mjs fragment-dev "$AZURITE_PORT"
+    start_celld
+    echo "fragment host: http://127.0.0.1:$CELLD_PORT"
+    ;;
+  deploy)
+    tools
+    (cd runtime && npm install --no-audit --no-fund >/dev/null)
+    celld deploy runtime --bucket "$BUCKET" | tail -2
+    stop_celld
+    start_celld
+    echo "deployed."
+    ;;
+  down)
+    stop_celld
+    if [ -f "$DEV/azurite.pid" ]; then
+      kill "$(cat "$DEV/azurite.pid")" 2>/dev/null || true
+      rm -f "$DEV/azurite.pid"
+    fi
+    echo "down."
+    ;;
+  status)
+    azurite_running && echo "azurite: up" || echo "azurite: down"
+    celld_running && echo "celld: up (http://127.0.0.1:$CELLD_PORT)" || echo "celld: down"
+    ;;
+  logs)
+    tail -30 "$DEV/celld.log"
+    ;;
+  *)
+    echo "usage: scripts/dev up|down|deploy|status|logs" >&2
+    exit 1
+    ;;
+esac

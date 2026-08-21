@@ -1,0 +1,17 @@
+// Cloudflare deploy config for the fragment runtime.
+// Same code as the celld deployment (wrangler.jsonc) — only the bindings differ:
+// the Worker Loader comes from a binding here instead of CELLD_WORKER_LOADER.
+// Deploy: ../scripts/deploy-cf
+{
+  "name": "fragment",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-20",
+  "workers_dev": true,
+  "durable_objects": { "bindings": [{ "name": "FRAGMENT", "class_name": "FragmentCell" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["FragmentCell"] }],
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "vars": {
+    "FRAGMENT_AI_MODEL": "deepseek/deepseek-v4-flash-0731",
+    "FRAGMENT_HOST_KIND": "cf"
+  }
+}
