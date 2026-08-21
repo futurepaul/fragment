@@ -1,12 +1,34 @@
-# /etc/caddy/Caddyfile — TLS termination in front of celld.
+# /etc/caddy/Caddyfile — TLS in front of celld.
+#
 # celld's public listener stays on loopback (127.0.0.1:8080); Caddy is the
-# only thing exposed. WebSockets (rooms) upgrade transparently.
+# only exposed surface. WebSockets (rooms) upgrade transparently.
+#
+# Subdomains: <fragment>.fragment.club serves that fragment's canonical
+# site. The runtime is path-based, so Caddy rewrites host → /f/<name>/.
+# Wildcard TLS is on-demand (LE cert per hostname on first visit), gated by
+# the local ask service (caddy-ask.service) so only names under
+# fragment.club can burn cert quota.
 
-fragment.club {
+{
+	on_demand_tls {
+		ask http://127.0.0.1:9999/ask
+	}
+}
+
+fragment.club, www.fragment.club {
 	encode zstd gzip
 	reverse_proxy 127.0.0.1:8080
 }
 
-www.fragment.club {
-	redir https://fragment.club{uri} permanent
+*.fragment.club {
+	tls {
+		on_demand
+	}
+	map {http.request.host} {fragment} {
+		~^(?<name>[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.fragment\.club$ ${name}
+		default ""
+	}
+	encode zstd gzip
+	rewrite * /f/{fragment}{uri}
+	reverse_proxy 127.0.0.1:8080
 }

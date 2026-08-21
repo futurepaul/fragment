@@ -2,8 +2,8 @@
 # One celld node = one fragment fleet. Single-node fleet for now; add peers
 # later with --internal-listen/--advertise on a private network.
 #
-# Secrets (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) live in /etc/celld.env,
-# mode 0600 root:root — never in this repo.
+# All host-specific values (bucket, endpoint, credentials) live in
+# /etc/celld.env — see deploy/env.example. Never in this repo.
 
 [Unit]
 Description=celld — fragment host fleet node
@@ -19,13 +19,13 @@ Environment=CELLD_WATCH=/var/lib/celld/watch
 Environment=CELLD_WORKER_LOADER=LOADER
 Environment=CELLD_VAR_FRAGMENT_INTERNAL_URL=http://127.0.0.1:8080
 ExecStart=/usr/local/bin/celld \
-  --bucket s3://BUCKET_NAME \
-  --endpoint ENDPOINT_URL \
+  --bucket ${CELLD_BUCKET} \
+  --endpoint ${S3_ENDPOINT} \
   --listen 127.0.0.1:8080
 StateDirectory=celld
 Restart=always
 RestartSec=2
-# graceful drain: celld default is 25s; give it headroom before RestartForce
+# graceful drain: celld default is 25s; give it headroom before the kill
 TimeoutStopSec=35
 KillMode=mixed
 LimitNOFILE=65536
