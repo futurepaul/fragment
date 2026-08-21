@@ -28,9 +28,9 @@ fragment bless hello <slug>
 fragment open hello   # prints URLs incl. the ?view= token
 ```
 
-Dev state lives in `.dev/` (delete it to reset the world). Production swaps
-azurite for a real bucket (S3/R2/GCS/Azure) and puts Caddy in front; nothing
-else changes.
+Dev state lives in `.dev/` (delete it to reset the world). For a real
+server, [docs/deploy-vps.md](docs/deploy-vps.md) is the production runbook
+(celld node + real bucket + Caddy); nothing else changes.
 
 ## Deploy to Cloudflare
 
@@ -131,6 +131,8 @@ Every claim below was executed against the local stack, not read from docs:
 ```
 ARCHITECTURE.md      the design, in plain language
 docs/api.md          CLI ↔ runtime wire contract (NIP-98, endpoints, rooms, ctx)
+docs/deploy-vps.md   production runbook: VPS + bucket + Caddy
+deploy/              systemd unit, Caddyfile, env template for the above
 cli/                 the Rust CLI (fragment) + GUIDE.md (agent doc)
 runtime/             the celld deployment (router + FragmentCell)
 scripts/dev          up | down | deploy | status | logs

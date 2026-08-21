@@ -1,0 +1,12 @@
+# /etc/caddy/Caddyfile — TLS termination in front of celld.
+# celld's public listener stays on loopback (127.0.0.1:8080); Caddy is the
+# only thing exposed. WebSockets (rooms) upgrade transparently.
+
+fragment.club {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8080
+}
+
+www.fragment.club {
+	redir https://fragment.club{uri} permanent
+}
