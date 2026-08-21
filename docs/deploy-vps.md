@@ -37,13 +37,14 @@ browser/CLI ──https/wss──▶ Caddy :443 ──▶ celld :8080 (loopback 
   the account ID is in the Object storage sidebar) and create an access key
   (Access keys tab; limited scope to this bucket, read-write).
 
-**One honest risk**: celld requires a store with **conditional writes and
-read-after-write consistency**. Its docs list S3, R2, GCS, Tigris, and Azure
-Blob as qualifying; Latitude storage (Megaport-backed) is unlisted. celld
-probes with a conditional write at startup, so we get a definitive answer the
-moment the node first runs. If it fails: fall back to a Cloudflare R2 bucket
-(free tier, endpoint `https://<account>.r2.cloudflarestorage.com`,
-`AWS_REGION=auto`) — everything else in this runbook stays identical.
+**One honest risk — now resolved for one provider**: celld requires a store
+with **conditional writes and read-after-write consistency** (S3, R2, GCS,
+Tigris, Azure Blob qualify). **Latitude object storage fails the probe**
+(verified 2026-08-21 on the high-performance class: it accepts
+`If-Match`/`If-None-Match` but does not enforce them; Object Lock is no
+substitute — WORM can't fence writes and would block celld's segment GC).
+fragment.club therefore runs on **Cloudflare R2** (`AWS_REGION=auto`), which
+passes. Everything else in this runbook is provider-agnostic.
 
 ## 1. Base system (as root)
 
