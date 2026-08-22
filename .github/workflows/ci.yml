@@ -1,0 +1,81 @@
+# fragment CI: unit tests for the Rust CLI + the full e2e suite against a
+# real celld+azurite stack (same shape as scripts/dev, no docker).
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            cli/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('cli/Cargo.lock') }}
+      - name: unit tests
+        run: cargo test
+        working-directory: cli
+
+  e2e:
+    runs-on: ubuntu-latest
+    env:
+      # well-known azurite emulator credentials (development-only)
+      AZURE_STORAGE_ACCOUNT_NAME: devstoreaccount1
+      AZURE_STORAGE_ACCOUNT_KEY: Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==
+      AZURE_STORAGE_USE_EMULATOR: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: install celld
+        run: |
+          curl -fsSL https://celld.dev/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          command -v celld
+
+      - name: root deps (@noble for signing)
+        run: npm install --no-audit --no-fund
+
+      - name: start stack (azurite + celld) with the host secret set
+        run: |
+          export FRAGMENT_HOST_SECRET="$(openssl rand -hex 32)"
+          echo "FRAGMENT_HOST_SECRET=$FRAGMENT_HOST_SECRET" >> "$GITHUB_ENV"
+          scripts/dev up
+          scripts/dev deploy
+          curl -fsS http://127.0.0.1:8789/__internal/ping
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            cli/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('cli/Cargo.lock') }}
+
+      - name: build CLI
+        run: cargo build
+        working-directory: cli
+
+      - name: e2e suite
+        run: >
+          FRAGMENT_BIN="$PWD/cli/target/debug/fragment"
+          node scripts/e2e.mjs --all
+
+      - name: celld log on failure
+        if: failure()
+        run: tail -80 .dev/celld.log
