@@ -40,6 +40,12 @@ case "${1:-}" in
     fi
     printf '%s' "$OPENROUTER_API_KEY" | "${W[@]}" secret put OPENROUTER_API_KEY
     echo "secret set."
+    # Also lock the /__internal loopback plane (recommended; generates one if absent).
+    host_secret="${FRAGMENT_HOST_SECRET:-$(openssl rand -hex 32)}"
+    printf '%s' "$host_secret" | "${W[@]}" secret put FRAGMENT_HOST_SECRET
+    echo "FRAGMENT_HOST_SECRET set. Keep this value in .env — redeploying the runtime"
+    echo "does not need it, but local CLI-driven tests against this host will."
+    [ -z "${FRAGMENT_HOST_SECRET:-}" ] && echo "(generated) FRAGMENT_HOST_SECRET=$host_secret"
     ;;
   tail) "${W[@]}" tail ;;
   url) worker_url ;;

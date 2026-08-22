@@ -93,8 +93,9 @@ editor /etc/celld.env        # fill from deploy/env.example
 ```
 
 `/etc/celld.env` holds `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
-`AWS_REGION`. Root-only, never committed, never pasted anywhere. The systemd
-unit reads it via `EnvironmentFile=`.
+`AWS_REGION`, and (recommended) `FRAGMENT_HOST_SECRET` — generate with
+`openssl rand -hex 32`. Root-only, never committed, never pasted anywhere.
+The systemd unit reads it via `EnvironmentFile=`.
 
 ## 3. celld service (now: two nodes on the box)
 

@@ -82,6 +82,8 @@ plus plain-JSON env:
 
 - `FRAGMENT_INTERNAL_URL` — e.g. `http://127.0.0.1:8789/__internal`
 - `FRAGMENT_RUN_TOKEN` — per-run/per-draft random token (cell validates)
+- `FRAGMENT_HOST_SECRET` — only present when the host sets it; ctx forwards
+  it as `x-fragment-host-secret`
 
 `fragment-ctx.mjs` implements `ctx` over fetch against `/__internal`:
 

@@ -5,9 +5,11 @@ export const CTX_SHIM_SOURCE = `
 export async function makeCtx(env) {
   const base = env.FRAGMENT_INTERNAL_URL;
   const tok = env.FRAGMENT_RUN_TOKEN;
+  const hsec = env.FRAGMENT_HOST_SECRET || "";
   const scope = env.FRAGMENT_SCOPE || "run";
   const call = async (path, opts = {}) => {
     const headers = Object.assign({}, opts.headers || {}, { "x-fragment-token": tok });
+    if (hsec) headers["x-fragment-host-secret"] = hsec;
     const r = await fetch(base + path, Object.assign({}, opts, { headers }));
     if (!r.ok) throw new Error("fragment ctx " + path + " -> " + r.status + ": " + (await r.text()));
     return r;

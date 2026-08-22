@@ -59,6 +59,7 @@ start_celld() {
   CELLD_WATCH="$PWD/$DEV/watch" \
   CELLD_VAR_FRAGMENT_INTERNAL_URL="http://127.0.0.1:$CELLD_PORT" \
   ${OPENROUTER_API_KEY:+CELLD_VAR_OPENROUTER_API_KEY="$OPENROUTER_API_KEY"} \
+  ${FRAGMENT_HOST_SECRET:+CELLD_VAR_FRAGMENT_HOST_SECRET="$FRAGMENT_HOST_SECRET"} \
   nohup celld --bucket "$BUCKET" --listen "127.0.0.1:$CELLD_PORT" > "$DEV/celld.log" 2>&1 &
   echo $! > "$DEV/celld.pid"
   sleep 3

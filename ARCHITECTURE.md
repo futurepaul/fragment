@@ -157,6 +157,12 @@ in the first prototype: never let a report disagree with the ledger.)
   each, one writer each, fenced by celld epochs. A broken fragment can only
   damage its own database.
 - Workflow code runs in loader isolates with no access to other cells.
+- The internal plane (`/__internal/f/<name>/…`) serves exactly one caller:
+  ctx loopback from loader isolates, authenticated per cell by run tokens.
+  The registry and cell-init are never reachable over HTTP — only via the
+  router's own DO binding. Hosts that want a second lock set
+  `FRAGMENT_HOST_SECRET` (celld: `CELLD_VAR_FRAGMENT_HOST_SECRET`; CF:
+  wrangler secret), which every loopback call must then carry.
 - celld does not terminate TLS and does not authenticate users. That is the
   ingress's job (Caddy in prod; nothing locally). Wildcard subdomain →
   `Host: <name>.frag.example` reaches the same router; path-based URLs work
