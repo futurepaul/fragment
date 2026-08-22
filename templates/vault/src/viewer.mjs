@@ -245,6 +245,37 @@ document.addEventListener("pointerover", (e) => {
   }
 }, { passive: true });
 
+// live updates: the fragment's notify workflow (trigger: "sync") pings the
+// "vault" room when files change; refresh the tree in place, and reopen the
+// current note if it was one of the changed paths
+let lastPing = 0;
+let refreshTimer = null;
+function scheduleRefresh(paths) {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(async () => {
+    try {
+      const r = await fetch(withView("api/tree"), { cache: "reload" });
+      const v = await r.json();
+      files = v.files || [];
+      buildIndex();
+      renderTree();
+      renderRecent();
+      const cur = decodeURIComponent(location.hash.replace(/^#\/?/, ""));
+      if (cur && paths.includes(cur)) route();
+      else setActive();
+    } catch {}
+  }, 60);
+}
+try {
+  const room = window.fragment && fragment.room("vault");
+  room.on("hello", (h) => { if (h?.state?.at) lastPing = h.state.at; });
+  room.on("state", (v) => {
+    if (!v || typeof v.at !== "number" || v.at <= lastPing) return;
+    lastPing = v.at;
+    scheduleRefresh(v.paths || []);
+  });
+} catch {}
+
 async function boot() {
   try {
     const r = await fetch(withView("api/tree"));

@@ -11,6 +11,7 @@ export async function run(ctx, input) {
     return { processed: 0 };
   }
   const done = new Set((await ctx.state.get("processed")) || []);
+  const outputs = [];
   let n = 0;
   for (const p of arrivals) {
     if (done.has(p)) continue;
@@ -41,10 +42,17 @@ export async function run(ctx, input) {
     const outPath =
       "output/" + p.replace(/^drop\//, "").replace(/\.[^.]+$/, "") + "-" + Date.now() + ".md";
     await ctx.files.write(outPath, out);
+    outputs.push(outPath);
     done.add(p);
     n++;
   }
   await ctx.state.put("processed", [...done].slice(-500));
+  // announce outputs to the room (run-scope writes don't re-trigger sync
+  // workflows by design, so the ingest notifies the viewers itself)
+  if (n > 0) {
+    const prev = (await ctx.rooms.getState("vault")) || {};
+    await ctx.rooms.setState("vault", { at: Date.now(), paths: outputs, n: (prev.n || 0) + 1 });
+  }
   ctx.log(`ingested ${n} file(s)`);
   return { processed: n };
 }

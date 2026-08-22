@@ -5,7 +5,8 @@
   "editors": [],
   "viewers": [],
   "workflows": [
-    { "name": "ingest", "file": "workflows/ingest.mjs", "trigger": "sync" }
+    { "name": "ingest", "file": "workflows/ingest.mjs", "trigger": "sync" },
+    { "name": "notify", "file": "workflows/notify.mjs", "trigger": "sync" }
   ],
   "secrets": []
 }

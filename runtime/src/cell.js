@@ -572,7 +572,7 @@ export class FragmentCell {
         } catch {}
       }
     }
-    this.sql.exec("INSERT INTO run_tokens (token, scope, expires) VALUES (?, ?, ?)", token, JSON.stringify(scope), ttl);
+    this.sql.exec("INSERT INTO run_tokens (token, scope, expires) VALUES (?, ?, ?)", token, JSON.stringify(scope), ttl === null ? null : Date.now() + ttl);
     return token;
   }
 

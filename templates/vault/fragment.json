@@ -4,6 +4,8 @@
   "liveFiles": true,
   "editors": [],
   "viewers": [],
-  "workflows": [],
+  "workflows": [
+    { "name": "notify", "file": "workflows/notify.mjs", "trigger": "sync" }
+  ],
   "secrets": []
 }

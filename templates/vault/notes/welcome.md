@@ -5,7 +5,8 @@ title: welcome
 # welcome to your vault
 
 This folder is a fragment vault. Everything here is live: save a change,
-sync, reload the page.
+sync, and watch it appear — open pages refresh themselves via the
+fragment's rooms.
 
 Try a [[wikilink]] — it resolves by file name anywhere in the tree. Broken
 ones look [[like this]] and stay red until the page exists.

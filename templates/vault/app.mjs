@@ -50,6 +50,7 @@ const SHELL = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>vault</title>
 <link rel="stylesheet" href="assets/viewer.css">
+<script src="__rt.js"></script>
 <script type="module" src="assets/viewer.js"></script>
 </head>
 <body>
