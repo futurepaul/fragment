@@ -246,6 +246,14 @@ export class FragmentCell {
     });
   }
 
+  // canonical URL for this fragment: subdomain form on hosts that declare a
+  // wildcard host (FRAGMENT_SUBDOMAIN_HOST), /f/<name>/ path form elsewhere
+  canonicalUrl(origin, name) {
+    const sub = this.env.FRAGMENT_SUBDOMAIN_HOST;
+    if (sub) return `https://${encodeURIComponent(name)}.${sub}/`;
+    return `${origin}/f/${name}/`;
+  }
+
   // ---------- control API (/api/...) ----------
   async apiRoute(request, url) {
     const p = url.pathname.slice(4); // after /api
@@ -291,7 +299,7 @@ export class FragmentCell {
         name: m.name, npub: this.getMeta("fragment_npub"), visibility: m.visibility,
         blessed: this.getMeta("blessed"), counts: { files, drafts, events }, crons,
         viewToken: this.getMeta("view_token"), inboxToken: this.getMeta("inbox_token"),
-        urls: { canonical: `/f/${m.name}/` },
+        urls: { canonical: this.canonicalUrl(url.origin, m.name) },
       });
     }
 
@@ -398,7 +406,7 @@ export class FragmentCell {
         } catch {}
       }
       this.addEvent("bless", `blessed ${slug}`);
-      return json({ ok: true, url: `/f/${m.name}/` });
+      return json({ ok: true, url: this.canonicalUrl(url.origin, m.name) });
     }
 
     if (p === "/run" && request.method === "POST") {

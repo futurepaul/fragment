@@ -87,7 +87,10 @@ export default {
           method: "POST", body: JSON.stringify({ name, ownerHex: g.pubkey }),
         });
         const info = await init.json();
-        return json({ name, npub: info.npub, viewToken: info.viewToken, inboxToken: info.inboxToken });
+        const canonical = env.FRAGMENT_SUBDOMAIN_HOST
+          ? `https://${encodeURIComponent(name)}.${env.FRAGMENT_SUBDOMAIN_HOST}/`
+          : `${url.origin}/f/${name}/`;
+        return json({ name, npub: info.npub, viewToken: info.viewToken, inboxToken: info.inboxToken, canonical });
       }
       if (path === "/api/fragments" && request.method === "GET") {
         const g = await gate();

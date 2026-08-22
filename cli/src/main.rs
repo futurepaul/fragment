@@ -307,7 +307,9 @@ fn main() -> Result<()> {
             println!("  npub:        {}", v["npub"].as_str().unwrap_or(""));
             println!("  view token:  {}", v["viewToken"].as_str().unwrap_or(""));
             println!("  inbox token: {}", v["inboxToken"].as_str().unwrap_or(""));
-            println!("  canonical:   {}/f/{}/", c.host, name);
+            let canon = v["canonical"].as_str().filter(|s| s.starts_with("http")).map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{}/f/{}/", c.host, name));
+            println!("  canonical:   {}", canon);
         }
         Cmd::List => {
             let v = c.call(c.get("/api/fragments")?)?;
@@ -378,7 +380,9 @@ fn main() -> Result<()> {
                     return out(&c, vv, true);
                 }
                 println!("draft published: {}/d/{}/", c.host, slug);
-                println!("blessed: {}{}", c.host, b["url"].as_str().unwrap_or(""));
+                let bu = b["url"].as_str().unwrap_or("");
+                let blessed = if bu.starts_with("http") { bu.to_string() } else { format!("{}{}", c.host, bu) };
+                println!("blessed: {}", blessed);
             } else {
                 if j {
                     return out(&c, v, true);
@@ -404,7 +408,9 @@ fn main() -> Result<()> {
         }
         Cmd::Bless { name, slug } => {
             let v = c.call(c.post_json(&format!("/api/f/{name}/bless"), &json!({ "slug": slug }))?)?;
-            println!("blessed: {}{}", c.host, v["url"].as_str().unwrap_or(""));
+            let bu = v["url"].as_str().unwrap_or("");
+            let blessed = if bu.starts_with("http") { bu.to_string() } else { format!("{}{}", c.host, bu) };
+            println!("blessed: {}", blessed);
         }
         Cmd::Run { name, workflow, input } => {
             let input_v: Value = match input.as_deref() {
@@ -474,7 +480,9 @@ fn main() -> Result<()> {
             let inbox = v["inboxToken"].as_str().unwrap_or("");
             let suffix = if public { "" } else { "?view=" };
             let view_part = if public { "" } else { view };
-            println!("canonical:  {}/f/{}/{}{}", c.host, name, suffix, view_part);
+            let server_canon = v["urls"]["canonical"].as_str().filter(|s| s.starts_with("http"));
+            let canon = server_canon.map(|s| s.to_string()).unwrap_or_else(|| format!("{}/f/{}/", c.host, name));
+            println!("canonical:  {}{}{}", canon, suffix, view_part);
             println!("drafts at:  {}/d/<slug>/", c.host);
             println!("inbox:      {}/api/f/{}/inbox?t={}", c.host, name, inbox);
             println!("rooms:      {}/f/{}/__room/<room>{}{}", c.host, name, suffix, view_part);

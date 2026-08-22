@@ -18,6 +18,7 @@ EnvironmentFile=/etc/celld.env
 Environment=CELLD_WATCH=/var/lib/celld/watch
 Environment=CELLD_WORKER_LOADER=LOADER
 Environment=CELLD_VAR_FRAGMENT_INTERNAL_URL=http://127.0.0.1:8080
+Environment=CELLD_VAR_FRAGMENT_SUBDOMAIN_HOST=fragment.club
 ExecStart=/usr/local/bin/celld \
   --bucket ${CELLD_BUCKET} \
   --endpoint ${S3_ENDPOINT} \
