@@ -55,11 +55,18 @@ start_azurite() {
 
 start_celld() {
   if celld_running; then echo "celld: already running on :$CELLD_PORT"; return; fi
+  # env passthroughs must be exported before exec — a ${VAR:+NAME=val}
+  # prefix expands to ordinary words, not assignments, and silently
+  # never reaches celld.
+  if [ -n "${OPENROUTER_API_KEY:-}" ]; then
+    export CELLD_VAR_OPENROUTER_API_KEY="$OPENROUTER_API_KEY"
+  fi
+  if [ -n "${FRAGMENT_HOST_SECRET:-}" ]; then
+    export CELLD_VAR_FRAGMENT_HOST_SECRET="$FRAGMENT_HOST_SECRET"
+  fi
   CELLD_WORKER_LOADER=LOADER \
   CELLD_WATCH="$PWD/$DEV/watch" \
   CELLD_VAR_FRAGMENT_INTERNAL_URL="http://127.0.0.1:$CELLD_PORT" \
-  ${OPENROUTER_API_KEY:+CELLD_VAR_OPENROUTER_API_KEY="$OPENROUTER_API_KEY"} \
-  ${FRAGMENT_HOST_SECRET:+CELLD_VAR_FRAGMENT_HOST_SECRET="$FRAGMENT_HOST_SECRET"} \
   nohup celld --bucket "$BUCKET" --listen "127.0.0.1:$CELLD_PORT" > "$DEV/celld.log" 2>&1 &
   echo $! > "$DEV/celld.pid"
   sleep 3
