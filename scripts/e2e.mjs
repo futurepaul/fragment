@@ -357,6 +357,22 @@ async function workflowSection() {
     method: 'POST', body: JSON.stringify({ source: 'e2e', payload: {} }),
   });
   eq(badTok.status, 403, 'inbox bad token → 403');
+  // header form: preferred for callers who control clients
+  const hdrTok = await fetch(`${BASE}/api/f/${name}/inbox`, {
+    method: 'POST',
+    headers: { 'x-fragment-inbox-token': inboxToken },
+    body: JSON.stringify({ source: 'e2e', payload: { via: 'header' } }),
+  });
+  const hdrBody = await hdrTok.json();
+  eq(hdrBody?.ok, true, 'inbox via x-fragment-inbox-token header accepted');
+
+  // run tokens are header-only (ctx shim's contract): a query-param token,
+  // valid or not, must never reach the internal plane
+  const qtok = await fetch(`${BASE}/__internal/f/${name}/__internal/secrets/all?t=junk`, {
+    headers: { 'x-fragment-host-secret': process.env.FRAGMENT_HOST_SECRET || '' },
+  });
+  ok(qtok.status === 403 && !JSON.stringify(await qtok.json()).includes('files'),
+    'internal plane ignores ?t= query-param tokens');
   const post = await fetch(`${BASE}/api/f/${name}/inbox?t=${inboxToken}`, {
     method: 'POST', body: JSON.stringify({ source: 'e2e', payload: { x: 1 } }),
   });

@@ -176,6 +176,10 @@ own copy of the folder — a wedged workflow cannot wedge the fragment itself.
 POST {host}/api/f/{name}/inbox?t={inboxToken}   {"source": "grafana", "payload": {...}}
 ```
 
+When you control the HTTP client, prefer sending the token as the
+`x-fragment-inbox-token` header instead of `?t=` — same result, but the
+secret stays out of access logs.
+
 No signature needed — the token is the auth (rotate by asking the owner to
 re-create… no, tokens are fixed at create; treat them as passwords).
 `fragment inbox my-thing --token <t> --payload '{"hello":"world"}'` tests it.

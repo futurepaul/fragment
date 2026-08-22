@@ -49,7 +49,7 @@ visibility=viewers).
 | `GET /api/f/{name}/secrets` | editor+ | → `{names: [...]}` (never values) |
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor+ | → `{ok}` |
 | `GET /api/f/{name}/events?since={id}` | viewer+ | → `{events:[{id, at, kind, summary, data?}]}` |
-| `POST /api/f/{name}/inbox?t={inboxToken}` | token only | `{source?, payload}` → `{ok, id}`; enqueues + runs `trigger:"inbox"` workflows |
+| `POST /api/f/{name}/inbox?t={inboxToken}` | token only | `{source?, payload}` → `{ok, id}`; enqueues + runs `trigger:"inbox"` workflows. Prefer the `x-fragment-inbox-token` header when you control the client — `?t=` lands in access logs. |
 | `PUT /api/f/{name}/file?path=&base_rev=` | editor+ | raw body; stale `base_rev` → 409. Successful writes schedule `trigger:"sync"` workflows (coalesced; workflow-plane writes don't) |
 
 ## Serving (no NIP-98)
@@ -81,7 +81,9 @@ Worker-Loader isolates. The cell injects a sibling module `fragment-ctx.mjs`
 plus plain-JSON env:
 
 - `FRAGMENT_INTERNAL_URL` — e.g. `http://127.0.0.1:8789/__internal`
-- `FRAGMENT_RUN_TOKEN` — per-run/per-draft random token (cell validates)
+- `FRAGMENT_RUN_TOKEN` — per-run/per-draft random token (cell validates; sent
+  as the `x-fragment-token` header — never a query param, so it stays out of
+  access logs)
 - `FRAGMENT_HOST_SECRET` — only present when the host sets it; ctx forwards
   it as `x-fragment-host-secret`
 
