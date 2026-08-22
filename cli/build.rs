@@ -37,7 +37,7 @@ fn main() {
     let dest = Path::new(&out_dir).join("templates.rs");
 
     let mut groups: Vec<(&str, Vec<(String, String)>)> = Vec::new();
-    for name in ["basic", "vault", "libs"] {
+    for name in ["basic", "vault"] {
         let mut files = Vec::new();
         collect(&tdir.join(name), &tdir, name, &mut files);
         files.sort();

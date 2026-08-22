@@ -72,7 +72,13 @@ export default {
 
     if (path === "api/tree") {
       const files = await ctx.files.index();
-      const body = JSON.stringify({ files: files.filter((f) => !junk(f.path)) });
+      // machinery: the fragment's own organs, pre-marked by the platform —
+      // watchers (feeds, pollers) filter on this instead of guessing
+      const body = JSON.stringify({
+        files: files
+          .filter((f) => !junk(f.path))
+          .map((f) => ({ path: f.path, size: f.size, updatedAt: f.updatedAt, machinery: !!f.machinery })),
+      });
       const cache = "private, max-age=15";
       const etag = await etagOf(body);
       return maybe304(req, etag, cache) || new Response(body, { headers: { "content-type": "application/json", "cache-control": cache, etag } });

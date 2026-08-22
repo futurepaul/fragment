@@ -1,5 +1,5 @@
 // Control plane (/api/...): NIP-98-gated fragment management.
-import { json, toAB, randSlug } from "./util.js";
+import { json, toAB, randSlug, isMachinery } from "./util.js";
 import { sha256Hex, safeEqual } from "./auth.js";
 import { parseCron, nextRun } from "./cron.js";
 import { normalizeManifest } from "./manifest.js";
@@ -116,7 +116,7 @@ export async function apiRoute(cell, request, url) {
     const since = parseInt(url.searchParams.get("since_rev") || "0", 10);
     const rows = cell.sql.exec(
       "SELECT path, rev, sha256, deleted, length(content) AS size FROM files WHERE rev > ? ORDER BY rev", since).toArray();
-    return json({ rev: parseInt(cell.getMeta("rev") || "0", 10), files: rows.map((r) => ({ path: r.path, rev: r.rev, size: r.size, sha256: r.sha256, deleted: !!r.deleted })) });
+    return json({ rev: parseInt(cell.getMeta("rev") || "0", 10), files: rows.map((r) => ({ path: r.path, rev: r.rev, size: r.size, sha256: r.sha256, deleted: !!r.deleted, machinery: isMachinery(r.path) })) });
   }
 
   if (p === "/file" && request.method === "GET") {

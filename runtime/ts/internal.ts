@@ -1,6 +1,6 @@
 // The /__internal plane: loopback API for ctx calls from loader isolates.
 // Run-token (and optional host-secret) gated.
-import { json, toAB } from "./util.js";
+import { json, toAB, isMachinery } from "./util.js";
 import { sha256Hex } from "./auth.js";
 import { checkToken } from "./loader.js";
 

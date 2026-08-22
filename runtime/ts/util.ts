@@ -32,6 +32,16 @@ export const MIME = {
 
 export const rankOf = (r) => ({ owner: 3, editor: 2, viewer: 1 })[r] || 0;
 
+// A fragment's own organs, not its content: manifests, app code, workflow
+// code, vendored helpers. Tree/list responses mark these with
+// `machinery: true` so watchers (feeds, pollers, indexes) don't have to
+// each re-derive an exclusion list — and each get it subtly wrong.
+export const MACHINERY = ["/fragment.json", "/app.mjs", "/rooms.mjs", "/_index.md"];
+export function isMachinery(path) {
+  if (MACHINERY.includes("/" + path)) return true;
+  return /^(workflows|applib|lib|node_modules)\/|^\./.test(path);
+}
+
 const SLUG_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789";
 
 export function randHex(bytes) {

@@ -110,8 +110,8 @@ replaces it. Shape:
   5 held runs in 10 minutes auto-pause the workflow (loud
   `workflow.auto-paused` event); `fragment pause|unpause <name> <workflow>`
   does it by hand. Files are idempotent by construction (identical writes
-  are no-ops); key external effects by cause — `fragment add once` vendors
-  `lib/once.mjs` for exactly that.
+  are no-ops); key external effects by cause — the once pattern below is
+  exactly that, in five lines.
 - **workflows**: `cron` is 5-field UTC (`*` lists ranges steps, month/day
   names OK; day-of-week 1=Sunday..7=Saturday, 0 is refused). `trigger:
   "inbox"` runs when a message lands; `trigger: "sync"` runs when files
@@ -177,6 +177,126 @@ the run's events come back. Check `fragment events my-thing` after cron runs.
 
 Workflows run in an isolated loader sandbox, one isolate per run, with their
 own copy of the folder — a wedged workflow cannot wedge the fragment itself.
+Split helpers into `lib/` and import them from a workflow
+(`import { x } from "../lib/util.mjs"`) — relative and map-path imports
+both work.
+
+## The authoring contract — three habits, that's all
+
+The platform carries the failure leg for you: retries with backoff, held
+runs with replay, auto-pause, loop protection, write-suppression. You get
+all of it without learning anything. What's left for you:
+
+1. **Throw, don't catch-and-continue.** If something unexpected happens,
+   `throw` and let the run fail. The host retries what's transient, parks
+   what isn't (`held`), and pauses the workflow if it keeps failing.
+   Recovery code you don't write is recovery code you can't get wrong.
+2. **Any trigger can fire twice; key effects by cause.** Writing files is
+   already safe — identical content is a no-op. For external side effects,
+   mark them done in `ctx.state` keyed by what caused them (see the once
+   pattern below).
+3. **React to state, write state.** Read the current state of what you
+   watch, write your output as a function of it. Fragments that mirror
+   state converge; fragments that emit events in response to events
+   oscillate.
+
+## Patterns — copy these
+
+Each is a complete workflow file (the e2e suite executes these exact
+blocks, so they cannot rot). Edit the ALL-CAPS constants and go.
+
+### pattern: poller
+
+Watch something on a schedule and process only what's new. The seen-set
+lives in `ctx.state`; it advances only when the whole pass succeeds, so a
+crashed pass re-sees (and skips, via once-style markers) its items. Tree
+responses mark a fragment's own organs with `machinery: true` — skip those.
+
+```js
+// workflows/watch.mjs — cron "*/2 * * * *"
+const SOURCE = "https://a-vault.fragment.club/api/tree"; // returns {files:[{path,size,machinery?}]}
+export async function run(ctx) {
+  const tree = await (await ctx.http(SOURCE)).json();
+  const seen = new Set((await ctx.state.get("seen")) || []);
+  for (const f of tree.files || []) {
+    if (f.machinery || seen.has(f.path)) continue;
+    seen.add(f.path);
+    await ctx.files.write("feed/" + f.path.replace(/\//g, "__") + ".md",
+      "# " + f.path + "\n\n" + f.size + " bytes\n");
+  }
+  await ctx.state.put("seen", [...seen].slice(-5000));
+  return { fresh: [...seen].length };
+}
+```
+
+### pattern: once
+
+Do an external side effect exactly once per cause. The marker survives
+crashes, restarts, and replays — a redelivered trigger skips the effect.
+
+```js
+// workflows/notify.mjs — trigger "inbox"
+const WEBHOOK = "https://example.com/hook";
+export async function run(ctx, input) {
+  const id = input && input.inbox && input.inbox.id;
+  if (!id || (await ctx.state.get("sent:" + id))) return { skipped: true };
+  await ctx.http(WEBHOOK, { method: "POST", body: JSON.stringify(input.inbox.payload ?? null) });
+  await ctx.state.put("sent:" + id, Date.now());   // after the effect, not before
+  return { sent: true };
+}
+```
+
+### pattern: sync-reaction
+
+Rebuild derived data when files change. Runs are level-triggered (input is
+"the files changed", not a diff) and writes are suppressed when unchanged,
+so running it twice is free.
+
+```js
+// workflows/reindex.mjs — trigger "sync"
+export async function run(ctx) {
+  const paths = await ctx.files.list("notes/");
+  const index = paths.sort().map((p) => "- [" + p + "](" + p + ")").join("\n");
+  await ctx.files.write("INDEX.md", "# Notes\n\n" + index + "\n");
+  return { indexed: paths.length };
+}
+```
+
+### pattern: inbox-log
+
+Receive webhooks, validate, append. Bounded shape, no growth surprises.
+
+```js
+// workflows/log.mjs — trigger "inbox"
+export async function run(ctx) {
+  for (const m of await ctx.inbox()) {
+    const line = JSON.stringify({ at: m.at, source: String(m.source).slice(0, 40), payload: m.payload }) + "\n";
+    if (line.length > 2000) continue;                    // refuse oversized
+    const p = "log/" + new Date(m.at).toISOString().slice(0, 10) + ".jsonl";
+    const prev = await ctx.files.read(p).catch(() => ""); // read throws if absent
+    await ctx.files.write(p, prev + line);
+  }
+  return { drained: true };
+}
+```
+
+### pattern: ai-pass
+
+Read, summarize, write — and let failures fail. A transient model error
+retries on its own; a terminal one parks as held for you to replay after a
+fix. Needs the host to have an inference key.
+
+```js
+// workflows/digest.mjs — cron "0 8 * * *"
+export async function run(ctx) {
+  const notes = await ctx.files.list("notes/");
+  const bodies = [];
+  for (const p of notes.slice(0, 20)) bodies.push("## " + p + "\n" + (await ctx.files.read(p)).slice(0, 2000));
+  const summary = await ctx.ai("One paragraph on today's notes:\n\n" + bodies.join("\n\n"));
+  await ctx.files.write("digests/" + new Date().toISOString().slice(0, 10) + ".md", summary + "\n");
+  return { notes: notes.length };
+}
+```
 
 ## Inbox (webhooks in)
 
@@ -268,7 +388,7 @@ Debugging: if `rooms.mjs` throws or returns `{error}`, the event log shows
 `room-error`; a drop shows `room-drop` (with `reason` if given). Read
 `fragment events <name>` when realtime misbehaves.
 
-## Recipes
+## Recipes — big scaffolds
 
 Two scaffolds ship in the CLI (`fragment new --list`): they are ordinary
 fragments — code you can read, edit, and re-bless — not special modes.
@@ -327,22 +447,22 @@ fragment login [--force]            fragment secret set <name> <KEY>
 fragment whoami                     fragment secret list <name>
 fragment host [<url>]               fragment secret rm <name> <KEY>
 fragment new <dir> [--template T]   fragment grant <name> --editor/--viewer <npub|name@dom>
-fragment add <lib>... [--dir D]     fragment revoke <name> --editor/--viewer <npub|name@dom>
-fragment create <name>              fragment inbox <name> --token T --payload JSON
-fragment list                       fragment run <name> <wf> [--input JSON]
-fragment status <name>              fragment runs <name> [--status S] [--limit N]
-fragment events <name> [--since N]  fragment pause <name> <wf>
-fragment manifest <name>            fragment unpause <name> <wf>
-fragment manifest-set <name> FILE   fragment replay <name> <run-id>
-fragment sync <name> [--dir D] [--watch N]
+fragment create <name>              fragment revoke <name> --editor/--viewer <npub|name@dom>
+fragment list                       fragment inbox <name> --token T --payload JSON
+fragment status <name>              fragment run <name> <wf> [--input JSON]
+fragment events <name> [--since N]  fragment runs <name> [--status S] [--limit N]
+fragment manifest <name>            fragment pause <name> <wf>
+fragment manifest-set <name> FILE   fragment unpause <name> <wf>
+fragment sync <name> [--dir D] [--watch N]   fragment replay <name> <run-id>
+                                   [--install | --uninstall]
 fragment publish <name> [--dir D] [--note N] [--bless]
 fragment drafts <name>              fragment bless <name> <slug>
 ```
 
-Libraries (`fragment add`): `poll` — the transactional cron-poller recipe
-(diff against a seen-set, advance only on success); `once` — exactly-once
-external effects keyed by cause. The full authoring contract is three
-habits — see docs/authoring.md.
+`fragment sync --install` writes a LaunchAgent (macOS) or systemd user
+unit (Linux) so the folder stays live without a terminal — the pattern the
+vault recipe uses. Everything an author needs to know is in this guide;
+if it isn't here, it isn't a rule.
 
 Global flags: `--host <url>` (or `FRAGMENT_HOST`), `--json`. Set a sticky
 default with `fragment host <url>` (e.g. `fragment host https://fragment.club`).

@@ -40,6 +40,11 @@ const MIME = {
   woff2: "font/woff2"
 };
 const rankOf = (r) => ({ owner: 3, editor: 2, viewer: 1 })[r] || 0;
+const MACHINERY = ["/fragment.json", "/app.mjs", "/rooms.mjs", "/_index.md"];
+function isMachinery(path) {
+  if (MACHINERY.includes("/" + path)) return true;
+  return /^(workflows|applib|lib|node_modules)\/|^\./.test(path);
+}
 const SLUG_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789";
 function randHex(bytes) {
   const b = new Uint8Array(bytes);
@@ -64,8 +69,10 @@ function json(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", ...headers } });
 }
 export {
+  MACHINERY,
   MIME,
   SCHEMA,
+  isMachinery,
   json,
   randHex,
   randSlug,

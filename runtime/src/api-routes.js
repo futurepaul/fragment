@@ -1,5 +1,5 @@
 // GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
-import { json, toAB, randSlug } from "./util.js";
+import { json, toAB, randSlug, isMachinery } from "./util.js";
 import { sha256Hex, safeEqual } from "./auth.js";
 import { nextRun } from "./cron.js";
 import { normalizeManifest } from "./manifest.js";
@@ -115,7 +115,7 @@ async function apiRoute(cell, request, url) {
       "SELECT path, rev, sha256, deleted, length(content) AS size FROM files WHERE rev > ? ORDER BY rev",
       since
     ).toArray();
-    return json({ rev: parseInt(cell.getMeta("rev") || "0", 10), files: rows.map((r) => ({ path: r.path, rev: r.rev, size: r.size, sha256: r.sha256, deleted: !!r.deleted })) });
+    return json({ rev: parseInt(cell.getMeta("rev") || "0", 10), files: rows.map((r) => ({ path: r.path, rev: r.rev, size: r.size, sha256: r.sha256, deleted: !!r.deleted, machinery: isMachinery(r.path) })) });
   }
   if (p === "/file" && request.method === "GET") {
     const a = authz("viewer");

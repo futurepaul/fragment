@@ -109,7 +109,9 @@ scripts/dev up && scripts/dev deploy
 node scripts/e2e.mjs        # add --all for the slow cron-fire check
 ```
 
-Snapshot from the last full manual pass (2026-08-20, celld v0.3.0, macOS):
+Snapshot from the last full manual pass (2026-08-22, celld v0.3.0, macOS,
+109 checks incl. the failure leg, workflow imports, and the guide's
+executable patterns):
 
 - NIP-98 auth end-to-end: create/list/status with signed requests; unsigned →
   401; valid signature without role → 403. Rust CLI signatures verify against

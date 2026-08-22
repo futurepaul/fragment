@@ -8,9 +8,11 @@
 // Exit code 0 = every check passed. Created fragments are named e2e-* and are
 // left behind on purpose — there is no destroy command yet.
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync as guideRead } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import fs from "node:fs";
 import { genKey, pubkeyFromSecret, nreq, authHeader } from './nip98.mjs';
 
 const args = process.argv.slice(2);
@@ -579,6 +581,132 @@ async function runsSection() {
   }
 }
 
+// ---------- patterns: the guide's examples are executable ----------
+// The GUIDE.md code blocks under "### pattern: <name>" are the product's
+// promises. This section extracts them verbatim, swaps only the ALL-CAPS
+// constants for local fixtures, and runs each as a real workflow — an
+// example that rots fails CI.
+function extractPatterns() {
+  const guide = guideRead(new URL('../cli/GUIDE.md', import.meta.url), 'utf8');
+  const out = {};
+  const re = /### pattern: ([a-z-]+)[\s\S]*?```js\n([\s\S]*?)```/g;
+  let m;
+  while ((m = re.exec(guide))) out[m[1]] = m[2];
+  return out;
+}
+
+async function patternsSection() {
+  if (!section('patterns')) return;
+  const patterns = extractPatterns();
+  ok(Object.keys(patterns).length >= 5, 'guide ships at least 5 patterns');
+
+  // poller — fed by a static JSON fixture on a public fragment
+  {
+    const srcName = `e2e-pt-src-${suffix}`;
+    await signed('POST', '/api/fragments', JSON.stringify({ name: srcName }));
+    await signed('PUT', `/api/f/${srcName}/file?path=site/api/tree.json&base_rev=0`, JSON.stringify({
+      files: [
+        { path: 'notes/a.md', size: 10 },
+        { path: 'notes/b.md', size: 20 },
+        { path: 'workflows/x.mjs', size: 5, machinery: true },
+      ],
+    }));
+    await signed('PUT', `/api/f/${srcName}/manifest`, JSON.stringify({ name: srcName, visibility: 'public', editors: [], viewers: [], workflows: [], secrets: [] }));
+    await signed('POST', `/api/f/${srcName}/drafts`, JSON.stringify({ note: 'patterns fixture' }));
+    const drafts = await signed('GET', `/api/f/${srcName}/drafts`);
+    await signed('POST', `/api/f/${srcName}/bless`, JSON.stringify({ slug: drafts.body.drafts[0].slug }));
+
+    const name = `e2e-pt-poll-${suffix}`;
+    await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    const code = patterns.poller.replace(/^const SOURCE = .*$/m, `const SOURCE = ${JSON.stringify(`${BASE}/f/${srcName}/api/tree.json`)}`);
+    await signed('PUT', `/api/f/${name}/file?path=workflows/watch.mjs&base_rev=0`, code);
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'watch', file: 'workflows/watch.mjs' }], secrets: [] }));
+    const r1 = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'watch' }));
+    eq(r1.body?.ok, true, 'poller pattern runs clean');
+    const feed = await signed('GET', `/api/f/${name}/files`);
+    const paths = (feed.body?.files || []).map((f) => f.path);
+    ok(paths.some((p) => p.includes('notes__a.md')), 'poller filed new content');
+    ok(!paths.some((p) => p.includes('x.mjs')), 'poller skipped machinery');
+    const r2 = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'watch' }));
+    eq(r2.body?.ok, true, 'poller re-run is clean (idempotent)');
+    const feed2 = await signed('GET', `/api/f/${name}/files`);
+    eq(feed2.body?.files?.length, feed.body?.files?.length, 're-run filed nothing new');
+  }
+
+  // once — the webhook is another fragment's inbox (a real POST)
+  {
+    const target = `e2e-pt-tgt-${suffix}`;
+    const tgt = await signed('POST', '/api/fragments', JSON.stringify({ name: target }));
+    const name = `e2e-pt-once-${suffix}`;
+    await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    const code = patterns.once.replace(/^const WEBHOOK = .*$/m, `const WEBHOOK = ${JSON.stringify(`${BASE}/api/f/${target}/inbox?t=${tgt.body.inboxToken}`)}`);
+    await signed('PUT', `/api/f/${name}/file?path=workflows/notify.mjs&base_rev=0`, code);
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'notify', file: 'workflows/notify.mjs', trigger: 'inbox' }], secrets: [] }));
+    const input = JSON.stringify({ workflow: 'notify', input: { inbox: { id: 42, payload: { hello: 'patterns' } } } });
+    const r1 = await signed('POST', `/api/f/${name}/run`, input);
+    eq(r1.body?.output?.sent, true, 'once pattern fires the effect');
+    const r2 = await signed('POST', `/api/f/${name}/run`, input);
+    eq(r2.body?.output?.skipped, true, 'once pattern refuses the duplicate');
+    const evs = await signed('GET', `/api/f/${target}/events`);
+    const arrivals = (evs.body?.events || []).filter((e) => e.kind === 'inbox');
+    eq(arrivals.length, 1, 'webhook received exactly one delivery');
+  }
+
+  // sync-reaction — derived index rebuilt from state
+  {
+    const name = `e2e-pt-sync-${suffix}`;
+    await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    await signed('PUT', `/api/f/${name}/file?path=notes/one.md&base_rev=0`, 'one');
+    await signed('PUT', `/api/f/${name}/file?path=notes/two.md&base_rev=0`, 'two');
+    await signed('PUT', `/api/f/${name}/file?path=workflows/reindex.mjs&base_rev=0`, patterns['sync-reaction']);
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'reindex', file: 'workflows/reindex.mjs', trigger: 'sync' }], secrets: [] }));
+    const r = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'reindex' }));
+    eq(r.body?.output?.indexed, 2, 'sync-reaction indexed the notes');
+    const idx = await fetch(`${BASE}/api/f/${name}/file?path=INDEX.md`, {
+      headers: { authorization: await authHeader('GET', `${BASE}/api/f/${name}/file?path=INDEX.md`, null, ownerKey) },
+    });
+    ok((await idx.text()).includes('notes/two.md'), 'INDEX.md lists the notes');
+  }
+
+  // inbox-log — validated appends
+  {
+    const name = `e2e-pt-log-${suffix}`;
+    const created = await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    await signed('PUT', `/api/f/${name}/file?path=workflows/log.mjs&base_rev=0`, patterns['inbox-log']);
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'log', file: 'workflows/log.mjs', trigger: 'inbox' }], secrets: [] }));
+    await fetch(`${BASE}/api/f/${name}/inbox?t=${created.body.inboxToken}`, { method: 'POST', body: JSON.stringify({ source: 'patterns', payload: { n: 1 } }) });
+    await fetch(`${BASE}/api/f/${name}/inbox?t=${created.body.inboxToken}`, { method: 'POST', body: JSON.stringify({ source: 'patterns', payload: { n: 2 } }) });
+    const r = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'log' }));
+    eq(r.body?.ok, true, 'inbox-log pattern runs clean');
+    const day = new Date().toISOString().slice(0, 10);
+    const log = await fetch(`${BASE}/api/f/${name}/file?path=log/${day}.jsonl`, {
+      headers: { authorization: await authHeader('GET', `${BASE}/api/f/${name}/file?path=log/${day}.jsonl`, null, ownerKey) },
+    });
+    const lines = (await log.text()).trim().split('\n').filter(Boolean);
+    eq(lines.length, 2, 'inbox-log appended both messages');
+  }
+
+  // ai-pass — needs a host inference key (CI has none; skipped there)
+  {
+    if (!process.env.OPENROUTER_API_KEY) {
+      console.log('skip  ai-pass pattern (no OPENROUTER_API_KEY on this stack)');
+      return;
+    }
+    const name = `e2e-pt-ai-${suffix}`;
+    await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    await signed('PUT', `/api/f/${name}/file?path=notes/x.md&base_rev=0`, 'the quick brown fox jumps over the lazy dog');
+    await signed('PUT', `/api/f/${name}/file?path=workflows/digest.mjs&base_rev=0`, patterns['ai-pass']);
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'digest', file: 'workflows/digest.mjs' }], secrets: [] }));
+    const r = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'digest' }));
+    eq(r.body?.output?.notes, 1, 'ai-pass pattern runs clean');
+    const day = new Date().toISOString().slice(0, 10);
+    const d = await fetch(`${BASE}/api/f/${name}/file?path=digests/${day}.md`, {
+      headers: { authorization: await authHeader('GET', `${BASE}/api/f/${name}/file?path=digests/${day}.md`, null, ownerKey) },
+    });
+    ok((await d.text()).length > 0, 'ai-pass wrote a digest');
+  }
+}
+
 // ---------- CLI sync ----------
 async function syncSection() {
   if (!section('sync')) return;
@@ -683,6 +811,7 @@ try {
   if (!ONLY || ONLY === 'rooms') await roomsSection();
   if (!ONLY || ONLY === 'workflows') await workflowSection();
   if (!ONLY || ONLY === 'paused') await pausedSection();
+  if (!ONLY || ONLY === 'patterns') await patternsSection();
   if (!ONLY || ONLY === 'runs') await runsSection();
   if (!ONLY || ONLY === 'sync') await syncSection();
   await cronSection();

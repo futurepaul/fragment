@@ -202,8 +202,9 @@ messages cap at 1000; beyond that the POST gets a 429 and the ledger gets
 
 **Delivery contract, one paragraph.** Any trigger may fire more than once
 for one logical change. Files are safe by construction (suppression);
-external side effects should be keyed by cause (`lib/once.mjs`). Sync
-coalescing is debounce — `debounceMs` in the manifest names the knob.
+external side effects should be keyed by cause (the once pattern in
+`fragment guide`). Sync coalescing is debounce — `debounceMs` in the
+manifest names the knob.
 
 `fragment runs <name> [--status held]` reads the table;
 `fragment pause|unpause|replay` drive it.

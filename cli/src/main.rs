@@ -68,6 +68,12 @@ enum Cmd {
         /// Re-sync every N seconds
         #[arg(long)]
         watch: Option<u64>,
+        /// Install (or, with --uninstall, remove) a LaunchAgent/systemd
+        /// unit that keeps this folder syncing after logout/reboot
+        #[arg(long, conflicts_with = "uninstall")]
+        install: bool,
+        #[arg(long)]
+        uninstall: bool,
     },
     /// Sync (if a dir is given) then publish a draft; prints the draft URL
     Publish {
@@ -135,14 +141,6 @@ enum Cmd {
         /// List available templates
         #[arg(long)]
         list: bool,
-    },
-    /// Vendor a library file into a fragment folder (poll | once)
-    Add {
-        /// Library name (see `fragment add` with no args for the list)
-        libs: Vec<String>,
-        /// Fragment folder (default: current directory); writes lib/<name>.mjs
-        #[arg(long, default_value = ".")]
-        dir: PathBuf,
     },
 }
 
@@ -323,39 +321,6 @@ fn main() -> Result<()> {
     let j = cli.json;
 
     match cli.cmd {
-        Cmd::Add { libs, dir } => {
-            let lib_group = TEMPLATES
-                .iter()
-                .find(|(n, _)| *n == "libs")
-                .map(|(_, files)| *files)
-                .unwrap_or(&[]);
-            if libs.is_empty() {
-                println!("libraries (fragment add <name>...):");
-                for (rel, _) in lib_group {
-                    let stem = rel.trim_end_matches(".mjs");
-                    println!("  {stem}  →  lib/{rel}");
-                }
-                return Ok(());
-            }
-            std::fs::create_dir_all(dir.join("lib"))?;
-            for name in &libs {
-                let rel = if name.ends_with(".mjs") { name.clone() } else { format!("{name}.mjs") };
-                let bytes = lib_group
-                    .iter()
-                    .find(|(r, _)| r == &rel)
-                    .map(|(_, b)| *b)
-                    .ok_or_else(|| anyhow!("unknown library '{name}'"))?;
-                let target = dir.join("lib").join(&rel);
-                if target.exists() {
-                    println!("  lib/{rel} exists, left alone");
-                    continue;
-                }
-                std::fs::write(&target, bytes)?;
-                println!("  lib/{rel}");
-            }
-            println!("import with: from a workflow, import {{ poll }} from \"../lib/poll.mjs\" (or once)");
-            return Ok(());
-        }
         Cmd::Create { name } => {
             let v = c.call(c.post_json("/api/fragments", &json!({ "name": name }))?)?;
             if j {
@@ -412,7 +377,11 @@ fn main() -> Result<()> {
             c.call(c.put_json(&format!("/api/f/{name}/manifest"), &v)?)?;
             println!("manifest updated");
         }
-        Cmd::Sync { name, dir, watch } => {
+        Cmd::Sync { name, dir, watch, install, uninstall } => {
+            if install || uninstall {
+                install_sync_unit(&name, &dir, install)?;
+                return Ok(());
+            }
             loop {
                 let report = sync::sync_once(&c, &name, &dir)?;
                 println!("sync {} ({})", name, dir.display());
@@ -664,4 +633,141 @@ fn chrono_like(secs: u64) -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:{s:02}Z")
+}
+
+// ---------- sync unit (keep a folder live without a terminal) ----------
+// Writes a LaunchAgent (macOS) or systemd user unit (Linux) for one
+// fragment+folder pair. Uses the CLI's own absolute path and an explicit
+// PATH — launchd and systemd both run with minimal environments (the
+// agent-built watch.sh failed on exactly this).
+
+fn install_sync_unit(name: &str, dir: &PathBuf, install: bool) -> Result<()> {
+    let dir = match dir.canonicalize() {
+        Ok(d) => d,
+        Err(_) => anyhow::bail!("no such directory: {}", dir.display()),
+    };
+    let home = std::env::var("HOME").context("HOME not set")?;
+    let exe = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .context("cannot resolve the fragment binary path")?;
+    let log = dir.join(".fragment").join("watch.log");
+
+    if cfg!(target_os = "macos") {
+        let label = format!("sh.finite.fragment-sync.{name}");
+        let plist_dir = PathBuf::from(&home).join("Library").join("LaunchAgents");
+        let plist = plist_dir.join(format!("{label}.plist"));
+        let _ = std::process::Command::new("launchctl")
+            .arg("bootout")
+            .arg(format!("gui/{}/{}", uid()?, label))
+            .status();
+        if install {
+            std::fs::create_dir_all(&plist_dir)?;
+            std::fs::create_dir_all(dir.join(".fragment"))?;
+            let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>__LABEL__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__EXE__</string>
+    <string>sync</string>
+    <string>__NAME__</string>
+    <string>--dir</string>
+    <string>__DIR__</string>
+    <string>--watch</string>
+    <string>3</string>
+  </array>
+  <key>WorkingDirectory</key><string>__DIR__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>__HOMEBIN__:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>__HOME__</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>__LOG__</string>
+  <key>StandardErrorPath</key><string>__LOG__</string>
+</dict>
+</plist>
+"#
+            .replace("__LABEL__", &label)
+            .replace("__EXE__", &exe.display().to_string())
+            .replace("__NAME__", name)
+            .replace("__DIR__", &dir.display().to_string())
+            .replace("__HOMEBIN__", &format!("{}/.local/bin:{}/.cargo/bin", home, home))
+            .replace("__HOME__", &home)
+            .replace("__LOG__", &log.display().to_string());
+            std::fs::write(&plist, xml)?;
+            let status = std::process::Command::new("launchctl")
+                .arg("bootstrap")
+                .arg(format!("gui/{}", uid()?))
+                .arg(&plist)
+                .status()
+                .context("launchctl bootstrap failed")?;
+            if !status.success() {
+                anyhow::bail!("launchctl bootstrap failed — try: launchctl bootstrap gui/{} {}", uid()?, plist.display());
+            }
+            println!("installed LaunchAgent {label}");
+            println!("  syncs {name} <-> {} every 3s, starting now and after reboot", dir.display());
+            println!("  log: {}", log.display());
+            println!("  remove with: fragment sync {name} --dir {} --uninstall", dir.display());
+        } else {
+            let _ = std::fs::remove_file(&plist);
+            println!("removed LaunchAgent {label}");
+        }
+    } else {
+        let unit = format!("fragment-sync-{name}.service");
+        let dir_units = PathBuf::from(&home).join(".config").join("systemd").join("user");
+        let path = dir_units.join(&unit);
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "disable", "--now", &unit])
+            .status();
+        if install {
+            std::fs::create_dir_all(&dir_units)?;
+            std::fs::create_dir_all(dir.join(".fragment"))?;
+            let ini = r#"[Unit]
+Description=fragment sync __NAME__
+After=network-online.target
+
+[Service]
+ExecStart=__EXE__ sync __NAME__ --dir __DIR__ --watch 3
+WorkingDirectory=__DIR__
+Environment=PATH=__HOMEBIN__:/usr/local/bin:/usr/bin:/bin
+Restart=always
+
+[Install]
+WantedBy=default.target
+"#
+                .replace("__NAME__", name)
+                .replace("__EXE__", &exe.display().to_string())
+                .replace("__DIR__", &dir.display().to_string())
+                .replace("__HOMEBIN__", &format!("{}/.local/bin:{}/.cargo/bin", home, home));
+            std::fs::write(&path, ini)?;
+            let run = |args: &[&str]| -> Result<()> {
+                let st = std::process::Command::new("systemctl")
+                    .arg("--user")
+                    .args(args)
+                    .status()
+                    .with_context(|| format!("systemctl --user {:?}", args))?;
+                if !st.success() { anyhow::bail!("systemctl --user {:?} failed", args); }
+                Ok(())
+            };
+            run(&["daemon-reload"])?;
+            run(&["enable", "--now", &unit])?;
+            println!("installed systemd user unit {unit}");
+            println!("  log: journalctl --user -u {unit} -f");
+            println!("  remove with: fragment sync {name} --dir {} --uninstall", dir.display());
+        } else {
+            let _ = std::fs::remove_file(&path);
+            let _ = std::process::Command::new("systemctl").args(["--user", "daemon-reload"]).status();
+            println!("removed systemd user unit {unit}");
+        }
+    }
+    Ok(())
+}
+
+fn uid() -> Result<String> {
+    let out = std::process::Command::new("id").arg("-u").output().context("id -u failed")?;
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
