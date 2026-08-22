@@ -120,6 +120,7 @@ pub fn scan_local(dir: &Path) -> Result<HashMap<String, (String, u64)>> {
 
 struct RemoteFile {
     rev: u64,
+    sha256: String,
     deleted: bool,
 }
 
@@ -133,6 +134,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path) -> Result<Report> {
             f["path"].as_str().unwrap_or("").to_string(),
             RemoteFile {
                 rev: f["rev"].as_u64().unwrap_or(0),
+                sha256: f["sha256"].as_str().unwrap_or("").to_string(),
                 deleted: f["deleted"].as_bool().unwrap_or(false),
             },
         );
@@ -174,7 +176,14 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path) -> Result<Report> {
                         pull_file(client, name, dir, &path, &mut state, &mut report)?;
                     }
                     (true, true) => {
-                        conflict_file(client, name, dir, &path, &mut report)?;
+                        // identical content on both sides is not a conflict
+                        // (e.g. a racing sync already pushed our change):
+                        // adopt the remote rev instead of spawning artifacts
+                        if rf.sha256 == *lhash {
+                            state.files.insert(path.clone(), FileState { rev: rf.rev, sha256: rf.sha256.clone() });
+                        } else {
+                            conflict_file(client, name, dir, &path, &mut report)?;
+                        }
                     }
                 }
             }
