@@ -49,7 +49,7 @@ export default {
 `;
 function makeToken(cell, scope) {
   const token = randHex(16);
-  const ttl = scope.kind === "run" || scope.kind === "draft" ? scope.blessed ? null : 36e5 : 36e5;
+  const ttl = scope.kind === "run" || scope.kind === "draft" && scope.blessed ? null : 36e5;
   cell.sql.exec("DELETE FROM run_tokens WHERE expires < ?", Date.now() - 24 * 36e5);
   if (scope.kind === "draft") {
     for (const r of cell.sql.exec("SELECT token, scope FROM run_tokens").toArray()) {
@@ -132,9 +132,13 @@ async function runWorkflowLocked(cell, wf, input, cause = null) {
     if (src === null) throw new Error(`workflow file not found in folder: ${wf.file}`);
     const modules = collectModules(cell, ["workflows/", "lib/"]);
     for (const k of Object.keys(modules)) modules[k] = rewriteRelatives(modules[k], k);
-    const rev = cell.getMeta("rev");
+    const codeHash = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(JSON.stringify([wf.file, modules]))
+    );
+    const hash = [...new Uint8Array(codeHash)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
     const ep = await cell.loadCode(
-      `wf:${name}:${wf.name}:${rev}`,
+      `wf:${name}:${wf.name}:${hash}`,
       WORKFLOW_MAIN.replaceAll("__WF__", wf.file),
       modules,
       { kind: "run", workflow: wf.name },

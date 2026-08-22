@@ -60,10 +60,12 @@ export default {
 export function makeToken(cell, scope) {
   const token = randHex(16);
   // token lifetime = the lifetime of the thing it authenticates:
-  // workflow runs are short (1h is a safety net for wedged runs), draft
-  // previews are rehearsals (1h), a blessed app lives until superseded
-  // (null expiry; revoked at rebless, swept on restart re-mint).
-  const ttl = scope.kind === "run" || scope.kind === "draft" ? (scope.blessed ? null : 3600_000) : 3600_000;
+  // workflow runs live in CACHED isolates (stable code-hash ids), which
+  // outlive any ttl — a cached worker with an expired token 403s its own
+  // ctx calls — so run tokens live until superseded (like blessed apps).
+  // Draft previews are rehearsals (1h); a blessed app lives until
+  // superseded (revoked at rebless, swept on restart re-mint).
+  const ttl = scope.kind === "run" || (scope.kind === "draft" && scope.blessed) ? null : 3600_000;
   cell.sql.exec("DELETE FROM run_tokens WHERE expires < ?", Date.now() - 24 * 3600_000);
   if (scope.kind === "draft") {
     // one live token per (slug, blessed-ness): re-mints sweep their predecessor
@@ -187,9 +189,17 @@ export async function runWorkflowLocked(cell, wf, input, cause = null) {
     // workflows/ plus lib/ (the `fragment add` recipes live there)
     const modules = collectModules(cell, ["workflows/", "lib/"]);
     for (const k of Object.keys(modules)) modules[k] = rewriteRelatives(modules[k], k);
-    const rev = cell.getMeta("rev");
+    // stable worker id, keyed on the workflow CODE, not the folder rev: the
+    // rev bumps on every file write — including the workflow's own output —
+    // so a rev-keyed id loads a fresh isolate per run and write-heavy cron
+    // workflows saturate the loader (256 workers; found live: the relay
+    // news bot churned held runs against it). The isolate now reloads only
+    // when the code actually changes.
+    const codeHash = await crypto.subtle.digest("SHA-256",
+      new TextEncoder().encode(JSON.stringify([wf.file, modules])));
+    const hash = [...new Uint8Array(codeHash)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
     const ep = await cell.loadCode(
-      `wf:${name}:${wf.name}:${rev}`,
+      `wf:${name}:${wf.name}:${hash}`,
       WORKFLOW_MAIN.replaceAll("__WF__", wf.file),
       modules,
       { kind: "run", workflow: wf.name },
