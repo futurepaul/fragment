@@ -611,6 +611,9 @@ export class FragmentCell {
         FRAGMENT_INTERNAL_URL: this.internalBase(),
         FRAGMENT_RUN_TOKEN: this.makeToken(scope),
         FRAGMENT_SCOPE: scope.kind,
+        // forwarded by ctx as x-fragment-host-secret; checked by the router
+        // on /__internal when the host sets FRAGMENT_HOST_SECRET
+        ...(this.env.FRAGMENT_HOST_SECRET ? { FRAGMENT_HOST_SECRET: this.env.FRAGMENT_HOST_SECRET } : {}),
       },
     }));
     return worker.getEntrypoint ? worker.getEntrypoint() : worker;

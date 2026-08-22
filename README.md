@@ -75,7 +75,9 @@ Worker Loader is the one exotic binding). Same code, different bindings:
 ```
 cd runtime && npx wrangler login        # once, browser OAuth
 ../scripts/deploy-cf deploy             # deploys + bakes in the worker URL
-../scripts/deploy-cf secret             # optional: OPENROUTER_API_KEY from .env
+../scripts/deploy-cf secret             # OPENROUTER_API_KEY from .env, plus
+                                        # FRAGMENT_HOST_SECRET (generated) that
+                                        # locks /__internal to ctx loopback
 fragment --host https://<you>.workers.dev create hello
 ```
 

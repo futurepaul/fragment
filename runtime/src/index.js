@@ -1,6 +1,6 @@
 // Router worker: public entry. Routes to cells, verifies NIP-98 on control
 // routes, stamps x-fragment-pubkey (and strips any inbound spoof).
-import { verifyNip98 } from "./auth.js";
+import { verifyNip98, sha256Hex } from "./auth.js";
 import { RT_CLIENT_SOURCE } from "./rt-client.js";
 
 export { FragmentCell } from "./cell.js";
@@ -70,6 +70,29 @@ export default {
       if (path.startsWith("/__internal/f/")) {
         const rest = path.slice("/__internal/f/".length);
         const name = rest.slice(0, rest.indexOf("/"));
+        // The internal plane exists only for loader-isolate loopback traffic
+        // (workflow/app/rooms ctx calls), which cells authenticate with their
+        // own run tokens. Two namespaces are never reachable over HTTP, from
+        // anyone: the registry and cell init. Both are exercised exclusively
+        // through the FRAGMENT binding by the router itself (create flow,
+        // syncRolesToRegistry, slug-map). Without this block, anyone who can
+        // reach the router could mint registry rows without a key, map
+        // arbitrary slugs onto other fragments, or win the __cell/init race
+        // on a not-yet-initialized name.
+        if (name === "_registry" || rest.slice(name.length).startsWith("/__cell/")) {
+          return new Response("not found", { status: 404 });
+        }
+        // Defense in depth when the host sets FRAGMENT_HOST_SECRET (celld:
+        // CELLD_VAR_FRAGMENT_HOST_SECRET; CF: a wrangler secret): loopback
+        // calls must carry x-fragment-host-secret. Cells stamp the value into
+        // loaded workers' env, so ctx keeps working unchanged. Unset (plain
+        // local dev) → per-cell run-token auth only, as before.
+        const want = env.FRAGMENT_HOST_SECRET;
+        if (want) {
+          const got = request.headers.get("x-fragment-host-secret") || "";
+          const [hw, hg] = await Promise.all([sha256Hex(want), sha256Hex(got)]);
+          if (hw !== hg) return json({ error: "bad host secret" }, 403);
+        }
         return toCell(name, path, null);
       }
 
