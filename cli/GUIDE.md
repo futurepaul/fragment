@@ -109,7 +109,9 @@ replaces it. Shape:
 - **workflows**: `cron` is 5-field UTC (`*` lists ranges steps, month/day
   names OK; day-of-week 1=Sunday..7=Saturday, 0 is refused). `trigger:
   "inbox"` runs when a message lands; `trigger: "sync"` runs when files
-  change on the editor plane (sync pushes, CLI writes — coalesced a few
+  change on the editor plane. Any workflow can set `"paused": true` in its
+  manifest entry — cron/inbox/sync triggers all skip it (manual `fragment
+  run` still works), which makes live maintenance race-free (sync pushes, CLI writes — coalesced a few
   seconds; workflow writes never re-trigger, so outputs are loop-safe).
   Neither = manual only (`fragment run`). The fragment sleeps between
   runs; the host's durable alarms fire crons — they survive restarts and

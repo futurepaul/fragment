@@ -51,6 +51,13 @@ jobs:
       - name: root deps (@noble for signing)
         run: npm install --no-audit --no-fund
 
+      - name: runtime typecheck + build freshness
+        run: |
+          scripts/build-runtime
+          git diff --exit-code runtime/src
+          git diff --exit-code --quiet runtime/src || {
+            echo "runtime/src is stale — run scripts/build-runtime and commit"; exit 1; }
+
       - name: start stack (azurite + celld) with the host secret set
         run: |
           export FRAGMENT_HOST_SECRET="$(openssl rand -hex 32)"

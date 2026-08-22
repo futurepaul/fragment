@@ -1,5 +1,8 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
-const RT_CLIENT_SOURCE = `
+// The __rt.js browser client served per fragment. Usage:
+//   <script src="/f/<name>/__rt.js"></script>  (or the /d/<slug>/ equivalent)
+//   const notes = fragment.room("notes");
+//   notes.on("msg", (m) => ...); notes.send({...}); notes.setState({...});
+export const RT_CLIENT_SOURCE = `
 window.fragment = (() => {
   function base() {
     // Works under /f/<name>/... and /d/<slug>/...; preserves ?view= token.
@@ -46,6 +49,3 @@ window.fragment = (() => {
   return { room };
 })();
 `;
-export {
-  RT_CLIENT_SOURCE
-};

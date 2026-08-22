@@ -1,5 +1,7 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
-const CTX_SHIM_SOURCE = `
+// The fragment-ctx.mjs module source, injected as a sibling module into every
+// loaded worker (workflow runs, app.mjs, rooms.mjs). ctx talks back to the
+// cell over the loopback internal API with a per-run token.
+export const CTX_SHIM_SOURCE = `
 export async function makeCtx(env) {
   const base = env.FRAGMENT_INTERNAL_URL;
   const tok = env.FRAGMENT_RUN_TOKEN;
@@ -14,7 +16,7 @@ export async function makeCtx(env) {
   };
   // Secrets: workflow runs (scope "run") need them synchronously, so they
   // await the fetch. Served apps (scope "draft") almost never touch secrets,
-  // and every request through the app used to pay a loopback for them \u2014 so
+  // and every request through the app used to pay a loopback for them — so
   // for draft scope the fetch runs in the background and fills the object
   // in when it lands.
   const secretsAll = {};
@@ -89,6 +91,3 @@ export async function makeCtx(env) {
   return ctx;
 }
 `;
-export {
-  CTX_SHIM_SOURCE
-};

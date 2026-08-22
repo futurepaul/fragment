@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Typecheck + transpile runtime/ts -> runtime/src.
+# src/ is committed build output (deploys and rsyncs use it directly);
+# edit runtime/ts and run this, never src by hand.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+(cd runtime && [ -x node_modules/.bin/tsc ] || npm install --no-audit --no-fund >/dev/null)
+(cd runtime && ./node_modules/.bin/tsc --noEmit -p .)
+(cd runtime && ./node_modules/.bin/esbuild ts/*.ts --outdir=src --format=esm --target=es2022 \
+  --log-level=warning \
+  --banner:js="// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.")
+echo "runtime built: ts -> src"

@@ -370,6 +370,47 @@ async function workflowSection() {
   eq(rm.status, 200, 'secret removed');
 }
 
+// ---------- paused workflows ----------
+async function pausedSection() {
+  if (!section('paused')) return;
+  const name = `e2e-paused-${suffix}`;
+  const created = await signed('POST', '/api/fragments', JSON.stringify({ name }));
+  const inboxToken = created.body.inboxToken;
+
+  const wf = 'export async function run(ctx) {\n  await ctx.files.write("out/fired.txt", "yes");\n  return { fired: true };\n}\n';
+  await signed('PUT', `/api/f/${name}/file?path=workflows/w.mjs&base_rev=0`, wf);
+  const man = await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({
+    name, visibility: 'token', editors: [], viewers: [],
+    workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'inbox', paused: true }],
+    secrets: [],
+  }));
+  eq(man.status, 200, 'manifest accepts paused: true on a workflow');
+
+  // an inbox arrival while paused must NOT run it
+  const post = await fetch(`${BASE}/api/f/${name}/inbox?t=${inboxToken}`, {
+    method: 'POST', body: JSON.stringify({ source: 'e2e', payload: {} }),
+  });
+  eq(post.status, 200, 'inbox POST still accepted while paused');
+  ok(!(post.body?.ran || []).some((r) => r.workflow === 'w'), 'paused workflow did not run on trigger');
+
+  // manual run is the maintenance path and must work
+  const run = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'w' }));
+  eq(run.status, 200, 'manual run works while paused');
+  eq(run.body?.output?.fired, true, 'manual run fired the workflow');
+
+  // unpause → trigger works again
+  const man2 = await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({
+    name, visibility: 'token', editors: [], viewers: [],
+    workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'inbox' }],
+    secrets: [],
+  }));
+  eq(man2.status, 200, 'unpause accepted');
+  const post2 = await (await fetch(`${BASE}/api/f/${name}/inbox?t=${inboxToken}`, {
+    method: 'POST', body: JSON.stringify({ source: 'e2e', payload: {} }),
+  })).json();
+  ok((post2?.ran || []).some((r) => r.workflow === 'w' && r.ok), 'unpaused workflow runs on trigger');
+}
+
 // ---------- CLI sync ----------
 async function syncSection() {
   if (!section('sync')) return;
@@ -470,6 +511,7 @@ try {
   if (!ONLY || ONLY === 'app') await appSection();
   if (!ONLY || ONLY === 'rooms') await roomsSection();
   if (!ONLY || ONLY === 'workflows') await workflowSection();
+  if (!ONLY || ONLY === 'paused') await pausedSection();
   if (!ONLY || ONLY === 'sync') await syncSection();
   await cronSection();
 } catch (e) {
