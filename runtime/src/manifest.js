@@ -33,6 +33,10 @@ const ManifestSchema = Type.Object({
   // or delete existing ones (identical bytes are a no-op; the owner is
   // exempt). Makes many-writer folders race-free by construction.
   appendOnly: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+  // POST {type:"changed", fragment, rev, paths} to each URL when files
+  // change (best-effort, coalesced, 3 retries). The push half of "bots
+  // watching bots" — the socket (__watch) stays for CLI sync clients.
+  notifyUrls: Type.Optional(Type.Array(Type.String({ minLength: 8 }), { maxItems: 3 })),
   // sync-trigger coalescing window (debounce); the knob is named, the
   // behavior is old
   debounceMs: Type.Optional(Type.Integer({ minimum: 250, maximum: 3e5 }))

@@ -48,6 +48,13 @@ visibility=viewers).
 | `POST /api/f/{name}/replay` | editor+ | `{run: id}` → re-runs a held run with its original input → `{ok, output?, error?, runId}` |
 | `GET /api/f/{name}/runs?status=&wf=&limit=&include=input` | viewer+ | → `{runs:[{id, wf, via, status, attempt, maxAttempts, error?, timings, cause}], counts}`. Statuses: `running \| backoff \| success \| held \| skipped \| blocked` |
 | `POST /api/f/{name}/pause` | editor+ | `{workflow, paused}` → pause/unpause a workflow (clears the auto-pause breaker) |
+
+**Notify-on-change** (manifest `notifyUrls: ["https://…"]`, max 3): every
+mutation POSTs `{type:"changed", fragment, rev, paths}` to each URL,
+coalesced per URL with 3 retries — push for fragments that can't hold a
+socket. Frames carry the hop budget (`x-fragment-hops: 1`), so notify
+loops die at the receiving inbox's cycle guard. `notify.sent` /
+`notify.failed` land on the event ledger.
 | `PUT /api/f/{name}/secrets/{KEY}` | editor+ | raw body = value → `{ok}` |
 | `GET /api/f/{name}/secrets` | editor+ | → `{names: [...]}` (never values) |
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor+ | → `{ok}` |
@@ -62,6 +69,8 @@ visibility=viewers).
 | `GET /f/{name}/...` | blessed draft of `{name}`. If draft contains `app.mjs`, requests go to its `fetch(req, ctx)`; else static files from `site/` (index.html default, 404 otherwise). Manifest `"liveFiles": true` switches the app's `ctx.files` reads from the draft snapshot to the live working copy (code frozen, data live). Token visibility: a valid `?view=` mints a `fragview_{name}` cookie so subresources (module imports, css, images) pass the gate. |
 | `GET /d/{slug}/...` | same, for one draft snapshot. |
 | `GET /f/{name}/__rt.js` | browser client for rooms (see below). |
+| `GET /f/{name}/__tree` | machine-readable tree: `{files:[{path,size,updatedAt,rev,sha256}]}`, machinery excluded. Gated exactly like the site (public / `?view=` token / NIP-98). Same form at `/d/{slug}/__tree` for the snapshot. |
+| `GET /f/{name}/__file?path=P` | raw file content under the same gate; machinery paths refused. The read API for watchers, feeds and other fragments — a view link is all a reader needs. |
 | `WS  /f/{name}/__room/{room}` (also `/d/{slug}/__room/{room}`) | realtime room. |
 | view token | when manifest `visibility:"token"`, append `?view={viewToken}`. When `"viewers"`, NIP-98 header on the GET. `public` needs nothing. Drafts are unguessable-slug public by default, plus the same visibility rule if a `view` token / NIP-98 is present it is ignored. |
 

@@ -1,6 +1,7 @@
 // GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
-import { toAB, MIME, rankOf } from "./util.js";
+import { toAB, MIME, rankOf, isMachinery } from "./util.js";
 import { safeEqual } from "./auth.js";
+import { json } from "./util.js";
 import { APP_MAIN } from "./loader.js";
 function canonicalUrl(cell, origin, name) {
   const sub = cell.env.FRAGMENT_SUBDOMAIN_HOST;
@@ -32,6 +33,20 @@ async function serveRoute(cell, request, url) {
   const rest = parts.join("/");
   const draft = cell.sql.exec("SELECT slug FROM drafts WHERE slug = ?", slug).toArray()[0];
   if (!draft) return new Response("no such draft\n", { status: 404 });
+  if (rest === "__tree") {
+    const rows = mode === "b" ? cell.sql.exec("SELECT path, length(content) AS size, updated_at, rev, sha256 FROM files WHERE deleted = 0 ORDER BY path").toArray() : cell.sql.exec("SELECT df.path, length(df.content) AS size, 0 AS updated_at, 0 AS rev, df.sha256 FROM draft_files df WHERE df.slug = ? ORDER BY df.path", slug).toArray();
+    const files = rows.filter((r) => !isMachinery(r.path)).map((r) => ({ path: r.path, size: r.size, updatedAt: r.updated_at || null, rev: r.rev || 0, sha256: r.sha256 }));
+    return json({ type: "tree", files, count: files.length });
+  }
+  if (rest.startsWith("__file")) {
+    const fPath = new URL(request.url).searchParams.get("path") || "";
+    if (!fPath || fPath.includes("..") || fPath.startsWith("/") || isMachinery(fPath)) {
+      return json({ error: "bad path" }, 400);
+    }
+    const row2 = mode === "b" ? cell.sql.exec("SELECT content FROM files WHERE path = ? AND deleted = 0", fPath).toArray()[0] : cell.sql.exec("SELECT content FROM draft_files WHERE slug = ? AND path = ?", slug, fPath).toArray()[0];
+    if (!row2) return json({ error: "no such file" }, 404);
+    return new Response(toAB(row2.content), { headers: { "content-type": "application/octet-stream", "cache-control": "no-store" } });
+  }
   const appRow = cell.sql.exec("SELECT content FROM draft_files WHERE slug = ? AND path = 'app.mjs'", slug).toArray()[0];
   if (appRow) {
     const modules = {};

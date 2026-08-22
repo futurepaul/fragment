@@ -318,6 +318,63 @@ export async function run(ctx) {
 }
 ```
 
+### pattern: dropzone
+
+Collect drops (notes, uploads, pings) into an append-only inbox folder.
+The manifest does the enforcing (`"appendOnly": ["inbox/"]`); content-hash
+naming makes identical re-drops no-ops and simultaneous drops
+collision-free. Nothing is ever lost or double-filed.
+
+```js
+// workflows/ingest.mjs — trigger "inbox"; manifest: "appendOnly": ["inbox/"]
+export async function run(ctx) {
+  const msgs = await ctx.inbox();
+  const filed = [];
+  for (const m of msgs) {
+    const text = String((m.payload && m.payload.text) || "").trim().slice(0, 5000);
+    if (!text) continue;
+    const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+    const hash = [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 8);
+    const p = "inbox/" + new Date(m.at).toISOString().slice(0, 10) + "-" + hash + ".md";
+    await ctx.files.write(p, text + "\n");
+    filed.push(p);
+  }
+  await ctx.inboxAck(msgs.map((m) => m.id)); // only what we observed
+  return { filed };
+}
+```
+
+### pattern: watcher
+
+React to another fragment's changes the moment they happen. Put your
+fragment's inbox URL in the WATCHED fragment's manifest (`notifyUrls`) —
+it gets POSTed a `{type:"changed", fragment, rev, paths}` frame on every
+change, which triggers this workflow instantly. Keep a cron on the same
+workflow as the floor (notify is best-effort). The machine-readable tree
+(`__tree`) and raw reads (`__file?path=`) are gated exactly like the
+site — a `?view=` link is all a reader needs.
+
+```js
+// workflows/check.mjs — trigger "inbox" AND cron "*/5 * * * *"
+const SOURCE = "https://some-fragment.fragment.club"; // its ?view= link works below
+export async function run(ctx, input) {
+  const token = ctx.secrets.SOURCE_VIEW_TOKEN;         // the watched fragment's view token
+  const tree = await (await ctx.http(SOURCE + "/__tree?view=" + token)).json();
+  const seen = new Set((await ctx.state.get("seen")) || []);
+  let fresh = 0;
+  for (const f of tree.files || []) {
+    if (f.machinery || seen.has(f.path)) continue;
+    seen.add(f.path);
+    fresh++;
+    // read new files with: await (await ctx.http(SOURCE + "/__file?path=…" + "&view=" + token)).text()
+  }
+  await ctx.state.put("seen", [...seen].slice(-5000));
+  const msgs = await ctx.inbox();
+  await ctx.inboxAck(msgs.map((m) => m.id));
+  return { fresh };
+}
+```
+
 ### pattern: ai-pass
 
 Read, summarize, write — and let failures fail. A transient model error

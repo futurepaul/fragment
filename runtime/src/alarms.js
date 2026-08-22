@@ -1,5 +1,6 @@
 // GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
 import { parseCron, nextRun, cronMatches } from "./cron.js";
+import { drainNotify, nextNotifyAt } from "./notify.js";
 async function rearmAlarm(cell) {
   const m = cell.manifest();
   if (!m) return;
@@ -17,6 +18,8 @@ async function rearmAlarm(cell) {
   if (syncAt && (next === null || syncAt < next)) next = syncAt;
   const retry = cell.sql.exec("SELECT MIN(next_attempt_at) t FROM runs WHERE status = 'backoff'").toArray()[0];
   if (retry && retry.t && (next === null || retry.t < next)) next = retry.t;
+  const notifyAt = nextNotifyAt(cell);
+  if (notifyAt && (next === null || notifyAt < next)) next = notifyAt;
   if (next !== null) await cell.state.storage.setAlarm(next);
   else await cell.state.storage.deleteAlarm();
 }
@@ -49,6 +52,7 @@ async function alarm(cell) {
     }
   }
   await cell.resumeDueRuns();
+  await drainNotify(cell);
   await cell.rearmAlarm();
 }
 async function scheduleSyncTrigger(cell, path) {

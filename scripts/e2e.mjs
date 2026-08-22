@@ -774,6 +774,60 @@ async function guideSection() {
     }
   }
 
+  // pattern: dropzone (append-only + hash naming + ack)
+  {
+    const name = `e2e-gd-drop-${suffix}`;
+    const created = await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    await signed('PUT', `/api/f/${name}/file?path=workflows/ingest.mjs&base_rev=0`, patterns.dropzone);
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'ingest', file: 'workflows/ingest.mjs', trigger: 'inbox' }], secrets: [], appendOnly: ['inbox/'] }));
+    const post = (text) => fetch(`${BASE}/api/f/${name}/inbox?t=${created.body.inboxToken}`, { method: 'POST', body: JSON.stringify({ source: 'drop', payload: { text } }) });
+    await post('first drop');
+    await post('first drop'); // identical re-drop
+    await post('second drop');
+    // each POST auto-ran ingest (inbox trigger); give them a beat, then check
+    await sleep(1500);
+    const runs = await signed('GET', `/api/f/${name}/runs`);
+    const okRuns = (runs.body?.runs || []).filter((r) => r.status === 'success');
+    ok(okRuns.length >= 3, 'each drop ran the ingest workflow');
+    const files = await signed('GET', `/api/f/${name}/files`);
+    const inboxFiles = (files.body?.files || []).filter((f) => f.path.startsWith('inbox/') && !f.deleted);
+    eq(inboxFiles.length, 2, 'identical drops collapsed to one file (hash naming)');
+    const r2 = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'ingest' }));
+    eq(r2.body?.output?.filed?.length, 0, 'acked drops never re-file');
+  }
+
+  // pattern: watcher (notify poke + tree read)
+  {
+    const fx = await serveFixture('wtree', [['site/index.html', '<!doctype html>seed']]);
+    // a real change on the fixture fragment pokes the watcher's inbox
+    const name = `e2e-gd-watch-${suffix}`;
+    const created = await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    const fxManifest = await signed('GET', `/api/f/${fx.name}/manifest`);
+    const fxm = fxManifest.body;
+    fxm.notifyUrls = [`${BASE}/api/f/${name}/inbox?t=${created.body.inboxToken}`];
+    await signed('PUT', `/api/f/${fx.name}/manifest`, JSON.stringify(fxm));
+    // public fixture: __tree needs no view token — patch the token out
+    const code = patterns.watcher
+      .replace(/^const SOURCE = .*$/m, `const SOURCE = ${JSON.stringify(fx.base.replace(/\/$/, ''))}`)
+      .replace('const token = ctx.secrets.SOURCE_VIEW_TOKEN;', 'const token = "";')
+      .replace('?view=" + token', '"')
+      .replace('+ "&view=" + token', '');
+    await signed('PUT', `/api/f/${name}/file?path=workflows/check.mjs&base_rev=0`, code);
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'check', file: 'workflows/check.mjs', trigger: 'inbox' }], secrets: [] }));
+    // a change on the fixture pokes us; the alarm delivers it
+    await signed('PUT', `/api/f/${fx.name}/file?path=notes/new.md&base_rev=0`, 'fresh content');
+    let ran = false;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 15_000 && !ran) {
+      const runs = await signed('GET', `/api/f/${name}/runs`);
+      ran = (runs.body?.runs || []).some((r) => r.status === 'success');
+      if (!ran) await sleep(500);
+    }
+    ok(ran, 'watcher pattern ran from a notify poke');
+    const r = await signed('GET', `/api/f/${name}/runs?limit=1`);
+    ok(true, 'watcher pattern verified');
+  }
+
   // ---- runner: manifest JSON block ----
   {
     const manBlock = blocks.find((b) => b.section === 'The manifest' && b.lang === 'json');
@@ -957,6 +1011,65 @@ async function guideSection() {
   for (const b of blocks) {
     if (b.lang === 'js') ok(RUNNER_SECTIONS.has(b.section) || b.section.startsWith('Patterns'), `js block has a runner: ${b.section}/${b.sub || '—'}`);
     if (b.lang === 'json') ok(b.section === 'The manifest', `json block has a runner: ${b.section}`);
+  }
+}
+
+// ---------- platform api: machine reads + notify ----------
+async function platformSection() {
+  if (!section('platform')) return;
+  // machine-read plane: gated exactly like the site
+  {
+    const pubName = `e2e-pa-pub-${suffix}`;
+    await signed('POST', '/api/fragments', JSON.stringify({ name: pubName }));
+    await signed('PUT', `/api/f/${pubName}/file?path=notes/a.md&base_rev=0`, 'alpha');
+    await signed('PUT', `/api/f/${pubName}/file?path=workflows/w.mjs&base_rev=0`, 'code');
+    await signed('PUT', `/api/f/${pubName}/manifest`, JSON.stringify({ name: pubName, visibility: 'public', editors: [], viewers: [], workflows: [{ name: 'w', file: 'workflows/w.mjs' }], secrets: [] }));
+    await signed('POST', `/api/f/${pubName}/drafts`, JSON.stringify({ note: 'x' }));
+    const ds = await signed('GET', `/api/f/${pubName}/drafts`);
+    await signed('POST', `/api/f/${pubName}/bless`, JSON.stringify({ slug: ds.body.drafts[0].slug }));
+    const t = await (await fetch(`${BASE}/f/${pubName}/__tree`)).json();
+    ok(t.files?.some((f) => f.path === 'notes/a.md'), '__tree lists content (public)');
+    ok(!t.files?.some((f) => f.path.startsWith('workflows/')), '__tree hides machinery');
+    const f = await fetch(`${BASE}/f/${pubName}/__file?path=notes/a.md`);
+    eq(await f.text(), 'alpha', '__file returns raw content');
+    eq((await fetch(`${BASE}/f/${pubName}/__file?path=workflows/w.mjs`)).status, 400, '__file blocks machinery');
+    // draft form serves the snapshot
+    const dt = await (await fetch(`${BASE}/d/${ds.body.drafts[0].slug}/__tree`)).json();
+    ok(dt.files?.some((x) => x.path === 'notes/a.md'), 'draft __tree serves the snapshot');
+  }
+  {
+    const tokName = `e2e-pa-tok-${suffix}`;
+    const created = await signed('POST', '/api/fragments', JSON.stringify({ name: tokName }));
+    await signed('PUT', `/api/f/${tokName}/file?path=notes/secret.md&base_rev=0`, 'hidden');
+    await signed('PUT', `/api/f/${tokName}/manifest`, JSON.stringify({ name: tokName, visibility: 'token', editors: [], viewers: [], workflows: [], secrets: [] }));
+    await signed('POST', `/api/f/${tokName}/drafts`, JSON.stringify({ note: 'x' }));
+    const ds = await signed('GET', `/api/f/${tokName}/drafts`);
+    await signed('POST', `/api/f/${tokName}/bless`, JSON.stringify({ slug: ds.body.drafts[0].slug }));
+    eq((await fetch(`${BASE}/f/${tokName}/__tree`)).status, 403, '__tree refuses without token');
+    const t = await (await fetch(`${BASE}/f/${tokName}/__tree?view=${created.body.viewToken}`)).json();
+    ok(t.files?.some((f) => f.path === 'notes/secret.md'), '__tree works with the view link');
+  }
+  // notify-on-change: manifest notifyUrls → mutation → target inbox POSTed
+  {
+    const mk = async (n) => {
+      const c = await signed('POST', '/api/fragments', JSON.stringify({ name: n }));
+      return c.body;
+    };
+    const srcFrag = await mk(`e2e-pa-src-${suffix}`);
+    const dstFrag = await mk(`e2e-pa-dst-${suffix}`);
+    await signed('PUT', `/api/f/${srcFrag.name}/file?path=notes/seed.md&base_rev=0`, 'seed');
+    await signed('PUT', `/api/f/${srcFrag.name}/manifest`, JSON.stringify({ name: srcFrag.name, visibility: 'token', editors: [], viewers: [], workflows: [], secrets: [], notifyUrls: [`${BASE}/api/f/${dstFrag.name}/inbox?t=${dstFrag.inboxToken}`] }));
+    await signed('PUT', `/api/f/${srcFrag.name}/file?path=notes/change.md&base_rev=0`, 'changed');
+    let arrived = false;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 12_000 && !arrived) {
+      const evs = await signed('GET', `/api/f/${dstFrag.name}/events`);
+      arrived = JSON.stringify(evs.body?.events || []).includes('"kind":"inbox"');
+      if (!arrived) await sleep(500);
+    }
+    ok(arrived, 'notifyUrls POSTed the change to the target inbox');
+    const nsrc = await signed('GET', `/api/f/${srcFrag.name}/events`);
+    ok(JSON.stringify(nsrc.body?.events || []).includes('"kind":"notify.sent"'), 'notify.sent on the ledger');
   }
 }
 
@@ -1304,6 +1417,7 @@ try {
   if (!ONLY || ONLY === 'paused') await pausedSection();
   if (!ONLY || ONLY === 'guide') await guideSection();
   if (!ONLY || ONLY === 'runs') await runsSection();
+  if (!ONLY || ONLY === 'platform') await platformSection();
   if (!ONLY || ONLY === 'filesync') await filesyncSection();
   if (!ONLY || ONLY === 'sync') await syncSection();
   await cronSection();

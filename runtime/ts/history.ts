@@ -3,6 +3,8 @@
 // file_revisions, so sync clients can fetch any recent ancestor for
 // three-way merges; watchers get a `changed` frame per mutation batch
 // over a dedicated, persistence-free websocket.
+import { enqueueNotify } from "./notify.js";
+
 const RETENTION = 10;
 
 // record a revision after a successful mutation; broadcasts to watchers
@@ -17,6 +19,7 @@ export function recordRevision(cell, path, rev, sha, content, deleted = false) {
     path, path, RETENTION,
   );
   watchBroadcast(cell, { type: "changed", rev: parseInt(cell.getMeta("rev") || "0", 10), paths: [path] });
+  enqueueNotify(cell, [path]);
 }
 
 export function watchBroadcast(cell, frame) {

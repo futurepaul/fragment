@@ -3,6 +3,7 @@
 // crash sweep + due retries (runs.resumeDueRuns) → rearm.
 import { parseCron, nextRun, cronMatches } from "./cron.js";
 import { resumeDueRuns } from "./runs.js";
+import { drainNotify, nextNotifyAt } from "./notify.js";
 
 
 // ------ rearmAlarm ------
@@ -22,9 +23,11 @@ export async function rearmAlarm(cell) {
   // the pending sync trigger (if any) competes for the one alarm
   const syncAt = parseInt(cell.getMeta("sync_trigger_at") || "0", 10);
   if (syncAt && (next === null || syncAt < next)) next = syncAt;
-  // and so does the soonest pending retry
+  // and so does the soonest pending retry, and any due notification
   const retry = cell.sql.exec("SELECT MIN(next_attempt_at) t FROM runs WHERE status = 'backoff'").toArray()[0];
   if (retry && retry.t && (next === null || retry.t < next)) next = retry.t;
+  const notifyAt = nextNotifyAt(cell);
+  if (notifyAt && (next === null || notifyAt < next)) next = notifyAt;
   if (next !== null) await cell.state.storage.setAlarm(next);
   else await cell.state.storage.deleteAlarm();
 }
@@ -56,6 +59,7 @@ export async function alarm(cell) {
     }
   }
   await cell.resumeDueRuns();
+  await drainNotify(cell);
   await cell.rearmAlarm();
 }
 
