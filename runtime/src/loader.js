@@ -65,8 +65,8 @@ function makeToken(cell, scope) {
   cell.sql.exec("INSERT INTO run_tokens (token, scope, expires) VALUES (?, ?, ?)", token, JSON.stringify(scope), ttl === null ? null : Date.now() + ttl);
   return token;
 }
-function checkToken(cell, request, url) {
-  const token = request.headers.get("x-fragment-token") || url.searchParams.get("t") || "";
+function checkToken(cell, request) {
+  const token = request.headers.get("x-fragment-token") || "";
   const row = cell.sql.exec("SELECT scope, expires FROM run_tokens WHERE token = ?", token).toArray()[0];
   if (!row) return null;
   if (row.expires !== null && row.expires !== void 0 && row.expires < Date.now()) return null;

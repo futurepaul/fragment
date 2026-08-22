@@ -1,5 +1,6 @@
 // GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
 import { toAB, MIME, rankOf } from "./util.js";
+import { safeEqual } from "./auth.js";
 import { APP_MAIN } from "./loader.js";
 function canonicalUrl(cell, origin, name) {
   const sub = cell.env.FRAGMENT_SUBDOMAIN_HOST;
@@ -57,8 +58,8 @@ function checkVisibility(cell, request, url) {
   const cookies = Object.fromEntries(
     (request.headers.get("cookie") || "").split(";").map((c) => c.split("=").map((s) => s.trim())).filter((p) => p.length === 2)
   );
-  const viaUrl = url.searchParams.get("view") === token;
-  const viaCookie = cookies[ck] === token;
+  const viaUrl = safeEqual(url.searchParams.get("view") || "", token);
+  const viaCookie = safeEqual(cookies[ck] || "", token);
   const okToken = viaUrl || viaCookie;
   const setCookie = viaUrl ? `${ck}=${token}; Path=/; Max-Age=604800; HttpOnly; SameSite=Lax` : null;
   if (m.visibility === "token") {

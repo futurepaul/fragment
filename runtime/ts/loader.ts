@@ -80,8 +80,12 @@ export function makeToken(cell, scope) {
 
 // ------ checkToken ------
 
-export function checkToken(cell, request, url) {
-  const token = request.headers.get("x-fragment-token") || url.searchParams.get("t") || "";
+export function checkToken(cell, request) {
+  // header-only, deliberately: run tokens unlock files/secrets/state for
+  // one isolate. Query params land in access logs, proxy logs, and browser
+  // history — a leaked run token is a fragment-wide capability leak. The
+  // ctx shim has always sent x-fragment-token as a header.
+  const token = request.headers.get("x-fragment-token") || "";
   const row = cell.sql.exec("SELECT scope, expires FROM run_tokens WHERE token = ?", token).toArray()[0];
   if (!row) return null;
   if (row.expires !== null && row.expires !== undefined && row.expires < Date.now()) return null;

@@ -9,6 +9,22 @@ export async function sha256Hex(data) {
   return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// Constant-time-ish secret comparison: XOR-fold over zero-padded UTF-8
+// bytes, length mismatch folded into the accumulator. Not cryptographic
+// perfection (JIT), but removes the early-exit timing signal that `===`
+// gives away for free.
+export function safeEqual(presented, secret) {
+  const enc = new TextEncoder();
+  const a = enc.encode(String(presented ?? ""));
+  const b = enc.encode(String(secret ?? ""));
+  const len = Math.max(a.length, b.length);
+  const da = new Uint8Array(len); da.set(a);
+  const db = new Uint8Array(len); db.set(b);
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < len; i++) diff |= da[i] ^ db[i];
+  return diff === 0;
+}
+
 function b64decode(s) {
   const bin = atob(s);
   const bytes = new Uint8Array(bin.length);

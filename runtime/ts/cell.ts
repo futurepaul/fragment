@@ -111,7 +111,7 @@ export class FragmentCell {
   async scheduleSyncTrigger(path) { return scheduleSyncTrigger(this, path); }
   async fireSyncTriggers(m) { return fireSyncTriggers(this, m); }
   makeToken(scope) { return makeToken(this, scope); }
-  checkToken(request, url) { return checkToken(this, request, url); }
+  checkToken(request) { return checkToken(this, request); }
   internalBase() { return internalBase(this); }
   async loadCode(id, mainSource, modules, scope) { return loadCode(this, id, mainSource, modules, scope); }
   collectModules(prefix) { return collectModules(this, prefix); }

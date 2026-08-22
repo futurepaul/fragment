@@ -1,6 +1,6 @@
 // Control plane (/api/...): NIP-98-gated fragment management.
 import { json, toAB, randSlug } from "./util.js";
-import { sha256Hex } from "./auth.js";
+import { sha256Hex, safeEqual } from "./auth.js";
 import { parseCron, nextRun } from "./cron.js";
 
 
@@ -11,9 +11,13 @@ export async function apiRoute(cell, request, url) {
   const m = cell.manifest();
   if (!m) return json({ error: "fragment not initialized" }, 404);
 
-  // inbox: token-gated, no nostr
+  // inbox: token-gated, no nostr. The token may arrive as a query param
+  // (webhook ergonomics: ?t=...) or, preferably, the x-fragment-inbox-token
+  // header for callers who control their clients and don't want the secret
+  // in access logs.
   if (p === "/inbox" && request.method === "POST") {
-    if (url.searchParams.get("t") !== cell.getMeta("inbox_token")) return json({ error: "bad inbox token" }, 403);
+    const presented = request.headers.get("x-fragment-inbox-token") || url.searchParams.get("t") || "";
+    if (!safeEqual(presented, cell.getMeta("inbox_token") || "")) return json({ error: "bad inbox token" }, 403);
     const body = await request.json().catch(() => ({}));
     const cur = cell.sql.exec("INSERT INTO inbox (at, source, payload) VALUES (?, ?, ?) RETURNING id",
       Date.now(), String(body.source || "external"), JSON.stringify(body.payload ?? null)).toArray()[0];

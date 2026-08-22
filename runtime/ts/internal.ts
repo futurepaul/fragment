@@ -11,7 +11,7 @@ export async function internalRoute(cell, request, url) {
   const p = url.pathname.slice("/__internal/f/".length);
   const slash = p.indexOf("/");
   const rest = p.slice(slash + 1);
-  const scope = cell.checkToken(request, url);
+  const scope = cell.checkToken(request);
   if (!scope) return json({ error: "bad or expired run token" }, 403);
   const isRun = scope.kind === "run";
 

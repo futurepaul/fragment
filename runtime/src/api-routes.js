@@ -1,13 +1,14 @@
 // GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
 import { json, toAB, randSlug } from "./util.js";
-import { sha256Hex } from "./auth.js";
+import { sha256Hex, safeEqual } from "./auth.js";
 import { nextRun } from "./cron.js";
 async function apiRoute(cell, request, url) {
   const p = url.pathname.slice(4);
   const m = cell.manifest();
   if (!m) return json({ error: "fragment not initialized" }, 404);
   if (p === "/inbox" && request.method === "POST") {
-    if (url.searchParams.get("t") !== cell.getMeta("inbox_token")) return json({ error: "bad inbox token" }, 403);
+    const presented = request.headers.get("x-fragment-inbox-token") || url.searchParams.get("t") || "";
+    if (!safeEqual(presented, cell.getMeta("inbox_token") || "")) return json({ error: "bad inbox token" }, 403);
     const body = await request.json().catch(() => ({}));
     const cur = cell.sql.exec(
       "INSERT INTO inbox (at, source, payload) VALUES (?, ?, ?) RETURNING id",
