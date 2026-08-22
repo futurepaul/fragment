@@ -22,10 +22,10 @@ const MIME = {
 };
 
 const junk = (p) =>
-  p === "fragment.json" ||
+  p === "fragment.json" || p === "app.mjs" || p === "rooms.mjs" || p === "_index.md" ||
   p.startsWith(".") || p.includes("/.") ||
-  p.endsWith(".remote-") || p.includes(".remote-") ||
-  p === "app.mjs" || p.startsWith("applib/") || p.startsWith("assets/") ||
+  p.endsWith(".remote-") || p.includes(".remote-") || p.includes(".conflict-") ||
+  p.startsWith("applib/") || p.startsWith("assets/") || p.startsWith("workflows/") || p.startsWith("lib/") ||
   p.includes("DS_Store") || p.endsWith(".keep");
 
 const resp = (body, type, cache) =>
