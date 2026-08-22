@@ -3,11 +3,9 @@
 //   node scripts/req.mjs POST http://127.0.0.1:8789/api/fragments '{"name":"x"}'
 //   node scripts/req.mjs PUT  'http://.../api/f/x/file?path=site/index.html&base_rev=0' @localfile
 // Key: .dev/devkey (hex), generated on first use.
-import { schnorr } from '@noble/curves/secp256k1.js';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { createHash, randomBytes } from 'node:crypto';
-
-const hexToBytes = (h) => Uint8Array.from(Buffer.from(h, 'hex'));
+import { randomBytes } from 'node:crypto';
+import { authHeader } from './nip98.mjs';
 
 const keyFile = new URL('../.dev/devkey', import.meta.url).pathname;
 let secret;
@@ -17,7 +15,6 @@ else {
   writeFileSync(keyFile, secret, { mode: 0o600 });
   console.error(`[req] generated dev key -> ${keyFile}`);
 }
-const pubkey = Buffer.from(schnorr.getPublicKey(hexToBytes(secret))).toString('hex');
 
 const [method, url, bodyArg] = process.argv.slice(2);
 if (!method || !url) {
@@ -31,26 +28,9 @@ if (bodyArg) {
   else body = Buffer.from(bodyArg);
 }
 
-const tags = [
-  ['u', url],
-  ['method', method.toUpperCase()],
-];
-if (body && body.length > 0) tags.push(['payload', createHash('sha256').update(body).digest('hex')]);
-
-const event = {
-  pubkey,
-  created_at: Math.floor(Date.now() / 1000),
-  kind: 27235,
-  tags,
-  content: '',
-};
-const id = createHash('sha256').update(JSON.stringify([0, event.pubkey, event.created_at, event.kind, event.tags, event.content])).digest();
-event.id = id.toString('hex');
-event.sig = Buffer.from(schnorr.sign(id, hexToBytes(secret))).toString('hex');
-
 const res = await fetch(url, {
   method: method.toUpperCase(),
-  headers: { authorization: 'Nostr ' + Buffer.from(JSON.stringify(event)).toString('base64') },
+  headers: { authorization: await authHeader(method.toUpperCase(), url, body, secret) },
   body,
   redirect: 'manual',
 });
