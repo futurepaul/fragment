@@ -21,7 +21,9 @@ Environment=CELLD_VAR_FRAGMENT_INTERNAL_URL=http://127.0.0.1:8080
 ExecStart=/usr/local/bin/celld \
   --bucket ${CELLD_BUCKET} \
   --endpoint ${S3_ENDPOINT} \
-  --listen 127.0.0.1:8080
+  --listen 127.0.0.1:8080 \
+  --internal-listen 127.0.0.1:8081 \
+  --advertise 127.0.0.1:8081
 StateDirectory=celld
 Restart=always
 RestartSec=2

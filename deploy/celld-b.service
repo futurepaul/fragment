@@ -1,0 +1,34 @@
+# /etc/systemd/system/celld-b.service
+# Second celld node on the same box: a local witness so acknowledged
+# writes stop paying a bucket round trip (single-node fleets cannot
+# self-ensemble). Same bucket, its own watch dir and peer ports.
+# See docs/deploy-vps.md §3 for the why and the caveats.
+
+[Unit]
+Description=celld — fragment host fleet node B (witness)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=celld
+Group=celld
+EnvironmentFile=/etc/celld.env
+Environment=CELLD_WATCH=/var/lib/celld-b/watch
+Environment=CELLD_WORKER_LOADER=LOADER
+Environment=CELLD_VAR_FRAGMENT_INTERNAL_URL=http://127.0.0.1:8090
+ExecStart=/usr/local/bin/celld \
+  --bucket ${CELLD_BUCKET} \
+  --endpoint ${S3_ENDPOINT} \
+  --listen 127.0.0.1:8090 \
+  --internal-listen 127.0.0.1:8091 \
+  --advertise 127.0.0.1:8091
+StateDirectory=celld-b
+Restart=always
+RestartSec=2
+TimeoutStopSec=35
+KillMode=mixed
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

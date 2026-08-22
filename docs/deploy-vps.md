@@ -96,14 +96,29 @@ editor /etc/celld.env        # fill from deploy/env.example
 `AWS_REGION`. Root-only, never committed, never pasted anywhere. The systemd
 unit reads it via `EnvironmentFile=`.
 
-## 3. celld service
+## 3. celld service (now: two nodes on the box)
+
+A **single-node fleet cannot self-witness**: with no peers, every
+acknowledged cell write is proven via the bucket (one R2 RTT, 150–200ms)
+and concurrent reads queue behind it — see
+`~/dev/finite/celld-investigation/FINDINGS.md`. The fix deployed here is a
+second celld on the same box (`celld-b.service`): ports 8090/8091, its own
+`/var/lib/celld-b/watch`, same bucket. Both journals then show
+`log ensemble open; fleet acks enabled` with two members, and acks ride the
+local peer journals instead of the bucket.
+
+Honest caveat: both witnesses share one machine, so machine death can lose
+the last acknowledged-but-not-yet-uploaded moments (the bucket still
+receives uploads in the background; exposure is small). Witness-only for
+now — Caddy still points at node A; B's public listener (8090) is spare.
+Real HA later: add B as a second Caddy upstream; cells already fail over
+between nodes via leases (~20s) without it.
 
 ```sh
-cp deploy/celld.service /etc/systemd/system/
-# edit: set --bucket s3://<your-bucket> and --endpoint https://<account-id>.s3.latitude.sh
-systemctl daemon-reload
-systemctl enable --now celld
-journalctl -u celld -f      # watch the bucket probe + restore
+cp deploy/celld.service /etc/systemd/system/          # node A (8080/8081)
+cp deploy/celld-b.service /etc/systemd/system/celld-b.service
+systemctl daemon-reload && systemctl enable --now celld celld-b
+journalctl -u celld -u celld-b -f                     # watch for "log ensemble open"
 ```
 
 First boot runs the conditional-write probe. It either passes (Latitude
