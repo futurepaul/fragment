@@ -270,7 +270,7 @@ export class FragmentCell {
       const results = [];
       for (const wf of m.workflows || []) {
         if (wf.trigger !== "inbox") continue;
-        const out = await this.runWorkflow(wf, { inbox: { id: cur.id, source: body.source, payload: body.payload } });
+        const out = await this.runWorkflow(wf, { inbox: { id: cur.id, source: body.source, payload: body.payload } }, { auto: true });
         results.push({ workflow: wf.name, ok: !!out.ok });
         if (out.ok) this.sql.exec("UPDATE inbox SET status = 'done' WHERE id = ?", cur.id);
       }
@@ -524,7 +524,7 @@ export class FragmentCell {
         if (t !== null && t <= now) dueAt = t;
       }
       if (dueAt !== null) {
-        await this.runWorkflow(wf, { cron: wf.cron, scheduledTime: dueAt });
+        await this.runWorkflow(wf, { cron: wf.cron, scheduledTime: dueAt }, { auto: true });
         cronState[wf.name] = dueAt;
         this.setMeta("cron_state", JSON.stringify(cronState));
       }
@@ -556,7 +556,7 @@ export class FragmentCell {
     this.setMeta("sync_dirty_paths", "[]");
     for (const wf of m.workflows || []) {
       if (wf.trigger !== "sync") continue;
-      await this.runWorkflow(wf, { sync: { paths, at } });
+      await this.runWorkflow(wf, { sync: { paths, at } }, { auto: true });
     }
   }
 
@@ -634,7 +634,29 @@ export class FragmentCell {
     return modules;
   }
 
-  async runWorkflow(wf, input) {
+  async runWorkflow(wf, input, opts = {}) {
+    // single-flight: auto-triggered runs (cron/inbox/sync) skip while a
+    // previous run of the same workflow is still active. Overlapping runs
+    // read pre-run state and duplicate each other's work — a loop amplifier
+    // (seen live: the news re-filing pileup). Manual `fragment run` always
+    // proceeds. The lock is a timestamp lease so a crashed run can't wedge
+    // the workflow forever.
+    const lockKey = `wf_lock_${wf.name}`;
+    const leaseMs = 10 * 60_000;
+    const lock = parseInt(this.getMeta(lockKey) || "0", 10);
+    if (opts.auto && lock && lock > Date.now() - leaseMs) {
+      this.addEvent("workflow-skipped", `${wf.name}: previous run still active`);
+      return { ok: true, skipped: true };
+    }
+    this.setMeta(lockKey, String(Date.now()));
+    try {
+      return await this.runWorkflowLocked(wf, input);
+    } finally {
+      this.setMeta(lockKey, "");
+    }
+  }
+
+  async runWorkflowLocked(wf, input) {
     const name = this.getMeta("name");
     this.addEvent("workflow-start", `${wf.name}`);
     try {

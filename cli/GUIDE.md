@@ -100,6 +100,12 @@ replaces it. Shape:
   link — the default, good for "send a human a link"; a valid token also
   mints a scoped cookie so subresources load), `viewers` (listed npubs
   only — agents authenticate; browsers can't).
+- **workflows**: auto-triggered runs are single-flight — a cron/inbox/sync
+  fire while a previous run of the same workflow is still active is
+  skipped (`workflow-skipped` in the event log; manual `fragment run`
+  always proceeds). Make workflows idempotent anyway: key effects by
+  content (e.g. a `filed` map in `ctx.state`), not by timing, so
+  re-delivery can't duplicate work.
 - **workflows**: `cron` is 5-field UTC (`*` lists ranges steps, month/day
   names OK; day-of-week 1=Sunday..7=Saturday, 0 is refused). `trigger:
   "inbox"` runs when a message lands; `trigger: "sync"` runs when files
