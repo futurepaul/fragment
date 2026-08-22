@@ -302,7 +302,10 @@ async function roomsSection() {
   ok(C.hello?.history?.length >= 1, 'reconnect hello carries history');
 
   C.send({ type: 'msg', data: { boom: true } });
-  await sleep(600);
+  // the error frame rides a freshly-loaded rooms isolate; on slow/CI stacks
+  // (bucket-backed loader) that can take longer than a warm one
+  const t0 = Date.now();
+  while (Date.now() - t0 < 5000 && C.errors.length === 0) await sleep(250);
   ok(C.errors.length > 0, 'rooms.mjs throw → error frame to sender');
   const evs = await signed('GET', `/api/f/${name}/events`);
   ok(JSON.stringify(evs.body?.events || []).includes('room-error'), 'room-error visible in event log');
