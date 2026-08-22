@@ -134,7 +134,7 @@ async function finishAttempt(cell, wf, runId, attempt, policy, trigger, t0, out)
     cell.addEvent("run.succeeded", `${wf.name}`, { wf: wf.name, runId, output: out.output !== null && out.output !== void 0 ? out.output : void 0 });
     return { ok: true, output: out.output ?? null, runId };
   }
-  const canRetry = retryableError(out.error) && attempt < policy.attempts;
+  const canRetry = (out.forceRetry || retryableError(out.error)) && attempt < policy.attempts;
   if (canRetry) {
     const inMs = backoffDelay(policy, attempt);
     updateRun(cell, runId, { status: "backoff", next_attempt_at: Date.now() + inMs, error: String(out.error || "").slice(0, 2e3) });
@@ -158,7 +158,7 @@ async function resumeDueRuns(cell) {
       continue;
     }
     const policy = retryPolicy(wf);
-    await finishAttempt(cell, wf, r.id, r.attempt, policy, r.via, r.started_at, { ok: false, error: "run interrupted (host restart)" });
+    await finishAttempt(cell, wf, r.id, r.attempt, policy, r.via, r.started_at, { ok: false, error: "run interrupted (host restart)", forceRetry: true });
   }
   const due = cell.sql.exec("SELECT * FROM runs WHERE status = 'backoff' AND next_attempt_at <= ? ORDER BY id", Date.now()).toArray();
   for (const r of due) {
