@@ -49,6 +49,9 @@ export async function serveRoute(cell, request, url) {
     for (const r of libRows) modules[r.path] = new TextDecoder().decode(toAB(r.content));
     modules["app.mjs"] = new TextDecoder().decode(toAB(appRow.content));
     const ep = await cell.loadCode(`app:${slug}`, APP_MAIN, modules, { kind: "draft", slug, blessed: mode === "b" });
+    // the public path the visitor used rides on x-fragment-url (set by the
+    // router and forwarded here) — apps that care read it; url.pathname
+    // stays the stable internal form so blessed drafts never break
     const appUrl = new URL(request.url);
     return stamp(await ep.fetch(new Request(appUrl.origin + "/" + rest + appUrl.search, request)));
   }

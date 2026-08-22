@@ -29,6 +29,7 @@ var index_default = {
     const toCell = async (name, newPath, verifiedPubkey) => {
       const headers = stripAuth(request.headers);
       if (verifiedPubkey) headers.set("x-fragment-pubkey", verifiedPubkey);
+      headers.set("x-fragment-url", request.url);
       const target = url.origin + newPath + url.search;
       const hasBody = request.method !== "GET" && request.method !== "HEAD";
       return cell(name).fetch(new Request(target, {

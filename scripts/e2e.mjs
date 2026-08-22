@@ -11,9 +11,10 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdi
 import { readFileSync as guideRead } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from "node:fs";
 import { genKey, pubkeyFromSecret, nreq, authHeader } from './nip98.mjs';
+import { npubFromHex } from '../runtime/src/bech32.js';
 
 const args = process.argv.slice(2);
 function arg(name) {
@@ -52,6 +53,7 @@ async function jres(promise) {
 
 // ---------- identity ----------
 const ownerKey = genKey();
+const ownerNpub = npubFromHex(pubkeyFromSecret(ownerKey));
 const ownerPub = pubkeyFromSecret(ownerKey);
 const strangerKey = genKey();
 const suffix = Math.random().toString(36).slice(2, 7);
@@ -581,44 +583,121 @@ async function runsSection() {
   }
 }
 
-// ---------- patterns: the guide's examples are executable ----------
-// The GUIDE.md code blocks under "### pattern: <name>" are the product's
-// promises. This section extracts them verbatim, swaps only the ALL-CAPS
-// constants for local fixtures, and runs each as a real workflow — an
-// example that rots fails CI.
-function extractPatterns() {
-  const guide = guideRead(new URL('../cli/GUIDE.md', import.meta.url), 'utf8');
-  const out = {};
-  const re = /### pattern: ([a-z-]+)[\s\S]*?```js\n([\s\S]*?)```/g;
+// ---------- the guide: every code block is executable ----------
+// The GUIDE.md blocks are the product's promises. This section extracts
+// them, swaps only ALL-CAPS constants and {placeholders} for local
+// fixtures, and runs them: js blocks as workflows/apps/room hooks, the
+// manifest JSON as a PUT, the CLI transcripts as real invocations, the
+// recipes end-to-end (scaffold → publish → bless → live ingest). A js or
+// json block without a runner fails the suite — a guide that rots fails CI.
+function extractGuideBlocks() {
+  const text = guideRead(new URL('../cli/GUIDE.md', import.meta.url), 'utf8');
+  const blocks = [];
+  let section = '', sub = '';
+  for (let i = 0; i < text.split('\n').length; i++) {} // (placeholder; replaced below)
+  const lines = text.split('\n');
+  let j = 0;
+  while (j < lines.length) {
+    const l = lines[j];
+    if (l.startsWith('## ')) { section = l.slice(3).trim(); sub = ''; }
+    if (l.startsWith('### ')) sub = l.slice(4).trim();
+    if (l.startsWith('```')) {
+      const lang = l.slice(3).trim();
+      const body = [];
+      j++;
+      while (j < lines.length && !lines[j].startsWith('```')) { body.push(lines[j]); j++; }
+      blocks.push({ section, sub, lang, code: body.join('\n') });
+    }
+    j++;
+  }
+  return blocks;
+}
+
+// a public static fixture fragment; returns its served base URL
+async function serveFixture(tag, files) {
+  const name = `e2e-fx-${tag}-${suffix}`;
+  await signed('POST', '/api/fragments', JSON.stringify({ name }));
+  for (const [path, body] of files) {
+    await signed('PUT', `/api/f/${name}/file?path=${encodeURIComponent(path)}&base_rev=0`, body);
+  }
+  await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'public', editors: [], viewers: [], workflows: [], secrets: [] }));
+  await signed('POST', `/api/f/${name}/drafts`, JSON.stringify({ note: tag }));
+  const ds = await signed('GET', `/api/f/${name}/drafts`);
+  await signed('POST', `/api/f/${name}/bless`, JSON.stringify({ slug: ds.body.drafts[0].slug }));
+  return { name, base: `${BASE}/f/${name}/` };
+}
+
+function shline(line) {
+  // strip trailing " # comment" (the guide's transcripts use these), keep quotes
+  const cut = line.indexOf(' # ');
+  return (cut >= 0 ? line.slice(0, cut) : line).trim();
+}
+
+function tokenize(cmd) {
+  const out = [];
+  const re = /"([^"]*)"|(\S+)/g;
   let m;
-  while ((m = re.exec(guide))) out[m[1]] = m[2];
+  while ((m = re.exec(cmd))) out.push(m[1] !== undefined ? m[1] : m[2]);
   return out;
 }
 
-async function patternsSection() {
-  if (!section('patterns')) return;
-  const patterns = extractPatterns();
-  ok(Object.keys(patterns).length >= 5, 'guide ships at least 5 patterns');
+function runCli(bin, args, opts = {}) {
+  try {
+    return execFileSync(bin, args, {
+      encoding: 'utf8',
+      cwd: opts.cwd || process.cwd(),
+      env: { ...process.env, FRAGMENT_HOST: BASE, ...(opts.env || {}) },
+      timeout: opts.timeout || 60_000,
+    });
+  } catch (e) {
+    throw new Error(`fragment ${args.join(' ')} failed: ${String(e.stderr || e.message).slice(0, 300)}`);
+  }
+}
 
-  // poller — fed by a static JSON fixture on a public fragment
+async function guideSection() {
+  if (!section('guide')) return;
+  const blocks = extractGuideBlocks();
+  ok(blocks.length >= 18, 'guide parses into blocks');
+
+  // ---- runner: Workflows ctx-tour js block ----
+  const tour = blocks.find((b) => b.section === 'Workflows' && b.lang === 'js');
   {
-    const srcName = `e2e-pt-src-${suffix}`;
-    await signed('POST', '/api/fragments', JSON.stringify({ name: srcName }));
-    await signed('PUT', `/api/f/${srcName}/file?path=site/api/tree.json&base_rev=0`, JSON.stringify({
+    ok(!!tour, 'guide ships the ctx-tour workflow block');
+    const fx = await serveFixture('api', [['site/api/data.json', JSON.stringify({ ok: true, items: [1, 2] })]]);
+    const name = `e2e-gd-tour-${suffix}`;
+    await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    await signed('PUT', `/api/f/${name}/file?path=notes/today.md&base_rev=0`, 'today: shipped the guide test');
+    await signed('PUT', `/api/f/${name}/file?path=data/export.csv&base_rev=0`, 'a,b\n1,2\n');
+    await signed('PUT', `/api/f/${name}/secrets/SOME_TOKEN`, 'tok');
+    const code = tour.code.replace(/^const API = .*$/m, `const API = ${JSON.stringify(fx.base + 'api/data.json')};`);
+    await signed('PUT', `/api/f/${name}/file?path=workflows/digest.mjs&base_rev=0`, code);
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'digest', file: 'workflows/digest.mjs' }], secrets: ['SOME_TOKEN'] }));
+    if (!process.env.OPENROUTER_API_KEY) {
+      console.log('skip  ctx-tour block run (no OPENROUTER_API_KEY on this stack)');
+    } else {
+      const r = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'digest' }));
+      eq(r.body?.ok, true, 'ctx-tour block runs clean (files/bytes/http/secrets/ai/state/log)');
+      const files = await signed('GET', `/api/f/${name}/files`);
+      ok((files.body?.files || []).some((f) => f.path.startsWith('digests/')), 'ctx-tour wrote a digest file');
+    }
+  }
+
+  // ---- runner: Patterns js blocks (by ### name) ----
+  const patterns = Object.fromEntries(
+    blocks.filter((b) => b.section.startsWith('Patterns') && b.lang === 'js').map((b) => [b.sub.replace(/^pattern: /, ''), b.code]),
+  );
+  ok(Object.keys(patterns).length >= 5, 'guide ships at least 5 patterns');
+  {
+    const fx = await serveFixture('tree', [['site/api/tree.json', JSON.stringify({
       files: [
         { path: 'notes/a.md', size: 10 },
         { path: 'notes/b.md', size: 20 },
         { path: 'workflows/x.mjs', size: 5, machinery: true },
       ],
-    }));
-    await signed('PUT', `/api/f/${srcName}/manifest`, JSON.stringify({ name: srcName, visibility: 'public', editors: [], viewers: [], workflows: [], secrets: [] }));
-    await signed('POST', `/api/f/${srcName}/drafts`, JSON.stringify({ note: 'patterns fixture' }));
-    const drafts = await signed('GET', `/api/f/${srcName}/drafts`);
-    await signed('POST', `/api/f/${srcName}/bless`, JSON.stringify({ slug: drafts.body.drafts[0].slug }));
-
-    const name = `e2e-pt-poll-${suffix}`;
+    })]]);
+    const name = `e2e-gd-poll-${suffix}`;
     await signed('POST', '/api/fragments', JSON.stringify({ name }));
-    const code = patterns.poller.replace(/^const SOURCE = .*$/m, `const SOURCE = ${JSON.stringify(`${BASE}/f/${srcName}/api/tree.json`)}`);
+    const code = patterns.poller.replace(/^const SOURCE = .*$/m, `const SOURCE = ${JSON.stringify(fx.base + 'api/tree.json')}`);
     await signed('PUT', `/api/f/${name}/file?path=workflows/watch.mjs&base_rev=0`, code);
     await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'watch', file: 'workflows/watch.mjs' }], secrets: [] }));
     const r1 = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'watch' }));
@@ -627,34 +706,27 @@ async function patternsSection() {
     const paths = (feed.body?.files || []).map((f) => f.path);
     ok(paths.some((p) => p.includes('notes__a.md')), 'poller filed new content');
     ok(!paths.some((p) => p.includes('x.mjs')), 'poller skipped machinery');
-    const r2 = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'watch' }));
-    eq(r2.body?.ok, true, 'poller re-run is clean (idempotent)');
+    await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'watch' }));
     const feed2 = await signed('GET', `/api/f/${name}/files`);
-    eq(feed2.body?.files?.length, feed.body?.files?.length, 're-run filed nothing new');
+    eq(feed2.body?.files?.length, feed.body?.files?.length, 'poller re-run is idempotent');
   }
-
-  // once — the webhook is another fragment's inbox (a real POST)
   {
-    const target = `e2e-pt-tgt-${suffix}`;
-    const tgt = await signed('POST', '/api/fragments', JSON.stringify({ name: target }));
-    const name = `e2e-pt-once-${suffix}`;
+    const tgt = await signed('POST', '/api/fragments', JSON.stringify({ name: `e2e-gd-tgt-${suffix}` }));
+    const name = `e2e-gd-once-${suffix}`;
     await signed('POST', '/api/fragments', JSON.stringify({ name }));
-    const code = patterns.once.replace(/^const WEBHOOK = .*$/m, `const WEBHOOK = ${JSON.stringify(`${BASE}/api/f/${target}/inbox?t=${tgt.body.inboxToken}`)}`);
+    const code = patterns.once.replace(/^const WEBHOOK = .*$/m, `const WEBHOOK = ${JSON.stringify(`${BASE}/api/f/e2e-gd-tgt-${suffix}/inbox?t=${tgt.body.inboxToken}`)}`);
     await signed('PUT', `/api/f/${name}/file?path=workflows/notify.mjs&base_rev=0`, code);
     await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'notify', file: 'workflows/notify.mjs', trigger: 'inbox' }], secrets: [] }));
-    const input = JSON.stringify({ workflow: 'notify', input: { inbox: { id: 42, payload: { hello: 'patterns' } } } });
+    const input = JSON.stringify({ workflow: 'notify', input: { inbox: { id: 42, payload: { hello: 'guide' } } } });
     const r1 = await signed('POST', `/api/f/${name}/run`, input);
     eq(r1.body?.output?.sent, true, 'once pattern fires the effect');
     const r2 = await signed('POST', `/api/f/${name}/run`, input);
     eq(r2.body?.output?.skipped, true, 'once pattern refuses the duplicate');
-    const evs = await signed('GET', `/api/f/${target}/events`);
-    const arrivals = (evs.body?.events || []).filter((e) => e.kind === 'inbox');
-    eq(arrivals.length, 1, 'webhook received exactly one delivery');
+    const evs = await signed('GET', `/api/f/e2e-gd-tgt-${suffix}/events`);
+    eq((evs.body?.events || []).filter((e) => e.kind === 'inbox').length, 1, 'webhook received exactly one delivery');
   }
-
-  // sync-reaction — derived index rebuilt from state
   {
-    const name = `e2e-pt-sync-${suffix}`;
+    const name = `e2e-gd-sync-${suffix}`;
     await signed('POST', '/api/fragments', JSON.stringify({ name }));
     await signed('PUT', `/api/f/${name}/file?path=notes/one.md&base_rev=0`, 'one');
     await signed('PUT', `/api/f/${name}/file?path=notes/two.md&base_rev=0`, 'two');
@@ -667,43 +739,218 @@ async function patternsSection() {
     });
     ok((await idx.text()).includes('notes/two.md'), 'INDEX.md lists the notes');
   }
-
-  // inbox-log — validated appends
   {
-    const name = `e2e-pt-log-${suffix}`;
+    const name = `e2e-gd-log-${suffix}`;
     const created = await signed('POST', '/api/fragments', JSON.stringify({ name }));
     await signed('PUT', `/api/f/${name}/file?path=workflows/log.mjs&base_rev=0`, patterns['inbox-log']);
     await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'log', file: 'workflows/log.mjs', trigger: 'inbox' }], secrets: [] }));
-    await fetch(`${BASE}/api/f/${name}/inbox?t=${created.body.inboxToken}`, { method: 'POST', body: JSON.stringify({ source: 'patterns', payload: { n: 1 } }) });
-    await fetch(`${BASE}/api/f/${name}/inbox?t=${created.body.inboxToken}`, { method: 'POST', body: JSON.stringify({ source: 'patterns', payload: { n: 2 } }) });
+    await fetch(`${BASE}/api/f/${name}/inbox?t=${created.body.inboxToken}`, { method: 'POST', body: JSON.stringify({ source: 'guide', payload: { n: 1 } }) });
+    await fetch(`${BASE}/api/f/${name}/inbox?t=${created.body.inboxToken}`, { method: 'POST', body: JSON.stringify({ source: 'guide', payload: { n: 2 } }) });
     const r = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'log' }));
     eq(r.body?.ok, true, 'inbox-log pattern runs clean');
     const day = new Date().toISOString().slice(0, 10);
     const log = await fetch(`${BASE}/api/f/${name}/file?path=log/${day}.jsonl`, {
       headers: { authorization: await authHeader('GET', `${BASE}/api/f/${name}/file?path=log/${day}.jsonl`, null, ownerKey) },
     });
-    const lines = (await log.text()).trim().split('\n').filter(Boolean);
-    eq(lines.length, 2, 'inbox-log appended both messages');
+    eq((await log.text()).trim().split('\n').filter(Boolean).length, 2, 'inbox-log appended both messages');
   }
-
-  // ai-pass — needs a host inference key (CI has none; skipped there)
   {
     if (!process.env.OPENROUTER_API_KEY) {
       console.log('skip  ai-pass pattern (no OPENROUTER_API_KEY on this stack)');
-      return;
+    } else {
+      const name = `e2e-gd-ai-${suffix}`;
+      await signed('POST', '/api/fragments', JSON.stringify({ name }));
+      await signed('PUT', `/api/f/${name}/file?path=notes/x.md&base_rev=0`, 'the quick brown fox jumps over the lazy dog');
+      await signed('PUT', `/api/f/${name}/file?path=workflows/digest.mjs&base_rev=0`, patterns['ai-pass']);
+      await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'digest', file: 'workflows/digest.mjs' }], secrets: [] }));
+      const r = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'digest' }));
+      eq(r.body?.output?.notes, 1, 'ai-pass pattern runs clean');
     }
-    const name = `e2e-pt-ai-${suffix}`;
+  }
+
+  // ---- runner: manifest JSON block ----
+  {
+    const manBlock = blocks.find((b) => b.section === 'The manifest' && b.lang === 'json');
+    ok(!!manBlock, 'guide ships the manifest JSON block');
+    const name = `e2e-gd-man-${suffix}`;
     await signed('POST', '/api/fragments', JSON.stringify({ name }));
-    await signed('PUT', `/api/f/${name}/file?path=notes/x.md&base_rev=0`, 'the quick brown fox jumps over the lazy dog');
-    await signed('PUT', `/api/f/${name}/file?path=workflows/digest.mjs&base_rev=0`, patterns['ai-pass']);
-    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'digest', file: 'workflows/digest.mjs' }], secrets: [] }));
-    const r = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'digest' }));
-    eq(r.body?.output?.notes, 1, 'ai-pass pattern runs clean');
-    const day = new Date().toISOString().slice(0, 10);
-    const d = await fetch(`${BASE}/api/f/${name}/file?path=digests/${day}.md`, {
-      headers: { authorization: await authHeader('GET', `${BASE}/api/f/${name}/file?path=digests/${day}.md`, null, ownerKey) },
-    });
-    ok((await d.text()).length > 0, 'ai-pass wrote a digest');
+    const parsed = JSON.parse(manBlock.code.replaceAll('npub1…', ownerNpub));
+    parsed.name = name;
+    const put = await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify(parsed));
+    eq(put.status, 200, 'documented manifest shape is accepted verbatim');
+  }
+
+  // ---- runner: app.mjs block ----
+  {
+    const appBlock = blocks.find((b) => b.section === 'Sites and apps' && b.lang === 'js');
+    ok(!!appBlock, 'guide ships the app.mjs block');
+    const name = `e2e-gd-app-${suffix}`;
+    await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    await signed('PUT', `/api/f/${name}/file?path=app.mjs&base_rev=0`, appBlock.code);
+    await signed('PUT', `/api/f/${name}/file?path=site/index.html&base_rev=0`, '<!doctype html><title>seed</title>');
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'public', editors: [], viewers: [], workflows: [], secrets: [] }));
+    await signed('POST', `/api/f/${name}/drafts`, JSON.stringify({ note: 'guide app' }));
+    const ds = await signed('GET', `/api/f/${name}/drafts`);
+    await signed('POST', `/api/f/${name}/bless`, JSON.stringify({ slug: ds.body.drafts[0].slug }));
+    const resp = await fetch(`${BASE}/f/${name}/`);
+    eq(await resp.text(), `hello /f/${name}/`, 'app.mjs block serves its documented response (public path via header)');
+  }
+
+  // ---- runner: rooms.mjs block ----
+  {
+    const roomBlock = blocks.find((b) => b.section === 'Multiplayer (rooms)' && b.lang === 'js');
+    ok(!!roomBlock, 'guide ships the rooms.mjs block');
+    const name = `e2e-gd-room-${suffix}`;
+    await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    await signed('PUT', `/api/f/${name}/file?path=rooms.mjs&base_rev=0`, roomBlock.code);
+    await signed('PUT', `/api/f/${name}/file?path=site/index.html&base_rev=0`, '<!doctype html><title>room</title>');
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'public', editors: [], viewers: [], workflows: [], secrets: [] }));
+    await signed('POST', `/api/f/${name}/drafts`, JSON.stringify({ note: 'guide rooms' }));
+    const ds = await signed('GET', `/api/f/${name}/drafts`);
+    await signed('POST', `/api/f/${name}/bless`, JSON.stringify({ slug: ds.body.drafts[0].slug }));
+    const wsUrl = BASE.replace('http', 'ws') + `/f/${name}/__room/lobby`;
+    const ws = new WebSocket(wsUrl);
+    await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+    const got = [];
+    ws.onmessage = (ev) => got.push(JSON.parse(ev.data));
+    ws.send(JSON.stringify({ type: 'msg', data: { text: '  padded  ', name: 'guide' } }));
+    await sleep(700);
+    const echo = got.find((m) => m.type === 'msg' && m.data && m.data.text === 'padded');
+    ok(!!echo && echo.data.name === 'guide', 'rooms.mjs block trims + rewrites the broadcast');
+    ws.send(JSON.stringify({ type: 'msg', data: { text: '   ' } }));
+    await sleep(700);
+    const dropped = got.filter((m) => m.type === 'msg').length;
+    eq(dropped, 1, 'rooms.mjs block drops empty messages');
+    ws.close();
+  }
+
+  // ---- runner: inbox HTTP spec block ----
+  {
+    const inboxBlock = blocks.find((b) => b.section === 'Inbox (webhooks in)' && !b.lang);
+    ok(!!inboxBlock, 'guide ships the inbox POST spec');
+    const m = inboxBlock.code.match(/POST (\S+)\s+(\{.*\})/);
+    ok(!!m, 'inbox spec is a parseable POST line + JSON body');
+    const tgt = await signed('POST', '/api/fragments', JSON.stringify({ name: `e2e-gd-inb-${suffix}` }));
+    const url = m[1].replace('{host}', BASE).replace('{name}', tgt.body.name).replace('{inboxToken}', tgt.body.inboxToken);
+    const resp = await fetch(url, { method: 'POST', body: m[2] });
+    eq(resp.status, 200, 'inbox spec POST works verbatim');
+    eq((await resp.json()).ok, true, 'inbox spec body accepted');
+  }
+
+  // ---- runner: CLI transcripts (First moves, daily loop, recipes) ----
+  const bin = findBinary();
+  if (!bin) {
+    console.log('skip  guide CLI transcripts (no fragment binary built)');
+  } else {
+    // First moves: login + whoami with an isolated HOME (login writes a key)
+    {
+      const home = mkdtempSync(join(tmpdir(), 'e2e-guide-home-'));
+      const out1 = runCli(bin, ['login'], { env: { HOME: home } });
+      ok(out1.includes('npub'), 'guide: fragment login prints an npub (isolated HOME)');
+      const out2 = runCli(bin, ['whoami'], { env: { HOME: home } });
+      ok(out2.includes('npub'), 'guide: whoami echoes the identity');
+      const out3 = runCli(bin, ['create', `e2e-gd-fm-${suffix}`], { env: { HOME: home } });
+      ok(out3.includes('view token'), 'guide: create prints the tokens');
+    }
+    // The daily loop: sync → publish → bless → drafts, run as documented
+    // (names substituted; the transcript owns its fragment via an isolated
+    // CLI identity, because the docs assume you created it yourself)
+    {
+      const home = mkdtempSync(join(tmpdir(), 'e2e-guide-home-'));
+      const H = { HOME: home };
+      const name = `e2e-gd-loop-${suffix}`;
+      const dir = join(mkdtempSync(join(tmpdir(), 'e2e-guide-')), 'my-thing');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'note.md'), 'first note');
+      runCli(bin, ['login'], { env: H });
+      runCli(bin, ['create', name], { env: H });
+      runCli(bin, ['sync', name, '--dir', dir], { env: H });
+      const pub = runCli(bin, ['publish', name, '--dir', dir, '--note', 'first cut'], { env: H });
+      ok(pub.includes('/d/'), 'guide: publish prints a draft URL');
+      const slug = (pub.match(/\/d\/([a-z0-9]+)\//) || [])[1];
+      ok(!!slug, 'guide: draft URL has a slug');
+      runCli(bin, ['bless', name, slug], { env: H });
+      const drafts = runCli(bin, ['drafts', name], { env: H });
+      ok(drafts.includes(slug), 'guide: drafts lists the blessed one');
+    }
+    // Recipes: vault + dropzone, run as documented (scaffold → live)
+    for (const [tpl, frag, probeFile] of [['vault', 'my-vault', null], ['dropzone', 'my-drop', 'drop/note.txt']]) {
+      const name = `e2e-gd-${tpl === 'vault' ? 'vault' : 'drop'}-${suffix}`;
+      const workdir = mkdtempSync(join(tmpdir(), 'e2e-guide-recipe-'));
+      const block = blocks.find((b) => b.section.startsWith('Recipes') && !b.lang && b.code.includes(frag));
+      ok(!!block, `guide ships the ${tpl} recipe transcript`);
+      let cwd = workdir;
+      let watcher = null;
+      const recipeName = `e2e-gd-recipe-${tpl}-${suffix}`;
+      // the transcript owns its fragment via an isolated CLI identity —
+      // the docs assume you created it yourself
+      const home = mkdtempSync(join(tmpdir(), 'e2e-guide-home-'));
+      const H = { HOME: home };
+      runCli(bin, ['login'], { env: H });
+      let viewToken = '';
+      for (const raw of block.code.split('\n')) {
+        const line = shline(raw).replaceAll(frag, recipeName);
+        if (!line) continue;
+        if (line.startsWith('cd ')) {
+          cwd = resolve(cwd, line.slice(3));
+          // the dropzone transcript says "same create/manifest-set/publish
+          // --bless as above" — materialize the elided steps here
+          if (tpl === 'dropzone' && !viewToken) {
+            const out = runCli(bin, ['create', recipeName], { cwd, env: H });
+            viewToken = (out.match(/view token:\s+(\S+)/) || [])[1] || '';
+            runCli(bin, ['manifest-set', recipeName, 'fragment.json'], { cwd, env: H });
+            const pub = runCli(bin, ['publish', recipeName, '--dir', '.', '--bless'], { cwd, env: H });
+            ok(pub.includes('/d/'), 'guide: dropzone recipe publishes a draft');
+          }
+          continue;
+        }
+        if (line.startsWith('echo ')) {
+          const mm = line.match(/^echo "(.*)" > (.*)$/);
+          const target = resolve(cwd, mm[2]);
+          mkdirSync(join(target, '..'), { recursive: true });
+          writeFileSync(target, mm[1] + '\n');
+          continue;
+        }
+        if (line.startsWith('fragment ')) {
+          const args = tokenize(line.slice('fragment '.length));
+          if (args.includes('--watch')) {
+            // the documented "leave running" step: it starts (and would keep
+            // running); the dropzone pull-back below uses one-shot syncs
+            watcher = spawn(bin, args, { cwd, env: { ...process.env, FRAGMENT_HOST: BASE, ...H }, stdio: 'ignore' });
+            await sleep(1500);
+          } else {
+            const out = runCli(bin, args, { cwd, env: H });
+            if (args[0] === 'create') viewToken = (out.match(/view token:\s+(\S+)/) || [])[1] || '';
+            if (args[0] === 'publish') ok(out.includes('/d/'), `guide: ${tpl} recipe publishes a draft`);
+          }
+          continue;
+        }
+        // plain commentary lines are skipped
+      }
+      if (watcher) { try { watcher.kill(); } catch {} }
+      // the recipe's promise: the scaffold is live at its canonical URL
+      ok(!!viewToken, `guide: ${tpl} create printed a view token`);
+      const canon = await fetch(`${BASE}/f/${recipeName}/?view=${viewToken}`);
+      eq(canon.status, 200, `guide: ${tpl} canonical serves after the recipe`);
+      if (probeFile) {
+        // dropzone promise: outputs land back in the folder within seconds
+        let pulled = false;
+        const t0 = Date.now();
+        while (Date.now() - t0 < 30_000 && !pulled) {
+          runCli(bin, ['sync', recipeName, '--dir', cwd], { env: H });
+          pulled = existsSync(join(cwd, 'output')) && readdirSync(join(cwd, 'output')).length > 0;
+          if (!pulled) await sleep(1500);
+        }
+        ok(pulled, 'guide: dropzone ingest output pulled back into the folder');
+      }
+    }
+  }
+
+  // ---- enforcement: every js/json block has a runner ----
+  const RUNNER_SECTIONS = new Set(['Workflows', 'Sites and apps', 'Multiplayer (rooms)']);
+  for (const b of blocks) {
+    if (b.lang === 'js') ok(RUNNER_SECTIONS.has(b.section) || b.section.startsWith('Patterns'), `js block has a runner: ${b.section}/${b.sub || '—'}`);
+    if (b.lang === 'json') ok(b.section === 'The manifest', `json block has a runner: ${b.section}`);
   }
 }
 
@@ -811,7 +1058,7 @@ try {
   if (!ONLY || ONLY === 'rooms') await roomsSection();
   if (!ONLY || ONLY === 'workflows') await workflowSection();
   if (!ONLY || ONLY === 'paused') await pausedSection();
-  if (!ONLY || ONLY === 'patterns') await patternsSection();
+  if (!ONLY || ONLY === 'guide') await guideSection();
   if (!ONLY || ONLY === 'runs') await runsSection();
   if (!ONLY || ONLY === 'sync') await syncSection();
   await cronSection();

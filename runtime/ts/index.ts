@@ -40,6 +40,9 @@ export default {
     const toCell = async (name, newPath, verifiedPubkey) => {
       const headers = stripAuth(request.headers);
       if (verifiedPubkey) headers.set("x-fragment-pubkey", verifiedPubkey);
+      // the public URL (path form the visitor used), so served apps can see
+      // their own paths instead of the internal /__serve/ route
+      headers.set("x-fragment-url", request.url);
       const target = url.origin + newPath + url.search;
       const hasBody = request.method !== "GET" && request.method !== "HEAD";
       return cell(name).fetch(new Request(target, {

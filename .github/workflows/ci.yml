@@ -36,6 +36,8 @@ jobs:
       AWS_ACCESS_KEY_ID: minio
       AWS_SECRET_ACCESS_KEY: miniosecret
       AWS_REGION: us-east-1
+      # optional: with this secret set, the guide's ai blocks run in CI too
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 
     steps:
       - uses: actions/checkout@v4

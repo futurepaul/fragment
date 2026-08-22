@@ -141,13 +141,14 @@ A workflow is a module exporting `run`:
 
 ```js
 // workflows/digest.mjs
+const API = "https://example.com/api"; // any JSON endpoint you can call
 export async function run(ctx, input) {
   const rows = await ctx.files.list("notes/");
   const note = await ctx.files.read("notes/today.md");        // string
   const raw  = await ctx.files.readBytes("data/export.csv");  // ArrayBuffer
   await ctx.files.write("digests/" + Date.now() + ".md", "# …");
 
-  const data = await ctx.http("https://example.com/api", {
+  const data = await ctx.http(API, {
     headers: { authorization: "Bearer " + ctx.secrets.SOME_TOKEN },
   }).then(r => r.json());
 
@@ -301,7 +302,7 @@ export async function run(ctx) {
 ## Inbox (webhooks in)
 
 ```
-POST {host}/api/f/{name}/inbox?t={inboxToken}   {"source": "grafana", "payload": {...}}
+POST {host}/api/f/{name}/inbox?t={inboxToken}   {"source": "grafana", "payload": {"alert": "disk 90%"}}
 ```
 
 When you control the HTTP client, prefer sending the token as the
@@ -326,8 +327,10 @@ export default {
   async fetch(req, ctx) {
     // same ctx as workflows (files are read-only here; normally the draft
     // snapshot — set "liveFiles": true in the manifest to read the live
-    // working copy instead)
-    return new Response("hello " + new URL(req.url).pathname);
+    // working copy instead). x-fragment-url is the public URL the visitor
+    // used; url.pathname is the internal route and stays stable.
+    const pub = req.headers.get("x-fragment-url") || req.url;
+    return new Response("hello " + new URL(pub).pathname);
   },
 };
 ```
