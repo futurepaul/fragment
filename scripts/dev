@@ -53,6 +53,15 @@ start_azurite() {
   echo "azurite: started (pid $(cat "$DEV/azurite.pid"))"
 }
 
+# dev convenience: bring the local OpenRouter key into the dev stack when
+# present, so guide ai-blocks run without remembering to export it first
+for keyfile in "$HOME/dev/finite/fragment/.env" "$PWD/.env"; do
+  if [ -z "${OPENROUTER_API_KEY:-}" ] && [ -f "$keyfile" ]; then
+    OPENROUTER_API_KEY="$(grep -o '^OPENROUTER_API_KEY=.*' "$keyfile" | head -1 | cut -d= -f2-)"
+    export OPENROUTER_API_KEY
+  fi
+done
+
 start_celld() {
   if celld_running; then echo "celld: already running on :$CELLD_PORT"; return; fi
   # env passthroughs must be exported before exec — a ${VAR:+NAME=val}
