@@ -38,7 +38,7 @@ async function serveRoute(cell, request, url) {
     const libRows = cell.sql.exec("SELECT path, content FROM draft_files WHERE slug = ? AND path LIKE 'applib/%'", slug).toArray();
     for (const r of libRows) modules[r.path] = new TextDecoder().decode(toAB(r.content));
     modules["app.mjs"] = new TextDecoder().decode(toAB(appRow.content));
-    const ep = await cell.loadCode(`app:${slug}`, APP_MAIN, modules, { kind: "draft", slug, blessed: mode === "b" });
+    const ep = await cell.loadCode(`app:${mode}:${slug}`, APP_MAIN, modules, { kind: "draft", worker: "app", slug, blessed: mode === "b" });
     const appUrl = new URL(request.url);
     return stamp(await ep.fetch(new Request(appUrl.origin + "/" + rest + appUrl.search, request)));
   }

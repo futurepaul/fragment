@@ -43,7 +43,7 @@ async function apiRoute(cell, request, url) {
       if (wf.trigger !== "inbox") continue;
       const out = await cell.executeWorkflow(wf, { inbox: { id: cur.id, source: body.source, payload: body.payload } }, { auto: true, trigger: "inbox", cause });
       results.push({ workflow: wf.name, ok: !!out.ok, status: out.blocked ? "blocked" : out.skipped ? "skipped" : out.held ? "held" : out.retrying ? "retrying" : "ran" });
-      if (out.ok) cell.sql.exec("UPDATE inbox SET status = 'done' WHERE id = ?", cur.id);
+      if (out.ok && !out.skipped && !out.blocked) cell.sql.exec("UPDATE inbox SET status = 'done' WHERE id = ?", cur.id);
     }
     return json({ ok: true, id: cur.id, ran: results });
   }

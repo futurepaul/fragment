@@ -85,8 +85,13 @@ export async function webSocketMessage(cell, ws, raw) {
       const row = cell.sql.exec("SELECT content FROM draft_files WHERE slug = ? AND path = 'rooms.mjs'", slug).toArray()[0];
       if (row) {
         try {
-          const ep = await cell.loadCode(`rooms:${slug}`, ROOMS_MAIN,
-            { "rooms.mjs": new TextDecoder().decode(toAB(row.content)) }, { kind: "draft", slug });
+          const isBlessed = cell.getMeta("blessed") === slug;
+          // blessed apps' rooms code is permanent like the app itself —
+          // a 1h preview token here dies mid-conversation; and the loader
+          // id carries blessed-ness so a preview worker is never reused
+          // for canonical traffic
+          const ep = await cell.loadCode(`rooms:${isBlessed ? "b" : "d"}:${slug}`, ROOMS_MAIN,
+            { "rooms.mjs": new TextDecoder().decode(toAB(row.content)) }, { kind: "draft", worker: "rooms", slug, blessed: isBlessed });
           const resp = await ep.fetch("http://loaded/rooms", {
             method: "POST",
             body: JSON.stringify({ room: a.room, msg: { from: a.clientId, data, at: Date.now() } }),

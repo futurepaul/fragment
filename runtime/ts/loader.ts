@@ -68,11 +68,14 @@ export function makeToken(cell, scope) {
   const ttl = scope.kind === "run" || (scope.kind === "draft" && scope.blessed) ? null : 3600_000;
   cell.sql.exec("DELETE FROM run_tokens WHERE expires < ?", Date.now() - 24 * 3600_000);
   if (scope.kind === "draft") {
-    // one live token per (slug, blessed-ness): re-mints sweep their predecessor
+    // one live token per (worker kind, slug, blessed-ness): re-mints sweep
+    // ONLY their predecessor. Keying on (slug, blessed) alone let an app
+    // re-mint delete a live rooms worker's token (and vice versa) — found
+    // live: a comments feature 403'd for 15 minutes after room activity.
     for (const r of cell.sql.exec("SELECT token, scope FROM run_tokens").toArray()) {
       try {
         const s = JSON.parse(r.scope);
-        if (s.kind === "draft" && s.slug === scope.slug && !!s.blessed === !!scope.blessed) {
+        if (s.kind === "draft" && s.worker === scope.worker && s.slug === scope.slug && !!s.blessed === !!scope.blessed) {
           cell.sql.exec("DELETE FROM run_tokens WHERE token = ?", r.token);
         }
       } catch {}

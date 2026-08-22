@@ -77,11 +77,12 @@ async function webSocketMessage(cell, ws, raw) {
       const row = cell.sql.exec("SELECT content FROM draft_files WHERE slug = ? AND path = 'rooms.mjs'", slug).toArray()[0];
       if (row) {
         try {
+          const isBlessed = cell.getMeta("blessed") === slug;
           const ep = await cell.loadCode(
-            `rooms:${slug}`,
+            `rooms:${isBlessed ? "b" : "d"}:${slug}`,
             ROOMS_MAIN,
             { "rooms.mjs": new TextDecoder().decode(toAB(row.content)) },
-            { kind: "draft", slug }
+            { kind: "draft", worker: "rooms", slug, blessed: isBlessed }
           );
           const resp = await ep.fetch("http://loaded/rooms", {
             method: "POST",

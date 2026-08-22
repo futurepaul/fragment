@@ -53,7 +53,11 @@ export async function apiRoute(cell, request, url) {
       if (wf.trigger !== "inbox") continue; // paused is a guard inside executeWorkflow
       const out = await cell.executeWorkflow(wf, { inbox: { id: cur.id, source: body.source, payload: body.payload } }, { auto: true, trigger: "inbox", cause });
       results.push({ workflow: wf.name, ok: !!out.ok, status: out.blocked ? "blocked" : out.skipped ? "skipped" : out.held ? "held" : out.retrying ? "retrying" : "ran" });
-      if (out.ok) cell.sql.exec("UPDATE inbox SET status = 'done' WHERE id = ?", cur.id);
+      // ack ONLY when this message actually ran — a skipped or blocked run
+      // did not observe it, and acking anyway loses it (found live: the
+      // dropzone bot lost 7 of 8 simultaneous drops this way). Unacked
+      // messages stay pending for the next run that drains ctx.inbox().
+      if (out.ok && !out.skipped && !out.blocked) cell.sql.exec("UPDATE inbox SET status = 'done' WHERE id = ?", cur.id);
     }
     return json({ ok: true, id: cur.id, ran: results });
   }

@@ -67,9 +67,15 @@ export async function makeCtx(env) {
     },
     secrets: secretsAll,
     scope,
+    // inbox() returns pending messages; ack(ids) marks what you observed
+    // as done. Skipping the ack means you will see them again next run \u2014
+    // never ack messages you didn't actually handle.
     async inbox() {
       const r = await call("/inbox/pending");
       return (await r.json()).messages;
+    },
+    async inboxAck(ids) {
+      await call("/inbox/ack", { method: "POST", body: JSON.stringify({ ids: ids || [] }) });
     },
     events: {
       async append(kind, data) {

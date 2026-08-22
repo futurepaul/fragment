@@ -48,7 +48,9 @@ export async function serveRoute(cell, request, url) {
     const libRows = cell.sql.exec("SELECT path, content FROM draft_files WHERE slug = ? AND path LIKE 'applib/%'", slug).toArray();
     for (const r of libRows) modules[r.path] = new TextDecoder().decode(toAB(r.content));
     modules["app.mjs"] = new TextDecoder().decode(toAB(appRow.content));
-    const ep = await cell.loadCode(`app:${slug}`, APP_MAIN, modules, { kind: "draft", slug, blessed: mode === "b" });
+    // the loader id carries the mode: blessing a slug creates a fresh worker
+// (a preview-cached one would keep its short-lived preview token forever)
+    const ep = await cell.loadCode(`app:${mode}:${slug}`, APP_MAIN, modules, { kind: "draft", worker: "app", slug, blessed: mode === "b" });
     // the public path the visitor used rides on x-fragment-url (set by the
     // router and forwarded here) — apps that care read it; url.pathname
     // stays the stable internal form so blessed drafts never break

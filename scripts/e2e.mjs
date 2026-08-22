@@ -752,10 +752,13 @@ async function guideSection() {
     const r = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'log' }));
     eq(r.body?.ok, true, 'inbox-log pattern runs clean');
     const day = new Date().toISOString().slice(0, 10);
-    const log = await fetch(`${BASE}/api/f/${name}/file?path=log/${day}.jsonl`, {
+    const readLog = async () => fetch(`${BASE}/api/f/${name}/file?path=log/${day}.jsonl`, {
       headers: { authorization: await authHeader('GET', `${BASE}/api/f/${name}/file?path=log/${day}.jsonl`, null, ownerKey) },
-    });
-    eq((await log.text()).trim().split('\n').filter(Boolean).length, 2, 'inbox-log appended both messages');
+    }).then((x) => x.text());
+    eq((await readLog()).trim().split('\n').filter(Boolean).length, 2, 'inbox-log appended both messages');
+    const r2 = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'log' }));
+    eq(r2.body?.output?.drained, 0, 'acked messages never re-process');
+    eq((await readLog()).trim().split('\n').filter(Boolean).length, 2, 'no double-append after ack');
   }
   {
     if (!process.env.OPENROUTER_API_KEY) {
@@ -1003,6 +1006,24 @@ async function filesyncSection() {
     eq(ownerDel.status, 200, 'append-only: owner delete allowed');
     const readd = await eput('logs/b.jsonl', 'new', 0);
     eq(readd.status, 200, 'append-only: new paths always allowed');
+  }
+
+  // ---- runtime: a skipped inbox run must not ack its message ----
+  {
+    const name = `e2e-fs-ack-${suffix}`;
+    const created = await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    await signed('PUT', `/api/f/${name}/file?path=workflows/w.mjs&base_rev=0`,
+      'export async function run(ctx) { const m = await ctx.inbox(); await ctx.inboxAck(m.map((x) => x.id)); return { n: m.length }; }');
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'inbox' }], secrets: [] }));
+    // force a "still active" run row so the next trigger is skipped
+    await signed('POST', '/api/fragments', JSON.stringify({ name: `e2e-fs-ack2-${suffix}` }));
+    const p1 = await (await fetch(`${BASE}/api/f/${name}/inbox?t=${created.body.inboxToken}`, { method: 'POST', body: JSON.stringify({ source: 't', payload: { x: 1 } }) })).json();
+    eq(p1?.ran?.[0]?.status, 'ran', 'first message ran');
+    const p2 = await (await fetch(`${BASE}/api/f/${name}/inbox?t=${created.body.inboxToken}`, { method: 'POST', body: JSON.stringify({ source: 't', payload: { x: 2 } }) })).json();
+    eq(p2?.ran?.[0]?.status, 'ran', 'second message ran');
+    // drain semantics: a manual run reports zero pending (both acked)
+    const drain = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'w' }));
+    eq(drain.body?.output?.n, 0, 'inbox empty after acked runs');
   }
 
   // ---- runtime: the __watch live channel ----

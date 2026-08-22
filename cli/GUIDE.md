@@ -305,14 +305,16 @@ Receive webhooks, validate, append. Bounded shape, no growth surprises.
 ```js
 // workflows/log.mjs — trigger "inbox"
 export async function run(ctx) {
-  for (const m of await ctx.inbox()) {
+  const msgs = await ctx.inbox();
+  for (const m of msgs) {
     const line = JSON.stringify({ at: m.at, source: String(m.source).slice(0, 40), payload: m.payload }) + "\n";
     if (line.length > 2000) continue;                    // refuse oversized
     const p = "log/" + new Date(m.at).toISOString().slice(0, 10) + ".jsonl";
     const prev = await ctx.files.read(p).catch(() => ""); // read throws if absent
     await ctx.files.write(p, prev + line);
   }
-  return { drained: true };
+  await ctx.inboxAck(msgs.map((m) => m.id)); // only what we observed
+  return { drained: msgs.length };
 }
 ```
 

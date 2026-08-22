@@ -55,7 +55,7 @@ function makeToken(cell, scope) {
     for (const r of cell.sql.exec("SELECT token, scope FROM run_tokens").toArray()) {
       try {
         const s = JSON.parse(r.scope);
-        if (s.kind === "draft" && s.slug === scope.slug && !!s.blessed === !!scope.blessed) {
+        if (s.kind === "draft" && s.worker === scope.worker && s.slug === scope.slug && !!s.blessed === !!scope.blessed) {
           cell.sql.exec("DELETE FROM run_tokens WHERE token = ?", r.token);
         }
       } catch {
