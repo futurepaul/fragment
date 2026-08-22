@@ -99,9 +99,17 @@ Two honest caveats:
   bucket *is* the backup (`sqlite3`-readable). If exportable state matters to
   an org, that's the argument for the celld host.
 
-## What's verified (2026-08-20, celld v0.3.0, macOS)
+## What's verified
 
-Every claim below was executed against the local stack, not read from docs:
+These claims are executable: `scripts/e2e.mjs` runs them against a live host
+and fails loudly if any regress.
+
+```
+scripts/dev up && scripts/dev deploy
+node scripts/e2e.mjs        # add --all for the slow cron-fire check
+```
+
+Snapshot from the last full manual pass (2026-08-20, celld v0.3.0, macOS):
 
 - NIP-98 auth end-to-end: create/list/status with signed requests; unsigned →
   401; valid signature without role → 403. Rust CLI signatures verify against
