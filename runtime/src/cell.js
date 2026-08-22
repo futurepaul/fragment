@@ -2,7 +2,7 @@
 // All fragment state lives in this cell's SQLite. See ARCHITECTURE.md.
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { npubFromHex, hexFromNpub } from "./bech32.js";
-import { sha256Hex } from "./auth.js";
+import { sha256Hex, safeEqual } from "./auth.js";
 import { parseCron, nextRun, cronMatches } from "./cron.js";
 import { CTX_SHIM_SOURCE } from "./ctx-shim.js";
 
@@ -260,9 +260,13 @@ export class FragmentCell {
     const m = this.manifest();
     if (!m) return json({ error: "fragment not initialized" }, 404);
 
-    // inbox: token-gated, no nostr
+    // inbox: token-gated, no nostr. The token may arrive as a query param
+    // (webhook ergonomics: ?t=...) or, preferably, the x-fragment-inbox-token
+    // header for callers who control their clients and don't want the secret
+    // in access logs.
     if (p === "/inbox" && request.method === "POST") {
-      if (url.searchParams.get("t") !== this.getMeta("inbox_token")) return json({ error: "bad inbox token" }, 403);
+      const presented = request.headers.get("x-fragment-inbox-token") || url.searchParams.get("t") || "";
+      if (!safeEqual(presented, this.getMeta("inbox_token") || "")) return json({ error: "bad inbox token" }, 403);
       const body = await request.json().catch(() => ({}));
       const cur = this.sql.exec("INSERT INTO inbox (at, source, payload) VALUES (?, ?, ?) RETURNING id",
         Date.now(), String(body.source || "external"), JSON.stringify(body.payload ?? null)).toArray()[0];
@@ -584,9 +588,14 @@ export class FragmentCell {
     return token;
   }
 
-  checkToken(request, url) {
-    const token = request.headers.get("x-fragment-token") || url.searchParams.get("t") || "";
-    const row = this.sql.exec("SELECT scope, expires FROM run_tokens WHERE token = ?", token).toArray()[0];
+  checkToken(request) {
+    // header-only, deliberately: run tokens unlock files/secrets/state for
+    // one isolate. Query params land in access logs, proxy logs, and browser
+    // history — a leaked run token is a fragment-wide capability leak. The
+    // ctx shim has always sent x-fragment-token as a header.
+    const row = this.sql
+      .exec("SELECT scope, expires FROM run_tokens WHERE token = ?", request.headers.get("x-fragment-token") || "")
+      .toArray()[0];
     if (!row) return null;
     if (row.expires !== null && row.expires !== undefined && row.expires < Date.now()) return null;
     return JSON.parse(row.scope);
@@ -687,7 +696,7 @@ export class FragmentCell {
     const p = url.pathname.slice("/__internal/f/".length);
     const slash = p.indexOf("/");
     const rest = p.slice(slash + 1);
-    const scope = this.checkToken(request, url);
+    const scope = this.checkToken(request);
     if (!scope) return json({ error: "bad or expired run token" }, 403);
     const isRun = scope.kind === "run";
 
