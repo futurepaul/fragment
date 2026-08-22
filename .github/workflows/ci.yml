@@ -1,5 +1,5 @@
 # fragment CI: unit tests for the Rust CLI + the full e2e suite against a
-# real celld+azurite stack (same shape as scripts/dev, no docker).
+# real celld stack backed by MinIO (S3 — same backend family as production).
 name: ci
 
 on:
@@ -30,11 +30,27 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+
+    services:
+      minio:
+        image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+        ports:
+          - 9000:9000
+        env:
+          MINIO_ROOT_USER: minio
+          MINIO_ROOT_PASSWORD: miniosecret
+        options: >-
+          --health-cmd "curl -fsS http://localhost:9000/minio/health/live"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+
     env:
-      # well-known azurite emulator credentials (development-only)
-      AZURE_STORAGE_ACCOUNT_NAME: devstoreaccount1
-      AZURE_STORAGE_ACCOUNT_KEY: Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==
-      AZURE_STORAGE_USE_EMULATOR: "true"
+      S3_ENDPOINT: http://127.0.0.1:9000
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: miniosecret
+      AWS_REGION: us-east-1
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -51,13 +67,14 @@ jobs:
       - name: root deps (@noble for signing)
         run: npm install --no-audit --no-fund
 
-      - name: start stack (azurite + celld) with the host secret set
+      - name: create bucket
+        run: scripts/ci-bucket
+
+      - name: deploy runtime + start host (with host secret)
         run: |
           export FRAGMENT_HOST_SECRET="$(openssl rand -hex 32)"
           echo "FRAGMENT_HOST_SECRET=$FRAGMENT_HOST_SECRET" >> "$GITHUB_ENV"
-          scripts/dev up
-          scripts/dev deploy
-          curl -fsS http://127.0.0.1:8789/__internal/ping
+          scripts/ci-up
 
       - uses: actions/cache@v4
         with:
