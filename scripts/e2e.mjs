@@ -1094,6 +1094,18 @@ async function filesyncSection() {
     eq(gone.status, 410, 'pruned revisions answer 410');
   }
 
+  // publish servability guard: parent-folder sync gets named
+  {
+    const name = `e2e-fs-serv-${suffix}`;
+    await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    await signed('PUT', `/api/f/${name}/file?path=${encodeURIComponent(name + '/site/index.html')}&base_rev=0`, '<!doctype html>oops');
+    const d = await signed('POST', `/api/f/${name}/drafts`, JSON.stringify({ note: 'nested' }));
+    eq(d.body?.servable, false, 'unservable draft flagged');
+    ok(String(d.body?.warning || '').includes('parent folder'), 'nested-sync hint names the cause');
+    const evs = await signed('GET', `/api/f/${name}/events`);
+    ok(JSON.stringify(evs.body?.events || []).includes('publish.warn'), 'publish.warn on the ledger');
+  }
+
   // ---- runtime: append-only enforcement ----
   {
     const name = `e2e-fs-app-${suffix}`;

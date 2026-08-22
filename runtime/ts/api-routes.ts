@@ -203,6 +203,17 @@ export async function apiRoute(cell, request, url) {
     const body = await request.json().catch(() => ({}));
     const slug = randSlug(8);
     const rows = cell.sql.exec("SELECT path, content, sha256 FROM files WHERE deleted = 0").toArray();
+    // servability check: a draft with no app.mjs and no site/ files will
+    // 404 at every URL. The #1 cause is syncing the PARENT folder, so
+    // every path gains a spurious prefix — name the suspect when visible.
+    const servable = rows.some((r) => r.path === "app.mjs" || r.path.startsWith("site/"));
+    const nested = rows.length && !servable && rows.every((r) => r.path.startsWith(m.name + "/"));
+    if (!servable) {
+      const hint = nested
+        ? ` every file is under "${m.name}/" — you probably synced the PARENT folder; sync the folder that CONTAINS site/ (or app.mjs)`
+        : " no app.mjs and no site/ files — the canonical URL will 404";
+      cell.addEvent("publish.warn", `draft ${slug}:${hint}`);
+    }
     cell.sql.exec("INSERT INTO drafts (slug, at, note) VALUES (?, ?, ?)", slug, Date.now(), String(body.note || ""));
     for (const r of rows) {
       cell.sql.exec("INSERT INTO draft_files (slug, path, content, sha256) VALUES (?, ?, ?, ?)", slug, r.path, toAB(r.content), r.sha256);
@@ -211,7 +222,7 @@ export async function apiRoute(cell, request, url) {
       method: "POST", body: JSON.stringify({ slug, name: m.name }),
     });
     cell.addEvent("draft", `draft ${slug} published (${rows.length} files)${body.note ? ": " + body.note : ""}`);
-    return json({ slug, url: `/d/${slug}/` });
+    return json({ slug, url: `/d/${slug}/`, servable, ...(servable ? {} : { warning: nested ? "all files under <name>/ — synced the parent folder?" : "no app.mjs or site/ — this draft will 404" }) });
   }
 
   if (p === "/drafts" && request.method === "GET") {

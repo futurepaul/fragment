@@ -476,6 +476,9 @@ fn main() -> Result<()> {
                 report.print();
             }
             let v = c.call(c.post_json(&format!("/api/f/{name}/drafts"), &json!({ "note": note }))?)?;
+            if v.get("warning").and_then(|w| w.as_str()).is_some() {
+                eprintln!("WARNING: {} — this draft will 404 at every URL", v["warning"].as_str().unwrap_or(""));
+            }
             let slug = v["slug"].as_str().unwrap_or("").to_string();
             if bless && !slug.is_empty() {
                 let b = c.call(c.post_json(&format!("/api/f/{name}/bless"), &json!({ "slug": slug }))?)?;
