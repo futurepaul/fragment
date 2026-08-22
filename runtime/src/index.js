@@ -102,6 +102,14 @@ var index_default = {
       if ((path.startsWith("/f/") || path.startsWith("/d/")) && path.endsWith("/__rt.js")) {
         return new Response(RT_CLIENT_SOURCE, { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-store" } });
       }
+      if (path.startsWith("/f/") && path.endsWith("/__watch")) {
+        const name = path.split("/")[2];
+        const g = await softGate();
+        if (g.error) return g.error;
+        const headers = stripAuth(request.headers);
+        if (g.pubkey) headers.set("x-fragment-pubkey", g.pubkey);
+        return cell(name).fetch(new Request(`${url.origin}/__watch${url.search}`, { method: request.method, headers }));
+      }
       if (path.startsWith("/f/") && path.includes("/__room/")) {
         const name = path.split("/")[2];
         const room = path.slice(path.indexOf("/__room/") + "/__room/".length);

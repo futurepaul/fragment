@@ -76,6 +76,41 @@ fragment drafts my-thing                        # list drafts ([blessed] marked)
 Rollback is `fragment bless` on an older draft. Drafts never change and never
 expire; publish as often as you think.
 
+## Sync in depth
+
+```
+fragment sync my-thing --dir .              # one mirror pass (default)
+fragment sync my-thing --dir . --watch      # continuous: OS events + live channel + 60s sweeps
+fragment sync my-thing --dir . --mode pull  # read-only copy (never deletes; --prune to apply)
+fragment sync my-thing --dir . --mode push  # publish-only
+fragment verify my-thing --dir .            # full-hash audit (caches lie; this doesn't)
+```
+
+- **Fast and crash-safe**: unchanged files are detected by size+mtime
+  (state in `.fragment/state.json`); writes are atomic; a second watcher on
+  the same folder is refused by a lock. If the folder moves, sync stops and
+  tells you (`--rebuild-state` after moving on purpose).
+- **Live**: with `--watch`, the cell pushes a `changed` frame over a
+  websocket the moment files mutate remotely; remote edits land in seconds.
+  Sweeps every 60s are the correctness floor — live is a latency win, never
+  the mechanism.
+- **Conflicts merge**: when both sides changed a text or JSON file, sync
+  fetches the common ancestor from the fragment's server-side history and
+  three-way merges. Non-overlapping edits merge silently (reported as
+  `merged`); overlapping ones write `<<<<<<<` markers locally and exit 3.
+  `--conflict-strategy copy` saves the remote version as
+  `<path>.conflict-<time>-<writer>` instead. The last 10 revisions of every
+  file are kept server-side (`/file/history`, `/file/at`).
+- **Mass-deletion guard**: deleting >max(10, 30%) of known files in one
+  pass is refused (exit 4) until `--apply-mass-delete` — the folder-looks-
+  unmounted protection.
+- **Append-only folders**: manifest `"appendOnly": ["logs/", "drop/"]`
+  makes those prefixes add-only for everyone but you — writers append,
+  identical rewrites are no-ops, modifications and deletes are refused.
+  Many-writer folders (logs, dropzones) become race-free by construction.
+- **Exit codes** (for scripting): 0 clean/merged, 1 hard failure, 3
+  conflicts present, 4 mass-deletion guard tripped.
+
 ## The manifest
 
 `fragment manifest my-thing` prints it; `fragment manifest-set my-thing m.json`
@@ -405,7 +440,7 @@ cd my-vault
 fragment create my-vault
 fragment manifest-set my-vault fragment.json
 fragment publish my-vault --dir . --bless
-fragment sync my-vault --dir . --watch 2     # leave running; edits go live
+fragment sync my-vault --dir . --watch        # leave running; edits go live
 ```
 
 The viewer (`app.mjs` + `assets/`) is frozen in the blessed draft; the notes
@@ -420,7 +455,7 @@ webview (and back in your folder):
 ```
 fragment new my-drop --template dropzone
 cd my-drop            # same create/manifest-set/publish --bless as above
-fragment sync my-drop --dir . --watch 2
+fragment sync my-drop --dir . --watch
 echo "hi" > drop/note.txt        # → output/note-*.md within seconds
 ```
 
@@ -456,7 +491,7 @@ fragment status <name>              fragment run <name> <wf> [--input JSON]
 fragment events <name> [--since N]  fragment runs <name> [--status S] [--limit N]
 fragment manifest <name>            fragment pause <name> <wf>
 fragment manifest-set <name> FILE   fragment unpause <name> <wf>
-fragment sync <name> [--dir D] [--watch N]   fragment replay <name> <run-id>
+fragment sync <name> [--dir D] [--watch] [--mode M]  fragment replay <name> <run-id>
                                    [--install | --uninstall]
 fragment publish <name> [--dir D] [--note N] [--bless]
 fragment drafts <name>              fragment bless <name> <slug>

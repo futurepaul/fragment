@@ -1,10 +1,12 @@
 mod api;
 mod auth;
 mod sync;
+mod watch;
 
 include!(concat!(env!("OUT_DIR"), "/templates.rs"));
 
 use crate::api::encode_q;
+use crate::sync::{ConflictStrategy, Mode, SyncOptions};
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
@@ -60,14 +62,45 @@ enum Cmd {
     Manifest { name: String },
     /// Replace the manifest from a local JSON file
     ManifestSet { name: String, file: PathBuf },
-    /// Sync a local folder with the fragment (bidirectional)
+    /// Sync a local folder with the fragment (default: bidirectional mirror)
     Sync {
         name: String,
         #[arg(long, default_value = ".")]
         dir: PathBuf,
-        /// Re-sync every N seconds
+        /// Keep syncing continuously (OS events + live channel + sweeps)
         #[arg(long)]
-        watch: Option<u64>,
+        watch: bool,
+        /// push: local→remote only; pull: remote→local only (never deletes
+        /// without --prune); mirror: bidirectional (default)
+        #[arg(long)]
+        mode: Option<String>,
+        /// In pull mode, apply remote deletions locally too
+        #[arg(long)]
+        prune: bool,
+        /// Conflict style: markers (default) or copy
+        #[arg(long)]
+        conflict_strategy: Option<String>,
+        /// Allow a mass deletion to propagate (the guard refuses otherwise)
+        #[arg(long)]
+        apply_mass_delete: bool,
+        /// Delete local state and start fresh (folder moved/replaced)
+        #[arg(long)]
+        rebuild_state: bool,
+        /// Watch tuning: event debounce ms (50–5000, default 300)
+        #[arg(long)]
+        debounce_ms: Option<u64>,
+        /// Watch tuning: poll fallback interval seconds (default 5)
+        #[arg(long)]
+        poll_interval: Option<u64>,
+        /// Watch tuning: full rescan sweep seconds (default 60)
+        #[arg(long)]
+        rescan_secs: Option<u64>,
+        /// Watch backend: auto (default), native, or poll
+        #[arg(long)]
+        watch_backend: Option<String>,
+        /// Disable the live __watch channel in continuous mode
+        #[arg(long)]
+        no_live: bool,
         /// Install (or, with --uninstall, remove) a LaunchAgent/systemd
         /// unit that keeps this folder syncing after logout/reboot
         #[arg(long, conflicts_with = "uninstall")]
@@ -75,6 +108,8 @@ enum Cmd {
         #[arg(long)]
         uninstall: bool,
     },
+    /// Full-hash audit of the folder against the fragment (no shortcuts)
+    Verify { name: String, #[arg(long, default_value = ".")] dir: PathBuf },
     /// Sync (if a dir is given) then publish a draft; prints the draft URL
     Publish {
         name: String,
@@ -377,24 +412,67 @@ fn main() -> Result<()> {
             c.call(c.put_json(&format!("/api/f/{name}/manifest"), &v)?)?;
             println!("manifest updated");
         }
-        Cmd::Sync { name, dir, watch, install, uninstall } => {
+        Cmd::Sync {
+            name, dir, watch, mode, prune, conflict_strategy, apply_mass_delete,
+            rebuild_state, debounce_ms, poll_interval, rescan_secs, watch_backend,
+            no_live, install, uninstall,
+        } => {
             if install || uninstall {
                 install_sync_unit(&name, &dir, install)?;
                 return Ok(());
             }
-            loop {
-                let report = sync::sync_once(&c, &name, &dir)?;
-                println!("sync {} ({})", name, dir.display());
-                report.print();
-                match watch {
-                    Some(secs) => std::thread::sleep(std::time::Duration::from_secs(secs)),
-                    None => break,
-                }
+            if rebuild_state {
+                let p = dir.join(".fragment").join("state.json");
+                std::fs::remove_file(&p).ok();
+                println!("state cleared: {}", p.display());
             }
+            let opts = SyncOptions {
+                mode: match mode.as_deref() {
+                    Some("push") => Mode::Push,
+                    Some("pull") => Mode::Pull,
+                    Some("mirror") | None => Mode::Mirror,
+                    other => anyhow::bail!("--mode must be push|pull|mirror, got {other:?}"),
+                },
+                strategy: match conflict_strategy.as_deref() {
+                    Some("copy") => ConflictStrategy::Copy,
+                    _ => ConflictStrategy::Markers,
+                },
+                apply_mass_delete,
+                prune,
+                verify: false,
+                writer_id: c.id.pubkey_hex.chars().take(8).collect(),
+            };
+            if watch {
+                let cfg = watch::WatchConfig {
+                    debounce_ms: debounce_ms.unwrap_or(300),
+                    poll_interval: poll_interval.unwrap_or(5),
+                    rescan_secs: rescan_secs.unwrap_or(60),
+                    backend: watch_backend.clone().unwrap_or_else(|| "auto".into()),
+                    live: !no_live,
+                };
+                watch::run(&c, &name, &dir, &opts, &cfg)?;
+                return Ok(());
+            }
+            let report = sync::sync_once(&c, &name, &dir, &opts)?;
+            if j {
+                return out(&c, serde_json::to_value(&report).unwrap_or_default(), true);
+            }
+            println!("sync {} ({})", name, dir.display());
+            report.print();
+            std::process::exit(report.exit_code());
+        }
+        Cmd::Verify { name, dir } => {
+            let report = sync::verify(&c, &name, &dir)?;
+            if j {
+                return out(&c, serde_json::to_value(&report).unwrap_or_default(), true);
+            }
+            println!("verify {} ({})", name, dir.display());
+            report.print();
+            std::process::exit(report.exit_code());
         }
         Cmd::Publish { name, dir, note, bless } => {
             if let Some(dir) = dir {
-                let report = sync::sync_once(&c, &name, &dir)?;
+                let report = sync::sync_once(&c, &name, &dir, &SyncOptions::default())?;
                 report.print();
             }
             let v = c.call(c.post_json(&format!("/api/f/{name}/drafts"), &json!({ "note": note }))?)?;
@@ -676,7 +754,6 @@ fn install_sync_unit(name: &str, dir: &PathBuf, install: bool) -> Result<()> {
     <string>--dir</string>
     <string>__DIR__</string>
     <string>--watch</string>
-    <string>3</string>
   </array>
   <key>WorkingDirectory</key><string>__DIR__</string>
   <key>EnvironmentVariables</key>
@@ -743,7 +820,7 @@ Description=fragment sync __NAME__
 After=network-online.target
 
 [Service]
-ExecStart=__EXE__ sync __NAME__ --dir __DIR__ --watch 3
+ExecStart=__EXE__ sync __NAME__ --dir __DIR__ --watch
 WorkingDirectory=__DIR__
 Environment=PATH=__HOMEBIN__:/usr/local/bin:/usr/bin:/bin
 Restart=always

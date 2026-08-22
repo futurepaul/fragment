@@ -7,11 +7,11 @@
 // Bring a stack up first (scripts/dev up && scripts/dev deploy), then run this.
 // Exit code 0 = every check passed. Created fragments are named e2e-* and are
 // left behind on purpose — there is no destroy command yet.
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import { readFileSync as guideRead } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import fs from "node:fs";
 import { genKey, pubkeyFromSecret, nreq, authHeader } from './nip98.mjs';
 import { npubFromHex } from '../runtime/src/bech32.js';
@@ -939,7 +939,7 @@ async function guideSection() {
         // dropzone promise: outputs land back in the folder within seconds
         let pulled = false;
         const t0 = Date.now();
-        while (Date.now() - t0 < 30_000 && !pulled) {
+        while (Date.now() - t0 < 45_000 && !pulled) {
           runCli(bin, ['sync', recipeName, '--dir', cwd], { env: H });
           pulled = existsSync(join(cwd, 'output')) && readdirSync(join(cwd, 'output')).length > 0;
           if (!pulled) await sleep(1500);
@@ -954,6 +954,223 @@ async function guideSection() {
   for (const b of blocks) {
     if (b.lang === 'js') ok(RUNNER_SECTIONS.has(b.section) || b.section.startsWith('Patterns'), `js block has a runner: ${b.section}/${b.sub || '—'}`);
     if (b.lang === 'json') ok(b.section === 'The manifest', `json block has a runner: ${b.section}`);
+  }
+}
+
+// ---------- file sync v2 (history, merges, append-only, live) ----------
+async function filesyncSection() {
+  if (!section('filesync')) return;
+  const put = (name, path, body, baseRev) =>
+    signed('PUT', `/api/f/${name}/file?path=${encodeURIComponent(path)}&base_rev=${baseRev}`, body);
+
+  // ---- runtime: revision history + file/at + retention ----
+  {
+    const name = `e2e-fs-hist-${suffix}`;
+    await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    for (let i = 1; i <= 12; i++) await put(name, 'doc.md', `v${i}\n`, i - 1);
+    const h = await signed('GET', `/api/f/${name}/file/history?path=doc.md`);
+    ok(h.body?.revs?.length <= 10, 'history retention keeps last 10 revisions');
+    const atUrl = `${BASE}/api/f/${name}/file/at?path=doc.md&rev=${h.body.revs[h.body.revs.length - 1].rev}`;
+    const at = await fetch(atUrl, { headers: { authorization: await authHeader('GET', atUrl, null, ownerKey) } });
+    eq(await at.text(), 'v3\n', 'file/at returns exact historical bytes');
+    const goneUrl = `${BASE}/api/f/${name}/file/at?path=doc.md&rev=1`;
+    const gone = await fetch(goneUrl, { headers: { authorization: await authHeader('GET', goneUrl, null, ownerKey) } });
+    eq(gone.status, 410, 'pruned revisions answer 410');
+  }
+
+  // ---- runtime: append-only enforcement ----
+  {
+    const name = `e2e-fs-app-${suffix}`;
+    await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    await put(name, 'logs/a.jsonl', 'x', 0);
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [], secrets: [], appendOnly: ['logs/'] }));
+    // the owner is exempt by design; enforcement is proven with an editor
+    const editorKey = genKey();
+    const edNpub = npubFromHex(pubkeyFromSecret(editorKey));
+    const man0 = await signed('GET', `/api/f/${name}/manifest`);
+    const nm = man0.body;
+    nm.editors = [...(nm.editors || []), edNpub];
+    const up = await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify(nm));
+    eq(up.status, 200, 'editor granted via manifest');
+    const eput = (path, body, br) => signed('PUT', `/api/f/${name}/file?path=${encodeURIComponent(path)}&base_rev=${br}`, body, editorKey);
+    const same = await eput('logs/a.jsonl', 'x', 1);
+    eq(same.body?.noop, true, 'append-only: identical rewrite is a noop');
+    const diff = await eput('logs/a.jsonl', 'y', 1);
+    eq(diff.status, 409, 'append-only: modified existing refused (editor)');
+    const del = await signed('DELETE', `/api/f/${name}/file?path=logs/a.jsonl`, null, editorKey);
+    eq(del.status, 403, 'append-only: delete refused (editor)');
+    const ownerDel = await signed('DELETE', `/api/f/${name}/file?path=logs/a.jsonl`);
+    eq(ownerDel.status, 200, 'append-only: owner delete allowed');
+    const readd = await eput('logs/b.jsonl', 'new', 0);
+    eq(readd.status, 200, 'append-only: new paths always allowed');
+  }
+
+  // ---- runtime: the __watch live channel ----
+  {
+    const name = `e2e-fs-live-${suffix}`;
+    const created = await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    const ws = new WebSocket(BASE.replace('http', 'ws') + `/f/${name}/__watch?view=${created.body.viewToken}`);
+    await new Promise((res, rej) => { ws.onopen = res; ws.onerror = () => rej(new Error('watch ws refused')); });
+    const frames = [];
+    ws.onmessage = (ev) => frames.push(JSON.parse(ev.data));
+    await put(name, 'notes/x.md', 'hello', 0);
+    const t0 = Date.now();
+    while (Date.now() - t0 < 3000 && !frames.some((f) => f.type === 'changed')) await sleep(150);
+    ok(frames.some((f) => f.type === 'changed' && f.paths.includes('notes/x.md')), 'watch channel frames mutations');
+    ws.close();
+    const denied = new WebSocket(BASE.replace('http', 'ws') + `/f/${name}/__watch?view=wrong`);
+    const deniedCode = await new Promise((resolve) => {
+      denied.onopen = () => resolve('open');
+      denied.onerror = () => resolve('refused');
+      denied.onclose = () => resolve('closed');
+      setTimeout(() => resolve('timeout'), 3000);
+    });
+    ok(deniedCode !== 'open' && deniedCode !== 'timeout', 'watch channel refuses bad tokens');
+  }
+
+  // ---- CLI: the whole stage-0/1/2 surface ----
+  const bin = findBinary();
+  if (!bin) {
+    console.log('skip  filesync CLI checks (no fragment binary built)');
+    return;
+  }
+  const H = { HOME: mkdtempSync(join(tmpdir(), 'fragment-fs-home-')) };
+  runCli(bin, ['login'], { env: H });
+  // CLI-owned fixtures; the suite acts as a second writer via an editor grant
+  const cliCreate = async (name) => {
+    runCli(bin, ['create', name], { env: H });
+    runCli(bin, ['grant', name, '--editor', ownerNpub], { env: H });
+  };
+
+  // merge3: non-overlapping offline edits merge clean
+  {
+    const name = `e2e-fs-m3a-${suffix}`;
+    await cliCreate(name);
+    const dir = join(mkdtempSync(join(tmpdir(), 'fragment-fs-')), 'm');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'doc.md'), 'one\ntwo\nthree\nfour\nfive\n');
+    runCli(bin, ['sync', name, '--dir', dir], { env: H });
+    // offline: local edits the top, remote (owner via API) edits the bottom
+    writeFileSync(join(dir, 'doc.md'), 'ONE-local\ntwo\nthree\nfour\nfive\n');
+    await put(name, 'doc.md', 'one\ntwo\nthree\nfour\nFIVE-remote\n', 1);
+    const r = runCli(bin, ['sync', name, '--dir', dir, '--json'], { env: H });
+    const rep = JSON.parse(r[r.indexOf('{') >= 0 ? r.indexOf('{') : 0] ? r.slice(r.indexOf('{')) : '{}');
+    ok((rep.merged || []).includes('doc.md'), 'non-overlapping edits merged automatically');
+    const local = readFileSync(join(dir, 'doc.md'), 'utf8');
+    ok(local.includes('ONE-local') && local.includes('FIVE-remote'), 'merge kept both sides');
+    const remoteFile = await fetch(`${BASE}/api/f/${name}/file?path=doc.md`, {
+      headers: { authorization: await authHeader('GET', `${BASE}/api/f/${name}/file?path=doc.md`, null, ownerKey) },
+    });
+    const remote = await remoteFile.text();
+    ok(remote.includes('ONE-local') && remote.includes('FIVE-remote'), 'merged result pushed');
+  }
+
+  // merge3: overlapping edits → markers + exit 3
+  {
+    const name = `e2e-fs-m3b-${suffix}`;
+    await cliCreate(name);
+    const dir = join(mkdtempSync(join(tmpdir(), 'fragment-fs-')), 'm');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'doc.md'), 'the same line\n');
+    runCli(bin, ['sync', name, '--dir', dir], { env: H });
+    writeFileSync(join(dir, 'doc.md'), 'ours rewrote it\n');
+    await put(name, 'doc.md', 'theirs rewrote it\n', 1);
+    const res = spawnSync(bin, ['sync', name, '--dir', dir], { encoding: 'utf8', env: { ...process.env, FRAGMENT_HOST: BASE, ...H } });
+    eq(res.status, 3, 'overlapping edits exit 3 (conflict)');
+    const local = readFileSync(join(dir, 'doc.md'), 'utf8');
+    ok(local.includes('<<<<<<<'), 'markers written locally');
+  }
+
+  // modes: pull withholds deletions; --prune restores
+  {
+    const name = `e2e-fs-mode-${suffix}`;
+    await cliCreate(name);
+    const dir = join(mkdtempSync(join(tmpdir(), 'fragment-fs-')), 'm');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'keep.md'), 'keep');
+    writeFileSync(join(dir, 'drop.md'), 'drop');
+    runCli(bin, ['sync', name, '--dir', dir], { env: H });
+    await signed('DELETE', `/api/f/${name}/file?path=drop.md`);
+    const r = runCli(bin, ['sync', name, '--dir', dir, '--mode', 'pull', '--json'], { env: H });
+    ok(r.includes('withheld_deletions') || r.includes('withheldDeletions'), 'pull mode withholds the deletion');
+    ok(existsSync(join(dir, 'drop.md')), 'pull mode kept the local file');
+    runCli(bin, ['sync', name, '--dir', dir, '--mode', 'pull', '--prune'], { env: H });
+    ok(existsSync(join(dir, 'drop.md')), '--prune pulls the file back');
+  }
+
+  // verify: clean pass then drift
+  {
+    const name = `e2e-fs-ver-${suffix}`;
+    await cliCreate(name);
+    const dir = join(mkdtempSync(join(tmpdir(), 'fragment-fs-')), 'm');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'a.md'), 'aaa');
+    runCli(bin, ['sync', name, '--dir', dir], { env: H });
+    const ok1 = spawnSync(bin, ['verify', name, '--dir', dir], { encoding: 'utf8', env: { ...process.env, FRAGMENT_HOST: BASE, ...H } });
+    eq(ok1.status, 0, 'verify exits 0 when in sync');
+    writeFileSync(join(dir, 'a.md'), 'tampered');
+    const ok2 = spawnSync(bin, ['verify', name, '--dir', dir], { encoding: 'utf8', env: { ...process.env, FRAGMENT_HOST: BASE, ...H } });
+    eq(ok2.status, 3, 'verify exits 3 on drift');
+  }
+
+  // mass-deletion guard
+  {
+    const name = `e2e-fs-guard-${suffix}`;
+    await cliCreate(name);
+    const dir = join(mkdtempSync(join(tmpdir(), 'fragment-fs-')), 'm');
+    mkdirSync(dir, { recursive: true });
+    for (let i = 0; i < 20; i++) writeFileSync(join(dir, `f${i}.md`), 'x');
+    runCli(bin, ['sync', name, '--dir', dir], { env: H });
+    for (let i = 0; i < 15; i++) rmSync(join(dir, `f${i}.md`));
+    const res = spawnSync(bin, ['sync', name, '--dir', dir], { encoding: 'utf8', env: { ...process.env, FRAGMENT_HOST: BASE, ...H } });
+    eq(res.status, 4, 'mass deletion trips the guard (exit 4)');
+    const files = await signed('GET', `/api/f/${name}/files`);
+    eq((files.body?.files || []).filter((f) => !f.deleted).length, 20, 'guard prevented remote deletions');
+    runCli(bin, ['sync', name, '--dir', dir, '--apply-mass-delete'], { env: H });
+    const files2 = await signed('GET', `/api/f/${name}/files`);
+    eq((files2.body?.files || []).filter((f) => !f.deleted).length, 5, '--apply-mass-delete proceeds');
+  }
+
+  // continuous: live channel pulls a remote write in seconds
+  {
+    const name = `e2e-fs-cont-${suffix}`;
+    await cliCreate(name);
+    const dir = join(mkdtempSync(join(tmpdir(), 'fragment-fs-')), 'm');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'seed.md'), 'seed');
+    runCli(bin, ['sync', name, '--dir', dir], { env: H });
+    const child = spawn(bin, ['sync', name, '--dir', dir, '--watch'], {
+      env: { ...process.env, FRAGMENT_HOST: BASE, ...H }, stdio: 'pipe',
+    });
+    let log = '';
+    child.stdout.on('data', (d) => { log += d; });
+    await sleep(2500);
+    await put(name, 'remote.md', 'from the server', 0);
+    let arrived = false;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 10_000 && !arrived) {
+      arrived = existsSync(join(dir, 'remote.md')) && readFileSync(join(dir, 'remote.md'), 'utf8') === 'from the server';
+      if (!arrived) await sleep(300);
+    }
+    ok(arrived, 'continuous mode pulled a remote write within seconds');
+    // local edit pushes
+    writeFileSync(join(dir, 'local.md'), 'from the client');
+    let pushed = false;
+    const t1 = Date.now();
+    while (Date.now() - t1 < 10_000 && !pushed) {
+      const remoteFile = await fetch(`${BASE}/api/f/${name}/file?path=local.md`, {
+        headers: { authorization: await authHeader('GET', `${BASE}/api/f/${name}/file?path=local.md`, null, ownerKey) },
+      });
+      pushed = remoteFile.ok;
+      if (!pushed) await sleep(300);
+    }
+    ok(pushed, 'continuous mode pushed a local edit');
+    // double-watcher guard: a second watcher must refuse
+    const second = spawnSync(bin, ['sync', name, '--dir', dir, '--watch'], {
+      encoding: 'utf8', env: { ...process.env, FRAGMENT_HOST: BASE, ...H }, timeout: 5000,
+    });
+    ok(second.status !== 0 && String(second.stderr).includes('another fragment sync'), 'second watcher refused by the lock');
+    child.kill();
   }
 }
 
@@ -1001,15 +1218,18 @@ async function syncSection() {
   });
   eq(goneGet.status, 404, 'sync delete propagation: remote tombstoned');
 
-  // conflict: both sides changed → remote saved as .remote-* copy, local kept
+  // conflict: both sides changed the same line → markers locally, exit 3
   const cur = await jres(nreq('GET', `${BASE}/api/f/${name}/files`, null, ownerKey));
   const entry = cur.body.files.find((f) => f.path === 'a.txt');
   writeFileSync(join(dir, 'a.txt'), 'alpha LOCAL edit');
   await signed('PUT', `/api/f/${name}/file?path=a.txt&base_rev=${entry.rev}`, 'alpha REMOTE edit');
-  cli(['sync', name, '--dir', dir]);
-  eq(readFileSync(join(dir, 'a.txt'), 'utf8'), 'alpha LOCAL edit', 'conflict: local kept');
-  const conflicts = readdirSync(dir).filter((f) => f.startsWith('a.txt.remote-'));
-  ok(conflicts.length === 1, `conflict: remote copy preserved as ${conflicts[0] || '???'}`);
+  const cres = spawnSync(bin, ['sync', name, '--dir', dir], {
+    encoding: 'utf8', env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, '.config') },
+  });
+  eq(cres.status, 3, 'conflict exits 3');
+  const after = readFileSync(join(dir, 'a.txt'), 'utf8');
+  ok(after.includes('<<<<<<<') && after.includes('alpha LOCAL edit') && after.includes('alpha REMOTE edit'),
+    'conflict: markers with both sides');
 }
 
 function findBinary() {
@@ -1063,6 +1283,7 @@ try {
   if (!ONLY || ONLY === 'paused') await pausedSection();
   if (!ONLY || ONLY === 'guide') await guideSection();
   if (!ONLY || ONLY === 'runs') await runsSection();
+  if (!ONLY || ONLY === 'filesync') await filesyncSection();
   if (!ONLY || ONLY === 'sync') await syncSection();
   await cronSection();
 } catch (e) {

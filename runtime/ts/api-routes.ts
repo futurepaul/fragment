@@ -3,6 +3,12 @@ import { json, toAB, randSlug, isMachinery } from "./util.js";
 import { sha256Hex, safeEqual } from "./auth.js";
 import { parseCron, nextRun } from "./cron.js";
 import { normalizeManifest } from "./manifest.js";
+import { recordRevision } from "./history.js";
+
+// append-only prefixes from the (already-normalized) manifest
+function appendOnlyHit(m, path) {
+  return (m.appendOnly || []).some((p) => path === p.slice(0, -1) || path.startsWith(p));
+}
 
 
 // ------ apiRoute ------
@@ -127,20 +133,50 @@ export async function apiRoute(cell, request, url) {
     return new Response(toAB(row.content), { headers: { "x-fragment-rev": String(row.rev) } });
   }
 
+  if (p === "/file/history" && request.method === "GET") {
+    const a = authz("viewer"); if (!a.ok) return deny(a);
+    const path = url.searchParams.get("path") || "";
+    const rows = cell.sql.exec("SELECT rev, blob_hash, deleted, at FROM file_revisions WHERE path = ? ORDER BY rev DESC", path).toArray();
+    return json({ path, revs: rows.map((r) => ({ rev: r.rev, blobHash: r.blob_hash, deleted: !!r.deleted, at: r.at })) });
+  }
+
+  if (p === "/file/at" && request.method === "GET") {
+    const a = authz("viewer"); if (!a.ok) return deny(a);
+    const path = url.searchParams.get("path") || "";
+    const rev = parseInt(url.searchParams.get("rev") || "0", 10);
+    const row = rev
+      ? cell.sql.exec("SELECT blob_hash, deleted FROM file_revisions WHERE path = ? AND rev = ?", path, rev).toArray()[0]
+      : cell.sql.exec("SELECT blob_hash, deleted FROM file_revisions WHERE path = ? ORDER BY rev DESC LIMIT 1", path).toArray()[0];
+    if (!row) return json({ error: "no such revision (pruned or never existed)" }, 410);
+    if (row.deleted) return json({ error: "deleted at that revision" }, 410);
+    const blob = cell.sql.exec("SELECT content FROM blobs WHERE hash = ?", row.blob_hash).toArray()[0];
+    if (!blob) return json({ error: "revision pruned" }, 410);
+    return new Response(toAB(blob.content), { headers: { "x-fragment-rev": String(rev || "") } });
+  }
+
   if (p === "/file" && request.method === "PUT") {
     const a = authz("editor"); if (!a.ok) return deny(a);
     const path = url.searchParams.get("path") || "";
     if (!path || path.includes("..") || path.startsWith("/")) return json({ error: "bad path" }, 400);
     const baseRev = parseInt(url.searchParams.get("base_rev") || "0", 10);
-    const cur = cell.sql.exec("SELECT rev FROM files WHERE path = ?", path).toArray()[0];
+    const cur = cell.sql.exec("SELECT rev, sha256, deleted FROM files WHERE path = ?", path).toArray()[0];
     const curRev = cur ? cur.rev : 0;
-    if (baseRev !== curRev) return json({ error: "conflict", currentRev: curRev }, 409);
     const body = await request.arrayBuffer();
+    const sha = await sha256Hex(body);
+    // append-only: an existing path may be re-sent identically (idempotent)
+    // but not modified except by the owner; new paths are always fine
+    if (cur && !cur.deleted && appendOnlyHit(m, path) && cur.sha256 !== sha && a.role !== "owner") {
+      return json({ error: "append-only", path }, 409);
+    }
+    if (cur && !cur.deleted && appendOnlyHit(m, path) && cur.sha256 === sha) {
+      return json({ path, rev: curRev, noop: true });
+    }
+    if (baseRev !== curRev) return json({ error: "conflict", currentRev: curRev }, 409);
     const newRev = parseInt(cell.getMeta("rev") || "0", 10) + 1;
     cell.setMeta("rev", String(newRev));
-    const sha = await sha256Hex(body);
     cell.sql.exec("INSERT INTO files (path, content, rev, sha256, updated_at, deleted) VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT(path) DO UPDATE SET content = excluded.content, rev = excluded.rev, sha256 = excluded.sha256, updated_at = excluded.updated_at, deleted = 0",
       path, body, newRev, sha, Date.now());
+    recordRevision(cell, path, newRev, sha, body);
     await cell.scheduleSyncTrigger(path);
     return json({ path, rev: newRev });
   }
@@ -148,10 +184,12 @@ export async function apiRoute(cell, request, url) {
   if (p === "/file" && request.method === "DELETE") {
     const a = authz("editor"); if (!a.ok) return deny(a);
     const path = url.searchParams.get("path") || "";
+    if (appendOnlyHit(m, path) && a.role !== "owner") return json({ error: "append-only", path }, 403);
     const newRev = parseInt(cell.getMeta("rev") || "0", 10) + 1;
     cell.setMeta("rev", String(newRev));
     cell.sql.exec("INSERT INTO files (path, content, rev, sha256, updated_at, deleted) VALUES (?, X'', ?, ?, ?, 1) ON CONFLICT(path) DO UPDATE SET content = X'', rev = excluded.rev, sha256 = NULL, updated_at = excluded.updated_at, deleted = 1",
       path, newRev, null, Date.now());
+    recordRevision(cell, path, newRev, null, null, true);
     await cell.scheduleSyncTrigger(path);
     return json({ ok: true, rev: newRev });
   }

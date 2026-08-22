@@ -10,6 +10,7 @@ import { executeWorkflow, resumeDueRuns } from "./runs.js";
 import { normalizeManifest } from "./manifest.js";
 import { internalRoute } from "./internal.js";
 import { roomRoute, presenceList, broadcast, webSocketMessage, webSocketClose } from "./rooms.js";
+import { watchRoute } from "./history.js";
 import { SCHEMA, rankOf } from "./util.js";
 class FragmentCell {
   state;
@@ -79,6 +80,7 @@ class FragmentCell {
       if (path.startsWith("/api/")) return await this.apiRoute(request, url);
       if (path.startsWith("/__serve/")) return await this.serveRoute(request, url);
       if (path.startsWith("/__room/")) return await this.roomRoute(request, url);
+      if (path.startsWith("/__watch")) return watchRoute(this, request, url);
       return new Response("not found", { status: 404 });
     } catch (e) {
       return json({ error: String(e && e.stack || e) }, 500);

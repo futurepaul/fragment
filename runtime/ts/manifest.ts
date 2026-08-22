@@ -34,6 +34,10 @@ const ManifestSchema = Type.Object({
   workflows: Type.Array(WorkflowSchema),
   secrets: Type.Array(Type.String()),
   liveFiles: Type.Optional(Type.Boolean()),
+  // append-only prefixes: writers may add paths under these, never modify
+  // or delete existing ones (identical bytes are a no-op; the owner is
+  // exempt). Makes many-writer folders race-free by construction.
+  appendOnly: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
   // sync-trigger coalescing window (debounce); the knob is named, the
   // behavior is old
   debounceMs: Type.Optional(Type.Integer({ minimum: 250, maximum: 300_000 })),
@@ -57,6 +61,7 @@ export function normalizeManifest(m) {
     if (wf.retry === false || typeof wf.retry === "boolean") continue;
   }
   if (out.debounceMs === undefined) out.debounceMs = 4000;
+  if (out.appendOnly) out.appendOnly = out.appendOnly.map((p) => (p.endsWith("/") ? p : p + "/"));
   for (const wf of out.workflows) {
     if (wf.maxRunsPerHour === undefined) wf.maxRunsPerHour = 120;
     if (wf.retry === true) wf.retry = {};

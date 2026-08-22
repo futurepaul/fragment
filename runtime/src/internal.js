@@ -1,6 +1,11 @@
 // GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
 import { json, toAB } from "./util.js";
 import { sha256Hex } from "./auth.js";
+import { recordRevision } from "./history.js";
+function appendOnlyHit(cell, path) {
+  const m = cell.manifest();
+  return m && (m.appendOnly || []).some((p) => path === p.slice(0, -1) || path.startsWith(p));
+}
 async function internalRoute(cell, request, url) {
   const p = url.pathname.slice("/__internal/f/".length);
   const slash = p.indexOf("/");
@@ -37,6 +42,10 @@ async function internalRoute(cell, request, url) {
       cell.addEvent("write.deduped", path);
       return json({ ok: true, deduped: true, rev: existing.rev });
     }
+    if (existing && appendOnlyHit(cell, path)) {
+      cell.addEvent("write.refused", `${path}: append-only`);
+      return json({ error: "append-only", path }, 409);
+    }
     const newRev = parseInt(cell.getMeta("rev") || "0", 10) + 1;
     cell.setMeta("rev", String(newRev));
     cell.sql.exec(
@@ -47,6 +56,7 @@ async function internalRoute(cell, request, url) {
       sha,
       Date.now()
     );
+    recordRevision(cell, path, newRev, sha, body);
     return json({ ok: true, deduped: false, rev: newRev });
   }
   if (rest === "files/list") {
