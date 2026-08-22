@@ -1,0 +1,78 @@
+# Encryption Without a Crypto PhD
+
+*Research for fragment: adding encryption so users don't have to become cryptographers. Sources cited inline; repo facts from `ARCHITECTURE.md`, `cli/GUIDE.md`, `cli/src/sync.rs`, `runtime/ts/registry.ts`.*
+
+The question is not "can we encrypt?" — it's "which encryption can we give away with zero ceremony, and which features must we honestly admit it does not cover?" Every prior art system eventually asks the user exactly one question ("do you hold exactly one secret, and did you back it up?"), and every one of them concentrates all remaining UX pain in recovery. The design job is picking where fragment sits on that spectrum *per feature*, not picking one answer for the whole product.
+
+## Prior art and their exact UX
+
+| System | What the user must do | Crypto core | Failure / abandonment mode |
+|---|---|---|---|
+| **Obsidian Sync E2EE** (default) | Type a vault password once; be told "lose it = gone forever" | scrypt(N=32768,r=8,p=1) → HKDF("ObsidianAesGcm") → AES-256-GCM contents; file paths + hashes moved to AES-SIV in Aug 2025 ([security page](https://obsidian.md/help/sync/security); [verify guide](https://obsidian.md/blog/verify-obsidian-sync-encryption/); [changelog](https://obsidian.md/changelog/2025-08-22/sync/)) | Lost password = full re-setup on primary device + reconnect every device. Deterministic encrypted hashes enable dedup but are a confirmation attack ([TOB-OBSYNC-9](https://obsidian.md/blog/cure53-tob-sync-audits/)); path↔content mapping, device IDs, timestamps stay server-readable (TOB-OBSYNC-10) |
+| **Obsidian "standard" mode** | Nothing | Server-held keys; same TLS+AES story as iCloud-without-ADP | Cure53: managed keys are "[fundamentally insecure… not secure even against an honest-but-curious server](https://obsidian.md/files/security/2024-Obsidian-Cure53-Sync-Audit-Full.pdf)" — yet most users pick it because it's frictionless |
+| **Cryptomator / gocryptfs / rclone crypt** | Create a vault *on top of* a synced folder; mount a virtual drive or learn crypt-specific commands; choose filename modes (`standard` EME ~143-char cap / `obfuscate` / `off`) ([rclone crypt](https://rclone.org/crypt/)) | scrypt(N=16384) → 80 bytes of key material; XSalsa20-Poly1305 per-file content; wide-block EME deterministic filenames | The two-folder mental model ("real vs mounted") breaks people; sync conflict files can destroy `masterkey.cryptomator` → vault unrecoverable ([community](https://community.cryptomator.org/t/lost-masterkey-cryptomator/7467)); rclone stores the password merely obscured in config; server-side search/dedup impossible; rotation = re-upload everything |
+| **Syncthing** | Nothing by default (transport-only TLS); opt-in per-folder password when sharing to an explicitly *untrusted* device | `folderKey = scrypt(password, "syncthing"+folderID)`; nonce-less AES-SIV filenames (deterministic so the tree is addressable); per-file `HKDF(folderKey+filename)`; block hashes encrypted under per-file keys; AES-SIV password token proves knowledge of the password without sending it ([spec](https://docs.syncthing.net/specs/untrusted.html)) | Rarely used because it's per-device-per-folder config; untrusted side sees garbage names and flat structure by design; recovery = know the password or restore from a trusted peer |
+| **Apple iCloud / Advanced Data Protection** | Default: nothing (keys in Apple HSMs, "available-after-authentication"). ADP: flip one switch, then *must* set up recovery — 28-character Recovery Key or 1–5 Recovery Contacts | Class-key hierarchy: per-file keys wrapped by class keys wrapped by hardware-bound keys; changing your passcode rewraps class keys, never file data ([Data Protection](https://support.apple.com/guide/security/data-protection-sece8608431d/1/web/1); [iCloud security overview](https://support.apple.com/guide/security/icloud-security-overview-secacde2d0da/web)) | ADP recovery contacts are split-key escrow done right: contact holds an encrypted packet, Apple holds a random AES key, neither alone suffices; SPAKE2+ at recovery time ([details](https://support.apple.com/guide/security/account-recovery-contact-security-secafa525057/web)). Cost: you are warned Apple can no longer help you |
+| **Keybase-style** | Generate account key; back up a paper key once at signup; add/revoke device keys freely | Per-device PGP-style subkeys; account key encrypted/wrapped to each device key; paper key = printable backup of account key | Paper-key UX was widely copied (Slack's "recovery code") because one printed string beats passphrase memorization; revoking devices must re-wrap everything |
+
+Four lessons survive contact with all six systems:
+
+1. **Nobody escapes asking for one secret.** The difference between good and bad UX is only *when* and *how recoverably*. Obsidian asks once per vault and punishes loss with total re-setup; Apple asks via a switch and forces recovery setup before enabling; Syncthing hides behind opt-in.
+2. **Vault-on-top-of-sync dies of adjacency.** Cryptomator/rclone put plaintext and ciphertext in the same folder tree; conflict files and partial syncs corrupt the masterkey file. Fragment already has one folder and LWW conflicts — bolting a second representation on top would import this failure mode.
+3. **Host-held keys get chosen by default and are worth almost nothing against the host.** Auditors keep saying it in those words. If fragment ships only bucket SSE / SQLCipher, it should be labeled honestly as tamper-evidence, not privacy.
+4. **Determinism is load-bearing for sync systems.** Obsidian's deterministic hash encryption (for dedup), Syncthing's nonce-less SIV filenames (so the server can address paths), rclone's EME names (so uploads land at stable paths). Pure probabilistic encryption breaks the server's ability to route anything.
+
+## Building blocks suitable for a Rust CLI in 2026
+
+**age / rage (`age` crate)** is the default answer for file-shaped encryption in Rust today: X25519 recipient stanzas wrapping a random file key, ChaCha20-Poly1305 payload, streaming via STREAM — 64 KiB chunks, nonce = 11-byte big-endian counter + 1 last-chunk flag byte, giving truncation detection and random-access decryption ([stream.rs source](https://docs.rs/age/latest/src/age/primitives/stream.rs.html); [format](https://github.com/FiloSottile/age)). Passphrase mode uses scrypt with work factor auto-tuned to ~1s on-device, and cannot be mixed with other recipients ([docs.rs/age scrypt::Recipient](https://docs.rs/age/latest/age/scrypt/struct.Recipient.html)). Its header pattern — wrap one random file key to N recipients — is exactly the shape needed for multi-editor fragments later.
+
+**AEAD choice: GCM vs GCM-SIV.** AES-GCM catastrophically loses confidentiality/integrity if a (key, nonce) pair repeats; AES-GCM-SIV (RFC 8452) degrades to leaking only message equality, costs ~⅔ speed on encrypt (two passes), can't stream, but permits random nonces safely ([RFC 8452](https://www.rfc-editor.org/rfc/rfc8452.html)). Rule: counter-managed nonces per file key → GCM is fine; any chance of stateless/random nonces across writers → SIV. Note the trap: SIV's misuse-resistance makes ciphertext deterministic under fixed input, which quietly reintroduces equality leakage — sometimes that's a feature (dedup), usually it's metadata.
+
+**Passphrase KDF:** Argon2id at OWASP minimums m=19456 KiB (19 MiB), t=2, p=1 — equal-strength alternatives trade memory for time down to m=7168/t=5; scrypt fallback N=2^17, r=8, p=1 ([OWASP Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html); [RustCrypto guidance](https://rustcrypto.org/key-derivation/hashing-password.html)).
+
+**Deriving keys from nostr secrets is sane — it isn't even a KDF problem.** A nostr secret key is 32 uniform bytes; there is no low-entropy stretching to do, so plain HKDF-SHA256 with distinct `info` labels per purpose is correct and cheap: `file_key = HKDF(ikm=root_secret, salt=fragment_npub_bytes, info="fragment/file-keys v1")`. The two real concerns are (a) **domain separation** — never let signing material double as encryption material without a label, and derive separate subkeys for filenames vs contents vs auth, the mistake Cure53 flagged in Obsidian's pre-fix key separation; and (b) **where the IKM lives** — deriving from a secret the host holds (see below) yields level-(c) protection no matter how clean the derivation.
+
+**NIP-44 v2** is well-designed but message-sized: secp256k1 ECDH → HKDF-extract(salt `"nip44-v2"`) → conversation key; per-message HKDF-expand(nonce) → ChaCha20 key + 12-byte nonce + HMAC-SHA256 key; versioned envelope `[0x02][nonce 32][ct][mac]`; power-of-two padding ([spec](https://github.com/nostr-protocol/nips/blob/master/44.md)). Practical plaintext caps sit at ~64 KB (rust-nostr enforces 65408; a 2026 RustSec advisory [RUSTSEC-2026-0227](https://rustsec.org/advisories/RUSTSEC-2026-0227.html) shows decode-before-limit DoS). Verdict: wrong tool for files, right tool for *wrapping small things* — key envelopes, manifests, metadata blobs — between npubs. Libsodium sealed boxes don't map onto nostr's secp256k1/BIP340 world at all, so skip them.
+
+## The hard problems nobody escapes
+
+**Filename/metadata leakage.** Encrypt names deterministically (SIV/EME) and the server can still address files — but identical names collide visibly and directory structure partially leaks through size/prefix patterns; encrypt probabilistically and the server needs a client-maintained name→ciphertext table (that's what Obsidian's 2025 migration fixed: IV-from-hash path encryption had rare collision patterns, replaced with AES-SIV).
+
+**Dedup vs encryption.** Content-addressed dedup requires either plaintext hashes (server sees them) or deterministic encrypted hashes (equality oracle — Obsidian's documented trade-off). Cross-user dedup is incompatible with per-user keys; within a single-writer cell it barely matters anyway.
+
+**Partial reads/deltas.** Chunked AEAD (age STREAM, 64 KiB) gives truncation safety and random access, but deltas still require chunk-level diffing machinery. Systems that skip it (fragment today) re-upload whole files — fine for notes-sized payloads, painful for binaries.
+
+**Public sites from encrypted-at-rest storage.** If the host decrypts at serve time, the host holds the keys during serving; "E2EE" then means only *cold-storage breach* protection, not protection from a compromised running host. This isn't a flaw to engineer away; it's a definitional boundary to state honestly.
+
+**Workflows reading files inside the cell (`ctx.files.read`).** True E2EE makes server-side workflow reads structurally impossible — the cell would see only ciphertext. Either workflows move client-side (huge architectural change), receive decrypted inputs (keys leak to the host at run time anyway), or encrypted fragments simply lose server-side compute. Same for `liveFiles` (a served `app.mjs` reading the live working copy server-side), rooms' persisted JSON documents, secrets injection, event-log digests, and the runtime's write-suppression dedup ("identical writes are no-ops"), which compares content server-side.
+
+**Key rotation/recovery.** Rotation should mean *rewrap*, not re-encrypt: keep per-file random keys, wrap them under a fragment key, rotate the wrapper. Recovery needs an Apple-grade answer (recovery key printout, split-key contact, or threshold across editors) or users will lose data at Obsidian rates.
+
+## Threat ladder
+
+| Level | What a breach exposes | UX cost | What breaks |
+|---|---|---|---|
+| (a) TLS-only | Everything to host, passive network taps excepted | Zero | Nothing |
+| (b) Host-held at-rest (bucket SSE, SQLCipher) | Nothing to opportunistic disk thieves; everything to host compromise, subpoena, insider | Near-zero; invisible | Nothing — but it is *not* privacy from the operator |
+| (c) Client-encrypts-before-send, keys derived from host-stored secrets (**today's `fragment_secret` lives in the cell**, generated server-side in `registry.ts`) | Cold-storage breach gets ciphertext; host compromise gets keys + plaintext | Low — still invisible | Nothing functionally, but calling it "E2EE" would be dishonest; single point of failure at the host |
+| (d) True E2EE, visible filenames | Ciphertext + full path/metadata graph to host | Moderate — one root secret, recovery story required | Public sites, `liveFiles`, `ctx.files.*`, rooms documents, server-side dedup/no-op suppression, secrets-in-workflows |
+| (e) E2EE + hidden filenames | Ciphertext + sizes/timestamps only | High — client-side path tables, harder multi-device consistency | Everything in (d) plus fast server-side routing/listing; drafts and version history become opaque |
+
+The honest summary: fragment's feature set (public sites, liveFiles, server-side workflows) is *built out of level-(a/b) capabilities*. Any real encryption offer must be scoped per fragment, and levels above (b) necessarily fork the product into "encrypted fragments" that behave differently.
+
+## **Opinionated recommendation for fragment**
+
+Fragment's identity story is genuinely special — npubs everywhere, NIP-98 auth, per-fragment keys — but note the current reality: **the fragment npub's secret is generated inside the cell** (`runtime/ts/registry.ts`: `cell.setMeta("fragment_secret", …)`), so anything derived from it today is level (c) at best. Build the ladder accordingly:
+
+**Stage 1 — honest at-rest hardening (ship first, changes no behavior):**
+Move fragment-npub generation client-side (CLI generates, sends pubkey + wrapped secret), and store the cell's copy wrapped under a host key (`FRAGMENT_HOST_SECRET` already exists as a concept). Add bucket-side SSE and document it as tamper-evidence. Zero API surface change, sets up stage 2.
+
+**Stage 2 — opt-in private fragments (the real product):**
+`fragment create <name> --private`. CLI derives `root_fragment_key = HKDF(user_nostr_secret ∥ fragment_npub, info="fragment/v1/file-keys")`; per-file random content keys wrapped under it (age-header pattern); **AES-SIV deterministic filenames** (Syncthing's exact trick) so the cell keeps routing, listing, drafts, and version history unchanged; contents via ChaCha20-Poly1305 whole-file envelopes (fragment syncs whole files already — `sync.rs` sha256/LWW — so no chunking needed initially). Consequences, stated plainly: such fragments have `visibility: token|viewers` only — **public site serving is disabled by construction**; `liveFiles` falls back to snapshot reads; workflows get a restricted ctx (`ctx.secrets`, `ctx.http`, `ctx.events` work; `ctx.files.read` returns ciphertext unless the run carries a user-derived token — support read-only loopback decryption for workflows whose author accepts host-visible plaintext, and surface that choice in the manifest as `workflowsDecrypt: true|false`). Editors list maps naturally to age-style multi-recipient wraps using NIP-44-style secp256k1 ECDH conversation keys — no new identity system.
+
+**Stage 3 — recovery without tears (before encouraging adoption):**
+Printable recovery key (28-char, Apple-style) generated at create; optional split-recovery to editor npubs (2-of-N unwrap). Rotation = rewrap file keys, never touch contents.
+
+**Explicitly do not build:** searchable encrypted server-side grep, cross-fragment dedup, CRDT-over-ciphertext. Each is a research project wearing a feature costume, and none survives contact with "users who didn't want to become cryptographers."
+
+The pitch writes itself: *"Fragments are public by default like the web. Mark one `--private` and even the host can't read it — here's your recovery key."*

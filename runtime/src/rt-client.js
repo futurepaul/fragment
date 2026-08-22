@@ -2,9 +2,22 @@
 const RT_CLIENT_SOURCE = `
 window.fragment = (() => {
   function base() {
-    // Works under /f/<name>/... and /d/<slug>/...; preserves ?view= token.
-    const parts = location.pathname.split("/").filter(Boolean);
-    const prefix = "/" + parts[0] + "/" + parts[1];
+    // Derive the prefix from this script's own URL \u2014 it is always served
+    // at <prefix>/__rt.js \u2014 so pages work at /f/<name>/, /d/<slug>/, AND at
+    // a bare canonical subdomain root (where location.pathname has no
+    // prefix at all). ?view= tokens propagate to the socket.
+    let prefix = "";
+    try {
+      const src = document.currentScript && document.currentScript.src;
+      if (src) {
+        const m = new URL(src, location.href).pathname.match(/^(.*)/__rt.js$/);
+        if (m) prefix = m[1];
+      }
+    } catch {}
+    if (!prefix) {
+      const parts = location.pathname.split("/").filter(Boolean);
+      if (parts[0] === "f" || parts[0] === "d") prefix = "/" + parts[0] + "/" + parts[1];
+    }
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const view = new URLSearchParams(location.search).get("view");
     return { url: (room) => proto + "//" + location.host + prefix + "/__room/" + encodeURIComponent(room) + (view ? "?view=" + view : "") };
@@ -13,7 +26,7 @@ window.fragment = (() => {
     const listeners = {};
     const r = {
       state: undefined, presence: [], history: [], ready: false,
-      _ws: null, _queue: [],
+      _ws: null, _queue: [], _presence: undefined,
       on(type, fn) { (listeners[type] ||= []).push(fn); return r; },
       _emit(type, data) { (listeners[type] || []).forEach((fn) => { try { fn(data); } catch (e) { console.error(e); } }); },
       _send(obj) {
@@ -22,12 +35,17 @@ window.fragment = (() => {
       },
       send(data) { r._send({ type: "msg", data }); },
       setState(value) { r._send({ type: "state:set", value }); },
-      setPresence(data) { r._send({ type: "presence", data }); },
+      setPresence(data) { r._presence = data; r._send({ type: "presence", data }); },
       close() { r._ws && r._ws.close(); },
       connect() {
         const ws = new WebSocket(base().url(name));
         r._ws = ws;
-        ws.onopen = () => { r._queue.splice(0).forEach((m) => ws.send(m)); };
+        // onopen: flush queued messages, then re-assert presence so names
+        // survive reconnects (the server drops presence on socket close)
+        ws.onopen = () => {
+          r._queue.splice(0).forEach((m) => ws.send(m));
+          if (r._presence !== undefined) r._send({ type: "presence", data: r._presence });
+        };
         ws.onmessage = (ev) => {
           let m; try { m = JSON.parse(ev.data); } catch { return; }
           if (m.type === "hello") {
