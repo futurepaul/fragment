@@ -22,7 +22,6 @@ const has = (n) => args.includes(n);
 const BASE = arg('--base') || process.env.FRAGMENT_BASE_URL || 'http://127.0.0.1:8789';
 const ONLY = arg('--only');
 const CRON = has('--all');
-const FAST = has('--fast');
 
 // ---------- tiny harness ----------
 let pass = 0, fail = 0;
@@ -452,7 +451,10 @@ function findBinary() {
 
 // ---------- cron (slow) ----------
 async function cronSection() {
-  if (FAST) return;
+  if (!CRON) {
+    if (!ONLY || ONLY === 'cron') console.log('skip  cron fire check is slow — pass --all to include it');
+    return;
+  }
   if (!section('cron')) return;
   const name = `e2e-cr-${suffix}`;
   await signed('POST', '/api/fragments', JSON.stringify({ name }));
