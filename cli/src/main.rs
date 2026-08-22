@@ -699,13 +699,25 @@ fn install_sync_unit(name: &str, dir: &PathBuf, install: bool) -> Result<()> {
             .replace("__HOME__", &home)
             .replace("__LOG__", &log.display().to_string());
             std::fs::write(&plist, xml)?;
-            let status = std::process::Command::new("launchctl")
-                .arg("bootstrap")
-                .arg(format!("gui/{}", uid()?))
-                .arg(&plist)
-                .status()
-                .context("launchctl bootstrap failed")?;
-            if !status.success() {
+            // bootstrap can race the bootout above (async port teardown) —
+            // give it a beat and retry once before giving up
+            let mut ok = false;
+            for attempt in 0..2 {
+                if attempt > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(1200));
+                }
+                let status = std::process::Command::new("launchctl")
+                    .arg("bootstrap")
+                    .arg(format!("gui/{}", uid()?))
+                    .arg(&plist)
+                    .status()
+                    .context("launchctl bootstrap failed")?;
+                if status.success() {
+                    ok = true;
+                    break;
+                }
+            }
+            if !ok {
                 anyhow::bail!("launchctl bootstrap failed — try: launchctl bootstrap gui/{} {}", uid()?, plist.display());
             }
             println!("installed LaunchAgent {label}");
