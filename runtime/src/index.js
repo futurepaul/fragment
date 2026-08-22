@@ -65,6 +65,21 @@ var index_default = {
         }
         return toCell(name, path, null);
       }
+      if (path === "/api/gallery" && request.method === "GET") {
+        const r = await registry().fetch("http://x/__registry/list-all");
+        const frags = (await r.json()).fragments || [];
+        const entries = [];
+        for (const f of frags) {
+          try {
+            const g = await cell(f.name).fetch("http://x/__cell/gallery-info");
+            const { entry } = await g.json();
+            if (entry) entries.push({ ...entry, createdAt: f.createdAt });
+          } catch {
+          }
+        }
+        entries.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        return json({ fragments: entries });
+      }
       if (path === "/api/fragments" && request.method === "POST") {
         const g = await gate();
         if (g.error) return g.error;
@@ -93,6 +108,16 @@ var index_default = {
         const rest = path.slice("/api/f/".length);
         const name = rest.slice(0, rest.indexOf("/") === -1 ? void 0 : rest.indexOf("/"));
         if (!name) return json({ error: "bad path" }, 400);
+        if (request.method === "DELETE" && (rest === name || rest === name + "/")) {
+          const g2 = await gate();
+          if (g2.error) return g2.error;
+          const rr = await registry().fetch(`http://x/__registry/role?name=${encodeURIComponent(name)}&pubkey=${g2.pubkey || ""}`);
+          const role = rr.ok ? (await rr.json()).role || null : null;
+          if (role !== "owner") return json({ error: "requires owner" }, 403);
+          await cell(name).fetch("http://x/__cell/wipe", { method: "POST" });
+          await registry().fetch("http://x/__registry/delete", { method: "POST", body: JSON.stringify({ name }) });
+          return json({ ok: true, deleted: name });
+        }
         const cellPath = "/api" + rest.slice(name.length);
         if (cellPath === "/api/inbox" && request.method === "POST") return toCell(name, cellPath, null);
         const g = await gate();

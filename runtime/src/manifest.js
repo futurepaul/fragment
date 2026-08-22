@@ -42,7 +42,16 @@ const ManifestSchema = Type.Object({
   notifyUrls: Type.Optional(Type.Array(Type.String({ minLength: 8 }), { maxItems: 3 })),
   // sync-trigger coalescing window (debounce); the knob is named, the
   // behavior is old
-  debounceMs: Type.Optional(Type.Integer({ minimum: 250, maximum: 3e5 }))
+  debounceMs: Type.Optional(Type.Integer({ minimum: 250, maximum: 3e5 })),
+  // social/preview metadata: title + description render as Open Graph
+  // tags on served pages; image defaults to the generated placeholder.
+  // listed: true opts into the public gallery (share link included).
+  meta: Type.Optional(Type.Object({
+    title: Type.Optional(Type.String({ maxLength: 120 })),
+    description: Type.Optional(Type.String({ maxLength: 400 })),
+    image: Type.Optional(Type.String({ maxLength: 500 })),
+    listed: Type.Optional(Type.Boolean())
+  }))
 });
 function normalizeManifest(m) {
   if (!m || typeof m !== "object") return { error: "manifest must be a JSON object" };

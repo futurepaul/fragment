@@ -76,6 +76,8 @@ class FragmentCell {
     try {
       if (path.startsWith("/__registry/")) return await this.registryRoute(request, url);
       if (path === "/__cell/init") return await this.initCell(request);
+      if (path === "/__cell/wipe") return this.wipeCell();
+      if (path === "/__cell/gallery-info") return this.galleryInfo();
       if (path.startsWith("/__internal/")) return await this.internalRoute(request, url);
       if (path.startsWith("/api/")) return await this.apiRoute(request, url);
       if (path.startsWith("/__serve/")) return await this.serveRoute(request, url);
@@ -95,6 +97,49 @@ class FragmentCell {
   getFileText(path) {
     const row = this.getFileRow(path);
     return row ? new TextDecoder().decode(toAB(row.content)) : null;
+  }
+  galleryInfo() {
+    const m = this.manifest();
+    if (!m) return json({ entry: null });
+    const listed = m.meta?.listed === true;
+    const isPublic = m.visibility === "public";
+    if (!listed && !isPublic) return json({ entry: null });
+    return json({
+      entry: {
+        name: m.name,
+        visibility: m.visibility,
+        title: m.meta?.title || null,
+        description: m.meta?.description || null,
+        image: m.meta?.image || null,
+        // sharing the link through the gallery is the opt-in's meaning
+        viewToken: listed ? this.getMeta("view_token") : null
+      }
+    });
+  }
+  wipeCell() {
+    for (const t of [
+      "meta",
+      "files",
+      "blobs",
+      "file_revisions",
+      "drafts",
+      "draft_files",
+      "secrets",
+      "inbox",
+      "events",
+      "wstate",
+      "rooms",
+      "room_msgs",
+      "run_tokens",
+      "runs",
+      "idem",
+      "notify_outbox"
+    ]) {
+      this.sql.exec(`DELETE FROM ${t}`);
+    }
+    this._manifest = null;
+    this._manifestRaw = null;
+    return json({ ok: true });
   }
   // ---------- delegating methods (implementation in sibling modules) ----------
   async initCell(request) {

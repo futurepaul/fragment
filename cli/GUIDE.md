@@ -355,23 +355,34 @@ workflow as the floor (notify is best-effort). The machine-readable tree
 site — a `?view=` link is all a reader needs.
 
 ```js
-// workflows/check.mjs — trigger "inbox" AND cron "*/5 * * * *"
-const SOURCE = "https://some-fragment.fragment.club"; // its ?view= link works below
-export async function run(ctx, input) {
-  const token = ctx.secrets.SOURCE_VIEW_TOKEN;         // the watched fragment's view token
+// workflows/check.mjs — trigger "inbox" AND cron "*/2 * * * *"
+const SOURCE = "https://some-fragment.fragment.club";
+const DELAY_MS = 60_000; // enrichment waits, so links appear instantly
+export async function run(ctx) {
+  const token = ctx.secrets.SOURCE_VIEW_TOKEN;
   const tree = await (await ctx.http(SOURCE + "/__tree?view=" + token)).json();
-  const seen = new Set((await ctx.state.get("seen")) || []);
-  let fresh = 0;
+  const state = (await ctx.state.get("watch")) || { seen: [], pending: [] };
+  const seen = new Set(state.seen);
+  // phase 1 — file new items NOW: the link must never wait for anything
   for (const f of tree.files || []) {
     if (f.machinery || seen.has(f.path)) continue;
     seen.add(f.path);
-    fresh++;
-    // read new files with: await (await ctx.http(SOURCE + "/__file?path=…" + "&view=" + token)).text()
+    state.pending.push({ path: f.path, at: Date.now() });
   }
-  await ctx.state.put("seen", [...seen].slice(-5000));
+  // phase 2 — enrich items filed >DELAY_MS ago: summaries/mentions appear
+  // on their own, a run or two after the link
+  const still = [];
+  for (const it of state.pending) {
+    if (Date.now() - it.at < DELAY_MS) { still.push(it); continue; }
+    const body = await (await ctx.http(SOURCE + "/__file?path=" + encodeURIComponent(it.path) + "&view=" + token)).text();
+    it.summary = await ctx.ai("one dry sentence about this file: " + body.slice(0, 4000));
+    await ctx.files.write("feed/" + it.path.replace(/\//g, "__") + ".json", JSON.stringify(it));
+  }
+  state.pending = still;
+  await ctx.state.put("watch", { seen: [...seen].slice(-5000), pending: still });
   const msgs = await ctx.inbox();
   await ctx.inboxAck(msgs.map((m) => m.id));
-  return { fresh };
+  return { fresh: seen.size };
 }
 ```
 
@@ -428,6 +439,12 @@ export default {
   },
 };
 ```
+
+Token-gated fragments and server-rendered links: the `?view=` token is
+a SECRET — when your app renders links into its own pages, bake the token
+in at render time (`ctx.secrets.MY_VIEW_TOKEN`); a client-side variable
+that never reaches the server renders as `view=undefined` and friends get
+403s. Browser-side `location.search` tokens only exist in the browser.
 
 ## Multiplayer (rooms)
 

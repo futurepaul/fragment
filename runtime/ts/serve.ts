@@ -8,6 +8,8 @@ import { APP_MAIN } from "./loader.js";
 
 // ------ canonicalUrl ------
 
+const esc = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+
 export function canonicalUrl(cell, origin, name) {
   const sub = cell.env.FRAGMENT_SUBDOMAIN_HOST;
   if (sub) return `https://${encodeURIComponent(name)}.${sub}/`;
@@ -45,6 +47,17 @@ export async function serveRoute(cell, request, url) {
   // ---- machine-read plane: the tree and raw files, gated exactly like
   // the rendered site — so watchers, feeds and other fragments can read
   // content with a link instead of scraping HTML or holding an editor key
+  // deterministic preview placeholder: seeded gradient + initial — every
+  // fragment has a decent share image for free (manifest meta.image
+  // overrides it in OG tags)
+  if (rest === "__preview.svg") {
+    let h = 0;
+    for (const c of (cell.getMeta("name") || "fragment")) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+    const hue = h % 360;
+    const letter = (cell.getMeta("name") || "f").charAt(0).toUpperCase();
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="hsl(${hue},65%,22%)"/><stop offset="1" stop-color="hsl(${(hue + 60) % 360},70%,38%)"/></linearGradient></defs><rect width="1200" height="630" fill="url(#g)"/><circle cx="1050" cy="90" r="220" fill="hsl(${(hue + 120) % 360},60%,45%)" opacity="0.25"/><text x="80" y="330" font-family="Georgia,serif" font-size="260" fill="hsl(${hue},30%,92%)">${letter}</text><text x="84" y="520" font-family="ui-monospace,Menlo,monospace" font-size="44" fill="hsl(${hue},25%,80%)">${cell.getMeta("name") || ""}</text><text x="84" y="572" font-family="ui-monospace,Menlo,monospace" font-size="26" fill="hsl(${hue},20%,65%)">fragment.club</text></svg>`;
+    return new Response(svg, { headers: { "content-type": "image/svg+xml", "cache-control": "public, max-age=3600" } });
+  }
   if (rest === "__tree") {
     const rows = mode === "b"
       ? cell.sql.exec("SELECT path, length(content) AS size, updated_at, rev, sha256 FROM files WHERE deleted = 0 ORDER BY path").toArray()
@@ -90,7 +103,28 @@ export async function serveRoute(cell, request, url) {
   if (!row) return new Response("not found", { status: 404 });
   const ext = (rel.match(/\.([a-z0-9]+)$/) || [])[1] || "";
   const cache = mode === "b" ? "no-store" : "public, max-age=3600, immutable";
-  return stamp(new Response(toAB(row.content), { headers: { "content-type": MIME[ext] || "application/octet-stream", "cache-control": cache } }));
+  let body = toAB(row.content);
+  const m2 = cell.manifest();
+  const isHtml = (MIME[ext] || "").includes("text/html");
+  if (isHtml && m2?.meta && rel === "index.html") {
+    // social preview injection: og tags from manifest meta unless the page
+    // brings its own; image falls back to the generated placeholder
+    let html = new TextDecoder().decode(body);
+    if (!html.includes("og:title")) {
+      const pubOrigin = new URL(request.headers.get("x-fragment-url") || request.url).origin;
+      const img = m2.meta.image || `${pubOrigin}/f/${m2.name}/__preview.svg`;
+      const tags = [
+        `<meta property="og:title" content="${esc(m2.meta.title || m2.name)}">`,
+        `<meta property="og:description" content="${esc(m2.meta.description || "")}">`,
+        `<meta property="og:image" content="${esc(img)}">`,
+        `<meta name="twitter:card" content="summary_large_image">`,
+        `<title>${esc(m2.meta.title || m2.name)}</title>`,
+      ].join("");
+      html = html.includes("<head>") ? html.replace("<head>", "<head>" + tags) : tags + html;
+      body = new TextEncoder().encode(html).buffer;
+    }
+  }
+  return stamp(new Response(body, { headers: { "content-type": MIME[ext] || "application/octet-stream", "cache-control": cache } }));
 }
 
 // ------ checkVisibility ------

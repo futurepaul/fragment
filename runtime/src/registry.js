@@ -38,6 +38,24 @@ async function registryRoute(cell, request, url) {
     cell.sql.exec("INSERT INTO roles (name, pubkey, role) VALUES (?, ?, 'owner')", name, ownerHex);
     return json({ ok: true });
   }
+  if (p === "/__registry/list-all") {
+    const rows = cell.sql.exec("SELECT name, created_at FROM fragments ORDER BY created_at DESC").toArray();
+    return json({ fragments: rows.map((r) => ({ name: r.name, createdAt: r.created_at })) });
+  }
+  if (p === "/__registry/role") {
+    const name = url.searchParams.get("name") || "";
+    const pubkey = url.searchParams.get("pubkey") || "";
+    const row = cell.sql.exec("SELECT role FROM roles WHERE name = ? AND pubkey = ?", name, pubkey).toArray()[0];
+    return json({ role: row ? row.role : null });
+  }
+  if (p === "/__registry/delete" && request.method === "POST") {
+    const { name } = await request.json();
+    if (!NAME_RE.test(name)) return json({ error: "bad name" }, 400);
+    cell.sql.exec("DELETE FROM fragments WHERE name = ?", name);
+    cell.sql.exec("DELETE FROM roles WHERE name = ?", name);
+    cell.sql.exec("DELETE FROM slugs WHERE name = ?", name);
+    return json({ ok: true });
+  }
   if (p === "/__registry/list") {
     const pk = url.searchParams.get("pubkey");
     const rows = cell.sql.exec(

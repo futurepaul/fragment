@@ -42,27 +42,48 @@ impl Client {
     fn request(&self, method: &str, path: &str, body: Option<Vec<u8>>) -> Result<Resp> {
         let url = format!("{}{}", self.host, path);
         let body = body.unwrap_or_default();
-        let auth = self.id.nip98_header(method, &url, &body);
-        let mut req = match method {
-            "GET" => self.http.get(&url),
-            "POST" => self.http.post(&url),
-            "PUT" => self.http.put(&url),
-            "DELETE" => self.http.delete(&url),
-            _ => return Err(anyhow!("bad method")),
-        };
-        req = req.header("authorization", auth);
-        if !body.is_empty() {
-            req = req.body(body);
+        // connection-level failures are retried a few times: long-lived
+        // sync clients hold keep-alive pools that go stale when the host
+        // restarts, and without retries a watcher wedges until its process
+        // is restarted (observed live on relay-vault)
+        let mut last_err = None;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(300 * attempt as u64));
+            }
+            let auth = self.id.nip98_header(method, &url, &body);
+            let mut req = match method {
+                "GET" => self.http.get(&url),
+                "POST" => self.http.post(&url),
+                "PUT" => self.http.put(&url),
+                "DELETE" => self.http.delete(&url),
+                _ => return Err(anyhow!("bad method")),
+            };
+            req = req.header("authorization", auth);
+            if !body.is_empty() {
+                req = req.body(body.clone());
+            }
+            match req.send() {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let rev = resp
+                        .headers()
+                        .get("x-fragment-rev")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse().ok());
+                    let bytes = resp.bytes().context("reading body")?.to_vec();
+                    return Ok(Resp { status, body: bytes, rev });
+                }
+                Err(e) if e.is_connect() || e.is_request() => {
+                    last_err = Some(e);
+                    continue; // stale pool / transient network — try again
+                }
+                Err(e) => return Err(e).context("request failed"),
+            }
         }
-        let resp = req.send().context("request failed")?;
-        let status = resp.status().as_u16();
-        let rev = resp
-            .headers()
-            .get("x-fragment-rev")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse().ok());
-        let body = resp.bytes().context("reading body")?.to_vec();
-        Ok(Resp { status, body, rev })
+        let e = last_err.context("request failed (retried)")?;
+        let _: reqwest::Error = e;
+        unreachable!("retry loop always sets last_err before failing")
     }
 
     pub fn get(&self, path: &str) -> Result<Resp> {

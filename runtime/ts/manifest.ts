@@ -48,6 +48,15 @@ const ManifestSchema = Type.Object({
   // sync-trigger coalescing window (debounce); the knob is named, the
   // behavior is old
   debounceMs: Type.Optional(Type.Integer({ minimum: 250, maximum: 300_000 })),
+  // social/preview metadata: title + description render as Open Graph
+  // tags on served pages; image defaults to the generated placeholder.
+  // listed: true opts into the public gallery (share link included).
+  meta: Type.Optional(Type.Object({
+    title: Type.Optional(Type.String({ maxLength: 120 })),
+    description: Type.Optional(Type.String({ maxLength: 400 })),
+    image: Type.Optional(Type.String({ maxLength: 500 })),
+    listed: Type.Optional(Type.Boolean()),
+  })),
 });
 
 // Validate + normalize. Returns { error } or { manifest } with defaults

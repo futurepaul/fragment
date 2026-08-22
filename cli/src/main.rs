@@ -110,6 +110,8 @@ enum Cmd {
     },
     /// Full-hash audit of the folder against the fragment (no shortcuts)
     Verify { name: String, #[arg(long, default_value = ".")] dir: PathBuf },
+    /// Delete a fragment you own (registry row + all cell data; name reusable)
+    Rm { name: String },
     /// Sync (if a dir is given) then publish a draft; prints the draft URL
     Publish {
         name: String,
@@ -460,6 +462,13 @@ fn main() -> Result<()> {
             println!("sync {} ({})", name, dir.display());
             report.print();
             std::process::exit(report.exit_code());
+        }
+        Cmd::Rm { name } => {
+            let v = c.call(c.delete(&format!("/api/f/{name}"))?)?;
+            if j {
+                return out(&c, v, true);
+            }
+            println!("deleted fragment {name} (registry row + all data; the name is reusable)");
         }
         Cmd::Verify { name, dir } => {
             let report = sync::verify(&c, &name, &dir)?;

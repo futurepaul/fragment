@@ -99,6 +99,22 @@ export default {
         return toCell(name, path, null);
       }
 
+      // ---- gallery: the public face of the fleet (opt-in per fragment) ----
+      if (path === "/api/gallery" && request.method === "GET") {
+        const r = await registry().fetch("http://x/__registry/list-all");
+        const frags = (await r.json()).fragments || [];
+        const entries = [];
+        for (const f of frags) {
+          try {
+            const g = await cell(f.name).fetch("http://x/__cell/gallery-info");
+            const { entry } = await g.json();
+            if (entry) entries.push({ ...entry, createdAt: f.createdAt });
+          } catch {}
+        }
+        entries.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        return json({ fragments: entries });
+      }
+
       // ---- control API ----
       if (path === "/api/fragments" && request.method === "POST") {
         const g = await gate();
@@ -128,6 +144,18 @@ export default {
         const rest = path.slice("/api/f/".length);
         const name = rest.slice(0, rest.indexOf("/") === -1 ? undefined : rest.indexOf("/"));
         if (!name) return json({ error: "bad path" }, 400);
+        // DELETE /api/f/{name} — owner-only fragment removal: registry row
+        // gone (unlisted, name reusable), cell data wiped
+        if (request.method === "DELETE" && (rest === name || rest === name + "/")) {
+          const g = await gate();
+          if (g.error) return g.error;
+          const rr = await registry().fetch(`http://x/__registry/role?name=${encodeURIComponent(name)}&pubkey=${g.pubkey || ""}`);
+          const role = rr.ok ? ((await rr.json()).role || null) : null;
+          if (role !== "owner") return json({ error: "requires owner" }, 403);
+          await cell(name).fetch("http://x/__cell/wipe", { method: "POST" });
+          await registry().fetch("http://x/__registry/delete", { method: "POST", body: JSON.stringify({ name }) });
+          return json({ ok: true, deleted: name });
+        }
         const cellPath = "/api" + rest.slice(name.length); // strip /f/<name>
         // the inbox is token-gated inside the cell, not nostr-gated
         if (cellPath === "/api/inbox" && request.method === "POST") return toCell(name, cellPath, null);

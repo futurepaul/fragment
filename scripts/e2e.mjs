@@ -806,10 +806,11 @@ async function guideSection() {
     const fxm = fxManifest.body;
     fxm.notifyUrls = [`${BASE}/api/f/${name}/inbox?t=${created.body.inboxToken}`];
     await signed('PUT', `/api/f/${fx.name}/manifest`, JSON.stringify(fxm));
-    // public fixture: __tree needs no view token — patch the token out
+    // public fixture: __tree needs no view token; run enrichment immediately
     const code = patterns.watcher
       .replace(/^const SOURCE = .*$/m, `const SOURCE = ${JSON.stringify(fx.base.replace(/\/$/, ''))}`)
       .replace('const token = ctx.secrets.SOURCE_VIEW_TOKEN;', 'const token = "";')
+      .replace(/^const DELAY_MS = .*$/m, process.env.OPENROUTER_API_KEY ? 'const DELAY_MS = 0;' : 'const DELAY_MS = 999999999;')
       .replace('?view=" + token', '"')
       .replace('+ "&view=" + token', '');
     await signed('PUT', `/api/f/${name}/file?path=workflows/check.mjs&base_rev=0`, code);
@@ -824,8 +825,16 @@ async function guideSection() {
       if (!ran) await sleep(500);
     }
     ok(ran, 'watcher pattern ran from a notify poke');
-    const r = await signed('GET', `/api/f/${name}/runs?limit=1`);
-    ok(true, 'watcher pattern verified');
+    if (process.env.OPENROUTER_API_KEY) {
+      let enriched = false;
+      const t1 = Date.now();
+      while (Date.now() - t1 < 20_000 && !enriched) {
+        const files = await signed('GET', `/api/f/${name}/files`);
+        enriched = (files.body?.files || []).some((f) => f.path.startsWith('feed/') && !f.deleted);
+        if (!enriched) await sleep(800);
+      }
+      ok(enriched, 'watcher pattern wrote enriched feed items (async phase)');
+    }
   }
 
   // ---- runner: manifest JSON block ----
@@ -1049,6 +1058,30 @@ async function platformSection() {
     const t = await (await fetch(`${BASE}/f/${tokName}/__tree?view=${created.body.viewToken}`)).json();
     ok(t.files?.some((f) => f.path === 'notes/secret.md'), '__tree works with the view link');
   }
+  // meta: OG injection, placeholder previews, gallery listing
+  {
+    const name = `e2e-pa-meta-${suffix}`;
+    const created = await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    await signed('PUT', `/api/f/${name}/file?path=site/index.html&base_rev=0`, '<!doctype html><html><head></head><body>x</body></html>');
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'public', workflows: [], meta: { title: 'Meta Test', description: 'desc', listed: true } }));
+    await signed('POST', `/api/f/${name}/drafts`, JSON.stringify({ note: 'x' }));
+    const ds = await signed('GET', `/api/f/${name}/drafts`);
+    await signed('POST', `/api/f/${name}/bless`, JSON.stringify({ slug: ds.body.drafts[0].slug }));
+    const page = await (await fetch(`${BASE}/f/${name}/`)).text();
+    ok(page.includes('og:title') && page.includes('Meta Test'), 'manifest meta injects OG tags');
+    ok(page.includes('__preview.svg'), 'OG image defaults to the placeholder');
+    const svg = await fetch(`${BASE}/f/${name}/__preview.svg`);
+    eq(svg.status, 200, 'placeholder preview served');
+    ok((svg.headers.get('content-type') || '').includes('svg'), 'placeholder is svg');
+    const gal = await (await fetch(`${BASE}/api/gallery`)).json();
+    const me = (gal.fragments || []).find((f) => f.name === name);
+    ok(!!me && me.title === 'Meta Test' && !!me.viewToken, 'listed fragment appears in the gallery with its share token');
+    // unlisted private fragments do not appear
+    const priv = await signed('POST', '/api/fragments', JSON.stringify({ name: `e2e-pa-priv-${suffix}` }));
+    const gal2 = await (await fetch(`${BASE}/api/gallery`)).json();
+    ok(!(gal2.fragments || []).some((f) => f.name === priv.body.name), 'unlisted fragments stay out of the gallery');
+  }
+
   // notify-on-change: manifest notifyUrls → mutation → target inbox POSTed
   {
     const mk = async (n) => {
