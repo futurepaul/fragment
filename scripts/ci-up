@@ -38,8 +38,19 @@ wait_ping() {
 # before starting the node also matches how production comes up.
 celld deploy runtime --bucket "$BUCKET" | tail -1
 
-pkill -f "celld --bucket $BUCKET" 2>/dev/null || true
-sleep 1
+# stop an existing node for this bucket: SIGTERM first, but never trust the
+# drain (hibernated websockets can hold it open to the 25s deadline) —
+# force-kill if it overstays, or the restart below hits EADDRINUSE.
+pids=$(pgrep -f "celld --bucket $BUCKET" || true)
+if [ -n "$pids" ]; then
+  kill $pids 2>/dev/null || true
+  for _ in $(seq 1 24); do
+    pgrep -f "celld --bucket $BUCKET" >/dev/null 2>&1 || break
+    sleep 0.5
+  done
+  pids=$(pgrep -f "celld --bucket $BUCKET" || true)
+  [ -n "$pids" ] && { echo "drain stalled; force-killing" >&2; kill -9 $pids 2>/dev/null || true; }
+fi
 
 export CELLD_WORKER_LOADER=LOADER
 export CELLD_WATCH="$PWD/$DEV/watch"
