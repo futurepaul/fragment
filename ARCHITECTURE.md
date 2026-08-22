@@ -91,6 +91,11 @@ my-fragment/
   `fragment secret set` and injected into workflow runs. They never appear in
   files, drafts, or logs.
 
+The manifest is decoded exactly once at the door: PUT validates it against
+the TypeBox schema in `runtime/ts/manifest.ts`, applies defaults, and stores
+the normalized form; the cell serves the parsed object from memory. Nothing
+downstream re-parses or re-validates it.
+
 ## Drafts and blessing
 
 `fragment publish` snapshots the fragment's current files + code and returns a
@@ -132,6 +137,76 @@ not inside the cell isolate — so a wedged workflow can't wedge the fragment.
 (platform-routed inference, host holds the key), `state` (per-workflow kv),
 `log`. Every run appends to the fragment's **event log** (start, finish,
 error, output digest) — the ledger is ground truth, `fragment events` reads it.
+
+## Runs: the failure leg
+
+Success-path machinery (triggers, single-flight, coalescing) is small; nearly
+all real-world fragment pain lives on the failure path. The platform carries
+that leg so authors don't have to. Everything below is default-on; an author
+who learns none of it still gets all of it.
+
+**Every execution is a run row** (`runs` table) — the single record of what
+happened: workflow, trigger (`cron|sync|inbox|manual`), input (JSON), status,
+attempt, cause chain, timings. Events are the narrative; runs are the facts.
+
+```
+ trigger fired ──▶ [guards] ──▶ running ──▶ success
+                    │  │            │ retryable error, attempts left
+                    │  │            ▼
+                    │  │         backoff ──(alarm)──▶ running, attempt+1
+                    │  │            │ attempts exhausted | terminal error
+                    │  │            ▼
+                    │  └─▶       held   (input + error parked, replayable)
+                    ▼
+             blocked | skipped   (paused / rate / cycle / single-flight)
+```
+
+The transitions live in exactly one module (`runtime/ts/runs.ts`), as
+straight-line code: guards in a fixed order, one attempt per invocation,
+backoff waits scheduled on the cell's single alarm — never a blocking sleep.
+
+**Retry.** Failed runs are classified retryable (network, timeout, 429/5xx)
+or terminal (code errors, 4xx, bad parse). Retryable failures re-run with
+exponential backoff + jitter (default 3 attempts, 30s base, 5min cap;
+`retry` in the workflow config tunes it, `retry: false` opts out). A run
+killed by a host restart (lease expired without a terminal status) counts as
+retryable — crashed ≠ dead.
+
+**Held, never dropped.** When attempts exhaust or the error is terminal, the
+run parks as `held` with its input and last error. `fragment replay <name>
+<run-id>` re-executes it with the original input. This is the dead-letter
+queue, as a status on the ledger rather than a second system.
+
+**Auto-pause.** Five held runs in ten minutes trip the circuit breaker: the
+workflow pauses itself (loud `workflow.auto-paused` event; the human is the
+one escalation level). Manual runs still work while paused — pause means
+"stop reacting, keep debugging." `fragment pause|unpause` does it by hand.
+
+**Loops, three layers.** Two fragments watching each other can only livelock
+(pull-based watching can't deadlock), and three cheap layers bound it:
+1. *Write-suppression* — `ctx.files.write` with unchanged content is a
+   recorded no-op (`{deduped: true}`). Copy-loops die on pass two; unchanged
+   rewrites don't churn `updatedAt`, so revcron feeds don't re-see old items.
+2. *Hop budget* — runs carry a cause chain `{origin, depth}`; `ctx.http`
+   stamps `x-fragment-hops: depth+1` on every outbound request; an inbox
+   trigger above 16 hops refuses to fire and records `cycle.detected`.
+   Workflows that intend recursion set `cycles: true`.
+3. *Rate ceiling* — more than 120 auto-triggered runs in a rolling hour
+   trips the auto-pause breaker. The only layer that catches a loop which
+   genuinely mutates content every pass (the AI-agent ping-pong shape).
+
+**Inbox, hardened at the door.** An `Idempotency-Key` header collapses
+redeliveries (24h retention) before any author code runs. Pending inbox
+messages cap at 1000; beyond that the POST gets a 429 and the ledger gets
+`queue.rejected` — overload is a signal, not memory pressure.
+
+**Delivery contract, one paragraph.** Any trigger may fire more than once
+for one logical change. Files are safe by construction (suppression);
+external side effects should be keyed by cause (`lib/once.mjs`). Sync
+coalescing is debounce — `debounceMs` in the manifest names the knob.
+
+`fragment runs <name> [--status held]` reads the table;
+`fragment pause|unpause|replay` drive it.
 
 ## The event log
 

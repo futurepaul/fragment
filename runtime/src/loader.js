@@ -76,7 +76,7 @@ function internalBase(cell) {
   const base = cell.env.FRAGMENT_INTERNAL_URL || "http://127.0.0.1:8789";
   return `${base}/__internal/f/${cell.getMeta("name")}`;
 }
-async function loadCode(cell, id, mainSource, modules, scope) {
+async function loadCode(cell, id, mainSource, modules, scope, cause = null) {
   const wrapped = {};
   for (const [k, v] of Object.entries({ "main.mjs": mainSource, "fragment-ctx.mjs": CTX_SHIM_SOURCE, ...modules })) {
     wrapped[k] = cell.env.FRAGMENT_HOST_KIND === "cf" ? { js: v } : v;
@@ -89,6 +89,8 @@ async function loadCode(cell, id, mainSource, modules, scope) {
       FRAGMENT_INTERNAL_URL: cell.internalBase(),
       FRAGMENT_RUN_TOKEN: cell.makeToken(scope),
       FRAGMENT_SCOPE: scope.kind,
+      // the run's cause chain, so ctx.http can stamp hop headers
+      ...cause ? { FRAGMENT_CAUSE: JSON.stringify(cause) } : {},
       // forwarded by ctx as x-fragment-host-secret; checked by the router
       // on /__internal when the host sets FRAGMENT_HOST_SECRET
       ...cell.env.FRAGMENT_HOST_SECRET ? { FRAGMENT_HOST_SECRET: cell.env.FRAGMENT_HOST_SECRET } : {}
@@ -102,24 +104,8 @@ function collectModules(cell, prefix) {
   for (const r of rows) modules[r.path] = new TextDecoder().decode(toAB(r.content));
   return modules;
 }
-async function runWorkflow(cell, wf, input, opts = {}) {
-  const lockKey = `wf_lock_${wf.name}`;
-  const leaseMs = 10 * 6e4;
-  const lock = parseInt(cell.getMeta(lockKey) || "0", 10);
-  if (opts.auto && lock && lock > Date.now() - leaseMs) {
-    cell.addEvent("workflow-skipped", `${wf.name}: previous run still active`);
-    return { ok: true, skipped: true };
-  }
-  cell.setMeta(lockKey, String(Date.now()));
-  try {
-    return await cell.runWorkflowLocked(wf, input);
-  } finally {
-    cell.setMeta(lockKey, "");
-  }
-}
-async function runWorkflowLocked(cell, wf, input) {
+async function runWorkflowLocked(cell, wf, input, cause = null) {
   const name = cell.getMeta("name");
-  cell.addEvent("workflow-start", `${wf.name}`);
   try {
     const src = cell.getFileText(wf.file);
     if (src === null) throw new Error(`workflow file not found in folder: ${wf.file}`);
@@ -129,15 +115,12 @@ async function runWorkflowLocked(cell, wf, input) {
       `wf:${name}:${wf.name}:${rev}`,
       WORKFLOW_MAIN.replaceAll("__WF__", wf.file),
       modules,
-      { kind: "run", workflow: wf.name }
+      { kind: "run", workflow: wf.name },
+      cause
     );
     const resp = await ep.fetch("http://loaded/run", { method: "POST", body: JSON.stringify(input ?? null) });
-    const out = await resp.json();
-    if (out.ok) cell.addEvent("workflow-ok", `${wf.name}`, out.output !== null && out.output !== void 0 ? { output: out.output } : void 0);
-    else cell.addEvent("workflow-error", `${wf.name}: ${out.error}`);
-    return out;
+    return await resp.json();
   } catch (e) {
-    cell.addEvent("workflow-error", `${wf.name}: ${String(e)}`);
     return { ok: false, error: String(e) };
   }
 }
@@ -150,6 +133,5 @@ export {
   internalBase,
   loadCode,
   makeToken,
-  runWorkflow,
   runWorkflowLocked
 };

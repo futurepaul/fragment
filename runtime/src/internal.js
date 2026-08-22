@@ -31,9 +31,14 @@ async function internalRoute(cell, request, url) {
     const path = url.searchParams.get("path") || "";
     if (!path || path.includes("..") || path.startsWith("/")) return json({ error: "bad path" }, 400);
     const body = await request.arrayBuffer();
+    const sha = await sha256Hex(body);
+    const existing = cell.sql.exec("SELECT rev, sha256 FROM files WHERE path = ? AND deleted = 0", path).toArray()[0];
+    if (existing && existing.sha256 === sha) {
+      cell.addEvent("write.deduped", path);
+      return json({ ok: true, deduped: true, rev: existing.rev });
+    }
     const newRev = parseInt(cell.getMeta("rev") || "0", 10) + 1;
     cell.setMeta("rev", String(newRev));
-    const sha = await sha256Hex(body);
     cell.sql.exec(
       "INSERT INTO files (path, content, rev, sha256, updated_at, deleted) VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT(path) DO UPDATE SET content = excluded.content, rev = excluded.rev, sha256 = excluded.sha256, updated_at = excluded.updated_at, deleted = 0",
       path,
@@ -42,7 +47,7 @@ async function internalRoute(cell, request, url) {
       sha,
       Date.now()
     );
-    return json({ ok: true, rev: newRev });
+    return json({ ok: true, deduped: false, rev: newRev });
   }
   if (rest === "files/list") {
     const prefix = url.searchParams.get("prefix") || "";

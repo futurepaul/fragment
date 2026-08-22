@@ -4,6 +4,7 @@ mod sync;
 
 include!(concat!(env!("OUT_DIR"), "/templates.rs"));
 
+use crate::api::encode_q;
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
@@ -85,6 +86,21 @@ enum Cmd {
     Bless { name: String, slug: String },
     /// Run a workflow now
     Run { name: String, workflow: String, #[arg(long)] input: Option<String> },
+    /// List workflow runs (the run history; --status held shows parked failures)
+    Runs {
+        name: String,
+        /// Filter by status: running | backoff | success | held | skipped | blocked
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value = "30")]
+        limit: u64,
+    },
+    /// Pause a workflow (auto-triggers stop; manual runs still work)
+    Pause { name: String, workflow: String },
+    /// Unpause a workflow (also clears the auto-pause breaker)
+    Unpause { name: String, workflow: String },
+    /// Re-run a held run with its original input (after fixing the workflow)
+    Replay { name: String, run: u64 },
     /// Manage secrets (values via env var of same name, or stdin)
     Secret {
         #[command(subcommand)]
@@ -119,6 +135,14 @@ enum Cmd {
         /// List available templates
         #[arg(long)]
         list: bool,
+    },
+    /// Vendor a library file into a fragment folder (poll | once)
+    Add {
+        /// Library name (see `fragment add` with no args for the list)
+        libs: Vec<String>,
+        /// Fragment folder (default: current directory); writes lib/<name>.mjs
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
     },
 }
 
@@ -254,7 +278,7 @@ fn main() -> Result<()> {
         }
         Cmd::New { dir, template, list } => {
             if list {
-                for (name, files) in TEMPLATES {
+                for (name, files) in TEMPLATES.iter().filter(|(n, _)| *n != "libs") {
                     println!("{name} ({} files)", files.len());
                 }
                 return Ok(());
@@ -264,6 +288,7 @@ fn main() -> Result<()> {
             let tpl = TEMPLATES
                 .iter()
                 .find(|(n, _)| *n == tpl_name)
+                .filter(|(n, _)| *n != "libs")
                 .ok_or_else(|| anyhow!("unknown template '{tpl_name}' (use --list)"))?;
             if dir.exists() && !dir.is_dir() {
                 anyhow::bail!("{} exists and is not a directory", dir.display());
@@ -298,6 +323,39 @@ fn main() -> Result<()> {
     let j = cli.json;
 
     match cli.cmd {
+        Cmd::Add { libs, dir } => {
+            let lib_group = TEMPLATES
+                .iter()
+                .find(|(n, _)| *n == "libs")
+                .map(|(_, files)| *files)
+                .unwrap_or(&[]);
+            if libs.is_empty() {
+                println!("libraries (fragment add <name>...):");
+                for (rel, _) in lib_group {
+                    let stem = rel.trim_end_matches(".mjs");
+                    println!("  {stem}  →  lib/{rel}");
+                }
+                return Ok(());
+            }
+            std::fs::create_dir_all(dir.join("lib"))?;
+            for name in &libs {
+                let rel = if name.ends_with(".mjs") { name.clone() } else { format!("{name}.mjs") };
+                let bytes = lib_group
+                    .iter()
+                    .find(|(r, _)| r == &rel)
+                    .map(|(_, b)| *b)
+                    .ok_or_else(|| anyhow!("unknown library '{name}'"))?;
+                let target = dir.join("lib").join(&rel);
+                if target.exists() {
+                    println!("  lib/{rel} exists, left alone");
+                    continue;
+                }
+                std::fs::write(&target, bytes)?;
+                println!("  lib/{rel}");
+            }
+            println!("import with: import {{ poll }} from \"./lib/poll.mjs\" (or once)");
+            return Ok(());
+        }
         Cmd::Create { name } => {
             let v = c.call(c.post_json("/api/fragments", &json!({ "name": name }))?)?;
             if j {
@@ -428,6 +486,65 @@ fn main() -> Result<()> {
             }
             for e in v["events"].as_array().cloned().unwrap_or_default() {
                 println!("  [{}] {}", e["kind"].as_str().unwrap_or(""), e["summary"].as_str().unwrap_or(""));
+            }
+        }
+        Cmd::Runs { name, status, limit } => {
+            let mut path = format!("/api/f/{name}/runs?limit={limit}");
+            if let Some(s) = &status {
+                path.push_str(&format!("&status={}", encode_q(s)));
+            }
+            let v = c.call(c.get(&path)?)?;
+            if j {
+                return out(&c, v, true);
+            }
+            let rows = v["runs"].as_array().cloned().unwrap_or_default();
+            for r in &rows {
+                let dur = r["durationMs"].as_u64().map(|d| format!("{d}ms")).unwrap_or_default();
+                println!(
+                    "#{}\t{}\t{}\t{}\ttry {}/{}\t{}",
+                    r["id"].as_u64().unwrap_or(0),
+                    r["via"].as_str().unwrap_or("?"),
+                    r["wf"].as_str().unwrap_or("?"),
+                    r["status"].as_str().unwrap_or("?"),
+                    r["attempt"].as_u64().unwrap_or(0),
+                    r["maxAttempts"].as_u64().unwrap_or(0),
+                    dur,
+                );
+                if let Some(e) = r["error"].as_str() {
+                    println!("  {}", e.chars().take(120).collect::<String>());
+                }
+            }
+            if rows.is_empty() {
+                println!("(no runs)");
+            }
+            let held = v["counts"]["held"].as_u64().unwrap_or(0);
+            if held > 0 {
+                println!("\n{held} held run(s) — `fragment replay {name} <run-id>` after fixing");
+            }
+        }
+        Cmd::Pause { name, workflow } => {
+            let v = c.call(c.post_json(&format!("/api/f/{name}/pause"), &json!({ "workflow": workflow, "paused": true }))?)?;
+            if j {
+                return out(&c, v, true);
+            }
+            println!("paused '{workflow}' (manual runs still work; unpause with `fragment unpause`)");
+        }
+        Cmd::Unpause { name, workflow } => {
+            let v = c.call(c.post_json(&format!("/api/f/{name}/pause"), &json!({ "workflow": workflow, "paused": false }))?)?;
+            if j {
+                return out(&c, v, true);
+            }
+            println!("unpaused '{workflow}'");
+        }
+        Cmd::Replay { name, run } => {
+            let v = c.call(c.post_json(&format!("/api/f/{name}/replay"), &json!({ "run": run }))?)?;
+            if j {
+                return out(&c, v, true);
+            }
+            if v["ok"].as_bool().unwrap_or(false) {
+                println!("replayed run #{run} → ok");
+            } else {
+                println!("replayed run #{run} → error: {}", v["error"].as_str().unwrap_or("unknown"));
             }
         }
         Cmd::Secret { sub } => match sub {

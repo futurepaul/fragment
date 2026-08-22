@@ -5,6 +5,8 @@ export async function makeCtx(env) {
   const tok = env.FRAGMENT_RUN_TOKEN;
   const hsec = env.FRAGMENT_HOST_SECRET || "";
   const scope = env.FRAGMENT_SCOPE || "run";
+  let cause = null;
+  try { cause = env.FRAGMENT_CAUSE ? JSON.parse(env.FRAGMENT_CAUSE) : null; } catch {}
   const call = async (path, opts = {}) => {
     const headers = Object.assign({}, opts.headers || {}, { "x-fragment-token": tok });
     if (hsec) headers["x-fragment-host-secret"] = hsec;
@@ -24,7 +26,16 @@ export async function makeCtx(env) {
     call("/secrets/all").then((r) => r.json()).then((s) => Object.assign(secretsAll, s)).catch(() => {});
   }
   const ctx = {
-    http: (url, init) => fetch(url, init),
+    // plain fetch, plus the cause chain: inside a run, every outbound
+    // request carries the run's hop budget so receiving fragments can
+    // refuse cycles before author code runs.
+    http: (url, init) => {
+      if (!cause) return fetch(url, init);
+      const headers = new Headers((init && init.headers) || {});
+      headers.set("x-fragment-hops", String((cause.depth || 0) + 1));
+      headers.set("x-fragment-cause", String(cause.origin || "fragment"));
+      return fetch(url, Object.assign({}, init, { headers }));
+    },
     files: {
       async read(path) {
         const r = await call("/files/read?path=" + encodeURIComponent(path));
@@ -34,9 +45,11 @@ export async function makeCtx(env) {
         const r = await call("/files/read?path=" + encodeURIComponent(path));
         return r.arrayBuffer();
       },
+      // returns {ok, deduped, rev}: writing identical content is a no-op
       async write(path, data) {
         const body = typeof data === "string" ? data : data;
-        await call("/files/write?path=" + encodeURIComponent(path), { method: "PUT", body });
+        const r = await call("/files/write?path=" + encodeURIComponent(path), { method: "PUT", body });
+        return r.json();
       },
       async list(prefix = "") {
         const r = await call("/files/list?prefix=" + encodeURIComponent(prefix));

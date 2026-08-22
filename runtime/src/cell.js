@@ -1,12 +1,13 @@
 // GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
-import { npubFromHex, hexFromNpub } from "./bech32.js";
+import { npubFromHex } from "./bech32.js";
 import { json, toAB } from "./util.js";
-import { parseCron } from "./cron.js";
 import { initCell, registryRoute, syncRolesToRegistry } from "./registry.js";
 import { canonicalUrl, serveRoute, checkVisibility } from "./serve.js";
 import { apiRoute } from "./api-routes.js";
 import { rearmAlarm, alarm, scheduleSyncTrigger, fireSyncTriggers } from "./alarms.js";
-import { makeToken, checkToken, internalBase, loadCode, collectModules, runWorkflow, runWorkflowLocked } from "./loader.js";
+import { makeToken, checkToken, internalBase, loadCode, collectModules, runWorkflowLocked } from "./loader.js";
+import { executeWorkflow, resumeDueRuns } from "./runs.js";
+import { normalizeManifest } from "./manifest.js";
 import { internalRoute } from "./internal.js";
 import { roomRoute, presenceList, broadcast, webSocketMessage, webSocketClose } from "./rooms.js";
 import { SCHEMA, rankOf } from "./util.js";
@@ -14,6 +15,8 @@ class FragmentCell {
   state;
   env;
   sql;
+  _manifest = null;
+  _manifestRaw = null;
   constructor(state, env) {
     this.state = state;
     this.env = env;
@@ -29,7 +32,11 @@ class FragmentCell {
   }
   manifest() {
     const raw = this.getMeta("manifest");
-    return raw ? JSON.parse(raw) : null;
+    if (raw !== this._manifestRaw) {
+      this._manifest = raw ? JSON.parse(raw) : null;
+      this._manifestRaw = raw;
+    }
+    return this._manifest;
   }
   addEvent(kind, summary, data) {
     this.sql.exec(
@@ -78,32 +85,7 @@ class FragmentCell {
     }
   }
   validateManifest(m) {
-    if (!m || typeof m !== "object") return "manifest must be a JSON object";
-    if (!["public", "viewers", "token"].includes(m.visibility)) return "visibility must be public|viewers|token";
-    for (const k of ["editors", "viewers"]) {
-      if (!Array.isArray(m[k])) return `${k} must be an array of npubs`;
-      for (const n of m[k]) {
-        try {
-          hexFromNpub(n);
-        } catch {
-          return `bad npub in ${k}: ${n}`;
-        }
-      }
-    }
-    if (!Array.isArray(m.workflows)) return "workflows must be an array";
-    for (const wf of m.workflows) {
-      if (!wf.name || !wf.file) return "each workflow needs name + file";
-      if (wf.cron) {
-        try {
-          parseCron(wf.cron);
-        } catch (e) {
-          return `workflow ${wf.name}: ${e.message}`;
-        }
-      }
-      if (wf.trigger && wf.trigger !== "inbox" && wf.trigger !== "sync") return `workflow ${wf.name}: unknown trigger ${wf.trigger}`;
-    }
-    if (!Array.isArray(m.secrets)) return "secrets must be an array of names";
-    return null;
+    return normalizeManifest(m).error || null;
   }
   getFileRow(path) {
     return this.sql.exec("SELECT content, rev, sha256 FROM files WHERE path = ? AND deleted = 0", path).toArray()[0] || null;
@@ -155,17 +137,20 @@ class FragmentCell {
   internalBase() {
     return internalBase(this);
   }
-  async loadCode(id, mainSource, modules, scope) {
-    return loadCode(this, id, mainSource, modules, scope);
+  async loadCode(id, mainSource, modules, scope, cause = null) {
+    return loadCode(this, id, mainSource, modules, scope, cause);
   }
   collectModules(prefix) {
     return collectModules(this, prefix);
   }
-  async runWorkflow(wf, input, opts = {}) {
-    return runWorkflow(this, wf, input, opts);
+  async runWorkflowLocked(wf, input, cause = null) {
+    return runWorkflowLocked(this, wf, input, cause);
   }
-  async runWorkflowLocked(wf, input) {
-    return runWorkflowLocked(this, wf, input);
+  async executeWorkflow(wf, input, opts = {}) {
+    return executeWorkflow(this, wf, input, opts);
+  }
+  async resumeDueRuns() {
+    return resumeDueRuns(this);
   }
   async internalRoute(request, url) {
     return internalRoute(this, request, url);

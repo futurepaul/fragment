@@ -44,12 +44,15 @@ visibility=viewers).
 | `POST /api/f/{name}/drafts` | editor+ | `{note?}` → `{slug, url}` (slug = 8 unguessable chars) |
 | `GET /api/f/{name}/drafts` | viewer+ | → `{drafts:[{slug, at, note, blessed}]}` |
 | `POST /api/f/{name}/bless` | editor+ | `{slug}` → `{ok, url}` |
-| `POST /api/f/{name}/run` | editor+ | `{workflow, input?}` → `{ok, output?, error?, events}` |
+| `POST /api/f/{name}/run` | editor+ | `{workflow, input?}` → `{ok, output?, error?, runId, events}` |
+| `POST /api/f/{name}/replay` | editor+ | `{run: id}` → re-runs a held run with its original input → `{ok, output?, error?, runId}` |
+| `GET /api/f/{name}/runs?status=&wf=&limit=&include=input` | viewer+ | → `{runs:[{id, wf, via, status, attempt, maxAttempts, error?, timings, cause}], counts}`. Statuses: `running \| backoff \| success \| held \| skipped \| blocked` |
+| `POST /api/f/{name}/pause` | editor+ | `{workflow, paused}` → pause/unpause a workflow (clears the auto-pause breaker) |
 | `PUT /api/f/{name}/secrets/{KEY}` | editor+ | raw body = value → `{ok}` |
 | `GET /api/f/{name}/secrets` | editor+ | → `{names: [...]}` (never values) |
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor+ | → `{ok}` |
 | `GET /api/f/{name}/events?since={id}` | viewer+ | → `{events:[{id, at, kind, summary, data?}]}` |
-| `POST /api/f/{name}/inbox?t={inboxToken}` | token only | `{source?, payload}` → `{ok, id}`; enqueues + runs `trigger:"inbox"` workflows. Prefer the `x-fragment-inbox-token` header when you control the client — `?t=` lands in access logs. |
+| `POST /api/f/{name}/inbox?t={inboxToken}` | token only | `{source?, payload}` → `{ok, id, ran}`; enqueues + runs `trigger:"inbox"` workflows. Prefer the `x-fragment-inbox-token` header when you control the client — `?t=` lands in access logs. Optional headers: `Idempotency-Key` (redelivery collapses for 24h), `x-fragment-hops`/`x-fragment-cause` (stamped by `ctx.http` — over-budget hops are refused with a `cycle.detected` event). Pending cap 1000 → `429`. |
 | `PUT /api/f/{name}/file?path=&base_rev=` | editor+ | raw body; stale `base_rev` → 409. Successful writes schedule `trigger:"sync"` workflows (coalesced; workflow-plane writes don't) |
 
 ## Serving (no NIP-98)

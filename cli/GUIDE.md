@@ -100,22 +100,28 @@ replaces it. Shape:
   link — the default, good for "send a human a link"; a valid token also
   mints a scoped cookie so subresources load), `viewers` (listed npubs
   only — agents authenticate; browsers can't).
-- **workflows**: auto-triggered runs are single-flight — a cron/inbox/sync
-  fire while a previous run of the same workflow is still active is
-  skipped (`workflow-skipped` in the event log; manual `fragment run`
-  always proceeds). Make workflows idempotent anyway: key effects by
-  content (e.g. a `filed` map in `ctx.state`), not by timing, so
-  re-delivery can't duplicate work.
+- **workflows**: auto-triggered runs are single-flight — a cron/sync fire
+  while a previous run of the same workflow is active or retrying is
+  skipped (`run.skipped` in the event log; manual `fragment run` always
+  proceeds). Failed runs retry with backoff (default 3 attempts, 30s base —
+  tune with `retry: {attempts, backoffMs}` or disable with `retry: false`);
+  exhausted failures park as **held** with their input, replayable after a
+  fix (`fragment runs <name> --status held` → `fragment replay <name> <id>`).
+  5 held runs in 10 minutes auto-pause the workflow (loud
+  `workflow.auto-paused` event); `fragment pause|unpause <name> <workflow>`
+  does it by hand. Files are idempotent by construction (identical writes
+  are no-ops); key external effects by cause — `fragment add once` vendors
+  `lib/once.mjs` for exactly that.
 - **workflows**: `cron` is 5-field UTC (`*` lists ranges steps, month/day
   names OK; day-of-week 1=Sunday..7=Saturday, 0 is refused). `trigger:
   "inbox"` runs when a message lands; `trigger: "sync"` runs when files
-  change on the editor plane. Any workflow can set `"paused": true` in its
-  manifest entry — cron/inbox/sync triggers all skip it (manual `fragment
-  run` still works), which makes live maintenance race-free (sync pushes, CLI writes — coalesced a few
-  seconds; workflow writes never re-trigger, so outputs are loop-safe).
-  Neither = manual only (`fragment run`). The fragment sleeps between
+  change on the editor plane (coalescing is `debounceMs`, default 4000;
+  workflow writes never re-trigger, so outputs are loop-safe). Neither =
+  manual only (`fragment run`). The fragment sleeps between
   runs; the host's durable alarms fire crons — they survive restarts and
-  sleep.
+  sleep. Cross-fragment loops are bounded: `ctx.http` stamps a hop budget,
+  over-deep inbox chains are refused (`cycle.detected`), and >120
+  auto-runs/hour trips auto-pause.
 - **liveFiles**: `true` makes a served `app.mjs` read the live working copy
   instead of its draft snapshot. Code stays frozen in whatever draft you
   blessed; only the data it reads flows live. This is what makes a folder
@@ -321,16 +327,22 @@ fragment login [--force]            fragment secret set <name> <KEY>
 fragment whoami                     fragment secret list <name>
 fragment host [<url>]               fragment secret rm <name> <KEY>
 fragment new <dir> [--template T]   fragment grant <name> --editor/--viewer <npub|name@dom>
-fragment create <name>              fragment revoke <name> --editor/--viewer <npub|name@dom>
-fragment list                       fragment inbox <name> --token T --payload JSON
-fragment status <name>              fragment run <name> <wf> [--input JSON]
-fragment events <name> [--since N]  fragment open <name>
-fragment manifest <name>            fragment guide
-fragment manifest-set <name> FILE
+fragment add <lib>... [--dir D]     fragment revoke <name> --editor/--viewer <npub|name@dom>
+fragment create <name>              fragment inbox <name> --token T --payload JSON
+fragment list                       fragment run <name> <wf> [--input JSON]
+fragment status <name>              fragment runs <name> [--status S] [--limit N]
+fragment events <name> [--since N]  fragment pause <name> <wf>
+fragment manifest <name>            fragment unpause <name> <wf>
+fragment manifest-set <name> FILE   fragment replay <name> <run-id>
 fragment sync <name> [--dir D] [--watch N]
 fragment publish <name> [--dir D] [--note N] [--bless]
 fragment drafts <name>              fragment bless <name> <slug>
 ```
+
+Libraries (`fragment add`): `poll` — the transactional cron-poller recipe
+(diff against a seen-set, advance only on success); `once` — exactly-once
+external effects keyed by cause. The full authoring contract is three
+habits — see docs/authoring.md.
 
 Global flags: `--host <url>` (or `FRAGMENT_HOST`), `--json`. Set a sticky
 default with `fragment host <url>` (e.g. `fragment host https://fragment.club`).

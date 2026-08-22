@@ -402,28 +402,165 @@ async function pausedSection() {
   eq(man.status, 200, 'manifest accepts paused: true on a workflow');
 
   // an inbox arrival while paused must NOT run it
-  const post = await fetch(`${BASE}/api/f/${name}/inbox?t=${inboxToken}`, {
+  const postResp = await fetch(`${BASE}/api/f/${name}/inbox?t=${inboxToken}`, {
     method: 'POST', body: JSON.stringify({ source: 'e2e', payload: {} }),
   });
-  eq(post.status, 200, 'inbox POST still accepted while paused');
-  ok(!(post.body?.ran || []).some((r) => r.workflow === 'w'), 'paused workflow did not run on trigger');
+  const post = await postResp.json();
+  eq(postResp.status, 200, 'inbox POST still accepted while paused');
+  ok((post?.ran || []).some((r) => r.workflow === 'w' && r.status === 'blocked'), 'paused trigger recorded as blocked, not run');
 
   // manual run is the maintenance path and must work
   const run = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'w' }));
   eq(run.status, 200, 'manual run works while paused');
   eq(run.body?.output?.fired, true, 'manual run fired the workflow');
 
-  // unpause → trigger works again
-  const man2 = await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({
-    name, visibility: 'token', editors: [], viewers: [],
-    workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'inbox' }],
-    secrets: [],
-  }));
-  eq(man2.status, 200, 'unpause accepted');
+  // unpause via the pause route → trigger works again
+  const un = await signed('POST', `/api/f/${name}/pause`, JSON.stringify({ workflow: 'w', paused: false }));
+  eq(un.status, 200, 'unpause via /pause accepted');
   const post2 = await (await fetch(`${BASE}/api/f/${name}/inbox?t=${inboxToken}`, {
     method: 'POST', body: JSON.stringify({ source: 'e2e', payload: {} }),
   })).json();
-  ok((post2?.ran || []).some((r) => r.workflow === 'w' && r.ok), 'unpaused workflow runs on trigger');
+  ok((post2?.ran || []).some((r) => r.workflow === 'w' && r.ok && r.status === 'ran'), 'unpaused workflow runs on trigger');
+}
+
+// ---------- runs: the failure leg ----------
+async function runsSection() {
+  if (!section('runs')) return;
+  const mkFrag = async (tag, workflows, extra = {}) => {
+    const name = `e2e-${tag}-${suffix}`;
+    const created = await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    return { name, inboxToken: created.body.inboxToken, workflows };
+  };
+  const putFile = (name, path, body) =>
+    signed('PUT', `/api/f/${name}/file?path=${encodeURIComponent(path)}&base_rev=0`, body);
+  const putManifest = (name, manifest) =>
+    signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], secrets: [], ...manifest }));
+  const postInbox = (name, tok, headers = {}, payload = {}) =>
+    fetch(`${BASE}/api/f/${name}/inbox?t=${tok}`, { method: 'POST', body: JSON.stringify(payload), headers });
+  const waitRuns = async (name, pred, label, timeoutMs = 15000) => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const r = await signed('GET', `/api/f/${name}/runs`);
+      if (pred(r.body)) return r.body;
+      if (Date.now() > deadline) { ok(false, label); return r.body; }
+      await sleep(300);
+    }
+  };
+
+  // retryable failure → backoff → retry (attempt 2) → held → replay after a fix
+  {
+    const { name, inboxToken } = await mkFrag('retry', null);
+    await putFile(name, 'workflows/flaky.mjs',
+      'export async function run(ctx) {\n  await ctx.http("http://127.0.0.1:9/unreachable");\n  return { fine: true };\n}\n');
+    await putManifest(name, { workflows: [{ name: 'flaky', file: 'workflows/flaky.mjs', trigger: 'inbox', retry: { attempts: 2, backoffMs: 300 } }] });
+    const post = await (await postInbox(name, inboxToken)).json();
+    eq(post?.ran?.[0]?.status, 'retrying', 'retryable failure schedules a retry');
+    const body = await waitRuns(name, (b) => (b.runs || []).some((r) => r.status === 'held' && r.attempt === 2), 'backoff retry reaches held after attempts exhaust');
+    const held = (body.runs || []).find((r) => r.status === 'held');
+    ok(!!held, 'held run row exists with input + error parked');
+    ok(held && held.error && /fetch/i.test(held.error), 'held row carries the error');
+    ok((body.counts || {}).held >= 1, 'runs counts include held');
+    const evs = await signed('GET', `/api/f/${name}/events`);
+    ok(JSON.stringify(evs.body?.events || []).includes('"kind":"run.retry"'), 'run.retry event on the ledger');
+    // fix the workflow, replay the held run with its original input
+    await signed('PUT', `/api/f/${name}/file?path=workflows/flaky.mjs&base_rev=1`,
+      'export async function run(ctx) {\n  return { fixed: true, got: ctx.input ?? null };\n}\n');
+    const rep = await signed('POST', `/api/f/${name}/replay`, JSON.stringify({ run: held.id }));
+    eq(rep.status, 200, 'replay accepted');
+    eq(rep.body?.ok, true, 'replayed run succeeds after the fix');
+    eq(rep.body?.output?.fixed, true, 'replay executed the fixed workflow');
+  }
+
+  // terminal failure: no retry, held immediately
+  {
+    const { name, inboxToken } = await mkFrag('term', null);
+    await putFile(name, 'workflows/term.mjs', 'export async function run(ctx) {\n  null.x;\n}\n');
+    await putManifest(name, { workflows: [{ name: 'term', file: 'workflows/term.mjs', trigger: 'inbox' }] });
+    const post = await (await postInbox(name, inboxToken)).json();
+    eq(post?.ran?.[0]?.status, 'held', 'terminal error holds immediately (attempt 1)');
+    const body = await signed('GET', `/api/f/${name}/runs`);
+    eq(body.body?.runs?.[0]?.attempt, 1, 'terminal error did not retry');
+  }
+
+  // write-suppression: identical content is a recorded no-op
+  {
+    const { name } = await mkFrag('dedup', null);
+    await putFile(name, 'workflows/w.mjs',
+      'export async function run(ctx) {\n  const a = await ctx.files.write("out/x.txt", "same");\n  const b = await ctx.files.write("out/x.txt", "same");\n  return { first: a.deduped, second: b.deduped };\n}\n');
+    await putManifest(name, { workflows: [{ name: 'w', file: 'workflows/w.mjs' }] });
+    const run = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'w' }));
+    eq(run.body?.output?.first, false, 'first write lands');
+    eq(run.body?.output?.second, true, 'identical rewrite is suppressed');
+    const evs = await signed('GET', `/api/f/${name}/events`);
+    ok(JSON.stringify(evs.body?.events || []).includes('"kind":"write.deduped"'), 'write.deduped on the ledger');
+  }
+
+  // breaker: 5 held runs in a window auto-pause the workflow
+  {
+    const { name, inboxToken } = await mkFrag('breaker', null);
+    await putFile(name, 'workflows/w.mjs', 'export async function run(ctx) {\n  null.x;\n}\n');
+    await putManifest(name, { workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'inbox' }] });
+    for (let i = 0; i < 5; i++) await postInbox(name, inboxToken);
+    const st = await signed('GET', `/api/f/${name}/status`);
+    ok((st.body?.paused || []).includes('w'), 'breaker auto-paused the workflow');
+    const evs = await signed('GET', `/api/f/${name}/events`);
+    ok(JSON.stringify(evs.body?.events || []).includes('"kind":"workflow.auto-paused"'), 'workflow.auto-paused event');
+    const post6 = await (await postInbox(name, inboxToken)).json();
+    eq(post6?.ran?.[0]?.status, 'blocked', 'triggers blocked while auto-paused');
+  }
+
+  // rate ceiling: maxRunsPerHour trips auto-pause
+  {
+    const { name, inboxToken } = await mkFrag('rate', null);
+    await putFile(name, 'workflows/w.mjs', 'export async function run(ctx) {\n  return { ok: 1 };\n}\n');
+    await putManifest(name, { workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'inbox', maxRunsPerHour: 2 }] });
+    await postInbox(name, inboxToken);
+    await postInbox(name, inboxToken);
+    const third = await (await postInbox(name, inboxToken)).json();
+    eq(third?.ran?.[0]?.status, 'blocked', 'third auto run in an hour is blocked');
+    const st = await signed('GET', `/api/f/${name}/status`);
+    ok((st.body?.paused || []).includes('w'), 'rate ceiling auto-paused the workflow');
+  }
+
+  // hop budget: over-deep inbox POSTs are refused with cycle.detected
+  {
+    const { name, inboxToken } = await mkFrag('hops', null);
+    await putFile(name, 'workflows/w.mjs', 'export async function run(ctx) {\n  return { ran: true };\n}\n');
+    await putManifest(name, { workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'inbox' }] });
+    const deep = await (await postInbox(name, inboxToken, { 'x-fragment-hops': '99', 'x-fragment-cause': 'other-frag' })).json();
+    eq(deep?.ran?.[0]?.status, 'blocked', 'over-budget hops blocked before author code');
+    const evs = await signed('GET', `/api/f/${name}/events`);
+    ok(JSON.stringify(evs.body?.events || []).includes('"kind":"cycle.detected"'), 'cycle.detected on the ledger');
+    const shallow = await (await postInbox(name, inboxToken)).json();
+    eq(shallow?.ran?.[0]?.status, 'ran', 'organic-depth POST still runs');
+  }
+
+  // inbox idempotency: a redelivered key collapses
+  {
+    const { name, inboxToken } = await mkFrag('idem', null);
+    await putFile(name, 'workflows/w.mjs', 'export async function run(ctx) {\n  return { ok: 1 };\n}\n');
+    await putManifest(name, { workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'inbox' }] });
+    const first = await (await postInbox(name, inboxToken, { 'idempotency-key': `e2e-${suffix}` })).json();
+    const second = await (await postInbox(name, inboxToken, { 'idempotency-key': `e2e-${suffix}` })).json();
+    eq(second?.deduped, true, 'redelivered Idempotency-Key collapses');
+    eq(second?.id, first?.id, 'same inbox id returned');
+    await waitRuns(name, (b) => (b.counts || {}).success === 1, 'exactly one run for two deliveries');
+  }
+
+  // single-flight for level-triggered sources: a pending retry absorbs the
+  // next sync trigger (skipped), then the retry lands held
+  {
+    const { name } = await mkFrag('flight', null);
+    await putFile(name, 'workflows/w.mjs',
+      'export async function run(ctx) {\n  await ctx.http("http://127.0.0.1:9/unreachable");\n}\n');
+    await putManifest(name, { debounceMs: 250, workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'sync', retry: { attempts: 2, backoffMs: 4000 } }] });
+    await putFile(name, 'data/a.txt', 'one');       // trigger 1 fires at +250ms → fails → backoff
+    await sleep(1000);
+    await putFile(name, 'data/b.txt', 'two');       // trigger 2 fires into the pending retry → skipped
+    const body = await waitRuns(name, (b) => (b.counts || {}).skipped >= 1, 'sync trigger during backoff is skipped', 8000);
+    ok((body.counts || {}).skipped >= 1, 'single-flight skip recorded');
+    await waitRuns(name, (b) => (b.counts || {}).held >= 1, 'pending retry eventually held', 20000);
+  }
 }
 
 // ---------- CLI sync ----------
@@ -514,7 +651,7 @@ async function cronSection() {
   while (Date.now() < deadline) {
     await sleep(5000);
     const evs = await signed('GET', `/api/f/${name}/events`);
-    fired = JSON.stringify(evs.body?.events || []).includes('"kind":"workflow-ok"') &&
+    fired = JSON.stringify(evs.body?.events || []).includes('"kind":"run.succeeded"') &&
             JSON.stringify(evs.body?.events || []).includes('tick');
     if (fired) break;
   }
@@ -530,6 +667,7 @@ try {
   if (!ONLY || ONLY === 'rooms') await roomsSection();
   if (!ONLY || ONLY === 'workflows') await workflowSection();
   if (!ONLY || ONLY === 'paused') await pausedSection();
+  if (!ONLY || ONLY === 'runs') await runsSection();
   if (!ONLY || ONLY === 'sync') await syncSection();
   await cronSection();
 } catch (e) {

@@ -2,6 +2,7 @@
 import { json, toAB, randSlug } from "./util.js";
 import { sha256Hex, safeEqual } from "./auth.js";
 import { nextRun } from "./cron.js";
+import { normalizeManifest } from "./manifest.js";
 async function apiRoute(cell, request, url) {
   const p = url.pathname.slice(4);
   const m = cell.manifest();
@@ -9,6 +10,16 @@ async function apiRoute(cell, request, url) {
   if (p === "/inbox" && request.method === "POST") {
     const presented = request.headers.get("x-fragment-inbox-token") || url.searchParams.get("t") || "";
     if (!safeEqual(presented, cell.getMeta("inbox_token") || "")) return json({ error: "bad inbox token" }, 403);
+    const idemKey = request.headers.get("idempotency-key");
+    if (idemKey) {
+      const prior = cell.sql.exec("SELECT inbox_id FROM idem WHERE key = ? AND at > ?", idemKey, Date.now() - 24 * 36e5).toArray()[0];
+      if (prior) return json({ ok: true, id: prior.inbox_id, deduped: true });
+    }
+    const pending = cell.sql.exec("SELECT COUNT(*) c FROM inbox WHERE status = 'pending'").toArray()[0].c;
+    if (pending > 1e3) {
+      cell.addEvent("queue.rejected", `inbox full (${pending} pending)`, { pending });
+      return json({ error: "inbox full \u2014 drain pending messages", pending }, 429);
+    }
     const body = await request.json().catch(() => ({}));
     const cur = cell.sql.exec(
       "INSERT INTO inbox (at, source, payload) VALUES (?, ?, ?) RETURNING id",
@@ -16,12 +27,18 @@ async function apiRoute(cell, request, url) {
       String(body.source || "external"),
       JSON.stringify(body.payload ?? null)
     ).toArray()[0];
+    if (idemKey) cell.sql.exec("INSERT OR REPLACE INTO idem (key, inbox_id, at) VALUES (?, ?, ?)", idemKey, cur.id, Date.now());
     cell.addEvent("inbox", `inbox #${cur.id} from ${body.source || "external"}`);
+    const cause = {
+      origin: request.headers.get("x-fragment-cause") || null,
+      depth: parseInt(request.headers.get("x-fragment-hops") || "0", 10) || 0,
+      inboxId: cur.id
+    };
     const results = [];
     for (const wf of m.workflows || []) {
-      if (wf.trigger !== "inbox" || wf.paused) continue;
-      const out = await cell.runWorkflow(wf, { inbox: { id: cur.id, source: body.source, payload: body.payload } }, { auto: true });
-      results.push({ workflow: wf.name, ok: !!out.ok });
+      if (wf.trigger !== "inbox") continue;
+      const out = await cell.executeWorkflow(wf, { inbox: { id: cur.id, source: body.source, payload: body.payload } }, { auto: true, trigger: "inbox", cause });
+      results.push({ workflow: wf.name, ok: !!out.ok, status: out.blocked ? "blocked" : out.skipped ? "skipped" : out.held ? "held" : out.retrying ? "retrying" : "ran" });
       if (out.ok) cell.sql.exec("UPDATE inbox SET status = 'done' WHERE id = ?", cur.id);
     }
     return json({ ok: true, id: cur.id, ran: results });
@@ -34,13 +51,14 @@ async function apiRoute(cell, request, url) {
     const files = cell.sql.exec("SELECT COUNT(*) c FROM files WHERE deleted = 0").toArray()[0].c;
     const drafts = cell.sql.exec("SELECT COUNT(*) c FROM drafts").toArray()[0].c;
     const events = cell.sql.exec("SELECT COUNT(*) c FROM events").toArray()[0].c;
+    const held = cell.sql.exec("SELECT COUNT(*) c FROM runs WHERE status = 'held'").toArray()[0].c;
     const crons = [];
     const cronState = JSON.parse(cell.getMeta("cron_state") || "{}");
     for (const wf of m.workflows || []) {
-      if (!wf.cron || wf.paused) continue;
+      if (!wf.cron) continue;
       try {
         const next = nextRun(wf.cron, cronState[wf.name] ?? Date.now());
-        crons.push({ name: wf.name, cron: wf.cron, nextAt: next ? new Date(next).toISOString() : null });
+        crons.push({ name: wf.name, cron: wf.cron, nextAt: next ? new Date(next).toISOString() : null, paused: !!wf.paused });
       } catch (e) {
         crons.push({ name: wf.name, cron: wf.cron, error: e.message });
       }
@@ -50,8 +68,9 @@ async function apiRoute(cell, request, url) {
       npub: cell.getMeta("fragment_npub"),
       visibility: m.visibility,
       blessed: cell.getMeta("blessed"),
-      counts: { files, drafts, events },
+      counts: { files, drafts, events, held },
       crons,
+      paused: (m.workflows || []).filter((w) => w.paused).map((w) => w.name),
       viewToken: cell.getMeta("view_token"),
       inboxToken: cell.getMeta("inbox_token"),
       urls: { canonical: cell.canonicalUrl(url.origin, m.name) }
@@ -66,14 +85,27 @@ async function apiRoute(cell, request, url) {
     const a = authz("editor");
     if (!a.ok) return deny(a);
     const nm = await request.json().catch(() => null);
-    const err = cell.validateManifest(nm);
-    if (err) return json({ error: err }, 400);
-    nm.name = m.name;
-    cell.setMeta("manifest", JSON.stringify(nm));
+    const res = normalizeManifest(nm);
+    if (res.error) return json({ error: res.error }, 400);
+    res.manifest.name = m.name;
+    cell.setMeta("manifest", JSON.stringify(res.manifest));
     cell.addEvent("manifest", "manifest updated");
     await cell.syncRolesToRegistry();
     await cell.rearmAlarm();
     return json({ ok: true });
+  }
+  if (p === "/pause" && request.method === "POST") {
+    const a = authz("editor");
+    if (!a.ok) return deny(a);
+    const { workflow, paused } = await request.json().catch(() => ({}));
+    const wf = (m.workflows || []).find((w) => w.name === workflow);
+    if (!wf) return json({ error: `no such workflow in manifest: ${workflow}` }, 404);
+    wf.paused = paused ? true : void 0;
+    cell.setMeta("manifest", JSON.stringify(m));
+    cell.sql.exec("DELETE FROM meta WHERE k = ?", `wf_breaker_${wf.name}`);
+    cell.addEvent(paused ? "workflow.paused" : "workflow.unpaused", `${wf.name}`, { wf: wf.name, by: "manual" });
+    await cell.rearmAlarm();
+    return json({ ok: true, workflow: wf.name, paused: !!wf.paused });
   }
   if (p === "/files" && request.method === "GET") {
     const a = authz("viewer");
@@ -184,9 +216,64 @@ async function apiRoute(cell, request, url) {
     const wf = (m.workflows || []).find((w) => w.name === workflow);
     if (!wf) return json({ error: `no such workflow in manifest: ${workflow}` }, 404);
     const before = cell.sql.exec("SELECT COALESCE(MAX(id), 0) m FROM events").toArray()[0].m;
-    const out = await cell.runWorkflow(wf, input ?? null);
+    const out = await cell.executeWorkflow(wf, input ?? null, { trigger: "manual" });
     const evs = cell.sql.exec("SELECT id, at, kind, summary FROM events WHERE id > ? ORDER BY id", before).toArray();
-    return json({ ok: !!out.ok, output: out.output ?? null, error: out.error ?? null, events: evs });
+    return json({ ok: !!out.ok, output: out.output ?? null, error: out.error ?? null, runId: out.runId ?? null, events: evs });
+  }
+  if (p === "/replay" && request.method === "POST") {
+    const a = authz("editor");
+    if (!a.ok) return deny(a);
+    const { run: runId } = await request.json().catch(() => ({}));
+    const row = cell.sql.exec("SELECT * FROM runs WHERE id = ?", Number(runId) || 0).toArray()[0];
+    if (!row) return json({ error: `no such run: ${runId}` }, 404);
+    const wf = (m.workflows || []).find((w) => w.name === row.wf);
+    if (!wf) return json({ error: `workflow ${row.wf} is no longer in the manifest` }, 404);
+    let cause = { origin: null, depth: 0 };
+    try {
+      cause = { ...cause, ...JSON.parse(row.cause || "{}") };
+    } catch {
+    }
+    const out = await cell.executeWorkflow(wf, JSON.parse(row.input || "null"), { trigger: "replay", cause: { ...cause, depth: 0, replayOf: row.id } });
+    return json({ ok: !!out.ok, output: out.output ?? null, error: out.error ?? null, runId: out.runId ?? null });
+  }
+  if (p === "/runs" && request.method === "GET") {
+    const a = authz("viewer");
+    if (!a.ok) return deny(a);
+    const status = url.searchParams.get("status");
+    const wfName = url.searchParams.get("wf");
+    const limit = Math.min(parseInt(url.searchParams.get("limit") || "50", 10) || 50, 500);
+    const conds = [];
+    const vals = [];
+    if (status) {
+      conds.push("status = ?");
+      vals.push(status);
+    }
+    if (wfName) {
+      conds.push("wf = ?");
+      vals.push(wfName);
+    }
+    const where = conds.length ? "WHERE " + conds.join(" AND ") : "";
+    const rows = cell.sql.exec(`SELECT * FROM runs ${where} ORDER BY id DESC LIMIT ?`, ...vals, limit).toArray();
+    const counts = {};
+    for (const r of cell.sql.exec("SELECT status, COUNT(*) c FROM runs GROUP BY status").toArray()) counts[r.status] = r.c;
+    return json({
+      runs: rows.map((r) => ({
+        id: r.id,
+        wf: r.wf,
+        via: r.via,
+        status: r.status,
+        attempt: r.attempt,
+        maxAttempts: r.max_attempts,
+        error: r.error || null,
+        startedAt: r.started_at,
+        finishedAt: r.finished_at,
+        durationMs: r.duration_ms,
+        nextAttemptAt: r.next_attempt_at,
+        input: url.searchParams.get("include") === "input" ? JSON.parse(r.input || "null") : void 0,
+        cause: r.cause ? JSON.parse(r.cause) : null
+      })),
+      counts
+    });
   }
   if (p === "/events" && request.method === "GET") {
     const a = authz("viewer");

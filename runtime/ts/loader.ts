@@ -1,5 +1,7 @@
 // Worker Loader machinery: mint/check run tokens, load workflow/app/
-// rooms code, single-flight workflow execution.
+// rooms code, and execute one workflow attempt in a loader isolate.
+// Lifecycle (guards, retries, held) lives in runs.ts; this module only
+// loads and executes.
 import { json, randHex, toAB } from "./util.js";
 import { CTX_SHIM_SOURCE } from "./ctx-shim.js";
 
@@ -101,7 +103,7 @@ export function internalBase(cell) {
 
 // ------ loadCode ------
 
-export async function loadCode(cell, id, mainSource, modules, scope) {
+export async function loadCode(cell, id, mainSource, modules, scope, cause = null) {
   // raw = { "main.mjs": mainSource, "fragment-ctx.mjs": CTX_SHIM_SOURCE, ...modules };
   // Host divergence: celld's loader wants plain-string modules (and accepts
   // .mjs names); CF's loader requires .js/.py names for strings, so on CF
@@ -123,6 +125,8 @@ export async function loadCode(cell, id, mainSource, modules, scope) {
       FRAGMENT_INTERNAL_URL: cell.internalBase(),
       FRAGMENT_RUN_TOKEN: cell.makeToken(scope),
       FRAGMENT_SCOPE: scope.kind,
+      // the run's cause chain, so ctx.http can stamp hop headers
+      ...(cause ? { FRAGMENT_CAUSE: JSON.stringify(cause) } : {}),
       // forwarded by ctx as x-fragment-host-secret; checked by the router
       // on /__internal when the host sets FRAGMENT_HOST_SECRET
       ...(cell.env.FRAGMENT_HOST_SECRET ? { FRAGMENT_HOST_SECRET: cell.env.FRAGMENT_HOST_SECRET } : {}),
@@ -140,35 +144,12 @@ export function collectModules(cell, prefix) {
   return modules;
 }
 
-// ------ runWorkflow ------
+// ------ runWorkflowLocked: one attempt, in a loader isolate ------
+// Called by runs.ts (which owns guards and transitions). Events are
+// appended there, not here — the ledger narrative has one author.
 
-export async function runWorkflow(cell, wf: any, input: any, opts: { auto?: boolean } = {}) {
-  // single-flight: auto-triggered runs (cron/inbox/sync) skip while a
-  // previous run of the same workflow is still active. Overlapping runs
-  // read pre-run state and duplicate each other's work — a loop amplifier
-  // (seen live: the news re-filing pileup). Manual `fragment run` always
-  // proceeds. The lock is a timestamp lease so a crashed run can't wedge
-  // the workflow forever.
-  const lockKey = `wf_lock_${wf.name}`;
-  const leaseMs = 10 * 60_000;
-  const lock = parseInt(cell.getMeta(lockKey) || "0", 10);
-  if (opts.auto && lock && lock > Date.now() - leaseMs) {
-    cell.addEvent("workflow-skipped", `${wf.name}: previous run still active`);
-    return { ok: true, skipped: true };
-  }
-  cell.setMeta(lockKey, String(Date.now()));
-  try {
-    return await cell.runWorkflowLocked(wf, input);
-  } finally {
-    cell.setMeta(lockKey, "");
-  }
-}
-
-// ------ runWorkflowLocked ------
-
-export async function runWorkflowLocked(cell, wf, input) {
+export async function runWorkflowLocked(cell, wf, input, cause = null) {
   const name = cell.getMeta("name");
-  cell.addEvent("workflow-start", `${wf.name}`);
   try {
     const src = cell.getFileText(wf.file);
     if (src === null) throw new Error(`workflow file not found in folder: ${wf.file}`);
@@ -179,15 +160,12 @@ export async function runWorkflowLocked(cell, wf, input) {
       WORKFLOW_MAIN.replaceAll("__WF__", wf.file),
       modules,
       { kind: "run", workflow: wf.name },
+      cause,
     );
     // body IS the workflow input (WORKFLOW_MAIN passes req.json() to run)
     const resp = await ep.fetch("http://loaded/run", { method: "POST", body: JSON.stringify(input ?? null) });
-    const out = await resp.json();
-    if (out.ok) cell.addEvent("workflow-ok", `${wf.name}`, out.output !== null && out.output !== undefined ? { output: out.output } : undefined);
-    else cell.addEvent("workflow-error", `${wf.name}: ${out.error}`);
-    return out;
+    return await resp.json();
   } catch (e) {
-    cell.addEvent("workflow-error", `${wf.name}: ${String(e)}`);
     return { ok: false, error: String(e) };
   }
 }

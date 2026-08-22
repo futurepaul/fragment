@@ -3,6 +3,7 @@
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { npubFromHex, hexFromNpub } from "./bech32.js";
 import { json, randHex, randSlug } from "./util.js";
+import { normalizeManifest } from "./manifest.js";
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
@@ -21,9 +22,9 @@ export async function initCell(cell, request) {
   cell.setMeta("view_token", randSlug(12));
   cell.setMeta("inbox_token", randHex(16));
   cell.setMeta("rev", "0");
-  cell.setMeta("manifest", JSON.stringify({
+  cell.setMeta("manifest", JSON.stringify(normalizeManifest({
     name, visibility: "token", editors: [], viewers: [], workflows: [], secrets: [],
-  }));
+  }).manifest));
   cell.addEvent("create", `fragment ${name} created`);
   return json({ ok: true, npub: cell.getMeta("fragment_npub"), viewToken: cell.getMeta("view_token"), inboxToken: cell.getMeta("inbox_token") });
 }

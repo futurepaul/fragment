@@ -2,14 +2,15 @@
 // All fragment state lives in this cell's SQLite. See ARCHITECTURE.md.
 // The class is the state + dispatch core; route planes and machinery live in
 // sibling modules and are invoked through the delegating methods below.
-import { npubFromHex, hexFromNpub } from "./bech32.js";
+import { npubFromHex } from "./bech32.js";
 import { json, toAB } from "./util.js";
-import { parseCron } from "./cron.js";
 import { initCell, registryRoute, syncRolesToRegistry } from './registry.js';
 import { canonicalUrl, serveRoute, checkVisibility } from './serve.js';
 import { apiRoute } from './api-routes.js';
 import { rearmAlarm, alarm, scheduleSyncTrigger, fireSyncTriggers } from './alarms.js';
-import { makeToken, checkToken, internalBase, loadCode, collectModules, runWorkflow, runWorkflowLocked } from './loader.js';
+import { makeToken, checkToken, internalBase, loadCode, collectModules, runWorkflowLocked } from './loader.js';
+import { executeWorkflow, resumeDueRuns } from './runs.js';
+import { normalizeManifest } from './manifest.js';
 import { internalRoute } from './internal.js';
 import { roomRoute, presenceList, broadcast, webSocketMessage, webSocketClose } from './rooms.js';
 import { SCHEMA, rankOf } from './util.js';
@@ -18,6 +19,8 @@ export class FragmentCell {
   state: any;
   env: any;
   sql: any;
+  _manifest: any = null;
+  _manifestRaw: string | null = null;
   constructor(state: any, env: any) {
     this.state = state;
     this.env = env;
@@ -32,8 +35,14 @@ export class FragmentCell {
     this.sql.exec("INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v", k, String(v));
   }
   manifest() {
+    // decoded once per change: the cache is keyed on the raw string, so any
+    // setMeta("manifest") invalidates it automatically
     const raw = this.getMeta("manifest");
-    return raw ? JSON.parse(raw) : null;
+    if (raw !== this._manifestRaw) {
+      this._manifest = raw ? JSON.parse(raw) : null;
+      this._manifestRaw = raw;
+    }
+    return this._manifest;
   }
   addEvent(kind, summary, data) {
     this.sql.exec("INSERT INTO events (at, kind, summary, data) VALUES (?, ?, ?, ?)",
@@ -74,21 +83,8 @@ export class FragmentCell {
     }
   }
   validateManifest(m) {
-    if (!m || typeof m !== "object") return "manifest must be a JSON object";
-    if (!["public", "viewers", "token"].includes(m.visibility)) return "visibility must be public|viewers|token";
-    for (const k of ["editors", "viewers"]) {
-      if (!Array.isArray(m[k])) return `${k} must be an array of npubs`;
-      for (const n of m[k]) { try { hexFromNpub(n); } catch { return `bad npub in ${k}: ${n}`; } }
-    }
-    if (!Array.isArray(m.workflows)) return "workflows must be an array";
-    for (const wf of m.workflows) {
-      if (!wf.name || !wf.file) return "each workflow needs name + file";
-      // neither cron nor trigger = manual-only workflow (fragment run)
-      if (wf.cron) { try { parseCron(wf.cron); } catch (e) { return `workflow ${wf.name}: ${e.message}`; } }
-      if (wf.trigger && wf.trigger !== "inbox" && wf.trigger !== "sync") return `workflow ${wf.name}: unknown trigger ${wf.trigger}`;
-    }
-    if (!Array.isArray(m.secrets)) return "secrets must be an array of names";
-    return null;
+    // the TypeBox schema in manifest.ts is the single source of truth
+    return normalizeManifest(m).error || null;
   }
   getFileRow(path) {
     return this.sql.exec("SELECT content, rev, sha256 FROM files WHERE path = ? AND deleted = 0", path).toArray()[0] || null;
@@ -113,10 +109,11 @@ export class FragmentCell {
   makeToken(scope) { return makeToken(this, scope); }
   checkToken(request) { return checkToken(this, request); }
   internalBase() { return internalBase(this); }
-  async loadCode(id, mainSource, modules, scope) { return loadCode(this, id, mainSource, modules, scope); }
+  async loadCode(id, mainSource, modules, scope, cause = null) { return loadCode(this, id, mainSource, modules, scope, cause); }
   collectModules(prefix) { return collectModules(this, prefix); }
-  async runWorkflow(wf, input, opts = {}) { return runWorkflow(this, wf, input, opts); }
-  async runWorkflowLocked(wf, input) { return runWorkflowLocked(this, wf, input); }
+  async runWorkflowLocked(wf, input, cause = null) { return runWorkflowLocked(this, wf, input, cause); }
+  async executeWorkflow(wf, input, opts = {}) { return executeWorkflow(this, wf, input, opts); }
+  async resumeDueRuns() { return resumeDueRuns(this); }
   async internalRoute(request, url) { return internalRoute(this, request, url); }
   async roomRoute(request, url) { return roomRoute(this, request, url); }
   presenceList(room) { return presenceList(this, room); }
