@@ -98,18 +98,40 @@ async function loadCode(cell, id, mainSource, modules, scope, cause = null) {
   }));
   return worker.getEntrypoint ? worker.getEntrypoint() : worker;
 }
-function collectModules(cell, prefix) {
-  const rows = cell.sql.exec("SELECT path, content FROM files WHERE path LIKE ? AND deleted = 0", prefix + "%").toArray();
+function collectModules(cell, prefixes) {
+  const list = Array.isArray(prefixes) ? prefixes : [prefixes];
   const modules = {};
-  for (const r of rows) modules[r.path] = new TextDecoder().decode(toAB(r.content));
+  for (const prefix of list) {
+    const rows = cell.sql.exec("SELECT path, content FROM files WHERE path LIKE ? AND deleted = 0", prefix + "%").toArray();
+    for (const r of rows) modules[r.path] = new TextDecoder().decode(toAB(r.content));
+  }
   return modules;
+}
+function rewriteRelatives(src, fromKey) {
+  const resolve = (spec) => {
+    const parts = spec.split("/");
+    if (parts[0] !== "." && parts[0] !== "..") return null;
+    const stack = fromKey.split("/").slice(0, -1);
+    for (const p of parts) {
+      if (p === ".") continue;
+      else if (p === "..") stack.pop();
+      else stack.push(p);
+    }
+    return stack.join("/");
+  };
+  const sub = (_m, pre, q, spec) => {
+    const r = resolve(spec);
+    return r === null ? _m : pre + q + r + q;
+  };
+  return src.replace(/(\bfrom\s*)(["'])(\.[^"']+)\2/g, sub).replace(/(\bimport\s*)(["'])(\.[^"']+)\2/g, sub).replace(/(\bimport\s*\(\s*)(["'])(\.[^"']+)\2/g, sub);
 }
 async function runWorkflowLocked(cell, wf, input, cause = null) {
   const name = cell.getMeta("name");
   try {
     const src = cell.getFileText(wf.file);
     if (src === null) throw new Error(`workflow file not found in folder: ${wf.file}`);
-    const modules = cell.collectModules("workflows/");
+    const modules = collectModules(cell, ["workflows/", "lib/"]);
+    for (const k of Object.keys(modules)) modules[k] = rewriteRelatives(modules[k], k);
     const rev = cell.getMeta("rev");
     const ep = await cell.loadCode(
       `wf:${name}:${wf.name}:${rev}`,
@@ -133,5 +155,6 @@ export {
   internalBase,
   loadCode,
   makeToken,
+  rewriteRelatives,
   runWorkflowLocked
 };

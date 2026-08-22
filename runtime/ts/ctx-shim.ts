@@ -20,12 +20,15 @@ export async function makeCtx(env) {
   // await the fetch. Served apps (scope "draft") almost never touch secrets,
   // and every request through the app used to pay a loopback for them — so
   // for draft scope the fetch runs in the background and fills the object
-  // in when it lands.
+  // in when it lands. Apps that DO read secrets should await
+  // ctx.secrets.ready first (found live: an agent-built app read the
+  // racing object and called it "unreliable").
   const secretsAll = {};
   if (scope === "run") {
     Object.assign(secretsAll, await call("/secrets/all").then((r) => r.json()).catch(() => ({})));
+    secretsAll.ready = Promise.resolve({});
   } else {
-    call("/secrets/all").then((r) => r.json()).then((s) => Object.assign(secretsAll, s)).catch(() => {});
+    secretsAll.ready = call("/secrets/all").then((r) => r.json()).then((s) => Object.assign(secretsAll, s)).catch(() => {});
   }
   const ctx = {
     // plain fetch, plus the cause chain: inside a run, every outbound

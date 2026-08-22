@@ -1,6 +1,6 @@
 // lib/poll.mjs — the cron-poller recipe, done transactionally.
 //
-//   import { poll } from "./lib/poll.mjs";
+//   import { poll } from "../lib/poll.mjs";
 //   await poll(ctx, {
 //     key: "vault",                      // per-workflow cursor namespace
 //     fetch: async () => items,          // the source's current items

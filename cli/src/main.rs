@@ -353,7 +353,7 @@ fn main() -> Result<()> {
                 std::fs::write(&target, bytes)?;
                 println!("  lib/{rel}");
             }
-            println!("import with: import {{ poll }} from \"./lib/poll.mjs\" (or once)");
+            println!("import with: from a workflow, import {{ poll }} from \"../lib/poll.mjs\" (or once)");
             return Ok(());
         }
         Cmd::Create { name } => {

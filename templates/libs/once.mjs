@@ -1,6 +1,6 @@
 // lib/once.mjs — run an effect exactly once per key.
 //
-//   import { once } from "./lib/once.mjs";
+//   import { once } from "../lib/once.mjs";
 //   const r = await once(ctx, `notify:${item.id}`, async () => {
 //     await ctx.http(webhook, { method: "POST", body: JSON.stringify(item) });
 //   });

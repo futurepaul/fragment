@@ -547,6 +547,22 @@ async function runsSection() {
     await waitRuns(name, (b) => (b.counts || {}).success === 1, 'exactly one run for two deliveries');
   }
 
+  // workflow imports: Node-style relative specifiers (./sibling, ../lib/x)
+  // and map paths must all instantiate — the loader is root-relative only,
+  // the runtime rewrites relatives at load time
+  {
+    const { name } = await mkFrag('imports', null);
+    await putFile(name, 'workflows/helper.mjs', 'export const tag = "helper-ok";\n');
+    await putFile(name, 'lib/other.mjs', 'export const tag = "lib-ok";\n');
+    await putFile(name, 'workflows/w.mjs',
+      'import { tag as a } from "./helper.mjs";\nimport { tag as b } from "../lib/other.mjs";\nimport { tag as c } from "workflows/helper.mjs";\nexport async function run(ctx) { return { a, b, c }; }\n');
+    await putManifest(name, { workflows: [{ name: 'w', file: 'workflows/w.mjs' }] });
+    const run = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'w' }));
+    eq(run.body?.output?.a, 'helper-ok', 'relative sibling import works in workflows');
+    eq(run.body?.output?.b, 'lib-ok', '../lib import works in workflows (fragment add recipes)');
+    eq(run.body?.output?.c, 'helper-ok', 'map-path import still works');
+  }
+
   // single-flight for level-triggered sources: a pending retry absorbs the
   // next sync trigger (skipped), then the retry lands held
   {

@@ -137,11 +137,42 @@ export async function loadCode(cell, id, mainSource, modules, scope, cause = nul
 
 // ------ collectModules ------
 
-export function collectModules(cell, prefix) {
-  const rows = cell.sql.exec("SELECT path, content FROM files WHERE path LIKE ? AND deleted = 0", prefix + "%").toArray();
-  const modules = {};
-  for (const r of rows) modules[r.path] = new TextDecoder().decode(toAB(r.content));
+export function collectModules(cell, prefixes: string | string[]) {
+  const list = Array.isArray(prefixes) ? prefixes : [prefixes];
+  const modules: Record<string, string> = {};
+  for (const prefix of list) {
+    const rows = cell.sql.exec("SELECT path, content FROM files WHERE path LIKE ? AND deleted = 0", prefix + "%").toArray();
+    for (const r of rows) modules[r.path] = new TextDecoder().decode(toAB(r.content));
+  }
   return modules;
+}
+
+// The loader resolves import specifiers root-relative ("./x" → "x"), with no
+// directory awareness — a `./helper.mjs` inside workflows/foo.mjs dials a
+// nonexistent module and dies with "instantiate: <none>". Authors (and
+// agents) write Node-style relative imports, so rewrite them against the
+// importing module's directory before the code reaches the loader. Map-path
+// imports ("workflows/helper.mjs", "lib/poll.mjs") pass through untouched.
+export function rewriteRelatives(src: string, fromKey: string): string {
+  const resolve = (spec: string) => {
+    const parts = spec.split("/");
+    if (parts[0] !== "." && parts[0] !== "..") return null;
+    const stack = fromKey.split("/").slice(0, -1);
+    for (const p of parts) {
+      if (p === ".") continue;
+      else if (p === "..") stack.pop();
+      else stack.push(p);
+    }
+    return stack.join("/");
+  };
+  const sub = (_m, pre, q, spec) => {
+    const r = resolve(spec);
+    return r === null ? _m : pre + q + r + q;
+  };
+  return src
+    .replace(/(\bfrom\s*)(["'])(\.[^"']+)\2/g, sub)                    // import x from / export … from
+    .replace(/(\bimport\s*)(["'])(\.[^"']+)\2/g, sub)                  // side-effect import "…"
+    .replace(/(\bimport\s*\(\s*)(["'])(\.[^"']+)\2/g, sub);            // dynamic import(…)
 }
 
 // ------ runWorkflowLocked: one attempt, in a loader isolate ------
@@ -153,7 +184,9 @@ export async function runWorkflowLocked(cell, wf, input, cause = null) {
   try {
     const src = cell.getFileText(wf.file);
     if (src === null) throw new Error(`workflow file not found in folder: ${wf.file}`);
-    const modules = cell.collectModules("workflows/");
+    // workflows/ plus lib/ (the `fragment add` recipes live there)
+    const modules = collectModules(cell, ["workflows/", "lib/"]);
+    for (const k of Object.keys(modules)) modules[k] = rewriteRelatives(modules[k], k);
     const rev = cell.getMeta("rev");
     const ep = await cell.loadCode(
       `wf:${name}:${wf.name}:${rev}`,
