@@ -16,7 +16,7 @@ use std::path::PathBuf;
 const GUIDE: &str = include_str!("../GUIDE.md");
 
 #[derive(Parser)]
-#[command(name = "fragment", about = "make and run fragments: folder + sqlite + urls + workflows, on celld")]
+#[command(name = "fragment", version, about = "make and run fragments: folder + sqlite + urls + workflows, on celld")]
 struct Cli {
     /// Host base URL (else FRAGMENT_HOST, else config, else http://127.0.0.1:8789)
     #[arg(long, global = true)]
