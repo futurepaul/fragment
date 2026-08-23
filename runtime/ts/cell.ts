@@ -37,10 +37,13 @@ export class FragmentCell {
   }
   manifest() {
     // decoded once per change: the cache is keyed on the raw string, so any
-    // setMeta("manifest") invalidates it automatically
+    // setMeta("manifest") invalidates it automatically. The legacy
+    // visibility literal migrates here too — a stored "token" must behave
+    // as "link" without requiring a re-PUT.
     const raw = this.getMeta("manifest");
     if (raw !== this._manifestRaw) {
       this._manifest = raw ? JSON.parse(raw) : null;
+      if (this._manifest && this._manifest.visibility === "token") this._manifest.visibility = "link";
       this._manifestRaw = raw;
     }
     return this._manifest;
