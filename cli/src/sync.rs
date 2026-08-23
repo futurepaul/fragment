@@ -590,7 +590,7 @@ fn resolve_conflict(
         _ => None,
     };
 
-    match try_merge(base.as_deref(), &ours, &theirs, path) {
+    match try_merge(base.as_deref(), &ours, &theirs) {
         MergeOutcome::Clean(merged) => {
             atomic_write(&dir.join(path), &merged)?;
             let sha = sha256_hex(&merged);
@@ -641,7 +641,7 @@ enum MergeOutcome {
     NotMergeable,
 }
 
-fn try_merge(base: Option<&[u8]>, ours: &[u8], theirs: &[u8], path: &str) -> MergeOutcome {
+fn try_merge(base: Option<&[u8]>, ours: &[u8], theirs: &[u8]) -> MergeOutcome {
     let base = match base {
         Some(b) => b,
         None => return MergeOutcome::NotMergeable, // no ancestor → copy
@@ -654,72 +654,14 @@ fn try_merge(base: Option<&[u8]>, ours: &[u8], theirs: &[u8], path: &str) -> Mer
         (Ok(b), Ok(o), Ok(t)) => (b.replace("\r\n", "\n"), o.replace("\r\n", "\n"), t.replace("\r\n", "\n")),
         _ => return MergeOutcome::NotMergeable,
     };
-    // JSON files: key-level merge (ours wins scalar conflicts)
-    if path.ends_with(".json") {
-        if let (Ok(bv), Ok(ov), Ok(tv)) = (serde_json::from_str::<Value>(&b), serde_json::from_str::<Value>(&o), serde_json::from_str::<Value>(&t)) {
-            if let Value::Object(bm) = bv {
-                let (Some(Value::Object(om)), Some(Value::Object(tm))) = (serde_json::from_str::<Value>(&o).ok(), serde_json::from_str::<Value>(&t).ok()) else {
-                    return MergeOutcome::NotMergeable;
-                };
-                let merged = json_merge(&bm, &om, &tm);
-                if let Ok(s) = serde_json::to_string_pretty(&merged) {
-                    return MergeOutcome::Clean(s.into_bytes());
-                }
-            }
-            return MergeOutcome::NotMergeable;
-        }
-    }
-    // diffy 0.5: Err(conflicted) carries the full merge WITH <<<<<<< markers
+    // diffy 0.5: Err(conflicted) carries the full merge WITH <<<<<<< markers.
+    // JSON gets no special treatment: a key-level "smart" merge was cut —
+    // zero uses ever, and silently dropping the other side's scalar loses
+    // data without a sound. JSON conflicts get loud markers like any text.
     match diffy::merge(&b, &o, &t) {
         Ok(m) => MergeOutcome::Clean(m.into_bytes()),
         Err(conflicted) => MergeOutcome::Markers(conflicted.into_bytes()),
     }
-}
-
-/// recursive object merge: keys changed from base win per side; scalar
-/// conflicts (both changed differently) resolve to ours
-fn json_merge(base: &serde_json::Map<String, Value>, ours: &serde_json::Map<String, Value>, theirs: &serde_json::Map<String, Value>) -> Value {
-    use serde_json::Map;
-    let mut out = Map::new();
-    let mut keys: Vec<&String> = base.keys().chain(ours.keys().chain(theirs.keys())).collect();
-    keys.sort();
-    keys.dedup();
-    for k in keys {
-        let b = base.get(k);
-        let o = ours.get(k);
-        let t = theirs.get(k);
-        let v = match (o, t) {
-            (Some(o), Some(t)) if o == t => o.clone(),
-            (Some(o), None) => {
-                if t.is_none() && b.is_some() && base.get(k) == Some(o) {
-                    // unchanged locally, deleted remotely → delete
-                    continue;
-                }
-                o.clone()
-            }
-            (None, Some(t)) => {
-                if o.is_none() && b.is_some() && base.get(k) == Some(t) {
-                    t.clone() // deleted locally, unchanged remotely → delete
-                } else {
-                    t.clone()
-                }
-            }
-            (None, None) => continue,
-            (Some(o), Some(t)) => match (b, o, t) {
-                (Some(b), _, _) if b == t => o.clone(), // only ours changed
-                (Some(b), _, _) if b == o => t.clone(), // only theirs changed
-                _ => {
-                    if let (Some(bo), Some(oo), Some(to)) = (b.and_then(|v| v.as_object()), o.as_object(), t.as_object()) {
-                        json_merge(bo, oo, to)
-                    } else {
-                        o.clone() // scalar conflict → ours
-                    }
-                }
-            },
-        };
-        out.insert(k.clone(), v);
-    }
-    Value::Object(out)
 }
 
 /// full-hash audit: local truth vs remote listing
@@ -789,22 +731,11 @@ mod tests {
     }
 
     #[test]
-    fn json_merge_disjoint_keys() {
-        let b: Value = serde_json::from_str(r#"{"a":1,"shared":"base"}"#).unwrap();
-        let o: Value = serde_json::from_str(r#"{"a":1,"shared":"base","ours":"x"}"#).unwrap();
-        let t: Value = serde_json::from_str(r#"{"a":2,"shared":"base","theirs":"y"}"#).unwrap();
-        let m = json_merge(b.as_object().unwrap(), o.as_object().unwrap(), t.as_object().unwrap());
-        assert_eq!(m["ours"], "x");
-        assert_eq!(m["theirs"], "y");
-        assert_eq!(m["a"], 2); // only theirs changed a
-    }
-
-    #[test]
     fn merge3_non_overlapping() {
         let base = "line1\nline2\nline3\n";
         let ours = "OURS\nline2\nline3\n";
         let theirs = "line1\nline2\nTHEIRS\n";
-        match try_merge(Some(base.as_bytes()), ours.as_bytes(), theirs.as_bytes(), "x.md") {
+        match try_merge(Some(base.as_bytes()), ours.as_bytes(), theirs.as_bytes()) {
             MergeOutcome::Clean(m) => {
                 let s = String::from_utf8(m).unwrap();
                 assert!(s.contains("OURS"));
@@ -820,7 +751,7 @@ mod tests {
         let base = "line\n";
         let ours = "ours-version\n";
         let theirs = "theirs-version\n";
-        match try_merge(Some(base.as_bytes()), ours.as_bytes(), theirs.as_bytes(), "x.md") {
+        match try_merge(Some(base.as_bytes()), ours.as_bytes(), theirs.as_bytes()) {
             MergeOutcome::Markers(m) => assert!(String::from_utf8(m).unwrap().contains("<<<<<<<")),
             _ => panic!("expected markers"),
         }
