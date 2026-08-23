@@ -573,8 +573,9 @@ back into your folder by the next sync.
    disagrees, the log is right.
 2. **Deploy freely, preview deliberately.** Snapshots are cheap and unguessable;
    `--preview` when you want to look before going live.
-3. **Secrets by name only.** `fragment secret set` reads from the environment
-   or stdin — never put values in files, manifests, or notes.
+3. **Secrets by name only.** `fragment secret set <name> <KEY> <value>`
+   (value may also come from the env var or stdin) — never put values in
+   files, manifests, or notes.
 4. **One fragment, one problem.** If a folder grows a second job, make a
    second fragment. They're free when asleep.
 5. **Small files, plain formats.** Markdown, JSON, CSV. Anything an agent can

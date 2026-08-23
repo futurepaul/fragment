@@ -188,7 +188,8 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum SecretCmd {
-    Set { name: String, key: String },
+    /// Set: value from argv, else env var of the same name, else stdin
+    Set { name: String, key: String, value: Option<String> },
     List { name: String },
     Rm { name: String, key: String },
 }
@@ -424,10 +425,7 @@ fn main() -> Result<()> {
             rebuild_state, no_live, install, uninstall,
         } => {
             if install || uninstall {
-                if let Some(m) = &mirror_from {
-                    std::env::set_var("FRAGMENT_MIRROR_FROM", m);
-                }
-                install_sync_unit(&name, &dir, install, std::env::var("FRAGMENT_MIRROR_FROM").ok().as_deref())?;
+                install_sync_unit(&name, &dir, install, mirror_from.as_deref().and_then(|p| p.to_str()))?;
                 return Ok(());
             }
             if rebuild_state {
@@ -730,15 +728,20 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Secret { sub } => match sub {
-            SecretCmd::Set { name, key } => {
-                let value = match std::env::var(&key) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        eprint!("value for {key} (stdin): ");
-                        let mut buf = String::new();
-                        std::io::stdin().read_to_string(&mut buf)?;
-                        buf.trim().to_string()
-                    }
+            SecretCmd::Set { name, key, value: argv_value } => {
+                // value from argv, else env var of the same name, else stdin
+                let value = match argv_value {
+                    Some(v) if !v.is_empty() => v,
+                    None => match std::env::var(&key) {
+                        Ok(v) if !v.is_empty() => v,
+                        _ => {
+                            eprint!("value for {key} (stdin): ");
+                            let mut buf = String::new();
+                            std::io::stdin().read_to_string(&mut buf)?;
+                            buf.trim().to_string()
+                        }
+                    },
+                    Some(_) => String::new(),
                 };
                 if value.is_empty() {
                     anyhow::bail!("empty secret value");
