@@ -98,6 +98,24 @@ async function apiRoute(cell, request, url) {
     await cell.rearmAlarm();
     return json({ ok: true });
   }
+  if (p === "/manifest/check" && request.method === "POST") {
+    const a = authz("viewer");
+    if (!a.ok) return deny(a);
+    const want = await request.json().catch(() => null);
+    const res = normalizeManifest(want);
+    if (res.error) return json({ error: res.error }, 400);
+    res.manifest.name = m.name;
+    const canon = (v) => {
+      if (Array.isArray(v)) return v.map(canon);
+      if (v && typeof v === "object") {
+        const out = {};
+        for (const k of Object.keys(v).sort()) out[k] = canon(v[k]);
+        return out;
+      }
+      return v;
+    };
+    return json({ differs: JSON.stringify(canon(m)) !== JSON.stringify(canon(res.manifest)), wanted: res.manifest });
+  }
   if (p === "/pause" && request.method === "POST") {
     const a = authz("editor");
     if (!a.ok) return deny(a);

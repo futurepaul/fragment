@@ -29,7 +29,7 @@ const ManifestSchema = Type.Object({
   // vault bot called this out)
   editors: Type.Optional(Type.Array(Type.String())),
   viewers: Type.Optional(Type.Array(Type.String())),
-  workflows: Type.Array(WorkflowSchema),
+  workflows: Type.Optional(Type.Array(WorkflowSchema)),
   secrets: Type.Optional(Type.Array(Type.String())),
   liveFiles: Type.Optional(Type.Boolean()),
   // append-only prefixes: writers may add paths under these, never modify
@@ -60,7 +60,7 @@ function normalizeManifest(m) {
     return { error: e ? `manifest${e.path}: ${e.message}` : "manifest does not match schema" };
   }
   const out = Value.Clone(m);
-  for (const k of ["editors", "viewers", "secrets"]) if (out[k] === void 0) out[k] = [];
+  for (const k of ["editors", "viewers", "secrets", "workflows"]) if (out[k] === void 0) out[k] = [];
   for (const k of ["editors", "viewers"]) {
     for (const n of out[k]) {
       try {

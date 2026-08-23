@@ -295,6 +295,25 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
         );
     }
     let manifest = client.call(client.get(&format!("/api/f/{name}/manifest"))?)?;
+    // the manifest-set guard: a fragment.json in the folder that disagrees
+    // with the live manifest means the files deployed but the MACHINERY
+    // (workflows, triggers, visibility, appendOnly) never armed — the #1
+    // silent-deploy trap observed across three agent-eval runs
+    let local_manifest_path = dir.join("fragment.json");
+    if local_manifest_path.exists() {
+        if let Ok(raw) = fs::read_to_string(&local_manifest_path) {
+            if let Ok(local) = serde_json::from_str::<Value>(&raw) {
+                if let Ok(resp) = client.call(client.post_json(&format!("/api/f/{name}/manifest/check"), &local)?) {
+                    if resp["differs"].as_bool() == Some(true) {
+                        eprintln!(
+                            "WARNING: fragment.json in the folder differs from the live manifest — files synced but the machinery (workflows/triggers/visibility) is NOT live.\n  fix: fragment manifest-set {name} {}",
+                            local_manifest_path.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
     let append_only: Vec<String> = manifest["appendOnly"].as_array().cloned().unwrap_or_default().iter().map(|v| v.as_str().unwrap_or("").to_string()).collect();
     let is_append_only = |p: &str| append_only.iter().any(|pre| p == pre.trim_end_matches('/') || p.starts_with(pre.as_str()));
 

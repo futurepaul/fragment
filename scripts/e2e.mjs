@@ -1207,6 +1207,20 @@ async function filesyncSection() {
     ok(deniedCode !== 'open' && deniedCode !== 'timeout', 'watch channel refuses bad tokens');
   }
 
+  // manifest/check: server-normalized drift detection (the manifest-set guard)
+  {
+    const name = `e2e-fs-mchk-${suffix}`;
+    await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    const man = { visibility: 'public', workflows: [] };
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify(man));
+    const same = await signed('POST', `/api/f/${name}/manifest/check`, JSON.stringify(man));
+    eq(same.body?.differs, false, 'manifest/check: identical manifest → no drift');
+    const drifted = await signed('POST', `/api/f/${name}/manifest/check`, JSON.stringify({ visibility: 'token', workflows: [{ name: 'w', file: 'workflows/w.mjs', cron: '* * * * *' }] }));
+    eq(drifted.body?.differs, true, 'manifest/check: drifted manifest detected');
+    const defaulted = await signed('POST', `/api/f/${name}/manifest/check`, JSON.stringify({ visibility: 'public' }));
+    eq(defaulted.body?.differs, false, 'manifest/check: omitted defaults are not drift');
+  }
+
   // ---- CLI: the whole stage-0/1/2 surface ----
   const bin = findBinary();
   if (!bin) {
