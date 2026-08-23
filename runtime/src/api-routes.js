@@ -284,6 +284,7 @@ async function apiRoute(cell, request, url) {
     } catch {
     }
     const out = await cell.executeWorkflow(wf, JSON.parse(row.input || "null"), { trigger: "replay", cause: { ...cause, depth: 0, replayOf: row.id } });
+    if (out.ok) cell.sql.exec("UPDATE runs SET status = 'replayed' WHERE id = ? AND status = 'held'", row.id);
     return json({ ok: !!out.ok, output: out.output ?? null, error: out.error ?? null, runId: out.runId ?? null });
   }
   if (p === "/runs" && request.method === "GET") {

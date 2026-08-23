@@ -24,36 +24,39 @@ async function rearmAlarm(cell) {
   else await cell.state.storage.deleteAlarm();
 }
 async function alarm(cell) {
-  const m = cell.manifest();
-  if (!m) return;
-  await cell.fireSyncTriggers(m);
-  const cronState = JSON.parse(cell.getMeta("cron_state") || "{}");
-  const now = Date.now();
-  for (const wf of m.workflows || []) {
-    if (!wf.cron) continue;
-    let parsed;
-    try {
-      parsed = parseCron(wf.cron);
-    } catch {
-      continue;
+  try {
+    const m = cell.manifest();
+    if (!m) return;
+    await cell.fireSyncTriggers(m);
+    const cronState = JSON.parse(cell.getMeta("cron_state") || "{}");
+    const now = Date.now();
+    for (const wf of m.workflows || []) {
+      if (!wf.cron) continue;
+      let parsed;
+      try {
+        parsed = parseCron(wf.cron);
+      } catch {
+        continue;
+      }
+      const last = cronState[wf.name];
+      let dueAt = null;
+      if (last === void 0) {
+        if (cronMatches(parsed, new Date(now))) dueAt = Math.floor(now / 6e4) * 6e4;
+      } else {
+        const t = nextRun(parsed, last);
+        if (t !== null && t <= now) dueAt = t;
+      }
+      if (dueAt !== null) {
+        await cell.executeWorkflow(wf, { cron: wf.cron, scheduledTime: dueAt }, { auto: true, trigger: "cron" });
+        cronState[wf.name] = dueAt;
+        cell.setMeta("cron_state", JSON.stringify(cronState));
+      }
     }
-    const last = cronState[wf.name];
-    let dueAt = null;
-    if (last === void 0) {
-      if (cronMatches(parsed, new Date(now))) dueAt = Math.floor(now / 6e4) * 6e4;
-    } else {
-      const t = nextRun(parsed, last);
-      if (t !== null && t <= now) dueAt = t;
-    }
-    if (dueAt !== null) {
-      await cell.executeWorkflow(wf, { cron: wf.cron, scheduledTime: dueAt }, { auto: true, trigger: "cron" });
-      cronState[wf.name] = dueAt;
-      cell.setMeta("cron_state", JSON.stringify(cronState));
-    }
+    await cell.resumeDueRuns();
+    await drainNotify(cell);
+  } finally {
+    await cell.rearmAlarm();
   }
-  await cell.resumeDueRuns();
-  await drainNotify(cell);
-  await cell.rearmAlarm();
 }
 async function scheduleSyncTrigger(cell, path) {
   const m = cell.manifest();

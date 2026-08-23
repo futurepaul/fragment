@@ -439,6 +439,9 @@ export async function run(ctx) {
 POST {host}/api/f/{name}/inbox?t={inboxToken}   {"source": "grafana", "payload": {"alert": "disk 90%"}}
 ```
 
+`{host}` is always the MAIN host — subdomains serve the site only, and
+`/api` there answers 403.
+
 When you control the HTTP client, prefer sending the token as the
 `x-fragment-inbox-token` header instead of `?t=` — same result, but the
 secret stays out of access logs.
@@ -504,7 +507,9 @@ Browser side — the fragment serves its own client at `__rt.js`:
 </script>
 ```
 
-The traps, plainly: **the initial state comes in `hello`, not in a `state`
+The traps, plainly: **messages echo to their sender too** (every client
+in the room, including yours, receives the broadcast — dedupe by client id
+or your own message id). **The initial state comes in `hello`, not in a `state`
 event** — if you only listen for `state` your UI sits empty until somebody
 changes something. And `msg.data` is whatever the sender passed to
 `room.send(...)` — the envelope is `{from, data, at}`.

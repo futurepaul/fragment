@@ -35,32 +35,40 @@ export async function rearmAlarm(cell) {
 // ------ alarm ------
 
 export async function alarm(cell) {
-  const m = cell.manifest();
-  if (!m) return;
-  await cell.fireSyncTriggers(m);
-  const cronState = JSON.parse(cell.getMeta("cron_state") || "{}");
-  const now = Date.now();
-  for (const wf of m.workflows || []) {
-    if (!wf.cron) continue; // paused is a guard inside executeWorkflow, recorded as a blocked run
-    let parsed;
-    try { parsed = parseCron(wf.cron); } catch { continue; }
-    const last = cronState[wf.name];
-    let dueAt = null;
-    if (last === undefined) {
-      if (cronMatches(parsed, new Date(now))) dueAt = Math.floor(now / 60000) * 60000;
-    } else {
-      const t = nextRun(parsed, last);
-      if (t !== null && t <= now) dueAt = t;
+  // THE DO ALARM RULE: always re-arm, even when the body throws. A throw
+  // anywhere below used to leave no future alarm scheduled — cron died
+  // silently while status kept computing a healthy nextAt (found live:
+  // relay-vault's sweep dead ~18h after host churn, revived only by a
+  // node restart). The finally is the whole fix.
+  try {
+    const m = cell.manifest();
+    if (!m) return;
+    await cell.fireSyncTriggers(m);
+    const cronState = JSON.parse(cell.getMeta("cron_state") || "{}");
+    const now = Date.now();
+    for (const wf of m.workflows || []) {
+      if (!wf.cron) continue; // paused is a guard inside executeWorkflow, recorded as a blocked run
+      let parsed;
+      try { parsed = parseCron(wf.cron); } catch { continue; }
+      const last = cronState[wf.name];
+      let dueAt = null;
+      if (last === undefined) {
+        if (cronMatches(parsed, new Date(now))) dueAt = Math.floor(now / 60000) * 60000;
+      } else {
+        const t = nextRun(parsed, last);
+        if (t !== null && t <= now) dueAt = t;
+      }
+      if (dueAt !== null) {
+        await cell.executeWorkflow(wf, { cron: wf.cron, scheduledTime: dueAt }, { auto: true, trigger: "cron" });
+        cronState[wf.name] = dueAt;
+        cell.setMeta("cron_state", JSON.stringify(cronState));
+      }
     }
-    if (dueAt !== null) {
-      await cell.executeWorkflow(wf, { cron: wf.cron, scheduledTime: dueAt }, { auto: true, trigger: "cron" });
-      cronState[wf.name] = dueAt;
-      cell.setMeta("cron_state", JSON.stringify(cronState));
-    }
+    await cell.resumeDueRuns();
+    await drainNotify(cell);
+  } finally {
+    await cell.rearmAlarm();
   }
-  await cell.resumeDueRuns();
-  await drainNotify(cell);
-  await cell.rearmAlarm();
 }
 
 // ------ scheduleSyncTrigger ------
