@@ -158,9 +158,6 @@ replaces it. Shape:
   sleep. Cross-fragment loops are bounded: `ctx.http` stamps a hop budget,
   over-deep inbox chains are refused (`cycle.detected`), and >120
   auto-runs/hour trips auto-pause.
-- **freeze**: served apps read the live working copy BY DEFAULT — code
-  frozen in the deploy snapshot, data flowing live. `freeze: true` pins an
-  app to its snapshot instead (the rare, deliberate case).
 - **secrets**: declare names here, set values with `fragment secret set`.
 
 Grants: `fragment grant my-thing --editor npub1… --viewer npub1…`

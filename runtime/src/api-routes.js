@@ -14,11 +14,6 @@ async function apiRoute(cell, request, url) {
   if (p === "/inbox" && request.method === "POST") {
     const presented = request.headers.get("x-fragment-inbox-token") || url.searchParams.get("t") || "";
     if (!safeEqual(presented, cell.getMeta("inbox_token") || "")) return json({ error: "bad inbox token" }, 403);
-    const idemKey = request.headers.get("idempotency-key");
-    if (idemKey) {
-      const prior = cell.sql.exec("SELECT inbox_id FROM idem WHERE key = ? AND at > ?", idemKey, Date.now() - 24 * 36e5).toArray()[0];
-      if (prior) return json({ ok: true, id: prior.inbox_id, deduped: true });
-    }
     const pending = cell.sql.exec("SELECT COUNT(*) c FROM inbox WHERE status = 'pending'").toArray()[0].c;
     if (pending > 1e3) {
       cell.addEvent("queue.rejected", `inbox full (${pending} pending)`, { pending });
@@ -31,7 +26,6 @@ async function apiRoute(cell, request, url) {
       String(body.source || "external"),
       JSON.stringify(body.payload ?? null)
     ).toArray()[0];
-    if (idemKey) cell.sql.exec("INSERT OR REPLACE INTO idem (key, inbox_id, at) VALUES (?, ?, ?)", idemKey, cur.id, Date.now());
     cell.addEvent("inbox", `inbox #${cur.id} from ${body.source || "external"}`);
     const cause = {
       origin: request.headers.get("x-fragment-cause") || null,

@@ -11,18 +11,21 @@ use std::time::Duration;
 
 #[derive(Clone)]
 pub struct WatchConfig {
-    pub debounce_ms: u64,   // default 300, clamp 50–5000
-    pub poll_interval: u64, // poll-watcher fallback cadence, default 5s
-    pub rescan_secs: u64,   // full reconcile sweep cadence, default 60
-    pub backend: String,    // auto | native | poll
-    pub live: bool,         // listen on the cell's __watch channel
+    pub live: bool, // listen on the cell's live change channel
 }
 
 impl Default for WatchConfig {
     fn default() -> Self {
-        WatchConfig { debounce_ms: 300, poll_interval: 5, rescan_secs: 60, backend: "auto".into(), live: true }
+        WatchConfig { live: true }
     }
 }
+
+// tuned constants: event debounce 300ms (max-latency 3x), poll fallback
+// 5s, full sweep every 60s. Nobody ever set the knobs; the defaults are
+// the product now.
+const DEBOUNCE_MS: u64 = 300;
+const POLL_INTERVAL_SECS: u64 = 5;
+const RESCAN_SECS: u64 = 60;
 
 /// paths that never count as content changes
 fn ignored(path: &str) -> bool {
@@ -72,7 +75,7 @@ enum Wakeup {
 
 pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, cfg: &WatchConfig) -> Result<()> {
     let _lock = SyncLock::acquire(dir)?; // one watcher per folder, ever
-    let debounce = Duration::from_millis(cfg.debounce_ms.clamp(50, 5000));
+    let debounce = Duration::from_millis(DEBOUNCE_MS);
     let gate = Arc::new(Debounced { pending: Arc::new(AtomicBool::new(false)), debounce, max_latency: debounce * 3 });
 
     // channel of wakeups (events win over the periodic sweep tick)
@@ -82,12 +85,12 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, cfg: &Wa
     // ---- backend 1: OS events (with poll fallback) ----
     let evt_tx = tx.clone();
     let evt_gate = gate.pending.clone();
-    let use_native = cfg.backend != "poll";
+    let use_native = true;
     let watcher: Option<Box<dyn Send>> = if use_native {
         match spawn_native(dir, evt_tx, evt_gate) {
             Ok(w) => Some(w),
             Err(e) => {
-                eprintln!("warning: native watcher unavailable ({e}); falling back to polling every {}s", cfg.poll_interval);
+                eprintln!("warning: native watcher unavailable ({e}); falling back to polling every {}s", POLL_INTERVAL_SECS);
                 backend_in_use = "poll";
                 None
             }
@@ -98,9 +101,8 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, cfg: &Wa
     };
     if watcher.is_none() {
         let tx2 = tx.clone();
-        let secs = cfg.poll_interval;
         std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_secs(secs));
+            std::thread::sleep(Duration::from_secs(POLL_INTERVAL_SECS));
             let _ = tx2.send(Wakeup::Events);
         });
     }
@@ -122,14 +124,14 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, cfg: &Wa
     println!(
         "sync {name} ({}) — watch: {backend_in_use}, live: {live_state}, sweep: every {}s",
         dir.display(),
-        cfg.rescan_secs
+        RESCAN_SECS
     );
 
     // ---- main loop: wakeups → one debounced whole-folder pass ----
     let mut last_sweep = std::time::Instant::now();
     loop {
         // block for a wakeup (or the sweep deadline)
-        let timeout = Duration::from_secs(cfg.rescan_secs).saturating_sub(last_sweep.elapsed());
+        let timeout = Duration::from_secs(RESCAN_SECS).saturating_sub(last_sweep.elapsed());
         let got = match rx.recv_timeout(timeout) {
             Ok(w) => Some(w),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Some(Wakeup::Sweep),

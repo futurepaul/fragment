@@ -90,19 +90,7 @@ enum Cmd {
         /// Delete local state and start fresh (folder moved/replaced)
         #[arg(long)]
         rebuild_state: bool,
-        /// Watch tuning: event debounce ms (50–5000, default 300)
-        #[arg(long)]
-        debounce_ms: Option<u64>,
-        /// Watch tuning: poll fallback interval seconds (default 5)
-        #[arg(long)]
-        poll_interval: Option<u64>,
-        /// Watch tuning: full rescan sweep seconds (default 60)
-        #[arg(long)]
-        rescan_secs: Option<u64>,
-        /// Watch backend: auto (default), native, or poll
-        #[arg(long)]
-        watch_backend: Option<String>,
-        /// Disable the live __watch channel in continuous mode
+        /// Disable the live change channel in continuous mode (sweeps only)
         #[arg(long)]
         no_live: bool,
         /// Install (or, with --uninstall, remove) a LaunchAgent/systemd
@@ -433,8 +421,7 @@ fn main() -> Result<()> {
         }
         Cmd::Sync {
             name, dir, watch, mode, prune, mirror_from, conflict_strategy, apply_mass_delete,
-            rebuild_state, debounce_ms, poll_interval, rescan_secs, watch_backend,
-            no_live, install, uninstall,
+            rebuild_state, no_live, install, uninstall,
         } => {
             if install || uninstall {
                 if let Some(m) = &mirror_from {
@@ -466,13 +453,7 @@ fn main() -> Result<()> {
                 writer_id: c.id.pubkey_hex.chars().take(8).collect(),
             };
             if watch {
-                let cfg = watch::WatchConfig {
-                    debounce_ms: debounce_ms.unwrap_or(300),
-                    poll_interval: poll_interval.unwrap_or(5),
-                    rescan_secs: rescan_secs.unwrap_or(60),
-                    backend: watch_backend.clone().unwrap_or_else(|| "auto".into()),
-                    live: !no_live,
-                };
+                let cfg = watch::WatchConfig { live: !no_live, ..Default::default() };
                 watch::run(&c, &name, &dir, &opts, &cfg)?;
                 return Ok(());
             }

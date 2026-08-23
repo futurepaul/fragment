@@ -24,9 +24,12 @@ export async function makeCtx(env) {
   const secretsAll = {};
   if (scope === "run") {
     Object.assign(secretsAll, await call("/secrets/all").then((r) => r.json()).catch(() => ({})));
-    secretsAll.ready = Promise.resolve({});
   } else {
-    secretsAll.ready = call("/secrets/all").then((r) => r.json()).then((s) => Object.assign(secretsAll, s)).catch(() => {});
+    // served apps: fetched in the background \u2014 a value may be absent for
+    // the first moments after an isolate spins up. Apps that need a
+    // secret at render time should read it from a workflow's output
+    // (files/state), not from ctx.secrets.
+    call("/secrets/all").then((r) => r.json()).then((s) => Object.assign(secretsAll, s)).catch(() => {});
   }
   const ctx = {
     // plain fetch, plus the cause chain: inside a run, every outbound

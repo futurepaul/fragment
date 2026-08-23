@@ -119,7 +119,7 @@ export class FragmentCell {
 
   wipeCell() {
     for (const t of ["meta", "files", "blobs", "file_revisions", "drafts", "draft_files", "secrets",
-      "inbox", "events", "wstate", "rooms", "room_msgs", "run_tokens", "runs", "idem", "notify_outbox"]) {
+      "inbox", "events", "wstate", "rooms", "room_msgs", "run_tokens", "runs", "notify_outbox"]) {
       this.sql.exec(`DELETE FROM ${t}`);
     }
     this._manifest = null;

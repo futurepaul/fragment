@@ -132,7 +132,6 @@ class FragmentCell {
       "room_msgs",
       "run_tokens",
       "runs",
-      "idem",
       "notify_outbox"
     ]) {
       this.sql.exec(`DELETE FROM ${t}`);

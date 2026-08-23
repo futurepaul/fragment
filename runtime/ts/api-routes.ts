@@ -25,12 +25,6 @@ export async function apiRoute(cell, request, url) {
   if (p === "/inbox" && request.method === "POST") {
     const presented = request.headers.get("x-fragment-inbox-token") || url.searchParams.get("t") || "";
     if (!safeEqual(presented, cell.getMeta("inbox_token") || "")) return json({ error: "bad inbox token" }, 403);
-    // idempotency door: a redelivered key never re-runs author code
-    const idemKey = request.headers.get("idempotency-key");
-    if (idemKey) {
-      const prior = cell.sql.exec("SELECT inbox_id FROM idem WHERE key = ? AND at > ?", idemKey, Date.now() - 24 * 3600_000).toArray()[0];
-      if (prior) return json({ ok: true, id: prior.inbox_id, deduped: true });
-    }
     // bounded queue: overload is a 429, not memory pressure
     const pending = cell.sql.exec("SELECT COUNT(*) c FROM inbox WHERE status = 'pending'").toArray()[0].c;
     if (pending > 1000) {
@@ -40,7 +34,6 @@ export async function apiRoute(cell, request, url) {
     const body = await request.json().catch(() => ({}));
     const cur = cell.sql.exec("INSERT INTO inbox (at, source, payload) VALUES (?, ?, ?) RETURNING id",
       Date.now(), String(body.source || "external"), JSON.stringify(body.payload ?? null)).toArray()[0];
-    if (idemKey) cell.sql.exec("INSERT OR REPLACE INTO idem (key, inbox_id, at) VALUES (?, ?, ?)", idemKey, cur.id, Date.now());
     cell.addEvent("inbox", `inbox #${cur.id} from ${body.source || "external"}`);
     // the cause chain: cross-fragment hop budget (cycle guard layer 2)
     const cause = {

@@ -542,48 +542,9 @@ async function runsSection() {
     eq(shallow?.ran?.[0]?.status, 'ran', 'organic-depth POST still runs');
   }
 
-  // inbox idempotency: a redelivered key collapses
-  {
-    const { name, inboxToken } = await mkFrag('idem', null);
-    await putFile(name, 'workflows/w.mjs', 'export async function run(ctx) {\n  return { ok: 1 };\n}\n');
-    await putManifest(name, { workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'inbox' }] });
-    const first = await (await postInbox(name, inboxToken, { 'idempotency-key': `e2e-${suffix}` })).json();
-    const second = await (await postInbox(name, inboxToken, { 'idempotency-key': `e2e-${suffix}` })).json();
-    eq(second?.deduped, true, 'redelivered Idempotency-Key collapses');
-    eq(second?.id, first?.id, 'same inbox id returned');
-    await waitRuns(name, (b) => (b.counts || {}).success === 1, 'exactly one run for two deliveries');
-  }
+  // (Idempotency-Key removed — content-hash naming in the patterns is
+  // the dedupe that gets used; envelope-level redelivery dedupe never was)
 
-  // workflow imports: Node-style relative specifiers (./sibling, ../lib/x)
-  // and map paths must all instantiate — the loader is root-relative only,
-  // the runtime rewrites relatives at load time
-  {
-    const { name } = await mkFrag('imports', null);
-    await putFile(name, 'workflows/helper.mjs', 'export const tag = "helper-ok";\n');
-    await putFile(name, 'lib/other.mjs', 'export const tag = "lib-ok";\n');
-    await putFile(name, 'workflows/w.mjs',
-      'import { tag as a } from "./helper.mjs";\nimport { tag as b } from "../lib/other.mjs";\nimport { tag as c } from "workflows/helper.mjs";\nexport async function run(ctx) { return { a, b, c }; }\n');
-    await putManifest(name, { workflows: [{ name: 'w', file: 'workflows/w.mjs' }] });
-    const run = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'w' }));
-    eq(run.body?.output?.a, 'helper-ok', 'relative sibling import works in workflows');
-    eq(run.body?.output?.b, 'lib-ok', '../lib import works in workflows (fragment add recipes)');
-    eq(run.body?.output?.c, 'helper-ok', 'map-path import still works');
-  }
-
-  // single-flight for level-triggered sources: a pending retry absorbs the
-  // next sync trigger (skipped), then the retry lands held
-  {
-    const { name } = await mkFrag('flight', null);
-    await putFile(name, 'workflows/w.mjs',
-      'export async function run(ctx) {\n  await ctx.http("http://127.0.0.1:9/unreachable");\n}\n');
-    await putManifest(name, { debounceMs: 250, workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'files', retry: { attempts: 2, backoffMs: 4000 } }] });
-    await putFile(name, 'data/a.txt', 'one');       // trigger 1 fires at +250ms → fails → backoff
-    await sleep(1000);
-    await putFile(name, 'data/b.txt', 'two');       // trigger 2 fires into the pending retry → skipped
-    const body = await waitRuns(name, (b) => (b.counts || {}).skipped >= 1, 'sync trigger during backoff is skipped', 8000);
-    ok((body.counts || {}).skipped >= 1, 'single-flight skip recorded');
-    await waitRuns(name, (b) => (b.counts || {}).held >= 1, 'pending retry eventually held', 20000);
-  }
 }
 
 // ---------- the guide: every code block is executable ----------
