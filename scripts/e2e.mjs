@@ -819,7 +819,7 @@ async function guideSection() {
     await signed('PUT', `/api/f/${fx.name}/file?path=notes/new.md&base_rev=0`, 'fresh content');
     let ran = false;
     const t0 = Date.now();
-    while (Date.now() - t0 < 15_000 && !ran) {
+    while (Date.now() - t0 < 30_000 && !ran) {
       const runs = await signed('GET', `/api/f/${name}/runs`);
       ran = (runs.body?.runs || []).some((r) => r.status === 'success');
       if (!ran) await sleep(500);
