@@ -289,6 +289,12 @@ fn mirror_overlay(src: &Path, dir: &Path) -> Result<()> {
         if rel.split('/').any(|seg| seg.starts_with('.') && seg != ".") {
             continue;
         }
+        // the target's own identity and state are never overlaid: a source
+        // folder carrying its own fragment.json must not stomp the
+        // corrected one (restore agents hit exactly this)
+        if rel == "fragment.json" || rel.starts_with(".fragment/") {
+            continue;
+        }
         let target = dir.join(&rel);
         let src_meta = fs::metadata(entry.path())?;
         if let Ok(t) = fs::metadata(&target) {

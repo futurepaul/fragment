@@ -42,6 +42,9 @@ async function internalRoute(cell, request, url) {
       cell.addEvent("write.deduped", path);
       return json({ ok: true, deduped: true, rev: existing.rev });
     }
+    if (path.startsWith("site/")) {
+      cell.addEvent("write.warn", `${path}: workflows writing into site/ serve from the deploy snapshot \u2014 data files belong outside site/`);
+    }
     if (existing && appendOnlyHit(cell, path)) {
       cell.addEvent("write.refused", `${path}: append-only`);
       return json({ error: "append-only", path }, 409);

@@ -81,9 +81,11 @@ impl Client {
                 Err(e) => return Err(e).context("request failed"),
             }
         }
-        let e = last_err.context("request failed (retried)")?;
+        // three connect-level failures in a row: surface the last error
+        // (previously an unreachable!() panicked here — found by restore agents)
+        let e = last_err.context("request failed after retries (host unreachable?)")?;
         let _: reqwest::Error = e;
-        unreachable!("retry loop always sets last_err before failing")
+        return Err(anyhow!("request failed after retries"));
     }
 
     pub fn get(&self, path: &str) -> Result<Resp> {

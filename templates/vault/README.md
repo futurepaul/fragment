@@ -8,11 +8,11 @@ highlighting, a file tree, and a "recent" rail.
 How it works:
 
 - `app.mjs` + `assets/` are the **viewer** (code). They're frozen in whatever
-  draft you `bless`. To upgrade the viewer: edit these files, then
-  `publish` + `bless` again.
+  draft you `go live`. To upgrade the viewer: edit these files, then
+  `deploy` + `go live` again.
 - everything else in the folder is **content** (data). With
-  `"liveFiles": true` in the manifest, synced changes are live: the
-  `notify` workflow (`trigger: "sync"`) pings the `vault` room and open
+  `(apps read live files by default now)` in the manifest, synced changes are live: the
+  `notify` workflow (`trigger: "files"`) pings the `vault` room and open
   viewers refresh their tree in place — new files appear while you watch.
 - `fragment.json` here is just a file; apply it live with
   `fragment manifest-set <name> fragment.json`.

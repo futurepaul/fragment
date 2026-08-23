@@ -150,7 +150,7 @@ async function finishAttempt(cell, wf, runId, attempt, policy, trigger, t0, out)
 async function resumeDueRuns(cell) {
   const m = cell.manifest();
   if (!m) return;
-  const crashed = cell.sql.exec("SELECT * FROM runs WHERE status = 'running' AND started_at < ?", Date.now() - 2e3).toArray();
+  const crashed = cell.sql.exec("SELECT * FROM runs WHERE status = 'running' AND started_at < ?", Date.now() - 6e4).toArray();
   for (const r of crashed) {
     const wf = (m.workflows || []).find((w) => w.name === r.wf);
     if (!wf) {

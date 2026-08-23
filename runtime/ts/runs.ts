@@ -171,9 +171,12 @@ export async function resumeDueRuns(cell) {
   const m = cell.manifest();
   if (!m) return;
 
-  // crashed runs: single-threaded DO means a `running` row seen here died
-  // with its host (restart, eviction). Crashed is retryable.
-  const crashed = cell.sql.exec("SELECT * FROM runs WHERE status = 'running' AND started_at < ?", Date.now() - 2000).toArray();
+  // crashed runs: a `running` row older than the grace window died with
+  // its host (restart, eviction) — or its caller's connection timed out
+  // while the isolate kept going. The grace is generous because a false
+  // sweep duplicates a live run (observed: manual runs with ~1min ctx.ai
+  // latency got misclassified and double-processed).
+  const crashed = cell.sql.exec("SELECT * FROM runs WHERE status = 'running' AND started_at < ?", Date.now() - 60_000).toArray();
   for (const r of crashed) {
     const wf = (m.workflows || []).find((w) => w.name === r.wf);
     if (!wf) { updateRun(cell, r.id, { status: "held", finished_at: Date.now(), error: "workflow removed while run in flight" }); continue; }

@@ -60,6 +60,12 @@ export async function internalRoute(cell, request, url) {
       cell.addEvent("write.deduped", path);
       return json({ ok: true, deduped: true, rev: existing.rev });
     }
+    // static site files serve from the deploy SNAPSHOT — a workflow
+    // writing here updates nothing visitors see (r2-news's silent-empty-
+    // feed failure mode)
+    if (path.startsWith("site/")) {
+      cell.addEvent("write.warn", `${path}: workflows writing into site/ serve from the deploy snapshot — data files belong outside site/`);
+    }
     // workflows inherit append-only constraints: identical rewrites are
     // no-ops (above), modifications under a prefix are refused
     if (existing && appendOnlyHit(cell, path)) {

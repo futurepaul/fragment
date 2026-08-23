@@ -152,7 +152,8 @@ replaces it. Shape:
   names OK; day-of-week 1=Sunday..7=Saturday, 0 is refused). `trigger:
   "inbox"` runs when a message lands; `trigger: "files"` runs when files
   change on the editor plane (coalescing is `debounceMs`, default 4000;
-  workflow writes never re-trigger, so outputs are loop-safe). Neither =
+  workflow writes never re-trigger, so outputs are loop-safe — files-trigger
+  input carries the changed paths at `input.sync.paths`). Neither =
   manual only (`fragment run`). The fragment sleeps between
   runs; the host's durable alarms fire crons — they survive restarts and
   sleep. Cross-fragment loops are bounded: `ctx.http` stamps a hop budget,
