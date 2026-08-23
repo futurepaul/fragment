@@ -61,7 +61,7 @@ export async function makeCtx(env) {
         return (await r.json()).paths;
       },
       // like list(), but returns [{path,size,updatedAt,rev}] (and only ever
-      // sees the working copy's live metadata on liveFiles fragments)
+      // sees the working copy's live metadata — the default, unless frozen)
       async index(prefix = "") {
         const r = await call("/files/list?prefix=" + encodeURIComponent(prefix));
         return (await r.json()).files;

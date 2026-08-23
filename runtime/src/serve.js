@@ -105,11 +105,11 @@ function checkVisibility(cell, request, url) {
   const viaCookie = safeEqual(cookies[ck] || "", token);
   const okToken = viaUrl || viaCookie;
   const setCookie = viaUrl ? `${ck}=${token}; Path=/; Max-Age=604800; HttpOnly; SameSite=Lax` : null;
-  if (m.visibility === "token") {
+  if (m.visibility === "link") {
     if (okToken) return { ok: true, setCookie };
     const role2 = cell.roleOf(request.headers.get("x-fragment-pubkey"));
     if (rankOf(role2) >= 1) return { ok: true };
-    return { ok: false, status: 403, error: "cell fragment needs its ?view= link token" };
+    return { ok: false, status: 403, error: "this fragment is link-only \u2014 open it with its share link (?view=)" };
   }
   const role = cell.roleOf(request.headers.get("x-fragment-pubkey"));
   if (rankOf(role) >= 1) return { ok: true };

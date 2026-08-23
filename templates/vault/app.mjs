@@ -1,7 +1,7 @@
 // fragment vault viewer — serves this folder as a live, browsable site.
 //
 // This file is code: it is frozen in whatever draft you bless. Your notes
-// are data: with "liveFiles": true in the manifest, every read below sees
+// are data: apps read the live working copy by default, so every read below sees
 // the live working copy, so synced folder changes appear on reload without
 // republishing. (Want a new viewer version? Edit, publish, bless.)
 //

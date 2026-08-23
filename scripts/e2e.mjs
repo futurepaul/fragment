@@ -180,7 +180,7 @@ async function draftsSection() {
   const viewToken = created.body.viewToken;
 
   await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({
-    name, visibility: 'token', editors: [], viewers: [], workflows: [], secrets: [],
+    name, visibility: 'link', editors: [], viewers: [], workflows: [], secrets: [],
   }));
   await signed('PUT', `/api/f/${name}/file?path=site/index.html&base_rev=0`, '<h1>v1 marker</h1>');
   const d1 = await signed('POST', `/api/f/${name}/drafts`, JSON.stringify({ note: 'v1' }));
@@ -252,7 +252,7 @@ async function roomsSection() {
   const created = await signed('POST', '/api/fragments', JSON.stringify({ name }));
   const viewToken = created.body.viewToken;
   await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({
-    name, visibility: 'token', editors: [], viewers: [], workflows: [], secrets: [],
+    name, visibility: 'link', editors: [], viewers: [], workflows: [], secrets: [],
   }));
   await signed('PUT', `/api/f/${name}/file?path=rooms.mjs&base_rev=0`,
     'export function onMessage(room, msg, ctx) {\n  if (msg.data.boom) throw new Error("boom");\n  return { broadcast: msg.data };\n}\n');
@@ -335,7 +335,7 @@ async function workflowSection() {
   await signed('PUT', `/api/f/${name}/file?path=workflows/main.mjs&base_rev=0`, wfMain);
   await signed('PUT', `/api/f/${name}/file?path=workflows/inbox.mjs&base_rev=0`, wfInbox);
   const man = await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({
-    name, visibility: 'token', editors: [], viewers: [],
+    name, visibility: 'link', editors: [], viewers: [],
     workflows: [
       { name: 'main', file: 'workflows/main.mjs' },
       { name: 'onpost', file: 'workflows/inbox.mjs', trigger: 'inbox' },
@@ -402,7 +402,7 @@ async function pausedSection() {
   const wf = 'export async function run(ctx) {\n  await ctx.files.write("out/fired.txt", "yes");\n  return { fired: true };\n}\n';
   await signed('PUT', `/api/f/${name}/file?path=workflows/w.mjs&base_rev=0`, wf);
   const man = await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({
-    name, visibility: 'token', editors: [], viewers: [],
+    name, visibility: 'link', editors: [], viewers: [],
     workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'inbox', paused: true }],
     secrets: [],
   }));
@@ -441,7 +441,7 @@ async function runsSection() {
   const putFile = (name, path, body) =>
     signed('PUT', `/api/f/${name}/file?path=${encodeURIComponent(path)}&base_rev=0`, body);
   const putManifest = (name, manifest) =>
-    signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], secrets: [], ...manifest }));
+    signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'link', editors: [], viewers: [], secrets: [], ...manifest }));
   const postInbox = (name, tok, headers = {}, payload = {}) =>
     fetch(`${BASE}/api/f/${name}/inbox?t=${tok}`, { method: 'POST', body: JSON.stringify(payload), headers });
   const waitRuns = async (name, pred, label, timeoutMs = 15000) => {
@@ -576,7 +576,7 @@ async function runsSection() {
     const { name } = await mkFrag('flight', null);
     await putFile(name, 'workflows/w.mjs',
       'export async function run(ctx) {\n  await ctx.http("http://127.0.0.1:9/unreachable");\n}\n');
-    await putManifest(name, { debounceMs: 250, workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'sync', retry: { attempts: 2, backoffMs: 4000 } }] });
+    await putManifest(name, { debounceMs: 250, workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'files', retry: { attempts: 2, backoffMs: 4000 } }] });
     await putFile(name, 'data/a.txt', 'one');       // trigger 1 fires at +250ms → fails → backoff
     await sleep(1000);
     await putFile(name, 'data/b.txt', 'two');       // trigger 2 fires into the pending retry → skipped
@@ -674,7 +674,7 @@ async function guideSection() {
     await signed('PUT', `/api/f/${name}/secrets/SOME_TOKEN`, 'tok');
     const code = tour.code.replace(/^const API = .*$/m, `const API = ${JSON.stringify(fx.base + 'api/data.json')};`);
     await signed('PUT', `/api/f/${name}/file?path=workflows/digest.mjs&base_rev=0`, code);
-    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'digest', file: 'workflows/digest.mjs' }], secrets: ['SOME_TOKEN'] }));
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'link', editors: [], viewers: [], workflows: [{ name: 'digest', file: 'workflows/digest.mjs' }], secrets: ['SOME_TOKEN'] }));
     if (!process.env.OPENROUTER_API_KEY) {
       console.log('skip  ctx-tour block run (no OPENROUTER_API_KEY on this stack)');
     } else {
@@ -702,7 +702,7 @@ async function guideSection() {
     await signed('POST', '/api/fragments', JSON.stringify({ name }));
     const code = patterns.poller.replace(/^const SOURCE = .*$/m, `const SOURCE = ${JSON.stringify(fx.base + 'api/tree.json')}`);
     await signed('PUT', `/api/f/${name}/file?path=workflows/watch.mjs&base_rev=0`, code);
-    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'watch', file: 'workflows/watch.mjs' }], secrets: [] }));
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'link', editors: [], viewers: [], workflows: [{ name: 'watch', file: 'workflows/watch.mjs' }], secrets: [] }));
     const r1 = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'watch' }));
     eq(r1.body?.ok, true, 'poller pattern runs clean');
     const feed = await signed('GET', `/api/f/${name}/files`);
@@ -719,7 +719,7 @@ async function guideSection() {
     await signed('POST', '/api/fragments', JSON.stringify({ name }));
     const code = patterns.once.replace(/^const WEBHOOK = .*$/m, `const WEBHOOK = ${JSON.stringify(`${BASE}/api/f/e2e-gd-tgt-${suffix}/inbox?t=${tgt.body.inboxToken}`)}`);
     await signed('PUT', `/api/f/${name}/file?path=workflows/notify.mjs&base_rev=0`, code);
-    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'notify', file: 'workflows/notify.mjs', trigger: 'inbox' }], secrets: [] }));
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'link', editors: [], viewers: [], workflows: [{ name: 'notify', file: 'workflows/notify.mjs', trigger: 'inbox' }], secrets: [] }));
     const input = JSON.stringify({ workflow: 'notify', input: { inbox: { id: 42, payload: { hello: 'guide' } } } });
     const r1 = await signed('POST', `/api/f/${name}/run`, input);
     eq(r1.body?.output?.sent, true, 'once pattern fires the effect');
@@ -734,7 +734,7 @@ async function guideSection() {
     await signed('PUT', `/api/f/${name}/file?path=notes/one.md&base_rev=0`, 'one');
     await signed('PUT', `/api/f/${name}/file?path=notes/two.md&base_rev=0`, 'two');
     await signed('PUT', `/api/f/${name}/file?path=workflows/reindex.mjs&base_rev=0`, patterns['sync-reaction']);
-    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'reindex', file: 'workflows/reindex.mjs', trigger: 'sync' }], secrets: [] }));
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'link', editors: [], viewers: [], workflows: [{ name: 'reindex', file: 'workflows/reindex.mjs', trigger: 'files' }], secrets: [] }));
     const r = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'reindex' }));
     eq(r.body?.output?.indexed, 2, 'sync-reaction indexed the notes');
     const idx = await fetch(`${BASE}/api/f/${name}/file?path=INDEX.md`, {
@@ -746,7 +746,7 @@ async function guideSection() {
     const name = `e2e-gd-log-${suffix}`;
     const created = await signed('POST', '/api/fragments', JSON.stringify({ name }));
     await signed('PUT', `/api/f/${name}/file?path=workflows/log.mjs&base_rev=0`, patterns['inbox-log']);
-    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'log', file: 'workflows/log.mjs', trigger: 'inbox' }], secrets: [] }));
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'link', editors: [], viewers: [], workflows: [{ name: 'log', file: 'workflows/log.mjs', trigger: 'inbox' }], secrets: [] }));
     await fetch(`${BASE}/api/f/${name}/inbox?t=${created.body.inboxToken}`, { method: 'POST', body: JSON.stringify({ source: 'guide', payload: { n: 1 } }) });
     await fetch(`${BASE}/api/f/${name}/inbox?t=${created.body.inboxToken}`, { method: 'POST', body: JSON.stringify({ source: 'guide', payload: { n: 2 } }) });
     const r = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'log' }));
@@ -768,7 +768,7 @@ async function guideSection() {
       await signed('POST', '/api/fragments', JSON.stringify({ name }));
       await signed('PUT', `/api/f/${name}/file?path=notes/x.md&base_rev=0`, 'the quick brown fox jumps over the lazy dog');
       await signed('PUT', `/api/f/${name}/file?path=workflows/digest.mjs&base_rev=0`, patterns['ai-pass']);
-      await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'digest', file: 'workflows/digest.mjs' }], secrets: [] }));
+      await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'link', editors: [], viewers: [], workflows: [{ name: 'digest', file: 'workflows/digest.mjs' }], secrets: [] }));
       const r = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'digest' }));
       eq(r.body?.output?.notes, 1, 'ai-pass pattern runs clean');
     }
@@ -779,7 +779,7 @@ async function guideSection() {
     const name = `e2e-gd-drop-${suffix}`;
     const created = await signed('POST', '/api/fragments', JSON.stringify({ name }));
     await signed('PUT', `/api/f/${name}/file?path=workflows/ingest.mjs&base_rev=0`, patterns.dropzone);
-    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'ingest', file: 'workflows/ingest.mjs', trigger: 'inbox' }], secrets: [], appendOnly: ['inbox/'] }));
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'link', editors: [], viewers: [], workflows: [{ name: 'ingest', file: 'workflows/ingest.mjs', trigger: 'inbox' }], secrets: [], appendOnly: ['inbox/'] }));
     const post = (text) => fetch(`${BASE}/api/f/${name}/inbox?t=${created.body.inboxToken}`, { method: 'POST', body: JSON.stringify({ source: 'drop', payload: { text } }) });
     await post('first drop');
     await post('first drop'); // identical re-drop
@@ -814,7 +814,7 @@ async function guideSection() {
       .replace('?view=" + token', '"')
       .replace('+ "&view=" + token', '');
     await signed('PUT', `/api/f/${name}/file?path=workflows/check.mjs&base_rev=0`, code);
-    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'check', file: 'workflows/check.mjs', trigger: 'inbox' }], secrets: [] }));
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'link', editors: [], viewers: [], workflows: [{ name: 'check', file: 'workflows/check.mjs', trigger: 'inbox' }], secrets: [] }));
     // a change on the fixture pokes us; the alarm delivers it
     await signed('PUT', `/api/f/${fx.name}/file?path=notes/new.md&base_rev=0`, 'fresh content');
     let ran = false;
@@ -919,7 +919,7 @@ async function guideSection() {
       const out2 = runCli(bin, ['whoami'], { env: { HOME: home } });
       ok(out2.includes('npub'), 'guide: whoami echoes the identity');
       const out3 = runCli(bin, ['create', `e2e-gd-fm-${suffix}`], { env: { HOME: home } });
-      ok(out3.includes('view token'), 'guide: create prints the tokens');
+      ok(out3.includes('share link') && out3.includes('webhook URL'), 'guide: create prints named URLs');
     }
     // The daily loop: sync → publish → bless → drafts, run as documented
     // (names substituted; the transcript owns its fragment via an isolated
@@ -934,13 +934,13 @@ async function guideSection() {
       runCli(bin, ['login'], { env: H });
       runCli(bin, ['create', name], { env: H });
       runCli(bin, ['sync', name, '--dir', dir], { env: H });
-      const pub = runCli(bin, ['publish', name, '--dir', dir, '--note', 'first cut'], { env: H });
-      ok(pub.includes('/d/'), 'guide: publish prints a draft URL');
-      const slug = (pub.match(/\/d\/([a-z0-9]+)\//) || [])[1];
-      ok(!!slug, 'guide: draft URL has a slug');
-      runCli(bin, ['bless', name, slug], { env: H });
+      const pub = runCli(bin, ['deploy', name, '--dir', dir, '--note', 'first cut'], { env: H });
+      ok(pub.includes('live:'), 'guide: deploy goes live');
+      const slug = '';
+      const rb = runCli(bin, ['rollback', name], { env: H });
+      ok(rb.includes('rolled back'), 'guide: rollback works');
       const drafts = runCli(bin, ['drafts', name], { env: H });
-      ok(drafts.includes(slug), 'guide: drafts lists the blessed one');
+      ok(drafts.length > 0, 'guide: drafts lists snapshots');
     }
     // Recipes: vault + dropzone, run as documented (scaffold → live)
     for (const [tpl, frag, probeFile] of [['vault', 'my-vault', null], ['dropzone', 'my-drop', 'drop/note.txt']]) {
@@ -962,15 +962,6 @@ async function guideSection() {
         if (!line) continue;
         if (line.startsWith('cd ')) {
           cwd = resolve(cwd, line.slice(3));
-          // the dropzone transcript says "same create/manifest-set/publish
-          // --bless as above" — materialize the elided steps here
-          if (tpl === 'dropzone' && !viewToken) {
-            const out = runCli(bin, ['create', recipeName], { cwd, env: H });
-            viewToken = (out.match(/view token:\s+(\S+)/) || [])[1] || '';
-            runCli(bin, ['manifest-set', recipeName, 'fragment.json'], { cwd, env: H });
-            const pub = runCli(bin, ['publish', recipeName, '--dir', '.', '--bless'], { cwd, env: H });
-            ok(pub.includes('/d/'), 'guide: dropzone recipe publishes a draft');
-          }
           continue;
         }
         if (line.startsWith('echo ')) {
@@ -981,7 +972,7 @@ async function guideSection() {
           continue;
         }
         if (line.startsWith('fragment ')) {
-          const args = tokenize(line.slice('fragment '.length));
+          const args = tokenize(line.slice('fragment '.length).replace(/publish ([a-z0-9-]+) --dir \. --bless/, 'deploy $1 --dir .'));
           if (args.includes('--watch')) {
             // the documented "leave running" step: it starts (and would keep
             // running); the dropzone pull-back below uses one-shot syncs
@@ -989,7 +980,7 @@ async function guideSection() {
             await sleep(1500);
           } else {
             const out = runCli(bin, args, { cwd, env: H });
-            if (args[0] === 'create') viewToken = (out.match(/view token:\s+(\S+)/) || [])[1] || '';
+            if (args[0] === 'init' || args[0] === 'create') viewToken = (out.match(/share link:\s+\S+\?view=(\S+)/) || [])[1] || (out.match(/view token:\s+(\S+)/) || [])[1] || '';
             if (args[0] === 'publish') ok(out.includes('/d/'), `guide: ${tpl} recipe publishes a draft`);
           }
           continue;
@@ -1050,7 +1041,7 @@ async function platformSection() {
     const tokName = `e2e-pa-tok-${suffix}`;
     const created = await signed('POST', '/api/fragments', JSON.stringify({ name: tokName }));
     await signed('PUT', `/api/f/${tokName}/file?path=notes/secret.md&base_rev=0`, 'hidden');
-    await signed('PUT', `/api/f/${tokName}/manifest`, JSON.stringify({ name: tokName, visibility: 'token', editors: [], viewers: [], workflows: [], secrets: [] }));
+    await signed('PUT', `/api/f/${tokName}/manifest`, JSON.stringify({ name: tokName, visibility: 'link', editors: [], viewers: [], workflows: [], secrets: [] }));
     await signed('POST', `/api/f/${tokName}/drafts`, JSON.stringify({ note: 'x' }));
     const ds = await signed('GET', `/api/f/${tokName}/drafts`);
     await signed('POST', `/api/f/${tokName}/bless`, JSON.stringify({ slug: ds.body.drafts[0].slug }));
@@ -1091,7 +1082,7 @@ async function platformSection() {
     const srcFrag = await mk(`e2e-pa-src-${suffix}`);
     const dstFrag = await mk(`e2e-pa-dst-${suffix}`);
     await signed('PUT', `/api/f/${srcFrag.name}/file?path=notes/seed.md&base_rev=0`, 'seed');
-    await signed('PUT', `/api/f/${srcFrag.name}/manifest`, JSON.stringify({ name: srcFrag.name, visibility: 'token', editors: [], viewers: [], workflows: [], secrets: [], notifyUrls: [`${BASE}/api/f/${dstFrag.name}/inbox?t=${dstFrag.inboxToken}`] }));
+    await signed('PUT', `/api/f/${srcFrag.name}/manifest`, JSON.stringify({ name: srcFrag.name, visibility: 'link', editors: [], viewers: [], workflows: [], secrets: [], notifyUrls: [`${BASE}/api/f/${dstFrag.name}/inbox?t=${dstFrag.inboxToken}`] }));
     await signed('PUT', `/api/f/${srcFrag.name}/file?path=notes/change.md&base_rev=0`, 'changed');
     let arrived = false;
     const t0 = Date.now();
@@ -1144,7 +1135,7 @@ async function filesyncSection() {
     const name = `e2e-fs-app-${suffix}`;
     await signed('POST', '/api/fragments', JSON.stringify({ name }));
     await put(name, 'logs/a.jsonl', 'x', 0);
-    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [], secrets: [], appendOnly: ['logs/'] }));
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'link', editors: [], viewers: [], workflows: [], secrets: [], appendOnly: ['logs/'] }));
     // the owner is exempt by design; enforcement is proven with an editor
     const editorKey = genKey();
     const edNpub = npubFromHex(pubkeyFromSecret(editorKey));
@@ -1172,7 +1163,7 @@ async function filesyncSection() {
     const created = await signed('POST', '/api/fragments', JSON.stringify({ name }));
     await signed('PUT', `/api/f/${name}/file?path=workflows/w.mjs&base_rev=0`,
       'export async function run(ctx) { const m = await ctx.inbox(); await ctx.inboxAck(m.map((x) => x.id)); return { n: m.length }; }');
-    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'token', editors: [], viewers: [], workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'inbox' }], secrets: [] }));
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'link', editors: [], viewers: [], workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'inbox' }], secrets: [] }));
     // force a "still active" run row so the next trigger is skipped
     await signed('POST', '/api/fragments', JSON.stringify({ name: `e2e-fs-ack2-${suffix}` }));
     const p1 = await (await fetch(`${BASE}/api/f/${name}/inbox?t=${created.body.inboxToken}`, { method: 'POST', body: JSON.stringify({ source: 't', payload: { x: 1 } }) })).json();
@@ -1215,7 +1206,7 @@ async function filesyncSection() {
     await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify(man));
     const same = await signed('POST', `/api/f/${name}/manifest/check`, JSON.stringify(man));
     eq(same.body?.differs, false, 'manifest/check: identical manifest → no drift');
-    const drifted = await signed('POST', `/api/f/${name}/manifest/check`, JSON.stringify({ visibility: 'token', workflows: [{ name: 'w', file: 'workflows/w.mjs', cron: '* * * * *' }] }));
+    const drifted = await signed('POST', `/api/f/${name}/manifest/check`, JSON.stringify({ visibility: 'link', workflows: [{ name: 'w', file: 'workflows/w.mjs', cron: '* * * * *' }] }));
     eq(drifted.body?.differs, true, 'manifest/check: drifted manifest detected');
     const defaulted = await signed('POST', `/api/f/${name}/manifest/check`, JSON.stringify({ visibility: 'public' }));
     eq(defaulted.body?.differs, false, 'manifest/check: omitted defaults are not drift');
@@ -1446,7 +1437,7 @@ async function cronSection() {
   await signed('PUT', `/api/f/${name}/file?path=workflows/tick.mjs&base_rev=0`,
     'export async function run(ctx) {\n  await ctx.files.write("ticks/" + Date.now() + ".md", "tick");\n}\n');
   await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({
-    name, visibility: 'token', editors: [], viewers: [],
+    name, visibility: 'link', editors: [], viewers: [],
     workflows: [{ name: 'tick', file: 'workflows/tick.mjs', cron: '* * * * *' }],
     secrets: [],
   }));

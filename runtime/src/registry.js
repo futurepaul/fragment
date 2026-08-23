@@ -18,7 +18,7 @@ async function initCell(cell, request) {
   cell.setMeta("rev", "0");
   cell.setMeta("manifest", JSON.stringify(normalizeManifest({
     name,
-    visibility: "token",
+    visibility: "link",
     editors: [],
     viewers: [],
     workflows: [],

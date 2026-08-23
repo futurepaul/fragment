@@ -1,11 +1,10 @@
 {
   "name": "CHANGE-ME",
-  "visibility": "token",
-  "liveFiles": true,
+  "visibility": "link",
   "editors": [],
   "viewers": [],
   "workflows": [
-    { "name": "notify", "file": "workflows/notify.mjs", "trigger": "sync" }
+    { "name": "notify", "file": "workflows/notify.mjs", "trigger": "files" }
   ],
   "secrets": []
 }

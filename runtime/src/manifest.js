@@ -7,7 +7,7 @@ const WorkflowSchema = Type.Object({
   name: Type.String({ minLength: 1, maxLength: 64 }),
   file: Type.String({ minLength: 1 }),
   cron: Type.Optional(Type.String()),
-  trigger: Type.Optional(Type.Union([Type.Literal("inbox"), Type.Literal("sync")])),
+  trigger: Type.Optional(Type.Union([Type.Literal("inbox"), Type.Literal("files")])),
   paused: Type.Optional(Type.Boolean()),
   cycles: Type.Optional(Type.Boolean()),
   // retry policy: false = never retry; otherwise defaults apply
@@ -23,7 +23,7 @@ const WorkflowSchema = Type.Object({
 });
 const ManifestSchema = Type.Object({
   name: Type.Optional(Type.String()),
-  visibility: Type.Union([Type.Literal("public"), Type.Literal("viewers"), Type.Literal("token")]),
+  visibility: Type.Union([Type.Literal("public"), Type.Literal("viewers"), Type.Literal("link")]),
   // editors/viewers/secrets default to empty when omitted — requiring
   // them explicitly tripped every first-time author (observed: the relay
   // vault bot called this out)
@@ -31,7 +31,10 @@ const ManifestSchema = Type.Object({
   viewers: Type.Optional(Type.Array(Type.String())),
   workflows: Type.Optional(Type.Array(WorkflowSchema)),
   secrets: Type.Optional(Type.Array(Type.String())),
-  liveFiles: Type.Optional(Type.Boolean()),
+  // freeze: true pins a served app to its deploy snapshot — the rare,
+  // deliberate case. By default apps read the live working copy (code
+  // frozen in the snapshot, data flowing live).
+  freeze: Type.Optional(Type.Boolean()),
   // append-only prefixes: writers may add paths under these, never modify
   // or delete existing ones (identical bytes are a no-op; the owner is
   // exempt). Makes many-writer folders race-free by construction.

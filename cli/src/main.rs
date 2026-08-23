@@ -46,7 +46,7 @@ enum Cmd {
     Create { name: String },
     /// List fragments you have a role on
     List,
-    /// Status of a fragment (counts, blessed draft, cron schedule, tokens)
+    /// Status of a fragment (counts, live snapshot, crons, share link)
     Status { name: String },
     /// Read the event log (--since is an event ID cursor; --tail shows the last N)
     Events {
@@ -112,21 +112,34 @@ enum Cmd {
     Verify { name: String, #[arg(long, default_value = ".")] dir: PathBuf },
     /// Delete a fragment you own (registry row + all cell data; name reusable)
     Rm { name: String },
-    /// Sync (if a dir is given) then publish a draft; prints the draft URL
-    Publish {
+    /// Deploy: sync (if --dir), apply fragment.json, snapshot, GO LIVE.
+    /// Prints the canonical URL. Drafts are kept as rollback snapshots.
+    Deploy {
         name: String,
         #[arg(long)]
         dir: Option<PathBuf>,
         #[arg(long)]
         note: Option<String>,
-        /// Bless the draft immediately (continuous-publish style)
+        /// Snapshot only — print the preview URL, don't go live
         #[arg(long)]
-        bless: bool,
+        preview: bool,
     },
-    /// List drafts
+    /// List deploy snapshots (drafts)
     Drafts { name: String },
-    /// Promote a draft to the canonical URL
-    Bless { name: String, slug: String },
+    /// Roll back to an earlier snapshot (default: the one before current)
+    Rollback {
+        name: String,
+        /// Snapshot slug to roll back to (see `fragment drafts`)
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// Scaffold + create + deploy in one command; prints share link + webhook URL
+    Init {
+        /// Fragment name (also the folder name, created in the current dir)
+        name: String,
+        #[arg(long)]
+        template: Option<String>,
+    },
     /// Run a workflow now
     Run { name: String, workflow: String, #[arg(long)] input: Option<String> },
     /// List workflow runs (the run history; --status held shows parked failures)
@@ -346,9 +359,7 @@ fn main() -> Result<()> {
             }
             println!("scaffolded '{tpl_name}' into {} ({created} files{})", dir.display(), if skipped > 0 { format!(", {skipped} existing left alone") } else { String::new() });
             println!("next:");
-            println!("  fragment create <name>");
-            println!("  fragment manifest-set <name> fragment.json");
-            println!("  fragment publish <name> --dir . --bless");
+            println!("  fragment init <name> --template <tpl>  (scaffold + create + deploy in one step)");
             return Ok(());
         }
         _ => {}
@@ -364,9 +375,11 @@ fn main() -> Result<()> {
                 return out(&c, v, true);
             }
             println!("created fragment {}", v["name"].as_str().unwrap_or(&name));
-            println!("  npub:        {}", v["npub"].as_str().unwrap_or(""));
-            println!("  view token:  {}", v["viewToken"].as_str().unwrap_or(""));
-            println!("  inbox token: {}", v["inboxToken"].as_str().unwrap_or(""));
+            println!("  npub:         {}", v["npub"].as_str().unwrap_or(""));
+            let canon2 = v["canonical"].as_str().filter(|s| s.starts_with("http")).map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{}/f/{}/", c.host, name));
+            println!("  share link:   {}?view={}", canon2.trim_end_matches('/'), v["viewToken"].as_str().unwrap_or(""));
+            println!("  webhook URL:  {}/api/f/{}/inbox?t={}", c.host.trim_end_matches('/'), name, v["inboxToken"].as_str().unwrap_or(""));
             let canon = v["canonical"].as_str().filter(|s| s.starts_with("http")).map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}/f/{}/", c.host, name));
             println!("  canonical:   {}", canon);
@@ -479,34 +492,73 @@ fn main() -> Result<()> {
             report.print();
             std::process::exit(report.exit_code());
         }
-        Cmd::Publish { name, dir, note, bless } => {
+        Cmd::Deploy { name, dir, note, preview } => {
             if let Some(dir) = dir {
                 let report = sync::sync_once(&c, &name, &dir, &SyncOptions::default())?;
                 report.print();
+                // deploy applies the folder's manifest — files and machinery
+                // go live together (the manifest-set trap cannot happen here)
+                let mf = dir.join("fragment.json");
+                if mf.exists() {
+                    let raw: Value = serde_json::from_str(&std::fs::read_to_string(&mf)?)
+                        .with_context(|| format!("{} is not valid JSON", mf.display()))?;
+                    c.call(c.put_json(&format!("/api/f/{name}/manifest"), &raw)?)?;
+                }
             }
             let v = c.call(c.post_json(&format!("/api/f/{name}/drafts"), &json!({ "note": note }))?)?;
             if v.get("warning").and_then(|w| w.as_str()).is_some() {
-                eprintln!("WARNING: {} — this draft will 404 at every URL", v["warning"].as_str().unwrap_or(""));
+                eprintln!("WARNING: {} — this deploy will 404 at every URL", v["warning"].as_str().unwrap_or(""));
             }
             let slug = v["slug"].as_str().unwrap_or("").to_string();
-            if bless && !slug.is_empty() {
-                let b = c.call(c.post_json(&format!("/api/f/{name}/bless"), &json!({ "slug": slug }))?)?;
-                if j {
-                    let mut vv = v;
-                    vv["blessed"] = b["url"].clone();
-                    return out(&c, vv, true);
-                }
-                println!("draft published: {}/d/{}/", c.host, slug);
-                let bu = b["url"].as_str().unwrap_or("");
-                let blessed = if bu.starts_with("http") { bu.to_string() } else { format!("{}{}", c.host, bu) };
-                println!("blessed: {}", blessed);
-            } else {
+            if preview {
                 if j {
                     return out(&c, v, true);
                 }
-                println!("draft published: {}/d/{}/", c.host, slug);
-                println!("bless with: fragment bless {} {}", name, slug);
+                println!("preview: {}/d/{}/", c.host, slug);
+                println!("go live with: fragment deploy {name}");
+                return Ok(());
             }
+            let b = c.call(c.post_json(&format!("/api/f/{name}/bless"), &json!({ "slug": slug }))?)?;
+            if j {
+                let mut vv = v;
+                vv["live"] = b["url"].clone();
+                return out(&c, vv, true);
+            }
+            let bu = b["url"].as_str().unwrap_or("");
+            let live = if bu.starts_with("http") { bu.to_string() } else { format!("{}{}", c.host, bu) };
+            println!("live: {live}");
+            let st = c.call(c.get(&format!("/api/f/{name}/status"))?)?;
+            if st["visibility"].as_str() == Some("link") {
+                if let Some(tok) = st["viewToken"].as_str() {
+                    let canon = st["urls"]["canonical"].as_str().filter(|s| s.starts_with("http"))
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| format!("{}/f/{}/", c.host, name));
+                    println!("share link: {}?view={}", canon.trim_end_matches('/'), tok);
+                }
+            }
+        }
+        Cmd::Rollback { name, to } => {
+            let v = c.call(c.get(&format!("/api/f/{name}/drafts"))?)?;
+            let drafts = v["drafts"].as_array().cloned().unwrap_or_default();
+            let slug = match to {
+                Some(s) => s,
+                None => {
+                    match drafts.iter().find(|d| !d["blessed"].as_bool().unwrap_or(false)) {
+                        Some(d) => d["slug"].as_str().unwrap_or("").to_string(),
+                        None => anyhow::bail!("no earlier snapshot to roll back to (see `fragment drafts {name}`)"),
+                    }
+                }
+            };
+            if slug.is_empty() {
+                anyhow::bail!("no snapshot slug; see `fragment drafts {name}`");
+            }
+            let b = c.call(c.post_json(&format!("/api/f/{name}/bless"), &json!({ "slug": slug }))?)?;
+            if j {
+                return out(&c, b, true);
+            }
+            let bu = b["url"].as_str().unwrap_or("");
+            let live = if bu.starts_with("http") { bu.to_string() } else { format!("{}{}", c.host, bu) };
+            println!("rolled back to {slug}: {live}");
         }
         Cmd::Drafts { name } => {
             let v = c.call(c.get(&format!("/api/f/{name}/drafts"))?)?;
@@ -523,11 +575,61 @@ fn main() -> Result<()> {
                 );
             }
         }
-        Cmd::Bless { name, slug } => {
-            let v = c.call(c.post_json(&format!("/api/f/{name}/bless"), &json!({ "slug": slug }))?)?;
-            let bu = v["url"].as_str().unwrap_or("");
-            let blessed = if bu.starts_with("http") { bu.to_string() } else { format!("{}{}", c.host, bu) };
-            println!("blessed: {}", blessed);
+        Cmd::Init { name, template } => {
+            // scaffold (reuse the New machinery) + create + deploy
+            let dir = std::env::current_dir()?.join(&name);
+            if dir.exists() {
+                anyhow::bail!("{} already exists", dir.display());
+            }
+            let tpl_name = template.as_deref().unwrap_or("basic");
+            let tpl = TEMPLATES
+                .iter()
+                .find(|(n, _)| *n == tpl_name)
+                .filter(|(n, _)| *n != "libs")
+                .ok_or_else(|| anyhow!("unknown template '{tpl_name}' (use `fragment new --list`)"))?;
+            std::fs::create_dir_all(&dir)?;
+            for (rel, bytes) in tpl.1 {
+                let target = dir.join(rel);
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&target, bytes)?;
+            }
+            println!("scaffolded '{tpl_name}' into {}", dir.display());
+            c.call(c.post_json("/api/fragments", &json!({ "name": name }))?)?;
+            // push the scaffold before snapshotting, so the first deploy
+            // is the real site, not an empty one
+            let report = sync::sync_once(&c, &name, &dir, &SyncOptions::default())?;
+            report.print();
+            let mf = dir.join("fragment.json");
+            if mf.exists() {
+                let raw: Value = serde_json::from_str(&std::fs::read_to_string(&mf)?)?;
+                let mut m = raw;
+                if let Value::Object(o) = &mut m { o.insert("name".into(), Value::String(name.clone())); }
+                c.call(c.put_json(&format!("/api/f/{name}/manifest"), &m)?)?;
+            }
+            let v = c.call(c.post_json(&format!("/api/f/{name}/drafts"), &json!({ "note": "init" }))?)?;
+            let slug = v["slug"].as_str().unwrap_or("").to_string();
+            if !slug.is_empty() {
+                c.call(c.post_json(&format!("/api/f/{name}/bless"), &json!({ "slug": slug }))?)?;
+            }
+            let st = c.call(c.get(&format!("/api/f/{name}/status"))?)?;
+            let canon = st["urls"]["canonical"].as_str().filter(|s| s.starts_with("http"))
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{}/f/{}/", c.host, name));
+            if j {
+                return out(&c, st, true);
+            }
+            println!("live: {}", canon);
+            if st["visibility"].as_str() == Some("link") {
+                if let Some(tok) = st["viewToken"].as_str() {
+                    println!("share link: {}?view={}", canon.trim_end_matches('/'), tok);
+                }
+            }
+            if let Some(tok) = st["inboxToken"].as_str() {
+                println!("webhook URL: {}/api/f/{}/inbox?t={}", c.host.trim_end_matches('/'), name, tok);
+            }
+            println!("folder: {}", dir.display());
         }
         Cmd::Run { name, workflow, input } => {
             let input_v: Value = match input.as_deref() {
@@ -658,10 +760,11 @@ fn main() -> Result<()> {
             let view_part = if public { "" } else { view };
             let server_canon = v["urls"]["canonical"].as_str().filter(|s| s.starts_with("http"));
             let canon = server_canon.map(|s| s.to_string()).unwrap_or_else(|| format!("{}/f/{}/", c.host, name));
-            println!("canonical:  {}{}{}", canon, suffix, view_part);
-            println!("drafts at:  {}/d/<slug>/", c.host);
-            println!("inbox:      {}/api/f/{}/inbox?t={}", c.host, name, inbox);
-            println!("rooms:      {}/f/{}/__room/<room>{}{}", c.host, name, suffix, view_part);
+            println!("canonical:   {}{}{}", canon, suffix, view_part);
+            println!("share link:   {}{}{}", canon, suffix, view_part);
+            println!("drafts at:   {}/d/<slug>/", c.host);
+            println!("webhook URL:  {}/api/f/{}/inbox?t={}", c.host, name, inbox);
+            println!("rooms:       {}/f/{}/__room/<room>{}{}", c.host, name, suffix, view_part);
         }
         Cmd::Login { .. } | Cmd::Whoami | Cmd::Host { .. } | Cmd::Guide | Cmd::New { .. } => unreachable!(),
     }

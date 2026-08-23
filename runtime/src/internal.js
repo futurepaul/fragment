@@ -22,7 +22,7 @@ async function internalRoute(cell, request, url) {
   }
   if (rest === "files/read") {
     const path = url.searchParams.get("path") || "";
-    if (isRun || cell.manifest()?.liveFiles === true) {
+    if (isRun || cell.manifest()?.freeze !== true) {
       const row2 = cell.getFileRow(path);
       if (!row2) return json({ error: "no such file" }, 404);
       return new Response(toAB(row2.content));
@@ -61,7 +61,7 @@ async function internalRoute(cell, request, url) {
   }
   if (rest === "files/list") {
     const prefix = url.searchParams.get("prefix") || "";
-    const live = isRun || cell.manifest()?.liveFiles === true;
+    const live = isRun || cell.manifest()?.freeze !== true;
     const rows = live ? cell.sql.exec("SELECT path, length(content) AS size, updated_at, rev FROM files WHERE path LIKE ? AND deleted = 0 ORDER BY path", prefix + "%").toArray() : cell.sql.exec("SELECT path, length(content) AS size, 0 AS updated_at, 0 AS rev FROM draft_files WHERE slug = ? AND path LIKE ? ORDER BY path", scope.slug, prefix + "%").toArray();
     return json({
       paths: rows.map((r) => r.path),

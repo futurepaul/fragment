@@ -23,7 +23,7 @@ export async function initCell(cell, request) {
   cell.setMeta("inbox_token", randHex(16));
   cell.setMeta("rev", "0");
   cell.setMeta("manifest", JSON.stringify(normalizeManifest({
-    name, visibility: "token", editors: [], viewers: [], workflows: [], secrets: [],
+    name, visibility: "link", editors: [], viewers: [], workflows: [], secrets: [],
   }).manifest));
   cell.addEvent("create", `fragment ${name} created`);
   return json({ ok: true, npub: cell.getMeta("fragment_npub"), viewToken: cell.getMeta("view_token"), inboxToken: cell.getMeta("inbox_token") });

@@ -14,7 +14,7 @@ so keep using the same machine/user account.
 
 - A fragment has a **working copy** (its folder) and immutable **drafts**
   (snapshots of the folder). Publishing makes a draft; **blessing** a draft
-  points the canonical URL at it. The live site only changes when you bless.
+  points the canonical URL at it — what `fragment deploy` does in one step.
 - URLs: canonical `/f/<name>/`, drafts `/d/<slug>/` (unguessable slugs, safe to
   share for review).
 - **Workflows** (`workflows/*.mjs`) are the fragment's machinery: they run on a
@@ -33,7 +33,8 @@ so keep using the same machine/user account.
 ```
 fragment login                 # once per machine; prints your npub
 fragment whoami                # sanity check
-fragment create my-thing       # prints the fragment's npub + tokens
+fragment init my-thing         # scaffold + create + deploy → live URL,
+                               #   share link, webhook URL (the one-command start)
 ```
 
 The create output shows the **view token** and **inbox token**. You can always
@@ -67,14 +68,14 @@ everything else      # just files: data, notes, exports — synced, versioned, s
 ## The daily loop
 
 ```
-fragment sync my-thing                          # push/pull the folder
-fragment publish my-thing --note "first cut"    # snapshot → draft URL /d/<slug>/
-fragment bless my-thing <slug>                  # promote draft → /f/my-thing/
-fragment drafts my-thing                        # list drafts ([blessed] marked)
+fragment sync my-thing                     # push/pull the folder
+fragment deploy my-thing --dir .           # snapshot + GO LIVE → /f/my-thing/
+fragment deploy my-thing --preview         # snapshot only → preview URL /d/<slug>/
+fragment drafts my-thing                   # list snapshots ([live] marked)
 ```
 
-Rollback is `fragment bless` on an older draft. Drafts never change and never
-expire; publish as often as you think.
+Rollback is `fragment rollback my-thing` (the previous snapshot). Snapshots
+never change and never expire; deploy as often as you think.
 
 ## Sync in depth
 
@@ -82,7 +83,7 @@ expire; publish as often as you think.
 fragment sync my-thing --dir .              # one mirror pass (default)
 fragment sync my-thing --dir . --watch      # continuous: OS events + live channel + 60s sweeps
 fragment sync my-thing --dir . --mode pull  # read-only copy (never deletes; --prune to apply)
-fragment sync my-thing --dir . --mode push  # publish-only
+fragment sync my-thing --dir . --mode push  # local→remote only
 fragment verify my-thing --dir .            # full-hash audit (caches lie; this doesn't)
 ```
 
@@ -119,7 +120,7 @@ replaces it. Shape:
 ```json
 {
   "name": "my-thing",
-  "visibility": "token",
+  "visibility": "link",
   "editors": ["npub1…"],
   "viewers": ["npub1…"],
   "workflows": [
@@ -135,7 +136,7 @@ replaces it. Shape:
   link — the default, good for "send a human a link"; a valid token also
   mints a scoped cookie so subresources load), `viewers` (listed npubs
   only — agents authenticate; browsers can't).
-- **workflows**: auto-triggered runs are single-flight — a cron/sync fire
+- **workflows**: auto-triggered runs are single-flight — a cron/files fire
   while a previous run of the same workflow is active or retrying is
   skipped (`run.skipped` in the event log; manual `fragment run` always
   proceeds). Failed runs retry with backoff (default 3 attempts, 30s base —
@@ -149,7 +150,7 @@ replaces it. Shape:
   exactly that, in five lines.
 - **workflows**: `cron` is 5-field UTC (`*` lists ranges steps, month/day
   names OK; day-of-week 1=Sunday..7=Saturday, 0 is refused). `trigger:
-  "inbox"` runs when a message lands; `trigger: "sync"` runs when files
+  "inbox"` runs when a message lands; `trigger: "files"` runs when files
   change on the editor plane (coalescing is `debounceMs`, default 4000;
   workflow writes never re-trigger, so outputs are loop-safe). Neither =
   manual only (`fragment run`). The fragment sleeps between
@@ -157,10 +158,9 @@ replaces it. Shape:
   sleep. Cross-fragment loops are bounded: `ctx.http` stamps a hop budget,
   over-deep inbox chains are refused (`cycle.detected`), and >120
   auto-runs/hour trips auto-pause.
-- **liveFiles**: `true` makes a served `app.mjs` read the live working copy
-  instead of its draft snapshot. Code stays frozen in whatever draft you
-  blessed; only the data it reads flows live. This is what makes a folder
-  a live vault (see Recipes).
+- **freeze**: served apps read the live working copy BY DEFAULT — code
+  frozen in the deploy snapshot, data flowing live. `freeze: true` pins an
+  app to its snapshot instead (the rare, deliberate case).
 - **secrets**: declare names here, set values with `fragment secret set`.
 
 Grants: `fragment grant my-thing --editor npub1… --viewer npub1…`
@@ -289,7 +289,7 @@ Rebuild derived data when files change. Runs are level-triggered (input is
 so running it twice is free.
 
 ```js
-// workflows/reindex.mjs — trigger "sync"
+// workflows/reindex.mjs — trigger "files"
 export async function run(ctx) {
   const paths = await ctx.files.list("notes/");
   const index = paths.sort().map((p) => "- [" + p + "](" + p + ")").join("\n");
@@ -505,23 +505,20 @@ Debugging: if `rooms.mjs` throws or returns `{error}`, the event log shows
 ## Recipes — big scaffolds
 
 Two scaffolds ship in the CLI (`fragment new --list`): they are ordinary
-fragments — code you can read, edit, and re-bless — not special modes.
+fragments — code you can read, edit, and redeploy — not special modes.
 
 **Vault** — turn any folder of text files into a live, URL-bearing,
 Obsidian-like site:
 
 ```
-fragment new my-vault --template vault
+fragment init my-vault --template vault
 cd my-vault
-fragment create my-vault
-fragment manifest-set my-vault fragment.json
-fragment publish my-vault --dir . --bless
 fragment sync my-vault --dir . --watch        # leave running; edits go live
 ```
 
-The viewer (`app.mjs` + `assets/`) is frozen in the blessed draft; the notes
+The viewer (`app.mjs` + `assets/`) is frozen in the deploy snapshot; the notes
 flow through the working copy (`liveFiles: true`), so a synced edit appears
-on reload without republishing. `[[wikilinks]]` resolve by filename; code
+on reload without redeploying. `[[wikilinks]]` resolve by filename; code
 files render with syntax highlighting; `_index.md`/`README.md` are folder
 landings.
 
@@ -529,13 +526,13 @@ landings.
 webview (and back in your folder):
 
 ```
-fragment new my-drop --template dropzone
-cd my-drop            # same create/manifest-set/publish --bless as above
+fragment init my-drop --template dropzone
+cd my-drop
 fragment sync my-drop --dir . --watch
 echo "hi" > drop/note.txt        # → output/note-*.md within seconds
 ```
 
-Arrivals under `drop/` fire the `ingest` workflow (`trigger: "sync"`); it
+Arrivals under `drop/` fire the `ingest` workflow (`trigger: "files"`); it
 summarizes with `ctx.ai` when the host has an inference key, else writes a
 plain digest. Outputs land in `output/`, visible on the webview and pulled
 back into your folder by the next sync.
@@ -545,8 +542,8 @@ back into your folder by the next sync.
 1. **The event log is truth.** Before and after claiming anything about a
    fragment, read `fragment events`. If you think something ran and the log
    disagrees, the log is right.
-2. **Publish freely, bless deliberately.** Drafts are cheap and unguessable.
-   Bless only what you checked.
+2. **Deploy freely, preview deliberately.** Snapshots are cheap and unguessable;
+   `--preview` when you want to look before going live.
 3. **Secrets by name only.** `fragment secret set` reads from the environment
    or stdin — never put values in files, manifests, or notes.
 4. **One fragment, one problem.** If a folder grows a second job, make a
@@ -560,7 +557,8 @@ back into your folder by the next sync.
 fragment login [--force]            fragment secret set <name> <KEY>
 fragment whoami                     fragment secret list <name>
 fragment host [<url>]               fragment secret rm <name> <KEY>
-fragment new <dir> [--template T]   fragment grant <name> --editor/--viewer <npub|name@dom>
+fragment init <name> [--template T] fragment grant <name> --editor/--viewer <npub|name@dom>
+fragment new <dir> [--template T]
 fragment create <name>              fragment revoke <name> --editor/--viewer <npub|name@dom>
 fragment list                       fragment inbox <name> --token T --payload JSON
 fragment status <name>              fragment run <name> <wf> [--input JSON]
@@ -569,8 +567,8 @@ fragment manifest <name>            fragment pause <name> <wf>
 fragment manifest-set <name> FILE   fragment unpause <name> <wf>
 fragment sync <name> [--dir D] [--watch] [--mode M]  fragment replay <name> <run-id>
                                    [--install | --uninstall]
-fragment publish <name> [--dir D] [--note N] [--bless]
-fragment drafts <name>              fragment bless <name> <slug>
+fragment deploy <name> [--dir D] [--preview]
+fragment drafts <name>              fragment rollback <name> [--to <slug>]
 ```
 
 `fragment sync --install` writes a LaunchAgent (macOS) or systemd user

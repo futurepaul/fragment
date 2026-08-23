@@ -57,7 +57,7 @@ async function alarm(cell) {
 }
 async function scheduleSyncTrigger(cell, path) {
   const m = cell.manifest();
-  if (!m || !(m.workflows || []).some((wf) => wf.trigger === "sync")) return;
+  if (!m || !(m.workflows || []).some((wf) => wf.trigger === "files")) return;
   const dirty = new Set(JSON.parse(cell.getMeta("sync_dirty_paths") || "[]"));
   dirty.add(path);
   cell.setMeta("sync_dirty_paths", JSON.stringify([...dirty].slice(-500)));
@@ -73,7 +73,7 @@ async function fireSyncTriggers(cell, m) {
   const paths = JSON.parse(cell.getMeta("sync_dirty_paths") || "[]");
   cell.setMeta("sync_dirty_paths", "[]");
   for (const wf of m.workflows || []) {
-    if (wf.trigger !== "sync") continue;
+    if (wf.trigger !== "files") continue;
     await cell.executeWorkflow(wf, { sync: { paths, at } }, { auto: true, trigger: "sync" });
   }
 }
