@@ -89,6 +89,10 @@ async function loadCode(cell, id, mainSource, modules, scope, cause = null) {
       FRAGMENT_INTERNAL_URL: cell.internalBase(),
       FRAGMENT_RUN_TOKEN: cell.makeToken(scope),
       FRAGMENT_SCOPE: scope.kind,
+      // apps that declare secrets get them eagerly — one loopback, paid
+      // only when the manifest asks for it (lazy fill broke first-render
+      // reads; found live: the tray 500'd "missing secrets")
+      ...(cell.manifest()?.secrets || []).length && scope.kind === "draft" ? { FRAGMENT_EAGER_SECRETS: "1" } : {},
       // the run's cause chain, so ctx.http can stamp hop headers
       ...cause ? { FRAGMENT_CAUSE: JSON.stringify(cause) } : {},
       // forwarded by ctx as x-fragment-host-secret; checked by the router

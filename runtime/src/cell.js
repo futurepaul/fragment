@@ -35,7 +35,6 @@ class FragmentCell {
     const raw = this.getMeta("manifest");
     if (raw !== this._manifestRaw) {
       this._manifest = raw ? JSON.parse(raw) : null;
-      if (this._manifest && this._manifest.visibility === "token") this._manifest.visibility = "link";
       this._manifestRaw = raw;
     }
     return this._manifest;

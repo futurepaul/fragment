@@ -22,13 +22,12 @@ export async function makeCtx(env) {
   // ctx.secrets.ready first (found live: an agent-built app read the
   // racing object and called it "unreliable").
   const secretsAll = {};
-  if (scope === "run") {
+  if (scope === "run" || env.FRAGMENT_EAGER_SECRETS) {
+    // runs always need secrets synchronously; served apps get them
+    // eagerly when the manifest declares any (the one-loopback cost is
+    // opt-in by declaring \u2014 lazy fill left first-render reads empty)
     Object.assign(secretsAll, await call("/secrets/all").then((r) => r.json()).catch(() => ({})));
   } else {
-    // served apps: fetched in the background \u2014 a value may be absent for
-    // the first moments after an isolate spins up. Apps that need a
-    // secret at render time should read it from a workflow's output
-    // (files/state), not from ctx.secrets.
     call("/secrets/all").then((r) => r.json()).then((s) => Object.assign(secretsAll, s)).catch(() => {});
   }
   const ctx = {

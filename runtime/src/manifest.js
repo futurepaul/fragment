@@ -23,8 +23,7 @@ const WorkflowSchema = Type.Object({
 });
 const ManifestSchema = Type.Object({
   name: Type.Optional(Type.String()),
-  visibility: Type.Union([Type.Literal("public"), Type.Literal("viewers"), Type.Literal("link"), Type.Literal("token")]),
-  // token = legacy, migrates
+  visibility: Type.Union([Type.Literal("public"), Type.Literal("viewers"), Type.Literal("link")]),
   // editors/viewers/secrets default to empty when omitted — requiring
   // them explicitly tripped every first-time author (observed: the relay
   // vault bot called this out)
@@ -59,7 +58,6 @@ const ManifestSchema = Type.Object({
 });
 function normalizeManifest(m) {
   if (!m || typeof m !== "object") return { error: "manifest must be a JSON object" };
-  if (m.visibility === "token") m = { ...m, visibility: "link" };
   if (!Value.Check(ManifestSchema, m)) {
     const e = Value.Errors(ManifestSchema, m).First();
     return { error: e ? `manifest${e.path}: ${e.message}` : "manifest does not match schema" };

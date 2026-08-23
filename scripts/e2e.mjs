@@ -1173,9 +1173,7 @@ async function filesyncSection() {
     const name = `e2e-fs-vis-${suffix}`;
     await signed('POST', '/api/fragments', JSON.stringify({ name }));
     const got = await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ visibility: 'token', workflows: [] }));
-    eq(got.status, 200, 'legacy "token" literal accepted (migrates to link)');
-    const st = await signed('GET', `/api/f/${name}/manifest`);
-    eq(st.body?.visibility, 'link', 'legacy literal normalized to link');
+    eq(got.status, 400, 'legacy "token" literal refused (hard cut, no port)');
   }
 
   // manifest/check: server-normalized drift detection (the manifest-set guard)
