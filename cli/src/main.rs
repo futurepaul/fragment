@@ -77,6 +77,10 @@ enum Cmd {
         /// In pull mode, apply remote deletions locally too
         #[arg(long)]
         prune: bool,
+        /// Overlay this read-only source folder into --dir before each
+        /// pass (new/changed files copy in; source never written)
+        #[arg(long)]
+        mirror_from: Option<PathBuf>,
         /// Conflict style: markers (default) or copy
         #[arg(long)]
         conflict_strategy: Option<String>,
@@ -428,12 +432,15 @@ fn main() -> Result<()> {
             println!("manifest updated");
         }
         Cmd::Sync {
-            name, dir, watch, mode, prune, conflict_strategy, apply_mass_delete,
+            name, dir, watch, mode, prune, mirror_from, conflict_strategy, apply_mass_delete,
             rebuild_state, debounce_ms, poll_interval, rescan_secs, watch_backend,
             no_live, install, uninstall,
         } => {
             if install || uninstall {
-                install_sync_unit(&name, &dir, install)?;
+                if let Some(m) = &mirror_from {
+                    std::env::set_var("FRAGMENT_MIRROR_FROM", m);
+                }
+                install_sync_unit(&name, &dir, install, std::env::var("FRAGMENT_MIRROR_FROM").ok().as_deref())?;
                 return Ok(());
             }
             if rebuild_state {
@@ -442,6 +449,7 @@ fn main() -> Result<()> {
                 println!("state cleared: {}", p.display());
             }
             let opts = SyncOptions {
+                mirror_from,
                 mode: match mode.as_deref() {
                     Some("push") => Mode::Push,
                     Some("pull") => Mode::Pull,
@@ -493,8 +501,8 @@ fn main() -> Result<()> {
             std::process::exit(report.exit_code());
         }
         Cmd::Deploy { name, dir, note, preview } => {
-            if let Some(dir) = dir {
-                let report = sync::sync_once(&c, &name, &dir, &SyncOptions::default())?;
+            if let Some(dir) = dir.as_deref() {
+                let report = sync::sync_once(&c, &name, dir, &SyncOptions::default())?;
                 report.print();
                 // deploy applies the folder's manifest — files and machinery
                 // go live together (the manifest-set trap cannot happen here)
@@ -503,6 +511,38 @@ fn main() -> Result<()> {
                     let raw: Value = serde_json::from_str(&std::fs::read_to_string(&mf)?)
                         .with_context(|| format!("{} is not valid JSON", mf.display()))?;
                     c.call(c.put_json(&format!("/api/f/{name}/manifest"), &raw)?)?;
+                }
+            }
+            // secrets declared in code but never set: the 3-round news
+            // failure — workflows reference ctx.secrets.X, nobody runs
+            // `fragment secret set`, every run holds. Catch it at deploy.
+            if let Some(d) = &dir {
+                let mut referenced: Vec<String> = Vec::new();
+                let wf_dir = d.join("workflows");
+                if wf_dir.exists() {
+                    for entry in walkdir::WalkDir::new(&wf_dir).max_depth(2) {
+                        let entry = match entry { Ok(e) => e, Err(_) => continue };
+                        if !entry.file_type().is_file() { continue; }
+                        let body = match std::fs::read_to_string(entry.path()) { Ok(b) => b, Err(_) => continue };
+                        for cap in body.match_indices("ctx.secrets.").map(|(i, _)| i) {
+                            let rest = &body[cap + "ctx.secrets.".len()..];
+                            let name: String = rest.chars().take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_').collect();
+                            if name.len() > 1 && !referenced.contains(&name) {
+                                referenced.push(name);
+                            }
+                        }
+                    }
+                }
+                if !referenced.is_empty() {
+                    let listed = c.get(&format!("/api/f/{name}/secrets"))?;
+                    let set = c.call(listed)?;
+                    let have: Vec<String> = set["names"].as_array().cloned().unwrap_or_default().iter()
+                        .map(|v| v.as_str().unwrap_or("").to_string()).collect();
+                    for r in referenced {
+                        if !have.contains(&r) {
+                            eprintln!("WARNING: workflows reference ctx.secrets.{r} but it is NOT set — every run will fail until you do:\n  fragment secret set {name} {r}");
+                        }
+                    }
                 }
             }
             let v = c.call(c.post_json(&format!("/api/f/{name}/drafts"), &json!({ "note": note }))?)?;
@@ -834,7 +874,7 @@ fn chrono_like(secs: u64) -> String {
 // PATH — launchd and systemd both run with minimal environments (the
 // agent-built watch.sh failed on exactly this).
 
-fn install_sync_unit(name: &str, dir: &PathBuf, install: bool) -> Result<()> {
+fn install_sync_unit(name: &str, dir: &PathBuf, install: bool, mirror_from: Option<&str>) -> Result<()> {
     let dir = match dir.canonicalize() {
         Ok(d) => d,
         Err(_) => anyhow::bail!("no such directory: {}", dir.display()),
@@ -844,6 +884,9 @@ fn install_sync_unit(name: &str, dir: &PathBuf, install: bool) -> Result<()> {
         .and_then(|p| p.canonicalize())
         .context("cannot resolve the fragment binary path")?;
     let log = dir.join(".fragment").join("watch.log");
+    let mirror_arg = mirror_from
+        .map(|m| format!("    <string>--mirror-from</string>\n    <string>{m}</string>\n"))
+        .unwrap_or_default();
 
     if cfg!(target_os = "macos") {
         let label = format!("sh.finite.fragment-sync.{name}");
@@ -888,6 +931,7 @@ fn install_sync_unit(name: &str, dir: &PathBuf, install: bool) -> Result<()> {
             .replace("__NAME__", name)
             .replace("__DIR__", &dir.display().to_string())
             .replace("__HOMEBIN__", &format!("{}/.local/bin:{}/.cargo/bin", home, home))
+            .replace("    __MIRROR__\n", &mirror_arg)
             .replace("__HOME__", &home)
             .replace("__LOG__", &log.display().to_string());
             std::fs::write(&plist, xml)?;
@@ -946,7 +990,8 @@ WantedBy=default.target
                 .replace("__NAME__", name)
                 .replace("__EXE__", &exe.display().to_string())
                 .replace("__DIR__", &dir.display().to_string())
-                .replace("__HOMEBIN__", &format!("{}/.local/bin:{}/.cargo/bin", home, home));
+                .replace("__HOMEBIN__", &format!("{}/.local/bin:{}/.cargo/bin", home, home))
+            .replace("    __MIRROR__\n", &mirror_arg);
             std::fs::write(&path, ini)?;
             let run = |args: &[&str]| -> Result<()> {
                 let st = std::process::Command::new("systemctl")

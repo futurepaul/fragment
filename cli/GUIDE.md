@@ -325,6 +325,12 @@ The manifest does the enforcing (`"appendOnly": ["inbox/"]`); content-hash
 naming makes identical re-drops no-ops and simultaneous drops
 collision-free. Nothing is ever lost or double-filed.
 
+**The standard drop envelope** (producers send this, consumers accept
+this — filter on the payload's shape, NEVER on the source string, or
+you will silently discard other fragments' drops):
+
+    POST {webhook URL}   {"source": "<your-name>", "payload": {"text": "...", "name": "optional sender"}}
+
 ```js
 // workflows/ingest.mjs — trigger "inbox"; manifest: "appendOnly": ["inbox/"]
 export async function run(ctx) {
@@ -344,6 +350,29 @@ export async function run(ctx) {
 }
 ```
 
+Receiving drops (the other side): file any message that has a
+`payload.text`, whatever its source — that is the contract.
+
+```js
+// workflows/ingest.mjs — trigger "inbox"; the RECEIVER of drops
+export async function run(ctx) {
+  const msgs = await ctx.inbox();
+  const filed = [];
+  for (const m of msgs) {
+    const p = (m.payload && typeof m.payload === "object") ? m.payload : {};
+    const text = String(p.text || "").trim().slice(0, 5000);
+    if (!text) continue;                       // shape filter, not source filter
+    const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+    const hash = [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 8);
+    const from = String(p.name || m.source || "anon").replace(/[^a-z0-9-]+/gi, "-").slice(0, 24);
+    await ctx.files.write(`inbox/${from}-${hash}.md`, text + "\n");
+    filed.push(m.id);
+  }
+  await ctx.inboxAck(msgs.map((m) => m.id));
+  return { filed: filed.length };
+}
+```
+
 ### pattern: watcher
 
 React to another fragment's changes the moment they happen. Put your
@@ -358,6 +387,8 @@ site — a `?view=` link is all a reader needs.
 // workflows/check.mjs — trigger "inbox" AND cron "*/2 * * * *"
 const SOURCE = "https://some-fragment.fragment.club";
 const DELAY_MS = 60_000; // enrichment waits, so links appear instantly
+// set the token first or every run will fail:
+//   fragment secret set <this-fragment> SOURCE_VIEW_TOKEN=<token>
 export async function run(ctx) {
   const token = ctx.secrets.SOURCE_VIEW_TOKEN;
   const tree = await (await ctx.http(SOURCE + "/__tree?view=" + token)).json();
@@ -513,7 +544,8 @@ Obsidian-like site:
 ```
 fragment init my-vault --template vault
 cd my-vault
-fragment sync my-vault --dir . --watch        # leave running; edits go live
+# my-notes is the folder to show — read-only, overlaid in each pass
+fragment sync my-vault --dir . --mirror-from ../my-notes --watch   # leave running
 ```
 
 The viewer (`app.mjs` + `assets/`) is frozen in the deploy snapshot; the notes

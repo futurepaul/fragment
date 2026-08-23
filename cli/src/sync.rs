@@ -30,6 +30,10 @@ pub enum ConflictStrategy {
 
 pub struct SyncOptions {
     pub mode: Mode,
+    /// overlay a read-only source folder into dir before each pass: new
+    /// and changed files copy in (source never written, nothing deleted —
+    /// dir can hold app code and drops alongside the mirrored content)
+    pub mirror_from: Option<PathBuf>,
     pub strategy: ConflictStrategy,
     pub apply_mass_delete: bool,
     pub prune: bool,
@@ -41,6 +45,7 @@ impl Default for SyncOptions {
     fn default() -> Self {
         SyncOptions {
             mode: Mode::Mirror,
+            mirror_from: None,
             strategy: ConflictStrategy::Markers,
             apply_mass_delete: false,
             prune: false,
@@ -268,7 +273,45 @@ struct RemoteFile {
     deleted: bool,
 }
 
+/// copy new/changed files from src into dir (never writes src, never
+/// deletes in dir); preserves mtimes so the scan shortcut stays valid
+fn mirror_overlay(src: &Path, dir: &Path) -> Result<()> {
+    for entry in walkdir::WalkDir::new(src).follow_links(false) {
+        let entry = entry?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || name.ends_with("~") || name.starts_with(".#") || name.ends_with(".swp") {
+            continue;
+        }
+        let rel = entry.path().strip_prefix(src).unwrap().to_string_lossy().replace('\\', "/");
+        if rel.split('/').any(|seg| seg.starts_with('.') && seg != ".") {
+            continue;
+        }
+        let target = dir.join(&rel);
+        let src_meta = fs::metadata(entry.path())?;
+        if let Ok(t) = fs::metadata(&target) {
+            if t.len() == src_meta.len() {
+                let sm = src_meta.modified()?.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i128).unwrap_or(0);
+                let tm = t.modified()?.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i128).unwrap_or(0);
+                if sm == tm {
+                    continue;
+                }
+            }
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(entry.path(), &target)?; // fs::copy preserves mtime
+    }
+    Ok(())
+}
+
 pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Result<Report> {
+    if let Some(src) = &opts.mirror_from {
+        mirror_overlay(src, dir)?;
+    }
     let mut state = load_state(dir, name)?;
 
     // root identity: a different (dev,ino) with recorded identity means the

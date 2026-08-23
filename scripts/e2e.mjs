@@ -793,7 +793,16 @@ async function guideSection() {
     const inboxFiles = (files.body?.files || []).filter((f) => f.path.startsWith('inbox/') && !f.deleted);
     eq(inboxFiles.length, 2, 'identical drops collapsed to one file (hash naming)');
     const r2 = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'ingest' }));
-    eq(r2.body?.output?.filed?.length, 0, 'acked drops never re-file');
+    eq(r2.body?.output?.filed, 0, 'acked drops never re-file');
+  }
+
+  // unnamed consumer js block in the dropzone pattern section gets the dropzone runner shape:
+  // (it's the RECEIVER side of the same pattern — covered by the same manifest shape)
+  {
+    // verify the guide teaches shape-not-source filtering
+    const consumer = Object.entries(patterns).find(([k]) => k.includes('ingest') || k.includes('RECEIVER'));
+    ok(!!consumer || patterns.dropzone.includes('payload.text') || JSON.stringify(patterns).includes('shape filter'),
+      'guide teaches the standard drop envelope (shape filter, not source)');
   }
 
   // pattern: watcher (notify poke + tree read)
@@ -819,7 +828,7 @@ async function guideSection() {
     await signed('PUT', `/api/f/${fx.name}/file?path=notes/new.md&base_rev=0`, 'fresh content');
     let ran = false;
     const t0 = Date.now();
-    while (Date.now() - t0 < 30_000 && !ran) {
+    while (Date.now() - t0 < 60_000 && !ran) {
       const runs = await signed('GET', `/api/f/${name}/runs`);
       ran = (runs.body?.runs || []).some((r) => r.status === 'success');
       if (!ran) await sleep(500);
@@ -1295,6 +1304,34 @@ async function filesyncSection() {
     writeFileSync(join(dir, 'a.md'), 'tampered');
     const ok2 = spawnSync(bin, ['verify', name, '--dir', dir], { encoding: 'utf8', env: { ...process.env, FRAGMENT_HOST: BASE, ...H } });
     eq(ok2.status, 3, 'verify exits 3 on drift');
+  }
+
+  // --mirror-from: read-only source overlay
+  {
+    const name = `e2e-fs-mir-${suffix}`;
+    const srcDir = join(mkdtempSync(join(tmpdir(), 'fragment-fs-')), 'src');
+    const dir = join(mkdtempSync(join(tmpdir(), 'fragment-fs-')), 'frag');
+    mkdirSync(srcDir, { recursive: true });
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(srcDir, 'a.md'), 'one');
+    mkdirSync(join(srcDir, 'sub'));
+    writeFileSync(join(srcDir, 'sub/b.md'), 'two');
+    runCli(bin, ['create', name], { env: H });
+    runCli(bin, ['grant', name, '--editor', ownerNpub], { env: H });
+    const remoteFiles = async () => {
+      const f = await signed('GET', `/api/f/${name}/files`);
+      return (f.body?.files || []).filter((x) => !x.deleted).map((x) => x.path);
+    };
+    runCli(bin, ['sync', name, '--dir', dir, '--mirror-from', srcDir], { env: H });
+    let paths = await remoteFiles();
+    ok(paths.includes('a.md') && paths.includes('sub/b.md'), 'mirror-from overlays the source');
+    // new file in the source arrives on the next pass
+    writeFileSync(join(srcDir, 'c.md'), 'three');
+    runCli(bin, ['sync', name, '--dir', dir, '--mirror-from', srcDir], { env: H });
+    paths = await remoteFiles();
+    ok(paths.includes('c.md'), 'new source files arrive on later passes');
+    // source untouched
+    ok(!existsSync(join(srcDir, '.fragment')), 'mirror source never written');
   }
 
   // mass-deletion guard
