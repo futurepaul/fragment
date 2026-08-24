@@ -538,8 +538,8 @@ async function runsSection() {
     await putManifest(name, { workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'inbox' }] });
     for (let i = 0; i < 5; i++) await postInbox(name, inboxToken);
     let pausedBy = false;
-    const bt0 = Date.now();
-    while (Date.now() - bt0 < 30_000 && !pausedBy) {
+    const bkT0 = Date.now();
+    while (Date.now() - bkT0 < 30_000 && !pausedBy) {
       const st = await signed('GET', `/api/f/${name}/status`);
       pausedBy = (st.body?.paused || []).includes('w');
       if (!pausedBy) await sleep(700);
