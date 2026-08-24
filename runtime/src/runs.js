@@ -125,7 +125,7 @@ async function executeWorkflow(cell, wf, input, opts = {}) {
       Date.now(),
       Date.now()
     );
-    void cell.rearmAlarm();
+    await cell.rearmAlarm();
     return { ok: true, scheduled: true };
   }
   const trigger = opts.trigger || "manual";

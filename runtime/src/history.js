@@ -1,7 +1,7 @@
 // GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
 import { enqueueNotify } from "./notify.js";
 const RETENTION = 10;
-function recordRevision(cell, path, rev, sha, content, deleted = false) {
+async function recordRevision(cell, path, rev, sha, content, deleted = false) {
   if (!deleted && sha && content != null) {
     cell.sql.exec("INSERT OR IGNORE INTO blobs (hash, content) VALUES (?, ?)", sha, content);
   }
@@ -20,7 +20,7 @@ function recordRevision(cell, path, rev, sha, content, deleted = false) {
     RETENTION
   );
   watchBroadcast(cell, { type: "changed", rev: parseInt(cell.getMeta("rev") || "0", 10), paths: [path] });
-  enqueueNotify(cell, [path]);
+  await enqueueNotify(cell, [path]);
 }
 function watchBroadcast(cell, frame) {
   for (const ws of cell.state.getWebSockets()) {

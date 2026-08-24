@@ -11,7 +11,7 @@ function enqueueNotify(cell, paths) {
       Date.now()
     );
   }
-  void cell.rearmAlarm();
+  return cell.rearmAlarm();
 }
 async function drainNotify(cell) {
   const name = cell.getMeta("name");

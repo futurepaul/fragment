@@ -7,8 +7,9 @@ import { enqueueNotify } from "./notify.js";
 
 const RETENTION = 10;
 
-// record a revision after a successful mutation; broadcasts to watchers
-export function recordRevision(cell, path, rev, sha, content, deleted = false) {
+// record a revision after a successful mutation; broadcasts to watchers.
+// Async so the notify rearm stays inside the caller's turn (see notify.ts)
+export async function recordRevision(cell, path, rev, sha, content, deleted = false) {
   if (!deleted && sha && content != null) {
     cell.sql.exec("INSERT OR IGNORE INTO blobs (hash, content) VALUES (?, ?)", sha, content);
   }
@@ -19,7 +20,7 @@ export function recordRevision(cell, path, rev, sha, content, deleted = false) {
     path, path, RETENTION,
   );
   watchBroadcast(cell, { type: "changed", rev: parseInt(cell.getMeta("rev") || "0", 10), paths: [path] });
-  enqueueNotify(cell, [path]);
+  await enqueueNotify(cell, [path]);
 }
 
 export function watchBroadcast(cell, frame) {

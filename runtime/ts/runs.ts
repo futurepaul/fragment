@@ -146,7 +146,11 @@ export async function executeWorkflow(cell, wf, input, opts: any = {}) {
       "INSERT INTO runs (wf, via, status, input, cause, attempt, max_attempts, started_at, next_attempt_at) VALUES (?, ?, 'pending', ?, ?, 0, ?, ?, ?)",
       wf.name, opts.trigger || "inbox", JSON.stringify(input ?? null), JSON.stringify(cause), policy.attempts, Date.now(), Date.now(),
     );
-    void cell.rearmAlarm();
+    // awaited, never detached: a detached rearm's setAlarm continuation can
+    // land after the HTTP turn ends, and celld panics the node on any
+    // storage op outside a turn (found live: fleet crash-looping every
+    // ~6.5 min from the first async inbox POST)
+    await cell.rearmAlarm();
     return { ok: true, scheduled: true };
   }
   const trigger = opts.trigger || "manual";

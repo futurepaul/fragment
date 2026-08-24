@@ -16,8 +16,10 @@ export function enqueueNotify(cell, paths) {
     );
   }
   // the mutation path doesn't otherwise arm the alarm (sync triggers may
-  // not exist) — wake it so the outbox drains immediately
-  void cell.rearmAlarm();
+  // not exist) — wake it so the outbox drains immediately. Returned so the
+  // caller's turn can await it: a detached rearm can outlive the turn and
+  // panics the host (same class as the async-inbox bug)
+  return cell.rearmAlarm();
 }
 
 export async function drainNotify(cell) {

@@ -76,7 +76,7 @@ export async function internalRoute(cell, request, url) {
     cell.setMeta("rev", String(newRev));
     cell.sql.exec("INSERT INTO files (path, content, rev, sha256, updated_at, deleted) VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT(path) DO UPDATE SET content = excluded.content, rev = excluded.rev, sha256 = excluded.sha256, updated_at = excluded.updated_at, deleted = 0",
       path, body, newRev, sha, Date.now());
-    recordRevision(cell, path, newRev, sha, body);
+    await recordRevision(cell, path, newRev, sha, body);
     return json({ ok: true, deduped: false, rev: newRev });
   }
 

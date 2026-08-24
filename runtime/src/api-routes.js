@@ -186,7 +186,7 @@ async function apiRoute(cell, request, url) {
       sha,
       Date.now()
     );
-    recordRevision(cell, path, newRev, sha, body);
+    await recordRevision(cell, path, newRev, sha, body);
     await cell.scheduleSyncTrigger(path);
     return json({ path, rev: newRev });
   }
@@ -204,7 +204,7 @@ async function apiRoute(cell, request, url) {
       null,
       Date.now()
     );
-    recordRevision(cell, path, newRev, null, null, true);
+    await recordRevision(cell, path, newRev, null, null, true);
     await cell.scheduleSyncTrigger(path);
     return json({ ok: true, rev: newRev });
   }

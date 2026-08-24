@@ -59,7 +59,7 @@ async function internalRoute(cell, request, url) {
       sha,
       Date.now()
     );
-    recordRevision(cell, path, newRev, sha, body);
+    await recordRevision(cell, path, newRev, sha, body);
     return json({ ok: true, deduped: false, rev: newRev });
   }
   if (rest === "files/list") {
