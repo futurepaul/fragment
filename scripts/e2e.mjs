@@ -537,8 +537,14 @@ async function runsSection() {
     await putFile(name, 'workflows/w.mjs', 'export async function run(ctx) {\n  null.x;\n}\n');
     await putManifest(name, { workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'inbox' }] });
     for (let i = 0; i < 5; i++) await postInbox(name, inboxToken);
-    const st = await signed('GET', `/api/f/${name}/status`);
-    ok((st.body?.paused || []).includes('w'), 'breaker auto-paused the workflow');
+    let pausedBy = false;
+    const bt0 = Date.now();
+    while (Date.now() - bt0 < 30_000 && !pausedBy) {
+      const st = await signed('GET', `/api/f/${name}/status`);
+      pausedBy = (st.body?.paused || []).includes('w');
+      if (!pausedBy) await sleep(700);
+    }
+    ok(pausedBy, 'breaker auto-paused the workflow');
     const evs = await signed('GET', `/api/f/${name}/events`);
     ok(JSON.stringify(evs.body?.events || []).includes('"kind":"workflow.auto-paused"'), 'workflow.auto-paused event');
     await postInbox(name, inboxToken);
