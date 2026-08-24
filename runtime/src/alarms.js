@@ -16,7 +16,7 @@ async function rearmAlarm(cell) {
   }
   const syncAt = parseInt(cell.getMeta("sync_trigger_at") || "0", 10);
   if (syncAt && (next === null || syncAt < next)) next = syncAt;
-  const retry = cell.sql.exec("SELECT MIN(next_attempt_at) t FROM runs WHERE status = 'backoff'").toArray()[0];
+  const retry = cell.sql.exec("SELECT MIN(next_attempt_at) t FROM runs WHERE status IN ('backoff', 'pending')").toArray()[0];
   if (retry && retry.t && (next === null || retry.t < next)) next = retry.t;
   const notifyAt = nextNotifyAt(cell);
   if (notifyAt && (next === null || notifyAt < next)) next = notifyAt;

@@ -96,12 +96,10 @@ function recentAutoRuns(cell, wf) {
 
 // ------ executeWorkflow: the one entry point for every trigger ------
 
-export async function executeWorkflow(cell, wf, input, opts: any = {}) {
-  const trigger = opts.trigger || "manual";
-  const auto = !!opts.auto;
-  const cause = { origin: null, depth: 0, ...(opts.cause || {}) };
-
-  // guards, in fixed order — each records what it refused and why
+// guards, in fixed order — each records what it refused and why. Shared
+// by direct execution and scheduled (alarm-fired) runs so async inbox
+// delivery cannot bypass pause/hops/rate/single-flight.
+async function runGuards(cell, wf, input, trigger, auto, cause) {
   if (auto && wf.paused) {
     const id = insertRun(cell, wf, trigger, input, cause, "blocked");
     cell.addEvent("run.blocked", `${wf.name}: paused`, { wf: wf.name, trigger, runId: id });
@@ -133,6 +131,30 @@ export async function executeWorkflow(cell, wf, input, opts: any = {}) {
       return { ok: true, skipped: true, runId: id };
     }
   }
+  return null;
+}
+
+export async function executeWorkflow(cell, wf, input, opts: any = {}) {
+  // scheduled mode: record the run as pending and arm the alarm — the
+  // caller (an inbox POST acknowledging a webhook) returns immediately;
+  // the alarm fires the actual execution. Manual runs and retries are
+  // unaffected (they pass no `schedule`).
+  if (opts.schedule) {
+    const cause = { origin: null, depth: 0, ...(opts.cause || {}) };
+    const policy = retryPolicy(wf);
+    cell.sql.exec(
+      "INSERT INTO runs (wf, via, status, input, cause, attempt, max_attempts, started_at, next_attempt_at) VALUES (?, ?, 'pending', ?, ?, 0, ?, ?, ?)",
+      wf.name, opts.trigger || "inbox", JSON.stringify(input ?? null), JSON.stringify(cause), policy.attempts, Date.now(), Date.now(),
+    );
+    void cell.rearmAlarm();
+    return { ok: true, scheduled: true };
+  }
+  const trigger = opts.trigger || "manual";
+  const auto = !!opts.auto;
+  const cause = { origin: null, depth: 0, ...(opts.cause || {}) };
+
+  const blocked = await runGuards(cell, wf, input, trigger, auto, cause);
+  if (blocked) return blocked;
 
   const policy = retryPolicy(wf);
   const t0 = Date.now();
@@ -186,16 +208,34 @@ export async function resumeDueRuns(cell) {
     await finishAttempt(cell, wf, r.id, r.attempt, policy, r.via, r.started_at, { ok: false, error: "run interrupted (host restart)", forceRetry: true });
   }
 
-  const due = cell.sql.exec("SELECT * FROM runs WHERE status = 'backoff' AND next_attempt_at <= ? ORDER BY id", Date.now()).toArray();
+  const due = cell.sql.exec("SELECT * FROM runs WHERE (status = 'backoff' OR status = 'pending') AND next_attempt_at <= ? ORDER BY id", Date.now()).toArray();
   for (const r of due) {
     const wf = (m.workflows || []).find((w) => w.name === r.wf);
     if (!wf) { updateRun(cell, r.id, { status: "held", finished_at: Date.now(), error: "workflow removed while retry pending" }); continue; }
-    if (wf.paused) continue; // the breaker won mid-retry; leave the row for unpause+replay
+    if (wf.paused && r.status !== "pending") continue; // breaker won mid-retry: leave backoff rows for unpause+replay; pending rows fall through to the guard so the block is RECORDED
+    let cause: any = { origin: null, depth: 0 };
+    try { cause = { ...cause, ...JSON.parse(r.cause || "{}") }; } catch {}
+    if (r.status === "pending") {
+      // first execution of a scheduled run: the same guards direct runs
+      // pass (pause/hops/rate/single-flight) — async delivery must not
+      // be a guard bypass. A single-flight skip RESCHEDULES rather than
+      // drops: the messages this run would drain have no other trigger
+      // coming for them (found: 3 rapid drops → 2 stranded).
+      const blocked = await runGuards(cell, wf, JSON.parse(r.input || "null"), r.via, true, cause);
+      if (blocked) {
+        if (blocked.skipped) {
+          updateRun(cell, r.id, { status: "pending", next_attempt_at: Date.now() + 2000 });
+          continue;
+        }
+        updateRun(cell, r.id, { status: "blocked", finished_at: Date.now(), error: blocked.reason || "paused" });
+        continue;
+      }
+    }
     const policy = retryPolicy(wf);
     const attempt = r.attempt + 1;
     const t0 = Date.now();
     updateRun(cell, r.id, { status: "running", attempt, started_at: t0, next_attempt_at: null });
-    cell.addEvent("run.started", `${wf.name} (retry ${attempt})`, { wf: wf.name, trigger: r.via, runId: r.id, attempt });
+    cell.addEvent("run.started", `${wf.name} (attempt ${attempt})`, { wf: wf.name, trigger: r.via, runId: r.id, attempt });
     await finishAttempt(cell, wf, r.id, attempt, policy, r.via, t0,
       await cell.runWorkflowLocked(wf, JSON.parse(r.input || "null"), JSON.parse(r.cause || "null")));
   }

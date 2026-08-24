@@ -379,12 +379,22 @@ async function workflowSection() {
   });
   ok(qtok.status === 403 && !JSON.stringify(await qtok.json()).includes('files'),
     'internal plane ignores ?t= query-param tokens');
+  const t0 = Date.now();
   const post = await fetch(`${BASE}/api/f/${name}/inbox?t=${inboxToken}`, {
     method: 'POST', body: JSON.stringify({ source: 'e2e', payload: { x: 1 } }),
   });
   const postBody = await post.json();
   eq(postBody?.ok, true, 'inbox POST accepted');
-  ok((postBody?.ran || []).some((r) => r.workflow === 'onpost' && r.ok), 'inbox-triggered workflow ran');
+  ok((postBody?.scheduled || postBody?.ran || []).length >= 1, 'workflow scheduled');
+  ok(Date.now() - t0 < 3000, 'inbox POST acknowledges fast (no workflow wait)');
+  let ranBy = false;
+  const rt0 = Date.now();
+  while (Date.now() - rt0 < 20_000 && !ranBy) {
+    const runs = await signed('GET', `/api/f/${name}/runs`);
+    ranBy = (runs.body?.runs || []).some((r) => r.wf === 'onpost' && r.status === 'success');
+    if (!ranBy) await sleep(500);
+  }
+  ok(ranBy, 'inbox-triggered workflow ran (async)');
 
   const secList = await signed('GET', `/api/f/${name}/secrets`);
   ok((secList.body?.names || []).includes('E2E_SECRET'), 'secret listed by name only');
@@ -412,9 +422,15 @@ async function pausedSection() {
   const postResp = await fetch(`${BASE}/api/f/${name}/inbox?t=${inboxToken}`, {
     method: 'POST', body: JSON.stringify({ source: 'e2e', payload: {} }),
   });
-  const post = await postResp.json();
   eq(postResp.status, 200, 'inbox POST still accepted while paused');
-  ok((post?.ran || []).some((r) => r.workflow === 'w' && r.status === 'blocked'), 'paused trigger recorded as blocked, not run');
+  let blockedBy = false;
+  const bt0 = Date.now();
+  while (Date.now() - bt0 < 15_000 && !blockedBy) {
+    const runs = await signed('GET', `/api/f/${name}/runs`);
+    blockedBy = (runs.body?.runs || []).some((r) => r.wf === 'w' && r.status === 'blocked');
+    if (!blockedBy) await sleep(400);
+  }
+  ok(blockedBy, 'paused trigger recorded as blocked, not run');
 
   // manual run is the maintenance path and must work
   const run = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'w' }));
@@ -424,10 +440,17 @@ async function pausedSection() {
   // unpause via the pause route → trigger works again
   const un = await signed('POST', `/api/f/${name}/pause`, JSON.stringify({ workflow: 'w', paused: false }));
   eq(un.status, 200, 'unpause via /pause accepted');
-  const post2 = await (await fetch(`${BASE}/api/f/${name}/inbox?t=${inboxToken}`, {
+  await fetch(`${BASE}/api/f/${name}/inbox?t=${inboxToken}`, {
     method: 'POST', body: JSON.stringify({ source: 'e2e', payload: {} }),
-  })).json();
-  ok((post2?.ran || []).some((r) => r.workflow === 'w' && r.ok && r.status === 'ran'), 'unpaused workflow runs on trigger');
+  });
+  let unpausedBy = false;
+  const ut0 = Date.now();
+  while (Date.now() - ut0 < 15_000 && !unpausedBy) {
+    const runs = await signed('GET', `/api/f/${name}/runs`);
+    unpausedBy = (runs.body?.runs || []).some((r) => r.wf === 'w' && r.status === 'success');
+    if (!unpausedBy) await sleep(400);
+  }
+  ok(unpausedBy, 'unpaused workflow runs on trigger');
 }
 
 // ---------- runs: the failure leg ----------
@@ -460,8 +483,7 @@ async function runsSection() {
     await putFile(name, 'workflows/flaky.mjs',
       'export async function run(ctx) {\n  await ctx.http("http://127.0.0.1:9/unreachable");\n  return { fine: true };\n}\n');
     await putManifest(name, { workflows: [{ name: 'flaky', file: 'workflows/flaky.mjs', trigger: 'inbox', retry: { attempts: 2, backoffMs: 300 } }] });
-    const post = await (await postInbox(name, inboxToken)).json();
-    eq(post?.ran?.[0]?.status, 'retrying', 'retryable failure schedules a retry');
+    await postInbox(name, inboxToken);
     const body = await waitRuns(name, (b) => (b.runs || []).some((r) => r.status === 'held' && r.attempt === 2), 'backoff retry reaches held after attempts exhaust');
     const held = (body.runs || []).find((r) => r.status === 'held');
     ok(!!held, 'held run row exists with input + error parked');
@@ -483,8 +505,15 @@ async function runsSection() {
     const { name, inboxToken } = await mkFrag('term', null);
     await putFile(name, 'workflows/term.mjs', 'export async function run(ctx) {\n  null.x;\n}\n');
     await putManifest(name, { workflows: [{ name: 'term', file: 'workflows/term.mjs', trigger: 'inbox' }] });
-    const post = await (await postInbox(name, inboxToken)).json();
-    eq(post?.ran?.[0]?.status, 'held', 'terminal error holds immediately (attempt 1)');
+    await postInbox(name, inboxToken);
+    let heldBy = false;
+    const ht0 = Date.now();
+    while (Date.now() - ht0 < 25_000 && !heldBy) {
+      const body = await signed('GET', `/api/f/${name}/runs`);
+      heldBy = (body.body?.runs || []).some((r) => r.status === 'held' && r.attempt === 1);
+      if (!heldBy) await sleep(600);
+    }
+    ok(heldBy, 'terminal error holds immediately (attempt 1)');
     const body = await signed('GET', `/api/f/${name}/runs`);
     eq(body.body?.runs?.[0]?.attempt, 1, 'terminal error did not retry');
   }
@@ -512,8 +541,15 @@ async function runsSection() {
     ok((st.body?.paused || []).includes('w'), 'breaker auto-paused the workflow');
     const evs = await signed('GET', `/api/f/${name}/events`);
     ok(JSON.stringify(evs.body?.events || []).includes('"kind":"workflow.auto-paused"'), 'workflow.auto-paused event');
-    const post6 = await (await postInbox(name, inboxToken)).json();
-    eq(post6?.ran?.[0]?.status, 'blocked', 'triggers blocked while auto-paused');
+    await postInbox(name, inboxToken);
+    let blocked6 = false;
+    const bt0 = Date.now();
+    while (Date.now() - bt0 < 20_000 && !blocked6) {
+      const runs6 = await signed('GET', `/api/f/${name}/runs`);
+      blocked6 = (runs6.body?.runs || []).some((r) => r.status === 'blocked');
+      if (!blocked6) await sleep(600);
+    }
+    ok(blocked6, 'triggers blocked while auto-paused');
   }
 
   // rate ceiling: maxRunsPerHour trips auto-pause
@@ -523,10 +559,23 @@ async function runsSection() {
     await putManifest(name, { workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'inbox', maxRunsPerHour: 2 }] });
     await postInbox(name, inboxToken);
     await postInbox(name, inboxToken);
-    const third = await (await postInbox(name, inboxToken)).json();
-    eq(third?.ran?.[0]?.status, 'blocked', 'third auto run in an hour is blocked');
-    const st = await signed('GET', `/api/f/${name}/status`);
-    ok((st.body?.paused || []).includes('w'), 'rate ceiling auto-paused the workflow');
+    await postInbox(name, inboxToken);
+    let rateBlocked = false;
+    const rt0 = Date.now();
+    while (Date.now() - rt0 < 25_000 && !rateBlocked) {
+      const runs = await signed('GET', `/api/f/${name}/runs`);
+      rateBlocked = (runs.body?.runs || []).some((r) => r.status === 'blocked');
+      if (!rateBlocked) await sleep(600);
+    }
+    ok(rateBlocked, 'third auto run in an hour is blocked');
+    let pausedBy = false;
+    const pt0 = Date.now();
+    while (Date.now() - pt0 < 10_000 && !pausedBy) {
+      const st = await signed('GET', `/api/f/${name}/status`);
+      pausedBy = (st.body?.paused || []).includes('w');
+      if (!pausedBy) await sleep(600);
+    }
+    ok(pausedBy, 'rate ceiling auto-paused the workflow');
   }
 
   // hop budget: over-deep inbox POSTs are refused with cycle.detected
@@ -534,12 +583,21 @@ async function runsSection() {
     const { name, inboxToken } = await mkFrag('hops', null);
     await putFile(name, 'workflows/w.mjs', 'export async function run(ctx) {\n  return { ran: true };\n}\n');
     await putManifest(name, { workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'inbox' }] });
-    const deep = await (await postInbox(name, inboxToken, { 'x-fragment-hops': '99', 'x-fragment-cause': 'other-frag' })).json();
-    eq(deep?.ran?.[0]?.status, 'blocked', 'over-budget hops blocked before author code');
+    await postInbox(name, inboxToken, { 'x-fragment-hops': '99', 'x-fragment-cause': 'other-frag' });
+    await postInbox(name, inboxToken);
+    let blockedBy = false, ranBy = false;
+    const ht0 = Date.now();
+    while (Date.now() - ht0 < 25_000 && !(blockedBy && ranBy)) {
+      const runs = await signed('GET', `/api/f/${name}/runs`);
+      const rs = runs.body?.runs || [];
+      blockedBy = blockedBy || rs.some((r) => r.status === 'blocked');
+      ranBy = ranBy || rs.some((r) => r.status === 'success');
+      if (!(blockedBy && ranBy)) await sleep(600);
+    }
+    ok(blockedBy, 'over-budget hops blocked before author code');
     const evs = await signed('GET', `/api/f/${name}/events`);
     ok(JSON.stringify(evs.body?.events || []).includes('"kind":"cycle.detected"'), 'cycle.detected on the ledger');
-    const shallow = await (await postInbox(name, inboxToken)).json();
-    eq(shallow?.ran?.[0]?.status, 'ran', 'organic-depth POST still runs');
+    ok(ranBy, 'organic-depth POST still runs');
   }
 
   // (Idempotency-Key removed — content-hash naming in the patterns is
@@ -745,10 +803,14 @@ async function guideSection() {
     await post('first drop');
     await post('first drop'); // identical re-drop
     await post('second drop');
-    // each POST auto-ran ingest (inbox trigger); give them a beat, then check
-    await sleep(1500);
-    const runs = await signed('GET', `/api/f/${name}/runs`);
-    const okRuns = (runs.body?.runs || []).filter((r) => r.status === 'success');
+    // each POST scheduled an ingest run; wait for all three to land
+    let okRuns = [];
+    const gt0 = Date.now();
+    while (Date.now() - gt0 < 25_000 && okRuns.length < 3) {
+      await sleep(800);
+      const runs = await signed('GET', `/api/f/${name}/runs`);
+      okRuns = (runs.body?.runs || []).filter((r) => r.status === 'success');
+    }
     ok(okRuns.length >= 3, 'each drop ran the ingest workflow');
     const files = await signed('GET', `/api/f/${name}/files`);
     const inboxFiles = (files.body?.files || []).filter((f) => f.path.startsWith('inbox/') && !f.deleted);
@@ -1134,13 +1196,18 @@ async function filesyncSection() {
     await signed('PUT', `/api/f/${name}/file?path=workflows/w.mjs&base_rev=0`,
       'export async function run(ctx) { const m = await ctx.inbox(); await ctx.inboxAck(m.map((x) => x.id)); return { n: m.length }; }');
     await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'link', editors: [], viewers: [], workflows: [{ name: 'w', file: 'workflows/w.mjs', trigger: 'inbox' }], secrets: [] }));
-    // force a "still active" run row so the next trigger is skipped
-    await signed('POST', '/api/fragments', JSON.stringify({ name: `e2e-fs-ack2-${suffix}` }));
-    const p1 = await (await fetch(`${BASE}/api/f/${name}/inbox?t=${created.body.inboxToken}`, { method: 'POST', body: JSON.stringify({ source: 't', payload: { x: 1 } }) })).json();
-    eq(p1?.ran?.[0]?.status, 'ran', 'first message ran');
-    const p2 = await (await fetch(`${BASE}/api/f/${name}/inbox?t=${created.body.inboxToken}`, { method: 'POST', body: JSON.stringify({ source: 't', payload: { x: 2 } }) })).json();
-    eq(p2?.ran?.[0]?.status, 'ran', 'second message ran');
-    // drain semantics: a manual run reports zero pending (both acked)
+    // async scheduling: both messages land, both runs fire, the workflow
+    // drains + acks them itself (the ack lives in the workflow now)
+    await fetch(`${BASE}/api/f/${name}/inbox?t=${created.body.inboxToken}`, { method: 'POST', body: JSON.stringify({ source: 't', payload: { x: 1 } }) });
+    await fetch(`${BASE}/api/f/${name}/inbox?t=${created.body.inboxToken}`, { method: 'POST', body: JSON.stringify({ source: 't', payload: { x: 2 } }) });
+    let drained = false;
+    const dt0 = Date.now();
+    while (Date.now() - dt0 < 25_000 && !drained) {
+      const runs = await signed('GET', `/api/f/${name}/runs`);
+      drained = (runs.body?.counts || {}).success >= 2;
+      if (!drained) await sleep(600);
+    }
+    ok(drained, 'both scheduled runs fired and drained their messages');
     const drain = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'w' }));
     eq(drain.body?.output?.n, 0, 'inbox empty after acked runs');
   }

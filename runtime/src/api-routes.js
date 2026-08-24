@@ -35,11 +35,10 @@ async function apiRoute(cell, request, url) {
     const results = [];
     for (const wf of m.workflows || []) {
       if (wf.trigger !== "inbox") continue;
-      const out = await cell.executeWorkflow(wf, { inbox: { id: cur.id, source: body.source, payload: body.payload } }, { auto: true, trigger: "inbox", cause });
-      results.push({ workflow: wf.name, ok: !!out.ok, status: out.blocked ? "blocked" : out.skipped ? "skipped" : out.held ? "held" : out.retrying ? "retrying" : "ran" });
-      if (out.ok && !out.skipped && !out.blocked) cell.sql.exec("UPDATE inbox SET status = 'done' WHERE id = ?", cur.id);
+      const out = await cell.executeWorkflow(wf, { inbox: { id: cur.id, source: body.source, payload: body.payload } }, { auto: true, trigger: "inbox", cause, schedule: true });
+      results.push({ workflow: wf.name, scheduled: true });
     }
-    return json({ ok: true, id: cur.id, ran: results });
+    return json({ ok: true, id: cur.id, scheduled: results });
   }
   const authz = (min) => cell.needRole(request, min);
   const deny = (a) => json({ error: a.error }, a.status);

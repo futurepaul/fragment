@@ -41,18 +41,18 @@ export async function apiRoute(cell, request, url) {
       depth: parseInt(request.headers.get("x-fragment-hops") || "0", 10) || 0,
       inboxId: cur.id,
     };
+    // acknowledge WITHOUT waiting for the workflows: the message is durably
+    // in the inbox; the runs are scheduled on the alarm and the failure leg
+    // owns retries/holds/dedup. Callers used to pay the whole workflow
+    // chain (cold start + nested inbox POSTs = 10s+ drops; found tracing
+    // r4-dropzone). The message acks when a run actually drains it.
     const results = [];
     for (const wf of m.workflows || []) {
       if (wf.trigger !== "inbox") continue; // paused is a guard inside executeWorkflow
-      const out = await cell.executeWorkflow(wf, { inbox: { id: cur.id, source: body.source, payload: body.payload } }, { auto: true, trigger: "inbox", cause });
-      results.push({ workflow: wf.name, ok: !!out.ok, status: out.blocked ? "blocked" : out.skipped ? "skipped" : out.held ? "held" : out.retrying ? "retrying" : "ran" });
-      // ack ONLY when this message actually ran — a skipped or blocked run
-      // did not observe it, and acking anyway loses it (found live: the
-      // dropzone bot lost 7 of 8 simultaneous drops this way). Unacked
-      // messages stay pending for the next run that drains ctx.inbox().
-      if (out.ok && !out.skipped && !out.blocked) cell.sql.exec("UPDATE inbox SET status = 'done' WHERE id = ?", cur.id);
+      const out = await cell.executeWorkflow(wf, { inbox: { id: cur.id, source: body.source, payload: body.payload } }, { auto: true, trigger: "inbox", cause, schedule: true });
+      results.push({ workflow: wf.name, scheduled: true });
     }
-    return json({ ok: true, id: cur.id, ran: results });
+    return json({ ok: true, id: cur.id, scheduled: results });
   }
 
   // everything below needs a role
