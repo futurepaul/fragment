@@ -23,6 +23,12 @@ class FragmentCell {
     this.env = env;
     this.sql = state.storage.sql;
     this.sql.exec(SCHEMA);
+    this.addColumnIfMissing("inbox", "claimed_at", "INTEGER");
+    this.addColumnIfMissing("inbox", "claim_token", "TEXT");
+  }
+  addColumnIfMissing(table, col, type) {
+    const cols = this.sql.exec(`PRAGMA table_info(${table})`).toArray().map((r) => String(r.name));
+    if (!cols.includes(col)) this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
   }
   getMeta(k) {
     const row = this.sql.exec("SELECT v FROM meta WHERE k = ?", k).toArray()[0];

@@ -27,6 +27,15 @@ export class FragmentCell {
     this.env = env;
     this.sql = state.storage.sql;
     this.sql.exec(SCHEMA);
+    // idempotent column migrations: CREATE TABLE IF NOT EXISTS never alters
+    // an existing table, so new columns need explicit adds (found live:
+    // claim_token threw in every alarm on cells created before it existed)
+    this.addColumnIfMissing("inbox", "claimed_at", "INTEGER");
+    this.addColumnIfMissing("inbox", "claim_token", "TEXT");
+  }
+  addColumnIfMissing(table: string, col: string, type: string) {
+    const cols = this.sql.exec(`PRAGMA table_info(${table})`).toArray().map((r: any) => String(r.name));
+    if (!cols.includes(col)) this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
   }
   getMeta(k) {
     const row = this.sql.exec("SELECT v FROM meta WHERE k = ?", k).toArray()[0];
