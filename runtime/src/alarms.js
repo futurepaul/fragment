@@ -52,6 +52,7 @@ async function alarm(cell) {
         cell.setMeta("cron_state", JSON.stringify(cronState));
       }
     }
+    cell.sql.exec("UPDATE inbox SET status = 'pending', claim_token = NULL WHERE status = 'claimed' AND claimed_at < ?", Date.now() - 10 * 6e4);
     await cell.resumeDueRuns();
     await drainNotify(cell);
   } finally {

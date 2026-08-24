@@ -72,14 +72,19 @@ async function internalRoute(cell, request, url) {
     });
   }
   if (rest === "inbox/pending") {
+    const token = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     const rows = cell.sql.exec("SELECT id, at, source, payload FROM inbox WHERE status = 'pending' ORDER BY id LIMIT 100").toArray();
-    return json({ messages: rows.map((r) => ({ id: r.id, at: r.at, source: r.source, payload: JSON.parse(r.payload) })) });
+    for (const r of rows) {
+      cell.sql.exec("UPDATE inbox SET status = 'claimed', claimed_at = ?, claim_token = ? WHERE id = ? AND status = 'pending'", Date.now(), token, r.id);
+    }
+    const mine = cell.sql.exec("SELECT id, at, source, payload FROM inbox WHERE claim_token = ? AND status = 'claimed' ORDER BY id", token).toArray();
+    return json({ messages: mine.map((r) => ({ id: r.id, at: r.at, source: r.source, payload: JSON.parse(r.payload) })) });
   }
   if (rest === "inbox/ack" && request.method === "POST") {
     const { ids } = await request.json().catch(() => ({}));
     if (!Array.isArray(ids)) return json({ error: "body: {ids: [...]}" }, 400);
     for (const id of ids.slice(0, 1e3)) {
-      cell.sql.exec("UPDATE inbox SET status = 'done' WHERE id = ?", Number(id) || 0);
+      cell.sql.exec("UPDATE inbox SET status = 'done', claim_token = NULL WHERE id = ? AND status IN ('claimed', 'pending')", Number(id) || 0);
     }
     return json({ ok: true, acked: ids.length });
   }

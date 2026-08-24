@@ -64,6 +64,8 @@ export async function alarm(cell) {
         cell.setMeta("cron_state", JSON.stringify(cronState));
       }
     }
+    // claims held by a run that died (visibility timeout): back to pending
+    cell.sql.exec("UPDATE inbox SET status = 'pending', claim_token = NULL WHERE status = 'claimed' AND claimed_at < ?", Date.now() - 10 * 60_000);
     await cell.resumeDueRuns();
     await drainNotify(cell);
   } finally {
