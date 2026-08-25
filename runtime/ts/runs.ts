@@ -21,7 +21,11 @@ export const LEASE_MS = 10 * 60_000;
 // and upstream providers (undici's "fetch failed", the isolate's Rust-backed
 // "error sending request"). Everything else (code errors, 4xx, bad parses)
 // is terminal — retrying a poison input politely is still retrying a wall.
-const RETRYABLE = /timeout|timed out|abort|network|fetch failed|error sending request|econn|socket|connection|overloaded|rate limit|too many requests|\b429\b|\b502\b|\b503\b|\b504\b/i;
+// 500 is included for cross-fragment delivery: the host can fail the
+// response edge after the target's writes already committed (setAlarm wake
+// gate vs a store blip), and a re-POST of the same payload is idempotent
+// through the target's content-addressed ingest.
+const RETRYABLE = /timeout|timed out|abort|network|fetch failed|error sending request|econn|socket|connection|overloaded|rate limit|too many requests|\b429\b|\b500\b|\b502\b|\b503\b|\b504\b/i;
 
 export function retryableError(err) {
   return RETRYABLE.test(String(err || ""));

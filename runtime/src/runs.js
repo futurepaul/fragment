@@ -3,7 +3,7 @@ const HOP_LIMIT = 16;
 const BREAKER_N = 5;
 const BREAKER_WINDOW = 10 * 6e4;
 const LEASE_MS = 10 * 6e4;
-const RETRYABLE = /timeout|timed out|abort|network|fetch failed|error sending request|econn|socket|connection|overloaded|rate limit|too many requests|\b429\b|\b502\b|\b503\b|\b504\b/i;
+const RETRYABLE = /timeout|timed out|abort|network|fetch failed|error sending request|econn|socket|connection|overloaded|rate limit|too many requests|\b429\b|\b500\b|\b502\b|\b503\b|\b504\b/i;
 function retryableError(err) {
   return RETRYABLE.test(String(err || ""));
 }
