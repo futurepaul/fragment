@@ -321,7 +321,13 @@ export async function apiRoute(cell, request, url) {
   if (p === "/events" && request.method === "GET") {
     const a = authz("viewer"); if (!a.ok) return deny(a);
     const since = parseInt(url.searchParams.get("since") || "0", 10);
-    const rows = cell.sql.exec("SELECT id, at, kind, summary, data FROM events WHERE id > ? ORDER BY id LIMIT 500", since).toArray();
+    // newest window, oldest-first delivery: an ascending LIMIT 500 pins the
+    // response to the FIRST 500 rows, so every cell with a longer history
+    // reads as frozen at [500] (relay-vault, r2-news in prod) while inserts
+    // continue. Select the newest 500 after the cursor DESC, then flip to
+    // the ascending order the CLI's --tail and since-cursor expect.
+    const rows = cell.sql.exec("SELECT id, at, kind, summary, data FROM events WHERE id > ? ORDER BY id DESC LIMIT 500", since).toArray();
+    rows.reverse();
     return json({ events: rows });
   }
 

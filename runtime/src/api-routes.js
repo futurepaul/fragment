@@ -329,7 +329,8 @@ async function apiRoute(cell, request, url) {
     const a = authz("viewer");
     if (!a.ok) return deny(a);
     const since = parseInt(url.searchParams.get("since") || "0", 10);
-    const rows = cell.sql.exec("SELECT id, at, kind, summary, data FROM events WHERE id > ? ORDER BY id LIMIT 500", since).toArray();
+    const rows = cell.sql.exec("SELECT id, at, kind, summary, data FROM events WHERE id > ? ORDER BY id DESC LIMIT 500", since).toArray();
+    rows.reverse();
     return json({ events: rows });
   }
   if (p === "/events" && request.method === "POST") {
