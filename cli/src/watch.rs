@@ -129,6 +129,7 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, cfg: &Wa
 
     // ---- main loop: wakeups → one debounced whole-folder pass ----
     let mut last_sweep = std::time::Instant::now();
+    let mut err_backoff = 1u64;
     loop {
         // block for a wakeup (or the sweep deadline)
         let timeout = Duration::from_secs(RESCAN_SECS).saturating_sub(last_sweep.elapsed());
@@ -142,10 +143,25 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, cfg: &Wa
             gate.wait(); // let a burst settle into one pass
         }
         last_sweep = std::time::Instant::now();
-        let report = sync::sync_once(client, name, dir, opts)?;
-        if !report.pulled.is_empty() || !report.pushed.is_empty() || !report.merged.is_empty() || !report.conflicts.is_empty() {
-            let at = chrono_like();
-            println!("{at} pushed {} pulled {} merged {} conflicts {}", report.pushed.len(), report.pulled.len(), report.merged.len(), report.conflicts.len());
+        // a transient sync error must not exit: under launchd KeepAlive an
+        // exiting watcher respawns into a full TLS + scan cycle every few
+        // seconds for as long as the host has a bad window (found live:
+        // banner/error churn in watch.log during a server blip). Log it,
+        // back off, keep the process and its warm watcher alive.
+        match sync::sync_once(client, name, dir, opts) {
+            Ok(report) => {
+                err_backoff = 1;
+                if !report.pulled.is_empty() || !report.pushed.is_empty() || !report.merged.is_empty() || !report.conflicts.is_empty() {
+                    let at = chrono_like();
+                    println!("{at} pushed {} pulled {} merged {} conflicts {}", report.pushed.len(), report.pulled.len(), report.merged.len(), report.conflicts.len());
+                }
+            }
+            Err(e) => {
+                let at = chrono_like();
+                eprintln!("{at} sync failed (retrying in {err_backoff}s): {e:#}");
+                std::thread::sleep(Duration::from_secs(err_backoff));
+                err_backoff = (err_backoff * 2).min(60);
+            }
         }
     }
 }
@@ -212,8 +228,12 @@ fn live_listener(url: &str, tx: std::sync::mpsc::Sender<Wakeup>) {
             }
             Err(_) => {}
         }
-        std::thread::sleep(Duration::from_secs(backoff.min(30)));
-        backoff *= 2;
+        // cap the value itself, not just the sleep: an uncapped doubling
+        // overflows u64 after ~64 reconnects, wraps to 0, and sleep(0)
+        // hot-spins the thread at 100% CPU forever (found live: a watcher
+        // left pegging a core for hours after a morning of reconnects)
+        std::thread::sleep(Duration::from_secs(backoff));
+        backoff = (backoff * 2).min(30);
     }
 }
 
