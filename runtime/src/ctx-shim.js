@@ -14,6 +14,15 @@ export async function makeCtx(env) {
     if (!r.ok) throw new Error("fragment ctx " + path + " -> " + r.status + ": " + (await r.text()));
     return r;
   };
+  // engines without AbortSignal.any get a tiny bridge: abort the combined
+  // controller the moment either source signal fires
+  const abortOnEither = (a, b) => {
+    const c = new AbortController();
+    const f = (e) => c.abort(e.target.reason);
+    if (a.aborted) c.abort(a.reason); else a.addEventListener("abort", f, { once: true });
+    if (b.aborted) c.abort(b.reason); else b.addEventListener("abort", f, { once: true });
+    return c.signal;
+  };
   // Secrets: workflow runs (scope "run") need them synchronously, so they
   // await the fetch. Served apps (scope "draft") almost never touch secrets,
   // and every request through the app used to pay a loopback for them \u2014 so
@@ -35,11 +44,19 @@ export async function makeCtx(env) {
     // request carries the run's hop budget so receiving fragments can
     // refuse cycles before author code runs.
     http: (url, init) => {
-      if (!cause) return fetch(url, init);
+      // default 30s timeout: a hung outbound fetch used to eat the run's
+      // full 300s host budget before failing. A caller-provided signal
+      // races it (whichever aborts first wins), so apps keep full control.
+      const timeout = AbortSignal.timeout(30000);
+      const own = init && init.signal;
+      const signal = !own ? timeout
+        : typeof AbortSignal.any === "function" ? AbortSignal.any([own, timeout])
+        : abortOnEither(own, timeout);
+      if (!cause) return fetch(url, Object.assign({}, init, { signal }));
       const headers = new Headers((init && init.headers) || {});
       headers.set("x-fragment-hops", String((cause.depth || 0) + 1));
       headers.set("x-fragment-cause", String(cause.origin || "fragment"));
-      return fetch(url, Object.assign({}, init, { headers }));
+      return fetch(url, Object.assign({}, init, { headers, signal }));
     },
     files: {
       async read(path) {

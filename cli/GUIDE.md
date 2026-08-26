@@ -199,7 +199,7 @@ export async function run(ctx, input) {
 
 - `ctx.files` — the fragment's folder (read/write/list).
 - `ctx.secrets` — plain object of secret values by name.
-- `ctx.http` — fetch.
+- `ctx.http` — fetch, with a 30s default timeout (pass your own `signal` to control it).
 - `ctx.ai(prompt, {model?})` — inference routed through the host (the host
   holds the platform key; you never see it).
 - `ctx.state` — per-workflow persistent key-value store.
