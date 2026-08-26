@@ -80,6 +80,8 @@ never change and never expire; deploy as often as you think.
 
 ## Sync in depth
 
+One contract: **files are capped at 1 MB**. Cells hold documents, not media — a cell's content lives in SQLite and replicates as WAL frames, so big blobs tax replication, restores, and write acks. Oversized files fail the sync up front; keep assets in a bucket or CDN and link them.
+
 ```
 fragment sync my-thing --dir .              # one mirror pass (default)
 fragment sync my-thing --dir . --watch      # continuous: OS events + live channel + 60s sweeps

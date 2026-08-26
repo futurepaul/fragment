@@ -1435,21 +1435,37 @@ async function filesyncSection() {
       if (!pushed) await sleep(300);
     }
     ok(pushed, 'continuous mode pushed a local edit');
-    // bodies past the ingress stream threshold must sync, not stall: the
-    // streamed-body path hangs the request (100-continue, then the host
-    // drops the connection), so hosts run a raised bytes threshold
+    // the 1MB per-file limit: cells hold documents, not media — oversized
+    // files are refused up front with the reason, and the just-under-limit
+    // file still syncs (regression guard for the silent 90s stall that
+    // oversized uploads used to hit inside the host)
     {
-      writeFileSync(join(dir, 'blob.bin'), Buffer.alloc(1_500_000, 7));
-      let big = false;
+      // oversized files are skipped with a warning, never block the sync,
+      // and never reach the cell; the API path answers 413 for direct writers
+      writeFileSync(join(dir, 'huge.bin'), Buffer.alloc(1_100_000, 7));
+      writeFileSync(join(dir, 'blob.bin'), Buffer.alloc(900_000, 7));
+      let big = false, hugeGone = false;
       const t2 = Date.now();
-      while (Date.now() - t2 < 30_000 && !big) {
-        const rf = await fetch(`${BASE}/api/f/${name}/file?path=blob.bin`, {
-          headers: { authorization: await authHeader('GET', `${BASE}/api/f/${name}/file?path=blob.bin`, null, ownerKey) },
-        });
-        big = rf.ok;
-        if (!big) await sleep(500);
+      while (Date.now() - t2 < 30_000 && !(big && hugeGone)) {
+        const [rf, hf] = await Promise.all([
+          fetch(`${BASE}/api/f/${name}/file?path=blob.bin`, {
+            headers: { authorization: await authHeader('GET', `${BASE}/api/f/${name}/file?path=blob.bin`, null, ownerKey) },
+          }),
+          fetch(`${BASE}/api/f/${name}/file?path=huge.bin`, {
+            headers: { authorization: await authHeader('GET', `${BASE}/api/f/${name}/file?path=huge.bin`, null, ownerKey) },
+          }),
+        ]);
+        big = rf.ok; hugeGone = hf.status === 404;
+        if (!(big && hugeGone)) await sleep(500);
       }
-      ok(big, '1.5MB asset syncs (large-body path)');
+      ok(big, '900KB file syncs (under the limit)');
+      ok(hugeGone, 'oversized file skipped — never lands in the cell');
+      const api413 = await fetch(`${BASE}/api/f/${name}/file?path=direct.bin&base_rev=0`, {
+        method: 'PUT',
+        headers: { authorization: await authHeader('PUT', `${BASE}/api/f/${name}/file?path=direct.bin&base_rev=0`, Buffer.alloc(1_100_000, 7), ownerKey) },
+        body: Buffer.alloc(1_100_000, 7),
+      });
+      eq(api413.status, 413, 'direct API write over the limit answers 413');
     }
     // double-watcher guard: a second watcher must refuse
     const second = spawnSync(bin, ['sync', name, '--dir', dir, '--watch'], {

@@ -1,6 +1,6 @@
 // The /__internal plane: loopback API for ctx calls from loader isolates.
 // Run-token (and optional host-secret) gated.
-import { json, toAB, isMachinery, randHex } from "./util.js";
+import { json, toAB, isMachinery, randHex, bodyTooLarge, MAX_BODY_BYTES } from "./util.js";
 import { sha256Hex } from "./auth.js";
 import { checkToken } from "./loader.js";
 import { recordRevision } from "./history.js";
@@ -14,6 +14,9 @@ function appendOnlyHit(cell, path) {
 // ------ internalRoute ------
 
 export async function internalRoute(cell, request, url) {
+  if (bodyTooLarge(request)) {
+    return json({ error: `body too large: cells accept at most ${MAX_BODY_BYTES} bytes per write — keep big assets out of workflows` }, 413);
+  }
   const p = url.pathname.slice("/__internal/f/".length);
   const slash = p.indexOf("/");
   const rest = p.slice(slash + 1);

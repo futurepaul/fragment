@@ -19,6 +19,11 @@ CREATE TABLE IF NOT EXISTS fragments (name TEXT PRIMARY KEY, owner TEXT, created
 CREATE TABLE IF NOT EXISTS roles (name TEXT, pubkey TEXT, role TEXT, PRIMARY KEY (name, pubkey));
 CREATE TABLE IF NOT EXISTS slugs (slug TEXT PRIMARY KEY, name TEXT);
 `;
+const MAX_BODY_BYTES = 1e6;
+function bodyTooLarge(request) {
+  const len = parseInt(request.headers.get("content-length") || "0", 10);
+  return len > MAX_BODY_BYTES;
+}
 const MIME = {
   html: "text/html; charset=utf-8",
   htm: "text/html; charset=utf-8",
@@ -72,8 +77,10 @@ function json(data, status = 200, headers = {}) {
 }
 export {
   MACHINERY,
+  MAX_BODY_BYTES,
   MIME,
   SCHEMA,
+  bodyTooLarge,
   isMachinery,
   json,
   randHex,

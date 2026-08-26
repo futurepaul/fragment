@@ -21,6 +21,18 @@ CREATE TABLE IF NOT EXISTS roles (name TEXT, pubkey TEXT, role TEXT, PRIMARY KEY
 CREATE TABLE IF NOT EXISTS slugs (slug TEXT PRIMARY KEY, name TEXT);
 `;
 
+// One bound for every body a cell will accept. Cell content lives in
+// SQLite and replicates as LTX WAL frames: big blobs amplify replication
+// traffic, restore cost, and write-ack latency, so cells hold documents,
+// not media. Decimal-1MB sits under the host's 1MiB ingress stream
+// threshold with headroom.
+export const MAX_BODY_BYTES = 1_000_000;
+
+export function bodyTooLarge(request) {
+  const len = parseInt(request.headers.get("content-length") || "0", 10);
+  return len > MAX_BODY_BYTES;
+}
+
 export const MIME = {
   html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8",
   css: "text/css", js: "text/javascript",

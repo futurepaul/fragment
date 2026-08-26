@@ -1,5 +1,5 @@
 // GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
-import { json, toAB, randHex } from "./util.js";
+import { json, toAB, randHex, bodyTooLarge, MAX_BODY_BYTES } from "./util.js";
 import { sha256Hex } from "./auth.js";
 import { recordRevision } from "./history.js";
 function appendOnlyHit(cell, path) {
@@ -7,6 +7,9 @@ function appendOnlyHit(cell, path) {
   return m && (m.appendOnly || []).some((p) => path === p.slice(0, -1) || path.startsWith(p));
 }
 async function internalRoute(cell, request, url) {
+  if (bodyTooLarge(request)) {
+    return json({ error: `body too large: cells accept at most ${MAX_BODY_BYTES} bytes per write \u2014 keep big assets out of workflows` }, 413);
+  }
   const p = url.pathname.slice("/__internal/f/".length);
   const slash = p.indexOf("/");
   const rest = p.slice(slash + 1);

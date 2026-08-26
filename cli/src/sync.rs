@@ -342,7 +342,42 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
     state.root_dev = md.dev();
     state.root_ino = md.ino();
 
-    let (local, stats) = scan_local(dir, Some(&state), opts.verify)?;
+    let (mut local, stats) = scan_local(dir, Some(&state), opts.verify)?;
+
+    // cells hold documents, not media: oversized files are skipped with a
+    // loud warning instead of blocking the whole publish (a bot dropping
+    // one big asset must not wedge every later sync). A skipped file that
+    // was previously synced keeps its state entry, so it is neither pushed
+    // nor mistaken for a local deletion — the remote keeps the last-good
+    // copy until the file shrinks or moves out.
+    const MAX_FILE_BYTES: u64 = 1_000_000;
+    let mut oversized: Vec<String> = Vec::new();
+    let mut kept: HashMap<String, LocalFile> = HashMap::new();
+    for (path, file) in local.iter() {
+        if file.size > MAX_FILE_BYTES {
+            oversized.push(format!("  {} ({:.1} KB over the 1 MB limit)", path, (file.size - MAX_FILE_BYTES) as f64 / 1000.0));
+        }
+    }
+    if !oversized.is_empty() {
+        eprintln!("warning: skipped {} oversized file(s) — cell storage is for documents, not assets (a bucket or CDN is the right home for media):\n{}", oversized.len(), oversized.join("\n"));
+        let skipped: Vec<String> = local
+            .iter()
+            .filter(|(_, f)| f.size > MAX_FILE_BYTES)
+            .map(|(p, _)| p.clone())
+            .collect();
+        for path in &skipped {
+            if let Some(last_good) = state.files.get(path) {
+                kept.insert(
+                    path.clone(),
+                    LocalFile { sha256: last_good.sha256.clone(), size: last_good.size, mtime_ns: last_good.mtime_ns },
+                );
+            }
+        }
+        local.retain(|_, f| f.size <= MAX_FILE_BYTES);
+        for (path, file) in kept {
+            local.insert(path, file);
+        }
+    }
 
     let remote_resp = client.call(client.get(&format!("/api/f/{name}/files?since_rev=0"))?)?;
     let mut remote: HashMap<String, RemoteFile> = HashMap::new();

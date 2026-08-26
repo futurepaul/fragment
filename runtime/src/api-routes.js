@@ -1,5 +1,5 @@
 // GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
-import { json, toAB, randSlug, isMachinery } from "./util.js";
+import { json, toAB, randSlug, isMachinery, bodyTooLarge, MAX_BODY_BYTES } from "./util.js";
 import { sha256Hex, safeEqual } from "./auth.js";
 import { nextRun } from "./cron.js";
 import { normalizeManifest } from "./manifest.js";
@@ -9,6 +9,9 @@ function appendOnlyHit(m, path) {
 }
 async function apiRoute(cell, request, url) {
   const p = url.pathname.slice(4);
+  if (bodyTooLarge(request)) {
+    return json({ error: `body too large: cells accept at most ${MAX_BODY_BYTES} bytes per request \u2014 keep big assets out of the folder` }, 413);
+  }
   const m = cell.manifest();
   if (!m) return json({ error: "fragment not initialized" }, 404);
   if (p === "/inbox" && request.method === "POST") {
