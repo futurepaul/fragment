@@ -53,6 +53,7 @@ class FragmentCell {
       String(summary).slice(0, 500),
       data === void 0 ? null : JSON.stringify(data).slice(0, 4e3)
     );
+    this.sql.exec("DELETE FROM events WHERE id <= (SELECT COALESCE(MAX(id), 0) - 5000 FROM events)");
   }
   roleOf(pubkeyHex) {
     const m = this.manifest();

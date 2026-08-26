@@ -59,6 +59,11 @@ export class FragmentCell {
   addEvent(kind, summary, data) {
     this.sql.exec("INSERT INTO events (at, kind, summary, data) VALUES (?, ?, ?, ?)",
       Date.now(), kind, String(summary).slice(0, 500), data === undefined ? null : JSON.stringify(data).slice(0, 4000));
+    // retention: keep the newest 5000 events — id is the rowid (INTEGER
+    // PRIMARY KEY) so the MAX(id) lookup is O(1) and the delete is a
+    // no-op below the cap; 5000 is far past the read endpoint's 500-row
+    // window (the prod brain had grown past 15k rows)
+    this.sql.exec("DELETE FROM events WHERE id <= (SELECT COALESCE(MAX(id), 0) - 5000 FROM events)");
   }
   roleOf(pubkeyHex) {
     // pubkeyHex may be null (unauthenticated)
