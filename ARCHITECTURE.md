@@ -46,7 +46,7 @@ agent ──fragment CLI──▶ celld public listener ──▶ router (Worker
                             │                 FragmentCell (one per fragment)
                             │                        │  files / drafts / workflows / secrets / inbox / events
                             ▼
-                     bucket (azurite locally; S3/R2/GCS in prod)
+                     bucket (MinIO locally — the CI image; S3/R2 in prod)
                      = durability, ownership, coordination. RPO=0.
 ```
 
@@ -251,14 +251,16 @@ in the first prototype: never let a report disagree with the ledger.)
 No docker, no cloud account:
 
 ```
-scripts/dev up       # azurite (npm, in .dev/) + celld on :8789
+scripts/dev up       # MinIO (docker) + celld on :8789
 scripts/dev deploy   # build + deploy runtime/ to the fleet
 scripts/dev down
 ```
 
-Azurite is the bucket (Azure emulator, documented celld dev path). State lives
-in `.dev/` — delete it and you've reset the world. Production swaps azurite
-for a real bucket and adds Caddy; nothing else changes.
+MinIO is the bucket — the same container image CI runs, so local and CI
+exercise one storage implementation (S3 signing, list semantics, the works)
+instead of an emulator's approximations. State lives in `.dev/` (`dev wipe`
+resets it). Production swaps MinIO's endpoint for R2 and adds Caddy; nothing
+else changes.
 
 ## What this deliberately does not have (yet)
 

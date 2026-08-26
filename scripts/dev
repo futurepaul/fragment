@@ -1,18 +1,26 @@
 #!/usr/bin/env bash
-# fragment dev environment: azurite (bucket) + celld (host).
-# verbs: up | down | deploy | status | logs
+# fragment dev environment: MinIO (bucket, same container image and creds as
+# CI) + celld (host). verbs: up | down | deploy | status | logs | wipe
+#
+# Local world persists in .dev/minio-data (bucket) and .dev/watch (cells).
+# `wipe` throws both away together — a fresh bucket behind an old watch dir
+# resurrects zombie cells, so they are born and destroyed as a pair.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DEV=.dev
 TOOLS="$DEV/tools"
-AZURITE_PORT=10000
+MINIO_PORT=9000
 CELLD_PORT=8789
-BUCKET=az://fragment-dev
+BUCKET=s3://fragment-dev
+MINIO_CONTAINER=fragment-dev-minio
+MINIO_IMAGE=minio/minio:RELEASE.2025-07-23T15-54-02Z
+MC_IMAGE=minio/mc:RELEASE.2025-08-13T08-35-41Z
 
-# Well-known Azurite emulator credentials (public, development-only).
-export AZURE_STORAGE_ACCOUNT_NAME=devstoreaccount1
-export AZURE_STORAGE_ACCOUNT_KEY='Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=='
-export AZURE_STORAGE_USE_EMULATOR=true
+# Same development-only credentials the CI workflow uses.
+export AWS_ACCESS_KEY_ID=minio
+export AWS_SECRET_ACCESS_KEY=miniosecret
+export AWS_REGION=us-east-1
+export S3_ENDPOINT="http://127.0.0.1:$MINIO_PORT"
 export CELLD_ESBUILD="$PWD/$TOOLS/node_modules/.bin/esbuild"
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -24,33 +32,49 @@ if [ -f .env ]; then set -a; . ./.env; set +a; fi
 tools() {
   if [ ! -x "$TOOLS/node_modules/.bin/esbuild" ]; then
     mkdir -p "$TOOLS"
-    (cd "$TOOLS" && [ -f package.json ] || npm init -y >/dev/null; npm install azurite esbuild >/dev/null)
+    (cd "$TOOLS" && [ -f package.json ] || npm init -y >/dev/null; npm install esbuild >/dev/null)
   fi
 }
 
-azurite_running() { curl -s -o /dev/null "http://127.0.0.1:$AZURITE_PORT/devstoreaccount1?comp=list" && [ $? -eq 0 ]; }
+minio_running() { curl -s -o /dev/null -m 2 "http://127.0.0.1:$MINIO_PORT/minio/health/live"; }
 celld_running() { curl -s -o /dev/null -m 2 "http://127.0.0.1:$CELLD_PORT/__internal/ping"; }
 
-start_azurite() {
-  if azurite_running; then
-    echo "azurite: already running on :$AZURITE_PORT"
-    if [ ! -d "$DEV/azdata" ]; then
-      echo "WARNING: azurite on :$AZURITE_PORT was not started by this project (no $DEV/azdata)." >&2
-      echo "         Its bucket data is NOT paired with this project's celld watch dir — a fresh" >&2
-      echo "         bucket behind an old watch dir resurrects zombie cells. Kill it and re-run" >&2
-      echo "         scripts/dev up for a clean, project-local world." >&2
+start_minio() {
+  if minio_running; then
+    echo "minio: already running on :$MINIO_PORT"
+    if ! docker inspect "$MINIO_CONTAINER" >/dev/null 2>&1; then
+      echo "WARNING: minio on :$MINIO_PORT was not started by this project." >&2
+      echo "         Its bucket data is not paired with this project's celld watch dir." >&2
     fi
     return
   fi
-  if [ ! -d "$DEV/azdata" ]; then
-    # Fresh bucket: the celld watch dir (local cell state) must be born with it,
-    # otherwise stale local state can shadow the empty bucket (zombie cells).
+  if [ ! -d "$DEV/minio-data" ]; then
+    # Fresh bucket: the celld watch dir (local cell state) must be born with
+    # it, otherwise stale local state shadows the empty bucket (zombie cells).
     rm -rf "$DEV/watch"
   fi
-  nohup "$TOOLS/node_modules/.bin/azurite-blob" --silent --location "$DEV/azdata" > "$DEV/azurite.log" 2>&1 &
-  echo $! > "$DEV/azurite.pid"
-  sleep 2
-  echo "azurite: started (pid $(cat "$DEV/azurite.pid"))"
+  mkdir -p "$DEV/minio-data"
+  docker run -d --name "$MINIO_CONTAINER" -p "127.0.0.1:$MINIO_PORT:9000" \
+    -v "$PWD/$DEV/minio-data:/data" \
+    -e MINIO_ROOT_USER="$AWS_ACCESS_KEY_ID" \
+    -e MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY" \
+    "$MINIO_IMAGE" server /data >/dev/null
+  for _ in $(seq 1 30); do
+    minio_running && break
+    sleep 0.5
+  done
+  minio_running || { echo "minio: container failed to come up" >&2; docker logs "$MINIO_CONTAINER" | tail -10 >&2; exit 1; }
+  echo "minio: started on :$MINIO_PORT (container $MINIO_CONTAINER)"
+}
+
+# Same mc invocation scripts/ci-bucket uses, so dev and CI create buckets
+# through identical code paths.
+make_bucket() {
+  local bucket="${BUCKET#s3://}"
+  docker run --rm --network host --entrypoint /bin/sh "$MC_IMAGE" -ec "
+    mc alias set dev '$S3_ENDPOINT' '$AWS_ACCESS_KEY_ID' '$AWS_SECRET_ACCESS_KEY' >/dev/null
+    mc mb --ignore-existing 'dev/$bucket'
+  " >/dev/null
 }
 
 # dev convenience: bring the local OpenRouter key into the dev stack when
@@ -76,9 +100,13 @@ start_celld() {
   CELLD_WORKER_LOADER=LOADER \
   CELLD_WATCH="$PWD/$DEV/watch" \
   CELLD_VAR_FRAGMENT_INTERNAL_URL="http://127.0.0.1:$CELLD_PORT" \
-  nohup celld --bucket "$BUCKET" --listen "127.0.0.1:$CELLD_PORT" > "$DEV/celld.log" 2>&1 &
+  nohup celld --bucket "$BUCKET" --endpoint "$S3_ENDPOINT" --listen "127.0.0.1:$CELLD_PORT" > "$DEV/celld.log" 2>&1 &
   echo $! > "$DEV/celld.pid"
-  sleep 3
+  for _ in $(seq 1 30); do
+    celld_running && break
+    sleep 0.5
+  done
+  celld_running || { echo "celld: did not come up on :$CELLD_PORT; last log lines:" >&2; tail -20 "$DEV/celld.log" >&2; exit 1; }
   echo "celld: started (pid $(cat "$DEV/celld.pid")) on :$CELLD_PORT"
 }
 
@@ -105,36 +133,48 @@ stop_celld() {
 case "${1:-}" in
   up)
     tools
-    start_azurite
-    node scripts/mkcontainer.mjs fragment-dev "$AZURITE_PORT"
+    start_minio
+    make_bucket
+    # s3:// buckets refuse to boot without a deployment pointer, so the
+    # runtime deploys before the first start (and after any wipe).
+    celld deploy runtime --bucket "$BUCKET" --endpoint "$S3_ENDPOINT" | tail -1
+    stop_celld
     start_celld
-    echo "fragment host: http://127.0.0.1:$CELLD_PORT"
+    echo "fragment host: http://127.0.0.1:$CELLD_PORT ($BUCKET)"
     ;;
   deploy)
     tools
     (cd runtime && npm install --no-audit --no-fund >/dev/null)
-    celld deploy runtime --bucket "$BUCKET" | tail -2
+    celld deploy runtime --bucket "$BUCKET" --endpoint "$S3_ENDPOINT" | tail -2
     stop_celld
     start_celld
     echo "deployed."
     ;;
   down)
     stop_celld
-    if [ -f "$DEV/azurite.pid" ]; then
-      kill "$(cat "$DEV/azurite.pid")" 2>/dev/null || true
-      rm -f "$DEV/azurite.pid"
+    if docker inspect "$MINIO_CONTAINER" >/dev/null 2>&1; then
+      docker stop "$MINIO_CONTAINER" >/dev/null && docker rm "$MINIO_CONTAINER" >/dev/null
+      echo "minio: stopped"
     fi
     echo "down."
     ;;
+  wipe)
+    stop_celld
+    if docker inspect "$MINIO_CONTAINER" >/dev/null 2>&1; then
+      docker rm -f "$MINIO_CONTAINER" >/dev/null 2>&1 || true
+    fi
+    rm -rf "$DEV/minio-data" "$DEV/watch"
+    echo "wiped: bucket and cell state discarded together"
+    ;;
   status)
-    azurite_running && echo "azurite: up" || echo "azurite: down"
+    minio_running && echo "minio: up" || echo "minio: down"
     celld_running && echo "celld: up (http://127.0.0.1:$CELLD_PORT)" || echo "celld: down"
     ;;
   logs)
     tail -30 "$DEV/celld.log"
     ;;
   *)
-    echo "usage: scripts/dev up|down|deploy|status|logs" >&2
+    echo "usage: scripts/dev up|down|deploy|status|logs|wipe" >&2
     exit 1
     ;;
 esac

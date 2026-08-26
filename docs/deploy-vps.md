@@ -163,7 +163,7 @@ the Mac never needs bucket credentials.
 
 ## 6. Point the CLI and ship something
 
-On your Mac (fresh world — the local azurite world does not travel):
+On your Mac (fresh world — the local MinIO world does not travel):
 
 ```sh
 fragment --host https://fragment.club create buddy-wire

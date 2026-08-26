@@ -51,7 +51,7 @@ cd cli && cargo install --path .
 ## Quickstart (local, no cloud account, no docker)
 
 ```
-scripts/dev up        # azurite (bucket emulator, npm) + celld on :8789
+scripts/dev up        # MinIO (bucket, docker — same image as CI) + celld on :8789
 scripts/dev deploy    # build + deploy the runtime
 fragment login        # generate your nostr keypair (once)
 fragment create hello
@@ -169,8 +169,8 @@ plane, and the guide's executable patterns):
   bucket, stale local state can shadow the bucket and resurrect *zombie
   cells* (observed: a cell from a dead bucket world came back owned by its
   old key, and its bucket chain then failed restore — `RestoreFailed` —
-  bricking the name). `scripts/dev up` enforces the pairing: a fresh azurite
-  data dir wipes the watch dir, and it warns on a foreign azurite. In this
+  bricking the name). `scripts/dev up` enforces the pairing: a fresh MinIO
+  data dir wipes the watch dir (see `scripts/dev wipe`). In this
   dev world the name `hello` is currently bricked by exactly this bug (left
   as a monument; every other fragment is healthy).
 
