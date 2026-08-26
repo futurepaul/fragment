@@ -82,10 +82,13 @@ impl Client {
             }
         }
         // three connect-level failures in a row: surface the last error
-        // (previously an unreachable!() panicked here — found by restore agents)
-        let e = last_err.context("request failed after retries (host unreachable?)")?;
-        let _: reqwest::Error = e;
-        return Err(anyhow!("request failed after retries"));
+        // with its cause — a bare "failed after retries" turned a host
+        // dropping large bodies into a silent 90s mystery (and before
+        // that, an unreachable!() panicked here; found by restore agents)
+        return Err(anyhow::anyhow!(
+            "request failed after retries (host unreachable, or it dropped the connection mid-body — check the request size): {}",
+            last_err.map(|e| e.to_string()).unwrap_or_else(|| "no error recorded".into())
+        ));
     }
 
     pub fn get(&self, path: &str) -> Result<Resp> {

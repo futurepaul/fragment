@@ -10,8 +10,13 @@ window.fragment = (() => {
     try {
       const src = document.currentScript && document.currentScript.src;
       if (src) {
-        const m = new URL(src, location.href).pathname.match(/^(.*)/__rt.js$/);
-        if (m) prefix = m[1];
+        // String ops, not a regex literal: this source lives inside a
+        // template literal, where \\/ and \\. looked correct in TS but
+        // shipped as unescaped / and . \u2014 a SyntaxError on every page that
+        // loaded __rt.js as a classic script, degrading rooms to solo.
+        const p = new URL(src, location.href).pathname;
+        const suffix = "/__rt.js";
+        if (p.endsWith(suffix)) prefix = p.slice(0, -suffix.length);
       }
     } catch {}
     if (!prefix) {

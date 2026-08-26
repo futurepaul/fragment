@@ -1,6 +1,6 @@
 // The /__internal plane: loopback API for ctx calls from loader isolates.
 // Run-token (and optional host-secret) gated.
-import { json, toAB, isMachinery } from "./util.js";
+import { json, toAB, isMachinery, randHex } from "./util.js";
 import { sha256Hex } from "./auth.js";
 import { checkToken } from "./loader.js";
 import { recordRevision } from "./history.js";
@@ -97,7 +97,8 @@ export async function internalRoute(cell, request, url) {
     // the same pass that reads them, so two runs can never see the same
     // message — even when a read trails another run's ack by a write
     // barrier (observed on single-node CI: 2 messages appended twice)
-    const token = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    // crypto-random like every other token the runtime mints
+    const token = randHex(16);
     const rows = cell.sql.exec("SELECT id, at, source, payload FROM inbox WHERE status = 'pending' ORDER BY id LIMIT 100").toArray();
     for (const r of rows) {
       cell.sql.exec("UPDATE inbox SET status = 'claimed', claimed_at = ?, claim_token = ? WHERE id = ? AND status = 'pending'", Date.now(), token, r.id);

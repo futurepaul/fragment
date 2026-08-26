@@ -1,65 +1,15 @@
-// bech32 (BIP-173) encode/decode — enough for npub <-> hex.
-const CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
-const REV = Object.fromEntries([...CHARSET].map((c, i) => [c, i]));
+// bech32 (BIP-173) for npub <-> hex, on @scure/base — the audited noble
+// ecosystem the runtime already trusts for schnorr. Checksum and padding
+// subtleties are exactly what a hand-roll gets silently wrong.
+import { bech32 } from "@scure/base";
 
-function polymod(values) {
-  const GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
-  let chk = 1;
-  for (const v of values) {
-    const top = chk >> 25;
-    chk = ((chk & 0x1ffffff) << 5) ^ v;
-    for (let i = 0; i < 5; i++) if ((top >> i) & 1) chk ^= GEN[i];
-  }
-  return chk;
+export function npubFromHex(hex: string): string {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return bech32.encode("npub", bech32.toWords(bytes));
 }
 
-function hrpExpand(hrp) {
-  return [...hrp].map((c) => c.charCodeAt(0) >> 5).concat([0], [...hrp].map((c) => c.charCodeAt(0) & 31));
-}
-
-function convertBits(data, from, to, pad) {
-  let acc = 0, bits = 0;
-  const out = [];
-  const maxv = (1 << to) - 1;
-  for (const v of data) {
-    if (v < 0 || v >> from !== 0) throw new Error("bech32: bad value");
-    acc = (acc << from) | v;
-    bits += from;
-    while (bits >= to) {
-      bits -= to;
-      out.push((acc >> bits) & maxv);
-    }
-  }
-  if (pad) {
-    if (bits > 0) out.push((acc << (to - bits)) & maxv);
-  } else if (bits >= from || ((acc << (to - bits)) & maxv)) {
-    throw new Error("bech32: bad padding");
-  }
-  return out;
-}
-
-export function npubFromHex(hex) {
-  const bytes = hex.match(/.{2}/g).map((b) => parseInt(b, 16));
-  const words = convertBits(bytes, 8, 5, true);
-  const hrp = "npub";
-  const pm = polymod(hrpExpand(hrp).concat(words, [0, 0, 0, 0, 0, 0])) ^ 1;
-  const checksum = [];
-  for (let i = 0; i < 6; i++) checksum.push((pm >> (5 * (5 - i))) & 31);
-  return hrp + "1" + words.concat(checksum).map((w) => CHARSET[w]).join("");
-}
-
-export function hexFromNpub(npub) {
-  if (typeof npub !== "string" || !npub.startsWith("npub1")) throw new Error("bad npub");
-  const hrp = npub.slice(0, npub.lastIndexOf("1"));
-  const chars = npub.slice(npub.lastIndexOf("1") + 1);
-  if (chars.length < 7) throw new Error("bad npub");
-  const words = [...chars].map((c) => {
-    const v = REV[c];
-    if (v === undefined) throw new Error("bad npub char");
-    return v;
-  });
-  if (polymod(hrpExpand(hrp).concat(words)) !== 1) throw new Error("bad npub checksum");
-  const data = words.slice(0, -6);
-  const bytes = convertBits(data, 5, 8, false);
-  return bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+export function hexFromNpub(npub: string): string {
+  const { words } = bech32.decode(npub as any, 90);
+  return [...bech32.fromWords(words)].map((b: number) => b.toString(16).padStart(2, "0")).join("");
 }

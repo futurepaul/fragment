@@ -238,20 +238,11 @@ fn live_listener(url: &str, tx: std::sync::mpsc::Sender<Wakeup>) {
 }
 
 fn chrono_like() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-    let days = secs / 86400;
-    let (h, mi, s) = ((secs % 86400) / 3600, (secs % 3600) / 60, secs % 60);
-    // 2026-01-01 = 20454 days after epoch (close enough for log lines)
-    let (y, mut doy) = (1970u64, days);
-    let mut year = y;
-    loop {
-        let dy = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 366 } else { 365 };
-        if doy < dy {
-            break;
-        }
-        doy -= dy;
-        year += 1;
-    }
-    let _ = &mut doy;
-    format!("{:02}:{:02}:{:02}", h, mi, s)
+    // UTC wall-clock log prefix; the old hand-roll walked leap years to
+    // produce a day-of-year it then discarded.
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("{:02}:{:02}:{:02}", (secs % 86400) / 3600, (secs % 3600) / 60, secs % 60)
 }

@@ -1105,6 +1105,13 @@ async function platformSection() {
     const gal = await (await fetch(`${BASE}/api/gallery`)).json();
     const me = (gal.fragments || []).find((f) => f.name === name);
     ok(!!me && me.title === 'Meta Test' && !!me.viewToken, 'listed fragment appears in the gallery with its share token');
+    // __rt.js must parse as a classic script: the source lives in a template
+    // literal, where regex escapes once shipped unescaped and SyntaxError'd
+    // every page that loaded it (rooms silently degraded to solo)
+    const rt = await (await fetch(`${BASE}/f/${name}/__rt.js`)).text();
+    writeFileSync(join(tmpdir(), 'rt-check.js'), rt);
+    const parse = spawnSync(process.execPath, ['--check', join(tmpdir(), 'rt-check.js')]);
+    ok(parse.status === 0, '__rt.js parses as a script (no template-escape damage)');
     // unlisted private fragments do not appear
     const priv = await signed('POST', '/api/fragments', JSON.stringify({ name: `e2e-pa-priv-${suffix}` }));
     const gal2 = await (await fetch(`${BASE}/api/gallery`)).json();
@@ -1428,6 +1435,22 @@ async function filesyncSection() {
       if (!pushed) await sleep(300);
     }
     ok(pushed, 'continuous mode pushed a local edit');
+    // bodies past the ingress stream threshold must sync, not stall: the
+    // streamed-body path hangs the request (100-continue, then the host
+    // drops the connection), so hosts run a raised bytes threshold
+    {
+      writeFileSync(join(dir, 'blob.bin'), Buffer.alloc(1_500_000, 7));
+      let big = false;
+      const t2 = Date.now();
+      while (Date.now() - t2 < 30_000 && !big) {
+        const rf = await fetch(`${BASE}/api/f/${name}/file?path=blob.bin`, {
+          headers: { authorization: await authHeader('GET', `${BASE}/api/f/${name}/file?path=blob.bin`, null, ownerKey) },
+        });
+        big = rf.ok;
+        if (!big) await sleep(500);
+      }
+      ok(big, '1.5MB asset syncs (large-body path)');
+    }
     // double-watcher guard: a second watcher must refuse
     const second = spawnSync(bin, ['sync', name, '--dir', dir, '--watch'], {
       encoding: 'utf8', env: { ...process.env, FRAGMENT_HOST: BASE, ...H }, timeout: 5000,

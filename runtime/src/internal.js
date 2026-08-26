@@ -1,5 +1,5 @@
 // GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
-import { json, toAB } from "./util.js";
+import { json, toAB, randHex } from "./util.js";
 import { sha256Hex } from "./auth.js";
 import { recordRevision } from "./history.js";
 function appendOnlyHit(cell, path) {
@@ -72,7 +72,7 @@ async function internalRoute(cell, request, url) {
     });
   }
   if (rest === "inbox/pending") {
-    const token = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const token = randHex(16);
     const rows = cell.sql.exec("SELECT id, at, source, payload FROM inbox WHERE status = 'pending' ORDER BY id LIMIT 100").toArray();
     for (const r of rows) {
       cell.sql.exec("UPDATE inbox SET status = 'claimed', claimed_at = ?, claim_token = ? WHERE id = ? AND status = 'pending'", Date.now(), token, r.id);
