@@ -1495,6 +1495,56 @@ async function syncSection() {
     'conflict: markers with both sides');
 }
 
+// ---------- git interop: .gitignore honored, git state never uploaded ----------
+async function gitignoreSection() {
+  if (!section('gitignore')) return;
+  const bin = findBinary();
+  if (!bin) {
+    console.log('skip  gitignore checks (no fragment binary built)');
+    return;
+  }
+  const H = { HOME: mkdtempSync(join(tmpdir(), 'fragment-gi-home-')) };
+  runCli(bin, ['login'], { env: H });
+  const name = `e2e-gi-${suffix}`;
+  runCli(bin, ['create', name], { env: H });
+  runCli(bin, ['grant', name, '--editor', ownerNpub], { env: H });
+
+  // a git repo whose .gitignore excludes secrets — the walker keys on .git
+  // presence (require_git default), so a bare .git dir makes it a repo
+  const dir = join(mkdtempSync(join(tmpdir(), 'fragment-gi-')), 'repo');
+  mkdirSync(join(dir, 'ignored-dir'), { recursive: true });
+  mkdirSync(join(dir, 'sub'), { recursive: true });
+  mkdirSync(join(dir, '.git'), { recursive: true });
+  writeFileSync(join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+  writeFileSync(join(dir, '.gitignore'), 'secrets.txt\nignored-dir/\n');
+  writeFileSync(join(dir, 'secrets.txt'), 'e2e-secret-marker');
+  writeFileSync(join(dir, 'ignored-dir', 'key.pem'), 'private');
+  writeFileSync(join(dir, '.env'), 'TOKEN=x');
+  writeFileSync(join(dir, 'readme.md'), 'public');
+  writeFileSync(join(dir, 'sub', '.gitignore'), 'inner.txt\n');
+  writeFileSync(join(dir, 'sub', 'inner.txt'), 'also secret');
+  writeFileSync(join(dir, 'sub', 'keep.txt'), 'kept');
+
+  const remotePaths = async () => {
+    const f = await signed('GET', `/api/f/${name}/files`);
+    return (f.body?.files || []).filter((x) => !x.deleted).map((x) => x.path);
+  };
+
+  runCli(bin, ['sync', name, '--dir', dir], { env: H });
+  let paths = await remotePaths();
+  ok(!paths.includes('secrets.txt'), 'gitignored secrets.txt never uploads');
+  ok(!paths.some((p) => p.startsWith('ignored-dir/')), 'gitignored dir contents never upload');
+  ok(!paths.includes('sub/inner.txt'), 'nested .gitignore honored');
+  ok(paths.includes('readme.md') && paths.includes('sub/keep.txt'), 'non-ignored files upload');
+  ok(!paths.includes('.env') && !paths.some((p) => p.startsWith('.git/')), '.env and .git/ never upload (dotfile rule)');
+
+  // a later edit to an ignored file must not leak either
+  writeFileSync(join(dir, 'secrets.txt'), 'e2e-secret-marker-v2');
+  runCli(bin, ['sync', name, '--dir', dir], { env: H });
+  paths = await remotePaths();
+  ok(!paths.some((p) => p.endsWith('secrets.txt')), 'modified gitignored file still never uploads');
+}
+
 function findBinary() {
   if (process.env.FRAGMENT_BIN) return existsSync(process.env.FRAGMENT_BIN) ? process.env.FRAGMENT_BIN : null;
   for (const c of ['cli/target/release/fragment', 'cli/target/debug/fragment']) {
@@ -1549,6 +1599,7 @@ try {
   if (!ONLY || ONLY === 'platform') await platformSection();
   if (!ONLY || ONLY === 'filesync') await filesyncSection();
   if (!ONLY || ONLY === 'sync') await syncSection();
+  if (!ONLY || ONLY === 'gitignore') await gitignoreSection();
   await cronSection();
 } catch (e) {
   fail++;

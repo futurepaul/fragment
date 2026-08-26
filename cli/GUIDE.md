@@ -52,7 +52,8 @@ fragment sync my-thing          # first run links the folder (creates .fragment/
 Sync is bidirectional and last-writer-wins. If both sides changed a file since
 the last sync, the remote copy is saved as `<path>.remote-<timestamp>` next to
 your local file and reported as a conflict. Nothing is ever silently merged or
-lost. Sync skips dotfiles and `.fragment/`.
+lost. Sync skips dotfiles and `.fragment/`; in a git repo it also honors
+`.gitignore` (ignored files and `.git/` never upload).
 
 What the folder means to the runtime:
 

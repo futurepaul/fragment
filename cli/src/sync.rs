@@ -222,18 +222,30 @@ struct LocalFile {
 
 /// Walk the folder. With state, a size+mtime match adopts the cached hash
 /// (O(changes)); with verify, everything is read and hashed. Skips
-/// dotfiles, .fragment/, symlinks, and sync artifacts.
+/// dotfiles, .fragment/, symlinks, and sync artifacts. Honors .gitignore
+/// (nested, parent-dir, global, and .git/info/exclude) exactly when git
+/// would: only inside a repo — a plain folder with a stray .gitignore
+/// still syncs everything.
 pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result<(HashMap<String, LocalFile>, ScanStats)> {
     let mut out = HashMap::new();
     let mut stats = ScanStats::default();
-    for entry in walkdir::WalkDir::new(dir).follow_links(false) {
+    // ripgrep's walker: hidden-file skipping (the old dotfile rules) plus
+    // full gitignore semantics; require_git stays at its default (true) so
+    // ignore rules apply only where git itself would apply them
+    let walker = ignore::WalkBuilder::new(dir)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .parents(true)
+        .build();
+    for entry in walker {
         let entry = entry?;
-        if !entry.file_type().is_file() {
+        if !entry.file_type().map_or(false, |t| t.is_file()) {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.')
-            || name.ends_with("~")
+        // editor droppings and sync artifacts the walker doesn't know about
+        if name.ends_with("~")
             || name.starts_with("~$")
             || name.starts_with(".#")
             || name.ends_with(".swp")
@@ -241,9 +253,6 @@ pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result
             continue;
         }
         let rel = entry.path().strip_prefix(dir).unwrap().to_string_lossy().replace('\\', "/");
-        if rel.split('/').any(|seg| seg.starts_with('.') && seg != ".") {
-            continue;
-        }
         if rel.contains(".remote-") || rel.contains(".conflict-") || rel.contains(".fragment-partial") {
             continue;
         }

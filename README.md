@@ -133,7 +133,8 @@ plane, and the guide's executable patterns):
 - Sync: push, pull, remote-delete propagation, wrong-dir guard, and the
   conflict path (both sides changed → if the contents are identical it
   auto-resolves by adopting the remote rev; otherwise the remote copy is
-  saved as `<path>.remote-<ts>`, local kept, reported).
+  saved as `<path>.remote-<ts>`, local kept, reported); git-init'd folders
+  honor `.gitignore` — ignored files and `.git/` never upload.
 - Secrets: set/list/rm via CLI; values never leave the cell except into
   workflow isolates at run time.
 - Grants: grant viewer → dev key can read; revoke → 403.
