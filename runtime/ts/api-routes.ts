@@ -1,5 +1,5 @@
 // Control plane (/api/...): NIP-98-gated fragment management.
-import { json, toAB, randSlug, isMachinery, bodyTooLarge, MAX_BODY_BYTES } from "./util.js";
+import { json, toAB, randSlug, randHex, isMachinery, bodyTooLarge, MAX_BODY_BYTES } from "./util.js";
 import { sha256Hex, safeEqual } from "./auth.js";
 import { parseCron, nextRun } from "./cron.js";
 import { normalizeManifest } from "./manifest.js";
@@ -136,6 +136,72 @@ export async function apiRoute(cell, request, url) {
     cell.addEvent(paused ? "workflow.paused" : "workflow.unpaused", `${wf.name}`, { wf: wf.name, by: "manual" });
     await cell.rearmAlarm();
     return json({ ok: true, workflow: wf.name, paused: !!wf.paused });
+  }
+
+  // rotate: hard-cut token invalidation for the share link (view_token) and
+  // the webhook secret (inbox_token). Older links/webhooks die instantly —
+  // accepted product decision (pre-users hard-cut culture).
+  if (p === "/rotate" && request.method === "POST") {
+    const a = authz("owner"); if (!a.ok) return deny(a);
+    const body = await request.json().catch(() => ({}));
+    if (body.scopes !== undefined && !Array.isArray(body.scopes)) return json({ error: "unknown scope" }, 400);
+    const want = Array.isArray(body.scopes) && body.scopes.length ? body.scopes : ["inbox", "view"];
+    for (const s of want) {
+      if (s !== "inbox" && s !== "view") return json({ error: "unknown scope" }, 400);
+    }
+    // same generators minted these at creation (registry.initCell), so the
+    // format never drifts; one upsert covers both rows so readers mid-request
+    // see pre-rotation or post-rotation tokens, never a half-write
+    const nextInbox = want.includes("inbox") ? randHex(16) : (cell.getMeta("inbox_token") || "");
+    const nextView = want.includes("view") ? randSlug(12) : (cell.getMeta("view_token") || "");
+    cell.sql.exec(
+      "INSERT INTO meta (k, v) VALUES ('inbox_token', ?), ('view_token', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+      nextInbox, nextView);
+    cell.addEvent("tokens.rotated", want.join("+"), { scopes: want });
+    return json({
+      ok: true,
+      inbox_token: nextInbox,
+      view_token: nextView,
+      rotated: ["inbox", "view"].filter((s) => want.includes(s)),
+    });
+  }
+
+  // rooms inspection: read-side of the rooms plane, gated at editor like the
+  // rest of the mutation-heavy API. Listing unions both shapes of room —
+  // state-only rows (state:set / rooms.mjs state) and msg-only rows (a plain
+  // chat room never touches the rooms table) — so nothing visible in the WS
+  // plane is invisible here.
+  if (p === "/rooms" && request.method === "GET") {
+    const a = authz("editor"); if (!a.ok) return deny(a);
+    const rooms: Record<string, { room: string; count: number; last_at: number | null }> = {};
+    for (const r of cell.sql.exec("SELECT room, COUNT(*) c, MAX(at) la FROM room_msgs GROUP BY room").toArray()) {
+      rooms[r.room] = { room: r.room, count: r.c, last_at: r.la ?? null };
+    }
+    for (const r of cell.sql.exec("SELECT room FROM rooms").toArray()) {
+      if (!rooms[r.room]) rooms[r.room] = { room: r.room, count: 0, last_at: null };
+    }
+    return json({ rooms: Object.values(rooms).sort((x, y) => (y.last_at || 0) - (x.last_at || 0)) });
+  }
+
+  // newest page by default; ?before=ID pages older; ALWAYS ascending in the
+  // response, so consumers diff/append without flipping (same rule as /events)
+  if (p.startsWith("/rooms/") && p.endsWith("/messages") && request.method === "GET") {
+    const a = authz("editor"); if (!a.ok) return deny(a);
+    const mid = p.slice("/rooms/".length, p.length - "/messages".length);
+    let room;
+    try { room = decodeURIComponent(mid); } catch { return json({ error: "bad room encoding" }, 400); }
+    let limit = parseInt(url.searchParams.get("limit") || "100", 10) || 100;
+    limit = Math.min(Math.max(limit, 1), 200);
+    const before = parseInt(url.searchParams.get("before") || "0", 10);
+    // data holds the broadcast frame as stored by rooms.ts (JSON.stringify of
+    // whatever the client sent): parse it back; unparseable junk passes raw
+    const parseFrame = (s) => { try { return JSON.parse(s); } catch { return s; } };
+    const rows = (before > 0
+      ? cell.sql.exec("SELECT id, at, sender, data FROM room_msgs WHERE room = ? AND id < ? ORDER BY id DESC LIMIT ?", room, before, limit)
+      : cell.sql.exec("SELECT id, at, sender, data FROM room_msgs WHERE room = ? ORDER BY id DESC LIMIT ?", room, limit)
+    ).toArray();
+    rows.reverse();
+    return json({ room, messages: rows.map((r) => ({ id: r.id, at: r.at, sender: r.sender, data: parseFrame(r.data) })) });
   }
 
   if (p === "/files" && request.method === "GET") {

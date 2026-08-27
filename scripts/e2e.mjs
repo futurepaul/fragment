@@ -1645,5 +1645,154 @@ try {
   failures.push('unexpected: ' + String(e && e.stack || e));
   console.log('FAIL  unexpected: ' + String(e && e.stack || e));
 }
+
+// ---- lane/runtime additions ----
+async function runtimeLaneSection() {
+  if (!section('runtime')) return;
+  const mkFrag = async (tag) => {
+    const name = `e2e-rt-${tag}-${suffix}`;
+    const created = await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    return { name, created: created.body };
+  };
+  const publishAndBless = async (name) => {
+    await signed('PUT', `/api/f/${name}/file?path=site/index.html&base_rev=0`, '<h1>lane</h1>');
+    await signed('POST', `/api/f/${name}/drafts`, JSON.stringify({ note: 'runtime lane' }));
+    const ds = await signed('GET', `/api/f/${name}/drafts`);
+    await signed('POST', `/api/f/${name}/bless`, JSON.stringify({ slug: ds.body.drafts[0].slug }));
+  };
+
+  // 1) __rt.js version stamp + header
+  {
+    const { name } = await mkFrag('stamp');
+    await publishAndBless(name);
+    const r = await fetch(`${BASE}/f/${name}/__rt.js`);
+    eq(r.headers.get('x-fragment-rt-version'), '1', '__rt.js carries x-fragment-rt-version: 1');
+    ok((await r.text()).startsWith('/* fragment rt-client v1 */'), '__rt.js first line is the version stamp');
+  }
+
+  // 2) rotate: old tokens die hard, new ones work; scoped rotation holds still otherwise
+  {
+    const { name, created } = await mkFrag('rotate');
+    const oldInbox = created.inboxToken;
+    const oldView = created.viewToken;
+    await publishAndBless(name);
+
+    eq((await signed('POST', `/api/f/${name}/rotate`, '{}', strangerKey)).status, 403, 'rotate refuses a roleless stranger');
+
+    const rot = await signed('POST', `/api/f/${name}/rotate`, JSON.stringify({}));
+    eq(rot.status, 200, 'rotate with no scopes → 200 rotating both');
+    eq(JSON.stringify(rot.body?.rotated), JSON.stringify(['inbox', 'view']), 'rotated reports both scopes');
+    ok(rot.body?.inbox_token && rot.body.inbox_token !== oldInbox, 'new inbox_token differs from the original');
+    ok(rot.body?.view_token && rot.body.view_token !== oldView, 'new view_token differs from the original');
+    ok(typeof rot.body?.inbox_token === 'string' && typeof rot.body?.view_token === 'string',
+      'rotate always returns both current tokens post-rotation');
+
+    const bad = await fetch(`${BASE}/api/f/${name}/inbox?t=${oldInbox}`, {
+      method: 'POST', body: JSON.stringify({ source: 'lane', payload: {} }),
+    });
+    eq(bad.status, 403, 'old inbox token refused on POST /inbox?t= after rotation');
+    const good = await fetch(`${BASE}/api/f/${name}/inbox?t=${rot.body.inbox_token}`, {
+      method: 'POST', body: JSON.stringify({ source: 'lane', payload: {} }),
+    });
+    eq((await good.json())?.ok, true, 'new inbox token accepted on POST /inbox?t=');
+    eq((await fetch(`${BASE}/f/${name}/?view=${oldView}`)).status, 403, 'old share link dies after view rotation');
+    eq((await fetch(`${BASE}/f/${name}/?view=${rot.body.view_token}`)).status, 200, 'new share link works after rotation');
+
+    const scoped = await signed('POST', `/api/f/${name}/rotate`, JSON.stringify({ scopes: ['view'] }));
+    eq(scoped.status, 200, 'scoped rotate → 200');
+    eq(JSON.stringify(scoped.body?.rotated), JSON.stringify(['view']), 'scoped rotate reports only the requested scope');
+    eq(scoped.body?.inbox_token, rot.body.inbox_token, 'scoped rotate leaves inbox_token untouched');
+    ok(scoped.body?.view_token !== rot.body.view_token, 'scoped rotate regenerates view_token');
+    // empty array = default = both (same as absent)
+    const emptyScopes = await signed('POST', `/api/f/${name}/rotate`, JSON.stringify({ scopes: [] }));
+    eq(JSON.stringify(emptyScopes.body?.rotated), JSON.stringify(['inbox', 'view']), 'empty scopes array defaults to both');
+
+    const unknown = await signed('POST', `/api/f/${name}/rotate`, JSON.stringify({ scopes: ['bogus'] }));
+    eq(unknown.status, 400, 'unknown scope → 400');
+    eq(unknown.body?.error, 'unknown scope', 'unknown scope error message verbatim');
+  }
+
+  // 3) rooms inspection: list + counts, tail pages ascending, cursor paging,
+  // limit bounds, auth gates
+  {
+    const { name } = await mkFrag('inspect');
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({
+      name, visibility: 'public', editors: [], viewers: [], workflows: [], secrets: [],
+    }));
+    // seed via the WS plane the suite already exercises — public manifest
+    // passes checkVisibility without a view token
+    const WebSocket = (await import('node:ws').catch(() => null))?.WebSocket ?? globalThis.WebSocket;
+    const connect = async (room) => {
+      const ws = new WebSocket(`${BASE.replace('http', 'ws')}/f/${name}/__room/${encodeURIComponent(room)}`);
+      await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+      await sleep(300);
+      return ws;
+    };
+    const seedRoom = async (room, n) => {
+      const ws = await connect(room);
+      for (let i = 0; i < n; i++) ws.send(JSON.stringify({ type: 'msg', data: { seq: i, room } }));
+      await sleep(600);
+      ws.close();
+    };
+    await seedRoom('alpha', 6);
+    await seedRoom('beta', 2);
+    await seedRoom('delta grid', 3);   // space in the name exercises URL decoding
+    {
+      const ws = await connect('ghost');   // state-only room: listed with count 0
+      ws.send(JSON.stringify({ type: 'state:set', value: { note: 'no msgs here' } }));
+      await sleep(600);
+      ws.close();
+    }
+
+    let list = null;
+    const t0 = Date.now();
+    for (;;) {
+      list = await signed('GET', `/api/f/${name}/rooms`);
+      const got = Object.fromEntries((list.body?.rooms || []).map((r) => [r.room, r.count]));
+      if (got.alpha === 6 && got.beta === 2 && got['delta grid'] === 3 && got.ghost === 0) break;
+      if (Date.now() - t0 > 10_000) break;
+      await sleep(400);
+    }
+    eq(list.status, 200, 'rooms list → 200');
+    const rooms = list.body?.rooms || [];
+    ok(rooms.some((r) => r.room === 'alpha' && r.count === 6 && typeof r.last_at === 'number'), 'alpha listed with count + last_at');
+    ok(rooms.some((r) => r.room === 'beta' && r.count === 2), 'beta listed with its count');
+    ok(rooms.some((r) => r.room === 'ghost' && r.count === 0 && r.last_at === null), 'state-only room listed with count 0, last_at null');
+    ok(rooms.every((r, i) => i === 0 || (rooms[i - 1].last_at || 0) >= (r.last_at || 0)), 'rooms sorted by last_at DESC');
+
+    const enc = encodeURIComponent('delta grid');
+    const page1 = await signed('GET', `/api/f/${name}/rooms/${enc}/messages?limit=2`);
+    eq(page1.status, 200, 'messages endpoint → 200');
+    eq(page1.body?.room, 'delta grid', 'room name decoded from the path');
+    const m1 = page1.body?.messages || [];
+    eq(m1.length, 2, 'limit trims to the newest N');
+    ok(m1.every((m, i) => i === 0 || m.id > m1[i - 1].id), 'messages ascending within the page');
+    ok(m1.every((m) => m.data && m.data.room === 'delta grid'), 'data is the parsed frame');
+
+    const cursor = m1[0].id;
+    const page2 = await signed('GET', `/api/f/${name}/rooms/${enc}/messages?limit=100&before=${cursor}`);
+    const m2 = page2.body?.messages || [];
+    ok(m2.length >= 1 && m2.every((m) => m.id < cursor), 'before-cursor returns strictly older ids');
+    ok(m2.every((m, i) => i === 0 || m.id > m2[i - 1].id), 'older page also ascending');
+
+    const all = await signed('GET', `/api/f/${name}/rooms/${encodeURIComponent('alpha')}/messages?limit=9999`);
+    eq(all.body?.messages?.length, 6, 'oversized limit clamps server-side, full room returned');
+
+    eq((await fetch(`${BASE}/api/f/${name}/rooms`)).status, 401, 'unauthenticated rooms list refused');
+    eq((await signed('GET', `/api/f/${name}/rooms`, null, strangerKey)).status, 403, 'roleless stranger rooms list → 403');
+    eq((await fetch(`${BASE}/api/f/${name}/rooms/${enc}/messages`)).status, 401, 'unauthenticated messages read refused');
+    eq((await signed('GET', `/api/f/${name}/rooms/${enc}/messages`, null, strangerKey)).status, 403, 'roleless stranger messages read → 403');
+  }
+}
+
+try {
+  if (!ONLY || ONLY === 'runtime') await runtimeLaneSection();
+} catch (e) {
+  fail++;
+  failures.push('unexpected(runtime): ' + String(e && e.stack || e));
+  console.log('FAIL  unexpected(runtime): ' + String(e && e.stack || e));
+}
+// ---- end lane/runtime additions ----
+
 console.log(`\n${pass} passed, ${fail} failed${fail ? ': ' + failures.join('; ') : ''}`);
 process.exit(fail ? 1 : 0);
