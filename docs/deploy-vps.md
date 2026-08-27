@@ -169,8 +169,8 @@ On your Mac (fresh world — the local MinIO world does not travel):
 fragment --host https://fragment.club create buddy-wire
 cd ../test-fragment-out                 # the codex-built chat app
 fragment --host https://fragment.club sync buddy-wire --dir .
-fragment --host https://fragment.club publish buddy-wire --note v1
-fragment --host https://fragment.club bless buddy-wire <slug>
+fragment --host https://fragment.club deploy buddy-wire --dir . --note v1
+fragment --host https://fragment.club rollback buddy-wire   # step back any time
 ```
 
 …or set `FRAGMENT_HOST=https://fragment.club` once and drop the flags.
