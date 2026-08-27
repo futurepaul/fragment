@@ -108,7 +108,12 @@ enum Cmd {
     /// Full-hash audit of the folder against the fragment (no shortcuts)
     Verify { name: String, #[arg(long, default_value = ".")] dir: PathBuf },
     /// Delete a fragment you own (registry row + all cell data; name reusable)
-    Rm { name: String },
+    Rm {
+        name: String,
+        /// drop just the registry row when the cell itself is unwedgeable
+        #[arg(long)]
+        force_registry: bool,
+    },
     /// Deploy: sync (if --dir), apply fragment.json, snapshot, GO LIVE.
     /// Prints the canonical URL. Drafts are kept as rollback snapshots.
     Deploy {
@@ -640,8 +645,24 @@ fn run(cli: Cli) -> Result<()> {
             report.print();
             std::process::exit(report.exit_code());
         }
-        Cmd::Rm { name } => {
-            c.call(c.delete(&format!("/api/f/{name}"))?)?;
+        Cmd::Rm { name, force_registry } => {
+            match c.call(c.delete(&format!("/api/f/{name}"))?) {
+                Ok(_) => {}
+                Err(e) if force_registry => {
+                    // the cell is unwedgeable (poisoned state from an older
+                    // era); drop the registry row and leave whatever cell
+                    // data exists to the bucket's own GC
+                    c.call(c.post_json(
+                        &format!("/api/f/_registry/__registry/delete"),
+                        &serde_json::json!({ "name": name }),
+                    )?)
+                    .context("registry delete request failed")?;
+                    if j { ok_exit(&json!({ "deleted": true, "name": name, "mode": "registry-only" })); }
+                    println!("deleted registry row for {name} (cell data left to GC; the name is reusable)");
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            }
             if j {
                 ok_exit(&json!({ "deleted": true, "name": name }));
             }

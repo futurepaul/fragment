@@ -448,6 +448,16 @@ async function apiRoute(cell, request, url) {
     const rows = cell.sql.exec("SELECT name FROM secrets ORDER BY name").toArray();
     return json({ names: rows.map((r) => r.name) });
   }
+  if (p === "/__registry/delete" && request.method === "POST" && m.name === "_registry") {
+    const a = authz("owner");
+    if (!a.ok) return deny(a);
+    const { name } = await request.json().catch(() => ({}));
+    if (!name) return json({ error: "name required" }, 400);
+    cell.sql.exec("DELETE FROM fragments WHERE name = ?", name);
+    cell.sql.exec("DELETE FROM roles WHERE name = ?", name);
+    cell.sql.exec("DELETE FROM slugs WHERE name = ?", name);
+    return json({ ok: true, name });
+  }
   if (p.startsWith("/secrets/") && request.method === "DELETE") {
     const a = authz("editor");
     if (!a.ok) return deny(a);
