@@ -1,10 +1,7 @@
 // GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
 import { enqueueNotify } from "./notify.js";
 const RETENTION = 10;
-async function recordRevision(cell, path, rev, sha, content, deleted = false) {
-  if (!deleted && sha && content != null) {
-    cell.sql.exec("INSERT OR IGNORE INTO blobs (hash, content) VALUES (?, ?)", sha, content);
-  }
+async function recordRevision(cell, path, rev, sha, deleted = false) {
   cell.sql.exec(
     "INSERT OR REPLACE INTO file_revisions (path, rev, blob_hash, deleted, at) VALUES (?, ?, ?, ?, ?)",
     path,

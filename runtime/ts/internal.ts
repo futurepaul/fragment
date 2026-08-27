@@ -1,9 +1,9 @@
 // The /__internal plane: loopback API for ctx calls from loader isolates.
 // Run-token (and optional host-secret) gated.
-import { json, toAB, isMachinery, randHex, bodyTooLarge, MAX_BODY_BYTES } from "./util.js";
-import { sha256Hex } from "./auth.js";
+import { json, isMachinery, randHex, bodyTooLarge, MAX_BODY_BYTES, MIME, mimeForPath } from "./util.js";
 import { checkToken } from "./loader.js";
 import { recordRevision } from "./history.js";
+import { READ_CEILING, TierError, admitFileWrite, tierStreamByHash } from "./blob-tier.js";
 
 function appendOnlyHit(cell, path) {
   const m = cell.manifest();
@@ -38,28 +38,43 @@ export async function internalRoute(cell, request, url) {
     // run scope, or a served app (live by default; freeze pins the
     // snapshot), reads the working copy: code stays frozen in the deploy
     // snapshot, data flows live.
-    if (isRun || cell.manifest()?.freeze !== true) {
-      const row = cell.getFileRow(path);
-      if (!row) return json({ error: "no such file" }, 404);
-      return new Response(toAB(row.content));
+    const live = isRun || cell.manifest()?.freeze !== true;
+    const row = live
+      ? cell.getFileMeta(path)
+      : cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = ?", scope.slug, path).toArray()[0];
+    if (!row) return json({ error: live ? "no such file" : "no such file in draft" }, 404);
+    // 8MiB decode ceiling: ctx.files.read consumers .text()/.arrayBuffer()
+    // whatever lands, so a bigger body would sit whole on the isolate heap —
+    // exactly the shape the two-tier split exists to kill. Point big reads
+    // at hashed/ranged access instead.
+    if ((row.size | 0) > READ_CEILING) {
+      return json({ error: `file is ${(row.size / 1048576).toFixed(1)}MiB — over the ${READ_CEILING / 1048576}MiB decode ceiling for whole-file reads; consume it via its hash (${String(row.sha256).slice(0, 12)}…) with ranged/streamed access` }, 413);
     }
-    // draft scope: read from the draft snapshot
-    const row = cell.sql.exec("SELECT content FROM draft_files WHERE slug = ? AND path = ?", scope.slug, path).toArray()[0];
-    if (!row) return json({ error: "no such file in draft" }, 404);
-    return new Response(toAB(row.content));
+    // proxy-stream loopback: bytes flow through untouched, never heap-buffered
+    const upstream = await tierStreamByHash(cell, row.sha256);
+    return new Response(upstream.body, {
+      headers: { "content-type": row.mime || mimeForPath(path) || "application/octet-stream" },
+    });
   }
 
   if (rest === "files/write" && request.method === "PUT") {
     if (!isRun) return json({ error: "drafts are immutable" }, 403);
     const path = url.searchParams.get("path") || "";
     if (!path || path.includes("..") || path.startsWith("/")) return json({ error: "bad path" }, 400);
-    const body = await request.arrayBuffer();
-    const sha = await sha256Hex(body);
+    // admission classifies the wire form and resolves the content address
+    // BEFORE any row state is touched (cheap gates stay byte-free)
+    let adm;
+    try {
+      adm = await admitFileWrite(cell, request, mimeForPath(path) || MIME.txt);
+    } catch (e) {
+      const status = e instanceof TierError ? e.status : 400;
+      return json({ error: String(e.message || e), ...(status === 413 ? { hint: "blob-first" } : {}) }, status);
+    }
     // write-suppression: identical content is a recorded no-op. Re-writing
     // the same bytes must not churn rev/updatedAt — pollers and revcron
     // feeds key on those, and churn is the fuel of copy-loops.
     const existing = cell.sql.exec("SELECT rev, sha256 FROM files WHERE path = ? AND deleted = 0", path).toArray()[0];
-    if (existing && existing.sha256 === sha) {
+    if (existing && existing.sha256 === adm.effSha) {
       cell.addEvent("write.deduped", path);
       return json({ ok: true, deduped: true, rev: existing.rev });
     }
@@ -75,20 +90,36 @@ export async function internalRoute(cell, request, url) {
       cell.addEvent("write.refused", `${path}: append-only`);
       return json({ error: "append-only", path }, 409);
     }
+    let desc;
+    try {
+      desc = await adm.place();
+    } catch (e) {
+      const status = e instanceof TierError ? e.status : 502;
+      return json({ error: String(e.message || e) }, status);
+    }
+    // paired assertions: identity must survive placement, and a name is
+    // never committed without a size — dangling names break every reader
+    if (desc.sha256 !== adm.effSha) {
+      return json({ error: `hash mismatch: tier received ${desc.sha256}, caller declared ${adm.effSha}` }, 400);
+    }
+    if (!(desc.sha256 && Number.isSafeInteger(desc.size))) {
+      return json({ error: "tier descriptor incomplete — refusing to commit a dangling name" }, 502);
+    }
     const newRev = parseInt(cell.getMeta("rev") || "0", 10) + 1;
     cell.setMeta("rev", String(newRev));
-    cell.sql.exec("INSERT INTO files (path, content, rev, sha256, updated_at, deleted) VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT(path) DO UPDATE SET content = excluded.content, rev = excluded.rev, sha256 = excluded.sha256, updated_at = excluded.updated_at, deleted = 0",
-      path, body, newRev, sha, Date.now());
-    await recordRevision(cell, path, newRev, sha, body);
+    cell.sql.exec("INSERT INTO files (path, sha256, size, mime, rev, updated_at, deleted) VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT(path) DO UPDATE SET sha256 = excluded.sha256, size = excluded.size, mime = excluded.mime, rev = excluded.rev, updated_at = excluded.updated_at, deleted = 0",
+      path, desc.sha256, desc.size, desc.mime, newRev, Date.now());
+    await recordRevision(cell, path, newRev, desc.sha256);
     return json({ ok: true, deduped: false, rev: newRev });
   }
 
   if (rest === "files/list") {
     const prefix = url.searchParams.get("prefix") || "";
     const live = isRun || cell.manifest()?.freeze !== true;
+    // sizes are stored columns now — no length(content) scan over bodies
     const rows = live
-      ? cell.sql.exec("SELECT path, length(content) AS size, updated_at, rev FROM files WHERE path LIKE ? AND deleted = 0 ORDER BY path", prefix + "%").toArray()
-      : cell.sql.exec("SELECT path, length(content) AS size, 0 AS updated_at, 0 AS rev FROM draft_files WHERE slug = ? AND path LIKE ? ORDER BY path", scope.slug, prefix + "%").toArray();
+      ? cell.sql.exec("SELECT path, size, updated_at, rev FROM files WHERE path LIKE ? AND deleted = 0 ORDER BY path", prefix + "%").toArray()
+      : cell.sql.exec("SELECT path, size, 0 AS updated_at, 0 AS rev FROM draft_files WHERE slug = ? AND path LIKE ? ORDER BY path", scope.slug, prefix + "%").toArray();
     return json({
       paths: rows.map((r) => r.path),
       files: rows.map((r) => ({ path: r.path, size: r.size, updatedAt: r.updated_at || null, rev: r.rev || 0 })),

@@ -1,7 +1,7 @@
 // GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
-import { json, toAB, randHex, bodyTooLarge, MAX_BODY_BYTES } from "./util.js";
-import { sha256Hex } from "./auth.js";
+import { json, randHex, bodyTooLarge, MAX_BODY_BYTES, MIME, mimeForPath } from "./util.js";
 import { recordRevision } from "./history.js";
+import { READ_CEILING, TierError, admitFileWrite, tierStreamByHash } from "./blob-tier.js";
 function appendOnlyHit(cell, path) {
   const m = cell.manifest();
   return m && (m.appendOnly || []).some((p) => path === p.slice(0, -1) || path.startsWith(p));
@@ -25,23 +25,30 @@ async function internalRoute(cell, request, url) {
   }
   if (rest === "files/read") {
     const path = url.searchParams.get("path") || "";
-    if (isRun || cell.manifest()?.freeze !== true) {
-      const row2 = cell.getFileRow(path);
-      if (!row2) return json({ error: "no such file" }, 404);
-      return new Response(toAB(row2.content));
+    const live = isRun || cell.manifest()?.freeze !== true;
+    const row = live ? cell.getFileMeta(path) : cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = ?", scope.slug, path).toArray()[0];
+    if (!row) return json({ error: live ? "no such file" : "no such file in draft" }, 404);
+    if ((row.size | 0) > READ_CEILING) {
+      return json({ error: `file is ${(row.size / 1048576).toFixed(1)}MiB \u2014 over the ${READ_CEILING / 1048576}MiB decode ceiling for whole-file reads; consume it via its hash (${String(row.sha256).slice(0, 12)}\u2026) with ranged/streamed access` }, 413);
     }
-    const row = cell.sql.exec("SELECT content FROM draft_files WHERE slug = ? AND path = ?", scope.slug, path).toArray()[0];
-    if (!row) return json({ error: "no such file in draft" }, 404);
-    return new Response(toAB(row.content));
+    const upstream = await tierStreamByHash(cell, row.sha256);
+    return new Response(upstream.body, {
+      headers: { "content-type": row.mime || mimeForPath(path) || "application/octet-stream" }
+    });
   }
   if (rest === "files/write" && request.method === "PUT") {
     if (!isRun) return json({ error: "drafts are immutable" }, 403);
     const path = url.searchParams.get("path") || "";
     if (!path || path.includes("..") || path.startsWith("/")) return json({ error: "bad path" }, 400);
-    const body = await request.arrayBuffer();
-    const sha = await sha256Hex(body);
+    let adm;
+    try {
+      adm = await admitFileWrite(cell, request, mimeForPath(path) || MIME.txt);
+    } catch (e) {
+      const status = e instanceof TierError ? e.status : 400;
+      return json({ error: String(e.message || e), ...status === 413 ? { hint: "blob-first" } : {} }, status);
+    }
     const existing = cell.sql.exec("SELECT rev, sha256 FROM files WHERE path = ? AND deleted = 0", path).toArray()[0];
-    if (existing && existing.sha256 === sha) {
+    if (existing && existing.sha256 === adm.effSha) {
       cell.addEvent("write.deduped", path);
       return json({ ok: true, deduped: true, rev: existing.rev });
     }
@@ -52,23 +59,37 @@ async function internalRoute(cell, request, url) {
       cell.addEvent("write.refused", `${path}: append-only`);
       return json({ error: "append-only", path }, 409);
     }
+    let desc;
+    try {
+      desc = await adm.place();
+    } catch (e) {
+      const status = e instanceof TierError ? e.status : 502;
+      return json({ error: String(e.message || e) }, status);
+    }
+    if (desc.sha256 !== adm.effSha) {
+      return json({ error: `hash mismatch: tier received ${desc.sha256}, caller declared ${adm.effSha}` }, 400);
+    }
+    if (!(desc.sha256 && Number.isSafeInteger(desc.size))) {
+      return json({ error: "tier descriptor incomplete \u2014 refusing to commit a dangling name" }, 502);
+    }
     const newRev = parseInt(cell.getMeta("rev") || "0", 10) + 1;
     cell.setMeta("rev", String(newRev));
     cell.sql.exec(
-      "INSERT INTO files (path, content, rev, sha256, updated_at, deleted) VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT(path) DO UPDATE SET content = excluded.content, rev = excluded.rev, sha256 = excluded.sha256, updated_at = excluded.updated_at, deleted = 0",
+      "INSERT INTO files (path, sha256, size, mime, rev, updated_at, deleted) VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT(path) DO UPDATE SET sha256 = excluded.sha256, size = excluded.size, mime = excluded.mime, rev = excluded.rev, updated_at = excluded.updated_at, deleted = 0",
       path,
-      body,
+      desc.sha256,
+      desc.size,
+      desc.mime,
       newRev,
-      sha,
       Date.now()
     );
-    await recordRevision(cell, path, newRev, sha, body);
+    await recordRevision(cell, path, newRev, desc.sha256);
     return json({ ok: true, deduped: false, rev: newRev });
   }
   if (rest === "files/list") {
     const prefix = url.searchParams.get("prefix") || "";
     const live = isRun || cell.manifest()?.freeze !== true;
-    const rows = live ? cell.sql.exec("SELECT path, length(content) AS size, updated_at, rev FROM files WHERE path LIKE ? AND deleted = 0 ORDER BY path", prefix + "%").toArray() : cell.sql.exec("SELECT path, length(content) AS size, 0 AS updated_at, 0 AS rev FROM draft_files WHERE slug = ? AND path LIKE ? ORDER BY path", scope.slug, prefix + "%").toArray();
+    const rows = live ? cell.sql.exec("SELECT path, size, updated_at, rev FROM files WHERE path LIKE ? AND deleted = 0 ORDER BY path", prefix + "%").toArray() : cell.sql.exec("SELECT path, size, 0 AS updated_at, 0 AS rev FROM draft_files WHERE slug = ? AND path LIKE ? ORDER BY path", scope.slug, prefix + "%").toArray();
     return json({
       paths: rows.map((r) => r.path),
       files: rows.map((r) => ({ path: r.path, size: r.size, updatedAt: r.updated_at || null, rev: r.rev || 0 }))

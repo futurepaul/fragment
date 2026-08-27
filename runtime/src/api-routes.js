@@ -1,9 +1,10 @@
 // GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
-import { json, toAB, randSlug, randHex, isMachinery, bodyTooLarge, MAX_BODY_BYTES } from "./util.js";
-import { sha256Hex, safeEqual } from "./auth.js";
+import { json, randSlug, randHex, isMachinery, bodyTooLarge, MAX_BODY_BYTES, MIME, mimeForPath } from "./util.js";
+import { safeEqual } from "./auth.js";
 import { nextRun } from "./cron.js";
 import { normalizeManifest } from "./manifest.js";
 import { recordRevision } from "./history.js";
+import { TierError, admitFileWrite, tierStreamByHash } from "./blob-tier.js";
 function appendOnlyHit(m, path) {
   return (m.appendOnly || []).some((p) => path === p.slice(0, -1) || path.startsWith(p));
 }
@@ -189,19 +190,20 @@ async function apiRoute(cell, request, url) {
     const a = authz("viewer");
     if (!a.ok) return deny(a);
     const since = parseInt(url.searchParams.get("since_rev") || "0", 10);
-    const rows = cell.sql.exec(
-      "SELECT path, rev, sha256, deleted, length(content) AS size FROM files WHERE rev > ? ORDER BY rev",
-      since
-    ).toArray();
+    const rows = cell.sql.exec("SELECT path, rev, sha256, size, deleted FROM files WHERE rev > ? ORDER BY rev", since).toArray();
     return json({ rev: parseInt(cell.getMeta("rev") || "0", 10), files: rows.map((r) => ({ path: r.path, rev: r.rev, size: r.size, sha256: r.sha256, deleted: !!r.deleted, machinery: isMachinery(r.path) })) });
   }
   if (p === "/file" && request.method === "GET") {
     const a = authz("viewer");
     if (!a.ok) return deny(a);
     const path = url.searchParams.get("path") || "";
-    const row = cell.sql.exec("SELECT content, rev FROM files WHERE path = ? AND deleted = 0", path).toArray()[0];
+    const row = cell.getFileMeta(path);
     if (!row) return json({ error: "no such file" }, 404);
-    return new Response(toAB(row.content), { headers: { "x-fragment-rev": String(row.rev) } });
+    const upstream = await tierStreamByHash(cell, row.sha256);
+    return new Response(upstream.body, { status: upstream.status, headers: {
+      "x-fragment-rev": String(row.rev),
+      "content-type": row.mime || mimeForPath(path) || "application/octet-stream"
+    } });
   }
   if (p === "/file/history" && request.method === "GET") {
     const a = authz("viewer");
@@ -218,9 +220,11 @@ async function apiRoute(cell, request, url) {
     const row = rev ? cell.sql.exec("SELECT blob_hash, deleted FROM file_revisions WHERE path = ? AND rev = ?", path, rev).toArray()[0] : cell.sql.exec("SELECT blob_hash, deleted FROM file_revisions WHERE path = ? ORDER BY rev DESC LIMIT 1", path).toArray()[0];
     if (!row) return json({ error: "no such revision (pruned or never existed)" }, 410);
     if (row.deleted) return json({ error: "deleted at that revision" }, 410);
-    const blob = cell.sql.exec("SELECT content FROM blobs WHERE hash = ?", row.blob_hash).toArray()[0];
-    if (!blob) return json({ error: "revision pruned" }, 410);
-    return new Response(toAB(blob.content), { headers: { "x-fragment-rev": String(rev || "") } });
+    const upstream = await tierStreamByHash(cell, row.blob_hash);
+    return new Response(upstream.body, { status: upstream.status, headers: {
+      "x-fragment-rev": String(rev || ""),
+      "content-type": "application/octet-stream"
+    } });
   }
   if (p === "/file" && request.method === "PUT") {
     const a = authz("editor");
@@ -228,28 +232,47 @@ async function apiRoute(cell, request, url) {
     const path = url.searchParams.get("path") || "";
     if (!path || path.includes("..") || path.startsWith("/")) return json({ error: "bad path" }, 400);
     const baseRev = parseInt(url.searchParams.get("base_rev") || "0", 10);
+    let adm;
+    try {
+      adm = await admitFileWrite(cell, request, mimeForPath(path) || MIME.txt);
+    } catch (e) {
+      const status = e instanceof TierError ? e.status : 400;
+      return json({ error: String(e.message || e), ...status === 413 ? { hint: "blob-first" } : {} }, status);
+    }
     const cur = cell.sql.exec("SELECT rev, sha256, deleted FROM files WHERE path = ?", path).toArray()[0];
     const curRev = cur ? cur.rev : 0;
-    const body = await request.arrayBuffer();
-    const sha = await sha256Hex(body);
-    if (cur && !cur.deleted && appendOnlyHit(m, path) && cur.sha256 !== sha && a.role !== "owner") {
+    if (cur && !cur.deleted && appendOnlyHit(m, path) && cur.sha256 !== adm.effSha && a.role !== "owner") {
       return json({ error: "append-only", path }, 409);
     }
-    if (cur && !cur.deleted && appendOnlyHit(m, path) && cur.sha256 === sha) {
+    if (cur && !cur.deleted && appendOnlyHit(m, path) && cur.sha256 === adm.effSha) {
       return json({ path, rev: curRev, noop: true });
     }
     if (baseRev !== curRev) return json({ error: "conflict", currentRev: curRev }, 409);
+    let desc;
+    try {
+      desc = await adm.place();
+    } catch (e) {
+      const status = e instanceof TierError ? e.status : 502;
+      return json({ error: String(e.message || e) }, status);
+    }
+    if (desc.sha256 !== adm.effSha) {
+      return json({ error: `hash mismatch: tier received ${desc.sha256}, caller declared ${adm.effSha}` }, 400);
+    }
+    if (!(desc.sha256 && Number.isSafeInteger(desc.size))) {
+      return json({ error: "tier descriptor incomplete \u2014 refusing to commit a dangling name" }, 502);
+    }
     const newRev = parseInt(cell.getMeta("rev") || "0", 10) + 1;
     cell.setMeta("rev", String(newRev));
     cell.sql.exec(
-      "INSERT INTO files (path, content, rev, sha256, updated_at, deleted) VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT(path) DO UPDATE SET content = excluded.content, rev = excluded.rev, sha256 = excluded.sha256, updated_at = excluded.updated_at, deleted = 0",
+      "INSERT INTO files (path, sha256, size, mime, rev, updated_at, deleted) VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT(path) DO UPDATE SET sha256 = excluded.sha256, size = excluded.size, mime = excluded.mime, rev = excluded.rev, updated_at = excluded.updated_at, deleted = 0",
       path,
-      body,
+      desc.sha256,
+      desc.size,
+      desc.mime,
       newRev,
-      sha,
       Date.now()
     );
-    await recordRevision(cell, path, newRev, sha, body);
+    await recordRevision(cell, path, newRev, desc.sha256);
     await cell.scheduleSyncTrigger(path);
     return json({ path, rev: newRev });
   }
@@ -261,13 +284,12 @@ async function apiRoute(cell, request, url) {
     const newRev = parseInt(cell.getMeta("rev") || "0", 10) + 1;
     cell.setMeta("rev", String(newRev));
     cell.sql.exec(
-      "INSERT INTO files (path, content, rev, sha256, updated_at, deleted) VALUES (?, X'', ?, ?, ?, 1) ON CONFLICT(path) DO UPDATE SET content = X'', rev = excluded.rev, sha256 = NULL, updated_at = excluded.updated_at, deleted = 1",
+      "INSERT INTO files (path, sha256, size, mime, rev, updated_at, deleted) VALUES (?, '', 0, '', ?, ?, 1) ON CONFLICT(path) DO UPDATE SET sha256 = '', size = 0, mime = '', rev = excluded.rev, updated_at = excluded.updated_at, deleted = 1",
       path,
       newRev,
-      null,
       Date.now()
     );
-    await recordRevision(cell, path, newRev, null, null, true);
+    await recordRevision(cell, path, newRev, null, true);
     await cell.scheduleSyncTrigger(path);
     return json({ ok: true, rev: newRev });
   }
@@ -276,7 +298,7 @@ async function apiRoute(cell, request, url) {
     if (!a.ok) return deny(a);
     const body = await request.json().catch(() => ({}));
     const slug = randSlug(8);
-    const rows = cell.sql.exec("SELECT path, content, sha256 FROM files WHERE deleted = 0").toArray();
+    const rows = cell.sql.exec("SELECT path FROM files WHERE deleted = 0").toArray();
     const servable = rows.some((r) => r.path === "app.mjs" || r.path.startsWith("site/"));
     const nested = rows.length && !servable && rows.every((r) => r.path.startsWith(m.name + "/"));
     if (!servable) {
@@ -284,9 +306,7 @@ async function apiRoute(cell, request, url) {
       cell.addEvent("publish.warn", `draft ${slug}:${hint}`);
     }
     cell.sql.exec("INSERT INTO drafts (slug, at, note) VALUES (?, ?, ?)", slug, Date.now(), String(body.note || ""));
-    for (const r of rows) {
-      cell.sql.exec("INSERT INTO draft_files (slug, path, content, sha256) VALUES (?, ?, ?, ?)", slug, r.path, toAB(r.content), r.sha256);
-    }
+    cell.sql.exec("INSERT INTO draft_files (slug, path, sha256, size, mime, rev, updated_at) SELECT ?, path, sha256, size, mime, rev, updated_at FROM files WHERE deleted = 0", slug);
     await cell.env.FRAGMENT.getByName("_registry").fetch("http://x/__registry/slug-map", {
       method: "POST",
       body: JSON.stringify({ slug, name: m.name })

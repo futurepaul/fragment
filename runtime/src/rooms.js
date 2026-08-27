@@ -1,6 +1,7 @@
 // GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
-import { toAB, randSlug } from "./util.js";
+import { randSlug } from "./util.js";
 import { ROOMS_MAIN } from "./loader.js";
+import { tierTextBounded } from "./blob-tier.js";
 async function roomRoute(cell, request, url) {
   const room = decodeURIComponent(url.pathname.slice("/__room/".length));
   const draftParam = url.searchParams.get("draft") || "blessed";
@@ -74,14 +75,15 @@ async function webSocketMessage(cell, ws, raw) {
     let data = msg.data;
     const slug = a.draft === "blessed" ? cell.getMeta("blessed") : a.draft;
     if (slug) {
-      const row = cell.sql.exec("SELECT content FROM draft_files WHERE slug = ? AND path = 'rooms.mjs'", slug).toArray()[0];
+      const row = cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = 'rooms.mjs'", slug).toArray()[0];
       if (row) {
         try {
           const isBlessed = cell.getMeta("blessed") === slug;
+          const src = await tierTextBounded(cell, row, "module rooms.mjs");
           const ep = await cell.loadCode(
             `rooms:${isBlessed ? "b" : "d"}:${slug}`,
             ROOMS_MAIN,
-            { "rooms.mjs": new TextDecoder().decode(toAB(row.content)) },
+            { "rooms.mjs": src },
             { kind: "draft", worker: "rooms", slug, blessed: isBlessed }
           );
           const resp = await ep.fetch("http://loaded/rooms", {
