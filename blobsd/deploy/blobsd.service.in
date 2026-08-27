@@ -1,0 +1,40 @@
+# /etc/systemd/system/blobsd.service — template; @INSTALL@-style fields to
+# fill at deploy time. All host-specific values live in /etc/blobsd.env (see
+# README config table) — never in this repo.
+#
+# Template fields:
+#   @BLOBSD_BINARY@   installed blobsd binary path (e.g. /usr/local/bin/blobsd)
+#   @DATA_DIR@        persistent state dir, owned by User= (e.g. /var/lib/blobsd)
+
+[Unit]
+Description=blobsd — fragment blob tier server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=blobsd
+Group=blobsd
+# chmod 600, root:root. Holds BLOBSD_* + S3_ENDPOINT + AWS_* (README table).
+EnvironmentFile=/etc/blobsd.env
+Environment=BLOBSD_DATA_DIR=@DATA_DIR@
+StateDirectory=blobsd
+# blobsd reads ALL configuration from the environment (validated at boot;
+# invalid or unknown config exits non-zero before binding) — no CLI flags.
+ExecStart=@BLOBSD_BINARY@
+Restart=always
+RestartSec=2
+# in-flight uploads are streamed to local staging; give a drained PUT a
+# moment before SIGKILL (KillMode=mixed finishes the leader process).
+TimeoutStopSec=35
+KillMode=mixed
+LimitNOFILE=65536
+# Hardening: nothing needs privileges or new processes.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=@DATA_DIR@
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
