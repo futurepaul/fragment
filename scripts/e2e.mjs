@@ -1296,7 +1296,9 @@ async function filesyncSection() {
     writeFileSync(join(dir, 'doc.md'), 'ONE-local\ntwo\nthree\nfour\nfive\n');
     await put(name, 'doc.md', 'one\ntwo\nthree\nfour\nFIVE-remote\n', 1);
     const r = runCli(bin, ['sync', name, '--dir', dir, '--json'], { env: H });
-    const rep = JSON.parse(r[r.indexOf('{') >= 0 ? r.indexOf('{') : 0] ? r.slice(r.indexOf('{')) : '{}');
+    const repRaw = JSON.parse(r[r.indexOf('{') >= 0 ? r.indexOf('{') : 0] ? r.slice(r.indexOf('{')) : '{}');
+    // both output shapes: the wrapped machine envelope ({ok,data:{...}}) and the bare report
+    const rep = repRaw && typeof repRaw === 'object' && 'data' in repRaw && repRaw.ok !== undefined ? repRaw.data : repRaw;
     ok((rep.merged || []).includes('doc.md'), 'non-overlapping edits merged automatically');
     const local = readFileSync(join(dir, 'doc.md'), 'utf8');
     ok(local.includes('ONE-local') && local.includes('FIVE-remote'), 'merge kept both sides');
@@ -1645,5 +1647,91 @@ try {
   failures.push('unexpected: ' + String(e && e.stack || e));
   console.log('FAIL  unexpected: ' + String(e && e.stack || e));
 }
+
+// ---- lane/cli additions ----
+// Machine envelope (--json), error codes, and the rotate/rooms verbs.
+// rotate/rooms land only when the runtime-lane endpoints merge — their
+// checks are labeled "(post-merge)" so a red suite today stays interpretable
+// (expected local tally: everything green except the three post-merge lines).
+async function cliLaneSection() {
+  if (!section('cli-lane')) return;
+  const bin = findBinary();
+  ok(!!bin, 'cli binary found for lane/cli checks');
+  if (!bin) return;
+  const H = { HOME: mkdtempSync(join(tmpdir(), 'fragment-cli-home-')) };
+  const env = { ...process.env, FRAGMENT_HOST: BASE, ...H };
+
+  // spawn with status capture (usage errors exit nonzero without throwing)
+  const run = (args) => {
+    const r = spawnSync(bin, args, { encoding: 'utf8', env, timeout: 60_000 });
+    return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
+  };
+  const parse = (s) => { try { return JSON.parse(s); } catch { return null; } };
+
+  runCli(bin, ['login'], { env: H });
+  const nm = `e2e-cli-${suffix}`;
+
+  // create --json: one line on stdout, {"ok":true} envelope carrying the tokens
+  const crRaw = run(['create', nm, '--json']).stdout;
+  const oneLine = (s) => s.replace(/\n$/, '').split('\n').length === 1;
+  ok(oneLine(crRaw) && parse(crRaw)?.ok === true, '(lane/cli) create --json emits a one-line {"ok":true} envelope');
+  const cr = parse(crRaw);
+  ok(cr?.ok === true && typeof cr.data?.inboxToken === 'string' && typeof cr.data?.viewToken === 'string',
+    '(lane/cli) create --json data carries inbox+view tokens');
+
+  // status/events/runs envelopes have the data key
+  for (const sub of ['status', 'events', 'runs']) {
+    const v = parse(run([sub, nm, '--json']).stdout);
+    ok(v?.ok === true && v && 'data' in v, `(lane/cli) ${sub} --json envelope has data key`);
+  }
+
+  // unknown fragment → failure envelope with stable code not_found
+  const nf = run(['status', `e2e-cli-nope-${suffix}`, '--json']);
+  const nfJ = parse(nf.stdout);
+  eq(nf.code, 1, '(lane/cli) unknown fragment exits 1');
+  ok(nfJ?.ok === false && nfJ?.error?.code === 'not_found' && typeof nfJ.error.message === 'string',
+    '(lane/cli) 404 maps to code not_found in the error envelope');
+
+  // bad subcommand → usage class: exit 2 + invalid_usage envelope on stdout
+  const bad = run(['definitely-not-a-fragment-verb', nm, '--json']);
+  const badJ = parse(bad.stdout);
+  eq(bad.code, 2, '(lane/cli) bad subcommand exits 2');
+  ok(badJ?.ok === false && badJ?.error?.code === 'invalid_usage', '(lane/cli) bad subcommand emits invalid_usage envelope');
+
+  // FRAGMENT_OUTPUT=json is a first-class equivalent
+  const ev = spawnSync(bin, ['whoami'], { encoding: 'utf8', env: { ...env, FRAGMENT_OUTPUT: 'json' } });
+  ok(parse(ev.stdout)?.ok === true && !!parse(ev.stdout)?.data?.npub, '(lane/cli) FRAGMENT_OUTPUT=json drives the envelope');
+
+  // -v logs requests to stderr, stdout stays exactly one clean line
+  const vb = spawnSync(bin, ['list', '--json', '-v'], { encoding: 'utf8', env });
+  ok((vb.stderr || '').includes('GET /api/fragments -> 200') && /\[retries=\d+\]/.test(vb.stderr),
+    '(lane/cli) -v traces signed requests to stderr');
+  ok(oneLine(vb.stdout || '') && parse(vb.stdout)?.ok === true, '(lane/cli) -v leaves stdout as one clean line');
+
+  // rotate (owner-only token rotation) — runtime endpoint lands post-merge
+  const rot = run(['rotate', nm, '--json']);
+  const rotJ = parse(rot.stdout);
+  ok(rotJ?.ok === true && typeof rotJ?.data?.inbox_token === 'string' && typeof rotJ?.data?.view_token === 'string'
+    && Array.isArray(rotJ?.data?.rotated), '(post-merge) rotate --json returns both tokens under data');
+
+  // rooms listing + message reads
+  const rms = parse(run(['rooms', nm, '--json']).stdout);
+  ok(rms?.ok === true && Array.isArray(rms?.data?.rooms), '(post-merge) rooms <name> --json lists rooms');
+  const rm1 = parse(run(['rooms', nm, 'general', '--tail', '5', '--json']).stdout);
+  ok(rm1?.ok === true && rm1?.data?.room === 'general' && Array.isArray(rm1?.data?.messages),
+    '(post-merge) rooms <name> <room> --tail N returns ascending messages');
+
+  // leave no trace (fragment created this session; allowed to rm e2e-cli-*)
+  runCli(bin, ['rm', nm], { env: H });
+}
+try {
+  if (!ONLY || ONLY === 'cli-lane') await cliLaneSection();
+} catch (e) {
+  fail++;
+  failures.push('cli-lane: ' + String(e && e.stack || e));
+  console.log('FAIL  cli-lane unexpected: ' + String(e && e.stack || e));
+}
+// ---- end lane/cli additions ----
+
 console.log(`\n${pass} passed, ${fail} failed${fail ? ': ' + failures.join('; ') : ''}`);
 process.exit(fail ? 1 : 0);

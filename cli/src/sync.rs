@@ -144,7 +144,7 @@ impl Report {
             && self.deleted_local.is_empty()
             && self.skipped_append_only.is_empty();
         if clean {
-            println!("  up to date ({}/{} hashed)", self.scan.hashed, self.scan.files);
+            println!("all {} files match host", self.scan.files);
         }
     }
 }

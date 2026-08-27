@@ -3,9 +3,56 @@ use crate::auth::Identity;
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 
+/// An error carrying a stable machine code (surfaced in the `--json`
+/// envelope as `error.code`). Display is the plain human message.
+#[derive(Debug)]
+pub struct CodedError {
+    pub code: &'static str,
+    pub msg: String,
+}
+impl std::fmt::Display for CodedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.msg)
+    }
+}
+impl std::error::Error for CodedError {}
+
+/// Map an HTTP status + server summary to a stable error-code string
+/// (the only place statuses become codes — the envelope picks it up at
+/// the top-level catch via downcast).
+pub fn code_for(status: u16, summary: &str) -> &'static str {
+    match status {
+        401 => "auth_failed",
+        403 => "forbidden",
+        404 => "not_found",
+        // base-rev mismatch and other racing writes are conflicts; the
+        // registry's duplicate-name response gets its own sharper code
+        409 if summary.contains("name taken") => "name_taken",
+        409 => "conflict",
+        413 => "too_large",
+        429 => "rate_limited",
+        502..=504 => "unavailable",
+        _ => "server_error",
+    }
+}
+
+/// Hint suffix for 5xx bodies: point agents at the event log; gateway
+/// blips get a retry blessing.
+fn http_context_suffix(status: u16) -> &'static str {
+    if (500..600).contains(&status) {
+        match status {
+            502 | 503 => " (usually transient; retrying is safe) — see fragment events <name> if it persists",
+            _ => " — see fragment events <name> if it persists",
+        }
+    } else {
+        ""
+    }
+}
+
 pub struct Client {
     pub host: String,
     pub id: Identity,
+    verbose: bool,
     http: reqwest::blocking::Client,
 }
 
@@ -35,8 +82,15 @@ impl Client {
         Self {
             host: host.trim_end_matches('/').to_string(),
             id,
+            verbose: false,
             http: reqwest::blocking::Client::new(),
         }
+    }
+
+    /// Builder-style toggle for `-v`: one stderr line per signed request.
+    pub fn with_verbose(mut self) -> Self {
+        self.verbose = true;
+        self
     }
 
     fn request(&self, method: &str, path: &str, body: Option<Vec<u8>>) -> Result<Resp> {
@@ -52,6 +106,7 @@ impl Client {
                 std::thread::sleep(std::time::Duration::from_millis(300 * attempt as u64));
             }
             let auth = self.id.nip98_header(method, &url, &body);
+            let t0 = std::time::Instant::now();
             let mut req = match method {
                 "GET" => self.http.get(&url),
                 "POST" => self.http.post(&url),
@@ -66,6 +121,12 @@ impl Client {
             match req.send() {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
+                    if self.verbose {
+                        eprintln!(
+                            "{method} {path} -> {status} ({}ms [retries={attempt}])",
+                            t0.elapsed().as_millis()
+                        );
+                    }
                     let rev = resp
                         .headers()
                         .get("x-fragment-rev")
@@ -75,6 +136,9 @@ impl Client {
                     return Ok(Resp { status, body: bytes, rev });
                 }
                 Err(e) if e.is_connect() || e.is_request() => {
+                    if self.verbose {
+                        eprintln!("{method} {path} -> retry after error ({}ms [retries={attempt}])", t0.elapsed().as_millis());
+                    }
                     last_err = Some(e);
                     continue; // stale pool / transient network — try again
                 }
@@ -85,10 +149,14 @@ impl Client {
         // with its cause — a bare "failed after retries" turned a host
         // dropping large bodies into a silent 90s mystery (and before
         // that, an unreachable!() panicked here; found by restore agents)
-        return Err(anyhow::anyhow!(
-            "request failed after retries (host unreachable, or it dropped the connection mid-body — check the request size): {}",
-            last_err.map(|e| e.to_string()).unwrap_or_else(|| "no error recorded".into())
-        ));
+        return Err(anyhow::Error::new(CodedError {
+            code: "unavailable",
+            msg: format!(
+                "request failed after retries ({host} unreachable, or it dropped the connection mid-body — check the request size): {err}",
+                host = self.host,
+                err = last_err.map(|e| e.to_string()).unwrap_or_else(|| "no error recorded".into())
+            ),
+        }));
     }
 
     pub fn get(&self, path: &str) -> Result<Resp> {
@@ -107,12 +175,17 @@ impl Client {
         self.request("DELETE", path, None)
     }
 
-    /// Full control call with standard error handling: returns parsed JSON or an Err with the server's message.
+    /// Full control call with standard error handling: returns parsed JSON or an Err carrying a
+    /// stable machine code (CodedError) plus the server's human-readable message.
     pub fn call(&self, resp: Resp) -> Result<Value> {
         if resp.ok() {
             resp.json()
         } else {
-            Err(anyhow!("http {}: {}", resp.status, resp.err_summary()))
+            let summary = resp.err_summary();
+            Err(anyhow::Error::new(CodedError {
+                code: code_for(resp.status, &summary),
+                msg: format!("http {}: {}{}", resp.status, summary, http_context_suffix(resp.status)),
+            }))
         }
     }
 }

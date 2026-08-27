@@ -13,8 +13,10 @@ so keep using the same machine/user account.
 ## The mental model
 
 - A fragment has a **working copy** (its folder) and immutable **drafts**
-  (snapshots of the folder). Publishing makes a draft; **blessing** a draft
-  points the canonical URL at it — what `fragment deploy` does in one step.
+  (snapshots of the folder). `fragment deploy` snapshots the folder and
+  points the canonical URL at that snapshot in one step; `--preview`
+  snapshots without going live, and `fragment rollback` repoints at an
+  older one.
 - URLs: canonical `/f/<name>/`, drafts `/d/<slug>/` (unguessable slugs, safe to
   share for review).
 - **Workflows** (`workflows/*.mjs`) are the fragment's machinery: they run on a
@@ -72,11 +74,12 @@ everything else      # just files: data, notes, exports — synced, versioned, s
 fragment sync my-thing                     # push/pull the folder
 fragment deploy my-thing --dir .           # snapshot + GO LIVE → /f/my-thing/
 fragment deploy my-thing --preview         # snapshot only → preview URL /d/<slug>/
-fragment drafts my-thing                   # list snapshots ([live] marked)
+fragment drafts my-thing                   # list snapshots (the live one marked [blessed])
 ```
 
-Rollback is `fragment rollback my-thing` (the previous snapshot). Snapshots
-never change and never expire; deploy as often as you think.
+Rollback is `fragment rollback my-thing` (the previous snapshot; `--to <slug>`
+picks one). Snapshots never change and never expire; deploy as often as you
+think.
 
 ## Sync in depth
 
@@ -449,8 +452,10 @@ When you control the HTTP client, prefer sending the token as the
 `x-fragment-inbox-token` header instead of `?t=` — same result, but the
 secret stays out of access logs.
 
-No signature needed — the token is the auth (rotate by asking the owner to
-re-create… no, tokens are fixed at create; treat them as passwords).
+No signature needed — the token is the auth. Tokens are created with the
+fragment; if one leaks, `fragment rotate <name> [--inbox] [--view]`
+(owner-only; default rotates both view + inbox tokens) mints new ones and
+prints the new webhook URL and share link — give senders the new URL.
 `fragment inbox my-thing --token <t> --payload '{"hello":"world"}'` tests it.
 Inbox messages run all `trigger: "inbox"` workflows and land in the event log.
 
@@ -539,6 +544,11 @@ Debugging: if `rooms.mjs` throws or returns `{error}`, the event log shows
 `room-error`; a drop shows `room-drop` (with `reason` if given). Read
 `fragment events <name>` when realtime misbehaves.
 
+From a terminal: `fragment rooms <name>` lists the fragment's rooms
+(connected-client count, last activity); `fragment rooms <name> <room> --tail 20`
+prints that room's most recent messages ascending — the fastest way to see
+what actually flowed through a room.
+
 ## Recipes — big scaffolds
 
 Two scaffolds ship in the CLI (`fragment new --list`): they are ordinary
@@ -608,6 +618,8 @@ fragment sync <name> [--dir D] [--watch] [--mode M]  fragment replay <name> <run
                                    [--install | --uninstall]
 fragment deploy <name> [--dir D] [--preview]
 fragment drafts <name>              fragment rollback <name> [--to <slug>]
+fragment rotate <name> [--inbox] [--view]
+fragment rooms <name> [<room>] [--tail N]
 ```
 
 `fragment sync --install` writes a LaunchAgent (macOS) or systemd user
@@ -615,5 +627,28 @@ unit (Linux) so the folder stays live without a terminal — the pattern the
 vault recipe uses. Everything an author needs to know is in this guide;
 if it isn't here, it isn't a rule.
 
-Global flags: `--host <url>` (or `FRAGMENT_HOST`), `--json`. Set a sticky
-default with `fragment host <url>` (e.g. `fragment host https://fragment.club`).
+Global flags: `--host <url>` (or `FRAGMENT_HOST`), `--json`, `-v`/`--verbose`.
+Every structured command accepts `--json` (equivalently, set
+`FRAGMENT_OUTPUT=json`): stdout is exactly ONE line — on success
+`{"ok":true,"data":…}`, on failure
+`{"ok":false,"error":{"code","message","hint"}}` where `message` is the
+human-readable text and `error.code` carries a stable machine code
+(`invalid_usage auth_failed forbidden not_found name_taken conflict
+too_large rate_limited unavailable server_error`). Exit codes for scripts:
+0 ok, 1 failure, 2 usage. `-v` logs every signed request to stderr
+(`GET /api/f/x/status -> 200 (12ms [retries=0])`) and leaves stdout clean,
+so `-v --json` works together. Set a sticky default host with
+`fragment host <url>` (e.g. `fragment host https://fragment.club`).
+
+## Migration notes
+
+Vocabulary renamed along the way; kept here so older scripts and
+transcripts still decode:
+
+- `fragment publish` → `fragment deploy`; `fragment bless <name> <slug>` →
+  `fragment rollback <name> --to <slug>`. The drafts listing still marks the
+  served snapshot `[blessed]`, and the wire endpoints keep their names
+  (`POST /drafts`, `POST /bless`) — only the CLI verbs changed.
+- Files-triggered workflows fire on `trigger: "files"` (was `"sync"`).
+- Every structured command accepts `--json`; errors carry stable codes under
+  `error.code` (see Global flags above).

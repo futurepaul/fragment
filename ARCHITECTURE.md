@@ -15,7 +15,7 @@ stateful, multiplayer, and can wake itself up.
 
 **`fragment` — the CLI (Rust, `cli/`).** The whole control surface. An agent
 with this CLI and a nostr key can do everything: make a fragment, sync a local
-folder into it, publish drafts, bless one, set secrets, grant access, trigger
+folder into it, snapshot and deploy drafts, set secrets, grant access, trigger
 workflows, read the event log. `fragment guide` prints the agent-facing skill
 doc. There is no other API to learn.
 
@@ -82,7 +82,7 @@ my-fragment/
 
 - **visibility**: `public` (anyone can view), `viewers` (listed npubs), or
   `token` (anyone with the `?view=` link token). Viewing never grants
-  editing. Editing (sync/publish/bless/secrets) requires the owner or an
+  editing. Editing (sync/deploy/secrets/rotate) requires the owner or an
   editor npub, proven per request with a NIP-98 signed event.
 - **workflows**: `cron` (5-field, UTC, via the cell's own durable alarm —
   survives sleep) or `trigger: "inbox"` (a POST to the fragment's inbox runs
@@ -96,13 +96,15 @@ the TypeBox schema in `runtime/ts/manifest.ts`, applies defaults, and stores
 the normalized form; the cell serves the parsed object from memory. Nothing
 downstream re-parses or re-validates it.
 
-## Drafts and blessing
+## Drafts and deploys
 
-`fragment publish` snapshots the fragment's current files + code and returns a
-random draft URL (`/d/x7k2q9/`). Drafts are immutable and unguessable — safe
-to share for review, safe to publish constantly. Nothing changes the live site
-until `fragment bless <name> <slug>` points the canonical URL (`/f/<name>/`)
-at a draft. Rollback = bless an older draft.
+`fragment deploy --preview` snapshots the fragment's current files + code and
+returns a random draft URL (`/d/x7k2q9/`). Drafts are immutable and unguessable
+— safe to share for review, safe to snapshot constantly. Nothing changes the
+live site until the deploy goes live (or `fragment rollback --to <slug>`
+points the canonical URL `/f/<name>/` at an older snapshot). The wire calls
+underneath are `POST /drafts` + `POST /bless`; only the CLI verbs were renamed.
+Rollback = deploying an older draft again.
 
 ## Multiplayer
 
@@ -211,8 +213,8 @@ manifest names the knob.
 
 ## The event log
 
-Everything that changes a fragment appends to `events`: syncs, publishes,
-blesses, secret sets, grants, workflow runs, inbox arrivals. The log is the
+Everything that changes a fragment appends to `events`: syncs, deploys,
+token rotations, secret sets, grants, workflow runs, inbox arrivals. The log is the
 answer to "what happened" and the runtime's own memory. (Learned the hard way
 in the first prototype: never let a report disagree with the ledger.)
 

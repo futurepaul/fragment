@@ -48,6 +48,9 @@ visibility=viewers).
 | `POST /api/f/{name}/replay` | editor+ | `{run: id}` → re-runs a held run with its original input → `{ok, output?, error?, runId}` |
 | `GET /api/f/{name}/runs?status=&wf=&limit=&include=input` | viewer+ | → `{runs:[{id, wf, via, status, attempt, maxAttempts, error?, timings, cause}], counts}`. Statuses: `running \| backoff \| success \| held \| skipped \| blocked` |
 | `POST /api/f/{name}/pause` | editor+ | `{workflow, paused}` → pause/unpause a workflow (clears the auto-pause breaker) |
+| `POST /api/f/{name}/rotate` | owner | `{"scopes": ["inbox","view"]?}` → `{ok, inbox_token?, view_token?, rotated}` (default both scopes; omitted scopes keep their old tokens). Callers should treat both token spellings as opaque. |
+| `GET /api/f/{name}/rooms` | editor+ | → `{rooms:[{room, count, last_at}]}` (connected-client count + last activity per room) |
+| `GET /api/f/{name}/rooms/{room}/messages?limit=&before=` | editor+ | → `{room, messages:[{id, at, sender, data}]}` ascending (most recent `limit`, default 30; `before=<id>` pages further back) |
 
 **Notify-on-change** (manifest `notifyUrls: ["https://…"]`, max 3): every
 mutation POSTs `{type:"changed", fragment, rev, paths}` to each URL,
@@ -60,7 +63,7 @@ loops die at the receiving inbox's cycle guard. `notify.sent` /
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor+ | → `{ok}` |
 | `GET /api/f/{name}/events?since={id}` | viewer+ | → `{events:[{id, at, kind, summary, data?}]}` |
 | `POST /api/f/{name}/inbox?t={inboxToken}` | token only | `{source?, payload}` → `{ok, id, ran}`; enqueues + runs `trigger:"inbox"` workflows. Prefer the `x-fragment-inbox-token` header when you control the client — `?t=` lands in access logs. Optional headers: `Idempotency-Key` (redelivery collapses for 24h), `x-fragment-hops`/`x-fragment-cause` (stamped by `ctx.http` — over-budget hops are refused with a `cycle.detected` event). Pending cap 1000 → `429`. |
-| `PUT /api/f/{name}/file?path=&base_rev=` | editor+ | raw body; stale `base_rev` → 409. Successful writes schedule `trigger:"sync"` workflows (coalesced; workflow-plane writes don't) |
+| `PUT /api/f/{name}/file?path=&base_rev=` | editor+ | raw body; stale `base_rev` → 409. Successful writes schedule `trigger:"files"` workflows (coalesced; workflow-plane writes don't) |
 
 ## Serving (no NIP-98)
 

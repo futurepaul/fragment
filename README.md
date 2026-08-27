@@ -17,13 +17,13 @@ wrapped around exactly one problem. This repo holds two things:
 - **vault** — any folder of text files becomes a live, URL-bearing,
   Obsidian-like site: file tree, `[[wikilinks]]`, syntax-highlighted code
   (via [@pierre/diffs](https://diffs.com)), a recent rail. The viewer is
-  code (frozen in the blessed draft); notes are data (live via
-  `"liveFiles": true` — synced edits appear on reload, no republish).
+  code (frozen in the deployed snapshot); notes are data (live via
+  `"liveFiles": true` — synced edits appear on reload, no redeploy).
 - **dropzone** — the vault plus a `drop/` folder and an `ingest` workflow
-  (`trigger: "sync"`): drop a file, watch `output/` appear on the webview
+  (`trigger: "files"`): drop a file, watch `output/` appear on the webview
   and sync back into your folder seconds later.
 
-Both are just folders — read the scaffolded code, edit it, re-bless. See
+Both are just folders — read the scaffolded code, edit it, re-deploy. See
 the Recipes section of `fragment guide`.
 
 Read [ARCHITECTURE.md](ARCHITECTURE.md) for the design and
@@ -57,9 +57,8 @@ fragment login        # generate your nostr keypair (once)
 fragment create hello
 mkdir hello && cd hello
 # …add site/index.html, workflows/*.mjs, manifest.json…
-fragment sync hello --dir .
-fragment publish hello --note v1
-fragment bless hello <slug>
+fragment deploy hello --dir . --note v1   # sync, snapshot, GO LIVE → /f/hello/
+fragment rollback hello                   # step back to the previous snapshot
 fragment open hello   # prints URLs incl. the ?view= token
 ```
 
@@ -83,7 +82,7 @@ fragment --host https://<you>.workers.dev create hello
 
 The CF footprint is deliberately tiny: Workers + Durable Object SQLite + the
 Worker Loader. No D1, no R2, no KV — one stateful primitive, one consistency
-model. Verified live (2026-08-20, wrangler 4.93.1): create/sync/publish/bless,
+model. Verified live (2026-08-20, wrangler 4.93.1): create/sync/deploy,
 token-gated serving, rooms over wss (presence + state + history), dynamic
 `app.mjs` in a loaded isolate, and workflows via the Worker Loader with the
 ctx loopback over the public hostname — including state persistence across
@@ -118,8 +117,9 @@ plane, and the guide's executable patterns):
   the JS runtime (@noble/curves) and vice versa (cross-implementation pinned
   npub test).
 - Files: PUT/GET/DELETE with per-file `base_rev`; stale base → 409.
-- Drafts/bless: publish → `/d/<slug>/` serves; bless → `/f/<name>/` serves;
-  token-gated canonical (`?view=`); draft rollback = bless an older slug.
+- Deploy: `deploy --preview` → `/d/<slug>/` serves; going live serves
+  `/f/<name>/`; token-gated canonical (`?view=`); rollback = redeploying
+  an older snapshot.
 - Dynamic apps: a draft with `app.mjs` serves computed responses in a loader
   isolate, with a persistent counter via `ctx.state`.
 - Rooms: two websocket clients exchange messages; `state:set` persists; a

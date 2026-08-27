@@ -21,9 +21,13 @@ struct Cli {
     /// Host base URL (else FRAGMENT_HOST, else config, else http://127.0.0.1:8789)
     #[arg(long, global = true)]
     host: Option<String>,
-    /// Machine-readable output (pass through server JSON)
+    /// Machine-readable output: one-line {"ok":true/false} envelope on stdout
+    /// (also via FRAGMENT_OUTPUT=json)
     #[arg(long, global = true)]
     json: bool,
+    /// Log every signed request to stderr (stdout stays clean)
+    #[arg(short = 'v', long, global = true)]
+    verbose: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -149,6 +153,25 @@ enum Cmd {
     Unpause { name: String, workflow: String },
     /// Re-run a held run with its original input (after fixing the workflow)
     Replay { name: String, run: u64 },
+    /// Rotate a fragment's tokens (owner-only; default rotates both scopes)
+    Rotate {
+        name: String,
+        /// rotate only the inbox token
+        #[arg(long)]
+        inbox: bool,
+        /// rotate only the view token
+        #[arg(long)]
+        view: bool,
+    },
+    /// List a fragment's rooms, or read one room's recent messages
+    Rooms {
+        name: String,
+        /// Room to read; omit to list all rooms with counts
+        room: Option<String>,
+        /// How many recent messages to show (with ROOM)
+        #[arg(long, default_value = "30")]
+        tail: u64,
+    },
     /// Manage secrets (values via env var of same name, or stdin)
     Secret {
         #[command(subcommand)]
@@ -224,27 +247,144 @@ fn resolve_host(cli_host: &Option<String>, cfg: &Config) -> String {
         .unwrap_or_else(|| "http://127.0.0.1:8789".to_string())
 }
 
-fn require_client(cli_host: &Option<String>) -> Result<api::Client> {
+fn require_client(cli_host: &Option<String>, verbose: bool) -> Result<api::Client> {
     let cfg = load_config();
     let host = resolve_host(cli_host, &cfg);
-    let sk = cfg.secret_key.ok_or_else(|| anyhow!("no keypair — run `fragment login` first"))?;
+    let sk = cfg.secret_key.ok_or_else(|| {
+        anyhow::Error::new(api::CodedError {
+            code: "auth_failed",
+            msg: "no keypair — run `fragment login` first".into(),
+        })
+    })?;
     let bytes = hex::decode(&sk).context("config secret_key is not hex")?;
     let arr: [u8; 32] = bytes.try_into().map_err(|_| anyhow!("config secret_key must be 32 bytes"))?;
-    Ok(api::Client::new(&host, auth::Identity::from_secret(arr)))
+    let c = api::Client::new(&host, auth::Identity::from_secret(arr));
+    Ok(if verbose { c.with_verbose() } else { c })
 }
 
-fn out(cli: &api::Client, v: Value, json_flag: bool) -> Result<()> {
-    let _ = cli;
-    if json_flag {
-        println!("{}", serde_json::to_string(&v)?);
-    } else {
-        println!("{}", serde_json::to_string_pretty(&v)?);
+/// Did the operator ask for machine output? `--json` may sit anywhere on the
+/// line (even after a token that failed to parse), so scan raw argv; the env
+/// var is the documented equivalent.
+fn json_env_flag() -> bool {
+    std::env::var("FRAGMENT_OUTPUT").map(|v| v.eq_ignore_ascii_case("json")).unwrap_or(false)
+        || std::env::args().any(|a| a == "--json")
+}
+
+// ---------- machine envelope (--json) ----------
+// Success: ONE line {"ok":true,"data":…} on stdout, exit 0.
+// Failure: {"ok":false,"error":{code,message,hint?}} on stdout, exit 1
+// (2 for usage-class errors). Human mode prints exactly as before.
+
+fn emit_ok(data: &Value) {
+    println!(
+        "{{\"ok\":true,\"data\":{}}}",
+        serde_json::to_string(data).unwrap_or_else(|_| "null".into())
+    );
+}
+
+fn ok_exit(data: &Value) -> ! {
+    emit_ok(data);
+    std::process::exit(0);
+}
+
+fn fail_json(code: &str, msg: &str, hint: Option<&str>, exit_code: i32) -> ! {
+    let mut err = json!({ "code": code, "message": msg });
+    if let Some(h) = hint {
+        err["hint"] = json!(h);
     }
-    Ok(())
+    println!(
+        "{{\"ok\":false,\"error\":{}}}",
+        serde_json::to_string(&err).unwrap_or_else(|_| "{\"code\":\"server_error\"}".into())
+    );
+    std::process::exit(exit_code);
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
+/// Read the first key that exists out of snake_case/camelCase spellings
+/// (runtime payloads have used both shapes over their life).
+fn jstr_any(v: &Value, keys: &[&str]) -> String {
+    for k in keys {
+        if let Some(s) = v[*k].as_str() {
+            return s.to_string();
+        }
+    }
+    String::new()
+}
+
+fn summary_of(v: &Value) -> String {
+    v["error"].as_str().unwrap_or("unknown error").to_string()
+}
+
+/// Next-action strings per stable error code (only shown under --json).
+fn default_hint(code: &str) -> Option<&'static str> {
+    match code {
+        "auth_failed" => Some("run `fragment login`, or point at another host with --host / `fragment host <url>`"),
+        "forbidden" => Some("your npub lacks a role here — ask the owner to `fragment grant` you"),
+        "not_found" => Some("check the name with `fragment list`"),
+        "name_taken" => Some("pick another name, or remove the existing fragment with `fragment rm <name>`"),
+        "conflict" => Some("re-sync (`fragment sync`) and reapply your change"),
+        "too_large" => Some("cell bodies cap at 1 MB — keep media in a bucket/CDN and link it"),
+        "rate_limited" => Some("back off and retry shortly"),
+        "unavailable" => Some("usually transient; retrying is safe"),
+        "server_error" => Some("see `fragment events <name>` if it persists"),
+        "invalid_usage" => Some("see `fragment --help`"),
+        _ => None,
+    }
+}
+
+/// Pick (code, exit_class) for an arbitrary error from anywhere in run().
+/// CodedError wins (mapped at the HTTP boundary); local misuse gets
+/// invalid_usage; everything else is a generic failure.
+fn classify_err(e: &anyhow::Error) -> (&'static str, i32) {
+    if let Some(ce) = e.downcast_ref::<api::CodedError>() {
+        return (ce.code, if ce.code == "invalid_usage" { 2 } else { 1 });
+    }
+    let msg = format!("{e:#}");
+    // connect-level failures that escaped mapping still count as unavailable
+    if e.chain().any(|c| c.downcast_ref::<reqwest::Error>().is_some()) {
+        return ("unavailable", 1);
+    }
+    // usage-style bails: bad flag values, bad inline JSON input
+    if msg.starts_with("--") || msg.contains("usage:") || msg.contains("usage: fragment") {
+        return ("invalid_usage", 2);
+    }
+    ("server_error", 1)
+}
+
+fn main() {
+    let json_mode = json_env_flag();
+    let cli = match Cli::try_parse() {
+        Ok(c) => c,
+        Err(e) => {
+            if !e.use_stderr() {
+                e.exit(); // help/version: print them, exit 0
+            }
+            if json_mode {
+                fail_json(
+                    "invalid_usage",
+                    &e.to_string(),
+                    default_hint("invalid_usage"),
+                    2,
+                );
+            }
+            e.exit(); // clap's own usage text + exit code 2
+        }
+    };
+    let verbose = cli.verbose;
+    let host = cli.host.clone();
+    if let Err(e) = run(cli) {
+        let (code, class) = classify_err(&e);
+        if json_mode {
+            fail_json(code, &format!("{e:#}"), default_hint(code), class);
+        }
+        eprintln!("error: {e:#}");
+        std::process::exit(class);
+    }
+    let _ = (verbose, host);
+}
+
+fn run(cli: Cli) -> Result<()> {
+    // env var is a first-class equivalent of passing --json on every command
+    let j = cli.json || json_env_flag();
 
     match cli.cmd {
         Cmd::Login { force } => {
@@ -254,6 +394,10 @@ fn main() -> Result<()> {
                 if let Some(sk) = cfg.secret_key {
                     let bytes = hex::decode(sk)?;
                     let id = auth::Identity::from_secret(bytes.try_into().map_err(|_| anyhow!("bad key"))?);
+                    if j {
+                        // never echo the key itself
+                        ok_exit(&json!({ "npub": id.npub(), "config": p.display().to_string(), "existing": true }));
+                    }
                     println!("already logged in as {}", id.npub());
                     println!("(use --force to replace the key)");
                     return Ok(());
@@ -268,12 +412,18 @@ fn main() -> Result<()> {
                 std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))?;
             }
             serde_json::to_writer_pretty(f, &json!({ "secret_key": hex::encode(id.secret) }))?;
+            if j {
+                ok_exit(&json!({ "npub": id.npub(), "config": p.display().to_string() }));
+            }
             println!("logged in: {}", id.npub());
             println!("config: {}", p.display());
             return Ok(());
         }
         Cmd::Whoami => {
-            let c = require_client(&cli.host)?;
+            let c = require_client(&cli.host, cli.verbose)?;
+            if j {
+                ok_exit(&json!({ "npub": c.id.npub(), "host": c.host }));
+            }
             println!("npub: {}", c.id.npub());
             println!("host: {}", c.host);
             return Ok(());
@@ -306,10 +456,18 @@ fn main() -> Result<()> {
                         let f = std::fs::File::create(&p)?;
                         serde_json::to_writer_pretty(f, &obj)?;
                     }
+                    if j {
+                        ok_exit(&json!({ "host": url, "config": p.display().to_string() }));
+                    }
                     println!("default host set: {url}");
                     println!("config: {}", p.display());
                 }
-                None => println!("host: {}", resolve_host(&cli.host, &cfg)),
+                None => {
+                    if j {
+                        ok_exit(&json!({ "host": resolve_host(&cli.host, &cfg) }));
+                    }
+                    println!("host: {}", resolve_host(&cli.host, &cfg));
+                }
             }
             return Ok(());
         }
@@ -358,14 +516,13 @@ fn main() -> Result<()> {
         _ => {}
     }
 
-    let c = require_client(&cli.host)?;
-    let j = cli.json;
+    let c = require_client(&cli.host, cli.verbose)?;
 
     match cli.cmd {
         Cmd::Create { name } => {
             let v = c.call(c.post_json("/api/fragments", &json!({ "name": name }))?)?;
             if j {
-                return out(&c, v, true);
+                ok_exit(&v);
             }
             println!("created fragment {}", v["name"].as_str().unwrap_or(&name));
             println!("  npub:         {}", v["npub"].as_str().unwrap_or(""));
@@ -380,7 +537,7 @@ fn main() -> Result<()> {
         Cmd::List => {
             let v = c.call(c.get("/api/fragments")?)?;
             if j {
-                return out(&c, v, true);
+                ok_exit(&v);
             }
             for f in v["fragments"].as_array().cloned().unwrap_or_default() {
                 println!("{} ({})", f["name"].as_str().unwrap_or(""), f["role"].as_str().unwrap_or(""));
@@ -389,7 +546,7 @@ fn main() -> Result<()> {
         Cmd::Status { name } => {
             let v = c.call(c.get(&format!("/api/f/{name}/status"))?)?;
             if j {
-                return out(&c, v, true);
+                ok_exit(&v);
             }
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
@@ -403,7 +560,7 @@ fn main() -> Result<()> {
                 }
             }
             if j {
-                return out(&c, json!({ "events": evs }), true);
+                ok_exit(&json!({ "events": evs }));
             }
             for e in evs {
                 let at = e["at"].as_u64().unwrap_or(0);
@@ -413,17 +570,33 @@ fn main() -> Result<()> {
         }
         Cmd::Manifest { name } => {
             let v = c.call(c.get(&format!("/api/f/{name}/manifest"))?)?;
+            if j {
+                ok_exit(&v);
+            }
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         Cmd::ManifestSet { name, file } => {
             let v: Value = serde_json::from_slice(&std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?)?;
             c.call(c.put_json(&format!("/api/f/{name}/manifest"), &v)?)?;
+            if j {
+                ok_exit(&json!({ "updated": true, "manifest": v }));
+            }
             println!("manifest updated");
         }
         Cmd::Sync {
             name, dir, watch, mode, prune, mirror_from, conflict_strategy, apply_mass_delete,
             rebuild_state, no_live, install, uninstall,
         } => {
+            // never stream JSON envelopes mid-run: watch prints progress
+            // lines forever; a json consumer would choke on line 2
+            if j && watch {
+                fail_json(
+                    "invalid_usage",
+                    "sync --watch streams progress lines continuously — --json is not supported there",
+                    Some("run single passes with --json (`fragment sync <name> --dir .`), or drop --json to watch"),
+                    2,
+                );
+            }
             if install || uninstall {
                 install_sync_unit(&name, &dir, install, mirror_from.as_deref().and_then(|p| p.to_str()))?;
                 return Ok(());
@@ -457,23 +630,26 @@ fn main() -> Result<()> {
             }
             let report = sync::sync_once(&c, &name, &dir, &opts)?;
             if j {
-                return out(&c, serde_json::to_value(&report).unwrap_or_default(), true);
+                emit_ok(&serde_json::to_value(&report).unwrap_or_default());
+                // scriptable exit codes survive the envelope (3 conflicts, 4 guard)
+                std::process::exit(report.exit_code());
             }
             println!("sync {} ({})", name, dir.display());
             report.print();
             std::process::exit(report.exit_code());
         }
         Cmd::Rm { name } => {
-            let v = c.call(c.delete(&format!("/api/f/{name}"))?)?;
+            c.call(c.delete(&format!("/api/f/{name}"))?)?;
             if j {
-                return out(&c, v, true);
+                ok_exit(&json!({ "deleted": true, "name": name }));
             }
             println!("deleted fragment {name} (registry row + all data; the name is reusable)");
         }
         Cmd::Verify { name, dir } => {
             let report = sync::verify(&c, &name, &dir)?;
             if j {
-                return out(&c, serde_json::to_value(&report).unwrap_or_default(), true);
+                emit_ok(&serde_json::to_value(&report).unwrap_or_default());
+                std::process::exit(report.exit_code());
             }
             println!("verify {} ({})", name, dir.display());
             report.print();
@@ -531,7 +707,7 @@ fn main() -> Result<()> {
             let slug = v["slug"].as_str().unwrap_or("").to_string();
             if preview {
                 if j {
-                    return out(&c, v, true);
+                    ok_exit(&v);
                 }
                 println!("preview: {}/d/{}/", c.host, slug);
                 println!("go live with: fragment deploy {name}");
@@ -541,7 +717,7 @@ fn main() -> Result<()> {
             if j {
                 let mut vv = v;
                 vv["live"] = b["url"].clone();
-                return out(&c, vv, true);
+                ok_exit(&vv);
             }
             let bu = b["url"].as_str().unwrap_or("");
             let live = if bu.starts_with("http") { bu.to_string() } else { format!("{}{}", c.host, bu) };
@@ -573,7 +749,7 @@ fn main() -> Result<()> {
             }
             let b = c.call(c.post_json(&format!("/api/f/{name}/bless"), &json!({ "slug": slug }))?)?;
             if j {
-                return out(&c, b, true);
+                ok_exit(&b);
             }
             let bu = b["url"].as_str().unwrap_or("");
             let live = if bu.starts_with("http") { bu.to_string() } else { format!("{}{}", c.host, bu) };
@@ -582,7 +758,7 @@ fn main() -> Result<()> {
         Cmd::Drafts { name } => {
             let v = c.call(c.get(&format!("/api/f/{name}/drafts"))?)?;
             if j {
-                return out(&c, v, true);
+                ok_exit(&v);
             }
             for d in v["drafts"].as_array().cloned().unwrap_or_default() {
                 println!(
@@ -637,7 +813,18 @@ fn main() -> Result<()> {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}/f/{}/", c.host, name));
             if j {
-                return out(&c, st, true);
+                // synthesized composite: the human output's three URLs plus the full status
+                let mut data = json!({
+                    "canonical": canon,
+                    "shareLink": format!("{}?view={}", canon.trim_end_matches('/'), st["viewToken"].as_str().unwrap_or("")),
+                    "webhookUrl": format!("{}/api/f/{}/inbox?t={}", c.host.trim_end_matches('/'), name, st["inboxToken"].as_str().unwrap_or("")),
+                    "folder": dir.display().to_string(),
+                    "status": st,
+                });
+                if st["visibility"].as_str() != Some("link") {
+                    data.as_object_mut().unwrap().remove("shareLink");
+                }
+                ok_exit(&data);
             }
             println!("live: {}", canon);
             if st["visibility"].as_str() == Some("link") {
@@ -657,7 +844,7 @@ fn main() -> Result<()> {
             };
             let v = c.call(c.post_json(&format!("/api/f/{name}/run"), &json!({ "workflow": workflow, "input": input_v }))?)?;
             if j {
-                return out(&c, v, true);
+                ok_exit(&v);
             }
             if v["ok"].as_bool().unwrap_or(false) {
                 println!("ok. output: {}", serde_json::to_string_pretty(&v["output"])?);
@@ -675,7 +862,7 @@ fn main() -> Result<()> {
             }
             let v = c.call(c.get(&path)?)?;
             if j {
-                return out(&c, v, true);
+                ok_exit(&v);
             }
             let rows = v["runs"].as_array().cloned().unwrap_or_default();
             for r in &rows {
@@ -705,26 +892,89 @@ fn main() -> Result<()> {
         Cmd::Pause { name, workflow } => {
             let v = c.call(c.post_json(&format!("/api/f/{name}/pause"), &json!({ "workflow": workflow, "paused": true }))?)?;
             if j {
-                return out(&c, v, true);
+                ok_exit(&v);
             }
             println!("paused '{workflow}' (manual runs still work; unpause with `fragment unpause`)");
         }
         Cmd::Unpause { name, workflow } => {
             let v = c.call(c.post_json(&format!("/api/f/{name}/pause"), &json!({ "workflow": workflow, "paused": false }))?)?;
             if j {
-                return out(&c, v, true);
+                ok_exit(&v);
             }
             println!("unpaused '{workflow}'");
         }
         Cmd::Replay { name, run } => {
             let v = c.call(c.post_json(&format!("/api/f/{name}/replay"), &json!({ "run": run }))?)?;
             if j {
-                return out(&c, v, true);
+                ok_exit(&v);
             }
             if v["ok"].as_bool().unwrap_or(false) {
                 println!("replayed run #{run} → ok");
             } else {
                 println!("replayed run #{run} → error: {}", v["error"].as_str().unwrap_or("unknown"));
+            }
+        }
+        Cmd::Rotate { name, inbox, view } => {
+            // flags narrow the default both-scopes rotation
+            let mut scopes: Vec<&str> = Vec::new();
+            if inbox {
+                scopes.push("inbox");
+            }
+            if view {
+                scopes.push("view");
+            }
+            let body = if scopes.is_empty() { json!({}) } else { json!({ "scopes": scopes }) };
+            let v = c.call(c.post_json(&format!("/api/f/{name}/rotate"), &body)?)?;
+            let it = jstr_any(&v, &["inbox_token", "inboxToken"]);
+            let vt = jstr_any(&v, &["view_token", "viewToken"]);
+            let rotated = match v["rotated"].as_array() {
+                Some(a) => a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", "),
+                None => String::from("both"),
+            };
+            let canon = format!("{}/f/{}/", c.host.trim_end_matches('/'), name);
+            if j {
+                ok_exit(&json!({ "inbox_token": it, "view_token": vt, "rotated": v["rotated"].clone() }));
+            }
+            println!("rotated: {rotated}");
+            println!("New webhook URL: {}/api/f/{}/inbox?t={}", c.host.trim_end_matches('/'), name, it);
+            println!("New share link: {}?view={}", canon.trim_end_matches('/'), vt);
+        }
+        Cmd::Rooms { name, room, tail } => {
+            match room {
+                None => {
+                    let v = c.call(c.get(&format!("/api/f/{name}/rooms"))?)?;
+                    if j {
+                        ok_exit(&v);
+                    }
+                    for r in v["rooms"].as_array().cloned().unwrap_or_default() {
+                        let last = r["last_at"].as_u64().unwrap_or(0);
+                        println!(
+                            "{}\t{}\t{}",
+                            r["room"].as_str().unwrap_or(""),
+                            r["count"].as_u64().unwrap_or(0),
+                            chrono_like(last / 1000),
+                        );
+                    }
+                }
+                Some(room) => {
+                    let enc = encode_q(&room).replace('/', "%2F");
+                    let v = c.call(c.get(&format!("/api/f/{name}/rooms/{enc}/messages?limit={tail}"))?)?;
+                    if j {
+                        ok_exit(&v);
+                    }
+                    for m in v["messages"].as_array().cloned().unwrap_or_default() {
+                        let data = serde_json::to_string(&m["data"]).unwrap_or_default();
+                        let preview: String = data.chars().take(80).collect::<String>();
+                        let preview = if data.chars().count() > 80 { format!("{preview}…") } else { preview };
+                        let at = m["at"].as_u64().unwrap_or(0);
+                        println!(
+                            "{}\t{}  {}",
+                            m["sender"].as_str().unwrap_or("-"),
+                            chrono_like(at / 1000),
+                            preview,
+                        );
+                    }
+                }
             }
         }
         Cmd::Secret { sub } => match sub {
@@ -747,16 +997,26 @@ fn main() -> Result<()> {
                     anyhow::bail!("empty secret value");
                 }
                 c.call(c.put_bytes(&format!("/api/f/{name}/secrets/{key}"), value.into_bytes())?)?;
+                if j {
+                    // names only — values never travel back
+                    ok_exit(&json!({ "name": name, "key": key, "set": true }));
+                }
                 println!("secret {key} set on {name}");
             }
             SecretCmd::List { name } => {
                 let v = c.call(c.get(&format!("/api/f/{name}/secrets"))?)?;
+                if j {
+                    ok_exit(&v);
+                }
                 for n in v["names"].as_array().cloned().unwrap_or_default() {
                     println!("{}", n.as_str().unwrap_or(""));
                 }
             }
             SecretCmd::Rm { name, key } => {
                 c.call(c.delete(&format!("/api/f/{name}/secrets/{key}"))?)?;
+                if j {
+                    ok_exit(&json!({ "name": name, "key": key, "removed": true }));
+                }
                 println!("secret {key} removed");
             }
         },
@@ -772,8 +1032,18 @@ fn main() -> Result<()> {
                 .body(body)
                 .header("content-type", "application/json")
                 .send()?;
-            let v: Value = serde_json::from_slice(&resp.bytes()?)?;
-            out(&c, v, true)?;
+            let status = resp.status().as_u16();
+            let bytes = resp.bytes()?;
+            let v: Value = serde_json::from_slice(&bytes)
+                .unwrap_or(Value::String(String::from_utf8_lossy(&bytes).to_string()));
+            if j {
+                if (200..300).contains(&status) {
+                    ok_exit(&v);
+                }
+                let code = api::code_for(status, &summary_of(&v));
+                fail_json(code, &format!("http {}: {}", status, summary_of(&v)), default_hint(code), 1);
+            }
+            println!("{}", serde_json::to_string(&v)?);
         }
         Cmd::Open { name } => {
             let v = c.call(c.get(&format!("/api/f/{name}/status"))?)?;
@@ -784,6 +1054,15 @@ fn main() -> Result<()> {
             let view_part = if public { "" } else { view };
             let server_canon = v["urls"]["canonical"].as_str().filter(|s| s.starts_with("http"));
             let canon = server_canon.map(|s| s.to_string()).unwrap_or_else(|| format!("{}/f/{}/", c.host, name));
+            if j {
+                ok_exit(&json!({
+                    "canonical": format!("{}{}{}", canon, suffix, view_part),
+                    "shareLink": format!("{}{}{}", canon, suffix, view_part),
+                    "draftsAt": format!("{}/d/<slug>/", c.host),
+                    "webhookUrl": format!("{}/api/f/{}/inbox?t={}", c.host, name, inbox),
+                    "rooms": format!("{}/f/{}/__room/<room>{}{}", c.host, name, suffix, view_part),
+                }));
+            }
             println!("canonical:   {}{}{}", canon, suffix, view_part);
             println!("share link:   {}{}{}", canon, suffix, view_part);
             println!("drafts at:   {}/d/<slug>/", c.host);
@@ -821,10 +1100,10 @@ fn edit_roles(c: &api::Client, name: &str, editors: Vec<String>, viewers: Vec<St
             m[key] = json!(cur);
         }
         c.call(c.put_json(&format!("/api/f/{name}/manifest"), &m)?)?;
-        if !j {
-            println!("roles updated on {name}");
+        if j {
+            ok_exit(&m);
         } else {
-            println!("{}", serde_json::to_string(&m)?);
+            println!("roles updated on {name}");
         }
         Ok(())
     })() {
