@@ -166,7 +166,15 @@ export default {
 
       // ---- rt client ----
       if ((path.startsWith("/f/") || path.startsWith("/d/")) && path.endsWith("/__rt.js")) {
-        return new Response(RT_CLIENT_SOURCE, { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-store" } });
+        // stamped so clients (and e2e) can tell which rt-client generation a
+        // host serves; keep the header and the first-line comment in lockstep
+        return new Response(`/* fragment rt-client v1 */\n` + RT_CLIENT_SOURCE, {
+          headers: {
+            "content-type": "text/javascript; charset=utf-8",
+            "cache-control": "no-store",
+            "x-fragment-rt-version": "1",
+          },
+        });
       }
 
       // ---- live sync channel ----

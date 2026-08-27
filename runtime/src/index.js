@@ -125,7 +125,14 @@ var index_default = {
         return toCell(name, cellPath, g.pubkey);
       }
       if ((path.startsWith("/f/") || path.startsWith("/d/")) && path.endsWith("/__rt.js")) {
-        return new Response(RT_CLIENT_SOURCE, { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-store" } });
+        return new Response(`/* fragment rt-client v1 */
+` + RT_CLIENT_SOURCE, {
+          headers: {
+            "content-type": "text/javascript; charset=utf-8",
+            "cache-control": "no-store",
+            "x-fragment-rt-version": "1"
+          }
+        });
       }
       if (path.startsWith("/f/") && path.endsWith("/__watch")) {
         const name = path.split("/")[2];

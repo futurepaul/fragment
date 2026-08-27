@@ -1,5 +1,5 @@
 // GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
-import { json, toAB, randSlug, isMachinery, bodyTooLarge, MAX_BODY_BYTES } from "./util.js";
+import { json, toAB, randSlug, randHex, isMachinery, bodyTooLarge, MAX_BODY_BYTES } from "./util.js";
 import { sha256Hex, safeEqual } from "./auth.js";
 import { nextRun } from "./cron.js";
 import { normalizeManifest } from "./manifest.js";
@@ -124,6 +124,66 @@ async function apiRoute(cell, request, url) {
     cell.addEvent(paused ? "workflow.paused" : "workflow.unpaused", `${wf.name}`, { wf: wf.name, by: "manual" });
     await cell.rearmAlarm();
     return json({ ok: true, workflow: wf.name, paused: !!wf.paused });
+  }
+  if (p === "/rotate" && request.method === "POST") {
+    const a = authz("owner");
+    if (!a.ok) return deny(a);
+    const body = await request.json().catch(() => ({}));
+    if (body.scopes !== void 0 && !Array.isArray(body.scopes)) return json({ error: "unknown scope" }, 400);
+    const want = Array.isArray(body.scopes) && body.scopes.length ? body.scopes : ["inbox", "view"];
+    for (const s of want) {
+      if (s !== "inbox" && s !== "view") return json({ error: "unknown scope" }, 400);
+    }
+    const nextInbox = want.includes("inbox") ? randHex(16) : cell.getMeta("inbox_token") || "";
+    const nextView = want.includes("view") ? randSlug(12) : cell.getMeta("view_token") || "";
+    cell.sql.exec(
+      "INSERT INTO meta (k, v) VALUES ('inbox_token', ?), ('view_token', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+      nextInbox,
+      nextView
+    );
+    cell.addEvent("tokens.rotated", want.join("+"), { scopes: want });
+    return json({
+      ok: true,
+      inbox_token: nextInbox,
+      view_token: nextView,
+      rotated: ["inbox", "view"].filter((s) => want.includes(s))
+    });
+  }
+  if (p === "/rooms" && request.method === "GET") {
+    const a = authz("editor");
+    if (!a.ok) return deny(a);
+    const rooms = {};
+    for (const r of cell.sql.exec("SELECT room, COUNT(*) c, MAX(at) la FROM room_msgs GROUP BY room").toArray()) {
+      rooms[r.room] = { room: r.room, count: r.c, last_at: r.la ?? null };
+    }
+    for (const r of cell.sql.exec("SELECT room FROM rooms").toArray()) {
+      if (!rooms[r.room]) rooms[r.room] = { room: r.room, count: 0, last_at: null };
+    }
+    return json({ rooms: Object.values(rooms).sort((x, y) => (y.last_at || 0) - (x.last_at || 0)) });
+  }
+  if (p.startsWith("/rooms/") && p.endsWith("/messages") && request.method === "GET") {
+    const a = authz("editor");
+    if (!a.ok) return deny(a);
+    const mid = p.slice("/rooms/".length, p.length - "/messages".length);
+    let room;
+    try {
+      room = decodeURIComponent(mid);
+    } catch {
+      return json({ error: "bad room encoding" }, 400);
+    }
+    let limit = parseInt(url.searchParams.get("limit") || "100", 10) || 100;
+    limit = Math.min(Math.max(limit, 1), 200);
+    const before = parseInt(url.searchParams.get("before") || "0", 10);
+    const parseFrame = (s) => {
+      try {
+        return JSON.parse(s);
+      } catch {
+        return s;
+      }
+    };
+    const rows = (before > 0 ? cell.sql.exec("SELECT id, at, sender, data FROM room_msgs WHERE room = ? AND id < ? ORDER BY id DESC LIMIT ?", room, before, limit) : cell.sql.exec("SELECT id, at, sender, data FROM room_msgs WHERE room = ? ORDER BY id DESC LIMIT ?", room, limit)).toArray();
+    rows.reverse();
+    return json({ room, messages: rows.map((r) => ({ id: r.id, at: r.at, sender: r.sender, data: parseFrame(r.data) })) });
   }
   if (p === "/files" && request.method === "GET") {
     const a = authz("viewer");
