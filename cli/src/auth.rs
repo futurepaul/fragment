@@ -45,34 +45,67 @@ impl Identity {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        // NIP-01 id: sha256 of the canonical serialization of
-        // [0, pubkey, created_at, kind, tags, content]
-        let preimage = serde_json::to_string(&serde_json::json!([
-            0,
-            self.pubkey_hex,
-            created_at,
-            27235,
-            tags,
-            ""
-        ]))
-        .unwrap();
+        self.nostr_header(27235, tags, "", created_at)
+    }
+
+    /// Shared signing core: kind + tags + content -> NIP-01 id over the
+    /// canonical serialization of [0, pubkey, created_at, kind, tags, content],
+    /// schnorr-signed, wrapped as the `Authorization: Nostr <b64>` value.
+    fn nostr_header(&self, kind: u64, tags: Vec<Value>, content: &str, created_at: u64) -> String {
+        let preimage =
+            serde_json::to_string(&serde_json::json!([0, self.pubkey_hex, created_at, kind, tags, content]))
+                .expect("event preimage serializes");
         let id = Sha256::digest(preimage.as_bytes());
         let secp = Secp256k1::new();
-        let kp = Keypair::from_seckey_slice(&secp, &self.secret).unwrap();
-        let msg = Message::from_digest_slice(&id).unwrap();
+        let kp = Keypair::from_seckey_slice(&secp, &self.secret).expect("valid secret key");
+        let msg = Message::from_digest_slice(&id).expect("32-byte digest");
         let sig = secp.sign_schnorr_no_aux_rand(&msg, &kp);
         let event = serde_json::json!({
             "id": hex::encode(id),
             "pubkey": self.pubkey_hex,
             "created_at": created_at,
-            "kind": 27235,
+            "kind": kind,
             "tags": tags,
-            "content": "",
+            "content": content,
             "sig": hex::encode(sig.as_ref()),
         });
         let b64 = base64::engine::general_purpose::STANDARD
             .encode(serde_json::to_string(&event).unwrap());
         format!("Nostr {b64}")
+    }
+
+    /// Blossom auth header (kind 24242) for the blob tier per
+    /// docs/blob-tier.md: `t` = action verb, `x` = the server's public URL
+    /// (this deployment pins the instance in x, not the content hash),
+    /// optional `payload` = sha256 of the body being authorized, required
+    /// `expiration` unix seconds. Used for blobsd upload/delete/list.
+    pub fn blossom_header(&self, action: &str, server_url: &str, payload_hash: &str, expires_secs: u64) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        self.blossom_header_at(action, server_url, payload_hash, expires_secs, now)
+    }
+
+    /// Deterministic variant of [`blossom_header`] for cross-implementation
+    /// vector tests (node scripts/nip98.mjs buildEvent must agree byte-for-byte).
+    pub(crate) fn blossom_header_at(
+        &self,
+        action: &str,
+        server_url: &str,
+        payload_hash: &str,
+        expires_secs: u64,
+        created_at: u64,
+    ) -> String {
+        let mut tags = vec![
+            serde_json::json!(["t", action]),
+            serde_json::json!(["x", server_url]),
+        ];
+        if !payload_hash.is_empty() {
+            tags.push(serde_json::json!(["payload", payload_hash]));
+        }
+        tags.push(serde_json::json!(["expiration", (created_at + expires_secs).to_string()]));
+        self.nostr_header(24242, tags, "", created_at)
     }
 }
 
@@ -209,5 +242,38 @@ mod tests {
         let raw = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
         let ev: serde_json::Value = serde_json::from_slice(&raw).unwrap();
         assert_eq!(ev["tags"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    // Cross-implementation pin: `buildEvent` in scripts/nip98.mjs generated
+    // this vector with created_at pinned to 1787800000 and the same inputs.
+    // The Rust signer must derive the identical event id, and node's
+    // signature must verify under this identity's pubkey (BIP340 is
+    // deterministic in the key+message, not the signer).
+    fn blossom_vector_pinned_vs_node() {
+        const NODE_B64: &str = "eyJwdWJrZXkiOiI5ODljMGI3NmNiNTYzOTcxZmRjOWJlZjMxZWMwNmMzNTYwZjMyNDlkNmVlOWU1ZDgzYzU3NjI1NTk2ZTA1ZjZmIiwiY3JlYXRlZF9hdCI6MTc4NzgwMDAwMCwia2luZCI6MjQyNDIsInRhZ3MiOltbInQiLCJ1cGxvYWQiXSxbIngiLCJodHRwOi8vMTI3LjAuMC4xOjk5NDEiXSxbInBheWxvYWQiLCI1NGUyZTAxZjYyZTlmZjMyMGVkZDQ1N2YwNjQ2MzNjZDFmMTZkZmFlNmI0ZGMzYmY3M2U0Y2RjNzZlZmUyZDc5Il0sWyJleHBpcmF0aW9uIiwiMTc4NzgwMDYwMCJdXSwiY29udGVudCI6IiIsImlkIjoiNjE3ODcyYjExYjc5MjNjMzhjZTcyMzA0ODRjN2NiMTMwYjI3OGY0NGFkNjIyMGJjYTY4MjUzYjYwMzkzNTFiMSIsInNpZyI6IjU0OTlkMmYwZWUyYmI4ZGI1MGU1MzBjNDk2YWFmM2ExMjY3YWJkZjVhMTU2MjY3NDdhZjU4NzRkZTA1MGE3ZjA2ODhjODhjYWU2MzM3ZWU3ZTYwYTllZGIwMDhhYzc0YmRiNmVmZjMxNDE4YzJiMWEwNGQzNmZmYzYwZmNhOTRhIn0=";
+        let id = Identity::from_secret([7u8; 32]);
+        let mine = id.blossom_header_at(
+            "upload",
+            "http://127.0.0.1:9941",
+            "54e2e01f62e9ff320edd457f064633cd1f16dfae6b4dc3bf73e4cdc76efe2d79",
+            600,
+            1_787_800_000,
+        );
+        let std64 = base64::engine::general_purpose::STANDARD;
+        let node_ev: Value =
+            serde_json::from_slice(&std64.decode(NODE_B64).unwrap()).unwrap();
+        let my_ev: Value =
+            serde_json::from_slice(&std64.decode(mine.strip_prefix("Nostr ").unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(node_ev["kind"], 24242);
+        assert_eq!(node_ev["tags"], my_ev["tags"], "tag shape/order must match node");
+        assert_eq!(my_ev["id"], node_ev["id"], "same inputs must yield the same NIP-01 id");
+        // the node-produced signature verifies under this identity's pubkey
+        let secp = Secp256k1::new();
+        let msg = Message::from_digest_slice(&hex::decode(node_ev["id"].as_str().unwrap()).unwrap()).unwrap();
+        let sig = secp256k1::schnorr::Signature::from_slice(&hex::decode(node_ev["sig"].as_str().unwrap()).unwrap()).unwrap();
+        let pk = XOnlyPublicKey::from_slice(&hex::decode(node_ev["pubkey"].as_str().unwrap()).unwrap()).unwrap();
+        secp.verify_schnorr(&sig, &msg, &pk).expect("node signature verifies");
     }
 }

@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import fs from "node:fs";
-import { genKey, pubkeyFromSecret, nreq, authHeader } from './nip98.mjs';
+import { genKey, pubkeyFromSecret, nreq, authHeader, buildEvent } from './nip98.mjs';
 import { npubFromHex } from '../runtime/src/bech32.js';
 
 const args = process.argv.slice(2);
@@ -1879,6 +1879,256 @@ try {
   console.log('FAIL  cli-lane unexpected: ' + String(e && e.stack || e));
 }
 // ---- end lane/cli additions ----
+// ---- lane/cli-tier additions ----
+// Blob-first push/pull (docs/blob-tier.md CLI section) exercised against a
+// LOCAL stub on port 9941 implementing the two-tier wire forms keyed off
+// Authorization-event PRESENCE, not validity — real crypto validation belongs
+// to blobsd's own suite. The local stack still runs the OLD runtime, so the
+// genuinely-end-to-end checks against real bloasd are appended below as
+// "(post-cutover)" skip-lines and stay interpretable until the cut lands.
+const cliTierSection = async () => {
+  if (!section('cli-lane-tier')) return;
+  const bin = findBinary();
+  ok(!!bin, 'cli binary found for lane/cli-tier checks');
+  if (!bin) return;
+  const http = await import('node:http');
+  const { schnorr } = await import('@noble/curves/secp256k1.js');
+  const { createHash } = await import('node:crypto');
+  const sha256hex = (b) => createHash('sha256').update(b).digest('hex');
+
+  // ---- stub: bloasd upload/GET surface + enough of the fragment API ----
+  const S = {
+    blobs: new Map(),            // sha256 -> Buffer
+    rows: new Map(),             // path -> {rev, sha256, deleted}
+    counts: new Map(),           // "METHOD target" -> n
+    rawPuts: [],                 // raw-body file commits
+    refPuts: [],                 // ref-form commits: {target, ct, body}
+    ups: [],                     // {sha256, auth} upload attempts
+  };
+  const bump = (k) => S.counts.set(k, (S.counts.get(k) || 0) + 1);
+  const count = (prefix) => [...S.counts.entries()].filter(([k]) => k.startsWith(prefix)).reduce((a, [, v]) => a + v, 0);
+  const srv = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const body = Buffer.concat(chunks);
+      const target = req.url;
+      bump(`${req.method} ${target}`);
+      const auth = req.headers.authorization || '';
+      const hasAuth = /^nostr /i.test(auth);
+      const reply = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
+      let path = '';
+      try { path = decodeURIComponent(target); } catch {}
+      const q = (name) => new URL(target, 'http://stub').searchParams.get(name);
+
+      if (req.method === 'HEAD' && /^\/[0-9a-f]{64}$/.test(path)) {
+        res.writeHead(S.blobs.has(path.slice(1)) ? 200 : 404, { etag: '"stub"' });
+        res.end();
+      } else if (req.method === 'PUT' && target === '/upload') {
+        if (!hasAuth) return reply(401, { error: 'missing Authorization event' });
+        const sha = sha256hex(body);
+        S.blobs.set(sha, body);
+        S.ups.push({ sha256: sha, auth });
+        reply(200, { sha256: sha, size: body.length, type: 'application/octet-stream', uploaded: Date.now() });
+      } else if (req.method === 'GET' && /^\/[0-9a-f]{64}$/.test(path)) {
+        const b = S.blobs.get(path.slice(1));
+        if (!b) { res.writeHead(404); return res.end(); }
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          etag: `"${path.slice(1)}"`,
+          'cache-control': 'public, max-age=31536000, immutable',
+        });
+        res.end(b);
+      } else if (req.method === 'GET' && /\/api\/f\/[^/]+\/files\?/.test(target)) {
+        reply(200, { files: [...S.rows.entries()].map(([p, r]) => ({ path: p, ...r })) });
+      } else if (req.method === 'GET' && /\/api\/f\/[^/]+\/manifest/.test(target)) {
+        reply(200, { name: 'stub', appendOnly: [], editors: [], viewers: [] });
+      } else if (req.method === 'GET' && /\/api\/f\/[^/]+\/file\?/.test(target)) {
+        const row = S.rows.get(q('path') || '');
+        if (!row || row.deleted) { res.writeHead(404); return res.end(); }
+        const b = S.blobs.get(row.sha256) || Buffer.alloc(0);
+        if (S.redirectMode) {
+          // the NEW-runtime public-read wire form: 302 to the hashed asset
+          res.writeHead(302, { location: `/${row.sha256}` });
+          res.end();
+        } else {
+          res.writeHead(200, { 'content-length': b.length });
+          res.end(b);
+        }
+      } else if (req.method === 'PUT' && /\/api\/f\/[^/]+\/file\?/.test(target)) {
+        const p = q('path') || '';
+        const rev = (S.rows.get(p)?.rev || 0) + 1;
+        const isRef = /^application\/json$/i.test(req.headers['content-type'] || '');
+        if (isRef) {
+          let ref = null;
+          try { ref = JSON.parse(body.toString('utf8')).ref; } catch {}
+          if (!ref || typeof ref.sha256 !== 'string' || !/^[0-9a-fA-F]{64}$/.test(ref.sha256)) {
+            return reply(400, { error: 'bad ref' });
+          }
+          S.rows.set(p, { rev, sha256: ref.sha256.toLowerCase(), deleted: false });
+          S.refPuts.push({ target, ct: req.headers['content-type'], body: JSON.parse(body.toString('utf8')) });
+        } else {
+          S.rows.set(p, { rev, sha256: sha256hex(body), deleted: false });
+          S.rawPuts.push({ target });
+        }
+        reply(200, { rev });
+      } else if (req.method === 'POST' && /\/api\/fragments$/.test(target)) {
+        reply(200, { name: q('name') || 'stub', npub: 'npub1stub' });
+      } else {
+        reply(404, { error: 'stub: no route ' + req.method + ' ' + target });
+      }
+    });
+  });
+  await new Promise((res, rej) => { srv.once('error', rej); srv.listen(9941, '127.0.0.1', res); });
+  const STUB = 'http://127.0.0.1:9941';
+
+  // isolated CLI config, same layout syncSection uses
+  const mkHome = (config) => {
+    const home = mkdtempSync(join(tmpdir(), 'fragment-tier-home-'));
+    const cfgDir = process.platform === 'darwin'
+      ? join(home, 'Library', 'Application Support', 'fragment')
+      : join(home, '.config', 'fragment');
+    mkdirSync(cfgDir, { recursive: true });
+    writeFileSync(join(cfgDir, 'config.json'), JSON.stringify(config));
+    return home;
+  };
+  // async on purpose: a blocking spawnSync would freeze the event loop and
+  // starve the in-process stub (deadlock at first request)
+  const cli = (home, args, extraEnv = {}) => new Promise((resolve) => {
+    const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), FRAGMENT_HOST: STUB };
+    delete env.FRAGMENT_BLOB_URL; // callers re-add it explicitly when wanted
+    Object.assign(env, extraEnv);
+    const p = spawn(bin, ['sync', 'e2e-tier', ...args], { env });
+    let out = '';
+    const kill = setTimeout(() => { try { p.kill('SIGKILL'); } catch {} }, 60_000);
+    p.stdout.on('data', (d) => (out += d));
+    p.stderr.on('data', (d) => (out += d));
+    p.on('error', () => {});
+    p.on('close', (code) => { clearTimeout(kill); resolve({ code, out }); });
+  });
+
+  try {
+    // 1) the JS signer: decodable 24242 event, right tags, verifiable sig
+    {
+      const hdr = await buildEvent({ actionTag: 'upload', serverUrl: STUB, payloadHash: sha256hex('x'), expirationSecs: 600 }, ownerKey);
+      ok(hdr.startsWith('Nostr '), 'buildEvent emits a Nostr authorization header');
+      const ev = JSON.parse(Buffer.from(hdr.slice(6), 'base64').toString('utf8'));
+      eq(ev.kind, 24242, 'signer event kind is 24242');
+      const tag = (n) => (ev.tags.find((t) => t[0] === n) || [])[1];
+      eq(tag('t'), 'upload', 'signer t tag carries the action');
+      eq(tag('x'), STUB, 'signer x tag carries the server URL');
+      eq(tag('payload'), sha256hex('x'), 'signer payload tag carries the body hash');
+      ok(Number(tag('expiration')) > Date.now() / 1000, 'signer expiration is in the future');
+      ok(schnorr.verify(Buffer.from(ev.sig, 'hex'), Buffer.from(ev.id, 'hex'), Buffer.from(ev.pubkey, 'hex')),
+        'signer signature verifies against its pubkey');
+    }
+
+    // 2) blob-first push: small stays inline; big goes HEAD -> PUT /upload -> ref row
+    const big = Buffer.alloc(70 * 1024, 65); // 'A' * 71680
+    const bigSha = sha256hex(big);
+    const dir = mkdtempSync(join(tmpdir(), 'fragment-tier-dir-'));
+    const home = mkHome({ host: STUB, secret_key: ownerKey });
+    writeFileSync(join(dir, 'small.txt'), 'tiny inline body');
+    writeFileSync(join(dir, 'big.bin'), big);
+
+    let r = await cli(home, ['--dir', dir], { FRAGMENT_BLOB_URL: STUB }); // env-only config
+    eq(r.code, 0, 'blob-first sync passes with FRAGMENT_BLOB_URL from env'
+      + (r.code === 0 ? '' : ` :: signal/${r.err?.code || ''} :: ${r.out.slice(0, 400)}`));
+    eq(count('PUT /upload'), 1, 'oversized file uploaded once to the tier');
+    eq(S.ups[0]?.sha256, bigSha, 'tier upload body hashes to the local sha256');
+    ok(S.rawPuts.some((x) => x.target.includes('path=small.txt')), 'file under 64 KiB committed raw (inline carve-out)');
+    {
+      const ref = S.refPuts.find((x) => x.target.includes('path=big.bin'));
+      ok(!!ref, 'oversized file committed in the ref form');
+      eq(ref?.body?.ref?.sha256, bigSha, 'ref-form sha256 matches local hash');
+      eq(ref?.body?.ref?.size, big.length, 'ref-form size matches');
+      ok(typeof ref?.body?.ref?.mime === 'string' && ref.body.ref.mime.length > 0, 'ref-form mime present');
+      eq(ref?.ct, 'application/json', 'ref-form commit sends content-type application/json');
+    }
+    // the CLI's own upload auth event (Rust signer) decodes as a proper 24242
+    {
+      const ev = JSON.parse(Buffer.from(S.ups[0].auth.replace(/^Nostr /, ''), 'base64').toString('utf8'));
+      const tag = (n) => (ev.tags.find((t) => t[0] === n) || [])[1];
+      eq(ev.kind, 24242, 'CLI upload event is kind 24242');
+      eq(tag('t'), 'upload', 'CLI upload event t tag');
+      eq(tag('x'), STUB, 'CLI upload event x tag = configured blob URL');
+      eq(tag('payload'), bigSha, 'CLI upload event payload = uploaded bytes hash');
+      ok(Number(tag('expiration')) > Date.now() / 1000, 'CLI upload event not expired');
+      ok(schnorr.verify(Buffer.from(ev.sig, 'hex'), Buffer.from(ev.id, 'hex'), Buffer.from(ev.pubkey, 'hex')),
+        'CLI upload event signature verifies');
+    }
+
+    // 3) HEAD-hit skips the PUT: wipe rows/state, keep the tier blob, re-push
+    S.rows.clear();
+    rmSync(join(dir, '.fragment'), { recursive: true, force: true });
+    r = await cli(home, ['--dir', dir], { FRAGMENT_BLOB_URL: STUB });
+    eq(r.code, 0, 're-push after state rebuild passes');
+    eq(count('PUT /upload'), 1, 'HEAD hit on existing blob skips the second PUT');
+    eq(count('HEAD /') >= 2, true, 'both passes probed the tier with HEAD first');
+    ok(S.refPuts.filter((x) => x.target.includes('path=big.bin')).length === 2, 'row re-committed via ref form');
+
+    // 4) env FRAGMENT_BLOB_URL overrides a config blob_url
+    const homeEnv = mkHome({ host: STUB, secret_key: ownerKey, blob_url: 'http://127.0.0.1:1' });
+    const big2 = Buffer.alloc(70 * 1024, 66);
+    writeFileSync(join(dir, 'big2.bin'), big2);
+    r = await cli(homeEnv, ['--dir', dir], { FRAGMENT_BLOB_URL: STUB });
+    eq(r.code, 0, 'FRAGMENT_BLOB_URL overrides config blob_url (dead config URL unused)');
+    eq(S.ups.at(-1)?.sha256, sha256hex(big2), 'override config uploaded the new blob');
+
+    // 5) pull: 302 to the hashed asset, then cache short-circuits the network
+    S.redirectMode = true;
+    rmSync(join(dir, 'big.bin'));
+    r = await cli(home, ['--dir', dir, '--mode', 'pull', '--prune'], { FRAGMENT_BLOB_URL: STUB });
+    eq(r.code, 0, 'pull --prune restores a locally-deleted file'
+      + (r.code === 0 ? '' : ` :: ${r.out.slice(0, 400)}`));
+    eq(readFileSync(join(dir, 'big.bin')).equals(big), true, 'pulled bytes identical (via 302 to tier)');
+    ok(existsSync(join(dir, '.fragment', 'cache', bigSha)), 'pull populated .fragment/cache/<sha>');
+    const getsAfterFirst = count(`GET /${bigSha}`);
+    eq(getsAfterFirst, 1, 'first pull fetched from the tier exactly once');
+
+    rmSync(join(dir, 'big.bin'));
+    r = await cli(home, ['--dir', dir, '--mode', 'pull', '--prune'], { FRAGMENT_BLOB_URL: STUB });
+    eq(r.code, 0, 'second pull --prune of the same sha passes');
+    eq(count(`GET /${bigSha}`), getsAfterFirst, 'cache short-circuit: zero network fetch on repeated pull');
+    eq(readFileSync(join(dir, 'big.bin')).equals(big), true, 'cache-fed pull restores identical bytes');
+
+    // negative control: without the cache entry the network fetch happens again
+    rmSync(join(dir, '.fragment', 'cache', bigSha));
+    rmSync(join(dir, 'big.bin'));
+    r = await cli(home, ['--dir', dir, '--mode', 'pull', '--prune'], { FRAGMENT_BLOB_URL: STUB });
+    eq(r.code, 0, 'cache-miss pull passes');
+    eq(count(`GET /${bigSha}`), getsAfterFirst + 1, 'cache miss re-fetches from the tier');
+    S.redirectMode = false;
+
+    // 6) oversized + no tier configured anywhere → non-zero exit with guidance
+    const homeBare = mkHome({ host: STUB, secret_key: ownerKey });
+    const dir3 = mkdtempSync(join(tmpdir(), 'fragment-tier-big-'));
+    writeFileSync(join(dir3, 'huge.bin'), Buffer.alloc(70 * 1024, 67));
+    const r3 = await cli(homeBare, ['--dir', dir3]);
+    ok(r3.code !== 0 && r3.code !== null, 'oversized push without any tier config exits non-zero');
+    const combined = r3.out;
+    ok(combined.includes('FRAGMENT_BLOB_URL'), 'error names FRAGMENT_BLOB_URL as the fix');
+    ok(combined.includes('blob_url'), 'error names the config blob_url key too');
+
+    // genuinely-end-to-end against the REAL stack (bloasd + two-tier runtime):
+    // appended as labeled skip-lines until the cutover merges; the suite stays
+    // interpretable (all green above) meanwhile.
+    console.log('skip  (post-cutover) blob-first push through real bloasd: descriptor, allowlist, replay-idempotence');
+    console.log('skip  (post-cutover) public read 302s to BLOBSD_PUBLIC_URL through the live blessed path');
+    console.log('skip  (post-cutover) acceptance #1: >64KB note syncs blob-first against prod');
+  } finally {
+    await new Promise((res) => srv.close(res));
+  }
+};
+
+try {
+  if (!ONLY || ONLY === 'cli-lane-tier') await cliTierSection();
+} catch (e) {
+  fail++;
+  failures.push('cli-lane-tier: ' + String(e && e.stack || e));
+  console.log('FAIL  cli-lane-tier unexpected: ' + String(e && e.stack || e));
+}
+// ---- end lane/cli-tier additions ----
 
 console.log(`\n${pass} passed, ${fail} failed${fail ? ': ' + failures.join('; ') : ''}`);
 process.exit(fail ? 1 : 0);

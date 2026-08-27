@@ -141,6 +141,25 @@ plane, and the guide's executable patterns):
 - The loader loopback spike: a Worker-Loader isolate can fetch the host's own
   listener (this is what makes `ctx.*` possible).
 
+## Web-hosting conventions
+
+How served fragments behave for browsers (details in `cli/GUIDE.md`, "Blob-first
+pushes"):
+
+- **Hashed asset naming**: files named `name.<hash8>.ext` — 8 lowercase hex
+  chars derived from the content, e.g. `app.a1b2c3d4.css` — are served with
+  `cache-control: public, max-age=31536000, immutable`, so deploys can churn
+  freely without cache-busting worries. Everything else gets `max-age=300`
+  (blessed snapshots change; short TTL keeps staleness boring).
+- **Fonts**: emit `woff2` and let the runtime serve it as `font/woff2`
+  (`font/woff`, `font/ttf`, `font/otf` likewise); the MIME map also covers
+  `webmanifest`, `svg`, and friends. Preload with `<link rel="preload"
+  as="font" type="font/woff2" crossorigin>`.
+- **Big media lives blob-side**: a fragment's rows are pointers; bodies over
+  64 KiB live in the content-addressed blob tier and are served from there
+  (hashed, immutable). Don't copy gigabytes into the folder expecting the
+  cell to carry them — point at the blob URL or keep them on a bucket/CDN.
+
 ## Contract decisions worth knowing
 
 - **Workflows run from the working copy** (the live folder). **Sites serve

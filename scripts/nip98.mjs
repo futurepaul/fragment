@@ -28,6 +28,41 @@ export async function authHeader(method, url, body, secret) {
   return 'Nostr ' + Buffer.from(JSON.stringify(event)).toString('base64');
 }
 
+// Generic Blossom auth-event builder (kind 24242, BUD-02 style) — reusable
+// for blobsd upload/delete/list, not just NIP-98 HTTP auth. Wire shape per
+// docs/blob-tier.md: `t` = action verb ("upload"|"delete"|"list"), `x` =
+// server URL (must equal the server's configured public URL), `payload` =
+// sha256 of the body being authorized (present when given), `expiration` =
+// unix seconds after which the event is dead. Returns the full
+// "Authorization: Nostr <base64>" header value.
+export async function buildEvent(opts, secret) {
+  const {
+    kind = 24242,
+    actionTag,
+    serverUrl,
+    payloadHash,
+    expirationSecs = 60,
+  } = opts;
+  if (!actionTag || !serverUrl) throw new Error('buildEvent needs actionTag and serverUrl');
+  const now = Math.floor(Date.now() / 1000);
+  const tags = [['t', actionTag], ['x', serverUrl]];
+  if (payloadHash) tags.push(['payload', payloadHash]);
+  tags.push(['expiration', String(now + Math.max(1, expirationSecs | 0))]);
+  const event = {
+    pubkey: pubkeyFromSecret(secret),
+    created_at: now,
+    kind,
+    tags,
+    content: '',
+  };
+  const id = createHash('sha256')
+    .update(JSON.stringify([0, event.pubkey, event.created_at, event.kind, event.tags, event.content]))
+    .digest();
+  event.id = id.toString('hex');
+  event.sig = Buffer.from(schnorr.sign(id, hexToBytes(secret))).toString('hex');
+  return 'Nostr ' + Buffer.from(JSON.stringify(event)).toString('base64');
+}
+
 // Signed fetch. Returns the raw Response. `url` must be exactly what the
 // server sees (origin+path+search) since the u tag is compared canonically.
 export async function nreq(method, url, body, secret) {

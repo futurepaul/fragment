@@ -83,7 +83,7 @@ think.
 
 ## Sync in depth
 
-One contract: **files are capped at 1 MB**. Cells hold documents, not media — a cell's content lives in SQLite and replicates as WAL frames, so big blobs tax replication, restores, and write acks. Oversized files fail the sync up front; keep assets in a bucket or CDN and link them.
+One contract: **files up to 64 KiB ride inline; anything larger is pushed blob-first** — the cell's rows stay tiny documents while the bytes live in a separate content-addressed blob store (see "Blob-first pushes" below). Cells hold documents, not media dumps; a cell's content lives in SQLite and replicates as WAL frames, so big bodies tax replication, restores, and write acks if they sit in the cell itself.
 
 ```
 fragment sync my-thing --dir .              # one mirror pass (default)
@@ -117,6 +117,36 @@ fragment verify my-thing --dir .            # full-hash audit (caches lie; this 
   Many-writer folders (logs, dropzones) become race-free by construction.
 - **Exit codes** (for scripting): 0 clean/merged, 1 hard failure, 3
   conflicts present, 4 mass-deletion guard tripped.
+
+## Blob-first pushes
+
+The 64 KiB inline carve-out is unchanged: small files sync exactly as
+before. Beyond that, sync goes blob-first — the bytes upload straight to
+the blob store (a Blossom-style server signed with a kind-24242 auth
+event derived from your own key) and the cell commits only a pointer row
+(`{sha256, size, mime}`). You must tell the CLI where that store is:
+
+```
+export FRAGMENT_BLOB_URL=https://blobs.example.com      # env wins
+# or persist it in the fragment config (~/.config/fragment/config.json):
+#   { "host": "...", "secret_key": "...", "blob_url": "https://blobs.example.com" }
+```
+
+- Without a configured store, a changed file over 64 KiB **fails the sync
+  with a clear error naming `FRAGMENT_BLOB_URL`** — it never silently
+  falls back to a raw body the cell would refuse.
+- Uploads are content-addressed and idempotent: each changed file is
+  hashed, probed with a HEAD (already-present bytes skip the PUT), and
+  the server's echoed hash is verified against the local one before any
+  row commit. Row commits themselves stay ordinary sync commits, so
+  revisions, conflicts, watchers, and notify all behave as usual.
+- Pulls are the mirror image: fetched bytes stream to a temp file and
+  rename in atomically, and `.fragment/cache/<sha>` short-circuits
+  re-downloading content you already have (soft cap 256 MB, evicted
+  oldest-accessed-first; cache misses just re-fetch).
+- Files larger than the tier's 64 MiB cap are warn-skipped (the folder's
+  last-good state is kept) — a bucket or CDN remains the right home for
+  those.
 
 ## The manifest
 
