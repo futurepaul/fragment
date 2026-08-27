@@ -1,6 +1,7 @@
 // GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
 import { npubFromHex } from "./bech32.js";
-import { json, toAB } from "./util.js";
+import { json } from "./util.js";
+import { tierTextBounded } from "./blob-tier.js";
 import { initCell, registryRoute, syncRolesToRegistry } from "./registry.js";
 import { canonicalUrl, serveRoute, checkVisibility } from "./serve.js";
 import { apiRoute } from "./api-routes.js";
@@ -11,7 +12,8 @@ import { normalizeManifest } from "./manifest.js";
 import { internalRoute } from "./internal.js";
 import { roomRoute, presenceList, broadcast, webSocketMessage, webSocketClose } from "./rooms.js";
 import { watchRoute } from "./history.js";
-import { SCHEMA, rankOf } from "./util.js";
+import { SCHEMA, SCHEMA_VERSION, rankOf } from "./util.js";
+import { TierError } from "./blob-tier.js";
 class FragmentCell {
   state;
   env;
@@ -22,9 +24,21 @@ class FragmentCell {
     this.state = state;
     this.env = env;
     this.sql = state.storage.sql;
-    this.sql.exec(SCHEMA);
-    this.addColumnIfMissing("inbox", "claimed_at", "INTEGER");
-    this.addColumnIfMissing("inbox", "claim_token", "TEXT");
+    const hasMeta = this.sql.exec("SELECT COUNT(*) c FROM sqlite_master WHERE type = 'table' AND name = 'meta'").toArray()[0].c > 0;
+    const metaRows = hasMeta ? this.sql.exec("SELECT COUNT(*) c FROM meta").toArray()[0].c : 0;
+    const stored = hasMeta ? this.getMeta("schema") : null;
+    if (!hasMeta || metaRows === 0) {
+      const hasFiles = this.sql.exec("SELECT COUNT(*) c FROM sqlite_master WHERE type = 'table' AND name = 'files'").toArray()[0].c > 0;
+      if (hasFiles) {
+        const cols = this.sql.exec("PRAGMA table_info(files)").toArray().map((r) => String(r.name));
+        if (!cols.includes("size")) throw new Error("pre-blob-tier cell data found: wipe fleet per cutover doc");
+      }
+      this.sql.exec(SCHEMA);
+      this.setMeta("schema", String(SCHEMA_VERSION));
+    } else if (String(stored) !== String(SCHEMA_VERSION)) {
+      this.addColumnIfMissing("inbox", "claimed_at", "INTEGER");
+      this.addColumnIfMissing("inbox", "claim_token", "TEXT");
+    }
   }
   addColumnIfMissing(table, col, type) {
     const cols = this.sql.exec(`PRAGMA table_info(${table})`).toArray().map((r) => String(r.name));
@@ -92,18 +106,21 @@ class FragmentCell {
       if (path.startsWith("/__watch")) return watchRoute(this, request, url);
       return new Response("not found", { status: 404 });
     } catch (e) {
+      if (e instanceof TierError) return json({ error: String(e && e.message || e) }, e.status);
       return json({ error: String(e && e.stack || e) }, 500);
     }
   }
   validateManifest(m) {
     return normalizeManifest(m).error || null;
   }
-  getFileRow(path) {
-    return this.sql.exec("SELECT content, rev, sha256 FROM files WHERE path = ? AND deleted = 0", path).toArray()[0] || null;
+  getFileMeta(path) {
+    return this.sql.exec("SELECT sha256, size, mime, rev FROM files WHERE path = ? AND deleted = 0", path).toArray()[0] || null;
   }
-  getFileText(path) {
-    const row = this.getFileRow(path);
-    return row ? new TextDecoder().decode(toAB(row.content)) : null;
+  // bounded whole-body read for code/docs; see blob-tier.tierTextBounded
+  async getFileText(path) {
+    const row = this.getFileMeta(path);
+    if (!row) return null;
+    return tierTextBounded(this, row, `file ${path}`);
   }
   galleryInfo() {
     const m = this.manifest();
@@ -127,7 +144,6 @@ class FragmentCell {
     for (const t of [
       "meta",
       "files",
-      "blobs",
       "file_revisions",
       "drafts",
       "draft_files",
@@ -193,7 +209,7 @@ class FragmentCell {
   async loadCode(id, mainSource, modules, scope, cause = null) {
     return loadCode(this, id, mainSource, modules, scope, cause);
   }
-  collectModules(prefix) {
+  async collectModules(prefix) {
     return collectModules(this, prefix);
   }
   async runWorkflowLocked(wf, input, cause = null) {

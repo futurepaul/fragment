@@ -1,6 +1,7 @@
 // Rooms: websockets with presence, persisted state, optional rooms.mjs hook.
-import { toAB, randSlug } from "./util.js";
+import { randSlug } from "./util.js";
 import { ROOMS_MAIN } from "./loader.js";
+import { tierTextBounded } from "./blob-tier.js";
 
 
 // ------ roomRoute ------
@@ -82,7 +83,7 @@ export async function webSocketMessage(cell, ws, raw) {
     // server-side hook from the served draft's rooms.mjs
     const slug = a.draft === "blessed" ? cell.getMeta("blessed") : a.draft;
     if (slug) {
-      const row = cell.sql.exec("SELECT content FROM draft_files WHERE slug = ? AND path = 'rooms.mjs'", slug).toArray()[0];
+      const row = cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = 'rooms.mjs'", slug).toArray()[0];
       if (row) {
         try {
           const isBlessed = cell.getMeta("blessed") === slug;
@@ -90,8 +91,9 @@ export async function webSocketMessage(cell, ws, raw) {
           // a 1h preview token here dies mid-conversation; and the loader
           // id carries blessed-ness so a preview worker is never reused
           // for canonical traffic
+          const src = await tierTextBounded(cell, row, "module rooms.mjs");
           const ep = await cell.loadCode(`rooms:${isBlessed ? "b" : "d"}:${slug}`, ROOMS_MAIN,
-            { "rooms.mjs": new TextDecoder().decode(toAB(row.content)) }, { kind: "draft", worker: "rooms", slug, blessed: isBlessed });
+            { "rooms.mjs": src }, { kind: "draft", worker: "rooms", slug, blessed: isBlessed });
           const resp = await ep.fetch("http://loaded/rooms", {
             method: "POST",
             body: JSON.stringify({ room: a.room, msg: { from: a.clientId, data, at: Date.now() } }),

@@ -1,11 +1,11 @@
 // GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+const SCHEMA_VERSION = 3;
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
-CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, content BLOB, rev INTEGER, sha256 TEXT, updated_at INTEGER, deleted INTEGER DEFAULT 0);
-CREATE TABLE IF NOT EXISTS blobs (hash TEXT PRIMARY KEY, content BLOB);
+CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, sha256 TEXT NOT NULL, size INTEGER NOT NULL, mime TEXT NOT NULL DEFAULT '', rev INTEGER NOT NULL, updated_at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS file_revisions (path TEXT NOT NULL, rev INTEGER NOT NULL, blob_hash TEXT, deleted INTEGER DEFAULT 0, at INTEGER, PRIMARY KEY (path, rev));
 CREATE TABLE IF NOT EXISTS drafts (slug TEXT PRIMARY KEY, at INTEGER, note TEXT, blessed INTEGER DEFAULT 0);
-CREATE TABLE IF NOT EXISTS draft_files (slug TEXT, path TEXT, content BLOB, sha256 TEXT, PRIMARY KEY (slug, path));
+CREATE TABLE IF NOT EXISTS draft_files (slug TEXT, path TEXT, sha256 TEXT NOT NULL, size INTEGER NOT NULL, mime TEXT NOT NULL DEFAULT '', rev INTEGER NOT NULL, updated_at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (slug, path));
 CREATE TABLE IF NOT EXISTS secrets (name TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS inbox (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, source TEXT, payload TEXT, status TEXT DEFAULT 'pending', claimed_at INTEGER, claim_token TEXT);
 CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, kind TEXT, summary TEXT, data TEXT);
@@ -44,8 +44,26 @@ const MIME = {
   pdf: "application/pdf",
   xml: "application/xml",
   csv: "text/csv; charset=utf-8",
-  woff2: "font/woff2"
+  // fonts + web-app manifest (blob-tier hosting conventions, docs/blob-tier.md):
+  // a vault or gallery that drops in woff/ttf still serves the right type
+  woff2: "font/woff2",
+  woff: "font/woff",
+  ttf: "font/ttf",
+  otf: "font/otf",
+  webmanifest: "application/manifest+json"
 };
+function hashInName(path) {
+  const base = String(path).split("/").pop() || "";
+  return /[0-9a-f]{8}\./i.test(base) || /\.[0-9a-f]{7,8}\./i.test(base);
+}
+function serveCacheControl(blessed, path) {
+  if (!blessed) return "no-store";
+  return hashInName(path) ? "public, max-age=31536000, immutable" : "public, max-age=300";
+}
+function mimeForPath(path) {
+  const ext = (String(path).match(/\.([a-z0-9]+)$/) || [])[1] || "";
+  return MIME[ext] || "";
+}
 const rankOf = (r) => ({ owner: 3, editor: 2, viewer: 1 })[r] || 0;
 const MACHINERY = ["/fragment.json", "/app.mjs", "/rooms.mjs", "/_index.md"];
 function isMachinery(path) {
@@ -80,11 +98,15 @@ export {
   MAX_BODY_BYTES,
   MIME,
   SCHEMA,
+  SCHEMA_VERSION,
   bodyTooLarge,
+  hashInName,
   isMachinery,
   json,
+  mimeForPath,
   randHex,
   randSlug,
   rankOf,
+  serveCacheControl,
   toAB
 };

@@ -2,8 +2,9 @@
 // rooms code, and execute one workflow attempt in a loader isolate.
 // Lifecycle (guards, retries, held) lives in runs.ts; this module only
 // loads and executes.
-import { json, randHex, toAB } from "./util.js";
+import { json, randHex } from "./util.js";
 import { CTX_SHIM_SOURCE } from "./ctx-shim.js";
+import { tierTextBounded } from "./blob-tier.js";
 
 export const WORKFLOW_MAIN = `
 import { makeCtx } from "./fragment-ctx.mjs";
@@ -130,6 +131,14 @@ export async function loadCode(cell, id, mainSource, modules, scope, cause = nul
       FRAGMENT_INTERNAL_URL: cell.internalBase(),
       FRAGMENT_RUN_TOKEN: cell.makeToken(scope),
       FRAGMENT_SCOPE: scope.kind,
+      // Blob-tier vars (docs/blob-tier.md) deliberately stay OUT of author
+      // workers: ctx.files.* funnels through the loopback internal plane and
+      // the CELL performs all tier traffic with host credentials. They ride
+      // the same CELLD_VAR_ passthrough as everything else on cell.env:
+      //   CELLD_VAR_BLOBSD_URL            -> env.BLOBSD_URL            (tier write/read base)
+      //   CELLD_VAR_BLOBSD_INTERNAL_TOKEN -> env.BLOBSD_INTERNAL_TOKEN (Bearer for runtime tier calls)
+      //   CELLD_VAR_BLOBSD_PUBLIC_GET=1   -> env.BLOBSD_PUBLIC_GET     (302 mode for public/link cells)
+      //   CELLD_VAR_BLOBSD_PUBLIC_URL     -> env.BLOBSD_PUBLIC_URL     (302 Location base)
       // apps that declare secrets get them eagerly — one loopback, paid
       // only when the manifest asks for it (lazy fill broke first-render
       // reads; found live: the tray 500'd "missing secrets")
@@ -146,12 +155,17 @@ export async function loadCode(cell, id, mainSource, modules, scope, cause = nul
 
 // ------ collectModules ------
 
-export function collectModules(cell, prefixes: string | string[]) {
+// Module source lives in the blob tier now (rows are name->hash); a cold
+// code load pays one loopback fetch per module. Bounded by READ_CEILING per
+// file inside tierTextBounded. Sequential by choice: cold loads are rare
+// (worker cache keyed on the code hash), and the count of workflow/lib
+// modules is small and human-scaled.
+export async function collectModules(cell, prefixes: string | string[]) {
   const list = Array.isArray(prefixes) ? prefixes : [prefixes];
   const modules: Record<string, string> = {};
   for (const prefix of list) {
-    const rows = cell.sql.exec("SELECT path, content FROM files WHERE path LIKE ? AND deleted = 0", prefix + "%").toArray();
-    for (const r of rows) modules[r.path] = new TextDecoder().decode(toAB(r.content));
+    const rows = cell.sql.exec("SELECT path, sha256, size FROM files WHERE path LIKE ? AND deleted = 0", prefix + "%").toArray();
+    for (const r of rows) modules[r.path] = await tierTextBounded(cell, r, `module ${r.path}`);
   }
   return modules;
 }
@@ -191,10 +205,10 @@ export function rewriteRelatives(src: string, fromKey: string): string {
 export async function runWorkflowLocked(cell, wf, input, cause = null) {
   const name = cell.getMeta("name");
   try {
-    const src = cell.getFileText(wf.file);
+    const src = await cell.getFileText(wf.file);
     if (src === null) throw new Error(`workflow file not found in folder: ${wf.file}`);
     // workflows/ plus lib/ (the `fragment add` recipes live there)
-    const modules = collectModules(cell, ["workflows/", "lib/"]);
+    const modules = await collectModules(cell, ["workflows/", "lib/"]);
     for (const k of Object.keys(modules)) modules[k] = rewriteRelatives(modules[k], k);
     // stable worker id, keyed on the workflow CODE, not the folder rev: the
     // rev bumps on every file write — including the workflow's own output —

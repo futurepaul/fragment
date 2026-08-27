@@ -3,7 +3,8 @@
 // The class is the state + dispatch core; route planes and machinery live in
 // sibling modules and are invoked through the delegating methods below.
 import { npubFromHex } from "./bech32.js";
-import { json, toAB } from "./util.js";
+import { json } from "./util.js";
+import { tierStreamByHash, tierTextBounded } from "./blob-tier.js";
 import { initCell, registryRoute, syncRolesToRegistry } from './registry.js';
 import { canonicalUrl, serveRoute, checkVisibility } from './serve.js';
 import { apiRoute } from './api-routes.js';
@@ -14,7 +15,8 @@ import { normalizeManifest } from './manifest.js';
 import { internalRoute } from './internal.js';
 import { roomRoute, presenceList, broadcast, webSocketMessage, webSocketClose } from './rooms.js';
 import { watchRoute } from './history.js';
-import { SCHEMA, rankOf } from './util.js';
+import { SCHEMA, SCHEMA_VERSION, rankOf } from './util.js';
+import { TierError } from './blob-tier.js';
 
 export class FragmentCell {
   state: any;
@@ -26,12 +28,36 @@ export class FragmentCell {
     this.state = state;
     this.env = env;
     this.sql = state.storage.sql;
-    this.sql.exec(SCHEMA);
-    // idempotent column migrations: CREATE TABLE IF NOT EXISTS never alters
-    // an existing table, so new columns need explicit adds (found live:
-    // claim_token threw in every alarm on cells created before it existed)
-    this.addColumnIfMissing("inbox", "claimed_at", "INTEGER");
-    this.addColumnIfMissing("inbox", "claim_token", "TEXT");
+    // Blob-tier hard cut gate (docs/blob-tier.md). Cells are either born on
+    // schema 3 or refuse to run: a pre-blob-tier DB stores file bodies in
+    // SQLite (files.content), which the new tables structurally cannot
+    // express — the fail-loud error beats a half-working shim. A meta table
+    // with ZERO rows is an emptied (wiped) or never-initialized cell, not
+    // legacy data: wipeCell clears meta outright, so it gets re-stamped and
+    // lives again. Legacy detection = rows present, marker absent.
+    const hasMeta = this.sql.exec("SELECT COUNT(*) c FROM sqlite_master WHERE type = 'table' AND name = 'meta'").toArray()[0].c > 0;
+    const metaRows = hasMeta ? this.sql.exec("SELECT COUNT(*) c FROM meta").toArray()[0].c : 0;
+    const stored = hasMeta ? this.getMeta("schema") : null;
+    if (!hasMeta || metaRows === 0) {
+      // structural guard for the ambiguous corner (meta emptied on a cell
+      // whose tables predate the cut): legacy `files` has no `size` column,
+      // so its shape alone identifies a pre-blob-tier DB — fail fast on it,
+      // re-stamp everything else
+      const hasFiles = this.sql.exec("SELECT COUNT(*) c FROM sqlite_master WHERE type = 'table' AND name = 'files'").toArray()[0].c > 0;
+      if (hasFiles) {
+        const cols = this.sql.exec("PRAGMA table_info(files)").toArray().map((r: any) => String(r.name));
+        if (!cols.includes("size")) throw new Error("pre-blob-tier cell data found: wipe fleet per cutover doc");
+      }
+      this.sql.exec(SCHEMA);
+      this.setMeta("schema", String(SCHEMA_VERSION));
+    } else if (String(stored) !== String(SCHEMA_VERSION)) {
+      // idempotent for cells already on 3; CREATE TABLE IF NOT EXISTS never
+      // alters an existing table, so past COLUMN additions need explicit adds
+      // (found live: claim_token threw in every alarm on cells created before
+      // it existed)
+      this.addColumnIfMissing("inbox", "claimed_at", "INTEGER");
+      this.addColumnIfMissing("inbox", "claim_token", "TEXT");
+    }
   }
   addColumnIfMissing(table: string, col: string, type: string) {
     const cols = this.sql.exec(`PRAGMA table_info(${table})`).toArray().map((r: any) => String(r.name));
@@ -99,6 +125,9 @@ export class FragmentCell {
       if (path.startsWith("/__watch")) return watchRoute(this, request, url);
       return new Response("not found", { status: 404 });
     } catch (e) {
+      // tier verdicts keep their HTTP semantics (404 missing blob, 400 bad
+      // hash, 413 ceilings): only genuinely unexpected failures become 500s
+      if (e instanceof TierError) return json({ error: String((e && e.message) || e) }, e.status);
       return json({ error: String((e && e.stack) || e) }, 500);
     }
   }
@@ -106,12 +135,16 @@ export class FragmentCell {
     // the TypeBox schema in manifest.ts is the single source of truth
     return normalizeManifest(m).error || null;
   }
-  getFileRow(path) {
-    return this.sql.exec("SELECT content, rev, sha256 FROM files WHERE path = ? AND deleted = 0", path).toArray()[0] || null;
+  getFileMeta(path) {
+    // names only: path -> {sha256, size, mime, rev}. Bodies are not here and
+    // must never come back through this accessor.
+    return this.sql.exec("SELECT sha256, size, mime, rev FROM files WHERE path = ? AND deleted = 0", path).toArray()[0] || null;
   }
-  getFileText(path) {
-    const row = this.getFileRow(path);
-    return row ? new TextDecoder().decode(toAB(row.content)) : null;
+  // bounded whole-body read for code/docs; see blob-tier.tierTextBounded
+  async getFileText(path) {
+    const row = this.getFileMeta(path);
+    if (!row) return null;
+    return tierTextBounded(this, row, `file ${path}`);
   }
 
   galleryInfo() {
@@ -134,7 +167,10 @@ export class FragmentCell {
   }
 
   wipeCell() {
-    for (const t of ["meta", "files", "blobs", "file_revisions", "drafts", "draft_files", "secrets",
+    // the old local `blobs` table died with the blob tier: bytes live in
+    // blobsd and wipeCell intentionally does NOT touch them (content-addressed
+    // objects are inert without their rows; tier GC is blobsd's concern)
+    for (const t of ["meta", "files", "file_revisions", "drafts", "draft_files", "secrets",
       "inbox", "events", "wstate", "rooms", "room_msgs", "run_tokens", "runs", "notify_outbox"]) {
       this.sql.exec(`DELETE FROM ${t}`);
     }
@@ -159,7 +195,7 @@ export class FragmentCell {
   checkToken(request) { return checkToken(this, request); }
   internalBase() { return internalBase(this); }
   async loadCode(id, mainSource, modules, scope, cause = null) { return loadCode(this, id, mainSource, modules, scope, cause); }
-  collectModules(prefix) { return collectModules(this, prefix); }
+  async collectModules(prefix) { return collectModules(this, prefix); }
   async runWorkflowLocked(wf, input, cause = null) { return runWorkflowLocked(this, wf, input, cause); }
   async executeWorkflow(wf, input, opts = {}) { return executeWorkflow(this, wf, input, opts); }
   async resumeDueRuns() { return resumeDueRuns(this); }

@@ -1,24 +1,26 @@
 // File history (content-addressed revisions) and the __watch change
-// channel. Every mutation of the working tree lands in blobs +
-// file_revisions, so sync clients can fetch any recent ancestor for
-// three-way merges; watchers get a `changed` frame per mutation batch
-// over a dedicated, persistence-free websocket.
+// channel. Every mutation of the working tree lands a hash pointer in
+// file_revisions (bytes live in the blob tier addressed by that hash, so
+// there is no local copy to write or prune), so sync clients can fetch any
+// recent ancestor for three-way merges; watchers get a `changed` frame per
+// mutation batch over a dedicated, persistence-free websocket.
 import { enqueueNotify } from "./notify.js";
 
 const RETENTION = 10;
 
 // record a revision after a successful mutation; broadcasts to watchers.
 // Async so the notify rearm stays inside the caller's turn (see notify.ts)
-export async function recordRevision(cell, path, rev, sha, content, deleted = false) {
-  if (!deleted && sha && content != null) {
-    cell.sql.exec("INSERT OR IGNORE INTO blobs (hash, content) VALUES (?, ?)", sha, content);
-  }
+export async function recordRevision(cell, path, rev, sha, deleted = false) {
   cell.sql.exec("INSERT OR REPLACE INTO file_revisions (path, rev, blob_hash, deleted, at) VALUES (?, ?, ?, ?, ?)",
     path, rev, deleted ? null : sha, deleted ? 1 : 0, Date.now());
   cell.sql.exec(
     "DELETE FROM file_revisions WHERE path = ? AND rev <= (SELECT COALESCE(MAX(rev), 0) FROM file_revisions WHERE path = ?) - ?",
     path, path, RETENTION,
   );
+  // Row-commit funnel stays the SOLE emitter for watchers + notify — this
+  // line and enqueueNotify below are unchanged by the two-tier split on
+  // purpose (cross-cell acceptance #3 in docs/blob-tier.md: bytes moved
+  // tiers, commits still drive every cross-cell notification).
   watchBroadcast(cell, { type: "changed", rev: parseInt(cell.getMeta("rev") || "0", 10), paths: [path] });
   await enqueueNotify(cell, [path]);
 }

@@ -71,6 +71,80 @@ try {
   console.error(`no host at ${BASE}. Bring one up: scripts/dev up && scripts/dev deploy`);
   process.exit(2);
 }
+
+// ---------- fake-blobsd stub for the whole run ----------
+// Every file write now touches the blob tier (inline carve-out uploads are
+// performed BY the runtime), so the stub must be listening for the ENTIRE
+// suite, not just the tier section. It runs as a CHILD PROCESS on purpose:
+// the harness makes blocking spawnSync CLI calls, and an in-process server
+// would deadlock them (blocked event loop can't serve the runtime's tier
+// fetch — found as a 60s spawnSync ETIMEDOUT in the guide transcripts).
+// Implements the upload/GET/HEAD hash contract in-memory on 127.0.0.1:9940;
+// real-side blobsd coverage happens post-merge.
+const E2E_TOKEN = process.env.E2E_BLOBSD_TOKEN || 'e2e-blob-token';
+const E2E_BLOBSD_PORT = 9940;
+const stubSrc = `
+const http = require('node:http');
+const { createHash } = require('node:crypto');
+const TOKEN = process.env.E2E_BLOBSD_TOKEN;
+const blobs = new Map(); // sha256 -> {bytes, mime}
+const server = http.createServer((req, res) => {
+  const chunks = [];
+  req.on('data', (c) => chunks.push(c));
+  req.on('end', () => {
+    const body = Buffer.concat(chunks);
+    const reply = (status, payload, headers = {}) => { res.writeHead(status, headers); res.end(payload); };
+    if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
+      return reply(200, JSON.stringify({ name: 'blobsd', version: 'stub-e2e' }), { 'content-type': 'application/json' });
+    }
+    // writes are internal-token gated; the hash data plane (GET/HEAD/<sha>)
+    // is NO-AUTH per spec — that is exactly what BLOBSD_PUBLIC_GET exposes
+    const isWrite = req.method === 'PUT' || req.method === 'DELETE';
+    if (isWrite && (req.headers.authorization || '') !== ('Bearer ' + TOKEN)) {
+      return reply(403, JSON.stringify({ error: 'bad internal token' }), { 'content-type': 'application/json' });
+    }
+    if (req.method === 'PUT' && req.url === '/upload') {
+      const sha = createHash('sha256').update(body).digest('hex');
+      const declared = String(req.headers['x-sha-256'] || '').toLowerCase();
+      if (declared && declared !== sha) return reply(400, JSON.stringify({ error: 'bad_hash' }), { 'content-type': 'application/json' });
+      blobs.set(sha, { bytes: body, mime: String(req.headers['content-type'] || '') });
+      return reply(200, JSON.stringify({ sha256: sha, size: body.length, type: String(req.headers['content-type'] || ''), uploaded: Math.floor(Date.now() / 1000) }), { 'content-type': 'application/json' });
+    }
+    const m = (req.url.match(/^\\/([0-9a-f]{64})$/) || [])[1];
+    if ((req.method === 'GET' || req.method === 'HEAD') && m) {
+      const hit = blobs.get(m);
+      if (!hit) return reply(404, 'no such blob');
+      return reply(200, req.method === 'HEAD' ? undefined : hit.bytes, {
+        etag: '"' + m + '"',
+        'cache-control': 'public, max-age=31536000, immutable',
+        'content-type': hit.mime || 'application/octet-stream',
+      });
+    }
+    return reply(404, 'not found');
+  });
+});
+server.listen(${E2E_BLOBSD_PORT}, '127.0.0.1');
+`;
+let blobsdStub = null;
+try {
+  blobsdStub = spawn(process.execPath, ['-e', stubSrc], {
+    env: { ...process.env, E2E_BLOBSD_TOKEN: E2E_TOKEN },
+    stdio: 'ignore',
+  });
+  blobsdStub.on('exit', () => { blobsdStub = null; });
+  // wait until it answers its health route (bounded)
+  const stubUp = async () => {
+    for (let i = 0; i < 50; i++) {
+      try { const r = await fetch(`http://127.0.0.1:${E2E_BLOBSD_PORT}/`); if (r.ok) return true; } catch {}
+      await sleep(100);
+    }
+    return false;
+  };
+  if (!(await stubUp())) throw new Error('stub did not answer /health in 5s');
+  process.on('exit', () => { try { blobsdStub && blobsdStub.kill(); } catch {} });
+} catch (e) {
+  console.log(`skip  could not start blobsd stub on :${E2E_BLOBSD_PORT} (${String(e.message || e)}) — tier checks will skip`);
+}
 if (!ONLY || ONLY === 'lockdown') await lockdownSection();
 
 // ---------- lockdown (router-level; see PR "security: lock /__internal") ----------
@@ -1879,6 +1953,228 @@ try {
   console.log('FAIL  cli-lane unexpected: ' + String(e && e.stack || e));
 }
 // ---- end lane/cli additions ----
+
+// ---- lane/runtime-tier additions ----
+// Two-tier files: names in cells, bytes in blobsd (docs/blob-tier.md).
+//
+// HOST ENV REQUIRED by these checks (all four ride the CELLD_VAR_ passthrough):
+//   CELLD_VAR_BLOBSD_URL=http://127.0.0.1:9940        (points at the stub started below)
+//   CELLD_VAR_BLOBSD_INTERNAL_TOKEN=e2e-blob-token    (override with E2E_BLOBSD_TOKEN)
+//   CELLD_VAR_BLOBSD_PUBLIC_GET=1                     (flips 302 mode ON)
+//   CELLD_VAR_BLOBSD_PUBLIC_URL=http://127.0.0.1:9940
+// scripts/dev does NOT export these automatically — bring the stack up like:
+//   CELLD_VAR_BLOBSD_URL=http://127.0.0.1:9940 \
+//   CELLD_VAR_BLOBSD_INTERNAL_TOKEN=e2e-blob-token \
+//   CELLD_VAR_BLOBSD_PUBLIC_GET=1 CELLD_VAR_BLOBSD_PUBLIC_URL=http://127.0.0.1:9940 \
+//   ./scripts/dev up && ./scripts/dev deploy && node scripts/e2e.mjs --only tier
+// If the running host lacks the env, every tier check SKIPS (detected by
+// probing one real inline write — the vars live on the host process and are
+// unreachable from here), so a plain suite stays green until cutover adds
+// them. Real-side coverage (the actual blobsd binary) happens post-merge;
+// the stub below implements only the upload/HEAD/GET hash contract in-memory
+// so this lane runs standalone.
+async function tierLaneSection() {
+  if (!section('tier')) return;
+  const TOKEN = E2E_TOKEN;
+  const PORT = E2E_BLOBSD_PORT;
+  const { createHash } = await import('node:crypto');
+
+  // helpers that keep raw bytes + headers (jres() above is JSON-only)
+  const rawFetch = async (url, init) => {
+    const r = await fetch(url, init);
+    return { status: r.status, buf: Buffer.from(await r.arrayBuffer()), headers: r.headers };
+  };
+  const signedPutRaw = async (name, qs, bodyBuf, headers = {}) => {
+    const url = `${BASE}/api/f/${name}/file?${qs}`;
+    return rawFetch(url, {
+      method: 'PUT',
+      headers: { authorization: await authHeader('PUT', url, bodyBuf, ownerKey), ...headers },
+      body: bodyBuf,
+    });
+  };
+  const timems = (fn) => {
+    const t0 = Date.now();
+    return fn().then((v) => ({ v, took: Date.now() - t0 }));
+  };
+  const getFile = async (name, path) => {
+    const url = `${BASE}/api/f/${name}/file?path=${encodeURIComponent(path)}`;
+    return rawFetch(url, { headers: { authorization: await authHeader('GET', url, null, ownerKey) } });
+  };
+
+  try {
+    // probe: does the RUNNING host carry the blob-tier env?
+    const probeName = `e2e-tier-probe-${suffix}`;
+    const created = await signed('POST', '/api/fragments', JSON.stringify({ name: probeName }));
+    eq(created.status, 200, '[tier] probe fragment created');
+    const probe = await signedPutRaw(probeName, 'path=probe.txt&base_rev=0', Buffer.from('probe'));
+    if (probe.status !== 200) {
+      console.log('skip  blob tier not configured on the host (set CELLD_VAR_BLOBSD_* per block header) — all tier checks skipped');
+      return;
+    }
+
+    // fixture: public fragment so __file/blessed reads need no token
+    const name = `e2e-tier-${suffix}`;
+    await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    const man = await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({
+      name, visibility: 'public', editors: [], viewers: [], workflows: [], secrets: [],
+    }));
+    eq(man.status, 200, '[tier] public manifest set');
+
+    // ---- static fixtures BEFORE first draft: cache heuristic needs blessing ----
+    const cssBody = Buffer.from('body{color:#123}');
+    const pCss = await signedPutRaw(name, 'path=' + encodeURIComponent('site/style-a.1b2c3d4.css') + '&base_rev=0', cssBody);
+    eq(pCss.status, 200, '[tier] hash-named css seeded');
+    const pIdx = await signedPutRaw(name, 'path=site%2Findex.html&base_rev=0', Buffer.from('<!doctype html><title>tier</title>'));
+    eq(pIdx.status, 200, '[tier] index.html seeded');
+    const d0 = await signed('POST', `/api/f/${name}/drafts`, JSON.stringify({ note: 'tier fixture' }));
+    ok(d0.body?.slug, '[tier] fixture draft published');
+    const bl = await signed('POST', `/api/f/${name}/bless`, JSON.stringify({ slug: d0.body.slug }));
+    eq(bl.status, 200, '[tier] fixture blessed');
+
+    // 1) raw-inline write/read roundtrip (no hash header; runtime uploads itself)
+    const inlineBody = Buffer.from('tier inline roundtrip\n');
+    const pInline = await signedPutRaw(name, 'path=' + encodeURIComponent('notes/inline.md') + '&base_rev=0', inlineBody);
+    eq(pInline.status, 200, '[tier] raw inline write commits');
+    const inlineRev = (JSON.parse(pInline.buf.toString()) || {}).rev;
+    ok(Number.isInteger(inlineRev), '[tier] raw inline write returns rev');
+    const wantSha = createHash('sha256').update(inlineBody).digest('hex');
+    const apiGet = await getFile(name, 'notes/inline.md');
+    eq(apiGet.status, 200, '[tier] authed API read after inline commit');
+    ok(apiGet.buf.equals(inlineBody), '[tier] inline roundtrip preserves bytes');
+    const listing = await signed('GET', `/api/f/${name}/files`);
+    const entry = (listing.body?.files || []).find((f) => f.path === 'notes/inline.md');
+    eq(entry?.sha256, wantSha, '[tier] row carries the content address');
+
+    // 2) >64KB push WITH x-fragment-hash commits & reads back (stream-through form)
+    const big = Buffer.alloc(100_000);
+    for (let i = 0; i < big.length; i++) big[i] = i % 251;
+    const bigSha = createHash('sha256').update(big).digest('hex');
+    const pBig = await signedPutRaw(name, 'path=' + encodeURIComponent('media/big.bin') + '&base_rev=0', big, { 'x-fragment-hash': bigSha });
+    eq(pBig.status, 200, '[tier] >64KB raw push with x-fragment-hash commits');
+    const bigBack = await getFile(name, 'media/big.bin');
+    ok(bigBack.buf.equals(big), '[tier] >64KB push reads back byte-exact');
+    // identity is enforced: declared hash must match what actually arrives
+    const wrongSha = createHash('sha256').update(Buffer.from('other')).digest('hex');
+    const pBad = await signedPutRaw(name, 'path=' + encodeURIComponent('media/evil.bin') + '&base_rev=0', big.slice(0, 1000), { 'x-fragment-hash': wrongSha });
+    eq(pBad.status, 400, '[tier] hash mismatch refuses to commit');
+    ok(JSON.parse(pBad.buf.toString()).error.includes(wrongSha), '[tier] mismatch error names the declared hash');
+    eq((await signed('GET', `/api/f/${name}/files`)).body.files.some((f) => f.path === 'media/evil.bin'), false, '[tier] refused push left no row');
+
+    // 3) oversize-no-hash answers 413 with the blob-first hint (spec text)
+    const p413 = await signedPutRaw(name, 'path=' + encodeURIComponent('media/too-big.bin') + '&base_rev=0', Buffer.alloc(70_000, 3));
+    eq(p413.status, 413, '[tier] oversize raw without hash -> 413');
+    ok(p413.buf.toString().includes('blob-first'), '[tier] 413 hint points at the blob-first flow');
+
+    // 4) ref-form JSON commit returns rev; subsequent __file serves stored mime
+    //    (bytes pushed DIRECT to the tier first — blob-first by construction;
+    //    same internal token proves it is the same store the runtime uses)
+    const refBytes = Buffer.from('ref-form woff payload'.repeat(10));
+    const refSha = createHash('sha256').update(refBytes).digest('hex');
+    const up = await rawFetch(`http://127.0.0.1:${PORT}/upload`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${TOKEN}`, 'x-sha-256': refSha, 'content-type': 'font/woff2' },
+      body: refBytes,
+    });
+    eq(up.status, 200, '[tier] direct tier upload accepted (same token/store)');
+    const refJson = JSON.stringify({ ref: { sha256: refSha, size: refBytes.length, mime: 'font/woff2' } });
+    const refUrl = `${BASE}/api/f/${name}/file?path=${encodeURIComponent('assets/font.woff2')}&base_rev=0`;
+    // fresh path: base_rev 0; sign over the exact json bytes
+    const pRef = await rawFetch(refUrl, {
+      method: 'PUT',
+      headers: { authorization: await authHeader('PUT', refUrl, Buffer.from(refJson), ownerKey), 'content-type': 'application/json' },
+      body: refJson,
+    });
+    eq(pRef.status, 200, '[tier] ref-form JSON commit returns 200');
+    ok(Number.isInteger((JSON.parse(pRef.buf.toString()) || {}).rev), '[tier] ref-form returns a rev');
+    const mimeRead = await rawFetch(`${BASE}/f/${name}/__file?path=assets%2Ffont.woff2`);
+    eq(mimeRead.status, 200, '[tier] blessed __file serves tier-backed file');
+    ok((mimeRead.headers.get('content-type') || '').startsWith('font/woff2'), '[tier] __file serves the stored mime');
+    ok(mimeRead.buf.equals(refBytes), '[tier] ref-committed bytes read back exactly');
+    // a ref naming bytes NOT in the tier still commits (presumed-present
+    // contract); its absence surfaces at READ time as a tier miss
+    const ghostSha = createHash('sha256').update(Buffer.from('ghost-bytes')).digest('hex');
+    const ghostJson = JSON.stringify({ ref: { sha256: ghostSha, size: 11, mime: 'text/plain' } });
+    const ghostUrl = `${BASE}/api/f/${name}/file?path=${encodeURIComponent('ghost.txt')}&base_rev=0`;
+    const pGhost = await rawFetch(ghostUrl, {
+      method: 'PUT',
+      headers: { authorization: await authHeader('PUT', ghostUrl, Buffer.from(ghostJson), ownerKey), 'content-type': 'application/json' },
+      body: ghostJson,
+    });
+    eq(pGhost.status, 200, '[tier] ghost-ref commits (bytes presumed in tier)');
+    const ghostRead = await rawFetch(`${BASE}/f/${name}/__file?path=ghost.txt`);
+    eq(ghostRead.status, 404, '[tier] reading a missing tier object answers blobsd 404, not a 500');
+
+    // 5) cache heuristic: immutable flag on [8-hex]-in-name asset through the
+    //    LIVE blessed path; everything else defaults to max-age=300
+    const cssResp = await rawFetch(`${BASE}/f/${name}/style-a.1b2c3d4.css`);
+    eq(cssResp.status, 200, '[tier] hash-named css serves from blessed snapshot');
+    ok((cssResp.headers.get('cache-control') || '').includes('immutable'), '[tier] hash-in-name asset marked immutable');
+    ok(cssResp.buf.equals(cssBody), '[tier] hash-named css bytes intact');
+    const idxResp = await rawFetch(`${BASE}/f/${name}/`);
+    ok((idxResp.headers.get('cache-control') || '').includes('max-age=300'), '[tier] blessed default is max-age=300');
+
+    // 6) 302 mode: gated on CELLD_VAR_BLOBSD_PUBLIC_GET=1 on the host.
+    //    Skipped when unset locally (documented in the block header).
+    const pubGet = await rawFetch(`${BASE}/f/${name}/__file?path=media%2Fbig.bin`, { redirect: 'manual' });
+    if (pubGet.status === 302) {
+      const loc = pubGet.headers.get('location') || '';
+      ok(new RegExp(`^http://127\\.0\\.0\\.1:${PORT}/${bigSha}$`).test(loc), '[tier] 302 Location targets BLOBSD_PUBLIC_URL/<sha>');
+      const followed = await rawFetch(loc);
+      ok(followed.buf.equals(big), '[tier] following the 302 yields the bytes browser-direct');
+      ok((followed.headers.get('etag') || '').includes(bigSha), '[tier] blobsd carries etag "<sha>"');
+    } else {
+      console.log('skip  CELLD_VAR_BLOBSD_PUBLIC_GET=1 not set on the host — 302 mode untested here');
+    }
+
+    // 7) draft snapshot stays O(rows): pure pointer copies — time-boxed — and
+    //    the bless round-trip moves counts/sizes by exactly zero (no byte
+    //    duplication anywhere: rows share tier addresses)
+    {
+      const snapName = `e2e-tier-snap-${suffix}`;
+      await signed('POST', '/api/fragments', JSON.stringify({ name: snapName }));
+      // public so /f/<name>/__tree reads without a token (the checks compare
+      // canonical vs snapshot trees)
+      await signed('PUT', `/api/f/${snapName}/manifest`, JSON.stringify({
+        name: snapName, visibility: 'public', editors: [], viewers: [], workflows: [], secrets: [],
+      }));
+      const N = 250;
+      for (let i = 0; i < N; i++) {
+        const r = await signedPutRaw(snapName, `path=${encodeURIComponent('corpus/f' + i + '.md')}&base_rev=0`, Buffer.from('doc '.repeat(i % 37 || 1)));
+        if (r.status !== 200) break;
+      }
+      const timed = await timems(() => signed('POST', `/api/f/${snapName}/drafts`, JSON.stringify({ note: 'snapshot perf' })));
+      const slug = timed.v.body?.slug;
+      ok(!!slug, '[tier] draft publish answered');
+      ok(timed.took < 2000, `[tier] snapshot stayed O(rows) (${timed.took}ms for ${N} rows, budget 2000ms)`);
+      await signed('POST', `/api/f/${snapName}/bless`, JSON.stringify({ slug }));
+      const sum = (t) => (t.body?.files || []).reduce((a, f) => a + (f.size || 0), 0);
+      const fTree = await signed('GET', `/f/${snapName}/__tree`);
+      eq(fTree.body?.count, N, '[tier] corpus of 250 listed (machinery excluded)');
+      const dTree = await signed('GET', `/d/${slug}/__tree`);
+      eq(dTree.body?.count, N, '[tier] snapshot tree mirrors working tree (count)');
+      eq(sum(dTree), sum(fTree), '[tier] snapshot size delta == 0 (pointers, not copies)');
+      // a second bless cycle leaves the working tree untouched: delta == 0
+      const d2 = await signed('POST', `/api/f/${snapName}/drafts`, JSON.stringify({ note: 'second' }));
+      await signed('POST', `/api/f/${snapName}/bless`, JSON.stringify({ slug: d2.body.slug }));
+      const fTree2 = await signed('GET', `/f/${snapName}/__tree`);
+      eq(fTree2.body?.count, fTree.body?.count, '[tier] working-tree count delta across re-bless == 0');
+      eq(sum(fTree2), sum(fTree), '[tier] working-tree size delta across re-bless == 0');
+    }
+  } catch (e) {
+    fail++;
+    failures.push('tier: ' + String(e && e.stack || e));
+    console.log('FAIL  tier unexpected: ' + String(e && e.stack || e));
+  }
+}
+
+try {
+  if (!ONLY || ONLY === 'tier') await tierLaneSection();
+} catch (e) {
+  fail++;
+  failures.push('tier-lane: ' + String(e && e.stack || e));
+  console.log('FAIL  tier-lane unexpected: ' + String(e && e.stack || e));
+}
+// ---- end lane/runtime-tier additions ----
 
 console.log(`\n${pass} passed, ${fail} failed${fail ? ': ' + failures.join('; ') : ''}`);
 process.exit(fail ? 1 : 0);

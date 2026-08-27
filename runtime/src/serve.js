@@ -1,8 +1,10 @@
 // GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
-import { toAB, MIME, rankOf, isMachinery } from "./util.js";
+import { MIME, rankOf, isMachinery, serveCacheControl, mimeForPath } from "./util.js";
 import { safeEqual } from "./auth.js";
 import { json } from "./util.js";
 import { APP_MAIN } from "./loader.js";
+import { tierStreamByHash, tierTextBounded, publicRedirectTarget } from "./blob-tier.js";
+const OG_MATERIALIZE_CEILING = 1024 * 1024;
 const esc = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
 function canonicalUrl(cell, origin, name) {
   const sub = cell.env.FRAGMENT_SUBDOMAIN_HOST;
@@ -43,7 +45,7 @@ async function serveRoute(cell, request, url) {
     return new Response(svg, { headers: { "content-type": "image/svg+xml", "cache-control": "public, max-age=3600" } });
   }
   if (rest === "__tree") {
-    const rows = mode === "b" ? cell.sql.exec("SELECT path, length(content) AS size, updated_at, rev, sha256 FROM files WHERE deleted = 0 ORDER BY path").toArray() : cell.sql.exec("SELECT df.path, length(df.content) AS size, 0 AS updated_at, 0 AS rev, df.sha256 FROM draft_files df WHERE df.slug = ? ORDER BY df.path", slug).toArray();
+    const rows = mode === "b" ? cell.sql.exec("SELECT path, size, updated_at, rev, sha256 FROM files WHERE deleted = 0 ORDER BY path").toArray() : cell.sql.exec("SELECT path, size, updated_at, rev, sha256 FROM draft_files WHERE slug = ? AND deleted = 0 ORDER BY path", slug).toArray();
     const files = rows.filter((r) => !isMachinery(r.path)).map((r) => ({ path: r.path, size: r.size, updatedAt: r.updated_at || null, rev: r.rev || 0, sha256: r.sha256 }));
     return json({ type: "tree", files, count: files.length });
   }
@@ -52,46 +54,64 @@ async function serveRoute(cell, request, url) {
     if (!fPath || fPath.includes("..") || fPath.startsWith("/") || isMachinery(fPath)) {
       return json({ error: "bad path" }, 400);
     }
-    const row2 = mode === "b" ? cell.sql.exec("SELECT content FROM files WHERE path = ? AND deleted = 0", fPath).toArray()[0] : cell.sql.exec("SELECT content FROM draft_files WHERE slug = ? AND path = ?", slug, fPath).toArray()[0];
-    if (!row2) return json({ error: "no such file" }, 404);
-    return new Response(toAB(row2.content), { headers: { "content-type": "application/octet-stream", "cache-control": "no-store" } });
+    const row = mode === "b" ? cell.getFileMeta(fPath) : cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = ? AND deleted = 0", slug, fPath).toArray()[0];
+    if (!row) return json({ error: "no such file" }, 404);
+    const mime2 = row.mime || mimeForPath(fPath) || "application/octet-stream";
+    const redirectBase = publicRedirectTarget(cell, mode === "b");
+    if (redirectBase) return stamp(new Response(null, { status: 302, headers: { location: `${redirectBase}/${row.sha256}` } }));
+    const upstream2 = await tierStreamByHash(cell, row.sha256);
+    return new Response(upstream2.body, { status: upstream2.status, headers: {
+      "content-type": mime2,
+      "cache-control": serveCacheControl(mode === "b", fPath)
+    } });
   }
-  const appRow = cell.sql.exec("SELECT content FROM draft_files WHERE slug = ? AND path = 'app.mjs'", slug).toArray()[0];
-  if (appRow) {
+  const appMeta = cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = 'app.mjs'", slug).toArray()[0];
+  if (appMeta) {
     const modules = {};
-    const libRows = cell.sql.exec("SELECT path, content FROM draft_files WHERE slug = ? AND path LIKE 'applib/%'", slug).toArray();
-    for (const r of libRows) modules[r.path] = new TextDecoder().decode(toAB(r.content));
-    modules["app.mjs"] = new TextDecoder().decode(toAB(appRow.content));
+    const libRows = cell.sql.exec("SELECT path, sha256, size FROM draft_files WHERE slug = ? AND path LIKE 'applib/%'", slug).toArray();
+    for (const r of libRows) modules[r.path] = await tierTextBounded(cell, r, `module ${r.path}`);
+    modules["app.mjs"] = await tierTextBounded(cell, appMeta, "module app.mjs");
     const ep = await cell.loadCode(`app:${mode}:${slug}`, APP_MAIN, modules, { kind: "draft", worker: "app", slug, blessed: mode === "b" });
     const appUrl = new URL(request.url);
     return stamp(await ep.fetch(new Request(appUrl.origin + "/" + rest + appUrl.search, request)));
   }
   let rel = rest === "" ? "index.html" : rest;
-  let row = cell.sql.exec("SELECT content FROM draft_files WHERE slug = ? AND path = ?", slug, "site/" + rel).toArray()[0];
-  if (!row && !rel.endsWith("/")) row = cell.sql.exec("SELECT content FROM draft_files WHERE slug = ? AND path = ?", slug, "site/" + rel + "/index.html").toArray()[0];
-  if (!row) return new Response("not found", { status: 404 });
+  const stMeta = (p) => cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = ? AND deleted = 0", slug, p).toArray()[0];
+  let meta = stMeta("site/" + rel);
+  if (!meta && !rel.endsWith("/")) meta = stMeta("site/" + rel + "/index.html");
+  if (!meta) return new Response("not found", { status: 404 });
   const ext = (rel.match(/\.([a-z0-9]+)$/) || [])[1] || "";
-  const cache = mode === "b" ? "no-store" : "public, max-age=3600, immutable";
-  let body = toAB(row.content);
+  const mime = meta.mime || MIME[ext] || "application/octet-stream";
+  const cache = serveCacheControl(mode === "b", rel);
   const m2 = cell.manifest();
-  const isHtml = (MIME[ext] || "").includes("text/html");
-  if (isHtml && m2?.meta && rel === "index.html") {
-    let html = new TextDecoder().decode(body);
-    if (!html.includes("og:title")) {
-      const pubOrigin = new URL(request.headers.get("x-fragment-url") || request.url).origin;
-      const img = m2.meta.image || `${pubOrigin}/f/${m2.name}/__preview.svg`;
-      const tags = [
-        `<meta property="og:title" content="${esc(m2.meta.title || m2.name)}">`,
-        `<meta property="og:description" content="${esc(m2.meta.description || "")}">`,
-        `<meta property="og:image" content="${esc(img)}">`,
-        `<meta name="twitter:card" content="summary_large_image">`,
-        `<title>${esc(m2.meta.title || m2.name)}</title>`
-      ].join("");
-      html = html.includes("<head>") ? html.replace("<head>", "<head>" + tags) : tags + html;
-      body = new TextEncoder().encode(html).buffer;
+  const wantsOg = (mime || "").includes("text/html") && !!m2?.meta && rel === "index.html";
+  let bodyStream = null;
+  let ogHtml = null;
+  if (wantsOg && (meta.size | 0) <= OG_MATERIALIZE_CEILING) {
+    try {
+      ogHtml = await tierTextBounded(cell, meta, `page ${rel}`);
+    } catch {
+      ogHtml = null;
     }
   }
-  return stamp(new Response(body, { headers: { "content-type": MIME[ext] || "application/octet-stream", "cache-control": cache } }));
+  if (ogHtml !== null && !ogHtml.includes("og:title")) {
+    const pubOrigin = new URL(request.headers.get("x-fragment-url") || request.url).origin;
+    const img = m2.meta.image || `${pubOrigin}/f/${m2.name}/__preview.svg`;
+    const tags = [
+      `<meta property="og:title" content="${esc(m2.meta.title || m2.name)}">`,
+      `<meta property="og:description" content="${esc(m2.meta.description || "")}">`,
+      `<meta property="og:image" content="${esc(img)}">`,
+      `<meta name="twitter:card" content="summary_large_image">`,
+      `<title>${esc(m2.meta.title || m2.name)}</title>`
+    ].join("");
+    ogHtml = ogHtml.includes("<head>") ? ogHtml.replace("<head>", "<head>" + tags) : tags + ogHtml;
+    return stamp(new Response(new TextEncoder().encode(ogHtml), { status: 200, headers: { "content-type": mime, "cache-control": cache } }));
+  }
+  if (ogHtml !== null) {
+    return stamp(new Response(ogHtml, { status: 200, headers: { "content-type": mime, "cache-control": cache } }));
+  }
+  const upstream = await tierStreamByHash(cell, meta.sha256);
+  return stamp(new Response(upstream.body, { status: upstream.status, headers: { "content-type": mime, "cache-control": cache } }));
 }
 function checkVisibility(cell, request, url) {
   const m = cell.manifest();
