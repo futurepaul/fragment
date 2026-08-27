@@ -1,0 +1,75 @@
+[package]
+name = "blobsd"
+version = "0.1.0"
+edition = "2021"
+description = "blobsd — minimal Blossom-conformant blob server backing the fragment blob tier"
+license = "Apache-2.0"
+
+# Standalone crate: fragment-rs has no root Cargo workspace (the cli/ directory
+# ships its own manifest + lockfile), so blobsd intentionally keeps its own
+# Cargo.lock and is not wired into any workspace. Audit boundary = this exact
+# lockfile; see docs/deps-audit.md.
+#
+# Version policy: every direct dependency is pinned exactly (`=`) to a release
+# published on or before 2026-05-22, and core HTTP/storage crates mirror the
+# versions celld audits wherever those versions themselves clear the cutoff
+# (docs/deps-audit.md records the overlap table and the divergences).
+
+[dependencies]
+axum = "=0.7.9"
+tokio = { version = "=1.52.3", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "signal",
+    "sync",
+    "time",
+    "fs",
+    "io-util",
+] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+thiserror = "=2.0.18"
+base64 = "=0.22.1"
+sha2 = "=0.10.9"
+hex = "=0.4.3"
+rusqlite = { version = "=0.31.0", features = ["bundled"] }
+# object_store feature set: `aws` is the bucket client. The `memory` backend
+# used by every non-live test ships unconditionally in this crate version —
+# no feature knob exists for it in 0.11.2.
+object_store = { version = "=0.11.2", default-features = false, features = [
+    "aws",
+] }
+futures-util = "=0.3.32"
+bytes = "=1.11.1"
+http = "=1.4.0"
+http-body = "=1.0.1"
+http-body-util = "=0.1.3"
+# Schnorr (BIP-340) verification over libsecp256k1, the same primitive
+# @noble/curves/secp256k1 implements client-side. Verification contexts only
+# in production code (`Secp256k1::verification_only`); the signing context
+# used by test fixtures is gated to cfg(test) — blobsd never signs at
+# runtime. Not part of celld's tree; justified independently in
+# docs/deps-audit.md (release 2024-09-06, bindings over the widely audited
+# C library).
+secp256k1 = { version = "=0.29.1", default-features = false, features = ["std"] }
+# npub (NIP-19 bech32) decoding for the allowlist and /list paths. Mirrors the
+# @scure/base codec the runtime and CLI lanes use, so all three agree on what
+# an npub is.
+bech32 = "=0.11.0"
+tempfile = "=3.27.0"
+
+[dev-dependencies]
+# ServiceExt::oneshot drives the router without a socket in integration tests.
+tower = { version = "=0.5.3", features = ["util"] }
+
+[profile.release]
+# Same shape celld ships: fat LTO prunes unused dependency code, panic=abort
+# drops unwind tables. A request path must not rely on unwinding anyway.
+lto = "fat"
+codegen-units = 1
+opt-level = "s"
+panic = "abort"
+strip = true
