@@ -1,5 +1,6 @@
 mod api;
 mod auth;
+mod blob;
 mod sync;
 mod watch;
 
@@ -622,6 +623,7 @@ fn run(cli: Cli) -> Result<()> {
                 prune,
                 verify: false,
                 writer_id: c.id.pubkey_hex.chars().take(8).collect(),
+                tiers: None, // sync_once resolves the tier per pass
             };
             if watch {
                 let cfg = watch::WatchConfig { live: !no_live, ..Default::default() };

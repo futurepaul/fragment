@@ -3,7 +3,11 @@
 // - atomic writes everywhere (state, pulled files); flock single-watcher guard
 // - three-way merge on conflicts (server keeps history); markers or copies
 // - append-only prefixes respected; mass-deletion guard; push/pull/mirror
+// - two-tier storage (docs/blob-tier.md): rows are pointers; bytes >64 KiB
+//   go CLI-direct to the blob tier below, pulls materialize via
+//   .fragment/cache/<sha> + streamed tmp + atomic rename
 use crate::api::{encode_q, Client};
+use crate::blob;
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -13,6 +17,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[derive(Debug)]
@@ -28,6 +33,7 @@ pub enum ConflictStrategy {
     Copy,
 }
 
+#[derive(Clone)]
 pub struct SyncOptions {
     pub mode: Mode,
     /// overlay a read-only source folder into dir before each pass: new
@@ -39,6 +45,10 @@ pub struct SyncOptions {
     pub prune: bool,
     pub verify: bool,
     pub writer_id: String, // 8 hex of our pubkey, for conflict-copy names
+    /// resolved blob-tier handle for THIS pass (memoized uploads across the
+    /// parallel warm pass and the serial commit loop); attached internally by
+    /// sync_once — callers construct options without it
+    pub tiers: Option<Arc<blob::TierShared>>,
 }
 
 impl Default for SyncOptions {
@@ -51,6 +61,7 @@ impl Default for SyncOptions {
             prune: false,
             verify: false,
             writer_id: "anon".into(),
+            tiers: None,
         }
     }
 }
@@ -329,6 +340,13 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
     }
     let mut state = load_state(dir, name)?;
 
+    // two-tier plumbing for this pass: FRAGMENT_BLOB_URL overrides config
+    // blob_url; without a tier the <=64 KiB inline path still works but any
+    // oversized push hard-fails with guidance (never a silent fallback)
+    let mut opts_owned = opts.clone();
+    opts_owned.tiers = Some(blob::TierShared::new(blob::BlobTier::resolve(&client.id)));
+    let opts = &opts_owned;
+
     // root identity: a different (dev,ino) with recorded identity means the
     // folder was moved/replaced — refuse rather than "sync" against a stranger
     let md = fs::metadata(dir)?;
@@ -344,25 +362,24 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
 
     let (mut local, stats) = scan_local(dir, Some(&state), opts.verify)?;
 
-    // cells hold documents, not media: oversized files are skipped with a
-    // loud warning instead of blocking the whole publish (a bot dropping
-    // one big asset must not wedge every later sync). A skipped file that
-    // was previously synced keeps its state entry, so it is neither pushed
-    // nor mistaken for a local deletion — the remote keeps the last-good
-    // copy until the file shrinks or moves out.
-    const MAX_FILE_BYTES: u64 = 1_000_000;
+    // beyond bloasd's own max-blob size nothing can ever land in the tier:
+    // those are warn-skipped (state keeps the last-good copy) instead of
+    // blocking the whole publish. Everything between the 64 KiB inline limit
+    // and this cap takes the blob-first path — an unconfigured tier fails
+    // THAT push loudly (blob::no_tier_error), it does not degrade to raw.
+    const OVER_TIER_CAP_SKIP: u64 = blob::MAX_BLOB_BYTES;
     let mut oversized: Vec<String> = Vec::new();
     let mut kept: HashMap<String, LocalFile> = HashMap::new();
     for (path, file) in local.iter() {
-        if file.size > MAX_FILE_BYTES {
-            oversized.push(format!("  {} ({:.1} KB over the 1 MB limit)", path, (file.size - MAX_FILE_BYTES) as f64 / 1000.0));
+        if file.size > OVER_TIER_CAP_SKIP {
+            oversized.push(format!("  {} ({:.1} MB over the 64 MiB tier cap)", path, (file.size - OVER_TIER_CAP_SKIP) as f64 / 1_000_000.0));
         }
     }
     if !oversized.is_empty() {
-        eprintln!("warning: skipped {} oversized file(s) — cell storage is for documents, not assets (a bucket or CDN is the right home for media):\n{}", oversized.len(), oversized.join("\n"));
+        eprintln!("warning: skipped {} oversized file(s) — even the blob tier caps out above here; host big media on a bucket/CDN and link it:\n{}", oversized.len(), oversized.join("\n"));
         let skipped: Vec<String> = local
             .iter()
-            .filter(|(_, f)| f.size > MAX_FILE_BYTES)
+            .filter(|(_, f)| f.size > OVER_TIER_CAP_SKIP)
             .map(|(p, _)| p.clone())
             .collect();
         for path in &skipped {
@@ -373,7 +390,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
                 );
             }
         }
-        local.retain(|_, f| f.size <= MAX_FILE_BYTES);
+        local.retain(|_, f| f.size <= OVER_TIER_CAP_SKIP);
         for (path, file) in kept {
             local.insert(path, file);
         }
@@ -431,6 +448,11 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
         }
     }
 
+    // blob-first warm pass: every big file this pass plausibly pushes gets
+    // its tier upload done here, <=UPLOAD_CONCURRENCY-wide, while the
+    // row-commit loop below stays serial (base_rev conflicts need order).
+    prewarm_tier(dir, &local, &append_only, &remote, opts.mode, opts.tiers.as_ref().expect("tiers attached"));
+
     for path in paths {
         let l = local.get(&path);
         let r = remote.get(&path).filter(|r| !r.deleted);
@@ -466,7 +488,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
                         if opts.mode == Mode::Push {
                             continue;
                         }
-                        pull_file(client, name, dir, &path, &mut state, &mut report, Some(lf))?;
+                        pull_file(client, name, dir, &path, &mut state, &mut report, Some((rf.rev, rf.sha256.as_str())))?;
                     }
                     (true, true) => {
                         if rf.sha256 == lf.sha256 {
@@ -506,7 +528,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
                             continue;
                         }
                         // --prune in pull mode: pull it back instead of deleting remote
-                        pull_file(client, name, dir, &path, &mut state, &mut report, None)?;
+                        pull_file(client, name, dir, &path, &mut state, &mut report, Some((rf.rev, rf.sha256.as_str())))?;
                         continue;
                     }
                     if is_append_only(&path) {
@@ -528,7 +550,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
                     if opts.mode == Mode::Push {
                         continue;
                     }
-                    pull_file(client, name, dir, &path, &mut state, &mut report, None)?;
+                    pull_file(client, name, dir, &path, &mut state, &mut report, Some((rf.rev, rf.sha256.as_str())))?;
                 }
             },
             (None, None) => {
@@ -553,10 +575,8 @@ fn push_file(
     opts: &SyncOptions,
 ) -> Result<()> {
     let bytes = fs::read(dir.join(path))?;
-    let resp = client.put_bytes(
-        &format!("/api/f/{name}/file?path={}&base_rev={base_rev}", encode_q(path)),
-        bytes.clone(),
-    )?;
+    let qs = format!("/api/f/{name}/file?path={}&base_rev={base_rev}", encode_q(path));
+    let resp = commit_push(client, opts.tiers.as_ref(), &qs, path, bytes.clone())?;
     if resp.status == 409 {
         // lost a race (or append-only): treat as a conflict to resolve
         let st = state.files.get(path).cloned();
@@ -576,6 +596,92 @@ fn push_file(
     Ok(())
 }
 
+/// One file → one row commit through the two-tier contract:
+/// `bytes.len() <= 65536` rides the inline carve-out as a raw body;
+/// anything larger is uploaded to the tier FIRST (kind-24242 auth event,
+/// HEAD-gated, descriptor hash verified) and then committed in the ref
+/// form {"ref":{"sha256","size","mime"}}. No tier + oversized = hard error.
+fn commit_push(
+    client: &Client,
+    tiers: Option<&Arc<blob::TierShared>>,
+    qs: &str,
+    path: &str,
+    bytes: Vec<u8>,
+) -> Result<crate::api::Resp> {
+    if bytes.len() <= blob::INLINE_MAX_BYTES {
+        return client.put_bytes(qs, bytes);
+    }
+    match tiers {
+        Some(tiers) => blob::blob_ensure(tiers, &sha256_hex(&bytes), &bytes)?,
+        None => return Err(blob::no_tier_error(path, bytes.len())),
+    }
+    client.put_ref(qs, &sha256_hex(&bytes), bytes.len() as u64, blob::mime_for(path))
+}
+
+/// Warm the tier for every big file this pass plausibly pushes so the
+/// uploads fan out (bounded by blob::UPLOAD_CONCURRENCY) instead of running
+/// one-at-a-time inside the commit loop. The candidate predicate is a
+/// deliberate SUPERSET of the real push decision: a spurious warm-up costs
+/// one HEAD probe against an idempotent store, while any missed warm-up
+/// still self-heals when push_file calls blob_ensure (same memo).
+/// Candidates are deduped by sha first — two files with identical content
+/// share one memo entry, so they can never double-PUT.
+fn prewarm_tier(
+    dir: &Path,
+    local: &HashMap<String, LocalFile>,
+    append_only: &[String],
+    remote: &HashMap<String, RemoteFile>,
+    mode: Mode,
+    tiers: &Arc<blob::TierShared>,
+) {
+    const MAX_IN_FLIGHT: usize = blob::UPLOAD_CONCURRENCY; // hard concurrency ceiling
+    if tiers.blob.is_none() || mode == Mode::Pull {
+        return; // nothing to warm without a tier or without pushes
+    }
+    let mut cands: Vec<(String, PathBuf)> = Vec::new();
+    for (path, lf) in local.iter() {
+        if lf.size <= blob::INLINE_MAX_BYTES as u64 {
+            continue;
+        }
+        let is_append_only = |p: &str| append_only.iter().any(|pre| p == pre.trim_end_matches('/') || p.starts_with(pre.as_str()));
+        if is_append_only(path) {
+            continue;
+        }
+        // will it actually change rows? unchanged-content files would only
+        // cost a HEAD; conservatively include them anyway except when the
+        // remote listing already shows this exact sha (pure no-op)
+        let remote_already_has_it =
+            remote.get(path).is_some_and(|r| !r.deleted && r.sha256 == lf.sha256);
+        if remote_already_has_it {
+            continue;
+        }
+        cands.push((lf.sha256.clone(), dir.join(path)));
+    }
+    if cands.is_empty() {
+        return;
+    }
+    cands.sort_by(|a, b| a.0.cmp(&b.0));
+    cands.dedup_by(|a, b| a.0 == b.0);
+    for chunk in cands.chunks(MAX_IN_FLIGHT) {
+        std::thread::scope(|scope| {
+            for (sha, p) in chunk {
+                let tiers = tiers.clone();
+                let sha = sha.clone();
+                let p = p.clone();
+                scope.spawn(move || {
+                    // best-effort: failures are recorded in the shared memo and
+                    // replayed loudly at the row-commit site; nothing printed here
+                    let _ = std::fs::read(&p).and_then(|bytes| {
+                        blob::blob_ensure(&tiers, &sha, &bytes).map_err(|e| {
+                            std::io::Error::other(format!("{e:#}"))
+                        })
+                    });
+                });
+            }
+        });
+    }
+}
+
 fn pull_file(
     client: &Client,
     name: &str,
@@ -583,21 +689,96 @@ fn pull_file(
     path: &str,
     state: &mut SyncState,
     report: &mut Report,
-    lf: Option<&LocalFile>,
+    src: Option<(u64, &str)>,
 ) -> Result<()> {
-    let resp = client.get(&format!("/api/f/{name}/file?path={}", encode_q(path)))?;
-    if !resp.ok() {
-        bail!("pull {} failed: {}", path, resp.err_summary());
-    }
     let target = dir.join(path);
-    atomic_write(&target, &resp.body)?;
-    let sha = sha256_hex(&resp.body);
+
+    // cache short-circuit BEFORE any network traffic: a present cache entry
+    // for this exact sha is content-addressed truth, so repeated pulls of an
+    // unchanged hash stay offline (and instant). Read errors degrade to a
+    // normal network pull.
+    let cached = src
+        .as_ref()
+        .and_then(|(_, sha)| blob::cache_lookup(dir, sha))
+        .and_then(|p| fs::read(&p).ok());
+    if let (Some((rev, sha)), Some(bytes)) = (&src, cached) {
+        atomic_write(&target, &bytes)?;
+        let md = fs::metadata(&target)?;
+        let mtime_ns = md.modified()?.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i128).unwrap_or(0);
+        state.files.insert(
+            path.to_string(),
+            FileState { rev: *rev, sha256: (*sha).to_string(), size: md.len(), mtime_ns },
+        );
+        report.pulled.push(path.to_string());
+        return Ok(());
+    }
+
+    // network fetch: follows redirects (the new public-read wire form answers
+    // with a 302 to `${BLOBSD_PUBLIC_URL}/${sha}`), streams to tmp next to
+    // the target (heap-flat for big blobs), fsyncs, then atomically renames;
+    // Last-Modified is honored best-effort so later scans keep their shortcut
+    let mut sr = client.get_stream(&format!("/api/f/{name}/file?path={}", encode_q(path)))?;
+    if !(200..300).contains(&sr.status) {
+        let st = sr.status;
+        bail!("pull {} failed: http {} {}", path, st, sr.err_summary());
+    }
+    let mtime = sr.last_modified();
+    let mut reader = sr.into_read();
+    let tmp = target.with_extension(format!("fragment-partial-{}", std::process::id()));
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let sha;
+    {
+        let f = File::create(&tmp)?;
+        let mut hw = HashWriter { inner: f, hasher: Sha256::new() };
+        std::io::copy(&mut reader, &mut hw).with_context(|| format!("streaming {path}"))?;
+        hw.inner.sync_all()?;
+        sha = hex::encode(hw.hasher.finalize());
+    }
+    if let Some((_, want)) = &src {
+        if !want.is_empty() && !want.eq_ignore_ascii_case(&sha) {
+            fs::remove_file(&tmp).ok();
+            bail!("pull {} failed: fetched sha256 {sha} but the listing promised {want}", path);
+        }
+    }
+    // write-through into the cache BEFORE publishing the file: hygiene errors
+    // never block a pull, so treat them as warnings only
+    if let Err(e) = blob::cache_store(dir, &sha, &tmp) {
+        eprintln!("warning: could not cache {}: {e}", sha);
+    }
+    if let Some(t) = mtime {
+        let f = File::options().write(true).open(&tmp)?;
+        f.set_times(fs::FileTimes::new().set_modified(t))?;
+    }
+    fs::rename(&tmp, &target)?;
+
     let md = fs::metadata(&target)?;
     let mtime_ns = md.modified()?.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i128).unwrap_or(0);
-    state.files.insert(path.to_string(), FileState { rev: resp.rev.unwrap_or(0), sha256: sha, size: md.len(), mtime_ns });
-    let _ = lf;
+    state.files.insert(
+        path.to_string(),
+        FileState { rev: src.map(|(r, _)| r).unwrap_or(0), sha256: sha, size: md.len(), mtime_ns },
+    );
     report.pulled.push(path.to_string());
     Ok(())
+}
+
+/// Write-forwarding wrapper tallying sha256 + byte count while streaming a
+/// pull body to its tmp file.
+struct HashWriter<W: Write> {
+    inner: W,
+    hasher: Sha256,
+}
+impl<W: Write> Write for HashWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // hash only the bytes actually consumed (partial writes are legal)
+        let n = self.inner.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 fn fetch_remote(client: &Client, name: &str, path: &str) -> Result<Option<RemoteFile>> {
@@ -644,10 +825,9 @@ fn resolve_conflict(
         MergeOutcome::Clean(merged) => {
             atomic_write(&dir.join(path), &merged)?;
             let sha = sha256_hex(&merged);
-            let resp = client.put_bytes(
-                &format!("/api/f/{name}/file?path={}&base_rev={}", encode_q(path), rf.rev),
-                merged.clone(),
-            )?;
+            let qs = format!("/api/f/{name}/file?path={}&base_rev={}", encode_q(path), rf.rev);
+            // merged pushes follow the same two-tier contract as plain pushes
+            let resp = commit_push(client, opts.tiers.as_ref(), &qs, path, merged.clone())?;
             if resp.ok() {
                 let v = resp.json()?;
                 let md = fs::metadata(dir.join(path))?;
@@ -817,5 +997,25 @@ mod tests {
         assert!(st.files.is_empty()); // v1 → fresh
         assert_eq!(st.schema_version, 2);
         fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod hw_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    // pins the trap this once caused: hex::encode(finalize()) is the digest,
+    // while sha256_hex(finalize()) would hash the digest a second time
+    fn hash_writer_tallies_streamed_bytes() {
+        let payload = b"hello pull";
+        let mut hw = HashWriter { inner: Cursor::new(Vec::new()), hasher: Sha256::new() };
+        let mut rd = Cursor::new(payload.to_vec());
+        std::io::copy(&mut rd, &mut hw).unwrap();
+        let inner = hw.inner.into_inner();
+        assert_eq!(inner, payload.to_vec(), "bytes forwarded");
+        assert_eq!(hex::encode(hw.hasher.finalize()), "6a853b1f10c0c94d79bdd80f7fd724207d05b5174104d67677ff916e1114f096");
+        assert_ne!(sha256_hex(&Sha256::digest(payload)), "6a853b1f10c0c94d79bdd80f7fd724207d05b5174104d67677ff916e1114f096");
     }
 }
