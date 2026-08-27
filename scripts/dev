@@ -91,6 +91,7 @@ start_celld() {
   # env passthroughs must be exported before exec — a ${VAR:+NAME=val}
   # prefix expands to ordinary words, not assignments, and silently
   # never reaches celld.
+  if [ -f "$DEV/tier.env" ]; then set -a; . "$DEV/tier.env"; set +a; fi
   if [ -n "${OPENROUTER_API_KEY:-}" ]; then
     export CELLD_VAR_OPENROUTER_API_KEY="$OPENROUTER_API_KEY"
   fi

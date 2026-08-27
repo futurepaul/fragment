@@ -74,6 +74,7 @@ pub fn verify_authorization(
     cfg_public_url: &str,
     required: Verb,
     allow_hex_pubkeys: &std::collections::BTreeSet<String>,
+    allow_all: bool,
     now_unix: i64,
 ) -> Result<Verified, ApiError> {
     // Ingress check: the configured URL is non-empty — an empty template
@@ -100,7 +101,7 @@ pub fn verify_authorization(
     }
 
     let event: RawEvent = serde_json::from_slice(&raw_json).map_err(|_| ApiError::MalformedAuth)?;
-    verify_event(event, cfg_public_url, required, allow_hex_pubkeys, now_unix)
+    verify_event(event, cfg_public_url, required, allow_hex_pubkeys, allow_all, now_unix)
 }
 
 /// Exact wire shape of the client event. Scalars keep their original types so
@@ -121,6 +122,7 @@ fn verify_event(
     cfg_public_url: &str,
     required: Verb,
     allow_hex_pubkeys: &std::collections::BTreeSet<String>,
+    allow_all: bool,
     now_unix: i64,
 ) -> Result<Verified, ApiError> {
     // ---- id hash -----------------------------------------------------------
@@ -176,7 +178,7 @@ fn verify_event(
         return Err(ApiError::ForbiddenUrl);
     }
     let pubkey_hex = ev.pubkey.to_lowercase();
-    if !allow_hex_pubkeys.contains(pubkey_hex.as_str()) {
+    if !allow_all && !allow_hex_pubkeys.contains(pubkey_hex.as_str()) {
         return Err(ApiError::ForbiddenNpub);
     }
 
@@ -387,7 +389,7 @@ mod tests {
     #[test]
     fn valid_upload_event_accepts_and_reports_key() {
         let header = fx::build_auth_header(SERVER_URL, "upload", &Override::default());
-        let verified = verify_authorization(&header, SERVER_URL, Verb::Upload, &allowlist(), now())
+        let verified = verify_authorization(&header, SERVER_URL, Verb::Upload, &allowlist(), false, now())
             .expect("valid event accepted");
         assert_eq!(verified.pubkey_hex, fx::test_pubkey_hex());
     }
@@ -400,6 +402,7 @@ mod tests {
             SERVER_URL,
             Verb::Upload,
             &allowlist(),
+            false,
             now(),
         )
         .unwrap_err();
@@ -415,6 +418,7 @@ mod tests {
             SERVER_URL,
             Verb::Upload,
             &allowlist(),
+            false,
             now(),
         )
         .unwrap_err();
@@ -430,6 +434,7 @@ mod tests {
             SERVER_URL,
             Verb::Upload,
             &allowlist(),
+            false,
             now(),
         )
         .unwrap_err();
@@ -445,6 +450,7 @@ mod tests {
             SERVER_URL,
             Verb::Upload,
             &allowlist(),
+            false,
             now(),
         )
         .unwrap_err();
@@ -460,6 +466,7 @@ mod tests {
             SERVER_URL,
             Verb::Upload,
             &allowlist(),
+            false,
             now(),
         )
         .unwrap_err();
@@ -475,6 +482,7 @@ mod tests {
             SERVER_URL,
             Verb::Upload,
             &allowlist(),
+            false,
             now(),
         )
         .unwrap_err();
@@ -490,6 +498,7 @@ mod tests {
             SERVER_URL,
             Verb::Upload,
             &allowlist(),
+            false,
             now(),
         )
         .unwrap_err();
@@ -505,6 +514,7 @@ mod tests {
             SERVER_URL,
             Verb::Upload,
             &allowlist(),
+            false,
             now(),
         )
         .unwrap_err();
@@ -520,6 +530,7 @@ mod tests {
             SERVER_URL,
             Verb::Delete,
             &allowlist(),
+            false,
             now(),
         )
         .unwrap_err();
@@ -531,6 +542,7 @@ mod tests {
             SERVER_URL,
             Verb::Delete,
             &allowlist(),
+            false,
             now(),
         )
         .unwrap_err();
@@ -542,20 +554,20 @@ mod tests {
         let allow = allowlist();
         // No nostr prefix at all.
         assert_eq!(
-            verify_authorization("Bearer something", SERVER_URL, Verb::Upload, &allow, now())
+            verify_authorization("Bearer something", SERVER_URL, Verb::Upload, &allow, false, now())
                 .unwrap_err(),
             ApiError::MissingAuth
         );
         // Prefix right, payload garbage.
         assert_eq!(
-            verify_authorization("Nostr !!!not-base64!!!", SERVER_URL, Verb::Upload, &allow, now())
+            verify_authorization("Nostr !!!not-base64!!!", SERVER_URL, Verb::Upload, &allow, false, now())
                 .unwrap_err(),
             ApiError::MalformedAuth
         );
         // Base64 of non-JSON.
         let b64 = base64::engine::general_purpose::STANDARD.encode(b"<html>");
         assert_eq!(
-            verify_authorization(&format!("Nostr {b64}"), SERVER_URL, Verb::Upload, &allow, now())
+            verify_authorization(&format!("Nostr {b64}"), SERVER_URL, Verb::Upload, &allow, false, now())
                 .unwrap_err(),
             ApiError::MalformedAuth
         );

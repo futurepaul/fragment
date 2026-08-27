@@ -111,7 +111,16 @@ async function apiRoute(cell, request, url) {
       }
       return v;
     };
-    return json({ differs: JSON.stringify(canon(m)) !== JSON.stringify(canon(res.manifest)), wanted: res.manifest });
+    const seeded = canon(normalizeManifest({
+      name: m.name,
+      visibility: "link",
+      editors: [],
+      viewers: [],
+      workflows: [],
+      secrets: []
+    }).manifest);
+    const unchanged = JSON.stringify(canon(m)) === JSON.stringify(seeded);
+    return json({ differs: !unchanged && JSON.stringify(canon(m)) !== JSON.stringify(canon(res.manifest)), wanted: res.manifest });
   }
   if (p === "/pause" && request.method === "POST") {
     const a = authz("editor");

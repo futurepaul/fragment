@@ -59,6 +59,9 @@ pub struct Config {
     /// Allowlisted signer pubkeys as lowercase hex, decoded from npubs at
     /// boot so request-path comparisons are plain fixed-width hex matches.
     pub allow_hex_pubkeys: BTreeSet<String>,
+    /// true when BLOBSD_ALLOW_NPUBS contains "*": any verified event pubkey
+    /// may store (dev/test; production sets explicit npubs).
+    pub allow_all: bool,
     pub internal_token: String,
     pub public_get: bool,
 }
@@ -158,16 +161,23 @@ impl Config {
             BootError::Config("BLOBSD_ALLOW_NPUBS is required".to_string()),
         )?;
         let mut allow_hex_pubkeys = BTreeSet::new();
+        let mut allow_all = false;
         for npub in allow_csv.split(',') {
             let npub = npub.trim();
             if npub.is_empty() {
+                continue;
+            }
+            if npub == "*" {
+                // Dev/test affordance: any verified event pubkey may store.
+                // Ledgered as accepted coarseness; production sets explicit npubs.
+                allow_all = true;
                 continue;
             }
             let hex_pubkey = crate::auth::npub_to_hex(npub)
                 .map_err(|e| BootError::Config(format!("BLOBSD_ALLOW_NPUBS: {npub}: {e}")))?;
             allow_hex_pubkeys.insert(hex_pubkey);
         }
-        if allow_hex_pubkeys.is_empty() {
+        if allow_hex_pubkeys.is_empty() && !allow_all {
             // Fail closed: an empty allowlist would silently brick every
             // write while serving reads fine — half-alive fleet state nobody
             // wants to discover from CLI errors three weeks later.
@@ -205,6 +215,7 @@ impl Config {
             public_url,
             max_blob_bytes: max_blob_bytes_raw,
             allow_hex_pubkeys,
+            allow_all,
             internal_token,
             public_get,
         })

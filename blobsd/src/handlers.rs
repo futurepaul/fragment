@@ -122,6 +122,31 @@ pub(crate) fn authorize(
     headers: &HeaderMap,
     verb: Verb,
 ) -> Result<auth::Verified, ApiError> {
+    // Internal callers (the fragment runtime) authenticate with the shared
+    // bearer on every verb — they hold no owner key to sign events, and
+    // bytes-first ordering must not force owner secrets into workers.
+    // Attributed to the fleet's first allowlisted pubkey so /list stays
+    // coherent for internally-placed blobs.
+    if let Some(value) = headers
+        .get(http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+    {
+        if let Some(provided) = value.strip_prefix("Bearer ") {
+            if token_matches(provided, &state.cfg.internal_token) {
+                let pubkey_hex = state
+                    .cfg
+                    .allow_hex_pubkeys
+                    .iter()
+                    .next()
+                    .cloned()
+                    // wildcard mode leaves the set empty by design; internal
+                    // blobs attribute to a stable synthetic identity instead
+                    .unwrap_or_else(|| "0".repeat(64));
+                return Ok(auth::Verified { pubkey_hex });
+            }
+            return Err(ApiError::BadReadToken);
+        }
+    }
     let header_value = headers
         .get(http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -131,6 +156,7 @@ pub(crate) fn authorize(
         &state.cfg.public_url,
         verb,
         &state.cfg.allow_hex_pubkeys,
+        state.cfg.allow_all,
         now_unix_secs(),
     )
 }
