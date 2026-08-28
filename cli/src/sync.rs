@@ -612,7 +612,7 @@ fn commit_push(
         return client.put_bytes(qs, bytes);
     }
     match tiers {
-        Some(tiers) => blob::blob_ensure(tiers, &sha256_hex(&bytes), &bytes)?,
+        Some(tiers) => blob::blob_ensure(tiers, &sha256_hex(&bytes), &bytes, blob::mime_for(path))?,
         None => return Err(blob::no_tier_error(path, bytes.len())),
     }
     client.put_ref(qs, &sha256_hex(&bytes), bytes.len() as u64, blob::mime_for(path))
@@ -672,7 +672,7 @@ fn prewarm_tier(
                     // best-effort: failures are recorded in the shared memo and
                     // replayed loudly at the row-commit site; nothing printed here
                     let _ = std::fs::read(&p).and_then(|bytes| {
-                        blob::blob_ensure(&tiers, &sha, &bytes).map_err(|e| {
+                        blob::blob_ensure(&tiers, &sha, &bytes, crate::blob::mime_for(p.to_string_lossy().as_ref())).map_err(|e| {
                             std::io::Error::other(format!("{e:#}"))
                         })
                     });

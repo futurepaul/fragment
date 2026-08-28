@@ -82,6 +82,13 @@ impl BlobTier {
     /// Ensure the bytes are in the tier (HEAD-gated PUT /upload), verifying
     /// the echoed descriptor names OUR hash before declaring victory.
     pub fn ensure_uploaded(&self, sha256: &str, bytes: &[u8]) -> Result<()> {
+        self.ensure_uploaded_with_mime(sha256, bytes, "application/octet-stream")
+    }
+
+    /// Mime rides the upload: bloasd stores it in the descriptor and serves
+    /// it on every public read — omitting it here sentenced >64KB assets to
+    /// application/octet-stream forever (dedupe replays never rewrite).
+    pub fn ensure_uploaded_with_mime(&self, sha256: &str, bytes: &[u8], mime: &str) -> Result<()> {
         if !self.needs_upload(sha256) {
             return Ok(());
         }
@@ -92,6 +99,7 @@ impl BlobTier {
             .http
             .put(format!("{}/upload", self.base))
             .header("authorization", &auth)
+            .header("content-type", mime)
             .body(bytes.to_vec())
             .send()
             .context("blob tier unreachable")?;
@@ -150,7 +158,7 @@ pub fn no_tier_error(path: &str, size: usize) -> anyhow::Error {
 
 /// Upload one candidate via the shared memo (memo hit short-circuits both
 /// directions: successes are free, failures replay their original error).
-pub fn blob_ensure(shared: &Arc<TierShared>, sha256: &str, bytes: &[u8]) -> Result<()> {
+pub fn blob_ensure(shared: &Arc<TierShared>, sha256: &str, bytes: &[u8], mime: &str) -> Result<()> {
     {
         let memo = shared.memo.lock().expect("memo lock");
         if let Some(entry) = memo.get(sha256) {
@@ -162,7 +170,7 @@ pub fn blob_ensure(shared: &Arc<TierShared>, sha256: &str, bytes: &[u8]) -> Resu
     }
     let outcome = match &shared.blob {
         Some(tier) => tier.ensure_uploaded(sha256, bytes),
-        None => Err(no_tier_error("(file)", bytes.len())),
+        None => Err(no_tier_error("(file — path unavailable in prewarm)", bytes.len())),
     };
     let msg = outcome.as_ref().err().map(|e| format!("{e:#}"));
     shared.memo.lock().expect("memo lock").insert(sha256.to_string(), msg);
@@ -557,12 +565,12 @@ mod tests {
     fn no_tier_guidance_names_the_env_var() {
         let shared = TierShared::new(None);
         let bytes = vec![0u8; INLINE_MAX_BYTES + 1];
-        let err = blob_ensure(&shared, &sha_of(&bytes), &bytes).expect_err("absent tier must hard-fail");
+        let err = blob_ensure(&shared, &sha_of(&bytes), &bytes, "application/octet-stream").expect_err("absent tier must hard-fail");
         let msg = format!("{err:#}");
         assert!(msg.contains("FRAGMENT_BLOB_URL"), "guidance names the env var: {msg}");
         assert!(msg.contains("blob_url"), "guidance names the config key: {msg}");
         // memo replays the SAME failure without retrying any network call
-        let again = blob_ensure(&shared, &sha_of(&bytes), &bytes).expect_err("replayed");
+        let again = blob_ensure(&shared, &sha_of(&bytes), &bytes, "application/octet-stream").expect_err("replayed");
         assert_eq!(format!("{again:#}"), msg);
     }
 

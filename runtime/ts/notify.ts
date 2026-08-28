@@ -43,7 +43,10 @@ export async function drainNotify(cell) {
           "x-fragment-hops": "1",
           "x-fragment-cause": String(name),
         },
-        body: JSON.stringify(frame),
+        // envelope like a hand-posted drop: the inbox route stores
+        // body.payload (a bare frame would arrive as payload:null and the
+        // receiver's workflows could never see paths/rev)
+        body: JSON.stringify({ source: `notify:${name}`, payload: frame }),
         signal: AbortSignal.timeout(10_000),
       });
       ok = resp.ok;
