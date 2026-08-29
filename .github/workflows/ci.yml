@@ -1,5 +1,6 @@
-# fragment CI: unit tests for the Rust CLI + the full e2e suite against a
-# real celld stack backed by MinIO (S3 — same backend family as production).
+# fragment CI: unit tests for the Rust CLI + blobsd, and the full e2e suite
+# against celld 0.4.0's `celld dev` (local object store) with the fs-backed
+# blobsd tier — all native processes, no docker, no MinIO.
 name: ci
 
 on:
@@ -10,6 +11,9 @@ on:
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  CELLD_VERSION: v0.4.0
 
 jobs:
   rust:
@@ -23,19 +27,19 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             cli/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('cli/Cargo.lock') }}
+            blobsd/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('cli/Cargo.lock', 'blobsd/Cargo.lock') }}
       - name: unit tests
         run: cargo test
         working-directory: cli
+      - name: blobsd tests
+        run: cargo test --release
+        working-directory: blobsd
 
   e2e:
     runs-on: ubuntu-latest
 
     env:
-      S3_ENDPOINT: http://127.0.0.1:9000
-      AWS_ACCESS_KEY_ID: minio
-      AWS_SECRET_ACCESS_KEY: miniosecret
-      AWS_REGION: us-east-1
       # optional: with this secret set, the guide's ai blocks run in CI too
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 
@@ -46,25 +50,13 @@ jobs:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
 
-      # not a services: container on purpose — this MinIO release ships
-      # Cmd=["minio"] with no default `server /data`, and service
-      # containers can't be given a command.
-      - name: start MinIO (pinned)
+      - name: install celld (pinned)
         run: |
-          docker run -d --name minio -p 9000:9000 \
-            -e MINIO_ROOT_USER=minio -e MINIO_ROOT_PASSWORD=miniosecret \
-            minio/minio:RELEASE.2025-07-23T15-54-02Z server /data
-          for _ in $(seq 1 30); do
-            curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1 && break
-            sleep 1
-          done
-          curl -fsS http://127.0.0.1:9000/minio/health/live
-
-      - name: install celld
-        run: |
-          curl -fsSL https://celld.dev/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          command -v celld
+          mkdir -p ~/.local/bin
+          curl -fsSL "https://github.com/denoland/celld/releases/download/${CELLD_VERSION}/celld-x86_64-unknown-linux-gnu.gz" \
+            | gunzip > ~/.local/bin/celld
+          chmod +x ~/.local/bin/celld
+          ~/.local/bin/celld --version
 
       - name: root deps (@noble for signing)
         run: npm install --no-audit --no-fund
@@ -75,32 +67,36 @@ jobs:
           git diff --exit-code --quiet runtime/src || {
             echo "runtime/src is stale — run scripts/build-runtime and commit"; exit 1; }
 
-      - name: create bucket
-        run: scripts/ci-bucket
-
-      - name: deploy runtime + start host (with host secret)
-        run: |
-          export FRAGMENT_HOST_SECRET="$(openssl rand -hex 32)"
-          echo "FRAGMENT_HOST_SECRET=$FRAGMENT_HOST_SECRET" >> "$GITHUB_ENV"
-          scripts/ci-up
-
       - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             cli/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('cli/Cargo.lock') }}
+            blobsd/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('cli/Cargo.lock', 'blobsd/Cargo.lock') }}
 
-      - name: build CLI
+      - name: build CLI + blobsd
         run: cargo build
         working-directory: cli
+      - name: build blobsd (release)
+        run: cargo build --release
+        working-directory: blobsd
+
+      - name: bring up the native stack (celld dev + fs tier)
+        run: |
+          export FRAGMENT_HOST_SECRET="$(openssl rand -hex 32)"
+          scripts/dev up
 
       - name: e2e suite
         run: >
+          E2E_BLOBSD_TOKEN=e2e-blob-token-0123456789abcdef
+          FRAGMENT_BLOB_URL=http://127.0.0.1:9940
           FRAGMENT_BIN="$PWD/cli/target/debug/fragment"
           node scripts/e2e.mjs --all
 
-      - name: celld log on failure
+      - name: host logs on failure
         if: failure()
-        run: tail -80 .dev/celld.log
+        run: |
+          tail -80 .dev/celld-dev.log 2>/dev/null || true
+          tail -40 .dev/blobsd.log 2>/dev/null || true

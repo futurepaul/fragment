@@ -2023,7 +2023,10 @@ const cliTierSection = async () => {
     req.on('end', () => {
       const body = Buffer.concat(chunks);
       const target = req.url;
-      bump(`${req.method} ${target}`);
+      // the CLI's presence probe is a 1-byte ranged GET; record it apart
+      // from full-body GETs so pull-path counting stays meaningful
+      const probe = req.method === 'GET' && !!req.headers.range;
+      bump(`${probe ? 'GET-probe' : req.method} ${target}`);
       const auth = req.headers.authorization || '';
       const hasAuth = /^nostr /i.test(auth);
       const reply = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
@@ -2174,7 +2177,7 @@ const cliTierSection = async () => {
     r = await cli(home, ['--dir', dir], { FRAGMENT_BLOB_URL: STUB });
     eq(r.code, 0, 're-push after state rebuild passes');
     eq(count('PUT /upload'), 1, 'HEAD hit on existing blob skips the second PUT');
-    eq(count('HEAD /') >= 2, true, 'both passes probed the tier with HEAD first');
+    eq(count('GET-probe /') >= 2, true, 'both passes probed tier presence (ranged GET) first');
     ok(S.refPuts.filter((x) => x.target.includes('path=big.bin')).length === 2, 'row re-committed via ref form');
 
     // 4) env FRAGMENT_BLOB_URL overrides a config blob_url
@@ -2194,7 +2197,7 @@ const cliTierSection = async () => {
     eq(readFileSync(join(dir, 'big.bin')).equals(big), true, 'pulled bytes identical (via 302 to tier)');
     ok(existsSync(join(dir, '.fragment', 'cache', bigSha)), 'pull populated .fragment/cache/<sha>');
     const getsAfterFirst = count(`GET /${bigSha}`);
-    eq(getsAfterFirst, 1, 'first pull fetched from the tier exactly once');
+    eq(getsAfterFirst, 1, 'first pull fetched from the tier exactly once (probes counted separately)');
 
     rmSync(join(dir, 'big.bin'));
     r = await cli(home, ['--dir', dir, '--mode', 'pull', '--prune'], { FRAGMENT_BLOB_URL: STUB });

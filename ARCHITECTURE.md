@@ -250,19 +250,23 @@ in the first prototype: never let a report disagree with the ledger.)
 
 ## Local dev
 
-No docker, no cloud account:
+No docker, no cloud account, no bucket:
 
 ```
-scripts/dev up       # MinIO (docker) + celld on :8789
-scripts/dev deploy   # build + deploy runtime/ to the fleet
+scripts/dev up       # celld dev (local object store) + blobsd (fs backend)
+scripts/dev deploy   # rebuild runtime/ and restart the dev host
 scripts/dev down
 ```
 
-MinIO is the bucket — the same container image CI runs, so local and CI
-exercise one storage implementation (S3 signing, list semantics, the works)
-instead of an emulator's approximations. State lives in `.dev/` (`dev wipe`
-resets it). Production swaps MinIO's endpoint for R2 and adds Caddy; nothing
-else changes.
+`celld dev` gives the fleet a persistent local object store;
+`BLOBSD_BACKEND=fs` gives the blob tier a plain directory — the whole stack
+is two native processes, which is what CI runs too (see `.github/workflows`).
+Everything above the storage seam (handlers, descriptors, convergence) is
+backend-blind, so the trade is explicit: local/CI exercise the fs lane while
+production runs S3/R2 — if the two ever disagree, the complaint goes
+upstream with a failing case from either side. State lives in
+`runtime/.celld/dev` (cells) and `.dev/blobs-root` (blobs); `dev wipe`
+resets both together.
 
 ## What this deliberately does not have (yet)
 

@@ -1,178 +1,145 @@
 #!/usr/bin/env bash
-# fragment dev environment: MinIO (bucket, same container image and creds as
-# CI) + celld (host). verbs: up | down | deploy | status | logs | wipe
+# fragment dev environment: celld dev (local object store) + blobsd (fs
+# backend) — two native processes, no docker, no MinIO.
+# verbs: up | down | deploy | status | logs | wipe
 #
-# Local world persists in .dev/minio-data (bucket) and .dev/watch (cells).
-# `wipe` throws both away together — a fresh bucket behind an old watch dir
-# resurrects zombie cells, so they are born and destroyed as a pair.
+# Local world persists in runtime/.celld/dev (cells) and .dev/blobs-root
+# (blob tier). `wipe` throws both away together — a fresh tier behind old
+# cell state means rows naming objects that don't exist, so they are born
+# and destroyed as a pair.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DEV=.dev
 TOOLS="$DEV/tools"
-MINIO_PORT=9000
 CELLD_PORT=8789
-BUCKET=s3://fragment-dev
-MINIO_CONTAINER=fragment-dev-minio
-MINIO_IMAGE=minio/minio:RELEASE.2025-07-23T15-54-02Z
-MC_IMAGE=minio/mc:RELEASE.2025-08-13T08-35-41Z
+BLOBSD_PORT=9940
+# Long enough for blobsd's 16-char token floor; the e2e hint below passes it
+# to the suite via E2E_BLOBSD_TOKEN so dev stack and tests share one tier.
+BLOBSD_TOKEN="${DEV_BLOBSD_TOKEN:-e2e-blob-token-0123456789abcdef}"
 
-# Same development-only credentials the CI workflow uses.
-export AWS_ACCESS_KEY_ID=minio
-export AWS_SECRET_ACCESS_KEY=miniosecret
-export AWS_REGION=us-east-1
-export S3_ENDPOINT="http://127.0.0.1:$MINIO_PORT"
-export CELLD_ESBUILD="$PWD/$TOOLS/node_modules/.bin/esbuild"
-export PATH="$HOME/.local/bin:$PATH"
-
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 mkdir -p "$DEV"
 
 # Optional project .env: OPENROUTER_API_KEY=... (never committed)
 if [ -f .env ]; then set -a; . ./.env; set +a; fi
-
-tools() {
-  if [ ! -x "$TOOLS/node_modules/.bin/esbuild" ]; then
-    mkdir -p "$TOOLS"
-    (cd "$TOOLS" && [ -f package.json ] || npm init -y >/dev/null; npm install esbuild >/dev/null)
-  fi
-}
-
-minio_running() { curl -s -o /dev/null -m 2 "http://127.0.0.1:$MINIO_PORT/minio/health/live"; }
-celld_running() { curl -s -o /dev/null -m 2 "http://127.0.0.1:$CELLD_PORT/__internal/ping"; }
-
-start_minio() {
-  if minio_running; then
-    echo "minio: already running on :$MINIO_PORT"
-    if ! docker inspect "$MINIO_CONTAINER" >/dev/null 2>&1; then
-      echo "WARNING: minio on :$MINIO_PORT was not started by this project." >&2
-      echo "         Its bucket data is not paired with this project's celld watch dir." >&2
-    fi
-    return
-  fi
-  if [ ! -d "$DEV/minio-data" ]; then
-    # Fresh bucket: the celld watch dir (local cell state) must be born with
-    # it, otherwise stale local state shadows the empty bucket (zombie cells).
-    rm -rf "$DEV/watch"
-  fi
-  mkdir -p "$DEV/minio-data"
-  docker run -d --name "$MINIO_CONTAINER" -p "127.0.0.1:$MINIO_PORT:9000" \
-    -v "$PWD/$DEV/minio-data:/data" \
-    -e MINIO_ROOT_USER="$AWS_ACCESS_KEY_ID" \
-    -e MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY" \
-    "$MINIO_IMAGE" server /data >/dev/null
-  for _ in $(seq 1 30); do
-    minio_running && break
-    sleep 0.5
-  done
-  minio_running || { echo "minio: container failed to come up" >&2; docker logs "$MINIO_CONTAINER" | tail -10 >&2; exit 1; }
-  echo "minio: started on :$MINIO_PORT (container $MINIO_CONTAINER)"
-}
-
-# Same mc invocation scripts/ci-bucket uses, so dev and CI create buckets
-# through identical code paths.
-make_bucket() {
-  local bucket="${BUCKET#s3://}"
-  docker run --rm --network host --entrypoint /bin/sh "$MC_IMAGE" -ec "
-    mc alias set dev '$S3_ENDPOINT' '$AWS_ACCESS_KEY_ID' '$AWS_SECRET_ACCESS_KEY' >/dev/null
-    mc mb --ignore-existing 'dev/$bucket'
-  " >/dev/null
-}
-
-# dev convenience: bring the local OpenRouter key into the dev stack when
-# present, so guide ai-blocks run without remembering to export it first
-for keyfile in "$HOME/dev/finite/fragment/.env" "$PWD/.env"; do
+for keyfile in "$HOME/dev/finite/fragment/.env"; do
   if [ -z "${OPENROUTER_API_KEY:-}" ] && [ -f "$keyfile" ]; then
     OPENROUTER_API_KEY="$(grep -o '^OPENROUTER_API_KEY=.*' "$keyfile" | head -1 | cut -d= -f2-)"
     export OPENROUTER_API_KEY
   fi
 done
 
-start_celld() {
-  if celld_running; then echo "celld: already running on :$CELLD_PORT"; return; fi
-  # env passthroughs must be exported before exec — a ${VAR:+NAME=val}
-  # prefix expands to ordinary words, not assignments, and silently
-  # never reaches celld.
-  if [ -f "$DEV/tier.env" ]; then set -a; . "$DEV/tier.env"; set +a; fi
+tools() {
+  # celld dev bundles the runtime with esbuild (CELLD_ESBUILD when not on PATH)
+  if [ ! -x "$TOOLS/node_modules/.bin/esbuild" ]; then
+    mkdir -p "$TOOLS"
+    (cd "$TOOLS" && [ -f package.json ] || npm init -y >/dev/null; npm install esbuild >/dev/null)
+  fi
+}
+
+celld_running() { curl -s -o /dev/null -m 2 "http://127.0.0.1:$CELLD_PORT/__internal/ping"; }
+blobsd_running() { curl -s -o /dev/null -m 2 "http://127.0.0.1:$BLOBSD_PORT/"; }
+
+start_blobsd() {
+  if blobsd_running; then echo "blobsd: already running on :$BLOBSD_PORT"; return; fi
+  if [ ! -x blobsd/target/release/blobsd ]; then
+    echo "blobsd: building (first run)…"
+    (cd blobsd && cargo build --release >/dev/null)
+  fi
+  mkdir -p "$DEV/blobsd" "$DEV/blobs-root"
+  BLOBSD_LISTEN="127.0.0.1:$BLOBSD_PORT" \
+  BLOBSD_DATA_DIR="$PWD/$DEV/blobsd" \
+  BLOBSD_PUBLIC_URL="http://127.0.0.1:$BLOBSD_PORT" \
+  BLOBSD_BACKEND=fs \
+  BLOBSD_FS_ROOT="$PWD/$DEV/blobs-root" \
+  BLOBSD_ALLOW_NPUBS='*' \
+  BLOBSD_INTERNAL_TOKEN="$BLOBSD_TOKEN" \
+  BLOBSD_PUBLIC_GET=true \
+  nohup blobsd/target/release/blobsd > "$DEV/blobsd.log" 2>&1 &
+  echo $! > "$DEV/blobsd.pid"
+  for _ in $(seq 1 20); do blobsd_running && break; sleep 0.5; done
+  blobsd_running || { echo "blobsd: did not come up; last log lines:" >&2; tail -10 "$DEV/blobsd.log" >&2; exit 1; }
+  echo "blobsd: started on :$BLOBSD_PORT (fs backend, $DEV/blobs-root)"
+}
+
+celld_env() {
+  export CELLD_WORKER_LOADER=LOADER
+  export CELLD_VAR_FRAGMENT_INTERNAL_URL="http://127.0.0.1:$CELLD_PORT"
+  export CELLD_ESBUILD="$PWD/$TOOLS/node_modules/.bin/esbuild"
+  export CELLD_VAR_BLOBSD_URL="http://127.0.0.1:$BLOBSD_PORT"
+  export CELLD_VAR_BLOBSD_INTERNAL_TOKEN="$BLOBSD_TOKEN"
+  export CELLD_VAR_BLOBSD_PUBLIC_URL="http://127.0.0.1:$BLOBSD_PORT"
+  export CELLD_VAR_BLOBSD_PUBLIC_GET="1"
   if [ -n "${OPENROUTER_API_KEY:-}" ]; then
     export CELLD_VAR_OPENROUTER_API_KEY="$OPENROUTER_API_KEY"
   fi
   if [ -n "${FRAGMENT_HOST_SECRET:-}" ]; then
     export CELLD_VAR_FRAGMENT_HOST_SECRET="$FRAGMENT_HOST_SECRET"
   fi
-  CELLD_WORKER_LOADER=LOADER \
-  CELLD_WATCH="$PWD/$DEV/watch" \
-  CELLD_VAR_FRAGMENT_INTERNAL_URL="http://127.0.0.1:$CELLD_PORT" \
-  nohup celld --bucket "$BUCKET" --endpoint "$S3_ENDPOINT" --listen "127.0.0.1:$CELLD_PORT" > "$DEV/celld.log" 2>&1 &
-  echo $! > "$DEV/celld.pid"
-  for _ in $(seq 1 30); do
-    celld_running && break
-    sleep 0.5
-  done
-  celld_running || { echo "celld: did not come up on :$CELLD_PORT; last log lines:" >&2; tail -20 "$DEV/celld.log" >&2; exit 1; }
-  echo "celld: started (pid $(cat "$DEV/celld.pid")) on :$CELLD_PORT"
 }
 
-stop_celld() {
-  local pids
-  pids=$(pgrep -f "celld --bucket" || true)
-  if [ -n "$pids" ]; then
-    kill $pids 2>/dev/null || true
-    for _ in $(seq 1 20); do
-      pids=$(pgrep -f "celld --bucket" || true)
-      [ -z "$pids" ] && break
-      sleep 0.5
-    done
-    pids=$(pgrep -f "celld --bucket" || true)
-    if [ -n "$pids" ]; then
-      echo "celld: graceful stop stalled (drain), forcing" >&2
-      kill -9 $pids 2>/dev/null || true
-      sleep 1
+start_celld() {
+  if celld_running; then echo "celld dev: already running on :$CELLD_PORT"; return; fi
+  celld_env
+  (cd runtime && nohup celld dev --port "$CELLD_PORT" > "../$DEV/celld-dev.log" 2>&1 & echo $! > "../$DEV/celld-dev.pid")
+  for _ in $(seq 1 30); do celld_running && break; sleep 0.5; done
+  celld_running || { echo "celld dev: did not come up; last log lines:" >&2; tail -20 "$DEV/celld-dev.log" >&2; exit 1; }
+  echo "celld dev: started on :$CELLD_PORT (state in runtime/.celld/dev)"
+}
+
+stop_all() {
+  for pidfile in "$DEV/celld-dev.pid" "$DEV/blobsd.pid"; do
+    if [ -f "$pidfile" ]; then
+      kill "$(cat "$pidfile")" 2>/dev/null || true
+      rm -f "$pidfile"
     fi
-  fi
-  rm -f "$DEV/celld.pid"
+  done
+  pkill -f "celld dev" 2>/dev/null || true
+  # celld dev re-execs itself as `celld --no-control-plane --bucket celld-dev`
+  pkill -f "celld.*--bucket celld-dev" 2>/dev/null || true
+  pkill -f "blobsd/target/release/blobsd" 2>/dev/null || true
+  # never trust the drain (the old ci-up lesson): force-kill the overstayers
+  # or the next start hits EADDRINUSE
+  for _ in $(seq 1 20); do
+    pgrep -f "celld.*--bucket celld-dev" >/dev/null 2>&1 || break
+    sleep 0.5
+  done
+  pkill -9 -f "celld.*--bucket celld-dev" 2>/dev/null || true
 }
 
 case "${1:-}" in
   up)
     tools
-    start_minio
-    make_bucket
-    # s3:// buckets refuse to boot without a deployment pointer, so the
-    # runtime deploys before the first start (and after any wipe).
-    celld deploy runtime --bucket "$BUCKET" --endpoint "$S3_ENDPOINT" | tail -1
-    stop_celld
+    ./scripts/build-runtime >/dev/null
+    start_blobsd
     start_celld
-    echo "fragment host: http://127.0.0.1:$CELLD_PORT ($BUCKET)"
+    echo "fragment host: http://127.0.0.1:$CELLD_PORT"
+    echo "  CLI:  fragment --host http://127.0.0.1:$CELLD_PORT …"
+    echo "  e2e:  E2E_BLOBSD_TOKEN=$BLOBSD_TOKEN FRAGMENT_BLOB_URL=http://127.0.0.1:$BLOBSD_PORT node scripts/e2e.mjs --all"
     ;;
   deploy)
-    tools
-    (cd runtime && npm install --no-audit --no-fund >/dev/null)
-    celld deploy runtime --bucket "$BUCKET" --endpoint "$S3_ENDPOINT" | tail -2
-    stop_celld
+    # celld dev runs the current runtime source; a deploy is just a rebuild
+    ./scripts/build-runtime
+    stop_all
+    start_blobsd
     start_celld
     echo "deployed."
     ;;
   down)
-    stop_celld
-    if docker inspect "$MINIO_CONTAINER" >/dev/null 2>&1; then
-      docker stop "$MINIO_CONTAINER" >/dev/null && docker rm "$MINIO_CONTAINER" >/dev/null
-      echo "minio: stopped"
-    fi
+    stop_all
     echo "down."
     ;;
-  wipe)
-    stop_celld
-    if docker inspect "$MINIO_CONTAINER" >/dev/null 2>&1; then
-      docker rm -f "$MINIO_CONTAINER" >/dev/null 2>&1 || true
-    fi
-    rm -rf "$DEV/minio-data" "$DEV/watch"
-    echo "wiped: bucket and cell state discarded together"
-    ;;
   status)
-    minio_running && echo "minio: up" || echo "minio: down"
-    celld_running && echo "celld: up (http://127.0.0.1:$CELLD_PORT)" || echo "celld: down"
+    blobsd_running && echo "blobsd: up (http://127.0.0.1:$BLOBSD_PORT)" || echo "blobsd: down"
+    celld_running && echo "celld dev: up (http://127.0.0.1:$CELLD_PORT)" || echo "celld dev: down"
     ;;
   logs)
-    tail -30 "$DEV/celld.log"
+    tail -30 "$DEV/celld-dev.log" 2>/dev/null
+    ;;
+  wipe)
+    stop_all
+    rm -rf runtime/.celld/dev "$DEV/blobsd" "$DEV/blobs-root"
+    echo "wiped: cell state and blob tier discarded together"
     ;;
   *)
     echo "usage: scripts/dev up|down|deploy|status|logs|wipe" >&2
