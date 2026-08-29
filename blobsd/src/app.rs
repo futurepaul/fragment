@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 
@@ -58,6 +59,26 @@ impl AppState {
     }
 }
 
+/// Public blob GETs are unauthenticated by design, and pages fetch them via
+/// cross-origin redirects from fragment hosts; mark every response readable
+/// from any origin. Writes stay bearer-gated — browsers cannot send an
+/// Authorization header cross-origin without a preflight, and we answer no
+/// preflights, so this widens reads only.
+async fn cors(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if req.method() == http::Method::OPTIONS {
+        return axum::http::StatusCode::NO_CONTENT.into_response();
+    }
+    let mut res = next.run(req).await;
+    res.headers_mut().insert(
+        http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        axum::http::HeaderValue::from_static("*"),
+    );
+    res
+}
+
 /// The entire HTTP surface plus the request-log middleware.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
@@ -74,6 +95,7 @@ pub fn build_router(state: AppState) -> Router {
         .layer(axum::extract::DefaultBodyLimit::max(
             usize::try_from(state.cfg.max_blob_bytes).unwrap_or(usize::MAX),
         ))
+        .layer(axum::middleware::from_fn(cors))
         .layer(axum::middleware::from_fn(logging::track))
         .with_state(state)
 }
