@@ -249,6 +249,26 @@ impl Client {
     pub fn post_json(&self, path: &str, v: &Value) -> Result<Resp> {
         self.request("POST", path, Some(serde_json::to_vec(v)?))
     }
+    /// POST /drafts runs a server-side copy loop over every file: on a big
+    /// fragment it outlives an impatient client, and a client that retries
+    /// the drop re-kills the copy mid-commit — each abandoned attempt
+    /// leaves another partial draft (the DurabilityUnproven amplifier).
+    /// One patient attempt, ten minutes, never retried.
+    pub fn post_json_patient(&self, path: &str, v: &Value) -> Result<Resp> {
+        let url = format!("{}{}", self.host, path);
+        let body = serde_json::to_vec(v)?;
+        let auth = self.id.nip98_header("POST", &url, &body);
+        let resp = self
+            .http
+            .post(&url)
+            .header("authorization", auth)
+            .header("content-type", "application/json")
+            .timeout(std::time::Duration::from_secs(600))
+            .body(body)
+            .send()
+            .context("drafts POST failed (deliberately not retried: a dropped draft copy must not be re-killed mid-commit)")?;
+        Ok(Resp { status: resp.status().as_u16(), body: resp.bytes().context("reading body")?.to_vec() })
+    }
     pub fn put_bytes(&self, path: &str, bytes: Vec<u8>) -> Result<Resp> {
         self.request("PUT", path, Some(bytes))
     }

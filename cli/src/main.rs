@@ -723,7 +723,7 @@ fn run(cli: Cli) -> Result<()> {
                     }
                 }
             }
-            let v = c.call(c.post_json(&format!("/api/f/{name}/drafts"), &json!({ "note": note }))?)?;
+            let v = c.call(c.post_json_patient(&format!("/api/f/{name}/drafts"), &json!({ "note": note }))?)?;
             if v.get("warning").and_then(|w| w.as_str()).is_some() {
                 eprintln!("WARNING: {} — this deploy will 404 at every URL", v["warning"].as_str().unwrap_or(""));
             }
@@ -826,7 +826,7 @@ fn run(cli: Cli) -> Result<()> {
                 if let Value::Object(o) = &mut m { o.insert("name".into(), Value::String(name.clone())); }
                 c.call(c.put_json(&format!("/api/f/{name}/manifest"), &m)?)?;
             }
-            let v = c.call(c.post_json(&format!("/api/f/{name}/drafts"), &json!({ "note": "init" }))?)?;
+            let v = c.call(c.post_json_patient(&format!("/api/f/{name}/drafts"), &json!({ "note": "init" }))?)?;
             let slug = v["slug"].as_str().unwrap_or("").to_string();
             if !slug.is_empty() {
                 c.call(c.post_json(&format!("/api/f/{name}/bless"), &json!({ "slug": slug }))?)?;

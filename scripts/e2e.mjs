@@ -453,6 +453,47 @@ async function workflowSection() {
   });
   eq(Buffer.from(await file.arrayBuffer()).toString(), 'ran', 'ctx.files.write landed');
 
+  // ---- write-CAS: ifRev pins + conflicts + stat ----
+  const wfCas = [
+    'export async function run(ctx) {',
+    '  await ctx.files.write("cas/a.txt", "v1");',
+    '  const st1 = await ctx.files.stat("cas/a.txt");',
+    '  const fresh = st1 && st1.rev > 0 && st1.sha256 && st1.deleted === false;',
+    '  const w2 = await ctx.files.write("cas/a.txt", "v2", { ifRev: st1.rev });',
+    '  let conflict = null;',
+    '  try {',
+    '    await ctx.files.write("cas/a.txt", "v3", { ifRev: st1.rev });',
+    '    conflict = { threw: false };',
+    '  } catch (e) {',
+    '    conflict = { threw: true, flagged: e.conflict === true, currentRev: e.currentRev };',
+    '  }',
+    '  const body = await ctx.files.read("cas/a.txt");',
+    '  const absent = await ctx.files.stat("cas/never-existed.txt");',
+    '  return { fresh, w2rev: w2.rev, advanced: w2.rev > st1.rev, conflict, body, absent };',
+    '}',
+  ].join('\n');
+  await signed('PUT', `/api/f/${name}/file?path=workflows/cas.mjs&base_rev=0`, wfCas);
+  const man2 = await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({
+    name, visibility: 'link', editors: [], viewers: [],
+    workflows: [
+      { name: 'main', file: 'workflows/main.mjs' },
+      { name: 'onpost', file: 'workflows/inbox.mjs', trigger: 'inbox' },
+      { name: 'cas', file: 'workflows/cas.mjs' },
+    ],
+    secrets: ['E2E_SECRET'],
+  }));
+  eq(man2.status, 200, 'manifest with cas workflow accepted');
+  const casRun = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'cas' }));
+  eq(casRun.status, 200, 'cas run → 200');
+  eq(casRun.body?.ok, true, 'cas workflow ran clean');
+  eq(casRun.body?.output?.fresh, true, 'ctx.files.stat reports the live row');
+  eq(casRun.body?.output?.advanced, true, 'ifRev write advances the rev');
+  eq(casRun.body?.output?.conflict?.threw, true, 'stale ifRev write throws');
+  eq(casRun.body?.output?.conflict?.flagged, true, 'the throw is a typed conflict (e.conflict)');
+  ok(Number.isInteger(casRun.body?.output?.conflict?.currentRev), 'conflict carries the current rev');
+  eq(casRun.body?.output?.body, 'v2', 'the conflicted write changed nothing');
+  eq(casRun.body?.output?.absent, null, 'stat of an unknown path is null');
+
   const evs = await signed('GET', `/api/f/${name}/events`);
   ok(JSON.stringify(evs.body?.events || []).includes('run number 1'), 'ctx.log lands in event log');
 
@@ -2464,6 +2505,72 @@ try {
   console.log('FAIL  tier-lane unexpected: ' + String(e && e.stack || e));
 }
 // ---- end lane/runtime-tier additions ----
+
+// ---- lane/converge: multi-mirror deletion propagation (tombstones) ----
+// The resurrection bug this pins: a mirror still holding a file the remote
+// deleted used to PUSH it back (remote-absence read as "must upload"),
+// ping-ponging deletions between mirrors forever.
+async function convergeSection() {
+  if (!section('converge')) return;
+  const bin = findBinary();
+  ok(!!bin, 'cli binary found for lane/converge');
+  if (!bin) return;
+
+  const name = `e2e-cv-${suffix}`;
+  await signed('POST', '/api/fragments', JSON.stringify({ name }));
+  const home = mkdtempSync(join(tmpdir(), 'fragment-cv-home-'));
+  const cfgDir = process.platform === 'darwin'
+    ? join(home, 'Library', 'Application Support', 'fragment')
+    : join(home, '.config', 'fragment');
+  mkdirSync(cfgDir, { recursive: true });
+  writeFileSync(join(cfgDir, 'config.json'), JSON.stringify({ host: BASE, secret_key: ownerKey }));
+  const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), FRAGMENT_HOST: BASE };
+
+  const dirA = mkdtempSync(join(tmpdir(), 'fragment-cv-a-'));
+  const dirB = mkdtempSync(join(tmpdir(), 'fragment-cv-b-'));
+  const sync = (dir) => execFileSync(bin, ['sync', name, '--dir', dir], { env, encoding: 'utf8' });
+
+  writeFileSync(join(dirA, 'keep.md'), 'kept');
+  writeFileSync(join(dirA, 'gone.md'), 'to be deleted');
+  writeFileSync(join(dirA, 'winner.md'), 'original');
+  const outA1 = sync(dirA);
+  ok(outA1.includes('pushed: 3'), '[converge] mirror A pushes three files');
+  const outB1 = sync(dirB);
+  ok(existsSync(join(dirB, 'gone.md')), '[converge] mirror B pulls the full set');
+  eq(readFileSync(join(dirB, 'keep.md'), 'utf8'), 'kept', '[converge] B content matches');
+
+  rmSync(join(dirA, 'gone.md'));
+  const outA2 = sync(dirA);
+  ok(outA2.includes('deleted remotely: 1'), '[converge] A pushes its deletion');
+
+  const outB2 = sync(dirB);
+  ok(!existsSync(join(dirB, 'gone.md')), '[converge] mirror B deletes its stale copy (no resurrection)');
+  ok(outB2.includes('deleted locally: 1'), '[converge] B reports the propagated deletion');
+
+  const outB3 = sync(dirB);
+  ok(outB3.includes('all 2 files match host'), '[converge] repeat sync is a no-op (no ping-pong)');
+  const list1 = await signed('GET', `/api/f/${name}/files?since_rev=0`);
+  const rows1 = list1.body?.files || [];
+  eq(rows1.filter((f) => !f.deleted).length, 2, '[converge] host holds exactly the two live files');
+  ok(rows1.some((f) => f.deleted && f.path === 'gone.md'), '[converge] gone.md lives on as a tombstone row (the convergence signal)');
+
+  // modification beats deletion: B edits a file A deletes
+  writeFileSync(join(dirB, 'winner.md'), 'modified content wins');
+  rmSync(join(dirA, 'winner.md'));
+  sync(dirA);
+  sync(dirB);
+  const wUrl = `${BASE}/api/f/${name}/file?path=winner.md`;
+  const w = await fetch(wUrl, { headers: { authorization: await authHeader('GET', wUrl, null, ownerKey) } });
+  eq(await w.text(), 'modified content wins', '[converge] a modified local copy beats a remote deletion');
+}
+try {
+  if (!ONLY || ONLY === 'converge') await convergeSection();
+} catch (e) {
+  fail++;
+  failures.push('converge: ' + String(e && e.stack || e));
+  console.log('FAIL  converge unexpected: ' + String(e && e.stack || e));
+}
+// ---- end lane/converge ----
 
 console.log(`\n${pass} passed, ${fail} failed${fail ? ': ' + failures.join('; ') : ''}`);
 process.exit(fail ? 1 : 0);
