@@ -6,7 +6,12 @@
 // content hash. The old body columns are GONE — an AddColumnIfMissing shim
 // cannot express a column-type drop, and shimming the old shape is exactly
 // what the spec forbids ("nothing shims the old column").
-export const SCHEMA_VERSION = 3;
+// v4 adds push_subs (Web Push subscriptions, endpoint-keyed — see
+// internal.ts push/* routes). Additive only: the table ships in SCHEMA for
+// cells born on v4, and the push routes CREATE TABLE IF NOT EXISTS it
+// lazily so cells created earlier pick it up on first touch (cell.ts's
+// version-mismatch branch does column adds only and can't mint tables).
+export const SCHEMA_VERSION = 4;
 export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, sha256 TEXT NOT NULL, size INTEGER NOT NULL, mime TEXT NOT NULL DEFAULT '', rev INTEGER NOT NULL, updated_at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
@@ -25,6 +30,7 @@ CREATE TABLE IF NOT EXISTS notify_outbox (url TEXT PRIMARY KEY, paths TEXT, atte
 CREATE TABLE IF NOT EXISTS fragments (name TEXT PRIMARY KEY, owner TEXT, created_at INTEGER);
 CREATE TABLE IF NOT EXISTS roles (name TEXT, pubkey TEXT, role TEXT, PRIMARY KEY (name, pubkey));
 CREATE TABLE IF NOT EXISTS slugs (slug TEXT PRIMARY KEY, name TEXT);
+CREATE TABLE IF NOT EXISTS push_subs (who TEXT, endpoint TEXT PRIMARY KEY, p256dh TEXT, auth TEXT, at INTEGER, fails INTEGER DEFAULT 0);
 `;
 
 // One bound for every body a cell will accept. Cell content lives in

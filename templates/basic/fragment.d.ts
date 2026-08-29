@@ -100,6 +100,16 @@ export interface Ctx {
     get(key: string): Promise<any>;
     put(key: string, value: any): Promise<void>;
   };
+  /**
+   * Send a Web Push notification to every device `who` has subscribed
+   * (browsers subscribe via fragment.push.register() from the page).
+   * Delivery is best-effort and self-healing: 404/410 from the push
+   * service drops that subscription permanently; five other failures
+   * drops it too. No subscriptions for `who` is a quiet success
+   * ({sent: 0}), not an error. Payload caps: title 80, body 200, url 500,
+   * tag 100 (collapse key).
+   */
+  push(who: string, payload: { title: string; body?: string; url?: string; tag?: string }): Promise<{ sent: number; dropped: number; detail: string }>;
   log(msg: string): void;
 }
 

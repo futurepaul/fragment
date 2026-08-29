@@ -47,7 +47,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function jres(promise) {
   const r = await promise;
   let body = null;
-  try { body = JSON.parse(Buffer.from(await r.arrayBuffer()).toString('utf8')); } catch {}
+  const text = Buffer.from(await r.arrayBuffer()).toString('utf8');
+  try { body = JSON.parse(text); } catch {
+    if (process.env.E2E_DEBUG_BODIES) console.log('NON-JSON RESPONSE', r.status, text.slice(0, 500));
+  }
   return { status: r.status, body };
 }
 

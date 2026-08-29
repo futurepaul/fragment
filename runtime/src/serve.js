@@ -4,6 +4,8 @@ import { safeEqual } from "./auth.js";
 import { json } from "./util.js";
 import { APP_MAIN } from "./loader.js";
 import { tierStreamByHash, tierTextBounded, publicRedirectTarget } from "./blob-tier.js";
+import { pushSubStore, pushUnsubStore, ensurePushTable, pushVapidFor } from "./internal.js";
+import { SW_CLIENT_SOURCE } from "./sw-client.js";
 const OG_MATERIALIZE_CEILING = 1024 * 1024;
 const esc = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
 function canonicalUrl(cell, origin, name) {
@@ -73,6 +75,27 @@ async function serveRoute(cell, request, url) {
       "content-type": mime,
       "cache-control": "no-store"
     } });
+  }
+  if (rest === "__sw.js") {
+    return new Response(`/* fragment sw-client v1 */
+` + SW_CLIENT_SOURCE, {
+      headers: {
+        "content-type": "text/javascript; charset=utf-8",
+        "cache-control": "no-store",
+        "x-fragment-sw-version": "1"
+      }
+    });
+  }
+  if (rest === "__push-key") {
+    const keys = await pushVapidFor(cell);
+    return json({ key: keys.pubRaw });
+  }
+  if (rest === "__push-sub" || rest === "__push-unsub") {
+    if (request.method !== "POST") return json({ error: "POST only" }, 405);
+    ensurePushTable(cell);
+    const body = await request.json().catch(() => null);
+    if (!body) return json({ error: "body required" }, 400);
+    return rest === "__push-sub" ? pushSubStore(cell, body) : pushUnsubStore(cell, body);
   }
   const appMeta = cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = 'app.mjs'", slug).toArray()[0];
   const stMeta = (p) => cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = ? AND deleted = 0", slug, p).toArray()[0];

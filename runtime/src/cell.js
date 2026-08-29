@@ -36,8 +36,10 @@ class FragmentCell {
       this.sql.exec(SCHEMA);
       this.setMeta("schema", String(SCHEMA_VERSION));
     } else if (String(stored) !== String(SCHEMA_VERSION)) {
+      this.sql.exec(SCHEMA);
       this.addColumnIfMissing("inbox", "claimed_at", "INTEGER");
       this.addColumnIfMissing("inbox", "claim_token", "TEXT");
+      this.setMeta("schema", String(SCHEMA_VERSION));
     }
   }
   addColumnIfMissing(table, col, type) {

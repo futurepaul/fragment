@@ -144,8 +144,21 @@ export async function makeCtx(env) {
         return (await r.json()).state;
       },
       async setState(room, value) {
-        await call("/rooms/state?room=" + encodeURIComponent(room), { method: "POST", body: JSON.stringify({ value }) });
+        await call("/rooms/state", { method: "POST", body: JSON.stringify({ value: value ?? null }) });
       },
+    },
+    // Web Push — closed-tab notifications. Sends payload {title (required,
+    // <= 80 chars), body (<= 200), url? (<= 500), tag? (collapse key)} to
+    // EVERY stored browser subscription for who. Subscriptions are
+    // platform-managed (the site's sw-client registers/drops them via the
+    // cell's push_subs table): a 404/410 from the push service drops the
+    // subscription permanently; any other failure bumps a counter and the
+    // subscription is dropped after 5. Budget: 20 endpoint POSTs per call.
+    // Returns {sent, dropped, detail}. No subscriptions is NOT an error —
+    // you get {sent: 0, dropped: 0, detail: "no subscriptions for ..."}.
+    async push(who, payload) {
+      const r = await call("/push/send", { method: "POST", body: JSON.stringify({ who: String(who ?? ""), payload: payload || {} }) });
+      return r.json();
     },
   };
   return ctx;

@@ -4,12 +4,103 @@ import { json, isMachinery, randHex, bodyTooLarge, MAX_BODY_BYTES, MIME, mimeFor
 import { checkToken } from "./loader.js";
 import { recordRevision } from "./history.js";
 import { READ_CEILING, TierError, admitFileWrite, tierStreamByHash } from "./blob-tier.js";
+import { encryptPayload, vapidHeaders, generateVapidKeys, webpushSelfTest, b64urlDecode } from "./webpush.js";
 
 function appendOnlyHit(cell, path) {
   const m = cell.manifest();
   return m && (m.appendOnly || []).some((p) => path === p.slice(0, -1) || path.startsWith(p));
 }
 
+// ---- Web Push storage/provisioning helpers ----
+// push_subs is additive (schema v4): cells born on v4 get it from SCHEMA,
+// cells born earlier meet it here first — CREATE TABLE IF NOT EXISTS is
+// idempotent, and the WeakSet keeps repeat calls to a pragma-free no-op
+// per cell instance.
+const pushTablesReady = new WeakSet();
+export function ensurePushTable(cell) {
+  if (pushTablesReady.has(cell)) return;
+  cell.sql.exec("CREATE TABLE IF NOT EXISTS push_subs (who TEXT, endpoint TEXT PRIMARY KEY, p256dh TEXT, auth TEXT, at INTEGER, fails INTEGER DEFAULT 0)");
+  pushTablesReady.add(cell);
+}
+
+// Get-or-generate the cell's VAPID keypair. Stored as cell meta:
+//   push_vapid_priv — JSON JWK (signing key; rotate by overwriting)
+//   push_vapid_pub  — base64url of the 65-byte raw point (what pages
+//                     feed pushManager.subscribe as applicationServerKey)
+// Exported so the site plane (serve.ts GET __push-key, sw-client's
+// subscribe route) can provision the keypair BEFORE the first workflow
+// send — a page cannot subscribe without the public key in hand.
+export async function pushVapidFor(cell) {
+  const privRaw = cell.getMeta("push_vapid_priv");
+  const pubRaw = cell.getMeta("push_vapid_pub");
+  if (privRaw && pubRaw) {
+    try {
+      return { privJwk: JSON.parse(privRaw), pubRaw };
+    } catch {
+      // fall through: a corrupt meta row regenerates rather than poisons
+    }
+  }
+  const keys = await generateVapidKeys();
+  cell.setMeta("push_vapid_priv", JSON.stringify(keys.privJwk));
+  cell.setMeta("push_vapid_pub", keys.pubRaw);
+  cell.addEvent("push.vapid", "generated VAPID keypair", { pubRaw: keys.pubRaw.slice(0, 20) + "…" });
+  return keys;
+}
+
+// A non-gone failure (4xx/5xx/network): bump the failure counter in place
+// (atomic in SQL, so concurrent send batches can't lose an increment) and
+// describe what happened — dropping happens at 5.
+function failNote(cell, endpoint, why) {
+  cell.sql.exec("UPDATE push_subs SET fails = fails + 1 WHERE endpoint = ?", endpoint);
+  const row = cell.sql.exec("SELECT fails FROM push_subs WHERE endpoint = ?", endpoint).toArray()[0];
+  const fails = row ? row.fails : "?";
+  if (row && row.fails >= 5) {
+    cell.sql.exec("DELETE FROM push_subs WHERE endpoint = ?", endpoint);
+    return { note: `${why} (${fails} fails) → dropped`, dropped: true };
+  }
+  return { note: `${why} (fails ${fails})` };
+}
+
+
+// Shared push-subscription storage cores: the run-scoped internal routes
+// and the PUBLIC site-plane routes (serve.ts __push-sub/__push-unsub, which
+// ride the fragment's normal visibility gate) enforce identical validation
+// because they are the same code.
+export function pushSubStore(cell, body) {
+  const { who, endpoint, p256dh, auth } = body || {};
+  if (typeof who !== "string" || !who.trim()) return json({ error: "body: {who, endpoint, p256dh, auth} — who required" }, 400);
+  if (typeof endpoint !== "string" || !/^https:\/\//.test(endpoint) || endpoint.length > 500)
+    return json({ error: "endpoint must be an https:// push-service URL (<= 500 chars)" }, 400);
+  if (typeof p256dh !== "string" || typeof auth !== "string") return json({ error: "p256dh and auth (base64url) required" }, 400);
+  const key = b64urlDecode(p256dh), secret = b64urlDecode(auth);
+  if (key.length !== 65) return json({ error: `p256dh must decode to 65 bytes, got ${key.length}` }, 400);
+  if (secret.length !== 16) return json({ error: `auth must decode to 16 bytes, got ${secret.length}` }, 400);
+  const w = who.trim().slice(0, 40);
+  // endpoint-keyed: a device re-subscribing refreshes in place (and
+  // resets its failure count); a person renames by re-subscribing
+  cell.sql.exec(
+    "INSERT INTO push_subs (who, endpoint, p256dh, auth, at, fails) VALUES (?, ?, ?, ?, ?, 0) " +
+    "ON CONFLICT(endpoint) DO UPDATE SET who = excluded.who, p256dh = excluded.p256dh, auth = excluded.auth, at = excluded.at, fails = 0",
+    w, endpoint, p256dh, auth, Date.now());
+  // device flood-brake: keep the newest 25 devices per person
+  const stale = cell.sql.exec("SELECT rowid FROM push_subs WHERE who = ? ORDER BY at DESC, rowid DESC LIMIT 100 OFFSET 25", w).toArray();
+  for (const r of stale) cell.sql.exec("DELETE FROM push_subs WHERE rowid = ?", r.rowid);
+  cell.addEvent("push.sub", `${w}: subscription stored`, { who: w, endpoint: endpoint.slice(0, 60) });
+  return json({ ok: true });
+}
+
+export function pushUnsubStore(cell, body) {
+  const { who, endpoint } = body || {};
+  if (typeof who !== "string" || !who.trim() || typeof endpoint !== "string" || !endpoint)
+    return json({ error: "body: {who, endpoint}" }, 400);
+  const hit = cell.sql.exec("SELECT rowid FROM push_subs WHERE who = ? AND endpoint = ?", who.trim().slice(0, 40), endpoint).toArray()[0];
+  if (hit) {
+    cell.sql.exec("DELETE FROM push_subs WHERE rowid = ?", hit.rowid);
+    cell.addEvent("push.unsub", `${who}: subscription removed`, { who: who.trim().slice(0, 40), endpoint: endpoint.slice(0, 60) });
+    return json({ ok: true, removed: true });
+  }
+  return json({ ok: true, removed: false });
+}
 
 // ------ internalRoute ------
 
@@ -201,6 +292,98 @@ export async function internalRoute(cell, request, url) {
     if (!resp.ok) return json({ error: `openrouter ${resp.status}: ${await resp.text()}` }, 502);
     const data = await resp.json();
     return json({ text: data.choices?.[0]?.message?.content ?? "" });
+  }
+
+  // ------ Web Push (RFC 8291 payloads, RFC 8292 VAPID) ------
+  // Run-scoped like files/write: subscriptions are managed through the
+  // site plane (sw-client) and sends through ctx.push from workflows.
+
+  if (rest === "push/sub" && request.method === "POST") {
+    if (!isRun) return json({ error: "push/sub is run-scoped" }, 403);
+    ensurePushTable(cell);
+    const body = await request.json().catch(() => ({}));
+    return pushSubStore(cell, body);
+  }
+
+  if (rest === "push/unsub" && request.method === "POST") {
+    if (!isRun) return json({ error: "push/unsub is run-scoped" }, 403);
+    ensurePushTable(cell);
+    const body = await request.json().catch(() => ({}));
+    return pushUnsubStore(cell, body);
+  }
+
+  if (rest === "push/send" && request.method === "POST") {
+    if (!isRun) return json({ error: "push/send is run-scoped" }, 403);
+    ensurePushTable(cell);
+    const { who, payload } = await request.json().catch(() => ({}));
+    if (typeof who !== "string" || !who.trim()) return json({ error: "who required" }, 400);
+    const p = (payload && typeof payload === "object") ? payload : {};
+    const title = String(p.title || "").slice(0, 80);
+    if (!title.trim()) return json({ error: "payload.title required (<= 80 chars)" }, 400);
+    // one JSON message, caps enforced here so ctx.push callers can't
+    // smuggle oversized payloads to devices
+    const message = JSON.stringify({
+      title,
+      body: String(p.body || "").slice(0, 200),
+      ...(p.url ? { url: String(p.url).slice(0, 500) } : {}),
+      ...(p.tag ? { tag: String(p.tag).slice(0, 100) } : {}),
+    });
+
+    // crypto sanity once per cell, before the first byte leaves: a broken
+    // WebCrypto edge would otherwise fail silently as 400s from every
+    // push service on earth
+    if (!cell.getMeta("push_selftest_done")) {
+      const t = await webpushSelfTest();
+      cell.addEvent("push.selftest", t.ok ? "webpush crypto self-test passed" : "webpush crypto self-test FAILED", t);
+      cell.setMeta("push_selftest_done", t.ok ? "ok" : "failed");
+      if (!t.ok) return json({ error: "webpush crypto self-test failed — refusing to send", detail: t.detail }, 500);
+    }
+
+    const keys = await pushVapidFor(cell);
+    const subs = cell.sql.exec(
+      "SELECT endpoint, p256dh, auth FROM push_subs WHERE who = ? ORDER BY at ASC LIMIT 20", who.trim().slice(0, 40)).toArray();
+    // sends run concurrently: a batch of dead endpoints must cost one
+    // timeout (10s), not 20 × 10s of the calling run's budget
+    const results = await Promise.all(subs.map(async (s) => {
+      try {
+        const enc = await encryptPayload(s, message);
+        const aud = new URL(s.endpoint).origin;
+        const vh = await vapidHeaders(keys.privJwk, keys.pubRaw, aud);
+        const resp = await fetch(s.endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/octet-stream",
+            ttl: "86400",
+            urgency: "high",
+            ...enc.headers,
+            authorization: vh.authorization,
+            "crypto-key": vh["crypto-key"],
+          },
+          body: enc.body as unknown as BodyInit,
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (resp.ok) return { sent: true };
+        if (resp.status === 404 || resp.status === 410) {
+          // the subscription is gone at the service — keep ours or every
+          // future send pays for a dead endpoint
+          cell.sql.exec("DELETE FROM push_subs WHERE endpoint = ?", s.endpoint);
+          return { note: `${resp.status} → dropped`, dropped: true };
+        }
+        const why = (await resp.text().catch(() => "")).slice(0, 120);
+        return failNote(cell, s.endpoint, `${resp.status}${why ? ": " + why : ""}`);
+      } catch (e) {
+        // network/timeout: count it, don't let one dead endpoint kill the batch
+        return failNote(cell, s.endpoint, `error: ${String((e && e.message) || e).slice(0, 80)}`);
+      }
+    }));
+    const sent = results.filter((r) => r.sent).length;
+    const dropped = results.filter((r) => r.dropped).length;
+    const notes = results.map((r) => r.note).filter(Boolean);
+    const detail = subs.length
+      ? `${sent}/${subs.length} sent` + (dropped ? `, ${dropped} dropped` : "") + (notes.length ? ` — ${notes.join("; ")}` : "")
+      : `no subscriptions for ${who.trim().slice(0, 40)}`;
+    cell.addEvent("push.send", `${who}: ${detail}`, { who: who.trim().slice(0, 40), sent, dropped, subs: subs.length });
+    return json({ sent, dropped, detail });
   }
 
   if (rest === "wstate") {

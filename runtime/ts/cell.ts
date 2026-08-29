@@ -51,12 +51,19 @@ export class FragmentCell {
       this.sql.exec(SCHEMA);
       this.setMeta("schema", String(SCHEMA_VERSION));
     } else if (String(stored) !== String(SCHEMA_VERSION)) {
-      // idempotent for cells already on 3; CREATE TABLE IF NOT EXISTS never
-      // alters an existing table, so past COLUMN additions need explicit adds
-      // (found live: claim_token threw in every alarm on cells created before
-      // it existed)
+      // Version upgrade for cells born on an older schema. CREATE TABLE IF
+      // NOT EXISTS never alters an existing table, so additive upgrades run
+      // the full SCHEMA first (safe on every cell, including special ones
+      // like the registry that were born before some tables existed — found
+      // live: the v3→4 bump made the registry's mismatch branch ALTER a
+      // nonexistent inbox table, failing every registry touch), then past
+      // COLUMN additions follow explicitly (claim_token threw in every
+      // alarm on cells created before it existed), and the stamp moves up
+      // so the branch runs once per upgrade, not per access.
+      this.sql.exec(SCHEMA);
       this.addColumnIfMissing("inbox", "claimed_at", "INTEGER");
       this.addColumnIfMissing("inbox", "claim_token", "TEXT");
+      this.setMeta("schema", String(SCHEMA_VERSION));
     }
   }
   addColumnIfMissing(table: string, col: string, type: string) {

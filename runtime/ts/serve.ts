@@ -9,6 +9,8 @@ import { safeEqual } from "./auth.js";
 import { json } from "./util.js";
 import { APP_MAIN } from "./loader.js";
 import { tierStreamByHash, tierTextBounded, publicRedirectTarget } from "./blob-tier.js";
+import { pushSubStore, pushUnsubStore, ensurePushTable, pushVapidFor } from "./internal.js";
+import { SW_CLIENT_SOURCE } from "./sw-client.js";
 
 // Whole-body budget for the one template materializer that must see text
 // (OG-tag injection into a site's index.html). Pages are documents; anything
@@ -112,6 +114,39 @@ export async function serveRoute(cell, request, url) {
       "content-type": mime,
       "cache-control": "no-store",
     } });
+  }
+
+  // ---- platform notify/push machinery: reserved names served exactly
+  // like the router's __rt.js (no-store, version-stamped) so every
+  // fragment gets them at its own prefix — /f/<name>/__sw.js,
+  // /d/<slug>/__sw.js, or the bare /__sw.js on a canonical subdomain. The
+  // worker is push-only (no fetch handler) and registers at its default
+  // scope: its own corner of the host, never the whole shared origin.
+  if (rest === "__sw.js") {
+    return new Response(`/* fragment sw-client v1 */\n` + SW_CLIENT_SOURCE, {
+      headers: {
+        "content-type": "text/javascript; charset=utf-8",
+        "cache-control": "no-store",
+        "x-fragment-sw-version": "1",
+      },
+    });
+  }
+  if (rest === "__push-key") {
+    // GET → {key}: the public VAPID key for this fragment's push fan-out.
+    // Get-or-generate: a page must be able to subscribe BEFORE any workflow
+    // has ever pushed, so the first key fetch provisions the keypair.
+    const keys = await pushVapidFor(cell);
+    return json({ key: keys.pubRaw });
+  }
+  if (rest === "__push-sub" || rest === "__push-unsub") {
+    // public subscription storage, riding the fragment's normal visibility
+    // gate (view cookie / link token) — same validation and store as the
+    // run-scoped internal routes, because it is the same code
+    if (request.method !== "POST") return json({ error: "POST only" }, 405);
+    ensurePushTable(cell);
+    const body = await request.json().catch(() => null);
+    if (!body) return json({ error: "body required" }, 400);
+    return rest === "__push-sub" ? pushSubStore(cell, body) : pushUnsubStore(cell, body);
   }
 
   // static from site/ — the fragment's browser-asset plane, reserved ahead

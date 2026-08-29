@@ -543,6 +543,20 @@ in at render time (`ctx.secrets.MY_VIEW_TOKEN`); a client-side variable
 that never reaches the server renders as `view=undefined` and friends get
 403s. Browser-side `location.search` tokens only exist in the browser.
 
+## Notifications
+
+Two platform surfaces, both loaded from `/f/<name>/__rt.js` (plus the
+service worker at `/f/<name>/__sw.js`):
+
+- **Open tab** — `fragment.notify.ask()` (call it ONLY from a click
+  handler), then `fragment.notify.show(title, {body, url})` fires when
+  the tab is hidden; clicks focus the window and navigate to `url`.
+- **Closed tab (Web Push)** — `fragment.push.register(who)` from the same
+  click: registers the worker, subscribes with the fragment's VAPID key,
+  and stores the subscription. Workforms send with
+  `await ctx.push(who, {title, body, url})`. Subscriptions live in the
+  fragment (`push_subs`), failures self-heal (410 drops, 5 strikes drop).
+
 ## Multiplayer (rooms)
 
 Every fragment has realtime rooms: named websocket channels with presence, a

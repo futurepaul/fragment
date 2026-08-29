@@ -2,9 +2,76 @@
 import { json, randHex, bodyTooLarge, MAX_BODY_BYTES, MIME, mimeForPath } from "./util.js";
 import { recordRevision } from "./history.js";
 import { READ_CEILING, TierError, admitFileWrite, tierStreamByHash } from "./blob-tier.js";
+import { encryptPayload, vapidHeaders, generateVapidKeys, webpushSelfTest, b64urlDecode } from "./webpush.js";
 function appendOnlyHit(cell, path) {
   const m = cell.manifest();
   return m && (m.appendOnly || []).some((p) => path === p.slice(0, -1) || path.startsWith(p));
+}
+const pushTablesReady = /* @__PURE__ */ new WeakSet();
+function ensurePushTable(cell) {
+  if (pushTablesReady.has(cell)) return;
+  cell.sql.exec("CREATE TABLE IF NOT EXISTS push_subs (who TEXT, endpoint TEXT PRIMARY KEY, p256dh TEXT, auth TEXT, at INTEGER, fails INTEGER DEFAULT 0)");
+  pushTablesReady.add(cell);
+}
+async function pushVapidFor(cell) {
+  const privRaw = cell.getMeta("push_vapid_priv");
+  const pubRaw = cell.getMeta("push_vapid_pub");
+  if (privRaw && pubRaw) {
+    try {
+      return { privJwk: JSON.parse(privRaw), pubRaw };
+    } catch {
+    }
+  }
+  const keys = await generateVapidKeys();
+  cell.setMeta("push_vapid_priv", JSON.stringify(keys.privJwk));
+  cell.setMeta("push_vapid_pub", keys.pubRaw);
+  cell.addEvent("push.vapid", "generated VAPID keypair", { pubRaw: keys.pubRaw.slice(0, 20) + "\u2026" });
+  return keys;
+}
+function failNote(cell, endpoint, why) {
+  cell.sql.exec("UPDATE push_subs SET fails = fails + 1 WHERE endpoint = ?", endpoint);
+  const row = cell.sql.exec("SELECT fails FROM push_subs WHERE endpoint = ?", endpoint).toArray()[0];
+  const fails = row ? row.fails : "?";
+  if (row && row.fails >= 5) {
+    cell.sql.exec("DELETE FROM push_subs WHERE endpoint = ?", endpoint);
+    return { note: `${why} (${fails} fails) \u2192 dropped`, dropped: true };
+  }
+  return { note: `${why} (fails ${fails})` };
+}
+function pushSubStore(cell, body) {
+  const { who, endpoint, p256dh, auth } = body || {};
+  if (typeof who !== "string" || !who.trim()) return json({ error: "body: {who, endpoint, p256dh, auth} \u2014 who required" }, 400);
+  if (typeof endpoint !== "string" || !/^https:\/\//.test(endpoint) || endpoint.length > 500)
+    return json({ error: "endpoint must be an https:// push-service URL (<= 500 chars)" }, 400);
+  if (typeof p256dh !== "string" || typeof auth !== "string") return json({ error: "p256dh and auth (base64url) required" }, 400);
+  const key = b64urlDecode(p256dh), secret = b64urlDecode(auth);
+  if (key.length !== 65) return json({ error: `p256dh must decode to 65 bytes, got ${key.length}` }, 400);
+  if (secret.length !== 16) return json({ error: `auth must decode to 16 bytes, got ${secret.length}` }, 400);
+  const w = who.trim().slice(0, 40);
+  cell.sql.exec(
+    "INSERT INTO push_subs (who, endpoint, p256dh, auth, at, fails) VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT(endpoint) DO UPDATE SET who = excluded.who, p256dh = excluded.p256dh, auth = excluded.auth, at = excluded.at, fails = 0",
+    w,
+    endpoint,
+    p256dh,
+    auth,
+    Date.now()
+  );
+  const stale = cell.sql.exec("SELECT rowid FROM push_subs WHERE who = ? ORDER BY at DESC, rowid DESC LIMIT 100 OFFSET 25", w).toArray();
+  for (const r of stale) cell.sql.exec("DELETE FROM push_subs WHERE rowid = ?", r.rowid);
+  cell.addEvent("push.sub", `${w}: subscription stored`, { who: w, endpoint: endpoint.slice(0, 60) });
+  return json({ ok: true });
+}
+function pushUnsubStore(cell, body) {
+  const { who, endpoint } = body || {};
+  if (typeof who !== "string" || !who.trim() || typeof endpoint !== "string" || !endpoint)
+    return json({ error: "body: {who, endpoint}" }, 400);
+  const hit = cell.sql.exec("SELECT rowid FROM push_subs WHERE who = ? AND endpoint = ?", who.trim().slice(0, 40), endpoint).toArray()[0];
+  if (hit) {
+    cell.sql.exec("DELETE FROM push_subs WHERE rowid = ?", hit.rowid);
+    cell.addEvent("push.unsub", `${who}: subscription removed`, { who: who.trim().slice(0, 40), endpoint: endpoint.slice(0, 60) });
+    return json({ ok: true, removed: true });
+  }
+  return json({ ok: true, removed: false });
 }
 async function internalRoute(cell, request, url) {
   if (bodyTooLarge(request)) {
@@ -154,6 +221,79 @@ async function internalRoute(cell, request, url) {
     const data = await resp.json();
     return json({ text: data.choices?.[0]?.message?.content ?? "" });
   }
+  if (rest === "push/sub" && request.method === "POST") {
+    if (!isRun) return json({ error: "push/sub is run-scoped" }, 403);
+    ensurePushTable(cell);
+    const body = await request.json().catch(() => ({}));
+    return pushSubStore(cell, body);
+  }
+  if (rest === "push/unsub" && request.method === "POST") {
+    if (!isRun) return json({ error: "push/unsub is run-scoped" }, 403);
+    ensurePushTable(cell);
+    const body = await request.json().catch(() => ({}));
+    return pushUnsubStore(cell, body);
+  }
+  if (rest === "push/send" && request.method === "POST") {
+    if (!isRun) return json({ error: "push/send is run-scoped" }, 403);
+    ensurePushTable(cell);
+    const { who, payload } = await request.json().catch(() => ({}));
+    if (typeof who !== "string" || !who.trim()) return json({ error: "who required" }, 400);
+    const p2 = payload && typeof payload === "object" ? payload : {};
+    const title = String(p2.title || "").slice(0, 80);
+    if (!title.trim()) return json({ error: "payload.title required (<= 80 chars)" }, 400);
+    const message = JSON.stringify({
+      title,
+      body: String(p2.body || "").slice(0, 200),
+      ...p2.url ? { url: String(p2.url).slice(0, 500) } : {},
+      ...p2.tag ? { tag: String(p2.tag).slice(0, 100) } : {}
+    });
+    if (!cell.getMeta("push_selftest_done")) {
+      const t = await webpushSelfTest();
+      cell.addEvent("push.selftest", t.ok ? "webpush crypto self-test passed" : "webpush crypto self-test FAILED", t);
+      cell.setMeta("push_selftest_done", t.ok ? "ok" : "failed");
+      if (!t.ok) return json({ error: "webpush crypto self-test failed \u2014 refusing to send", detail: t.detail }, 500);
+    }
+    const keys = await pushVapidFor(cell);
+    const subs = cell.sql.exec(
+      "SELECT endpoint, p256dh, auth FROM push_subs WHERE who = ? ORDER BY at ASC LIMIT 20",
+      who.trim().slice(0, 40)
+    ).toArray();
+    const results = await Promise.all(subs.map(async (s) => {
+      try {
+        const enc = await encryptPayload(s, message);
+        const aud = new URL(s.endpoint).origin;
+        const vh = await vapidHeaders(keys.privJwk, keys.pubRaw, aud);
+        const resp = await fetch(s.endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/octet-stream",
+            ttl: "86400",
+            urgency: "high",
+            ...enc.headers,
+            authorization: vh.authorization,
+            "crypto-key": vh["crypto-key"]
+          },
+          body: enc.body,
+          signal: AbortSignal.timeout(1e4)
+        });
+        if (resp.ok) return { sent: true };
+        if (resp.status === 404 || resp.status === 410) {
+          cell.sql.exec("DELETE FROM push_subs WHERE endpoint = ?", s.endpoint);
+          return { note: `${resp.status} \u2192 dropped`, dropped: true };
+        }
+        const why = (await resp.text().catch(() => "")).slice(0, 120);
+        return failNote(cell, s.endpoint, `${resp.status}${why ? ": " + why : ""}`);
+      } catch (e) {
+        return failNote(cell, s.endpoint, `error: ${String(e && e.message || e).slice(0, 80)}`);
+      }
+    }));
+    const sent = results.filter((r) => r.sent).length;
+    const dropped = results.filter((r) => r.dropped).length;
+    const notes = results.map((r) => r.note).filter(Boolean);
+    const detail = subs.length ? `${sent}/${subs.length} sent` + (dropped ? `, ${dropped} dropped` : "") + (notes.length ? ` \u2014 ${notes.join("; ")}` : "") : `no subscriptions for ${who.trim().slice(0, 40)}`;
+    cell.addEvent("push.send", `${who}: ${detail}`, { who: who.trim().slice(0, 40), sent, dropped, subs: subs.length });
+    return json({ sent, dropped, detail });
+  }
   if (rest === "wstate") {
     const k = url.searchParams.get("k") || "";
     const dim = scope.workflow || scope.kind;
@@ -183,5 +323,9 @@ async function internalRoute(cell, request, url) {
   return new Response("not found", { status: 404 });
 }
 export {
-  internalRoute
+  ensurePushTable,
+  internalRoute,
+  pushSubStore,
+  pushUnsubStore,
+  pushVapidFor
 };
