@@ -470,6 +470,21 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
                             st.size = lf.size;
                             st.mtime_ns = lf.mtime_ns;
                         }
+                        // shas agreeing with the ROW doesn't prove the bytes
+                        // exist in the tier — descriptors can outlive their
+                        // objects (bucket emptied out-of-band). One ranged
+                        // probe per big file re-uploads the liars; small
+                        // cost, and small files are inline anyway.
+                        if lf.size > blob::INLINE_MAX_BYTES as u64 {
+                            if let Some(tiers) = opts.tiers.as_ref() {
+                                match std::fs::read(dir.join(&path)) {
+                                    Ok(bytes) => {
+                                        let _ = blob::blob_ensure(tiers, &lf.sha256, &bytes, blob::mime_for(&path));
+                                    }
+                                    Err(e) => eprintln!("warning: could not re-read {path} for tier re-upload: {e}"),
+                                }
+                            }
+                        }
                     }
                     (true, false) => {
                         if opts.mode == Mode::Pull {
@@ -563,6 +578,35 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
     Ok(report)
 }
 
+/// True when a whole file's bytes are a blob-tier ref-envelope
+/// ({"ref":{"sha256","size","mime"}}). Real content never looks like this —
+/// the only way it reaches disk is sync corruption (an older build once
+/// wrote pointer rows over local files), and round-tripping it would make
+/// the corruption canonical. Guarded on both the push and the pull path.
+fn looks_like_ref_envelope(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(bytes)
+        .ok()
+        .and_then(|v| {
+            let r = v.get("ref")?;
+            Some(
+                r.get("sha256").and_then(|s| s.as_str()).map(|s| s.len() == 64).unwrap_or(false)
+                    && r.get("size").and_then(|s| s.as_u64()).is_some(),
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Envelope check that only reads the file when it could plausibly be one;
+/// big pulls never pay for a second read.
+fn small_file_ref_envelope(p: &Path) -> Option<bool> {
+    let md = fs::metadata(p).ok()?;
+    if md.len() > 512 {
+        return Some(false);
+    }
+    let bytes = fs::read(p).ok()?;
+    Some(looks_like_ref_envelope(&bytes))
+}
+
 fn push_file(
     client: &Client,
     name: &str,
@@ -575,6 +619,13 @@ fn push_file(
     opts: &SyncOptions,
 ) -> Result<()> {
     let bytes = fs::read(dir.join(path))?;
+    if looks_like_ref_envelope(&bytes) {
+        bail!(
+            "refusing to push {path}: its bytes are a blob-tier ref-envelope, which is \
+             sync corruption in this folder, not file content — restore the real file \
+             (or delete it) before pushing"
+        );
+    }
     let qs = format!("/api/f/{name}/file?path={}&base_rev={base_rev}", encode_q(path));
     let resp = commit_push(client, opts.tiers.as_ref(), &qs, path, bytes.clone())?;
     if resp.status == 409 {
@@ -596,8 +647,7 @@ fn push_file(
     Ok(())
 }
 
-/// One file → one row commit through the two-tier contract:
-/// `bytes.len() <= 65536` rides the inline carve-out as a raw body;
+/// One file → one row commit through the two-tier contract:/// `bytes.len() <= 65536` rides the inline carve-out as a raw body;
 /// anything larger is uploaded to the tier FIRST (kind-24242 auth event,
 /// HEAD-gated, descriptor hash verified) and then committed in the ref
 /// form {"ref":{"sha256","size","mime"}}. No tier + oversized = hard error.
@@ -741,6 +791,13 @@ fn pull_file(
             fs::remove_file(&tmp).ok();
             bail!("pull {} failed: fetched sha256 {sha} but the listing promised {want}", path);
         }
+    }
+    if let Some(true) = small_file_ref_envelope(&tmp) {
+        fs::remove_file(&tmp).ok();
+        bail!(
+            "pull {path} refused: the host served a ref-envelope as file content — \
+             the host row itself is corrupted; fix the host side before syncing"
+        );
     }
     // write-through into the cache BEFORE publishing the file: hygiene errors
     // never block a pull, so treat them as warnings only

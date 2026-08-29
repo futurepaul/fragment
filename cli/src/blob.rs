@@ -72,10 +72,22 @@ impl BlobTier {
         BlobTier { base: base.trim_end_matches('/').to_string(), id, http: reqwest::blocking::Client::new() }
     }
 
-    /// True when the tier does NOT have this object yet (HEAD probe).
+    /// True when the tier does NOT have this object yet.
+    ///
+    /// Probed with a 1-byte ranged GET, not HEAD: the HEAD reads bloasd's
+    /// descriptor row, which can outlive the R2 object it names (a bucket
+    /// emptied out-of-band) — trusting it skips uploads for blobs that
+    /// aren't actually there, and every read 404s forever after. A ranged
+    /// GET touches the object itself, so the answer is the truth.
     pub fn needs_upload(&self, sha256: &str) -> bool {
         let url = format!("{}/{}", self.base, sha256);
-        let hit = matches!(self.http.head(&url).send(), Ok(resp) if resp.status().is_success());
+        let hit = matches!(
+            self.http
+                .get(&url)
+                .header("range", "bytes=0-0")
+                .send(),
+            Ok(resp) if resp.status().is_success()
+        );
         !hit
     }
 
@@ -515,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn head_hit_skips_put_and_descriptor_echo_is_checked() {
+    fn presence_probe_skips_put_and_descriptor_echo_is_checked() {
         let stub = Stub::spawn();
         let tier = BlobTier::for_base(&stub.base(), Identity::from_secret([7u8; 32]));
         let bytes = b"fragment blob tier";
@@ -523,17 +535,17 @@ mod tests {
 
         // first call: HEAD miss -> PUT /upload carrying the auth event
         tier.ensure_uploaded(&sha, bytes).expect("fresh upload succeeds");
-        assert_eq!(stub.count_of("HEAD", "/"), 1, "one HEAD probe");
+        assert_eq!(stub.count_of("GET", "/"), 1, "one presence probe");
         assert_eq!(stub.count_of("PUT", "/upload"), 1, "one upload PUT");
 
         // an explicit presence check now answers negatively WITHOUT another PUT
         assert!(!tier.needs_upload(&sha), "object now present");
-        assert_eq!(stub.count_of("HEAD", "/"), 2);
+        assert_eq!(stub.count_of("GET", "/"), 2);
         assert_eq!(stub.count_of("PUT", "/upload"), 1);
 
         // idempotent re-push: HEAD hit means zero further PUTs
         tier.ensure_uploaded(&sha, bytes).expect("HEAD-hit short circuit");
-        assert_eq!(stub.count_of("HEAD", "/"), 3);
+        assert_eq!(stub.count_of("GET", "/"), 3);
         assert_eq!(stub.count_of("PUT", "/upload"), 1, "HEAD hit skips the PUT");
 
         // bytes addressable by their exact hash afterwards
