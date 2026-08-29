@@ -115,5 +115,8 @@ export function toAB(x: unknown): ArrayBuffer {
 }
 
 export function json(data, status = 200, headers = {}) {
-  return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", ...headers } });
+  // API and tree responses are per-request views over mutable cell state;
+  // browsers must never heuristically cache them (a cached __tree makes
+  // polling clients go blind to rev changes until a hard reload)
+  return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", "cache-control": "no-store", ...headers } });
 }

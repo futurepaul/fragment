@@ -56,16 +56,64 @@ async function serveRoute(cell, request, url) {
     }
     const row = mode === "b" ? cell.getFileMeta(fPath) : cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = ? AND deleted = 0", slug, fPath).toArray()[0];
     if (!row) return json({ error: "no such file" }, 404);
-    const mime2 = row.mime || mimeForPath(fPath) || "application/octet-stream";
+    const mime = row.mime || mimeForPath(fPath) || "application/octet-stream";
     const redirectBase = publicRedirectTarget(cell, mode === "b");
-    if (redirectBase) return stamp(new Response(null, { status: 302, headers: { location: `${redirectBase}/${row.sha256}` } }));
-    const upstream2 = await tierStreamByHash(cell, row.sha256);
-    return new Response(upstream2.body, { status: upstream2.status, headers: {
-      "content-type": mime2,
-      "cache-control": serveCacheControl(mode === "b", fPath)
+    if (redirectBase) return stamp(new Response(null, { status: 302, headers: {
+      location: `${redirectBase}/${row.sha256}`,
+      // public-GET bytes are unauthenticated by design; the ACAO header lets
+      // a page's fetch() follow the cross-origin redirect (browsers require
+      // CORS on every hop of a cors-mode redirect)
+      "access-control-allow-origin": "*",
+      // the path->hash mapping is mutable; only the blob itself is immutable.
+      // A cached 302 would keep serving a stale file after an edit.
+      "cache-control": "no-store"
+    } }));
+    const upstream = await tierStreamByHash(cell, row.sha256);
+    return new Response(upstream.body, { status: upstream.status, headers: {
+      "content-type": mime,
+      "cache-control": "no-store"
     } });
   }
   const appMeta = cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = 'app.mjs'", slug).toArray()[0];
+  if (rest !== "" || !appMeta) {
+    let rel = rest === "" ? "index.html" : rest;
+    const stMeta = (p) => cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = ? AND deleted = 0", slug, p).toArray()[0];
+    let meta = stMeta("site/" + rel);
+    if (!meta && !rel.endsWith("/")) meta = stMeta("site/" + rel + "/index.html");
+    if (meta) {
+      const ext = (rel.match(/\.([a-z0-9]+)$/) || [])[1] || "";
+      const mime = meta.mime || MIME[ext] || "application/octet-stream";
+      const cache = serveCacheControl(mode === "b", rel);
+      const m2 = cell.manifest();
+      const wantsOg = (mime || "").includes("text/html") && !!m2?.meta && rel === "index.html";
+      let ogHtml = null;
+      if (wantsOg && (meta.size | 0) <= OG_MATERIALIZE_CEILING) {
+        try {
+          ogHtml = await tierTextBounded(cell, meta, `page ${rel}`);
+        } catch {
+          ogHtml = null;
+        }
+      }
+      if (ogHtml !== null && !ogHtml.includes("og:title")) {
+        const pubOrigin = new URL(request.headers.get("x-fragment-url") || request.url).origin;
+        const img = m2.meta.image || `${pubOrigin}/f/${m2.name}/__preview.svg`;
+        const tags = [
+          `<meta property="og:title" content="${esc(m2.meta.title || m2.name)}">`,
+          `<meta property="og:description" content="${esc(m2.meta.description || "")}">`,
+          `<meta property="og:image" content="${esc(img)}">`,
+          `<meta name="twitter:card" content="summary_large_image">`,
+          `<title>${esc(m2.meta.title || m2.name)}</title>`
+        ].join("");
+        ogHtml = ogHtml.includes("<head>") ? ogHtml.replace("<head>", "<head>" + tags) : tags + ogHtml;
+        return stamp(new Response(new TextEncoder().encode(ogHtml), { status: 200, headers: { "content-type": mime, "cache-control": cache } }));
+      }
+      if (ogHtml !== null) {
+        return stamp(new Response(ogHtml, { status: 200, headers: { "content-type": mime, "cache-control": cache } }));
+      }
+      const upstream = await tierStreamByHash(cell, meta.sha256);
+      return stamp(new Response(upstream.body, { status: upstream.status, headers: { "content-type": mime, "cache-control": cache } }));
+    }
+  }
   if (appMeta) {
     const modules = {};
     const libRows = cell.sql.exec("SELECT path, sha256, size FROM draft_files WHERE slug = ? AND path LIKE 'applib/%'", slug).toArray();
@@ -75,43 +123,7 @@ async function serveRoute(cell, request, url) {
     const appUrl = new URL(request.url);
     return stamp(await ep.fetch(new Request(appUrl.origin + "/" + rest + appUrl.search, request)));
   }
-  let rel = rest === "" ? "index.html" : rest;
-  const stMeta = (p) => cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = ? AND deleted = 0", slug, p).toArray()[0];
-  let meta = stMeta("site/" + rel);
-  if (!meta && !rel.endsWith("/")) meta = stMeta("site/" + rel + "/index.html");
-  if (!meta) return new Response("not found", { status: 404 });
-  const ext = (rel.match(/\.([a-z0-9]+)$/) || [])[1] || "";
-  const mime = meta.mime || MIME[ext] || "application/octet-stream";
-  const cache = serveCacheControl(mode === "b", rel);
-  const m2 = cell.manifest();
-  const wantsOg = (mime || "").includes("text/html") && !!m2?.meta && rel === "index.html";
-  let bodyStream = null;
-  let ogHtml = null;
-  if (wantsOg && (meta.size | 0) <= OG_MATERIALIZE_CEILING) {
-    try {
-      ogHtml = await tierTextBounded(cell, meta, `page ${rel}`);
-    } catch {
-      ogHtml = null;
-    }
-  }
-  if (ogHtml !== null && !ogHtml.includes("og:title")) {
-    const pubOrigin = new URL(request.headers.get("x-fragment-url") || request.url).origin;
-    const img = m2.meta.image || `${pubOrigin}/f/${m2.name}/__preview.svg`;
-    const tags = [
-      `<meta property="og:title" content="${esc(m2.meta.title || m2.name)}">`,
-      `<meta property="og:description" content="${esc(m2.meta.description || "")}">`,
-      `<meta property="og:image" content="${esc(img)}">`,
-      `<meta name="twitter:card" content="summary_large_image">`,
-      `<title>${esc(m2.meta.title || m2.name)}</title>`
-    ].join("");
-    ogHtml = ogHtml.includes("<head>") ? ogHtml.replace("<head>", "<head>" + tags) : tags + ogHtml;
-    return stamp(new Response(new TextEncoder().encode(ogHtml), { status: 200, headers: { "content-type": mime, "cache-control": cache } }));
-  }
-  if (ogHtml !== null) {
-    return stamp(new Response(ogHtml, { status: 200, headers: { "content-type": mime, "cache-control": cache } }));
-  }
-  const upstream = await tierStreamByHash(cell, meta.sha256);
-  return stamp(new Response(upstream.body, { status: upstream.status, headers: { "content-type": mime, "cache-control": cache } }));
+  return new Response("not found", { status: 404 });
 }
 function checkVisibility(cell, request, url) {
   const m = cell.manifest();

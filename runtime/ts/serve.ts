@@ -94,17 +94,76 @@ export async function serveRoute(cell, request, url) {
     // minting rides along (stamp) so the ?view= upgrade still lands on the
     // first hit even when it is a file URL.
     const redirectBase = publicRedirectTarget(cell, mode === "b");
-    if (redirectBase) return stamp(new Response(null, { status: 302, headers: { location: `${redirectBase}/${row.sha256}` } }));
-    // private/link-less fallback: proxy-stream loopback, heap-flat
+    if (redirectBase) return stamp(new Response(null, { status: 302, headers: {
+      location: `${redirectBase}/${row.sha256}`,
+      // public-GET bytes are unauthenticated by design; the ACAO header lets
+      // a page's fetch() follow the cross-origin redirect (browsers require
+      // CORS on every hop of a cors-mode redirect)
+      "access-control-allow-origin": "*",
+      // the path->hash mapping is mutable; only the blob itself is immutable.
+      // A cached 302 would keep serving a stale file after an edit.
+      "cache-control": "no-store",
+    } }));
+    // private/link-less fallback: proxy-stream loopback, heap-flat.
+    // no-store: same rule as the 302 above — the path's content can change;
+    // only hash-named blobs themselves are immutable.
     const upstream = await tierStreamByHash(cell, row.sha256);
     return new Response(upstream.body, { status: upstream.status, headers: {
       "content-type": mime,
-      "cache-control": serveCacheControl(mode === "b", fPath),
+      "cache-control": "no-store",
     } });
   }
 
-  // dynamic app
+  // static from site/ — the fragment's browser-asset plane, reserved ahead
+  // of app dispatch: browsers don't attach ?view= to subresource fetches
+  // (module imports, css, img), so clean hash-named paths are how an
+  // app-bearing fragment serves those assets. The app keeps the root — a
+  // stray site/index.html never shadows it.
   const appMeta = cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = 'app.mjs'", slug).toArray()[0];
+  if (rest !== "" || !appMeta) {
+    let rel = rest === "" ? "index.html" : rest;
+    const stMeta = (p) => cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = ? AND deleted = 0", slug, p).toArray()[0];
+    let meta = stMeta("site/" + rel);
+    if (!meta && !rel.endsWith("/")) meta = stMeta("site/" + rel + "/index.html");
+    if (meta) {
+      const ext = (rel.match(/\.([a-z0-9]+)$/) || [])[1] || "";
+      const mime = meta.mime || MIME[ext] || "application/octet-stream";
+      const cache = serveCacheControl(mode === "b", rel);
+      const m2 = cell.manifest();
+      const wantsOg = (mime || "").includes("text/html") && !!m2?.meta && rel === "index.html";
+      let ogHtml: string | null = null;
+      if (wantsOg && (meta.size | 0) <= OG_MATERIALIZE_CEILING) {
+        // template materializer: the ONLY static path allowed a whole-body
+        // decode, bounded above so a mislabeled huge file can't blow the heap
+        try { ogHtml = await tierTextBounded(cell, meta, `page ${rel}`); } catch { ogHtml = null; }
+      }
+      if (ogHtml !== null && !ogHtml.includes("og:title")) {
+        // social preview injection: og tags from manifest meta unless the page
+        // brings its own; image falls back to the generated placeholder
+        const pubOrigin = new URL(request.headers.get("x-fragment-url") || request.url).origin;
+        const img = m2.meta.image || `${pubOrigin}/f/${m2.name}/__preview.svg`;
+        const tags = [
+          `<meta property="og:title" content="${esc(m2.meta.title || m2.name)}">`,
+          `<meta property="og:description" content="${esc(m2.meta.description || "")}">`,
+          `<meta property="og:image" content="${esc(img)}">`,
+          `<meta name="twitter:card" content="summary_large_image">`,
+          `<title>${esc(m2.meta.title || m2.name)}</title>`,
+        ].join("");
+        ogHtml = ogHtml.includes("<head>") ? ogHtml.replace("<head>", "<head>" + tags) : tags + ogHtml;
+        return stamp(new Response(new TextEncoder().encode(ogHtml), { status: 200, headers: { "content-type": mime, "cache-control": cache } }));
+      }
+      if (ogHtml !== null) {
+        // decoded for injection eligibility but page carries its own OG tags:
+        // re-serve the exact bytes we read rather than a re-encoded copy
+        return stamp(new Response(ogHtml, { status: 200, headers: { "content-type": mime, "cache-control": cache } }));
+      }
+      // everything else streams untouched out of the tier
+      const upstream = await tierStreamByHash(cell, meta.sha256);
+      return stamp(new Response(upstream.body, { status: upstream.status, headers: { "content-type": mime, "cache-control": cache } }));
+    }
+  }
+
+  // dynamic app
   if (appMeta) {
     const modules = {};
     // code materializes through bounded tier reads; module counts are
@@ -122,47 +181,7 @@ export async function serveRoute(cell, request, url) {
     return stamp(await ep.fetch(new Request(appUrl.origin + "/" + rest + appUrl.search, request)));
   }
 
-  // static from site/
-  let rel = rest === "" ? "index.html" : rest;
-  const stMeta = (p) => cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = ? AND deleted = 0", slug, p).toArray()[0];
-  let meta = stMeta("site/" + rel);
-  if (!meta && !rel.endsWith("/")) meta = stMeta("site/" + rel + "/index.html");
-  if (!meta) return new Response("not found", { status: 404 });
-  const ext = (rel.match(/\.([a-z0-9]+)$/) || [])[1] || "";
-  const mime = meta.mime || MIME[ext] || "application/octet-stream";
-  const cache = serveCacheControl(mode === "b", rel);
-  const m2 = cell.manifest();
-  const wantsOg = (mime || "").includes("text/html") && !!m2?.meta && rel === "index.html";
-  let bodyStream = null;
-  let ogHtml: string | null = null;
-  if (wantsOg && (meta.size | 0) <= OG_MATERIALIZE_CEILING) {
-    // template materializer: the ONLY static path allowed a whole-body
-    // decode, bounded above so a mislabeled huge file can't blow the heap
-    try { ogHtml = await tierTextBounded(cell, meta, `page ${rel}`); } catch { ogHtml = null; }
-  }
-  if (ogHtml !== null && !ogHtml.includes("og:title")) {
-    // social preview injection: og tags from manifest meta unless the page
-    // brings its own; image falls back to the generated placeholder
-    const pubOrigin = new URL(request.headers.get("x-fragment-url") || request.url).origin;
-    const img = m2.meta.image || `${pubOrigin}/f/${m2.name}/__preview.svg`;
-    const tags = [
-      `<meta property="og:title" content="${esc(m2.meta.title || m2.name)}">`,
-      `<meta property="og:description" content="${esc(m2.meta.description || "")}">`,
-      `<meta property="og:image" content="${esc(img)}">`,
-      `<meta name="twitter:card" content="summary_large_image">`,
-      `<title>${esc(m2.meta.title || m2.name)}</title>`,
-    ].join("");
-    ogHtml = ogHtml.includes("<head>") ? ogHtml.replace("<head>", "<head>" + tags) : tags + ogHtml;
-    return stamp(new Response(new TextEncoder().encode(ogHtml), { status: 200, headers: { "content-type": mime, "cache-control": cache } }));
-  }
-  if (ogHtml !== null) {
-    // decoded for injection eligibility but page carries its own OG tags:
-    // re-serve the exact bytes we read rather than a re-encoded copy
-    return stamp(new Response(ogHtml, { status: 200, headers: { "content-type": mime, "cache-control": cache } }));
-  }
-  // everything else streams untouched out of the tier
-  const upstream = await tierStreamByHash(cell, meta.sha256);
-  return stamp(new Response(upstream.body, { status: upstream.status, headers: { "content-type": mime, "cache-control": cache } }));
+  return new Response("not found", { status: 404 });
 }
 
 // ------ checkVisibility ------

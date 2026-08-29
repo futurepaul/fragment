@@ -91,7 +91,7 @@ function toAB(x) {
   throw new Error("unexpected storage value type: " + typeof x);
 }
 function json(data, status = 200, headers = {}) {
-  return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", ...headers } });
+  return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", "cache-control": "no-store", ...headers } });
 }
 export {
   MACHINERY,
