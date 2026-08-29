@@ -486,42 +486,26 @@ async fn private_instance_gates_reads_on_internal_bearer() {
 
 #[tokio::test]
 async fn descriptors_persist_across_app_restart() {
+    // fs backend: the tempdir root plays "the remote that outlives the
+    // process", so the restart shape is exercised with no MinIO dependency.
     let dir = tempfile::tempdir().unwrap();
-    let shared_base = {
-        let mut vars: HashMap<String, String> = HashMap::new();
+    let fs_vars = |vars: &mut HashMap<String, String>| {
         vars.insert("BLOBSD_LISTEN".into(), "127.0.0.1:0".into());
         vars.insert("BLOBSD_DATA_DIR".into(), dir.path().display().to_string());
         vars.insert("BLOBSD_PUBLIC_URL".into(), SERVER_URL.into());
-        vars.insert("BLOBSD_BUCKET".into(), "fragment-dev".into());
-        vars.insert("S3_ENDPOINT".into(), "http://127.0.0.1:9000".into());
-        vars.insert("AWS_ACCESS_KEY_ID".into(), "minio".into());
-        vars.insert("AWS_SECRET_ACCESS_KEY".into(), "miniosecret".into());
-        vars.insert("AWS_REGION".into(), "us-east-1".into());
+        vars.insert("BLOBSD_BACKEND".into(), "fs".into());
+        vars.insert(
+            "BLOBSD_FS_ROOT".into(),
+            format!("{}/blobs-root", dir.path().display()),
+        );
         vars.insert("BLOBSD_ALLOW_NPUBS".into(), fx::test_npub());
         vars.insert("BLOBSD_INTERNAL_TOKEN".into(), INTERNAL_TOKEN.into());
         vars.insert("BLOBSD_PUBLIC_GET".into(), "true".into());
-        let cfg = Config::from_map(&vars).unwrap();
-        AppState::boot(cfg.clone()).await.unwrap()
     };
-    // The bucket outlives the "process" (it is the remote); keep one Arc.
-    let shared_bucket: Bucket = shared_base.bucket.clone();
-    drop(shared_base);
-
     let mut vars: HashMap<String, String> = HashMap::new();
-    vars.insert("BLOBSD_LISTEN".into(), "127.0.0.1:0".into());
-    vars.insert("BLOBSD_DATA_DIR".into(), dir.path().display().to_string());
-    vars.insert("BLOBSD_PUBLIC_URL".into(), SERVER_URL.into());
-    vars.insert("BLOBSD_BUCKET".into(), "fragment-dev".into());
-    vars.insert("S3_ENDPOINT".into(), "http://127.0.0.1:9000".into());
-    vars.insert("AWS_ACCESS_KEY_ID".into(), "minio".into());
-    vars.insert("AWS_SECRET_ACCESS_KEY".into(), "miniosecret".into());
-    vars.insert("AWS_REGION".into(), "us-east-1".into());
-    vars.insert("BLOBSD_ALLOW_NPUBS".into(), fx::test_npub());
-    vars.insert("BLOBSD_INTERNAL_TOKEN".into(), INTERNAL_TOKEN.into());
-    vars.insert("BLOBSD_PUBLIC_GET".into(), "true".into());
+    fs_vars(&mut vars);
     let cfg = Config::from_map(&vars).unwrap();
-    let state = AppState::boot(cfg).await.unwrap();
-    let state = AppState { bucket: shared_bucket.clone(), ..state };
+    let state = AppState::boot(cfg.clone()).await.unwrap();
     let router1 = build_router(state);
 
     // First "process": upload.
@@ -531,24 +515,10 @@ async fn descriptors_persist_across_app_restart() {
     assert_eq!(status, StatusCode::OK);
     drop(router1);
 
-    // Second "process": fresh router over the same db file + same bucket.
-    let cfg = {
-        let mut vars: HashMap<String, String> = HashMap::new();
-        vars.insert("BLOBSD_LISTEN".into(), "127.0.0.1:0".into());
-        vars.insert("BLOBSD_DATA_DIR".into(), dir.path().display().to_string());
-        vars.insert("BLOBSD_PUBLIC_URL".into(), SERVER_URL.into());
-        vars.insert("BLOBSD_BUCKET".into(), "fragment-dev".into());
-        vars.insert("S3_ENDPOINT".into(), "http://127.0.0.1:9000".into());
-        vars.insert("AWS_ACCESS_KEY_ID".into(), "minio".into());
-        vars.insert("AWS_SECRET_ACCESS_KEY".into(), "miniosecret".into());
-        vars.insert("AWS_REGION".into(), "us-east-1".into());
-        vars.insert("BLOBSD_ALLOW_NPUBS".into(), fx::test_npub());
-        vars.insert("BLOBSD_INTERNAL_TOKEN".into(), INTERNAL_TOKEN.into());
-        vars.insert("BLOBSD_PUBLIC_GET".into(), "true".into());
-        Config::from_map(&vars).unwrap()
-    };
+    // Second "process": fresh boot over the same db file + same blob root.
+    let mut vars: HashMap<String, String> = HashMap::new();
+    fs_vars(&mut vars);
     let state = AppState::boot(cfg).await.unwrap();
-    let state = AppState { bucket: shared_bucket, ..state };
     let router2 = build_router(state);
 
     let sha = sha_hex(&data);

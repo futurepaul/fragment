@@ -46,7 +46,7 @@ impl AppState {
             other => BootError::Db(other.to_string()),
         })?;
 
-        let bucket = Bucket::open_s3(&cfg)?;
+        let bucket = Bucket::open(&cfg)?;
 
         Ok(AppState {
             cfg,

@@ -29,7 +29,7 @@ const MIN_INTERNAL_TOKEN_LEN: usize = 16;
 /// Recognized `BLOBSD_*` environment names. Anything else prefixed
 /// `BLOBSD_` fails boot: a typo'd variable silently falling back to default
 /// behavior is exactly how an instance ends up public without meaning to be.
-pub const KNOWN_BLOBSD_VARS: [&str; 8] = [
+pub const KNOWN_BLOBSD_VARS: [&str; 10] = [
     "BLOBSD_LISTEN",
     "BLOBSD_DATA_DIR",
     "BLOBSD_PUBLIC_URL",
@@ -38,7 +38,19 @@ pub const KNOWN_BLOBSD_VARS: [&str; 8] = [
     "BLOBSD_INTERNAL_TOKEN",
     "BLOBSD_PUBLIC_GET",
     "BLOBSD_BUCKET",
+    "BLOBSD_BACKEND",
+    "BLOBSD_FS_ROOT",
 ];
+
+/// Which object store backs the blob tier. `S3` is production (and anything
+/// with an S3-compatible endpoint); `Fs` stores blobs as plain files under a
+/// local root so dev and CI run the whole stack as native processes — no
+/// container, no MinIO, same handlers and descriptor store either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    S3,
+    Fs,
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -46,6 +58,9 @@ pub struct Config {
     pub data_dir: String,
     /// Object key prefix inside the bucket, always `blobs/<sha256>`.
     pub bucket_prefix: &'static str,
+    pub backend: Backend,
+    /// Local filesystem root for `Backend::Fs` (unused by `Backend::S3`).
+    pub fs_root: String,
     pub bucket: String,
     pub s3_endpoint: String,
     pub aws_access_key_id: String,
@@ -106,6 +121,16 @@ impl Config {
             }
         };
 
+        let backend = match vars.get("BLOBSD_BACKEND").map(String::as_str) {
+            None | Some("s3") => Backend::S3,
+            Some("fs") => Backend::Fs,
+            Some(other) => {
+                return Err(BootError::Config(format!(
+                    "BLOBSD_BACKEND must be s3 or fs (got {other:?})"
+                )))
+            }
+        };
+
         let listen = get("BLOBSD_LISTEN")?
             .parse::<SocketAddr>()
             .map_err(|e| BootError::Config(format!("BLOBSD_LISTEN: {e}")))?;
@@ -115,29 +140,51 @@ impl Config {
         let public_url = get("BLOBSD_PUBLIC_URL")?;
         validate_public_url(&public_url)?;
 
-        let bucket = get("BLOBSD_BUCKET")?;
-        validate_bucket_name(&bucket)?;
-
-        let s3_endpoint = get("S3_ENDPOINT")?;
-        if !(s3_endpoint.starts_with("http://") || s3_endpoint.starts_with("https://")) {
-            return Err(BootError::Config(
-                "S3_ENDPOINT must start with http:// or https://".to_string(),
-            ));
-        }
-
-        let aws_access_key_id = get("AWS_ACCESS_KEY_ID")?;
-        let aws_secret_access_key = get("AWS_SECRET_ACCESS_KEY")?;
-        let aws_region = get("AWS_REGION")?;
-        if aws_region.is_empty()
-            || aws_region.len() > 64
-            || !aws_region
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        {
-            return Err(BootError::Config(
-                "AWS_REGION must be 1-64 chars of [a-z0-9-]".to_string(),
-            ));
-        }
+        // S3 wiring applies to the s3 backend only; the fs backend takes a
+        // local root instead and must not demand cloud credentials.
+        let (fs_root, bucket, s3_endpoint, aws_access_key_id, aws_secret_access_key, aws_region) =
+            match backend {
+                Backend::Fs => {
+                    let root = get("BLOBSD_FS_ROOT")?;
+                    if root.contains("..") || !root.starts_with('/') {
+                        return Err(BootError::Config(
+                            "BLOBSD_FS_ROOT must be an absolute path without '..'".to_string(),
+                        ));
+                    }
+                    (root, String::new(), String::new(), String::new(), String::new(), String::new())
+                }
+                Backend::S3 => {
+                    let bucket = get("BLOBSD_BUCKET")?;
+                    validate_bucket_name(&bucket)?;
+                    let s3_endpoint = get("S3_ENDPOINT")?;
+                    if !(s3_endpoint.starts_with("http://") || s3_endpoint.starts_with("https://")) {
+                        return Err(BootError::Config(
+                            "S3_ENDPOINT must start with http:// or https://".to_string(),
+                        ));
+                    }
+                    let aws_access_key_id = get("AWS_ACCESS_KEY_ID")?;
+                    let aws_secret_access_key = get("AWS_SECRET_ACCESS_KEY")?;
+                    let aws_region = get("AWS_REGION")?;
+                    if aws_region.is_empty()
+                        || aws_region.len() > 64
+                        || !aws_region
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                    {
+                        return Err(BootError::Config(
+                            "AWS_REGION must be 1-64 chars of [a-z0-9-]".to_string(),
+                        ));
+                    }
+                    (
+                        String::new(),
+                        bucket,
+                        s3_endpoint,
+                        aws_access_key_id,
+                        aws_secret_access_key,
+                        aws_region,
+                    )
+                }
+            };
 
         let max_blob_bytes_raw = match vars.get("BLOBSD_MAX_BLOB_BYTES") {
             // Unset takes the specced default; set-but-empty is an error so a
@@ -207,6 +254,8 @@ impl Config {
             listen,
             data_dir,
             bucket_prefix: "blobs",
+            backend,
+            fs_root,
             bucket,
             s3_endpoint,
             aws_access_key_id,

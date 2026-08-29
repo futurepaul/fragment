@@ -60,9 +60,25 @@ pub struct Bucket {
     /// so the ambiguity must reach the handler undisturbed.
     cas_store: Arc<dyn ObjectStore>,
     prefix: String,
+    /// S3 put dialect: a successful conditional write must carry an etag to
+    /// fence future writes, and content-type rides the object attributes.
+    /// The local fs backend has no etags to require and refuses attributes
+    /// outright — its atomic create is enough, and content-type falls back
+    /// to the descriptor on read.
+    s3_dialect: bool,
 }
 
 impl Bucket {
+    /// Open the configured backend: S3 in production, a plain directory for
+    /// dev/CI (`BLOBSD_BACKEND=fs`). Everything above this seam — handlers,
+    /// descriptor store, convergence logic — is backend-blind.
+    pub fn open(cfg: &Config) -> Result<Bucket, BootError> {
+        match cfg.backend {
+            crate::config::Backend::S3 => Self::open_s3(cfg),
+            crate::config::Backend::Fs => Self::open_fs(cfg),
+        }
+    }
+
     /// Build the S3-compatible client pair from validated config. Always
     /// path-style (`with_virtual_hosted_style_request(false)`): MinIO dev,
     /// Latitude and R2-style endpoints are all addressed by path, never by
@@ -91,6 +107,26 @@ impl Bucket {
             store: Arc::new(store),
             cas_store: Arc::new(cas_store),
             prefix: cfg.bucket_prefix.to_string(),
+            s3_dialect: true,
+        })
+    }
+
+    /// Local filesystem backend: blobs as files under one root. The dev/CI
+    /// stack runs entirely as native processes this way — the read path's
+    /// `GetResultPayload::File` arm already knows how to stream these.
+    fn open_fs(cfg: &Config) -> Result<Bucket, BootError> {
+        let root = std::path::Path::new(&cfg.fs_root);
+        std::fs::create_dir_all(root)
+            .map_err(|e| BootError::Bucket(format!("create fs root {}: {e}", cfg.fs_root)))?;
+        let store: Arc<dyn ObjectStore> = Arc::new(
+            object_store::local::LocalFileSystem::new_with_prefix(root)
+                .map_err(|e| BootError::Bucket(format!("open fs root {}: {e}", cfg.fs_root)))?,
+        );
+        Ok(Bucket {
+            store: store.clone(),
+            cas_store: store,
+            prefix: cfg.bucket_prefix.to_string(),
+            s3_dialect: false,
         })
     }
 
@@ -105,6 +141,9 @@ impl Bucket {
             store: store.clone(),
             cas_store: store,
             prefix: "blobs".to_string(),
+            // The memory backend accepts attributes and returns etags, so it
+            // faithfully stands in for the production S3 dialect in tests.
+            s3_dialect: true,
         }
     }
 
@@ -230,12 +269,16 @@ impl Bucket {
     ) -> Result<PutCreate, BucketError> {
         let key = self.key(sha_hex);
         let mut attributes = Attributes::new();
-        // Content-type strings were validated ASCII/length at the handler
-        // boundary; AttributeValue takes the plain string form.
-        attributes.insert(
-            Attribute::ContentType,
-            object_store::AttributeValue::from(content_type.to_string()),
-        );
+        if self.s3_dialect {
+            // Content-type strings were validated ASCII/length at the handler
+            // boundary; AttributeValue takes the plain string form. The fs
+            // backend rejects any attribute, so this stays an S3 dialect
+            // concern; reads fall back to the descriptor's mime there.
+            attributes.insert(
+                Attribute::ContentType,
+                object_store::AttributeValue::from(content_type.to_string()),
+            );
+        }
         let options = PutOptions {
             mode: PutMode::Create,
             attributes,
@@ -243,7 +286,7 @@ impl Bucket {
         };
         match self.cas_store.put_opts(&key, payload, options).await {
             Ok(result) => {
-                if result.e_tag.is_none() {
+                if self.s3_dialect && result.e_tag.is_none() {
                     return Err(BucketError::MissingCasToken);
                 }
                 Ok(PutCreate::Applied)

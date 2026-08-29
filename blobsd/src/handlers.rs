@@ -516,13 +516,26 @@ pub async fn get_blob(
         .map_err(bucket_to_api)?
         .ok_or(ApiError::NotFound)?;
 
-    // Content-type preference: stored object attribute wins; fall back
-    // conservative when a backend dropped the attribute.
-    let content_type = result
+    // Content-type preference: stored object attribute wins; then the
+    // descriptor row (the fs backend stores no attributes, but the upload's
+    // declared mime lives in the descriptor); conservative fallback last.
+    let attribute_mime = result
         .attributes
         .get(&object_store::Attribute::ContentType)
         .map(|value| value.to_string())
-        .unwrap_or_else(|| info.content_type.clone().unwrap_or_else(|| "application/octet-stream".to_string()));
+        .or_else(|| info.content_type.clone());
+    let content_type = match attribute_mime {
+        Some(mime) => mime,
+        None => state
+            .db
+            .get_upload(&sha_param)
+            .await
+            .ok()
+            .flatten()
+            .filter(|row| !row.mime.is_empty())
+            .map(|row| row.mime)
+            .unwrap_or_else(|| "application/octet-stream".to_string()),
+    };
 
     let served_len = byte_interval
         .as_ref()
