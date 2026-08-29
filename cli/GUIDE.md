@@ -492,9 +492,12 @@ Inbox messages run all `trigger: "inbox"` workflows and land in the event log.
 ## Sites and apps
 
 Static: files under `site/` serve at the draft/canonical URLs. `/` serves
-`site/index.html`.
+`site/index.html` — even when the folder also has an app.
 
-Dynamic: if the folder has `app.mjs`, every request to the fragment goes to it:
+Dynamic: if the folder has `app.mjs`, every request that isn't a real
+`site/` file (or a reserved platform path like `__tree`) goes to it. A
+fragment with both is the normal shape — the page is a file, the app is
+the API:
 
 ```js
 // app.mjs

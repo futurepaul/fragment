@@ -331,14 +331,12 @@ async function appSection() {
   await signed('POST', `/api/f/${name}/bless`, JSON.stringify({ slug: draft.body.slug }));
 
   const r1 = await fetch(`${BASE}/f/${name}/anything?view=${viewToken}`);
-  eq(r1.status, 200, 'app.mjs serves all paths');
+  eq(r1.status, 200, 'app.mjs serves every non-site path');
   eq(await r1.text(), 'hits=1', 'ctx.state counter first hit');
-  const r2 = await fetch(`${BASE}/f/${name}/?view=${viewToken}`);
+  const r2 = await fetch(`${BASE}/f/${name}/again?view=${viewToken}`);
   eq(await r2.text(), 'hits=2', 'ctx.state persists across requests (cached isolate)');
-
-  // drafts are immutable: app writing files must 403 — covered implicitly by
-  // design; assert static site/ still reachable when app.mjs exists? No: when
-  // app.mjs is present it owns ALL paths (documented). Skip.
+  const root = await fetch(`${BASE}/f/${name}/?view=${viewToken}`);
+  eq(await root.text(), '<html>static</html>', 'site/index.html owns the root beside an app');
 }
 
 // ---------- rooms ----------
@@ -1045,8 +1043,10 @@ async function guideSection() {
     await signed('POST', `/api/f/${name}/drafts`, JSON.stringify({ note: 'guide app' }));
     const ds = await signed('GET', `/api/f/${name}/drafts`);
     await signed('POST', `/api/f/${name}/bless`, JSON.stringify({ slug: ds.body.drafts[0].slug }));
-    const resp = await fetch(`${BASE}/f/${name}/`);
-    eq(await resp.text(), `hello /f/${name}/`, 'app.mjs block serves its documented response (public path via header)');
+    const resp = await fetch(`${BASE}/f/${name}/api`);
+    eq(await resp.text(), `hello /f/${name}/api`, 'app.mjs block serves its documented response (public path via header)');
+    const seed = await fetch(`${BASE}/f/${name}/`);
+    ok((await seed.text()).includes('seed'), 'guide app example: site/index.html still serves the root');
   }
 
   // ---- runner: rooms.mjs block ----
@@ -2571,6 +2571,67 @@ try {
   console.log('FAIL  converge unexpected: ' + String(e && e.stack || e));
 }
 // ---- end lane/converge ----
+
+// ---- lane/static-root: site/index.html owns the root when present ----
+// The static+API authoring shape: page is a file, modules import normally,
+// the app handles POSTs and unknown paths. An app with no site/index.html
+// keeps the legacy single-handler behavior.
+async function staticRootSection() {
+  if (!section('static-root')) return;
+  {
+    const name = `e2e-sr-${suffix}`;
+    await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({
+      name, visibility: 'public', editors: [], viewers: [], workflows: [], secrets: [],
+    }));
+    await signed('PUT', `/api/f/${name}/file?path=site/index.html&base_rev=0`,
+      '<!doctype html><html><head><script type="module" src="/app.js"></script></head><body><h1>static root</h1></body></html>');
+    await signed('PUT', `/api/f/${name}/file?path=site/app.js&base_rev=0`,
+      'export const n = 41 + 1;\n');
+    await signed('PUT', `/api/f/${name}/file?path=app.mjs&base_rev=0`,
+      'export default { async fetch(req) { return new Response(req.method === "POST" ? "app-post" : "app-get", { status: 200 }); } }\n');
+    const d = await signed('POST', `/api/f/${name}/drafts`, JSON.stringify({ note: 'go live' }));
+    await signed('POST', `/api/f/${name}/bless`, JSON.stringify({ slug: d.body.slug }));
+
+    const root = await fetch(`${BASE}/f/${name}/`);
+    const rootBody = await root.text();
+    eq(root.status, 200, '[static-root] root serves the page');
+    ok(rootBody.includes('static root'), '[static-root] root body is index.html');
+    ok((root.headers.get('content-type') || '').includes('text/html'), '[static-root] root content-type is html');
+
+    const mod = await fetch(`${BASE}/f/${name}/app.js`);
+    eq(mod.status, 200, '[static-root] module served at clean path');
+    ok((mod.headers.get('content-type') || '').includes('javascript'), '[static-root] module MIME is javascript');
+
+    const post = await fetch(`${BASE}/f/${name}/submit`, { method: 'POST', body: 'x' });
+    eq(await post.text(), 'app-post', '[static-root] app answers POSTs');
+
+    const unknown = await fetch(`${BASE}/f/${name}/no-such-page`);
+    eq(await unknown.text(), 'app-get', '[static-root] unknown GET paths reach the app');
+  }
+  {
+    // no site/index.html: the app keeps the root (legacy shape)
+    const name = `e2e-sr-apponly-${suffix}`;
+    await signed('POST', '/api/fragments', JSON.stringify({ name }));
+    await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({
+      name, visibility: 'public', editors: [], viewers: [], workflows: [], secrets: [],
+    }));
+    await signed('PUT', `/api/f/${name}/file?path=app.mjs&base_rev=0`,
+      'export default { async fetch() { return new Response("app-owns-root", { status: 200 }); } }\n');
+    const d = await signed('POST', `/api/f/${name}/drafts`, JSON.stringify({ note: 'go live' }));
+    await signed('POST', `/api/f/${name}/bless`, JSON.stringify({ slug: d.body.slug }));
+    const root = await fetch(`${BASE}/f/${name}/`);
+    eq(await root.text(), 'app-owns-root', '[static-root] app without site/index.html keeps the root');
+  }
+}
+try {
+  if (!ONLY || ONLY === 'static-root') await staticRootSection();
+} catch (e) {
+  fail++;
+  failures.push('static-root: ' + String(e && e.stack || e));
+  console.log('FAIL  static-root unexpected: ' + String(e && e.stack || e));
+}
+// ---- end lane/static-root ----
 
 console.log(`\n${pass} passed, ${fail} failed${fail ? ': ' + failures.join('; ') : ''}`);
 process.exit(fail ? 1 : 0);

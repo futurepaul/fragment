@@ -117,12 +117,15 @@ export async function serveRoute(cell, request, url) {
   // static from site/ — the fragment's browser-asset plane, reserved ahead
   // of app dispatch: browsers don't attach ?view= to subresource fetches
   // (module imports, css, img), so clean hash-named paths are how an
-  // app-bearing fragment serves those assets. The app keeps the root — a
-  // stray site/index.html never shadows it.
+  // app-bearing fragment serves those assets. An exact site/index.html
+  // serves the root too — the normal static+API hosting shape, where the
+  // page is a file and the app handles everything else. An app with no
+  // site/index.html keeps the root (legacy single-handler shape).
   const appMeta = cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = 'app.mjs'", slug).toArray()[0];
-  if (rest !== "" || !appMeta) {
+  const stMeta = (p) => cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = ? AND deleted = 0", slug, p).toArray()[0];
+  const siteOwnsRoot = !!appMeta && !!stMeta("site/index.html");
+  if (rest !== "" || !appMeta || siteOwnsRoot) {
     let rel = rest === "" ? "index.html" : rest;
-    const stMeta = (p) => cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = ? AND deleted = 0", slug, p).toArray()[0];
     let meta = stMeta("site/" + rel);
     if (!meta && !rel.endsWith("/")) meta = stMeta("site/" + rel + "/index.html");
     if (meta) {

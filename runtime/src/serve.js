@@ -75,9 +75,10 @@ async function serveRoute(cell, request, url) {
     } });
   }
   const appMeta = cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = 'app.mjs'", slug).toArray()[0];
-  if (rest !== "" || !appMeta) {
+  const stMeta = (p) => cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = ? AND deleted = 0", slug, p).toArray()[0];
+  const siteOwnsRoot = !!appMeta && !!stMeta("site/index.html");
+  if (rest !== "" || !appMeta || siteOwnsRoot) {
     let rel = rest === "" ? "index.html" : rest;
-    const stMeta = (p) => cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = ? AND deleted = 0", slug, p).toArray()[0];
     let meta = stMeta("site/" + rel);
     if (!meta && !rel.endsWith("/")) meta = stMeta("site/" + rel + "/index.html");
     if (meta) {
