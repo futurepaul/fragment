@@ -242,7 +242,11 @@ export async function vapidHeaders(privJwk: JsonWebKey, pubRaw: string, audience
   const signingInput = header + "." + claims;
   const priv = await crypto.subtle.importKey("jwk", privJwk, ECDSA, false, ["sign"]);
   const rawSig = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, priv, utf8(signingInput)));
-  const jwt = signingInput + "." + b64urlEncode(rawSigToDer(rawSig));
+  // The JWT signature is subtle.sign's DER output VERBATIM (JWS ES256).
+  // Found by live triangulation: double-DER (wrapping subtle's already-DER
+  // bytes) drew FCM's 403 "invalid JWT" while lenient Apple waved it
+  // through; raw r||s drew "not a DER SEQUENCE" from BOTH services.
+  const jwt = signingInput + "." + b64urlEncode(rawSig);
   return {
     authorization: `vapid t=${jwt}, k=${pubRaw}`,
     "crypto-key": `p256ecdsa=${pubRaw}`,
@@ -289,12 +293,12 @@ export async function webpushSelfTest(): Promise<{ ok: boolean; detail: string }
     if (c.sub !== "mailto:dev@fragment.club") throw new Error("bad sub " + c.sub);
     const nowSec = Math.floor(Date.now() / 1000);
     if (typeof c.exp !== "number" || c.exp <= nowSec || c.exp > nowSec + 12 * 3600 + 60) throw new Error("bad exp " + c.exp);
-    // rebuild the public key from the raw point and verify — the JWT
-    // carries the DER (JWS) form, WebCrypto verifies the raw form, so
-    // derSigToRaw doubles as the structural check of our own encoding
+    // rebuild the public key from the raw point and verify — the wire form
+    // is DER (JWS); WebCrypto verifies the raw P1363 form, so unwrap first
+    // (derSigToRaw doubles as the structural check of our own encoding)
     const pub = await importEcPub(b64urlDecode(kp.pubRaw), ECDSA, ["verify"]);
-    const sig = b64urlDecode(m[3]);
-    const rawSig = derSigToRaw(sig);
+    const der = b64urlDecode(m[3]);
+    const rawSig = derSigToRaw(der);
     const okSig = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, pub, rawSig as unknown as BufferSource, utf8(m[1] + "." + m[2]));
     if (!okSig) throw new Error("VAPID signature does not verify");
     if (!/^p256ecdsa=/.test(vh["crypto-key"])) throw new Error("bad Crypto-Key header");

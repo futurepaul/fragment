@@ -4,7 +4,7 @@ import { json, isMachinery, randHex, bodyTooLarge, MAX_BODY_BYTES, MIME, mimeFor
 import { checkToken } from "./loader.js";
 import { recordRevision } from "./history.js";
 import { READ_CEILING, TierError, admitFileWrite, tierStreamByHash } from "./blob-tier.js";
-import { encryptPayload, vapidHeaders, generateVapidKeys, webpushSelfTest, b64urlDecode } from "./webpush.js";
+import { encryptPayload, vapidHeaders, generateVapidKeys, webpushSelfTest, b64urlDecode, b64urlEncode } from "./webpush.js";
 
 function appendOnlyHit(cell, path) {
   const m = cell.manifest();
@@ -23,6 +23,11 @@ export function ensurePushTable(cell) {
   pushTablesReady.add(cell);
 }
 
+
+function pubRawToBytes(s: string): Uint8Array {
+  try { return b64urlDecode(s); } catch { return new Uint8Array(0); }
+}
+
 // Get-or-generate the cell's VAPID keypair. Stored as cell meta:
 //   push_vapid_priv — JSON JWK (signing key; rotate by overwriting)
 //   push_vapid_pub  — base64url of the 65-byte raw point (what pages
@@ -35,7 +40,18 @@ export async function pushVapidFor(cell) {
   const pubRaw = cell.getMeta("push_vapid_pub");
   if (privRaw && pubRaw) {
     try {
-      return { privJwk: JSON.parse(privRaw), pubRaw };
+      const privJwk = JSON.parse(privRaw);
+      // self-heal a pre-normalization key: the very first keypairs were
+      // generated before the SPKI-vs-raw fix, so pubRaw holds 91 bytes the
+      // browser rejects at subscribe time. The private JWK carries x/y —
+      // rebuild the 65-byte point from them and repair the meta row.
+      if (pubRawToBytes(pubRaw).length !== 65 && privJwk.x && privJwk.y) {
+        const fixed = b64urlEncode(new Uint8Array([0x04, ...b64urlDecode(privJwk.x), ...b64urlDecode(privJwk.y)]));
+        cell.setMeta("push_vapid_pub", fixed);
+        cell.addEvent("push.vapid", "repaired public key to raw point form", {});
+        return { privJwk, pubRaw: fixed };
+      }
+      return { privJwk, pubRaw };
     } catch {
       // fall through: a corrupt meta row regenerates rather than poisons
     }

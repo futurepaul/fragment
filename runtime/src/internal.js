@@ -2,7 +2,7 @@
 import { json, randHex, bodyTooLarge, MAX_BODY_BYTES, MIME, mimeForPath } from "./util.js";
 import { recordRevision } from "./history.js";
 import { READ_CEILING, TierError, admitFileWrite, tierStreamByHash } from "./blob-tier.js";
-import { encryptPayload, vapidHeaders, generateVapidKeys, webpushSelfTest, b64urlDecode } from "./webpush.js";
+import { encryptPayload, vapidHeaders, generateVapidKeys, webpushSelfTest, b64urlDecode, b64urlEncode } from "./webpush.js";
 function appendOnlyHit(cell, path) {
   const m = cell.manifest();
   return m && (m.appendOnly || []).some((p) => path === p.slice(0, -1) || path.startsWith(p));
@@ -13,12 +13,26 @@ function ensurePushTable(cell) {
   cell.sql.exec("CREATE TABLE IF NOT EXISTS push_subs (who TEXT, endpoint TEXT PRIMARY KEY, p256dh TEXT, auth TEXT, at INTEGER, fails INTEGER DEFAULT 0)");
   pushTablesReady.add(cell);
 }
+function pubRawToBytes(s) {
+  try {
+    return b64urlDecode(s);
+  } catch {
+    return new Uint8Array(0);
+  }
+}
 async function pushVapidFor(cell) {
   const privRaw = cell.getMeta("push_vapid_priv");
   const pubRaw = cell.getMeta("push_vapid_pub");
   if (privRaw && pubRaw) {
     try {
-      return { privJwk: JSON.parse(privRaw), pubRaw };
+      const privJwk = JSON.parse(privRaw);
+      if (pubRawToBytes(pubRaw).length !== 65 && privJwk.x && privJwk.y) {
+        const fixed = b64urlEncode(new Uint8Array([4, ...b64urlDecode(privJwk.x), ...b64urlDecode(privJwk.y)]));
+        cell.setMeta("push_vapid_pub", fixed);
+        cell.addEvent("push.vapid", "repaired public key to raw point form", {});
+        return { privJwk, pubRaw: fixed };
+      }
+      return { privJwk, pubRaw };
     } catch {
     }
   }

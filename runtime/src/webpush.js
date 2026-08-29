@@ -157,7 +157,7 @@ async function vapidHeaders(privJwk, pubRaw, audience) {
   const signingInput = header + "." + claims;
   const priv = await crypto.subtle.importKey("jwk", privJwk, ECDSA, false, ["sign"]);
   const rawSig = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, priv, utf8(signingInput)));
-  const jwt = signingInput + "." + b64urlEncode(rawSigToDer(rawSig));
+  const jwt = signingInput + "." + b64urlEncode(rawSig);
   return {
     authorization: `vapid t=${jwt}, k=${pubRaw}`,
     "crypto-key": `p256ecdsa=${pubRaw}`
@@ -194,8 +194,8 @@ async function webpushSelfTest() {
     const nowSec = Math.floor(Date.now() / 1e3);
     if (typeof c.exp !== "number" || c.exp <= nowSec || c.exp > nowSec + 12 * 3600 + 60) throw new Error("bad exp " + c.exp);
     const pub = await importEcPub(b64urlDecode(kp.pubRaw), ECDSA, ["verify"]);
-    const sig = b64urlDecode(m[3]);
-    const rawSig = derSigToRaw(sig);
+    const der = b64urlDecode(m[3]);
+    const rawSig = derSigToRaw(der);
     const okSig = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, pub, rawSig, utf8(m[1] + "." + m[2]));
     if (!okSig) throw new Error("VAPID signature does not verify");
     if (!/^p256ecdsa=/.test(vh["crypto-key"])) throw new Error("bad Crypto-Key header");
