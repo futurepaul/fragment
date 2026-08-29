@@ -332,10 +332,12 @@ export async function internalRoute(cell, request, url) {
     // crypto sanity once per cell, before the first byte leaves: a broken
     // WebCrypto edge would otherwise fail silently as 400s from every
     // push service on earth
-    if (!cell.getMeta("push_selftest_done")) {
+    // "ok" is the only sticky state — a FAILED self-test retries next send
+      // (self-healing; the first prod run caught a SPKI-vs-raw point quirk)
+      if (cell.getMeta("push_selftest_done") !== "ok") {
       const t = await webpushSelfTest();
       cell.addEvent("push.selftest", t.ok ? "webpush crypto self-test passed" : "webpush crypto self-test FAILED", t);
-      cell.setMeta("push_selftest_done", t.ok ? "ok" : "failed");
+      if (t.ok) cell.setMeta("push_selftest_done", "ok");
       if (!t.ok) return json({ error: "webpush crypto self-test failed — refusing to send", detail: t.detail }, 500);
     }
 

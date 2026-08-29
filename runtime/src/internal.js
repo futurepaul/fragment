@@ -247,10 +247,10 @@ async function internalRoute(cell, request, url) {
       ...p2.url ? { url: String(p2.url).slice(0, 500) } : {},
       ...p2.tag ? { tag: String(p2.tag).slice(0, 100) } : {}
     });
-    if (!cell.getMeta("push_selftest_done")) {
+    if (cell.getMeta("push_selftest_done") !== "ok") {
       const t = await webpushSelfTest();
       cell.addEvent("push.selftest", t.ok ? "webpush crypto self-test passed" : "webpush crypto self-test FAILED", t);
-      cell.setMeta("push_selftest_done", t.ok ? "ok" : "failed");
+      if (t.ok) cell.setMeta("push_selftest_done", "ok");
       if (!t.ok) return json({ error: "webpush crypto self-test failed \u2014 refusing to send", detail: t.detail }, 500);
     }
     const keys = await pushVapidFor(cell);

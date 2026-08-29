@@ -47,15 +47,28 @@ function cat(...parts: Uint8Array[]): Uint8Array {
 
 const utf8 = (s: string) => te.encode(s);
 
-// WebCrypto HKDF is extract+expand in one shot — exactly the HKDF(salt,
-// ikm, info, L) composition RFC 8291 writes out.
+// RFC 5869 HKDF over HMAC-SHA256, in JS: the worker isolate's WebCrypto
+// rejects HKDF key imports ("unsupported key import" — probed live), while
+// HMAC is fine. Extract-then-expand, byte-exact with the standard.
+async function hmac(key: Uint8Array, data: Uint8Array): Promise<Uint8Array> {
+  const k = await crypto.subtle.importKey("raw", key as unknown as BufferSource, { name: "HMAC", hash: "SHA-256" } as Algorithm, false, ["sign"]);
+  return new Uint8Array(await crypto.subtle.sign("HMAC", k, data as unknown as BufferSource));
+}
 async function hkdf(salt: Uint8Array, ikm: Uint8Array, info: Uint8Array, bytes: number): Promise<Uint8Array> {
-  const key = await crypto.subtle.importKey("raw", ikm as unknown as BufferSource, "HKDF", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits(
-    { name: "HKDF", hash: "SHA-256", salt: salt as unknown as BufferSource, info: info as unknown as BufferSource },
-    key, bytes * 8,
-  );
-  return new Uint8Array(bits);
+  const prk = await hmac(salt.length ? salt : new Uint8Array(32), ikm);
+  const n = Math.ceil(bytes / 32);
+  let t: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
+  const out = new Uint8Array(bytes);
+  let filled = 0;
+  for (let i = 1; i <= n; i++) {
+    const block = new Uint8Array(t.length + info.length + 1);
+    block.set(t, 0); block.set(info, t.length); block[t.length + info.length] = i;
+    t = await hmac(prk, block);
+    const take = Math.min(32, bytes - filled);
+    out.set(t.subarray(0, take), filled);
+    filled += take;
+  }
+  return out;
 }
 
 const ECDH = { name: "ECDH", namedCurve: "P-256" } as const;
@@ -75,6 +88,32 @@ const RS = 4096;
 
 // Encrypt `payload` for one subscription. Returns the exact POST body
 // (salt ‖ rs ‖ keyid ‖ ciphertext) and the content headers that describe
+// Some worker runtimes hand back SPKI (91 bytes for P-256) from
+// exportKey("raw") where the Web Push RFCs want the bare uncompressed
+// point (65 bytes). The point is always the suffix — normalize at the
+// single choke point every export goes through. (Found live: the prod
+// isolate's self-test got 91 and refused to send.)
+async function rawPoint(key: CryptoKey): Promise<Uint8Array> {
+  const raw = new Uint8Array(await crypto.subtle.exportKey("raw", key));
+  if (raw.length === 91 && raw[0] === 0x30) return raw.slice(raw.length - 65);
+  return raw;
+}
+
+// Raw-format EC key imports are spotty across worker runtimes ("unsupported
+// key import" in the prod isolate) — the JWK form is universally accepted,
+// so every raw point goes in through this door. Found live on the second
+// prod self-test run.
+async function importEcPub(raw: Uint8Array, alg: AlgorithmIdentifier, usages: KeyUsage[]): Promise<CryptoKey> {
+  if (raw.length !== 65) throw new Error(`expected 65-byte point, got ${raw.length}`);
+  const jwk = {
+    kty: "EC" as const,
+    crv: "P-256",
+    x: b64urlEncode(raw.slice(1, 33)),
+    y: b64urlEncode(raw.slice(33, 65)),
+  };
+  return crypto.subtle.importKey("jwk", jwk, alg, false, usages);
+}
+
 // it — the caller merges TTL/Urgency/VAPID/auth around them.
 export async function encryptPayload(sub: PushSub, payload: string): Promise<{ body: Uint8Array; headers: Record<string, string> }> {
   const uaPub = b64urlDecode(sub.p256dh);
@@ -86,8 +125,8 @@ export async function encryptPayload(sub: PushSub, payload: string): Promise<{ b
   if (plaintext.length + 17 > RS) throw new Error(`payload too large for one aes128gcm record (${plaintext.length} + 17 > ${RS})`);
 
   const asKeys = await crypto.subtle.generateKey(ECDH, true, ["deriveBits"]) as CryptoKeyPair;
-  const asPub = new Uint8Array(await crypto.subtle.exportKey("raw", asKeys.publicKey));
-  const uaPubKey = await crypto.subtle.importKey("raw", uaPub as unknown as BufferSource, ECDH, false, []);
+  const asPub = await rawPoint(asKeys.publicKey);
+  const uaPubKey = await importEcPub(uaPub, ECDH, []);
 
   // ikm = shared secret; PRK = HKDF(auth_secret, ikm, "WebPush: info" ‖ 0x00 ‖ ua_pub ‖ as_pub)
   const ikm = new Uint8Array(await crypto.subtle.deriveBits({ name: "ECDH", public: uaPubKey }, asKeys.privateKey, 256));
@@ -113,7 +152,7 @@ async function uaDecrypt(body: Uint8Array, uaPriv: CryptoKey, uaPub: Uint8Array,
   const idLen = body[20];
   const asPub = body.subarray(21, 21 + idLen);
   const ciphertext = body.subarray(21 + idLen);
-  const asPubKey = await crypto.subtle.importKey("raw", asPub as unknown as BufferSource, ECDH, false, []);
+  const asPubKey = await importEcPub(asPub, ECDH, []);
   const ikm = new Uint8Array(await crypto.subtle.deriveBits({ name: "ECDH", public: asPubKey }, uaPriv, 256));
   const prk = await hkdf(authSecret, ikm, cat(utf8("WebPush: info\0"), uaPub, asPub), 32);
   const cekRaw = await hkdf(salt, prk, utf8("Content-Encoding: aes128gcm\0"), 16);
@@ -137,7 +176,7 @@ export interface VapidKeys {
 export async function generateVapidKeys(): Promise<VapidKeys> {
   const kp = await crypto.subtle.generateKey(ECDSA, true, ["sign", "verify"]) as CryptoKeyPair;
   const privJwk = await crypto.subtle.exportKey("jwk", kp.privateKey);
-  const pubRaw = b64urlEncode(new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey)));
+  const pubRaw = b64urlEncode(await rawPoint(kp.publicKey));
   return { privJwk, pubRaw };
 }
 
@@ -218,14 +257,19 @@ export async function vapidHeaders(privJwk: JsonWebKey, pubRaw: string, audience
 // plus a VAPID JWT that verifies against the signer's public key and
 // decodes to the exact header/claims we wrote. Pure — no cell, no I/O.
 export async function webpushSelfTest(): Promise<{ ok: boolean; detail: string }> {
+  let step = "enter";
   try {
     // 1) RFC 8291 round-trip
+    step = "ua-keygen";
     const ua = await crypto.subtle.generateKey(ECDH, true, ["deriveBits"]) as CryptoKeyPair;
-    const uaPub = new Uint8Array(await crypto.subtle.exportKey("raw", ua.publicKey));
+    step = "ua-export";
+    const uaPub = await rawPoint(ua.publicKey);
     const authSecret = crypto.getRandomValues(new Uint8Array(16));
     const msg = JSON.stringify({ title: "self-test ✔", body: "round-trip", url: "/?id=7", tag: "push-selftest" });
+    step = "encrypt";
     const enc = await encryptPayload({ p256dh: b64urlEncode(uaPub), auth: b64urlEncode(authSecret) }, msg);
     const rs = (enc.body[16] << 24) | (enc.body[17] << 16) | (enc.body[18] << 8) | enc.body[19];
+    step = "decrypt";
     const back = await uaDecrypt(enc.body, ua.privateKey, uaPub, authSecret);
     if (back !== msg) throw new Error("round-trip mismatch: " + JSON.stringify(back));
     if (enc.headers["Content-Encoding"] !== "aes128gcm") throw new Error("missing Content-Encoding header");
@@ -248,7 +292,7 @@ export async function webpushSelfTest(): Promise<{ ok: boolean; detail: string }
     // rebuild the public key from the raw point and verify — the JWT
     // carries the DER (JWS) form, WebCrypto verifies the raw form, so
     // derSigToRaw doubles as the structural check of our own encoding
-    const pub = await crypto.subtle.importKey("raw", b64urlDecode(kp.pubRaw) as unknown as BufferSource, ECDSA, false, ["verify"]);
+    const pub = await importEcPub(b64urlDecode(kp.pubRaw), ECDSA, ["verify"]);
     const sig = b64urlDecode(m[3]);
     const rawSig = derSigToRaw(sig);
     const okSig = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, pub, rawSig as unknown as BufferSource, utf8(m[1] + "." + m[2]));
@@ -260,6 +304,6 @@ export async function webpushSelfTest(): Promise<{ ok: boolean; detail: string }
       detail: `rfc8291 round-trip ok (${msg.length}B payload, rs=${rs}, keyid=${enc.body[20]}B, body=${enc.body.length}B); rfc8292 ES256 jwt verifies (aud=${c.aud}, exp=+${c.exp - nowSec}s)`,
     };
   } catch (e) {
-    return { ok: false, detail: String((e && e.message) || e) };
+    return { ok: false, detail: `[${step}] ${String((e && e.message) || e)}` };
   }
 }
