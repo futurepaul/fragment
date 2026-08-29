@@ -2633,5 +2633,54 @@ try {
 }
 // ---- end lane/static-root ----
 
+// ---- lane/build: fragment build (TS strip, hashing, parse gate) ----
+async function buildLaneSection() {
+  if (!section('build')) return;
+  const bin = findBinary();
+  ok(!!bin, 'cli binary found for lane/build');
+  if (!bin) return;
+
+  const dir = mkdtempSync(join(tmpdir(), 'fragment-build-'));
+  mkdirSync(join(dir, 'site'), { recursive: true });
+  mkdirSync(join(dir, 'workflows'), { recursive: true });
+  writeFileSync(join(dir, 'fragment.json'), JSON.stringify({ name: `e2e-bd-${suffix}`, visibility: 'public', workflows: [{ name: 'w', file: 'workflows/w.mjs' }], secrets: [] }));
+  writeFileSync(join(dir, 'app.ts'), 'const app = { async fetch(req) { return new Response("ts-app " + new URL(req.url).pathname); } };\nexport default app;\n');
+  writeFileSync(join(dir, 'site', 'dep.ts'), 'export const answer = (q: string): number => q.length;\n');
+  writeFileSync(join(dir, 'site', 'main.ts'), 'import { answer } from "./dep.ts";\nconsole.log(answer("fragment"));\n');
+  writeFileSync(join(dir, 'site', 'index.html'), '<p id="out"></p><script type="module" src="/main.js"></script>\n');
+  writeFileSync(join(dir, 'workflows', 'w.ts'), 'export async function run(ctx) { await ctx.files.write("built.txt", "ok"); return { done: true }; }\n');
+
+  const out = execFileSync(bin, ['build', dir], { encoding: 'utf8' });
+  ok(out.includes('compiled (ts -> js): 4'), '[build] TS sources compiled');
+  ok(existsSync(join(dir, 'app.mjs')), '[build] app.ts -> app.mjs');
+  ok(!existsSync(join(dir, 'app.ts')), '[build] sources replaced by compiled siblings');
+  ok(existsSync(join(dir, 'workflows', 'w.mjs')), '[build] workflow compiled');
+  const hashed = readdirSync(join(dir, 'site')).filter((f) => /^main\.[0-9a-f]{8}\.mjs$/.test(f));
+  eq(hashed.length, 1, '[build] site module content-hashed');
+  const idx = readFileSync(join(dir, 'site', 'index.html'), 'utf8');
+  ok(idx.includes(`src="/${hashed[0]}"`), '[build] index.html rewritten to the hashed name');
+  const mainJs = readFileSync(join(dir, 'site', 'main.mjs'), 'utf8');
+  const depHashed = readdirSync(join(dir, 'site')).find((f) => /^dep\.[0-9a-f]{8}\.mjs$/.test(f));
+  ok(depHashed && mainJs.includes(`./${depHashed}`), '[build] import specifier rewritten to hashed sibling');
+  ok(out.includes('parse gate:'), '[build] parse gate ran');
+
+  // gate refuses broken served bytes
+  const bad = mkdtempSync(join(tmpdir(), 'fragment-build-bad-'));
+  mkdirSync(join(bad, 'site'), { recursive: true });
+  writeFileSync(join(bad, 'fragment.json'), JSON.stringify({ name: 'bad', visibility: 'public' }));
+  writeFileSync(join(bad, 'site', 'broken.js'), 'const x = {::::;\n');
+  let refused = false;
+  try { execFileSync(bin, ['build', bad], { encoding: 'utf8', stdio: 'pipe' }); } catch { refused = true; }
+  ok(refused, '[build] parse gate refuses a syntax error');
+}
+try {
+  if (!ONLY || ONLY === 'build') await buildLaneSection();
+} catch (e) {
+  fail++;
+  failures.push('build: ' + String(e && e.stack || e));
+  console.log('FAIL  build unexpected: ' + String(e && e.stack || e));
+}
+// ---- end lane/build ----
+
 console.log(`\n${pass} passed, ${fail} failed${fail ? ': ' + failures.join('; ') : ''}`);
 process.exit(fail ? 1 : 0);

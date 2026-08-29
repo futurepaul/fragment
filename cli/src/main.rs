@@ -1,6 +1,7 @@
 mod api;
 mod auth;
 mod blob;
+mod builder;
 mod sync;
 mod watch;
 
@@ -128,6 +129,12 @@ enum Cmd {
     },
     /// List deploy snapshots (drafts)
     Drafts { name: String },
+    /// Compile a fragment folder: TypeScript sources -> runnable files,
+    /// hashed site assets, and a parse gate on everything served
+    Build {
+        /// The fragment folder (default: current directory)
+        dir: Option<String>,
+    },
     /// Roll back to an earlier snapshot (default: the one before current)
     Rollback {
         name: String,
@@ -792,6 +799,14 @@ fn run(cli: Cli) -> Result<()> {
                     d["at"].as_u64().map(|ms| chrono_like(ms / 1000)).unwrap_or_default(),
                 );
             }
+        }
+
+        Cmd::Build { dir } => {
+            let dir = match dir {
+                Some(d) => std::path::PathBuf::from(d),
+                None => std::env::current_dir()?,
+            };
+            builder::run(&dir)?;
         }
         Cmd::Init { name, template } => {
             // scaffold (reuse the New machinery) + create + deploy

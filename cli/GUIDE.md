@@ -513,6 +513,30 @@ export default {
 };
 ```
 
+### Authoring in TypeScript
+
+Author fragments like a normal web app: `app.ts`, `site/*.ts`,
+`workflows/*.ts`, with real imports and a `fragment.d.ts` declaring the
+platform surface (`Ctx`, `ctx.files`, `ctx.inbox`… — every doc comment in
+it is a real contract, including the one about acking your drains). Run
+`fragment build` before deploying (or let `init`/`deploy` do it): it
+strips types, fixes import specifiers to the compiled siblings,
+content-hashes site assets and rewrites their references, and parse-gates
+everything that would be served — a syntax error fails the build instead
+of shipping. The compiled `.mjs` files land beside where the sources were
+and are what syncs; `fragment.json` names workflow files by their compiled
+path (`workflows/w.mjs`).
+
+```
+my-fragment/
+  fragment.json       # workflows listed by compiled path
+  fragment.d.ts       # platform types (in the basic template)
+  app.ts              # compiles to app.mjs
+  site/index.html     # references /main.js — build rewrites to the hash
+  site/main.ts        # imports ./dep.ts normally
+  workflows/w.ts      # compiles to workflows/w.mjs
+```
+
 Token-gated fragments and server-rendered links: the `?view=` token is
 a SECRET — when your app renders links into its own pages, bake the token
 in at render time (`ctx.secrets.MY_VIEW_TOKEN`); a client-side variable
