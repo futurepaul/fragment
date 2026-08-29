@@ -437,9 +437,16 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
     if !opts.apply_mass_delete {
         let known = state.files.len().max(1);
         let pending_deletes = paths.iter().filter(|p| {
-            local.get(*p).is_none()
-                && remote.get(*p).map(|r| !r.deleted).unwrap_or(false)
-                && state.files.get(*p).map(|s| s.rev == remote.get(*p).unwrap().rev).unwrap_or(false)
+            match (local.get(*p), remote.get(*p), state.files.get(*p)) {
+                // deleted on disk, row unchanged since we saw it → push the delete
+                (None, Some(r), Some(st)) => !r.deleted && r.rev == st.rev,
+                // tombstoned remotely after our last sync, local copy
+                // untouched → propagate the deletion (new convergence rule)
+                (Some(lf), Some(r), Some(st)) => {
+                    r.deleted && r.rev >= st.rev && st.sha256 == lf.sha256
+                }
+                _ => false,
+            }
         }).count();
         if pending_deletes > 10 && pending_deletes * 10 > known * 3 {
             report.mass_delete_guard = Some(pending_deletes);
@@ -522,12 +529,22 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
                 if opts.mode == Mode::Pull {
                     continue;
                 }
-                if let (Some(tomb), Some(st)) = (r_tomb, &s) {
-                    if tomb.rev == st.rev && st.sha256 == lf.sha256 {
-                        fs::remove_file(dir.join(&path)).ok();
-                        state.files.remove(&path);
-                        report.deleted_local.push(path.clone());
-                        continue;
+                if let (Some(tomb), Some(st)) = (r_tomb, s.as_ref()) {
+                    // Deletion propagation by rev ordering: DELETE bumps the
+                    // row rev, so a tombstone at-or-above our last-synced rev
+                    // means the remote deleted this path after we saw it. An
+                    // untouched local copy propagates the deletion; a MODIFIED
+                    // local copy wins instead (falls through to the re-add
+                    // push below — content beats deletion). Without this rule
+                    // every stale mirror resurrects what others deleted, and
+                    // mirrors ping-pong deleted files forever.
+                    if tomb.rev >= st.rev && opts.mode == Mode::Mirror {
+                        if st.sha256 == lf.sha256 {
+                            fs::remove_file(dir.join(&path)).ok();
+                            state.files.remove(&path);
+                            report.deleted_local.push(path.clone());
+                            continue;
+                        }
                     }
                 }
                 let base = r_tomb.map(|t| t.rev).unwrap_or(0);
