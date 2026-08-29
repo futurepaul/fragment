@@ -2653,7 +2653,7 @@ async function buildLaneSection() {
   const out = execFileSync(bin, ['build', dir], { encoding: 'utf8' });
   ok(out.includes('compiled (ts -> js): 4'), '[build] TS sources compiled');
   ok(existsSync(join(dir, 'app.mjs')), '[build] app.ts -> app.mjs');
-  ok(!existsSync(join(dir, 'app.ts')), '[build] sources replaced by compiled siblings');
+  ok(existsSync(join(dir, 'app.ts')), '[build] sources kept beside compiled siblings');
   ok(existsSync(join(dir, 'workflows', 'w.mjs')), '[build] workflow compiled');
   const hashed = readdirSync(join(dir, 'site')).filter((f) => /^main\.[0-9a-f]{8}\.mjs$/.test(f));
   eq(hashed.length, 1, '[build] site module content-hashed');

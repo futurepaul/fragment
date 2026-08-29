@@ -162,9 +162,10 @@ fn compile_typescript(dir: &Path, report: &mut BuildReport) -> Result<()> {
         };
         let out = dir.join(&out_rel);
         std::fs::write(&out, emitted).with_context(|| format!("write {out_rel}"))?;
-        // keep the served tree free of stale sources the runtime would
-        // otherwise also sync: the compiled sibling replaces the .ts
-        std::fs::remove_file(&src).with_context(|| format!("remove source {rel}"))?;
+        // the .ts source STAYS beside its compiled sibling: the folder is
+        // the author's project and the source of truth — builds are
+        // repeatable, editors keep their types, and the runtime only ever
+        // loads the compiled path the manifest names
         report.compiled.push(out_rel);
     }
     Ok(())
