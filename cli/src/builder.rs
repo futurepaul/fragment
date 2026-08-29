@@ -211,6 +211,7 @@ fn hash_site_assets(dir: &Path, report: &mut BuildReport) -> Result<()> {
         return Ok(());
     }
     let mut renames: BTreeMap<String, String> = BTreeMap::new(); // "/old" -> "/new"
+    let mut stale_hash_targets: Vec<(String, String, String)> = Vec::new(); // (stem, ext, new hashed name)
     let mut assets: Vec<PathBuf> = Vec::new();
     collect_assets(&site, &mut assets)?;
     for asset in &assets {
@@ -248,6 +249,8 @@ fn hash_site_assets(dir: &Path, report: &mut BuildReport) -> Result<()> {
                 renames.insert(dir_old, format!("./{}", hashed_name));
             }
         }
+        let (stem_for_stale, ext_for_stale) = name.rsplit_once('.').map(|(a, b)| (a.to_string(), b.to_string())).unwrap_or((name.clone(), String::new()));
+        stale_hash_targets.push((stem_for_stale, ext_for_stale, hashed_name.clone()));
         report.hashed.push((rel, hashed_rel));
     }
     if renames.is_empty() {
@@ -264,6 +267,30 @@ fn hash_site_assets(dir: &Path, report: &mut BuildReport) -> Result<()> {
             for q in ['"', '\''] {
                 text = text.replace(&format!("{q}{old}{q}"), &format!("{q}{new}{q}"));
             }
+        }
+        // previously-hashed spellings retarget too: a rebuild after an edit
+        // must move /app.<oldhash>.js references to the new hash, or the
+        // page keeps serving the stale asset forever (found live on meatproxy)
+        for (stem, ext, hashed_name) in &stale_hash_targets {
+            let mut re_text = text.clone();
+            let mut out = String::with_capacity(text.len());
+            let mut rest = re_text.as_str();
+            let needle_open = format!("/{stem}.");
+            while let Some(i) = rest.find(&needle_open) {
+                let after = &rest[i + needle_open.len()..];
+                let hex: String = after.chars().take(8).collect();
+                let tail = &after[hex.len().min(after.len())..];
+                if hex.len() == 8 && hex.bytes().all(|b| b.is_ascii_hexdigit()) && tail.starts_with(&format!(".{ext}")) {
+                    out.push_str(&rest[..i]);
+                    out.push_str(&format!("/{hashed_name}"));
+                    rest = &after[8 + ext.len() + 1..];
+                } else {
+                    out.push_str(&rest[..i + needle_open.len()]);
+                    rest = &rest[i + needle_open.len()..];
+                }
+            }
+            out.push_str(rest);
+            text = out;
         }
         if text != before {
             std::fs::write(t, text)?;
