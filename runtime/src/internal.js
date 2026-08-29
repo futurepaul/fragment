@@ -261,10 +261,10 @@ async function internalRoute(cell, request, url) {
       ...p2.url ? { url: String(p2.url).slice(0, 500) } : {},
       ...p2.tag ? { tag: String(p2.tag).slice(0, 100) } : {}
     });
-    if (cell.getMeta("push_selftest_done") !== "ok") {
+    if (cell.getMeta("push_selftest_v2_done") !== "ok") {
       const t = await webpushSelfTest();
-      cell.addEvent("push.selftest", t.ok ? "webpush crypto self-test passed" : "webpush crypto self-test FAILED", t);
-      if (t.ok) cell.setMeta("push_selftest_done", "ok");
+      cell.addEvent("push.selftest", t.ok ? "webpush crypto self-test v2 passed" : "webpush crypto self-test FAILED", t);
+      if (t.ok) cell.setMeta("push_selftest_v2_done", "ok");
       if (!t.ok) return json({ error: "webpush crypto self-test failed \u2014 refusing to send", detail: t.detail }, 500);
     }
     const keys = await pushVapidFor(cell);
@@ -275,28 +275,35 @@ async function internalRoute(cell, request, url) {
     const results = await Promise.all(subs.map(async (s) => {
       try {
         const enc = await encryptPayload(s, message);
-        const aud = new URL(s.endpoint).origin;
-        const vh = await vapidHeaders(keys.privJwk, keys.pubRaw, aud);
-        const resp = await fetch(s.endpoint, {
+        const url2 = new URL(s.endpoint);
+        const vh = await vapidHeaders(keys.privJwk, keys.pubRaw, url2.origin);
+        const sendWith = (authorization) => fetch(s.endpoint, {
           method: "POST",
           headers: {
             "content-type": "application/octet-stream",
             ttl: "86400",
             urgency: "high",
             ...enc.headers,
-            authorization: vh.authorization,
+            authorization,
             "crypto-key": vh["crypto-key"]
           },
           body: enc.body,
           signal: AbortSignal.timeout(1e4)
         });
+        const fcmFirst = url2.host === "fcm.googleapis.com";
+        let form = fcmFirst ? "raw" : "der";
+        let resp = await sendWith(fcmFirst ? vh.authorizationRaw : vh.authorization);
+        if (resp.status === 403) {
+          form = fcmFirst ? "der" : "raw";
+          resp = await sendWith(fcmFirst ? vh.authorization : vh.authorizationRaw);
+        }
         if (resp.ok) return { sent: true };
         if (resp.status === 404 || resp.status === 410) {
           cell.sql.exec("DELETE FROM push_subs WHERE endpoint = ?", s.endpoint);
           return { note: `${resp.status} \u2192 dropped`, dropped: true };
         }
         const why = (await resp.text().catch(() => "")).slice(0, 120);
-        return failNote(cell, s.endpoint, `${resp.status}${why ? ": " + why : ""}`);
+        return failNote(cell, s.endpoint, `${resp.status} (sig ${vh.sigShape}, form ${form})${why ? ": " + why : ""}`);
       } catch (e) {
         return failNote(cell, s.endpoint, `error: ${String(e && e.message || e).slice(0, 80)}`);
       }

@@ -349,11 +349,13 @@ export async function internalRoute(cell, request, url) {
     // WebCrypto edge would otherwise fail silently as 400s from every
     // push service on earth
     // "ok" is the only sticky state — a FAILED self-test retries next send
-      // (self-healing; the first prod run caught a SPKI-vs-raw point quirk)
-      if (cell.getMeta("push_selftest_done") !== "ok") {
+      // (self-healing; the first prod run caught a SPKI-vs-raw point quirk).
+      // v2: the strict RFC 8188 final-record delimiter check — the v1 test
+      // round-tripped a spec-invalid payload and called it fine
+      if (cell.getMeta("push_selftest_v2_done") !== "ok") {
       const t = await webpushSelfTest();
-      cell.addEvent("push.selftest", t.ok ? "webpush crypto self-test passed" : "webpush crypto self-test FAILED", t);
-      if (t.ok) cell.setMeta("push_selftest_done", "ok");
+      cell.addEvent("push.selftest", t.ok ? "webpush crypto self-test v2 passed" : "webpush crypto self-test FAILED", t);
+      if (t.ok) cell.setMeta("push_selftest_v2_done", "ok");
       if (!t.ok) return json({ error: "webpush crypto self-test failed — refusing to send", detail: t.detail }, 500);
     }
 
@@ -365,21 +367,32 @@ export async function internalRoute(cell, request, url) {
     const results = await Promise.all(subs.map(async (s) => {
       try {
         const enc = await encryptPayload(s, message);
-        const aud = new URL(s.endpoint).origin;
-        const vh = await vapidHeaders(keys.privJwk, keys.pubRaw, aud);
-        const resp = await fetch(s.endpoint, {
+        const url = new URL(s.endpoint);
+        const vh = await vapidHeaders(keys.privJwk, keys.pubRaw, url.origin);
+        const sendWith = (authorization: string) => fetch(s.endpoint, {
           method: "POST",
           headers: {
             "content-type": "application/octet-stream",
             ttl: "86400",
             urgency: "high",
             ...enc.headers,
-            authorization: vh.authorization,
+            authorization,
             "crypto-key": vh["crypto-key"],
           },
           body: enc.body as unknown as BodyInit,
           signal: AbortSignal.timeout(10_000),
         });
+        // FCM parses only the raw P1363 JWT signature; RFC 7515 DER is for
+        // everyone else (Apple accepts both — probed live, 2026). One
+        // fallback try on 403 so a service flipping parsers can't kill
+        // delivery silently.
+        const fcmFirst = url.host === "fcm.googleapis.com";
+        let form = fcmFirst ? "raw" : "der";
+        let resp = await sendWith(fcmFirst ? vh.authorizationRaw : vh.authorization);
+        if (resp.status === 403) {
+          form = fcmFirst ? "der" : "raw";
+          resp = await sendWith(fcmFirst ? vh.authorization : vh.authorizationRaw);
+        }
         if (resp.ok) return { sent: true };
         if (resp.status === 404 || resp.status === 410) {
           // the subscription is gone at the service — keep ours or every
@@ -388,7 +401,7 @@ export async function internalRoute(cell, request, url) {
           return { note: `${resp.status} → dropped`, dropped: true };
         }
         const why = (await resp.text().catch(() => "")).slice(0, 120);
-        return failNote(cell, s.endpoint, `${resp.status}${why ? ": " + why : ""}`);
+        return failNote(cell, s.endpoint, `${resp.status} (sig ${vh.sigShape}, form ${form})${why ? ": " + why : ""}`);
       } catch (e) {
         // network/timeout: count it, don't let one dead endpoint kill the batch
         return failNote(cell, s.endpoint, `error: ${String((e && e.message) || e).slice(0, 80)}`);

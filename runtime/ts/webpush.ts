@@ -136,8 +136,12 @@ export async function encryptPayload(sub: PushSub, payload: string): Promise<{ b
   const cekRaw = await hkdf(salt, prk, utf8("Content-Encoding: aes128gcm\0"), 16);
   const nonce = await hkdf(salt, prk, utf8("Content-Encoding: nonce\0"), 12);
   const cek = await crypto.subtle.importKey("raw", cekRaw as unknown as BufferSource, "AES-GCM", false, ["encrypt"]);
-  // plaintext ends with the RFC 8188 padding delimiter; 0x01 = no padding
-  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce as unknown as BufferSource }, cek, cat(plaintext, new Uint8Array([1])) as unknown as BufferSource));
+  // RFC 8188: the record's padding starts with a delimiter — 0x02 on the
+  // LAST record, 0x01 on every other. We always send one record, so it is
+  // always 0x02. (0x01 here made every browser's ECE decoder throw
+  // "last record needs to start padding with a 2" and drop the push
+  // silently; the push services can't see it — the payload is E2E-encrypted.)
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce as unknown as BufferSource }, cek, cat(plaintext, new Uint8Array([2])) as unknown as BufferSource));
 
   const rs = new Uint8Array([(RS >>> 24) & 0xff, (RS >>> 16) & 0xff, (RS >>> 8) & 0xff, RS & 0xff]);
   const body = cat(salt, rs, new Uint8Array([asPub.length]), asPub, ciphertext);
@@ -162,7 +166,10 @@ async function uaDecrypt(body: Uint8Array, uaPriv: CryptoKey, uaPub: Uint8Array,
   let end = padded.length;
   while (end > 0 && padded[end - 1] === 0) end--; // strip zero padding
   const delim = end > 0 ? padded[end - 1] : 0;
-  if (delim !== 1 && delim !== 2) throw new Error(`bad padding delimiter 0x${delim.toString(16)}`);
+  // exactly what browsers enforce: the final (here, only) record must end
+  // its padding with 0x02 — accepting 0x01 here let a wire-format bug pass
+  // the self-test while every real device rejected the payload
+  if (delim !== 2) throw new Error(`last record needs to start padding with a 2 (got 0x${delim.toString(16)})`);
   return td.decode(padded.subarray(0, end - 1));
 }
 
@@ -232,7 +239,7 @@ function derSigToRaw(der: Uint8Array): Uint8Array {
 // We send the RFC form with the public key in BOTH blessed locations
 // (`k=` in the auth params, `p256ecdsa=` in Crypto-Key) so both the
 // current services and older autopush deployments can read it.
-export async function vapidHeaders(privJwk: JsonWebKey, pubRaw: string, audience: string): Promise<{ authorization: string; "crypto-key": string }> {
+export async function vapidHeaders(privJwk: JsonWebKey, pubRaw: string, audience: string): Promise<{ authorization: string; authorizationRaw: string; "crypto-key": string; sigShape: string }> {
   const header = b64urlEncode(utf8(JSON.stringify({ typ: "JWT", alg: "ES256" })));
   const claims = b64urlEncode(utf8(JSON.stringify({
     aud: audience,
@@ -241,15 +248,31 @@ export async function vapidHeaders(privJwk: JsonWebKey, pubRaw: string, audience
   })));
   const signingInput = header + "." + claims;
   const priv = await crypto.subtle.importKey("jwk", privJwk, ECDSA, false, ["sign"]);
-  const rawSig = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, priv, utf8(signingInput)));
-  // The JWT signature is subtle.sign's DER output VERBATIM (JWS ES256).
-  // Found by live triangulation: double-DER (wrapping subtle's already-DER
-  // bytes) drew FCM's 403 "invalid JWT" while lenient Apple waved it
-  // through; raw r||s drew "not a DER SEQUENCE" from BOTH services.
-  const jwt = signingInput + "." + b64urlEncode(rawSig);
+  const sig = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, priv, utf8(signingInput)));
+  // Two wire forms of the SAME signature, because the services disagree:
+  // RFC 7515 says JWS ES256 is DER and Apple accepts DER, but FCM (probed
+  // live, 2026: DER → 403 "invalid JWT", raw → 201) parses only the raw
+  // P1363 r||s form. The worker isolate returns either shape depending on
+  // key provenance, so normalize to BOTH from whatever subtle.sign gives us
+  // and let the sender pick (with a fallback) per service.
+  let rawSig: Uint8Array<ArrayBufferLike>, derSig: Uint8Array<ArrayBufferLike>;
+  if (sig.length === 64) {
+    rawSig = sig;
+    derSig = rawSigToDer(sig);
+  } else {
+    try {
+      derSig = sig;
+      rawSig = derSigToRaw(sig); // structural check: tight SEQUENCE of two INTEGERs
+    } catch (e) {
+      throw new Error(`unexpected ECDSA signature shape (${sig.length}B, starts 0x${sig[0]?.toString(16) ?? "?"}): ${String((e as Error)?.message || e)}`);
+    }
+  }
+  const auth = (jwt: string) => `vapid t=${jwt}, k=${pubRaw}`;
   return {
-    authorization: `vapid t=${jwt}, k=${pubRaw}`,
+    authorization: auth(signingInput + "." + b64urlEncode(new Uint8Array(derSig))),
+    authorizationRaw: auth(signingInput + "." + b64urlEncode(new Uint8Array(rawSig))),
     "crypto-key": `p256ecdsa=${pubRaw}`,
+    sigShape: `der ${derSig.length}B / raw ${rawSig.length}B`,
   };
 }
 

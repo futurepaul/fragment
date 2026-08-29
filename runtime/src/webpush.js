@@ -83,7 +83,7 @@ async function encryptPayload(sub, payload) {
   const cekRaw = await hkdf(salt, prk, utf8("Content-Encoding: aes128gcm\0"), 16);
   const nonce = await hkdf(salt, prk, utf8("Content-Encoding: nonce\0"), 12);
   const cek = await crypto.subtle.importKey("raw", cekRaw, "AES-GCM", false, ["encrypt"]);
-  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, cek, cat(plaintext, new Uint8Array([1]))));
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, cek, cat(plaintext, new Uint8Array([2]))));
   const rs = new Uint8Array([RS >>> 24 & 255, RS >>> 16 & 255, RS >>> 8 & 255, RS & 255]);
   const body = cat(salt, rs, new Uint8Array([asPub.length]), asPub, ciphertext);
   return { body, headers: { "Content-Encoding": "aes128gcm" } };
@@ -104,7 +104,7 @@ async function uaDecrypt(body, uaPriv, uaPub, authSecret) {
   let end = padded.length;
   while (end > 0 && padded[end - 1] === 0) end--;
   const delim = end > 0 ? padded[end - 1] : 0;
-  if (delim !== 1 && delim !== 2) throw new Error(`bad padding delimiter 0x${delim.toString(16)}`);
+  if (delim !== 2) throw new Error(`last record needs to start padding with a 2 (got 0x${delim.toString(16)})`);
   return td.decode(padded.subarray(0, end - 1));
 }
 async function generateVapidKeys() {
@@ -156,11 +156,25 @@ async function vapidHeaders(privJwk, pubRaw, audience) {
   })));
   const signingInput = header + "." + claims;
   const priv = await crypto.subtle.importKey("jwk", privJwk, ECDSA, false, ["sign"]);
-  const rawSig = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, priv, utf8(signingInput)));
-  const jwt = signingInput + "." + b64urlEncode(rawSig);
+  const sig = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, priv, utf8(signingInput)));
+  let rawSig, derSig;
+  if (sig.length === 64) {
+    rawSig = sig;
+    derSig = rawSigToDer(sig);
+  } else {
+    try {
+      derSig = sig;
+      rawSig = derSigToRaw(sig);
+    } catch (e) {
+      throw new Error(`unexpected ECDSA signature shape (${sig.length}B, starts 0x${sig[0]?.toString(16) ?? "?"}): ${String(e?.message || e)}`);
+    }
+  }
+  const auth = (jwt) => `vapid t=${jwt}, k=${pubRaw}`;
   return {
-    authorization: `vapid t=${jwt}, k=${pubRaw}`,
-    "crypto-key": `p256ecdsa=${pubRaw}`
+    authorization: auth(signingInput + "." + b64urlEncode(new Uint8Array(derSig))),
+    authorizationRaw: auth(signingInput + "." + b64urlEncode(new Uint8Array(rawSig))),
+    "crypto-key": `p256ecdsa=${pubRaw}`,
+    sigShape: `der ${derSig.length}B / raw ${rawSig.length}B`
   };
 }
 async function webpushSelfTest() {
