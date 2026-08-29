@@ -57,6 +57,17 @@ export async function internalRoute(cell, request, url) {
     });
   }
 
+  if (rest === "files/stat") {
+    const path = url.searchParams.get("path") || "";
+    if (!path || path.includes("..") || path.startsWith("/")) return json({ error: "bad path" }, 400);
+    // live row INCLUDING tombstones: read-modify-write loops compare revs
+    // against this, so a deleted path must surface (deleted: true) rather
+    // than 404 — "absent" and "never existed" carry different rev history
+    const row = cell.sql.exec("SELECT rev, sha256, size, deleted FROM files WHERE path = ?", path).toArray()[0];
+    if (!row) return json({ stat: null });
+    return json({ stat: { path, rev: row.rev || 0, sha256: row.sha256 || "", size: row.size || 0, deleted: !!row.deleted } });
+  }
+
   if (rest === "files/write" && request.method === "PUT") {
     if (!isRun) return json({ error: "drafts are immutable" }, 403);
     const path = url.searchParams.get("path") || "";
@@ -74,6 +85,18 @@ export async function internalRoute(cell, request, url) {
     // the same bytes must not churn rev/updatedAt — pollers and revcron
     // feeds key on those, and churn is the fuel of copy-loops.
     const existing = cell.sql.exec("SELECT rev, sha256 FROM files WHERE path = ? AND deleted = 0", path).toArray()[0];
+    // optimistic concurrency: ifRev pins the write to a known row state, so
+    // a stale snapshot (a sweep holding metas across a slow AI call, two
+    // workflows editing one file) fails loudly here instead of clobbering.
+    // A deleted row counts as absent: its rev belongs to the tombstone.
+    const ifRevRaw = url.searchParams.get("if_rev");
+    if (ifRevRaw !== null) {
+      const ifRev = parseInt(ifRevRaw, 10);
+      const curRev = existing ? existing.rev : 0;
+      if (ifRev !== curRev) {
+        return json({ error: "rev conflict", path, currentRev: curRev, ifRev }, 409);
+      }
+    }
     if (existing && existing.sha256 === adm.effSha) {
       cell.addEvent("write.deduped", path);
       return json({ ok: true, deduped: true, rev: existing.rev });

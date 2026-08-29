@@ -36,6 +36,13 @@ async function internalRoute(cell, request, url) {
       headers: { "content-type": row.mime || mimeForPath(path) || "application/octet-stream" }
     });
   }
+  if (rest === "files/stat") {
+    const path = url.searchParams.get("path") || "";
+    if (!path || path.includes("..") || path.startsWith("/")) return json({ error: "bad path" }, 400);
+    const row = cell.sql.exec("SELECT rev, sha256, size, deleted FROM files WHERE path = ?", path).toArray()[0];
+    if (!row) return json({ stat: null });
+    return json({ stat: { path, rev: row.rev || 0, sha256: row.sha256 || "", size: row.size || 0, deleted: !!row.deleted } });
+  }
   if (rest === "files/write" && request.method === "PUT") {
     if (!isRun) return json({ error: "drafts are immutable" }, 403);
     const path = url.searchParams.get("path") || "";
@@ -48,6 +55,14 @@ async function internalRoute(cell, request, url) {
       return json({ error: String(e.message || e), ...status === 413 ? { hint: "blob-first" } : {} }, status);
     }
     const existing = cell.sql.exec("SELECT rev, sha256 FROM files WHERE path = ? AND deleted = 0", path).toArray()[0];
+    const ifRevRaw = url.searchParams.get("if_rev");
+    if (ifRevRaw !== null) {
+      const ifRev = parseInt(ifRevRaw, 10);
+      const curRev = existing ? existing.rev : 0;
+      if (ifRev !== curRev) {
+        return json({ error: "rev conflict", path, currentRev: curRev, ifRev }, 409);
+      }
+    }
     if (existing && existing.sha256 === adm.effSha) {
       cell.addEvent("write.deduped", path);
       return json({ ok: true, deduped: true, rev: existing.rev });

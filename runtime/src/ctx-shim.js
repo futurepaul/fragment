@@ -67,11 +67,30 @@ export async function makeCtx(env) {
         const r = await call("/files/read?path=" + encodeURIComponent(path));
         return r.arrayBuffer();
       },
-      // returns {ok, deduped, rev}: writing identical content is a no-op
-      async write(path, data) {
+      // returns {ok, deduped, rev}: writing identical content is a no-op.
+      // opts.ifRev pins the write to a row state from ctx.files.stat() \u2014
+      // a moved row rejects with Error.conflict (and .currentRev) instead
+      // of clobbering: read-modify-write loops stay safe across slow awaits
+      async write(path, data, opts) {
         const body = typeof data === "string" ? data : data;
-        const r = await call("/files/write?path=" + encodeURIComponent(path), { method: "PUT", body });
+        let qs = "/files/write?path=" + encodeURIComponent(path);
+        if (opts && Number.isInteger(opts.ifRev)) qs += "&if_rev=" + opts.ifRev;
+        const r = await fetch(base + qs, { method: "PUT", body, headers: { "x-fragment-token": tok, ...(hsec ? { "x-fragment-host-secret": hsec } : {}) } });
+        if (r.status === 409) {
+          const j = await r.json().catch(() => ({}));
+          const e = new Error("rev conflict on " + path + ": row is at rev " + (j.currentRev ?? "?") + (j.ifRev !== undefined ? ", write pinned to " + j.ifRev : ""));
+          e.conflict = true;
+          e.currentRev = j.currentRev;
+          throw e;
+        }
+        if (!r.ok) throw new Error("fragment ctx files/write -> " + r.status + ": " + (await r.text()));
         return r.json();
+      },
+      // live row metadata INCLUDING tombstones ({deleted:true} with the
+      // tombstone's rev); null when the path has no history at all
+      async stat(path) {
+        const r = await call("/files/stat?path=" + encodeURIComponent(path));
+        return (await r.json()).stat;
       },
       async list(prefix = "") {
         const r = await call("/files/list?prefix=" + encodeURIComponent(prefix));
