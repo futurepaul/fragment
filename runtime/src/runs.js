@@ -1,4 +1,4 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 const HOP_LIMIT = 16;
 const BREAKER_N = 5;
 const BREAKER_WINDOW = 10 * 6e4;

@@ -1,4 +1,4 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 import { enqueueNotify } from "./notify.js";
 const RETENTION = 10;
 async function recordRevision(cell, path, rev, sha, deleted = false) {

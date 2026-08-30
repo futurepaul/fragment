@@ -1,4 +1,4 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 import { npubFromHex } from "./bech32.js";
 import { json } from "./util.js";
 import { tierTextBounded } from "./blob-tier.js";

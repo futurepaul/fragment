@@ -60,6 +60,8 @@ export interface FilesApi {
    * resurrecting a file someone deleted mid-flight.
    */
   write(path: string, data: string | ArrayBuffer, opts?: { ifRev?: number }): Promise<WriteResult>;
+  /** Stream a remote URL into the tier and commit it at path. */
+  ingest(url: string, path: string): Promise<{ path: string; sha256: string; size: number; mime: string; url: string }>;
   list(prefix?: string): Promise<string[]>;
   /** Like list(), but with metadata: [{path, size, updatedAt, rev}]. */
   index(prefix?: string): Promise<Array<{ path: string; size: number; updatedAt: number | null; rev: number }>>;
@@ -74,8 +76,7 @@ export interface Ctx {
   files: FilesApi;
   /** Declared secrets, by name. Never logged, never in files. */
   secrets: Record<string, string>;
-  /** Platform-routed LLM call (the host holds the key). */
-  ai(prompt: string): Promise<string>;
+
   /** Outbound fetch. Stamps x-fragment-hops for cycle detection. */
   http(url: string, init?: RequestInit): Promise<Response>;
   /**
@@ -125,4 +126,54 @@ export interface FragmentApp {
 declare global {
   /** The workflow entry point: `export async function run(ctx)`. */
   async function run(ctx: Ctx): Promise<unknown>;
+}
+
+/**
+ * The platform "ai" module — `import { … } from "fragment:ai"`. One call shape and
+ * one result shape across text, image, and video; the host holds the keys
+ * and the default models. Loaded only for fragments that import it.
+ */
+declare module "fragment:ai" {
+  /** Media output: already a file in the working copy (syncs to the folder). */
+  interface MediaFile {
+    mediaType: string;
+    path: string;
+    /** Site-relative serve URL (`__file?path=…`). */
+    url: string;
+    sha256: string;
+    size: number;
+    /** Lazy byte access — fetched from the tier on demand. */
+    bytes(): Promise<Uint8Array>;
+    base64(): Promise<string>;
+  }
+
+  interface ImageGenOpts {
+    prompt: string;
+    model?: string;
+    n?: number;
+    size?: string;
+    seed?: number;
+    dir?: string;
+    providerOptions?: { fal?: Record<string, unknown> };
+  }
+  interface VideoGenOpts {
+    prompt: string;
+    model?: string;
+    duration?: number;
+    aspectRatio?: "21:9" | "16:9" | "4:3" | "1:1" | "3:4" | "9:16";
+    resolution?: "480P" | "768P";
+    seed?: number;
+    dir?: string;
+    providerOptions?: { fal?: Record<string, unknown> };
+  }
+
+  export function generateText(opts: Record<string, any>): Promise<{ text: string; [k: string]: any }>;
+  export function streamText(opts: Record<string, any>): Promise<AsyncIterable<string> & Record<string, any>>;
+  export function generateObject(opts: Record<string, any>): Promise<Record<string, any>>;
+  export function tool(def: Record<string, any>): Record<string, any>;
+  export function generateImage(opts: ImageGenOpts): Promise<{ image: MediaFile; images: MediaFile[] }>;
+  export function generateVideo(opts: VideoGenOpts): Promise<{ video: MediaFile }>;
+  export class NoImageGeneratedError extends Error {}
+  export class NoVideoGeneratedError extends Error {}
+  export class XSAIError extends Error {}
 }

@@ -1,4 +1,4 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 import { schnorr } from "@noble/curves/secp256k1.js";
 const textEncoder = new TextEncoder();
 async function sha256Hex(data) {

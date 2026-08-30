@@ -1,12 +1,30 @@
 #!/usr/bin/env bash
-# Typecheck + transpile runtime/ts -> runtime/src.
+# Typecheck + transpile runtime/ts -> runtime/src, and bundle the platform
+# "ai" module (runtime/ai + vendored xsai) into a string the loader injects.
 # src/ is committed build output (deploys and rsyncs use it directly);
-# edit runtime/ts and run this, never src by hand.
+# edit runtime/ts or runtime/ai and run this, never src by hand.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 (cd runtime && [ -x node_modules/.bin/tsc ] || npm install --no-audit --no-fund >/dev/null)
+
+# the platform "ai" module: xsai + our fal client, bundled to ONE esm module
+# and wrapped as a generated ts/ai-module.ts (a giant string export). The
+# --external set is xsschema's OPTIONAL schema adapters (dynamic imports
+# that fail soft via tryImport when absent).
+(cd runtime && ./node_modules/.bin/esbuild ai/module.mjs --bundle --format=esm --target=es2022 --minify --outfile=../.ai-bundle.mjs --log-level=warning --external:effect --external:zod --external:arktype --external:sury --external:fs --external:path --external:os)
+node -e '
+  const fs = require("fs");
+  const src = fs.readFileSync(".ai-bundle.mjs", "utf8");
+  fs.writeFileSync("runtime/ts/ai-module.ts",
+    "// GENERATED from runtime/ai - run scripts/build-runtime after editing sources.\n" +
+    "// The bundled platform ai module as a string; loader.ts injects it as a\n" +
+    "// sibling module named \"ai\" for fragments that import it.\n" +
+    "export const AI_MODULE_SOURCE: string = " + JSON.stringify(src) + ";\n");
+  fs.rmSync(".ai-bundle.mjs");
+'
+
 (cd runtime && ./node_modules/.bin/tsc --noEmit -p .)
 (cd runtime && ./node_modules/.bin/esbuild ts/*.ts --outdir=src --format=esm --target=es2022 \
   --log-level=warning \
-  --banner:js="// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.")
-echo "runtime built: ts -> src"
+  --banner:js="// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.")
+echo "runtime built: ts -> src, ai module bundled"

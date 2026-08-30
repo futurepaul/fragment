@@ -1,4 +1,4 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { hexFromNpub } from "./bech32.js";

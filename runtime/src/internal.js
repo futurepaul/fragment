@@ -1,7 +1,8 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 import { json, randHex, bodyTooLarge, MAX_BODY_BYTES, MIME, mimeForPath } from "./util.js";
+import { checkTokenRaw } from "./loader.js";
 import { recordRevision } from "./history.js";
-import { READ_CEILING, TierError, admitFileWrite, tierStreamByHash } from "./blob-tier.js";
+import { READ_CEILING, TierError, admitFileWrite, tierStreamByHash, tierPlaceFromUrl } from "./blob-tier.js";
 import { encryptPayload, vapidHeaders, generateVapidKeys, webpushSelfTest, b64urlDecode, b64urlEncode } from "./webpush.js";
 function appendOnlyHit(cell, path) {
   const m = cell.manifest();
@@ -94,7 +95,11 @@ async function internalRoute(cell, request, url) {
   const p = url.pathname.slice("/__internal/f/".length);
   const slash = p.indexOf("/");
   const rest = p.slice(slash + 1);
-  const scope = cell.checkToken(request);
+  let scope = cell.checkToken(request);
+  if (!scope && rest.startsWith("egress/")) {
+    const auth = request.headers.get("authorization") || "";
+    if (auth.startsWith("Bearer ")) scope = checkTokenRaw(cell, auth.slice(7));
+  }
   if (!scope) return json({ error: "bad or expired run token" }, 403);
   const isRun = scope.kind === "run";
   if (rest === "ping") return new Response("pong");
@@ -218,22 +223,82 @@ async function internalRoute(cell, request, url) {
     cell.addEvent("log", `[${scope.workflow || scope.kind}] ${msg}`);
     return json({ ok: true });
   }
-  if (rest === "infer" && request.method === "POST") {
-    const key = cell.env.OPENROUTER_API_KEY;
-    if (!key) return json({ error: "host has no OPENROUTER_API_KEY (set CELLD_VAR_OPENROUTER_API_KEY on the node)" }, 501);
-    const { prompt, model } = await request.json().catch(() => ({}));
-    const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        model: model || cell.env.FRAGMENT_AI_MODEL || "deepseek/deepseek-v4-flash-0731",
-        messages: [{ role: "user", content: String(prompt) }]
-      }),
-      signal: AbortSignal.timeout(9e4)
-    });
-    if (!resp.ok) return json({ error: `openrouter ${resp.status}: ${await resp.text()}` }, 502);
-    const data = await resp.json();
-    return json({ text: data.choices?.[0]?.message?.content ?? "" });
+  {
+    const m = url.pathname.match(/\/egress\/([^/]+)\/(.+)$/);
+    if (m && rest.startsWith("egress/")) {
+      const host = m[1];
+      const falKey = String(cell.env.FAL_API_KEY || "");
+      const orKey = String(cell.env.OPENROUTER_API_KEY || "");
+      const falBaseHost = (() => {
+        try {
+          return new URL(String(cell.env.FRAGMENT_FAL_BASE || "https://queue.fal.run")).host;
+        } catch {
+          return "queue.fal.run";
+        }
+      })();
+      const keys = {
+        [falBaseHost]: falKey ? { header: `Key ${falKey}` } : null,
+        "openrouter.ai": orKey ? { header: `Bearer ${orKey}` } : null
+      };
+      const cred = keys[host];
+      if (!cred) {
+        return json({ error: `egress host '${host}' is not allowlisted \u2014 the host holds keys for: ${Object.keys(keys).filter((k) => keys[k]).join(", ") || "(none)"}` }, 403);
+      }
+      const loopback = /^(127\.0\.0\.1|localhost|\[::1\])(:|$)/.test(host);
+      const upstream = `http${loopback ? "" : "s"}://${host}/${m[2]}${url.search}`;
+      const drop = new Request(upstream, {
+        method: request.method,
+        headers: {
+          "content-type": request.headers.get("content-type") || "application/json",
+          // the vendor credential REPLACES the caller's authorization (the
+          // caller's was the run token)
+          authorization: cred.header
+        },
+        body: ["GET", "HEAD"].includes(request.method) ? void 0 : request.body,
+        // @ts-ignore duplex required for streaming bodies
+        duplex: "half"
+      });
+      const upstreamResp = await fetch(drop, { signal: AbortSignal.timeout(12e4) });
+      return new Response(upstreamResp.body, {
+        status: upstreamResp.status,
+        headers: { "content-type": upstreamResp.headers.get("content-type") || "application/json" }
+      });
+    }
+  }
+  if (rest === "files/ingest" && request.method === "POST") {
+    const { url: remoteUrl, path } = await request.json().catch(() => ({}));
+    if (typeof remoteUrl !== "string" || !/^https?:\/\//.test(remoteUrl) || remoteUrl.length > 500)
+      return json({ error: "body: {url: https://\u2026, path}" }, 400);
+    if (!path || typeof path !== "string" || path.includes("..") || path.startsWith("/") || path.length > 200)
+      return json({ error: "bad path" }, 400);
+    let desc;
+    try {
+      desc = await tierPlaceFromUrl(cell, remoteUrl, mimeForPath(path) || "application/octet-stream");
+    } catch (e) {
+      return json({ error: String(e && e.message || e) }, e instanceof TierError ? e.status : 502);
+    }
+    const existing = cell.sql.exec("SELECT rev, sha256 FROM files WHERE path = ? AND deleted = 0", path).toArray()[0];
+    if (existing && existing.sha256 === desc.sha256) {
+      return json({ ok: true, deduped: true, file: { path, sha256: desc.sha256, size: desc.size, mime: desc.mime, url: `__file?path=${encodeURIComponent(path)}` } });
+    }
+    if (existing && appendOnlyHit(cell, path)) {
+      cell.addEvent("write.refused", `${path}: append-only`);
+      return json({ error: "append-only", path }, 409);
+    }
+    const newRev = parseInt(cell.getMeta("rev") || "0", 10) + 1;
+    cell.setMeta("rev", String(newRev));
+    cell.sql.exec(
+      "INSERT INTO files (path, sha256, size, mime, rev, updated_at, deleted) VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT(path) DO UPDATE SET sha256 = excluded.sha256, size = excluded.size, mime = excluded.mime, rev = excluded.rev, updated_at = excluded.updated_at, deleted = 0",
+      path,
+      desc.sha256,
+      desc.size,
+      desc.mime,
+      newRev,
+      Date.now()
+    );
+    await recordRevision(cell, path, newRev, desc.sha256);
+    cell.addEvent("file.ingested", `${path} (${(desc.size / 1024).toFixed(0)}KiB from ${String(remoteUrl).slice(0, 80)})`, { path, sha256: desc.sha256 });
+    return json({ ok: true, file: { path, sha256: desc.sha256, size: desc.size, mime: desc.mime, url: `__file?path=${encodeURIComponent(path)}` } });
   }
   if (rest === "push/sub" && request.method === "POST") {
     if (!isRun) return json({ error: "push/sub is run-scoped" }, 403);

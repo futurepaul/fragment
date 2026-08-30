@@ -1,4 +1,4 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 const SW_CLIENT_SOURCE = `
 /* fragment sw-client v1 \u2014 push only: no fetch handler, ever */
 self.addEventListener("push", (event) => {

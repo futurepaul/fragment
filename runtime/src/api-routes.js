@@ -1,4 +1,4 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 import { json, randSlug, randHex, isMachinery, bodyTooLarge, MAX_BODY_BYTES, MIME, mimeForPath } from "./util.js";
 import { safeEqual } from "./auth.js";
 import { nextRun } from "./cron.js";

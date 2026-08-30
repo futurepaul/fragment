@@ -1,4 +1,4 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 import { bech32 } from "@scure/base";
 function npubFromHex(hex) {
   const bytes = new Uint8Array(hex.length / 2);

@@ -5,7 +5,10 @@
   "dependencies": {
     "@noble/curves": "^1.9.0",
     "@scure/base": "^1.2.6",
-    "@sinclair/typebox": "^0.34.49"
+    "@sinclair/typebox": "^0.34.49",
+    "@valibot/to-json-schema": "^1.7.0",
+    "valibot": "^1.4.0",
+    "xsai": "^0.4.0"
   },
   "devDependencies": {
     "esbuild": "^0.25.0",

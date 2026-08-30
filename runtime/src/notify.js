@@ -1,4 +1,4 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 const MAX_ATTEMPTS = 3;
 function enqueueNotify(cell, paths) {
   const urls = (cell.manifest()?.notifyUrls || []).slice(0, 3);

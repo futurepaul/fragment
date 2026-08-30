@@ -1,4 +1,4 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { npubFromHex, hexFromNpub } from "./bech32.js";
 import { json, randHex, randSlug } from "./util.js";

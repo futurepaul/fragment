@@ -91,6 +91,10 @@ jobs:
       - name: bring up the native stack (celld dev + fs tier)
         run: |
           export FRAGMENT_HOST_SECRET="$(openssl rand -hex 32)"
+          # E2E_FAL_FAKE stands in a local fal queue with a dummy key, so
+          # the gen tools (ctx.image/ctx.video) get full-pipeline coverage
+          # in CI without spending money or holding a key
+          export E2E_FAL_FAKE=1
           scripts/dev up
 
       - name: e2e suite

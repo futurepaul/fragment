@@ -212,6 +212,8 @@ A workflow is a module exporting `run`:
 
 ```js
 // workflows/digest.mjs
+import { generateText } from "fragment:ai";
+
 const API = "https://example.com/api"; // any JSON endpoint you can call
 export async function run(ctx, input) {
   const rows = await ctx.files.list("notes/");
@@ -223,7 +225,7 @@ export async function run(ctx, input) {
     headers: { authorization: "Bearer " + ctx.secrets.SOME_TOKEN },
   }).then(r => r.json());
 
-  const text = await ctx.ai("summarize in one line: " + note); // host-routed LLM
+  const { text } = await generateText({ prompt: "summarize in one line: " + note }); // host-routed LLM
   const n = (await ctx.state.get("runs")) || 0;
   await ctx.state.put("runs", n + 1);
 
@@ -240,8 +242,20 @@ export async function run(ctx, input) {
   keep slow read-modify-writes from clobbering fresh edits.
 - `ctx.secrets` — plain object of secret values by name.
 - `ctx.http` — fetch, with a 30s default timeout (pass your own `signal` to control it).
-- `ctx.ai(prompt, {model?})` — inference routed through the host (the host
-  holds the platform key; you never see it).
+- `ctx.files.ingest(url, path)` — place remote bytes as a file (streams
+  the URL into the blob tier, commits the row; dedup and append-only gates
+  as usual).
+- **the `fragment:ai` module** — `import { generateText, streamText, generateObject,
+  tool, generateImage, generateVideo } from "fragment:ai"`. One call shape and one
+  result shape across all three (established SDK ergonomics); the host
+  holds the keys (OpenRouter for text, fal.ai for media) and picks the
+  default models (`FRAGMENT_AI_MODEL` / `FRAGMENT_IMAGE_MODEL` /
+  `FRAGMENT_VIDEO_MODEL`). Media results are ALREADY files in the working
+  copy under `gen/`: `{path, url, sha256, size, mediaType, bytes(),
+  base64()}` — they sync to your folder like any other file. `model`
+  swaps the endpoint per call; `providerOptions.fal` passes raw fal input
+  through when a knob has no top-level spelling. The module loads only
+  for fragments that import it (~30KB, nothing for everyone else).
 - `ctx.state` — per-workflow persistent key-value store.
 - `ctx.inbox()` — pending inbox messages (inbox-triggered runs auto-ack theirs).
 - `ctx.events.append` / `ctx.log` — write to the event log.
@@ -423,7 +437,7 @@ export async function run(ctx) {
   for (const it of state.pending) {
     if (Date.now() - it.at < DELAY_MS) { still.push(it); continue; }
     const body = await (await ctx.http(SOURCE + "/__file?path=" + encodeURIComponent(it.path) + "&view=" + token)).text();
-    it.summary = await ctx.ai("one dry sentence about this file: " + body.slice(0, 4000));
+    it.summary = (await generateText({ prompt: "one dry sentence about this file: " + body.slice(0, 4000) })).text;
     await ctx.files.write("feed/" + it.path.replace(/\//g, "__") + ".json", JSON.stringify(it));
   }
   state.pending = still;
@@ -431,6 +445,24 @@ export async function run(ctx) {
   const msgs = await ctx.inbox();
   await ctx.inboxAck(msgs.map((m) => m.id));
   return { fresh: seen.size };
+}
+```
+
+### pattern: gen
+
+One line per medium; the result is a folder file, not a return value you
+have to store. Needs the host to have a fal key (`FAL_API_KEY`).
+
+```js
+// workflows/illustrate.mjs — inbox or cron triggered
+import { generateImage, generateVideo } from "fragment:ai";
+
+export async function run(ctx) {
+  const { image: shot } = await generateImage({ prompt: "a lighthouse at dawn, heavy fog, 35mm film still" });
+  await ctx.events.append("illustrated", { path: shot.path });
+  const { video: clip } = await generateVideo({ prompt: "waves hitting the lighthouse rocks", duration: 5 });
+  ctx.log("made " + shot.path + " and " + clip.path);
+  return { image: shot.path, video: clip.path };
 }
 ```
 
@@ -442,11 +474,13 @@ fix. Needs the host to have an inference key.
 
 ```js
 // workflows/digest.mjs — cron "0 8 * * *"
+import { generateText } from "fragment:ai";
+
 export async function run(ctx) {
   const notes = await ctx.files.list("notes/");
   const bodies = [];
   for (const p of notes.slice(0, 20)) bodies.push("## " + p + "\n" + (await ctx.files.read(p)).slice(0, 2000));
-  const summary = await ctx.ai("One paragraph on today's notes:\n\n" + bodies.join("\n\n"));
+  const { text: summary } = await generateText({ prompt: "One paragraph on today's notes:\n\n" + bodies.join("\n\n") });
   await ctx.files.write("digests/" + new Date().toISOString().slice(0, 10) + ".md", summary + "\n");
   return { notes: notes.length };
 }
@@ -635,7 +669,7 @@ echo "hi" > drop/note.txt        # → output/note-*.md within seconds
 ```
 
 Arrivals under `drop/` fire the `ingest` workflow (`trigger: "files"`); it
-summarizes with `ctx.ai` when the host has an inference key, else writes a
+summarizes with `generateText` when the host has an inference key, else writes a
 plain digest. Outputs land in `output/`, visible on the webview and pulled
 back into your folder by the next sync.
 

@@ -14,6 +14,7 @@ import { join, resolve } from 'node:path';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import fs from "node:fs";
 import { genKey, pubkeyFromSecret, nreq, authHeader, buildEvent } from './nip98.mjs';
+import { createHash } from 'node:crypto';
 import { npubFromHex } from '../runtime/src/bech32.js';
 
 const args = process.argv.slice(2);
@@ -1780,6 +1781,110 @@ async function cronSection() {
   ok(fired, 'cron workflow fired via durable alarm');
 }
 
+
+// ---------- gen (the platform `fragment:ai` module over keyed egress) ----------
+async function genSection() {
+  if (!section('gen')) return;
+
+  // One workflow exercising all three generators in RUN scope, with the
+  // egress fail-closed check. Errors ride back as data so the suite
+  // branches on the host's lane (real keys / e2e fake fal / keyless).
+  const wf = `
+import { generateText, generateImage, generateVideo } from "fragment:ai";
+
+export async function run(ctx) {
+  const out = {};
+  try {
+    const { text } = await generateText({ prompt: "reply with exactly: ok" });
+    out.text = String(text).slice(0, 80);
+  } catch (e) { out.textError = String((e && e.message) || e); }
+  try {
+    const { image } = await generateImage({ prompt: "e2e: a single red cube on a white background, studio light" });
+    out.image = { path: image.path, size: image.size, mime: image.mediaType, sha: image.sha256 };
+  } catch (e) { out.imageError = String((e && e.message) || e); }
+  try {
+    const { video } = await generateVideo({ prompt: "e2e: slow pan across a red cube" });
+    out.video = { path: video.path, size: video.size, mime: video.mediaType, sha: video.sha256 };
+  } catch (e) { out.videoError = String((e && e.message) || e); }
+  return out;
+}`;
+  const name = `e2e-gen-${suffix}`;
+  await signed('POST', '/api/fragments', JSON.stringify({ name }));
+  await signed('PUT', `/api/f/${name}/file?path=workflows/gen.mjs&base_rev=0`, wf);
+  await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'link', editors: [], viewers: [], workflows: [{ name: 'gen', file: 'workflows/gen.mjs' }], secrets: [] }));
+  const r = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'gen' }));
+  eq(r.body?.ok, true, 'gen workflow runs');
+  const out = r.body?.output || {};
+  // text lane is probed, not assumed: whether the host holds an
+  // OpenRouter key is a STACK property the suite cannot see in its own env
+  // (scripts/dev falls back to the main repo's .env for it)
+  if (out.textError && /not allowlisted/.test(String(out.textError))) {
+    ok(/not allowlisted/.test(String(out.textError)), 'generateText without an OpenRouter key fails closed');
+    console.log('skip  generateText content (host has no OpenRouter key)');
+  } else {
+    eq(out.textError, undefined, `generateText resolves (${out.textError || 'ok'})`);
+    ok(typeof out.text === 'string' && out.text.length > 0, 'generateText returned text');
+  }
+
+  if (String(out.imageError || '').includes('not allowlisted')) {
+    console.log('skip  gen media placement (no FAL_API_KEY on this stack — put FAL_API_KEY=... in .env and scripts/dev up)');
+    ok(String(out.imageError).includes('queue.fal.run') || String(out.imageError).includes('FAL'), 'keyless host error names the fal host');
+    return;
+  }
+  eq(out.imageError, undefined, `generateImage resolves (${out.imageError || 'ok'})`);
+  eq(out.videoError, undefined, `generateVideo resolves (${out.videoError || 'ok'})`);
+  ok(/^gen\/.+\.(jpeg|png|webp)$/.test(out.image?.path || ''), 'generateImage placed an image row under gen/');
+  ok(/^gen\/.+\.mp4$/.test(out.video?.path || ''), 'generateVideo placed an mp4 row under gen/');
+  ok(String(out.image?.mime || '').startsWith('image/'), 'image carries an image mediaType');
+  ok(String(out.video?.mime || '').startsWith('video/'), 'video carries a video mediaType');
+
+  // integrity through the whole pipe: served bytes hash to the committed sha
+  for (const [label, f] of [['image', out.image], ['video', out.video]]) {
+    if (!f) continue;
+    const fileUrl = `${BASE}/api/f/${name}/file?path=${encodeURIComponent(f.path)}`;
+    const resp = await fetch(fileUrl, { headers: { authorization: await authHeader('GET', fileUrl, null, ownerKey) } });
+    eq(resp.status, 200, `${label}: placed file serves over the api plane`);
+    const buf = Buffer.from(await resp.arrayBuffer());
+    eq(buf.length, f.size, `${label}: served size matches the descriptor`);
+    eq(createHash('sha256').update(buf).digest('hex'), f.sha, `${label}: served bytes hash to the committed sha256`);
+  }
+
+  // the example app (templates/gen) live, in draft scope: single-await generate
+  const appName = `e2e-gen-app-${suffix}`;
+  const created = await signed('POST', '/api/fragments', JSON.stringify({ name: appName }));
+  const vt = created.body.viewToken;
+  await signed('PUT', `/api/f/${appName}/file?path=app.mjs&base_rev=0`, guideRead(new URL('../templates/gen/app.mjs', import.meta.url), 'utf8'));
+  await signed('PUT', `/api/f/${appName}/file?path=${encodeURIComponent('site/index.html')}&base_rev=0`, guideRead(new URL('../templates/gen/site/index.html', import.meta.url), 'utf8'));
+  const draft = await signed('POST', `/api/f/${appName}/drafts`, JSON.stringify({}));
+  await signed('POST', `/api/f/${appName}/bless`, JSON.stringify({ slug: draft.body.slug }));
+  const page = await fetch(`${BASE}/f/${appName}/?view=${vt}`);
+  ok((await page.text()).includes('id="prompt"'), 'gen template page serves with its prompt box');
+
+  const gen0 = await jres(fetch(`${BASE}/f/${appName}/generate?view=${vt}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'image', prompt: 'e2e app: blue sphere on white' }) }));
+  eq(gen0.status, 200, 'app generate route answers 200');
+  ok(gen0.body?.file?.path?.startsWith('gen/'), 'app generate returns a placed file');
+  const media = await fetch(`${BASE}/f/${appName}/__file?path=${encodeURIComponent(gen0.body?.file?.path || '')}&view=${vt}`);
+  eq(media.status, 200, 'generated media serves at __file?path=');
+  eq(media.headers.get('content-type') || '', (gen0.body?.file?.mime) || '', '__file serves the stored mediaType');
+  const recent = await (await fetch(`${BASE}/f/${appName}/recent?view=${vt}`)).json();
+  ok((recent.files || []).some((x) => x.path === gen0.body?.file?.path), 'app recent route lists the generation');
+
+  // bad input shapes are cheap 400s, not fal traffic
+  const bad = await jres(fetch(`${BASE}/f/${appName}/generate?view=${vt}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'audio', prompt: 'x' }) }));
+  eq(bad.status, 400, 'generate rejects an unknown kind');
+  const bad2 = await jres(fetch(`${BASE}/f/${appName}/generate?view=${vt}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'image' }) }));
+  eq(bad2.status, 400, 'generate rejects a missing prompt');
+
+  // the CLI knows the template (build.rs registry)
+  const bin = findBinary();
+  if (bin) {
+    const list = runCli(bin, ['new', '--list']);
+    ok(/\bgen\b/.test(list), 'fragment new --list offers the gen template');
+  } else {
+    console.log('skip  gen template registry check (no fragment binary built)');
+  }
+}
+
 // ---------- main ----------
 try {
   if (!ONLY || ONLY === 'auth') await authSection();
@@ -1792,6 +1897,7 @@ try {
   if (!ONLY || ONLY === 'guide') await guideSection();
   if (!ONLY || ONLY === 'runs') await runsSection();
   if (!ONLY || ONLY === 'platform') await platformSection();
+  if (!ONLY || ONLY === 'gen') await genSection();
   if (!ONLY || ONLY === 'filesync') await filesyncSection();
   if (!ONLY || ONLY === 'sync') await syncSection();
   if (!ONLY || ONLY === 'gitignore') await gitignoreSection();

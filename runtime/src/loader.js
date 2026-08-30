@@ -1,6 +1,7 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 import { randHex } from "./util.js";
 import { CTX_SHIM_SOURCE } from "./ctx-shim.js";
+import { AI_MODULE_SOURCE } from "./ai-module.js";
 import { tierTextBounded } from "./blob-tier.js";
 const WORKFLOW_MAIN = `
 import { makeCtx } from "./fragment-ctx.mjs";
@@ -12,6 +13,7 @@ export default {
     try { ctx = await makeCtx(env); } catch (e) {
       return Response.json({ ok: false, error: "ctx init: " + String(e) });
     }
+    //__FRAGMENT_AI_INIT__
     try {
       const output = await run(ctx, input);
       return Response.json({ ok: true, output: output ?? null });
@@ -27,6 +29,7 @@ import app from "./app.mjs";
 export default {
   async fetch(req, env) {
     const ctx = await makeCtx(env);
+    //__FRAGMENT_AI_INIT__
     return app.fetch(req, ctx);
   }
 }
@@ -40,6 +43,7 @@ export default {
     let out = {};
     try {
       const ctx = await makeCtx(env);
+      //__FRAGMENT_AI_INIT__
       out = (await onMessage(room, msg, ctx)) ?? {};
     } catch (e) {
       return Response.json({ error: String((e && e.stack) || e) });
@@ -68,6 +72,10 @@ function makeToken(cell, scope) {
 }
 function checkToken(cell, request) {
   const token = request.headers.get("x-fragment-token") || "";
+  return checkTokenRaw(cell, token);
+}
+function checkTokenRaw(cell, token) {
+  if (!token) return null;
   const row = cell.sql.exec("SELECT scope, expires FROM run_tokens WHERE token = ?", token).toArray()[0];
   if (!row) return null;
   if (row.expires !== null && row.expires !== void 0 && row.expires < Date.now()) return null;
@@ -78,8 +86,13 @@ function internalBase(cell) {
   return `${base}/__internal/f/${cell.getMeta("name")}`;
 }
 async function loadCode(cell, id, mainSource, modules, scope, cause = null) {
+  const wantsAi = Object.values(modules).some((src) => /\b(?:from|import)\s*["']fragment:ai["']/.test(String(src)));
+  const mainFinal = wantsAi ? 'import { init as __fragmentAiInit } from "fragment:ai";\n' + mainSource.replace(
+    "//__FRAGMENT_AI_INIT__",
+    'try { __fragmentAiInit(env); } catch (e) { return Response.json({ ok: false, error: "fragment:ai init: " + String(e) }); }'
+  ) : mainSource.replace("//__FRAGMENT_AI_INIT__", "");
   const wrapped = {};
-  for (const [k, v] of Object.entries({ "main.mjs": mainSource, "fragment-ctx.mjs": CTX_SHIM_SOURCE, ...modules })) {
+  for (const [k, v] of Object.entries({ "main.mjs": mainFinal, "fragment-ctx.mjs": CTX_SHIM_SOURCE, ...wantsAi ? { "fragment:ai": AI_MODULE_SOURCE } : {}, ...modules })) {
     wrapped[k] = cell.env.FRAGMENT_HOST_KIND === "cf" ? { js: v } : v;
   }
   const worker = await cell.env.LOADER.get(id, async () => ({
@@ -106,7 +119,14 @@ async function loadCode(cell, id, mainSource, modules, scope, cause = null) {
       ...cause ? { FRAGMENT_CAUSE: JSON.stringify(cause) } : {},
       // forwarded by ctx as x-fragment-host-secret; checked by the router
       // on /__internal when the host sets FRAGMENT_HOST_SECRET
-      ...cell.env.FRAGMENT_HOST_SECRET ? { FRAGMENT_HOST_SECRET: cell.env.FRAGMENT_HOST_SECRET } : {}
+      ...cell.env.FRAGMENT_HOST_SECRET ? { FRAGMENT_HOST_SECRET: cell.env.FRAGMENT_HOST_SECRET } : {},
+      // host model defaults + fal base for the platform "ai" module —
+      // configuration, never credentials (keys stay cell-side; the egress
+      // route attaches them)
+      ...cell.env.FRAGMENT_AI_MODEL ? { FRAGMENT_AI_MODEL: cell.env.FRAGMENT_AI_MODEL } : {},
+      ...cell.env.FRAGMENT_IMAGE_MODEL ? { FRAGMENT_IMAGE_MODEL: cell.env.FRAGMENT_IMAGE_MODEL } : {},
+      ...cell.env.FRAGMENT_VIDEO_MODEL ? { FRAGMENT_VIDEO_MODEL: cell.env.FRAGMENT_VIDEO_MODEL } : {},
+      ...cell.env.FRAGMENT_FAL_BASE ? { FRAGMENT_FAL_BASE: cell.env.FRAGMENT_FAL_BASE } : {}
     }
   }));
   return worker.getEntrypoint ? worker.getEntrypoint() : worker;
@@ -168,6 +188,7 @@ export {
   ROOMS_MAIN,
   WORKFLOW_MAIN,
   checkToken,
+  checkTokenRaw,
   collectModules,
   internalBase,
   loadCode,

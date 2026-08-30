@@ -1,4 +1,4 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 const CTX_SHIM_SOURCE = `
 export async function makeCtx(env) {
   const base = env.FRAGMENT_INTERNAL_URL;
@@ -72,10 +72,23 @@ export async function makeCtx(env) {
       // a moved row rejects with Error.conflict (and .currentRev) instead
       // of clobbering: read-modify-write loops stay safe across slow awaits
       async write(path, data, opts) {
-        const body = typeof data === "string" ? data : data;
+        let body = typeof data === "string" ? data : data;
+        const headers = { "x-fragment-token": tok, ...(hsec ? { "x-fragment-host-secret": hsec } : {}) };
+        // blob-first for big bodies: over the 64KiB inline carve-out, hash
+        // client-side and send with x-fragment-hash so the cell streams the
+        // bytes through to the tier instead of refusing them (the SDK-style
+        // generators return whole Uint8Arrays \u2014 images and clips are MBs)
+        if (typeof body !== "string" || body.length > 65536) {
+          const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body instanceof ArrayBuffer ? new Uint8Array(body) : body;
+          if (bytes.byteLength > 65536) {
+            const digest = await crypto.subtle.digest("SHA-256", bytes);
+            headers["x-fragment-hash"] = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+            body = bytes;
+          }
+        }
         let qs = "/files/write?path=" + encodeURIComponent(path);
         if (opts && Number.isInteger(opts.ifRev)) qs += "&if_rev=" + opts.ifRev;
-        const r = await fetch(base + qs, { method: "PUT", body, headers: { "x-fragment-token": tok, ...(hsec ? { "x-fragment-host-secret": hsec } : {}) } });
+        const r = await fetch(base + qs, { method: "PUT", body, headers });
         if (r.status === 409) {
           const j = await r.json().catch(() => ({}));
           const e = new Error("rev conflict on " + path + ": row is at rev " + (j.currentRev ?? "?") + (j.ifRev !== undefined ? ", write pinned to " + j.ifRev : ""));
@@ -85,6 +98,14 @@ export async function makeCtx(env) {
         }
         if (!r.ok) throw new Error("fragment ctx files/write -> " + r.status + ": " + (await r.text()));
         return r.json();
+      },
+      // place remote bytes as a file: streams the URL into the blob tier
+      // and commits the row (dedup + append-only gates as usual). The
+      // public-CDN half of generated-media placement; equally useful for
+      // "archive this URL into my folder".
+      async ingest(url, path) {
+        const r = await call("/files/ingest", { method: "POST", body: JSON.stringify({ url: String(url), path }) });
+        return (await r.json()).file;
       },
       // live row metadata INCLUDING tombstones ({deleted:true} with the
       // tombstone's rev); null when the path has no history at all
@@ -122,10 +143,6 @@ export async function makeCtx(env) {
     },
     log(msg) {
       return call("/log", { method: "POST", body: JSON.stringify({ msg: String(msg) }) }).catch(() => {});
-    },
-    async ai(prompt, opts = {}) {
-      const r = await call("/infer", { method: "POST", body: JSON.stringify({ prompt: String(prompt), model: opts.model }) });
-      return (await r.json()).text;
     },
     state: {
       async get(k) {
