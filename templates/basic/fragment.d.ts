@@ -7,6 +7,53 @@
  * LESSON were learned from production incidents.
  */
 
+/** A generation job handle — opaque, safe to round-trip through a browser. */
+export interface GenJob {
+  kind: "image" | "video";
+  model: string;
+  requestId: string;
+  /** The path the finished media will be committed at (gen/… by default). */
+  path: string;
+  mime: string;
+}
+
+/** One poll of `ctx.gen.status`; the done shape carries the placed file. */
+export interface GenStatus {
+  status: "queued" | "working" | "done";
+  queuePosition?: number;
+  file?: GeneratedFile;
+}
+
+/** Where generated media lands: a working-copy file row, syncs to the folder. */
+export interface GeneratedFile {
+  path: string;
+  sha256: string;
+  size: number;
+  mime: string;
+  /** Site-relative URL — serve it from pages as `__file?path=…`. */
+  url: string;
+}
+
+/** Bounded tuning knobs; everything else is dropped (fal rejects unknown keys). */
+export interface GenOpts {
+  model?: string;
+  dir?: string;
+  pollMs?: number;
+  timeoutMs?: number;
+  // image
+  image_size?: string | { width: number; height: number };
+  num_images?: number;
+  num_inference_steps?: number;
+  guidance_scale?: number;
+  output_format?: "png" | "jpeg" | "webp";
+  // video
+  duration?: number;
+  resolution?: "480P" | "768P";
+  aspect_ratio?: "21:9" | "16:9" | "4:3" | "1:1" | "3:4" | "9:16";
+  prompt_expansion_mode?: "balanced" | "quality";
+  seed?: number;
+}
+
 /** One pending inbox message, as `ctx.inbox()` returns it. */
 export interface InboxMessage {
   id: number;
@@ -76,6 +123,24 @@ export interface Ctx {
   secrets: Record<string, string>;
   /** Platform-routed LLM call (the host holds the key). */
   ai(prompt: string): Promise<string>;
+  /**
+   * Generate an image (host's fal.ai key; cheap ~1MP default). The result
+   * is already a file row in the working copy — syncs to the folder.
+   */
+  image(prompt: string, opts?: GenOpts): Promise<GeneratedFile>;
+  /** Generate a video (5s, 768p default — MiniMax H3 Max via the host). */
+  video(prompt: string, opts?: GenOpts): Promise<GeneratedFile>;
+  /**
+   * The pieces behind the one-liners, for apps that show progress instead
+   * of holding a request open: start() submits, status() is one poll, and
+   * the SLEEPING between polls belongs to caller code — the cell never
+   * waits (a waiting cell would stall the whole fragment).
+   */
+  gen: {
+    start(kind: "image" | "video", prompt: string, opts?: GenOpts): Promise<GenJob>;
+    status(job: GenJob): Promise<GenStatus>;
+    wait(job: GenJob, opts?: GenOpts): Promise<GenStatus>;
+  };
   /** Outbound fetch. Stamps x-fragment-hops for cycle detection. */
   http(url: string, init?: RequestInit): Promise<Response>;
   /**

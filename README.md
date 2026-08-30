@@ -22,6 +22,10 @@ wrapped around exactly one problem. This repo holds two things:
 - **dropzone** — the vault plus a `drop/` folder and an `ingest` workflow
   (`trigger: "files"`): drop a file, watch `output/` appear on the webview
   and sync back into your folder seconds later.
+- **gen** — a prompt box that makes images and videos (`ctx.image` /
+  `ctx.video`, fal.ai behind the host's key): no dials, cheap defaults, and
+  every generation lands in `gen/` as an ordinary file that syncs to your
+  folder.
 
 Both are just folders — read the scaffolded code, edit it, re-deploy. See
 the Recipes section of `fragment guide`.
@@ -74,9 +78,9 @@ Worker Loader is the one exotic binding). Same code, different bindings:
 ```
 cd runtime && npx wrangler login        # once, browser OAuth
 ../scripts/deploy-cf deploy             # deploys + bakes in the worker URL
-../scripts/deploy-cf secret             # OPENROUTER_API_KEY from .env, plus
-                                        # FRAGMENT_HOST_SECRET (generated) that
-                                        # locks /__internal to ctx loopback
+../scripts/deploy-cf secret             # OPENROUTER_API_KEY + FAL_API_KEY
+                                        # from .env, plus FRAGMENT_HOST_SECRET
+                                        # (generated) that locks /__internal
 fragment --host https://<you>.workers.dev create hello
 ```
 

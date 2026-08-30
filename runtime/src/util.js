@@ -51,7 +51,11 @@ const MIME = {
   woff: "font/woff",
   ttf: "font/ttf",
   otf: "font/otf",
-  webmanifest: "application/manifest+json"
+  webmanifest: "application/manifest+json",
+  // generated media (ctx.image/ctx.video land here as file rows)
+  mp4: "video/mp4",
+  webm: "video/webm",
+  mov: "video/quicktime"
 };
 function hashInName(path) {
   const base = String(path).split("/").pop() || "";

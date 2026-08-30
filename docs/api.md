@@ -110,6 +110,7 @@ plus plain-JSON env:
 - `ctx.inbox()` → pending inbox messages
 - `ctx.events.append(kind, data)`, `ctx.log(msg)`
 - `ctx.ai(prompt, {model?})` → `POST /__internal/infer` (host adds the platform key from `CELLD_VAR_OPENROUTER_API_KEY`; default model `deepseek/deepseek-v4-flash-0731`... configurable via `CELLD_VAR_FRAGMENT_AI_MODEL`)
+- `ctx.image(prompt, opts?)` / `ctx.video(prompt, opts?)` → `POST /__internal/gen/start` then `POST /__internal/gen/status` until done (host adds the fal.ai key from `CELLD_VAR_FAL_API_KEY`; defaults `fal-ai/flux-2` image / `minimax/h3-max/text-to-video` video, configurable via `CELLD_VAR_FRAGMENT_IMAGE_MODEL` / `CELLD_VAR_FRAGMENT_VIDEO_MODEL`). The finished media is placed in the blob tier and committed as a working-copy file row (`gen/…` by default) — `ctx.gen.status` resolving `{status:"done", file:{path, sha256, size, mime, url}}`. Poll sleeps live in the caller's isolate, never the cell.
 - `ctx.state` → per-workflow kv via `/__internal/wstate`
 
 A workflow file exports `async run(ctx)`. The cell invokes it via

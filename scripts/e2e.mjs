@@ -14,6 +14,7 @@ import { join, resolve } from 'node:path';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import fs from "node:fs";
 import { genKey, pubkeyFromSecret, nreq, authHeader, buildEvent } from './nip98.mjs';
+import { createHash } from 'node:crypto';
 import { npubFromHex } from '../runtime/src/bech32.js';
 
 const args = process.argv.slice(2);
@@ -1780,6 +1781,113 @@ async function cronSection() {
   ok(fired, 'cron workflow fired via durable alarm');
 }
 
+
+// ---------- gen (fal.ai media tools: ctx.image / ctx.video / ctx.gen) ----------
+async function genSection() {
+  if (!section('gen')) return;
+
+  // The workflow exercises the one-liners in RUN scope; the template app
+  // below exercises the pieces API in DRAFT scope (the app's start/status
+  // routes ARE ctx.gen.start/status). Errors ride back as data so the suite
+  // branches on the host's lane (real key / e2e fake queue / keyless)
+  // instead of guessing host env.
+  const wf = `
+export async function run(ctx) {
+  const out = {};
+  try {
+    const img = await ctx.image("e2e: a single red cube on a white background, studio light");
+    out.image = { path: img.path, size: img.size, mime: img.mime, sha: img.sha256 };
+  } catch (e) { out.imageError = String((e && e.message) || e); }
+  try {
+    const vid = await ctx.video("e2e: slow pan across a red cube", { duration: 5 });
+    out.video = { path: vid.path, size: vid.size, mime: vid.mime, sha: vid.sha256 };
+  } catch (e) { out.videoError = String((e && e.message) || e); }
+  return out;
+}`;
+  const name = `e2e-gen-${suffix}`;
+  await signed('POST', '/api/fragments', JSON.stringify({ name }));
+  await signed('PUT', `/api/f/${name}/file?path=workflows/gen.mjs&base_rev=0`, wf);
+  await signed('PUT', `/api/f/${name}/manifest`, JSON.stringify({ name, visibility: 'link', editors: [], viewers: [], workflows: [{ name: 'gen', file: 'workflows/gen.mjs' }], secrets: [] }));
+  const r = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'gen' }));
+  eq(r.body?.ok, true, 'gen workflow runs');
+  const out = r.body?.output || {};
+
+  if (String(out.imageError || '').includes('no FAL_API_KEY')) {
+    console.log('skip  gen media placement (no FAL_API_KEY on this stack — put FAL_API_KEY=... in .env and scripts/dev up)');
+    ok(String(out.imageError).includes('CELLD_VAR_FAL_API_KEY'), 'keyless host answers with the set-CELLD_VAR_FAL_API_KEY hint');
+    return;
+  }
+  eq(out.imageError, undefined, `ctx.image resolves (${out.imageError || 'ok'})`);
+  eq(out.videoError, undefined, `ctx.video resolves (${out.videoError || 'ok'})`);
+  ok(/^gen\/.+\.(jpeg|png|webp)$/.test(out.image?.path || ''), 'ctx.image placed an image row under gen/');
+  ok(/^gen\/.+\.mp4$/.test(out.video?.path || ''), 'ctx.video placed an mp4 row under gen/');
+  ok(String(out.image?.mime || '').startsWith('image/'), 'image row carries an image mime');
+  ok(String(out.video?.mime || '').startsWith('video/'), 'video row carries a video mime');
+
+  // integrity through the whole pipe: served bytes hash to the committed sha
+  for (const [label, f] of [['image', out.image], ['video', out.video]]) {
+    if (!f) continue;
+    const fileUrl = `${BASE}/api/f/${name}/file?path=${encodeURIComponent(f.path)}`;
+    const resp = await fetch(fileUrl, { headers: { authorization: await authHeader('GET', fileUrl, null, ownerKey) } });
+    eq(resp.status, 200, `${label}: placed file serves over the api plane`);
+    const buf = Buffer.from(await resp.arrayBuffer());
+    eq(buf.length, f.size, `${label}: served size matches the descriptor`);
+    eq(createHash('sha256').update(buf).digest('hex'), f.sha, `${label}: served bytes hash to the committed sha256`);
+  }
+
+  // the example app (templates/gen) live, in draft scope: page, start,
+  // status polling, media serving, recent listing
+  const appName = `e2e-gen-app-${suffix}`;
+  const created = await signed('POST', '/api/fragments', JSON.stringify({ name: appName }));
+  const vt = created.body.viewToken;
+  await signed('PUT', `/api/f/${appName}/file?path=app.mjs&base_rev=0`, guideRead(new URL('../templates/gen/app.mjs', import.meta.url), 'utf8'));
+  await signed('PUT', `/api/f/${appName}/file?path=${encodeURIComponent('site/index.html')}&base_rev=0`, guideRead(new URL('../templates/gen/site/index.html', import.meta.url), 'utf8'));
+  const draft = await signed('POST', `/api/f/${appName}/drafts`, JSON.stringify({}));
+  await signed('POST', `/api/f/${appName}/bless`, JSON.stringify({ slug: draft.body.slug }));
+  const page = await fetch(`${BASE}/f/${appName}/?view=${vt}`);
+  ok((await page.text()).includes('id="prompt"'), 'gen template page serves with its prompt box');
+
+  const post0 = await jres(fetch(`${BASE}/f/${appName}/start?view=${vt}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'image', prompt: 'e2e app: blue sphere on white' }) }));
+  eq(post0.status, 200, 'app start route answers 200');
+  const job = post0.body?.job;
+  ok(job && job.kind === 'image' && typeof job.requestId === 'string' && job.path.startsWith('gen/'), 'app start returns an opaque job handle');
+  const poll = () => jres(fetch(`${BASE}/f/${appName}/status?view=${vt}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ job }) }));
+  const first = await poll();
+  ok(['queued', 'working', 'done'].includes(first.body?.status), 'app status reports a lamp state');
+  let file = null;
+  const t0 = Date.now();
+  while (Date.now() - t0 < 90_000 && !file) {
+    await sleep(1500);
+    const st = await poll();
+    if (st.body?.status === 'done') file = st.body.file;
+    if (st.body?.status === 'error') break;
+  }
+  ok(file && file.path.startsWith('gen/'), 'app generation completes to a placed file');
+  const again = await poll();
+  eq(again.body?.status, 'done', 're-polling a done job stays done');
+  eq(again.body?.deduped, true, 're-polling a done job is a dedup no-op (rev did not churn)');
+  const media = await fetch(`${BASE}/f/${appName}/__file?path=${encodeURIComponent(file ? file.path : '')}&view=${vt}`);
+  eq(media.status, 200, 'generated media serves at __file?path=');
+  eq(media.headers.get('content-type') || '', (file && file.mime) || '', '__file serves the stored mime');
+  const recent = await (await fetch(`${BASE}/f/${appName}/recent?view=${vt}`)).json();
+  ok((recent.files || []).some((x) => x.path === (file && file.path)), 'app recent route lists the generation');
+
+  // bad input shapes are cheap 400s, not fal traffic
+  const bad = await jres(fetch(`${BASE}/f/${appName}/start?view=${vt}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'audio', prompt: 'x' }) }));
+  eq(bad.status, 400, 'start rejects an unknown kind');
+  const badStatus = await jres(fetch(`${BASE}/f/${appName}/status?view=${vt}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ job: { kind: 'image' } }) }));
+  eq(badStatus.body?.status, 'error', 'status surfaces a bad job as an app-level error');
+
+  // the CLI knows the template (build.rs registry)
+  const bin = findBinary();
+  if (bin) {
+    const list = runCli(bin, ['new', '--list']);
+    ok(/\bgen\b/.test(list), 'fragment new --list offers the gen template');
+  } else {
+    console.log('skip  gen template registry check (no fragment binary built)');
+  }
+}
+
 // ---------- main ----------
 try {
   if (!ONLY || ONLY === 'auth') await authSection();
@@ -1792,6 +1900,7 @@ try {
   if (!ONLY || ONLY === 'guide') await guideSection();
   if (!ONLY || ONLY === 'runs') await runsSection();
   if (!ONLY || ONLY === 'platform') await platformSection();
+  if (!ONLY || ONLY === 'gen') await genSection();
   if (!ONLY || ONLY === 'filesync') await filesyncSection();
   if (!ONLY || ONLY === 'sync') await syncSection();
   if (!ONLY || ONLY === 'gitignore') await gitignoreSection();

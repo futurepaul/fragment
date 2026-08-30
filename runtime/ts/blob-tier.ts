@@ -91,6 +91,68 @@ export async function uploadInlineBytes(cell, bytes, declaredSha, mime, pathMime
   return { sha256: sha, size: bytes.byteLength, mime: cleanMime(mime, pathMime) };
 }
 
+// Placement from an external URL (the gen tools' output side): stream the
+// remote body straight through to the tier with NO declared hash — blobsd
+// computes the content address itself and hands it back in the descriptor,
+// which is exactly what a cell that just learned the URL wants (it cannot
+// know the bytes' hash without buffering them). Pass-through requires the
+// upstream to state a content-length (blobsd enforces one); a chunked
+// upstream falls back to a capped buffer — the one whole-body hop this
+// module allows itself, and only because generation outputs (a 5s clip, an
+// image) are megabyte-scale, not note-scale.
+export const GEN_PLACE_CAP = 64 * 1024 * 1024;
+
+export async function tierPlaceFromUrl(cell, url, mimeHint) {
+  const cfg = requireTier(cell);
+  // no abort signal on the media fetch, deliberately: workerd keeps
+  // ownership of a signal-guarded response body ("the body stream is not
+  // owned"), which kills the stream-forward below. Time is bounded by the
+  // race instead; a lost race cancels the handler's request context.
+  const timed = (p) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new TierError("fetch output timed out after 120s", 504)), 120_000))]);
+  const remote = await timed(fetch(url));
+  if (!remote.ok) throw new TierError(`fetch output: ${remote.status} ${String(url).slice(0, 120)}`, 502);
+  const mime = cleanMime(remote.headers.get("content-type"), mimeHint);
+  const len = parseInt(remote.headers.get("content-length") || "0", 10);
+  if (len > GEN_PLACE_CAP) throw new TierError(`generated output is ${(len / 1048576).toFixed(1)}MiB — over the ${GEN_PLACE_CAP / 1048576}MiB placement cap`, 413);
+  const put = (body) => fetch(`${cfg.url}/upload`, {
+    method: "PUT",
+    headers: bearer(cfg, { "content-type": mime }),
+    body,
+    // @ts-ignore duplex required for streaming bodies
+    duplex: "half",
+  });
+  let resp;
+  if (len > 0) {
+    // workerd refuses to hand a fetch RESPONSE body straight to another
+    // fetch ("the body stream is not owned") — pipe it through an identity
+    // transform first, which mints a stream this context owns
+    const owned = typeof IdentityTransformStream === "function"
+      ? remote.body.pipeThrough(new IdentityTransformStream())
+      : remote.body;
+    try {
+      resp = await timed(put(owned));
+    } catch (e) {
+      if (!/not owned/i.test(String((e && e.message) || e))) throw e;
+      // workerd without IdentityTransformStream semantics: re-fetch and
+      // buffer (bounded) — placement is megabyte-scale media, not notes
+      const buf = new Uint8Array(await (await timed(fetch(url))).arrayBuffer());
+      if (buf.byteLength > GEN_PLACE_CAP) throw new TierError(`generated output is ${(buf.byteLength / 1048576).toFixed(1)}MiB — over the ${GEN_PLACE_CAP / 1048576}MiB placement cap`, 413);
+      resp = await put(buf);
+    }
+  } else {
+    const bytes = new Uint8Array(await remote.arrayBuffer());
+    if (bytes.byteLength > GEN_PLACE_CAP) throw new TierError(`generated output is ${(bytes.byteLength / 1048576).toFixed(1)}MiB — over the ${GEN_PLACE_CAP / 1048576}MiB placement cap`, 413);
+    resp = await put(bytes);
+  }
+  if (!resp.ok) throw await tierError("place generated output", resp);
+  const desc = await resp.json().catch(() => null);
+  // paired assertions: a descriptor without an address or size must never
+  // become a committed row (same contract as every other placement path)
+  if (!desc || !SHA_RE.test(String(desc.sha256 || ""))) throw new TierError("place generated output: tier returned no content address");
+  if (!Number.isSafeInteger(desc.size)) throw new TierError("place generated output: tier returned no size");
+  return { sha256: desc.sha256, size: desc.size, mime };
+}
+
 // Hash-pushed form (x-fragment-hash present): the body streams THROUGH the
 // cell into the tier — chunked reader -> chunked writer, no point where the
 // whole payload exists in JS memory. Identity is settled by comparing the

@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gen</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: #101214; color: #e8e6e3;
+    font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    display: flex; justify-content: center;
+  }
+  main { width: 100%; max-width: 880px; padding: 32px 20px 80px; }
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: .08em; color: #9aa0a6; margin: 0 0 20px; }
+  form { display: flex; gap: 8px; }
+  #prompt {
+    flex: 1; padding: 12px 14px; font: inherit; color: inherit;
+    background: #191c1f; border: 1px solid #2a2e33; border-radius: 8px; outline: none;
+  }
+  #prompt:focus { border-color: #4a5158; }
+  #go {
+    padding: 12px 18px; font: inherit; font-weight: 600; color: #101214;
+    background: #e8e6e3; border: 0; border-radius: 8px; cursor: pointer;
+  }
+  #go:disabled { opacity: .5; cursor: default; }
+  .toggle { display: flex; gap: 4px; margin: 0 0 8px; }
+  .toggle button {
+    font: inherit; font-size: 13px; padding: 5px 12px; cursor: pointer;
+    color: #9aa0a6; background: none; border: 1px solid #2a2e33; border-radius: 999px;
+  }
+  .toggle button.on { color: #101214; background: #e8e6e3; border-color: #e8e6e3; }
+  #grid { margin-top: 28px; display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
+  .card { background: #191c1f; border: 1px solid #23272b; border-radius: 10px; overflow: hidden; }
+  .card .media { aspect-ratio: 1; display: flex; align-items: center; justify-content: center; background: #0c0e10; }
+  .card img, .card video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .card .meta { padding: 8px 10px; font-size: 12px; color: #9aa0a6; display: flex; justify-content: space-between; gap: 8px; }
+  .card .meta .p { color: #c8c5c0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .st { font-size: 12px; color: #9aa0a6; animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .45; } }
+  .err { font-size: 12px; color: #e07b7b; padding: 8px 10px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>△ fragment gen</h1>
+  <div class="toggle">
+    <button type="button" id="tImage" class="on">image</button>
+    <button type="button" id="tVideo">video</button>
+  </div>
+  <form id="f">
+    <input id="prompt" placeholder="describe it…" autocomplete="off" autofocus>
+    <button id="go">generate</button>
+  </form>
+  <div id="grid"></div>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const grid = $("grid");
+let kind = "image";
+
+for (const [id, k] of [["tImage", "image"], ["tVideo", "video"]]) {
+  $(id).onclick = () => {
+    kind = k;
+    $("tImage").classList.toggle("on", k === "image");
+    $("tVideo").classList.toggle("on", k === "video");
+    $("prompt").focus();
+  };
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const src = (path) => "__file?path=" + encodeURIComponent(path);
+const kb = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + "M" : Math.max(1, Math.round(n / 1024)) + "K";
+
+function card(prompt, mediaHtml) {
+  const el = document.createElement("div");
+  el.className = "card";
+  el.innerHTML = `<div class="media">${mediaHtml}</div><div class="meta"><span class="p">${esc(prompt)}</span><span class="sz"></span></div>`;
+  grid.prepend(el);
+  return el;
+}
+
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  return r.json();
+}
+
+async function generate(prompt) {
+  const el = card(prompt, `<div class="st">submitting…</div>`);
+  const st = () => el.querySelector(".st");
+  try {
+    const { job, error } = await post("start", { kind, prompt });
+    if (error || !job) throw new Error(error || "no job");
+    st().textContent = "queued…";
+    // the sleep lives here in the tab; the fragment never blocks on it
+    for (;;) {
+      await sleep(kind === "video" ? 2000 : 1000);
+      const s = await post("status", { job });
+      if (s.status === "done" && s.file) return fill(el, s.file);
+      if (s.status === "error") throw new Error(s.error || "generation failed");
+      st().textContent = s.status === "queued" ? `queued${s.queuePosition != null ? " #" + (s.queuePosition + 1) : ""}…` : "working…";
+    }
+  } catch (e) {
+    const m = el.querySelector(".media");
+    if (m) m.innerHTML = `<div class="err">${esc(String(e.message || e)).slice(0, 200)}</div>`;
+    else el.prepend(Object.assign(document.createElement("div"), { className: "err", textContent: String(e.message || e).slice(0, 200) }));
+  }
+}
+
+function fill(el, file) {
+  const media = kind === "video"
+    ? `<video controls playsinline preload="metadata" src="${src(file.path)}"></video>`
+    : `<img loading="lazy" src="${src(file.path)}" alt="">`;
+  el.querySelector(".media").outerHTML = `<div class="media">${media}</div>`;
+  el.querySelector(".sz").textContent = kb(file.size);
+}
+
+$("f").onsubmit = (e) => {
+  e.preventDefault();
+  const prompt = $("prompt").value.trim();
+  if (!prompt) return;
+  $("prompt").value = "";
+  generate(prompt);
+};
+
+// recent generations on load — the grid persists across visits because the
+// files persist in the fragment (and in your folder)
+(async () => {
+  try {
+    const { files } = await (await fetch("recent")).json();
+    for (const f of files || []) {
+      const isVideo = /\.(mp4|webm|mov)$/i.test(f.path);
+      card(f.path, isVideo
+        ? `<video controls playsinline preload="metadata" src="${src(f.path)}"></video>`
+        : `<img loading="lazy" src="${src(f.path)}" alt="">`).querySelector(".sz").textContent = kb(f.size);
+    }
+  } catch {}
+})();
+</script>
+</body>
+</html>

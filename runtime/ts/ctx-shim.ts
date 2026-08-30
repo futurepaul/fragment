@@ -129,6 +129,45 @@ export async function makeCtx(env) {
       const r = await call("/infer", { method: "POST", body: JSON.stringify({ prompt: String(prompt), model: opts.model }) });
       return (await r.json()).text;
     },
+    // Generation tools (fal.ai, host holds the key). ctx.image/ctx.video are
+    // the one-liners; ctx.gen is the three-pieces version for apps that want
+    // to show progress instead of holding a request open.
+    gen: {
+      // submit; resolves to an opaque job — pass it to status()/wait() (or
+      // round-trip it through a browser: it carries no secrets)
+      async start(kind, prompt, opts = {}) {
+        const r = await call("/gen/start", { method: "POST", body: JSON.stringify({ kind, prompt, model: opts.model, opts, dir: opts.dir }) });
+        return (await r.json()).job;
+      },
+      // one poll — {status: "queued"|"working"|"done", file?}. Never sleeps.
+      async status(job) {
+        const r = await call("/gen/status", { method: "POST", body: JSON.stringify({ job }) });
+        return await r.json();
+      },
+      // sleep-and-poll until done. Sleeping happens HERE in the isolate on
+      // purpose: the cell is single-threaded, and a cell-side wait would
+      // stall the fragment's own webview for the whole generation.
+      async wait(job, opts = {}) {
+        const pollMs = opts.pollMs || (job.kind === "video" ? 2500 : 1200);
+        const timeoutMs = opts.timeoutMs || (job.kind === "video" ? 300_000 : 120_000);
+        const deadline = Date.now() + timeoutMs;
+        for (;;) {
+          const st = await ctx.gen.status(job);
+          if (st.status === "done") return st;
+          if (Date.now() > deadline) throw new Error("generation timed out after " + Math.round(timeoutMs / 1000) + "s (job still " + st.status + ")");
+          await new Promise((r) => setTimeout(r, pollMs));
+        }
+      },
+    },
+    // one-liners: generate, wait, return {path, sha256, size, mime, url} —
+    // the media is already a file row in the working copy (syncs to the
+    // folder like any other file)
+    async image(prompt, opts = {}) {
+      return (await ctx.gen.wait(await ctx.gen.start("image", prompt, opts), opts)).file;
+    },
+    async video(prompt, opts = {}) {
+      return (await ctx.gen.wait(await ctx.gen.start("video", prompt, opts), opts)).file;
+    },
     state: {
       async get(k) {
         const r = await call("/wstate?k=" + encodeURIComponent(k));

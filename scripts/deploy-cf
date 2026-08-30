@@ -34,12 +34,19 @@ case "${1:-}" in
     echo "deployed: $url"
     ;;
   secret)
-    # Pipe the platform inference key: OPENROUTER_API_KEY=... scripts/deploy-cf secret
-    if [ -z "${OPENROUTER_API_KEY:-}" ]; then
-      echo "set OPENROUTER_API_KEY in env or .env first" >&2; exit 1
+    # Pipe the platform keys: OPENROUTER_API_KEY=... FAL_API_KEY=...
+    # scripts/deploy-cf secret  (each optional; only what is set is pushed)
+    if [ -z "${OPENROUTER_API_KEY:-}" ] && [ -z "${FAL_API_KEY:-}" ]; then
+      echo "set OPENROUTER_API_KEY and/or FAL_API_KEY in env or .env first" >&2; exit 1
     fi
-    printf '%s' "$OPENROUTER_API_KEY" | "${W[@]}" secret put OPENROUTER_API_KEY
-    echo "secret set."
+    if [ -n "${OPENROUTER_API_KEY:-}" ]; then
+      printf '%s' "$OPENROUTER_API_KEY" | "${W[@]}" secret put OPENROUTER_API_KEY
+      echo "OPENROUTER_API_KEY set."
+    fi
+    if [ -n "${FAL_API_KEY:-}" ]; then
+      printf '%s' "$FAL_API_KEY" | "${W[@]}" secret put FAL_API_KEY
+      echo "FAL_API_KEY set (generation tools: ctx.image / ctx.video)."
+    fi
     # Also lock the /__internal loopback plane (recommended; generates one if absent).
     host_secret="${FRAGMENT_HOST_SECRET:-$(openssl rand -hex 32)}"
     printf '%s' "$host_secret" | "${W[@]}" secret put FRAGMENT_HOST_SECRET

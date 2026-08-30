@@ -59,6 +59,44 @@ async function uploadInlineBytes(cell, bytes, declaredSha, mime, pathMime) {
   if (!desc || desc.sha256 !== sha) throw new TierError("inline upload: descriptor hash mismatch");
   return { sha256: sha, size: bytes.byteLength, mime: cleanMime(mime, pathMime) };
 }
+const GEN_PLACE_CAP = 64 * 1024 * 1024;
+async function tierPlaceFromUrl(cell, url, mimeHint) {
+  const cfg = requireTier(cell);
+  const timed = (p) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new TierError("fetch output timed out after 120s", 504)), 12e4))]);
+  const remote = await timed(fetch(url));
+  if (!remote.ok) throw new TierError(`fetch output: ${remote.status} ${String(url).slice(0, 120)}`, 502);
+  const mime = cleanMime(remote.headers.get("content-type"), mimeHint);
+  const len = parseInt(remote.headers.get("content-length") || "0", 10);
+  if (len > GEN_PLACE_CAP) throw new TierError(`generated output is ${(len / 1048576).toFixed(1)}MiB \u2014 over the ${GEN_PLACE_CAP / 1048576}MiB placement cap`, 413);
+  const put = (body) => fetch(`${cfg.url}/upload`, {
+    method: "PUT",
+    headers: bearer(cfg, { "content-type": mime }),
+    body,
+    // @ts-ignore duplex required for streaming bodies
+    duplex: "half"
+  });
+  let resp;
+  if (len > 0) {
+    const owned = typeof IdentityTransformStream === "function" ? remote.body.pipeThrough(new IdentityTransformStream()) : remote.body;
+    try {
+      resp = await timed(put(owned));
+    } catch (e) {
+      if (!/not owned/i.test(String(e && e.message || e))) throw e;
+      const buf = new Uint8Array(await (await timed(fetch(url))).arrayBuffer());
+      if (buf.byteLength > GEN_PLACE_CAP) throw new TierError(`generated output is ${(buf.byteLength / 1048576).toFixed(1)}MiB \u2014 over the ${GEN_PLACE_CAP / 1048576}MiB placement cap`, 413);
+      resp = await put(buf);
+    }
+  } else {
+    const bytes = new Uint8Array(await remote.arrayBuffer());
+    if (bytes.byteLength > GEN_PLACE_CAP) throw new TierError(`generated output is ${(bytes.byteLength / 1048576).toFixed(1)}MiB \u2014 over the ${GEN_PLACE_CAP / 1048576}MiB placement cap`, 413);
+    resp = await put(bytes);
+  }
+  if (!resp.ok) throw await tierError("place generated output", resp);
+  const desc = await resp.json().catch(() => null);
+  if (!desc || !SHA_RE.test(String(desc.sha256 || ""))) throw new TierError("place generated output: tier returned no content address");
+  if (!Number.isSafeInteger(desc.size)) throw new TierError("place generated output: tier returned no size");
+  return { sha256: desc.sha256, size: desc.size, mime };
+}
 async function streamThroughUpload(cell, requestBody, declaredSha, mime, pathMime) {
   const cfg = requireTier(cell);
   const resp = await fetch(`${cfg.url}/upload`, {
@@ -153,6 +191,7 @@ async function admitFileWrite(cell, request, pathMimeGuess) {
   };
 }
 export {
+  GEN_PLACE_CAP,
   INLINE_LIMIT,
   OVERSIZE_HINT,
   READ_CEILING,
@@ -161,6 +200,7 @@ export {
   publicRedirectTarget,
   streamThroughUpload,
   tierConfig,
+  tierPlaceFromUrl,
   tierStreamByHash,
   tierTextBounded,
   uploadInlineBytes

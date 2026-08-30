@@ -237,6 +237,16 @@ export async function run(ctx, input) {
 - `ctx.http` — fetch, with a 30s default timeout (pass your own `signal` to control it).
 - `ctx.ai(prompt, {model?})` — inference routed through the host (the host
   holds the platform key; you never see it).
+- `ctx.image(prompt, opts?)` / `ctx.video(prompt, opts?)` — generate media
+  through the host's fal.ai key and get back
+  `{path, sha256, size, mime, url}`: the file is ALREADY a row in the
+  fragment's working copy (under `gen/` by default), so it syncs to your
+  folder like any other file and serves at `__file?path=…`. Defaults are
+  cheap and fixed (a ~1MP FLUX.2 image, a 5s 768p MiniMax H3 Max clip);
+  bounded opts (`duration`, `resolution`, `aspect_ratio`, `image_size`,
+  `num_images`, `output_format`, `seed`, …) override them. For progress UIs,
+  the pieces are `ctx.gen.start` → `ctx.gen.status` → (sleep in YOUR code) —
+  a waiting cell would stall the fragment, so the platform never sleeps.
 - `ctx.state` — per-workflow persistent key-value store.
 - `ctx.inbox()` — pending inbox messages (inbox-triggered runs auto-ack theirs).
 - `ctx.events.append` / `ctx.log` — write to the event log.
@@ -448,6 +458,22 @@ export async function run(ctx) {
   const msgs = await ctx.inbox();
   await ctx.inboxAck(msgs.map((m) => m.id));
   return { fresh: seen.size };
+}
+```
+
+### pattern: gen
+
+One line per medium; the result is a folder file, not a return value you
+have to store. Needs the host to have a fal key (`FAL_API_KEY`).
+
+```js
+// workflows/illustrate.mjs — inbox or cron triggered
+export async function run(ctx) {
+  const shot = await ctx.image("a lighthouse at dawn, heavy fog, 35mm film still");
+  await ctx.events.append("illustrated", { path: shot.path });
+  const clip = await ctx.video("waves hitting the lighthouse rocks", { duration: 5 });
+  ctx.log("made " + shot.path + " and " + clip.path);
+  return { image: shot.path, video: clip.path };
 }
 ```
 

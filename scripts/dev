@@ -13,6 +13,7 @@ DEV=.dev
 TOOLS="$DEV/tools"
 CELLD_PORT=8789
 BLOBSD_PORT=9940
+FAL_FAKE_PORT=9942  # 9941 is taken by the e2e tier-lane stub
 # Long enough for blobsd's 16-char token floor; the e2e hint below passes it
 # to the suite via E2E_BLOBSD_TOKEN so dev stack and tests share one tier.
 BLOBSD_TOKEN="${DEV_BLOBSD_TOKEN:-e2e-blob-token-0123456789abcdef}"
@@ -20,7 +21,7 @@ BLOBSD_TOKEN="${DEV_BLOBSD_TOKEN:-e2e-blob-token-0123456789abcdef}"
 export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 mkdir -p "$DEV"
 
-# Optional project .env: OPENROUTER_API_KEY=... (never committed)
+# Optional project .env: OPENROUTER_API_KEY=..., FAL_API_KEY=... (never committed)
 if [ -f .env ]; then set -a; . ./.env; set +a; fi
 for keyfile in "$HOME/dev/finite/fragment/.env"; do
   if [ -z "${OPENROUTER_API_KEY:-}" ] && [ -f "$keyfile" ]; then
@@ -62,6 +63,16 @@ start_blobsd() {
   echo "blobsd: started on :$BLOBSD_PORT (fs backend, $DEV/blobs-root)"
 }
 
+start_fal_fake() {
+  fal_fake_running() { curl -s -o /dev/null -m 2 "http://127.0.0.1:$FAL_FAKE_PORT/health"; }
+  if fal_fake_running; then echo "fal-fake: already running on :$FAL_FAKE_PORT"; return; fi
+  nohup node scripts/fal-fake.mjs "$FAL_FAKE_PORT" > "$DEV/fal-fake.log" 2>&1 &
+  echo $! > "$DEV/fal-fake.pid"
+  for _ in $(seq 1 20); do fal_fake_running && break; sleep 0.5; done
+  fal_fake_running || { echo "fal-fake: did not come up; last log lines:" >&2; tail -10 "$DEV/fal-fake.log" >&2; exit 1; }
+  echo "fal-fake: started on :$FAL_FAKE_PORT (stand-in fal queue for e2e)"
+}
+
 celld_env() {
   export CELLD_WORKER_LOADER=LOADER
   export CELLD_VAR_FRAGMENT_INTERNAL_URL="http://127.0.0.1:$CELLD_PORT"
@@ -72,6 +83,24 @@ celld_env() {
   export CELLD_VAR_BLOBSD_PUBLIC_GET="1"
   if [ -n "${OPENROUTER_API_KEY:-}" ]; then
     export CELLD_VAR_OPENROUTER_API_KEY="$OPENROUTER_API_KEY"
+  fi
+  # generation tools (ctx.image/ctx.video): fal.ai key + optional defaults
+  if [ -n "${FAL_API_KEY:-}" ]; then
+    export CELLD_VAR_FAL_API_KEY="$FAL_API_KEY"
+  fi
+  if [ -n "${FRAGMENT_IMAGE_MODEL:-}" ]; then
+    export CELLD_VAR_FRAGMENT_IMAGE_MODEL="$FRAGMENT_IMAGE_MODEL"
+  fi
+  if [ -n "${FRAGMENT_VIDEO_MODEL:-}" ]; then
+    export CELLD_VAR_FRAGMENT_VIDEO_MODEL="$FRAGMENT_VIDEO_MODEL"
+  fi
+  # e2e fake lane: E2E_FAL_FAKE=1 starts a local stand-in fal queue and
+  # points the runtime at it with a dummy key, so the gen pipeline gets
+  # full coverage in CI without spending money (or a key)
+  if [ -n "${E2E_FAL_FAKE:-}" ]; then
+    start_fal_fake
+    export CELLD_VAR_FAL_API_KEY="${E2E_FAL_KEY:-e2e-fal-key-0123456789abcdef}"
+    export CELLD_VAR_FRAGMENT_FAL_BASE="http://127.0.0.1:$FAL_FAKE_PORT"
   fi
   if [ -n "${FRAGMENT_HOST_SECRET:-}" ]; then
     export CELLD_VAR_FRAGMENT_HOST_SECRET="$FRAGMENT_HOST_SECRET"
@@ -104,7 +133,7 @@ start_celld() {
 }
 
 stop_all() {
-  for pidfile in "$DEV/celld-dev.pid" "$DEV/blobsd.pid"; do
+  for pidfile in "$DEV/celld-dev.pid" "$DEV/blobsd.pid" "$DEV/fal-fake.pid"; do
     if [ -f "$pidfile" ]; then
       kill "$(cat "$pidfile")" 2>/dev/null || true
       rm -f "$pidfile"

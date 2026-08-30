@@ -58,6 +58,8 @@ export const MIME = {
   // a vault or gallery that drops in woff/ttf still serves the right type
   woff2: "font/woff2", woff: "font/woff", ttf: "font/ttf", otf: "font/otf",
   webmanifest: "application/manifest+json",
+  // generated media (ctx.image/ctx.video land here as file rows)
+  mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime",
 };
 
 // True when the basename carries a content-hash segment. The documented
