@@ -80,11 +80,12 @@ celld_env() {
 
 start_celld() {
   if celld_running; then echo "celld dev: already running on :$CELLD_PORT"; return; fi
-  # celld dev watches PROJECT and restarts the worker on changes — and on
-  # linux/inotify that includes its OWN state under PROJECT/.celld/dev, so
-  # every cell write mid-suite bounced the host (macOS/FSEvents stays quiet,
-  # which is why local e2e never saw it). A symlinked state dir moves those
-  # writes out of the watched tree: inotify watches the link, not its target.
+  # state lives under .dev (reached through a runtime/.celld symlink) so
+  # `wipe` owns all of it in one place. NOTE: this does NOT quiet celld dev's
+  # watcher on linux — inotify resolves the link and watches the target's
+  # inodes, so state writes there still restart the worker (repro'd in a
+  # container; see .github/workflows/ci.yml for why e2e runs on macOS).
+  # macOS/FSEvents is path-rooted, so dev machines stay quiet either way.
   if [ -d runtime/.celld ] && [ ! -L runtime/.celld ]; then rm -rf runtime/.celld; fi
   mkdir -p "$DEV/celld-state"
   ln -sfn "../$DEV/celld-state" runtime/.celld

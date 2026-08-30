@@ -36,8 +36,13 @@ jobs:
         run: cargo test --release
         working-directory: blobsd
 
+  # e2e runs on macOS on purpose: celld dev's watcher restarts the worker when
+  # its own state writes land under PROJECT/.celld on linux/inotify (FSEvents
+  # on macOS is path-rooted and stays quiet — the same suite is green locally
+  # and churns in a linux container; repro in wedge-repro/). Until celld
+  # excludes its state from the watch set, the suite needs the mac watcher.
   e2e:
-    runs-on: ubuntu-latest
+    runs-on: macos-14
 
     env:
       # optional: with this secret set, the guide's ai blocks run in CI too
@@ -53,7 +58,7 @@ jobs:
       - name: install celld (pinned)
         run: |
           mkdir -p ~/.local/bin
-          curl -fsSL "https://github.com/denoland/celld/releases/download/${CELLD_VERSION}/celld-x86_64-unknown-linux-gnu.gz" \
+          curl -fsSL "https://github.com/denoland/celld/releases/download/${CELLD_VERSION}/celld-aarch64-apple-darwin.gz" \
             | gunzip > ~/.local/bin/celld
           chmod +x ~/.local/bin/celld
           ~/.local/bin/celld --version
@@ -86,7 +91,6 @@ jobs:
       - name: bring up the native stack (celld dev + fs tier)
         run: |
           export FRAGMENT_HOST_SECRET="$(openssl rand -hex 32)"
-          export CELLD_DEV_LOGS=1
           scripts/dev up
 
       - name: e2e suite
