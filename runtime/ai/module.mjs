@@ -65,6 +65,10 @@ const wired = (opts = {}) => {
     baseURL: `${g.base}/egress/openrouter.ai/api/v1`,
     apiKey: g.tok,
     model: g.models.text,
+    // hosts that lock /__internal with FRAGMENT_HOST_SECRET require it on
+    // every internal call — the egress route included (found by CI: local
+    // stacks without the secret never exercise this)
+    ...(g.hsec ? { headers: { "x-fragment-host-secret": g.hsec, ...(opts.headers || {}) } } : {}),
     ...opts,
   };
 };
