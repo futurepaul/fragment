@@ -99,6 +99,14 @@ editor /etc/celld.env        # fill from deploy/env.example
 (ctx.image/ctx.video). Root-only, never committed, never pasted anywhere.
 The systemd unit reads it via `EnvironmentFile=`.
 
+ALL `CELLD_VAR_*` settings belong in this one file — the deploy flow sources
+it too, so services and deploys can never disagree about environment. The
+only per-node exceptions stay in the unit files' `Environment=` lines:
+`CELLD_WATCH` and `CELLD_VAR_FRAGMENT_INTERNAL_URL` (each node points at its
+own listener). Don't move those into the shared file: `EnvironmentFile`
+overrides unit `Environment=`, so a shared value would silently flatten the
+per-node one (found the hard way during the consolidation).
+
 ## 3. celld service (now: two nodes on the box)
 
 A **single-node fleet cannot self-witness**: with no peers, every
