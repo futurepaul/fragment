@@ -73,6 +73,11 @@ for (const [id, k] of [["tImage", "image"], ["tVideo", "video"]]) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const src = (path) => "__file?path=" + encodeURIComponent(path);
+// the app's routes, slash-proof: a document loaded from a share link
+// without the trailing slash resolves relative fetches against /f/, so
+// build the base from the pathname explicitly
+const here = location.pathname.endsWith("/") ? location.pathname : location.pathname + "/";
+const api = (route) => here + route;
 const kb = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + "M" : Math.max(1, Math.round(n / 1024)) + "K";
 
 function card(prompt, mediaHtml) {
@@ -86,12 +91,16 @@ function card(prompt, mediaHtml) {
 async function generate(prompt) {
   const el = card(prompt, `<div class="st">generating…</div>`);
   try {
-    const r = await fetch("generate", {
+    const r = await fetch(api("generate"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ kind, prompt }),
     });
-    const { file, error } = await r.json();
+    let body = null;
+    try { body = await r.json(); } catch {
+      throw new Error(`non-JSON response (HTTP ${r.status}) — route or host trouble, not the model`);
+    }
+    const { file, error } = body || {};
     if (error || !file) throw new Error(error || "generation failed");
     const media = kind === "video"
       ? `<video controls playsinline preload="metadata" src="${src(file.path)}"></video>`
@@ -115,7 +124,7 @@ $("f").onsubmit = (e) => {
 // files persist in the fragment (and in your folder)
 (async () => {
   try {
-    const { files } = await (await fetch("recent")).json();
+    const { files } = await (await fetch(api("recent"))).json();
     for (const f of files || []) {
       const isVideo = /\.(mp4|webm|mov)$/i.test(f.path);
       card(f.path, isVideo

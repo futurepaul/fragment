@@ -214,6 +214,17 @@ export default {
       if (path.startsWith("/f/")) {
         const name = path.split("/")[2];
         if (!name) return new Response("not found\n", { status: 404 });
+        // canonicalize the bare fragment URL to its slash form: pages load
+        // either way, but RELATIVE subresource fetches (an app's POST
+        // routes, a vault's assets/) resolve against the document URL —
+        // without the slash they land on /f/<route> and 404 (found live:
+        // the gen app's generate POST from a share link, as Safari's
+        // "string did not match the expected pattern" from a JSON.parse
+        // on the plain-text 404). 308 keeps method and body; the view
+        // token rides along.
+        if (path === `/f/${name}` && request.method === "GET") {
+          return Response.redirect(`${url.origin}/f/${name}/${url.search}`, 308);
+        }
         const rest = path.slice(`/f/${name}/`.length).replace(/^\//, "");
         const g = await softGate();
         if (g.error) return g.error;

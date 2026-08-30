@@ -166,6 +166,9 @@ var index_default = {
       if (path.startsWith("/f/")) {
         const name = path.split("/")[2];
         if (!name) return new Response("not found\n", { status: 404 });
+        if (path === `/f/${name}` && request.method === "GET") {
+          return Response.redirect(`${url.origin}/f/${name}/${url.search}`, 308);
+        }
         const rest = path.slice(`/f/${name}/`.length).replace(/^\//, "");
         const g = await softGate();
         if (g.error) return g.error;
