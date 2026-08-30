@@ -2653,7 +2653,12 @@ async function buildLaneSection() {
   writeFileSync(join(dir, 'site', 'index.html'), '<p id="out"></p><script type="module" src="/main.js"></script>\n');
   writeFileSync(join(dir, 'workflows', 'w.ts'), 'export async function run(ctx) { await ctx.files.write("built.txt", "ok"); return { done: true }; }\n');
 
-  const out = execFileSync(bin, ['build', dir], { encoding: 'utf8' });
+  // isolated HOME + login: `fragment build` signs/records with the local
+  // keypair, and a bare runner HOME has none ("no keypair — run fragment
+  // login first" — found on the first hosted run)
+  const home = mkdtempSync(join(tmpdir(), 'e2e-build-home-'));
+  execFileSync(bin, ['login'], { env: { HOME: home }, encoding: 'utf8', stdio: 'pipe' });
+  const out = execFileSync(bin, ['build', dir], { encoding: 'utf8', env: { HOME: home } });
   ok(out.includes('compiled (ts -> js): 4'), '[build] TS sources compiled');
   ok(existsSync(join(dir, 'app.mjs')), '[build] app.ts -> app.mjs');
   ok(existsSync(join(dir, 'app.ts')), '[build] sources kept beside compiled siblings');
