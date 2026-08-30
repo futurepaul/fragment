@@ -93,9 +93,13 @@ start_celld() {
   # cd too, so the pid write ran from the repo root and landed in
   # <repo>/../.dev — a directory that happens to exist on dev machines and
   # never on CI runners (found by the first GitHub-hosted run)
+  # CELLD_DEV_LOGS=1 turns on celld's own logging (watcher paths included) —
+  # exists to diagnose host churn from CI artifacts
+  dev_logs=()
+  [ -n "${CELLD_DEV_LOGS:-}" ] && dev_logs=(--logs)
   (
     cd runtime
-    nohup celld dev --port "$CELLD_PORT" > "../$DEV/celld-dev.log" 2>&1 &
+    nohup celld dev --port "$CELLD_PORT" "${dev_logs[@]}" > "../$DEV/celld-dev.log" 2>&1 &
     echo $! > "../$DEV/celld-dev.pid"
   )
   for _ in $(seq 1 30); do celld_running && break; sleep 0.5; done

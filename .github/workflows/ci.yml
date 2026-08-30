@@ -86,6 +86,7 @@ jobs:
       - name: bring up the native stack (celld dev + fs tier)
         run: |
           export FRAGMENT_HOST_SECRET="$(openssl rand -hex 32)"
+          export CELLD_DEV_LOGS=1
           scripts/dev up
 
       - name: e2e suite
@@ -98,5 +99,6 @@ jobs:
       - name: host logs on failure
         if: failure()
         run: |
+          grep -E "change detected|watch" -A2 .dev/celld-dev.log 2>/dev/null | tail -60 || true
           tail -80 .dev/celld-dev.log 2>/dev/null || true
           tail -40 .dev/blobsd.log 2>/dev/null || true
