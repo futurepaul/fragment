@@ -81,7 +81,15 @@ celld_env() {
 start_celld() {
   if celld_running; then echo "celld dev: already running on :$CELLD_PORT"; return; fi
   celld_env
-  (cd runtime && nohup celld dev --port "$CELLD_PORT" > "../$DEV/celld-dev.log" 2>&1 & echo $! > "../$DEV/celld-dev.pid")
+  # explicit sequencing: `cd runtime && nohup … & echo $!` backgrounds the
+  # cd too, so the pid write ran from the repo root and landed in
+  # <repo>/../.dev — a directory that happens to exist on dev machines and
+  # never on CI runners (found by the first GitHub-hosted run)
+  (
+    cd runtime
+    nohup celld dev --port "$CELLD_PORT" > "../$DEV/celld-dev.log" 2>&1 &
+    echo $! > "../$DEV/celld-dev.pid"
+  )
   for _ in $(seq 1 30); do celld_running && break; sleep 0.5; done
   celld_running || { echo "celld dev: did not come up; last log lines:" >&2; tail -20 "$DEV/celld-dev.log" >&2; exit 1; }
   echo "celld dev: started on :$CELLD_PORT (state in runtime/.celld/dev)"
