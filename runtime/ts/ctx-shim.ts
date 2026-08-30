@@ -74,10 +74,23 @@ export async function makeCtx(env) {
       // a moved row rejects with Error.conflict (and .currentRev) instead
       // of clobbering: read-modify-write loops stay safe across slow awaits
       async write(path, data, opts) {
-        const body = typeof data === "string" ? data : data;
+        let body = typeof data === "string" ? data : data;
+        const headers = { "x-fragment-token": tok, ...(hsec ? { "x-fragment-host-secret": hsec } : {}) };
+        // blob-first for big bodies: over the 64KiB inline carve-out, hash
+        // client-side and send with x-fragment-hash so the cell streams the
+        // bytes through to the tier instead of refusing them (the SDK-style
+        // generators return whole Uint8Arrays — images and clips are MBs)
+        if (typeof body !== "string" || body.length > 65536) {
+          const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body instanceof ArrayBuffer ? new Uint8Array(body) : body;
+          if (bytes.byteLength > 65536) {
+            const digest = await crypto.subtle.digest("SHA-256", bytes);
+            headers["x-fragment-hash"] = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+            body = bytes;
+          }
+        }
         let qs = "/files/write?path=" + encodeURIComponent(path);
         if (opts && Number.isInteger(opts.ifRev)) qs += "&if_rev=" + opts.ifRev;
-        const r = await fetch(base + qs, { method: "PUT", body, headers: { "x-fragment-token": tok, ...(hsec ? { "x-fragment-host-secret": hsec } : {}) } });
+        const r = await fetch(base + qs, { method: "PUT", body, headers });
         if (r.status === 409) {
           const j = await r.json().catch(() => ({}));
           const e = new Error("rev conflict on " + path + ": row is at rev " + (j.currentRev ?? "?") + (j.ifRev !== undefined ? ", write pinned to " + j.ifRev : ""));
@@ -87,6 +100,14 @@ export async function makeCtx(env) {
         }
         if (!r.ok) throw new Error("fragment ctx files/write -> " + r.status + ": " + (await r.text()));
         return r.json();
+      },
+      // place remote bytes as a file: streams the URL into the blob tier
+      // and commits the row (dedup + append-only gates as usual). The
+      // public-CDN half of generated-media placement; equally useful for
+      // "archive this URL into my folder".
+      async ingest(url, path) {
+        const r = await call("/files/ingest", { method: "POST", body: JSON.stringify({ url: String(url), path }) });
+        return (await r.json()).file;
       },
       // live row metadata INCLUDING tombstones ({deleted:true} with the
       // tombstone's rev); null when the path has no history at all
@@ -125,49 +146,6 @@ export async function makeCtx(env) {
     log(msg) {
       return call("/log", { method: "POST", body: JSON.stringify({ msg: String(msg) }) }).catch(() => {});
     },
-    async ai(prompt, opts = {}) {
-      const r = await call("/infer", { method: "POST", body: JSON.stringify({ prompt: String(prompt), model: opts.model }) });
-      return (await r.json()).text;
-    },
-    // Generation tools (fal.ai, host holds the key). ctx.image/ctx.video are
-    // the one-liners; ctx.gen is the three-pieces version for apps that want
-    // to show progress instead of holding a request open.
-    gen: {
-      // submit; resolves to an opaque job — pass it to status()/wait() (or
-      // round-trip it through a browser: it carries no secrets)
-      async start(kind, prompt, opts = {}) {
-        const r = await call("/gen/start", { method: "POST", body: JSON.stringify({ kind, prompt, model: opts.model, opts, dir: opts.dir }) });
-        return (await r.json()).job;
-      },
-      // one poll — {status: "queued"|"working"|"done", file?}. Never sleeps.
-      async status(job) {
-        const r = await call("/gen/status", { method: "POST", body: JSON.stringify({ job }) });
-        return await r.json();
-      },
-      // sleep-and-poll until done. Sleeping happens HERE in the isolate on
-      // purpose: the cell is single-threaded, and a cell-side wait would
-      // stall the fragment's own webview for the whole generation.
-      async wait(job, opts = {}) {
-        const pollMs = opts.pollMs || (job.kind === "video" ? 2500 : 1200);
-        const timeoutMs = opts.timeoutMs || (job.kind === "video" ? 300_000 : 120_000);
-        const deadline = Date.now() + timeoutMs;
-        for (;;) {
-          const st = await ctx.gen.status(job);
-          if (st.status === "done") return st;
-          if (Date.now() > deadline) throw new Error("generation timed out after " + Math.round(timeoutMs / 1000) + "s (job still " + st.status + ")");
-          await new Promise((r) => setTimeout(r, pollMs));
-        }
-      },
-    },
-    // one-liners: generate, wait, return {path, sha256, size, mime, url} —
-    // the media is already a file row in the working copy (syncs to the
-    // folder like any other file)
-    async image(prompt, opts = {}) {
-      return (await ctx.gen.wait(await ctx.gen.start("image", prompt, opts), opts)).file;
-    },
-    async video(prompt, opts = {}) {
-      return (await ctx.gen.wait(await ctx.gen.start("video", prompt, opts), opts)).file;
-    },
     state: {
       async get(k) {
         const r = await call("/wstate?k=" + encodeURIComponent(k));
@@ -199,6 +177,20 @@ export async function makeCtx(env) {
       const r = await call("/push/send", { method: "POST", body: JSON.stringify({ who: String(who ?? ""), payload: payload || {} }) });
       return r.json();
     },
+  };
+  // the platform "ai" module (conditionally injected when author code
+  // imports it) reads this global lazily: egress base + token + host model
+  // defaults. Keys never appear here — the cell attaches them.
+  globalThis.__FRAGMENT_AI__ = {
+    base,
+    tok,
+    hsec,
+    models: {
+      text: env.FRAGMENT_AI_MODEL || "deepseek/deepseek-v4-flash-0731",
+      image: env.FRAGMENT_IMAGE_MODEL || "fal-ai/flux-2",
+      video: env.FRAGMENT_VIDEO_MODEL || "minimax/h3-max/text-to-video",
+    },
+    falBase: env.FRAGMENT_FAL_BASE || "https://queue.fal.run",
   };
   return ctx;
 }

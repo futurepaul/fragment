@@ -1,42 +1,14 @@
 // The /__internal plane: loopback API for ctx calls from loader isolates.
 // Run-token (and optional host-secret) gated.
 import { json, isMachinery, randHex, bodyTooLarge, MAX_BODY_BYTES, MIME, mimeForPath } from "./util.js";
-import { checkToken } from "./loader.js";
+import { checkToken, checkTokenRaw } from "./loader.js";
 import { recordRevision } from "./history.js";
 import { READ_CEILING, TierError, admitFileWrite, tierStreamByHash, tierPlaceFromUrl } from "./blob-tier.js";
-import { GEN_KINDS, falSubmit, falStatus, falResult, genOutputUrl, falUrlOk, falBase } from "./fal.js";
 import { encryptPayload, vapidHeaders, generateVapidKeys, webpushSelfTest, b64urlDecode, b64urlEncode } from "./webpush.js";
 
 function appendOnlyHit(cell, path) {
   const m = cell.manifest();
   return m && (m.appendOnly || []).some((p) => path === p.slice(0, -1) || path.startsWith(p));
-}
-
-// Whitelisted per-kind generation opts. The tools ship "sane defaults, no
-// dials" — but the platform shouldn't hard-wall agents that know what they
-// want: bounded, typed keys only, everything else dropped silently (fal
-// 422s on unknown keys, so an open merge would turn typos into failures).
-function genOpts(kind: string, opts: any) {
-  const out: Record<string, any> = {};
-  if (!opts || typeof opts !== "object") return out;
-  const int = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi ? v : undefined;
-  if (kind === "image") {
-    const sz = opts.image_size;
-    if (typeof sz === "string" && /^[a-z0-9_]{1,32}$/.test(sz)) out.image_size = sz;
-    else if (sz && typeof sz === "object" && Number.isInteger(sz.width) && Number.isInteger(sz.height)) out.image_size = { width: sz.width, height: sz.height };
-    const n = int(opts.num_images, 1, 4); if (n !== undefined) out.num_images = n;
-    const steps = int(opts.num_inference_steps, 1, 50); if (steps !== undefined) out.num_inference_steps = steps;
-    if (typeof opts.guidance_scale === "number" && opts.guidance_scale > 0 && opts.guidance_scale <= 30) out.guidance_scale = opts.guidance_scale;
-    if (["png", "jpeg", "webp"].includes(opts.output_format)) out.output_format = opts.output_format;
-    const seed = int(opts.seed, 0, Number.MAX_SAFE_INTEGER); if (seed !== undefined) out.seed = seed;
-  } else {
-    const dur = int(opts.duration, 1, 15); if (dur !== undefined) out.duration = dur;
-    if (["480P", "768P"].includes(opts.resolution)) out.resolution = opts.resolution;
-    if (["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"].includes(opts.aspect_ratio)) out.aspect_ratio = opts.aspect_ratio;
-    if (["balanced", "quality"].includes(opts.prompt_expansion_mode)) out.prompt_expansion_mode = opts.prompt_expansion_mode;
-    const seed = int(opts.seed, 0, Number.MAX_SAFE_INTEGER); if (seed !== undefined) out.seed = seed;
-  }
-  return out;
 }
 
 // ---- Web Push storage/provisioning helpers ----
@@ -155,7 +127,12 @@ export async function internalRoute(cell, request, url) {
   const p = url.pathname.slice("/__internal/f/".length);
   const slash = p.indexOf("/");
   const rest = p.slice(slash + 1);
-  const scope = cell.checkToken(request);
+  let scope = cell.checkToken(request);
+  if (!scope && rest.startsWith("egress/")) {
+    // apiKey-shaped clients put the run token in the Bearer credential
+    const auth = request.headers.get("authorization") || "";
+    if (auth.startsWith("Bearer ")) scope = checkTokenRaw(cell, auth.slice(7));
+  }
   if (!scope) return json({ error: "bad or expired run token" }, 403);
   const isRun = scope.kind === "run";
 
@@ -320,135 +297,88 @@ export async function internalRoute(cell, request, url) {
     return json({ ok: true });
   }
 
-  if (rest === "infer" && request.method === "POST") {
-    const key = cell.env.OPENROUTER_API_KEY;
-    if (!key) return json({ error: "host has no OPENROUTER_API_KEY (set CELLD_VAR_OPENROUTER_API_KEY on the node)" }, 501);
-    const { prompt, model } = await request.json().catch(() => ({}));
-    const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        model: model || cell.env.FRAGMENT_AI_MODEL || "deepseek/deepseek-v4-flash-0731",
-        messages: [{ role: "user", content: String(prompt) }],
-      }),
-      signal: AbortSignal.timeout(90_000),
-    });
-    if (!resp.ok) return json({ error: `openrouter ${resp.status}: ${await resp.text()}` }, 502);
-    const data = await resp.json();
-    return json({ text: data.choices?.[0]?.message?.content ?? "" });
-  }
-
-  // ------ Generation tools (fal.ai) ------
-  // ctx.image / ctx.video / ctx.gen.*: submit through the cell (the FAL_API_KEY
-  // never enters an author isolate), sleep-and-poll in the caller's isolate,
-  // and place the finished media as a working-copy file row — so generated
-  // assets land in the folder and sync out like any other file. Both scopes
-  // may generate: run (workflows) and draft (served apps — the fragment's
-  // visibility gate has already run by the time app code is reachable).
-
-  if (rest === "gen/start" && request.method === "POST") {
-    const body = await request.json().catch(() => ({}));
-    const { kind, prompt } = body || {};
-    if (kind !== "image" && kind !== "video") return json({ error: 'body: {kind: "image"|"video", prompt, model?, opts?}' }, 400);
-    if (typeof prompt !== "string" || !prompt.trim() || prompt.length > 4000)
-      return json({ error: "prompt required (1..4000 chars)" }, 400);
-    const def = GEN_KINDS[kind];
-    // model: caller override > host default > built-in default; the id shape
-    // is constrained because it becomes part of the tier/queue URL space
-    const modelOverride = typeof body.model === "string" && /^[A-Za-z0-9][-A-Za-z0-9._/]{0,119}$/.test(body.model) ? body.model : null;
-    const model = modelOverride
-      || (kind === "image" ? cell.env.FRAGMENT_IMAGE_MODEL : cell.env.FRAGMENT_VIDEO_MODEL)
-      || def.model;
-    // default tuning applies to the built-in default model only: fal
-    // validates input strictly (unknown keys 422), so a caller-supplied
-    // model gets ONLY the keys it asked for plus the prompt
-    const input = { ...(model === def.model ? def.input : {}), prompt: prompt.trim(), ...genOpts(kind, body.opts) };
-    const dir = typeof body.dir === "string" && /^[A-Za-z0-9][A-Za-z0-9._/-]{0,79}$/.test(body.dir) && !body.dir.includes("..") ? body.dir : "gen";
-    const ext = kind === "image" && ["png", "jpeg", "webp"].includes(String(body.opts?.output_format || "")) ? body.opts.output_format : def.ext;
-    const path = `${dir}/${new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14)}-${randHex(4)}.${ext}`;
-    if (path.startsWith("site/")) {
-      cell.addEvent("gen.warn", `${path}: site/ serves from the deploy snapshot — generated media belongs outside site/`);
-    }
-    let sub;
-    try {
-      sub = await falSubmit(cell.env, model, input);
-    } catch (e) {
-      return json({ error: String((e && e.message) || e) }, (e && e.status) || 500);
-    }
-    cell.addEvent(`gen.${kind}.start`, `${model} → ${path}`, { model, path, requestId: sub.request_id });
-    // statusUrl/responseUrl are fal's own paths (per-namespace shapes — see
-    // falSubmit); the job is opaque to callers and carries no secrets, but
-    // gen/status re-validates them against the host's fal base before use
-    return json({ ok: true, job: {
-      kind, model, requestId: sub.request_id, path,
-      statusUrl: sub.status_url || `${falBase(cell.env)}/${model}/requests/${encodeURIComponent(sub.request_id)}/status`,
-      responseUrl: sub.response_url || `${falBase(cell.env)}/${model}/requests/${encodeURIComponent(sub.request_id)}`,
-      mime: ext === def.ext ? def.mime : MIME[ext] || def.mime,
-    } });
-  }
-
-  if (rest === "gen/status" && request.method === "POST") {
-    const { job } = await request.json().catch(() => ({}));
-    const valid = job && typeof job === "object"
-      && (job.kind === "image" || job.kind === "video")
-      && typeof job.model === "string" && /^[A-Za-z0-9][-A-Za-z0-9._/]{0,119}$/.test(job.model)
-      && typeof job.requestId === "string" && job.requestId.length <= 128
-      && typeof job.path === "string" && job.path.length <= 200 && !job.path.includes("..") && !job.path.startsWith("/");
-    if (!valid) return json({ error: "body: {job} — the opaque job object from gen/start" }, 400);
-    // the keyed fal calls only ever go to the host's own fal base — a
-    // round-tripped job is browser-visible data, so its URLs are re-pinned
-    // here (falUrlOk) rather than trusted
-    const statusUrl = falUrlOk(cell.env, job.statusUrl)
-      ? job.statusUrl
-      : `${falBase(cell.env)}/${job.model}/requests/${encodeURIComponent(job.requestId)}/status`;
-    const responseUrl = falUrlOk(cell.env, job.responseUrl)
-      ? job.responseUrl
-      : `${falBase(cell.env)}/${job.model}/requests/${encodeURIComponent(job.requestId)}`;
-    let st;
-    try {
-      st = await falStatus(cell.env, statusUrl);
-    } catch (e) {
-      return json({ error: String((e && e.message) || e) }, (e && e.status) || 500);
-    }
-    if (st.status !== "COMPLETED") {
-      // the lamp states map to the tool's vocabulary; anything unexpected
-      // passes through lowercased rather than lying
-      const mapped = st.status === "IN_QUEUE" ? "queued" : st.status === "IN_PROGRESS" ? "working" : st.status.toLowerCase();
-      return json({ status: mapped, ...(st.queuePosition !== null ? { queuePosition: st.queuePosition } : {}) });
-    }
-    let out;
-    try {
-      const result = await falResult(cell.env, responseUrl);
-      out = genOutputUrl(result, job.kind);
-      if (!out) {
-        return json({ error: `fal result carried no ${job.kind} output — shape was: ${JSON.stringify(result).slice(0, 300)}` }, 502);
+  // ------ Keyed egress ------
+  // The ONE AI-adjacent surface in the cell — and it is vendor-free: author
+  // code (the platform "ai" module, or anything OpenAI-compatible) sends a
+  // request to /egress/<host>/<path>; the cell forwards it to
+  // https://<host>/<path> IF the host is allowlisted by which provider keys
+  // the host holds, attaching the matching key. The run token rides either
+  // the usual x-fragment-token header or as the Bearer credential (so
+  // apiKey-shaped clients work unmodified). Model dialects, option shapes,
+  // and queue dances all live client-side in the ai module — swapping a
+  // vendor touches zero cell code.
+  {
+    const m = url.pathname.match(/\/egress\/([^/]+)\/(.+)$/);
+    if (m && rest.startsWith("egress/")) {
+      const host = m[1];
+      // allowlist: derived from configured keys, never open — an egress to
+      // an unconfigured host must fail closed, not fall through to plain
+      // fetch with no key (that would look like success and confuse everyone)
+      const falKey = String(cell.env.FAL_API_KEY || "");
+      const orKey = String(cell.env.OPENROUTER_API_KEY || "");
+      const falBaseHost = (() => { try { return new URL(String(cell.env.FRAGMENT_FAL_BASE || "https://queue.fal.run")).host; } catch { return "queue.fal.run"; } })();
+      const keys = {
+        [falBaseHost]: falKey ? { header: `Key ${falKey}` } : null,
+        "openrouter.ai": orKey ? { header: `Bearer ${orKey}` } : null,
+      };
+      const cred = keys[host];
+      if (!cred) {
+        return json({ error: `egress host '${host}' is not allowlisted — the host holds keys for: ${Object.keys(keys).filter((k) => keys[k]).join(", ") || "(none)"}` }, 403);
       }
-    } catch (e) {
-      return json({ error: String((e && e.message) || e) }, (e && e.status) || 500);
+      // loopback hosts ride http (the e2e fake fal); everything else https
+      const loopback = /^(127\.0\.0\.1|localhost|\[::1\])(:|$)/.test(host);
+      const upstream = `http${loopback ? "" : "s"}://${host}/${m[2]}${url.search}`;
+      const drop = new Request(upstream, {
+        method: request.method,
+        headers: {
+          "content-type": request.headers.get("content-type") || "application/json",
+          // the vendor credential REPLACES the caller's authorization (the
+          // caller's was the run token)
+          authorization: cred.header,
+        },
+        body: ["GET", "HEAD"].includes(request.method) ? undefined : request.body,
+        // @ts-ignore duplex required for streaming bodies
+        duplex: "half",
+      });
+      const upstreamResp = await fetch(drop, { signal: AbortSignal.timeout(120_000) });
+      return new Response(upstreamResp.body, {
+        status: upstreamResp.status,
+        headers: { "content-type": upstreamResp.headers.get("content-type") || "application/json" },
+      });
     }
+  }
+
+  // ------ Ingest: place remote bytes as a file ------
+  // files-plane primitive (not an AI feature): stream a public URL into the
+  // tier and commit the row. The ai module composes this for generated
+  // media; dropzones and pollers can use it for any remote asset.
+  if (rest === "files/ingest" && request.method === "POST") {
+    const { url: remoteUrl, path } = await request.json().catch(() => ({}));
+    if (typeof remoteUrl !== "string" || !/^https?:\/\//.test(remoteUrl) || remoteUrl.length > 500)
+      return json({ error: "body: {url: https://…, path}" }, 400);
+    if (!path || typeof path !== "string" || path.includes("..") || path.startsWith("/") || path.length > 200)
+      return json({ error: "bad path" }, 400);
     let desc;
     try {
-      desc = await tierPlaceFromUrl(cell, out.url, out.mime || job.mime || GEN_KINDS[job.kind].mime);
+      desc = await tierPlaceFromUrl(cell, remoteUrl, mimeForPath(path) || "application/octet-stream");
     } catch (e) {
       return json({ error: String((e && e.message) || e) }, e instanceof TierError ? e.status : 502);
     }
-    // row gates mirror files/write: identical bytes are a no-op (a re-polled
-    // COMPLETED job must not churn the rev), append-only prefixes refuse
-    const existing = cell.sql.exec("SELECT rev, sha256 FROM files WHERE path = ? AND deleted = 0", job.path).toArray()[0];
+    const existing = cell.sql.exec("SELECT rev, sha256 FROM files WHERE path = ? AND deleted = 0", path).toArray()[0];
     if (existing && existing.sha256 === desc.sha256) {
-      return json({ status: "done", deduped: true, file: { path: job.path, sha256: desc.sha256, size: desc.size, mime: desc.mime, url: `__file?path=${encodeURIComponent(job.path)}` } });
+      return json({ ok: true, deduped: true, file: { path, sha256: desc.sha256, size: desc.size, mime: desc.mime, url: `__file?path=${encodeURIComponent(path)}` } });
     }
-    if (existing && appendOnlyHit(cell, job.path)) {
-      cell.addEvent("write.refused", `${job.path}: append-only`);
-      return json({ error: "append-only", path: job.path }, 409);
+    if (existing && appendOnlyHit(cell, path)) {
+      cell.addEvent("write.refused", `${path}: append-only`);
+      return json({ error: "append-only", path }, 409);
     }
     const newRev = parseInt(cell.getMeta("rev") || "0", 10) + 1;
     cell.setMeta("rev", String(newRev));
     cell.sql.exec("INSERT INTO files (path, sha256, size, mime, rev, updated_at, deleted) VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT(path) DO UPDATE SET sha256 = excluded.sha256, size = excluded.size, mime = excluded.mime, rev = excluded.rev, updated_at = excluded.updated_at, deleted = 0",
-      job.path, desc.sha256, desc.size, desc.mime, newRev, Date.now());
-    await recordRevision(cell, job.path, newRev, desc.sha256);
-    cell.addEvent(`gen.${job.kind}.done`, `${job.path} (${(desc.size / 1024).toFixed(0)}KiB)`, { path: job.path, sha256: desc.sha256, model: job.model, requestId: job.requestId });
-    return json({ status: "done", file: { path: job.path, sha256: desc.sha256, size: desc.size, mime: desc.mime, url: `__file?path=${encodeURIComponent(job.path)}` } });
+      path, desc.sha256, desc.size, desc.mime, newRev, Date.now());
+    await recordRevision(cell, path, newRev, desc.sha256);
+    cell.addEvent("file.ingested", `${path} (${(desc.size / 1024).toFixed(0)}KiB from ${String(remoteUrl).slice(0, 80)})`, { path, sha256: desc.sha256 });
+    return json({ ok: true, file: { path, sha256: desc.sha256, size: desc.size, mime: desc.mime, url: `__file?path=${encodeURIComponent(path)}` } });
   }
 
   // ------ Web Push (RFC 8291 payloads, RFC 8292 VAPID) ------

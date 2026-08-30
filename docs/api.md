@@ -109,8 +109,10 @@ plus plain-JSON env:
 - `ctx.secrets` → lazy proxy, `GET /__internal/secrets/{KEY}`
 - `ctx.inbox()` → pending inbox messages
 - `ctx.events.append(kind, data)`, `ctx.log(msg)`
-- `ctx.ai(prompt, {model?})` → `POST /__internal/infer` (host adds the platform key from `CELLD_VAR_OPENROUTER_API_KEY`; default model `deepseek/deepseek-v4-flash-0731`... configurable via `CELLD_VAR_FRAGMENT_AI_MODEL`)
-- `ctx.image(prompt, opts?)` / `ctx.video(prompt, opts?)` → `POST /__internal/gen/start` then `POST /__internal/gen/status` until done (host adds the fal.ai key from `CELLD_VAR_FAL_API_KEY`; defaults `fal-ai/flux-2` image / `minimax/h3-max/text-to-video` video, configurable via `CELLD_VAR_FRAGMENT_IMAGE_MODEL` / `CELLD_VAR_FRAGMENT_VIDEO_MODEL`). The finished media is placed in the blob tier and committed as a working-copy file row (`gen/…` by default) — `ctx.gen.status` resolving `{status:"done", file:{path, sha256, size, mime, url}}`. Poll sleeps live in the caller's isolate, never the cell.
+- `ctx.files.ingest(url, path)` → `POST /__internal/files/ingest` (cell streams the URL into the blob tier and commits the row — dedup + append-only gates apply)
+- the **`ai` module** (`import … from "ai"`) — generateText/streamText/generateObject/tool (xsai, wired to the host's OpenRouter key) and generateImage/generateVideo (our fal queue client; media placed via files/ingest). Injected as a sibling module ONLY for fragments whose code imports it. The cell's entire AI surface is one vendor-free primitive:
+  - `ANY /__internal/egress/<host>/<path…>` — keyed egress proxy. Run token via `x-fragment-token` OR as the Bearer credential (so apiKey-shaped clients work). The cell forwards to `https://<host>/<path>` (http for loopback, for the e2e fake) IF the host is allowlisted by the keys the node holds (`CELLD_VAR_FAL_API_KEY` → the FRAGMENT_FAL_BASE host, default `queue.fal.run`; `CELLD_VAR_OPENROUTER_API_KEY` → `openrouter.ai`), attaching the matching key. Unconfigured hosts fail closed with a 403 naming what IS configured.
+  - model defaults ride the loader env: `CELLD_VAR_FRAGMENT_AI_MODEL` / `CELLD_VAR_FRAGMENT_IMAGE_MODEL` / `CELLD_VAR_FRAGMENT_VIDEO_MODEL`, `CELLD_VAR_FRAGMENT_FAL_BASE` (tests/proxies).
 - `ctx.state` → per-workflow kv via `/__internal/wstate`
 
 A workflow file exports `async run(ctx)`. The cell invokes it via

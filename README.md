@@ -22,10 +22,10 @@ wrapped around exactly one problem. This repo holds two things:
 - **dropzone** — the vault plus a `drop/` folder and an `ingest` workflow
   (`trigger: "files"`): drop a file, watch `output/` appear on the webview
   and sync back into your folder seconds later.
-- **gen** — a prompt box that makes images and videos (`ctx.image` /
-  `ctx.video`, fal.ai behind the host's key): no dials, cheap defaults, and
-  every generation lands in `gen/` as an ordinary file that syncs to your
-  folder.
+- **gen** — a prompt box that makes images and videos (`generateImage` /
+  `generateVideo` from the platform `ai` module, fal.ai behind the host's
+  key): no dials, cheap defaults, and every generation lands in `gen/` as
+  an ordinary file that syncs to your folder.
 
 Both are just folders — read the scaffolded code, edit it, re-deploy. See
 the Recipes section of `fragment guide`.

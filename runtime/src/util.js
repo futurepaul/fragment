@@ -1,4 +1,4 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 const SCHEMA_VERSION = 4;
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);

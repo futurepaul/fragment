@@ -1,4 +1,4 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 import { parseCron, nextRun, cronMatches } from "./cron.js";
 import { drainNotify, nextNotifyAt } from "./notify.js";
 async function rearmAlarm(cell) {

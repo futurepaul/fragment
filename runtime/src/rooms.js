@@ -1,4 +1,4 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 import { randSlug } from "./util.js";
 import { ROOMS_MAIN } from "./loader.js";
 import { tierTextBounded } from "./blob-tier.js";

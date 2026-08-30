@@ -4,6 +4,7 @@
 // loads and executes.
 import { json, randHex } from "./util.js";
 import { CTX_SHIM_SOURCE } from "./ctx-shim.js";
+import { AI_MODULE_SOURCE } from "./ai-module.js";
 import { tierTextBounded } from "./blob-tier.js";
 
 export const WORKFLOW_MAIN = `
@@ -94,6 +95,14 @@ export function checkToken(cell, request) {
   // history — a leaked run token is a fragment-wide capability leak. The
   // ctx shim has always sent x-fragment-token as a header.
   const token = request.headers.get("x-fragment-token") || "";
+  return checkTokenRaw(cell, token);
+}
+
+// raw-string variant: the egress route also accepts the token as the Bearer
+// credential so apiKey-shaped OpenAI-compatible clients (xsai et al.) can
+// point their baseURL at the platform without custom-header support
+export function checkTokenRaw(cell, token) {
+  if (!token) return null;
   const row = cell.sql.exec("SELECT scope, expires FROM run_tokens WHERE token = ?", token).toArray()[0];
   if (!row) return null;
   if (row.expires !== null && row.expires !== undefined && row.expires < Date.now()) return null;
@@ -114,8 +123,14 @@ export async function loadCode(cell, id, mainSource, modules, scope, cause = nul
   // Host divergence: celld's loader wants plain-string modules (and accepts
   // .mjs names); CF's loader requires .js/.py names for strings, so on CF
   // we wrap every module as {js: source} to keep our .mjs names legal.
+  //
+  // The platform "ai" module is included ONLY when author code imports it
+  // (fragment-granularity tree-shaking): fragments that never mention it
+  // never load a byte of it, and worker caching by code-hash means the
+  // ~30KB parse is paid once per code version by AI-using fragments only.
+  const wantsAi = Object.values(modules).some((src) => /\b(?:from|import)\s*["']ai["']/.test(String(src)));
   const wrapped = {};
-  for (const [k, v] of Object.entries({ "main.mjs": mainSource, "fragment-ctx.mjs": CTX_SHIM_SOURCE, ...modules })) {
+  for (const [k, v] of Object.entries({ "main.mjs": mainSource, "fragment-ctx.mjs": CTX_SHIM_SOURCE, ...(wantsAi ? { ai: AI_MODULE_SOURCE } : {}), ...modules })) {
     wrapped[k] = cell.env.FRAGMENT_HOST_KIND === "cf" ? { js: v } : v;
   }
   // the token is minted ONLY when the worker is actually created: the
@@ -148,6 +163,13 @@ export async function loadCode(cell, id, mainSource, modules, scope, cause = nul
       // forwarded by ctx as x-fragment-host-secret; checked by the router
       // on /__internal when the host sets FRAGMENT_HOST_SECRET
       ...(cell.env.FRAGMENT_HOST_SECRET ? { FRAGMENT_HOST_SECRET: cell.env.FRAGMENT_HOST_SECRET } : {}),
+      // host model defaults + fal base for the platform "ai" module —
+      // configuration, never credentials (keys stay cell-side; the egress
+      // route attaches them)
+      ...(cell.env.FRAGMENT_AI_MODEL ? { FRAGMENT_AI_MODEL: cell.env.FRAGMENT_AI_MODEL } : {}),
+      ...(cell.env.FRAGMENT_IMAGE_MODEL ? { FRAGMENT_IMAGE_MODEL: cell.env.FRAGMENT_IMAGE_MODEL } : {}),
+      ...(cell.env.FRAGMENT_VIDEO_MODEL ? { FRAGMENT_VIDEO_MODEL: cell.env.FRAGMENT_VIDEO_MODEL } : {}),
+      ...(cell.env.FRAGMENT_FAL_BASE ? { FRAGMENT_FAL_BASE: cell.env.FRAGMENT_FAL_BASE } : {}),
     },
   }));
   return worker.getEntrypoint ? worker.getEntrypoint() : worker;

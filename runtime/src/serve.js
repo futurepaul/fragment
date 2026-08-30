@@ -1,4 +1,4 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 import { MIME, rankOf, isMachinery, serveCacheControl, mimeForPath } from "./util.js";
 import { safeEqual } from "./auth.js";
 import { json } from "./util.js";

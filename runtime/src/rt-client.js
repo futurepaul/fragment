@@ -1,4 +1,4 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 const RT_CLIENT_SOURCE = `
 window.fragment = (() => {
   function prefix() {

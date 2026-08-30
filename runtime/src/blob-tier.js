@@ -1,4 +1,4 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 import { sha256Hex } from "./auth.js";
 const INLINE_LIMIT = 65536;
 const READ_CEILING = 8 * 1024 * 1024;

@@ -15,5 +15,5 @@ echo "hello" > drop/note.txt               # watch output/ appear
 ```
 
 The viewer is the vault template's (see its README). `workflows/ingest.mjs`
-is the whole pipeline: arrivals in `drop/` → summary (ctx.ai if the host has
+is the whole pipeline: arrivals in `drop/` → summary (generateText if the host has
 an inference key, else a word/heading digest) → `output/*.md`.

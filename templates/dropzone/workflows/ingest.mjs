@@ -23,9 +23,9 @@ export async function run(ctx, input) {
     }
     let out;
     try {
-      const summary = await ctx.ai(
-        "Summarize this file in 3 bullets, then list any action items:\n\n" + text.slice(0, 20000)
-      );
+      const summary = (await generateText({
+        prompt: "Summarize this file in 3 bullets, then list any action items:\n\n" + text.slice(0, 20000),
+      })).text;
       out = `# ${p}\n\n_ingested ${new Date().toISOString()}_\n\n${summary}\n`;
     } catch (e) {
       const words = text.split(/\s+/).filter(Boolean).length;
@@ -35,7 +35,7 @@ export async function run(ctx, input) {
         .slice(0, 12)
         .join("\n");
       out =
-        `# ${p}\n\n_digest mode (ctx.ai unavailable: ${String(e).slice(0, 120)})_\n\n` +
+        `# ${p}\n\n_digest mode (generateText unavailable: ${String(e).slice(0, 120)})_\n\n` +
         `- ${words} words\n\n` +
         (heads ? `## headings\n\n${heads}\n` : "");
     }

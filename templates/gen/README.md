@@ -6,8 +6,8 @@ A prompt box that makes images and videos. That's the whole app.
 - **video** — MiniMax H3 Max default (5s, 768p, ≈ $0.40 each at list; watch
   for fal's launch discounts)
 
-No dials, no settings: the defaults live in the platform (`ctx.image` /
-`ctx.video`), not in this app, so tuning them is a host concern
+No dials, no settings: the defaults live in the platform (`generateImage` /
+`generateVideo` from the `ai` module), not in this app, so tuning them is a host concern
 (`FRAGMENT_IMAGE_MODEL` / `FRAGMENT_VIDEO_MODEL`) rather than an app
 concern.
 
@@ -32,9 +32,9 @@ they sync like any other file.
 ## Pieces
 
 - `site/index.html` — the page: toggle, prompt, optimistic card per
-  generation, polls `status` from the tab (the sleep is browser-side; the
-  fragment never blocks on a generation).
-- `app.mjs` — three routes over `ctx.gen.start/status` + `ctx.files.index`.
+  generation; one held request per generation (~5-10s), no polling.
+- `app.mjs` — two routes over `generateImage`/`generateVideo` (imported
+  from the platform "ai" module) + `ctx.files.index`.
 
 Preview drafts (`/d/<slug>/…`) read the frozen snapshot, so files generated
 after the preview was cut won't render there — generate from the live app.

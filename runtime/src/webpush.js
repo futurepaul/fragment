@@ -1,4 +1,4 @@
-// GENERATED from runtime/ts — run scripts/build-runtime after editing sources.
+// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 const te = new TextEncoder();
 const td = new TextDecoder();
 function b64urlEncode(bytes) {

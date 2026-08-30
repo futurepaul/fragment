@@ -83,39 +83,24 @@ function card(prompt, mediaHtml) {
   return el;
 }
 
-async function post(path, body) {
-  const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-  return r.json();
-}
-
 async function generate(prompt) {
-  const el = card(prompt, `<div class="st">submitting…</div>`);
-  const st = () => el.querySelector(".st");
+  const el = card(prompt, `<div class="st">generating…</div>`);
   try {
-    const { job, error } = await post("start", { kind, prompt });
-    if (error || !job) throw new Error(error || "no job");
-    st().textContent = "queued…";
-    // the sleep lives here in the tab; the fragment never blocks on it
-    for (;;) {
-      await sleep(kind === "video" ? 2000 : 1000);
-      const s = await post("status", { job });
-      if (s.status === "done" && s.file) return fill(el, s.file);
-      if (s.status === "error") throw new Error(s.error || "generation failed");
-      st().textContent = s.status === "queued" ? `queued${s.queuePosition != null ? " #" + (s.queuePosition + 1) : ""}…` : "working…";
-    }
+    const r = await fetch("generate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind, prompt }),
+    });
+    const { file, error } = await r.json();
+    if (error || !file) throw new Error(error || "generation failed");
+    const media = kind === "video"
+      ? `<video controls playsinline preload="metadata" src="${src(file.path)}"></video>`
+      : `<img loading="lazy" src="${src(file.path)}" alt="">`;
+    el.querySelector(".media").innerHTML = media;
+    el.querySelector(".sz").textContent = kb(file.size);
   } catch (e) {
-    const m = el.querySelector(".media");
-    if (m) m.innerHTML = `<div class="err">${esc(String(e.message || e)).slice(0, 200)}</div>`;
-    else el.prepend(Object.assign(document.createElement("div"), { className: "err", textContent: String(e.message || e).slice(0, 200) }));
+    el.querySelector(".media").innerHTML = `<div class="err">${esc(String(e.message || e)).slice(0, 200)}</div>`;
   }
-}
-
-function fill(el, file) {
-  const media = kind === "video"
-    ? `<video controls playsinline preload="metadata" src="${src(file.path)}"></video>`
-    : `<img loading="lazy" src="${src(file.path)}" alt="">`;
-  el.querySelector(".media").outerHTML = `<div class="media">${media}</div>`;
-  el.querySelector(".sz").textContent = kb(file.size);
 }
 
 $("f").onsubmit = (e) => {

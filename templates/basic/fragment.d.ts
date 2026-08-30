@@ -7,53 +7,6 @@
  * LESSON were learned from production incidents.
  */
 
-/** A generation job handle — opaque, safe to round-trip through a browser. */
-export interface GenJob {
-  kind: "image" | "video";
-  model: string;
-  requestId: string;
-  /** The path the finished media will be committed at (gen/… by default). */
-  path: string;
-  mime: string;
-}
-
-/** One poll of `ctx.gen.status`; the done shape carries the placed file. */
-export interface GenStatus {
-  status: "queued" | "working" | "done";
-  queuePosition?: number;
-  file?: GeneratedFile;
-}
-
-/** Where generated media lands: a working-copy file row, syncs to the folder. */
-export interface GeneratedFile {
-  path: string;
-  sha256: string;
-  size: number;
-  mime: string;
-  /** Site-relative URL — serve it from pages as `__file?path=…`. */
-  url: string;
-}
-
-/** Bounded tuning knobs; everything else is dropped (fal rejects unknown keys). */
-export interface GenOpts {
-  model?: string;
-  dir?: string;
-  pollMs?: number;
-  timeoutMs?: number;
-  // image
-  image_size?: string | { width: number; height: number };
-  num_images?: number;
-  num_inference_steps?: number;
-  guidance_scale?: number;
-  output_format?: "png" | "jpeg" | "webp";
-  // video
-  duration?: number;
-  resolution?: "480P" | "768P";
-  aspect_ratio?: "21:9" | "16:9" | "4:3" | "1:1" | "3:4" | "9:16";
-  prompt_expansion_mode?: "balanced" | "quality";
-  seed?: number;
-}
-
 /** One pending inbox message, as `ctx.inbox()` returns it. */
 export interface InboxMessage {
   id: number;
@@ -107,6 +60,8 @@ export interface FilesApi {
    * resurrecting a file someone deleted mid-flight.
    */
   write(path: string, data: string | ArrayBuffer, opts?: { ifRev?: number }): Promise<WriteResult>;
+  /** Stream a remote URL into the tier and commit it at path. */
+  ingest(url: string, path: string): Promise<{ path: string; sha256: string; size: number; mime: string; url: string }>;
   list(prefix?: string): Promise<string[]>;
   /** Like list(), but with metadata: [{path, size, updatedAt, rev}]. */
   index(prefix?: string): Promise<Array<{ path: string; size: number; updatedAt: number | null; rev: number }>>;
@@ -121,26 +76,7 @@ export interface Ctx {
   files: FilesApi;
   /** Declared secrets, by name. Never logged, never in files. */
   secrets: Record<string, string>;
-  /** Platform-routed LLM call (the host holds the key). */
-  ai(prompt: string): Promise<string>;
-  /**
-   * Generate an image (host's fal.ai key; cheap ~1MP default). The result
-   * is already a file row in the working copy — syncs to the folder.
-   */
-  image(prompt: string, opts?: GenOpts): Promise<GeneratedFile>;
-  /** Generate a video (5s, 768p default — MiniMax H3 Max via the host). */
-  video(prompt: string, opts?: GenOpts): Promise<GeneratedFile>;
-  /**
-   * The pieces behind the one-liners, for apps that show progress instead
-   * of holding a request open: start() submits, status() is one poll, and
-   * the SLEEPING between polls belongs to caller code — the cell never
-   * waits (a waiting cell would stall the whole fragment).
-   */
-  gen: {
-    start(kind: "image" | "video", prompt: string, opts?: GenOpts): Promise<GenJob>;
-    status(job: GenJob): Promise<GenStatus>;
-    wait(job: GenJob, opts?: GenOpts): Promise<GenStatus>;
-  };
+
   /** Outbound fetch. Stamps x-fragment-hops for cycle detection. */
   http(url: string, init?: RequestInit): Promise<Response>;
   /**
@@ -190,4 +126,54 @@ export interface FragmentApp {
 declare global {
   /** The workflow entry point: `export async function run(ctx)`. */
   async function run(ctx: Ctx): Promise<unknown>;
+}
+
+/**
+ * The platform "ai" module — `import { … } from "ai"`. One call shape and
+ * one result shape across text, image, and video; the host holds the keys
+ * and the default models. Loaded only for fragments that import it.
+ */
+declare module "ai" {
+  /** Media output: already a file in the working copy (syncs to the folder). */
+  interface MediaFile {
+    mediaType: string;
+    path: string;
+    /** Site-relative serve URL (`__file?path=…`). */
+    url: string;
+    sha256: string;
+    size: number;
+    /** Lazy byte access — fetched from the tier on demand. */
+    bytes(): Promise<Uint8Array>;
+    base64(): Promise<string>;
+  }
+
+  interface ImageGenOpts {
+    prompt: string;
+    model?: string;
+    n?: number;
+    size?: string;
+    seed?: number;
+    dir?: string;
+    providerOptions?: { fal?: Record<string, unknown> };
+  }
+  interface VideoGenOpts {
+    prompt: string;
+    model?: string;
+    duration?: number;
+    aspectRatio?: "21:9" | "16:9" | "4:3" | "1:1" | "3:4" | "9:16";
+    resolution?: "480P" | "768P";
+    seed?: number;
+    dir?: string;
+    providerOptions?: { fal?: Record<string, unknown> };
+  }
+
+  export function generateText(opts: Record<string, any>): Promise<{ text: string; [k: string]: any }>;
+  export function streamText(opts: Record<string, any>): Promise<AsyncIterable<string> & Record<string, any>>;
+  export function generateObject(opts: Record<string, any>): Promise<Record<string, any>>;
+  export function tool(def: Record<string, any>): Record<string, any>;
+  export function generateImage(opts: ImageGenOpts): Promise<{ image: MediaFile; images: MediaFile[] }>;
+  export function generateVideo(opts: VideoGenOpts): Promise<{ video: MediaFile }>;
+  export class NoImageGeneratedError extends Error {}
+  export class NoVideoGeneratedError extends Error {}
+  export class XSAIError extends Error {}
 }
