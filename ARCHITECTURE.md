@@ -265,7 +265,7 @@ Everything above the storage seam (handlers, descriptors, convergence) is
 backend-blind, so the trade is explicit: local/CI exercise the fs lane while
 production runs S3/R2 — if the two ever disagree, the complaint goes
 upstream with a failing case from either side. State lives in
-`runtime/.celld/dev` (cells) and `.dev/blobs-root` (blobs); `dev wipe`
+`.dev/celld-state` (cells, reached through a `runtime/.celld` symlink so celld dev's own watcher never sees its state writes) and `.dev/blobs-root` (blobs); `dev wipe`
 resets both together.
 
 ## What this deliberately does not have (yet)

@@ -3,7 +3,7 @@
 # backend) — two native processes, no docker, no MinIO.
 # verbs: up | down | deploy | status | logs | wipe
 #
-# Local world persists in runtime/.celld/dev (cells) and .dev/blobs-root
+# Local world persists in .dev/celld-state (cells, via the runtime/.celld
 # (blob tier). `wipe` throws both away together — a fresh tier behind old
 # cell state means rows naming objects that don't exist, so they are born
 # and destroyed as a pair.
@@ -80,6 +80,14 @@ celld_env() {
 
 start_celld() {
   if celld_running; then echo "celld dev: already running on :$CELLD_PORT"; return; fi
+  # celld dev watches PROJECT and restarts the worker on changes — and on
+  # linux/inotify that includes its OWN state under PROJECT/.celld/dev, so
+  # every cell write mid-suite bounced the host (macOS/FSEvents stays quiet,
+  # which is why local e2e never saw it). A symlinked state dir moves those
+  # writes out of the watched tree: inotify watches the link, not its target.
+  if [ -d runtime/.celld ] && [ ! -L runtime/.celld ]; then rm -rf runtime/.celld; fi
+  mkdir -p "$DEV/celld-state"
+  ln -sfn "../$DEV/celld-state" runtime/.celld
   celld_env
   # explicit sequencing: `cd runtime && nohup … & echo $!` backgrounds the
   # cd too, so the pid write ran from the repo root and landed in
@@ -92,7 +100,7 @@ start_celld() {
   )
   for _ in $(seq 1 30); do celld_running && break; sleep 0.5; done
   celld_running || { echo "celld dev: did not come up; last log lines:" >&2; tail -20 "$DEV/celld-dev.log" >&2; exit 1; }
-  echo "celld dev: started on :$CELLD_PORT (state in runtime/.celld/dev)"
+  echo "celld dev: started on :$CELLD_PORT (state via runtime/.celld → .dev/celld-state)"
 }
 
 stop_all() {
@@ -146,7 +154,7 @@ case "${1:-}" in
     ;;
   wipe)
     stop_all
-    rm -rf runtime/.celld/dev "$DEV/blobsd" "$DEV/blobs-root"
+    rm -rf "$DEV/celld-state" "$DEV/blobsd" "$DEV/blobs-root"
     echo "wiped: cell state and blob tier discarded together"
     ;;
   *)
