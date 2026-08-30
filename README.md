@@ -51,18 +51,20 @@ cd cli && cargo install --path .
 ## Quickstart (local, no cloud account, no docker)
 
 ```
-scripts/dev up        # MinIO (bucket, docker — same image as CI) + celld on :8789
-scripts/dev deploy    # build + deploy the runtime
+scripts/dev up        # celld dev (local object store) + blobsd (fs tier) on :8789/:9940 —
+                      # two native processes, no docker
+scripts/dev deploy    # rebuild the runtime + restart the dev host
 fragment login        # generate your nostr keypair (once)
 fragment create hello
 mkdir hello && cd hello
-# …add site/index.html, workflows/*.mjs, manifest.json…
+# …add site/index.html, app.ts, workflows/*.ts…
+fragment build        # TS → runnable files, hashed site assets, parse gate
 fragment deploy hello --dir . --note v1   # sync, snapshot, GO LIVE → /f/hello/
 fragment rollback hello                   # step back to the previous snapshot
 fragment open hello   # prints URLs incl. the ?view= token
 ```
 
-Dev state lives in `.dev/` (delete it to reset the world). For a real
+Dev state lives in `.dev/` (`scripts/dev wipe` resets the world). For a real
 server, [docs/deploy-vps.md](docs/deploy-vps.md) is the production runbook
 (celld node + real bucket + Caddy); nothing else changes.
 
@@ -108,9 +110,9 @@ scripts/dev up && scripts/dev deploy
 node scripts/e2e.mjs        # add --all for the slow cron-fire check
 ```
 
-Snapshot from the last full manual pass (2026-08-22, celld v0.4.2, macOS,
-196 checks incl. the failure leg, sync v2, the machine-read/notify
-plane, and the guide's executable patterns):
+The suite runs in CI on every push (macOS runner; Linux can't host it —
+see the celld caveats below). Snapshot from the last full pass
+(2026-08-29, celld v0.4.0, 386 checks):
 
 - NIP-98 auth end-to-end: create/list/status with signed requests; unsigned →
   401; valid signature without role → 403. Rust CLI signatures verify against
@@ -135,6 +137,21 @@ plane, and the guide's executable patterns):
   auto-resolves by adopting the remote rev; otherwise the remote copy is
   saved as `<path>.remote-<ts>`, local kept, reported); git-init'd folders
   honor `.gitignore` — ignored files and `.git/` never upload.
+- Write-CAS: `ctx.files.write(path, data, {ifRev})` conflicts on moved
+  rows; `ctx.files.stat` exposes live row + tombstones. Sync converges on
+  tombstones — remote deletions propagate instead of resurrecting; a
+  modified local copy beats the deletion.
+- The blob tier: blob-first pushes/pulls over 64 KiB (content-addressed,
+  idempotent, hash-verified), ranged-GET presence probes for descriptors
+  whose objects vanished, and the fs-backed blobsd the dev stack runs.
+- The static+API shape and `fragment build`: `site/index.html` owns the
+  root beside an `app.mjs` API; TS sources compile with sources kept,
+  hashed asset references rewritten (including stale hashes), and the
+  parse gate refusing broken bytes.
+- Web push: subscribe/unsubscribe routes register real browser
+  subscriptions against the fragment's VAPID key; the crypto stack
+  self-tests per cell before the first send (RFC 8291/8292, live-proven
+  against both Apple's and Google's push services).
 - Secrets: set/list/rm via CLI; values never leave the cell except into
   workflow isolates at run time.
 - Grants: grant viewer → dev key can read; revoke → 403.
@@ -166,6 +183,11 @@ pushes"):
   from draft snapshots.** `app.mjs`/`rooms.mjs` come from the served draft.
 - `base_rev` is **per file** (new file → 0; re-uploading a deleted file → the
   tombstone's rev, which the files listing reports).
+- **Write-CAS**: `ctx.files.write` accepts `{ifRev}` and conflicts on a moved
+  row; `ctx.files.stat` returns the rev and tombstone history — read-modify-
+  write loops pin their writes instead of clobbering.
+- **Deletions are data**: tombstones carry revs, sync converges on them
+  (unchanged copies delete, modified copies win) — deleting is not losing.
 - Cron subset: 5 fields, `*` lists ranges steps, month/day names; no
   `L W # ?`; day-of-week 1=Sunday..7=Saturday (0 refused) — matches celld.
 - `manifest.json` in the folder is just a file. The live manifest changes only
@@ -174,25 +196,30 @@ pushes"):
 
 ## celld alpha caveats observed
 
-- `celld deploy` requires a **node restart** to take effect (`scripts/dev
-  deploy` handles it).
+- On 0.4.0, `celld deploy` no longer needs a node restart: running nodes
+  poll the deployment pointer and adopt the new version in ~30–40s
+  (observed across the prod fleet).
+- **`celld dev` on Linux restarts the worker on its own state writes** —
+  the dev watcher doesn't exclude `PROJECT/.celld`, so every cell write
+  bounces the host (~1s outage; macOS/FSEvents is quiet). This is why the
+  e2e job runs on a macOS runner. Repro and dead ends:
+  `wedge-repro/CELLD-DEV-WATCHER-SELF-RESTART.md` (upstream candidate).
 - Graceful shutdown can stall past its 25s drain deadline when a cell holds
   hibernated websockets. Dev handles it with a force-kill fallback in
   `scripts/dev`; for production rollouts, expect connected rooms clients to
   ride out a failover (the `__rt.js` client auto-reconnects).
 - After a hard kill, cells show "owner unreachable" until the lease expires
   (~20s), then restore from the bucket with zero acknowledged writes lost.
+- Restarting both fleet nodes at once wedges their peer tunnels (409s, all
+  500s until recovered). Safe order: full stop → wait for real process
+  exit → start main → start witness (the VPS units encode this ordering).
 - Not safe for hostile multi-tenant use (celld's own security page says so).
   One fleet = one trust domain.
 - **The watch dir is paired to the bucket.** celld keeps local cell state in
-  `CELLD_WATCH`; if you point a node with an old watch dir at a fresh/empty
-  bucket, stale local state can shadow the bucket and resurrect *zombie
-  cells* (observed: a cell from a dead bucket world came back owned by its
-  old key, and its bucket chain then failed restore — `RestoreFailed` —
-  bricking the name). `scripts/dev up` enforces the pairing: a fresh MinIO
-  data dir wipes the watch dir (see `scripts/dev wipe`). In this
-  dev world the name `hello` is currently bricked by exactly this bug (left
-  as a monument; every other fragment is healthy).
+  `CELLD_WATCH`; pointing a node with an old watch dir at a fresh/empty
+  bucket can resurrect zombie cells whose bucket chain then fails restore
+  (`RestoreFailed`, bricking the name). `scripts/dev wipe` throws state and
+  tier away together for exactly this reason.
 
 ## Layout
 
@@ -202,8 +229,11 @@ docs/api.md          CLI ↔ runtime wire contract (NIP-98, endpoints, rooms, ct
 docs/deploy-vps.md   production runbook: VPS + bucket + Caddy
 deploy/              systemd unit, Caddyfile, env template for the above
 cli/                 the Rust CLI (fragment) + GUIDE.md (agent doc)
+blobsd/              the blob tier server (Blossom-conformant; fs or S3 backend)
 runtime/             the celld deployment (router + FragmentCell)
-scripts/dev          up | down | deploy | status | logs
+scripts/dev          up | down | deploy | status | logs | wipe
+scripts/build-runtime  typecheck + compile runtime/ts → runtime/src
+scripts/e2e.mjs      the executable claims behind "What's verified"
 scripts/req.mjs      dev NIP-98 request helper (node)
-scripts/rooms-test.mjs
+scripts/rooms-test.mjs  two-client rooms smoke test
 ```

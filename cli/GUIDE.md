@@ -54,7 +54,9 @@ fragment sync my-thing          # first run links the folder (creates .fragment/
 Sync is bidirectional and last-writer-wins. If both sides changed a file since
 the last sync, the remote copy is saved as `<path>.remote-<timestamp>` next to
 your local file and reported as a conflict. Nothing is ever silently merged or
-lost. Sync skips dotfiles and `.fragment/`; in a git repo it also honors
+lost. Deletions converge too: a remote delete newer than your last sync
+removes the local copy, unless you modified it — your modified copy wins and
+stays. Sync skips dotfiles and `.fragment/`; in a git repo it also honors
 `.gitignore` (ignored files and `.git/` never upload).
 
 What the folder means to the runtime:
@@ -232,7 +234,10 @@ export async function run(ctx, input) {
 }
 ```
 
-- `ctx.files` — the fragment's folder (read/write/list).
+- `ctx.files` — the fragment's folder (read/write/list). `write` takes an
+  optional `{ifRev}` for compare-and-swap (a moved row → 409-style conflict),
+  and `stat` reports a file's live rev plus its tombstones — together they
+  keep slow read-modify-writes from clobbering fresh edits.
 - `ctx.secrets` — plain object of secret values by name.
 - `ctx.http` — fetch, with a 30s default timeout (pass your own `signal` to control it).
 - `ctx.ai(prompt, {model?})` — inference routed through the host (the host
@@ -371,28 +376,6 @@ export async function run(ctx) {
   const msgs = await ctx.inbox();
   const filed = [];
   for (const m of msgs) {
-    const text = String((m.payload && m.payload.text) || "").trim().slice(0, 5000);
-    if (!text) continue;
-    const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-    const hash = [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 8);
-    const p = "inbox/" + new Date(m.at).toISOString().slice(0, 10) + "-" + hash + ".md";
-    await ctx.files.write(p, text + "\n");
-    filed.push(p);
-  }
-  await ctx.inboxAck(msgs.map((m) => m.id)); // only what we observed
-  return { filed };
-}
-```
-
-Receiving drops (the other side): file any message that has a
-`payload.text`, whatever its source — that is the contract.
-
-```js
-// workflows/ingest.mjs — trigger "inbox"; the RECEIVER of drops
-export async function run(ctx) {
-  const msgs = await ctx.inbox();
-  const filed = [];
-  for (const m of msgs) {
     const p = (m.payload && typeof m.payload === "object") ? m.payload : {};
     const text = String(p.text || "").trim().slice(0, 5000);
     if (!text) continue;                       // shape filter, not source filter
@@ -402,7 +385,7 @@ export async function run(ctx) {
     await ctx.files.write(`inbox/${from}-${hash}.md`, text + "\n");
     filed.push(m.id);
   }
-  await ctx.inboxAck(msgs.map((m) => m.id));
+  await ctx.inboxAck(msgs.map((m) => m.id)); // only what we observed
   return { filed: filed.length };
 }
 ```
@@ -553,7 +536,7 @@ service worker at `/f/<name>/__sw.js`):
   the tab is hidden; clicks focus the window and navigate to `url`.
 - **Closed tab (Web Push)** — `fragment.push.register(who)` from the same
   click: registers the worker, subscribes with the fragment's VAPID key,
-  and stores the subscription. Workforms send with
+  and stores the subscription. Workflows send with
   `await ctx.push(who, {title, body, url})`. Subscriptions live in the
   fragment (`push_subs`), failures self-heal (410 drops, 5 strikes drop).
 
@@ -687,6 +670,8 @@ fragment manifest <name>            fragment pause <name> <wf>
 fragment manifest-set <name> FILE   fragment unpause <name> <wf>
 fragment sync <name> [--dir D] [--watch] [--mode M]  fragment replay <name> <run-id>
                                    [--install | --uninstall]
+fragment verify <name> [--dir D]    fragment rm <name>
+fragment build [DIR]                fragment open <name>
 fragment deploy <name> [--dir D] [--preview]
 fragment drafts <name>              fragment rollback <name> [--to <slug>]
 fragment rotate <name> [--inbox] [--view]
