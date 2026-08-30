@@ -1,4 +1,4 @@
-// The platform "ai" module — what author code gets from `import … from "ai"`.
+// The platform ai module — what author code gets from `import … from "fragment:ai"`.
 //
 // Surface follows the established SDK ergonomics (generateText /
 // generateImage / generateVideo: one options object, results you
@@ -32,11 +32,29 @@ export class NoVideoGeneratedError extends Error {
   constructor(message, options) { super(message, options); this.name = "NoVideoGeneratedError"; }
 }
 
-// set by fragment-ctx.mjs on every makeCtx: { base, tok, hsec, models, falBase }
+// module-scoped binding, set ONCE per worker by init(env) — which the
+// loader-injected main module calls only when this module was included for
+// the fragment. No globals, no per-request state: the binding is
+// env-derived (per worker), never request-derived.
+let binding = null;
+
+export function init(env) {
+  binding = {
+    base: env.FRAGMENT_INTERNAL_URL,
+    tok: env.FRAGMENT_RUN_TOKEN,
+    hsec: env.FRAGMENT_HOST_SECRET || "",
+    models: {
+      text: env.FRAGMENT_AI_MODEL || "deepseek/deepseek-v4-flash-0731",
+      image: env.FRAGMENT_IMAGE_MODEL || "fal-ai/flux-2",
+      video: env.FRAGMENT_VIDEO_MODEL || "minimax/h3-max/text-to-video",
+    },
+    falBase: env.FRAGMENT_FAL_BASE || "https://queue.fal.run",
+  };
+}
+
 const ai = () => {
-  const g = globalThis.__FRAGMENT_AI__;
-  if (!g) throw new Error('the "ai" module needs a fragment context (it works inside fragment workflows and apps)');
-  return g;
+  if (!binding) throw new Error('fragment:ai is available inside fragment workflows and apps');
+  return binding;
 };
 
 // xsai talks OpenAI-compatible to OpenRouter THROUGH the egress route: the

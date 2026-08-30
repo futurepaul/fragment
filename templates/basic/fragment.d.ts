@@ -129,11 +129,11 @@ declare global {
 }
 
 /**
- * The platform "ai" module — `import { … } from "ai"`. One call shape and
+ * The platform "ai" module — `import { … } from "fragment:ai"`. One call shape and
  * one result shape across text, image, and video; the host holds the keys
  * and the default models. Loaded only for fragments that import it.
  */
-declare module "ai" {
+declare module "fragment:ai" {
   /** Media output: already a file in the working copy (syncs to the folder). */
   interface MediaFile {
     mediaType: string;

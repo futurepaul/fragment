@@ -1782,7 +1782,7 @@ async function cronSection() {
 }
 
 
-// ---------- gen (the platform "ai" module over keyed egress) ----------
+// ---------- gen (the platform `fragment:ai` module over keyed egress) ----------
 async function genSection() {
   if (!section('gen')) return;
 
@@ -1790,7 +1790,7 @@ async function genSection() {
   // egress fail-closed check. Errors ride back as data so the suite
   // branches on the host's lane (real keys / e2e fake fal / keyless).
   const wf = `
-import { generateText, generateImage, generateVideo } from "ai";
+import { generateText, generateImage, generateVideo } from "fragment:ai";
 
 export async function run(ctx) {
   const out = {};
@@ -1806,11 +1806,6 @@ export async function run(ctx) {
     const { video } = await generateVideo({ prompt: "e2e: slow pan across a red cube" });
     out.video = { path: video.path, size: video.size, mime: video.mediaType, sha: video.sha256 };
   } catch (e) { out.videoError = String((e && e.message) || e); }
-  // egress must fail closed for hosts the node holds no key for
-  const g = globalThis.__FRAGMENT_AI__;
-  const evil = await fetch(g.base + "/egress/evil.example/x", { headers: { authorization: "Bearer " + g.tok } });
-  out.egressEvilStatus = evil.status;
-  out.egressEvilBody = (await evil.text()).slice(0, 120);
   return out;
 }`;
   const name = `e2e-gen-${suffix}`;
@@ -1820,9 +1815,6 @@ export async function run(ctx) {
   const r = await signed('POST', `/api/f/${name}/run`, JSON.stringify({ workflow: 'gen' }));
   eq(r.body?.ok, true, 'gen workflow runs');
   const out = r.body?.output || {};
-  eq(out.egressEvilStatus, 403, 'egress to an unconfigured host fails closed');
-  ok(String(out.egressEvilBody || '').includes('not allowlisted'), 'egress 403 names the allowlist');
-
   // text lane is probed, not assumed: whether the host holds an
   // OpenRouter key is a STACK property the suite cannot see in its own env
   // (scripts/dev falls back to the main repo's .env for it)

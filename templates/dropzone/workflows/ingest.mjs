@@ -1,8 +1,11 @@
 // drop-zone ingest: runs whenever files change on the editor plane
 // ("trigger": "sync" — sync pushes, CLI writes). New arrivals under drop/
-// are processed into output/. Uses ctx.ai when the host has an inference
-// key; falls back to a plain digest otherwise. Workflow writes never
+// are processed into output/. Uses generateText (the platform
+// `fragment:ai` module) when the host has an inference key; falls back
+// to a plain digest otherwise. Workflow writes never
 // re-trigger sync workflows, so writing output/ here is loop-safe.
+import { generateText } from "fragment:ai";
+
 export async function run(ctx, input) {
   const changed = input?.sync?.paths || [];
   const arrivals = changed.filter((p) => p.startsWith("drop/"));

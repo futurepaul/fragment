@@ -176,20 +176,6 @@ export async function makeCtx(env) {
       return r.json();
     },
   };
-  // the platform "ai" module (conditionally injected when author code
-  // imports it) reads this global lazily: egress base + token + host model
-  // defaults. Keys never appear here \u2014 the cell attaches them.
-  globalThis.__FRAGMENT_AI__ = {
-    base,
-    tok,
-    hsec,
-    models: {
-      text: env.FRAGMENT_AI_MODEL || "deepseek/deepseek-v4-flash-0731",
-      image: env.FRAGMENT_IMAGE_MODEL || "fal-ai/flux-2",
-      video: env.FRAGMENT_VIDEO_MODEL || "minimax/h3-max/text-to-video",
-    },
-    falBase: env.FRAGMENT_FAL_BASE || "https://queue.fal.run",
-  };
   return ctx;
 }
 `;

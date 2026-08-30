@@ -8,7 +8,7 @@
 // canonical subdomain alike):
 //   POST generate  {kind: "image"|"video", prompt} → {file}   (held ~5-10s)
 //   GET  recent    → {files: […gen/ rows…]}                    (the grid on load)
-import { generateImage, generateVideo } from "ai";
+import { generateImage, generateVideo } from "fragment:ai";
 
 const j = (body, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });

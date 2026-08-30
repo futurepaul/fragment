@@ -13,6 +13,7 @@ export default {
     try { ctx = await makeCtx(env); } catch (e) {
       return Response.json({ ok: false, error: "ctx init: " + String(e) });
     }
+    //__FRAGMENT_AI_INIT__
     try {
       const output = await run(ctx, input);
       return Response.json({ ok: true, output: output ?? null });
@@ -28,6 +29,7 @@ import app from "./app.mjs";
 export default {
   async fetch(req, env) {
     const ctx = await makeCtx(env);
+    //__FRAGMENT_AI_INIT__
     return app.fetch(req, ctx);
   }
 }
@@ -41,6 +43,7 @@ export default {
     let out = {};
     try {
       const ctx = await makeCtx(env);
+      //__FRAGMENT_AI_INIT__
       out = (await onMessage(room, msg, ctx)) ?? {};
     } catch (e) {
       return Response.json({ error: String((e && e.stack) || e) });
@@ -83,9 +86,13 @@ function internalBase(cell) {
   return `${base}/__internal/f/${cell.getMeta("name")}`;
 }
 async function loadCode(cell, id, mainSource, modules, scope, cause = null) {
-  const wantsAi = Object.values(modules).some((src) => /\b(?:from|import)\s*["']ai["']/.test(String(src)));
+  const wantsAi = Object.values(modules).some((src) => /\b(?:from|import)\s*["']fragment:ai["']/.test(String(src)));
+  const mainFinal = wantsAi ? 'import { init as __fragmentAiInit } from "fragment:ai";\n' + mainSource.replace(
+    "//__FRAGMENT_AI_INIT__",
+    'try { __fragmentAiInit(env); } catch (e) { return Response.json({ ok: false, error: "fragment:ai init: " + String(e) }); }'
+  ) : mainSource.replace("//__FRAGMENT_AI_INIT__", "");
   const wrapped = {};
-  for (const [k, v] of Object.entries({ "main.mjs": mainSource, "fragment-ctx.mjs": CTX_SHIM_SOURCE, ...wantsAi ? { ai: AI_MODULE_SOURCE } : {}, ...modules })) {
+  for (const [k, v] of Object.entries({ "main.mjs": mainFinal, "fragment-ctx.mjs": CTX_SHIM_SOURCE, ...wantsAi ? { "fragment:ai": AI_MODULE_SOURCE } : {}, ...modules })) {
     wrapped[k] = cell.env.FRAGMENT_HOST_KIND === "cf" ? { js: v } : v;
   }
   const worker = await cell.env.LOADER.get(id, async () => ({

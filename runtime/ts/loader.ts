@@ -17,6 +17,7 @@ export default {
     try { ctx = await makeCtx(env); } catch (e) {
       return Response.json({ ok: false, error: "ctx init: " + String(e) });
     }
+    //__FRAGMENT_AI_INIT__
     try {
       const output = await run(ctx, input);
       return Response.json({ ok: true, output: output ?? null });
@@ -33,6 +34,7 @@ import app from "./app.mjs";
 export default {
   async fetch(req, env) {
     const ctx = await makeCtx(env);
+    //__FRAGMENT_AI_INIT__
     return app.fetch(req, ctx);
   }
 }
@@ -47,6 +49,7 @@ export default {
     let out = {};
     try {
       const ctx = await makeCtx(env);
+      //__FRAGMENT_AI_INIT__
       out = (await onMessage(room, msg, ctx)) ?? {};
     } catch (e) {
       return Response.json({ error: String((e && e.stack) || e) });
@@ -128,9 +131,25 @@ export async function loadCode(cell, id, mainSource, modules, scope, cause = nul
   // (fragment-granularity tree-shaking): fragments that never mention it
   // never load a byte of it, and worker caching by code-hash means the
   // ~30KB parse is paid once per code version by AI-using fragments only.
-  const wantsAi = Object.values(modules).some((src) => /\b(?:from|import)\s*["']ai["']/.test(String(src)));
+  // fragment:ai is included ONLY when author code imports it
+  // (fragment-granularity tree-shaking): fragments that never mention it
+  // never load a byte of it, and worker caching by code-hash means the
+  // ~30KB parse is paid once per code version by AI-using fragments only.
+  // The init line is injected textually under the same condition, so the
+  // "fragment:ai" specifier only ever exists in workers where the module
+  // is present — import resolution cannot see an absent module.
+  const wantsAi = Object.values(modules).some((src) => /\b(?:from|import)\s*["']fragment:ai["']/.test(String(src)));
+  // static import (workerd rejects dynamic import of map modules): the
+  // import line and the init call are injected under the same condition,
+  // so workers without the module never mention the specifier at all
+  const mainFinal = wantsAi
+    ? 'import { init as __fragmentAiInit } from "fragment:ai";\n' + mainSource.replace(
+        "//__FRAGMENT_AI_INIT__",
+        'try { __fragmentAiInit(env); } catch (e) { return Response.json({ ok: false, error: "fragment:ai init: " + String(e) }); }',
+      )
+    : mainSource.replace("//__FRAGMENT_AI_INIT__", "");
   const wrapped = {};
-  for (const [k, v] of Object.entries({ "main.mjs": mainSource, "fragment-ctx.mjs": CTX_SHIM_SOURCE, ...(wantsAi ? { ai: AI_MODULE_SOURCE } : {}), ...modules })) {
+  for (const [k, v] of Object.entries({ "main.mjs": mainFinal, "fragment-ctx.mjs": CTX_SHIM_SOURCE, ...(wantsAi ? { "fragment:ai": AI_MODULE_SOURCE } : {}), ...modules })) {
     wrapped[k] = cell.env.FRAGMENT_HOST_KIND === "cf" ? { js: v } : v;
   }
   // the token is minted ONLY when the worker is actually created: the

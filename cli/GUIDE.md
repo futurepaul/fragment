@@ -210,7 +210,7 @@ A workflow is a module exporting `run`:
 
 ```js
 // workflows/digest.mjs
-import { generateText } from "ai";
+import { generateText } from "fragment:ai";
 
 const API = "https://example.com/api"; // any JSON endpoint you can call
 export async function run(ctx, input) {
@@ -240,8 +240,8 @@ export async function run(ctx, input) {
 - `ctx.files.ingest(url, path)` — place remote bytes as a file (streams
   the URL into the blob tier, commits the row; dedup and append-only gates
   as usual).
-- **the `ai` module** — `import { generateText, streamText, generateObject,
-  tool, generateImage, generateVideo } from "ai"`. One call shape and one
+- **the `fragment:ai` module** — `import { generateText, streamText, generateObject,
+  tool, generateImage, generateVideo } from "fragment:ai"`. One call shape and one
   result shape across all three (established SDK ergonomics); the host
   holds the keys (OpenRouter for text, fal.ai for media) and picks the
   default models (`FRAGMENT_AI_MODEL` / `FRAGMENT_IMAGE_MODEL` /
@@ -472,7 +472,7 @@ have to store. Needs the host to have a fal key (`FAL_API_KEY`).
 
 ```js
 // workflows/illustrate.mjs — inbox or cron triggered
-import { generateImage, generateVideo } from "ai";
+import { generateImage, generateVideo } from "fragment:ai";
 
 export async function run(ctx) {
   const { image: shot } = await generateImage({ prompt: "a lighthouse at dawn, heavy fog, 35mm film still" });
@@ -491,7 +491,7 @@ fix. Needs the host to have an inference key.
 
 ```js
 // workflows/digest.mjs — cron "0 8 * * *"
-import { generateText } from "ai";
+import { generateText } from "fragment:ai";
 
 export async function run(ctx) {
   const notes = await ctx.files.list("notes/");
