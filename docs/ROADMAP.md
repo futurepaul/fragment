@@ -48,6 +48,10 @@ the finite-brain local rule, which fragment adopts for this work).
   claim; ref policies protect `live`). Git remotes (if ever used) take
   username `t`, password = JWT.
 - LFS rides the same JWT-authenticated remote — no separate LFS server.
+- Org: **`finite`** (verified live 2026-09-07: key authenticates, org
+  reachable, zero repos — clean slate). Local dev reads
+  `PIERRE_PRIVATE_KEY` from `.env` (gitignored, untracked, never in
+  history); prod delivers it via the systemd credential.
 
 ## The truth map (invariants — every change is checked against this)
 
