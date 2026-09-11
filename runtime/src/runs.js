@@ -1,9 +1,10 @@
 // GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
+import { launchNativeRun, nativeStatus, wfInstanceId } from "./wf-engine.js";
 const HOP_LIMIT = 16;
 const BREAKER_N = 5;
 const BREAKER_WINDOW = 10 * 6e4;
 const LEASE_MS = 10 * 6e4;
-const RETRYABLE = /timeout|timed out|abort|network|fetch failed|error sending request|econn|socket|connection|overloaded|rate limit|too many requests|\b429\b|\b500\b|\b502\b|\b503\b|\b504\b/i;
+const RETRYABLE = /timeout|timed out|abort|network|fetch failed|error sending request|econn|socket|connection|overloaded|rate limit|too many requests|\b429\b|\b500\b|\b502\b|\b503\b|\b504\b|branch moved|precondition_failed/i;
 function retryableError(err) {
   return RETRYABLE.test(String(err || ""));
 }
@@ -137,18 +138,22 @@ async function executeWorkflow(cell, wf, input, opts = {}) {
   const t0 = Date.now();
   const runId = insertRun(cell, wf, trigger, input, cause, "running", { attempt: 1, maxAttempts: policy.attempts });
   cell.sql.exec("UPDATE runs SET started_at = ? WHERE id = ?", t0, runId);
-  return finishAttempt(
-    cell,
-    wf,
-    runId,
-    1,
-    policy,
-    trigger,
-    t0,
-    await cell.runWorkflowLocked(wf, input, cause)
-  );
+  cell.addEvent("run.started", `${wf.name} (attempt 1)`, { wf: wf.name, trigger, runId, attempt: 1 });
+  try {
+    const instanceId = await launchNativeRun(cell, runId, 1);
+    return { ok: true, launched: true, runId, instanceId };
+  } catch (e) {
+    const out = { ok: false, error: `native launch failed: ${String(e.message || e)}` };
+    return finishAttempt(cell, wf, runId, 1, policy, trigger, t0, out);
+  }
 }
 async function finishAttempt(cell, wf, runId, attempt, policy, trigger, t0, out) {
+  const row = cell.sql.exec("SELECT status FROM runs WHERE id = ?", runId).toArray()[0];
+  if (!row) return { ok: false, error: "no such run", runId };
+  if (row.status !== "running") {
+    cell.addEvent("run.report-ignored", `run ${runId} already ${row.status} \u2014 duplicate outcome report dropped`);
+    return { ok: row.status === "success", output: null, runId, already: row.status };
+  }
   if (out.ok) {
     updateRun(cell, runId, { status: "success", finished_at: Date.now(), duration_ms: Date.now() - t0, error: null });
     cell.sql.exec("DELETE FROM meta WHERE k = ?", `wf_breaker_${wf.name}`);
@@ -178,7 +183,15 @@ async function resumeDueRuns(cell) {
       updateRun(cell, r.id, { status: "held", finished_at: Date.now(), error: "workflow removed while run in flight" });
       continue;
     }
+    const st = await nativeStatus(cell, wfInstanceId(r.id, r.attempt));
+    if (st === null) continue;
+    if (st.status === "running" || st.status === "queued" || st.status === "paused" || st.status === "waiting") continue;
     const policy = retryPolicy(wf);
+    if (st.status === "complete") {
+      const out = st.output && typeof st.output === "object" && "ok" in st.output ? st.output : { ok: false, error: "run finished without a decodable outcome" };
+      await finishAttempt(cell, wf, r.id, r.attempt, policy, r.via, r.started_at, out);
+      continue;
+    }
     await finishAttempt(cell, wf, r.id, r.attempt, policy, r.via, r.started_at, { ok: false, error: "run interrupted (host restart)", forceRetry: true });
   }
   const due = cell.sql.exec("SELECT * FROM runs WHERE (status = 'backoff' OR status = 'pending') AND next_attempt_at <= ? ORDER BY id", Date.now()).toArray();
@@ -210,16 +223,11 @@ async function resumeDueRuns(cell) {
     const t0 = Date.now();
     updateRun(cell, r.id, { status: "running", attempt, started_at: t0, next_attempt_at: null });
     cell.addEvent("run.started", `${wf.name} (attempt ${attempt})`, { wf: wf.name, trigger: r.via, runId: r.id, attempt });
-    await finishAttempt(
-      cell,
-      wf,
-      r.id,
-      attempt,
-      policy,
-      r.via,
-      t0,
-      await cell.runWorkflowLocked(wf, JSON.parse(r.input || "null"), JSON.parse(r.cause || "null"))
-    );
+    try {
+      await launchNativeRun(cell, r.id, attempt);
+    } catch (e) {
+      await finishAttempt(cell, wf, r.id, attempt, policy, r.via, t0, { ok: false, error: `native launch failed: ${String(e.message || e)}` });
+    }
   }
 }
 export {
@@ -228,6 +236,7 @@ export {
   HOP_LIMIT,
   LEASE_MS,
   executeWorkflow,
+  finishAttempt,
   resumeDueRuns,
   retryPolicy,
   retryableError

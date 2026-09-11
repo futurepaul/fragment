@@ -55,8 +55,8 @@ cd cli && cargo install --path .
 ## Quickstart (local, no cloud account, no docker)
 
 ```
-scripts/dev up        # celld dev (local object store) + blobsd (fs tier) on :8789/:9940 —
-                      # two native processes, no docker
+scripts/dev up        # celld dev (local object store) + the mock code.storage on
+                      # :8789/:9940 — two native processes, no docker
 scripts/dev deploy    # rebuild the runtime + restart the dev host
 fragment login        # generate your nostr keypair (once)
 fragment create hello
@@ -122,12 +122,15 @@ see the celld caveats below). Snapshot from the last full pass
   401; valid signature without role → 403. Rust CLI signatures verify against
   the JS runtime (@noble/curves) and vice versa (cross-implementation pinned
   npub test).
-- Files: PUT/GET/DELETE with per-file `base_rev`; stale base → 409.
-- Deploy: `deploy --preview` → `/d/<slug>/` serves; going live serves
-  `/f/<name>/`; token-gated canonical (`?view=`); rollback = redeploying
-  an older snapshot.
-- Dynamic apps: a draft with `app.mjs` serves computed responses in a loader
-  isolate, with a persistent counter via `ctx.state`.
+- Files: read via the git plane (tree/stat/stream against `main@SHA`);
+  writes are commits to the code.storage repo (storage-token auth, CAS).
+- Deploy: `deploy --preview` creates an ephemeral ref (no served URL —
+  the ref is the preview); going live moves `live` and serves
+  `/f/<name>/`; token-gated canonical (`?view=`); rollback = re-pointing
+  `live` at a prior commit.
+- Dynamic apps: the deployed `app.mjs` (from the `live` ref) serves
+  computed responses in a loader isolate, with a persistent counter via
+  `ctx.state`.
 - Rooms: two websocket clients exchange messages; `state:set` persists; a
   third client reconnecting gets `hello` with state + history; room without
   the view token → 403; `rooms.mjs` errors → `room-error` events, drops →
@@ -145,9 +148,8 @@ see the celld caveats below). Snapshot from the last full pass
   rows; `ctx.files.stat` exposes live row + tombstones. Sync converges on
   tombstones — remote deletions propagate instead of resurrecting; a
   modified local copy beats the deletion.
-- The blob tier: blob-first pushes/pulls over 64 KiB (content-addressed,
-  idempotent, hash-verified), ranged-GET presence probes for descriptors
-  whose objects vanished, and the fs-backed blobsd the dev stack runs.
+- Large files: chunked commit-packs to code.storage (≤4 MiB chunks, no
+  total cap); reads stream through with no size ceiling.
 - The static+API shape and `fragment build`: `site/index.html` owns the
   root beside an `app.mjs` API; TS sources compile with sources kept,
   hashed asset references rewritten (including stale hashes), and the
@@ -176,27 +178,30 @@ pushes"):
   (`font/woff`, `font/ttf`, `font/otf` likewise); the MIME map also covers
   `webmanifest`, `svg`, and friends. Preload with `<link rel="preload"
   as="font" type="font/woff2" crossorigin>`.
-- **Big media lives blob-side**: a fragment's rows are pointers; bodies over
-  64 KiB live in the content-addressed blob tier and are served from there
-  (hashed, immutable). Don't copy gigabytes into the folder expecting the
-  cell to carry them — point at the blob URL or keep them on a bucket/CDN.
+- **Big media rides the repo**: files of any size commit to code.storage
+  in ≤4 MiB chunks and stream back on demand — the cell never buffers or
+  persists file bytes (a 64 MiB RAM cache covers the small/hot end; the
+  rest streams through). Keep genuinely huge media on a bucket/CDN only
+  for cost/taste reasons, not because the system requires it.
 
 ## Contract decisions worth knowing
 
-- **Workflows run from the working copy** (the live folder). **Sites serve
-  from draft snapshots.** `app.mjs`/`rooms.mjs` come from the served draft.
-- `base_rev` is **per file** (new file → 0; re-uploading a deleted file → the
-  tombstone's rev, which the files listing reports).
-- **Write-CAS**: `ctx.files.write` accepts `{ifRev}` and conflicts on a moved
-  row; `ctx.files.stat` returns the rev and tombstone history — read-modify-
-  write loops pin their writes instead of clobbering.
-- **Deletions are data**: tombstones carry revs, sync converges on them
-  (unchanged copies delete, modified copies win) — deleting is not losing.
+- **Workflows read the pinned working copy** (`main@SHA`, refreshed by
+  webhook + poll). **Sites serve from `live@SHA`.** `app.mjs`/`rooms.mjs`
+  come from the `live` ref.
+- **Write-CAS is content-addressed**: `ctx.files.write` accepts `{ifSha}`
+  (from `ctx.files.stat`) and conflicts when the path's content sha moved;
+  `stat` returns `{sha, lastCommitSha, size, present}` — read-modify-write
+  loops pin their writes instead of clobbering.
+- **No tombstones**: under git, deleted and never-existed are the same
+  thing at a ref (`present: false`); history lives in the repo, and a
+  modified local copy beats a remote deletion at sync.
 - Cron subset: 5 fields, `*` lists ranges steps, month/day names; no
   `L W # ?`; day-of-week 1=Sunday..7=Saturday (0 refused) — matches celld.
-- `manifest.json` in the folder is just a file. The live manifest changes only
-  via `fragment manifest-set`. (Sync carries it as data, nothing more.)
-- Drafts are immutable; `ctx.files.write` from `app.mjs` (draft scope) → 403.
+- `fragment.json` is a git file — the manifest's authority is the repo;
+  `fragment manifest-set` is an edit-and-commit like any other.
+- `ctx.files.write` from `app.mjs` (blessed scope) → 403 — the serving
+  plane doesn't mutate the working copy.
 
 ## celld alpha caveats observed
 
@@ -233,7 +238,8 @@ docs/api.md          CLI ↔ runtime wire contract (NIP-98, endpoints, rooms, ct
 docs/deploy-vps.md   production runbook: VPS + bucket + Caddy
 deploy/              systemd unit, Caddyfile, env template for the above
 cli/                 the Rust CLI (fragment) + GUIDE.md (agent doc)
-blobsd/              the blob tier server (Blossom-conformant; fs or S3 backend)
+notify-relay/        the NOTIFY queue consumer (celld forbids fetch + queue
+                     consumer in one deployment)
 runtime/             the celld deployment (router + FragmentCell)
 scripts/dev          up | down | deploy | status | logs | wipe
 scripts/build-runtime  typecheck + compile runtime/ts → runtime/src

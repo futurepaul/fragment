@@ -1,16 +1,21 @@
 // Runs: the failure-leg state machine. Every workflow execution is a row in
 // `runs`, and every transition — guards, attempts, backoff, held, auto-pause,
-// crash sweep — happens in this module, as straight-line code. Backoff waits
-// are scheduled on the cell's alarm, never a blocking sleep.
+// crash sweep — happens in this module, as straight-line code.
 //
-//   trigger ─▶ [guards] ─▶ running ─▶ success
+//   trigger ─▶ [guards] ─▶ running ─(native launch)─▶ success
 //                │            └▶ backoff ─(alarm)─▶ running, attempt+1
 //                │                 └▶ held (exhausted | terminal)
 //                └▶ blocked | skipped
 //
-// Because a Durable Object is single-threaded, a `running` row observed by
-// the alarm handler is by definition a crashed run — crash detection is a
-// SELECT, not a heartbeat.
+// EXECUTION runs on native Workflows (wf-engine.ts): each attempt is a
+// Workflow instance whose step.do drives the author body inside the cell
+// and reports the outcome back to /__internal/wf/complete, which applies
+// finishAttempt. Backoff WAITS stay on the cell's single alarm (the runs
+// ledger owns WHEN); the native engine owns HOW an attempt executes and
+// survives restarts. A `running` row with a dead instance is detected by
+// the sweep below querying instance status — crash detection stays a
+// SELECT plus one status read, never a heartbeat.
+import { launchNativeRun, nativeStatus, wfInstanceId } from "./wf-engine.js";
 
 export const HOP_LIMIT = 16;
 export const BREAKER_N = 5;
@@ -22,10 +27,12 @@ export const LEASE_MS = 10 * 60_000;
 // "error sending request"). Everything else (code errors, 4xx, bad parses)
 // is terminal — retrying a poison input politely is still retrying a wall.
 // 500 is included for cross-fragment delivery: the host can fail the
-// response edge after the target's writes already committed (setAlarm wake
-// gate vs a store blip), and a re-POST of the same payload is idempotent
-// through the target's content-addressed ingest.
-const RETRYABLE = /timeout|timed out|abort|network|fetch failed|error sending request|econn|socket|connection|overloaded|rate limit|too many requests|\b429\b|\b500\b|\b502\b|\b503\b|\b504\b/i;
+// response edge after the target's writes already committed, and a re-POST
+// of the same payload is idempotent through the target's content-addressed
+// ingest. CAS conflicts ("branch moved", precondition_failed) are retryable:
+// the commit funnel already healed-or-retried internally, so what surfaces
+// here lost a genuine race and a later attempt refetches state anyway.
+const RETRYABLE = /timeout|timed out|abort|network|fetch failed|error sending request|econn|socket|connection|overloaded|rate limit|too many requests|\b429\b|\b500\b|\b502\b|\b503\b|\b504\b|branch moved|precondition_failed/i;
 
 export function retryableError(err) {
   return RETRYABLE.test(String(err || ""));
@@ -150,10 +157,6 @@ export async function executeWorkflow(cell, wf, input, opts: any = {}) {
       "INSERT INTO runs (wf, via, status, input, cause, attempt, max_attempts, started_at, next_attempt_at) VALUES (?, ?, 'pending', ?, ?, 0, ?, ?, ?)",
       wf.name, opts.trigger || "inbox", JSON.stringify(input ?? null), JSON.stringify(cause), policy.attempts, Date.now(), Date.now(),
     );
-    // awaited, never detached: a detached rearm's setAlarm continuation can
-    // land after the HTTP turn ends, and celld panics the node on any
-    // storage op outside a turn (found live: fleet crash-looping every
-    // ~6.5 min from the first async inbox POST)
     await cell.rearmAlarm();
     return { ok: true, scheduled: true };
   }
@@ -168,13 +171,31 @@ export async function executeWorkflow(cell, wf, input, opts: any = {}) {
   const t0 = Date.now();
   const runId = insertRun(cell, wf, trigger, input, cause, "running", { attempt: 1, maxAttempts: policy.attempts });
   cell.sql.exec("UPDATE runs SET started_at = ? WHERE id = ?", t0, runId);
-  return finishAttempt(cell, wf, runId, 1, policy, trigger, t0,
-    await cell.runWorkflowLocked(wf, input, cause));
+  cell.addEvent("run.started", `${wf.name} (attempt 1)`, { wf: wf.name, trigger, runId, attempt: 1 });
+  try {
+    const instanceId = await launchNativeRun(cell, runId, 1);
+    return { ok: true, launched: true, runId, instanceId };
+  } catch (e) {
+    // launch failures are the host's problem, not the workflow's: park as
+    // held with the launch error — a missing binding or a wedged engine
+    // must be loud, not retried into oblivion
+    const out = { ok: false, error: `native launch failed: ${String((e as Error).message || e)}` };
+    return finishAttempt(cell, wf, runId, 1, policy, trigger, t0, out);
+  }
 }
 
 // apply an attempt's outcome: success, schedule the retry, or park as held.
-// Called by executeWorkflow and by resumeDueRuns (its only two callers).
-async function finishAttempt(cell, wf, runId, attempt, policy, trigger, t0, out) {
+// Called by /__internal/wf/complete (the workflow's report step) and by
+// the crash sweep — its only two callers.
+export async function finishAttempt(cell, wf, runId, attempt, policy, trigger, t0, out) {
+  // idempotence guard: a late duplicate report (workflow retried its
+  // report step after the sweep already reconciled) must not double-apply
+  const row = cell.sql.exec("SELECT status FROM runs WHERE id = ?", runId).toArray()[0];
+  if (!row) return { ok: false, error: "no such run", runId };
+  if (row.status !== "running") {
+    cell.addEvent("run.report-ignored", `run ${runId} already ${row.status} — duplicate outcome report dropped`);
+    return { ok: row.status === "success", output: null, runId, already: row.status };
+  }
   if (out.ok) {
     updateRun(cell, runId, { status: "success", finished_at: Date.now(), duration_ms: Date.now() - t0, error: null });
     cell.sql.exec("DELETE FROM meta WHERE k = ?", `wf_breaker_${wf.name}`);
@@ -201,18 +222,28 @@ export async function resumeDueRuns(cell) {
   const m = cell.manifest();
   if (!m) return;
 
-  // crashed runs: a `running` row older than the grace window died with
-  // its host (restart, eviction) — or its caller's connection timed out
-  // while the isolate kept going. The grace is generous because a false
-  // sweep duplicates a live run (observed: manual runs with ~1min ctx.ai
-  // latency got misclassified and double-processed).
+  // crashed runs: a `running` row whose native instance is terminal (and
+  // whose report never landed) or unresolvable. The grace is generous
+  // because a false sweep duplicates a live run; the authoritative check
+  // is the instance's own status, which is durable state, not a guess.
   const crashed = cell.sql.exec("SELECT * FROM runs WHERE status = 'running' AND started_at < ?", Date.now() - 60_000).toArray();
   for (const r of crashed) {
     const wf = (m.workflows || []).find((w) => w.name === r.wf);
     if (!wf) { updateRun(cell, r.id, { status: "held", finished_at: Date.now(), error: "workflow removed while run in flight" }); continue; }
+    const st = await nativeStatus(cell, wfInstanceId(r.id, r.attempt));
+    if (st === null) continue; // engine unreachable: try again next alarm; never guess
+    if (st.status === "running" || st.status === "queued" || st.status === "paused" || st.status === "waiting") continue;
     const policy = retryPolicy(wf);
-    // crashed is retryable by definition — a host restart says nothing
-    // about the input (found live: deploys were parking runs as terminal)
+    if (st.status === "complete") {
+      // finished but the report step never landed: reconcile from the
+      // instance's own return value (the outcome object)
+      const out = (st.output && typeof st.output === "object" && "ok" in (st.output as object))
+        ? st.output : { ok: false, error: "run finished without a decodable outcome" };
+      await finishAttempt(cell, wf, r.id, r.attempt, policy, r.via, r.started_at, out as any);
+      continue;
+    }
+    // errored/terminated: crashed is retryable by definition — a host
+    // restart says nothing about the input
     await finishAttempt(cell, wf, r.id, r.attempt, policy, r.via, r.started_at, { ok: false, error: "run interrupted (host restart)", forceRetry: true });
   }
 
@@ -228,7 +259,7 @@ export async function resumeDueRuns(cell) {
       // pass (pause/hops/rate/single-flight) — async delivery must not
       // be a guard bypass. A single-flight skip RESCHEDULES rather than
       // drops: the messages this run would drain have no other trigger
-      // coming for them (found: 3 rapid drops → 2 stranded).
+      // coming for them.
       const blocked = await runGuards(cell, wf, JSON.parse(r.input || "null"), r.via, true, cause);
       if (blocked) {
         if (blocked.skipped) {
@@ -244,7 +275,10 @@ export async function resumeDueRuns(cell) {
     const t0 = Date.now();
     updateRun(cell, r.id, { status: "running", attempt, started_at: t0, next_attempt_at: null });
     cell.addEvent("run.started", `${wf.name} (attempt ${attempt})`, { wf: wf.name, trigger: r.via, runId: r.id, attempt });
-    await finishAttempt(cell, wf, r.id, attempt, policy, r.via, t0,
-      await cell.runWorkflowLocked(wf, JSON.parse(r.input || "null"), JSON.parse(r.cause || "null")));
+    try {
+      await launchNativeRun(cell, r.id, attempt);
+    } catch (e) {
+      await finishAttempt(cell, wf, r.id, attempt, policy, r.via, t0, { ok: false, error: `native launch failed: ${String((e as Error).message || e)}` });
+    }
   }
 }

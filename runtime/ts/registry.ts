@@ -4,29 +4,77 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import { npubFromHex, hexFromNpub } from "./bech32.js";
 import { json, randHex, randSlug } from "./util.js";
 import { normalizeManifest } from "./manifest.js";
+import { ensureRepo, CodeStorageError } from "./codestorage.js";
+import { wrapSecret } from "./secretwrap.js";
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 
 // ------ initCell ------
 
+// Level-c create flow (docs/encryption-research.md stage 1): the npub
+// secret is generated CLIENT-SIDE and supplied here over the creator's
+// authenticated channel; the cell stores it WRAPPED (HKDF+AES-GCM under
+// FRAGMENT_HOST_SECRET, keyed by the fragment's npub). There is no
+// server-side generation path — the hard cut deletes it.
 export async function initCell(cell, request) {
   if (cell.getMeta("name")) return json({ ok: true, already: true });
-  const { name, ownerHex } = await request.json();
-  const secretKey = randHex(32);
-  const pubHex = [...schnorr.getPublicKey(Uint8Array.from(secretKey.match(/.{2}/g).map((b) => parseInt(b, 16))))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const { name, ownerHex, fragmentSecret } = await request.json();
+  if (!NAME_RE.test(name)) return json({ error: "bad name" }, 400);
+  if (typeof fragmentSecret !== "string" || !/^[0-9a-f]{64}$/.test(fragmentSecret)) {
+    return json({ error: "fragmentSecret required: 64-hex secp256k1 secret generated client-side (the CLI does this)" }, 400);
+  }
+  const hostSecret = String(cell.env.FRAGMENT_HOST_SECRET || "");
+  if (!hostSecret) {
+    return json({ error: "FRAGMENT_HOST_SECRET is not set on this host — wrapped secret storage requires it (set CELLD_VAR_FRAGMENT_HOST_SECRET)" }, 500);
+  }
+  let pubHex: string;
+  try {
+    const sk = Uint8Array.from(fragmentSecret.match(/.{2}/g).map((b) => parseInt(b, 16)));
+    pubHex = [...schnorr.getPublicKey(sk)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  } catch (e) {
+    return json({ error: `fragmentSecret is not a usable secp256k1 scalar: ${String(e)}` }, 400);
+  }
+  const npub = npubFromHex(pubHex);
+
+  // one code.storage repo per fragment, named like the fragment (ROADMAP
+  // wire contract; default branch main) — but ADDRESSED by the url-form
+  // identity the service returns (live-verified 2026-09-11: the human
+  // name 404s on repo-scoped calls). Persisted as cs_repo; every later
+  // call and minted token carries it. A same-named repo that still exists
+  // is an operator problem now: the url is only knowable at create time,
+  // so re-init after a cell wipe requires the repo deleted out-of-band
+  // first (the documented rm flow).
+  let repoUrl: string;
+  try {
+    repoUrl = await ensureRepo(cell.env, name);
+  } catch (e) {
+    if (e instanceof CodeStorageError && e.kind === "not-configured") {
+      return json({ error: e.message }, 500);
+    }
+    return json({ error: `code.storage repo create failed: ${String((e as Error).message || e)}` }, 502);
+  }
+
   cell.setMeta("name", name);
   cell.setMeta("owner", ownerHex);
-  cell.setMeta("fragment_secret", secretKey);
-  cell.setMeta("fragment_npub", npubFromHex(pubHex));
+  cell.setMeta("fragment_secret", await wrapSecret(hostSecret, npub, fragmentSecret));
+  cell.setMeta("fragment_npub", npub);
   cell.setMeta("view_token", randSlug(12));
   cell.setMeta("inbox_token", randHex(16));
-  cell.setMeta("rev", "0");
+  cell.setMeta("webhook_secret", randHex(16));
+  cell.setMeta("cs_repo", repoUrl);
   cell.setMeta("manifest", JSON.stringify(normalizeManifest({
     name, visibility: "link", editors: [], viewers: [], workflows: [], secrets: [],
   }).manifest));
-  cell.addEvent("create", `fragment ${name} created`);
-  return json({ ok: true, npub: cell.getMeta("fragment_npub"), viewToken: cell.getMeta("view_token"), inboxToken: cell.getMeta("inbox_token") });
+  cell.addEvent("create", `fragment ${name} created (repo ${repoUrl}, npub secret supplied client-side, stored wrapped)`);
+  return json({
+    ok: true,
+    npub,
+    viewToken: cell.getMeta("view_token"),
+    inboxToken: cell.getMeta("inbox_token"),
+    webhookSecret: cell.getMeta("webhook_secret"),
+    repo: repoUrl,
+  });
 }
 
 // ------ registryRoute ------
@@ -57,7 +105,6 @@ export async function registryRoute(cell, request, url) {
     if (!NAME_RE.test(name)) return json({ error: "bad name" }, 400);
     cell.sql.exec("DELETE FROM fragments WHERE name = ?", name);
     cell.sql.exec("DELETE FROM roles WHERE name = ?", name);
-    cell.sql.exec("DELETE FROM slugs WHERE name = ?", name);
     return json({ ok: true });
   }
   if (p === "/__registry/list") {
@@ -65,16 +112,6 @@ export async function registryRoute(cell, request, url) {
     const rows = cell.sql.exec(
       "SELECT r.name, r.role, f.created_at FROM roles r JOIN fragments f ON f.name = r.name WHERE r.pubkey = ?", pk || "").toArray();
     return json({ fragments: rows.map((r) => ({ name: r.name, role: r.role })) });
-  }
-  if (p === "/__registry/slug-map" && request.method === "POST") {
-    const { slug, name } = await request.json();
-    cell.sql.exec("INSERT INTO slugs (slug, name) VALUES (?, ?) ON CONFLICT(slug) DO NOTHING", slug, name);
-    return json({ ok: true });
-  }
-  if (p === "/__registry/slug") {
-    const slug = url.searchParams.get("s");
-    const row = cell.sql.exec("SELECT name FROM slugs WHERE slug = ?", slug || "").toArray()[0];
-    return row ? json({ name: row.name }) : json({ error: "unknown draft" }, 404);
   }
   if (p === "/__registry/roles-sync" && request.method === "POST") {
     const { name, owner, editors, viewers } = await request.json();

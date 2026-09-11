@@ -1,75 +1,41 @@
 // Notify-on-change: the push half of "bots watching bots". Mutations
-// enqueue a notification per manifest notifyUrls entry; the cell's alarm
-// drains the outbox with coalescing and bounded retries. Frames carry the
-// hop budget like every cross-fragment trigger, so notify loops die at
-// the receiving inbox's cycle guard.
-const MAX_ATTEMPTS = 3;
+// enqueue a notification per manifest notifyUrls entry onto the celld
+// Queues binding (NOTIFY); the notify-relay consumer script delivers.
+// The hand-rolled retry loop (notify_outbox table + alarm drain) is
+// DELETED — delivery, ordering, and retries are queue-owned now
+// (at-least-once, 4-day retention; same promise class as before).
+//
+// One writer (this runtime) and one consumer (notify-relay) fits celld
+// Queues' constraints exactly (docs/explorations/queues-eval.md).
+// Frames carry the hop budget like every cross-fragment trigger, so
+// notify loops die at the receiving inbox's cycle guard.
+export const NOTIFY_MAX_URLS = 3; // manifest cap, unchanged
 
-export function enqueueNotify(cell, paths) {
-  const urls = (cell.manifest()?.notifyUrls || []).slice(0, 3);
-  if (!urls.length) return;
-  for (const url of urls) {
-    // coalesce: one pending row per URL — a newer change supersedes
-    cell.sql.exec(
-      "INSERT INTO notify_outbox (url, paths, attempts, next_at) VALUES (?, ?, 0, ?) ON CONFLICT(url) DO UPDATE SET paths = excluded.paths, next_at = excluded.next_at",
-      url, JSON.stringify(paths.slice(0, 50)), Date.now(),
-    );
+export function enqueueNotify(cell, paths: string[]) {
+  const urls = (cell.manifest()?.notifyUrls || []).slice(0, NOTIFY_MAX_URLS);
+  if (!urls.length) return Promise.resolve();
+  const queue = (cell.env as any).NOTIFY;
+  if (!queue || typeof queue.send !== "function") {
+    // loud, not fatal: file-plane mutations must not fail because the
+    // relay deployment is missing — but the ledger records every drop
+    cell.addEvent("notify.unavailable", "NOTIFY queue binding missing on this host — notifications dropped (deploy notify-relay + queues config)", {});
+    return Promise.resolve();
   }
-  // the mutation path doesn't otherwise arm the alarm (sync triggers may
-  // not exist) — wake it so the outbox drains immediately. Returned so the
-  // caller's turn can await it: a detached rearm can outlive the turn and
-  // panics the host (same class as the async-inbox bug)
-  return cell.rearmAlarm();
-}
-
-export async function drainNotify(cell) {
   const name = cell.getMeta("name");
-  const due = cell.sql.exec("SELECT * FROM notify_outbox WHERE next_at <= ? ORDER BY next_at", Date.now()).toArray();
-  for (const row of due) {
-    const frame = {
-      type: "changed",
-      fragment: name,
-      rev: parseInt(cell.getMeta("rev") || "0", 10),
-      paths: JSON.parse(row.paths || "[]"),
-    };
-    let ok = false;
-    try {
-      const resp = await fetch(row.url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          // cross-fragment courtesy: carry the hop budget and origin so
-          // the receiver's inbox cycle guard applies to notify loops
-          "x-fragment-hops": "1",
-          "x-fragment-cause": String(name),
-        },
-        // envelope like a hand-posted drop: the inbox route stores
-        // body.payload (a bare frame would arrive as payload:null and the
-        // receiver's workflows could never see paths/rev)
-        body: JSON.stringify({ source: `notify:${name}`, payload: frame }),
-        signal: AbortSignal.timeout(10_000),
-      });
-      ok = resp.ok;
-    } catch {
-      ok = false;
-    }
-    if (ok) {
-      cell.sql.exec("DELETE FROM notify_outbox WHERE url = ?", row.url);
-      cell.addEvent("notify.sent", `${row.url.slice(0, 80)}`);
-    } else if (row.attempts + 1 >= MAX_ATTEMPTS) {
-      cell.sql.exec("DELETE FROM notify_outbox WHERE url = ?", row.url);
-      cell.addEvent("notify.failed", `${row.url.slice(0, 80)} after ${MAX_ATTEMPTS} attempts`);
-    } else {
-      // exponential backoff on the alarm
-      const delay = 15_000 * Math.pow(2, row.attempts);
-      cell.sql.exec("UPDATE notify_outbox SET attempts = attempts + 1, next_at = ? WHERE url = ?", Date.now() + delay, row.url);
-      return row.attempts + 1; // signal the alarm to rearm
-    }
-  }
-  return 0;
-}
-
-export function nextNotifyAt(cell) {
-  const row = cell.sql.exec("SELECT MIN(next_at) t FROM notify_outbox").toArray()[0];
-  return row && row.t ? row.t : null;
+  const frame = {
+    type: "changed",
+    fragment: name,
+    sha: cell.getMeta("pin_main_sha") || null,
+    paths: paths.slice(0, 50),
+  };
+  // one message per URL: the relay POSTs each to its destination; queue
+  // retries are per-message, so one dead URL never blocks the others.
+  // Every enqueue lands on the ledger (audit-trail parity with webhook
+  // deliveries); the relay's delivery is at-least-once queue semantics.
+  const sends = urls.map((url) =>
+    queue.send({ url, source: `notify:${name}`, frame })
+      .then(() => cell.addEvent("notify.queued", String(url).slice(0, 120), { url: url.slice(0, 300), paths: paths.slice(0, 10) }))
+      .catch((e) => cell.addEvent("notify.enqueue-failed", `${String(url).slice(0, 80)}: ${String((e && e.message) || e).slice(0, 120)}`)),
+  );
+  return Promise.all(sends);
 }

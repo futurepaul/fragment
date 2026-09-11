@@ -1,11 +1,10 @@
 // GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
-CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, sha256 TEXT NOT NULL, size INTEGER NOT NULL, mime TEXT NOT NULL DEFAULT '', rev INTEGER NOT NULL, updated_at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS file_revisions (path TEXT NOT NULL, rev INTEGER NOT NULL, blob_hash TEXT, deleted INTEGER DEFAULT 0, at INTEGER, PRIMARY KEY (path, rev));
-CREATE TABLE IF NOT EXISTS drafts (slug TEXT PRIMARY KEY, at INTEGER, note TEXT, blessed INTEGER DEFAULT 0);
-CREATE TABLE IF NOT EXISTS draft_files (slug TEXT, path TEXT, sha256 TEXT NOT NULL, size INTEGER NOT NULL, mime TEXT NOT NULL DEFAULT '', rev INTEGER NOT NULL, updated_at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (slug, path));
+CREATE TABLE IF NOT EXISTS git_tree (ref TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, mode TEXT NOT NULL DEFAULT '100644', last_commit_sha TEXT NOT NULL, PRIMARY KEY (ref, path));
+CREATE TABLE IF NOT EXISTS own_commits (sha TEXT PRIMARY KEY, at INTEGER, via TEXT);
+CREATE TABLE IF NOT EXISTS webhook_events (k TEXT PRIMARY KEY, at INTEGER);
 CREATE TABLE IF NOT EXISTS secrets (name TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS inbox (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, source TEXT, payload TEXT, status TEXT DEFAULT 'pending', claimed_at INTEGER, claim_token TEXT);
 CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, kind TEXT, summary TEXT, data TEXT);
@@ -14,16 +13,27 @@ CREATE TABLE IF NOT EXISTS rooms (room TEXT PRIMARY KEY, state TEXT);
 CREATE TABLE IF NOT EXISTS room_msgs (id INTEGER PRIMARY KEY AUTOINCREMENT, room TEXT, at INTEGER, sender TEXT, data TEXT);
 CREATE TABLE IF NOT EXISTS run_tokens (token TEXT PRIMARY KEY, scope TEXT, expires INTEGER);
 CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY AUTOINCREMENT, wf TEXT, via TEXT, status TEXT, input TEXT, cause TEXT, error TEXT, attempt INTEGER DEFAULT 1, max_attempts INTEGER DEFAULT 1, started_at INTEGER, next_attempt_at INTEGER, finished_at INTEGER, duration_ms INTEGER);
-CREATE TABLE IF NOT EXISTS notify_outbox (url TEXT PRIMARY KEY, paths TEXT, attempts INTEGER DEFAULT 0, next_at INTEGER);
 CREATE TABLE IF NOT EXISTS fragments (name TEXT PRIMARY KEY, owner TEXT, created_at INTEGER);
 CREATE TABLE IF NOT EXISTS roles (name TEXT, pubkey TEXT, role TEXT, PRIMARY KEY (name, pubkey));
-CREATE TABLE IF NOT EXISTS slugs (slug TEXT PRIMARY KEY, name TEXT);
 CREATE TABLE IF NOT EXISTS push_subs (who TEXT, endpoint TEXT PRIMARY KEY, p256dh TEXT, auth TEXT, at INTEGER, fails INTEGER DEFAULT 0);
 `;
+const SCHEMA_DROPS = [
+  "files",
+  "file_revisions",
+  "drafts",
+  "draft_files",
+  "notify_outbox",
+  "slugs"
+];
 const MAX_BODY_BYTES = 1e6;
+const WRITE_CEILING = 32 * 1024 * 1024;
 function bodyTooLarge(request) {
   const len = parseInt(request.headers.get("content-length") || "0", 10);
   return len > MAX_BODY_BYTES;
+}
+function writeBodyTooLarge(request) {
+  const len = parseInt(request.headers.get("content-length") || "0", 10);
+  return len > WRITE_CEILING;
 }
 const MIME = {
   html: "text/html; charset=utf-8",
@@ -45,8 +55,8 @@ const MIME = {
   pdf: "application/pdf",
   xml: "application/xml",
   csv: "text/csv; charset=utf-8",
-  // fonts + web-app manifest (blob-tier hosting conventions, docs/blob-tier.md):
-  // a vault or gallery that drops in woff/ttf still serves the right type
+  // fonts + web-app manifest (web-hosting conventions): a vault or
+  // gallery that drops in woff/ttf still serves the right type
   woff2: "font/woff2",
   woff: "font/woff",
   ttf: "font/ttf",
@@ -103,7 +113,9 @@ export {
   MAX_BODY_BYTES,
   MIME,
   SCHEMA,
+  SCHEMA_DROPS,
   SCHEMA_VERSION,
+  WRITE_CEILING,
   bodyTooLarge,
   hashInName,
   isMachinery,
@@ -113,5 +125,6 @@ export {
   randSlug,
   rankOf,
   serveCacheControl,
-  toAB
+  toAB,
+  writeBodyTooLarge
 };

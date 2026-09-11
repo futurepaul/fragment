@@ -1,69 +1,26 @@
 // GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
-const MAX_ATTEMPTS = 3;
+const NOTIFY_MAX_URLS = 3;
 function enqueueNotify(cell, paths) {
-  const urls = (cell.manifest()?.notifyUrls || []).slice(0, 3);
-  if (!urls.length) return;
-  for (const url of urls) {
-    cell.sql.exec(
-      "INSERT INTO notify_outbox (url, paths, attempts, next_at) VALUES (?, ?, 0, ?) ON CONFLICT(url) DO UPDATE SET paths = excluded.paths, next_at = excluded.next_at",
-      url,
-      JSON.stringify(paths.slice(0, 50)),
-      Date.now()
-    );
+  const urls = (cell.manifest()?.notifyUrls || []).slice(0, NOTIFY_MAX_URLS);
+  if (!urls.length) return Promise.resolve();
+  const queue = cell.env.NOTIFY;
+  if (!queue || typeof queue.send !== "function") {
+    cell.addEvent("notify.unavailable", "NOTIFY queue binding missing on this host \u2014 notifications dropped (deploy notify-relay + queues config)", {});
+    return Promise.resolve();
   }
-  return cell.rearmAlarm();
-}
-async function drainNotify(cell) {
   const name = cell.getMeta("name");
-  const due = cell.sql.exec("SELECT * FROM notify_outbox WHERE next_at <= ? ORDER BY next_at", Date.now()).toArray();
-  for (const row of due) {
-    const frame = {
-      type: "changed",
-      fragment: name,
-      rev: parseInt(cell.getMeta("rev") || "0", 10),
-      paths: JSON.parse(row.paths || "[]")
-    };
-    let ok = false;
-    try {
-      const resp = await fetch(row.url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          // cross-fragment courtesy: carry the hop budget and origin so
-          // the receiver's inbox cycle guard applies to notify loops
-          "x-fragment-hops": "1",
-          "x-fragment-cause": String(name)
-        },
-        // envelope like a hand-posted drop: the inbox route stores
-        // body.payload (a bare frame would arrive as payload:null and the
-        // receiver's workflows could never see paths/rev)
-        body: JSON.stringify({ source: `notify:${name}`, payload: frame }),
-        signal: AbortSignal.timeout(1e4)
-      });
-      ok = resp.ok;
-    } catch {
-      ok = false;
-    }
-    if (ok) {
-      cell.sql.exec("DELETE FROM notify_outbox WHERE url = ?", row.url);
-      cell.addEvent("notify.sent", `${row.url.slice(0, 80)}`);
-    } else if (row.attempts + 1 >= MAX_ATTEMPTS) {
-      cell.sql.exec("DELETE FROM notify_outbox WHERE url = ?", row.url);
-      cell.addEvent("notify.failed", `${row.url.slice(0, 80)} after ${MAX_ATTEMPTS} attempts`);
-    } else {
-      const delay = 15e3 * Math.pow(2, row.attempts);
-      cell.sql.exec("UPDATE notify_outbox SET attempts = attempts + 1, next_at = ? WHERE url = ?", Date.now() + delay, row.url);
-      return row.attempts + 1;
-    }
-  }
-  return 0;
-}
-function nextNotifyAt(cell) {
-  const row = cell.sql.exec("SELECT MIN(next_at) t FROM notify_outbox").toArray()[0];
-  return row && row.t ? row.t : null;
+  const frame = {
+    type: "changed",
+    fragment: name,
+    sha: cell.getMeta("pin_main_sha") || null,
+    paths: paths.slice(0, 50)
+  };
+  const sends = urls.map(
+    (url) => queue.send({ url, source: `notify:${name}`, frame }).then(() => cell.addEvent("notify.queued", String(url).slice(0, 120), { url: url.slice(0, 300), paths: paths.slice(0, 10) })).catch((e) => cell.addEvent("notify.enqueue-failed", `${String(url).slice(0, 80)}: ${String(e && e.message || e).slice(0, 120)}`))
+  );
+  return Promise.all(sends);
 }
 export {
-  drainNotify,
-  enqueueNotify,
-  nextNotifyAt
+  NOTIFY_MAX_URLS,
+  enqueueNotify
 };

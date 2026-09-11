@@ -67,48 +67,43 @@ export async function makeCtx(env) {
         const r = await call("/files/read?path=" + encodeURIComponent(path));
         return r.arrayBuffer();
       },
-      // returns {ok, deduped, rev}: writing identical content is a no-op.
-      // opts.ifRev pins the write to a row state from ctx.files.stat() \u2014
-      // a moved row rejects with Error.conflict (and .currentRev) instead
-      // of clobbering: read-modify-write loops stay safe across slow awaits
+      // returns {ok, deduped, sha, commitSha}: writing identical content
+      // is a no-op (the commit funnel dedups by git blob identity).
+      // opts.ifSha pins the write to the path's current content sha from
+      // ctx.files.stat() \u2014 a moved path rejects with Error.conflict
+      // (and .currentSha) instead of clobbering: read-modify-write loops
+      // stay safe across slow awaits
       async write(path, data, opts) {
-        let body = typeof data === "string" ? data : data;
-        const headers = { "x-fragment-token": tok, ...(hsec ? { "x-fragment-host-secret": hsec } : {}) };
-        // blob-first for big bodies: over the 64KiB inline carve-out, hash
-        // client-side and send with x-fragment-hash so the cell streams the
-        // bytes through to the tier instead of refusing them (the SDK-style
-        // generators return whole Uint8Arrays \u2014 images and clips are MBs)
-        if (typeof body !== "string" || body.length > 65536) {
-          const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body instanceof ArrayBuffer ? new Uint8Array(body) : body;
-          if (bytes.byteLength > 65536) {
-            const digest = await crypto.subtle.digest("SHA-256", bytes);
-            headers["x-fragment-hash"] = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-            body = bytes;
-          }
-        }
+        const wh = { "x-fragment-token": tok, ...(hsec ? { "x-fragment-host-secret": hsec } : {}) };
         let qs = "/files/write?path=" + encodeURIComponent(path);
-        if (opts && Number.isInteger(opts.ifRev)) qs += "&if_rev=" + opts.ifRev;
-        const r = await fetch(base + qs, { method: "PUT", body, headers });
+        if (opts && typeof opts.ifSha === "string") qs += "&if_sha=" + encodeURIComponent(opts.ifSha);
+        const r = await fetch(base + qs, { method: "PUT", body: data, headers: wh });
         if (r.status === 409) {
           const j = await r.json().catch(() => ({}));
-          const e = new Error("rev conflict on " + path + ": row is at rev " + (j.currentRev ?? "?") + (j.ifRev !== undefined ? ", write pinned to " + j.ifRev : ""));
+          const e = new Error("content conflict on " + path + ": path is at sha " + (j.currentSha || "?").slice(0, 12) + (j.ifSha !== undefined ? ", write pinned to " + String(j.ifSha).slice(0, 12) : ""));
           e.conflict = true;
-          e.currentRev = j.currentRev;
+          e.currentSha = j.currentSha;
           throw e;
         }
         if (!r.ok) throw new Error("fragment ctx files/write -> " + r.status + ": " + (await r.text()));
         return r.json();
       },
-      // place remote bytes as a file: streams the URL into the blob tier
-      // and commits the row (dedup + append-only gates as usual). The
-      // public-CDN half of generated-media placement; equally useful for
-      // "archive this URL into my folder".
+      // delete a path (append-only prefixes refuse; deleting an absent
+      // path is a recorded no-op)
+      async delete(path) {
+        const r = await call("/files/delete", { method: "POST", body: JSON.stringify({ path }) });
+        return r.json();
+      },
+      // place remote bytes as a file: the cell fetches the URL and commits
+      // it at path (dedup + append-only gates as usual)
       async ingest(url, path) {
         const r = await call("/files/ingest", { method: "POST", body: JSON.stringify({ url: String(url), path }) });
         return (await r.json()).file;
       },
-      // live row metadata INCLUDING tombstones ({deleted:true} with the
-      // tombstone's rev); null when the path has no history at all
+      // live path metadata at the working-copy pin: {path, size, sha
+      // (git blob sha), lastCommitSha, present}. Absent and deleted
+      // unify to present:false \u2014 git has no tombstones at a ref. The
+      // read half of the ifSha pattern.
       async stat(path) {
         const r = await call("/files/stat?path=" + encodeURIComponent(path));
         return (await r.json()).stat;
@@ -117,8 +112,7 @@ export async function makeCtx(env) {
         const r = await call("/files/list?prefix=" + encodeURIComponent(prefix));
         return (await r.json()).paths;
       },
-      // like list(), but returns [{path,size,updatedAt,rev}] (and only ever
-      // sees the working copy's live metadata \u2014 the default, unless frozen)
+      // like list(), but returns [{path,size,mode,lastCommitSha}]
       async index(prefix = "") {
         const r = await call("/files/list?prefix=" + encodeURIComponent(prefix));
         return (await r.json()).files;

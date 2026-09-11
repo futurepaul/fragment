@@ -10,6 +10,11 @@
   "durable_objects": { "bindings": [{ "name": "FRAGMENT", "class_name": "FragmentCell" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["FragmentCell"] }],
   "worker_loaders": [{ "binding": "LOADER" }],
+  // native Workflows executor (wf-engine.ts FragmentWorkflow) — same
+  // shape as the celld deployment
+  "workflows": [{ "name": "fragment-run", "class_name": "FragmentWorkflow", "binding_name": "WORKFLOWS" }],
+  // notify outbox: one writer (cells), one consumer (notify-relay)
+  "queues": { "producers": [{ "binding": "NOTIFY", "queue": "fragment-notify" }] },
   "vars": {
     "FRAGMENT_AI_MODEL": "deepseek/deepseek-v4-flash-0731",
     "FRAGMENT_HOST_KIND": "cf"

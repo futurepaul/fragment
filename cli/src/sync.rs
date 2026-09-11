@@ -1,36 +1,35 @@
-// Bidirectional folder sync, v2 (hard cut):
-// - state v2 with size+mtime_ns cache → O(changes) scans (verify for truth)
-// - atomic writes everywhere (state, pulled files); flock single-watcher guard
-// - three-way merge on conflicts (server keeps history); markers or copies
-// - append-only prefixes respected; mass-deletion guard; push/pull/mirror
-// - two-tier storage (docs/blob-tier.md): rows are pointers; bytes >64 KiB
-//   go CLI-direct to the blob tier below, pulls materialize via
-//   .fragment/cache/<sha> + streamed tmp + atomic rename
-use crate::api::{encode_q, Client};
-use crate::blob;
-use anyhow::{bail, Context, Result};
+// Thin sync over the code.storage commit builder — commit without a local
+// clone (ROADMAP workstream B):
+//   push  = scan folder, diff against the branch-head listing, ONE
+//           commit-pack with expected-parent CAS; conflict -> refetch head,
+//           rebuild the diff, retry (bounded, explicit error after)
+//   pull  = fetch tree/files from main into the folder
+//   mirror= push then pull
+// No local .git, no git2, no host file API. `.fragment/state.json` is a
+// stat cache only (path -> content sha + mtime + last-seen commit); the
+// repo is the truth, the folder is a disposable working copy.
+//
+// Hard cuts vs the old engine: the three-way merge/conflict-marker
+// machinery and the blob tier are gone (remote content survives in git
+// history; conflicts keep local and save a `.conflict-` copy). The
+// root-identity (dev/ino) check is subsumed by the mass-deletion guard,
+// which now also refuses a total wipe regardless of file count.
+use crate::api::Client;
+use crate::codestorage::{Author, Change, CodeStorage, CsError, RemoteFile, MAIN, MAX_CAS_ATTEMPTS};
+use anyhow::{anyhow, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     Push,
     Pull,
     Mirror,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ConflictStrategy {
-    Markers,
-    Copy,
 }
 
 #[derive(Clone)]
@@ -38,17 +37,19 @@ pub struct SyncOptions {
     pub mode: Mode,
     /// overlay a read-only source folder into dir before each pass: new
     /// and changed files copy in (source never written, nothing deleted —
-    /// dir can hold app code and drops alongside the mirrored content)
+    /// dir can hold app code and drops alongside the mirrored content).
+    /// Non-git sources (fbrain) depend on this; git sources would collapse
+    /// to a fetch, but that is not the Brain case.
     pub mirror_from: Option<PathBuf>,
-    pub strategy: ConflictStrategy,
     pub apply_mass_delete: bool,
+    /// in pull mode, delete local files that were deleted remotely
+    /// (pull never deletes without it; mirror always propagates)
     pub prune: bool,
     pub verify: bool,
     pub writer_id: String, // 8 hex of our pubkey, for conflict-copy names
-    /// resolved blob-tier handle for THIS pass (memoized uploads across the
-    /// parallel warm pass and the serial commit loop); attached internally by
-    /// sync_once — callers construct options without it
-    pub tiers: Option<Arc<blob::TierShared>>,
+    /// FRAGMENT_CODESTORAGE_URL/config override for the code.storage
+    /// server (backend-swap knob; else the storage-token response wins)
+    pub codestorage: Option<String>,
 }
 
 impl Default for SyncOptions {
@@ -56,59 +57,83 @@ impl Default for SyncOptions {
         SyncOptions {
             mode: Mode::Mirror,
             mirror_from: None,
-            strategy: ConflictStrategy::Markers,
             apply_mass_delete: false,
             prune: false,
             verify: false,
             writer_id: "anon".into(),
-            tiers: None,
+            codestorage: None,
         }
     }
 }
 
+/// Typed sync errors (engineering style: no anyhow in the sync module).
+#[derive(Debug)]
+pub enum SyncError {
+    Cs(CsError),
+    Io(String),
+}
+impl From<CsError> for SyncError {
+    fn from(e: CsError) -> Self {
+        SyncError::Cs(e)
+    }
+}
+impl From<std::io::Error> for SyncError {
+    fn from(e: std::io::Error) -> Self {
+        SyncError::Io(e.to_string())
+    }
+}
+impl std::fmt::Display for SyncError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SyncError::Cs(e) => write!(f, "{e}"),
+            SyncError::Io(e) => write!(f, "io: {e}"),
+        }
+    }
+}
+impl std::error::Error for SyncError {}
+
+/// stat cache v3: content sha + last-seen remote commit per path.
+/// Anything else (or a v2 file from the old engine) reads as fresh —
+/// corrupt or old states never wedge the folder.
 #[derive(Serialize, Deserialize, Default)]
 pub struct SyncState {
     #[serde(rename = "schemaVersion")]
-    pub schema_version: u32, // 2; anything else reads as fresh
+    pub schema_version: u32, // 3
     pub name: String,
-    pub root_dev: u64,
-    pub root_ino: u64,
     pub files: HashMap<String, FileState>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FileState {
-    pub rev: u64,
     pub sha256: String,
     pub size: u64,
     pub mtime_ns: i128,
+    /// last commit SHA we saw touch this path (the listing's
+    /// last_commit_sha) — our per-file remote version marker
+    pub commit: String,
 }
 
-#[derive(Default, Serialize)]
+#[derive(Default, Serialize, Debug)]
 pub struct Report {
     pub pushed: Vec<String>,
     pub pulled: Vec<String>,
-    pub merged: Vec<String>,
-    pub conflicts: Vec<String>,
     pub deleted_remote: Vec<String>,
     pub deleted_local: Vec<String>,
     pub withheld_deletions: Vec<String>,
-    pub skipped_append_only: Vec<String>,
+    pub conflicts: Vec<String>,
     pub mass_delete_guard: Option<usize>,
-    #[serde(rename = "appendOnly")]
-    pub append_only: Vec<String>,
     pub scan: ScanStats,
     pub mode: String,
 }
 
-#[derive(Default, Serialize, Clone, Copy)]
+#[derive(Default, Serialize, Clone, Copy, Debug)]
 pub struct ScanStats {
     pub files: usize,
     pub hashed: usize,
 }
 
 impl Report {
-    /// exit code: 0 clean/merged, 3 conflicts present, 4 mass-deletion guard
+    /// exit code: 0 clean, 3 conflicts present, 4 mass-deletion guard
     pub fn exit_code(&self) -> i32 {
         if self.mass_delete_guard.is_some() {
             4
@@ -130,32 +155,28 @@ impl Report {
         };
         p("pushed", &self.pushed);
         p("pulled", &self.pulled);
-        p("merged (auto, three-way)", &self.merged);
         p("deleted remotely", &self.deleted_remote);
         p("deleted locally", &self.deleted_local);
         if !self.withheld_deletions.is_empty() {
             println!("  deletions withheld (pull mode; --prune to apply): {})", self.withheld_deletions.len());
         }
-        p("append-only drift (not pushed; edit remotely or remove local)", &self.skipped_append_only);
         if !self.conflicts.is_empty() {
-            println!("  CONFLICTS ({}): local keeps yours; see the markers/copies", self.conflicts.len());
+            println!("  CONFLICTS ({}): local keeps yours; the remote copy is saved beside it (.conflict-…)", self.conflicts.len());
             for f in &self.conflicts {
                 println!("    {f}");
             }
         }
         if let Some(n) = self.mass_delete_guard {
-            println!("  REFUSING to propagate {n} deletions — folder looks unmounted/reset.");
+            println!("  REFUSING to propagate {n} deletion(s) — folder looks unmounted/reset.");
             println!("  re-run with --apply-mass-delete if this is intended");
         }
         let clean = self.pushed.is_empty()
             && self.pulled.is_empty()
-            && self.merged.is_empty()
             && self.conflicts.is_empty()
             && self.deleted_remote.is_empty()
-            && self.deleted_local.is_empty()
-            && self.skipped_append_only.is_empty();
+            && self.deleted_local.is_empty();
         if clean {
-            println!("all {} files match host", self.scan.files);
+            println!("all {} files match the repo", self.scan.files);
         }
     }
 }
@@ -170,8 +191,8 @@ fn state_path(dir: &Path) -> PathBuf {
 
 /// The single-watcher lock: an advisory flock on .fragment/sync.lock, held
 /// for the process lifetime. Stale by construction (the OS drops it when
-/// the holder dies), unlike pid-file guessing.
-pub struct SyncLock(File);
+/// the holder dies).
+pub struct SyncLock(#[allow(dead_code)] File); // the field IS the lock (RAII)
 impl SyncLock {
     pub fn acquire(dir: &Path) -> Result<Self> {
         let p = dir.join(".fragment").join("sync.lock");
@@ -180,7 +201,7 @@ impl SyncLock {
         }
         let f = File::create(&p)?;
         f.try_lock_exclusive()
-            .map_err(|_| anyhow::anyhow!("another fragment sync holds this folder ({}). If that's wrong, no process should own it; otherwise stop it or use a different folder.", p.display()))?;
+            .map_err(|_| anyhow!("another fragment sync holds this folder ({}). If that's wrong, no process should own it; otherwise stop it or use a different folder.", p.display()))?;
         Ok(SyncLock(f))
     }
 }
@@ -188,20 +209,18 @@ impl SyncLock {
 pub fn load_state(dir: &Path, name: &str) -> Result<SyncState> {
     let p = state_path(dir);
     if !p.exists() {
-        return Ok(SyncState { schema_version: 2, name: name.to_string(), root_dev: 0, root_ino: 0, files: HashMap::new() });
+        return Ok(SyncState { schema_version: 3, name: name.to_string(), files: HashMap::new() });
     }
-    // Hard cut: anything that isn't clean v2 reads as missing (one full
-    // re-scan) — corrupt or old states never wedge the folder
     match serde_json::from_slice::<SyncState>(&fs::read(&p)?) {
-        Ok(s) if s.schema_version == 2 => {
+        Ok(s) if s.schema_version == 3 => {
             if s.name != name {
-                bail!("directory is synced to fragment '{}', not '{}'", s.name, name);
+                anyhow::bail!("directory is synced to fragment '{}', not '{}'", s.name, name);
             }
             Ok(s)
         }
         _ => {
             eprintln!("warning: {} unreadable or old format — rebuilding state", p.display());
-            Ok(SyncState { schema_version: 2, name: name.to_string(), root_dev: 0, root_ino: 0, files: HashMap::new() })
+            Ok(SyncState { schema_version: 3, name: name.to_string(), files: HashMap::new() })
         }
     }
 }
@@ -221,28 +240,26 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-pub fn save_state(dir: &Path, state: &SyncState) -> Result<()> {
+fn save_state(dir: &Path, state: &SyncState) -> Result<()> {
+    if let Some(parent) = state_path(dir).parent() {
+        fs::create_dir_all(parent)?;
+    }
     atomic_write(&state_path(dir), serde_json::to_string_pretty(state)?.as_bytes())
 }
 
-struct LocalFile {
-    sha256: String,
-    size: u64,
-    mtime_ns: i128,
+pub(crate) struct LocalFile {
+    pub(crate) sha256: String,
+    pub(crate) size: u64,
+    pub(crate) mtime_ns: i128,
 }
 
 /// Walk the folder. With state, a size+mtime match adopts the cached hash
 /// (O(changes)); with verify, everything is read and hashed. Skips
-/// dotfiles, .fragment/, symlinks, and sync artifacts. Honors .gitignore
-/// (nested, parent-dir, global, and .git/info/exclude) exactly when git
-/// would: only inside a repo — a plain folder with a stray .gitignore
-/// still syncs everything.
-pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result<(HashMap<String, LocalFile>, ScanStats)> {
-    let mut out = HashMap::new();
+/// dotfiles, .fragment/, symlinks, and editor droppings. Honors
+/// .gitignore exactly when git would (only inside a repo).
+pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result<(BTreeMap<String, LocalFile>, ScanStats)> {
+    let mut out = BTreeMap::new();
     let mut stats = ScanStats::default();
-    // ripgrep's walker: hidden-file skipping (the old dotfile rules) plus
-    // full gitignore semantics; require_git stays at its default (true) so
-    // ignore rules apply only where git itself would apply them
     let walker = ignore::WalkBuilder::new(dir)
         .git_ignore(true)
         .git_global(true)
@@ -251,20 +268,15 @@ pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result
         .build();
     for entry in walker {
         let entry = entry?;
-        if !entry.file_type().map_or(false, |t| t.is_file()) {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        // editor droppings and sync artifacts the walker doesn't know about
-        if name.ends_with("~")
-            || name.starts_with("~$")
-            || name.starts_with(".#")
-            || name.ends_with(".swp")
-        {
+        if name.ends_with("~") || name.starts_with("~$") || name.starts_with(".#") || name.ends_with(".swp") {
             continue;
         }
         let rel = entry.path().strip_prefix(dir).unwrap().to_string_lossy().replace('\\', "/");
-        if rel.contains(".remote-") || rel.contains(".conflict-") || rel.contains(".fragment-partial") {
+        if rel.contains(".conflict-") || rel.contains(".fragment-partial") {
             continue;
         }
         let md = fs::metadata(entry.path())?;
@@ -275,8 +287,8 @@ pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result
             .map(|d| d.as_nanos() as i128)
             .unwrap_or(0);
         let cached = state.and_then(|s| s.files.get(&rel)).filter(|st| st.size == size && st.mtime_ns == mtime_ns);
-        let sha = if cached.is_some() && !verify {
-            cached.unwrap().sha256.clone()
+        let sha = if let (Some(st), false) = (cached, verify) {
+            st.sha256.clone()
         } else {
             stats.hashed += 1;
             sha256_hex(&fs::read(entry.path())?)
@@ -287,14 +299,10 @@ pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result
     Ok((out, stats))
 }
 
-struct RemoteFile {
-    rev: u64,
-    sha256: String,
-    deleted: bool,
-}
-
 /// copy new/changed files from src into dir (never writes src, never
-/// deletes in dir); preserves mtimes so the scan shortcut stays valid
+/// deletes in dir); preserves mtimes so the scan shortcut stays valid.
+/// The target's own identity is never overlaid: a source folder carrying
+/// its own fragment.json must not stomp the corrected one.
 fn mirror_overlay(src: &Path, dir: &Path) -> Result<()> {
     for entry in walkdir::WalkDir::new(src).follow_links(false) {
         let entry = entry?;
@@ -309,9 +317,6 @@ fn mirror_overlay(src: &Path, dir: &Path) -> Result<()> {
         if rel.split('/').any(|seg| seg.starts_with('.') && seg != ".") {
             continue;
         }
-        // the target's own identity and state are never overlaid: a source
-        // folder carrying its own fragment.json must not stomp the
-        // corrected one (restore agents hit exactly this)
         if rel == "fragment.json" || rel.starts_with(".fragment/") {
             continue;
         }
@@ -334,688 +339,438 @@ fn mirror_overlay(src: &Path, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Result<Report> {
-    if let Some(src) = &opts.mirror_from {
-        mirror_overlay(src, dir)?;
-    }
-    let mut state = load_state(dir, name)?;
+/// What one push pass wants to do, computed purely from (local, remote,
+/// state) so CAS retries can rebuild it against a fresh listing.
+struct PushPlan {
+    upserts: Vec<String>,
+    deletes: Vec<String>, // paths to delete remotely (deleted locally)
+    conflicts: Vec<String>,
+}
 
-    // two-tier plumbing for this pass: FRAGMENT_BLOB_URL overrides config
-    // blob_url; without a tier the <=64 KiB inline path still works but any
-    // oversized push hard-fails with guidance (never a silent fallback)
-    let mut opts_owned = opts.clone();
-    opts_owned.tiers = Some(blob::TierShared::new(blob::BlobTier::resolve(&client.id)));
-    let opts = &opts_owned;
-
-    // root identity: a different (dev,ino) with recorded identity means the
-    // folder was moved/replaced — refuse rather than "sync" against a stranger
-    let md = fs::metadata(dir)?;
-    use std::os::unix::fs::MetadataExt;
-    if state.root_dev != 0 && (state.root_dev != md.dev() || state.root_ino != md.ino()) {
-        bail!(
-            "folder moved or replaced since the last sync (root identity changed).\n  if this is really the same folder, run `fragment sync {name} --dir {} --rebuild-state`",
-            dir.display()
-        );
-    }
-    state.root_dev = md.dev();
-    state.root_ino = md.ino();
-
-    let (mut local, stats) = scan_local(dir, Some(&state), opts.verify)?;
-
-    // beyond bloasd's own max-blob size nothing can ever land in the tier:
-    // those are warn-skipped (state keeps the last-good copy) instead of
-    // blocking the whole publish. Everything between the 64 KiB inline limit
-    // and this cap takes the blob-first path — an unconfigured tier fails
-    // THAT push loudly (blob::no_tier_error), it does not degrade to raw.
-    const OVER_TIER_CAP_SKIP: u64 = blob::MAX_BLOB_BYTES;
-    let mut oversized: Vec<String> = Vec::new();
-    let mut kept: HashMap<String, LocalFile> = HashMap::new();
-    for (path, file) in local.iter() {
-        if file.size > OVER_TIER_CAP_SKIP {
-            oversized.push(format!("  {} ({:.1} MB over the 64 MiB tier cap)", path, (file.size - OVER_TIER_CAP_SKIP) as f64 / 1_000_000.0));
-        }
-    }
-    if !oversized.is_empty() {
-        eprintln!("warning: skipped {} oversized file(s) — even the blob tier caps out above here; host big media on a bucket/CDN and link it:\n{}", oversized.len(), oversized.join("\n"));
-        let skipped: Vec<String> = local
-            .iter()
-            .filter(|(_, f)| f.size > OVER_TIER_CAP_SKIP)
-            .map(|(p, _)| p.clone())
-            .collect();
-        for path in &skipped {
-            if let Some(last_good) = state.files.get(path) {
-                kept.insert(
-                    path.clone(),
-                    LocalFile { sha256: last_good.sha256.clone(), size: last_good.size, mtime_ns: last_good.mtime_ns },
-                );
-            }
-        }
-        local.retain(|_, f| f.size <= OVER_TIER_CAP_SKIP);
-        for (path, file) in kept {
-            local.insert(path, file);
-        }
-    }
-
-    let remote_resp = client.call(client.get(&format!("/api/f/{name}/files?since_rev=0"))?)?;
-    let mut remote: HashMap<String, RemoteFile> = HashMap::new();
-    for f in remote_resp["files"].as_array().cloned().unwrap_or_default() {
-        remote.insert(
-            f["path"].as_str().unwrap_or("").to_string(),
-            RemoteFile { rev: f["rev"].as_u64().unwrap_or(0), sha256: f["sha256"].as_str().unwrap_or("").to_string(), deleted: f["deleted"].as_bool().unwrap_or(false) },
-        );
-    }
-    let manifest = client.call(client.get(&format!("/api/f/{name}/manifest"))?)?;
-    // the manifest-set guard: a fragment.json in the folder that disagrees
-    // with the live manifest means the files deployed but the MACHINERY
-    // (workflows, triggers, visibility, appendOnly) never armed — the #1
-    // silent-deploy trap observed across three agent-eval runs
-    let local_manifest_path = dir.join("fragment.json");
-    if local_manifest_path.exists() {
-        if let Ok(raw) = fs::read_to_string(&local_manifest_path) {
-            if let Ok(local) = serde_json::from_str::<Value>(&raw) {
-                if let Ok(resp) = client.call(client.post_json(&format!("/api/f/{name}/manifest/check"), &local)?) {
-                    if resp["differs"].as_bool() == Some(true) {
-                        eprintln!(
-                            "WARNING: fragment.json in the folder differs from the live manifest — files synced but the machinery (workflows/triggers/visibility) is NOT live.\n  fix: fragment manifest-set {name} {}",
-                            local_manifest_path.display()
-                        );
-                    }
-                }
-            }
-        }
-    }
-    let append_only: Vec<String> = manifest["appendOnly"].as_array().cloned().unwrap_or_default().iter().map(|v| v.as_str().unwrap_or("").to_string()).collect();
-    let is_append_only = |p: &str| append_only.iter().any(|pre| p == pre.trim_end_matches('/') || p.starts_with(pre.as_str()));
-
-    let mut report = Report { scan: stats, mode: format!("{:?}", opts.mode).to_lowercase(), append_only: append_only.clone(), ..Default::default() };
-
-    let mut paths: Vec<String> = local.keys().chain(remote.keys()).chain(state.files.keys()).cloned().collect();
+fn push_plan(
+    local: &BTreeMap<String, LocalFile>,
+    remote: &HashMap<String, RemoteFile>,
+    state: &SyncState,
+) -> PushPlan {
+    let mut plan = PushPlan { upserts: Vec::new(), deletes: Vec::new(), conflicts: Vec::new() };
+    let mut paths: Vec<&String> = local.keys().chain(remote.keys()).collect();
     paths.sort();
     paths.dedup();
-
-    // mass-deletion guard: count what this pass would delete locally
-    if !opts.apply_mass_delete {
-        let known = state.files.len().max(1);
-        let pending_deletes = paths.iter().filter(|p| {
-            match (local.get(*p), remote.get(*p), state.files.get(*p)) {
-                // deleted on disk, row unchanged since we saw it → push the delete
-                (None, Some(r), Some(st)) => !r.deleted && r.rev == st.rev,
-                // tombstoned remotely after our last sync, local copy
-                // untouched → propagate the deletion (new convergence rule)
-                (Some(lf), Some(r), Some(st)) => {
-                    r.deleted && r.rev >= st.rev && st.sha256 == lf.sha256
+    for path in paths {
+        let l = local.get(path);
+        let r = remote.get(path);
+        let s = state.files.get(path);
+        match (l, r, s) {
+            (Some(lf), Some(rf), Some(st)) => {
+                let local_changed = st.sha256 != lf.sha256;
+                let remote_changed = st.commit != rf.last_commit_sha;
+                if local_changed && remote_changed {
+                    plan.conflicts.push(path.clone());
+                } else if local_changed {
+                    plan.upserts.push(path.clone());
                 }
-                _ => false,
+                // local unchanged: remote-side changes are the pull
+                // phase's business, never a push
             }
-        }).count();
-        if pending_deletes > 10 && pending_deletes * 10 > known * 3 {
-            report.mass_delete_guard = Some(pending_deletes);
-            save_state(dir, &state)?;
-            return Ok(report);
+            (Some(lf), Some(rf), None) => {
+                // stateless bootstrap: equal size is provisional-same
+                // (fragment verify audits content); else local wins and
+                // the prior remote content survives in git history
+                if lf.size != rf.size {
+                    plan.upserts.push(path.clone());
+                }
+            }
+            (Some(lf), None, Some(st)) => {
+                if st.sha256 != lf.sha256 {
+                    plan.upserts.push(path.clone()); // content beats deletion
+                }
+                // else: deleted remotely, local untouched -> pull phase
+                // propagates the deletion (guarded)
+            }
+            (Some(_), None, None) => plan.upserts.push(path.clone()), // new file
+            (None, Some(rf), Some(st)) => {
+                // deleted locally, remotely untouched since we saw it -> delete remotely
+                if st.commit == rf.last_commit_sha {
+                    plan.deletes.push(path.clone());
+                }
+                // else remote moved on: leave it; pull re-materializes
+            }
+            (None, Some(_), None) => {} // remote-only: pull fetches
+            (None, None, _) => {}       // stale state row; pull phase cleans
         }
     }
+    plan
+}
 
-    // blob-first warm pass: every big file this pass plausibly pushes gets
-    // its tier upload done here, <=UPLOAD_CONCURRENCY-wide, while the
-    // row-commit loop below stays serial (base_rev conflicts need order).
-    prewarm_tier(dir, &local, &append_only, &remote, opts.mode, opts.tiers.as_ref().expect("tiers attached"));
+/// Mass-deletion guard (ported): a pass that would delete more than
+/// max(10, 30%) of the known files, or ALL of them (the unmounted-disk /
+/// replaced-folder case the old root-identity check covered), is refused
+/// until --apply-mass-delete. Counts both directions — deletions pushed
+/// remotely and deletions applied locally.
+fn mass_delete_trips(push_deletes: usize, local_deletes: usize, known: usize, apply: bool) -> Option<usize> {
+    if apply {
+        return None;
+    }
+    let pending = push_deletes + local_deletes;
+    let known = known.max(1);
+    if (pending > 10 && pending * 10 > known * 3) || (pending == known && pending > 0) {
+        Some(pending)
+    } else {
+        None
+    }
+}
 
-    for path in paths {
-        let l = local.get(&path);
-        let r = remote.get(&path).filter(|r| !r.deleted);
-        let r_tomb = remote.get(&path).filter(|r| r.deleted);
-        let s = state.files.get(&path).cloned();
+pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Result<Report, SyncError> {
+    if let Some(src) = &opts.mirror_from {
+        mirror_overlay(src, dir).map_err(|e| SyncError::Io(format!("mirror-from {}: {e}", src.display())))?;
+    }
+    let mut state = load_state(dir, name).map_err(|e| SyncError::Io(e.to_string()))?;
+    let (local, stats) = scan_local(dir, Some(&state), opts.verify).map_err(|e| SyncError::Io(e.to_string()))?;
+    let storage = CodeStorage::connect(client, name, opts.codestorage.as_deref())?;
+    let author = Author::writer(&opts.writer_id);
+    let mut report = Report { scan: stats, mode: format!("{:?}", opts.mode).to_lowercase(), ..Default::default() };
 
-        match (l, r) {
-            (Some(lf), Some(rf)) => {
-                let local_changed = s.as_ref().map(|st| st.sha256 != lf.sha256).unwrap_or(true);
-                let remote_changed = s.as_ref().map(|st| st.rev != rf.rev).unwrap_or(true);
-                match (local_changed, remote_changed) {
-                    (false, false) => {
-                        // keep mtime cache fresh
-                        if let Some(st) = state.files.get_mut(&path) {
-                            st.size = lf.size;
-                            st.mtime_ns = lf.mtime_ns;
-                        }
-                        // shas agreeing with the ROW doesn't prove the bytes
-                        // exist in the tier — descriptors can outlive their
-                        // objects (bucket emptied out-of-band). One ranged
-                        // probe per big file re-uploads the liars; small
-                        // cost, and small files are inline anyway.
-                        if lf.size > blob::INLINE_MAX_BYTES as u64 {
-                            if let Some(tiers) = opts.tiers.as_ref() {
-                                match std::fs::read(dir.join(&path)) {
-                                    Ok(bytes) => {
-                                        let _ = blob::blob_ensure(tiers, &lf.sha256, &bytes, blob::mime_for(&path));
-                                    }
-                                    Err(e) => eprintln!("warning: could not re-read {path} for tier re-upload: {e}"),
-                                }
-                            }
-                        }
-                    }
-                    (true, false) => {
-                        if opts.mode == Mode::Pull {
-                            continue;
-                        }
-                        if is_append_only(&path) {
-                            // our local edit can never overwrite the remote
-                            // append-only file; keep both, say so once
-                            state.files.insert(path.clone(), FileState { rev: rf.rev, sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns });
-                            report.skipped_append_only.push(path.clone());
-                            continue;
-                        }
-                        push_file(client, name, dir, &path, s.as_ref().map(|x| x.rev).unwrap_or(0), lf, &mut state, &mut report, opts)?;
-                    }
-                    (false, true) => {
-                        if opts.mode == Mode::Push {
-                            continue;
-                        }
-                        pull_file(client, name, dir, &path, &mut state, &mut report, Some((rf.rev, rf.sha256.as_str())))?;
-                    }
-                    (true, true) => {
-                        if rf.sha256 == lf.sha256 {
-                            // racing sync already pushed our content: adopt
-                            state.files.insert(path.clone(), FileState { rev: rf.rev, sha256: rf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns });
-                        } else if is_append_only(&path) {
-                            state.files.insert(path.clone(), FileState { rev: rf.rev, sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns });
-                            report.skipped_append_only.push(path.clone());
-                        } else {
-                            resolve_conflict(client, name, dir, &path, lf, rf, s.as_ref(), &mut state, &mut report, opts)?;
-                        }
-                    }
-                }
+    let remote = list_main(&storage)?;
+    // candidate local deletions: known remotely before, gone from the
+    // listing now, local copy untouched since we saw it
+    let local_delete_candidates: Vec<String> = state
+        .files
+        .iter()
+        .filter(|(p, st)| {
+            !remote.contains_key(*p)
+                && local.get(*p).is_some_and(|lf| lf.sha256 == st.sha256)
+        })
+        .map(|(p, _)| p.clone())
+        .collect();
+    let pre = push_plan(&local, &remote, &state);
+    // pull mode never deletes remotely, so would-be push deletions must not
+    // trip the guard there (a wiped folder in pull mode just re-downloads)
+    let push_side = if opts.mode == Mode::Pull { 0 } else { pre.deletes.len() };
+    if let Some(n) = mass_delete_trips(push_side, local_delete_candidates.len(), state.files.len(), opts.apply_mass_delete) {
+        report.mass_delete_guard = Some(n);
+        // dropping stale rows keeps the guard from re-tripping forever on
+        // state that no longer matches either side
+        for p in local_delete_candidates {
+            state.files.remove(&p);
+        }
+        save_state(dir, &state).map_err(|e| SyncError::Io(e.to_string()))?;
+        return Ok(report);
+    }
+
+    // ---- push: one commit with expected-parent CAS, bounded rebuilds ----
+    if opts.mode != Mode::Pull {
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            let (remote_now, head) = if attempt == 1 {
+                (remote.clone(), storage.branch_head(MAIN)?)
+            } else {
+                let r = list_main(&storage)?;
+                let h = storage.branch_head(MAIN)?;
+                (r, h)
+            };
+            let plan = push_plan(&local, &remote_now, &state);
+            record_conflicts(
+                ConflictCtx { storage: &storage, dir, local: &local, remote: &remote_now, state: &mut state, report: &mut report, writer_id: &opts.writer_id },
+                &plan.conflicts,
+            )?;
+            if plan.upserts.is_empty() && plan.deletes.is_empty() {
+                break; // nothing to commit (clean, or a replay absorbed)
             }
-            (Some(lf), None) => {
-                if opts.mode == Mode::Pull {
+            let mut changes: Vec<Change> = Vec::with_capacity(plan.upserts.len() + plan.deletes.len());
+            for p in &plan.upserts {
+                let bytes = fs::read(dir.join(p)).map_err(|e| SyncError::Io(format!("read {p}: {e}")))?;
+                changes.push(Change::Upsert { path: p.clone(), bytes });
+            }
+            for p in &plan.deletes {
+                changes.push(Change::Delete { path: p.clone() });
+            }
+            let msg = format!(
+                "fragment sync {}: +{} -{}",
+                name,
+                plan.upserts.len(),
+                plan.deletes.len()
+            );
+            match storage.commit(head.as_deref(), &msg, &author, &changes) {
+                Ok(tip) => {
+                    for p in &plan.upserts {
+                        if let Some(lf) = local.get(p) {
+                            state.files.insert(
+                                p.clone(),
+                                FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: tip.clone() },
+                            );
+                        }
+                        report.pushed.push(p.clone());
+                    }
+                    for p in &plan.deletes {
+                        state.files.remove(p);
+                        report.deleted_remote.push(p.clone());
+                    }
+                    break;
+                }
+                Err(CsError::CasRejected { .. }) if attempt < MAX_CAS_ATTEMPTS => {
+                    eprintln!("  branch moved under us — refetching head and rebuilding the diff (attempt {attempt}/{MAX_CAS_ATTEMPTS})");
                     continue;
                 }
-                if let (Some(tomb), Some(st)) = (r_tomb, s.as_ref()) {
-                    // Deletion propagation by rev ordering: DELETE bumps the
-                    // row rev, so a tombstone at-or-above our last-synced rev
-                    // means the remote deleted this path after we saw it. An
-                    // untouched local copy propagates the deletion; a MODIFIED
-                    // local copy wins instead (falls through to the re-add
-                    // push below — content beats deletion). Without this rule
-                    // every stale mirror resurrects what others deleted, and
-                    // mirrors ping-pong deleted files forever.
-                    if tomb.rev >= st.rev && opts.mode == Mode::Mirror {
-                        if st.sha256 == lf.sha256 {
-                            fs::remove_file(dir.join(&path)).ok();
-                            state.files.remove(&path);
-                            report.deleted_local.push(path.clone());
-                            continue;
-                        }
-                    }
+                Err(CsError::CasRejected { detail }) => {
+                    return Err(SyncError::Cs(CsError::CasRejected {
+                        detail: format!("branch kept moving after {MAX_CAS_ATTEMPTS} attempts ({detail}); re-run fragment sync"),
+                    }));
                 }
-                let base = r_tomb.map(|t| t.rev).unwrap_or(0);
-                push_file(client, name, dir, &path, base, lf, &mut state, &mut report, opts)?;
-            }
-            (None, Some(rf)) => match &s {
-                Some(st) if st.rev == rf.rev => {
-                    // deleted locally, unchanged remotely → delete remotely
-                    if opts.mode == Mode::Pull {
-                        if !opts.prune {
-                            report.withheld_deletions.push(path.clone());
-                            state.files.remove(&path); // stop re-reporting every pass
-                            continue;
-                        }
-                        // --prune in pull mode: pull it back instead of deleting remote
-                        pull_file(client, name, dir, &path, &mut state, &mut report, Some((rf.rev, rf.sha256.as_str())))?;
-                        continue;
-                    }
-                    if is_append_only(&path) {
-                        // non-owner deletes under append-only are refused
-                        // server-side; keep the local file, say so once
-                        state.files.remove(&path);
-                        report.skipped_append_only.push(path.clone());
-                        continue;
-                    }
-                    let resp = client.delete(&format!("/api/f/{name}/file?path={}", encode_q(&path)))?;
-                    if resp.ok() {
-                        state.files.remove(&path);
-                        report.deleted_remote.push(path.clone());
-                    } else {
-                        bail!("delete {} failed: {}", path, resp.err_summary());
-                    }
-                }
-                _ => {
-                    if opts.mode == Mode::Push {
-                        continue;
-                    }
-                    pull_file(client, name, dir, &path, &mut state, &mut report, Some((rf.rev, rf.sha256.as_str())))?;
-                }
-            },
-            (None, None) => {
-                state.files.remove(&path);
+                Err(e) => return Err(e.into()),
             }
         }
     }
 
-    save_state(dir, &state)?;
+    // ---- pull: make the folder match main (fetch new/changed; propagate
+    // remote deletions per mode) ----
+    if opts.mode != Mode::Push {
+        let remote = list_main(&storage)?;
+        for rf in remote.values() {
+            let l = local.get(&rf.path);
+            let s = state.files.get(&rf.path);
+            let fetch = match (l, s) {
+                (None, _) => true, // remote-only
+                (Some(lf), None) => {
+                    // stateless bootstrap: adopt provisionally on size
+                    // match (verify audits), fetch on mismatch
+                    if lf.size == rf.size {
+                        state.files.insert(
+                            rf.path.clone(),
+                            FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: rf.last_commit_sha.clone() },
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                }
+                (Some(lf), Some(st)) => {
+                    let local_changed = st.sha256 != lf.sha256;
+                    let remote_changed = st.commit != rf.last_commit_sha;
+                    if local_changed && remote_changed {
+                        // both changed and push didn't resolve it (push
+                        // modes off, or a race) — same conflict treatment
+                        record_conflicts(
+                            ConflictCtx { storage: &storage, dir, local: &local, remote: &remote, state: &mut state, report: &mut report, writer_id: &opts.writer_id },
+                            std::slice::from_ref(&rf.path),
+                        )?;
+                        false
+                    } else {
+                        remote_changed && !local_changed
+                    }
+                }
+            };
+            if fetch {
+                pull_file(&storage, dir, &rf.path, &rf.last_commit_sha, &mut state, &mut report)?;
+            }
+        }
+        // remote deletions: known before, gone now, local copy untouched
+        let mut paths: Vec<String> = state.files.keys().cloned().collect();
+        paths.sort();
+        for p in paths {
+            if remote.contains_key(&p) {
+                continue;
+            }
+            let untouched = local.get(&p).is_some_and(|lf| Some(&lf.sha256) == state.files.get(&p).map(|s| &s.sha256));
+            if !untouched {
+                continue;
+            }
+            match opts.mode {
+                Mode::Mirror => {
+                    fs::remove_file(dir.join(&p)).map_err(|e| SyncError::Io(format!("delete {p}: {e}")))?;
+                    state.files.remove(&p);
+                    report.deleted_local.push(p.clone());
+                }
+                Mode::Pull => {
+                    if opts.prune {
+                        fs::remove_file(dir.join(&p)).map_err(|e| SyncError::Io(format!("delete {p}: {e}")))?;
+                        state.files.remove(&p);
+                        report.deleted_local.push(p.clone());
+                    } else {
+                        report.withheld_deletions.push(p.clone());
+                        // keep the state row: dropping it here made the
+                        // deletion unknowable, so a later --prune pass could
+                        // never apply it (found by the e2e withhold-then-prune
+                        // sequence). Re-reporting each pass is honest — the
+                        // deletion is still pending.
+                    }
+                }
+                Mode::Push => unreachable!("pull phase only runs when mode != Push"),
+            }
+        }
+    }
+
+    save_state(dir, &state).map_err(|e| SyncError::Io(e.to_string()))?;
     Ok(report)
 }
 
-/// True when a whole file's bytes are a blob-tier ref-envelope
-/// ({"ref":{"sha256","size","mime"}}). Real content never looks like this —
-/// the only way it reaches disk is sync corruption (an older build once
-/// wrote pointer rows over local files), and round-tripping it would make
-/// the corruption canonical. Guarded on both the push and the pull path.
-fn looks_like_ref_envelope(bytes: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(bytes)
-        .ok()
-        .and_then(|v| {
-            let r = v.get("ref")?;
-            Some(
-                r.get("sha256").and_then(|s| s.as_str()).map(|s| s.len() == 64).unwrap_or(false)
-                    && r.get("size").and_then(|s| s.as_u64()).is_some(),
-            )
-        })
-        .unwrap_or(false)
+fn list_main(storage: &CodeStorage) -> Result<HashMap<String, RemoteFile>, SyncError> {
+    if storage.branch_head(MAIN)?.is_none() {
+        return Ok(HashMap::new()); // empty repo: everything local is new
+    }
+    Ok(storage.list_files(MAIN)?.into_iter().map(|f| (f.path.clone(), f)).collect())
 }
 
-/// Envelope check that only reads the file when it could plausibly be one;
-/// big pulls never pay for a second read.
-fn small_file_ref_envelope(p: &Path) -> Option<bool> {
-    let md = fs::metadata(p).ok()?;
-    if md.len() > 512 {
-        return Some(false);
-    }
-    let bytes = fs::read(p).ok()?;
-    Some(looks_like_ref_envelope(&bytes))
-}
-
-fn push_file(
-    client: &Client,
-    name: &str,
-    dir: &Path,
-    path: &str,
-    base_rev: u64,
-    lf: &LocalFile,
-    state: &mut SyncState,
-    report: &mut Report,
-    opts: &SyncOptions,
-) -> Result<()> {
-    let bytes = fs::read(dir.join(path))?;
-    if looks_like_ref_envelope(&bytes) {
-        bail!(
-            "refusing to push {path}: its bytes are a blob-tier ref-envelope, which is \
-             sync corruption in this folder, not file content — restore the real file \
-             (or delete it) before pushing"
-        );
-    }
-    let qs = format!("/api/f/{name}/file?path={}&base_rev={base_rev}", encode_q(path));
-    let resp = commit_push(client, opts.tiers.as_ref(), &qs, path, bytes.clone())?;
-    if resp.status == 409 {
-        // lost a race (or append-only): treat as a conflict to resolve
-        let st = state.files.get(path).cloned();
-        let remote = fetch_remote(client, name, path)?;
-        if let Some(rf) = remote {
-            resolve_conflict(client, name, dir, path, lf, &rf, st.as_ref(), state, report, opts)?;
+/// both sides changed: keep local, save the remote bytes beside it as
+/// `<path>.conflict-<ts>-<writer>`, then adopt (remote commit, LOCAL file
+/// sha) so the conflict reports once and the next pass pushes local
+/// content — the old copy-strategy semantics (theirs survives in the copy
+/// file and in git history).
+fn record_conflicts(
+    ctx: ConflictCtx<'_>,
+    conflicts: &[String],
+) -> Result<(), SyncError> {
+    for path in conflicts {
+        if ctx.report.conflicts.iter().any(|c| c.starts_with(path.as_str())) {
+            continue; // already recorded this pass
         }
-        return Ok(());
+        let rf_commit = ctx.remote.get(path).map(|r| r.last_commit_sha.clone()).unwrap_or_default();
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let (stem, ext) = match path.rfind('.') {
+            Some(i) if !path[i..].contains('/') => (&path[..i], &path[i..]),
+            _ => (path.as_str(), ""),
+        };
+        let conflict_path = format!("{stem}.conflict-{ts}-{}{ext}", ctx.writer_id);
+        match ctx.storage.read_file(path, MAIN) {
+            Ok(bytes) => {
+                atomic_write(&ctx.dir.join(&conflict_path), &bytes).map_err(|e| SyncError::Io(e.to_string()))?;
+                ctx.report.conflicts.push(format!("{path} (remote copy: {conflict_path})"));
+            }
+            Err(e) => {
+                ctx.report.conflicts.push(format!("{path} (remote copy unavailable: {e})"));
+            }
+        }
+        let entry = match ctx.local.get(path) {
+            Some(lf) => FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: rf_commit },
+            None => match ctx.state.files.get(path) {
+                Some(st) => FileState { commit: rf_commit, ..st.clone() },
+                None => continue,
+            },
+        };
+        ctx.state.files.insert(path.clone(), entry);
     }
-    if !resp.ok() {
-        bail!("push {} failed: {}", path, resp.err_summary());
-    }
-    let v = resp.json()?;
-    let sha = sha256_hex(&bytes);
-    state.files.insert(path.to_string(), FileState { rev: v["rev"].as_u64().unwrap_or(0), sha256: sha, size: lf.size, mtime_ns: lf.mtime_ns });
-    report.pushed.push(path.to_string());
     Ok(())
 }
 
-/// One file → one row commit through the two-tier contract:/// `bytes.len() <= 65536` rides the inline carve-out as a raw body;
-/// anything larger is uploaded to the tier FIRST (kind-24242 auth event,
-/// HEAD-gated, descriptor hash verified) and then committed in the ref
-/// form {"ref":{"sha256","size","mime"}}. No tier + oversized = hard error.
-fn commit_push(
-    client: &Client,
-    tiers: Option<&Arc<blob::TierShared>>,
-    qs: &str,
-    path: &str,
-    bytes: Vec<u8>,
-) -> Result<crate::api::Resp> {
-    if bytes.len() <= blob::INLINE_MAX_BYTES {
-        return client.put_bytes(qs, bytes);
-    }
-    match tiers {
-        Some(tiers) => blob::blob_ensure(tiers, &sha256_hex(&bytes), &bytes, blob::mime_for(path))?,
-        None => return Err(blob::no_tier_error(path, bytes.len())),
-    }
-    client.put_ref(qs, &sha256_hex(&bytes), bytes.len() as u64, blob::mime_for(path))
-}
-
-/// Warm the tier for every big file this pass plausibly pushes so the
-/// uploads fan out (bounded by blob::UPLOAD_CONCURRENCY) instead of running
-/// one-at-a-time inside the commit loop. The candidate predicate is a
-/// deliberate SUPERSET of the real push decision: a spurious warm-up costs
-/// one HEAD probe against an idempotent store, while any missed warm-up
-/// still self-heals when push_file calls blob_ensure (same memo).
-/// Candidates are deduped by sha first — two files with identical content
-/// share one memo entry, so they can never double-PUT.
-fn prewarm_tier(
-    dir: &Path,
-    local: &HashMap<String, LocalFile>,
-    append_only: &[String],
-    remote: &HashMap<String, RemoteFile>,
-    mode: Mode,
-    tiers: &Arc<blob::TierShared>,
-) {
-    const MAX_IN_FLIGHT: usize = blob::UPLOAD_CONCURRENCY; // hard concurrency ceiling
-    if tiers.blob.is_none() || mode == Mode::Pull {
-        return; // nothing to warm without a tier or without pushes
-    }
-    let mut cands: Vec<(String, PathBuf)> = Vec::new();
-    for (path, lf) in local.iter() {
-        if lf.size <= blob::INLINE_MAX_BYTES as u64 {
-            continue;
-        }
-        let is_append_only = |p: &str| append_only.iter().any(|pre| p == pre.trim_end_matches('/') || p.starts_with(pre.as_str()));
-        if is_append_only(path) {
-            continue;
-        }
-        // will it actually change rows? unchanged-content files would only
-        // cost a HEAD; conservatively include them anyway except when the
-        // remote listing already shows this exact sha (pure no-op)
-        let remote_already_has_it =
-            remote.get(path).is_some_and(|r| !r.deleted && r.sha256 == lf.sha256);
-        if remote_already_has_it {
-            continue;
-        }
-        cands.push((lf.sha256.clone(), dir.join(path)));
-    }
-    if cands.is_empty() {
-        return;
-    }
-    cands.sort_by(|a, b| a.0.cmp(&b.0));
-    cands.dedup_by(|a, b| a.0 == b.0);
-    for chunk in cands.chunks(MAX_IN_FLIGHT) {
-        std::thread::scope(|scope| {
-            for (sha, p) in chunk {
-                let tiers = tiers.clone();
-                let sha = sha.clone();
-                let p = p.clone();
-                scope.spawn(move || {
-                    // best-effort: failures are recorded in the shared memo and
-                    // replayed loudly at the row-commit site; nothing printed here
-                    let _ = std::fs::read(&p).and_then(|bytes| {
-                        blob::blob_ensure(&tiers, &sha, &bytes, crate::blob::mime_for(p.to_string_lossy().as_ref())).map_err(|e| {
-                            std::io::Error::other(format!("{e:#}"))
-                        })
-                    });
-                });
-            }
-        });
-    }
+/// Everything record_conflicts needs; keeps it at one argument.
+struct ConflictCtx<'a> {
+    storage: &'a CodeStorage,
+    dir: &'a Path,
+    local: &'a BTreeMap<String, LocalFile>,
+    remote: &'a HashMap<String, RemoteFile>,
+    state: &'a mut SyncState,
+    report: &'a mut Report,
+    writer_id: &'a str,
 }
 
 fn pull_file(
-    client: &Client,
-    name: &str,
+    storage: &CodeStorage,
     dir: &Path,
     path: &str,
+    commit: &str,
     state: &mut SyncState,
     report: &mut Report,
-    src: Option<(u64, &str)>,
-) -> Result<()> {
-    let target = dir.join(path);
-
-    // cache short-circuit BEFORE any network traffic: a present cache entry
-    // for this exact sha is content-addressed truth, so repeated pulls of an
-    // unchanged hash stay offline (and instant). Read errors degrade to a
-    // normal network pull.
-    let cached = src
-        .as_ref()
-        .and_then(|(_, sha)| blob::cache_lookup(dir, sha))
-        .and_then(|p| fs::read(&p).ok());
-    if let (Some((rev, sha)), Some(bytes)) = (&src, cached) {
-        atomic_write(&target, &bytes)?;
-        let md = fs::metadata(&target)?;
-        let mtime_ns = md.modified()?.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i128).unwrap_or(0);
-        state.files.insert(
-            path.to_string(),
-            FileState { rev: *rev, sha256: (*sha).to_string(), size: md.len(), mtime_ns },
-        );
-        report.pulled.push(path.to_string());
-        return Ok(());
-    }
-
-    // network fetch: follows redirects (the new public-read wire form answers
-    // with a 302 to `${BLOBSD_PUBLIC_URL}/${sha}`), streams to tmp next to
-    // the target (heap-flat for big blobs), fsyncs, then atomically renames;
-    // Last-Modified is honored best-effort so later scans keep their shortcut
-    let mut sr = client.get_stream(&format!("/api/f/{name}/file?path={}", encode_q(path)))?;
-    if !(200..300).contains(&sr.status) {
-        let st = sr.status;
-        bail!("pull {} failed: http {} {}", path, st, sr.err_summary());
-    }
-    let mtime = sr.last_modified();
-    let mut reader = sr.into_read();
-    let tmp = target.with_extension(format!("fragment-partial-{}", std::process::id()));
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let sha;
-    {
-        let f = File::create(&tmp)?;
-        let mut hw = HashWriter { inner: f, hasher: Sha256::new() };
-        std::io::copy(&mut reader, &mut hw).with_context(|| format!("streaming {path}"))?;
-        hw.inner.sync_all()?;
-        sha = hex::encode(hw.hasher.finalize());
-    }
-    if let Some((_, want)) = &src {
-        if !want.is_empty() && !want.eq_ignore_ascii_case(&sha) {
-            fs::remove_file(&tmp).ok();
-            bail!("pull {} failed: fetched sha256 {sha} but the listing promised {want}", path);
-        }
-    }
-    if let Some(true) = small_file_ref_envelope(&tmp) {
-        fs::remove_file(&tmp).ok();
-        bail!(
-            "pull {path} refused: the host served a ref-envelope as file content — \
-             the host row itself is corrupted; fix the host side before syncing"
-        );
-    }
-    // write-through into the cache BEFORE publishing the file: hygiene errors
-    // never block a pull, so treat them as warnings only
-    if let Err(e) = blob::cache_store(dir, &sha, &tmp) {
-        eprintln!("warning: could not cache {}: {e}", sha);
-    }
-    if let Some(t) = mtime {
-        let f = File::options().write(true).open(&tmp)?;
-        f.set_times(fs::FileTimes::new().set_modified(t))?;
-    }
-    fs::rename(&tmp, &target)?;
-
-    let md = fs::metadata(&target)?;
-    let mtime_ns = md.modified()?.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i128).unwrap_or(0);
+) -> Result<(), SyncError> {
+    let bytes = storage.read_file(path, MAIN)?;
+    let sha = sha256_hex(&bytes);
+    atomic_write(&dir.join(path), &bytes).map_err(|e| SyncError::Io(e.to_string()))?;
+    let md = fs::metadata(dir.join(path)).map_err(|e| SyncError::Io(e.to_string()))?;
+    let mtime_ns = md.modified().map(|m| m.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i128).unwrap_or(0)).unwrap_or(0);
     state.files.insert(
         path.to_string(),
-        FileState { rev: src.map(|(r, _)| r).unwrap_or(0), sha256: sha, size: md.len(), mtime_ns },
+        FileState { sha256: sha, size: md.len(), mtime_ns, commit: commit.to_string() },
     );
     report.pulled.push(path.to_string());
     Ok(())
 }
 
-/// Write-forwarding wrapper tallying sha256 + byte count while streaming a
-/// pull body to its tmp file.
-struct HashWriter<W: Write> {
-    inner: W,
-    hasher: Sha256,
-}
-impl<W: Write> Write for HashWriter<W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        // hash only the bytes actually consumed (partial writes are legal)
-        let n = self.inner.write(buf)?;
-        self.hasher.update(&buf[..n]);
-        Ok(n)
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
-}
-
-fn fetch_remote(client: &Client, name: &str, path: &str) -> Result<Option<RemoteFile>> {
-    let resp = client.call(client.get(&format!("/api/f/{name}/files?since_rev=0"))?)?;
-    for f in resp["files"].as_array().cloned().unwrap_or_default() {
-        if f["path"].as_str() == Some(path) {
-            return Ok(Some(RemoteFile { rev: f["rev"].as_u64().unwrap_or(0), sha256: f["sha256"].as_str().unwrap_or("").to_string(), deleted: f["deleted"].as_bool().unwrap_or(false) }));
-        }
-    }
-    Ok(None)
-}
-
-/// both sides changed: try a three-way merge against the recorded ancestor
-/// (the server keeps history), falling back to markers or conflict copies
-fn resolve_conflict(
-    client: &Client,
-    name: &str,
-    dir: &Path,
-    path: &str,
-    lf: &LocalFile,
-    rf: &RemoteFile,
-    st: Option<&FileState>,
-    state: &mut SyncState,
-    report: &mut Report,
-    opts: &SyncOptions,
-) -> Result<()> {
-    let ours = fs::read(dir.join(path))?;
-    let theirs_resp = client.get(&format!("/api/f/{name}/file?path={}", encode_q(path)))?;
-    if !theirs_resp.ok() {
-        bail!("conflict fetch {} failed: {}", path, theirs_resp.err_summary());
-    }
-    let theirs = theirs_resp.body;
-
-    // ancestor: the revision we last synced, from server history
-    let base: Option<Vec<u8>> = match st {
-        Some(s) if s.rev > 0 => {
-            let a = client.get(&format!("/api/f/{name}/file/at?path={}&rev={}", encode_q(path), s.rev))?;
-            if a.ok() && sha256_hex(&a.body) == s.sha256 { Some(a.body) } else { None }
-        }
-        _ => None,
-    };
-
-    match try_merge(base.as_deref(), &ours, &theirs) {
-        MergeOutcome::Clean(merged) => {
-            atomic_write(&dir.join(path), &merged)?;
-            let sha = sha256_hex(&merged);
-            let qs = format!("/api/f/{name}/file?path={}&base_rev={}", encode_q(path), rf.rev);
-            // merged pushes follow the same two-tier contract as plain pushes
-            let resp = commit_push(client, opts.tiers.as_ref(), &qs, path, merged.clone())?;
-            if resp.ok() {
-                let v = resp.json()?;
-                let md = fs::metadata(dir.join(path))?;
-                let mtime_ns = md.modified()?.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i128).unwrap_or(0);
-                state.files.insert(path.to_string(), FileState { rev: v["rev"].as_u64().unwrap_or(0), sha256: sha, size: md.len(), mtime_ns });
-                report.merged.push(path.to_string());
-            } else {
-                // push lost a race; local merge stands, next pass re-resolves
-                report.conflicts.push(format!("{path} (merged locally, push lost a race: {})", resp.err_summary()));
-            }
-        }
-        MergeOutcome::Markers(merged) if opts.strategy == ConflictStrategy::Markers => {
-            atomic_write(&dir.join(path), &merged)?;
-            let sha = sha256_hex(&merged);
-            let md = fs::metadata(dir.join(path))?;
-            let mtime_ns = md.modified()?.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i128).unwrap_or(0);
-            // stable until the user resolves: local sha adopted at remote rev
-            state.files.insert(path.to_string(), FileState { rev: rf.rev, sha256: sha, size: md.len(), mtime_ns });
-            report.conflicts.push(path.to_string());
-        }
-        _ => {
-            // copy strategy (or markers of a non-mergeable): save theirs
-            // beside ours, keep ours local, adopt (remote rev, local sha)
-            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-            let (stem, ext) = match path.rfind('.') {
-                Some(i) if !path[i..].contains('/') => (&path[..i], &path[i..]),
-                _ => (path, ""),
-            };
-            let conflict_path = format!("{stem}.conflict-{ts}-{}{ext}", opts.writer_id);
-            atomic_write(&dir.join(&conflict_path), &theirs)?;
-            state.files.insert(path.to_string(), FileState { rev: rf.rev, sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns });
-            report.conflicts.push(format!("{path} (remote copy: {conflict_path})"));
-        }
-    }
-    Ok(())
-}
-
-enum MergeOutcome {
-    Clean(Vec<u8>),
-    Markers(Vec<u8>),
-    NotMergeable,
-}
-
-fn try_merge(base: Option<&[u8]>, ours: &[u8], theirs: &[u8]) -> MergeOutcome {
-    let base = match base {
-        Some(b) => b,
-        None => return MergeOutcome::NotMergeable, // no ancestor → copy
-    };
-    const MAX: usize = 5 * 1024 * 1024;
-    if ours.len() > MAX || theirs.len() > MAX || base.len() > MAX {
-        return MergeOutcome::NotMergeable;
-    }
-    let (b, o, t) = match (std::str::from_utf8(base), std::str::from_utf8(ours), std::str::from_utf8(theirs)) {
-        (Ok(b), Ok(o), Ok(t)) => (b.replace("\r\n", "\n"), o.replace("\r\n", "\n"), t.replace("\r\n", "\n")),
-        _ => return MergeOutcome::NotMergeable,
-    };
-    // diffy 0.5: Err(conflicted) carries the full merge WITH <<<<<<< markers.
-    // JSON gets no special treatment: a key-level "smart" merge was cut —
-    // zero uses ever, and silently dropping the other side's scalar loses
-    // data without a sound. JSON conflicts get loud markers like any text.
-    match diffy::merge(&b, &o, &t) {
-        Ok(m) => MergeOutcome::Clean(m.into_bytes()),
-        Err(conflicted) => MergeOutcome::Markers(conflicted.into_bytes()),
-    }
-}
-
-/// full-hash audit: local truth vs remote listing
-pub fn verify(client: &Client, name: &str, dir: &Path) -> Result<Report> {
-    let mut opts = SyncOptions::default();
-    opts.verify = true;
-    let state = load_state(dir, name)?;
-    let (local, stats) = scan_local(dir, Some(&state), true)?;
-    let remote_resp = client.call(client.get(&format!("/api/f/{name}/files?since_rev=0"))?)?;
+/// Full-content audit: local truth vs the repo listing + fetched bytes
+/// (no shortcuts — every remote file is fetched and hashed).
+pub fn verify(client: &Client, name: &str, dir: &Path, codestorage: Option<&str>) -> Result<Report, SyncError> {
+    let state = load_state(dir, name).map_err(|e| SyncError::Io(e.to_string()))?;
+    let (local, stats) = scan_local(dir, Some(&state), true).map_err(|e| SyncError::Io(e.to_string()))?;
+    let storage = CodeStorage::connect(client, name, codestorage)?;
     let mut drift = Report { scan: stats, mode: "verify".into(), ..Default::default() };
-    for f in remote_resp["files"].as_array().cloned().unwrap_or_default() {
-        let p = f["path"].as_str().unwrap_or("").to_string();
-        let rsha = f["sha256"].as_str().unwrap_or("").to_string();
-        if f["deleted"].as_bool().unwrap_or(false) {
-            if local.contains_key(&p) {
-                drift.conflicts.push(format!("{p}: deleted remotely, present locally"));
+    let remote = list_main(&storage)?;
+    for (p, rf) in &remote {
+        match local.get(p) {
+            None => drift.conflicts.push(format!("{p}: in the repo, missing locally")),
+            Some(lf) => {
+                let bytes = storage.read_file(p, MAIN)?;
+                if sha256_hex(&bytes) != lf.sha256 {
+                    drift.conflicts.push(format!("{p}: content differs from the repo"));
+                }
+                let _ = rf;
             }
-            continue;
-        }
-        match local.get(&p) {
-            Some(lf) if lf.sha256 == rsha => {}
-            Some(_) => drift.conflicts.push(format!("{p}: content differs from remote")),
-            None => drift.conflicts.push(format!("{p}: missing locally")),
         }
     }
     for p in local.keys() {
-        if !remote_resp["files"].as_array().cloned().unwrap_or_default().iter().any(|f| f["path"].as_str() == Some(p.as_str())) {
-            drift.conflicts.push(format!("{p}: not on remote"));
+        if !remote.contains_key(p) {
+            drift.conflicts.push(format!("{p}: not in the repo"));
         }
     }
     Ok(drift)
 }
 
+/// Commit exactly one file to main with CAS retries (manifest-set).
+pub fn commit_single_file(
+    client: &Client,
+    name: &str,
+    path: &str,
+    bytes: Vec<u8>,
+    message: &str,
+    writer_id: &str,
+    codestorage: Option<&str>,
+) -> Result<String, SyncError> {
+    let storage = CodeStorage::connect(client, name, codestorage)?;
+    let author = Author::writer(writer_id);
+    for attempt in 1..=MAX_CAS_ATTEMPTS {
+        let head = storage.branch_head(MAIN)?;
+        match storage.commit(head.as_deref(), message, &author, &[Change::Upsert { path: path.to_string(), bytes: bytes.clone() }]) {
+            Ok(tip) => return Ok(tip),
+            Err(CsError::CasRejected { .. }) if attempt < MAX_CAS_ATTEMPTS => continue,
+            Err(CsError::CasRejected { detail }) => {
+                return Err(SyncError::Cs(CsError::CasRejected {
+                    detail: format!("branch kept moving after {MAX_CAS_ATTEMPTS} attempts ({detail})"),
+                }));
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    unreachable!("bounded loop returns from every arm")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth;
+    use crate::mockcs::MockServer;
+
+    fn client_for(mock: &MockServer) -> Client {
+        Client::new(&mock.url, auth::Identity::from_secret([7u8; 32]))
+    }
+
+    fn opts(mode: Mode) -> SyncOptions {
+        SyncOptions { mode, writer_id: "deadbeef".into(), ..Default::default() }
+    }
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("fragment-sync3-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
 
     #[test]
     fn scan_uses_cache() {
-        let dir = std::env::temp_dir().join(format!("fragment-scan2-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = tmpdir("scan");
         fs::create_dir_all(dir.join("site")).unwrap();
         fs::write(dir.join("site/index.html"), b"hi").unwrap();
-        // first scan: hashed
         let (l1, s1) = scan_local(&dir, None, false).unwrap();
         assert_eq!(s1.hashed, 1);
-        // seed state, rescan with cache: zero hashes
-        let mut st = SyncState { schema_version: 2, name: "x".into(), root_dev: 0, root_ino: 0, files: HashMap::new() };
+        let mut st = SyncState { schema_version: 3, name: "x".into(), files: HashMap::new() };
         let lf = l1.get("site/index.html").unwrap();
-        st.files.insert("site/index.html".into(), FileState { rev: 1, sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns });
+        st.files.insert("site/index.html".into(), FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: "c".into() });
         let (_, s2) = scan_local(&dir, Some(&st), false).unwrap();
         assert_eq!(s2.hashed, 0);
         fs::remove_dir_all(&dir).ok();
@@ -1023,73 +778,368 @@ mod tests {
 
     #[test]
     fn atomic_write_leaves_no_partial() {
-        let dir = std::env::temp_dir().join(format!("fragment-atomic-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let dir = tmpdir("atomic");
         atomic_write(&dir.join("a.txt"), b"content").unwrap();
         assert_eq!(fs::read(dir.join("a.txt")).unwrap(), b"content");
-        assert!(dir.join("a.fragment-partial-1").exists() == false);
         let leftovers: Vec<_> = fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains("partial")).collect();
         assert!(leftovers.is_empty());
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn merge3_non_overlapping() {
-        let base = "line1\nline2\nline3\n";
-        let ours = "OURS\nline2\nline3\n";
-        let theirs = "line1\nline2\nTHEIRS\n";
-        match try_merge(Some(base.as_bytes()), ours.as_bytes(), theirs.as_bytes()) {
-            MergeOutcome::Clean(m) => {
-                let s = String::from_utf8(m).unwrap();
-                assert!(s.contains("OURS"));
-                assert!(s.contains("THEIRS"));
-                assert!(!s.contains("<<<<<<<"));
-            }
-            _ => panic!("expected clean merge"),
-        }
-    }
-
-    #[test]
-    fn merge3_overlapping_marks() {
-        let base = "line\n";
-        let ours = "ours-version\n";
-        let theirs = "theirs-version\n";
-        match try_merge(Some(base.as_bytes()), ours.as_bytes(), theirs.as_bytes()) {
-            MergeOutcome::Markers(m) => assert!(String::from_utf8(m).unwrap().contains("<<<<<<<")),
-            _ => panic!("expected markers"),
-        }
-    }
-
-    #[test]
     fn old_state_reads_fresh() {
-        let dir = std::env::temp_dir().join(format!("fragment-v1state-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = tmpdir("oldstate");
         fs::create_dir_all(dir.join(".fragment")).unwrap();
-        fs::write(dir.join(".fragment/state.json"), b"{\"name\":\"x\",\"files\":{\"a\":{\"rev\":1,\"sha256\":\"beef\"}}}").unwrap();
+        fs::write(dir.join(".fragment/state.json"), b"{\"name\":\"x\",\"files\":{\"a\":{\"rev\":1}}}").unwrap();
         let st = load_state(&dir, "x").unwrap();
-        assert!(st.files.is_empty()); // v1 → fresh
-        assert_eq!(st.schema_version, 2);
+        assert!(st.files.is_empty()); // v2 → fresh
+        assert_eq!(st.schema_version, 3);
         fs::remove_dir_all(&dir).ok();
     }
-}
-
-#[cfg(test)]
-mod hw_tests {
-    use super::*;
-    use std::io::Cursor;
 
     #[test]
-    // pins the trap this once caused: hex::encode(finalize()) is the digest,
-    // while sha256_hex(finalize()) would hash the digest a second time
-    fn hash_writer_tallies_streamed_bytes() {
-        let payload = b"hello pull";
-        let mut hw = HashWriter { inner: Cursor::new(Vec::new()), hasher: Sha256::new() };
-        let mut rd = Cursor::new(payload.to_vec());
-        std::io::copy(&mut rd, &mut hw).unwrap();
-        let inner = hw.inner.into_inner();
-        assert_eq!(inner, payload.to_vec(), "bytes forwarded");
-        assert_eq!(hex::encode(hw.hasher.finalize()), "6a853b1f10c0c94d79bdd80f7fd724207d05b5174104d67677ff916e1114f096");
-        assert_ne!(sha256_hex(&Sha256::digest(payload)), "6a853b1f10c0c94d79bdd80f7fd724207d05b5174104d67677ff916e1114f096");
+    fn mass_delete_guard_semantics() {
+        // ported rule: pending > 10 AND pending > 30% of known
+        assert!(mass_delete_trips(11, 0, 30, false).is_some());
+        assert!(mass_delete_trips(11, 0, 100, false).is_none()); // 11% only
+        assert!(mass_delete_trips(9, 0, 30, false).is_none()); // 30% exactly, but <= 10
+        // full wipe trips regardless of count (unmounted-folder case)
+        assert!(mass_delete_trips(3, 0, 3, false).is_some());
+        assert!(mass_delete_trips(1, 0, 1, false).is_some());
+        // override
+        assert!(mass_delete_trips(11, 0, 30, true).is_none());
+        // pull-side deletions count toward the same guard
+        assert!(mass_delete_trips(0, 11, 30, false).is_some());
+        // empty state floors `known` at 1: mass deletions without state
+        // cannot happen for real, but the wipe rule still catches them
+        assert!(mass_delete_trips(100, 0, 1, false).is_some());
+    }
+
+    // ---- end-to-end against the mock code.storage ----
+
+    #[test]
+    fn push_success_commits_folder() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[]);
+        let c = client_for(&mock);
+        let dir = tmpdir("push-ok");
+        fs::write(dir.join("a.txt"), b"alpha").unwrap();
+        fs::create_dir_all(dir.join("site")).unwrap();
+        fs::write(dir.join("site/index.html"), b"<h1>hi</h1>").unwrap();
+        let report = sync_once(&c, "t", &dir, &opts(Mode::Push)).unwrap();
+        assert_eq!(report.pushed.len(), 2);
+        assert_eq!(mock.file_at("t", "main", "a.txt").unwrap(), b"alpha");
+        assert_eq!(mock.file_at("t", "main", "site/index.html").unwrap(), b"<h1>hi</h1>");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn push_replay_commits_exactly_once() {
+        // the idempotency replay: the same folder re-synced must send NO
+        // further commit-packs (content equality short-circuits)
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[]);
+        let c = client_for(&mock);
+        let dir = tmpdir("push-replay");
+        fs::write(dir.join("a.txt"), b"alpha").unwrap();
+        sync_once(&c, "t", &dir, &opts(Mode::Push)).unwrap();
+        assert_eq!(mock.commit_pack_count(), 1);
+        let r2 = sync_once(&c, "t", &dir, &opts(Mode::Push)).unwrap();
+        assert!(r2.pushed.is_empty());
+        assert_eq!(mock.commit_pack_count(), 1, "replayed sync must not commit again");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn push_conflicting_parent_retries_then_succeeds() {
+        // competitor moves the tip once: our pack 409s, we refetch,
+        // rebuild, and land on the new tip — both changes survive
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[]);
+        mock.sabotage_commit_packs(1);
+        let c = client_for(&mock);
+        let dir = tmpdir("push-conflict-once");
+        fs::write(dir.join("a.txt"), b"alpha").unwrap();
+        let report = sync_once(&c, "t", &dir, &opts(Mode::Push)).unwrap();
+        assert_eq!(report.pushed.len(), 1);
+        assert!(mock.file_at("t", "main", "competitor.txt").is_some(), "competitor commit survives");
+        assert_eq!(mock.file_at("t", "main", "a.txt").unwrap(), b"alpha");
+        assert!(mock.commit_pack_count() >= 2, "one rejected attempt plus one landing");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn push_conflicting_parent_forever_is_bounded() {
+        // every attempt is sabotaged: explicit error after MAX_CAS_ATTEMPTS
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[]);
+        mock.sabotage_commit_packs(99);
+        let c = client_for(&mock);
+        let dir = tmpdir("push-conflict-forever");
+        fs::write(dir.join("a.txt"), b"alpha").unwrap();
+        let err = sync_once(&c, "t", &dir, &opts(Mode::Push)).unwrap_err();
+        assert!(err.to_string().contains("branch kept moving"), "got: {err}");
+        assert_eq!(mock.commit_pack_count(), MAX_CAS_ATTEMPTS, "exactly the bounded number of attempts");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pull_materializes_repo() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("a.txt", b"remote-a"), ("site/index.html", b"<p>x</p>")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("pull");
+        let report = sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
+        assert_eq!(report.pulled.len(), 2);
+        assert_eq!(fs::read(dir.join("a.txt")).unwrap(), b"remote-a");
+        assert_eq!(fs::read(dir.join("site/index.html")).unwrap(), b"<p>x</p>");
+        // second pull: nothing to do
+        let r2 = sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
+        assert!(r2.pulled.is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mirror_pushes_and_pulls() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("remote-only.txt", b"r")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("mirror");
+        fs::write(dir.join("local-only.txt"), b"l").unwrap();
+        let report = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(report.pushed, vec!["local-only.txt"]);
+        assert_eq!(report.pulled, vec!["remote-only.txt"]);
+        assert!(dir.join("remote-only.txt").exists());
+        assert!(mock.file_at("t", "main", "local-only.txt").is_some());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn deletion_pushes_and_propagates_back() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("gone.txt", b"g"), ("kept.txt", b"k")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("delete");
+        // first pass: adopt both files locally
+        sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        // delete one locally, push the deletion
+        fs::remove_file(dir.join("gone.txt")).unwrap();
+        let report = sync_once(&c, "t", &dir, &opts(Mode::Push)).unwrap();
+        assert_eq!(report.deleted_remote, vec!["gone.txt"]);
+        assert!(mock.file_at("t", "main", "gone.txt").is_none());
+        assert!(mock.file_at("t", "main", "kept.txt").is_some());
+        // a second folder (fresh state) pulling sees the deletion
+        let dir2 = tmpdir("delete-other");
+        sync_once(&c, "t", &dir2, &opts(Mode::Pull)).unwrap();
+        assert!(dir2.join("kept.txt").exists());
+        assert!(!dir2.join("gone.txt").exists(), "pull of an empty path must not create it");
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&dir2).ok();
+    }
+
+    #[test]
+    fn remote_deletion_propagates_in_mirror_withheld_in_pull() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("gone.txt", b"g"), ("kept.txt", b"k")]);
+        let c = client_for(&mock);
+        // three folders adopt both files
+        let dir = tmpdir("rdelete");
+        let dir2 = tmpdir("rdelete-other");
+        let dir3 = tmpdir("rdelete-third");
+        sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        sync_once(&c, "t", &dir3, &opts(Mode::Pull)).unwrap();
+        // dir2 pulls, deletes gone.txt, pushes the deletion
+        sync_once(&c, "t", &dir2, &opts(Mode::Pull)).unwrap();
+        fs::remove_file(dir2.join("gone.txt")).unwrap();
+        sync_once(&c, "t", &dir2, &opts(Mode::Push)).unwrap();
+        // mirror folder: local untouched → deletion propagates locally
+        let report = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(report.deleted_local, vec!["gone.txt"]);
+        assert!(!dir.join("gone.txt").exists());
+        // pull-only folder with untouched local copy: withheld without --prune
+        let report = sync_once(&c, "t", &dir3, &opts(Mode::Pull)).unwrap();
+        assert_eq!(report.withheld_deletions, vec!["gone.txt"]);
+        assert!(dir3.join("gone.txt").exists(), "pull without --prune never deletes");
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&dir2).ok();
+        fs::remove_dir_all(&dir3).ok();
+    }
+
+    #[test]
+    fn remote_deletion_applies_in_pull_with_prune() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("gone.txt", b"g"), ("kept.txt", b"k")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("prune");
+        let other = tmpdir("prune-other");
+        sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
+        sync_once(&c, "t", &other, &opts(Mode::Pull)).unwrap();
+        fs::remove_file(other.join("gone.txt")).unwrap();
+        sync_once(&c, "t", &other, &opts(Mode::Push)).unwrap();
+        let o = SyncOptions { prune: true, ..opts(Mode::Pull) };
+        let report = sync_once(&c, "t", &dir, &o).unwrap();
+        assert_eq!(report.deleted_local, vec!["gone.txt"]);
+        assert!(!dir.join("gone.txt").exists());
+        assert!(dir.join("kept.txt").exists());
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&other).ok();
+    }
+
+    #[test]
+    fn withheld_deletion_still_applies_on_a_later_prune_pass() {
+        // pull without --prune withholds; the FOLLOWING pass with --prune
+        // must apply it — dropping the state row on withhold made the
+        // deletion unknowable (e2e: filesync modes sequence)
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("gone.txt", b"g"), ("kept.txt", b"k")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("prune-late");
+        let other = tmpdir("prune-late-other");
+        sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
+        sync_once(&c, "t", &other, &opts(Mode::Pull)).unwrap();
+        fs::remove_file(other.join("gone.txt")).unwrap();
+        sync_once(&c, "t", &other, &opts(Mode::Push)).unwrap();
+        // withhold first
+        let withheld = sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
+        assert_eq!(withheld.withheld_deletions, vec!["gone.txt"]);
+        assert!(dir.join("gone.txt").exists());
+        // then apply
+        let report = sync_once(&c, "t", &dir, &SyncOptions { prune: true, ..opts(Mode::Pull) }).unwrap();
+        assert_eq!(report.deleted_local, vec!["gone.txt"]);
+        assert!(!dir.join("gone.txt").exists());
+        assert!(dir.join("kept.txt").exists());
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&other).ok();
+    }
+
+    #[test]
+    fn mass_deletion_guard_blocks_push() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("a", b"1"), ("b", b"2"), ("c", b"3")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("guard");
+        sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        // wipe the folder locally: full-wipe rule trips (3 known, 3 pending)
+        fs::remove_file(dir.join("a")).unwrap();
+        fs::remove_file(dir.join("b")).unwrap();
+        fs::remove_file(dir.join("c")).unwrap();
+        let report = sync_once(&c, "t", &dir, &opts(Mode::Push)).unwrap();
+        assert!(report.mass_delete_guard.is_some());
+        assert_eq!(report.exit_code(), 4);
+        assert!(mock.file_at("t", "main", "a").is_some(), "nothing deleted while guarded");
+        // override applies it
+        let report = sync_once(&c, "t", &dir, &SyncOptions { apply_mass_delete: true, ..opts(Mode::Push) }).unwrap();
+        assert_eq!(report.deleted_remote.len(), 3);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn wiped_folder_in_pull_mode_re_downloads_not_guard() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("a", b"1"), ("b", b"2"), ("c", b"3")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("wipe-pull");
+        sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
+        fs::remove_file(dir.join("a")).unwrap();
+        fs::remove_file(dir.join("b")).unwrap();
+        fs::remove_file(dir.join("c")).unwrap();
+        let report = sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
+        assert!(report.mass_delete_guard.is_none(), "pull must not trip on local deletions");
+        assert_eq!(report.pulled.len(), 3, "everything re-downloads");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn conflict_both_changed_saves_remote_copy() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("shared.txt", b"base")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("conflict");
+        sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        // remote side changes it
+        let other = tmpdir("conflict-other");
+        sync_once(&c, "t", &other, &opts(Mode::Pull)).unwrap();
+        fs::write(other.join("shared.txt"), b"theirs").unwrap();
+        sync_once(&c, "t", &other, &opts(Mode::Push)).unwrap();
+        // local side changes it too
+        fs::write(dir.join("shared.txt"), b"ours").unwrap();
+        let report = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(report.exit_code(), 3);
+        assert_eq!(fs::read(dir.join("shared.txt")).unwrap(), b"ours", "local keeps ours");
+        // the copy name splits stem/ext like the old engine: shared.conflict-<ts>-<w>.txt
+        let copy = fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).find(|n| n.starts_with("shared.conflict-"));
+        assert!(copy.is_some(), "remote copy saved beside it");
+        let copy_bytes = fs::read(dir.join(copy.unwrap())).unwrap();
+        assert_eq!(copy_bytes, b"theirs");
+        assert_eq!(mock.file_at("t", "main", "shared.txt").unwrap(), b"theirs", "remote untouched by our conflict");
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&other).ok();
+    }
+
+    #[test]
+    fn verify_catches_drift() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("a.txt", b"same"), ("b.txt", b"will-drift")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("verify");
+        sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
+        // same size, different content — the exact lie the audit exists for
+        fs::write(dir.join("b.txt"), b"went-drft").unwrap();
+        let report = verify(&c, "t", &dir, None).unwrap();
+        assert!(report.conflicts.iter().any(|c| c.starts_with("b.txt")), "{:?}", report.conflicts);
+        assert!(report.conflicts.iter().all(|c| !c.starts_with("a.txt")));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stateless_bootstrap_same_size_is_provisional() {
+        // no state, equal size: adopted provisionally; content drift is
+        // the verify command's job to catch (documented behavior)
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("a.txt", b"12345")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("bootstrap");
+        fs::write(dir.join("a.txt"), b"67890").unwrap();
+        let report = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        assert!(report.pushed.is_empty(), "size-equal bootstrap adopts, does not push");
+        let st = load_state(&dir, "t").unwrap();
+        assert!(st.files.contains_key("a.txt"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mirror_from_overlays_before_push() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[]);
+        let c = client_for(&mock);
+        let src = tmpdir("mf-src");
+        fs::create_dir_all(src.join("notes")).unwrap();
+        fs::write(src.join("notes/x.md"), b"note body").unwrap();
+        fs::write(src.join("fragment.json"), b"{}").unwrap(); // never overlaid
+        let dir = tmpdir("mf");
+        fs::write(dir.join("app.mjs"), b"// app").unwrap();
+        let o = SyncOptions { mirror_from: Some(src.clone()), ..opts(Mode::Push) };
+        let report = sync_once(&c, "t", &dir, &o).unwrap();
+        assert_eq!(report.pushed.len(), 2); // app.mjs + notes/x.md
+        assert!(mock.file_at("t", "main", "notes/x.md").is_some());
+        assert!(mock.file_at("t", "main", "app.mjs").is_some());
+        assert!(mock.file_at("t", "main", "fragment.json").is_none(), "source fragment.json must not stomp the target's");
+        fs::remove_dir_all(&src).ok();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn commit_single_file_lands_with_cas_retry() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("fragment.json", br#"{"name":"t"}"#)]);
+        let c = client_for(&mock);
+        let tip = commit_single_file(&c, "t", "fragment.json", br#"{"name":"t","visibility":"public"}"#.to_vec(), "manifest-set", "deadbeef", None).unwrap();
+        assert!(!tip.is_empty());
+        let v: serde_json::Value = serde_json::from_slice(&mock.file_at("t", "main", "fragment.json").unwrap()).unwrap();
+        assert_eq!(v["visibility"], "public");
+        // replay (same expected parent now stale) still succeeds via retry
+        let tip2 = commit_single_file(&c, "t", "fragment.json", br#"{"name":"t","visibility":"token"}"#.to_vec(), "manifest-set", "deadbeef", None).unwrap();
+        assert_ne!(tip, tip2);
     }
 }

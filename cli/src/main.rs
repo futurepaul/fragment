@@ -1,19 +1,23 @@
 mod api;
 mod auth;
-mod blob;
 mod builder;
+mod codestorage;
 mod sync;
 mod watch;
+
+#[cfg(test)]
+mod mockcs;
 
 include!(concat!(env!("OUT_DIR"), "/templates.rs"));
 
 use crate::api::encode_q;
-use crate::sync::{ConflictStrategy, Mode, SyncOptions};
+use crate::codestorage::{Author, CodeStorage, CsError, LIVE, MAIN, MAX_CAS_ATTEMPTS};
+use crate::sync::{Mode, SyncOptions};
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const GUIDE: &str = include_str!("../GUIDE.md");
 
@@ -68,7 +72,8 @@ enum Cmd {
     Manifest { name: String },
     /// Replace the manifest from a local JSON file
     ManifestSet { name: String, file: PathBuf },
-    /// Sync a local folder with the fragment (default: bidirectional mirror)
+    /// Sync a local folder with the fragment's code.storage repo
+    /// (default: bidirectional mirror)
     Sync {
         name: String,
         #[arg(long, default_value = ".")]
@@ -76,20 +81,17 @@ enum Cmd {
         /// Keep syncing continuously (OS events + live channel + sweeps)
         #[arg(long)]
         watch: bool,
-        /// push: local→remote only; pull: remote→local only (never deletes
+        /// push: local→repo only; pull: repo→local only (never deletes
         /// without --prune); mirror: bidirectional (default)
         #[arg(long)]
         mode: Option<String>,
-        /// In pull mode, apply remote deletions locally too
+        /// In pull mode, delete local files that were deleted remotely
         #[arg(long)]
         prune: bool,
         /// Overlay this read-only source folder into --dir before each
         /// pass (new/changed files copy in; source never written)
         #[arg(long)]
         mirror_from: Option<PathBuf>,
-        /// Conflict style: markers (default) or copy
-        #[arg(long)]
-        conflict_strategy: Option<String>,
         /// Allow a mass deletion to propagate (the guard refuses otherwise)
         #[arg(long)]
         apply_mass_delete: bool,
@@ -115,19 +117,19 @@ enum Cmd {
         #[arg(long)]
         force_registry: bool,
     },
-    /// Deploy: sync (if --dir), apply fragment.json, snapshot, GO LIVE.
-    /// Prints the canonical URL. Drafts are kept as rollback snapshots.
+    /// Deploy: sync (if --dir), then move the `live` ref to main's tip.
+    /// Prints the canonical URL. History is git history (`fragment drafts`).
     Deploy {
         name: String,
         #[arg(long)]
         dir: Option<PathBuf>,
         #[arg(long)]
         note: Option<String>,
-        /// Snapshot only — print the preview URL, don't go live
+        /// Preview only — point an ephemeral ref at main's tip, don't go live
         #[arg(long)]
         preview: bool,
     },
-    /// List deploy snapshots (drafts)
+    /// List deploy history (commits of the `live` ref; newest is live)
     Drafts { name: String },
     /// Compile a fragment folder: TypeScript sources -> runnable files,
     /// hashed site assets, and a parse gate on everything served
@@ -135,10 +137,10 @@ enum Cmd {
         /// The fragment folder (default: current directory)
         dir: Option<String>,
     },
-    /// Roll back to an earlier snapshot (default: the one before current)
+    /// Roll `live` back to an earlier deploy (default: the one before live)
     Rollback {
         name: String,
-        /// Snapshot slug to roll back to (see `fragment drafts`)
+        /// Deploy commit SHA to roll back to (see `fragment drafts`)
         #[arg(long)]
         to: Option<String>,
     },
@@ -233,6 +235,9 @@ enum SecretCmd {
 struct Config {
     host: Option<String>,
     secret_key: Option<String>,
+    /// optional code.storage server override (backend-swap knob; the
+    /// storage-token response is the default source)
+    codestorage: Option<String>,
 }
 
 fn config_path() -> PathBuf {
@@ -246,10 +251,23 @@ fn load_config() -> Config {
         Config {
             host: v["host"].as_str().map(|s| s.to_string()),
             secret_key: v["secret_key"].as_str().map(|s| s.to_string()),
+            codestorage: v["codestorage"].as_str().map(|s| s.trim_end_matches('/').to_string()),
         }
     } else {
-        Config { host: None, secret_key: None }
+        Config { host: None, secret_key: None, codestorage: None }
     }
+}
+
+/// code.storage server override: FRAGMENT_CODESTORAGE_URL env, then the
+/// config file's `codestorage` key; else the host's storage-token response
+/// decides. Plain URL so the backend stays swappable.
+fn codestorage_override() -> Option<String> {
+    if let Ok(u) = std::env::var("FRAGMENT_CODESTORAGE_URL") {
+        if !u.trim().is_empty() {
+            return Some(u.trim().trim_end_matches('/').to_string());
+        }
+    }
+    load_config().codestorage
 }
 
 fn resolve_host(cli_host: &Option<String>, cfg: &Config) -> String {
@@ -533,12 +551,20 @@ fn run(cli: Cli) -> Result<()> {
 
     match cli.cmd {
         Cmd::Create { name } => {
-            let v = c.call(c.post_json("/api/fragments", &json!({ "name": name }))?)?;
+            // Client-side fragment identity (ROADMAP level-c fix): the
+            // npub keypair is generated HERE, and the secret crosses the
+            // wire exactly once as `fragmentSecret` (the field the create
+            // route reads), inside the creator's NIP-98-authenticated
+            // request; the runtime stores it wrapped and the CLI drops it.
+            let fid = auth::Identity::generate();
+            let v = c.call(c.post_json("/api/fragments", &json!({ "name": name, "fragmentSecret": hex::encode(fid.secret) }))?)?;
+            let npub = v["npub"].as_str().unwrap_or_default().to_string();
+            let npub = if npub.is_empty() { fid.npub() } else { npub };
             if j {
                 ok_exit(&v);
             }
             println!("created fragment {}", v["name"].as_str().unwrap_or(&name));
-            println!("  npub:         {}", v["npub"].as_str().unwrap_or(""));
+            println!("  npub:         {npub}");
             let canon2 = v["canonical"].as_str().filter(|s| s.starts_with("http")).map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}/f/{}/", c.host, name));
             println!("  share link:   {}?view={}", canon2.trim_end_matches('/'), v["viewToken"].as_str().unwrap_or(""));
@@ -589,15 +615,21 @@ fn run(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         Cmd::ManifestSet { name, file } => {
-            let v: Value = serde_json::from_slice(&std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?)?;
-            c.call(c.put_json(&format!("/api/f/{name}/manifest"), &v)?)?;
+            let bytes = std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
+            let v: Value = serde_json::from_slice(&bytes)
+                .with_context(|| format!("{} is not valid JSON", file.display()))?;
+            // fragment.json is a git file at the repo root: manifest-set is
+            // edit-and-commit (expected-parent CAS, bounded retries)
+            let writer = writer_id(&c);
+            let tip = sync::commit_single_file(&c, &name, "fragment.json", serde_json::to_vec(&v)?, &format!("manifest-set {name}"), &writer, codestorage_override().as_deref())
+                .map_err(cs_anyhow)?;
             if j {
-                ok_exit(&json!({ "updated": true, "manifest": v }));
+                ok_exit(&json!({ "updated": true, "commit": tip, "manifest": v }));
             }
-            println!("manifest updated");
+            println!("manifest updated (commit {})", &tip[..8.min(tip.len())]);
         }
         Cmd::Sync {
-            name, dir, watch, mode, prune, mirror_from, conflict_strategy, apply_mass_delete,
+            name, dir, watch, mode, prune, mirror_from, apply_mass_delete,
             rebuild_state, no_live, install, uninstall,
         } => {
             // never stream JSON envelopes mid-run: watch prints progress
@@ -627,22 +659,18 @@ fn run(cli: Cli) -> Result<()> {
                     Some("mirror") | None => Mode::Mirror,
                     other => anyhow::bail!("--mode must be push|pull|mirror, got {other:?}"),
                 },
-                strategy: match conflict_strategy.as_deref() {
-                    Some("copy") => ConflictStrategy::Copy,
-                    _ => ConflictStrategy::Markers,
-                },
                 apply_mass_delete,
                 prune,
                 verify: false,
-                writer_id: c.id.pubkey_hex.chars().take(8).collect(),
-                tiers: None, // sync_once resolves the tier per pass
+                writer_id: writer_id(&c),
+                codestorage: codestorage_override(),
             };
             if watch {
-                let cfg = watch::WatchConfig { live: !no_live, ..Default::default() };
+                let cfg = watch::WatchConfig { live: !no_live };
                 watch::run(&c, &name, &dir, &opts, &cfg)?;
                 return Ok(());
             }
-            let report = sync::sync_once(&c, &name, &dir, &opts)?;
+            let report = sync::sync_once(&c, &name, &dir, &opts).map_err(cs_anyhow)?;
             if j {
                 emit_ok(&serde_json::to_value(&report).unwrap_or_default());
                 // scriptable exit codes survive the envelope (3 conflicts, 4 guard)
@@ -655,12 +683,12 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Rm { name, force_registry } => {
             match c.call(c.delete(&format!("/api/f/{name}"))?) {
                 Ok(_) => {}
-                Err(e) if force_registry => {
+                Err(_) if force_registry => {
                     // the cell is unwedgeable (poisoned state from an older
                     // era); drop the registry row and leave whatever cell
                     // data exists to the bucket's own GC
                     c.call(c.post_json(
-                        &format!("/api/f/_registry/__registry/delete"),
+                        "/api/f/_registry/__registry/delete",
                         &serde_json::json!({ "name": name }),
                     )?)
                     .context("registry delete request failed")?;
@@ -676,7 +704,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("deleted fragment {name} (registry row + all data; the name is reusable)");
         }
         Cmd::Verify { name, dir } => {
-            let report = sync::verify(&c, &name, &dir)?;
+            let report = sync::verify(&c, &name, &dir, codestorage_override().as_deref()).map_err(cs_anyhow)?;
             if j {
                 emit_ok(&serde_json::to_value(&report).unwrap_or_default());
                 std::process::exit(report.exit_code());
@@ -686,17 +714,14 @@ fn run(cli: Cli) -> Result<()> {
             std::process::exit(report.exit_code());
         }
         Cmd::Deploy { name, dir, note, preview } => {
+            let writer = writer_id(&c);
+            let cs = codestorage_override();
             if let Some(dir) = dir.as_deref() {
-                let report = sync::sync_once(&c, &name, dir, &SyncOptions::default())?;
+                let report = sync::sync_once(&c, &name, dir, &SyncOptions { writer_id: writer.clone(), codestorage: cs.clone(), ..Default::default() })
+                    .map_err(cs_anyhow)?;
                 report.print();
-                // deploy applies the folder's manifest — files and machinery
-                // go live together (the manifest-set trap cannot happen here)
-                let mf = dir.join("fragment.json");
-                if mf.exists() {
-                    let raw: Value = serde_json::from_str(&std::fs::read_to_string(&mf)?)
-                        .with_context(|| format!("{} is not valid JSON", mf.display()))?;
-                    c.call(c.put_json(&format!("/api/f/{name}/manifest"), &raw)?)?;
-                }
+                // fragment.json rides the commit (it is a git file at the
+                // repo root) — files and machinery go live together
             }
             // secrets declared in code but never set: the 3-round news
             // failure — workflows reference ctx.secrets.X, nobody runs
@@ -730,28 +755,53 @@ fn run(cli: Cli) -> Result<()> {
                     }
                 }
             }
-            let v = c.call(c.post_json_patient(&format!("/api/f/{name}/drafts"), &json!({ "note": note }))?)?;
-            if v.get("warning").and_then(|w| w.as_str()).is_some() {
-                eprintln!("WARNING: {} — this deploy will 404 at every URL", v["warning"].as_str().unwrap_or(""));
-            }
-            let slug = v["slug"].as_str().unwrap_or("").to_string();
+            let storage = CodeStorage::connect(&c, &name, cs.as_deref()).map_err(cs_anyhow)?;
+            let main_tip = storage.branch_head(MAIN).map_err(cs_anyhow)?
+                .ok_or_else(|| anyhow!("nothing to deploy: main has no commits (sync a folder with --dir first)"))?;
+            let author = Author::writer(&writer);
             if preview {
+                // ephemeral ref at main's tip: unguessable, invisible to
+                // clones, promoted by deploying. There is no served URL —
+                // the ref IS the preview.
+                let slug = format!("preview/{:012x}", rand::random::<u64>());
+                let sha = storage.create_branch(&main_tip, &slug, true).map_err(cs_anyhow)?;
                 if j {
-                    ok_exit(&v);
+                    ok_exit(&json!({ "preview": slug, "sha": sha }));
                 }
-                println!("preview: {}/d/{}/", c.host, slug);
+                println!("preview: {slug} (ephemeral ref at {})", &sha[..12.min(sha.len())]);
                 println!("go live with: fragment deploy {name}");
                 return Ok(());
             }
-            let b = c.call(c.post_json(&format!("/api/f/{name}/bless"), &json!({ "slug": slug }))?)?;
+            let msg = format!("deploy {name}{}", note.as_deref().map(|n| format!(": {n}")).unwrap_or_default());
+            // move live to main's tip; create it on first deploy; bounded
+            // target_moved retries after that
+            let live_tip = match storage.branch_head(LIVE).map_err(cs_anyhow)? {
+                None => storage.create_branch(&main_tip, LIVE, false).map_err(cs_anyhow)?,
+                Some(t) if t == main_tip => t,
+                Some(mut expected) => {
+                    let mut landed: Option<String> = None;
+                    for _attempt in 0..MAX_CAS_ATTEMPTS {
+                        match storage.promote_live(&expected, &msg, &author) {
+                            Ok(new_tip) => {
+                                landed = Some(new_tip);
+                                break;
+                            }
+                            Err(CsError::CasRejected { .. }) => {
+                                expected = storage.branch_head(LIVE).map_err(cs_anyhow)?
+                                    .ok_or_else(|| anyhow!("the live ref vanished mid-deploy"))?;
+                                continue;
+                            }
+                            Err(e) => return Err(cs_anyhow(e)),
+                        }
+                    }
+                    landed.ok_or_else(|| anyhow!("live kept moving under {MAX_CAS_ATTEMPTS} deploy attempts; re-run"))?
+                }
+            };
+            let live_url = format!("{}/f/{}/", c.host.trim_end_matches('/'), name);
             if j {
-                let mut vv = v;
-                vv["live"] = b["url"].clone();
-                ok_exit(&vv);
+                ok_exit(&json!({ "live": live_url, "liveTip": live_tip, "mainTip": main_tip }));
             }
-            let bu = b["url"].as_str().unwrap_or("");
-            let live = if bu.starts_with("http") { bu.to_string() } else { format!("{}{}", c.host, bu) };
-            println!("live: {live}");
+            println!("live: {live_url}");
             let st = c.call(c.get(&format!("/api/f/{name}/status"))?)?;
             if st["visibility"].as_str() == Some("link") {
                 if let Some(tok) = st["viewToken"].as_str() {
@@ -763,42 +813,43 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Rollback { name, to } => {
-            let v = c.call(c.get(&format!("/api/f/{name}/drafts"))?)?;
-            let drafts = v["drafts"].as_array().cloned().unwrap_or_default();
-            let slug = match to {
+            let storage = CodeStorage::connect(&c, &name, codestorage_override().as_deref()).map_err(cs_anyhow)?;
+            let history = storage.list_commits(LIVE, 30).map_err(cs_anyhow)?;
+            let live_tip = history.first().map(|cm| cm.sha.clone())
+                .ok_or_else(|| anyhow!("live has no deploys yet (see `fragment deploy {name}`)"))?;
+            let target = match to {
                 Some(s) => s,
-                None => {
-                    match drafts.iter().find(|d| !d["blessed"].as_bool().unwrap_or(false)) {
-                        Some(d) => d["slug"].as_str().unwrap_or("").to_string(),
-                        None => anyhow::bail!("no earlier snapshot to roll back to (see `fragment drafts {name}`)"),
-                    }
-                }
+                None => history.get(1).map(|cm| cm.sha.clone())
+                    .ok_or_else(|| anyhow!("no earlier deploy to roll back to (see `fragment drafts {name}`)"))?,
             };
-            if slug.is_empty() {
-                anyhow::bail!("no snapshot slug; see `fragment drafts {name}`");
-            }
-            let b = c.call(c.post_json(&format!("/api/f/{name}/bless"), &json!({ "slug": slug }))?)?;
+            let author = Author::writer(&writer_id(&c));
+            let new_tip = storage.restore_live(&target, &live_tip, &format!("rollback {name} to {target}"), &author)
+                .map_err(cs_anyhow)?;
             if j {
-                ok_exit(&b);
+                ok_exit(&json!({ "rolledBackTo": target, "liveTip": new_tip }));
             }
-            let bu = b["url"].as_str().unwrap_or("");
-            let live = if bu.starts_with("http") { bu.to_string() } else { format!("{}{}", c.host, bu) };
-            println!("rolled back to {slug}: {live}");
+            println!("rolled back to {}: live is now {}", &target[..8.min(target.len())], &new_tip[..8.min(new_tip.len())]);
         }
         Cmd::Drafts { name } => {
-            let v = c.call(c.get(&format!("/api/f/{name}/drafts"))?)?;
+            let storage = CodeStorage::connect(&c, &name, codestorage_override().as_deref()).map_err(cs_anyhow)?;
+            let commits = storage.list_commits(LIVE, 30).map_err(cs_anyhow)?;
             if j {
-                ok_exit(&v);
+                ok_exit(&json!({ "deploys": commits }));
             }
-            for d in v["drafts"].as_array().cloned().unwrap_or_default() {
+            if commits.is_empty() {
+                println!("(no deploys yet)");
+                return Ok(());
+            }
+            for (i, cm) in commits.iter().enumerate() {
                 println!(
                     "{} {}{}  {}",
-                    d["slug"].as_str().unwrap_or(""),
-                    if d["blessed"].as_bool().unwrap_or(false) { "[blessed] " } else { "" },
-                    d["note"].as_str().unwrap_or(""),
-                    d["at"].as_u64().map(|ms| chrono_like(ms / 1000)).unwrap_or_default(),
+                    &cm.sha[..8.min(cm.sha.len())],
+                    if i == 0 { "[live] " } else { "" },
+                    cm.message,
+                    cm.date,
                 );
             }
+            println!("roll back with: fragment rollback {name} --to <sha>");
         }
 
         Cmd::Build { dir } => {
@@ -828,24 +879,32 @@ fn run(cli: Cli) -> Result<()> {
                 }
                 std::fs::write(&target, bytes)?;
             }
-            println!("scaffolded '{tpl_name}' into {}", dir.display());
-            c.call(c.post_json("/api/fragments", &json!({ "name": name }))?)?;
-            // push the scaffold before snapshotting, so the first deploy
-            // is the real site, not an empty one
-            let report = sync::sync_once(&c, &name, &dir, &SyncOptions::default())?;
-            report.print();
+            // stamp the fragment's name into the manifest BEFORE the first
+            // sync — fragment.json is a git file and rides the commit
             let mf = dir.join("fragment.json");
             if mf.exists() {
-                let raw: Value = serde_json::from_str(&std::fs::read_to_string(&mf)?)?;
-                let mut m = raw;
-                if let Value::Object(o) = &mut m { o.insert("name".into(), Value::String(name.clone())); }
-                c.call(c.put_json(&format!("/api/f/{name}/manifest"), &m)?)?;
+                let mut m: Value = serde_json::from_str(&std::fs::read_to_string(&mf)?)?;
+                if let Value::Object(o) = &mut m {
+                    o.insert("name".into(), Value::String(name.clone()));
+                }
+                std::fs::write(&mf, serde_json::to_vec_pretty(&m)?)?;
             }
-            let v = c.call(c.post_json_patient(&format!("/api/f/{name}/drafts"), &json!({ "note": "init" }))?)?;
-            let slug = v["slug"].as_str().unwrap_or("").to_string();
-            if !slug.is_empty() {
-                c.call(c.post_json(&format!("/api/f/{name}/bless"), &json!({ "slug": slug }))?)?;
-            }
+            println!("scaffolded '{tpl_name}' into {}", dir.display());
+            // client-side npub; secret crosses the wire once (fragmentSecret),
+            // wrapped at rest
+            let fid = auth::Identity::generate();
+            c.call(c.post_json("/api/fragments", &json!({ "name": name, "fragmentSecret": hex::encode(fid.secret) }))?)?;
+            // push the scaffold, then point live at it — the first deploy
+            // is the real site, not an empty one
+            let writer = writer_id(&c);
+            let cs = codestorage_override();
+            let report = sync::sync_once(&c, &name, &dir, &SyncOptions { writer_id: writer.clone(), codestorage: cs.clone(), ..Default::default() })
+                .map_err(cs_anyhow)?;
+            report.print();
+            let storage = CodeStorage::connect(&c, &name, cs.as_deref()).map_err(cs_anyhow)?;
+            let main_tip = storage.branch_head(MAIN).map_err(cs_anyhow)?
+                .ok_or_else(|| anyhow!("first sync produced no commits"))?;
+            storage.create_branch(&main_tip, LIVE, false).map_err(cs_anyhow)?;
             let st = c.call(c.get(&format!("/api/f/{name}/status"))?)?;
             let canon = st["urls"]["canonical"].as_str().filter(|s| s.starts_with("http"))
                 .map(|s| s.to_string())
@@ -965,13 +1024,17 @@ fn run(cli: Cli) -> Result<()> {
             let v = c.call(c.post_json(&format!("/api/f/{name}/rotate"), &body)?)?;
             let it = jstr_any(&v, &["inbox_token", "inboxToken"]);
             let vt = jstr_any(&v, &["view_token", "viewToken"]);
+            let wh = jstr_any(&v, &["webhook_secret", "webhookSecret"]);
             let rotated = match v["rotated"].as_array() {
                 Some(a) => a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", "),
                 None => String::from("both"),
             };
             let canon = format!("{}/f/{}/", c.host.trim_end_matches('/'), name);
             if j {
-                ok_exit(&json!({ "inbox_token": it, "view_token": vt, "rotated": v["rotated"].clone() }));
+                // webhook_secret included: the code.storage push HMAC is
+                // only ever visible at create/rotate, and machine consumers
+                // (dev harnesses registering push webhooks) need it back
+                ok_exit(&json!({ "inbox_token": it, "view_token": vt, "webhook_secret": wh, "rotated": v["rotated"].clone() }));
             }
             println!("rotated: {rotated}");
             println!("New webhook URL: {}/api/f/{}/inbox?t={}", c.host.trim_end_matches('/'), name, it);
@@ -1096,14 +1159,12 @@ fn run(cli: Cli) -> Result<()> {
                 ok_exit(&json!({
                     "canonical": format!("{}{}{}", canon, suffix, view_part),
                     "shareLink": format!("{}{}{}", canon, suffix, view_part),
-                    "draftsAt": format!("{}/d/<slug>/", c.host),
                     "webhookUrl": format!("{}/api/f/{}/inbox?t={}", c.host, name, inbox),
                     "rooms": format!("{}/f/{}/__room/<room>{}{}", c.host, name, suffix, view_part),
                 }));
             }
             println!("canonical:   {}{}{}", canon, suffix, view_part);
             println!("share link:   {}{}{}", canon, suffix, view_part);
-            println!("drafts at:   {}/d/<slug>/", c.host);
             println!("webhook URL:  {}/api/f/{}/inbox?t={}", c.host, name, inbox);
             println!("rooms:       {}/f/{}/__room/<room>{}{}", c.host, name, suffix, view_part);
         }
@@ -1112,8 +1173,30 @@ fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
+/// 8 hex chars of the user's pubkey — the writer identity that names
+/// conflict copies and signs commits
+fn writer_id(c: &api::Client) -> String {
+    c.id.pubkey_hex.chars().take(8).collect()
+}
+
+/// typed sync/code.storage errors -> anyhow. CAS rejections map to the
+/// stable "conflict" machine code so `--json` consumers can branch.
+fn cs_anyhow(e: impl Into<crate::sync::SyncError>) -> anyhow::Error {
+    let e = e.into();
+    match e {
+        crate::sync::SyncError::Cs(CsError::CasRejected { .. }) => anyhow::Error::new(api::CodedError {
+            code: "conflict",
+            msg: e.to_string(),
+        }),
+        other => anyhow!("{other}"),
+    }
+}
+
 fn edit_roles(c: &api::Client, name: &str, editors: Vec<String>, viewers: Vec<String>, add: bool, j: bool) {
     if let Err(e) = (|| -> Result<()> {
+        // fragment.json is a git file at the repo root: grant/revoke is
+        // read-manifest, edit roles, commit — the same edit-and-commit
+        // shape manifest-set uses (the PUT /manifest route is gone)
         let mut m = c.call(c.get(&format!("/api/f/{name}/manifest"))?)?;
         for (list, key) in [(editors, "editors"), (viewers, "viewers")] {
             let mut cur: Vec<String> = m[key]
@@ -1137,11 +1220,21 @@ fn edit_roles(c: &api::Client, name: &str, editors: Vec<String>, viewers: Vec<St
             }
             m[key] = json!(cur);
         }
-        c.call(c.put_json(&format!("/api/f/{name}/manifest"), &m)?)?;
+        let writer = writer_id(c);
+        let tip = sync::commit_single_file(
+            c,
+            name,
+            "fragment.json",
+            serde_json::to_vec(&m)?,
+            &format!("roles {name}"),
+            &writer,
+            codestorage_override().as_deref(),
+        )
+        .map_err(cs_anyhow)?;
         if j {
             ok_exit(&m);
         } else {
-            println!("roles updated on {name}");
+            println!("roles updated on {name} (commit {})", &tip[..8.min(tip.len())]);
         }
         Ok(())
     })() {
@@ -1175,7 +1268,7 @@ fn chrono_like(secs: u64) -> String {
 // PATH — launchd and systemd both run with minimal environments (the
 // agent-built watch.sh failed on exactly this).
 
-fn install_sync_unit(name: &str, dir: &PathBuf, install: bool, mirror_from: Option<&str>) -> Result<()> {
+fn install_sync_unit(name: &str, dir: &Path, install: bool, mirror_from: Option<&str>) -> Result<()> {
     let dir = match dir.canonicalize() {
         Ok(d) => d,
         Err(_) => anyhow::bail!("no such directory: {}", dir.display()),

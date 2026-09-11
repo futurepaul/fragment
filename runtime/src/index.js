@@ -1,7 +1,14 @@
 // GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 import { verifyNip98, sha256Hex } from "./auth.js";
 import { RT_CLIENT_SOURCE } from "./rt-client.js";
+import { runNativeAttempt } from "./wf-engine.js";
+import { WorkflowEntrypoint } from "cloudflare:workers";
 import { FragmentCell } from "./cell.js";
+class FragmentWorkflow extends WorkflowEntrypoint {
+  async run(event, step) {
+    return await runNativeAttempt(event.payload, step, this.env);
+  }
+}
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
 }
@@ -83,8 +90,8 @@ var index_default = {
       if (path === "/api/fragments" && request.method === "POST") {
         const g = await gate();
         if (g.error) return g.error;
-        const { name } = await request.json().catch(() => ({}));
-        if (!name || typeof name !== "string") return json({ error: "body: {name}" }, 400);
+        const { name, fragmentSecret } = await request.json().catch(() => ({}));
+        if (!name || typeof name !== "string") return json({ error: "body: {name, fragmentSecret}" }, 400);
         const created = await registry().fetch("http://x/__registry/create", {
           method: "POST",
           body: JSON.stringify({ name, ownerHex: g.pubkey })
@@ -92,11 +99,20 @@ var index_default = {
         if (!created.ok) return created;
         const init = await cell(name).fetch("http://x/__cell/init", {
           method: "POST",
-          body: JSON.stringify({ name, ownerHex: g.pubkey })
+          body: JSON.stringify({ name, ownerHex: g.pubkey, fragmentSecret })
         });
         const info = await init.json();
+        if (!info.ok) return json({ error: info.error || "init failed" }, 500);
         const canonical = env.FRAGMENT_SUBDOMAIN_HOST ? `https://${encodeURIComponent(name)}.${env.FRAGMENT_SUBDOMAIN_HOST}/` : `${url.origin}/f/${name}/`;
-        return json({ name, npub: info.npub, viewToken: info.viewToken, inboxToken: info.inboxToken, canonical });
+        return json({
+          name,
+          npub: info.npub,
+          viewToken: info.viewToken,
+          inboxToken: info.inboxToken,
+          webhookSecret: info.webhookSecret,
+          repo: info.repo,
+          canonical
+        });
       }
       if (path === "/api/fragments" && request.method === "GET") {
         const g = await gate();
@@ -120,11 +136,12 @@ var index_default = {
         }
         const cellPath = "/api" + rest.slice(name.length);
         if (cellPath === "/api/inbox" && request.method === "POST") return toCell(name, cellPath, null);
+        if (cellPath === "/api/webhook" && request.method === "POST") return toCell(name, cellPath, null);
         const g = await gate();
         if (g.error) return g.error;
         return toCell(name, cellPath, g.pubkey);
       }
-      if ((path.startsWith("/f/") || path.startsWith("/d/")) && path.endsWith("/__rt.js")) {
+      if (path.startsWith("/f/") && path.endsWith("/__rt.js")) {
         return new Response(`/* fragment rt-client v1 */
 ` + RT_CLIENT_SOURCE, {
           headers: {
@@ -147,21 +164,9 @@ var index_default = {
         const room = path.slice(path.indexOf("/__room/") + "/__room/".length);
         const g = await softGate();
         if (g.error) return g.error;
-        const q = new URLSearchParams(url.search);
-        q.set("draft", "blessed");
         const headers = stripAuth(request.headers);
         if (g.pubkey) headers.set("x-fragment-pubkey", g.pubkey);
-        return cell(name).fetch(new Request(`${url.origin}/__room/${room}?${q}`, { method: request.method, headers }));
-      }
-      if (path.startsWith("/d/") && path.includes("/__room/")) {
-        const slug = path.split("/")[2];
-        const room = path.slice(path.indexOf("/__room/") + "/__room/".length);
-        const r = await registry().fetch(`http://x/__registry/slug?s=${encodeURIComponent(slug)}`);
-        if (!r.ok) return json({ error: "unknown draft" }, 404);
-        const { name } = await r.json();
-        const q = new URLSearchParams(url.search);
-        q.set("draft", slug);
-        return cell(name).fetch(new Request(`${url.origin}/__room/${room}?${q}`, { method: request.method, headers: stripAuth(request.headers) }));
+        return cell(name).fetch(new Request(`${url.origin}/__room/${room}${url.search}`, { method: request.method, headers }));
       }
       if (path.startsWith("/f/")) {
         const name = path.split("/")[2];
@@ -174,15 +179,6 @@ var index_default = {
         if (g.error) return g.error;
         return toCell(name, `/__serve/b/${rest}`, g.pubkey);
       }
-      if (path.startsWith("/d/")) {
-        const slug = path.split("/")[2];
-        if (!slug) return new Response("not found\n", { status: 404 });
-        const rest = path.slice(`/d/${slug}/`.length).replace(/^\//, "");
-        const r = await registry().fetch(`http://x/__registry/slug?s=${encodeURIComponent(slug)}`);
-        if (!r.ok) return json({ error: "unknown draft" }, 404);
-        const { name } = await r.json();
-        return toCell(name, `/__serve/d/${slug}/${rest}`, null);
-      }
       return new Response("fragment host. see /f/<name>/ for fragments.\n", { status: 404 });
     } catch (e) {
       return json({ error: String(e && e.stack || e) }, 500);
@@ -191,5 +187,6 @@ var index_default = {
 };
 export {
   FragmentCell,
+  FragmentWorkflow,
   index_default as default
 };

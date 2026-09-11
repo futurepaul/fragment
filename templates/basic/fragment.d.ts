@@ -18,58 +18,79 @@ export interface InboxMessage {
 /** Result of `ctx.files.write`. */
 export interface WriteResult {
   ok: boolean;
-  /** true when the content was byte-identical — rev/updatedAt did NOT move. */
+  /** true when the content was byte-identical to the branch head — no
+   *  commit was made (write-suppression; the fuel of copy-loops). */
   deduped: boolean;
-  rev: number;
+  /** The git blob sha of the content written (or already present when
+   *  deduped) — the identity `stat().sha` reports. */
+  sha: string;
+  /** The commit that carried the write; the head sha when deduped; null
+   *  when nothing changed at all. */
+  commitSha: string | null;
 }
 
-/** Live row metadata, from `ctx.files.stat`. */
+/** Path identity at the working-copy pin, from `ctx.files.stat`. */
 export interface FileStat {
   path: string;
-  rev: number;
-  sha256: string;
+  /** The git blob sha — the CONTENT identity the ifSha CAS pins to. */
+  sha: string;
+  /** The most recent commit that touched the path. */
+  lastCommitSha: string;
   size: number;
-  /** true when the row is a tombstone — the path is deleted, and `rev` is
-   *  the revision OF the deletion. */
-  deleted: boolean;
+  /** false when the path is absent at the pin — deleted and never-existed
+   *  are the same thing under git (no tombstones at a ref). */
+  present: boolean;
 }
 
-/** Thrown by `ctx.files.write` when `{ ifRev }` loses the race. */
-export class RevConflict extends Error {
+/** Thrown by `ctx.files.write` when `{ ifSha }` loses the race. */
+export class ContentConflict extends Error {
   conflict: true;
-  currentRev: number;
+  currentSha: string;
 }
 
 export interface FilesApi {
-  /** Read a file's bytes as text. Throws over the 8MiB decode ceiling —
-   *  consume giants by hash with ranged access instead. */
+  /** Read a file's bytes as text (from the pinned working copy). Throws
+   *  over the 8MiB decode ceiling — consume giants streamed instead. */
   read(path: string): Promise<string>;
   readBytes(path: string): Promise<ArrayBuffer>;
   /**
-   * Write a file. Identical content is a recorded no-op (deduped) that does
-   * not churn the revision counter.
+   * Write a file: one git commit to `main` under expected-parent CAS.
+   * Identical content is a recorded no-op (deduped) that makes no commit —
+   *  that is the write-suppression layer of loop protection.
    *
-   * Pass `{ ifRev }` (from `ctx.files.stat`) for read-modify-write: the
-   * write only lands if the row is still at that revision, else it rejects
-   * with `e.conflict === true` and `e.currentRev`.
+   * Pass `{ ifSha }` (from `ctx.files.stat`) for read-modify-write: the
+   * write only lands if the path still carries that content sha, else it
+   * rejects with `e.conflict === true` and `e.currentSha`.
    *
    * LESSON — always pin multi-step updates: a workflow that holds a
    * snapshot across a slow await (an LLM call, an outbound fetch) WILL race
-   * other writers. `stat` → merge → `write({ ifRev })` makes the stale
+   * other writers. `stat` → merge → `write({ ifSha })` makes the stale
    * write fail loudly instead of clobbering a concurrent edit — or
    * resurrecting a file someone deleted mid-flight.
+   *
+   * Replays are safe by construction: a run re-executed after a crash
+   * re-resolves the branch head and commits each logical change exactly
+   * once (identical bytes dedup; racing writers trigger a bounded
+   * refetch-and-retry).
    */
-  write(path: string, data: string | ArrayBuffer, opts?: { ifRev?: number }): Promise<WriteResult>;
-  /** Stream a remote URL into the tier and commit it at path. */
-  ingest(url: string, path: string): Promise<{ path: string; sha256: string; size: number; mime: string; url: string }>;
-  list(prefix?: string): Promise<string[]>;
-  /** Like list(), but with metadata: [{path, size, updatedAt, rev}]. */
-  index(prefix?: string): Promise<Array<{ path: string; size: number; updatedAt: number | null; rev: number }>>;
+  write(path: string, data: string | ArrayBuffer | Uint8Array, opts?: { ifSha?: string }): Promise<WriteResult>;
   /**
-   * Live row metadata including tombstones; null when the path has no
-   * history at all. The read half of the ifRev pattern.
+   * Delete a path (append-only prefixes refuse; deleting an absent path
+   * is a recorded no-op).
    */
-  stat(path: string): Promise<FileStat | null>;
+  delete(path: string): Promise<WriteResult>;
+  /** Fetch a remote URL and commit it at path (dedup + append-only gates
+   *  as usual). Media-scale outputs (32MiB+) belong to the CLI's direct
+   *  commit path. */
+  ingest(url: string, path: string): Promise<{ path: string; sha: string; size: number; url: string }>;
+  list(prefix?: string): Promise<string[]>;
+  /** Like list(), but with metadata: [{path, size, mode, lastCommitSha}]. */
+  index(prefix?: string): Promise<Array<{ path: string; size: number; mode: string; lastCommitSha: string }>>;
+  /**
+   * Path identity at the pinned working copy — the read half of the ifSha
+   * pattern. `present: false` covers both "never existed" and "deleted".
+   */
+  stat(path: string): Promise<FileStat>;
 }
 
 export interface Ctx {
@@ -142,7 +163,7 @@ declare module "fragment:ai" {
     url: string;
     sha256: string;
     size: number;
-    /** Lazy byte access — fetched from the tier on demand. */
+        /** Lazy byte access — fetched from the file plane on demand. */
     bytes(): Promise<Uint8Array>;
     base64(): Promise<string>;
   }

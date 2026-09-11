@@ -1,10 +1,12 @@
-// The /__internal plane: loopback API for ctx calls from loader isolates.
+// The /__internal plane: loopback API for ctx calls from loader isolates,
+// plus the native-workflow driver routes (/wf/attempt, /wf/complete).
 // Run-token (and optional host-secret) gated.
-import { json, isMachinery, randHex, bodyTooLarge, MAX_BODY_BYTES, MIME, mimeForPath } from "./util.js";
-import { checkToken, checkTokenRaw } from "./loader.js";
-import { recordRevision } from "./history.js";
-import { READ_CEILING, TierError, admitFileWrite, tierStreamByHash, tierPlaceFromUrl } from "./blob-tier.js";
+import { json, randHex, mimeForPath, bodyTooLarge, writeBodyTooLarge, WRITE_CEILING } from "./util.js";
+import { checkToken, checkTokenRaw, runWorkflowLocked } from "./loader.js";
 import { encryptPayload, vapidHeaders, generateVapidKeys, webpushSelfTest, b64urlDecode, b64urlEncode } from "./webpush.js";
+import { commitPaths, readFileStream, statPath, treeList, gitBlobSha } from "./git-plane.js";
+import { CodeStorageError } from "./codestorage.js";
+import { unwrapSecret } from "./secretwrap.js";
 
 function appendOnlyHit(cell, path) {
   const m = cell.manifest();
@@ -12,10 +14,9 @@ function appendOnlyHit(cell, path) {
 }
 
 // ---- Web Push storage/provisioning helpers ----
-// push_subs is additive (schema v4): cells born on v4 get it from SCHEMA,
-// cells born earlier meet it here first — CREATE TABLE IF NOT EXISTS is
-// idempotent, and the WeakSet keeps repeat calls to a pragma-free no-op
-// per cell instance.
+// push_subs is additive: cells born on v5 get it from SCHEMA, cells born
+// earlier meet it here first — CREATE TABLE IF NOT EXISTS is idempotent,
+// and the WeakSet keeps repeat calls to a pragma-free no-op per cell.
 const pushTablesReady = new WeakSet();
 export function ensurePushTable(cell) {
   if (pushTablesReady.has(cell)) return;
@@ -118,15 +119,47 @@ export function pushUnsubStore(cell, body) {
   return json({ ok: true, removed: false });
 }
 
+// ---- secrets: stored wrapped, unwrapped at the door ----
+
+function hostSecretOrThrow(cell) {
+  const hs = String(cell.env.FRAGMENT_HOST_SECRET || "");
+  if (!hs) {
+    // fail loudly: silently serving plaintext secrets (or crashing deep in
+    // a run) is the level-(c) bug the wrapping exists to close
+    throw new Error("secrets are wrapped at rest but FRAGMENT_HOST_SECRET is not set on this host — set CELLD_VAR_FRAGMENT_HOST_SECRET before using secrets");
+  }
+  return hs;
+}
+
+async function secretsUnwrapped(cell): Promise<Record<string, string>> {
+  const npub = cell.getMeta("fragment_npub") || "";
+  const hs = hostSecretOrThrow(cell);
+  const out = {};
+  for (const r of cell.sql.exec("SELECT name, value FROM secrets").toArray()) {
+    out[r.name] = await unwrapSecret(hs, npub, r.value);
+  }
+  return out;
+}
+
 // ------ internalRoute ------
 
 export async function internalRoute(cell, request, url) {
-  if (bodyTooLarge(request)) {
-    return json({ error: `body too large: cells accept at most ${MAX_BODY_BYTES} bytes per write — keep big assets out of workflows` }, 413);
+  // Two legal spellings: routed via the public router
+  // (/__internal/f/<name>/<rest>) or called directly on the DO binding by
+  // the native workflow driver (/__internal/<rest>). Normalize to <rest>.
+  let pathIsh = url.pathname;
+  if (pathIsh.startsWith("/__internal/f/")) {
+    const after = pathIsh.slice("/__internal/f/".length);
+    pathIsh = "/__internal/" + after.slice(after.indexOf("/") + 1);
   }
-  const p = url.pathname.slice("/__internal/f/".length);
-  const slash = p.indexOf("/");
-  const rest = p.slice(slash + 1);
+  const rest = pathIsh.slice("/__internal/".length);
+  // the write plane alone carries the big ceiling; every other internal
+  // route keeps the small general body bound
+  if (rest === "files/write" ? writeBodyTooLarge(request) : bodyTooLarge(request)) {
+    return json({ error: rest === "files/write"
+      ? `body too large: workflow writes accept at most ${WRITE_CEILING} bytes per file — split the payload or push big assets with the CLI's direct commit path`
+      : `body too large: internal routes accept at most 1 MiB` }, 413);
+  }
   let scope = cell.checkToken(request);
   if (!scope && rest.startsWith("egress/")) {
     // apiKey-shaped clients put the run token in the Bearer credential
@@ -135,129 +168,128 @@ export async function internalRoute(cell, request, url) {
   }
   if (!scope) return json({ error: "bad or expired run token" }, 403);
   const isRun = scope.kind === "run";
+  const isWf = scope.kind === "wf-run";
+
+  // ---- native workflow driver routes (wf-engine.ts calls these) ----
+  if (rest === "wf/attempt" && request.method === "POST") {
+    if (!isWf) return json({ error: "wf/attempt requires a wf-run token" }, 403);
+    const { runId, attempt } = await request.json().catch(() => ({}));
+    if (Number(runId) !== Number(scope.runId) || Number(attempt) !== Number(scope.attempt)) {
+      return json({ error: "token scope mismatch" }, 403);
+    }
+    const row = cell.sql.exec("SELECT * FROM runs WHERE id = ?", Number(runId) || 0).toArray()[0];
+    if (!row) return json({ error: `no such run: ${runId}` }, 404);
+    const m = cell.manifest();
+    const wf = m && (m.workflows || []).find((w) => w.name === row.wf);
+    if (!wf) return json({ error: `workflow ${row.wf} is no longer in the manifest` }, 404);
+    return json(await cell.runWorkflowLocked(wf, JSON.parse(row.input || "null"), JSON.parse(row.cause || "null")));
+  }
+  if (rest === "wf/complete" && request.method === "POST") {
+    if (!isWf) return json({ error: "wf/complete requires a wf-run token" }, 403);
+    const { runId, attempt, outcome } = await request.json().catch(() => ({}));
+    if (Number(runId) !== Number(scope.runId) || Number(attempt) !== Number(scope.attempt)) {
+      return json({ error: "token scope mismatch" }, 403);
+    }
+    if (!outcome || typeof outcome !== "object" || !("ok" in outcome)) {
+      return json({ error: "body: {runId, attempt, outcome: {ok, output?|error?}}" }, 400);
+    }
+    return await cell.applyRunOutcome(runId, attempt, outcome);
+  }
 
   if (rest === "ping") return new Response("pong");
 
   if (rest === "secrets/all") {
-    const rows = cell.sql.exec("SELECT name, value FROM secrets").toArray();
-    const out = {};
-    for (const r of rows) out[r.name] = r.value;
+    let out: Record<string, string>;
+    try {
+      out = await secretsUnwrapped(cell);
+    } catch (e) {
+      return json({ error: String((e as Error).message || e) }, 500);
+    }
     return json(out);
   }
 
   if (rest === "files/read") {
     const path = url.searchParams.get("path") || "";
-    // run scope, or a served app (live by default; freeze pins the
-    // snapshot), reads the working copy: code stays frozen in the deploy
-    // snapshot, data flows live.
-    const live = isRun || cell.manifest()?.freeze !== true;
-    const row = live
-      ? cell.getFileMeta(path)
-      : cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = ?", scope.slug, path).toArray()[0];
-    if (!row) return json({ error: live ? "no such file" : "no such file in draft" }, 404);
-    // 8MiB decode ceiling: ctx.files.read consumers .text()/.arrayBuffer()
-    // whatever lands, so a bigger body would sit whole on the isolate heap —
-    // exactly the shape the two-tier split exists to kill. Point big reads
-    // at hashed/ranged access instead.
-    if ((row.size | 0) > READ_CEILING) {
-      return json({ error: `file is ${(row.size / 1048576).toFixed(1)}MiB — over the ${READ_CEILING / 1048576}MiB decode ceiling for whole-file reads; consume it via its hash (${String(row.sha256).slice(0, 12)}…) with ranged/streamed access` }, 413);
-    }
-    // proxy-stream loopback: bytes flow through untouched, never heap-buffered
-    const upstream = await tierStreamByHash(cell, row.sha256);
-    return new Response(upstream.body, {
-      headers: { "content-type": row.mime || mimeForPath(path) || "application/octet-stream" },
+    // run scope reads the working copy (main pin); served apps read the
+    // working copy too unless the fragment freezes them to the live ref
+    // (code frozen at deploy, data flowing live — same promise as before,
+    // now over refs: freeze maps main→live)
+    const ref = isRun || cell.manifest()?.freeze !== true ? "main" : "live";
+    const resp = await readFileStream(cell, path, ref);
+    if (resp.status !== 200) return resp;
+    return new Response(resp.body, {
+      status: resp.status,
+      headers: { "content-type": mimeForPath(path) || "application/octet-stream" },
     });
   }
 
   if (rest === "files/stat") {
     const path = url.searchParams.get("path") || "";
     if (!path || path.includes("..") || path.startsWith("/")) return json({ error: "bad path" }, 400);
-    // live row INCLUDING tombstones: read-modify-write loops compare revs
-    // against this, so a deleted path must surface (deleted: true) rather
-    // than 404 — "absent" and "never existed" carry different rev history
-    const row = cell.sql.exec("SELECT rev, sha256, size, deleted FROM files WHERE path = ?", path).toArray()[0];
-    if (!row) return json({ stat: null });
-    return json({ stat: { path, rev: row.rev || 0, sha256: row.sha256 || "", size: row.size || 0, deleted: !!row.deleted } });
+    // read-modify-write loops compare against the path's CONTENT identity
+    // now (git blob sha), not a numeric rev — deletion and never-existed
+    // unify to {present: false} (git has no tombstones at a ref)
+    const st = await statPath(cell, path);
+    return json({ stat: st });
   }
 
   if (rest === "files/write" && request.method === "PUT") {
-    if (!isRun) return json({ error: "drafts are immutable" }, 403);
+    if (!isRun) return json({ error: "only workflow runs write files (editors commit directly via code.storage)" }, 403);
     const path = url.searchParams.get("path") || "";
     if (!path || path.includes("..") || path.startsWith("/")) return json({ error: "bad path" }, 400);
-    // admission classifies the wire form and resolves the content address
-    // BEFORE any row state is touched (cheap gates stay byte-free)
-    let adm;
-    try {
-      adm = await admitFileWrite(cell, request, mimeForPath(path) || MIME.txt);
-    } catch (e) {
-      const status = e instanceof TierError ? e.status : 400;
-      return json({ error: String(e.message || e), ...(status === 413 ? { hint: "blob-first" } : {}) }, status);
-    }
-    // write-suppression: identical content is a recorded no-op. Re-writing
-    // the same bytes must not churn rev/updatedAt — pollers and revcron
-    // feeds key on those, and churn is the fuel of copy-loops.
-    const existing = cell.sql.exec("SELECT rev, sha256 FROM files WHERE path = ? AND deleted = 0", path).toArray()[0];
-    // optimistic concurrency: ifRev pins the write to a known row state, so
-    // a stale snapshot (a sweep holding metas across a slow AI call, two
-    // workflows editing one file) fails loudly here instead of clobbering.
-    // A deleted row counts as absent: its rev belongs to the tombstone.
-    const ifRevRaw = url.searchParams.get("if_rev");
-    if (ifRevRaw !== null) {
-      const ifRev = parseInt(ifRevRaw, 10);
-      const curRev = existing ? existing.rev : 0;
-      if (ifRev !== curRev) {
-        return json({ error: "rev conflict", path, currentRev: curRev, ifRev }, 409);
+    // bytes buffered ONCE inside this turn (bounded by WRITE_CEILING at
+    // the top); the commit-pack writer re-chunks them at 3 MiB
+    const bytes = new Uint8Array(await request.arrayBuffer());
+    // ifSha: pin the write to the path's current blob sha from stat() —
+    // a moved path fails loudly instead of clobbering
+    const ifSha = url.searchParams.get("if_sha");
+    if (ifSha !== null) {
+      const st = await statPath(cell, path);
+      const cur = st.present ? st.blobSha : "";
+      if (ifSha !== cur) {
+        return json({ error: "content conflict", path, currentSha: cur, ifSha }, 409);
       }
     }
-    if (existing && existing.sha256 === adm.effSha) {
-      cell.addEvent("write.deduped", path);
-      return json({ ok: true, deduped: true, rev: existing.rev });
-    }
-    // static site files serve from the deploy SNAPSHOT — a workflow
-    // writing here updates nothing visitors see (r2-news's silent-empty-
-    // feed failure mode)
-    if (path.startsWith("site/")) {
-      cell.addEvent("write.warn", `${path}: workflows writing into site/ serve from the deploy snapshot — data files belong outside site/`);
-    }
-    // workflows inherit append-only constraints: identical rewrites are
-    // no-ops (above), modifications under a prefix are refused
-    if (existing && appendOnlyHit(cell, path)) {
-      cell.addEvent("write.refused", `${path}: append-only`);
-      return json({ error: "append-only", path }, 409);
-    }
-    let desc;
+    let out;
     try {
-      desc = await adm.place();
+      out = await commitPaths(cell, [{ path, bytes }], `workflow write: ${scope.workflow || "run"}`, `wf:${scope.workflow || "?"}`);
     } catch (e) {
-      const status = e instanceof TierError ? e.status : 502;
-      return json({ error: String(e.message || e) }, status);
+      if (e instanceof CodeStorageError) return json({ error: String(e.message || e) }, e.status || 502);
+      throw e;
     }
-    // paired assertions: identity must survive placement, and a name is
-    // never committed without a size — dangling names break every reader
-    if (desc.sha256 !== adm.effSha) {
-      return json({ error: `hash mismatch: tier received ${desc.sha256}, caller declared ${adm.effSha}` }, 400);
+    if (!out.ok) return json({ error: out.error, ...(out.conflict ? { conflict: true } : {}) }, out.status);
+    // static site files serve from the LIVE ref — a workflow writing into
+    // site/ updates nothing visitors see until the next deploy
+    if (path.startsWith("site/")) {
+      cell.addEvent("write.warn", `${path}: workflows writing into site/ serve from the live ref — data files belong outside site/`);
     }
-    if (!(desc.sha256 && Number.isSafeInteger(desc.size))) {
-      return json({ error: "tier descriptor incomplete — refusing to commit a dangling name" }, 502);
+    const blobSha = await gitBlobSha(bytes);
+    return json({ ok: true, deduped: out.deduped, sha: blobSha, commitSha: out.commitSha });
+  }
+
+  if (rest === "files/delete" && request.method === "POST") {
+    if (!isRun) return json({ error: "only workflow runs write files" }, 403);
+    const { path } = await request.json().catch(() => ({}));
+    if (!path || typeof path !== "string" || path.includes("..") || path.startsWith("/")) return json({ error: "body: {path}" }, 400);
+    if (appendOnlyHit(cell, path)) return json({ error: `append-only: ${path} refuses deletion` }, 409);
+    let out;
+    try {
+      out = await commitPaths(cell, [{ path, delete: true }], `workflow delete: ${scope.workflow || "run"}`, `wf:${scope.workflow || "?"}`);
+    } catch (e) {
+      if (e instanceof CodeStorageError) return json({ error: String(e.message || e) }, e.status || 502);
+      throw e;
     }
-    const newRev = parseInt(cell.getMeta("rev") || "0", 10) + 1;
-    cell.setMeta("rev", String(newRev));
-    cell.sql.exec("INSERT INTO files (path, sha256, size, mime, rev, updated_at, deleted) VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT(path) DO UPDATE SET sha256 = excluded.sha256, size = excluded.size, mime = excluded.mime, rev = excluded.rev, updated_at = excluded.updated_at, deleted = 0",
-      path, desc.sha256, desc.size, desc.mime, newRev, Date.now());
-    await recordRevision(cell, path, newRev, desc.sha256);
-    return json({ ok: true, deduped: false, rev: newRev });
+    if (!out.ok) return json({ error: out.error }, out.status);
+    return json({ ok: true, deduped: out.deduped, commitSha: out.commitSha });
   }
 
   if (rest === "files/list") {
     const prefix = url.searchParams.get("prefix") || "";
-    const live = isRun || cell.manifest()?.freeze !== true;
-    // sizes are stored columns now — no length(content) scan over bodies
-    const rows = live
-      ? cell.sql.exec("SELECT path, size, updated_at, rev FROM files WHERE path LIKE ? AND deleted = 0 ORDER BY path", prefix + "%").toArray()
-      : cell.sql.exec("SELECT path, size, 0 AS updated_at, 0 AS rev FROM draft_files WHERE slug = ? AND path LIKE ? ORDER BY path", scope.slug, prefix + "%").toArray();
+    const ref = isRun || cell.manifest()?.freeze !== true ? "main" : "live";
+    const rows = treeList(cell, ref, prefix);
     return json({
       paths: rows.map((r) => r.path),
-      files: rows.map((r) => ({ path: r.path, size: r.size, updatedAt: r.updated_at || null, rev: r.rev || 0 })),
+      files: rows.map((r) => ({ path: r.path, size: r.size, mode: r.mode, lastCommitSha: r.last_commit_sha })),
     });
   }
 
@@ -265,8 +297,7 @@ export async function internalRoute(cell, request, url) {
     // claim-on-drain: pending rows flip to claimed under a unique token in
     // the same pass that reads them, so two runs can never see the same
     // message — even when a read trails another run's ack by a write
-    // barrier (observed on single-node CI: 2 messages appended twice)
-    // crypto-random like every other token the runtime mints
+    // barrier. crypto-random like every other token the runtime mints.
     const token = randHex(16);
     const rows = cell.sql.exec("SELECT id, at, source, payload FROM inbox WHERE status = 'pending' ORDER BY id LIMIT 100").toArray();
     for (const r of rows) {
@@ -302,18 +333,11 @@ export async function internalRoute(cell, request, url) {
   // code (the platform "ai" module, or anything OpenAI-compatible) sends a
   // request to /egress/<host>/<path>; the cell forwards it to
   // https://<host>/<path> IF the host is allowlisted by which provider keys
-  // the host holds, attaching the matching key. The run token rides either
-  // the usual x-fragment-token header or as the Bearer credential (so
-  // apiKey-shaped clients work unmodified). Model dialects, option shapes,
-  // and queue dances all live client-side in the ai module — swapping a
-  // vendor touches zero cell code.
+  // the host holds, attaching the matching key.
   {
     const m = url.pathname.match(/\/egress\/([^/]+)\/(.+)$/);
     if (m && rest.startsWith("egress/")) {
       const host = m[1];
-      // allowlist: derived from configured keys, never open — an egress to
-      // an unconfigured host must fail closed, not fall through to plain
-      // fetch with no key (that would look like success and confuse everyone)
       const falKey = String(cell.env.FAL_API_KEY || "");
       const orKey = String(cell.env.OPENROUTER_API_KEY || "");
       const falBaseHost = (() => { try { return new URL(String(cell.env.FRAGMENT_FAL_BASE || "https://queue.fal.run")).host; } catch { return "queue.fal.run"; } })();
@@ -325,15 +349,12 @@ export async function internalRoute(cell, request, url) {
       if (!cred) {
         return json({ error: `egress host '${host}' is not allowlisted — the host holds keys for: ${Object.keys(keys).filter((k) => keys[k]).join(", ") || "(none)"}` }, 403);
       }
-      // loopback hosts ride http (the e2e fake fal); everything else https
       const loopback = /^(127\.0\.0\.1|localhost|\[::1\])(:|$)/.test(host);
       const upstream = `http${loopback ? "" : "s"}://${host}/${m[2]}${url.search}`;
       const drop = new Request(upstream, {
         method: request.method,
         headers: {
           "content-type": request.headers.get("content-type") || "application/json",
-          // the vendor credential REPLACES the caller's authorization (the
-          // caller's was the run token)
           authorization: cred.header,
         },
         body: ["GET", "HEAD"].includes(request.method) ? undefined : request.body,
@@ -349,36 +370,47 @@ export async function internalRoute(cell, request, url) {
   }
 
   // ------ Ingest: place remote bytes as a file ------
-  // files-plane primitive (not an AI feature): stream a public URL into the
-  // tier and commit the row. The ai module composes this for generated
-  // media; dropzones and pollers can use it for any remote asset.
+  // files-plane primitive (not an AI feature): fetch a public URL and
+  // commit it at a path (dedup + append-only gates as usual). The ai
+  // module composes this for generated media; dropzones and pollers can
+  // use it for any remote asset.
   if (rest === "files/ingest" && request.method === "POST") {
+    // run scope, plus BLESSED apps: the gen template's /generate route is a
+    // served app placing media — the ai module's ingest is its placement
+    // primitive, not a general app write path (ctx.files.write stays
+    // run-only). Draft previews never load app code (no /d/ anymore), so
+    // blessed app scope is exactly the served-app plane.
+    const canPlace = isRun || (scope.kind === "draft" && scope.blessed === true);
+    if (!canPlace) return json({ error: "ingest is run-scoped (or a blessed app's generate)" }, 403);
     const { url: remoteUrl, path } = await request.json().catch(() => ({}));
     if (typeof remoteUrl !== "string" || !/^https?:\/\//.test(remoteUrl) || remoteUrl.length > 500)
       return json({ error: "body: {url: https://…, path}" }, 400);
     if (!path || typeof path !== "string" || path.includes("..") || path.startsWith("/") || path.length > 200)
       return json({ error: "bad path" }, 400);
-    let desc;
+    // bounded buffer: same ceiling as writes — media-scale placement
+    // belongs to the CLI's direct commit path
+    const timed = (p) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("fetch output timed out after 120s")), 120_000))]);
+    const remote = await timed(fetch(remoteUrl));
+    if (!remote.ok) return json({ error: `fetch output: ${remote.status}` }, 502);
+    const bytes = new Uint8Array(await timed(remote.arrayBuffer()));
+    if (bytes.byteLength > WRITE_CEILING) {
+      return json({ error: `generated output is ${(bytes.byteLength / 1048576).toFixed(1)}MiB — over the ${WRITE_CEILING / 1048576}MiB placement cap; use the CLI commit path for bigger media` }, 413);
+    }
+    let out;
     try {
-      desc = await tierPlaceFromUrl(cell, remoteUrl, mimeForPath(path) || "application/octet-stream");
+      out = await commitPaths(cell, [{ path, bytes }], `ingest from ${String(remoteUrl).slice(0, 80)}`, "wf:ingest");
     } catch (e) {
-      return json({ error: String((e && e.message) || e) }, e instanceof TierError ? e.status : 502);
+      if (e instanceof CodeStorageError) return json({ error: String(e.message || e) }, e.status || 502);
+      throw e;
     }
-    const existing = cell.sql.exec("SELECT rev, sha256 FROM files WHERE path = ? AND deleted = 0", path).toArray()[0];
-    if (existing && existing.sha256 === desc.sha256) {
-      return json({ ok: true, deduped: true, file: { path, sha256: desc.sha256, size: desc.size, mime: desc.mime, url: `__file?path=${encodeURIComponent(path)}` } });
-    }
-    if (existing && appendOnlyHit(cell, path)) {
-      cell.addEvent("write.refused", `${path}: append-only`);
-      return json({ error: "append-only", path }, 409);
-    }
-    const newRev = parseInt(cell.getMeta("rev") || "0", 10) + 1;
-    cell.setMeta("rev", String(newRev));
-    cell.sql.exec("INSERT INTO files (path, sha256, size, mime, rev, updated_at, deleted) VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT(path) DO UPDATE SET sha256 = excluded.sha256, size = excluded.size, mime = excluded.mime, rev = excluded.rev, updated_at = excluded.updated_at, deleted = 0",
-      path, desc.sha256, desc.size, desc.mime, newRev, Date.now());
-    await recordRevision(cell, path, newRev, desc.sha256);
-    cell.addEvent("file.ingested", `${path} (${(desc.size / 1024).toFixed(0)}KiB from ${String(remoteUrl).slice(0, 80)})`, { path, sha256: desc.sha256 });
-    return json({ ok: true, file: { path, sha256: desc.sha256, size: desc.size, mime: desc.mime, url: `__file?path=${encodeURIComponent(path)}` } });
+    if (!out.ok) return json({ error: out.error }, out.status);
+    const blobSha = await gitBlobSha(bytes);
+    // sha256 + mime complete the documented media-descriptor contract
+    // (fal.mjs surfaces both on generateImage/generateVideo results)
+    const digest = await crypto.subtle.digest("SHA-256", bytes as unknown as BufferSource);
+    const sha256 = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    cell.addEvent("file.ingested", `${path} (${(bytes.byteLength / 1024).toFixed(0)}KiB from ${String(remoteUrl).slice(0, 80)})`, { path, sha: blobSha });
+    return json({ ok: true, file: { path, sha: blobSha, sha256, size: bytes.byteLength, mime: mimeForPath(path) || "application/octet-stream", url: `__file?path=${encodeURIComponent(path)}` } });
   }
 
   // ------ Web Push (RFC 8291 payloads, RFC 8292 VAPID) ------
@@ -418,12 +450,9 @@ export async function internalRoute(cell, request, url) {
 
     // crypto sanity once per cell, before the first byte leaves: a broken
     // WebCrypto edge would otherwise fail silently as 400s from every
-    // push service on earth
-    // "ok" is the only sticky state — a FAILED self-test retries next send
-      // (self-healing; the first prod run caught a SPKI-vs-raw point quirk).
-      // v2: the strict RFC 8188 final-record delimiter check — the v1 test
-      // round-tripped a spec-invalid payload and called it fine
-      if (cell.getMeta("push_selftest_v2_done") !== "ok") {
+    // push service on earth. "ok" is the only sticky state — a FAILED
+    // self-test retries next send (self-healing).
+    if (cell.getMeta("push_selftest_v2_done") !== "ok") {
       const t = await webpushSelfTest();
       cell.addEvent("push.selftest", t.ok ? "webpush crypto self-test v2 passed" : "webpush crypto self-test FAILED", t);
       if (t.ok) cell.setMeta("push_selftest_v2_done", "ok");
@@ -454,9 +483,8 @@ export async function internalRoute(cell, request, url) {
           signal: AbortSignal.timeout(10_000),
         });
         // FCM parses only the raw P1363 JWT signature; RFC 7515 DER is for
-        // everyone else (Apple accepts both — probed live, 2026). One
-        // fallback try on 403 so a service flipping parsers can't kill
-        // delivery silently.
+        // everyone else. One fallback try on 403 so a service flipping
+        // parsers can't kill delivery silently.
         const fcmFirst = url.host === "fcm.googleapis.com";
         let form = fcmFirst ? "raw" : "der";
         let resp = await sendWith(fcmFirst ? vh.authorizationRaw : vh.authorization);
@@ -466,15 +494,12 @@ export async function internalRoute(cell, request, url) {
         }
         if (resp.ok) return { sent: true };
         if (resp.status === 404 || resp.status === 410) {
-          // the subscription is gone at the service — keep ours or every
-          // future send pays for a dead endpoint
           cell.sql.exec("DELETE FROM push_subs WHERE endpoint = ?", s.endpoint);
           return { note: `${resp.status} → dropped`, dropped: true };
         }
         const why = (await resp.text().catch(() => "")).slice(0, 120);
         return failNote(cell, s.endpoint, `${resp.status} (sig ${vh.sigShape}, form ${form})${why ? ": " + why : ""}`);
       } catch (e) {
-        // network/timeout: count it, don't let one dead endpoint kill the batch
         return failNote(cell, s.endpoint, `error: ${String((e && e.message) || e).slice(0, 80)}`);
       }
     }));
@@ -518,3 +543,4 @@ export async function internalRoute(cell, request, url) {
 
   return new Response("not found", { status: 404 });
 }
+

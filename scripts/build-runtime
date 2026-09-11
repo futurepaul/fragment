@@ -24,6 +24,9 @@ node -e '
 '
 
 (cd runtime && ./node_modules/.bin/tsc --noEmit -p .)
+# plain transpile (no bundle): the native Workflows import
+# (cloudflare:workers) passes through unresolved for the platform runtime
+# to provide — the same way celld/wrangler provide DO classes.
 (cd runtime && ./node_modules/.bin/esbuild ts/*.ts --outdir=src --format=esm --target=es2022 \
   --log-level=warning \
   --banner:js="// GENERATED from runtime/ts - run scripts/build-runtime after editing sources.")

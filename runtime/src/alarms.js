@@ -1,6 +1,6 @@
 // GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 import { parseCron, nextRun, cronMatches } from "./cron.js";
-import { drainNotify, nextNotifyAt } from "./notify.js";
+import { nextPollAt, pollBackstop } from "./git-plane.js";
 async function rearmAlarm(cell) {
   const m = cell.manifest();
   if (!m) return;
@@ -18,8 +18,8 @@ async function rearmAlarm(cell) {
   if (syncAt && (next === null || syncAt < next)) next = syncAt;
   const retry = cell.sql.exec("SELECT MIN(next_attempt_at) t FROM runs WHERE status IN ('backoff', 'pending')").toArray()[0];
   if (retry && retry.t && (next === null || retry.t < next)) next = retry.t;
-  const notifyAt = nextNotifyAt(cell);
-  if (notifyAt && (next === null || notifyAt < next)) next = notifyAt;
+  const pollAt = nextPollAt(cell);
+  if (pollAt && (next === null || pollAt < next)) next = pollAt;
   if (next !== null) await cell.state.storage.setAlarm(next);
   else await cell.state.storage.deleteAlarm();
 }
@@ -54,19 +54,9 @@ async function alarm(cell) {
     }
     cell.sql.exec("UPDATE inbox SET status = 'pending', claim_token = NULL WHERE status = 'claimed' AND claimed_at < ?", Date.now() - 10 * 6e4);
     await cell.resumeDueRuns();
-    await drainNotify(cell);
+    const pollAt = nextPollAt(cell);
+    if (pollAt !== null && pollAt <= Date.now()) await pollBackstop(cell);
   } finally {
-    await cell.rearmAlarm();
-  }
-}
-async function scheduleSyncTrigger(cell, path) {
-  const m = cell.manifest();
-  if (!m || !(m.workflows || []).some((wf) => wf.trigger === "files")) return;
-  const dirty = new Set(JSON.parse(cell.getMeta("sync_dirty_paths") || "[]"));
-  dirty.add(path);
-  cell.setMeta("sync_dirty_paths", JSON.stringify([...dirty].slice(-500)));
-  if (!parseInt(cell.getMeta("sync_trigger_at") || "0", 10)) {
-    cell.setMeta("sync_trigger_at", String(Date.now() + (m.debounceMs ?? 4e3)));
     await cell.rearmAlarm();
   }
 }
@@ -84,6 +74,5 @@ async function fireSyncTriggers(cell, m) {
 export {
   alarm,
   fireSyncTriggers,
-  rearmAlarm,
-  scheduleSyncTrigger
+  rearmAlarm
 };

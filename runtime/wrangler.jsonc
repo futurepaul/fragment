@@ -3,5 +3,14 @@
   "main": "src/index.js",
   "compatibility_date": "2026-01-01",
   "durable_objects": { "bindings": [{ "name": "FRAGMENT", "class_name": "FragmentCell" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["FragmentCell"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["FragmentCell"] }],
+  // native Workflows: the durable executor for workflow run attempts
+  // (wf-engine.ts FragmentWorkflow). One binding for the whole fleet —
+  // instances are per-run (`r<runId>a<attempt>`), addressed by id.
+  // (`binding`, not `binding_name`: the current wrangler/celld schema)
+  "workflows": [{ "name": "fragment-run", "class_name": "FragmentWorkflow", "binding": "WORKFLOWS" }],
+  // notify-on-change outbox: one writer (this runtime's cells), one
+  // consumer (the notify-relay deployment). Delivery/retries are
+  // queue-owned (docs/explorations/queues-eval.md).
+  "queues": { "producers": [{ "binding": "NOTIFY", "queue": "fragment-notify" }] }
 }

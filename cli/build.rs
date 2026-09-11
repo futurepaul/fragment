@@ -54,7 +54,7 @@ fn main() {
     dz.sort();
     groups.push(("dropzone", dz));
 
-    let mut src = String::from("pub static TEMPLATES: &[(&str, &[(&str, &[u8])])] = &[\n");
+    let mut src = String::from("#[allow(clippy::type_complexity)] // generated table of template files\npub static TEMPLATES: &[(&str, &[(&str, &[u8])])] = &[\n");
     for (name, files) in &groups {
         src.push_str(&format!("    ({name:?}, &[\n"));
         for (rel, origin) in files {

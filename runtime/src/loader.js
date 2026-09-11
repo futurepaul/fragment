@@ -1,8 +1,8 @@
 // GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 import { randHex } from "./util.js";
+import { treeList, readFileText } from "./git-plane.js";
 import { CTX_SHIM_SOURCE } from "./ctx-shim.js";
 import { AI_MODULE_SOURCE } from "./ai-module.js";
-import { tierTextBounded } from "./blob-tier.js";
 const WORKFLOW_MAIN = `
 import { makeCtx } from "./fragment-ctx.mjs";
 import { run } from "./__WF__";
@@ -103,14 +103,11 @@ async function loadCode(cell, id, mainSource, modules, scope, cause = null) {
       FRAGMENT_INTERNAL_URL: cell.internalBase(),
       FRAGMENT_RUN_TOKEN: cell.makeToken(scope),
       FRAGMENT_SCOPE: scope.kind,
-      // Blob-tier vars (docs/blob-tier.md) deliberately stay OUT of author
-      // workers: ctx.files.* funnels through the loopback internal plane and
-      // the CELL performs all tier traffic with host credentials. They ride
-      // the same CELLD_VAR_ passthrough as everything else on cell.env:
-      //   CELLD_VAR_BLOBSD_URL            -> env.BLOBSD_URL            (tier write/read base)
-      //   CELLD_VAR_BLOBSD_INTERNAL_TOKEN -> env.BLOBSD_INTERNAL_TOKEN (Bearer for runtime tier calls)
-      //   CELLD_VAR_BLOBSD_PUBLIC_GET=1   -> env.BLOBSD_PUBLIC_GET     (302 mode for public/link cells)
-      //   CELLD_VAR_BLOBSD_PUBLIC_URL     -> env.BLOBSD_PUBLIC_URL     (302 Location base)
+      // File-plane vars deliberately stay OUT of author workers:
+      // ctx.files.* funnels through the loopback internal plane and the
+      // CELL performs all code.storage traffic with host credentials
+      // (CELLD_VAR_PIERRE_PRIVATE_KEY etc. ride the CELLD_VAR_
+      // passthrough to cell.env only).
       // apps that declare secrets get them eagerly — one loopback, paid
       // only when the manifest asks for it (lazy fill broke first-render
       // reads; found live: the tray 500'd "missing secrets")
@@ -135,8 +132,9 @@ async function collectModules(cell, prefixes) {
   const list = Array.isArray(prefixes) ? prefixes : [prefixes];
   const modules = {};
   for (const prefix of list) {
-    const rows = cell.sql.exec("SELECT path, sha256, size FROM files WHERE path LIKE ? AND deleted = 0", prefix + "%").toArray();
-    for (const r of rows) modules[r.path] = await tierTextBounded(cell, r, `module ${r.path}`);
+    for (const r of treeList(cell, "main", prefix)) {
+      modules[r.path] = await readFileText(cell, r.path, `module ${r.path}`);
+    }
   }
   return modules;
 }

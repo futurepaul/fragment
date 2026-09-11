@@ -155,7 +155,7 @@ fn compile_typescript(dir: &Path, report: &mut BuildReport) -> Result<()> {
             "app.mjs".to_string()
         } else if let Some(stem) = rel.strip_suffix(".ts") {
             format!("{stem}.mjs")
-        } else if let Some(stem) = rel.strip_suffix(".tsx") {
+        } else if rel.strip_suffix(".tsx").is_some() {
             bail!("{rel}: .tsx is not supported yet — author jsx-free or wait for the jsx step");
         } else {
             unreachable!()
@@ -176,7 +176,7 @@ fn collect_ts(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         let entry = entry?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        if skip(&path.strip_prefix(root).unwrap_or(&path)) {
+        if skip(path.strip_prefix(root).unwrap_or(&path)) {
             continue;
         }
         if path.is_dir() {
@@ -272,7 +272,7 @@ fn hash_site_assets(dir: &Path, report: &mut BuildReport) -> Result<()> {
         // must move /app.<oldhash>.js references to the new hash, or the
         // page keeps serving the stale asset forever (found live on meatproxy)
         for (stem, ext, hashed_name) in &stale_hash_targets {
-            let mut re_text = text.clone();
+            let re_text = text.clone();
             let mut out = String::with_capacity(text.len());
             let mut rest = re_text.as_str();
             let needle_open = format!("/{stem}.");

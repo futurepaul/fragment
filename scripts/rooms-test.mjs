@@ -14,7 +14,9 @@ function client(name) {
     if (m.type === 'presence') log(name, 'presence', m.list.map((p) => p.clientId).join(','));
   };
   c.send = (obj) => ws.send(JSON.stringify(obj));
-  c.ready = new Promise((res) => { ws.onopen = res; });
+  // reject on error: a refused ws (token-gated room without ?view=) must
+  // fail loudly, not hang the script on an unsettled await
+  c.ready = new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
   return c;
 }
 

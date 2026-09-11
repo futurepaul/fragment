@@ -93,10 +93,15 @@ editor /etc/celld.env        # fill from deploy/env.example
 ```
 
 `/etc/celld.env` holds `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
-`AWS_REGION`, and (recommended) `FRAGMENT_HOST_SECRET` — generate with
-`openssl rand -hex 32`. Platform keys ride the `CELLD_VAR_` passthrough:
-`CELLD_VAR_OPENROUTER_API_KEY` (ctx.ai) and `CELLD_VAR_FAL_API_KEY`
-(ctx.image/ctx.video). Root-only, never committed, never pasted anywhere.
+`AWS_REGION`, and (required) `FRAGMENT_HOST_SECRET` — generate with
+`openssl rand -hex 32`; it key-wraps every secret a cell stores (fragment
+npub secrets, secret values). Platform keys ride the `CELLD_VAR_`
+passthrough: `CELLD_VAR_OPENROUTER_API_KEY` (ctx.ai) and
+`CELLD_VAR_FAL_API_KEY` (ctx.image/ctx.video). The file plane rides
+code.storage: `CELLD_VAR_CODESTORAGE_ORG_NAME` +
+`CELLD_VAR_PIERRE_PRIVATE_KEY` (PKCS8 PEM org key; its public half is
+registered in the org's code.storage dashboard — see deploy/env.example).
+Root-only, never committed, never pasted anywhere.
 The systemd unit reads it via `EnvironmentFile=`.
 
 ALL `CELLD_VAR_*` settings belong in this one file — the deploy flow sources

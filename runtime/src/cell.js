@@ -1,19 +1,19 @@
 // GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 import { npubFromHex } from "./bech32.js";
 import { json } from "./util.js";
-import { tierTextBounded } from "./blob-tier.js";
+import { readFileText } from "./git-plane.js";
 import { initCell, registryRoute, syncRolesToRegistry } from "./registry.js";
 import { canonicalUrl, serveRoute, checkVisibility } from "./serve.js";
 import { apiRoute } from "./api-routes.js";
-import { rearmAlarm, alarm, scheduleSyncTrigger, fireSyncTriggers } from "./alarms.js";
+import { rearmAlarm, alarm, fireSyncTriggers } from "./alarms.js";
 import { makeToken, checkToken, internalBase, loadCode, collectModules, runWorkflowLocked } from "./loader.js";
-import { executeWorkflow, resumeDueRuns } from "./runs.js";
+import { executeWorkflow, resumeDueRuns, finishAttempt, retryPolicy } from "./runs.js";
 import { normalizeManifest } from "./manifest.js";
 import { internalRoute } from "./internal.js";
 import { roomRoute, presenceList, broadcast, webSocketMessage, webSocketClose } from "./rooms.js";
 import { watchRoute } from "./history.js";
-import { SCHEMA, SCHEMA_VERSION, rankOf } from "./util.js";
-import { TierError } from "./blob-tier.js";
+import { SCHEMA, SCHEMA_VERSION, SCHEMA_DROPS, rankOf } from "./util.js";
+import { CodeStorageError } from "./codestorage.js";
 class FragmentCell {
   state;
   env;
@@ -28,23 +28,13 @@ class FragmentCell {
     const metaRows = hasMeta ? this.sql.exec("SELECT COUNT(*) c FROM meta").toArray()[0].c : 0;
     const stored = hasMeta ? this.getMeta("schema") : null;
     if (!hasMeta || metaRows === 0) {
-      const hasFiles = this.sql.exec("SELECT COUNT(*) c FROM sqlite_master WHERE type = 'table' AND name = 'files'").toArray()[0].c > 0;
-      if (hasFiles) {
-        const cols = this.sql.exec("PRAGMA table_info(files)").toArray().map((r) => String(r.name));
-        if (!cols.includes("size")) throw new Error("pre-blob-tier cell data found: wipe fleet per cutover doc");
-      }
       this.sql.exec(SCHEMA);
       this.setMeta("schema", String(SCHEMA_VERSION));
     } else if (String(stored) !== String(SCHEMA_VERSION)) {
       this.sql.exec(SCHEMA);
-      this.addColumnIfMissing("inbox", "claimed_at", "INTEGER");
-      this.addColumnIfMissing("inbox", "claim_token", "TEXT");
+      for (const t of SCHEMA_DROPS) this.sql.exec(`DROP TABLE IF EXISTS ${t}`);
       this.setMeta("schema", String(SCHEMA_VERSION));
     }
-  }
-  addColumnIfMissing(table, col, type) {
-    const cols = this.sql.exec(`PRAGMA table_info(${table})`).toArray().map((r) => String(r.name));
-    if (!cols.includes(col)) this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
   }
   getMeta(k) {
     const row = this.sql.exec("SELECT v FROM meta WHERE k = ?", k).toArray()[0];
@@ -108,21 +98,12 @@ class FragmentCell {
       if (path.startsWith("/__watch")) return watchRoute(this, request, url);
       return new Response("not found", { status: 404 });
     } catch (e) {
-      if (e instanceof TierError) return json({ error: String(e && e.message || e) }, e.status);
+      if (e instanceof CodeStorageError) return json({ error: String(e && e.message || e) }, e.status || 502);
       return json({ error: String(e && e.stack || e) }, 500);
     }
   }
   validateManifest(m) {
     return normalizeManifest(m).error || null;
-  }
-  getFileMeta(path) {
-    return this.sql.exec("SELECT sha256, size, mime, rev FROM files WHERE path = ? AND deleted = 0", path).toArray()[0] || null;
-  }
-  // bounded whole-body read for code/docs; see blob-tier.tierTextBounded
-  async getFileText(path) {
-    const row = this.getFileMeta(path);
-    if (!row) return null;
-    return tierTextBounded(this, row, `file ${path}`);
   }
   galleryInfo() {
     const m = this.manifest();
@@ -145,10 +126,9 @@ class FragmentCell {
   wipeCell() {
     for (const t of [
       "meta",
-      "files",
-      "file_revisions",
-      "drafts",
-      "draft_files",
+      "git_tree",
+      "own_commits",
+      "webhook_events",
       "secrets",
       "inbox",
       "events",
@@ -157,7 +137,9 @@ class FragmentCell {
       "room_msgs",
       "run_tokens",
       "runs",
-      "notify_outbox"
+      "fragments",
+      "roles",
+      "push_subs"
     ]) {
       this.sql.exec(`DELETE FROM ${t}`);
     }
@@ -193,9 +175,6 @@ class FragmentCell {
   async alarm() {
     return alarm(this);
   }
-  async scheduleSyncTrigger(path) {
-    return scheduleSyncTrigger(this, path);
-  }
   async fireSyncTriggers(m) {
     return fireSyncTriggers(this, m);
   }
@@ -223,6 +202,15 @@ class FragmentCell {
   async resumeDueRuns() {
     return resumeDueRuns(this);
   }
+  async applyRunOutcome(runId, attempt, outcome) {
+    const row = this.sql.exec("SELECT * FROM runs WHERE id = ?", Number(runId) || 0).toArray()[0];
+    if (!row) return json({ error: `no such run: ${runId}` }, 404);
+    const m = this.manifest();
+    const wf = m && (m.workflows || []).find((w) => w.name === row.wf);
+    if (!wf) return json({ error: `workflow ${row.wf} is no longer in the manifest` }, 404);
+    const res = await finishAttempt(this, wf, row.id, Number(attempt) || row.attempt, retryPolicy(wf), row.via, row.started_at, outcome);
+    return json(res);
+  }
   async internalRoute(request, url) {
     return internalRoute(this, request, url);
   }
@@ -240,6 +228,11 @@ class FragmentCell {
   }
   async webSocketClose(ws) {
     return webSocketClose(this, ws);
+  }
+  // bounded text read over the git plane (kept as a cell method because
+  // loader/rooms/serve all used cell.getFileText)
+  async getFileText(path) {
+    return readFileText(this, path);
   }
 }
 export {

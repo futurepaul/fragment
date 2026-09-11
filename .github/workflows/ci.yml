@@ -1,6 +1,6 @@
-# fragment CI: unit tests for the Rust CLI + blobsd, and the full e2e suite
-# against celld 0.4.0's `celld dev` (local object store) with the fs-backed
-# blobsd tier — all native processes, no docker, no MinIO.
+# fragment CI: unit tests for the Rust CLI, the runtime unit suite (node
+# --test against the mock code.storage server), and the e2e suite against
+# celld 0.4.0's `celld dev` (local object store).
 name: ci
 
 on:
@@ -27,14 +27,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             cli/target
-            blobsd/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('cli/Cargo.lock', 'blobsd/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('cli/Cargo.lock') }}
       - name: unit tests
         run: cargo test
         working-directory: cli
-      - name: blobsd tests
-        run: cargo test --release
-        working-directory: blobsd
 
   # e2e runs on macOS on purpose: celld dev's watcher restarts the worker when
   # its own state writes land under PROJECT/.celld on linux/inotify (FSEvents
@@ -78,17 +74,16 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             cli/target
-            blobsd/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('cli/Cargo.lock', 'blobsd/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('cli/Cargo.lock') }}
 
-      - name: build CLI + blobsd
+      - name: build CLI
         run: cargo build
         working-directory: cli
-      - name: build blobsd (release)
-        run: cargo build --release
-        working-directory: blobsd
 
-      - name: bring up the native stack (celld dev + fs tier)
+      - name: runtime unit tests (mock code.storage)
+        run: node --test runtime/test/
+
+      - name: bring up the native stack (celld dev + mock code.storage)
         run: |
           export FRAGMENT_HOST_SECRET="$(openssl rand -hex 32)"
           # E2E_FAL_FAKE stands in a local fal queue with a dummy key, so
@@ -99,8 +94,6 @@ jobs:
 
       - name: e2e suite
         run: >
-          E2E_BLOBSD_TOKEN=e2e-blob-token-0123456789abcdef
-          FRAGMENT_BLOB_URL=http://127.0.0.1:9940
           FRAGMENT_BIN="$PWD/cli/target/debug/fragment"
           node scripts/e2e.mjs --all
 
@@ -109,4 +102,4 @@ jobs:
         run: |
           grep -E "change detected|watch" -A2 .dev/celld-dev.log 2>/dev/null | tail -60 || true
           tail -80 .dev/celld-dev.log 2>/dev/null || true
-          tail -40 .dev/blobsd.log 2>/dev/null || true
+          tail -40 .dev/cs-mock.log 2>/dev/null || true

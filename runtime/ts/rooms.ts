@@ -1,18 +1,17 @@
 // Rooms: websockets with presence, persisted state, optional rooms.mjs hook.
 import { randSlug } from "./util.js";
 import { ROOMS_MAIN } from "./loader.js";
-import { tierTextBounded } from "./blob-tier.js";
+import { pinOf } from "./git-plane.js";
+import { readFileTextAtLive } from "./serve.js";
 
 
 // ------ roomRoute ------
 
 export async function roomRoute(cell, request, url) {
   const room = decodeURIComponent(url.pathname.slice("/__room/".length));
-  const draftParam = url.searchParams.get("draft") || "blessed";
-  if (draftParam === "blessed") {
-    const vis = cell.checkVisibility(request, url);
-    if (!vis.ok) return new Response(vis.error + "\n", { status: vis.status });
-  }
+  // rooms ride the fragment's normal visibility gate (live-ref rooms)
+  const vis = cell.checkVisibility(request, url);
+  if (!vis.ok) return new Response(vis.error + "\n", { status: vis.status });
   if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
     return new Response("websocket upgrade required", { status: 426 });
   }
@@ -20,7 +19,7 @@ export async function roomRoute(cell, request, url) {
   const server = pair[0];
   cell.state.acceptWebSocket(server);
   const clientId = randSlug(6);
-  server.serializeAttachment({ room, clientId, label: null, draft: draftParam });
+  server.serializeAttachment({ room, clientId, label: null });
   // hello
   const stateRow = cell.sql.exec("SELECT state FROM rooms WHERE room = ?", room).toArray()[0];
   const history = cell.sql.exec("SELECT sender, data, at FROM room_msgs WHERE room = ? ORDER BY id DESC LIMIT 50", room).toArray().reverse();
@@ -80,44 +79,39 @@ export async function webSocketMessage(cell, ws, raw) {
 
   if (msg.type === "msg") {
     let data = msg.data;
-    // server-side hook from the served draft's rooms.mjs
-    const slug = a.draft === "blessed" ? cell.getMeta("blessed") : a.draft;
-    if (slug) {
-      const row = cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = 'rooms.mjs'", slug).toArray()[0];
-      if (row) {
-        try {
-          const isBlessed = cell.getMeta("blessed") === slug;
-          // blessed apps' rooms code is permanent like the app itself —
-          // a 1h preview token here dies mid-conversation; and the loader
-          // id carries blessed-ness so a preview worker is never reused
-          // for canonical traffic
-          const src = await tierTextBounded(cell, row, "module rooms.mjs");
-          const ep = await cell.loadCode(`rooms:${isBlessed ? "b" : "d"}:${slug}`, ROOMS_MAIN,
-            { "rooms.mjs": src }, { kind: "draft", worker: "rooms", slug, blessed: isBlessed });
-          const resp = await ep.fetch("http://loaded/rooms", {
-            method: "POST",
-            body: JSON.stringify({ room: a.room, msg: { from: a.clientId, data, at: Date.now() } }),
-          });
-          const out = await resp.json();
-          if (out.error) {
-            cell.addEvent("room-error", `rooms.mjs in ${a.room}: ${out.error}`);
-            ws.send(JSON.stringify({ type: "error", error: out.error }));
-            return;
-          }
-          if ("broadcast" in out) data = out.broadcast;
-          if ("state" in out) {
-            cell.sql.exec("INSERT INTO rooms (room, state) VALUES (?, ?) ON CONFLICT(room) DO UPDATE SET state = excluded.state", a.room, JSON.stringify(out.state));
-            cell.broadcast(a.room, JSON.stringify({ type: "state", value: out.state }));
-          }
-          if (out.drop) {
-            cell.addEvent("room-drop", `rooms.mjs dropped a message in ${a.room}${out.reason ? ": " + out.reason : ""}`);
-            return;
-          }
-        } catch (e) {
-          cell.addEvent("room-error", `rooms.mjs threw in ${a.room}: ${String(e)}`);
-          ws.send(JSON.stringify({ type: "error", error: "rooms.mjs: " + String(e) }));
+    // server-side hook from the LIVE ref's rooms.mjs (served code comes
+    // from the live pin; the loader id carries the pin so a deploy that
+    // moves live creates a fresh worker)
+    const pin = pinOf(cell, "live");
+    const row = pin ? cell.sql.exec("SELECT 1 AS y FROM git_tree WHERE ref = 'live' AND path = 'rooms.mjs'", ).toArray()[0] : null;
+    if (pin && row) {
+      try {
+        const src = await readFileTextAtLive(cell, "rooms.mjs");
+        const ep = await cell.loadCode(`rooms:live:${pin}`, ROOMS_MAIN,
+          { "rooms.mjs": src }, { kind: "draft", worker: "rooms", slug: pin, blessed: true });
+        const resp = await ep.fetch("http://loaded/rooms", {
+          method: "POST",
+          body: JSON.stringify({ room: a.room, msg: { from: a.clientId, data, at: Date.now() } }),
+        });
+        const out = await resp.json();
+        if (out.error) {
+          cell.addEvent("room-error", `rooms.mjs in ${a.room}: ${out.error}`);
+          ws.send(JSON.stringify({ type: "error", error: out.error }));
           return;
         }
+        if ("broadcast" in out) data = out.broadcast;
+        if ("state" in out) {
+          cell.sql.exec("INSERT INTO rooms (room, state) VALUES (?, ?) ON CONFLICT(room) DO UPDATE SET state = excluded.state", a.room, JSON.stringify(out.state));
+          cell.broadcast(a.room, JSON.stringify({ type: "state", value: out.state }));
+        }
+        if (out.drop) {
+          cell.addEvent("room-drop", `rooms.mjs dropped a message in ${a.room}${out.reason ? ": " + out.reason : ""}`);
+          return;
+        }
+      } catch (e) {
+        cell.addEvent("room-error", `rooms.mjs threw in ${a.room}: ${String(e)}`);
+        ws.send(JSON.stringify({ type: "error", error: "rooms.mjs: " + String(e) }));
+        return;
       }
     }
     const at = Date.now();

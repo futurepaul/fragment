@@ -1,9 +1,28 @@
 // Router worker: public entry. Routes to cells, verifies NIP-98 on control
 // routes, stamps x-fragment-pubkey (and strips any inbound spoof).
+// Also exports the native Workflows class (FragmentWorkflow) — the durable
+// executor for workflow run attempts (wf-engine.ts).
 import { verifyNip98, sha256Hex } from "./auth.js";
 import { RT_CLIENT_SOURCE } from "./rt-client.js";
+import { runNativeAttempt } from "./wf-engine.js";
+import { WorkflowEntrypoint } from "cloudflare:workers";
 
 export { FragmentCell } from "./cell.js";
+
+// One workflow class for the whole fleet: instances are per-run
+// (`r<runId>a<attempt>`), parameters carry fragment + runId + a wf-run
+// token, and the body (author code, ctx, commits) executes inside the
+// cell via /__internal/wf/attempt. See wf-engine.ts for the division of
+// labor with the runs ledger.
+export class FragmentWorkflow extends WorkflowEntrypoint {
+  async run(event: any, step: any) {
+    // the Workflows event shape is { payload, instanceId, ... } — the
+    // params live at event.payload (celld and current Cloudflare agree;
+    // reading the params straight off `event` sent every attempt at a
+    // fragment named "undefined" — found booting the dev stack)
+    return await runNativeAttempt(event.payload, step, this.env);
+  }
+}
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
@@ -74,22 +93,19 @@ export default {
         const rest = path.slice("/__internal/f/".length);
         const name = rest.slice(0, rest.indexOf("/"));
         // The internal plane exists only for loader-isolate loopback traffic
-        // (workflow/app/rooms ctx calls), which cells authenticate with their
-        // own run tokens. Two namespaces are never reachable over HTTP, from
-        // anyone: the registry and cell init. Both are exercised exclusively
-        // through the FRAGMENT binding by the router itself (create flow,
-        // syncRolesToRegistry, slug-map). Without this block, anyone who can
-        // reach the router could mint registry rows without a key, map
-        // arbitrary slugs onto other fragments, or win the __cell/init race
-        // on a not-yet-initialized name.
+        // (workflow/app/rooms ctx calls) and the native workflow driver,
+        // which cells authenticate with their own run/wf-run tokens. Two
+        // namespaces are never reachable over HTTP, from anyone: the
+        // registry and cell init. Both are exercised exclusively through
+        // the FRAGMENT binding by the router itself.
         if (name === "_registry" || rest.slice(name.length).startsWith("/__cell/")) {
           return new Response("not found", { status: 404 });
         }
         // Defense in depth when the host sets FRAGMENT_HOST_SECRET (celld:
         // CELLD_VAR_FRAGMENT_HOST_SECRET; CF: a wrangler secret): loopback
         // calls must carry x-fragment-host-secret. Cells stamp the value into
-        // loaded workers' env, so ctx keeps working unchanged. Unset (plain
-        // local dev) → per-cell run-token auth only, as before.
+        // loaded workers' and workflow params' env, so ctx keeps working
+        // unchanged. Unset (plain local dev) → per-cell run-token auth only.
         const want = env.FRAGMENT_HOST_SECRET;
         if (want) {
           const got = request.headers.get("x-fragment-host-secret") || "";
@@ -119,20 +135,27 @@ export default {
       if (path === "/api/fragments" && request.method === "POST") {
         const g = await gate();
         if (g.error) return g.error;
-        const { name } = await request.json().catch(() => ({}));
-        if (!name || typeof name !== "string") return json({ error: "body: {name}" }, 400);
+        const { name, fragmentSecret } = await request.json().catch(() => ({}));
+        if (!name || typeof name !== "string") return json({ error: "body: {name, fragmentSecret}" }, 400);
         const created = await registry().fetch("http://x/__registry/create", {
           method: "POST", body: JSON.stringify({ name, ownerHex: g.pubkey }),
         });
         if (!created.ok) return created;
+        // fragmentSecret: the npub secret generated CLIENT-side (level-c
+        // fix) — passed through to the cell on this authenticated channel
+        // and stored wrapped; never echoed back
         const init = await cell(name).fetch("http://x/__cell/init", {
-          method: "POST", body: JSON.stringify({ name, ownerHex: g.pubkey }),
+          method: "POST", body: JSON.stringify({ name, ownerHex: g.pubkey, fragmentSecret }),
         });
         const info = await init.json();
+        if (!info.ok) return json({ error: info.error || "init failed" }, 500);
         const canonical = env.FRAGMENT_SUBDOMAIN_HOST
           ? `https://${encodeURIComponent(name)}.${env.FRAGMENT_SUBDOMAIN_HOST}/`
           : `${url.origin}/f/${name}/`;
-        return json({ name, npub: info.npub, viewToken: info.viewToken, inboxToken: info.inboxToken, canonical });
+        return json({
+          name, npub: info.npub, viewToken: info.viewToken, inboxToken: info.inboxToken,
+          webhookSecret: info.webhookSecret, repo: info.repo, canonical,
+        });
       }
       if (path === "/api/fragments" && request.method === "GET") {
         const g = await gate();
@@ -145,7 +168,8 @@ export default {
         const name = rest.slice(0, rest.indexOf("/") === -1 ? undefined : rest.indexOf("/"));
         if (!name) return json({ error: "bad path" }, 400);
         // DELETE /api/f/{name} — owner-only fragment removal: registry row
-        // gone (unlisted, name reusable), cell data wiped
+        // gone (unlisted, name reusable), cell data wiped. The code.storage
+        // repo is deleted out-of-band.
         if (request.method === "DELETE" && (rest === name || rest === name + "/")) {
           const g = await gate();
           if (g.error) return g.error;
@@ -157,15 +181,17 @@ export default {
           return json({ ok: true, deleted: name });
         }
         const cellPath = "/api" + rest.slice(name.length); // strip /f/<name>
-        // the inbox is token-gated inside the cell, not nostr-gated
+        // token/HMAC-gated doors (no nostr): the inbox (its token) and the
+        // code.storage webhook (its HMAC secret, verified in the cell)
         if (cellPath === "/api/inbox" && request.method === "POST") return toCell(name, cellPath, null);
+        if (cellPath === "/api/webhook" && request.method === "POST") return toCell(name, cellPath, null);
         const g = await gate();
         if (g.error) return g.error;
         return toCell(name, cellPath, g.pubkey);
       }
 
       // ---- rt client ----
-      if ((path.startsWith("/f/") || path.startsWith("/d/")) && path.endsWith("/__rt.js")) {
+      if (path.startsWith("/f/") && path.endsWith("/__rt.js")) {
         // stamped so clients (and e2e) can tell which rt-client generation a
         // host serves; keep the header and the first-line comment in lockstep
         return new Response(`/* fragment rt-client v1 */\n` + RT_CLIENT_SOURCE, {
@@ -193,35 +219,21 @@ export default {
         const room = path.slice(path.indexOf("/__room/") + "/__room/".length);
         const g = await softGate();
         if (g.error) return g.error;
-        const q = new URLSearchParams(url.search);
-        q.set("draft", "blessed");
         const headers = stripAuth(request.headers);
         if (g.pubkey) headers.set("x-fragment-pubkey", g.pubkey);
-        return cell(name).fetch(new Request(`${url.origin}/__room/${room}?${q}`, { method: request.method, headers }));
-      }
-      if (path.startsWith("/d/") && path.includes("/__room/")) {
-        const slug = path.split("/")[2];
-        const room = path.slice(path.indexOf("/__room/") + "/__room/".length);
-        const r = await registry().fetch(`http://x/__registry/slug?s=${encodeURIComponent(slug)}`);
-        if (!r.ok) return json({ error: "unknown draft" }, 404);
-        const { name } = await r.json();
-        const q = new URLSearchParams(url.search);
-        q.set("draft", slug);
-        return cell(name).fetch(new Request(`${url.origin}/__room/${room}?${q}`, { method: request.method, headers: stripAuth(request.headers) }));
+        return cell(name).fetch(new Request(`${url.origin}/__room/${room}${url.search}`, { method: request.method, headers }));
       }
 
-      // ---- site serving ----
+      // ---- site serving (from the live ref; previews are code.storage
+      // ephemeral refs served with a storage token, not a runtime route) ----
       if (path.startsWith("/f/")) {
         const name = path.split("/")[2];
         if (!name) return new Response("not found\n", { status: 404 });
         // canonicalize the bare fragment URL to its slash form: pages load
         // either way, but RELATIVE subresource fetches (an app's POST
         // routes, a vault's assets/) resolve against the document URL —
-        // without the slash they land on /f/<route> and 404 (found live:
-        // the gen app's generate POST from a share link, as Safari's
-        // "string did not match the expected pattern" from a JSON.parse
-        // on the plain-text 404). 308 keeps method and body; the view
-        // token rides along.
+        // without the slash they land on /f/<route> and 404. 308 keeps
+        // method and body; the view token rides along.
         if (path === `/f/${name}` && request.method === "GET") {
           return Response.redirect(`${url.origin}/f/${name}/${url.search}`, 308);
         }
@@ -229,15 +241,6 @@ export default {
         const g = await softGate();
         if (g.error) return g.error;
         return toCell(name, `/__serve/b/${rest}`, g.pubkey);
-      }
-      if (path.startsWith("/d/")) {
-        const slug = path.split("/")[2];
-        if (!slug) return new Response("not found\n", { status: 404 });
-        const rest = path.slice(`/d/${slug}/`.length).replace(/^\//, "");
-        const r = await registry().fetch(`http://x/__registry/slug?s=${encodeURIComponent(slug)}`);
-        if (!r.ok) return json({ error: "unknown draft" }, 404);
-        const { name } = await r.json();
-        return toCell(name, `/__serve/d/${slug}/${rest}`, null);
       }
 
       return new Response("fragment host. see /f/<name>/ for fragments.\n", { status: 404 });

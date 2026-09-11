@@ -4,19 +4,19 @@
 // sibling modules and are invoked through the delegating methods below.
 import { npubFromHex } from "./bech32.js";
 import { json } from "./util.js";
-import { tierStreamByHash, tierTextBounded } from "./blob-tier.js";
+import { readFileText } from "./git-plane.js";
 import { initCell, registryRoute, syncRolesToRegistry } from './registry.js';
 import { canonicalUrl, serveRoute, checkVisibility } from './serve.js';
 import { apiRoute } from './api-routes.js';
-import { rearmAlarm, alarm, scheduleSyncTrigger, fireSyncTriggers } from './alarms.js';
+import { rearmAlarm, alarm, fireSyncTriggers } from './alarms.js';
 import { makeToken, checkToken, internalBase, loadCode, collectModules, runWorkflowLocked } from './loader.js';
-import { executeWorkflow, resumeDueRuns } from './runs.js';
+import { executeWorkflow, resumeDueRuns, finishAttempt, retryPolicy } from './runs.js';
 import { normalizeManifest } from './manifest.js';
 import { internalRoute } from './internal.js';
 import { roomRoute, presenceList, broadcast, webSocketMessage, webSocketClose } from './rooms.js';
 import { watchRoute } from './history.js';
-import { SCHEMA, SCHEMA_VERSION, rankOf } from './util.js';
-import { TierError } from './blob-tier.js';
+import { SCHEMA, SCHEMA_VERSION, SCHEMA_DROPS, rankOf } from './util.js';
+import { CodeStorageError } from './codestorage.js';
 
 export class FragmentCell {
   state: any;
@@ -28,47 +28,25 @@ export class FragmentCell {
     this.state = state;
     this.env = env;
     this.sql = state.storage.sql;
-    // Blob-tier hard cut gate (docs/blob-tier.md). Cells are either born on
-    // schema 3 or refuse to run: a pre-blob-tier DB stores file bodies in
-    // SQLite (files.content), which the new tables structurally cannot
-    // express — the fail-loud error beats a half-working shim. A meta table
-    // with ZERO rows is an emptied (wiped) or never-initialized cell, not
-    // legacy data: wipeCell clears meta outright, so it gets re-stamped and
-    // lives again. Legacy detection = rows present, marker absent.
+    // Schema v5 — the code.storage hard cut. A meta table with ZERO rows
+    // is an emptied (wiped) or never-initialized cell, not legacy data:
+    // wipeCell clears meta outright, so it gets re-stamped and lives
+    // again. Legacy detection = rows present, marker absent or old.
     const hasMeta = this.sql.exec("SELECT COUNT(*) c FROM sqlite_master WHERE type = 'table' AND name = 'meta'").toArray()[0].c > 0;
     const metaRows = hasMeta ? this.sql.exec("SELECT COUNT(*) c FROM meta").toArray()[0].c : 0;
     const stored = hasMeta ? this.getMeta("schema") : null;
     if (!hasMeta || metaRows === 0) {
-      // structural guard for the ambiguous corner (meta emptied on a cell
-      // whose tables predate the cut): legacy `files` has no `size` column,
-      // so its shape alone identifies a pre-blob-tier DB — fail fast on it,
-      // re-stamp everything else
-      const hasFiles = this.sql.exec("SELECT COUNT(*) c FROM sqlite_master WHERE type = 'table' AND name = 'files'").toArray()[0].c > 0;
-      if (hasFiles) {
-        const cols = this.sql.exec("PRAGMA table_info(files)").toArray().map((r: any) => String(r.name));
-        if (!cols.includes("size")) throw new Error("pre-blob-tier cell data found: wipe fleet per cutover doc");
-      }
       this.sql.exec(SCHEMA);
       this.setMeta("schema", String(SCHEMA_VERSION));
     } else if (String(stored) !== String(SCHEMA_VERSION)) {
-      // Version upgrade for cells born on an older schema. CREATE TABLE IF
-      // NOT EXISTS never alters an existing table, so additive upgrades run
-      // the full SCHEMA first (safe on every cell, including special ones
-      // like the registry that were born before some tables existed — found
-      // live: the v3→4 bump made the registry's mismatch branch ALTER a
-      // nonexistent inbox table, failing every registry touch), then past
-      // COLUMN additions follow explicitly (claim_token threw in every
-      // alarm on cells created before it existed), and the stamp moves up
-      // so the branch runs once per upgrade, not per access.
+      // Upgrade: CREATE TABLE IF NOT EXISTS never alters existing tables,
+      // so additive tables come from SCHEMA and the pre-git folder model
+      // is dropped explicitly (hard cut — those rows are re-published
+      // from git, not migrated). The stamp moves up so this runs once.
       this.sql.exec(SCHEMA);
-      this.addColumnIfMissing("inbox", "claimed_at", "INTEGER");
-      this.addColumnIfMissing("inbox", "claim_token", "TEXT");
+      for (const t of SCHEMA_DROPS) this.sql.exec(`DROP TABLE IF EXISTS ${t}`);
       this.setMeta("schema", String(SCHEMA_VERSION));
     }
-  }
-  addColumnIfMissing(table: string, col: string, type: string) {
-    const cols = this.sql.exec(`PRAGMA table_info(${table})`).toArray().map((r: any) => String(r.name));
-    if (!cols.includes(col)) this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
   }
   getMeta(k) {
     const row = this.sql.exec("SELECT v FROM meta WHERE k = ?", k).toArray()[0];
@@ -79,9 +57,9 @@ export class FragmentCell {
   }
   manifest() {
     // decoded once per change: the cache is keyed on the raw string, so any
-    // setMeta("manifest") invalidates it automatically. The legacy
-    // visibility literal migrates here too — a stored "token" must behave
-    // as "link" without requiring a re-PUT.
+    // setMeta("manifest") invalidates it automatically. The manifest is
+    // READ FROM THE REPO at the pinned SHA and cached here (git-plane
+    // refreshManifestCache is the only writer).
     const raw = this.getMeta("manifest");
     if (raw !== this._manifestRaw) {
       this._manifest = raw ? JSON.parse(raw) : null;
@@ -95,7 +73,7 @@ export class FragmentCell {
     // retention: keep the newest 5000 events — id is the rowid (INTEGER
     // PRIMARY KEY) so the MAX(id) lookup is O(1) and the delete is a
     // no-op below the cap; 5000 is far past the read endpoint's 500-row
-    // window (the prod brain had grown past 15k rows)
+    // window
     this.sql.exec("DELETE FROM events WHERE id <= (SELECT COALESCE(MAX(id), 0) - 5000 FROM events)");
   }
   roleOf(pubkeyHex) {
@@ -132,26 +110,16 @@ export class FragmentCell {
       if (path.startsWith("/__watch")) return watchRoute(this, request, url);
       return new Response("not found", { status: 404 });
     } catch (e) {
-      // tier verdicts keep their HTTP semantics (404 missing blob, 400 bad
-      // hash, 413 ceilings): only genuinely unexpected failures become 500s
-      if (e instanceof TierError) return json({ error: String((e && e.message) || e) }, e.status);
+      // code.storage verdicts keep their HTTP semantics (404 missing
+      // branch/file, 413 decode ceilings, 409 conflicts): only genuinely
+      // unexpected failures become 500s
+      if (e instanceof CodeStorageError) return json({ error: String((e && e.message) || e) }, e.status || 502);
       return json({ error: String((e && e.stack) || e) }, 500);
     }
   }
   validateManifest(m) {
     // the TypeBox schema in manifest.ts is the single source of truth
     return normalizeManifest(m).error || null;
-  }
-  getFileMeta(path) {
-    // names only: path -> {sha256, size, mime, rev}. Bodies are not here and
-    // must never come back through this accessor.
-    return this.sql.exec("SELECT sha256, size, mime, rev FROM files WHERE path = ? AND deleted = 0", path).toArray()[0] || null;
-  }
-  // bounded whole-body read for code/docs; see blob-tier.tierTextBounded
-  async getFileText(path) {
-    const row = this.getFileMeta(path);
-    if (!row) return null;
-    return tierTextBounded(this, row, `file ${path}`);
   }
 
   galleryInfo() {
@@ -174,11 +142,12 @@ export class FragmentCell {
   }
 
   wipeCell() {
-    // the old local `blobs` table died with the blob tier: bytes live in
-    // blobsd and wipeCell intentionally does NOT touch them (content-addressed
-    // objects are inert without their rows; tier GC is blobsd's concern)
-    for (const t of ["meta", "files", "file_revisions", "drafts", "draft_files", "secrets",
-      "inbox", "events", "wstate", "rooms", "room_msgs", "run_tokens", "runs", "notify_outbox"]) {
+    // bytes never lived here (git does); wiping clears cell-plane state
+    // only. The repo itself is deleted out-of-band (code.storage console
+    // or API) — a wiped cell re-inits and re-ensures the same repo name.
+    for (const t of ["meta", "git_tree", "own_commits", "webhook_events", "secrets",
+      "inbox", "events", "wstate", "rooms", "room_msgs", "run_tokens", "runs",
+      "fragments", "roles", "push_subs"]) {
       this.sql.exec(`DELETE FROM ${t}`);
     }
     this._manifest = null;
@@ -196,7 +165,6 @@ export class FragmentCell {
   async apiRoute(request, url) { return apiRoute(this, request, url); }
   async rearmAlarm() { return rearmAlarm(this); }
   async alarm() { return alarm(this); }
-  async scheduleSyncTrigger(path) { return scheduleSyncTrigger(this, path); }
   async fireSyncTriggers(m) { return fireSyncTriggers(this, m); }
   makeToken(scope) { return makeToken(this, scope); }
   checkToken(request) { return checkToken(this, request); }
@@ -206,10 +174,25 @@ export class FragmentCell {
   async runWorkflowLocked(wf, input, cause = null) { return runWorkflowLocked(this, wf, input, cause); }
   async executeWorkflow(wf, input, opts = {}) { return executeWorkflow(this, wf, input, opts); }
   async resumeDueRuns() { return resumeDueRuns(this); }
+  async applyRunOutcome(runId, attempt, outcome) {
+    // the /__internal/wf/complete half: map a run row to its workflow and
+    // apply the native engine's reported outcome through the same
+    // finishAttempt the sweep uses
+    const row = this.sql.exec("SELECT * FROM runs WHERE id = ?", Number(runId) || 0).toArray()[0];
+    if (!row) return json({ error: `no such run: ${runId}` }, 404);
+    const m = this.manifest();
+    const wf = m && (m.workflows || []).find((w) => w.name === row.wf);
+    if (!wf) return json({ error: `workflow ${row.wf} is no longer in the manifest` }, 404);
+    const res = await finishAttempt(this, wf, row.id, Number(attempt) || row.attempt, retryPolicy(wf), row.via, row.started_at, outcome);
+    return json(res);
+  }
   async internalRoute(request, url) { return internalRoute(this, request, url); }
   async roomRoute(request, url) { return roomRoute(this, request, url); }
   presenceList(room) { return presenceList(this, room); }
   broadcast(room, text) { return broadcast(this, room, text); }
   async webSocketMessage(ws, raw) { return webSocketMessage(this, ws, raw); }
   async webSocketClose(ws) { return webSocketClose(this, ws); }
+  // bounded text read over the git plane (kept as a cell method because
+  // loader/rooms/serve all used cell.getFileText)
+  async getFileText(path) { return readFileText(this, path); }
 }

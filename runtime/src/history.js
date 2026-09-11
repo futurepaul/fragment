@@ -1,24 +1,4 @@
 // GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
-import { enqueueNotify } from "./notify.js";
-const RETENTION = 10;
-async function recordRevision(cell, path, rev, sha, deleted = false) {
-  cell.sql.exec(
-    "INSERT OR REPLACE INTO file_revisions (path, rev, blob_hash, deleted, at) VALUES (?, ?, ?, ?, ?)",
-    path,
-    rev,
-    deleted ? null : sha,
-    deleted ? 1 : 0,
-    Date.now()
-  );
-  cell.sql.exec(
-    "DELETE FROM file_revisions WHERE path = ? AND rev <= (SELECT COALESCE(MAX(rev), 0) FROM file_revisions WHERE path = ?) - ?",
-    path,
-    path,
-    RETENTION
-  );
-  watchBroadcast(cell, { type: "changed", rev: parseInt(cell.getMeta("rev") || "0", 10), paths: [path] });
-  await enqueueNotify(cell, [path]);
-}
 function watchBroadcast(cell, frame) {
   for (const ws of cell.state.getWebSockets()) {
     try {
@@ -37,11 +17,10 @@ function watchRoute(cell, request, url) {
   const pair = new WebSocketPair();
   cell.state.acceptWebSocket(pair[0]);
   pair[0].serializeAttachment({ watch: true });
-  pair[0].send(JSON.stringify({ type: "hello", rev: parseInt(cell.getMeta("rev") || "0", 10) }));
+  pair[0].send(JSON.stringify({ type: "hello", ref: "main", sha: cell.getMeta("pin_main_sha") || null }));
   return new Response(null, { status: 101, webSocket: pair[1] });
 }
 export {
-  recordRevision,
   watchBroadcast,
   watchRoute
 };

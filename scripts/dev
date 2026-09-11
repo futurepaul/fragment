@@ -1,22 +1,17 @@
 #!/usr/bin/env bash
-# fragment dev environment: celld dev (local object store) + blobsd (fs
-# backend) — two native processes, no docker, no MinIO.
+# fragment dev environment: celld dev (local object store) + the mock
+# code.storage server (tests/dev file plane) — native processes, no docker.
 # verbs: up | down | deploy | status | logs | wipe
 #
 # Local world persists in .dev/celld-state (cells, via the runtime/.celld
-# (blob tier). `wipe` throws both away together — a fresh tier behind old
-# cell state means rows naming objects that don't exist, so they are born
-# and destroyed as a pair.
+# symlink) — file bytes live in code.storage (the mock for local dev).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DEV=.dev
 TOOLS="$DEV/tools"
 CELLD_PORT=8789
-BLOBSD_PORT=9940
-FAL_FAKE_PORT=9942  # 9941 is taken by the e2e tier-lane stub
-# Long enough for blobsd's 16-char token floor; the e2e hint below passes it
-# to the suite via E2E_BLOBSD_TOKEN so dev stack and tests share one tier.
-BLOBSD_TOKEN="${DEV_BLOBSD_TOKEN:-e2e-blob-token-0123456789abcdef}"
+CS_MOCK_PORT=9940
+FAL_FAKE_PORT=9942
 
 export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 mkdir -p "$DEV"
@@ -39,28 +34,20 @@ tools() {
 }
 
 celld_running() { curl -s -o /dev/null -m 2 "http://127.0.0.1:$CELLD_PORT/__internal/ping"; }
-blobsd_running() { curl -s -o /dev/null -m 2 "http://127.0.0.1:$BLOBSD_PORT/"; }
+cs_mock_running() { curl -s -o /dev/null -m 2 "http://127.0.0.1:$CS_MOCK_PORT/healthz"; }
 
-start_blobsd() {
-  if blobsd_running; then echo "blobsd: already running on :$BLOBSD_PORT"; return; fi
-  if [ ! -x blobsd/target/release/blobsd ]; then
-    echo "blobsd: building (first run)…"
-    (cd blobsd && cargo build --release >/dev/null)
-  fi
-  mkdir -p "$DEV/blobsd" "$DEV/blobs-root"
-  BLOBSD_LISTEN="127.0.0.1:$BLOBSD_PORT" \
-  BLOBSD_DATA_DIR="$PWD/$DEV/blobsd" \
-  BLOBSD_PUBLIC_URL="http://127.0.0.1:$BLOBSD_PORT" \
-  BLOBSD_BACKEND=fs \
-  BLOBSD_FS_ROOT="$PWD/$DEV/blobs-root" \
-  BLOBSD_ALLOW_NPUBS='*' \
-  BLOBSD_INTERNAL_TOKEN="$BLOBSD_TOKEN" \
-  BLOBSD_PUBLIC_GET=true \
-  nohup blobsd/target/release/blobsd > "$DEV/blobsd.log" 2>&1 &
-  echo $! > "$DEV/blobsd.pid"
-  for _ in $(seq 1 20); do blobsd_running && break; sleep 0.5; done
-  blobsd_running || { echo "blobsd: did not come up; last log lines:" >&2; tail -10 "$DEV/blobsd.log" >&2; exit 1; }
-  echo "blobsd: started on :$BLOBSD_PORT (fs backend, $DEV/blobs-root)"
+# the mock code.storage server (runtime/test/mock-codestorage.mjs): the
+# local-dev stand-in for the real file plane — repos (url-form identity),
+# commit-packs with expected-parent CAS, file streams, branch heads,
+# branch create/merge/restore (the CLI's deploy/preview/rollback plane)
+start_cs_mock() {
+  if cs_mock_running; then echo "cs-mock: already running on :$CS_MOCK_PORT"; return; fi
+  MOCK_ORG_PRIV="$(cat "$DEV/cs-org-key.pem")" \
+    nohup node runtime/test/mock-codestorage.mjs "$CS_MOCK_PORT" "$DEV/cs-mock-root" > "$DEV/cs-mock.log" 2>&1 &
+  echo $! > "$DEV/cs-mock.pid"
+  for _ in $(seq 1 20); do cs_mock_running && break; sleep 0.5; done
+  cs_mock_running || { echo "cs-mock: did not come up; last log lines:" >&2; tail -10 "$DEV/cs-mock.log" >&2; exit 1; }
+  echo "cs-mock: started on :$CS_MOCK_PORT (state in $DEV/cs-mock-root)"
 }
 
 start_fal_fake() {
@@ -77,10 +64,27 @@ celld_env() {
   export CELLD_WORKER_LOADER=LOADER
   export CELLD_VAR_FRAGMENT_INTERNAL_URL="http://127.0.0.1:$CELLD_PORT"
   export CELLD_ESBUILD="$PWD/$TOOLS/node_modules/.bin/esbuild"
-  export CELLD_VAR_BLOBSD_URL="http://127.0.0.1:$BLOBSD_PORT"
-  export CELLD_VAR_BLOBSD_INTERNAL_TOKEN="$BLOBSD_TOKEN"
-  export CELLD_VAR_BLOBSD_PUBLIC_URL="http://127.0.0.1:$BLOBSD_PORT"
-  export CELLD_VAR_BLOBSD_PUBLIC_GET="1"
+  # wrapped-secret storage (level-c) REQUIRES a host secret; a throwaway
+  # persisted next to the org key so restarts keep cells decryptable.
+  # An operator/CI-provided FRAGMENT_HOST_SECRET wins (exported as-is);
+  # either way the e2e process sees the same value the host runs.
+  if [ -z "${FRAGMENT_HOST_SECRET:-}" ]; then
+    if [ ! -f "$DEV/host-secret" ]; then
+      node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))" > "$DEV/host-secret"
+    fi
+    export FRAGMENT_HOST_SECRET="$(cat "$DEV/host-secret")"
+  fi
+  export CELLD_VAR_FRAGMENT_HOST_SECRET="$FRAGMENT_HOST_SECRET"
+  # code.storage file plane: the local mock + a throwaway org key. The
+  # mock gets the PRIVATE half (MOCK_ORG_PRIV) so it actually verifies the
+  # JWTs the runtime mints — the same discipline the real service has.
+  if [ ! -f "$DEV/cs-org-key.pem" ]; then
+    node -e "const {generateKeyPairSync}=require('node:crypto');const {privateKey}=generateKeyPairSync('ec',{namedCurve:'P-256'});require('node:fs').writeFileSync(process.argv[1],privateKey.export({type:'pkcs8',format:'pem'}))" "$DEV/cs-org-key.pem"
+  fi
+  start_cs_mock
+  export CELLD_VAR_CODESTORAGE_API_URL="http://127.0.0.1:$CS_MOCK_PORT"
+  export CELLD_VAR_CODESTORAGE_ORG_NAME="fragment-dev"
+  export CELLD_VAR_PIERRE_PRIVATE_KEY="$(cat "$DEV/cs-org-key.pem")"
   if [ -n "${OPENROUTER_API_KEY:-}" ]; then
     export CELLD_VAR_OPENROUTER_API_KEY="$OPENROUTER_API_KEY"
   fi
@@ -136,7 +140,7 @@ start_celld() {
 }
 
 stop_all() {
-  for pidfile in "$DEV/celld-dev.pid" "$DEV/blobsd.pid" "$DEV/fal-fake.pid"; do
+  for pidfile in "$DEV/celld-dev.pid" "$DEV/cs-mock.pid" "$DEV/fal-fake.pid"; do
     if [ -f "$pidfile" ]; then
       kill "$(cat "$pidfile")" 2>/dev/null || true
       rm -f "$pidfile"
@@ -145,7 +149,6 @@ stop_all() {
   pkill -f "celld dev" 2>/dev/null || true
   # celld dev re-execs itself as `celld --no-control-plane --bucket celld-dev`
   pkill -f "celld.*--bucket celld-dev" 2>/dev/null || true
-  pkill -f "blobsd/target/release/blobsd" 2>/dev/null || true
   # never trust the drain (the old ci-up lesson): force-kill the overstayers
   # or the next start hits EADDRINUSE
   for _ in $(seq 1 20); do
@@ -159,17 +162,14 @@ case "${1:-}" in
   up)
     tools
     ./scripts/build-runtime >/dev/null
-    start_blobsd
     start_celld
-    echo "fragment host: http://127.0.0.1:$CELLD_PORT"
+    echo "fragment host: http://127.0.0.1:$CELLD_PORT (file plane: mock code.storage on :$CS_MOCK_PORT)"
     echo "  CLI:  fragment --host http://127.0.0.1:$CELLD_PORT …"
-    echo "  e2e:  E2E_BLOBSD_TOKEN=$BLOBSD_TOKEN FRAGMENT_BLOB_URL=http://127.0.0.1:$BLOBSD_PORT node scripts/e2e.mjs --all"
     ;;
   deploy)
     # celld dev runs the current runtime source; a deploy is just a rebuild
     ./scripts/build-runtime
     stop_all
-    start_blobsd
     start_celld
     echo "deployed."
     ;;
@@ -178,7 +178,7 @@ case "${1:-}" in
     echo "down."
     ;;
   status)
-    blobsd_running && echo "blobsd: up (http://127.0.0.1:$BLOBSD_PORT)" || echo "blobsd: down"
+    cs_mock_running && echo "cs-mock: up (http://127.0.0.1:$CS_MOCK_PORT)" || echo "cs-mock: down"
     celld_running && echo "celld dev: up (http://127.0.0.1:$CELLD_PORT)" || echo "celld dev: down"
     ;;
   logs)
@@ -186,8 +186,8 @@ case "${1:-}" in
     ;;
   wipe)
     stop_all
-    rm -rf "$DEV/celld-state" "$DEV/blobsd" "$DEV/blobs-root"
-    echo "wiped: cell state and blob tier discarded together"
+    rm -rf "$DEV/celld-state" "$DEV/cs-mock-root" "$DEV/cs-org-key.pem" "$DEV/host-secret"
+    echo "wiped: cell state, the mock file plane, and the dev keys discarded together"
     ;;
   *)
     echo "usage: scripts/dev up|down|deploy|status|logs|wipe" >&2

@@ -1,9 +1,10 @@
 // GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
-import { json, randHex, bodyTooLarge, MAX_BODY_BYTES, MIME, mimeForPath } from "./util.js";
+import { json, randHex, mimeForPath, bodyTooLarge, writeBodyTooLarge, WRITE_CEILING } from "./util.js";
 import { checkTokenRaw } from "./loader.js";
-import { recordRevision } from "./history.js";
-import { READ_CEILING, TierError, admitFileWrite, tierStreamByHash, tierPlaceFromUrl } from "./blob-tier.js";
 import { encryptPayload, vapidHeaders, generateVapidKeys, webpushSelfTest, b64urlDecode, b64urlEncode } from "./webpush.js";
+import { commitPaths, readFileStream, statPath, treeList, gitBlobSha } from "./git-plane.js";
+import { CodeStorageError } from "./codestorage.js";
+import { unwrapSecret } from "./secretwrap.js";
 function appendOnlyHit(cell, path) {
   const m = cell.manifest();
   return m && (m.appendOnly || []).some((p) => path === p.slice(0, -1) || path.startsWith(p));
@@ -88,13 +89,32 @@ function pushUnsubStore(cell, body) {
   }
   return json({ ok: true, removed: false });
 }
-async function internalRoute(cell, request, url) {
-  if (bodyTooLarge(request)) {
-    return json({ error: `body too large: cells accept at most ${MAX_BODY_BYTES} bytes per write \u2014 keep big assets out of workflows` }, 413);
+function hostSecretOrThrow(cell) {
+  const hs = String(cell.env.FRAGMENT_HOST_SECRET || "");
+  if (!hs) {
+    throw new Error("secrets are wrapped at rest but FRAGMENT_HOST_SECRET is not set on this host \u2014 set CELLD_VAR_FRAGMENT_HOST_SECRET before using secrets");
   }
-  const p = url.pathname.slice("/__internal/f/".length);
-  const slash = p.indexOf("/");
-  const rest = p.slice(slash + 1);
+  return hs;
+}
+async function secretsUnwrapped(cell) {
+  const npub = cell.getMeta("fragment_npub") || "";
+  const hs = hostSecretOrThrow(cell);
+  const out = {};
+  for (const r of cell.sql.exec("SELECT name, value FROM secrets").toArray()) {
+    out[r.name] = await unwrapSecret(hs, npub, r.value);
+  }
+  return out;
+}
+async function internalRoute(cell, request, url) {
+  let pathIsh = url.pathname;
+  if (pathIsh.startsWith("/__internal/f/")) {
+    const after = pathIsh.slice("/__internal/f/".length);
+    pathIsh = "/__internal/" + after.slice(after.indexOf("/") + 1);
+  }
+  const rest = pathIsh.slice("/__internal/".length);
+  if (rest === "files/write" ? writeBodyTooLarge(request) : bodyTooLarge(request)) {
+    return json({ error: rest === "files/write" ? `body too large: workflow writes accept at most ${WRITE_CEILING} bytes per file \u2014 split the payload or push big assets with the CLI's direct commit path` : `body too large: internal routes accept at most 1 MiB` }, 413);
+  }
   let scope = cell.checkToken(request);
   if (!scope && rest.startsWith("egress/")) {
     const auth = request.headers.get("authorization") || "";
@@ -102,98 +122,106 @@ async function internalRoute(cell, request, url) {
   }
   if (!scope) return json({ error: "bad or expired run token" }, 403);
   const isRun = scope.kind === "run";
+  const isWf = scope.kind === "wf-run";
+  if (rest === "wf/attempt" && request.method === "POST") {
+    if (!isWf) return json({ error: "wf/attempt requires a wf-run token" }, 403);
+    const { runId, attempt } = await request.json().catch(() => ({}));
+    if (Number(runId) !== Number(scope.runId) || Number(attempt) !== Number(scope.attempt)) {
+      return json({ error: "token scope mismatch" }, 403);
+    }
+    const row = cell.sql.exec("SELECT * FROM runs WHERE id = ?", Number(runId) || 0).toArray()[0];
+    if (!row) return json({ error: `no such run: ${runId}` }, 404);
+    const m = cell.manifest();
+    const wf = m && (m.workflows || []).find((w) => w.name === row.wf);
+    if (!wf) return json({ error: `workflow ${row.wf} is no longer in the manifest` }, 404);
+    return json(await cell.runWorkflowLocked(wf, JSON.parse(row.input || "null"), JSON.parse(row.cause || "null")));
+  }
+  if (rest === "wf/complete" && request.method === "POST") {
+    if (!isWf) return json({ error: "wf/complete requires a wf-run token" }, 403);
+    const { runId, attempt, outcome } = await request.json().catch(() => ({}));
+    if (Number(runId) !== Number(scope.runId) || Number(attempt) !== Number(scope.attempt)) {
+      return json({ error: "token scope mismatch" }, 403);
+    }
+    if (!outcome || typeof outcome !== "object" || !("ok" in outcome)) {
+      return json({ error: "body: {runId, attempt, outcome: {ok, output?|error?}}" }, 400);
+    }
+    return await cell.applyRunOutcome(runId, attempt, outcome);
+  }
   if (rest === "ping") return new Response("pong");
   if (rest === "secrets/all") {
-    const rows = cell.sql.exec("SELECT name, value FROM secrets").toArray();
-    const out = {};
-    for (const r of rows) out[r.name] = r.value;
+    let out;
+    try {
+      out = await secretsUnwrapped(cell);
+    } catch (e) {
+      return json({ error: String(e.message || e) }, 500);
+    }
     return json(out);
   }
   if (rest === "files/read") {
     const path = url.searchParams.get("path") || "";
-    const live = isRun || cell.manifest()?.freeze !== true;
-    const row = live ? cell.getFileMeta(path) : cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = ?", scope.slug, path).toArray()[0];
-    if (!row) return json({ error: live ? "no such file" : "no such file in draft" }, 404);
-    if ((row.size | 0) > READ_CEILING) {
-      return json({ error: `file is ${(row.size / 1048576).toFixed(1)}MiB \u2014 over the ${READ_CEILING / 1048576}MiB decode ceiling for whole-file reads; consume it via its hash (${String(row.sha256).slice(0, 12)}\u2026) with ranged/streamed access` }, 413);
-    }
-    const upstream = await tierStreamByHash(cell, row.sha256);
-    return new Response(upstream.body, {
-      headers: { "content-type": row.mime || mimeForPath(path) || "application/octet-stream" }
+    const ref = isRun || cell.manifest()?.freeze !== true ? "main" : "live";
+    const resp = await readFileStream(cell, path, ref);
+    if (resp.status !== 200) return resp;
+    return new Response(resp.body, {
+      status: resp.status,
+      headers: { "content-type": mimeForPath(path) || "application/octet-stream" }
     });
   }
   if (rest === "files/stat") {
     const path = url.searchParams.get("path") || "";
     if (!path || path.includes("..") || path.startsWith("/")) return json({ error: "bad path" }, 400);
-    const row = cell.sql.exec("SELECT rev, sha256, size, deleted FROM files WHERE path = ?", path).toArray()[0];
-    if (!row) return json({ stat: null });
-    return json({ stat: { path, rev: row.rev || 0, sha256: row.sha256 || "", size: row.size || 0, deleted: !!row.deleted } });
+    const st = await statPath(cell, path);
+    return json({ stat: st });
   }
   if (rest === "files/write" && request.method === "PUT") {
-    if (!isRun) return json({ error: "drafts are immutable" }, 403);
+    if (!isRun) return json({ error: "only workflow runs write files (editors commit directly via code.storage)" }, 403);
     const path = url.searchParams.get("path") || "";
     if (!path || path.includes("..") || path.startsWith("/")) return json({ error: "bad path" }, 400);
-    let adm;
-    try {
-      adm = await admitFileWrite(cell, request, mimeForPath(path) || MIME.txt);
-    } catch (e) {
-      const status = e instanceof TierError ? e.status : 400;
-      return json({ error: String(e.message || e), ...status === 413 ? { hint: "blob-first" } : {} }, status);
-    }
-    const existing = cell.sql.exec("SELECT rev, sha256 FROM files WHERE path = ? AND deleted = 0", path).toArray()[0];
-    const ifRevRaw = url.searchParams.get("if_rev");
-    if (ifRevRaw !== null) {
-      const ifRev = parseInt(ifRevRaw, 10);
-      const curRev = existing ? existing.rev : 0;
-      if (ifRev !== curRev) {
-        return json({ error: "rev conflict", path, currentRev: curRev, ifRev }, 409);
+    const bytes = new Uint8Array(await request.arrayBuffer());
+    const ifSha = url.searchParams.get("if_sha");
+    if (ifSha !== null) {
+      const st = await statPath(cell, path);
+      const cur = st.present ? st.blobSha : "";
+      if (ifSha !== cur) {
+        return json({ error: "content conflict", path, currentSha: cur, ifSha }, 409);
       }
     }
-    if (existing && existing.sha256 === adm.effSha) {
-      cell.addEvent("write.deduped", path);
-      return json({ ok: true, deduped: true, rev: existing.rev });
-    }
-    if (path.startsWith("site/")) {
-      cell.addEvent("write.warn", `${path}: workflows writing into site/ serve from the deploy snapshot \u2014 data files belong outside site/`);
-    }
-    if (existing && appendOnlyHit(cell, path)) {
-      cell.addEvent("write.refused", `${path}: append-only`);
-      return json({ error: "append-only", path }, 409);
-    }
-    let desc;
+    let out;
     try {
-      desc = await adm.place();
+      out = await commitPaths(cell, [{ path, bytes }], `workflow write: ${scope.workflow || "run"}`, `wf:${scope.workflow || "?"}`);
     } catch (e) {
-      const status = e instanceof TierError ? e.status : 502;
-      return json({ error: String(e.message || e) }, status);
+      if (e instanceof CodeStorageError) return json({ error: String(e.message || e) }, e.status || 502);
+      throw e;
     }
-    if (desc.sha256 !== adm.effSha) {
-      return json({ error: `hash mismatch: tier received ${desc.sha256}, caller declared ${adm.effSha}` }, 400);
+    if (!out.ok) return json({ error: out.error, ...out.conflict ? { conflict: true } : {} }, out.status);
+    if (path.startsWith("site/")) {
+      cell.addEvent("write.warn", `${path}: workflows writing into site/ serve from the live ref \u2014 data files belong outside site/`);
     }
-    if (!(desc.sha256 && Number.isSafeInteger(desc.size))) {
-      return json({ error: "tier descriptor incomplete \u2014 refusing to commit a dangling name" }, 502);
+    const blobSha = await gitBlobSha(bytes);
+    return json({ ok: true, deduped: out.deduped, sha: blobSha, commitSha: out.commitSha });
+  }
+  if (rest === "files/delete" && request.method === "POST") {
+    if (!isRun) return json({ error: "only workflow runs write files" }, 403);
+    const { path } = await request.json().catch(() => ({}));
+    if (!path || typeof path !== "string" || path.includes("..") || path.startsWith("/")) return json({ error: "body: {path}" }, 400);
+    if (appendOnlyHit(cell, path)) return json({ error: `append-only: ${path} refuses deletion` }, 409);
+    let out;
+    try {
+      out = await commitPaths(cell, [{ path, delete: true }], `workflow delete: ${scope.workflow || "run"}`, `wf:${scope.workflow || "?"}`);
+    } catch (e) {
+      if (e instanceof CodeStorageError) return json({ error: String(e.message || e) }, e.status || 502);
+      throw e;
     }
-    const newRev = parseInt(cell.getMeta("rev") || "0", 10) + 1;
-    cell.setMeta("rev", String(newRev));
-    cell.sql.exec(
-      "INSERT INTO files (path, sha256, size, mime, rev, updated_at, deleted) VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT(path) DO UPDATE SET sha256 = excluded.sha256, size = excluded.size, mime = excluded.mime, rev = excluded.rev, updated_at = excluded.updated_at, deleted = 0",
-      path,
-      desc.sha256,
-      desc.size,
-      desc.mime,
-      newRev,
-      Date.now()
-    );
-    await recordRevision(cell, path, newRev, desc.sha256);
-    return json({ ok: true, deduped: false, rev: newRev });
+    if (!out.ok) return json({ error: out.error }, out.status);
+    return json({ ok: true, deduped: out.deduped, commitSha: out.commitSha });
   }
   if (rest === "files/list") {
     const prefix = url.searchParams.get("prefix") || "";
-    const live = isRun || cell.manifest()?.freeze !== true;
-    const rows = live ? cell.sql.exec("SELECT path, size, updated_at, rev FROM files WHERE path LIKE ? AND deleted = 0 ORDER BY path", prefix + "%").toArray() : cell.sql.exec("SELECT path, size, 0 AS updated_at, 0 AS rev FROM draft_files WHERE slug = ? AND path LIKE ? ORDER BY path", scope.slug, prefix + "%").toArray();
+    const ref = isRun || cell.manifest()?.freeze !== true ? "main" : "live";
+    const rows = treeList(cell, ref, prefix);
     return json({
       paths: rows.map((r) => r.path),
-      files: rows.map((r) => ({ path: r.path, size: r.size, updatedAt: r.updated_at || null, rev: r.rev || 0 }))
+      files: rows.map((r) => ({ path: r.path, size: r.size, mode: r.mode, lastCommitSha: r.last_commit_sha }))
     });
   }
   if (rest === "inbox/pending") {
@@ -250,8 +278,6 @@ async function internalRoute(cell, request, url) {
         method: request.method,
         headers: {
           "content-type": request.headers.get("content-type") || "application/json",
-          // the vendor credential REPLACES the caller's authorization (the
-          // caller's was the run token)
           authorization: cred.header
         },
         body: ["GET", "HEAD"].includes(request.method) ? void 0 : request.body,
@@ -266,39 +292,33 @@ async function internalRoute(cell, request, url) {
     }
   }
   if (rest === "files/ingest" && request.method === "POST") {
+    const canPlace = isRun || scope.kind === "draft" && scope.blessed === true;
+    if (!canPlace) return json({ error: "ingest is run-scoped (or a blessed app's generate)" }, 403);
     const { url: remoteUrl, path } = await request.json().catch(() => ({}));
     if (typeof remoteUrl !== "string" || !/^https?:\/\//.test(remoteUrl) || remoteUrl.length > 500)
       return json({ error: "body: {url: https://\u2026, path}" }, 400);
     if (!path || typeof path !== "string" || path.includes("..") || path.startsWith("/") || path.length > 200)
       return json({ error: "bad path" }, 400);
-    let desc;
+    const timed = (p) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("fetch output timed out after 120s")), 12e4))]);
+    const remote = await timed(fetch(remoteUrl));
+    if (!remote.ok) return json({ error: `fetch output: ${remote.status}` }, 502);
+    const bytes = new Uint8Array(await timed(remote.arrayBuffer()));
+    if (bytes.byteLength > WRITE_CEILING) {
+      return json({ error: `generated output is ${(bytes.byteLength / 1048576).toFixed(1)}MiB \u2014 over the ${WRITE_CEILING / 1048576}MiB placement cap; use the CLI commit path for bigger media` }, 413);
+    }
+    let out;
     try {
-      desc = await tierPlaceFromUrl(cell, remoteUrl, mimeForPath(path) || "application/octet-stream");
+      out = await commitPaths(cell, [{ path, bytes }], `ingest from ${String(remoteUrl).slice(0, 80)}`, "wf:ingest");
     } catch (e) {
-      return json({ error: String(e && e.message || e) }, e instanceof TierError ? e.status : 502);
+      if (e instanceof CodeStorageError) return json({ error: String(e.message || e) }, e.status || 502);
+      throw e;
     }
-    const existing = cell.sql.exec("SELECT rev, sha256 FROM files WHERE path = ? AND deleted = 0", path).toArray()[0];
-    if (existing && existing.sha256 === desc.sha256) {
-      return json({ ok: true, deduped: true, file: { path, sha256: desc.sha256, size: desc.size, mime: desc.mime, url: `__file?path=${encodeURIComponent(path)}` } });
-    }
-    if (existing && appendOnlyHit(cell, path)) {
-      cell.addEvent("write.refused", `${path}: append-only`);
-      return json({ error: "append-only", path }, 409);
-    }
-    const newRev = parseInt(cell.getMeta("rev") || "0", 10) + 1;
-    cell.setMeta("rev", String(newRev));
-    cell.sql.exec(
-      "INSERT INTO files (path, sha256, size, mime, rev, updated_at, deleted) VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT(path) DO UPDATE SET sha256 = excluded.sha256, size = excluded.size, mime = excluded.mime, rev = excluded.rev, updated_at = excluded.updated_at, deleted = 0",
-      path,
-      desc.sha256,
-      desc.size,
-      desc.mime,
-      newRev,
-      Date.now()
-    );
-    await recordRevision(cell, path, newRev, desc.sha256);
-    cell.addEvent("file.ingested", `${path} (${(desc.size / 1024).toFixed(0)}KiB from ${String(remoteUrl).slice(0, 80)})`, { path, sha256: desc.sha256 });
-    return json({ ok: true, file: { path, sha256: desc.sha256, size: desc.size, mime: desc.mime, url: `__file?path=${encodeURIComponent(path)}` } });
+    if (!out.ok) return json({ error: out.error }, out.status);
+    const blobSha = await gitBlobSha(bytes);
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    const sha256 = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    cell.addEvent("file.ingested", `${path} (${(bytes.byteLength / 1024).toFixed(0)}KiB from ${String(remoteUrl).slice(0, 80)})`, { path, sha: blobSha });
+    return json({ ok: true, file: { path, sha: blobSha, sha256, size: bytes.byteLength, mime: mimeForPath(path) || "application/octet-stream", url: `__file?path=${encodeURIComponent(path)}` } });
   }
   if (rest === "push/sub" && request.method === "POST") {
     if (!isRun) return json({ error: "push/sub is run-scoped" }, 403);
@@ -317,14 +337,14 @@ async function internalRoute(cell, request, url) {
     ensurePushTable(cell);
     const { who, payload } = await request.json().catch(() => ({}));
     if (typeof who !== "string" || !who.trim()) return json({ error: "who required" }, 400);
-    const p2 = payload && typeof payload === "object" ? payload : {};
-    const title = String(p2.title || "").slice(0, 80);
+    const p = payload && typeof payload === "object" ? payload : {};
+    const title = String(p.title || "").slice(0, 80);
     if (!title.trim()) return json({ error: "payload.title required (<= 80 chars)" }, 400);
     const message = JSON.stringify({
       title,
-      body: String(p2.body || "").slice(0, 200),
-      ...p2.url ? { url: String(p2.url).slice(0, 500) } : {},
-      ...p2.tag ? { tag: String(p2.tag).slice(0, 100) } : {}
+      body: String(p.body || "").slice(0, 200),
+      ...p.url ? { url: String(p.url).slice(0, 500) } : {},
+      ...p.tag ? { tag: String(p.tag).slice(0, 100) } : {}
     });
     if (cell.getMeta("push_selftest_v2_done") !== "ok") {
       const t = await webpushSelfTest();

@@ -4,7 +4,9 @@ A fragment is a folder of files, a SQLite database, some URLs, and an inbox —
 wrapped around exactly one problem. This repo is the second implementation of
 the idea (the first was a throwaway Cloudflare prototype, never published).
 This one is built on [celld](https://celld.dev): self-hosted Durable Objects
-that keep their state in a bucket you own.
+that keep their state in a bucket you own, and on
+[code.storage](https://code.storage): one git repo per fragment, which is
+where the files live.
 
 There is no agent inside a fragment. A fragment is a *place*: agents and
 people use the `fragment` CLI to put files, code, workflows, and permissions
@@ -15,9 +17,9 @@ stateful, multiplayer, and can wake itself up.
 
 **`fragment` — the CLI (Rust, `cli/`).** The whole control surface. An agent
 with this CLI and a nostr key can do everything: make a fragment, sync a local
-folder into it, snapshot and deploy drafts, set secrets, grant access, trigger
-workflows, read the event log. `fragment guide` prints the agent-facing skill
-doc. There is no other API to learn.
+folder into its repo, deploy, set secrets, grant access, trigger workflows,
+read the event log. `fragment guide` prints the agent-facing skill doc. There
+is no other API to learn.
 
 **The runtime (JavaScript, `runtime/`).** One Worker + Durable Object bundle,
 deployed once per host fleet. Every fragment is one **cell** (a Durable
@@ -39,32 +41,53 @@ own account and hands out the CLI.
 
 ```
 agent ──fragment CLI──▶ celld public listener ──▶ router (Worker)
-                            │                        │  /f/<name>/…  → blessed draft of fragment <name>
-                            │                        │  /d/<slug>/…  → one draft snapshot
+                            │                        │  /f/<name>/…  → fragment <name> served from live@SHA
                             │                        │  /api/…       → control (NIP-98 signed)
                             │                        ▼
                             │                 FragmentCell (one per fragment)
-                            │                        │  files / drafts / workflows / secrets / inbox / events
-                            ▼
-                     bucket (MinIO locally — the CI image; S3/R2 in prod)
-                     = durability, ownership, coordination. RPO=0.
+                            │                        │  pins + tree index / workflows / secrets / inbox / events
+                            ▼                        ▼
+                     bucket (MinIO locally — the CI image; S3/R2 in prod)   code.storage git (file truth:
+                     = celld state only. RPO=0.                              main + live refs, per fragment)
 ```
 
-## What a fragment is made of
+## Files: code.storage is the truth
 
-A fragment folder, as the CLI sees it locally:
+One git repo per fragment on code.storage. `main` is the working branch;
+`live` is the blessed serve point. The cell never owns file bytes:
 
-```
-my-fragment/
-  fragment.json      # manifest (see below)
-  site/              # static files → the fragment's URLs
-  app.mjs            # optional: dynamic request handler for the site
-  rooms.mjs          # optional: server-side reactions to realtime messages
-  workflows/         # *.mjs durable-ish workflows, cron or inbox triggered
-  …anything else     # just files (data, notes, sqlite exports, whatever)
-```
+- **Pins.** The cell pins `main@SHA` for working-copy reads and `live@SHA`
+  for serving. Pins move on webhooks (HMAC-verified push events), on the
+  cell's own commits, and on a 5-minute poll backstop. Webhook `after`
+  values are never trusted for the pin — the branch head is re-read — so a
+  late or reordered delivery cannot move a pin backward.
+- **Tree index.** Path/size/mode/last-commit per pinned SHA, in cell
+  SQLite. Metadata only: **no file bytes ever persist in the cell or the
+  bucket.** The bucket holds celld state; nothing approaches its
+  conditional-write limits by construction.
+- **Contents.** Streamed from code.storage on demand through a RAM LRU
+  (64 MiB total, per-entry cap; oversized files stream through uncached).
+  The stream path never buffers a whole body and has no size ceiling.
+- **Writes.** Two planes, one protocol: workflows commit server-side via
+  the cell-held JWT (expected-parent CAS, content dedup — identical writes
+  are recorded no-ops, so replays commit exactly once), and the CLI commits
+  directly with a short-lived **storage token**
+  (`GET /api/f/{name}/storage-token`, editor+; repo-scoped, git-only
+  scopes, minutes-scale expiry, every mint on the event ledger). Conflicts
+  keep your copy and save the remote one beside it as `.conflict-*`; the
+  old content also lives on in git history.
 
-`fragment.json`:
+Repo identity is the url-form id code.storage returns at create time — the
+human name 404s on repo-scoped calls — recorded in the cell at create and
+carried by every call and minted token after that.
+
+## The manifest
+
+`fragment.json` is a git file at the repo root — the repo is its authority.
+The CLI commits it (`manifest-set`, `grant`, `revoke` are edit-and-commit);
+the cell caches the pinned copy and serves the parsed object. An invalid
+manifest at a new pin is rejected with a ledger event and the last good
+cache keeps serving. Shape:
 
 ```json
 {
@@ -81,30 +104,29 @@ my-fragment/
 ```
 
 - **visibility**: `public` (anyone can view), `viewers` (listed npubs), or
-  `token` (anyone with the `?view=` link token). Viewing never grants
-  editing. Editing (sync/deploy/secrets/rotate) requires the owner or an
-  editor npub, proven per request with a NIP-98 signed event.
+  `link` (anyone with the `?view=<token>` share link — the default, good
+  for "send a human a link"; a valid token also mints a scoped cookie so
+  subresources load). Viewing never grants editing. Editing
+  (sync/deploy/secrets/rotate) requires the owner or an editor npub,
+  proven per request with a NIP-98 signed event.
 - **workflows**: `cron` (5-field, UTC, via the cell's own durable alarm —
-  survives sleep) or `trigger: "inbox"` (a POST to the fragment's inbox runs
-  it). `fragment run <name> <workflow>` triggers manually.
-- **secrets**: declared by name only. Values are set with
-  `fragment secret set` and injected into workflow runs. They never appear in
-  files, drafts, or logs.
+  survives sleep), `trigger: "inbox"` (a POST to the fragment's inbox runs
+  it), or `trigger: "files"` (fires when the working copy changes on an
+  external push; workflow writes never re-trigger). `fragment run <name>
+  <workflow>` triggers manually.
+- **secrets**: declared by name only. Values are set with `fragment secret
+  set`, stored wrapped (HKDF+AES-GCM under `FRAGMENT_HOST_SECRET`), and
+  injected into workflow runs. They never appear in the repo, by rule.
 
-The manifest is decoded exactly once at the door: PUT validates it against
-the TypeBox schema in `runtime/ts/manifest.ts`, applies defaults, and stores
-the normalized form; the cell serves the parsed object from memory. Nothing
-downstream re-parses or re-validates it.
+## Deploys, previews, rollback
 
-## Drafts and deploys
-
-`fragment deploy --preview` snapshots the fragment's current files + code and
-returns a random draft URL (`/d/x7k2q9/`). Drafts are immutable and unguessable
-— safe to share for review, safe to snapshot constantly. Nothing changes the
-live site until the deploy goes live (or `fragment rollback --to <slug>`
-points the canonical URL `/f/<name>/` at an older snapshot). The wire calls
-underneath are `POST /drafts` + `POST /bless`; only the CLI verbs were renamed.
-Rollback = deploying an older draft again.
+Deploy = commit + move `live`: `fragment deploy` syncs the folder (one
+commit-pack with expected-parent CAS) and fast-forwards `live` to main's
+tip (a merge commit after a rollback). `--preview` points an unguessable
+ephemeral ref at the pending state instead. `fragment rollback` appends a
+restore-commit on `live` whose tree matches an earlier deploy. `fragment
+drafts` lists the `live` ref's commit history — deploys are git commits,
+so history, authors, and messages come free and nothing expires.
 
 ## Multiplayer
 
@@ -132,13 +154,18 @@ export async function run(ctx) {
 }
 ```
 
-Workflow code runs in a **separate isolate per run** (celld's Worker Loader),
-not inside the cell isolate — so a wedged workflow can't wedge the fragment.
-`ctx`: `http` (fetch), `files` (read/write/list the folder), `secrets`,
-`inbox` (pending messages), `events` (append to the ledger), `ai`
-(platform-routed inference, host holds the key), `state` (per-workflow kv),
-`log`. Every run appends to the fragment's **event log** (start, finish,
-error, output digest) — the ledger is ground truth, `fragment events` reads it.
+Each run attempt executes on the host's **native Workflows engine** (one
+instance per attempt; steps survive restarts), while everything
+product-shaped — the runs ledger, triggers, guards, retry classification —
+stays in the cell. Author code runs in a **separate loader isolate**, not
+inside the cell isolate, so a wedged workflow can't wedge the fragment.
+`ctx`: `http` (fetch), `files` (read/write/list the repo — writes are git
+commits under CAS, with `{ifSha}` compare-and-swap and blob-identity
+suppression), `secrets`, `inbox` (pending messages), `events` (append to the
+ledger), `ai` (platform-routed inference, host holds the key), `state`
+(per-workflow kv), `log`. Every run appends to the fragment's **event log**
+(start, finish, error, output digest) — the ledger is ground truth,
+`fragment events` reads it.
 
 ## Runs: the failure leg
 
@@ -187,8 +214,7 @@ one escalation level). Manual runs still work while paused — pause means
 **Loops, three layers.** Two fragments watching each other can only livelock
 (pull-based watching can't deadlock), and three cheap layers bound it:
 1. *Write-suppression* — `ctx.files.write` with unchanged content is a
-   recorded no-op (`{deduped: true}`). Copy-loops die on pass two; unchanged
-   rewrites don't churn `updatedAt`, so revcron feeds don't re-see old items.
+   recorded no-op (`{deduped: true}`). Copy-loops die on pass two.
 2. *Hop budget* — runs carry a cause chain `{origin, depth}`; `ctx.http`
    stamps `x-fragment-hops: depth+1` on every outbound request; an inbox
    trigger above 16 hops refuses to fire and records `cycle.detected`.
@@ -197,10 +223,10 @@ one escalation level). Manual runs still work while paused — pause means
    trips the auto-pause breaker. The only layer that catches a loop which
    genuinely mutates content every pass (the AI-agent ping-pong shape).
 
-**Inbox, hardened at the door.** An `Idempotency-Key` header collapses
-redeliveries (24h retention) before any author code runs. Pending inbox
-messages cap at 1000; beyond that the POST gets a 429 and the ledger gets
-`queue.rejected` — overload is a signal, not memory pressure.
+**Inbox, hardened at the door.** Pending inbox messages cap at 1000; beyond
+that the POST gets a 429 and the ledger gets `queue.rejected` — overload is a
+signal, not memory pressure. Inbox-triggered runs ack their own messages
+when they drain them.
 
 **Delivery contract, one paragraph.** Any trigger may fire more than once
 for one logical change. Files are safe by construction (suppression);
@@ -213,10 +239,12 @@ manifest names the knob.
 
 ## The event log
 
-Everything that changes a fragment appends to `events`: syncs, deploys,
-token rotations, secret sets, grants, workflow runs, inbox arrivals. The log is the
-answer to "what happened" and the runtime's own memory. (Learned the hard way
-in the first prototype: never let a report disagree with the ledger.)
+Everything that changes a fragment appends to `events`: pin refreshes,
+deploys, token rotations, secret sets, grants, workflow runs, inbox arrivals,
+webhook deliveries (deduped, redeliveries recorded as no-ops), notify
+enqueues. The log is the answer to "what happened" and the runtime's own
+memory. (Learned the hard way in the first prototype: never let a report
+disagree with the ledger.)
 
 ## Auth, plainly
 
@@ -224,10 +252,16 @@ in the first prototype: never let a report disagree with the ledger.)
   `~/.config/fragment/`.
 - Every control request carries a NIP-98 event (kind 27235, url+method+payload
   tags), verified in the runtime with pure-JS secp256k1 schnorr.
-- Each fragment also *has* an npub (generated at create, secret stays in the
-  cell) so fragments can be addressed and can sign later.
+- Each fragment also *has* an npub — the keypair is generated client-side at
+  create and crosses the wire exactly once, inside the creator's
+  authenticated request; the cell stores it wrapped (HKDF+AES-GCM under
+  `FRAGMENT_HOST_SECRET`) so fragments can be addressed and can sign later.
 - No email, no passwords. The `?view=` token exists for "send a link to a
-  human" (visibility `token`).
+  human" (visibility `link`).
+- code.storage auth is customer-signed JWTs: the host holds only the org
+  private key (`PIERRE_PRIVATE_KEY`, via systemd LoadCredentialEncrypted on
+  celld) and mints short-lived tokens — repo-scoped and git-only for the
+  CLI's direct commits; the CLI never sees the org key.
 
 ## Isolation and ingress
 
@@ -236,47 +270,57 @@ in the first prototype: never let a report disagree with the ledger.)
   damage its own database.
 - Workflow code runs in loader isolates with no access to other cells.
 - The internal plane (`/__internal/f/<name>/…`) serves exactly one caller:
-  ctx loopback from loader isolates, authenticated per cell by run tokens.
-  The registry and cell-init are never reachable over HTTP — only via the
-  router's own DO binding. Hosts that want a second lock set
-  `FRAGMENT_HOST_SECRET` (celld: `CELLD_VAR_FRAGMENT_HOST_SECRET`; CF:
-  wrangler secret), which every loopback call must then carry.
+  ctx loopback from loader isolates and the native workflow driver,
+  authenticated per cell by run tokens. The registry and cell-init are never
+  reachable over HTTP — only via the router's own DO binding. Hosts that
+  want a second lock set `FRAGMENT_HOST_SECRET` (celld:
+  `CELLD_VAR_FRAGMENT_HOST_SECRET`; CF: wrangler secret), which every
+  loopback call must then carry.
 - celld does not terminate TLS and does not authenticate users. That is the
   ingress's job (Caddy in prod; nothing locally). Wildcard subdomain →
   `Host: <name>.frag.example` reaches the same router; path-based URLs work
   everywhere, so subdomains are sugar, not load-bearing.
 - cellds don't talk to each other: there is one fleet; cells can't reach other
   cells except through the public URLs, where normal auth applies.
+- Notifications (manifest `notifyUrls`) enqueue onto celld Queues; a separate
+  tiny deployment, `notify-relay/`, is the queue's one consumer and POSTs
+  each frame with the cross-fragment hop headers. Delivery is at-least-once;
+  receivers key effects by cause.
 
 ## Local dev
 
 No docker, no cloud account, no bucket:
 
 ```
-scripts/dev up       # celld dev (local object store) + blobsd (fs backend)
+scripts/dev up       # celld dev (local object store) + the mock code.storage
 scripts/dev deploy   # rebuild runtime/ and restart the dev host
 scripts/dev down
 ```
 
-`celld dev` gives the fleet a persistent local object store;
-`BLOBSD_BACKEND=fs` gives the blob tier a plain directory — the whole stack
-is two native processes, which is what CI runs too (see `.github/workflows`).
-Everything above the storage seam (handlers, descriptors, convergence) is
-backend-blind, so the trade is explicit: local/CI exercise the fs lane while
-production runs S3/R2 — if the two ever disagree, the complaint goes
-upstream with a failing case from either side. State lives in
-`.dev/celld-state` (cells, reached through a `runtime/.celld` symlink so celld dev's own watcher never sees its state writes) and `.dev/blobs-root` (blobs); `dev wipe`
-resets both together.
+The whole stack is native processes: `celld dev` gives the fleet a persistent
+local object store, and `runtime/test/mock-codestorage.mjs` stands in for
+code.storage — repos (url-form identity), commit-packs with expected-parent
+CAS, branch moves, signed push webhook delivery — with a throwaway org key
+the mock uses to verify the JWTs the runtime mints. What the mock can't
+stand in for (the real service's scale, its dashboard) is the only
+production-only surface left. State lives in `.dev/celld-state` (cells,
+reached through a `runtime/.celld` symlink so celld dev's own watcher never
+sees its state writes) and `.dev/cs-mock-root` (repos); `dev wipe` resets
+both together.
 
 ## What this deliberately does not have (yet)
 
 - No in-fragment planning agent. The mind is external; fragments are places.
-- No local test-run story. Publish drafts instead — drafts are the rehearsal.
 - No fragment-to-fragment private channels. They use public URLs + npub auth
   like everyone else.
-- No CRDT file sync. Sync is last-writer-wins with conflict files, on purpose.
+- No CRDT file sync. Sync is last-writer-wins with conflict copies, on
+  purpose — the old content lives on in git history.
+- No large-media tier. All files ride the chunked commit-pack; the read path
+  streams with no size ceiling (Range pass-through is recorded as future
+  work, not built).
 
 ## Non-goals
 
-KV-style global state, blob storage, multi-tenant hostile isolation (celld is
-alpha; fleet = one trust domain), replacing the first prototype's hosts.
+KV-style global state, a second blob tier (deleted with blobsd — git is the
+file store now), multi-tenant hostile isolation (celld is alpha; fleet = one
+trust domain), replacing the first prototype's hosts.

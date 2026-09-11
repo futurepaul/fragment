@@ -3,9 +3,9 @@ import { MIME, rankOf, isMachinery, serveCacheControl, mimeForPath } from "./uti
 import { safeEqual } from "./auth.js";
 import { json } from "./util.js";
 import { APP_MAIN } from "./loader.js";
-import { tierStreamByHash, tierTextBounded, publicRedirectTarget } from "./blob-tier.js";
 import { pushSubStore, pushUnsubStore, ensurePushTable, pushVapidFor } from "./internal.js";
 import { SW_CLIENT_SOURCE } from "./sw-client.js";
+import { ensurePins, pinOf, treeList, readFileStream, readFileTextAt, repoOf } from "./git-plane.js";
 const OG_MATERIALIZE_CEILING = 1024 * 1024;
 const esc = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
 function canonicalUrl(cell, origin, name) {
@@ -16,28 +16,24 @@ function canonicalUrl(cell, origin, name) {
 async function serveRoute(cell, request, url) {
   const parts = url.pathname.slice("/__serve/".length).split("/");
   const mode = parts.shift();
-  let slug;
-  let setCookie = null;
-  if (mode === "b") {
-    const m = cell.manifest();
-    slug = cell.getMeta("blessed");
-    if (!slug) return new Response(`fragment "${m?.name}" has no blessed draft yet \u2014 publish and bless one first.
+  if (mode !== "b") return new Response("not found\n", { status: 404 });
+  const m = cell.manifest();
+  const rest = parts.join("/");
+  await ensurePins(cell);
+  const pin = pinOf(cell, "live");
+  if (!pin) {
+    return new Response(`fragment "${m?.name}" has no live ref yet \u2014 deploy first (move the live ref in code.storage).
 `, { status: 404 });
-    const vis = cell.checkVisibility(request, url);
-    if (!vis.ok) return new Response(vis.error + "\n", { status: vis.status });
-    setCookie = vis.setCookie;
-  } else {
-    slug = parts.shift();
   }
+  const vis = cell.checkVisibility(request, url);
+  if (!vis.ok) return new Response(vis.error + "\n", { status: vis.status });
   const stamp = (r) => {
-    if (!setCookie) return r;
+    if (!vis.setCookie) return r;
     const h = new Headers(r.headers);
-    h.append("set-cookie", setCookie);
+    h.append("set-cookie", vis.setCookie);
     return new Response(r.body, { status: r.status, headers: h });
   };
-  const rest = parts.join("/");
-  const draft = cell.sql.exec("SELECT slug FROM drafts WHERE slug = ?", slug).toArray()[0];
-  if (!draft) return new Response("no such draft\n", { status: 404 });
+  const liveRow = (p) => cell.sql.exec("SELECT size, mode, last_commit_sha FROM git_tree WHERE ref = 'live' AND path = ?", p).toArray()[0] || null;
   if (rest === "__preview.svg") {
     let h = 0;
     for (const c of cell.getMeta("name") || "fragment") h = h * 31 + c.charCodeAt(0) >>> 0;
@@ -47,34 +43,24 @@ async function serveRoute(cell, request, url) {
     return new Response(svg, { headers: { "content-type": "image/svg+xml", "cache-control": "public, max-age=3600" } });
   }
   if (rest === "__tree") {
-    const rows = mode === "b" ? cell.sql.exec("SELECT path, size, updated_at, rev, sha256 FROM files WHERE deleted = 0 ORDER BY path").toArray() : cell.sql.exec("SELECT path, size, updated_at, rev, sha256 FROM draft_files WHERE slug = ? AND deleted = 0 ORDER BY path", slug).toArray();
-    const files = rows.filter((r) => !isMachinery(r.path)).map((r) => ({ path: r.path, size: r.size, updatedAt: r.updated_at || null, rev: r.rev || 0, sha256: r.sha256 }));
-    return json({ type: "tree", files, count: files.length });
+    const rows = treeList(cell, "live");
+    const files = rows.filter((r) => !isMachinery(r.path)).map((r) => ({ path: r.path, size: r.size, mode: r.mode, lastCommitSha: r.last_commit_sha }));
+    return json({ type: "tree", ref: "live", sha: pin, files, count: files.length });
   }
   if (rest.startsWith("__file")) {
     const fPath = new URL(request.url).searchParams.get("path") || "";
     if (!fPath || fPath.includes("..") || fPath.startsWith("/") || isMachinery(fPath)) {
       return json({ error: "bad path" }, 400);
     }
-    const row = mode === "b" ? cell.getFileMeta(fPath) : cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = ? AND deleted = 0", slug, fPath).toArray()[0];
+    const row = liveRow(fPath) || cell.sql.exec("SELECT size, mode, last_commit_sha FROM git_tree WHERE ref = 'main' AND path = ?", fPath).toArray()[0] || null;
     if (!row) return json({ error: "no such file" }, 404);
-    const mime = row.mime || mimeForPath(fPath) || "application/octet-stream";
-    const redirectBase = publicRedirectTarget(cell, mode === "b");
-    if (redirectBase) return stamp(new Response(null, { status: 302, headers: {
-      location: `${redirectBase}/${row.sha256}`,
-      // public-GET bytes are unauthenticated by design; the ACAO header lets
-      // a page's fetch() follow the cross-origin redirect (browsers require
-      // CORS on every hop of a cors-mode redirect)
-      "access-control-allow-origin": "*",
-      // the path->hash mapping is mutable; only the blob itself is immutable.
-      // A cached 302 would keep serving a stale file after an edit.
+    const upstream = await readFileStream(cell, fPath, liveRow(fPath) ? "live" : "main");
+    return stamp(new Response(upstream.body, { status: upstream.status, headers: {
+      "content-type": mimeForPath(fPath) || "application/octet-stream",
+      // the path's content can change when live moves (or, for main-fallback
+      // rows, on any commit); only hash-named files are immutable
       "cache-control": "no-store"
     } }));
-    const upstream = await tierStreamByHash(cell, row.sha256);
-    return new Response(upstream.body, { status: upstream.status, headers: {
-      "content-type": mime,
-      "cache-control": "no-store"
-    } });
   }
   if (rest === "__sw.js") {
     return new Response(`/* fragment sw-client v1 */
@@ -97,8 +83,8 @@ async function serveRoute(cell, request, url) {
     if (!body) return json({ error: "body required" }, 400);
     return rest === "__push-sub" ? pushSubStore(cell, body) : pushUnsubStore(cell, body);
   }
-  const appMeta = cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = 'app.mjs'", slug).toArray()[0];
-  const stMeta = (p) => cell.sql.exec("SELECT sha256, size, mime FROM draft_files WHERE slug = ? AND path = ? AND deleted = 0", slug, p).toArray()[0];
+  const appMeta = liveRow("app.mjs");
+  const stMeta = (p) => cell.sql.exec("SELECT size, mode, last_commit_sha FROM git_tree WHERE ref = 'live' AND path = ?", p).toArray()[0] || null;
   const siteOwnsRoot = !!appMeta && !!stMeta("site/index.html");
   if (rest !== "" || !appMeta || siteOwnsRoot) {
     let rel = rest === "" ? "index.html" : rest;
@@ -106,14 +92,14 @@ async function serveRoute(cell, request, url) {
     if (!meta && !rel.endsWith("/")) meta = stMeta("site/" + rel + "/index.html");
     if (meta) {
       const ext = (rel.match(/\.([a-z0-9]+)$/) || [])[1] || "";
-      const mime = meta.mime || MIME[ext] || "application/octet-stream";
-      const cache = serveCacheControl(mode === "b", rel);
+      const mime = MIME[ext] || "application/octet-stream";
+      const cache = serveCacheControl(true, rel);
       const m2 = cell.manifest();
       const wantsOg = (mime || "").includes("text/html") && !!m2?.meta && rel === "index.html";
       let ogHtml = null;
       if (wantsOg && (meta.size | 0) <= OG_MATERIALIZE_CEILING) {
         try {
-          ogHtml = await tierTextBounded(cell, meta, `page ${rel}`);
+          ogHtml = await readFileTextAtLive(cell, "site/" + rel);
         } catch {
           ogHtml = null;
         }
@@ -134,20 +120,27 @@ async function serveRoute(cell, request, url) {
       if (ogHtml !== null) {
         return stamp(new Response(ogHtml, { status: 200, headers: { "content-type": mime, "cache-control": cache } }));
       }
-      const upstream = await tierStreamByHash(cell, meta.sha256);
+      const upstream = await readFileStream(cell, "site/" + rel, "live");
       return stamp(new Response(upstream.body, { status: upstream.status, headers: { "content-type": mime, "cache-control": cache } }));
     }
   }
   if (appMeta) {
     const modules = {};
-    const libRows = cell.sql.exec("SELECT path, sha256, size FROM draft_files WHERE slug = ? AND path LIKE 'applib/%'", slug).toArray();
-    for (const r of libRows) modules[r.path] = await tierTextBounded(cell, r, `module ${r.path}`);
-    modules["app.mjs"] = await tierTextBounded(cell, appMeta, "module app.mjs");
-    const ep = await cell.loadCode(`app:${mode}:${slug}`, APP_MAIN, modules, { kind: "draft", worker: "app", slug, blessed: mode === "b" });
+    for (const r of treeList(cell, "live", "applib/")) {
+      modules[r.path] = await readFileTextAtLive(cell, r.path);
+    }
+    modules["app.mjs"] = await readFileTextAtLive(cell, "app.mjs");
+    const ep = await cell.loadCode(`app:live:${pin}`, APP_MAIN, modules, { kind: "draft", worker: "app", slug: pin, blessed: true });
     const appUrl = new URL(request.url);
     return stamp(await ep.fetch(new Request(appUrl.origin + "/" + rest + appUrl.search, request)));
   }
   return new Response("not found", { status: 404 });
+}
+async function readFileTextAtLive(cell, path) {
+  const pin = pinOf(cell, "live");
+  const row = cell.sql.exec("SELECT size FROM git_tree WHERE ref = 'live' AND path = ?", path).toArray()[0];
+  if (!row) throw new Error(`no such live file: ${path}`);
+  return await readFileTextAt(cell, repoOf(cell), path, pin || "", `module ${path}`);
 }
 function checkVisibility(cell, request, url) {
   const m = cell.manifest();
@@ -174,5 +167,6 @@ function checkVisibility(cell, request, url) {
 export {
   canonicalUrl,
   checkVisibility,
+  readFileTextAtLive,
   serveRoute
 };

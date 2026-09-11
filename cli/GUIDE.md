@@ -12,13 +12,14 @@ so keep using the same machine/user account.
 
 ## The mental model
 
-- A fragment has a **working copy** (its folder) and immutable **drafts**
-  (snapshots of the folder). `fragment deploy` snapshots the folder and
-  points the canonical URL at that snapshot in one step; `--preview`
-  snapshots without going live, and `fragment rollback` repoints at an
-  older one.
-- URLs: canonical `/f/<name>/`, drafts `/d/<slug>/` (unguessable slugs, safe to
-  share for review).
+- A fragment's files live in a **git repo** — one repo per fragment, on
+  code.storage. `main` is the working branch; `live` is the blessed serve
+  point. `fragment deploy` commits the folder and moves `live` in one
+  step; `--preview` points an unguessable ephemeral ref at the pending
+  state; `fragment rollback` re-points `live` at an earlier deploy. Full
+  per-file history with authors and messages comes free.
+- URLs: canonical `/f/<name>/`, previews `/d/<ref>/` (unguessable refs,
+  safe to share for review).
 - **Workflows** (`workflows/*.mjs`) are the fragment's machinery: they run on a
   cron, on inbox messages, or when you trigger them. They read and write the
   working copy. Every run is recorded in the fragment's **event log** — the
@@ -51,12 +52,13 @@ mkdir my-thing && cd my-thing
 fragment sync my-thing          # first run links the folder (creates .fragment/)
 ```
 
-Sync is bidirectional and last-writer-wins. If both sides changed a file since
-the last sync, the remote copy is saved as `<path>.remote-<timestamp>` next to
-your local file and reported as a conflict. Nothing is ever silently merged or
-lost. Deletions converge too: a remote delete newer than your last sync
-removes the local copy, unless you modified it — your modified copy wins and
-stays. Sync skips dotfiles and `.fragment/`; in a git repo it also honors
+Sync is bidirectional. If both sides changed a file since the last sync,
+your copy stays and the remote copy is saved beside it as
+`<path>.conflict-<timestamp>-<writer>`, reported as a conflict — nothing is
+ever silently merged or lost (the old content also lives on in git history).
+Deletions converge too: a remote delete newer than your last sync removes
+the local copy, unless you modified it — your modified copy wins and stays.
+Sync skips dotfiles and `.fragment/`; in a git repo it also honors
 `.gitignore` (ignored files and `.git/` never upload).
 
 What the folder means to the runtime:
@@ -74,86 +76,69 @@ everything else      # just files: data, notes, exports — synced, versioned, s
 
 ```
 fragment sync my-thing                     # push/pull the folder
-fragment deploy my-thing --dir .           # snapshot + GO LIVE → /f/my-thing/
-fragment deploy my-thing --preview         # snapshot only → preview URL /d/<slug>/
-fragment drafts my-thing                   # list snapshots (the live one marked [blessed])
+fragment deploy my-thing --dir .           # commit + move live → /f/my-thing/
+fragment deploy my-thing --preview         # ephemeral preview ref → /d/<ref>/
+fragment drafts my-thing                   # deploy history (live ref commits)
 ```
 
-Rollback is `fragment rollback my-thing` (the previous snapshot; `--to <slug>`
-picks one). Snapshots never change and never expire; deploy as often as you
-think.
+Rollback is `fragment rollback my-thing` (the previous deploy; `--to <sha>`
+picks one). Deploys are git commits — they never change, never expire, and
+carry full history; deploy as often as you think.
 
 ## Sync in depth
 
-One contract: **files up to 64 KiB ride inline; anything larger is pushed blob-first** — the cell's rows stay tiny documents while the bytes live in a separate content-addressed blob store (see "Blob-first pushes" below). Cells hold documents, not media dumps; a cell's content lives in SQLite and replicates as WAL frames, so big bodies tax replication, restores, and write acks if they sit in the cell itself.
+The repo is the truth; your folder is a disposable working copy. Sync talks
+to code.storage directly — one repo per fragment, `main` = working files —
+authorizing with a short-lived, repo-scoped storage token the host mints on
+every pass (`GET /api/f/{name}/storage-token`, editor+, your NIP-98
+signature). No local `.git` is created or needed.
 
 ```
 fragment sync my-thing --dir .              # one mirror pass (default)
 fragment sync my-thing --dir . --watch      # continuous: OS events + live channel + 60s sweeps
 fragment sync my-thing --dir . --mode pull  # read-only copy (never deletes; --prune to apply)
-fragment sync my-thing --dir . --mode push  # local→remote only
-fragment verify my-thing --dir .            # full-hash audit (caches lie; this doesn't)
+fragment sync my-thing --dir . --mode push  # local→repo only
+fragment verify my-thing --dir .            # full-content audit (fetches every file — caches lie, this doesn't)
 ```
 
+- **Push is one commit behind expected-parent CAS**: the folder is
+  scanned, diffed against the branch-head listing, and sent as a single
+  commit (files stream as NDJSON chunks — any file size, no separate
+  store). If the branch moved under you, sync refetches the head,
+  rebuilds the diff, and retries — at most 3 times, then a loud conflict
+  error. Re-running an unchanged sync sends no commit at all: a replayed
+  sync commits exactly once.
 - **Fast and crash-safe**: unchanged files are detected by size+mtime
-  (state in `.fragment/state.json`); writes are atomic; a second watcher on
-  the same folder is refused by a lock. If the folder moves, sync stops and
-  tells you (`--rebuild-state` after moving on purpose).
+  (stat cache in `.fragment/state.json`); pulled files land via atomic
+  writes; a second watcher on the same folder is refused by a lock.
 - **Live**: with `--watch`, the cell pushes a `changed` frame over a
-  websocket the moment files mutate remotely; remote edits land in seconds.
-  Sweeps every 60s are the correctness floor — live is a latency win, never
-  the mechanism.
-- **Conflicts merge**: when both sides changed a text or JSON file, sync
-  fetches the common ancestor from the fragment's server-side history and
-  three-way merges. Non-overlapping edits merge silently (reported as
-  `merged`); overlapping ones write `<<<<<<<` markers locally and exit 3.
-  `--conflict-strategy copy` saves the remote version as
-  `<path>.conflict-<time>-<writer>` instead. The last 10 revisions of every
-  file are kept server-side (`/file/history`, `/file/at`).
-- **Mass-deletion guard**: deleting >max(10, 30%) of known files in one
-  pass is refused (exit 4) until `--apply-mass-delete` — the folder-looks-
-  unmounted protection.
-- **Append-only folders**: manifest `"appendOnly": ["logs/", "drop/"]`
-  makes those prefixes add-only for everyone but you — writers append,
-  identical rewrites are no-ops, modifications and deletes are refused.
-  Many-writer folders (logs, dropzones) become race-free by construction.
-- **Exit codes** (for scripting): 0 clean/merged, 1 hard failure, 3
-  conflicts present, 4 mass-deletion guard tripped.
-
-## Blob-first pushes
-
-The 64 KiB inline carve-out is unchanged: small files sync exactly as
-before. Beyond that, sync goes blob-first — the bytes upload straight to
-the blob store (a Blossom-style server signed with a kind-24242 auth
-event derived from your own key) and the cell commits only a pointer row
-(`{sha256, size, mime}`). You must tell the CLI where that store is:
-
-```
-export FRAGMENT_BLOB_URL=https://blobs.example.com      # env wins
-# or persist it in the fragment config (~/.config/fragment/config.json):
-#   { "host": "...", "secret_key": "...", "blob_url": "https://blobs.example.com" }
-```
-
-- Without a configured store, a changed file over 64 KiB **fails the sync
-  with a clear error naming `FRAGMENT_BLOB_URL`** — it never silently
-  falls back to a raw body the cell would refuse.
-- Uploads are content-addressed and idempotent: each changed file is
-  hashed, probed with a HEAD (already-present bytes skip the PUT), and
-  the server's echoed hash is verified against the local one before any
-  row commit. Row commits themselves stay ordinary sync commits, so
-  revisions, conflicts, watchers, and notify all behave as usual.
-- Pulls are the mirror image: fetched bytes stream to a temp file and
-  rename in atomically, and `.fragment/cache/<sha>` short-circuits
-  re-downloading content you already have (soft cap 256 MB, evicted
-  oldest-accessed-first; cache misses just re-fetch).
-- Files larger than the tier's 64 MiB cap are warn-skipped (the folder's
-  last-good state is kept) — a bucket or CDN remains the right home for
-  those.
+  websocket the moment files mutate remotely; remote edits land in
+  seconds. Sweeps every 60s are the correctness floor — live is a latency
+  win, never the mechanism.
+- **Conflicts**: when both sides changed a file since your last sync,
+  sync keeps yours and saves the remote copy beside it as
+  `<path>.conflict-<time>-<writer>` (exit 3). The remote content also
+  stays in git history.
+- **Mass-deletion guard**: a pass that would delete more than
+  max(10, 30%) of known files — or *all* of them (the
+  folder-looks-unmounted protection) — is refused (exit 4) until
+  `--apply-mass-delete`.
+- **Deletions converge**: delete locally + push removes it from the repo;
+  a deletion made remotely removes the local copy on the next mirror
+  (pull mode withholds it unless `--prune`); a locally-modified copy wins
+  over a remote deletion.
+- **First sync of an existing folder** (no cache): files whose size
+  matches the repo are adopted provisionally; run `fragment verify` to
+  audit content.
+- **Exit codes** (for scripting): 0 clean, 1 hard failure, 3 conflicts
+  present, 4 mass-deletion guard tripped.
 
 ## The manifest
 
-`fragment manifest my-thing` prints it; `fragment manifest-set my-thing m.json`
-replaces it. Shape:
+`fragment.json` is a git file at the repo root — the repo is its authority,
+and the cell caches it. `fragment manifest my-thing` prints it;
+`fragment manifest-set my-thing m.json` validates the JSON and commits it to
+`main` (edit-and-commit under the same expected-parent CAS as sync). Shape:
 
 ```json
 {
@@ -236,15 +221,19 @@ export async function run(ctx, input) {
 }
 ```
 
-- `ctx.files` — the fragment's folder (read/write/list). `write` takes an
-  optional `{ifRev}` for compare-and-swap (a moved row → 409-style conflict),
-  and `stat` reports a file's live rev plus its tombstones — together they
-  keep slow read-modify-writes from clobbering fresh edits.
-- `ctx.secrets` — plain object of secret values by name.
+- `ctx.files` — the fragment's repo (read/write/list). `write` takes an
+  optional `{ifSha}` for compare-and-swap (a changed path → 409-style
+  conflict), and `stat` reports a file's content sha (`sha`, the git blob
+  identity) plus `lastCommitSha` — together they keep slow
+  read-modify-writes from clobbering fresh edits. Absent and deleted are
+  the same thing now (`present: false`) — git has no tombstones at a ref.
+- `ctx.secrets` — plain object of secret values by name (stored wrapped
+  at rest in the cell; never in the repo).
 - `ctx.http` — fetch, with a 30s default timeout (pass your own `signal` to control it).
-- `ctx.files.ingest(url, path)` — place remote bytes as a file (streams
-  the URL into the blob tier, commits the row; dedup and append-only gates
-  as usual).
+- `ctx.files.ingest(url, path)` — place remote bytes as a file (fetches
+  the URL into the cell and commits it; dedup and append-only gates as
+  usual). `ctx.files.delete(path)` removes one (append-only prefixes
+  refuse; deleting an absent path is a recorded no-op).
 - **the `fragment:ai` module** — `import { generateText, streamText, generateObject,
   tool, generateImage, generateVideo } from "fragment:ai"`. One call shape and one
   result shape across all three (established SDK ergonomics); the host
@@ -261,12 +250,19 @@ export async function run(ctx, input) {
 - `ctx.events.append` / `ctx.log` — write to the event log.
 - `ctx.rooms.getState/setState(room)` — read/write a room's persisted document.
 
-Trigger one: `fragment run my-thing digest --input '{"x":1}'`. The result and
-the run's events come back. Check `fragment events my-thing` after cron runs.
+Trigger one: `fragment run my-thing digest --input '{"x":1}'`. The run's
+events come back; the outcome lands in the ledger the moment the run
+finishes (`fragment runs my-thing` / `fragment events my-thing` after cron
+runs).
 
-Workflows run in an isolated loader sandbox, one isolate per run, with their
-own copy of the folder — a wedged workflow cannot wedge the fragment itself.
-Split helpers into `lib/` and import them from a workflow
+Runs execute on the host's native Workflows engine: each attempt is a
+durably-replayed workflow whose steps survive restarts, and every
+`ctx.files.write` is a git commit under expected-parent CAS — a replayed
+or crashed-then-retried run commits each logical change exactly once
+(identical content is a no-op; a racing writer triggers a bounded
+refetch-and-retry). The author code itself still runs in an isolated
+loader sandbox, one isolate per run — a wedged workflow cannot wedge the
+fragment. Split helpers into `lib/` and import them from a workflow
 (`import { x } from "../lib/util.mjs"`) — relative and map-path imports
 both work.
 
@@ -299,7 +295,8 @@ blocks, so they cannot rot). Edit the ALL-CAPS constants and go.
 Watch something on a schedule and process only what's new. The seen-set
 lives in `ctx.state`; it advances only when the whole pass succeeds, so a
 crashed pass re-sees (and skips, via once-style markers) its items. Tree
-responses mark a fragment's own organs with `machinery: true` — skip those.
+responses list content only — a fragment's own organs (workflows/,
+fragment.json, app code) never appear.
 
 ```js
 // workflows/watch.mjs — cron "*/2 * * * *"
@@ -508,7 +505,8 @@ Inbox messages run all `trigger: "inbox"` workflows and land in the event log.
 
 ## Sites and apps
 
-Static: files under `site/` serve at the draft/canonical URLs. `/` serves
+Static: files under `site/` serve from the LIVE ref (the blessed serve
+point — `live@SHA` in code.storage; deploys move it). `/` serves
 `site/index.html` — even when the folder also has an app.
 
 Dynamic: if the folder has `app.mjs`, every request that isn't a real
@@ -520,10 +518,11 @@ the API:
 // app.mjs
 export default {
   async fetch(req, ctx) {
-    // same ctx as workflows (files are read-only here; normally the draft
-    // snapshot — set "liveFiles": true in the manifest to read the live
-    // working copy instead). x-fragment-url is the public URL the visitor
-    // used; url.pathname is the internal route and stays stable.
+    // same ctx as workflows (files are read-only here). Code serves from
+    // the live ref; data reads ride the working copy (main@SHA) — set
+    // "freeze": true in the manifest to pin reads to the live ref instead.
+    // x-fragment-url is the public URL the visitor used; url.pathname is
+    // the internal route and stays stable.
     const pub = req.headers.get("x-fragment-url") || req.url;
     return new Response("hello " + new URL(pub).pathname);
   },
@@ -652,7 +651,7 @@ cd my-vault
 fragment sync my-vault --dir . --mirror-from ../my-notes --watch   # leave running
 ```
 
-The viewer (`app.mjs` + `assets/`) is frozen in the deploy snapshot; the notes
+The viewer (`app.mjs` + `assets/`) is frozen at the live ref; the notes
 flow through the working copy (`liveFiles: true`), so a synced edit appears
 on reload without redeploying. `[[wikilinks]]` resolve by filename; code
 files render with syntax highlighting; `_index.md`/`README.md` are folder
@@ -707,7 +706,7 @@ fragment sync <name> [--dir D] [--watch] [--mode M]  fragment replay <name> <run
 fragment verify <name> [--dir D]    fragment rm <name>
 fragment build [DIR]                fragment open <name>
 fragment deploy <name> [--dir D] [--preview]
-fragment drafts <name>              fragment rollback <name> [--to <slug>]
+fragment drafts <name>              fragment rollback <name> [--to <sha>]
 fragment rotate <name> [--inbox] [--view]
 fragment rooms <name> [<room>] [--tail N]
 ```
@@ -730,15 +729,23 @@ too_large rate_limited unavailable server_error`). Exit codes for scripts:
 so `-v --json` works together. Set a sticky default host with
 `fragment host <url>` (e.g. `fragment host https://fragment.club`).
 
+**code.storage server** (where the fragment repos live): the host's
+storage-token response names it, and that is almost always right. To point
+the CLI at a different backend, set `FRAGMENT_CODESTORAGE_URL` or add
+`"codestorage": "<server-url>"` to the same config file as your host
+(`~/.config/fragment/config.json`). The server URL is the spec base, e.g.
+`https://api.your-org.code.storage`.
+
 ## Migration notes
 
 Vocabulary renamed along the way; kept here so older scripts and
 transcripts still decode:
 
 - `fragment publish` → `fragment deploy`; `fragment bless <name> <slug>` →
-  `fragment rollback <name> --to <slug>`. The drafts listing still marks the
-  served snapshot `[blessed]`, and the wire endpoints keep their names
-  (`POST /drafts`, `POST /bless`) — only the CLI verbs changed.
+  `fragment rollback <name> --to <sha>`. The snapshot system (`POST /drafts`,
+  `POST /bless`) is gone outright: deploys are git commits on the `live`
+  ref, previews are ephemeral refs, and rollback is a restore-commit —
+  `fragment drafts` now lists the live ref's commit history.
 - Files-triggered workflows fire on `trigger: "files"` (was `"sync"`).
 - Every structured command accepts `--json`; errors carry stable codes under
   `error.code` (see Global flags above).

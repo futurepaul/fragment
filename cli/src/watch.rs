@@ -47,9 +47,6 @@ struct Debounced {
 }
 
 impl Debounced {
-    fn trigger(&self) {
-        self.pending.store(true, Ordering::Relaxed);
-    }
     /// block until quiet, then clear
     fn wait(&self) {
         let mut quiet_for = Duration::ZERO;
@@ -151,14 +148,14 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, cfg: &Wa
         match sync::sync_once(client, name, dir, opts) {
             Ok(report) => {
                 err_backoff = 1;
-                if !report.pulled.is_empty() || !report.pushed.is_empty() || !report.merged.is_empty() || !report.conflicts.is_empty() {
+                if !report.pulled.is_empty() || !report.pushed.is_empty() || !report.deleted_remote.is_empty() || !report.deleted_local.is_empty() || !report.conflicts.is_empty() {
                     let at = chrono_like();
-                    println!("{at} pushed {} pulled {} merged {} conflicts {}", report.pushed.len(), report.pulled.len(), report.merged.len(), report.conflicts.len());
+                    println!("{at} pushed {} pulled {} deleted {} conflicts {}", report.pushed.len(), report.pulled.len(), report.deleted_remote.len() + report.deleted_local.len(), report.conflicts.len());
                 }
             }
             Err(e) => {
                 let at = chrono_like();
-                eprintln!("{at} sync failed (retrying in {err_backoff}s): {e:#}");
+                eprintln!("{at} sync failed (retrying in {err_backoff}s): {e}");
                 std::thread::sleep(Duration::from_secs(err_backoff));
                 err_backoff = (err_backoff * 2).min(60);
             }
@@ -212,21 +209,18 @@ fn live_listener(url: &str, tx: std::sync::mpsc::Sender<Wakeup>) {
             Ok(r) => r,
             Err(_) => return,
         };
-        match tungstenite::connect(req) {
-            Ok((mut socket, _)) => {
-                backoff = 1;
-                loop {
-                    match socket.read() {
-                        Ok(tungstenite::Message::Text(_)) => {
-                            let _ = tx.send(Wakeup::Live);
-                        }
-                        Ok(tungstenite::Message::Close(_)) => break,
-                        Err(_) => break,
-                        Ok(_) => {}
+        if let Ok((mut socket, _)) = tungstenite::connect(req) {
+            backoff = 1;
+            loop {
+                match socket.read() {
+                    Ok(tungstenite::Message::Text(_)) => {
+                        let _ = tx.send(Wakeup::Live);
                     }
+                    Ok(tungstenite::Message::Close(_)) => break,
+                    Err(_) => break,
+                    Ok(_) => {}
                 }
             }
-            Err(_) => {}
         }
         // cap the value itself, not just the sleep: an uncapped doubling
         // overflows u64 after ~64 reconnects, wraps to 0, and sleep(0)
