@@ -103,6 +103,12 @@ celld state only; nothing approaches 8 MiB by construction.
   claim + git scopes), signed by the host from the org key; the CLI uses
   it for direct commits. CLI backend precedence: `FRAGMENT_CODESTORAGE_URL`
   env > `config.json` `codestorage` key > the token response's `api`.
+  **Access boundary:** minted tokens are per-repo scoped with git scopes
+  only — org-wide endpoints (List Repos) are structurally unreachable —
+  the repo claim is built server-side from the validated fragment name,
+  editor+ only, minutes-scale expiry, every mint audited in the events
+  ledger. A user's storage reach is exactly the fragments they hold
+  grants on, which is the existing nostr grant model, unchanged.
 - Fragment identity: npub secret generated **client-side** at create;
   transmitted once over the creator's authenticated channel and stored
   wrapped (level-c fix from `docs/encryption-research.md` stage 1).
