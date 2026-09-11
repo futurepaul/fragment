@@ -47,7 +47,15 @@ the finite-brain local rule, which fragment adopts for this work).
   `repo:write`, `git:read`, `git:write`; per-repo scoping via the `repo`
   claim; ref policies protect `live`). Git remotes (if ever used) take
   username `t`, password = JWT.
-- LFS rides the same JWT-authenticated remote — no separate LFS server.
+- **No LFS (spec-corrected 2026-09-07).** The HTTP API has no LFS
+  endpoints; LFS exists only git-client-side over the git remote, which
+  fragment doesn't use. All files ride the chunked commit-pack inline
+  (`POST /api/repos/{repo}/commit-pack`, NDJSON, ≤4 MiB decoded chunks,
+  no total size limit). The chunk boundary stays one function so a tier
+  could slot in later if ever needed. Spec vocabulary: expected-parent is
+  `expected_target_sha`; CAS failure is 409 with
+  `result.status="precondition_failed"`; previews are
+  `POST /branches/create` with `target_is_ephemeral: true`.
 - Org: **`finite`** (verified live 2026-09-07: key authenticates, org
   reachable, zero repos — clean slate). Local dev reads
   `PIERRE_PRIVATE_KEY` from `.env` (gitignored, untracked, never in
@@ -80,8 +88,11 @@ celld state only; nothing approaches 8 MiB by construction.
   rebuild, retry (bounded, e.g. 3 attempts, explicit error after).
 - LFS: files over 1 MiB become LFS objects via the SDK; pointers in git.
 - Storage tokens: `GET /api/f/{name}/storage-token` (editor+, NIP-98)
-  returns a short-lived code.storage JWT scoped to that fragment's repo —
-  the host mints it from the org key; the CLI uses it for direct commits.
+  returns `{ "token": "<jwt>", "repo": "<repo>", "api": "https://api.<cluster>.code.storage" }`
+  — a short-lived code.storage JWT scoped to that fragment's repo (repo
+  claim + git scopes), signed by the host from the org key; the CLI uses
+  it for direct commits. CLI backend precedence: `FRAGMENT_CODESTORAGE_URL`
+  env > `config.json` `codestorage` key > the token response's `api`.
 - Fragment identity: npub secret generated **client-side** at create;
   transmitted once over the creator's authenticated channel and stored
   wrapped (level-c fix from `docs/encryption-research.md` stage 1).
