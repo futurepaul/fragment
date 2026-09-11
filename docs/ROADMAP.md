@@ -51,11 +51,21 @@ the finite-brain local rule, which fragment adopts for this work).
   endpoints; LFS exists only git-client-side over the git remote, which
   fragment doesn't use. All files ride the chunked commit-pack inline
   (`POST /api/repos/{repo}/commit-pack`, NDJSON, ≤4 MiB decoded chunks,
-  no total size limit). The chunk boundary stays one function so a tier
-  could slot in later if ever needed. Spec vocabulary: expected-parent is
+  no total size limit). Spec vocabulary: expected-parent is
   `expected_target_sha`; CAS failure is 409 with
   `result.status="precondition_failed"`; previews are
   `POST /branches/create` with `target_is_ephemeral: true`.
+- **Large media is possible, not built (decided 2026-09-07).** Two users
+  sharing a vault of video files must never be *blocked* by the no-LFS
+  design, but nothing ships for it this run. Scope note: fragment serves
+  its own CLI/runtime paths only — git-clone/GitHub-mirror interop is
+  explicitly out of scope, which is what makes inline chunked blobs safe.
+  The two future items (recorded, not built): Range/seek pass-through for
+  video scrubbing in viewers, and any tier beyond the chunked commit-pack
+  if repo ergonomics ever demand it. Hard constraint on the current work:
+  the runtime read path streams through (no whole-file buffering, no size
+  ceiling; oversized files skip the RAM LRU), and the upstream fetch stays
+  the single place a Range header could later be forwarded.
 - Org: **`finite`** (verified live 2026-09-07: key authenticates, org
   reachable, zero repos — clean slate). Local dev reads
   `PIERRE_PRIVATE_KEY` from `.env` (gitignored, untracked, never in
