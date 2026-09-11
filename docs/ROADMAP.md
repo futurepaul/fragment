@@ -70,6 +70,18 @@ the finite-brain local rule, which fragment adopts for this work).
   reachable, zero repos — clean slate). Local dev reads
   `PIERRE_PRIVATE_KEY` from `.env` (gitignored, untracked, never in
   history); prod delivers it via the systemd credential.
+- **Live-verified 2026-09-11** (scratch repo, deleted after — org back to
+  0): auth works (ES256, repo claim = the repo's `url`-form UUID, NOT the
+  human repoId — repo-scoped calls 404 with repoId); commit-builder lands
+  real SHAs; branch head reads match; **expected-parent CAS is enforced
+  by the real service** (stale `expectedHeadSha` rejected with "base_ref
+  does not match current head", file did not land); the spec endpoints
+  our first-party clients call (`/api/repos/{repo}/file`,
+  `/files/metadata`) return the exact shapes we parse. SDK 1.16.2
+  (installed under a lifted registry cap) still routes some calls through
+  deprecated `/api/v1` aliases — the first-party OpenAPI-shaped client
+  stays. Open for cutover day: confirm the live CAS-rejection status code
+  is 409.
 
 ## The truth map (invariants — every change is checked against this)
 
