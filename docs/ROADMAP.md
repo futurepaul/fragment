@@ -29,6 +29,26 @@ the finite-brain local rule, which fragment adopts for this work).
    without replacement; the S3 8 MiB conditional-write limit is
    irrelevant because nothing file-shaped lives in S3.
 
+## Canonical sources (per code.storage's own onboarding docs)
+
+- Source of truth: `https://code.storage/docs/llms.txt` + the OpenAPI spec
+  at `https://code.storage/docs/openapi.json`. Documented behavior only.
+- Runtime uses the official SDK: `@pierre/storage` (TS) — `GitStorage`,
+  fluent `createCommit()` builder, `getFileStream()`/`headFile()`/
+  `listFilesWithMetadata()` for the file plane, `getEphemeralRemoteURL()`.
+  The Rust CLI has no SDK and codes against the OpenAPI spec: Create
+  Commit from Files (push), List Files / Get File (pull), Get Branch
+  (expected-parent), Reset Branch to Commit (rollback), Create Branch
+  (preview). The default branch cannot be deleted.
+- The org private key env var is **`PIERRE_PRIVATE_KEY`** — on the host it
+  is delivered via systemd `LoadCredentialEncrypted=` (celld passes it
+  through as `CELLD_VAR_PIERRE_PRIVATE_KEY`); never committed, never in
+  client code. JWTs are customer-signed by us (scopes `org:read`,
+  `repo:write`, `git:read`, `git:write`; per-repo scoping via the `repo`
+  claim; ref policies protect `live`). Git remotes (if ever used) take
+  username `t`, password = JWT.
+- LFS rides the same JWT-authenticated remote — no separate LFS server.
+
 ## The truth map (invariants — every change is checked against this)
 
 | Thing | Source of truth | Derived/copies must be |
