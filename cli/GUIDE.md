@@ -18,8 +18,8 @@ so keep using the same machine/user account.
   step; `--preview` points an unguessable ephemeral ref at the pending
   state; `fragment rollback` re-points `live` at an earlier deploy. Full
   per-file history with authors and messages comes free.
-- URLs: canonical `/f/<name>/`, previews `/d/<ref>/` (unguessable refs,
-  safe to share for review).
+- URLs: canonical `/f/<name>/` (token-gated unless public). Previews are
+  ephemeral refs — no served URL; promote with `fragment deploy`.
 - **Workflows** (`workflows/*.mjs`) are the fragment's machinery: they run on a
   cron, on inbox messages, or when you trigger them. They read and write the
   working copy. Every run is recorded in the fragment's **event log** — the
@@ -77,7 +77,7 @@ everything else      # just files: data, notes, exports — synced, versioned, s
 ```
 fragment sync my-thing                     # push/pull the folder
 fragment deploy my-thing --dir .           # commit + move live → /f/my-thing/
-fragment deploy my-thing --preview         # ephemeral preview ref → /d/<ref>/
+fragment deploy my-thing --preview         # ephemeral preview ref (no served URL)
 fragment drafts my-thing                   # deploy history (live ref commits)
 ```
 

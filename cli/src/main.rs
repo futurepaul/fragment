@@ -207,7 +207,7 @@ enum Cmd {
         #[arg(long, default_value = "fragment-cli")]
         source: String,
     },
-    /// Print the canonical, draft, and inbox URLs
+    /// Print the canonical and inbox URLs
     Open { name: String },
     /// Print the agent guide (start here if you are an agent)
     Guide,
