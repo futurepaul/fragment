@@ -207,6 +207,21 @@ async function resumeDueRuns(cell) {
       cause = { ...cause, ...JSON.parse(r.cause || "{}") };
     } catch {
     }
+    if (r.via === "inbox") {
+      try {
+        const inp = JSON.parse(r.input || "null");
+        const mid = Number(inp?.inbox?.id) || 0;
+        if (mid) {
+          const st = cell.sql.exec("SELECT status FROM inbox WHERE id = ?", mid).toArray()[0];
+          if (st && st.status === "done") {
+            updateRun(cell, r.id, { status: "success", finished_at: Date.now(), duration_ms: 0, error: null });
+            cell.addEvent("run.deduped", `${r.wf}: inbox #${mid} was drained by an earlier run`, { wf: r.wf, run: r.id, inboxId: mid });
+            continue;
+          }
+        }
+      } catch {
+      }
+    }
     if (r.status === "pending") {
       const blocked = await runGuards(cell, wf, JSON.parse(r.input || "null"), r.via, true, cause);
       if (blocked) {

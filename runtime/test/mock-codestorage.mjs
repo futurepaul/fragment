@@ -390,6 +390,13 @@ const server = createServer(async (req, res) => {
             continue;
           }
           const parts = chunksById.get(f.content_id) || [];
+          // the real service requires each content stream to end with an
+          // eof:true chunk (live-verified: eof:false finals → 400
+          // "incomplete content stream") — enforce it here or the suite
+          // passes while prod fails
+          if (!parts.length || !parts[parts.length - 1].eof) {
+            return send(400, { error: `incomplete content stream for ${f.path}` });
+          }
           const bytes = Buffer.concat(parts.map((p) => p.data));
           changes.push({ op: "upsert", path: f.path, bytes });
         }

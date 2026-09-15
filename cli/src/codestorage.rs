@@ -302,9 +302,14 @@ impl CodeStorage {
             match ch {
                 Change::Upsert { path, bytes } => {
                     files_meta.push(json_f(path, "upsert", &id));
-                    // spec: decoded chunks cap at 4 MiB; stream bigger files
-                    for piece in bytes.chunks(CHUNK_MAX.max(1)) {
-                        chunks.push(line(&id, &b64.encode(piece), piece.is_empty()));
+                    // spec: decoded chunks cap at 4 MiB; each content stream
+                    // must END with an eof:true chunk (live-verified: the
+                    // real service reports "incomplete content stream" for
+                    // a final chunk sent with eof:false)
+                    let pieces: Vec<&[u8]> = bytes.chunks(CHUNK_MAX.max(1)).collect();
+                    for (i, piece) in pieces.iter().enumerate() {
+                        let last = i + 1 == pieces.len();
+                        chunks.push(line(&id, &b64.encode(piece), last));
                     }
                     if bytes.is_empty() {
                         chunks.push(line(&id, "", true)); // empty file: one eof chunk

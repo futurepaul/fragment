@@ -254,6 +254,25 @@ export async function resumeDueRuns(cell) {
     if (wf.paused && r.status !== "pending") continue; // breaker won mid-retry: leave backoff rows for unpause+replay; pending rows fall through to the guard so the block is RECORDED
     let cause: any = { origin: null, depth: 0 };
     try { cause = { ...cause, ...JSON.parse(r.cause || "{}") }; } catch {}
+    // inbox runs batch: ctx.inbox() claims ALL pending messages, so an
+    // earlier run may have drained this row's message already. The
+    // message is processed — resolve the row as success-by-elsewhere
+    // instead of racing a duplicate execution into single-flight skips
+    // (three quick posts used to yield one success and two skips).
+    if (r.via === "inbox") {
+      try {
+        const inp = JSON.parse(r.input || "null");
+        const mid = Number(inp?.inbox?.id) || 0;
+        if (mid) {
+          const st = cell.sql.exec("SELECT status FROM inbox WHERE id = ?", mid).toArray()[0];
+          if (st && st.status === "done") {
+            updateRun(cell, r.id, { status: "success", finished_at: Date.now(), duration_ms: 0, error: null });
+            cell.addEvent("run.deduped", `${r.wf}: inbox #${mid} was drained by an earlier run`, { wf: r.wf, run: r.id, inboxId: mid });
+            continue;
+          }
+        }
+      } catch {}
+    }
     if (r.status === "pending") {
       // first execution of a scheduled run: the same guards direct runs
       // pass (pause/hops/rate/single-flight) — async delivery must not
