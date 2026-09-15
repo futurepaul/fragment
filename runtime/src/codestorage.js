@@ -204,7 +204,7 @@ async function commitFiles(env, repo, fragmentName, opts) {
     metadata.expected_target_sha = opts.expectedTargetSha;
     metadata.expected_head_sha = opts.expectedTargetSha;
   }
-  const stream = commitPackBody(metadata, opts.files);
+  const packBody = commitPackBody(metadata, opts.files);
   const resp = await csFetch(env, {
     repo,
     scopes: ["git:write"],
@@ -213,7 +213,7 @@ async function commitFiles(env, repo, fragmentName, opts) {
     init: {
       method: "POST",
       headers: { "content-type": "application/x-ndjson", accept: "application/json" },
-      body: stream
+      body: packBody
     },
     initTimeoutMs: 12e4
   });

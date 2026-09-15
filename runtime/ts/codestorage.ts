@@ -330,14 +330,14 @@ export async function commitFiles(
     metadata.expected_target_sha = opts.expectedTargetSha;
     metadata.expected_head_sha = opts.expectedTargetSha;
   }
-  const body = commitPackBody(metadata, opts.files);
+  const packBody = commitPackBody(metadata, opts.files);
   const resp = await csFetch(env, {
     repo, scopes: ["git:write"], sub: "fragment-runtime",
     path: `/api/repos/${repoSeg(repo)}/commit-pack`,
     init: {
       method: "POST",
       headers: { "content-type": "application/x-ndjson", accept: "application/json" },
-      body,
+      body: packBody,
     },
     initTimeoutMs: 120_000,
   });
