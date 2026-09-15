@@ -162,23 +162,17 @@ function authorFor(fragmentName) {
   return { name: `fragment:${fragmentName}`, email: `${fragmentName}@fragment.runtime` };
 }
 function commitPackBody(metadata, files) {
-  const enc = new TextEncoder();
-  const lines = [enc.encode(JSON.stringify(metadata) + "\n")];
+  const lines = [JSON.stringify(metadata)];
   files.forEach((f, i) => {
     const contentId = `b${i}`;
     const chunks = f.op === "delete" ? [new Uint8Array(0)] : carve(f.bytes);
     for (let c = 0; c < chunks.length; c++) {
-      lines.push(enc.encode(JSON.stringify({
+      lines.push(JSON.stringify({
         blob_chunk: { content_id: contentId, data: base64(chunks[c]), eof: c === chunks.length - 1 }
-      }) + "\n"));
+      }));
     }
   });
-  return new ReadableStream({
-    start(ctrl) {
-      for (const l of lines) ctrl.enqueue(l);
-      ctrl.close();
-    }
-  });
+  return lines.join("\n") + "\n";
 }
 function carve(bytes) {
   if (bytes.byteLength === 0) return [new Uint8Array(0)];
@@ -219,8 +213,6 @@ async function commitFiles(env, repo, fragmentName, opts) {
     init: {
       method: "POST",
       headers: { "content-type": "application/x-ndjson", accept: "application/json" },
-      // @ts-ignore duplex required for streaming bodies
-      duplex: "half",
       body: stream
     },
     initTimeoutMs: 12e4

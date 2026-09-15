@@ -267,25 +267,24 @@ function authorFor(fragmentName: string) {
 // Bytes never sit whole in memory — each file is read from its Uint8Array
 // only because callers already bounded it (see WRITE_CEILING); chunk lines
 // are emitted per COMMIT_CHUNK_BYTES slice.
-function commitPackBody(metadata: Record<string, unknown>, files: CommitFile[]): ReadableStream<Uint8Array> {
-  const enc = new TextEncoder();
-  const lines: Uint8Array[] = [enc.encode(JSON.stringify(metadata) + "\n")];
+function commitPackBody(metadata: Record<string, unknown>, files: CommitFile[]): string {
+  // buffered, not streamed: contents are already in memory (the 32 MiB
+  // write ceiling bounds them) and the REAL service rejects workerd's
+  // chunked stream framing with "first payload must be metadata"
+  // (live-verified 2026-09-15; the local mock was stream-tolerant). The
+  // body is ASCII (JSON + base64), so a plain string carries it exactly.
+  const lines: string[] = [JSON.stringify(metadata)];
   files.forEach((f, i) => {
     const contentId = `b${i}`;
     // delete entries still get an empty-eof chunk (documented example shape)
     const chunks: Uint8Array[] = f.op === "delete" ? [new Uint8Array(0)] : carve(f.bytes);
     for (let c = 0; c < chunks.length; c++) {
-      lines.push(enc.encode(JSON.stringify({
+      lines.push(JSON.stringify({
         blob_chunk: { content_id: contentId, data: base64(chunks[c]), eof: c === chunks.length - 1 },
-      }) + "\n"));
+      }));
     }
   });
-  return new ReadableStream({
-    start(ctrl) {
-      for (const l of lines) ctrl.enqueue(l);
-      ctrl.close();
-    },
-  });
+  return lines.join("\n") + "\n";
 }
 
 function carve(bytes: Uint8Array): Uint8Array[] {
@@ -331,16 +330,14 @@ export async function commitFiles(
     metadata.expected_target_sha = opts.expectedTargetSha;
     metadata.expected_head_sha = opts.expectedTargetSha;
   }
-  const stream = commitPackBody(metadata, opts.files);
+  const body = commitPackBody(metadata, opts.files);
   const resp = await csFetch(env, {
     repo, scopes: ["git:write"], sub: "fragment-runtime",
     path: `/api/repos/${repoSeg(repo)}/commit-pack`,
     init: {
       method: "POST",
       headers: { "content-type": "application/x-ndjson", accept: "application/json" },
-      // @ts-ignore duplex required for streaming bodies
-      duplex: "half",
-      body: stream,
+      body,
     },
     initTimeoutMs: 120_000,
   });
