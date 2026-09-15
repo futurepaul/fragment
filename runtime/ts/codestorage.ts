@@ -364,15 +364,50 @@ export async function commitFiles(
 // JWT repo claim. The caller must persist what this returns as THE repo
 // identifier; using the requested name gets 404 "repository not found".
 export async function ensureRepo(env, repo: string): Promise<string> {
-  const resp = await csFetch(env, {
-    scopes: ["repo:write"], sub: "fragment-runtime", repo, // org-level path; repo claim still required
-    path: `/api/repos`,
-    init: { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: repo, default_branch: "main" }) },
+  // create-or-exists, then resolve the authoritative url identity. The
+  // real service (spec + live-verified 2026-09-15): POST /api/repos replies
+  // {repo_id, repo_name, http_url, message} (201) or 409 when the name
+  // exists; the JWT repo claim/path identity comes from
+  // GET /api/repo-urls/{repo_id} -> {repo_id, repo_name, url}. The url is
+  // what every repo-scoped call and minted token must carry (live-verified:
+  // other spellings 404/403).
+  let repoId = "";
+  try {
+    const resp = await csFetch(env, {
+      scopes: ["repo:write"], sub: "fragment-runtime", repo,
+      path: `/api/repos`,
+      init: { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: repo, default_branch: "main" }) },
+    });
+    const body = await resp.json().catch(() => null);
+    repoId = body && typeof body.repo_id === "string" ? body.repo_id : "";
+  } catch (e) {
+    if (!(e instanceof CodeStorageError) || e.status !== 409) throw e;
+    // name already taken in our org: resolve the existing repo via the
+    // org-level listing (repo_name + url ride every row — spec-verified)
+  }
+  if (!repoId) {
+    const listResp = await csFetch(env, {
+      scopes: ["org:read"], sub: "fragment-runtime", repo,
+      path: `/api/repos`,
+      init: { method: "GET" },
+    });
+    const lb = await listResp.json().catch(() => null);
+    const hit = lb && Array.isArray(lb.repos) ? lb.repos.find((r: any) => r.repo_name === repo) : null;
+    const listedUrl = hit && typeof hit.url === "string" ? hit.url : "";
+    if (!listedUrl) {
+      throw new CodeStorageError("bad-response", `repo ${repo} exists but the org listing resolved no url for it: ${JSON.stringify(lb).slice(0, 200)}`);
+    }
+    return listedUrl;
+  }
+  const urlResp = await csFetch(env, {
+    scopes: ["org:read"], sub: "fragment-runtime", repo: repoId,
+    path: `/api/repo-urls/${encodeURIComponent(repoId)}`,
+    init: { method: "GET" },
   });
-  const body = await resp.json().catch(() => null);
-  const url = body && typeof body.url === "string" ? body.url : "";
+  const ub = await urlResp.json().catch(() => null);
+  const url = ub && typeof ub.url === "string" && ub.url ? ub.url : "";
   if (!url) {
-    throw new CodeStorageError("bad-response", `repo create for ${repo} returned no url identity: ${JSON.stringify(body).slice(0, 200)}`);
+    throw new CodeStorageError("bad-response", `repo-urls for ${repo} (${repoId}) returned no url identity: ${JSON.stringify(ub).slice(0, 200)}`);
   }
   return url;
 }

@@ -261,22 +261,38 @@ const server = createServer(async (req, res) => {
     if (path === "/healthz") return send(200, { ok: true });
 
     // ---- org-level: create repo ----
+    // raw HTTP shapes per the org OpenAPI spec (live-verified 2026-09-15):
+    // create replies {repo_id, repo_name, http_url, message}; the url
+    // identity comes from GET /api/repo-urls/{repo_id}; the org listing
+    // rows carry repo_name + url.
     if (path === "/api/repos" && req.method === "POST") {
       const a = await checkAuth(req, null, "repo:write");
       if (!a.ok) return send(a.status, a.body);
       const body = JSON.parse((await readBody(req)).toString() || "{}");
       if (!body.id) return send(400, { error: "id required" });
       if (byName.has(body.id)) {
-        // dev mode (persisted state) is idempotent and returns the
-        // existing url — a wiped cell re-init must find the same repo;
-        // in-memory mode (unit tests) treats re-create as exists
+        // dev mode (persisted state) is idempotent — a wiped cell re-init
+        // must find the same repo; unit mode treats re-create as 409
         if (!STATE_DIR) return send(409, { error: "repository already exists" });
         const r = repos.get(byName.get(body.id));
-        return send(200, { repoId: r.repoId, url: r.url, defaultBranch: r.defaultBranch, createdAt: 0 });
+        return send(200, { repo_id: r.repoId, repo_name: body.id, http_url: r.url, message: "repository exists" });
       }
       const r = newRepo(body.id, body.default_branch);
       persist();
-      return send(201, { repoId: r.repoId, url: r.url, defaultBranch: r.defaultBranch, createdAt: Date.now() });
+      return send(201, { repo_id: r.repoId, repo_name: body.id, http_url: r.url, message: "repository created" });
+    }
+    if (path === "/api/repos" && req.method === "GET") {
+      const a = await checkAuth(req, null, "org:read");
+      if (!a.ok) return send(a.status, a.body);
+      return send(200, { repos: [...repos.values()].map((r) => ({ repo_id: r.repoId, repo_name: r.name, url: r.url, default_branch: r.defaultBranch, created_at: new Date(r.createdAt || 0).toISOString() })), has_more: false });
+    }
+    if (path.startsWith("/api/repo-urls/") && req.method === "GET") {
+      const a = await checkAuth(req, null, "org:read");
+      if (!a.ok) return send(a.status, a.body);
+      const repoId = decodeURIComponent(path.slice("/api/repo-urls/".length));
+      const r = [...repos.values()].find((x) => x.repoId === repoId);
+      if (!r) return send(404, { error: "repository not found" });
+      return send(200, { repo_id: r.repoId, repo_name: r.name, url: r.url });
     }
 
     // ---- repo-scoped routes: /api/repos/{repo}/... ({repo} = url-form id) ----
