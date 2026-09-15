@@ -128,3 +128,16 @@ test("verifyWebhookDelivery: valid, stale, future, tampered, malformed", async (
   assert.equal(malformed.ok, false);
   assert.match(malformed.reason, /format/);
 });
+
+// env-delivery normalization: an \n-escaped single-line PEM (what systemd
+// EnvironmentFile can carry) must normalize to the identical key the
+// real-newline form produces.
+test("csConfig normalizes \\n-escaped PEM for EnvironmentFile delivery", async () => {
+  const mod = await import("../src/codestorage.js");
+  const pem = "-----BEGIN PRIVATE KEY-----\nMIabc123\n-----END PRIVATE KEY-----";
+  const escaped = pem.replace(/\n/g, "\\n");
+  const a = mod.csConfig({ PIERRE_PRIVATE_KEY: pem, CODESTORAGE_ORG_NAME: "finite" });
+  const b = mod.csConfig({ PIERRE_PRIVATE_KEY: escaped, CODESTORAGE_ORG_NAME: "finite" });
+  assert.equal(b.keyPem, a.keyPem, "escaped form normalizes to the real-newline form");
+  assert.ok(b.keyPem.startsWith("-----BEGIN"), "PEM header intact after normalization");
+});

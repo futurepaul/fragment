@@ -13,7 +13,7 @@ class CodeStorageError extends Error {
 }
 const CS_SCOPES = ["org:read", "repo:write", "git:read", "git:write"];
 function csConfig(env) {
-  const keyPem = String(env.PIERRE_PRIVATE_KEY || "");
+  const keyPem = String(env.PIERRE_PRIVATE_KEY || "").replace(/\\n/g, "\n").trim();
   const org = String(env.CODESTORAGE_ORG_NAME || "").trim();
   if (!keyPem || !org) {
     throw new CodeStorageError(

@@ -65,7 +65,11 @@ export type CsScope = (typeof CS_SCOPES)[number];
 // CELLD_VAR_CODESTORAGE_ORG_NAME -> env.CODESTORAGE_ORG_NAME,
 // CELLD_VAR_CODESTORAGE_API_URL -> env.CODESTORAGE_API_URL (override).
 export function csConfig(env): CsConfig {
-  const keyPem = String(env.PIERRE_PRIVATE_KEY || "");
+  // systemd EnvironmentFile is line-based, so the PEM arrives there with
+  // literal \n escapes; real newlines (dev spawns, tests) pass untouched.
+  const keyPem = String(env.PIERRE_PRIVATE_KEY || "")
+    .replace(/\\n/g, "\n")
+    .trim();
   const org = String(env.CODESTORAGE_ORG_NAME || "").trim();
   if (!keyPem || !org) {
     throw new CodeStorageError(
