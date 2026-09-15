@@ -273,7 +273,11 @@ function commitPackBody(metadata: Record<string, unknown>, files: CommitFile[]):
   // chunked stream framing with "first payload must be metadata"
   // (live-verified 2026-09-15; the local mock was stream-tolerant). The
   // body is ASCII (JSON + base64), so a plain string carries it exactly.
-  const lines: string[] = [JSON.stringify(metadata)];
+  // the service's NDJSON framing requires the first line to be a
+  // metadata PAYLOAD — {"metadata": {...}} — not the bare object
+  // (live-verified: bare first lines 400 with "first payload must be
+  // metadata"; the CLI wraps, the mock now enforces)
+  const lines: string[] = [JSON.stringify({ metadata })];
   files.forEach((f, i) => {
     const contentId = `b${i}`;
     // delete entries still get an empty-eof chunk (documented example shape)

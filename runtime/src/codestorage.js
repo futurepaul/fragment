@@ -162,7 +162,7 @@ function authorFor(fragmentName) {
   return { name: `fragment:${fragmentName}`, email: `${fragmentName}@fragment.runtime` };
 }
 function commitPackBody(metadata, files) {
-  const lines = [JSON.stringify(metadata)];
+  const lines = [JSON.stringify({ metadata })];
   files.forEach((f, i) => {
     const contentId = `b${i}`;
     const chunks = f.op === "delete" ? [new Uint8Array(0)] : carve(f.bytes);

@@ -364,6 +364,9 @@ const server = createServer(async (req, res) => {
           meta = JSON.parse(lines[0]);
         } catch { return send(400, { error: "bad metadata line" }); }
         // tolerate both {metadata:{...}} and a bare metadata object
+        if (meta && typeof meta === "object" && meta.metadata === undefined) {
+          return send(400, { error: "first payload must be metadata", result: { status: "invalid", message: "first payload must be metadata" } });
+        }
         if (meta && typeof meta === "object" && meta.metadata) meta = meta.metadata;
         if (!meta || typeof meta !== "object" || !meta.target_branch) {
           return send(400, { error: "metadata line needs target_branch" });

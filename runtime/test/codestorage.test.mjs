@@ -71,7 +71,7 @@ test("commit-pack: success, CAS conflict, and idempotent same-content commit", a
       author: { name: "t", email: "t@t" },
       files: [{ path: "big.bin", operation: "upsert", content_id: "b0", mode: "100644" }],
     });
-    const ndjson = meta + "\n" + JSON.stringify({ blob_chunk: { content_id: "b0", data: big, eof: true } }) + "\n";
+    const ndjson = JSON.stringify({ metadata: JSON.parse(meta) }) + "\n" + JSON.stringify({ blob_chunk: { content_id: "b0", data: big, eof: true } }) + "\n";
     const tok = await cs.mintCsJwt(env, { repo, scopes: ["git:write"], sub: "t", ttlSec: 60 });
     const resp = await fetch(`${w.mockUrl}/api/repos/${repo}/commit-pack`, {
       method: "POST", headers: { authorization: `Bearer ${tok}`, "content-type": "application/x-ndjson" }, body: ndjson,
