@@ -103,7 +103,11 @@ export async function mintCsJwt(env, opts: { repo?: string; scopes: CsScope[]; s
   return await new SignJWT({
     iss: cfg.org,
     sub: opts.sub,
-    ...(opts.repo ? { repo: opts.repo } : {}), // omit for org-level tokens
+    // the repo claim is REQUIRED by the real service on every call,
+    // org-level included (live-verified 2026-09-15: claim-less tokens 403
+    // "Invalid or expired token" even with correct key/scopes; the value
+    // is not enforced on org-level paths, so default it to the org)
+    repo: opts.repo ?? cfg.org,
     scopes: opts.scopes,
     iat: now,
     exp: now + opts.ttlSec,
@@ -361,7 +365,7 @@ export async function commitFiles(
 // identifier; using the requested name gets 404 "repository not found".
 export async function ensureRepo(env, repo: string): Promise<string> {
   const resp = await csFetch(env, {
-    scopes: ["repo:write"], sub: "fragment-runtime", // org-level: no repo claim
+    scopes: ["repo:write"], sub: "fragment-runtime", repo, // org-level path; repo claim still required
     path: `/api/repos`,
     init: { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: repo, default_branch: "main" }) },
   });

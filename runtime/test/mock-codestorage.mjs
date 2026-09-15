@@ -230,6 +230,7 @@ async function checkAuth(req, repo, needScope) {
   try {
     const { payload } = await jwtVerify(h.slice(7), orgKey, { algorithms: ["ES256"] });
     if (payload.iss !== ORG) return { ok: false, status: 401, body: { error: "wrong iss" } };
+    if (typeof payload.repo !== "string" || !payload.repo) return { ok: false, status: 403, body: { error: "missing repo claim (the real service rejects claim-less tokens on every path)" } };
     const scopes = Array.isArray(payload.scopes) ? payload.scopes : [];
     if (!scopes.includes(needScope)) return { ok: false, status: 403, body: { error: `missing scope ${needScope}` } };
     if (repo !== null && payload.repo !== repo) return { ok: false, status: 403, body: { error: "repo claim mismatch" } };

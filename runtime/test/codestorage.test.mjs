@@ -141,3 +141,25 @@ test("csConfig normalizes \\n-escaped PEM for EnvironmentFile delivery", async (
   assert.equal(b.keyPem, a.keyPem, "escaped form normalizes to the real-newline form");
   assert.ok(b.keyPem.startsWith("-----BEGIN"), "PEM header intact after normalization");
 });
+
+// regression (live-verified 2026-09-15): the real service 403s claim-less
+// tokens on every path, org-level included — the mock must too, or the
+// suite passes while prod fails.
+test("org-level mint without a repo claim is refused (mock fidelity)", async () => {
+  const { SignJWT, importPKCS8 } = await import("jose");
+  const w = await makeWorld();
+  try {
+    const key = await importPKCS8(w.env.PIERRE_PRIVATE_KEY, "ES256");
+    const now = Math.floor(Date.now() / 1e3);
+    const jwt = await new SignJWT({ iss: w.env.CODESTORAGE_ORG_NAME, sub: "fragment-runtime", scopes: ["repo:write"], iat: now, exp: now + 300 })
+      .setProtectedHeader({ alg: "ES256", typ: "JWT" }).sign(key);
+    const r = await fetch(`${w.mockUrl}/api/repos`, { method: "POST",
+      headers: { authorization: `Bearer ${jwt}`, "content-type": "application/json" },
+      body: JSON.stringify({ id: "claimless", default_branch: "main" }) });
+    assert.equal(r.status, 403, "claim-less token must be refused");
+    // and the runtime's own ensureRepo mint (now always carries repo) works
+    const mod = await import("../src/codestorage.js");
+    const url = await mod.ensureRepo(w.env, "with-claim");
+    assert.ok(url.length > 0, "ensureRepo succeeds with the repo claim present");
+  } finally { await w.stop(); }
+});
