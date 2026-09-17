@@ -103,3 +103,18 @@ test("viewer is rejected; editor mints exact-claim short-lived token; mint is au
     await w.stop();
   }
 });
+
+// regression (live-found 2026-09-17): a fragment name whose minted-token
+// payload needs base64 padding used to throw InvalidCharacterError in the
+// egress assert (atob on unpadded base64url) — a coin flip per name.
+test("storage-token mints for a padding-demanding name", async () => {
+  const w = await makeWorld();
+  try {
+    const name = "tok-pad";
+    await setup(w, name);
+    const r = await mint(w, name, EDITOR_HEX);
+    assert.equal(r.status, 200, "mint must survive padding-length payloads");
+    const body = await r.json();
+    assert.ok(body.token && body.repo && body.api);
+  } finally { await w.stop(); }
+});

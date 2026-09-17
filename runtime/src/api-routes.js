@@ -1,4 +1,5 @@
 // GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
+import { decodeJwt } from "jose";
 import { json, randSlug, randHex, isMachinery, mimeForPath } from "./util.js";
 import { safeEqual } from "./auth.js";
 import { nextRun } from "./cron.js";
@@ -122,8 +123,7 @@ async function apiRoute(cell, request, url) {
     } catch (e) {
       return json({ error: String(e.message || e) }, 500);
     }
-    const [_, payloadB64] = token.split(".");
-    const claims = JSON.parse(atob(payloadB64.replace(/-/g, "+").replace(/_/g, "/")));
+    const claims = decodeJwt(token);
     if (claims.repo !== repo || !Array.isArray(claims.scopes) || claims.scopes.join(",") !== "git:read,git:write" || typeof claims.exp !== "number" || claims.exp - claims.iat > STORAGE_TOKEN_TTL_SEC + 1) {
       return json({ error: "minted token claims failed egress validation" }, 500);
     }
