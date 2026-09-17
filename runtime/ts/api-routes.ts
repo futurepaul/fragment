@@ -1,5 +1,4 @@
 // Control plane (/api/...): NIP-98-gated fragment management.
-import { decodeJwt } from "jose";
 import { json, randSlug, randHex, isMachinery, mimeForPath } from "./util.js";
 import { safeEqual } from "./auth.js";
 import { parseCron, nextRun } from "./cron.js";
@@ -149,11 +148,13 @@ export async function apiRoute(cell, request, url) {
     }
     // egress assert: decode the minted token and verify the claims we
     // promised — a mint that drifted (wrong repo, leaked scope, long exp)
-    // must fail here, not at code.storage. decodeJwt, not hand-rolled
-    // atob: jose emits UNPADDED base64url and atob throws
-    // InvalidCharacterError on payloads whose length needs padding — a
-    // coin flip per fragment name (live-found via strategy-vault)
-    const claims = decodeJwt(token);
+    // must fail here, not at code.storage. Manual base64url→padded-base64:
+    // jose emits UNPADDED base64url and BOTH raw atob and jose's decoder
+    // choke on it inside workerd (live-found via strategy-vault; the same
+    // tokens verify fine at code.storage — only our decode was broken)
+    const seg = token.split(".")[1];
+    const b64 = seg.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((seg.length + 3) % 4);
+    const claims = JSON.parse(atob(b64));
     if (claims.repo !== repo || !Array.isArray(claims.scopes) || claims.scopes.join(",") !== "git:read,git:write"
       || typeof claims.exp !== "number" || claims.exp - claims.iat > STORAGE_TOKEN_TTL_SEC + 1) {
       return json({ error: "minted token claims failed egress validation" }, 500);
