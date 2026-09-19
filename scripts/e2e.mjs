@@ -171,7 +171,9 @@ async function csCommit(name, changes, message = 'e2e commit', viaWebhook = true
         : { path: c.path, operation: 'upsert', content_id: `b${i}`, mode: '100644' })),
       ...(head ? { expected_target_sha: head } : {}),
     };
-    const lines = [JSON.stringify(meta)];
+    // enveloped first line — the real service (and the hardened mock)
+    // refuse a bare metadata payload
+    const lines = [JSON.stringify({ metadata: meta })];
     changes.forEach((c, i) => {
       if (c.delete) {
         lines.push(JSON.stringify({ blob_chunk: { content_id: `b${i}`, data: '', eof: true } }));
@@ -411,12 +413,12 @@ async function filesSection() {
 
   // CAS: a stale expected parent is rejected with precondition_failed
   const tok = await mint(name);
-  const stalePack = JSON.stringify({
+  const stalePack = JSON.stringify({ metadata: {
     target_branch: 'main', commit_message: 'stale',
     author: { name: 'e2e-suite', email: 'e2e@fragment.test' },
     files: [{ path: 'notes/b.md', operation: 'upsert', content_id: 'b0', mode: '100644' }],
     expected_target_sha: '0'.repeat(40),
-  }) + '\n' + JSON.stringify({ blob_chunk: { content_id: 'b0', data: Buffer.from('x').toString('base64'), eof: true } }) + '\n';
+  } }) + '\n' + JSON.stringify({ blob_chunk: { content_id: 'b0', data: Buffer.from('x').toString('base64'), eof: true } }) + '\n';
   const stale = await csRaw(name, 'POST', '/commit-pack', { body: stalePack, contentType: 'application/x-ndjson' }, tok);
   ok(stale.status === 409 && stale.text.includes('precondition_failed'), 'stale expected-parent CAS → 409 precondition_failed');
 

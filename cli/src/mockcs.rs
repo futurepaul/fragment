@@ -34,6 +34,8 @@ pub struct MockState {
     seen_commit_packs: u32,
     api_base: String,
     requests: Vec<String>,
+    /// /api/f/{name}/refresh nudges received (the pin-refresh contract)
+    refresh_count: u32,
 }
 
 pub struct MockServer {
@@ -96,6 +98,11 @@ impl MockServer {
 
     pub fn commit_pack_count(&self) -> u32 {
         self.state.lock().unwrap().seen_commit_packs
+    }
+
+    /// pin-refresh nudges received so far
+    pub fn refresh_count(&self) -> u32 {
+        self.state.lock().unwrap().refresh_count
     }
 
     /// Peek at a repo's file bytes at the tip of a branch.
@@ -253,6 +260,15 @@ fn handle(mut stream: TcpStream, state: Arc<Mutex<MockState>>) {
         let name = req.path.trim_start_matches("/api/f/").trim_end_matches("/storage-token").to_string();
         let api = state.lock().unwrap().api_base.clone();
         let body = serde_json::to_vec(&json!({ "token": "test-jwt", "repo": name, "api": api })).unwrap();
+        write_response(&mut stream, 200, &body, "application/json");
+        return;
+    }
+
+    // fragment-host side: the pin-refresh nudge landing syncs/deployed
+    // fire after a commit (the real endpoint is NIP-98 editor+)
+    if req.method == "POST" && req.path.starts_with("/api/f/") && req.path.ends_with("/refresh") {
+        state.lock().unwrap().refresh_count += 1;
+        let body = serde_json::to_vec(&json!({ "ok": true })).unwrap();
         write_response(&mut stream, 200, &body, "application/json");
         return;
     }

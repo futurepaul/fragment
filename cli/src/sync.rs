@@ -71,6 +71,9 @@ impl Default for SyncOptions {
 pub enum SyncError {
     Cs(CsError),
     Io(String),
+    /// the folder's journal belongs to a different repo than the fragment
+    /// being synced — refuse before touching anything
+    Repo(String),
 }
 impl From<CsError> for SyncError {
     fn from(e: CsError) -> Self {
@@ -87,6 +90,7 @@ impl std::fmt::Display for SyncError {
         match self {
             SyncError::Cs(e) => write!(f, "{e}"),
             SyncError::Io(e) => write!(f, "io: {e}"),
+            SyncError::Repo(e) => write!(f, "{e}"),
         }
     }
 }
@@ -100,6 +104,20 @@ pub struct SyncState {
     #[serde(rename = "schemaVersion")]
     pub schema_version: u32, // 3
     pub name: String,
+    /// url-form repo identity this folder last synced against, plus the
+    /// fragment host it synced through. The mirror trusts the journal to
+    /// mean "same world": without the binding, a journal from ANOTHER
+    /// world (a wiped+recreated fragment, or the same name on a different
+    /// host — dev vs prod bite equally, and repo ids alone can't tell
+    /// them apart when the service reports name-form identities) makes
+    /// every file look remotely-changed and the pull phase faithfully
+    /// mirrors the wrong world over the folder — silent local data loss
+    /// (found live, twice in one day). None on old journals; bound on the
+    /// first sync.
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub repo: Option<String>,
     pub files: HashMap<String, FileState>,
 }
 
@@ -209,7 +227,7 @@ impl SyncLock {
 pub fn load_state(dir: &Path, name: &str) -> Result<SyncState> {
     let p = state_path(dir);
     if !p.exists() {
-        return Ok(SyncState { schema_version: 3, name: name.to_string(), files: HashMap::new() });
+        return Ok(SyncState { schema_version: 3, name: name.to_string(), host: None, repo: None, files: HashMap::new() });
     }
     match serde_json::from_slice::<SyncState>(&fs::read(&p)?) {
         Ok(s) if s.schema_version == 3 => {
@@ -220,7 +238,7 @@ pub fn load_state(dir: &Path, name: &str) -> Result<SyncState> {
         }
         _ => {
             eprintln!("warning: {} unreadable or old format — rebuilding state", p.display());
-            Ok(SyncState { schema_version: 3, name: name.to_string(), files: HashMap::new() })
+            Ok(SyncState { schema_version: 3, name: name.to_string(), host: None, repo: None, files: HashMap::new() })
         }
     }
 }
@@ -372,13 +390,14 @@ fn push_plan(
                 // local unchanged: remote-side changes are the pull
                 // phase's business, never a push
             }
-            (Some(lf), Some(rf), None) => {
-                // stateless bootstrap: equal size is provisional-same
-                // (fragment verify audits content); else local wins and
-                // the prior remote content survives in git history
-                if lf.size != rf.size {
-                    plan.upserts.push(path.clone());
-                }
+            (Some(_), Some(_), None) => {
+                // stateless bootstrap: equal size is NOT identity — the
+                // bootstrap pass in sync_once adopts verified-equal files
+                // into the journal, so anything still journal-absent here
+                // is content-different (or the pass could not run) and
+                // local wins; the prior remote content survives in git
+                // history
+                plan.upserts.push(path.clone());
             }
             (Some(lf), None, Some(st)) => {
                 if st.sha256 != lf.sha256 {
@@ -403,17 +422,20 @@ fn push_plan(
 }
 
 /// Mass-deletion guard (ported): a pass that would delete more than
-/// max(10, 30%) of the known files, or ALL of them (the unmounted-disk /
+/// max(3, 30%) of the known files, or ALL of them (the unmounted-disk /
 /// replaced-folder case the old root-identity check covered), is refused
 /// until --apply-mass-delete. Counts both directions — deletions pushed
-/// remotely and deletions applied locally.
+/// remotely and deletions applied locally. The floor is 3, not 10: with a
+/// floor of 10, deleting 8 of a 10-file fragment (a whole world change,
+/// found live) sailed through because 8 ≤ 10 while being 80% of the
+/// folder. Small folders deserve the percent protection most.
 fn mass_delete_trips(push_deletes: usize, local_deletes: usize, known: usize, apply: bool) -> Option<usize> {
     if apply {
         return None;
     }
     let pending = push_deletes + local_deletes;
     let known = known.max(1);
-    if (pending > 10 && pending * 10 > known * 3) || (pending == known && pending > 0) {
+    if (pending > 3 && pending * 10 > known * 3) || (pending == known && pending > 0) {
         Some(pending)
     } else {
         None
@@ -427,10 +449,51 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
     let mut state = load_state(dir, name).map_err(|e| SyncError::Io(e.to_string()))?;
     let (local, stats) = scan_local(dir, Some(&state), opts.verify).map_err(|e| SyncError::Io(e.to_string()))?;
     let storage = CodeStorage::connect(client, name, opts.codestorage.as_deref())?;
+    // World binding: this folder's journal must belong to THIS host+repo.
+    // A mismatch means the fragment was recreated, or this folder last
+    // synced the same name somewhere else (dev vs prod) — mirroring now
+    // would faithfully copy the wrong world over the folder. Refuse
+    // before any read or write.
+    let bound_host = client.host.trim_end_matches('/').to_string();
+    match (&state.host, &state.repo) {
+        (Some(h), Some(r)) if h != &bound_host || r != storage.repo() => {
+            return Err(SyncError::Repo(format!(
+                "this folder is bound to {} repo {r}, but fragment '{name}' is {} repo {} — the fragment was likely recreated or this folder synced a different host.\n  to sync here anyway: rm {}/.fragment/state.json (rebinds; remote content survives in git history)",
+                h, bound_host, storage.repo(), dir.display()
+            )));
+        }
+        _ => {
+            state.host = Some(bound_host);
+            state.repo = Some(storage.repo().to_string());
+        }
+    }
     let author = Author::writer(&opts.writer_id);
     let mut report = Report { scan: stats, mode: format!("{:?}", opts.mode).to_lowercase(), ..Default::default() };
 
     let remote = list_main(&storage)?;
+    // stateless bootstrap (journal-absent files present on both sides):
+    // equal size used to be "provisionally same" — but equal size is not
+    // identity, and a same-size different-content file silently never
+    // pushed (found live). Verify by content: fetch and hash each
+    // equal-size unknown; adopt into the journal only on a real match, so
+    // push and pull both see an ordinary unchanged file. Mismatches stay
+    // journal-absent and the push plan treats them as local-wins.
+    for (p, rf) in remote.iter() {
+        if state.files.contains_key(p) {
+            continue;
+        }
+        let Some(lf) = local.get(p) else { continue };
+        if lf.size != rf.size {
+            continue;
+        }
+        let bytes = storage.read_file(p, MAIN)?;
+        if sha256_hex(&bytes) == lf.sha256 {
+            state.files.insert(
+                p.clone(),
+                FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: rf.last_commit_sha.clone() },
+            );
+        }
+    }
     // candidate local deletions: known remotely before, gone from the
     // listing now, local copy untouched since we saw it
     let local_delete_candidates: Vec<String> = state
@@ -458,6 +521,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
     }
 
     // ---- push: one commit with expected-parent CAS, bounded rebuilds ----
+    let mut landed_commit = false;
     if opts.mode != Mode::Pull {
         let mut attempt: u32 = 0;
         loop {
@@ -506,6 +570,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
                         state.files.remove(p);
                         report.deleted_remote.push(p.clone());
                     }
+                    landed_commit = true;
                     break;
                 }
                 Err(CsError::CasRejected { .. }) if attempt < MAX_CAS_ATTEMPTS => {
@@ -531,18 +596,12 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
             let s = state.files.get(&rf.path);
             let fetch = match (l, s) {
                 (None, _) => true, // remote-only
-                (Some(lf), None) => {
-                    // stateless bootstrap: adopt provisionally on size
-                    // match (verify audits), fetch on mismatch
-                    if lf.size == rf.size {
-                        state.files.insert(
-                            rf.path.clone(),
-                            FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: rf.last_commit_sha.clone() },
-                        );
-                        false
-                    } else {
-                        true
-                    }
+                (Some(_), None) => {
+                    // journal-absent but present locally: the bootstrap
+                    // pass adopted every content-verified match, so what's
+                    // left here is content-different — fetch (remote wins
+                    // in pull/mirror; push modes already pushed local)
+                    true
                 }
                 (Some(lf), Some(st)) => {
                     let local_changed = st.sha256 != lf.sha256;
@@ -601,6 +660,15 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
     }
 
     save_state(dir, &state).map_err(|e| SyncError::Io(e.to_string()))?;
+    if landed_commit {
+        // our commit is an EXTERNAL push from the cell's perspective:
+        // without this nudge the cell's pins wait out the 5-minute poll
+        // backstop before app reads and serving see it. Best-effort — the
+        // poll covers a missed nudge.
+        if let Err(e) = client.post_json(&format!("/api/f/{name}/refresh"), &serde_json::json!({})) {
+            eprintln!("warning: cell pin refresh failed ({e:#}); the poll backstop will catch up");
+        }
+    }
     Ok(report)
 }
 
@@ -768,7 +836,7 @@ mod tests {
         fs::write(dir.join("site/index.html"), b"hi").unwrap();
         let (l1, s1) = scan_local(&dir, None, false).unwrap();
         assert_eq!(s1.hashed, 1);
-        let mut st = SyncState { schema_version: 3, name: "x".into(), files: HashMap::new() };
+        let mut st = SyncState { schema_version: 3, name: "x".into(), host: None, repo: None, files: HashMap::new() };
         let lf = l1.get("site/index.html").unwrap();
         st.files.insert("site/index.html".into(), FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: "c".into() });
         let (_, s2) = scan_local(&dir, Some(&st), false).unwrap();
@@ -799,10 +867,18 @@ mod tests {
 
     #[test]
     fn mass_delete_guard_semantics() {
-        // ported rule: pending > 10 AND pending > 30% of known
+        // rule: pending > max(3, 30% of known), or ALL of them
         assert!(mass_delete_trips(11, 0, 30, false).is_some());
         assert!(mass_delete_trips(11, 0, 100, false).is_none()); // 11% only
-        assert!(mass_delete_trips(9, 0, 30, false).is_none()); // 30% exactly, but <= 10
+        assert!(mass_delete_trips(9, 0, 30, false).is_none()); // 30% exactly
+        // the live incident: 8 of a 10-file folder (80%) must trip — the
+        // old floor of 10 let a whole world change through (8 ≤ 10)
+        assert!(mass_delete_trips(0, 8, 10, false).is_some());
+        assert!(mass_delete_trips(8, 0, 10, false).is_some());
+        // small legitimate deletions stay quiet: 3 or fewer, or a small
+        // share of a big folder
+        assert!(mass_delete_trips(3, 0, 10, false).is_none());
+        assert!(mass_delete_trips(3, 0, 1000, false).is_none());
         // full wipe trips regardless of count (unmounted-folder case)
         assert!(mass_delete_trips(3, 0, 3, false).is_some());
         assert!(mass_delete_trips(1, 0, 1, false).is_some());
@@ -1093,16 +1169,18 @@ mod tests {
     }
 
     #[test]
-    fn stateless_bootstrap_same_size_is_provisional() {
-        // no state, equal size: adopted provisionally; content drift is
-        // the verify command's job to catch (documented behavior)
+    fn stateless_bootstrap_verifies_by_content() {
+        // no state, equal size, DIFFERENT content ("12345" vs "67890"):
+        // bootstrap verifies by content — no adoption, local wins. The old
+        // size-provisional rule silently never pushed these (found live);
+        // verify audits nothing if the first sync already guessed wrong.
         let mock = MockServer::start();
         mock.seed_repo("t", &[("a.txt", b"12345")]);
         let c = client_for(&mock);
         let dir = tmpdir("bootstrap");
         fs::write(dir.join("a.txt"), b"67890").unwrap();
         let report = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
-        assert!(report.pushed.is_empty(), "size-equal bootstrap adopts, does not push");
+        assert_eq!(report.pushed, vec!["a.txt".to_string()], "content-different must push, not adopt");
         let st = load_state(&dir, "t").unwrap();
         assert!(st.files.contains_key("a.txt"));
         fs::remove_dir_all(&dir).ok();
@@ -1141,5 +1219,108 @@ mod tests {
         // replay (same expected parent now stale) still succeeds via retry
         let tip2 = commit_single_file(&c, "t", "fragment.json", br#"{"name":"t","visibility":"token"}"#.to_vec(), "manifest-set", "deadbeef", None).unwrap();
         assert_ne!(tip, tip2);
+    }
+
+    // ---- the world-change regressions (both found live in one day) ----
+
+    #[test]
+    fn journal_bound_to_other_world_refuses() {
+        // a journal from a DIFFERENT world must refuse before mirroring
+        // that world over the folder. Two dimensions, two incidents:
+        // (a) different repo, same host — a recreated fragment
+        // (b) same repo name, different host — dev vs prod (repo ids
+        //     alone can't tell these apart when the service reports
+        //     name-form identities)
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("old.txt", b"remote world")]);
+        let c = client_for(&mock);
+        for (tag, journal) in [
+            (
+                "other repo, same host",
+                format!("{{\"schemaVersion\":3,\"name\":\"t\",\"host\":\"{}\",\"repo\":\"urn:some-other-repo\",\"files\":{{}}}}", mock.url),
+            ),
+            (
+                "same repo, other host",
+                r#"{"schemaVersion":3,"name":"t","host":"https://fragment.club","repo":"t","files":{}}"#.to_string(),
+            ),
+        ] {
+            let dir = tmpdir("world-mismatch");
+            fs::write(dir.join("local.txt"), b"local world").unwrap();
+            fs::create_dir_all(dir.join(".fragment")).unwrap();
+            fs::write(dir.join(".fragment/state.json"), journal).unwrap();
+            let err = match sync_once(&c, "t", &dir, &opts(Mode::Mirror)) {
+                Err(SyncError::Repo(msg)) => msg,
+                other => panic!("{tag}: expected Repo error, got {other:?}"),
+            };
+            assert!(err.contains("rebinds"), "{tag}: error offers the remedy: {err}");
+            // nothing touched: local intact, no commits sent
+            assert_eq!(fs::read(dir.join("local.txt")).unwrap(), b"local world", "{tag}");
+            assert_eq!(mock.commit_pack_count(), 0, "{tag}");
+            fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn recreated_remote_world_guard_holds_local_files() {
+        // same repo identity, but the remote was reset (fresh seed, empty
+        // tree): the journal's files look remotely-deleted and the mirror
+        // would delete them locally — the guard must refuse instead
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[]);
+        let c = client_for(&mock);
+        let dir = tmpdir("world-reset");
+        for i in 0..5 {
+            fs::write(dir.join(format!("f{i}.txt")), format!("content {i}").as_bytes()).unwrap();
+        }
+        sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap(); // binds the journal
+        assert_eq!(mock.refresh_count(), 1, "landing sync nudges the pin refresh");
+        mock.seed_repo("t", &[]); // server-side world reset, same repo id
+        let report = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        assert!(report.mass_delete_guard.is_some(), "5 of 5 remotely-deleted must trip the guard");
+        for i in 0..5 {
+            assert!(dir.join(format!("f{i}.txt")).exists(), "f{i}.txt must survive the refusal");
+        }
+        // the escape hatch applies it
+        let o = SyncOptions { apply_mass_delete: true, ..opts(Mode::Mirror) };
+        let report = sync_once(&c, "t", &dir, &o).unwrap();
+        assert!(report.mass_delete_guard.is_none());
+        assert_eq!(report.deleted_local.len() + report.pushed.len(), 5, "re-seeded local files push back");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bootstrap_same_size_different_content_pushes() {
+        // stateless bootstrap used to treat equal SIZE as same FILE — a
+        // same-size different-content file silently never pushed (found
+        // live). Content must decide.
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("a.txt", b"aaaa")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("bootstrap-diff");
+        fs::write(dir.join("a.txt"), b"bbbb").unwrap();
+        let report = sync_once(&c, "t", &dir, &opts(Mode::Push)).unwrap();
+        assert_eq!(report.pushed, vec!["a.txt".to_string()], "equal size, different content must push");
+        assert_eq!(mock.file_at("t", "main", "a.txt").unwrap(), b"bbbb");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bootstrap_identical_content_adopts_without_commit() {
+        // the flip side: byte-identical files adopt into the journal with
+        // no commit and no re-fetch on the next pass
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("a.txt", b"same")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("bootstrap-same");
+        fs::write(dir.join("a.txt"), b"same").unwrap();
+        let report = sync_once(&c, "t", &dir, &opts(Mode::Push)).unwrap();
+        assert!(report.pushed.is_empty(), "identical content is not a push");
+        assert_eq!(mock.commit_pack_count(), 0, "no commit-packs sent — the seed commit is server-side");
+        let r2 = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        assert!(r2.pushed.is_empty() && r2.pulled.is_empty(), "adopted file stays quiet");
+        let st = load_state(&dir, "t").unwrap();
+        assert_eq!(st.repo.as_deref(), Some("t"), "journal binds to the repo identity");
+        assert_eq!(st.host.as_deref(), Some(mock.url.as_str()), "journal binds to the host identity");
+        fs::remove_dir_all(&dir).ok();
     }
 }

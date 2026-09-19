@@ -52,6 +52,7 @@ server-side generation path.
 | `GET /api/f/{name}/status` | viewer+ | → `{name, npub, repo, pins: {main, live}, counts, crons:[{name,nextAt,paused}]}` |
 | `GET /api/f/{name}/manifest` | viewer+ | → manifest JSON — read from the repo (pinned `fragment.json`), cached in the cell; `manifest-set` is an ordinary commit made by the CLI |
 | `GET /api/f/{name}/storage-token` | editor+ | → `{token, repo, api}` — a short-lived (15 min) code.storage JWT scoped to exactly this fragment's repo with `["git:read","git:write"]` (no org scope). `api` is the code.storage API base; all endpoint paths append under it (`/api/repos/{repo}/...`). Every mint writes a `storage-token.minted` ledger event (actor npub, repo, scopes, expiry). The repo claim is built server-side from the validated fragment name and asserted on egress. |
+| `POST /api/f/{name}/refresh` | editor+ | `→ {ok, refs: {main, live}}` — re-reads both refs from code.storage and moves the pins (the authenticated equivalent of a push webhook's interpret step; external commits schedule `trigger:"files"` workflows + notify exactly like a delivery). The CLI fires it after landing syncs, deploys, and rollbacks so its own commits are visible immediately instead of waiting out the 5-minute poll backstop. A never-pushed ref reports `{absent: true}`. |
 | `GET /api/f/{name}/files` | viewer+ | → `{ref: <pinned main sha>, files:[{path, size, mode, lastCommitSha, machinery}]}` — metadata only, no bytes |
 | `GET /api/f/{name}/file?path={p}` | viewer+ | → raw bytes streamed from the pinned main ref (+ `x-fragment-ref`) |
 | `GET /api/f/{name}/file/stat?path={p}` | viewer+ | → `{stat: {path, size, sha, lastCommitSha, present}, ref}` — the ifSha read half |
@@ -94,6 +95,13 @@ the ledger.
 | `GET /f/{name}/__file?path=P` | raw file content from the live ref under the same gate. The read API for watchers, feeds and other fragments — a view link is all a reader needs. |
 | `WS  /f/{name}/__room/{room}` | realtime room. |
 | view token | `visibility:"link"`: append `?view={viewToken}` (mints the cookie). `"viewers"`: NIP-98 header on the GET. `public` needs nothing. |
+
+Canonical subdomains (`<name>.<host>`, when `FRAGMENT_SUBDOMAIN_HOST` is
+set) serve the fragment's site — but `/api/*` is passed through to the
+control plane un-rewritten, so a served app can reach its own inbox,
+storage-token, and refresh routes same-origin from its subdomain. Control
+routes carry their own auth (tokens / NIP-98), which is why widening
+reachability this way widens nothing else.
 
 Previews (`fragment deploy --preview`) are ephemeral refs in code.storage;
 they are not runtime URLs — the CLI serves/mints them with a storage token.

@@ -3,7 +3,7 @@ import { json, randSlug, randHex, isMachinery, mimeForPath } from "./util.js";
 import { safeEqual } from "./auth.js";
 import { parseCron, nextRun } from "./cron.js";
 import { mintCsJwt, csConfig, verifyWebhookDelivery, webhookDedupeKey } from "./codestorage.js";
-import { treeList, readFileStream, ensurePins, pinOf, repoOf, ingestWebhookPush, parsePushPayload, statPath } from "./git-plane.js";
+import { treeList, readFileStream, ensurePins, pinOf, repoOf, ingestWebhookPush, parsePushPayload, statPath, interpretPush } from "./git-plane.js";
 import { wrapSecret } from "./secretwrap.js";
 import { awaitNativeRun } from "./wf-engine.js";
 
@@ -120,6 +120,23 @@ export async function apiRoute(cell, request, url) {
     // the manifest is read from the repo (pinned main) and cached in cell
     // meta; manifest-set is an ordinary commit made by the CLI
     return json(m);
+  }
+
+  // ---- refresh: re-read both refs from code.storage and move the pins.
+  // editor+ and NIP-98 — this is the authenticated equivalent of a push
+  // webhook delivery's interpret step, so the CLI can make its own
+  // commits visible immediately instead of waiting out the 5-minute poll
+  // backstop (deploys and syncs nudge this after landing). A ref that has
+  // never been pushed (no live yet) reports absent, not an error.
+  if (p === "/refresh" && request.method === "POST") {
+    const a = authz("editor"); if (!a.ok) return deny(a);
+    const out: any = { ok: true, refs: {} };
+    for (const which of ["main", "live"] as const) {
+      const r = await interpretPush(cell, which);
+      const pin = pinOf(cell, which);
+      out.refs[which] = pin ? { moved: r.changed && !r.own, pin } : { absent: true };
+    }
+    return json(out);
   }
 
   // ---- storage-token: mint a short-lived code.storage JWT scoped to

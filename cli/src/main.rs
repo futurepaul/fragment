@@ -719,6 +719,10 @@ fn run(cli: Cli) -> Result<()> {
             if let Some(dir) = dir.as_deref() {
                 let report = sync::sync_once(&c, &name, dir, &SyncOptions { writer_id: writer.clone(), codestorage: cs.clone(), ..Default::default() })
                     .map_err(cs_anyhow)?;
+                if report.mass_delete_guard.is_some() {
+                    report.print();
+                    anyhow::bail!("sync refused a mass deletion — deploy aborted before moving live. If the deletions are intended, run `fragment sync {} --dir {} --apply-mass-delete` first, then deploy again.", name, dir.display());
+                }
                 report.print();
                 // fragment.json rides the commit (it is a git file at the
                 // repo root) — files and machinery go live together
@@ -798,6 +802,12 @@ fn run(cli: Cli) -> Result<()> {
                 }
             };
             let live_url = format!("{}/f/{}/", c.host.trim_end_matches('/'), name);
+            // the live move is an external ref change from the cell's
+            // perspective — nudge the pins so serving sees THIS deploy now,
+            // not at the next poll backstop (best-effort; the poll covers)
+            if let Err(e) = c.post_json(&format!("/api/f/{name}/refresh"), &json!({})) {
+                eprintln!("warning: cell pin refresh failed ({e:#}); the poll backstop will catch up");
+            }
             if j {
                 ok_exit(&json!({ "live": live_url, "liveTip": live_tip, "mainTip": main_tip }));
             }
@@ -825,6 +835,9 @@ fn run(cli: Cli) -> Result<()> {
             let author = Author::writer(&writer_id(&c));
             let new_tip = storage.restore_live(&target, &live_tip, &format!("rollback {name} to {target}"), &author)
                 .map_err(cs_anyhow)?;
+            if let Err(e) = c.post_json(&format!("/api/f/{name}/refresh"), &json!({})) {
+                eprintln!("warning: cell pin refresh failed ({e:#}); the poll backstop will catch up");
+            }
             if j {
                 ok_exit(&json!({ "rolledBackTo": target, "liveTip": new_tip }));
             }

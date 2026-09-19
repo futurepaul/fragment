@@ -147,6 +147,12 @@ impl CodeStorage {
         mint_from_host(host, name, override_url)
     }
 
+    /// url-form repo identity this client is scoped to — the world a sync
+    /// journal binds itself to
+    pub fn repo(&self) -> &str {
+        &self.repo
+    }
+
     /// repo name URL-encoded as one path segment (spec: `a/b` -> `a%2Fb`)
     fn repo_seg(&self) -> String {
         let mut out = String::new();

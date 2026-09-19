@@ -29,6 +29,17 @@ fragment.club, www.fragment.club {
 		default ""
 	}
 	encode zstd gzip
-	rewrite * /f/{fragment}{uri}
-	reverse_proxy 127.0.0.1:8080
+	# /api/* is the CONTROL plane, not part of any fragment's site: pass it
+	# through un-rewritten so a served app on its canonical subdomain can
+	# reach /api/f/<name>/inbox and friends same-origin. Control routes
+	# carry their own auth (inbox/webhook tokens, NIP-98), so this widens
+	# reachability without widening authority. Everything else is the
+	# fragment's site: rewrite host → /f/<name>/.
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8080
+	}
+	handle {
+		rewrite * /f/{fragment}{uri}
+		reverse_proxy 127.0.0.1:8080
+	}
 }

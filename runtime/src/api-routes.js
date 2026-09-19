@@ -3,7 +3,7 @@ import { json, randSlug, randHex, isMachinery, mimeForPath } from "./util.js";
 import { safeEqual } from "./auth.js";
 import { nextRun } from "./cron.js";
 import { mintCsJwt, csConfig, verifyWebhookDelivery, webhookDedupeKey } from "./codestorage.js";
-import { treeList, readFileStream, ensurePins, pinOf, repoOf, ingestWebhookPush, parsePushPayload, statPath } from "./git-plane.js";
+import { treeList, readFileStream, ensurePins, pinOf, repoOf, ingestWebhookPush, parsePushPayload, statPath, interpretPush } from "./git-plane.js";
 import { wrapSecret } from "./secretwrap.js";
 import { awaitNativeRun } from "./wf-engine.js";
 const STORAGE_TOKEN_TTL_SEC = 900;
@@ -105,6 +105,17 @@ async function apiRoute(cell, request, url) {
     const a = authz("viewer");
     if (!a.ok) return deny(a);
     return json(m);
+  }
+  if (p === "/refresh" && request.method === "POST") {
+    const a = authz("editor");
+    if (!a.ok) return deny(a);
+    const out = { ok: true, refs: {} };
+    for (const which of ["main", "live"]) {
+      const r = await interpretPush(cell, which);
+      const pin = pinOf(cell, which);
+      out.refs[which] = pin ? { moved: r.changed && !r.own, pin } : { absent: true };
+    }
+    return json(out);
   }
   if (p === "/storage-token" && request.method === "GET") {
     const a = authz("editor");
