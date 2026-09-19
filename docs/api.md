@@ -97,11 +97,13 @@ the ledger.
 | view token | `visibility:"link"`: append `?view={viewToken}` (mints the cookie). `"viewers"`: NIP-98 header on the GET. `public` needs nothing. |
 
 Canonical subdomains (`<name>.<host>`, when `FRAGMENT_SUBDOMAIN_HOST` is
-set) serve the fragment's site — but `/api/*` is passed through to the
-control plane un-rewritten, so a served app can reach its own inbox,
-storage-token, and refresh routes same-origin from its subdomain. Control
-routes carry their own auth (tokens / NIP-98), which is why widening
-reachability this way widens nothing else.
+set) serve the fragment's site. The one carve-out: `/api/f/*` — the control
+namespace — is passed through un-rewritten, so a served app can reach its
+own inbox, storage-token, and refresh routes same-origin from its
+subdomain. Control routes carry their own auth (tokens / NIP-98), which is
+why widening reachability this way widens nothing else. An app's OWN
+`/api/*` routes are unaffected (they stay on the site plane; don't name an
+app route `api/f/…`).
 
 Previews (`fragment deploy --preview`) are ephemeral refs in code.storage;
 they are not runtime URLs — the CLI serves/mints them with a storage token.

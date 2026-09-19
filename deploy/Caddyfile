@@ -29,13 +29,14 @@ fragment.club, www.fragment.club {
 		default ""
 	}
 	encode zstd gzip
-	# /api/* is the CONTROL plane, not part of any fragment's site: pass it
-	# through un-rewritten so a served app on its canonical subdomain can
-	# reach /api/f/<name>/inbox and friends same-origin. Control routes
+	# /api/f/* is the CONTROL plane, not part of any fragment's site: pass
+	# it through un-rewritten so a served app on its canonical subdomain
+	# can reach its own inbox and friend routes same-origin. Control routes
 	# carry their own auth (inbox/webhook tokens, NIP-98), so this widens
-	# reachability without widening authority. Everything else is the
-	# fragment's site: rewrite host → /f/<name>/.
-	handle /api/* {
+	# reachability without widening authority. Everything else — including
+	# an app's OWN /api/* routes — stays on the fragment's site plane:
+	# rewrite host → /f/<name>/.
+	handle /api/f/* {
 		reverse_proxy 127.0.0.1:8080
 	}
 	handle {
