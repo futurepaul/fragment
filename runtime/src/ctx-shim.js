@@ -153,7 +153,7 @@ export async function makeCtx(env) {
         return (await r.json()).state;
       },
       async setState(room, value) {
-        await call("/rooms/state", { method: "POST", body: JSON.stringify({ value: value ?? null }) });
+        await call("/rooms/state?room=" + encodeURIComponent(room), { method: "POST", body: JSON.stringify({ value: value ?? null }) });
       },
     },
     // Web Push \u2014 closed-tab notifications. Sends payload {title (required,
