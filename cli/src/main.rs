@@ -996,7 +996,12 @@ fn run(cli: Cli) -> Result<()> {
             // client-side npub; secret crosses the wire once (fragmentSecret),
             // wrapped at rest
             let fid = auth::Identity::generate();
-            c.call(c.post_json("/api/fragments", &json!({ "name": name, "fragmentSecret": hex::encode(fid.secret) }))?)?;
+            let created = c.post_json("/api/fragments", &json!({ "name": name, "fragmentSecret": hex::encode(fid.secret) })).and_then(|r| c.call(r));
+            if let Err(e) = created {
+                // nothing was created, so leave nothing here either: the same init can be retried
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(e);
+            }
             // push the scaffold, then point live at it — the first deploy
             // is the real site, not an empty one
             let writer = writer_id(&c);
