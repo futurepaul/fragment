@@ -70,8 +70,8 @@ inbox), and a computer's wake/exec.
    per-fragment subdomains for origin isolation.
 7. **Inference is OpenRouter for everything**, and the host holds the
    key: text `z-ai/glm-5.3-flash` (reads images and video, so
-   screenshots work), video `minimax/hailuo-3-max` (H3 Max), images per
-   the open decision below. fal is removed.
+   screenshots work), images `google/gemini-3.1-flash-lite-image`, video
+   `minimax/hailuo-3-max` (H3 Max). fal is removed.
 8. **Rust for everything except the cell runtime.** The runtime stays
    TypeScript because celld runs Workers-style JavaScript (ledgered).
    Tooling, e2e, mocks, the machine front door, the ACP runner, and
@@ -230,7 +230,4 @@ decision above.
 
 ## Open decisions
 
-- The default image model on OpenRouter (candidates:
-  `google/gemini-3.1-flash-image`, `black-forest-labs/flux.2-pro`,
-  `bytedance-seed/seedream-5-0-lite`).
 - A GitHub remote for fragment-next (none yet).
