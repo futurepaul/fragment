@@ -75,6 +75,6 @@ limits still apply.)
   blobs); not ledgered.
 - **job**: a Workflow; each step is a query, a mutation, or an external
   effect (see spike 3).
-- **limits**: facet database 16 MiB by default (~18 ms per mutation),
-  64 MiB at most (~55–61 ms, and a whole-image root snapshot every few
-  dozen mutations); large bytes go to R2.
+- **limits**: facet database capped at 16 MiB (~18 ms per mutation; at
+  64 MiB it was ~55–61 ms plus a whole-image root snapshot every few dozen
+  mutations). Paul chose the 16 MiB cap; large files go to git storage.

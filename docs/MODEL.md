@@ -191,7 +191,7 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
 | operation or step result | 1 MiB | the Workflows step-result limit |
 | channel record body | 64 KiB | records are messages, not files |
 | channel page | 1000 records | bounded reads |
-| app facet database | 16 MiB default, 64 MiB at most | celld copies the whole facet image into the root after each changed turn: a mutation took ~9 ms at 1 MiB, ~18 ms at 16 MiB, ~55–61 ms at 64 MiB, where root snapshots carrying the image added ~2 MB of replication per mutation (spike 2) |
+| app facet database | 16 MiB | celld copies the whole facet image into the root after each changed turn: a mutation took ~9 ms at 1 MiB, ~18 ms at 16 MiB, ~55–61 ms at 64 MiB, where root snapshots carrying the image added ~2 MB of replication per mutation (spike 2) |
 | `cpuMs` per invocation | 30 000 | a runaway loop cannot hold the fragment |
 | `subRequests` per invocation | 50 | bounds fan-out |
 | inbox pending | 1000 | overload is a 429, not memory pressure |
@@ -237,10 +237,17 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
 - **Channel retention:** `events` 90 days, `inbox` until acknowledged,
   app-declared channels forever.
 
-## Open (for Paul, from the spikes)
+## Answered from the spikes (2026-09-23)
 
-- **Mutations are synchronous and return their effects** (spike 2). This
-  keeps the answered authoring shape (one `App` class, one method per
-  operation) but adds a rule authors feel: a mutation cannot `await`, call
-  a capability, or fetch; queries and jobs can.
-- **Facet database limits**: 16 MiB by default, 64 MiB at most.
+- **Mutations are synchronous and return their effects** (spike 2): a
+  mutation cannot `await`, call a capability, or fetch; queries and jobs
+  can. Paul: yes.
+- **The app facet database is capped at 16 MiB** (~18 ms per mutation at
+  the cap). Paul: large files belong in git storage, so a 16 MiB cap.
+
+## Open
+
+- **Where large bytes go.** Paul (2026-09-23): "large files should be
+  landing in git storage." This row of the anatomy table still says R2
+  for uploads and generated media; which one holds them is to be settled
+  before phase 2 builds the bytes path.

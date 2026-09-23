@@ -145,9 +145,10 @@ deployment.
   cannot enclose a facet past ~1.6 MB); agent turns as Workflows (SIGKILL
   mid-turn repeats no finished call); celld v0.5.1 (311/312, the red check
   is a celld alarm regression in the ledger). `docs/MODEL.md` is updated.
-- Waiting on Paul: the synchronous-mutation rule (an authoring change),
-  the facet size limits, and whether to report the alarm regression
-  upstream.
+- Paul (2026-09-23): synchronous mutations yes; facet database capped at
+  16 MiB, large files in git storage. Still open: whether to report the
+  celld alarm regression upstream, and git vs R2 for uploads and
+  generated media.
 - **Acceptance:** each spike ends with a written verdict and numbers
   (bundle size, cold activation, facet image cost at 1/16/64 MiB, replay
   without repeated effects); `docs/MODEL.md` updated to match; Paul's
