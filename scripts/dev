@@ -2,6 +2,7 @@
 # fragment dev environment: celld dev (local object store) + the mock
 # code.storage server (tests/dev file plane) — native processes, no docker.
 # verbs: up | down | deploy | status | logs | wipe
+# CELLD_BIN=<path> runs another celld build (the fork in celld-worktrees)
 #
 # Local world persists in .dev/celld-state (cells, via the runtime/.celld
 # symlink) — file bytes live in code.storage (the mock for local dev).
@@ -141,7 +142,7 @@ start_celld() {
   # exists to diagnose host churn from CI artifacts
   (
     cd runtime
-    nohup celld dev --port "$CELLD_PORT" ${CELLD_DEV_LOGS:+--logs} > "../$DEV/celld-dev.log" 2>&1 &
+    nohup "${CELLD_BIN:-celld}" dev --port "$CELLD_PORT" ${CELLD_DEV_LOGS:+--logs} > "../$DEV/celld-dev.log" 2>&1 &
     echo $! > "../$DEV/celld-dev.pid"
   )
   for _ in $(seq 1 30); do celld_running && break; sleep 0.5; done
