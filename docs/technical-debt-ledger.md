@@ -72,17 +72,21 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** phase 1 moves generation to OpenRouter and the Rust
   harness always starts its own OpenRouter fake.
 
-## celld 0.5.1 holds an alarm handler's completion until the deadline
+## celld 0.5.1 holds an alarm open while its handler's timers run
 
-- **Observed:** 2026-09-23, `spikes/celld-0.5.1/README.md`. A re-arm to
-  now ~13 ms after an alarm handler re-armed itself did not fire until
-  `CELLD_OPERATION_DEADLINE_MS` (15 s) after that handler started. The
-  e2e check "paused trigger recorded as blocked, not run" fails on 10 of
-  12 runs; 312/312 passed on 0.4.0.
+- **Observed:** 2026-09-23, `spikes/celld-0.5.1/README.md`. An `alarm()`
+  that leaves a timer pending (fragment's `csFetch` uses
+  `AbortSignal.timeout(30 s)`) holds the alarm firing until the timer ends
+  or the 15 s operation deadline; every re-arm meanwhile waits. The e2e
+  check "paused trigger recorded as blocked, not run" failed on 10 of 12
+  runs; 312/312 passed on 0.4.0.
 - **Risk:** every schedule, retry, and inbox run shares one alarm per
-  fragment, so work armed right after a firing can wait 15 s.
+  fragment, so work armed during or right after a firing waits up to 15 s.
 - **First proof:** already present (the red e2e check).
-- **Delete when:** a celld release passes `node scripts/e2e.mjs --only
-  paused` 10 of 10 on a stack that has not just rebuilt, or a minimal
-  repro is reported upstream and fixed. The check stays red until then;
-  its timeout is not widened.
+- **Fix in hand:** a one-hunk patch in the fork worktree
+  `celld-worktrees/alarm-fix` (branch `fix/alarm-completion`) passes
+  `--only paused` 10 of 10 and the full e2e 312 of 312. Paul chose to run the fork and upstream the
+  fix.
+- **Delete when:** a celld release from denoland carries the fix and
+  passes `--only paused` 10 of 10; until then dev and hosting run the fork
+  build, and its timeout is not widened to hide a regression.

@@ -1,7 +1,8 @@
 # Spike 4: celld v0.4.0 → v0.5.1
 
-Status: done 2026-09-23. Verdict: **adopt v0.5.1**, with one upstream
-regression to report (alarm completion held until the operation deadline).
+Status: done 2026-09-23. Verdict: **adopt v0.5.1 with a one-hunk fork
+fix** for an alarm regression (an alarm held open while its handler's
+timers run); the fix goes upstream.
 
 ## What changed for us
 
@@ -59,20 +60,33 @@ as still running and re-fired at the deadline.
 passes 3 of 3 (the stall shrinks to ~5 s, inside the test's 15 s wait). On
 v0.4.0 the same code passed 312/312.
 
-**Not reproduced minimally.** `no-repro-alarm.js` with `no-repro-sweep.mjs`
-re-arms to now at 0–40 ms after an alarm whose handler re-arms to +4 s
-(small writes, 80 KB, and 4 MB of writes in the handler): 0 of 92 lost. The
-difference from fragment's cell is not yet known (fragment's handler reads
-a manifest, runs sync triggers, and writes events and runs; its request
-path does the same writes as the POST above).
+**Root cause** (found by the sibling session "fragment next (fork)",
+2026-09-23; introduced in v0.5.0, v0.4.1 is fine). An `alarm()` that leaves
+a timer pending holds the alarm "firing" until the timer ends or
+`CELLD_OPERATION_DEADLINE_MS` expires it. That covers `setTimeout` and
+`AbortSignal.timeout()`, and fragment's `codestorage.ts` `csFetch` uses a
+30 s one. A re-arm made meanwhile waits, even one from `alarm()` itself.
+v0.5 added `|| self.completed_cell_event` to `InFlight::keeps_native_ops()`
+(`crates/celld/js.rs`), so a completed event keeps its pending I/O, and
+`RuntimeManager::fire_alarm` (`crates/celld/runtime.rs`) awaited that whole
+drive before reporting `AlarmFinished`; the core staged every new
+`setAlarm` in `AlarmState::Firing` until then. My attempted repro
+(`no-repro-alarm.js`) left no timer, which is why it never failed. The
+sibling's minimal repro: 0.4.0 and 0.4.1 re-arm in 2–6 ms; 0.5.0 and 0.5.1
+wait 14.5 s with a 60 s timer or `AbortSignal.timeout(60 s)`, 2.5 s with a
+3 s timer, and a self-re-arming 100 ms alarm fires at 15 ms, 15.5 s, 31 s.
 
-**Likely area.** `crates/celld/actor.rs` `Effect::FireAlarm`: the shell
-reports `AlarmFinished` after the consuming commit's proof ("the deadline
-that stands after the handler"); a request that re-arms inside that window
-appears to leave the core waiting until the deadline.
+**Fix** (candidate, one hunk in `crates/celld/runtime.rs`, in the fork
+worktree `celld-worktrees/alarm-fix`, branch `fix/alarm-completion`): on a
+successful alarm, `fire_alarm` detaches the drive instead of awaiting it.
+The handler already settled its claim and replied with its final snapshot
+in the completion turn; a failed or cancelled alarm still awaits the drive.
+With the patched release build, `node scripts/e2e.mjs --only paused`
+passes 10 of 10 (the unpatched source build: 0 of 3), and the full e2e
+passes 312 of 312.
 
 **Our exposure.** The model multiplexes every schedule and retry on one
 alarm per fragment (`docs/MODEL.md`), so a 15 s stall on a re-arm right
 after a firing is a correctness-visible latency bug (cron, retries, inbox
-runs). Recorded in `docs/technical-debt-ledger.md`. Reporting it upstream
-is Paul's call (an issue on github.com/denoland/celld is public).
+runs). Recorded in `docs/technical-debt-ledger.md`. Paul (2026-09-23):
+run a fork that fixes it and send the fix upstream.
