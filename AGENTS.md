@@ -18,14 +18,27 @@ celld (https://celld.dev/docs/).
    engineering-style.md` (hard cuts, limits, assertions on in release,
    typed errors, valid/invalid/replay/restart tests, Rust for tooling).
 
-## Commands (until phase 2 replaces them with `cargo xtask`)
+## Commands
+
+The new runtime (`cell/`, Rust; phase 2, `docs/phase-2.md`):
+
+- One-time setup: `cargo install worker-build --version 0.8.5 --locked`,
+  `rustup target add wasm32-unknown-unknown`, then `cargo xtask celld`
+  (builds the celld fork with the alarm fix into `target/celld/bin`).
+- `cargo xtask check`: host tests and clippy (host and wasm), warnings
+  denied.
+- `cargo xtask e2e [--only <section>]`: builds `cell/` and runs
+  `crates/e2e` against a fresh `celld dev` node.
+- `cargo xtask dev [--clean]`: the new stack in the foreground on :8790.
+
+The old runtime (`runtime/`, TypeScript), until slice G deletes it:
 
 - Runtime tests: `npm run test:runtime` (after `scripts/build-runtime`
   when `runtime/ts` changes; `runtime/src` is committed build output).
-- CLI: `cd cli && cargo test && cargo clippy --all-targets -- -D warnings`.
 - Local stack: `E2E_FAL_FAKE=1 scripts/dev up` (celld :8789, code.storage
   mock :9940, fal fake :9942), then `node scripts/e2e.mjs` (needs
-  `cd cli && cargo build` first). `scripts/dev down` stops it.
+  `cargo build -p fragment-cli` first). `scripts/dev down` stops it.
+  `CELLD_BIN=target/celld/bin/celld` runs it on the celld fork.
 
 ## Rules
 

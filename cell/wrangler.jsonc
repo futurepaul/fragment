@@ -1,0 +1,11 @@
+{
+  "name": "fragment",
+  // entry.mjs is the JavaScript shim around the Rust build (build/index.js):
+  // workers-rs classes do not extend DurableObject, which celld requires for
+  // RPC, so the shim declares the class and forwards to Rust.
+  "main": "entry.mjs",
+  "compatibility_date": "2026-01-01",
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "durable_objects": { "bindings": [{ "name": "FRAGMENT", "class_name": "Fragment" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Fragment"] }]
+}

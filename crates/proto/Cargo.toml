@@ -1,0 +1,10 @@
+[package]
+name = "fragment-proto"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Wire types shared by the fragment cell, the CLI, and the e2e."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

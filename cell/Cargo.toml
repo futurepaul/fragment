@@ -1,0 +1,29 @@
+[package]
+name = "fragment-cell"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "The fragment platform cells on celld: the router and the Fragment supervisor."
+
+# Built for wasm32 by worker-build (`cargo xtask build`), outside the host workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# 0.8.5, not 0.8.6: 0.8.6 is younger than the two-week dependency cooldown.
+worker = "=0.8.5"
+worker-sys = "=0.8.5"
+worker-macros = "=0.8.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+fragment-proto = { path = "../crates/proto" }
+fragment-nip98 = { path = "../crates/nip98" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "s"

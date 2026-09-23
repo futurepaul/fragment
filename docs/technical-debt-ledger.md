@@ -90,3 +90,15 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** a celld release from denoland carries the fix and
   passes `--only paused` 10 of 10; until then dev and hosting run the fork
   build, and its timeout is not widened to hide a regression.
+
+## App code arrives by `PUT /api/f/<name>/code`
+
+- **Observed:** phase 2 slice A (`cell/src/fragment.rs`). The owner
+  uploads `app.mjs` and its declared operations directly; nothing reads
+  them from git yet, and only the owner may act (no members).
+- **Risk:** a second path for code that bypasses git history, review, and
+  the `live` pin.
+- **First proof:** already present.
+- **Delete when:** slice B serves code from the fragment's `live` pin in
+  code.storage and the route is removed, with an e2e case proving a
+  `PUT code` is a 404.

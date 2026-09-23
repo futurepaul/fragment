@@ -7,3 +7,7 @@ runtime/.celld
 .DS_Store
 runtime/.dev.vars
 runtime/.dev.vars.tmp
+cell/.celld/
+cell/.dev.vars
+cell/build/
+cell/target/

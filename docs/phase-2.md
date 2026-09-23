@@ -28,10 +28,13 @@ cell/                 the celld project: wrangler.jsonc, entry.mjs (the JS
 cli/                  the fragment CLI (existing), gains call/channel/members
 crates/proto/         wire types shared by cell, CLI, and e2e: operations,
                       channel records, errors, limits
+crates/nip98/         NIP-98 auth: verify in the cell (wasm), sign on hosts
+crates/devstack/      starts, stops, and crashes celld dev nodes for xtask
+                      and the e2e
 crates/e2e/           the Rust e2e: drives the real node, the CLI, a browser
 crates/fakes/         code.storage (from cli/src/mockcs.rs), OpenRouter,
                       a web push service
-xtask/                cargo xtask dev | build | e2e | celld
+xtask/                cargo xtask build | celld | dev | e2e | check
 templates/            todo, vault (reference apps on the new model)
 ```
 
@@ -60,13 +63,22 @@ Each slice lands with its tests; the old runtime and `scripts/e2e.mjs`
 stay green until slice G deletes them together. **Checkpoints** are where
 Paul reviews before the next slice starts.
 
-**A. Workspace and harness.** The Cargo workspace, `crates/proto`,
-`cell/` from the spike (supervisor skeleton, router, shim,
-`platform.mjs`), `crates/fakes` with the code.storage mock served over
-HTTP, `xtask dev` (renders `.dev.vars`, runs celld and the fakes) and
-`xtask e2e`, and the first e2e cases: install an app, call a mutation,
-replay it, conflict it, restart the node. **Checkpoint A**: the layout and
-the harness shape.
+**A. Workspace and harness.** The Cargo workspace, `crates/proto` (wire
+types), `crates/nip98`, `cell/` from the spike (router, supervisor, shim,
+`platform.mjs`), `crates/devstack`, `xtask` (`build`, `celld`, `dev`,
+`e2e`, `check`), and the first e2e cases: create, install an app, call a
+mutation, replay it, conflict it, restart and crash the node.
+**Checkpoint A**: the layout and the harness shape.
+
+*Done 2026-09-23.* `cargo xtask check` is clean (host and wasm clippy,
+warnings denied); `cargo xtask e2e` passes 35/35 (auth, create, ops,
+restart with a graceful stop and a SIGKILL). The cell is 615 KB of wasm
+(215 KB gzipped) with NIP-98 verification in `k256`, which agrees with the
+CLI's `secp256k1` signer in both directions. Loaded app code is keyed by
+the SHA-256 of the platform wrapper plus the author's source, because the
+Worker Loader memoizes by id across every fragment in an isolate. `PUT
+code` is in the debt ledger until slice B, and the code.storage mock
+moves to `crates/fakes` in slice B, where the cell first needs it.
 
 **B. Identity, membership, the file plane.** NIP-98 in the cell;
 fragment create/list; members, invites, roles; visibility (`public`,

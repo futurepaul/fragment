@@ -1667,7 +1667,7 @@ function findBinary() {
   if (process.env.FRAGMENT_BIN) return existsSync(process.env.FRAGMENT_BIN) ? process.env.FRAGMENT_BIN : null;
   // debug first: `cargo build` (what CI and this suite document) refreshes
   // it, while a stale local release build silently tests old code
-  for (const c of ['cli/target/debug/fragment', 'cli/target/release/fragment']) {
+  for (const c of ['target/debug/fragment', 'target/release/fragment']) {
     const p = resolve(process.cwd(), c);
     if (existsSync(p)) return p;
   }

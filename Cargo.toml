@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["cli", "crates/proto", "crates/nip98", "crates/devstack", "crates/e2e", "xtask"]
+# cell/ builds for wasm32 with worker-build; spikes/ are throwaway crates.
+exclude = ["cell", "spikes"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+
+[profile.release]
+strip = true
