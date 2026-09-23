@@ -79,6 +79,7 @@ the SHA-256 of the platform wrapper plus the author's source, because the
 Worker Loader memoizes by id across every fragment in an isolate. `PUT
 code` is in the debt ledger until slice B, and the code.storage mock
 moves to `crates/fakes` in slice B, where the cell first needs it.
+**Checkpoint A approved by Paul (2026-09-23).**
 
 **B. Identity, membership, the file plane.** NIP-98 in the cell;
 fragment create/list; members, invites, roles; visibility (`public`,
@@ -86,7 +87,9 @@ fragment create/list; members, invites, roles; visibility (`public`,
 secrets wrapped at rest; the code.storage plane (storage tokens,
 `main`/`live` pins, the tree index, webhooks and the poll backstop);
 deploy, preview, rollback, drafts. e2e: the auth, lockdown, platform,
-deploy, and folder-sync lanes against the new cell.
+deploy, and folder-sync lanes against the new cell. The hostname suffix
+and the fleet's settings are configuration, never constants (ROADMAP
+decision 13).
 
 **C. Operations, the app facet, channels.** Operations declared in
 `fragment.json` with input schemas (a bounded JSON Schema subset in Rust);

@@ -13,6 +13,7 @@ celld (https://celld.dev/docs/).
 3. `docs/finite-next-lessons.md` — what to port from finite-next and the
    gotchas (celld, libfx, fx over ACP, Sprites), prices, resources.
 4. `docs/published-fragments.md` — primitives that must stay expressible.
+   `docs/secrets.md` — where secrets live and how code reaches them.
 5. `docs/technical-debt-ledger.md` — the only place shortcuts may live.
 6. The engineering style: `/Users/futurepaul/dev/finite/engineering-style/
    engineering-style.md` (hard cuts, limits, assertions on in release,

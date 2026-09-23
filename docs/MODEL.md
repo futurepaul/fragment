@@ -162,30 +162,54 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
 
 ## Agents
 
-- An agent is a Durable Object with a key, memory in SQL (with the
-  `sqlite_vec` flag for recall), and memberships in fragments.
-- A turn is a Workflow instance: model calls (OpenRouter through the
-  host) and tool calls (operations keyed `<turn>:tool-<n>`) are steps, so
-  a crashed turn replays from recorded results instead of repeating
-  effects (spike 3: SIGKILL mid model call and mid tool effect, no
-  finished call repeated, the in-flight effect applied once). Each model
-  step records the request's hash; a replay that asks a different
-  question fails the turn.
+The agent loop is goose's (`goose-agent`, the GDK), everywhere: it
+replaces libfx in cells and fx over ACP on computers (Paul, 2026-09-23;
+the spike and its handoff are on branch `spike/goose-agent`,
+`spikes/goose-agent/HANDOFF.md`).
+
+- An agent is a Durable Object with a key, memberships in fragments, and
+  its conversation in SQL. It runs as its own celld project (`agent/`,
+  a workers-rs Durable Object, ~6 MB of wasm), so fragment cells do not
+  carry goose.
+- **The loop runs where the agent's hands are**: on its computer when it
+  has one (`fragment computer serve` on the Sprite), in its cell when it
+  does not. The conversation always lives in the agent's cell, so a dead
+  computer loses nothing.
+- A turn is goose's state machine: load the conversation, run one step (a
+  model call, a batch of tool calls, or a steer), apply the step's
+  effects in SQL, repeat. The saved conversation is the replay ledger; a
+  watchdog alarm resumes a turn a crash interrupted (SIGKILL mid-tool:
+  the replay reuses the tool-call id and the effect lands once). This
+  supersedes spike 3's Workflow-per-turn design; Workflows remain for app
+  `job` operations.
+- Tools are the operations of the fragments the agent belongs to, plus
+  goose's developer tools on a computer. The model's tool-call id is the
+  operation id, so the operation ledger dedupes a replayed call.
+- People steer a running turn (a durable queue drained between steps) and
+  stop it (11–15 ms in a cell).
 - A chat is a fragment with a `chat` channel. The agent member
-  subscribes; a member's message triggers a turn. Guests act with the
-  owner's full authority (ROADMAP decision 3).
+  subscribes; a member's message starts a turn; the messages people
+  should see are the turn's effects appended to that channel, while the
+  full working conversation (tool calls and results) stays in the agent's
+  cell. Guests act with the owner's full authority (ROADMAP decision 3).
+- Model calls use the owner's own model credential (`docs/secrets.md`).
 
 ## Computers
 
 - A computer is a Sprite with an owner principal (a person, an agent, or
   a fragment). One `Computer` Durable Object per Sprite holds ownership,
   lifecycle, and idle policy (an alarm), and speaks to the Sprites API
-  with the Fly token as a host secret; nothing else holds that token.
+  with the owner's Sprites org token: ours by default, the owner's own if
+  they bring a Sprites org. No computer holds that token.
+- The computer runs one binary, `fragment computer serve` (the CLI):
+  goose's loop and tools over HTTP with a journal keyed by tool-call id,
+  file sync through git, and nothing secret on disk. Credentials reach it
+  through Sprites connectors (`docs/secrets.md`).
 - A fragment that owns a computer calls it through a capability in its
   app `env`; output streams into a channel (the Blender example).
 - Builder workspaces are computers owned by the fragment they build,
-  running the `fragment` CLI and fx with an editor key delegated for that
-  one fragment.
+  running the `fragment` CLI with an editor key delegated for that one
+  fragment.
 
 ## Limits (initial; each enforced and tested)
 
@@ -227,7 +251,9 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
    request.
 2. **Facet as author SQL** — adopted with the synchronous-mutation rule
    above; the root transaction is out.
-3. **Deterministic agent turns** — adopted: a libfx turn is a Workflow.
+3. **Deterministic agent turns** — passed (a libfx turn as a Workflow,
+   SIGKILL-tested), then superseded for agent turns by goose's own
+   step loop (see Agents); Workflows stay for app jobs.
 4. **celld v0.5.1** — adopted; one alarm regression is in the debt
    ledger.
 

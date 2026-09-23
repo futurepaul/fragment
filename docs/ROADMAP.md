@@ -62,25 +62,47 @@ computer's wake/exec.
    fragment with a Google-Docs-style share header. The desktop (user
    code the agent can rewrite) can never grant anything by itself.
 5. **All computers are Sprites** (personal computers and builder
-   workspaces); Agent Substrate and GKE are dropped. A Rust machine
-   front door (nostr-key auth, ownership, quotas, sleep policy) holds the
-   Fly token; nothing else does.
+   workspaces); Agent Substrate and GKE are dropped. A `Computer` cell per
+   Sprite (ownership, quotas, sleep policy) holds the owner's Sprites org
+   token; no computer does.
 6. **Hosting:** celld on always-on Fly Machines (two, `ord`) over a
    Tigris single-region bucket in `ord` (conditional writes, strongly
    consistent); one shared fleet (cross-user sharing needs cells to call
    each other; crons need an always-on fleet). Domain: `fragment.club`,
    per-fragment subdomains for origin isolation.
-7. **Inference is OpenRouter for everything**, and the host holds the
-   key: text `z-ai/glm-5.3-flash` (reads images and video, so
-   screenshots work), images `google/gemini-3.1-flash-lite-image`, video
-   `minimax/hailuo-3-max` (H3 Max). fal is removed.
-8. **Rust wherever it runs.** Tooling, e2e, mocks, the ACP runner, and
-   deploy are Rust; platform cells become Rust (workers-rs on celld) if
-   the spike in `docs/MODEL.md` holds, otherwise they stay TypeScript
-   (ledgered). Author code stays JavaScript. No shell or Python. The
-   Cloudflare host path is deleted (celld only, v0.5.1).
+7. **Inference is OpenRouter for everything**: text `z-ai/glm-5.3-flash`
+   (reads images and video, so screenshots work), images
+   `google/gemini-3.1-flash-lite-image`, video `minimax/hailuo-3-max`
+   (H3 Max). fal is removed. Each person uses their own model credential
+   ("Connect OpenRouter"), not one shared key (decision 11).
+8. **Rust wherever it runs.** Tooling, e2e, fakes, the computer binary,
+   and deploy are Rust; the platform cells are Rust (workers-rs on celld;
+   spike 1 held). Author code stays JavaScript. No shell or Python. The
+   Cloudflare host path is deleted (celld only: v0.5.1 plus our fork's
+   alarm fix, `futurepaul/celld@b5f57ea`, until upstream ships it).
 9. fragment.club's published fragments are not migrated; every primitive
    they used stays expressible and proven (`docs/published-fragments.md`).
+10. **One agent loop: goose** (`goose-agent`, pinned to the fork
+    `futurepaul/goose` at `12922e7`) replaces libfx in cells and fx over
+    ACP on computers. The loop runs where the agent's hands are (its
+    computer, else its cell); the conversation lives in the agent's cell.
+    finite-next's fx path (`acp-job.mjs`, `run-job.sh`, the inference
+    shim, ACP event mapping, the cancel file) is not ported.
+11. **Secrets have one home, and code holds capabilities, not keys**
+    (`docs/secrets.md`): encrypted in the owning cell; computers reach
+    credentials through Sprites connectors; each person connects their own
+    OpenRouter account (OAuth PKCE), with Stripe Projects as a later
+    origin if it gains a platform API.
+12. **Sign-in for fragment.club is WorkOS** (phase 4): WorkOS
+    authenticates people; the platform holds one key per person behind
+    it; the CLI and agents keep signing with NIP-98.
+13. **Bring your own compute is a later phase (10)**, per org: an org's
+    own celld fleet, Tigris bucket, Sprites org, and OpenRouter account
+    under `<org>.fragment.club`. The shared fragment.club is deployed the
+    same way, as our own org. Four things stay configuration from now on,
+    so this needs no migration: the hostname suffix, the fleet's bucket,
+    the Sprites org and token per owner, and the fleet `xtask deploy`
+    targets.
 
 ## Truth map (every change is checked against this)
 
@@ -94,9 +116,9 @@ computer's wake/exec.
 | Large file bytes (1 MiB or more: uploads, generated media) | blobs in Tigris (celld's R2 binding, the fleet bucket under `r2/`), keyed by SHA-256 | git holds a pointer; a sync resolves it to the real file; blobs no branch tip references are deleted; never in cell SQL |
 | Identities ↔ keys, designated owners | BANKS registry cell | sessions and caches name it and never outlive a revocation |
 | Browser sessions | platform session cookie (platform origin only) | maps to one identity key; re-checked against grants per request |
-| Agent turns and operation log | the agent's cell | effects dedupe at their owners by operation id |
+| Agent conversations and turns | the agent's cell (goose's conversation in SQL) | a computer holds a working copy and a tool journal; effects dedupe at their owners by tool-call id |
 | Computer disks | Sprites durable storage | the front door's registry records ownership only |
-| Secrets (fragment, host, OpenRouter, code.storage, Fly) | cell (wrapped under `FRAGMENT_HOST_SECRET`) or the host secret store | never in a repo, a bucket in plaintext, a log, or a command line |
+| Secrets (personal, fragment, host, OpenRouter, code.storage, Sprites) | the owning cell, encrypted; fleet secrets in the deployed config (`docs/secrets.md`) | never in a repo, a bucket in plaintext, a log, a command line, or a computer's disk; computers use Sprites connectors |
 | Compute/audit trail | events ledger | webhook deliveries recorded as events, deduped by delivery key |
 
 Hard rule kept: **no file bytes persist in cell SQLite.** File bytes live
@@ -183,56 +205,92 @@ deployment.
   restart-always policy (celld self-fences and must be restarted),
   peers on Fly's private network; real code.storage (org `finite`);
   secrets set from files, never printed. A staging hostname until the
-  cutover.
+  cutover. `cargo xtask deploy <fleet>` reads that fleet's configuration
+  (hostname suffix, bucket, Sprites org) rather than constants, so
+  phase 10 adds fleets without a migration.
 - **Acceptance:** the e2e suite passes against the hosted URL; durable
   write latency (fleet proof), cold cell load, and cell-to-Sprite
   latency recorded; an operator runbook.
 
 ### 4. Identity and browser sessions
 - BANKS registry cell: identities (person, agent, fragment) ↔ npub and
-  designated owners. Dev login (`dev:<handle>`, WorkOS later) creates a
-  person with a custodial key wrapped under `FRAGMENT_HOST_SECRET`. A
-  platform session maps a browser to that principal; each fragment is
-  served from its own origin (`<name>.fragment.club`), with the hostname
-  checked before it is trusted.
+  designated owners. Sign-in is WorkOS (decision 12; a dev login stands in
+  locally), creating a person with a custodial key encrypted in their
+  cell. A platform session maps a browser to that principal; each
+  fragment is served from its own origin (`<name>.fragment.club`, the
+  suffix from configuration), with the hostname checked before it is
+  trusted. "Connect OpenRouter" (OAuth PKCE) stores the person's model
+  credential (`docs/secrets.md`).
 - **Acceptance:** identical allow/deny decisions for CLI and browser
   across public, link, and members; negative tests (no session, revoked
   member, cross-fragment cookie) and a session restart test.
 
 ### 5. Agents as members
-- The agent cell (libfx WASM, memory in SQL with `sqlite_vec`) with its
-  own key; a turn is a Workflow (or finite-next's lease-and-ledger turn
-  if the determinism spike fails). Its tools are the operations of the
-  fragments it belongs to. Inference goes through the host's OpenRouter
-  route.
-- **Acceptance:** finite-next's crash-mid-tool and replay checks,
-  ported; an agent uses the todo fragment only through its operations.
+- The agent cell: goose's loop as a workers-rs Durable Object in its own
+  celld project (`agent/`), ported from `spike/goose-agent`'s `cell/`
+  (store, effects, durable steer queue, watchdog). Its tools are the
+  operations of the fragments it belongs to, keyed by tool-call id; the
+  turn's visible messages stream into the chat's channel. Model calls use
+  the owner's credential.
+- **Acceptance:** the goose spike's checks, ported to the Rust e2e (steer
+  mid-tool, stop, SIGKILL mid-tool runs the effect once, SIGKILL between
+  steps); an agent uses the todo fragment only through its operations.
 
-### 6. Chats, desktops, sharing
+### 6. The desktop
+- The person's home fragment, laid out as the Desktop UI session designed
+  it (`finite-next-worktrees/desktop-ui`, branch `claude/desktop-ui`):
+  a collapsible sidebar of chats and apps, the chat in the middle, and a
+  collapsible viewer on the right that stacks app and file panes, newest
+  on top, reordered by dragging a header. split-grid (vendored, ~3 KB),
+  Finite's look (not a code-tool look); files are `{fragment, path}` read
+  through the fragment file API. Forkable and resettable.
+- **Acceptance:** a browser e2e opens apps and files into the viewer,
+  reorders and closes panes, collapses both sides, and works at phone
+  width; the layout survives a reload.
+
+### 7. Chats and sharing
 - A chat template (a `chat` channel) whose agent member answers new
-  messages. The desktop as the user's home fragment (from an
-  upstream template; forkable and resettable). Platform shell: share
-  sheet, invites, direct URLs with the share header, shared badges.
+  messages. Platform shell: share sheet, invites, direct URLs with the
+  share header, shared badges in the desktop's sidebar.
 - **Acceptance:** two users, one chat: invite, accept, both see messages
   stream live and labeled by sender; the guest drives the owner's agent;
   revoking closes the guest's socket and returns 403; a rewritten
   desktop cannot share without the sheet click.
 
-### 7. Computers and builder workspaces on Sprites
+### 8. Computers and builder workspaces on Sprites
 - A `Computer` cell per Sprite (ownership by principal, fragments
-  included; lifecycle and idle policy on its alarm; the only holder of
-  the Fly token). The personal computer as Sprite services
-  (Chrome, display, control). Builder workspaces: the precompiled
-  `fragment` CLI and fx over ACP (a Rust runner), with an editor key
-  delegated for one fragment; the host proxies inference so no model
-  key lands on a Sprite.
-- **Acceptance:** a signed-in Chrome survives deep sleep; a builder
-  takes a task to `deploy --preview` and then live; Stop cancels over
-  ACP and leaves nothing published.
+  included; lifecycle and idle policy on its alarm; the owner's Sprites
+  org and token, ours by default). The computer runs `fragment computer
+  serve` (goose's loop and tools, a journal keyed by tool-call id, file
+  sync through git), ported from `spike/goose-agent`'s `computer/`, and
+  holds a Sprites Task while a turn runs. Credentials arrive through
+  Sprites connectors (`docs/secrets.md`). The personal computer adds
+  Sprite services (Chrome, display, control).
+- **Acceptance:** a builder takes a task to `deploy --preview` and then
+  live; Stop cancels the running command and leaves nothing published;
+  a platform kill mid-tool runs the tool once; a computer restart
+  resumes the turn from the cell's conversation; no credential is on the
+  Sprite's disk.
 
-### 8. Cutover
+### 9. Cutover
 - `fragment.club` DNS to Fly (owner action), the VPS retired, and the
   example fragments re-created from templates.
+
+### 10. Bring your own compute (after everything above)
+- An org signs up and gets its own deployment under `<org>.fragment.club`:
+  its own celld fleet on its Fly org, Tigris bucket, Sprites org, and
+  OpenRouter account. A small control plane holds the directory (org to
+  fleet) and provisions with the org's credentials. Neither Fly nor
+  Sprites offers third-party OAuth, so "connect" is `fragment connect fly`
+  (a scoped, expiring org token minted from the person's own flyctl
+  login) plus a Sprites org token. DNS and certificates: a record per org
+  pointing at its app, Fly certificates on that app, a wildcard for
+  per-fragment origins through a DNS challenge we answer. Releases ship
+  into every fleet (celld upgrades can need a whole-fleet stop). WorkOS
+  organizations map to our orgs, including an org's own SSO. Open: a
+  shared code.storage org with a repo per org, or the org's own.
+- A dedicated fleet also retires the shared-process isolation debt for
+  that org (`docs/technical-debt-ledger.md`).
 
 ## Evaluation
 
