@@ -162,6 +162,7 @@ impl FragmentCell {
         let repo = self.must("repo")?;
         let Some(sha) = live else {
             self.exec("DELETE FROM code", vec![])?;
+            self.sync_schedules(&[])?;
             self.del_meta("meta_live")?;
             self.del_meta("code_error")?;
             js::abort_app_facet(&self.raw, "live is gone")?;
@@ -184,6 +185,7 @@ impl FragmentCell {
         }
         if self.tree_row("live", "app.mjs")?.is_none() {
             self.exec("DELETE FROM code", vec![])?;
+            self.sync_schedules(&[])?;
             self.del_meta("code_error")?;
             js::abort_app_facet(&self.raw, "live has no app.mjs")?;
             self.event("code.none", &format!("live {} has no app.mjs", short(Some(sha))), json!({ "sha": sha }));
@@ -237,12 +239,13 @@ impl FragmentCell {
         let loader_id = format!("app:{}", hex::encode(hasher.finalize()));
         let operations = serde_json::to_string(&manifest.operations).expect("operations serialize");
         let channels = serde_json::to_string(&manifest.channels).expect("channels serialize");
+        let triggers = serde_json::to_string(&manifest.triggers).expect("triggers serialize");
         let module_count = modules.len();
         self.exec(
-            "INSERT INTO code (id, sha, loader_id, source, operations, cpu_ms, installed_at, channels, modules) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO code (id, sha, loader_id, source, operations, cpu_ms, installed_at, channels, modules, triggers) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (id) DO UPDATE SET sha = excluded.sha, loader_id = excluded.loader_id, source = excluded.source,
                operations = excluded.operations, cpu_ms = excluded.cpu_ms, installed_at = excluded.installed_at,
-               channels = excluded.channels, modules = excluded.modules",
+               channels = excluded.channels, modules = excluded.modules, triggers = excluded.triggers",
             vec![
                 sha.into(),
                 loader_id.into(),
@@ -252,13 +255,21 @@ impl FragmentCell {
                 SqlStorageValue::Integer(js::now_ms()),
                 channels.into(),
                 serde_json::to_string(&modules).expect("modules serialize").into(),
+                triggers.into(),
             ],
         )?;
+        self.sync_schedules(&manifest.triggers)?;
         self.del_meta("code_error")?;
         js::abort_app_facet(&self.raw, "new code from live")?;
         self.event(
             "code.installed",
-            &format!("app.mjs from live {} ({} operations, {} channels, {module_count} applib modules)", short(Some(sha)), manifest.operations.len(), manifest.channels.len()),
+            &format!(
+                "app.mjs from live {} ({} operations, {} channels, {} triggers, {module_count} applib modules)",
+                short(Some(sha)),
+                manifest.operations.len(),
+                manifest.channels.len(),
+                manifest.triggers.len()
+            ),
             json!({ "sha": sha, "operations": manifest.operations.keys().collect::<Vec<_>>() }),
         );
         Ok(())
@@ -270,14 +281,24 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// Refreshes both pins; an external move of main notifies the change feed.
+    /// Refreshes pins; a move of main notifies the change feed and starts
+    /// the runs its file triggers name.
     pub(crate) async fn interpret(&self, refs: &[&str]) -> CellResult<Vec<(String, PinMove)>> {
+        let out = self.interpret_locked(refs).await?;
+        // the file triggers' runs, and the alarm for newly installed schedules
+        self.launch_queued().await;
+        self.schedule().await?;
+        Ok(out)
+    }
+
+    async fn interpret_locked(&self, refs: &[&str]) -> CellResult<Vec<(String, PinMove)>> {
         let _held = self.plane.lock().await;
         let mut out = vec![];
         for which in refs {
             let moved = self.refresh_pin(which).await?;
             if *which == "main" && moved.changed {
                 self.broadcast_change(moved.to.as_deref(), &moved.paths);
+                self.fire_files(moved.to.as_deref(), &moved.paths)?;
             }
             self.follow(which).await?;
             out.push((which.to_string(), moved));

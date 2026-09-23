@@ -75,6 +75,30 @@ pub mod limits {
     /// Modules an app may load besides `app.mjs` (`applib/`), and their total size.
     pub const APPLIB_FILES_MAX: usize = 64;
     pub const APP_MODULES_MAX_BYTES: usize = 4 * 1024 * 1024;
+    /// Triggers per fragment.
+    pub const TRIGGERS_MAX: usize = 32;
+    /// How many hops a chain of triggered runs may take (a mutation's record
+    /// triggering a run whose record triggers another …) before the next is
+    /// blocked as a loop.
+    pub const HOP_DEPTH_MAX: u32 = 16;
+    /// Inbox records whose runs have not succeeded; past this a post is 429.
+    pub const INBOX_PENDING_MAX: u64 = 1000;
+    /// Steps one job run may take.
+    pub const JOB_STEPS_MAX: usize = 100;
+    /// Every step result of one run together (the job re-reads them at each step).
+    pub const JOB_RESULTS_MAX_BYTES: usize = 4 * 1024 * 1024;
+    /// A job's `fetch`: its request body, its response body, and how long it may take.
+    pub const FETCH_BODY_MAX_BYTES: usize = 256 * 1024;
+    pub const FETCH_RESPONSE_MAX_BYTES: usize = 1024 * 1024;
+    pub const FETCH_TIMEOUT_MS: u64 = 120_000;
+    /// A triggered operation pauses itself after this many held runs within the window …
+    pub const AUTO_PAUSE_HELD: u64 = 5;
+    pub const AUTO_PAUSE_WINDOW_MS: i64 = 10 * 60 * 1000;
+    /// … or after this many triggered runs within an hour.
+    pub const TRIGGERED_RUNS_PER_HOUR: u64 = 120;
+    /// Finished runs are kept this long, and at most this many.
+    pub const RUN_RETENTION_MS: i64 = 30 * 24 * 3600 * 1000;
+    pub const RUNS_KEPT: i64 = 10_000;
 }
 
 /// A secret's name: `^[A-Z][A-Z0-9_]{0,63}$`.
@@ -381,6 +405,8 @@ pub struct StorageToken {
 pub enum OpKind {
     Query,
     Mutation,
+    /// Runs as a Workflow, one durable step at a time.
+    Job,
 }
 
 /// An operation as `fragment.json` declares it.
@@ -421,7 +447,100 @@ pub fn valid_channel_name(name: &str) -> bool {
 }
 
 /// The channels every fragment has.
-pub const BUILTIN_CHANNELS: [&str; 2] = ["events", "ops"];
+pub const BUILTIN_CHANNELS: [&str; 3] = ["events", "ops", "inbox"];
+
+/// What starts a triggered run, as `fragment.json`'s `triggers` declares it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TriggerOn {
+    /// A five-field schedule, UTC.
+    Cron(String),
+    /// Each record appended to this channel (`inbox`, or an app channel).
+    Channel(String),
+    /// A move of `main` that changes a path matching this pattern.
+    Files(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TriggerDecl {
+    #[serde(flatten)]
+    pub on: TriggerOn,
+    /// The operation it runs (a mutation or a job).
+    pub run: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    /// Recorded; its Workflow is being started.
+    Queued,
+    Running,
+    Succeeded,
+    /// Failed after its retries: kept for a replay.
+    Held,
+    /// Not started: its operation was paused, or the chain was too deep.
+    Blocked,
+}
+
+impl RunStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunStatus::Queued => "queued",
+            RunStatus::Running => "running",
+            RunStatus::Succeeded => "succeeded",
+            RunStatus::Held => "held",
+            RunStatus::Blocked => "blocked",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<RunStatus> {
+        [RunStatus::Queued, RunStatus::Running, RunStatus::Succeeded, RunStatus::Held, RunStatus::Blocked].into_iter().find(|r| r.as_str() == s)
+    }
+}
+
+/// One run of an operation: a job, or a triggered mutation (`GET /api/f/<name>/runs`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Run {
+    pub id: i64,
+    pub op: String,
+    /// `call`, `cron`, `channel`, `files`, or `job` (started by another run's step)
+    pub via: String,
+    /// The cron schedule, channel, file pattern, or parent run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+    pub principal: String,
+    pub status: RunStatus,
+    pub attempt: u32,
+    pub depth: u32,
+    pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Only when one run is read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<Value>,
+}
+
+/// `POST /api/f/<name>/pause` (editor): triggers stop starting runs of
+/// `op`; calls still work.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetPaused {
+    #[serde(alias = "workflow")]
+    pub op: String,
+    pub paused: bool,
+}
+
+/// `POST /api/f/<name>/replay` (editor): runs a held or blocked run again
+/// with its original input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Replay {
+    pub run: i64,
+}
 
 /// `POST /api/f/<name>/ops/<op>`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

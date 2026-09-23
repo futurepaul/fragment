@@ -13,8 +13,15 @@
 // appends a record to a channel declared in fragment.json once the
 // mutation commits.
 //
+// A job's method gets (input, job) and runs as a Workflow: each `await
+// job.call / job.fetch / job.publish / job.sleep` is a durable step. The
+// body re-runs from the top at every step with the results so far, so it
+// must reach its steps in the same order each time and change nothing
+// except through steps (docs/api.md, Jobs).
+//
 // Every answer is an envelope, so no value an author returns can be
-// mistaken for a platform answer: { result, replayed, effects } or { error }.
+// mistaken for a platform answer: { result, replayed, effects } or { error };
+// for a job, { next } (its next step), { done, output }, or { failed }.
 import { App as AuthorApp } from "./app.js";
 
 const LEDGER = "_fragment_ops";
@@ -25,6 +32,20 @@ const EFFECTS_MAX = 64;
 const RESULT_MAX_BYTES = 1024 * 1024;
 const KIND = /^[a-z][a-z0-9._-]{0,63}$/;
 const RESERVED = new Set(["constructor", "fetch", "alarm", "webSocketMessage", "webSocketClose", "webSocketError"]);
+// A step not yet taken never settles: the body stops there, and a try/catch
+// or Promise.all in author code cannot swallow the suspension.
+const NEVER = new Promise(() => {});
+const SLEEP_MAX_MS = 30 * 24 * 3600 * 1000;
+const DURATION = /^(\d+)\s*(second|minute|hour|day)s?$/;
+const UNIT_MS = { second: 1000, minute: 60_000, hour: 3_600_000, day: 86_400_000 };
+
+function describe(e) {
+  return e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+}
+
+function bytes(text) {
+  return new TextEncoder().encode(text).length;
+}
 
 function authorMethod(name) {
   return !name.startsWith("__") && !RESERVED.has(name) && typeof AuthorApp.prototype[name] === "function";
@@ -53,6 +74,106 @@ class Call {
 
   get effects() {
     return this.#effects;
+  }
+}
+
+// A step that failed for good (its retries ran out, or it was refused).
+class StepError extends Error {
+  constructor(kind, message) {
+    super(message);
+    this.name = "StepError";
+    this.kind = kind;
+  }
+}
+
+// What job.fetch resolves to: the parts of a Response a step can record.
+class JobResponse {
+  constructor(v) {
+    this.status = v.status;
+    this.ok = v.status >= 200 && v.status < 300;
+    this.headers = new Headers(v.headers || {});
+    this.body = v.body ?? "";
+  }
+  text() {
+    return this.body;
+  }
+  json() {
+    return JSON.parse(this.body);
+  }
+}
+
+class Job {
+  #channels;
+  #results;
+  #index = 0;
+  #onStep;
+
+  constructor(meta, results, onStep) {
+    this.principal = meta.principal;
+    this.role = meta.role;
+    this.run = meta.run;
+    this.attempt = meta.attempt;
+    this.#channels = new Set(meta.channels || []);
+    this.#results = results;
+    this.#onStep = onStep;
+  }
+
+  #step(kind, args) {
+    const index = this.#index++;
+    const done = this.#results[index];
+    if (!done) {
+      this.#onStep({ index, kind, args });
+      return NEVER;
+    }
+    if (done.kind !== kind) {
+      return Promise.reject(new Error(`step ${index} was ${done.kind} when this run took it and is ${kind} now: the job's code changed under the run`));
+    }
+    if ("error" in done) return Promise.reject(new StepError(kind, done.error));
+    return Promise.resolve(done.value);
+  }
+
+  // An HTTP request from the platform (the app itself has no network).
+  // Header values may name the fragment's secrets as {{NAME}}.
+  fetch(url, init = {}) {
+    if (typeof url !== "string") throw new TypeError("job.fetch(url, init): url is a string");
+    const headers = {};
+    for (const [k, v] of Object.entries(init.headers || {})) headers[k] = String(v);
+    let body = init.body;
+    if (body != null && typeof body !== "string") {
+      body = JSON.stringify(body);
+      if (!Object.keys(headers).some((k) => k.toLowerCase() === "content-type")) headers["content-type"] = "application/json";
+    }
+    const args = { url, method: init.method || "GET", headers };
+    if (body != null) args.body = body;
+    return this.#step("fetch", args).then((v) => new JobResponse(v));
+  }
+
+  // An operation of this fragment, as the run's principal. Calling a job
+  // starts it and resolves to { run, status }.
+  call(op, input = {}) {
+    if (typeof op !== "string") throw new TypeError("job.call(op, input): op is an operation name");
+    return this.#step("call", { op, input: JSON.parse(JSON.stringify(input ?? {})) });
+  }
+
+  publish(channel, body, kind = "message") {
+    if (!this.#channels.has(channel)) throw new Error(`channel ${channel} is not declared in fragment.json`);
+    if (typeof kind !== "string" || !KIND.test(kind)) throw new Error("kind must match ^[a-z][a-z0-9._-]{0,63}$");
+    const text = JSON.stringify(body ?? null);
+    if (bytes(text) > RECORD_MAX_BYTES) throw new Error(`a record's body is at most ${RECORD_MAX_BYTES} bytes`);
+    return this.#step("publish", { channel, kind, body: JSON.parse(text) });
+  }
+
+  // Milliseconds, or "N seconds|minutes|hours|days"; up to 30 days.
+  sleep(duration) {
+    let ms = duration;
+    if (typeof duration === "string") {
+      const m = DURATION.exec(duration.trim());
+      ms = m ? Number(m[1]) * UNIT_MS[m[2]] : NaN;
+    }
+    if (!Number.isFinite(ms) || ms < 0 || ms > SLEEP_MAX_MS) {
+      throw new Error('job.sleep takes milliseconds or "N seconds|minutes|hours|days", up to 30 days');
+    }
+    return this.#step("sleep", { ms: Math.round(ms) });
   }
 }
 
@@ -101,6 +222,34 @@ export class App extends AuthorApp {
     if (!authorMethod(name)) return { error: "unknown_operation" };
     const result = await AuthorApp.prototype[name].call(this, input, new Call(meta, false));
     return { replayed: false, result: result ?? null };
+  }
+
+  // Runs a job's body over the results of the steps it has taken, up to
+  // the next step it asks for (the Workflow takes it and asks again).
+  async __job(name, input, meta, results) {
+    if (!authorMethod(name)) return { error: "unknown_operation" };
+    let next = null;
+    let wake;
+    const asked = new Promise((resolve) => (wake = resolve));
+    const job = new Job(meta, results, (step) => {
+      if (!next) {
+        next = step;
+        wake();
+      }
+    });
+    let out;
+    try {
+      out = await Promise.race([
+        (async () => ({ value: await AuthorApp.prototype[name].call(this, input, job) }))(),
+        asked,
+      ]);
+    } catch (e) {
+      return next ? { next } : { failed: describe(e) };
+    }
+    if (next) return { next };
+    const text = JSON.stringify(out.value ?? null);
+    if (bytes(text) > RESULT_MAX_BYTES) return { failed: `a job's result is at most ${RESULT_MAX_BYTES} bytes` };
+    return { done: true, output: JSON.parse(text) };
   }
 
   // The newest ledger rows, for the supervisor's sweep of effects it may

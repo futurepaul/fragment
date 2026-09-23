@@ -95,9 +95,30 @@ pub fn open(host_secrets: &[&str], salt: &str, sealed: &str) -> Result<Opened, S
     Ok(Opened { plaintext, stale: i != 0 })
 }
 
+/// The secret names a header value refers to as `{{NAME}}` (a job's
+/// fetch; the cell substitutes them at its egress point).
+pub fn placeholders(v: &str) -> Vec<&str> {
+    let mut names = vec![];
+    let mut rest = v;
+    while let Some(start) = rest.find("{{") {
+        let Some(end) = rest[start + 2..].find("}}") else { break };
+        names.push(&rest[start + 2..start + 2 + end]);
+        rest = &rest[start + 2 + end + 2..];
+    }
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn header_placeholders() {
+        assert_eq!(placeholders("Bearer {{API_KEY}}"), vec!["API_KEY"]);
+        assert_eq!(placeholders("{{A}}:{{B}}"), vec!["A", "B"]);
+        assert!(placeholders("no {{ end").is_empty());
+        assert!(placeholders("plain").is_empty());
+    }
 
     const HOST: &str = "0123456789abcdef0123456789abcdef-current";
     const OLD: &str = "0123456789abcdef0123456789abcdef-previous";

@@ -4,6 +4,9 @@
 
 pub mod access;
 pub mod codestorage;
+pub mod cron;
+pub mod egress;
+pub mod glob;
 pub mod manifest;
 pub mod npub;
 pub mod ratelimit;

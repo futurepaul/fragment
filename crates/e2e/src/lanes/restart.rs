@@ -1,11 +1,15 @@
-//! State survives a graceful restart and a crash of the node; then the
+//! State survives a graceful restart and a crash of the node (a sleeping
+//! job included); then the
 //! node runs without hostnames and serves fragments from `/f/<name>/`.
+
+use std::time::Duration;
 
 use anyhow::Result;
 use fragment_nip98::Keys;
 use serde_json::json;
 
 use super::app::ship;
+use super::jobs;
 use crate::api::{Api, Call};
 use crate::Suite;
 
@@ -39,8 +43,15 @@ pub fn restart(s: &mut Suite, api: Api) -> Result<Api> {
 
     let r = api.op(&owner, &name, "add_todo", "r2", json!({ "text": "before the crash" }))?;
     s.ok("a mutation before the crash", r.status == 200, &r);
+    let (jobs, _) = jobs::jobs_fragment(s, &api, &owner, "restart-jobs", |_| {})?;
+    let r = api.op(&owner, &jobs, "nap", "through-the-crash", json!({ "ms": 4000 }))?;
+    let nap = jobs::started(&r);
+    std::thread::sleep(Duration::from_millis(1000));
     s.crash()?;
     let api = s.start(false, true)?;
+    let woke = jobs::settle(&api, &owner, &jobs, nap, &["succeeded", "held"], Duration::from_secs(60));
+    let naps = jobs::records(&api, &owner, &jobs, "feed").iter().filter(|r| r["kind"] == "nap").count();
+    s.ok("a job sleeping through a crash wakes and finishes, once", woke["status"] == "succeeded" && naps == 1, format!("{woke} ({naps} nap records)"));
     let r = api.op(&owner, &name, "add_todo", "r2", json!({ "text": "before the crash" }))?;
     s.ok("after a crash an acknowledged mutation replays", r.body["replayed"] == true, &r);
     s.ok("after a crash no acknowledged write is lost", count(&api, &owner, &name) == 2, "count");

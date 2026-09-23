@@ -1,0 +1,19 @@
+{
+  "name": "inbox",
+  "operations": {
+    "ingest": { "kind": "job" },
+    "add": {
+      "kind": "mutation",
+      "input": {
+        "type": "object",
+        "required": ["text", "source"],
+        "additionalProperties": false,
+        "properties": { "text": { "type": "string", "maxLength": 2000 }, "source": { "type": "string", "maxLength": 200 } }
+      }
+    },
+    "list": { "kind": "query", "role": "public", "input": { "type": "object", "additionalProperties": false } }
+  },
+  "channels": { "feed": { "read": "public" } },
+  "triggers": [{ "channel": "inbox", "run": "ingest" }],
+  "meta": { "title": "Inbox", "description": "Webhook deliveries, live: each one is handled by a durable job." }
+}

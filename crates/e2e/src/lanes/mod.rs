@@ -3,6 +3,7 @@
 mod app;
 mod author;
 mod control;
+mod jobs;
 mod members;
 mod plane;
 mod restart;
@@ -32,6 +33,8 @@ pub fn run(s: &mut Suite, api: Api) -> Result<()> {
     author::routes(s, &api)?;
     author::cli(s, &api)?;
     author::browser(s, &api)?;
+    jobs::jobs(s, &api)?;
+    jobs::triggers(s, &api)?;
     sync::folder_sync(s, &api)?;
     let api = restart::restart(s, api)?;
     restart::pathmode(s, api)?;

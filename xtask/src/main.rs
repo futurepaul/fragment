@@ -84,6 +84,8 @@ fn dev(args: &[String]) -> Result<()> {
         host_suffix: Some("fragment.localhost".into()),
         // No webhooks reach dev fragments (the CLI's refresh and this poll do).
         poll_interval_s: 10,
+        egress_local: true,
+        job_retry_delay_s: 2,
     }
     .write_vars()?;
     let opts = devstack::NodeOptions { port: DEV_PORT, clean, watch: true, env: vec![] };

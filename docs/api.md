@@ -8,7 +8,7 @@ keeps has the same route and body, and the cell's errors are
 
 # The Rust cell (phase 2)
 
-Status: slices B and C (2026-09-23). `cargo xtask e2e` proves every
+Status: slices B, C, and D (2026-09-23). `cargo xtask e2e` proves every
 route below.
 
 ## Configuration
@@ -23,7 +23,9 @@ Worker variables, rendered from the fleet's settings (ROADMAP decision
 | `CODESTORAGE_ORG`, `CODESTORAGE_PRIVATE_KEY` | the org and its PKCS#8 P-256 key (a one-line PEM may carry literal `\n`) |
 | `CODESTORAGE_API_URL` | the API base (default `https://api.<org>.code.storage`) |
 | `FRAGMENT_HOST_SUFFIX` | fragments are served from `<name>.<suffix>`; unset, from `/f/<name>/` |
-| `FRAGMENT_POLL_INTERVAL_S` | the webhook backstop (default 300) |
+| `FRAGMENT_POLL_INTERVAL_S` | the webhook backstop (default 300); also how often running runs are checked against their Workflows |
+| `FRAGMENT_JOB_RETRY_DELAY_S` | a failed job step's first retry delay, doubling over 4 retries (default 10) |
+| `FRAGMENT_EGRESS_LOCAL` | `allow` lets jobs fetch loopback and private addresses (dev and e2e fakes); never on a shared fleet |
 
 ## Principals and access
 
@@ -74,9 +76,15 @@ member may leave. Each person's list of fragments is kept in their
 | `GET /api/f/{name}/file?path=` | viewer | → the bytes at main (`x-fragment-ref`) |
 | `GET /api/f/{name}/file/stat?path=` | viewer | → `{stat: {path, size, blobSha, lastCommitSha, present}, ref}` |
 | `GET /api/f/{name}/events?since=` | viewer | → `{events: [{id, at, kind, summary, data}]}` (500 a page; 5000 kept) |
-| `POST /api/f/{name}/ops/{op}` | the operation's role | `{id, input}` → `{result, replayed}` |
+| `POST /api/f/{name}/ops/{op}` | the operation's role | `{id, input}` → `{result, replayed}`; for a job, `result` is `{run, status}` (the same id answers the same run) |
+| `GET /api/f/{name}/runs?status=&op=&limit=` | viewer | → `{runs: [{id, op, via, trigger, principal, status, attempt, depth, createdAt, finishedAt, error}], counts: {<status>: n}, paused}` newest first (30, at most 200) |
+| `GET /api/f/{name}/runs/{id}` | viewer | → one run with its `input` and `output` |
+| `POST /api/f/{name}/replay` | editor | `{run}` → `{ok, run, attempt}`: a `held` or `blocked` run again, as its next attempt, with its input |
+| `POST /api/f/{name}/pause` | editor | `{op, paused}` (`workflow` is accepted for `op`) → `{ok, op, paused}`: the operation's triggers stop or start; calls are never paused |
+| `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron\|channel\|files, run, paused, nextAt?}], paused}` |
+| `POST /api/f/{name}/inbox` | the inbox token | token in `x-fragment-inbox-token` or `?t=`; a JSON body `{source?, payload}` (any other JSON, or text, is the payload), at most 64 KiB → `{ok, seq, runs}`. Bad token 403; 1000 pending, 429 |
 
-| `GET /api/f/{name}/channels` | viewer | → `{channels: [{name, read, seq}]}`: `events`, `ops`, and the app's |
+| `GET /api/f/{name}/channels` | viewer | → `{channels: [{name, read, seq}]}`: `events`, `ops`, `inbox`, and the app's |
 | `GET /api/f/{name}/channels/{channel}?after=&limit=` | the channel's reader | → `{channel, records: [{channel, seq, at, principal, kind, body}], next}` (1000 a page) |
 
 ## Apps
@@ -106,7 +114,15 @@ keeps the last good code and says why in `status.code.error`.
   other keyword is refused at deploy). A call whose input does not fit is
   400 naming the JSON pointer (`input /text: is required`).
 - `channels` declares the app's channels and their readers (default
-  `viewer`); `events` and `ops` are built in (readers: viewers).
+  `viewer`); `events`, `ops`, and `inbox` are built in (readers: viewers).
+- `kind` is `query`, `mutation`, or `job` (below); a job's `role`
+  defaults to `editor`.
+- `triggers` (at most 32) start runs of an operation: `{"cron": "0 9 * *
+  *", "run": op}` (five fields, UTC, 1 = Sunday), `{"channel": "inbox" |
+  <app channel>, "run": op}` (each new record), `{"files": "notes/**",
+  "run": op}` (a move of `main` changing a matching path; `*`, `**`, `?`,
+  a trailing `/`). The operation must be a mutation or a job an editor
+  may call.
 
 `app.mjs` exports `class App extends DurableObject` with one method per
 operation, each called `(input, call)`: `call.principal` (an npub or
@@ -119,6 +135,55 @@ returns the stored result; the same id with another input is 409. Every
 applied mutation also appends `{op, id}` to `ops`. An optional
 `fetch(request)` answers every path that is not a site file (any
 method), with `x-fragment-principal` and `x-fragment-role` set.
+
+### Jobs and triggers
+
+A job is a method called `(input, job)` that runs as a celld Workflow,
+outside any request. Each `await` on the job's four steps is durable:
+
+- `job.call(op, input)`: an operation of this fragment as the run's
+  principal, with `job:<run>:<step>` as its id (a retried or replayed
+  step is a replay). Calling a job starts it: `{run, status}`, one hop
+  deeper.
+- `job.fetch(url, {method, headers, body})` → `{status, ok, headers,
+  text(), json()}`: the app's one way out. `{{NAME}}` in a header value
+  is the fragment's secret `NAME`, added by the platform at the egress
+  point; the app never holds it. http(s) only; loopback, private, and
+  `.internal` addresses are refused; redirects are answered, not
+  followed; a body of at most 256 KiB, a response of at most 1 MiB, 120
+  seconds. Every fetch carries `x-fragment-hops`.
+- `job.publish(channel, body, kind)`: a record, once per step.
+- `job.sleep(ms | "N seconds|minutes|hours|days")`, up to 30 days.
+
+`job.principal`, `job.role`, `job.run`, and `job.attempt` say who and
+which. The method re-runs from the top at every step with the results so
+far, so it must reach its steps in the same order each time and change
+nothing except through steps. A step that fails for a reason that may
+pass (an upstream 429 or 5xx, a timeout, a platform error) is retried 4
+times with doubling delays; one that fails for good (a refused URL, an
+unknown operation, a call that threw), or runs out of retries, makes the
+`await` throw a `StepError` the job may catch. A job that throws is
+**held**: its run keeps the input and error until someone replays it. At
+most 100 steps and 4 MiB of step results per run; a result of at most
+1 MiB.
+
+Every job call and every trigger is a **run**: `queued`, `running`,
+`succeeded`, `held`, or `blocked`. A triggered mutation is a run of one
+step. Triggered runs act as the fragment itself (its npub) with an
+editor's role, `via` `cron`, `channel`, or `files`, and a `depth`: a
+record appended by a run at depth d triggers runs at d + 1, and a
+delivery's `x-fragment-hops` is its depth. Deeper than 16 is `blocked`
+(`cycle.detected`). An operation's triggers pause themselves (`op.
+auto-paused`) after 5 held runs in 10 minutes or 120 triggered runs in
+an hour (blocked runs do not count); while paused, a trigger records a
+`blocked` run and cron skips.
+A cron tick whose previous run is still going is skipped. The inbox's
+pending records are its runs that have not succeeded; at 1000 a post is
+429 (`inbox.rejected`). Finished runs are kept 30 days (at most 10 000).
+
+CLI: `fragment runs <name> [<run>] [--status S]`, `fragment triggers
+<name>`, `fragment replay <name> <run>`, `fragment pause|unpause <name>
+<op>`, `fragment inbox <name> --token T --payload JSON`.
 
 ## Serving
 

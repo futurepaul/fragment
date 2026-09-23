@@ -1,6 +1,6 @@
 //! The JavaScript surfaces workers-rs 0.8.5 does not wrap: the Worker
-//! Loader and Durable Object facets. Every `Reflect` call in the cell lives
-//! here, behind typed functions.
+//! Loader, Durable Object facets, and the Workflows binding. Every
+//! `Reflect` call in the cell lives here, behind typed functions.
 
 use worker::js_sys::{self, Array, Function, Object, Promise, Reflect};
 use worker::wasm_bindgen::{closure::Closure, JsCast, JsValue};
@@ -145,6 +145,35 @@ pub fn delete_app_facet(ctx: &JsValue) -> CellResult<()> {
     let facets = get(ctx, "facets")?;
     call(&facets, "delete", &[APP_FACET.into()]).map_err(|e| CellError::host(format!("facets.delete: {}", js_message(&e))))?;
     Ok(())
+}
+
+/// The Workflows binding that runs jobs (`JOBS`, class `Job` in entry.mjs).
+fn jobs(env: &JsValue) -> CellResult<JsValue> {
+    let binding = get(env, "JOBS")?;
+    if binding.is_undefined() {
+        return Err(CellError::host("this node has no JOBS Workflow binding (wrangler.jsonc `workflows`)"));
+    }
+    Ok(binding)
+}
+
+/// Starts a job's Workflow instance; an instance that already exists is
+/// left as it is, so starting twice is harmless.
+pub async fn jobs_create(env: &JsValue, id: &str, params: &serde_json::Value) -> CellResult<()> {
+    let binding = jobs(env)?;
+    let item = Object::new();
+    set(&item, "id", id);
+    set(&item, "params", to_js(params));
+    let pending = call(&binding, "createBatch", &[Array::of1(&item).into()]).map_err(|e| CellError::host(format!("createBatch: {}", js_message(&e))))?;
+    settle(pending).await.map_err(|e| CellError::host(format!("createBatch: {}", js_message(&e))))?;
+    Ok(())
+}
+
+/// A Workflow instance's `status()`: `{status, error?, output?}`.
+pub async fn jobs_status(env: &JsValue, id: &str) -> Result<serde_json::Value, String> {
+    let binding = jobs(env).map_err(|e| e.message)?;
+    let instance = settle(call(&binding, "get", &[id.into()]).map_err(|e| js_message(&e))?).await.map_err(|e| js_message(&e))?;
+    let status = settle(call(&instance, "status", &[]).map_err(|e| js_message(&e))?).await.map_err(|e| js_message(&e))?;
+    from_js(&status)
 }
 
 pub fn now_ms() -> i64 {

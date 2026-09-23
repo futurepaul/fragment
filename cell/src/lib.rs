@@ -8,7 +8,8 @@
 //!   POST   /api/fragments                  create (signed; the signer owns it)
 //!   GET    /api/fragments                  the fragments the signer belongs to
 //!   DELETE /api/f/<name>                   delete (owner)
-//!   *      /api/f/<name>/<route>           the control API (signed; the code.storage webhook is HMAC)
+//!   *      /api/f/<name>/<route>           the control API (signed; the code.storage webhook is HMAC,
+//!                                          the inbox is its token)
 //!   *      <name>.<suffix>/<path>          the fragment's site, on its own origin
 //!   *      /f/<name>/<path>                the same, when no suffix is configured (dev)
 //!
@@ -22,6 +23,7 @@ mod channels;
 mod cs;
 mod error;
 mod fragment;
+mod jobs;
 mod js;
 mod live;
 mod members;
@@ -94,6 +96,8 @@ struct Forward<'a> {
     inner: String,
     principal: Option<String>,
     mode: Option<&'a str>,
+    /// Headers this route passes on purpose (the inbox's token and hop count).
+    extra: Vec<(&'static str, String)>,
 }
 
 /// Hands a request to the fragment's supervisor.
@@ -112,6 +116,9 @@ async fn forward(env: &Env, req: &Request, url: &Url, body: Vec<u8>, f: Forward<
     if let Some(m) = f.mode {
         headers.set(MODE_HEADER, m)?;
     }
+    for (k, v) in &f.extra {
+        headers.set(k, v)?;
+    }
     let mut init = RequestInit::new();
     init.with_method(req.method()).with_headers(headers);
     if !body.is_empty() {
@@ -127,7 +134,7 @@ async fn serve(mut req: Request, env: &Env, url: &Url, name: &str, rest: &str, m
     check_name(name)?;
     let body = read_body(&mut req).await?;
     let principal = authenticate_if_signed(&req, url, &body)?;
-    let f = Forward { name, inner: format!("/serve/{rest}"), principal, mode: Some(mode) };
+    let f = Forward { name, inner: format!("/serve/{rest}"), principal, mode: Some(mode), extra: vec![] };
     forward(env, &req, url, body, f).await
 }
 
@@ -150,7 +157,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             let create: CreateFragment = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             check_name(&create.name)?;
             let principal = authenticate(&req, &url, &body)?;
-            let f = Forward { name: &create.name, inner: "/create".into(), principal: Some(principal), mode: None };
+            let f = Forward { name: &create.name, inner: "/create".into(), principal: Some(principal), mode: None, extra: vec![] };
             forward(env, &req, &url, body, f).await
         }
         (Method::Get, ["api", "fragments"]) => {
@@ -166,9 +173,22 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
                 _ => format!("/api/{}", rest.join("/")),
             };
             let body = read_body(&mut req).await?;
-            // code.storage signs its deliveries with the fragment's webhook secret instead.
-            let principal = if inner == "/api/webhook" { None } else { Some(authenticate(&req, &url, &body)?) };
-            let f = Forward { name, inner, principal, mode: None };
+            // code.storage signs its deliveries with the fragment's webhook
+            // secret, and the inbox takes its token, instead of a signature.
+            let mut extra = vec![];
+            let principal = match inner.as_str() {
+                "/api/webhook" => None,
+                "/api/inbox" => {
+                    for k in ["x-fragment-inbox-token", jobs::HOPS_HEADER] {
+                        if let Some(v) = req.headers().get(k)? {
+                            extra.push((k, v));
+                        }
+                    }
+                    None
+                }
+                _ => Some(authenticate(&req, &url, &body)?),
+            };
+            let f = Forward { name, inner, principal, mode: None, extra };
             forward(env, &req, &url, body, f).await
         }
         (_, ["f", name]) => {

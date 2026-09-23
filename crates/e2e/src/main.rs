@@ -76,6 +76,8 @@ impl Suite {
             codestorage_url: self.fake.url.clone(),
             host_suffix: suffix.then(|| SUFFIX.to_string()),
             poll_interval_s: POLL_S,
+            egress_local: true,
+            job_retry_delay_s: 1,
         }
         .write_vars()?;
         let opts = devstack::NodeOptions { port: self.port, clean, watch: false, env: vec![] };

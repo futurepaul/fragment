@@ -105,19 +105,28 @@ pub struct Fleet {
     /// Fragments are served from `<name>.<suffix>` when set.
     pub host_suffix: Option<String>,
     pub poll_interval_s: u32,
+    /// Jobs may fetch loopback and private addresses (the local fakes).
+    pub egress_local: bool,
+    /// The first retry delay of a failed job step (it doubles each time).
+    pub job_retry_delay_s: u32,
 }
 
 impl Fleet {
     /// Renders the fleet into `cell/.dev.vars`.
     pub fn write_vars(&self) -> Result<()> {
         let poll = self.poll_interval_s.to_string();
+        let retry = self.job_retry_delay_s.to_string();
         let mut vars = vec![
             ("FRAGMENT_HOST_SECRET", self.host_secret.as_str()),
             ("CODESTORAGE_ORG", self.codestorage_org.as_str()),
             ("CODESTORAGE_PRIVATE_KEY", self.codestorage_key_pem.as_str()),
             ("CODESTORAGE_API_URL", self.codestorage_url.as_str()),
             ("FRAGMENT_POLL_INTERVAL_S", poll.as_str()),
+            ("FRAGMENT_JOB_RETRY_DELAY_S", retry.as_str()),
         ];
+        if self.egress_local {
+            vars.push(("FRAGMENT_EGRESS_LOCAL", "allow"));
+        }
         if let Some(s) = &self.host_suffix {
             vars.push(("FRAGMENT_HOST_SUFFIX", s.as_str()));
         }

@@ -219,6 +219,68 @@ change, channel message); schedules multiplexed on the supervisor's
 alarm; held runs, replay, auto-pause, the hop budget; secrets for jobs;
 the inbox cap.
 
+*Done 2026-09-23.* `cargo xtask e2e` passes 371 of 371 checks in 22 sections
+(slice D added `jobs` and `triggers`, and a job sleeping through a SIGKILL
+in `restart`); `cargo xtask check` is clean; the old JS e2e still passes
+312 of 312. The contract is in
+`docs/api.md` (Jobs and triggers). What landed:
+
+- **Jobs** (`cell/src/jobs.rs`, the `Job` Workflow in `cell/entry.mjs`,
+  `__job` in `platform.mjs`): a `job` method gets `(input, job)` with
+  four durable steps, `job.call`, `job.fetch`, `job.publish`,
+  `job.sleep`. Each run is a Workflow instance that asks the supervisor
+  to advance the job (the facet re-runs its body over the step results so
+  far, up to the next step) and then to perform that step; both answers
+  are Workflow step results, so a crash resumes at the step it was on.
+- **Runs**: every job call and every trigger is a run (`queued`,
+  `running`, `succeeded`, `held`, `blocked`) with `fragment runs`,
+  `replay`, `pause`, `unpause`, `triggers`, and `inbox` in the CLI (the
+  old commands keep their routes and bodies).
+- **Triggers** in `fragment.json`: cron (on the supervisor's alarm),
+  channel records (the `inbox` is a built-in channel), and file changes
+  on `main`.
+- **`crates/core`**: `cron` (five fields, Cloudflare's day numbering),
+  `glob` (file patterns), `egress` (which URLs a job may fetch), secret
+  placeholders.
+- **`templates/inbox`**: a webhook inbox whose deliveries a job turns
+  into lines on a live page (`fragment new --template inbox`).
+- The cell is 1.33 MB of wasm (470 KB gzipped, +95 KB).
+
+Decisions made in D (each in `docs/api.md`):
+
+- **Author code never runs in the Workflow.** A Workflow class must live
+  in the platform's script, so the job's body runs in the app facet by
+  deterministic replay and the Workflow only loops and calls back. A
+  body must reach its steps in the same order each time; a step whose
+  kind changed under a run (new code) fails it.
+- **Secrets reach only the egress point**: `{{NAME}}` in a fetch header
+  is opened in the supervisor as the request leaves, never in the facet,
+  a step result, or a run. This is the seam the "fork forever?" thread's
+  native egress would replace, with no change to apps.
+- **A triggered mutation is a one-step run**, so retries, held runs, and
+  replays work the same for mutations and jobs. Triggered runs act as
+  the fragment's own key with an editor's role (a trigger cannot run an
+  owner operation).
+- **The inbox is a channel** (`inbox`, the third built-in); its pending
+  records are its runs that have not succeeded (1000, then 429). The old
+  wire contract stands (`{source, payload}`, the token in
+  `x-fragment-inbox-token` or `?t=`).
+- **Pausing is per operation and stops only triggers**; calls always
+  run. Auto-pause after 5 held runs in 10 minutes or 120 triggered runs
+  in an hour; unpausing forgives the held runs before it.
+- **The hop budget counts through channels, job-to-job calls, and other
+  fragments** (`x-fragment-hops` on every fetch, read by the inbox); past
+  16 a run is blocked.
+- **Retries**: an upstream 429 or 5xx, a timeout, or a platform error is
+  retried 4 times with doubling delays (10 s first in production); any
+  other failure is final and the job may catch it. A replay re-runs the
+  job from the start: its call steps replay (same ids), its fetches run
+  again.
+- **Not now**: cancelling a run, `waitForEvent` (approvals arrive with
+  agents), per-operation retry policy, binary fetch bodies, per-secret
+  host allowlists. Each is in the debt ledger or waits for the phase
+  that needs it.
+
 **E. Files and blobs.** The files capability; CAS; pointers for files of
 1 MiB or more with bytes in Tigris (celld's R2 binding); blob deletion by
 reachability from branch tips; the CLI resolves pointers when it syncs;

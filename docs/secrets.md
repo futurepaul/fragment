@@ -14,7 +14,7 @@ secret sealed it. Rotating the host secret: set the new one as
 `FRAGMENT_HOST_SECRET` and the old as `FRAGMENT_HOST_SECRET_PREVIOUS`;
 values sealed under the old one still open (phase 2 slice B,
 `crates/core/src/secrets.rs`). The cell reseals such a value when it
-first reads it, from slice D, where jobs read secrets.
+first reads it (slice D: a job's fetch).
 
 | Secret | Home |
 |---|---|
@@ -33,6 +33,10 @@ uses it reads it from there.
   platform through a capability ("call OpenRouter", "fetch this API with
   secret X"), and the platform adds the credential on the way out
   (`globalOutbound` is `null`; the capability is the only way out).
+  Built in slice D: a job's `job.fetch` names a secret as `{{NAME}}` in a
+  header, and the supervisor opens it only as the request leaves
+  (`step_fetch` in `cell/src/jobs.rs`). That one function is the egress
+  point a native egress in the celld fork would take over.
 - **Agents in cells** call models through the platform, which attaches
   the user's own model credential.
 - **Computers** (Sprites) use **Sprites connectors**, Fly's credential

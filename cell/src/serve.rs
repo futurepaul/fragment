@@ -27,7 +27,7 @@ const ANON_COOKIE_AGE_S: i64 = 365 * 24 * 3600;
 /// Pages up to this size get Open Graph tags from `meta`.
 const OG_MAX_BYTES: u64 = 1024 * 1024;
 
-fn eq_ct(a: &str, b: &str) -> bool {
+pub(crate) fn eq_ct(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 

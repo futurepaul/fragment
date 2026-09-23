@@ -69,7 +69,7 @@ pub fn ops(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a stranger calling an operation is 403", r.status == 403, &r);
 
     // a bad manifest on a later deploy keeps the good code running
-    s.commit(&c, &[("fragment.json", Some(br#"{"operations":{"x":{"kind":"job"}}}"#))]);
+    s.commit(&c, &[("fragment.json", Some(br#"{"operations":{"x":{"kind":"task"}}}"#))]);
     let bad = s.deploy(&c);
     let r = api.status(&owner, &name)?;
     s.ok(

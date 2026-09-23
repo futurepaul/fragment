@@ -158,20 +158,24 @@ enum Cmd {
     },
     /// Run a workflow now
     Run { name: String, workflow: String, #[arg(long)] input: Option<String> },
-    /// List workflow runs (the run history; --status held shows parked failures)
+    /// List runs (jobs and triggered operations; --status held shows parked failures), or show one
     Runs {
         name: String,
-        /// Filter by status: running | backoff | success | held | skipped | blocked
+        /// Show this run in full (input, output, error)
+        run: Option<u64>,
+        /// Filter by status: queued | running | succeeded | held | blocked
         #[arg(long)]
         status: Option<String>,
         #[arg(long, default_value = "30")]
         limit: u64,
     },
-    /// Pause a workflow (auto-triggers stop; manual runs still work)
+    /// List a fragment's triggers (cron, channel, files) and what is paused
+    Triggers { name: String },
+    /// Pause an operation's triggers (calls still work)
     Pause { name: String, workflow: String },
-    /// Unpause a workflow (also clears the auto-pause breaker)
+    /// Unpause an operation's triggers (also after an auto-pause)
     Unpause { name: String, workflow: String },
-    /// Re-run a held run with its original input (after fixing the workflow)
+    /// Re-run a held or blocked run with its original input (after fixing the code)
     Replay { name: String, run: u64 },
     /// Rotate a fragment's tokens (owner-only; default rotates both scopes)
     Rotate {
@@ -1055,7 +1059,33 @@ fn run(cli: Cli) -> Result<()> {
                 println!("  [{}] {}", e["kind"].as_str().unwrap_or(""), e["summary"].as_str().unwrap_or(""));
             }
         }
-        Cmd::Runs { name, status, limit } => {
+        Cmd::Runs { name, run: Some(id), .. } => {
+            let v = c.call(c.get(&format!("/api/f/{name}/runs/{id}"))?)?;
+            if j {
+                ok_exit(&v);
+            }
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        }
+        Cmd::Triggers { name } => {
+            let v = c.call(c.get(&format!("/api/f/{name}/triggers"))?)?;
+            if j {
+                ok_exit(&v);
+            }
+            let rows = v["triggers"].as_array().cloned().unwrap_or_default();
+            for t in &rows {
+                let on = ["cron", "channel", "files"]
+                    .iter()
+                    .find_map(|k| t[*k].as_str().map(|v| format!("{k} {v}")))
+                    .unwrap_or_default();
+                let next = t["nextAt"].as_u64().map(|n| format!("\tnext {} UTC", chrono_like(n / 1000))).unwrap_or_default();
+                let paused = if t["paused"].as_bool().unwrap_or(false) { "\tPAUSED" } else { "" };
+                println!("{on}\t→ {}{next}{paused}", t["run"].as_str().unwrap_or("?"));
+            }
+            if rows.is_empty() {
+                println!("(no triggers)");
+            }
+        }
+        Cmd::Runs { name, run: None, status, limit } => {
             let mut path = format!("/api/f/{name}/runs?limit={limit}");
             if let Some(s) = &status {
                 path.push_str(&format!("&status={}", encode_q(s)));
@@ -1067,14 +1097,18 @@ fn run(cli: Cli) -> Result<()> {
             let rows = v["runs"].as_array().cloned().unwrap_or_default();
             for r in &rows {
                 let dur = r["durationMs"].as_u64().map(|d| format!("{d}ms")).unwrap_or_default();
+                // the Rust cell names the operation (`op`); the TypeScript runtime the workflow (`wf`)
+                let tries = match r["maxAttempts"].as_u64() {
+                    Some(max) => format!("try {}/{max}", r["attempt"].as_u64().unwrap_or(0)),
+                    None => format!("attempt {}", r["attempt"].as_u64().unwrap_or(0)),
+                };
                 println!(
-                    "#{}\t{}\t{}\t{}\ttry {}/{}\t{}",
+                    "#{}\t{}\t{}\t{}\t{}\t{}",
                     r["id"].as_u64().unwrap_or(0),
                     r["via"].as_str().unwrap_or("?"),
-                    r["wf"].as_str().unwrap_or("?"),
+                    r["op"].as_str().or(r["wf"].as_str()).unwrap_or("?"),
                     r["status"].as_str().unwrap_or("?"),
-                    r["attempt"].as_u64().unwrap_or(0),
-                    r["maxAttempts"].as_u64().unwrap_or(0),
+                    tries,
                     dur,
                 );
                 if let Some(e) = r["error"].as_str() {

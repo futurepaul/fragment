@@ -23,8 +23,13 @@
 //!   POST   /api/webhook                   code.storage (HMAC)
 //!   GET    /api/files  /api/file?path=  /api/file/stat?path=   viewer
 //!   GET    /api/events?since=             viewer
-//!   POST   /api/ops/<operation>           the operation's role
+//!   POST   /api/ops/<operation>           the operation's role (a job answers its run)
+//!   GET    /api/runs?status=&op=  /api/runs/<id>   viewer
+//!   POST   /api/replay  POST /api/pause   editor
+//!   GET    /api/triggers                  viewer
+//!   POST   /api/inbox                     the inbox token (no signature)
 //!   *      /serve/<path>                  the site, `__tree`, `__file`, `__op`, `__watch`
+//!   POST   /job/advance|effect|finish     a run's Workflow (jobs.rs); never routed from outside
 
 use std::cell::{Cell, RefCell};
 
@@ -72,7 +77,14 @@ CREATE TABLE IF NOT EXISTS deliveries (key TEXT PRIMARY KEY, at INTEGER NOT NULL
 CREATE TABLE IF NOT EXISTS code (
   id INTEGER PRIMARY KEY CHECK (id = 1), sha TEXT NOT NULL, loader_id TEXT NOT NULL, source TEXT NOT NULL,
   operations TEXT NOT NULL, cpu_ms INTEGER NOT NULL, installed_at INTEGER NOT NULL,
-  channels TEXT NOT NULL DEFAULT '{}', modules TEXT NOT NULL DEFAULT '{}');
+  channels TEXT NOT NULL DEFAULT '{}', modules TEXT NOT NULL DEFAULT '{}', triggers TEXT NOT NULL DEFAULT '[]');
+CREATE TABLE IF NOT EXISTS runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, via TEXT NOT NULL, trigger TEXT, principal TEXT NOT NULL,
+  role TEXT NOT NULL, depth INTEGER NOT NULL, call_id TEXT, input_sha TEXT, input TEXT NOT NULL, status TEXT NOT NULL,
+  attempt INTEGER NOT NULL, output TEXT, error TEXT, created_at INTEGER NOT NULL, launched_at INTEGER, finished_at INTEGER);
+CREATE UNIQUE INDEX IF NOT EXISTS runs_call ON runs (principal, call_id) WHERE call_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS runs_status ON runs (status, op);
+CREATE TABLE IF NOT EXISTS schedules (idx INTEGER PRIMARY KEY, op TEXT NOT NULL, cron TEXT NOT NULL, next_at INTEGER NOT NULL);
 ";
 
 #[durable_object]
@@ -94,9 +106,13 @@ impl DurableObject for FragmentCell {
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         let sql = state.storage().sql();
         sql.exec(SCHEMA, None).expect("the Fragment schema applies");
-        // a code table made before channels and applib (phase 2 slice B)
+        // a code table made before channels, applib, and triggers (phase 2 slices B and C)
         let cols: Vec<Value> = sql.exec("PRAGMA table_info(code)", None).and_then(|c| c.to_array()).unwrap_or_default();
-        for (col, decl) in [("channels", "channels TEXT NOT NULL DEFAULT '{}'"), ("modules", "modules TEXT NOT NULL DEFAULT '{}'")] {
+        for (col, decl) in [
+            ("channels", "channels TEXT NOT NULL DEFAULT '{}'"),
+            ("modules", "modules TEXT NOT NULL DEFAULT '{}'"),
+            ("triggers", "triggers TEXT NOT NULL DEFAULT '[]'"),
+        ] {
             if !cols.iter().any(|c| c["name"] == col) {
                 sql.exec(&format!("ALTER TABLE code ADD COLUMN {decl}"), None).expect("the code table migrates");
             }
@@ -267,6 +283,25 @@ impl FragmentCell {
         let routed_name = req.headers().get(NAME_HEADER)?.ok_or_else(|| CellError::host("no fragment name from the router"))?;
         let caller = Caller { principal, url: arrived };
         let path = req.path();
+        if let Some(step) = path.strip_prefix("/job/") {
+            // Only this script's Workflow sets the header; the router never passes it.
+            if req.headers().get(crate::jobs::JOB_HEADER)?.is_none() {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            let bytes = req.bytes().await?;
+            let body: Value = serde_json::from_slice(&bytes).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            // A Workflow from a deleted fragment's earlier life stops.
+            if body["incarnation"].as_str() != self.meta("created_at")?.as_deref() {
+                return json_response(&json!({ "stop": true }));
+            }
+            let answer = match step {
+                "advance" => self.job_advance(body, bytes.len()).await?,
+                "effect" => self.job_effect(body).await?,
+                "finish" => self.job_finish(body)?,
+                _ => return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
+            };
+            return json_response(&answer);
+        }
         if let Some(rest) = path.strip_prefix("/serve/") {
             let rest = rest.to_string();
             return self.serve(req, &caller, &routed_name, &rest).await;
@@ -340,6 +375,29 @@ impl FragmentCell {
                 let body = body_json(&mut req).await?;
                 let op = op.to_string();
                 self.api_op(&caller, &op, body).await
+            }
+            (Method::Get, ["api", "runs"]) => {
+                let limit = query("limit").and_then(|s| s.parse().ok()).unwrap_or(30);
+                self.runs_api(&caller, query("status"), query("op"), limit)
+            }
+            (Method::Get, ["api", "runs", id]) => self.run_api(&caller, id),
+            (Method::Post, ["api", "replay"]) => {
+                let body = body_json(&mut req).await?;
+                self.replay(&caller, body).await
+            }
+            (Method::Post, ["api", "pause"]) => {
+                let body = body_json(&mut req).await?;
+                self.pause(&caller, body)
+            }
+            (Method::Get, ["api", "triggers"]) => self.triggers_api(&caller),
+            (Method::Post, ["api", "inbox"]) => {
+                let token = match req.headers().get("x-fragment-inbox-token")? {
+                    Some(t) => t,
+                    None => query("t").unwrap_or_default(),
+                };
+                let hops = req.headers().get(crate::jobs::HOPS_HEADER)?.and_then(|h| h.parse().ok()).unwrap_or(0);
+                let body = req.bytes().await?;
+                self.inbox(&token, hops, &body).await
             }
             _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {path}", req.method().as_ref()))),
         }
@@ -481,7 +539,8 @@ impl FragmentCell {
         json_response(&json!({ "events": events }))
     }
 
-    /// The alarm runs the index outbox and the poll backstop, then re-arms.
+    /// The alarm runs the index outbox, due schedules, queued runs, and the
+    /// poll backstop (which also checks running runs), then re-arms.
     async fn on_alarm(&self) -> CellResult<()> {
         if self.meta("created_at")?.is_none() {
             return Ok(());
@@ -492,10 +551,15 @@ impl FragmentCell {
                 self.sweep(&facet).await?;
             }
         }
+        self.fire_cron()?;
+        self.launch_queued().await;
         let poll_at: i64 = self.meta("poll_at")?.and_then(|s| s.parse().ok()).unwrap_or(0);
         if poll_at <= js::now_ms() {
             self.trim_audit()?;
+            self.trim_runs()?;
             self.poll().await;
+            self.reconcile_runs().await;
+            self.launch_queued().await;
             self.set_meta("poll_at", &(js::now_ms() + self.cfg.poll_interval_ms).to_string())?;
         }
         self.schedule().await
@@ -508,7 +572,7 @@ impl FragmentCell {
         }
         let poll_at: i64 = self.meta("poll_at")?.and_then(|s| s.parse().ok()).unwrap_or_else(|| js::now_ms() + self.cfg.poll_interval_ms);
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
-        let at = outbox.map_or(poll_at, |o| o.min(poll_at)).max(js::now_ms() + 50);
+        let at = [outbox, self.runs_due_at()?].into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + 50);
         self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;
         Ok(())
     }

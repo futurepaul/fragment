@@ -32,13 +32,18 @@ The new runtime (`cell/`, Rust; phase 2, `docs/phase-2.md`):
   runs `crates/e2e` against a fresh `celld dev` node and the in-process
   code.storage fake (sections: auth, create, lockdown, members, secrets,
   files, deploy, ops, public, site, watch, schemas, channels, live,
-  routes, cli, browser, sync, restart, pathmode). The browser section
-  drives headless Chrome (`CHROME_BIN` to choose one).
+  routes, cli, browser, jobs, triggers, sync, restart, pathmode). The
+  browser section drives headless Chrome (`CHROME_BIN` to choose one);
+  `triggers` waits for a cron minute (about a minute).
 - `cargo xtask dev [--clean]`: the new stack in the foreground: the cell
   on :8790 with fragments at `http://<name>.fragment.localhost:8790/`, and
   the code.storage fake on :8792 (state in `target/devstack/`; its org
   key and the host secret are made there on first run). Point the CLI at
-  it with `FRAGMENT_HOST=http://127.0.0.1:8790`.
+  it with `FRAGMENT_HOST=http://127.0.0.1:8790`. Dev fleets let jobs
+  fetch local addresses (`FRAGMENT_EGRESS_LOCAL=allow`).
+- Templates on the new model: `fragment new --template todo` (operations,
+  channels, the browser library) and `--template inbox` (a trigger, a
+  job, the inbox).
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
   logic, host-tested), `crates/nip98`, `crates/fakes` (code.storage),
   `crates/devstack`, `crates/e2e`.

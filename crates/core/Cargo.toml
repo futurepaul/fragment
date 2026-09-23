@@ -13,6 +13,7 @@ sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
 bech32 = "0.9"
+url = "2.5"
 hmac = "0.12"
 hkdf = "0.12"
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }

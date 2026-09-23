@@ -36,19 +36,15 @@ without a delete condition is unfinished design, not debt.
   hibernatable WebSockets, the Worker Loader, and facets, with a ~35-line
   JavaScript shim, 181 KB of gzipped wasm, and ~9 ms once per isolate.
 
-## Primitives with no check: web push, the inbox cap
+## A primitive with no check: web push
 
 - **Observed:** `docs/published-fragments.md` (2026-09-23). Web push
-  (`webpush.ts`, 336 lines) has no test anywhere; the 1000-message inbox
-  cap has no e2e. (Presence: proven in the Rust e2e, slice C.)
-- **Risk:** linecount- and meatproxy-style notifications, presence
-  lists, or overload behavior break silently.
-- **First proof:** any change to `webpush.ts`, `rooms.ts`, or the inbox
-  route.
-- **Delete when:** the Rust e2e (phase 1) proves subscribe → `ctx.push`
-  → an encrypted delivery accepted by a fake push service, presence
-  join/leave frames, and a 1001st pending message answered with 429 and
-  a `queue.rejected` event.
+  (`webpush.ts`, 336 lines) has no test anywhere. (Presence: proven in
+  the Rust e2e, slice C; the inbox cap: slice D, e2e `triggers`.)
+- **Risk:** linecount- and meatproxy-style notifications break silently.
+- **First proof:** any change to `webpush.ts`.
+- **Delete when:** the Rust e2e (slice F) proves a subscription → a
+  delivery → an encrypted push accepted by a fake push service.
 
 ## Shell, Node, and Python tooling
 
@@ -162,3 +158,47 @@ without a delete condition is unfinished design, not debt.
   numbers.
 - **Delete when:** `fragment.json` can declare a channel's retention
   (count or age) with a platform ceiling, enforced and tested.
+
+## Job egress is checked by URL, not by address
+
+- **Observed:** phase 2 slice D. A job's fetch leaves from the fragment's
+  supervisor; `crates/core/src/egress.rs` refuses loopback, private,
+  link-local, and `.internal`/`.flycast` hosts by the URL. A public name
+  that resolves to a private address (DNS rebinding, or a record someone
+  points at the fleet) is not caught there. (Redirects are not followed:
+  the job gets the 3xx and a fetch of its target is checked again.)
+- **Risk:** an author's job reaches the fleet's private network: celld's
+  unauthenticated internal listener, other services on Fly's 6PN.
+- **First proof:** a hosted fleet running strangers' jobs.
+- **Delete when:** phase 3 gives the nodes an outbound firewall that
+  drops private destinations from the worker process (or the fork's
+  native egress resolves and pins the address, and refuses redirects),
+  with a test that a name resolving to 127.0.0.1 is refused.
+
+## A secret can go anywhere its fragment's code sends it
+
+- **Observed:** phase 2 slice D. `{{NAME}}` in a job's fetch header is
+  opened for any URL the job names. An editor cannot read a secret's
+  value, but can write a job that sends it to their own server.
+- **Risk:** editors are trusted with the fragment's code, so this is the
+  code's authority, not an escalation; it matters once people share
+  editing with others they trust less than their keys.
+- **First proof:** a fragment with a secret and an editor who is not its
+  owner.
+- **Delete when:** a secret can name the hosts it may be sent to
+  (`fragment secret set NAME --host api.example.com`), checked at the
+  egress point.
+
+## Running runs are checked a few at a time
+
+- **Observed:** phase 2 slice D. A run whose Workflow ended without
+  reporting (an error outside a step, or a lost instance) is found by the
+  poll backstop, which checks the 25 longest-running runs per pass. Runs
+  asleep for days are checked every pass, and could crowd out a stuck
+  one when there are more than 25.
+- **Risk:** a stuck run stays `running`, holding its inbox record's
+  place under the cap.
+- **First proof:** a fragment with more than 25 long-sleeping jobs.
+- **Delete when:** runs record when they were last checked and the pass
+  takes the least recently checked, or the Workflow reports its own end
+  from a `finally` step.

@@ -137,11 +137,15 @@ impl FragmentCell {
         json_response(&json!({ "channel": channel, "records": records, "next": next }))
     }
 
-    /// Applies a committed mutation's effects, then its `ops` record.
-    pub(crate) fn apply(&self, ledger_id: &str, op: &str, effects: &[Effect]) -> CellResult<()> {
+    /// Applies a committed mutation's effects, then its `ops` record. Each
+    /// new record starts the runs its channel triggers, one hop deeper than
+    /// the mutation (`depth`).
+    pub(crate) fn apply(&self, ledger_id: &str, op: &str, effects: &[Effect], depth: u32) -> CellResult<()> {
         let principal = ledger_id.split_once('/').map(|(p, _)| p).unwrap_or("unknown");
         for (i, e) in effects.iter().enumerate() {
-            self.append(&e.channel, principal, &e.kind, &e.body, Some((ledger_id, i as i64)))?;
+            if let Some(record) = self.append(&e.channel, principal, &e.kind, &e.body, Some((ledger_id, i as i64)))? {
+                self.fire_channel(&record, depth + 1)?;
+            }
         }
         let id = ledger_id.split_once('/').map(|(_, id)| id).unwrap_or(ledger_id);
         if self.append("ops", principal, "mutation", &json!({ "op": op, "id": id }), Some((ledger_id, -1)))?.is_some() {
@@ -164,7 +168,8 @@ impl FragmentCell {
             let done = !self.rows("SELECT seq FROM records WHERE op = ? AND idx = -1", vec![id.into()])?.is_empty();
             if !done && !id.is_empty() {
                 let effects: Vec<Effect> = serde_json::from_value(row["effects"].clone()).unwrap_or_default();
-                self.apply(id, row["name"].as_str().unwrap_or(""), &effects)?;
+                // The depth the mutation ran at is not kept; a swept chain restarts at 0.
+                self.apply(id, row["name"].as_str().unwrap_or(""), &effects, 0)?;
                 applied += 1;
             }
         }

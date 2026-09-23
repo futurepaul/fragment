@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use fragment_proto::{limits, valid_channel_name, valid_op_name, ChannelDecl, OpDecl, OpKind, Role, BUILTIN_CHANNELS};
+use fragment_proto::{limits, valid_channel_name, valid_op_name, ChannelDecl, OpDecl, OpKind, Role, TriggerDecl, TriggerOn, BUILTIN_CHANNELS};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
@@ -21,6 +21,7 @@ pub struct Manifest {
     /// App channels (the built-ins, `events` and `ops`, are not listed).
     pub channels: BTreeMap<String, ChannelDecl>,
     pub meta: Option<Meta>,
+    pub triggers: Vec<TriggerDecl>,
     /// Top-level keys that no longer do anything here.
     pub ignored: Vec<&'static str>,
 }
@@ -46,12 +47,13 @@ fn operation(name: &str, v: &Value) -> Result<OpDecl, String> {
     let kind = match obj.get("kind").and_then(Value::as_str) {
         Some("query") => OpKind::Query,
         Some("mutation") => OpKind::Mutation,
-        _ => return Err(format!("operations.{name}.kind must be \"query\" or \"mutation\"")),
+        Some("job") => OpKind::Job,
+        _ => return Err(format!("operations.{name}.kind must be \"query\", \"mutation\", or \"job\"")),
     };
     let role = match obj.get("role") {
         None => match kind {
             OpKind::Query => Role::Viewer,
-            OpKind::Mutation => Role::Editor,
+            OpKind::Mutation | OpKind::Job => Role::Editor,
         },
         Some(r) => r
             .as_str()
@@ -79,6 +81,45 @@ fn channel(name: &str, v: &Value) -> Result<ChannelDecl, String> {
         Some(r) => r.as_str().and_then(Role::parse).ok_or_else(|| format!("channels.{name}.read must be public, viewer, editor, or owner"))?,
     };
     Ok(ChannelDecl { read })
+}
+
+/// One entry of `triggers`: `{"cron" | "channel" | "files": …, "run": op}`.
+fn trigger(i: usize, v: &Value, m: &Manifest) -> Result<TriggerDecl, String> {
+    let at = format!("triggers[{i}]");
+    let obj = v.as_object().ok_or_else(|| format!("{at} must be an object"))?;
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "cron" | "channel" | "files" | "run")) {
+        return Err(format!("{at} has an unknown key {k:?} (cron, channel, files, run)"));
+    }
+    let text = |k: &str| obj.get(k).map(|v| v.as_str().map(str::to_string).ok_or_else(|| format!("{at}.{k} must be a string"))).transpose();
+    let on = match (text("cron")?, text("channel")?, text("files")?) {
+        (Some(c), None, None) => {
+            crate::cron::Cron::parse(&c).map_err(|e| format!("{at}.cron: {e}"))?;
+            TriggerOn::Cron(c)
+        }
+        (None, Some(c), None) => {
+            if c != "inbox" && !m.channels.contains_key(&c) {
+                return Err(format!("{at}.channel must be inbox or a channel this fragment.json declares, not {c:?}"));
+            }
+            TriggerOn::Channel(c)
+        }
+        (None, None, Some(f)) => {
+            if !crate::glob::valid(&f) {
+                return Err(format!("{at}.files must be a relative path pattern (* ** ?), not {f:?}"));
+            }
+            TriggerOn::Files(f)
+        }
+        _ => return Err(format!("{at} needs exactly one of cron, channel, files")),
+    };
+    let run = text("run")?.ok_or_else(|| format!("{at} needs run: the operation it starts"))?;
+    let decl = m.operations.get(&run).ok_or_else(|| format!("{at}.run names no declared operation: {run:?}"))?;
+    if decl.kind == OpKind::Query {
+        return Err(format!("{at}.run: {run} is a query; a trigger runs a mutation or a job"));
+    }
+    // A triggered run acts as the fragment itself, with an editor's reach.
+    if decl.role > Role::Editor {
+        return Err(format!("{at}.run: {run} needs the owner role; a trigger acts as an editor"));
+    }
+    Ok(TriggerDecl { on, run })
 }
 
 pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
@@ -132,6 +173,19 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
         }
         Some(_) => return Err("meta must be an object".into()),
     }
+    match obj.get("triggers") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(list)) => {
+            if list.len() > limits::TRIGGERS_MAX {
+                return Err(format!("at most {} triggers", limits::TRIGGERS_MAX));
+            }
+            for (i, t) in list.iter().enumerate() {
+                let t = trigger(i, t, &m)?;
+                m.triggers.push(t);
+            }
+        }
+        Some(_) => return Err("triggers must be an array".into()),
+    }
     Ok(m)
 }
 
@@ -155,6 +209,17 @@ mod tests {
         let m = parse(br#"{"channels":{"chat":{},"news":{"read":"public"}}}"#).unwrap();
         assert_eq!(m.channels["chat"].read, Role::Viewer);
         assert_eq!(m.channels["news"].read, Role::Public);
+        let m = parse(br#"{"operations":{"digest":{"kind":"job"},"save":{"kind":"mutation"}},"channels":{"chat":{}},
+            "triggers":[{"cron":"0 9 * * *","run":"digest"},{"channel":"inbox","run":"save"},{"channel":"chat","run":"digest"},
+            {"files":"notes/**","run":"digest"}]}"#)
+        .unwrap();
+        assert_eq!(m.operations["digest"], OpDecl { kind: OpKind::Job, role: Role::Editor, input: None });
+        assert_eq!(m.triggers.len(), 4);
+        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Cron("0 9 * * *".into()), run: "digest".into() });
+        assert_eq!(m.triggers[1].on, TriggerOn::Channel("inbox".into()));
+        assert_eq!(m.triggers[3].on, TriggerOn::Files("notes/**".into()));
+        let back: TriggerDecl = serde_json::from_value(serde_json::to_value(&m.triggers[0]).unwrap()).unwrap();
+        assert_eq!(back, m.triggers[0], "stored triggers read back");
     }
 
     #[test]
@@ -162,7 +227,17 @@ mod tests {
         for bad in [
             &br#"[]"#[..],
             br#"{"operations":{"Bad":{"kind":"query"}}}"#,
-            br#"{"operations":{"x":{"kind":"job"}}}"#,
+            br#"{"operations":{"x":{"kind":"task"}}}"#,
+            br#"{"operations":{"x":{"kind":"job"}},"triggers":[{"cron":"* * * *","run":"x"}]}"#,
+            br#"{"operations":{"x":{"kind":"query"}},"triggers":[{"cron":"* * * * *","run":"x"}]}"#,
+            br#"{"operations":{"x":{"kind":"job","role":"owner"}},"triggers":[{"cron":"* * * * *","run":"x"}]}"#,
+            br#"{"operations":{"x":{"kind":"job"}},"triggers":[{"channel":"events","run":"x"}]}"#,
+            br#"{"operations":{"x":{"kind":"job"}},"triggers":[{"channel":"chat","run":"x"}]}"#,
+            br#"{"operations":{"x":{"kind":"job"}},"triggers":[{"files":"/abs","run":"x"}]}"#,
+            br#"{"operations":{"x":{"kind":"job"}},"triggers":[{"cron":"* * * * *","files":"a","run":"x"}]}"#,
+            br#"{"operations":{"x":{"kind":"job"}},"triggers":[{"cron":"* * * * *","run":"y"}]}"#,
+            br#"{"operations":{"x":{"kind":"job"}},"triggers":[{"cron":"* * * * *"}]}"#,
+            br#"{"operations":{"x":{"kind":"job"}},"triggers":{"cron":"* * * * *","run":"x"}}"#,
             br#"{"operations":{"x":{"kind":"query","rol":"public"}}}"#,
             br#"{"operations":{"x":{"kind":"query","role":"admin"}}}"#,
             br#"{"operations":{"x":{"kind":"query","input":"string"}}}"#,

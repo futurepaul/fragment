@@ -94,11 +94,16 @@ caller (`principal`, `role`) and, in a mutation, collects its effects
   **effects** through `call`; the ledger row keeps them, so the ledger is
   also an outbox. Ledger rows are kept seven days: a replay after that
   runs again.
-- **job** — runs as a Workflow instance whose id is the namespaced
-  operation id; each `step.do` is a query, a mutation, or an external
-  effect, so retries, backoff, `waitForEvent` (approvals, invites), and
-  sleeps are celld's. fragment's failure leg (held runs, replay,
-  auto-pause, hop budget, loop suppression) moves onto this.
+- **job** — runs as a Workflow instance, one per run; its method gets
+  `(input, job)`, and each `await job.call(op)` (a query, a mutation, or
+  another job), `job.fetch(url)` (the external effect: secrets are added
+  at the egress point), `job.publish`, or `job.sleep` is a durable step,
+  so retries, backoff, and sleeps are celld's. The body runs in the app
+  facet by replay up to its next step; the Workflow, platform code, takes
+  the step through the supervisor. fragment's failure leg (held runs,
+  replay, auto-pause, the hop budget) is on runs (phase 2 slice D;
+  `docs/api.md`, Jobs and triggers). `waitForEvent` (approvals, invites)
+  comes with agents.
 
 The call path, for every trigger:
 
@@ -121,7 +126,10 @@ never marked applied.
 Triggers: an HTTP call from the UI (`POST /__op/<name>`), `fragment call`
 from the CLI, an agent tool call (an operation's schema *is* its tool
 schema), a cron entry, an inbox webhook, a channel message, a pin move
-(file change), and a computer event. A custom `App.fetch` stays
+(file change), and a computer event. The last four are declared in
+`fragment.json`'s `triggers` and start runs as the fragment's own key;
+a triggered mutation is a run of one step, so it retries and is held
+like a job. A custom `App.fetch` stays
 available for routes that are not operations (dynamic HTML, file
 serving), but agents and the platform only use operations.
 
@@ -130,8 +138,10 @@ serving), but agents and the platform only use operations.
 A channel is a supervisor table: `(channel, seq)` → `{at, principal,
 kind, body, op_id}`, append-only, with a per-channel retention policy.
 
-- Built in: `events` (audit, platform-written), `inbox` (webhooks; the
-  pending cap answers 429; slice D), `ops` (`{op, id}` per applied
+- Built in: `events` (audit, platform-written), `inbox` (webhooks,
+  appended by the inbox route; its pending records are the runs they
+  triggered that have not succeeded, and at 1000 a post is 429), `ops`
+  (`{op, id}` per applied
   mutation: the ledger's public view, and the marker that its effects
   were applied), and app-declared channels (a chat transcript, a room's
   messages), declared in `fragment.json` with the role that may read

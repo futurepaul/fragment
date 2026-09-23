@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Inbox</title>
+  <style>
+    :root { --bg: #f7f5f0; --fg: #1d1b16; --muted: #857f72; --line: #e2ddd2; --accent: #2f5d50; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #16150f; --fg: #eeeae0; --muted: #9a9384; --line: #2d2b24; --accent: #7fb5a3; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 ui-sans-serif, system-ui, sans-serif; }
+    main { max-width: 38rem; margin: 3rem auto; padding: 0 1rem; }
+    h1 { font: 600 1.6rem/1.2 Georgia, serif; margin: 0 0 .25rem; }
+    p { color: var(--muted); font-size: .9rem; }
+    code { font-size: .85em; background: var(--line); padding: .1rem .3rem; border-radius: .25rem; overflow-wrap: anywhere; }
+    ul { list-style: none; padding: 0; margin: 1.5rem 0 0; }
+    li { padding: .6rem 0; border-bottom: 1px solid var(--line); }
+    li small { display: block; color: var(--muted); font-size: .8rem; }
+    li.new { animation: flash 1.2s ease-out; }
+    @keyframes flash { from { background: color-mix(in srgb, var(--accent) 25%, transparent); } to { background: transparent; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Inbox</h1>
+    <p>Anything posted to this fragment's inbox shows up here, live. From a terminal:
+      <code>fragment inbox &lt;name&gt; --token &lt;inbox token&gt; --payload '{"text":"hello"}'</code>
+      (the token is in <code>fragment status &lt;name&gt;</code>). A payload with a <code>url</code> is fetched for its title.</p>
+    <ul id="items"></ul>
+  </main>
+  <script type="module">
+    import * as fragment from "./__fragment.js";
+
+    let seen = null;
+    fragment.live("list", {}, ({ items }) => {
+      document.getElementById("items").replaceChildren(...items.map((i) => {
+        const li = document.createElement("li");
+        if (seen && !seen.has(i.id)) li.className = "new";
+        li.append(i.text, Object.assign(document.createElement("small"), { textContent: `${i.source} · ${new Date(i.at).toLocaleString()}` }));
+        return li;
+      }));
+      seen = new Set(items.map((i) => i.id));
+    });
+  </script>
+</body>
+</html>
