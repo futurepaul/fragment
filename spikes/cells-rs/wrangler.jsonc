@@ -1,0 +1,11 @@
+{
+  "name": "spike-cells-rs",
+  // entry.mjs re-exports the workers-rs shim and adds the capability
+  // entrypoints loaded code receives (workers-rs 0.8.5 has no
+  // WorkerEntrypoint classes).
+  "main": "entry.mjs",
+  "compatibility_date": "2026-01-01",
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "durable_objects": { "bindings": [{ "name": "SUPERVISOR", "class_name": "Supervisor" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Supervisor"] }]
+}

@@ -30,12 +30,11 @@ without a delete condition is unfinished design, not debt.
   strings, not typed enums, at the cell boundary.
 - **First proof:** a bug class the Rust type system or typed errors
   would have caught, found in the runtime.
-- **Delete when:** the Rust-cells spike (`docs/MODEL.md`, spike 1)
-  shows workers-rs on celld covers the supervisor (SQL, hibernatable
-  WebSockets, alarms, Worker Loader and facets, with at most a thin
-  JavaScript shim) at acceptable bundle size and cold activation; the
-  platform cells are then rewritten in Rust during the core cut. celld
-  documents workers-rs support (https://celld.dev/docs/wasm).
+- **Delete when:** the platform cells are rewritten in Rust during the
+  core cut. The spike that gated this passed on 2026-09-23
+  (`spikes/cells-rs/README.md`): workers-rs 0.8.5 covers SQL, alarms,
+  hibernatable WebSockets, the Worker Loader, and facets, with a ~35-line
+  JavaScript shim, 181 KB of gzipped wasm, and ~9 ms once per isolate.
 
 ## Primitives with no check: web push, room presence, the inbox cap
 
@@ -59,8 +58,10 @@ without a delete condition is unfinished design, not debt.
 - **Risk:** infrastructure in languages the engineering style excludes;
   untyped glue that fails at runtime.
 - **First proof:** already present.
-- **Delete when:** phase 1 lands the `xtask` crate and the Rust e2e, and
-  phase 2 replaces the VPS deploy with Fly.
+- **Delete when:** phase 2 lands the `xtask` crate and the Rust e2e, and
+  phase 3 replaces the VPS deploy with Fly. The spike drivers
+  (`spikes/driver`) are the first Rust harness pieces; `scripts/dev` now
+  also writes `runtime/.dev.vars` for celld 0.5.
 
 ## The e2e generation lane needs a fake host flag
 

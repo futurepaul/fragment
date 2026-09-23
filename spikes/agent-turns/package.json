@@ -1,0 +1,8 @@
+{
+  "name": "spike-agent-turns",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "libfx": "0.0.10"
+  }
+}

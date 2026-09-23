@@ -1,0 +1,11 @@
+{
+  "name": "spike-cells-js",
+  "main": "index.js",
+  "compatibility_date": "2026-01-01",
+  // platform.txt (a copy of ../apps/platform.mjs; the driver checks they
+  // match) is sent to loaded code as text; celld rules take `**/*.ext` only
+  "rules": [{ "type": "Text", "globs": ["**/*.txt"] }],
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "durable_objects": { "bindings": [{ "name": "SUPERVISOR", "class_name": "Supervisor" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Supervisor"] }]
+}

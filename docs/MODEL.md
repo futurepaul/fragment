@@ -1,9 +1,10 @@
 # MODEL — the fragment-next core model
 
-Status: proposed 2026-09-23, for review. This is the target shape the
-runtime is hard-cut to (ROADMAP decisions 2-4 and the five changes Paul
-approved the same day). Every mechanism names the celld primitive it
-uses; read with the celld docs (https://celld.dev/docs/, v0.5.1).
+Status: proposed 2026-09-23, revised the same day by the phase 1 spikes
+(`spikes/README.md`). This is the target shape the runtime is hard-cut to
+(ROADMAP decisions 2-4 and the five changes Paul approved). Every
+mechanism names the celld primitive it uses; read with the celld docs
+(https://celld.dev/docs/, v0.5.1).
 
 ## The five changes
 
@@ -31,8 +32,8 @@ uses; read with the celld docs (https://celld.dev/docs/, v0.5.1).
 
 | Part | celld primitive | Holds |
 |---|---|---|
-| Supervisor | a Durable Object (`Fragment`), platform code | members, invites, the operation ledger, channels, schedules, wrapped secrets, the file-plane pins and tree index, the live code pin |
-| App | a **Durable Object Facet** named `app`, started from the author's `App` class loaded with the **Worker Loader** at `live@SHA` | the author's SQLite database (`this.ctx.storage.sql`), which the supervisor's tables never share |
+| Supervisor | a Durable Object (`Fragment`), platform code in Rust | members, invites, the audit copy of the operation ledger, channels, schedules, wrapped secrets, the file-plane pins and tree index, the live code pin |
+| App | a **Durable Object Facet** named `app`, started through the **Worker Loader** at `live@SHA` from `platform.js` (platform code) wrapping the author's `App` class | the author's SQLite database (`this.ctx.storage.sql`), which the supervisor's tables never share, and the mutation ledger `_fragment_ops` beside it |
 | Files | code.storage git (wire contract unchanged) | code, templates, documents |
 | Bytes | an **R2** binding (the fleet bucket under `r2/<bucket>/`) | uploads, generated images and video, exports |
 | Jobs | **Workflows** (each instance is a cell) | multi-step or long operations, and agent turns |
@@ -51,9 +52,13 @@ secret injection) or `null` to remove ambient network entirely.
 
 Why a facet and not our own SQL loopback: a facet gives author code a
 real, private SQLite database that replicates with the supervisor in one
-upload, commits or rolls back with the supervisor's transaction, and
-cannot see platform tables. finite-next filtered SQL strings with a
-regex instead; that is deleted.
+upload and cannot see platform tables. finite-next filtered SQL strings
+with a regex instead; that is deleted. The supervisor's root transaction
+cannot enclose a facet call (spike 2: celld writes the facet's whole
+image into one root row at commit, which fails past ~1.6 MB, and a
+capability call inside it deadlocks), so atomicity lives inside the
+facet: platform code runs each mutation and its ledger row in the facet's
+own `transactionSync`.
 
 ## Operations
 
@@ -72,25 +77,38 @@ Declared in `fragment.json`:
 Implemented as methods of the author's `App` class (the facet answers
 RPC methods), each receiving `(input, ctx)`:
 
-- **query** — read-only; not ledgered; may be re-run on change signals to
-  drive live views.
-- **mutation** — one facet turn, transactional; ledgered by operation id.
+- **query** — read-only; not ledgered; may be async and may call read
+  capabilities (files, channels, blobs); may be re-run on change signals
+  to drive live views.
+- **mutation** — synchronous, over the app's own SQL only: no `await`, no
+  capabilities, no network. Platform code in the facet runs it and its
+  ledger row in one `transactionSync` keyed by operation id. What it
+  wants to happen next (channel records, notifications, starting a job, a
+  vault's file writes) it returns as **effects**; the ledger row keeps
+  them, so the ledger is also an outbox.
 - **job** — runs as a Workflow instance whose id is the namespaced
-  operation id; each `step.do` calls back into the supervisor, so
-  retries, backoff, `waitForEvent` (approvals, invites), and sleeps are
-  celld's. fragment's failure leg (held runs, replay, auto-pause, hop
-  budget, loop suppression) moves onto this.
+  operation id; each `step.do` is a query, a mutation, or an external
+  effect, so retries, backoff, `waitForEvent` (approvals, invites), and
+  sleeps are celld's. fragment's failure leg (held runs, replay,
+  auto-pause, hop budget, loop suppression) moves onto this.
 
 The call path, for every trigger:
 
 ```
 trigger ─▶ principal + op id + input ─▶ Fragment (supervisor)
-   role check ─▶ schema check ─▶ ledger lookup
-     ├─ same id, same input, done   → return the stored result
-     ├─ same id, different input    → reject (conflicting body)
-     └─ new                         → App facet method (or Workflow for jobs)
-   ─▶ ledger result ─▶ append to channels ─▶ change signal to subscribers
+   role check ─▶ schema check ─▶ App facet __mutate(id, name, sha(input), input)
+      facet transactionSync: ledger lookup
+        ├─ same id, same input      → the stored result (a replay)
+        ├─ same id, different input → reject (conflicting body)
+        └─ new                      → the author's method, then its ledger row
+   ─▶ apply returned effects keyed by (op id, index) ─▶ mark the row applied
+   ─▶ append to channels ─▶ change signal to subscribers
 ```
+
+A supervisor that dies after the facet committed loses nothing: the
+caller's retry is a replay that returns the same effects, and on
+activation the supervisor sweeps ledger rows the facet committed but it
+never marked applied.
 
 Triggers: an HTTP call from the UI (`POST /__op/<name>`), `fragment call`
 from the CLI, an agent tool call (an operation's schema *is* its tool
@@ -143,10 +161,12 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
 - An agent is a Durable Object with a key, memory in SQL (with the
   `sqlite_vec` flag for recall), and memberships in fragments.
 - A turn is a Workflow instance: model calls (OpenRouter through the
-  host) and tool calls (operations) are steps, so a crashed turn replays
-  from recorded results instead of repeating effects. This depends on
-  driving libfx deterministically from step results (spike below);
-  finite-next's lease, watchdog, and operation log are the fallback.
+  host) and tool calls (operations keyed `<turn>:tool-<n>`) are steps, so
+  a crashed turn replays from recorded results instead of repeating
+  effects (spike 3: SIGKILL mid model call and mid tool effect, no
+  finished call repeated, the in-flight effect applied once). Each model
+  step records the request's hash; a replay that asks a different
+  question fails the turn.
 - A chat is a fragment with a `chat` channel. The agent member
   subscribes; a member's message triggers a turn. Guests act with the
   owner's full authority (ROADMAP decision 3).
@@ -171,7 +191,7 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
 | operation or step result | 1 MiB | the Workflows step-result limit |
 | channel record body | 64 KiB | records are messages, not files |
 | channel page | 1000 records | bounded reads |
-| app facet database | 64 MiB | celld copies the whole facet image into the root after each changed turn |
+| app facet database | 16 MiB default, 64 MiB at most | celld copies the whole facet image into the root after each changed turn: a mutation took ~9 ms at 1 MiB, ~18 ms at 16 MiB, ~55–61 ms at 64 MiB, where root snapshots carrying the image added ~2 MB of replication per mutation (spike 2) |
 | `cpuMs` per invocation | 30 000 | a runaway loop cannot hold the fragment |
 | `subRequests` per invocation | 50 | bounds fan-out |
 | inbox pending | 1000 | overload is a 429, not memory pressure |
@@ -192,22 +212,19 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
 - The internal listener is plaintext and unauthenticated beyond the fleet
   HMAC; it must stay on Fly's private (WireGuard) network.
 
-## Spikes before the cut
+## Spikes (done 2026-09-23; `spikes/README.md`)
 
-1. **Rust cells.** celld runs workers-rs Durable Objects (WASM). Build the
-   supervisor skeleton in Rust: SQL, hibernatable WebSockets, alarms, and
-   the Worker Loader plus facets (through a thin JavaScript shim if
-   workers-rs lacks them). Measure bundle size and cold activation. If it
-   holds, the platform cells are Rust and the TypeScript-runtime debt
-   entry is deleted; author code stays JavaScript.
-2. **Facet as author SQL.** An `App` class with a schema, a mutation, and a
-   query; replay and conflicting-body tests through the supervisor;
-   facet image size vs turn latency at 1, 16, and 64 MiB.
-3. **Deterministic agent turns.** Drive a libfx turn inside a Workflow with
-   model and tool calls as steps; kill the node mid-turn and prove the
-   replay repeats no effect.
-4. **celld v0.5.1.** Move dev and CI from v0.4.0 to v0.5.1 (a wake-format
-   upgrade; dev state resets with `celld dev --clean`).
+1. **Rust cells** — adopted: workers-rs 0.8.5 covers SQL, alarms, and
+   hibernatable WebSockets; the Worker Loader and facets are reached
+   through `js_sys`; a ~35-line JavaScript shim adds `extends
+   DurableObject` (celld refuses RPC otherwise) and the capability
+   `WorkerEntrypoint` classes. ~9 ms once per isolate, 0.05–0.2 ms per
+   request.
+2. **Facet as author SQL** — adopted with the synchronous-mutation rule
+   above; the root transaction is out.
+3. **Deterministic agent turns** — adopted: a libfx turn is a Workflow.
+4. **celld v0.5.1** — adopted; one alarm regression is in the debt
+   ledger.
 
 ## Answered (2026-09-23)
 
@@ -219,3 +236,11 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   ephemeral principal each (above).
 - **Channel retention:** `events` 90 days, `inbox` until acknowledged,
   app-declared channels forever.
+
+## Open (for Paul, from the spikes)
+
+- **Mutations are synchronous and return their effects** (spike 2). This
+  keeps the answered authoring shape (one `App` class, one method per
+  operation) but adds a rule authors feel: a mutation cannot `await`, call
+  a capability, or fetch; queries and jobs can.
+- **Facet database limits**: 16 MiB by default, 64 MiB at most.

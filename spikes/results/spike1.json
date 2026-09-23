@@ -1,0 +1,302 @@
+{
+  "checks": {
+    "failed": [],
+    "passed": 54
+  },
+  "js": {
+    "bundle": {
+      "baseline_js_bytes": 8316,
+      "glue_js_bytes": 0,
+      "shim_js_bytes": 0,
+      "wasm_bytes": 0,
+      "wasm_gzip_bytes": 0
+    },
+    "cold": {
+      "after_idle_eviction_facet_query": {
+        "max_ms": 15.55,
+        "mean_ms": 11.05,
+        "n": 5,
+        "p50_ms": 9.38,
+        "p95_ms": 15.55
+      },
+      "after_idle_eviction_noop": {
+        "max_ms": 18.41,
+        "mean_ms": 8.84,
+        "n": 5,
+        "p50_ms": 6.54,
+        "p95_ms": 18.41
+      },
+      "first_request_after_restart_facet_query": {
+        "max_ms": 6.4,
+        "mean_ms": 5.86,
+        "n": 5,
+        "p50_ms": 5.84,
+        "p95_ms": 6.4
+      },
+      "first_request_after_restart_noop": {
+        "max_ms": 1.64,
+        "mean_ms": 1.61,
+        "n": 5,
+        "p50_ms": 1.6,
+        "p95_ms": 1.64
+      },
+      "process_start_to_ready": {
+        "max_ms": 4397.26,
+        "mean_ms": 4376.89,
+        "n": 5,
+        "p50_ms": 4387.37,
+        "p95_ms": 4397.26
+      }
+    },
+    "cpu_limit": {
+      "cpu_ms": 200,
+      "next_call_status": 200,
+      "spin_message": "query: Worker exceeded CPU limit of 200 ms",
+      "spin_status": 422,
+      "stopped_after_ms": 210.43
+    },
+    "facet_image": {
+      "16MiB": {
+        "facet_bytes": 16814080,
+        "mutation": {
+          "max_ms": 26.78,
+          "mean_ms": 19.49,
+          "n": 30,
+          "p50_ms": 18.76,
+          "p95_ms": 24.52
+        },
+        "mutation_objects": 31,
+        "mutation_replicated_bytes_per_op": 6489,
+        "supervisor_write": {
+          "max_ms": 12.51,
+          "mean_ms": 7.39,
+          "n": 30,
+          "p50_ms": 7.11,
+          "p95_ms": 12.07
+        },
+        "supervisor_write_objects": 31,
+        "supervisor_write_replicated_bytes_per_op": 418
+      },
+      "1MiB": {
+        "facet_bytes": 1134592,
+        "mutation": {
+          "max_ms": 23.98,
+          "mean_ms": 9.37,
+          "n": 30,
+          "p50_ms": 8.21,
+          "p95_ms": 20.06
+        },
+        "mutation_objects": 31,
+        "mutation_replicated_bytes_per_op": 77451,
+        "supervisor_write": {
+          "max_ms": 22.14,
+          "mean_ms": 7.65,
+          "n": 30,
+          "p50_ms": 7.16,
+          "p95_ms": 9.14
+        },
+        "supervisor_write_objects": 32,
+        "supervisor_write_replicated_bytes_per_op": 36247
+      },
+      "64MiB": {
+        "facet_bytes": 67637248,
+        "mutation": {
+          "max_ms": 186.94,
+          "mean_ms": 71.32,
+          "n": 30,
+          "p50_ms": 61.3,
+          "p95_ms": 111.74
+        },
+        "mutation_objects": 33,
+        "mutation_replicated_bytes_per_op": 1991065,
+        "supervisor_write": {
+          "max_ms": 16.58,
+          "mean_ms": 7.58,
+          "n": 30,
+          "p50_ms": 7.22,
+          "p95_ms": 9.77
+        },
+        "supervisor_write_objects": 31,
+        "supervisor_write_replicated_bytes_per_op": 418
+      }
+    },
+    "warm": {
+      "mutation": {
+        "max_ms": 10.25,
+        "mean_ms": 7.89,
+        "n": 200,
+        "p50_ms": 7.85,
+        "p95_ms": 8.77
+      },
+      "noop": {
+        "max_ms": 0.45,
+        "mean_ms": 0.22,
+        "n": 200,
+        "p50_ms": 0.21,
+        "p95_ms": 0.31
+      },
+      "query": {
+        "max_ms": 0.78,
+        "mean_ms": 0.4,
+        "n": 200,
+        "p50_ms": 0.38,
+        "p95_ms": 0.57
+      },
+      "supervisor_write": {
+        "max_ms": 15.05,
+        "mean_ms": 7.49,
+        "n": 200,
+        "p50_ms": 6.93,
+        "p95_ms": 13.09
+      }
+    }
+  },
+  "rs": {
+    "bundle": {
+      "baseline_js_bytes": 0,
+      "glue_js_bytes": 27816,
+      "shim_js_bytes": 1368,
+      "wasm_bytes": 516626,
+      "wasm_gzip_bytes": 180580
+    },
+    "cold": {
+      "after_idle_eviction_facet_query": {
+        "max_ms": 23.46,
+        "mean_ms": 13.3,
+        "n": 5,
+        "p50_ms": 13.5,
+        "p95_ms": 23.46
+      },
+      "after_idle_eviction_noop": {
+        "max_ms": 11.87,
+        "mean_ms": 8.44,
+        "n": 5,
+        "p50_ms": 9.76,
+        "p95_ms": 11.87
+      },
+      "first_request_after_restart_facet_query": {
+        "max_ms": 12.3,
+        "mean_ms": 11.47,
+        "n": 5,
+        "p50_ms": 11.19,
+        "p95_ms": 12.3
+      },
+      "first_request_after_restart_noop": {
+        "max_ms": 14.25,
+        "mean_ms": 11.09,
+        "n": 5,
+        "p50_ms": 10.43,
+        "p95_ms": 14.25
+      },
+      "process_start_to_ready": {
+        "max_ms": 4402.76,
+        "mean_ms": 4386.58,
+        "n": 5,
+        "p50_ms": 4398.51,
+        "p95_ms": 4402.76
+      }
+    },
+    "cpu_limit": {
+      "cpu_ms": 200,
+      "next_call_status": 200,
+      "spin_message": "query: Worker exceeded CPU limit of 200 ms",
+      "spin_status": 422,
+      "stopped_after_ms": 211.73
+    },
+    "facet_image": {
+      "16MiB": {
+        "facet_bytes": 16814080,
+        "mutation": {
+          "max_ms": 22.43,
+          "mean_ms": 18.67,
+          "n": 30,
+          "p50_ms": 18.21,
+          "p95_ms": 21.55
+        },
+        "mutation_objects": 31,
+        "mutation_replicated_bytes_per_op": 6488,
+        "supervisor_write": {
+          "max_ms": 17.47,
+          "mean_ms": 8.32,
+          "n": 30,
+          "p50_ms": 7.75,
+          "p95_ms": 12.84
+        },
+        "supervisor_write_objects": 32,
+        "supervisor_write_replicated_bytes_per_op": 444
+      },
+      "1MiB": {
+        "facet_bytes": 1134592,
+        "mutation": {
+          "max_ms": 28.18,
+          "mean_ms": 9.72,
+          "n": 30,
+          "p50_ms": 8.71,
+          "p95_ms": 19.56
+        },
+        "mutation_objects": 32,
+        "mutation_replicated_bytes_per_op": 77477,
+        "supervisor_write": {
+          "max_ms": 23.39,
+          "mean_ms": 8.71,
+          "n": 30,
+          "p50_ms": 8.23,
+          "p95_ms": 12.98
+        },
+        "supervisor_write_objects": 31,
+        "supervisor_write_replicated_bytes_per_op": 36222
+      },
+      "64MiB": {
+        "facet_bytes": 67637248,
+        "mutation": {
+          "max_ms": 176.66,
+          "mean_ms": 64.48,
+          "n": 30,
+          "p50_ms": 55.21,
+          "p95_ms": 91.28
+        },
+        "mutation_objects": 33,
+        "mutation_replicated_bytes_per_op": 2221480,
+        "supervisor_write": {
+          "max_ms": 33.72,
+          "mean_ms": 8.0,
+          "n": 30,
+          "p50_ms": 7.04,
+          "p95_ms": 9.1
+        },
+        "supervisor_write_objects": 31,
+        "supervisor_write_replicated_bytes_per_op": 419
+      }
+    },
+    "warm": {
+      "mutation": {
+        "max_ms": 18.19,
+        "mean_ms": 8.28,
+        "n": 200,
+        "p50_ms": 8.21,
+        "p95_ms": 8.95
+      },
+      "noop": {
+        "max_ms": 7.37,
+        "mean_ms": 0.31,
+        "n": 200,
+        "p50_ms": 0.26,
+        "p95_ms": 0.36
+      },
+      "query": {
+        "max_ms": 5.02,
+        "mean_ms": 0.61,
+        "n": 200,
+        "p50_ms": 0.56,
+        "p95_ms": 0.84
+      },
+      "supervisor_write": {
+        "max_ms": 14.9,
+        "mean_ms": 7.83,
+        "n": 200,
+        "p50_ms": 7.16,
+        "p95_ms": 13.68
+      }
+    }
+  }
+}
