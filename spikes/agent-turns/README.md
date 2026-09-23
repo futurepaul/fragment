@@ -43,7 +43,7 @@ instance without waiting for a scan.
   be operations keyed by `<turn>:tool-<n>`, which the operation ledger
   already dedupes (spike 2).
 - Step results are capped at 1 MiB (Workflows), so a model response or a
-  tool result above that must go to R2 and be referenced by key.
+  tool result above that must be stored as a blob and referenced by its hash.
 - Non-step work may stay pending for at most 60 s (celld), so libfx's own
   work between steps must stay short; it does.
 - The fake speaks AI SDK LanguageModelV3 stream parts (`finishReason:

@@ -45,8 +45,8 @@ computer's wake/exec.
    are rebuilt on it. finite-next's app cell, repo layer, and workspace
    sync/publish plumbing are hard-cut (provenance: finite-next
    `claude/cell-agent` @ `6545f08`).
-2. The core model is `docs/MODEL.md`: code in git, state in SQL, bytes in
-   R2, history in channels; one execution primitive (the typed, durable
+2. The core model is `docs/MODEL.md`: files in git (large ones as
+   pointers to blobs in Tigris), state in SQL, history in channels; one execution primitive (the typed, durable
    **operation**); one log (**channels**); membership as live cell state
    with every actor a key; agents and computers as participants.
    Author-facing SQL is a Durable Object Facet (the app's own SQLite).
@@ -91,7 +91,7 @@ computer's wake/exec.
 | Manifest and declared operations | `fragment.json` in git | cell caches the pinned copy; an invalid manifest at a new pin keeps the last good cache and records an event |
 | Members, roles, invites | the fragment's supervisor cell | grants and revokes are transactional; the `events` channel records each change |
 | Cell state (supervisor tables, operation ledger, channels, the app facet's SQL) | the S3 bucket (Tigris), via celld replication | — |
-| Large bytes (uploads, generated media) | R2 (the fleet bucket under `r2/`) | referenced by content hash; never in git or cell SQL |
+| Large file bytes (1 MiB or more: uploads, generated media) | blobs in Tigris (celld's R2 binding, the fleet bucket under `r2/`), keyed by SHA-256 | git holds a pointer; a sync resolves it to the real file; blobs no branch tip references are deleted; never in cell SQL |
 | Identities ↔ keys, designated owners | BANKS registry cell | sessions and caches name it and never outlive a revocation |
 | Browser sessions | platform session cookie (platform origin only) | maps to one identity key; re-checked against grants per request |
 | Agent turns and operation log | the agent's cell | effects dedupe at their owners by operation id |
@@ -99,7 +99,9 @@ computer's wake/exec.
 | Secrets (fragment, host, OpenRouter, code.storage, Fly) | cell (wrapped under `FRAGMENT_HOST_SECRET`) or the host secret store | never in a repo, a bucket in plaintext, a log, or a command line |
 | Compute/audit trail | events ledger | webhook deliveries recorded as events, deduped by delivery key |
 
-Hard rule kept: **no file bytes persist in cell SQLite or the bucket.**
+Hard rule kept: **no file bytes persist in cell SQLite.** File bytes live
+in git, or, at 1 MiB and above, in the bucket as content-addressed blobs
+that a pointer in git names.
 
 ## Wire contract (carried forward, unchanged)
 
@@ -146,16 +148,16 @@ deployment.
   mid-turn repeats no finished call); celld v0.5.1 (311/312, the red check
   is a celld alarm regression in the ledger). `docs/MODEL.md` is updated.
 - Paul (2026-09-23): synchronous mutations yes; facet database capped at
-  16 MiB, large files in git storage. Still open: whether to report the
-  celld alarm regression upstream, and git vs R2 for uploads and
-  generated media.
+  16 MiB; every file in git, 1 MiB and up as pointers to Tigris blobs,
+  latest version only; fix the celld alarm regression in a fork
+  (`celld-worktrees/alarm-fix`) and upstream it.
 - **Acceptance:** each spike ends with a written verdict and numbers
   (bundle size, cold activation, facet image cost at 1/16/64 MiB, replay
   without repeated effects); `docs/MODEL.md` updated to match; Paul's
   open questions answered.
 
 ### 2. The core cut
-- Operations, channels, membership, the app facet, R2 bytes, and
+- Operations, channels, membership, the app facet, blob pointers, and
   OpenRouter (text, image, video) replace workflows-as-files, rooms
   documents, inbox tables, `ctx.state`, git grants, and fal, in hard
   cuts. Every published-fragment primitive is re-expressed on the new

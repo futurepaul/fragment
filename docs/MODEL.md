@@ -8,12 +8,16 @@ mechanism names the celld primitive it uses; read with the celld docs
 
 ## The five changes
 
-1. **Code in git, state in SQL, bytes in R2, history in channels.** git
-   (code.storage) holds what you deploy: code, templates, and deliberate
-   documents. App state lives in SQL. Large bytes (uploads, generated
-   media) live in R2. What happened lives in channels. File-based apps
-   (a vault, a wiki) stay first-class: for them the files *are* the
-   state, and operations read and write them through `ctx.files`.
+1. **Files in git, state in SQL, history in channels.** Every file is in
+   git (code.storage): code, templates, documents, uploads, generated
+   images and video. git is the one file tree, its history, and the sync
+   to computers and local folders. A file of 1 MiB or more is stored in
+   git as a pointer (hash, size, type) whose bytes live in Tigris under
+   that hash; syncing resolves pointers, so computers and agents see
+   real files. App state lives in SQL. What happened lives in channels.
+   File-based apps (a vault, a wiki) stay first-class: for them the files
+   *are* the state, and operations read and write them through
+   `ctx.files`.
 2. **One execution primitive: the operation.** Named, schema-typed,
    role-checked, idempotent by operation id, ledgered. Every trigger
    (browser, CLI, agent tool call, cron, webhook, channel message, file
@@ -34,8 +38,8 @@ mechanism names the celld primitive it uses; read with the celld docs
 |---|---|---|
 | Supervisor | a Durable Object (`Fragment`), platform code in Rust | members, invites, the audit copy of the operation ledger, channels, schedules, wrapped secrets, the file-plane pins and tree index, the live code pin |
 | App | a **Durable Object Facet** named `app`, started through the **Worker Loader** at `live@SHA` from `platform.js` (platform code) wrapping the author's `App` class | the author's SQLite database (`this.ctx.storage.sql`), which the supervisor's tables never share, and the mutation ledger `_fragment_ops` beside it |
-| Files | code.storage git (wire contract unchanged) | code, templates, documents |
-| Bytes | an **R2** binding (the fleet bucket under `r2/<bucket>/`) | uploads, generated images and video, exports |
+| Files | code.storage git (wire contract unchanged) | every file; one of 1 MiB or more as a pointer to its blob |
+| Blobs | celld's **R2** binding, which stores objects in the fleet bucket (Tigris) under `r2/<bucket>/`; no Cloudflare R2 | the bytes of large files, content-addressed by SHA-256; only blobs a pointer at a branch tip references are kept |
 | Jobs | **Workflows** (each instance is a cell) | multi-step or long operations, and agent turns |
 | Deliveries | **Queues** (at-least-once, dead-letter queue, `message.id` as idempotency key) | outbound webhooks and web push |
 | Schedules | the supervisor's alarm (facets cannot set alarms) | per-fragment cron and retry backoff, multiplexed onto one alarm |
@@ -187,7 +191,8 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
 
 | Limit | Value | Why |
 |---|---|---|
-| operation input | 256 KiB | a request, not an upload (bytes go to R2) |
+| operation input | 256 KiB | a request, not an upload (uploads go to the file plane) |
+| inline file in git | under 1 MiB | a file of 1 MiB or more is a pointer to a blob |
 | operation or step result | 1 MiB | the Workflows step-result limit |
 | channel record body | 64 KiB | records are messages, not files |
 | channel page | 1000 records | bounded reads |
@@ -244,10 +249,10 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   can. Paul: yes.
 - **The app facet database is capped at 16 MiB** (~18 ms per mutation at
   the cap). Paul: large files belong in git storage, so a 16 MiB cap.
-
-## Open
-
-- **Where large bytes go.** Paul (2026-09-23): "large files should be
-  landing in git storage." This row of the anatomy table still says R2
-  for uploads and generated media; which one holds them is to be settled
-  before phase 2 builds the bytes path.
+- **Every file is in git; large ones are pointers** (Paul, 2026-09-23).
+  Files of 1 MiB or more are pointers in git with their bytes in Tigris
+  (code.storage's HTTP API has no LFS path). Syncing a fragment to a
+  computer or a folder delivers real files, generated media included.
+  Only the latest version's bytes are kept: a blob no branch tip
+  references is deleted. A future exception (keeping every version of,
+  say, a large Photoshop file) is not needed now.
