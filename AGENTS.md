@@ -9,6 +9,7 @@ celld (https://celld.dev/docs/).
 
 1. `docs/ROADMAP.md` — decisions, truth map, phases, escalations.
 2. `docs/MODEL.md` — the core model on celld primitives and the spikes.
+   `docs/phase-2.md` — the current phase's slices and checkpoints.
 3. `docs/finite-next-lessons.md` — what to port from finite-next and the
    gotchas (celld, libfx, fx over ACP, Sprites), prices, resources.
 4. `docs/published-fragments.md` — primitives that must stay expressible.

@@ -157,6 +157,8 @@ deployment.
   open questions answered.
 
 ### 2. The core cut
+- Started 2026-09-23 on Paul's go; slices, checkpoints, and the
+  primitive mapping live in `docs/phase-2.md`.
 - Operations, channels, membership, the app facet, blob pointers, and
   OpenRouter (text, image, video) replace workflows-as-files, rooms
   documents, inbox tables, `ctx.state`, git grants, and fal, in hard
