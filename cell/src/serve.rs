@@ -18,6 +18,8 @@ use crate::fragment::{decode_segment, json_response, Caller, FragmentCell};
 use crate::js;
 
 pub const MODE_HEADER: &str = "x-fragment-mode";
+/// The browser library pages import as `./__fragment.js`.
+const CLIENT_JS: &str = include_str!("../client.mjs");
 const VIEW_COOKIE: &str = "fragview";
 const ANON_COOKIE: &str = "fragment_anon";
 const VIEW_COOKIE_AGE_S: i64 = 7 * 24 * 3600;
@@ -71,6 +73,7 @@ impl FragmentCell {
             set.push(origin.cookie(VIEW_COOKIE, &view_token, VIEW_COOKIE_AGE_S));
         }
         let path: String = rest.split('/').map(decode_segment).collect::<Vec<_>>().join("/");
+        let anon = site::cookie(&cookies, ANON_COOKIE).filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())).map(anon_principal);
         let resp = if let Some(op) = path.strip_prefix("__op/") {
             if req.method() != Method::Post {
                 return Err(CellError::invalid("call an operation with POST"));
@@ -81,31 +84,66 @@ impl FragmentCell {
                 return Err(CellError::invalid("send the call as application/json"));
             }
             let body: OpCall = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            let principal = match &caller.principal {
-                Some(p) => p.clone(),
-                None => match site::cookie(&cookies, ANON_COOKIE).filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())) {
-                    Some(v) => anon_principal(v),
-                    None => {
-                        let fresh = js::random_hex::<32>();
-                        set.push(origin.cookie(ANON_COOKIE, &fresh, ANON_COOKIE_AGE_S));
-                        anon_principal(&fresh)
-                    }
-                },
+            let principal = match (&caller.principal, anon) {
+                (Some(p), _) => p.clone(),
+                (None, Some(a)) => a,
+                (None, None) => {
+                    let fresh = js::random_hex::<32>();
+                    set.push(origin.cookie(ANON_COOKIE, &fresh, ANON_COOKIE_AGE_S));
+                    anon_principal(&fresh)
+                }
             };
             let result = self.call_op(caller, &principal, link, op, body).await?;
             json_response(&result)?
         } else if path == "__watch" {
             self.watch(&req, caller, link)?
+        } else if path == "__live" {
+            // an unsigned visitor without a cookie yet is anonymous for this socket only
+            let principal = caller.principal.clone().or(anon).unwrap_or_else(|| anon_principal(&js::random_hex::<32>()));
+            self.live(&req, caller, &principal, link)?
         } else {
-            self.require(caller, link, Role::Public)?;
-            let head = match req.method() {
-                Method::Get => false,
-                Method::Head => true,
-                _ => return Err(CellError::invalid("a site answers GET and HEAD")),
-            };
-            self.site(caller, name, &path, &url, head).await?
+            let role = self.require(caller, link, Role::Public)?;
+            let who = caller.principal.as_deref().map(npub::display).or(anon).unwrap_or_else(|| "anonymous".into());
+            match req.method() {
+                Method::Get | Method::Head => self.site(&mut req, caller, name, &path, &url, role, &who).await?,
+                // Only the app's own routes take other methods.
+                _ => self.app_fetch(&mut req, caller, name, &path, &url, role, &who).await?,
+            }
         };
         with_cookies(resp, &set)
+    }
+
+    /// The author's `fetch` for a path that is not a site file: it sees the
+    /// fragment's public URL and who is asking (`x-fragment-principal`,
+    /// `x-fragment-role`).
+    #[allow(clippy::too_many_arguments)]
+    async fn app_fetch(&self, req: &mut Request, caller: &Caller, name: &str, path: &str, url: &url::Url, role: Role, who: &str) -> CellResult<Response> {
+        let facet = match self.facet() {
+            Ok(f) => f,
+            Err(e) if e.code == ErrorCode::NoCode => {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no page or app route for {} /{path}", req.method().as_ref())))
+            }
+            Err(e) => return Err(e),
+        };
+        let headers = Headers::new();
+        for k in ["content-type", "accept", "if-none-match", "range"] {
+            if let Some(v) = req.headers().get(k)? {
+                headers.set(k, &v)?;
+            }
+        }
+        headers.set("x-fragment-principal", who)?;
+        headers.set("x-fragment-role", role.as_str())?;
+        let mut init = RequestInit::new();
+        init.with_method(req.method()).with_headers(headers);
+        if !matches!(req.method(), Method::Get | Method::Head) {
+            let body = req.bytes().await?;
+            if !body.is_empty() {
+                init.with_body(Some(worker::js_sys::Uint8Array::from(body.as_slice()).into()));
+            }
+        }
+        let query = url.query().map(|q| format!("?{q}")).unwrap_or_default();
+        let target = format!("{}{path}{query}", self.cfg.canonical(&caller.url, name));
+        facet.fetch(Request::new_with_init(&target, &init)?).await
     }
 
     /// The change feed for `fragment sync --watch`: a frame per external
@@ -125,7 +163,15 @@ impl FragmentCell {
         Ok(Response::from_websocket(pair.client)?)
     }
 
-    async fn site(&self, caller: &Caller, name: &str, path: &str, url: &url::Url, head: bool) -> CellResult<Response> {
+    #[allow(clippy::too_many_arguments)]
+    async fn site(&self, req: &mut Request, caller: &Caller, name: &str, path: &str, url: &url::Url, role: Role, who: &str) -> CellResult<Response> {
+        let head = req.method() == Method::Head;
+        if path == "__fragment.js" {
+            let h = Headers::new();
+            h.set("content-type", "text/javascript; charset=utf-8")?;
+            h.set("cache-control", "no-cache")?;
+            return Ok(Response::ok(CLIENT_JS)?.with_headers(h));
+        }
         self.ensure_pins().await?;
         let live = self.pin("live")?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("{name} has no live commit yet: deploy first")))?;
         let public = self.visibility()? == Visibility::Public;
@@ -176,7 +222,10 @@ impl FragmentCell {
             return Err(CellError::new(ErrorCode::NotFound, "no such page"));
         }
         let Some((file, row)) = site::site_candidates(path).into_iter().find_map(|c| self.tree_row("live", &c).ok().flatten().map(|r| (c, r))) else {
-            return Err(CellError::new(ErrorCode::NotFound, format!("no page {path:?} (the site is site/ in the live commit)")));
+            if !path.starts_with("__") {
+                return self.app_fetch(req, caller, name, path, url, role, who).await;
+            }
+            return Err(CellError::new(ErrorCode::NotFound, format!("no page {path:?}")));
         };
         let mime = site::mime_for_path(&file);
         let cache = site::cache_control(&file, public);

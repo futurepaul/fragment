@@ -271,6 +271,9 @@ impl FragmentCell {
         self.require_owner(caller)?;
         let before = self.visibility()?;
         self.set_meta("visibility", body.visibility.as_str())?;
+        if body.visibility != Visibility::Public {
+            self.close_sockets("anon", "the fragment is no longer public");
+        }
         if body.visibility == Visibility::Members {
             self.close_sockets("view", "the fragment is now members only");
         }

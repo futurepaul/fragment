@@ -60,6 +60,21 @@ pub mod limits {
     pub const PUBLIC_CALLS_PER_MIN: u32 = 60;
     /// `public`-role calls per minute into one fragment by non-members.
     pub const PUBLIC_CALLS_PER_MIN_FRAGMENT: u32 = 600;
+    /// A channel record's body.
+    pub const RECORD_BODY_MAX_BYTES: usize = 64 * 1024;
+    /// Records per page of a channel read.
+    pub const CHANNEL_PAGE: usize = 1000;
+    /// Records one mutation may publish.
+    pub const EFFECTS_MAX: usize = 64;
+    /// App channels per fragment.
+    pub const CHANNELS_MAX: usize = 32;
+    /// How long `events` and `ops` records are kept.
+    pub const AUDIT_RETENTION_MS: i64 = 90 * 24 * 3600 * 1000;
+    /// A socket's presence data.
+    pub const PRESENCE_MAX_BYTES: usize = 4 * 1024;
+    /// Modules an app may load besides `app.mjs` (`applib/`), and their total size.
+    pub const APPLIB_FILES_MAX: usize = 64;
+    pub const APP_MODULES_MAX_BYTES: usize = 4 * 1024 * 1024;
 }
 
 /// A secret's name: `^[A-Z][A-Z0-9_]{0,63}$`.
@@ -374,7 +389,39 @@ pub struct OpDecl {
     pub kind: OpKind,
     /// The weakest role that may call it.
     pub role: Role,
+    /// Its input's JSON Schema (the supported subset); also its tool schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<Value>,
 }
+
+/// A channel as `fragment.json` declares it (app channels), or a built-in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChannelDecl {
+    /// The weakest role that may read it.
+    pub read: Role,
+}
+
+/// One record in a channel. Records are appended by the platform (`events`,
+/// `ops`) or by mutations' effects (app channels), never by clients.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChannelRecord {
+    pub channel: String,
+    pub seq: i64,
+    pub at: i64,
+    /// npub, `anon:…`, or `platform`
+    pub principal: String,
+    pub kind: String,
+    pub body: Value,
+}
+
+/// Channel names: `^[a-z][a-z0-9_-]{0,63}$`.
+pub fn valid_channel_name(name: &str) -> bool {
+    let b = name.as_bytes();
+    !b.is_empty() && b.len() <= 64 && b[0].is_ascii_lowercase() && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_' || *c == b'-')
+}
+
+/// The channels every fragment has.
+pub const BUILTIN_CHANNELS: [&str; 2] = ["events", "ops"];
 
 /// `POST /api/f/<name>/ops/<op>`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -456,6 +503,12 @@ mod tests {
         assert!(!valid_repo_path("/abs"));
         assert!(!valid_repo_path("a//b"));
         assert!(!valid_repo_path("a/./b"));
+    }
+
+    #[test]
+    fn channel_names() {
+        assert!(valid_channel_name("chat") && valid_channel_name("room-1") && valid_channel_name("a_b"));
+        assert!(!valid_channel_name("Chat") && !valid_channel_name("1a") && !valid_channel_name(""));
     }
 
     #[test]

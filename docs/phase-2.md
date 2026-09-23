@@ -161,6 +161,54 @@ the browser library (`fragment.call`, `fragment.subscribe`) that replaces
 e2e drives a browser. **Checkpoint C**: the author-facing API, reviewed on
 the todo app.
 
+*Done 2026-09-23 (Paul away); waiting at checkpoint C.* `cargo xtask e2e`
+passes 310 of 310 checks in 20 sections (slice C added schemas, channels, live,
+routes, cli, browser; the browser section drives headless Chrome over
+the DevTools protocol, two tabs on the todo template). What landed:
+
+- **Operations**: `fragment.json` declares each operation's kind, role,
+  and input schema (a bounded JSON Schema subset, `crates/core/src/
+  schema.rs`, refused at deploy when it steps outside); inputs are checked
+  before the app runs and a refusal names the JSON pointer.
+- **The call context**: every method gets `(input, call)`: who is calling
+  (`call.principal`, `call.role`) and, in a mutation, `call.publish(
+  channel, body, kind)`. Published records are the mutation's effects,
+  kept in its ledger row, applied after the commit keyed by (ledger id,
+  index), and swept after a restart. The ledger keeps a mutation seven
+  days.
+- **Channels**: `events` (the audit trail moved here), `ops` (one record
+  per applied mutation), and app channels declared with a reader role.
+  Read a page over the API or live over `__live` from a cursor, with
+  presence and a change signal after every mutation.
+- **The browser library** `./__fragment.js`: `call`, `live`,
+  `subscribe`, `presence`, `me`, over one reconnecting socket.
+  The old JS e2e still passes 312 of 312 against the TypeScript runtime.
+- **Custom routes**: `App.fetch` answers every path that is not a site
+  file; `applib/` modules load with `app.mjs`.
+- **CLI**: `fragment call` and `fragment channel [--follow]`; `fragment
+  init` refreshes the cell so code installs at once.
+- **The todo template** (`templates/todo`, `fragment new --template
+  todo`).
+
+**Checkpoint C: what to review** (the author-facing API, on
+`templates/todo`):
+
+1. The shape of an app: `fragment.json` (operations, roles, schemas,
+   channels) plus an `App` class with one method per operation. Is
+   `(input, call)` with `call.publish` the right surface, or should
+   effects be returned (`return { result, publish: [...] }`)?
+2. Roles on the todo template are `public` (anyone who can open it can
+   change it) because browsers cannot act as members until sign-in
+   (phase 4). Keep that default for templates, or keep `editor` and
+   accept that the template is read-only in a browser until phase 4?
+3. The browser library's names: `call`, `live`, `subscribe`,
+   `presence.set/on`, `me`.
+4. Channel records are written only by the platform and by mutations
+   (never directly by clients), and app channels keep their records
+   forever (MODEL); `events` and `ops` keep 90 days and 10 000 records.
+5. A mutation's replay window is seven days (the facet's ledger is pruned
+   after that, keeping the 16 MiB facet budget for the app).
+
 **D. Jobs, triggers, schedules.** `job` operations as Workflows whose
 steps call back into the supervisor; triggers (cron, inbox webhook, file
 change, channel message); schedules multiplexed on the supervisor's

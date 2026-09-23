@@ -162,9 +162,14 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
         ..Call::default()
     })?;
     s.ok("an unsigned webhook is 401", r.status == 401, &r);
+    // Refused from its declared length before it is read: the client may see
+    // the 413, or the connection closing while it is still sending.
     let big = json!({ "name": s.name("big"), "fragmentSecret": "x".repeat(3 * 1024 * 1024) });
-    let r = api.create_with(&owner, big)?;
-    s.ok("a body over 2 MiB is 413", r.status == 413 && r.error() == "too_large", &r);
+    let refused = match api.create_with(&owner, big) {
+        Ok(r) => r.status == 413 && r.error() == "too_large",
+        Err(e) => format!("{e:#}").contains("reset") || format!("{e:#}").contains("Broken pipe"),
+    };
+    s.ok("a body over 2 MiB is refused unread (413)", refused, "");
     let r = api.call(Call {
         method: "GET",
         url: api.site_url(&name, ""),

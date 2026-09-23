@@ -8,7 +8,8 @@ keeps has the same route and body, and the cell's errors are
 
 # The Rust cell (phase 2)
 
-Status: slice B (2026-09-23). `cargo xtask e2e` proves every route below.
+Status: slices B and C (2026-09-23). `cargo xtask e2e` proves every
+route below.
 
 ## Configuration
 
@@ -75,12 +76,49 @@ member may leave. Each person's list of fragments is kept in their
 | `GET /api/f/{name}/events?since=` | viewer | → `{events: [{id, at, kind, summary, data}]}` (500 a page; 5000 kept) |
 | `POST /api/f/{name}/ops/{op}` | the operation's role | `{id, input}` → `{result, replayed}` |
 
+| `GET /api/f/{name}/channels` | viewer | → `{channels: [{name, read, seq}]}`: `events`, `ops`, and the app's |
+| `GET /api/f/{name}/channels/{channel}?after=&limit=` | the channel's reader | → `{channel, records: [{channel, seq, at, principal, kind, body}], next}` (1000 a page) |
+
+## Apps
+
 Code comes from git: when `live` moves, the cell reads `fragment.json`
-(`operations: {name: {kind: query\|mutation, role?, input?}}`; a query
-defaults to `viewer`, a mutation to `editor`) and `app.mjs` from the live
-commit. A live commit with an invalid `fragment.json` keeps the last good
-code and says why in `status.code.error`. Operation ids belong to their
-caller: the ledger keys them by principal.
+and `app.mjs` (with `applib/**.mjs|js`, at most 64 modules and 4 MiB in
+all) from the live commit. A live commit with an invalid `fragment.json`
+keeps the last good code and says why in `status.code.error`.
+
+```json
+{
+  "operations": {
+    "add":  { "kind": "mutation", "role": "editor", "input": { "type": "object", "required": ["text"],
+              "properties": { "text": { "type": "string", "maxLength": 200 } }, "additionalProperties": false } },
+    "list": { "kind": "query" }
+  },
+  "channels": { "activity": { "read": "viewer" } },
+  "meta": { "title": "Todo", "description": "…", "image": "https://…" }
+}
+```
+
+- `role` defaults to `viewer` for a query and `editor` for a mutation.
+  `fetch` and `alarm` are not operation names.
+- `input` is a JSON Schema in a bounded subset (`crates/core/src/schema.rs`:
+  types, `enum`, `const`, lengths, ranges, `items`, `properties`,
+  `required`, `additionalProperties`, counts; annotations allowed; any
+  other keyword is refused at deploy). A call whose input does not fit is
+  400 naming the JSON pointer (`input /text: is required`).
+- `channels` declares the app's channels and their readers (default
+  `viewer`); `events` and `ops` are built in (readers: viewers).
+
+`app.mjs` exports `class App extends DurableObject` with one method per
+operation, each called `(input, call)`: `call.principal` (an npub or
+`anon:…`) and `call.role`. A mutation is synchronous over the app's own
+SQLite; `call.publish(channel, body, kind = "message")` appends a record
+(body at most 64 KiB, 64 per mutation) once the mutation commits, and an
+exception rolls back its writes and its records (422). The ledger keys a
+mutation by (principal, id) for seven days: a retry with the same id
+returns the stored result; the same id with another input is 409. Every
+applied mutation also appends `{op, id}` to `ops`. An optional
+`fetch(request)` answers every path that is not a site file (any
+method), with `x-fragment-principal` and `x-fragment-role` set.
 
 ## Serving
 
@@ -94,7 +132,36 @@ one, those redirect to the fragment's host, except `__watch`):
 | `__file?path=` | a content file from live, else main |
 | `__preview.svg` | the placeholder preview image |
 | `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; an unsigned caller gets an anonymous principal cookie; callers holding only `public` get 60 calls a minute each, 600 per fragment |
+| `__fragment.js` | the browser library (below) |
+| `__live` | WebSocket, anyone who can see the fragment: channel subscriptions from a cursor, presence, change signals (below) |
 | `__watch` | WebSocket, viewers and up (the share link, or a signed upgrade): `{type: "hello", ref, sha}`, then `{type: "changed", ref: "main", sha, paths}` per external move of main |
+| anything else | the app's `fetch`, when it has one |
+
+`__live` and `__watch` are also served in place at `/f/<name>/…` for the
+CLI. The `__live` protocol (JSON frames):
+
+- client → server: `{type: "subscribe", channel, after}`,
+  `{type: "unsubscribe", channel}`, `{type: "presence", data}` (at most
+  4 KiB; `null` clears), `{type: "ping"}`
+- server → client: `{type: "hello", id, principal, role}`,
+  `{type: "record", channel, seq, at, principal, kind, body}`,
+  `{type: "subscribed", channel, next, more}` (after the backlog),
+  `{type: "presence", list: [{id, principal, data}]}`,
+  `{type: "changed", op}` (after every applied mutation),
+  `{type: "error", message}`
+
+A socket's role is fixed when it connects. Removing a member closes their
+sockets; rotating the share link closes link holders'; a fragment that
+stops being public closes its anonymous visitors'.
+
+The browser library (`import * as fragment from "./__fragment.js"`):
+`call(op, input, {id?})` (retries keep the id), `live(op, input,
+onResult, onError?)` (re-runs a query after every change), `subscribe(
+channel, onRecord, {after?})`, `presence.set(data)`, `presence.on(fn)`,
+`me()`.
+
+CLI: `fragment call <name> <op> --input '{...}' [--id ID]`, `fragment
+channel <name> [<channel>] [--after N] [--follow]`.
 
 # The TypeScript runtime (deleted in slice G)
 

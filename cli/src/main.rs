@@ -214,6 +214,28 @@ enum Cmd {
     },
     /// Join a fragment with an invite token
     Join { name: String, token: String },
+    /// Call an operation; prints its result (a retry with the same --id is a replay)
+    Call {
+        name: String,
+        op: String,
+        /// The input, as JSON
+        #[arg(long, default_value = "{}")]
+        input: String,
+        /// The operation id (default: a fresh one)
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// List a fragment's channels, or read one (--follow keeps streaming)
+    Channel {
+        name: String,
+        channel: Option<String>,
+        /// Records after this sequence number
+        #[arg(long, default_value = "0")]
+        after: i64,
+        /// Keep streaming new records (one JSON line each)
+        #[arg(long)]
+        follow: bool,
+    },
     /// Show or set who can see a fragment: public | link | members
     Visibility { name: String, value: Option<String> },
     /// Post to a fragment's inbox (webhook-style, token auth)
@@ -982,6 +1004,10 @@ fn run(cli: Cli) -> Result<()> {
             let main_tip = storage.branch_head(MAIN).map_err(cs_anyhow)?
                 .ok_or_else(|| anyhow!("first sync produced no commits"))?;
             storage.create_branch(&main_tip, LIVE, false).map_err(cs_anyhow)?;
+            // the new live ref is a git move the cell learns of now, not at its next poll
+            if let Err(e) = c.post_json(&format!("/api/f/{name}/refresh"), &json!({})) {
+                eprintln!("warning: cell pin refresh failed ({e:#}); the poll backstop will catch up");
+            }
             let st = c.call(c.get(&format!("/api/f/{name}/status"))?)?;
             let canon = st["urls"]["canonical"].as_str().filter(|s| s.starts_with("http"))
                 .map(|s| s.to_string())
@@ -1326,6 +1352,43 @@ fn run(cli: Cli) -> Result<()> {
                 println!("joined {name} as {}", v["role"].as_str().unwrap_or(""));
             } else {
                 println!("already a member of {name} ({})", v["role"].as_str().unwrap_or(""));
+            }
+        }
+        Cmd::Call { name, op, input, id } => {
+            let input: Value = serde_json::from_str(&input).context("--input must be JSON")?;
+            let id = id.unwrap_or_else(|| format!("cli-{:016x}", rand::random::<u64>()));
+            let v = c.call(c.post_json(&format!("/api/f/{name}/ops/{op}"), &json!({ "id": id, "input": input }))?)?;
+            if j {
+                ok_exit(&json!({ "id": id, "result": v["result"], "replayed": v["replayed"] }));
+            }
+            println!("{}", serde_json::to_string_pretty(&v["result"])?);
+            if v["replayed"].as_bool().unwrap_or(false) {
+                eprintln!("(replayed: operation {id} had already run)");
+            }
+        }
+        Cmd::Channel { name, channel: None, .. } => {
+            let v = c.call(c.get(&format!("/api/f/{name}/channels"))?)?;
+            if j {
+                ok_exit(&v);
+            }
+            for ch in v["channels"].as_array().cloned().unwrap_or_default() {
+                println!("{}\t{}\t{} records", ch["name"].as_str().unwrap_or(""), ch["read"].as_str().unwrap_or(""), ch["seq"]);
+            }
+        }
+        Cmd::Channel { name, channel: Some(channel), after, follow } => {
+            if follow {
+                if j {
+                    fail_json("invalid_usage", "--follow streams JSON lines; --json does not apply", None, 2);
+                }
+                watch::follow_channel(&c, &name, &channel, after)?;
+                return Ok(());
+            }
+            let v = c.call(c.get(&format!("/api/f/{name}/channels/{channel}?after={after}"))?)?;
+            if j {
+                ok_exit(&v);
+            }
+            for r in v["records"].as_array().cloned().unwrap_or_default() {
+                println!("{}", serde_json::to_string(&r)?);
             }
         }
         Cmd::Visibility { name, value } => {

@@ -31,7 +31,9 @@ The new runtime (`cell/`, Rust; phase 2, `docs/phase-2.md`):
 - `cargo xtask e2e [--only <section>]`: builds `cell/` and the CLI, then
   runs `crates/e2e` against a fresh `celld dev` node and the in-process
   code.storage fake (sections: auth, create, lockdown, members, secrets,
-  files, deploy, ops, public, site, watch, sync, restart, pathmode).
+  files, deploy, ops, public, site, watch, schemas, channels, live,
+  routes, cli, browser, sync, restart, pathmode). The browser section
+  drives headless Chrome (`CHROME_BIN` to choose one).
 - `cargo xtask dev [--clean]`: the new stack in the foreground: the cell
   on :8790 with fragments at `http://<name>.fragment.localhost:8790/`, and
   the code.storage fake on :8792 (state in `target/devstack/`; its org

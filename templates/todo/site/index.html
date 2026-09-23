@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Todo</title>
+  <style>
+    :root { --bg: #f7f5f0; --fg: #1d1b16; --muted: #857f72; --line: #e2ddd2; --accent: #2f5d50; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #16150f; --fg: #eeeae0; --muted: #9a9384; --line: #2d2b24; --accent: #7fb5a3; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 ui-sans-serif, system-ui, sans-serif; }
+    main { max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }
+    h1 { font: 600 1.6rem/1.2 Georgia, serif; margin: 0 0 .25rem; }
+    #here { color: var(--muted); font-size: .85rem; margin-bottom: 1.5rem; }
+    form { display: flex; gap: .5rem; margin-bottom: 1rem; }
+    input[type=text] { flex: 1; padding: .6rem .75rem; border: 1px solid var(--line); border-radius: .5rem; background: transparent; color: inherit; font: inherit; }
+    button { padding: .6rem 1rem; border: 0; border-radius: .5rem; background: var(--accent); color: var(--bg); font: inherit; cursor: pointer; }
+    ul { list-style: none; padding: 0; margin: 0; }
+    li { display: flex; align-items: center; gap: .6rem; padding: .55rem 0; border-bottom: 1px solid var(--line); }
+    li.done span { text-decoration: line-through; color: var(--muted); }
+    li span { flex: 1; }
+    li .x { background: none; color: var(--muted); padding: 0 .3rem; }
+    #activity { margin-top: 2rem; color: var(--muted); font-size: .85rem; }
+    #activity div { padding: .1rem 0; }
+    #error { color: #b3261e; min-height: 1.5rem; font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Todo</h1>
+    <div id="here">connecting…</div>
+    <form id="add"><input type="text" id="text" placeholder="What needs doing?" maxlength="200" autocomplete="off"><button>Add</button></form>
+    <div id="error"></div>
+    <ul id="todos"></ul>
+    <div id="activity"></div>
+  </main>
+  <script type="module">
+    import * as fragment from "./__fragment.js";
+
+    const $ = (id) => document.getElementById(id);
+    const show = (e) => { $("error").textContent = e ? e.message : ""; };
+
+    fragment.live("list", {}, ({ todos }) => {
+      $("todos").replaceChildren(...todos.map((t) => {
+        const li = document.createElement("li");
+        li.className = t.done ? "done" : "";
+        li.dataset.id = t.id;
+        const box = Object.assign(document.createElement("input"), { type: "checkbox", checked: t.done });
+        box.onchange = () => fragment.call("toggle", { id: t.id }).then(() => show(), show);
+        const text = Object.assign(document.createElement("span"), { textContent: t.text });
+        const x = Object.assign(document.createElement("button"), { className: "x", textContent: "×", title: "Remove" });
+        x.onclick = () => fragment.call("remove", { id: t.id }).then(() => show(), show);
+        li.append(box, text, x);
+        return li;
+      }));
+    }, show);
+
+    $("add").onsubmit = async (e) => {
+      e.preventDefault();
+      const text = $("text").value.trim();
+      if (!text) return;
+      try {
+        await fragment.call("add", { text });
+        $("text").value = "";
+        show();
+      } catch (err) {
+        show(err);
+      }
+    };
+
+    fragment.subscribe("activity", (r) => {
+      const line = document.createElement("div");
+      line.textContent = `${r.body.did} “${r.body.text}”`;
+      $("activity").prepend(line);
+    });
+
+    const me = await fragment.me();
+    fragment.presence.set({ joined: Date.now() });
+    fragment.presence.on((list) => {
+      const others = list.filter((p) => p.id !== me.id).length;
+      $("here").textContent = others ? `you and ${others} other${others === 1 ? "" : "s"} here` : "just you here";
+    });
+  </script>
+</body>
+</html>

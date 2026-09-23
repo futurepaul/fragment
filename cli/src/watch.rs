@@ -248,3 +248,48 @@ fn chrono_like() -> String {
         .as_secs();
     format!("{:02}:{:02}:{:02}", (secs % 86400) / 3600, (secs % 3600) / 60, secs % 60)
 }
+
+/// Streams a channel's records as JSON lines from the fragment's live
+/// socket, resuming after the last record seen when the socket drops.
+pub fn follow_channel(client: &Client, name: &str, channel: &str, after: i64) -> Result<()> {
+    use tungstenite::client::IntoClientRequest;
+    let http = format!("{}/f/{name}/__live", client.host.trim_end_matches('/'));
+    let ws_url = http.replacen("http", "ws", 1);
+    let mut last = after;
+    let mut backoff = 1u64;
+    loop {
+        let mut req = ws_url.as_str().into_client_request().context("the live socket URL")?;
+        req.headers_mut().insert("authorization", client.id.nip98_header("GET", &http, &[]).parse().context("auth header")?);
+        match tungstenite::connect(req) {
+            Ok((mut socket, _)) => {
+                backoff = 1;
+                let sub = serde_json::json!({ "type": "subscribe", "channel": channel, "after": last });
+                socket.send(tungstenite::Message::Text(sub.to_string().into()))?;
+                loop {
+                    match socket.read() {
+                        Ok(tungstenite::Message::Text(t)) => {
+                            let v: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
+                            match v["type"].as_str() {
+                                Some("record") if v["channel"] == channel => {
+                                    last = v["seq"].as_i64().unwrap_or(last);
+                                    println!("{t}");
+                                }
+                                Some("error") => anyhow::bail!("{}", v["message"].as_str().unwrap_or("the live socket refused")),
+                                _ => {}
+                            }
+                        }
+                        Ok(tungstenite::Message::Close(_)) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+            }
+            Err(tungstenite::Error::Http(resp)) if resp.status() == 401 || resp.status() == 403 || resp.status() == 404 => {
+                let body = resp.body().as_deref().map(String::from_utf8_lossy).unwrap_or_default().to_string();
+                anyhow::bail!("the live socket refused ({}): {body}", resp.status());
+            }
+            Err(_) => {}
+        }
+        std::thread::sleep(Duration::from_secs(backoff));
+        backoff = (backoff * 2).min(30);
+    }
+}

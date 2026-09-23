@@ -67,7 +67,7 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.call(Call { method: "HEAD", url: api.site_url(&name, ""), cookie: Some(cookie.clone()), ..Call::default() })?;
     s.ok("HEAD answers without a body", r.status == 200 && r.text.is_empty(), &r);
     let r = api.call(Call { method: "DELETE", url: api.site_url(&name, ""), cookie: Some(cookie.clone()), ..Call::default() })?;
-    s.ok("a site answers only GET and HEAD", r.status == 400, &r);
+    s.ok("other methods are for the app's routes (none here: 404)", r.status == 404 && r.message().contains("no page or app route for DELETE /"), &r);
 
     // the machine-read plane
     let r = api.page(&name, "__tree", Some(&cookie))?;

@@ -90,8 +90,9 @@ pub fn inject_og(html: &str, name: &str, meta: &Meta, image_url: &str) -> String
         return html.to_string();
     }
     let title = html_escape(meta.title.as_deref().unwrap_or(name));
+    let page_title = if html.contains("<title") { String::new() } else { format!("<title>{title}</title>") };
     let tags = format!(
-        r#"<meta property="og:title" content="{title}"><meta property="og:description" content="{}"><meta property="og:image" content="{}"><meta name="twitter:card" content="summary_large_image"><title>{title}</title>"#,
+        r#"<meta property="og:title" content="{title}"><meta property="og:description" content="{}"><meta property="og:image" content="{}"><meta name="twitter:card" content="summary_large_image">{page_title}"#,
         html_escape(meta.description.as_deref().unwrap_or("")),
         html_escape(meta.image.as_deref().unwrap_or(image_url)),
     );
@@ -144,6 +145,9 @@ mod tests {
         let out = inject_og("<html><head></head></html>", "n", &meta, "https://n/__preview.svg");
         assert!(out.contains(r#"og:title" content="T&lt;x&gt;""#) && out.contains("__preview.svg"));
         assert_eq!(inject_og(&out, "n", &meta, "x"), out);
+        assert!(out.contains("<title>T&lt;x&gt;</title>"));
+        let titled = inject_og("<head><title>Own</title></head>", "n", &meta, "x");
+        assert_eq!(titled.matches("<title>").count(), 1, "a page's own title stays the only one");
         assert!(preview_svg("todo").starts_with("<svg"));
     }
 }

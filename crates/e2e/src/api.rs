@@ -189,3 +189,58 @@ pub fn watch(api: &Api, name: &str, query: &str, keys: Option<&Keys>) -> Result<
     }
     Ok(socket)
 }
+
+/// A socket to a fragment's `__watch` or `__live`, read as JSON frames.
+pub struct Socket(tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>);
+
+impl Socket {
+    /// Opens `/f/<name>/<path>` (reachable in place on every fleet);
+    /// `keys` signs the upgrade, `cookie` rides along like a browser's.
+    pub fn open(api: &Api, name: &str, path: &str, keys: Option<&Keys>, cookie: Option<&str>) -> Result<Socket> {
+        use tungstenite::client::IntoClientRequest;
+        let http = format!("{}/f/{name}/{path}", api.base);
+        let mut req = http.replacen("http", "ws", 1).into_client_request()?;
+        if let Some(k) = keys {
+            req.headers_mut().insert("authorization", k.header("GET", &http, &[], now_s()).parse()?);
+        }
+        if let Some(c) = cookie {
+            req.headers_mut().insert("cookie", c.parse()?);
+        }
+        let (socket, _) = tungstenite::connect(req)?;
+        if let tungstenite::stream::MaybeTlsStream::Plain(s) = socket.get_ref() {
+            s.set_read_timeout(Some(Duration::from_secs(5)))?;
+        }
+        Ok(Socket(socket))
+    }
+
+    pub fn send(&mut self, v: &Value) -> Result<()> {
+        self.0.send(tungstenite::Message::Text(v.to_string().into()))?;
+        Ok(())
+    }
+
+    /// The next frame; `Err` on a timeout or a close (its code in the message).
+    pub fn next(&mut self) -> Result<Value> {
+        loop {
+            match self.0.read()? {
+                tungstenite::Message::Text(t) => return Ok(serde_json::from_str(&t)?),
+                tungstenite::Message::Close(f) => anyhow::bail!("closed {}", f.map(|f| u16::from(f.code)).unwrap_or(0)),
+                _ => {}
+            }
+        }
+    }
+
+    /// Frames until one of `kind` arrives (at most `limit` frames).
+    pub fn until(&mut self, kind: &str, limit: usize) -> Result<Value> {
+        for _ in 0..limit {
+            let v = self.next()?;
+            if v["type"] == kind {
+                return Ok(v);
+            }
+        }
+        anyhow::bail!("no {kind} frame in {limit} frames")
+    }
+
+    pub fn close(mut self) {
+        let _ = self.0.close(None);
+    }
+}

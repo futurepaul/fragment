@@ -79,17 +79,21 @@ Declared in `fragment.json`:
 ```
 
 Implemented as methods of the author's `App` class (the facet answers
-RPC methods), each receiving `(input, ctx)`:
+RPC methods), each receiving `(input, call)`, where `call` names the
+caller (`principal`, `role`) and, in a mutation, collects its effects
+(`call.publish(channel, body, kind)`; phase 2 slice C):
 
 - **query** — read-only; not ledgered; may be async and may call read
   capabilities (files, channels, blobs); may be re-run on change signals
   to drive live views.
 - **mutation** — synchronous, over the app's own SQL only: no `await`, no
   capabilities, no network. Platform code in the facet runs it and its
-  ledger row in one `transactionSync` keyed by operation id. What it
-  wants to happen next (channel records, notifications, starting a job, a
-  vault's file writes) it returns as **effects**; the ledger row keeps
-  them, so the ledger is also an outbox.
+  ledger row in one `transactionSync` keyed by (principal, operation id).
+  What it wants to happen next (channel records now; notifications,
+  starting a job, a vault's file writes in later slices) it declares as
+  **effects** through `call`; the ledger row keeps them, so the ledger is
+  also an outbox. Ledger rows are kept seven days: a replay after that
+  runs again.
 - **job** — runs as a Workflow instance whose id is the namespaced
   operation id; each `step.do` is a query, a mutation, or an external
   effect, so retries, backoff, `waitForEvent` (approvals, invites), and
@@ -127,8 +131,12 @@ A channel is a supervisor table: `(channel, seq)` → `{at, principal,
 kind, body, op_id}`, append-only, with a per-channel retention policy.
 
 - Built in: `events` (audit, platform-written), `inbox` (webhooks; the
-  pending cap answers 429), `ops` (the operation ledger's public view),
-  and app-declared channels (a chat transcript, a room's messages).
+  pending cap answers 429; slice D), `ops` (`{op, id}` per applied
+  mutation: the ledger's public view, and the marker that its effects
+  were applied), and app-declared channels (a chat transcript, a room's
+  messages), declared in `fragment.json` with the role that may read
+  them. Clients never append: records come from the platform and from
+  mutations' effects.
 - Subscribers: hibernatable WebSockets that resume from a cursor (a
   WebSocket closes when the cell moves, so clients reconnect with their
   last `seq`); channel-triggered operations; agents; and outbound

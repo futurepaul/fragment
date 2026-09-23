@@ -52,14 +52,17 @@ fn from_js(v: &JsValue) -> Result<serde_json::Value, String> {
     serde_json::from_str(&String::from(text)).map_err(|e| format!("not JSON: {e}"))
 }
 
-/// What the Worker Loader compiles for an app: the platform wrapper and the
-/// author's module, with no ambient network and bounded CPU.
+/// What the Worker Loader compiles for an app: the platform wrapper, the
+/// author's `app.mjs` (as `app.js`), and their `applib/` modules, with no
+/// ambient network and bounded CPU.
 pub struct AppCode<'a> {
-    /// Content address of `platform` + `source`: the loader memoizes by id
-    /// per isolate across every fragment, so the id must name the bytes.
+    /// Content address of every module: the loader memoizes by id per
+    /// isolate across every fragment, so the id must name the bytes.
     pub id: &'a str,
     pub platform: &'a str,
     pub source: &'a str,
+    /// `applib/…` path → source.
+    pub modules: &'a std::collections::BTreeMap<String, String>,
     pub cpu_ms: u32,
     pub subrequests: u32,
 }
@@ -76,6 +79,9 @@ pub fn app_facet(ctx: &JsValue, env: &JsValue, code: &AppCode<'_>) -> CellResult
     let modules = Object::new();
     set(&modules, "platform.js", code.platform);
     set(&modules, "app.js", code.source);
+    for (path, source) in code.modules {
+        set(&modules, path, source.as_str());
+    }
     let limits = Object::new();
     set(&limits, "cpuMs", code.cpu_ms);
     set(&limits, "subRequests", code.subrequests);
@@ -114,6 +120,16 @@ pub fn abort_app_facet(ctx: &JsValue, reason: &str) -> CellResult<()> {
 }
 
 impl Facet {
+    /// Forwards a request to the facet's `fetch` (the author's custom routes).
+    pub async fn fetch(&self, req: worker::Request) -> CellResult<worker::Response> {
+        let raw = JsValue::from(req.inner());
+        let pending = call(&self.stub, "fetch", &[raw]).map_err(|e| CellError::new(fragment_proto::ErrorCode::AppFailed, js_message(&e)))?;
+        let out = settle(pending).await.map_err(|e| CellError::new(fragment_proto::ErrorCode::AppFailed, js_message(&e)))?;
+        let resp: worker_sys::web_sys::Response =
+            out.dyn_into().map_err(|_| CellError::new(fragment_proto::ErrorCode::AppFailed, "the app's fetch did not return a Response"))?;
+        Ok(worker::Response::from(resp))
+    }
+
     /// Calls a platform method on the facet (`__query`, `__mutate`). An
     /// exception from author code comes back as `Err(message)`.
     pub async fn call(&self, method: &str, args: &[serde_json::Value]) -> Result<serde_json::Value, String> {

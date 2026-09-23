@@ -27,17 +27,17 @@ replaces `scripts/e2e.mjs` must cover every row.
 
 | Primitive | Used by | Proven by |
 |---|---|---|
-| Rooms: browser `fragment.room` (`__rt.js`), messages, persisted document | linecount, strategy-vault, events-rfc, sycamore | e2e `rooms`, `runtime` |
+| Rooms: browser `fragment.room` (`__rt.js`), messages, persisted document | linecount, strategy-vault, events-rfc, sycamore | e2e `rooms`, `runtime`. Rust: channels + live queries + `__fragment.js` (e2e `channels`, `live`, `browser`) |
 | Room state from workflows: `ctx.rooms.getState/setState` on a named room | linecount, strategy-vault, events-rfc, sycamore | `runtime/test/rooms-state.test.mjs` |
-| Room presence | (rooms clients) | **gap** |
+| Room presence | (rooms clients) | Rust: e2e `live` (join, leave, size limit) and `browser` (two tabs) |
 | Web push: browser `fragment.push`/`fragment.notify`, server `ctx.push`, VAPID keys | linecount, meatproxy | **gap** (no test anywhere) |
 | Inbox webhooks: token (query or `x-fragment-inbox-token`), `ctx.inbox`/`ctx.inboxAck` | linecount, meatproxy, events-rfc, sycamore | e2e `workflows`, `runs`, `paused` |
 | Inbox pending cap (1000, then 429 + `queue.rejected`) | all inbox fragments | **gap** |
 | Workflow triggers: `cron`, `inbox`, `files`/`sync`, manual `run` | all | e2e `cron`, `workflows`, `filesync`, `runs` |
 | Runs ledger: retry classes, held runs, replay, auto-pause, hop budget | meatproxy | e2e `runs`, `paused`; `runtime/test/runs.test.mjs`, `flagship-replay.test.mjs` |
-| Dynamic `app.mjs` + `applib/` from the live pin | meatproxy, strategy-vault, events-rfc, sycamore | e2e `app`, `static-root`, `build`. Rust: static `site/` from live in e2e `site`; `App.fetch` and `applib/` modules are slice C |
+| Dynamic `app.mjs` + `applib/` from the live pin | meatproxy, strategy-vault, events-rfc, sycamore | e2e `app`, `static-root`, `build`. Rust: e2e `site` (static `site/` from live) and `routes` (`App.fetch`, `applib/` imports) |
 | Files: `ctx.files` read/write/list/stat/index/readBytes/ingest, CAS, write suppression | all | e2e `files`, `workflows`; `runtime/test/git-plane.test.mjs` |
-| Event ledger: `ctx.events.append`, `fragment events` | meatproxy, events-rfc, sycamore | e2e `runs`, `workflows`, `platform` |
+| Event ledger: `ctx.events.append`, `fragment events` | meatproxy, events-rfc, sycamore | e2e `runs`, `workflows`, `platform`. Rust: the `events` channel (e2e `channels`, `members`); app-side appends are channel publishes |
 | Per-workflow state: `ctx.state` | meatproxy | e2e `app`, `workflows` |
 | Secrets: declared by name, wrapped at rest, injected into runs | meatproxy, events-rfc, sycamore | e2e `auth`, `lockdown`, `workflows`; `runtime/test/secretwrap.test.mjs`. Rust: e2e `secrets` (set, list by name, never returned, limits) and `crates/core` sealing tests; injection into jobs is slice D |
 | Platform AI: `fragment:ai` text, image, video | meatproxy | e2e `gen`, `cron` (moves from fal to OpenRouter) |

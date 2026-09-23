@@ -198,12 +198,51 @@ impl FragmentCell {
             Err(e) if e.code == ErrorCode::TooLarge => return self.code_refused(sha, &e.message),
             Err(e) => return Err(e),
         };
-        let loader_id = format!("app:{}", hex::encode(Sha256::digest(format!("{PLATFORM_JS}\0{source}"))));
+        // applib/: the modules app.mjs imports, read with it from the same commit
+        let libs: Vec<String> = self
+            .tree_rows("live")?
+            .iter()
+            .filter_map(|r| r["path"].as_str())
+            .filter(|p| p.starts_with("applib/") && (p.ends_with(".mjs") || p.ends_with(".js")))
+            .map(str::to_string)
+            .collect();
+        if libs.len() > limits::APPLIB_FILES_MAX {
+            return self.code_refused(sha, &format!("applib/ has {} modules; the limit is {}", libs.len(), limits::APPLIB_FILES_MAX));
+        }
+        let mut modules = BTreeMap::new();
+        let mut total = source.len();
+        let mut hasher = Sha256::new();
+        hasher.update(PLATFORM_JS.as_bytes());
+        hasher.update(b"\0app.js\0");
+        hasher.update(source.as_bytes());
+        for path in libs {
+            let room = limits::APP_MODULES_MAX_BYTES.saturating_sub(total);
+            let text = match cs.read(&repo, sha, &path, room).await {
+                Ok(Some(b)) => String::from_utf8(b).map_err(|_| format!("{path} is not UTF-8")),
+                Ok(None) => Err(format!("{path} vanished between the listing and the read")),
+                Err(e) if e.code == ErrorCode::TooLarge => Err(format!("app.mjs and applib/ are over {} bytes", limits::APP_MODULES_MAX_BYTES)),
+                Err(e) => return Err(e),
+            };
+            let text = match text {
+                Ok(t) => t,
+                Err(why) => return self.code_refused(sha, &why),
+            };
+            total += text.len();
+            hasher.update(b"\0");
+            hasher.update(path.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(text.as_bytes());
+            modules.insert(path, text);
+        }
+        let loader_id = format!("app:{}", hex::encode(hasher.finalize()));
         let operations = serde_json::to_string(&manifest.operations).expect("operations serialize");
+        let channels = serde_json::to_string(&manifest.channels).expect("channels serialize");
+        let module_count = modules.len();
         self.exec(
-            "INSERT INTO code (id, sha, loader_id, source, operations, cpu_ms, installed_at) VALUES (1, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO code (id, sha, loader_id, source, operations, cpu_ms, installed_at, channels, modules) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (id) DO UPDATE SET sha = excluded.sha, loader_id = excluded.loader_id, source = excluded.source,
-               operations = excluded.operations, cpu_ms = excluded.cpu_ms, installed_at = excluded.installed_at",
+               operations = excluded.operations, cpu_ms = excluded.cpu_ms, installed_at = excluded.installed_at,
+               channels = excluded.channels, modules = excluded.modules",
             vec![
                 sha.into(),
                 loader_id.into(),
@@ -211,13 +250,15 @@ impl FragmentCell {
                 operations.into(),
                 SqlStorageValue::Integer(limits::APP_CPU_MS.into()),
                 SqlStorageValue::Integer(js::now_ms()),
+                channels.into(),
+                serde_json::to_string(&modules).expect("modules serialize").into(),
             ],
         )?;
         self.del_meta("code_error")?;
         js::abort_app_facet(&self.raw, "new code from live")?;
         self.event(
             "code.installed",
-            &format!("app.mjs from live {} ({} operations)", short(Some(sha)), manifest.operations.len()),
+            &format!("app.mjs from live {} ({} operations, {} channels, {module_count} applib modules)", short(Some(sha)), manifest.operations.len(), manifest.channels.len()),
             json!({ "sha": sha, "operations": manifest.operations.keys().collect::<Vec<_>>() }),
         );
         Ok(())

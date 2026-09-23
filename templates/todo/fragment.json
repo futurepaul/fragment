@@ -1,0 +1,38 @@
+{
+  "name": "todo",
+  "operations": {
+    "add": {
+      "kind": "mutation",
+      "role": "public",
+      "input": {
+        "type": "object",
+        "required": ["text"],
+        "additionalProperties": false,
+        "properties": { "text": { "type": "string", "minLength": 1, "maxLength": 200 } }
+      }
+    },
+    "toggle": {
+      "kind": "mutation",
+      "role": "public",
+      "input": {
+        "type": "object",
+        "required": ["id"],
+        "additionalProperties": false,
+        "properties": { "id": { "type": "integer", "minimum": 1 } }
+      }
+    },
+    "remove": {
+      "kind": "mutation",
+      "role": "public",
+      "input": {
+        "type": "object",
+        "required": ["id"],
+        "additionalProperties": false,
+        "properties": { "id": { "type": "integer", "minimum": 1 } }
+      }
+    },
+    "list": { "kind": "query", "role": "public", "input": { "type": "object", "additionalProperties": false } }
+  },
+  "channels": { "activity": { "read": "public" } },
+  "meta": { "title": "Todo", "description": "A shared todo list, live for everyone who has it open." }
+}

@@ -26,7 +26,7 @@
 //!   POST   /api/ops/<operation>           the operation's role
 //!   *      /serve/<path>                  the site, `__tree`, `__file`, `__op`, `__watch`
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use fragment_core::access::{self, Decision};
 use fragment_core::{npub, secrets};
@@ -61,18 +61,18 @@ CREATE TABLE IF NOT EXISTS index_outbox (
   principal TEXT PRIMARY KEY, role TEXT, version INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS secrets (
   name TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_by TEXT NOT NULL, set_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, kind TEXT NOT NULL, summary TEXT NOT NULL, data TEXT);
+CREATE TABLE IF NOT EXISTS records (
+  channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, principal TEXT NOT NULL, kind TEXT NOT NULL,
+  body TEXT NOT NULL, op TEXT, idx INTEGER, PRIMARY KEY (channel, seq));
+CREATE UNIQUE INDEX IF NOT EXISTS records_effect ON records (op, idx) WHERE op IS NOT NULL;
 CREATE TABLE IF NOT EXISTS tree (
   ref TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, mode TEXT NOT NULL, last_commit TEXT NOT NULL,
   PRIMARY KEY (ref, path));
 CREATE TABLE IF NOT EXISTS deliveries (key TEXT PRIMARY KEY, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS code (
   id INTEGER PRIMARY KEY CHECK (id = 1), sha TEXT NOT NULL, loader_id TEXT NOT NULL, source TEXT NOT NULL,
-  operations TEXT NOT NULL, cpu_ms INTEGER NOT NULL, installed_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS ops (
-  id TEXT PRIMARY KEY, name TEXT NOT NULL, principal TEXT NOT NULL, input_sha TEXT NOT NULL, result TEXT NOT NULL,
-  at INTEGER NOT NULL);
+  operations TEXT NOT NULL, cpu_ms INTEGER NOT NULL, installed_at INTEGER NOT NULL,
+  channels TEXT NOT NULL DEFAULT '{}', modules TEXT NOT NULL DEFAULT '{}');
 ";
 
 #[durable_object]
@@ -84,15 +84,26 @@ pub struct FragmentCell {
     /// Serializes pin refreshes: two refreshes racing could leave the older head pinned.
     pub(crate) plane: futures_util::lock::Mutex<()>,
     pub(crate) rate: RefCell<fragment_core::ratelimit::Rate>,
+    /// Whether this activation has swept the facet's ledger for effects.
+    pub(crate) swept: Cell<bool>,
 }
 
 impl DurableObject for FragmentCell {
     fn new(state: State, env: Env) -> Self {
         let raw: JsValue = state._inner().into();
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
-        state.storage().sql().exec(SCHEMA, None).expect("the Fragment schema applies");
+        let sql = state.storage().sql();
+        sql.exec(SCHEMA, None).expect("the Fragment schema applies");
+        // a code table made before channels and applib (phase 2 slice B)
+        let cols: Vec<Value> = sql.exec("PRAGMA table_info(code)", None).and_then(|c| c.to_array()).unwrap_or_default();
+        for (col, decl) in [("channels", "channels TEXT NOT NULL DEFAULT '{}'"), ("modules", "modules TEXT NOT NULL DEFAULT '{}'")] {
+            if !cols.iter().any(|c| c["name"] == col) {
+                sql.exec(&format!("ALTER TABLE code ADD COLUMN {decl}"), None).expect("the code table migrates");
+            }
+        }
         let cfg = Config::from_env(&env);
-        FragmentCell { state, raw, env, cfg, plane: futures_util::lock::Mutex::new(()), rate: RefCell::new(fragment_core::ratelimit::Rate::new(limits::PUBLIC_CALLS_PER_MIN, limits::PUBLIC_CALLS_PER_MIN_FRAGMENT)) }
+        let rate = fragment_core::ratelimit::Rate::new(limits::PUBLIC_CALLS_PER_MIN, limits::PUBLIC_CALLS_PER_MIN_FRAGMENT);
+        FragmentCell { state, raw, env, cfg, plane: futures_util::lock::Mutex::new(()), rate: RefCell::new(rate), swept: Cell::new(false) }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -111,15 +122,21 @@ impl DurableObject for FragmentCell {
     }
 
     async fn websocket_message(&self, ws: WebSocket, message: WebSocketIncomingMessage) -> Result<()> {
-        if let WebSocketIncomingMessage::String(s) = message {
-            if serde_json::from_str::<Value>(&s).is_ok_and(|v| v["type"] == "ping") {
-                ws.send_with_str(r#"{"type":"pong"}"#)?;
+        let WebSocketIncomingMessage::String(s) = message else { return Ok(()) };
+        if self.state.get_tags(&ws).iter().any(|t| t == "live") {
+            if let Err(e) = self.live_message(&ws, &s) {
+                ws.send_with_str(json!({ "type": "error", "message": e.message }).to_string())?;
             }
+        } else if serde_json::from_str::<Value>(&s).is_ok_and(|v| v["type"] == "ping") {
+            ws.send_with_str(r#"{"type":"pong"}"#)?;
         }
         Ok(())
     }
 
     async fn websocket_close(&self, ws: WebSocket, code: usize, reason: String, _clean: bool) -> Result<()> {
+        if self.state.get_tags(&ws).iter().any(|t| t == "live") {
+            self.live_closed(&ws);
+        }
         let code = if code == 1005 || code == 1006 { 1000 } else { code as u16 };
         let _ = ws.close(Some(code), Some(reason));
         Ok(())
@@ -194,12 +211,10 @@ impl FragmentCell {
         Ok(self.rows(q, vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0))
     }
 
-    /// Appends to the audit trail (the `events` channel from slice C).
+    /// Appends to the audit trail: the `events` channel, written by the platform.
     pub(crate) fn event(&self, kind: &str, summary: &str, data: Value) {
         let summary: String = summary.chars().take(500).collect();
-        let data = if data.is_null() { SqlStorageValue::Null } else { data.to_string().into() };
-        let _ = self.exec("INSERT INTO events (at, kind, summary, data) VALUES (?, ?, ?, ?)", vec![SqlStorageValue::Integer(js::now_ms()), kind.into(), summary.into(), data]);
-        let _ = self.exec("DELETE FROM events WHERE id <= (SELECT COALESCE(MAX(id), 0) - ? FROM events)", vec![SqlStorageValue::Integer(limits::EVENTS_KEPT)]);
+        let _ = self.append("events", "platform", kind, &json!({ "summary": summary, "data": data }), None);
     }
 
     /// The fragment's name, or 404 when it was never created (or was deleted).
@@ -315,6 +330,12 @@ impl FragmentCell {
             (Method::Get, ["api", "file"]) => self.file(&caller, &query("path").unwrap_or_default()).await,
             (Method::Get, ["api", "file", "stat"]) => self.stat(&caller, &query("path").unwrap_or_default()).await,
             (Method::Get, ["api", "events"]) => self.events(&caller, query("since").and_then(|s| s.parse().ok()).unwrap_or(0)),
+            (Method::Get, ["api", "channels"]) => self.channels(&caller),
+            (Method::Get, ["api", "channels", channel]) => {
+                let after = query("after").and_then(|s| s.parse().ok()).unwrap_or(0);
+                let limit = query("limit").and_then(|s| s.parse().ok()).unwrap_or(limits::CHANNEL_PAGE);
+                self.channel(&caller, channel, after, limit)
+            }
             (Method::Post, ["api", "ops", op]) => {
                 let body = body_json(&mut req).await?;
                 let op = op.to_string();
@@ -438,7 +459,7 @@ impl FragmentCell {
             pins: Pins { main: self.meta("pin_main")?, live: self.meta("pin_live")? },
             counts: Counts {
                 files: self.count("SELECT COUNT(*) AS n FROM tree WHERE ref = 'main'")?,
-                events: self.count("SELECT COUNT(*) AS n FROM events")?,
+                events: self.count("SELECT COUNT(*) AS n FROM records WHERE channel = 'events'")?,
                 members: self.count("SELECT COUNT(*) AS n FROM members")?,
             },
             code: self.code_status()?,
@@ -449,18 +470,13 @@ impl FragmentCell {
         })
     }
 
+    /// The `events` channel in the shape `fragment events` reads.
     fn events(&self, caller: &Caller, since: i64) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
-        let rows = self.rows(
-            "SELECT id, at, kind, summary, data FROM events WHERE id > ? ORDER BY id LIMIT ?",
-            vec![SqlStorageValue::Integer(since), SqlStorageValue::Integer(limits::EVENTS_PAGE as i64)],
-        )?;
-        let events: Vec<Value> = rows
+        let events: Vec<Value> = self
+            .read_channel("events", since, limits::EVENTS_PAGE)?
             .into_iter()
-            .map(|mut r| {
-                r["data"] = r["data"].as_str().and_then(|d| serde_json::from_str(d).ok()).unwrap_or(Value::Null);
-                r
-            })
+            .map(|r| json!({ "id": r.seq, "at": r.at, "kind": r.kind, "summary": r.body["summary"], "data": r.body["data"] }))
             .collect();
         json_response(&json!({ "events": events }))
     }
@@ -471,8 +487,14 @@ impl FragmentCell {
             return Ok(());
         }
         self.flush_index().await;
+        if !self.swept.get() {
+            if let Ok(facet) = self.facet() {
+                self.sweep(&facet).await?;
+            }
+        }
         let poll_at: i64 = self.meta("poll_at")?.and_then(|s| s.parse().ok()).unwrap_or(0);
         if poll_at <= js::now_ms() {
+            self.trim_audit()?;
             self.poll().await;
             self.set_meta("poll_at", &(js::now_ms() + self.cfg.poll_interval_ms).to_string())?;
         }

@@ -7,6 +7,7 @@
 //! the process exits non-zero when any check fails.
 
 mod api;
+mod browser;
 mod lanes;
 
 use std::path::{Path, PathBuf};

@@ -14,13 +14,16 @@
 //!
 //! With a suffix configured, `/f/<name>/…` redirects to the fragment's own
 //! host: fragments sharing one origin could act as each other's visitors.
-//! `__watch` stays reachable there for the CLI, which carries no cookies.
+//! `__watch` and `__live` stay reachable there for the CLI, which carries
+//! no cookies.
 
 mod config;
+mod channels;
 mod cs;
 mod error;
 mod fragment;
 mod js;
+mod live;
 mod members;
 mod ops;
 mod plane;
@@ -176,7 +179,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
         (method, ["f", name, rest @ ..]) => {
             check_name(name)?;
             let rest = rest.join("/");
-            if cfg.host_suffix.is_some() && rest != "__watch" {
+            if cfg.host_suffix.is_some() && rest != "__watch" && rest != "__live" {
                 if !matches!(method, Method::Get | Method::Head) {
                     return Err(CellError::new(ErrorCode::NotFound, "fragments are served from their own origin"));
                 }

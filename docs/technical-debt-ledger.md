@@ -36,11 +36,11 @@ without a delete condition is unfinished design, not debt.
   hibernatable WebSockets, the Worker Loader, and facets, with a ~35-line
   JavaScript shim, 181 KB of gzipped wasm, and ~9 ms once per isolate.
 
-## Primitives with no check: web push, room presence, the inbox cap
+## Primitives with no check: web push, the inbox cap
 
 - **Observed:** `docs/published-fragments.md` (2026-09-23). Web push
-  (`webpush.ts`, 336 lines) has no test anywhere; presence and the
-  1000-message inbox cap have no e2e.
+  (`webpush.ts`, 336 lines) has no test anywhere; the 1000-message inbox
+  cap has no e2e. (Presence: proven in the Rust e2e, slice C.)
 - **Risk:** linecount- and meatproxy-style notifications, presence
   lists, or overload behavior break silently.
 - **First proof:** any change to `webpush.ts`, `rooms.ts`, or the inbox
@@ -135,3 +135,30 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** the interval backs off for fragments with no recent
   pushes (or webhooks are proven reliable enough to poll daily), with a
   test that an idle fragment's alarm spacing grows.
+
+## The effects sweep has no fault-injection test
+
+- **Observed:** phase 2 slice C. A mutation's effects apply after the
+  facet commits it; if the supervisor dies in between, the next
+  activation sweeps the newest 200 ledger rows and applies what has no
+  `ops` record. The e2e proves re-application is idempotent (a replay
+  appends nothing twice) but cannot stop the node between the two
+  commits.
+- **Risk:** a mutation whose records never appear (and no `changed`
+  signal) after a crash in that window, if the sweep is wrong.
+- **First proof:** a crash in production between facet commit and apply.
+- **Delete when:** celld (or a test build of the cell) offers a fault
+  point after the facet call, and an e2e kills the node there and finds
+  the records after restart.
+
+## App channels grow without bound
+
+- **Observed:** phase 2 slice C, as MODEL decided: app channels keep
+  their records forever in the supervisor's SQLite (`events` and `ops`
+  keep 90 days and 10 000 records).
+- **Risk:** a busy chat grows the supervisor's database until celld's
+  per-object limits or replication cost bite.
+- **First proof:** a channel past ~100 000 records, or phase 3 storage
+  numbers.
+- **Delete when:** `fragment.json` can declare a channel's retention
+  (count or age) with a platform ceiling, enforced and tested.

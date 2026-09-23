@@ -1,6 +1,7 @@
 //! The sections, in the order they run.
 
 mod app;
+mod author;
 mod control;
 mod members;
 mod plane;
@@ -25,6 +26,12 @@ pub fn run(s: &mut Suite, api: Api) -> Result<()> {
     app::public(s, &api)?;
     site::site(s, &api)?;
     site::watch(s, &api)?;
+    author::schemas(s, &api)?;
+    author::channels(s, &api)?;
+    author::live(s, &api)?;
+    author::routes(s, &api)?;
+    author::cli(s, &api)?;
+    author::browser(s, &api)?;
     sync::folder_sync(s, &api)?;
     let api = restart::restart(s, api)?;
     restart::pathmode(s, api)?;

@@ -1,0 +1,23 @@
+{
+  "operations": {
+    "say": {
+      "kind": "mutation",
+      "role": "public",
+      "input": {
+        "type": "object",
+        "required": ["text"],
+        "additionalProperties": false,
+        "properties": { "text": { "type": "string", "minLength": 1, "maxLength": 100 } }
+      }
+    },
+    "note": { "kind": "mutation", "input": { "type": "object", "required": ["text"], "properties": { "text": { "type": "string" } } } },
+    "undeclared": { "kind": "mutation", "role": "public" },
+    "huge": { "kind": "mutation", "role": "public" },
+    "count": { "kind": "query", "role": "public" },
+    "whoami": { "kind": "query", "role": "public" }
+  },
+  "channels": {
+    "room": { "read": "public" },
+    "staff": { "read": "editor" }
+  }
+}
