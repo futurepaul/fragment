@@ -18,7 +18,7 @@
 // The production code under test is imported from ../src (what
 // scripts/build-runtime emits) — no test hooks, no reimplementation.
 import { DatabaseSync } from "node:sqlite";
-import { generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { createServer } from "node:http";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -199,6 +199,13 @@ export async function makeWorld(opts = {}) {
   env.WORKFLOWS = {
     instances: wfInstances,
     async create({ id, params }) {
+      // celld semantics: an id is refused while its instance is live and
+      // replaced once it is terminal. A fake that silently overwrote here
+      // hid the fleet-wide id collision between fragments.
+      const prior = wfInstances.get(id);
+      if (prior && !["complete", "errored", "terminated"].includes(prior.statusValue.status)) {
+        throw new Error(`WORKFLOW_ERROR: instance "${id}" already exists with status "${prior.statusValue.status}"`);
+      }
       const inst = {
         id, params,
         store: { steps: new Map() },
@@ -254,7 +261,10 @@ export async function makeWorld(opts = {}) {
       await reg.sql.exec("INSERT OR REPLACE INTO roles (name, pubkey, role) VALUES (?, ?, 'owner')", name, ownerHex);
       const resp = await facade.fetch("http://x/__cell/init", {
         method: "POST",
-        body: JSON.stringify({ name, ownerHex, fragmentSecret: secretHex || "ab".repeat(32) }),
+        // Production mints a random key per fragment client-side; a shared
+        // default here would make every fragment the same identity, so the
+        // default is derived from the name (distinct, and stable per test).
+        body: JSON.stringify({ name, ownerHex, fragmentSecret: secretHex || createHash("sha256").update(`fragment-key:${name}`).digest("hex") }),
         headers: { "content-type": "application/json" },
       });
       return { cell: facade, resp: await resp.json(), facade };

@@ -183,7 +183,7 @@ async function resumeDueRuns(cell) {
       updateRun(cell, r.id, { status: "held", finished_at: Date.now(), error: "workflow removed while run in flight" });
       continue;
     }
-    const st = await nativeStatus(cell, wfInstanceId(r.id, r.attempt));
+    const st = await nativeStatus(cell, wfInstanceId(cell.getMeta("fragment_npub"), r.id, r.attempt));
     if (st === null) continue;
     if (st.status === "running" || st.status === "queued" || st.status === "paused" || st.status === "waiting") continue;
     const policy = retryPolicy(wf);

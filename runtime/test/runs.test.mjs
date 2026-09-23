@@ -4,6 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { makeWorld, upsert } from "./harness.mjs";
+import { wfInstanceId } from "../src/wf-engine.js";
 
 const WF = "workflows/job.mjs";
 
@@ -73,7 +74,7 @@ test("valid transitions: launch → success; terminal error → held; retryable 
     // due retry: attempt 2 runs clean and succeeds
     w.cell(name).sql.exec("UPDATE runs SET next_attempt_at = ? WHERE id = ?", Date.now() - 1000, out.runId);
     await w.cell(name).resumeDueRuns();
-    const inst2 = w.env.WORKFLOWS.instances.get(`r${out.runId}a2`);
+    const inst2 = w.env.WORKFLOWS.instances.get(wfInstanceId(w.cell(name).getMeta("fragment_npub"), out.runId, 2));
     assert.ok(inst2);
     await inst2.run();
     row = rowOf(w.cell(name), out.runId);
@@ -82,6 +83,46 @@ test("valid transitions: launch → success; terminal error → held; retryable 
   } finally {
     await w.stop();
   }
+});
+
+test("instance ids are namespaced per fragment: two fragments' first runs launch side by side", async () => {
+  // Goal: the native Workflows binding is one namespace for the whole fleet
+  // and run ids restart at 1 in every fragment, so instance ids must name
+  // the fragment. Method: launch run 1 in two fragments while the first is
+  // still live, on a binding that refuses live duplicates as celld does,
+  // then finish both and read each outcome back through its own row.
+  const w = await makeWorld();
+  try {
+    await setup(w, "ns-a", [{ name: "job", file: WF }]);
+    await setup(w, "ns-b", [{ name: "job", file: WF }]);
+    const a = await w.cell("ns-a").executeWorkflow({ name: "job", file: WF }, null, { trigger: "manual" });
+    const b = await w.cell("ns-b").executeWorkflow({ name: "job", file: WF }, null, { trigger: "manual" });
+    assert.equal(a.launched, true);
+    assert.equal(b.launched, true, "the second fragment's first run launches while the first is live");
+    assert.equal(a.runId, 1);
+    assert.equal(b.runId, 1);
+    assert.notEqual(a.instanceId, b.instanceId);
+    await w.env.WORKFLOWS.instances.get(b.instanceId).run();
+    await w.env.WORKFLOWS.instances.get(a.instanceId).run();
+    assert.equal(rowOf(w.cell("ns-a"), 1).status, "success");
+    assert.equal(rowOf(w.cell("ns-b"), 1).status, "success");
+  } finally {
+    await w.stop();
+  }
+});
+
+test("instance ids: same fragment and run differ per attempt; corrupt inputs are refused", () => {
+  // Goal: retries never collide with a live attempt, and an id is never
+  // guessed from corrupt state. Method: derive ids directly.
+  const npubA = "npub1" + "q".repeat(58);
+  const npubB = "npub1" + "p".repeat(58);
+  assert.notEqual(wfInstanceId(npubA, 1, 1), wfInstanceId(npubA, 1, 2));
+  assert.notEqual(wfInstanceId(npubA, 1, 1), wfInstanceId(npubB, 1, 1));
+  assert.match(wfInstanceId(npubA, 12, 3), /^f[a-z0-9]{16}r12a3$/);
+  assert.throws(() => wfInstanceId(null, 1, 1), /corrupt state: fragment npub/);
+  assert.throws(() => wfInstanceId("npub1short", 1, 1), /corrupt state: fragment npub/);
+  assert.throws(() => wfInstanceId(npubA, 0, 1), /corrupt state: run id/);
+  assert.throws(() => wfInstanceId(npubA, 1, 1.5), /corrupt state: attempt/);
 });
 
 test("invalid transitions: paused blocks auto runs; single-flight skips; hop budget refuses", async () => {

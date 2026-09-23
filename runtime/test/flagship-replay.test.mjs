@@ -8,6 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { makeWorld, upsert, deliverWebhook, pushPayload } from "./harness.mjs";
+import { wfInstanceId } from "../src/wf-engine.js";
 
 const WF_FILE = `workflows/writer.mjs`;
 const WF_SOURCE = `
@@ -117,7 +118,7 @@ test("FLAGSHIP crash-mid-attempt: commit landed, step result lost — re-run hea
     // due retry launches attempt 2; drive it WITHOUT the crash hook
     w.cell(name).sql.exec("UPDATE runs SET next_attempt_at = ? WHERE id = ?", Date.now() - 1000, out.runId);
     await w.cell(name).resumeDueRuns();
-    const inst2Id = `r${out.runId}a2`;
+    const inst2Id = wfInstanceId(w.cell(name).getMeta("fragment_npub"), out.runId, 2);
     const inst2 = w.env.WORKFLOWS.instances.get(inst2Id);
     assert.ok(inst2, "attempt-2 instance launched");
     const r2 = await inst2.run();
@@ -157,7 +158,7 @@ test("FLAGSHIP conflicting body: a competing writer between crash and re-run —
     await w.cell(name).resumeDueRuns();
     w.cell(name).sql.exec("UPDATE runs SET next_attempt_at = ? WHERE id = ?", Date.now() - 1000, out.runId);
     await w.cell(name).resumeDueRuns();
-    const inst2 = w.env.WORKFLOWS.instances.get(`r${out.runId}a2`);
+    const inst2 = w.env.WORKFLOWS.instances.get(wfInstanceId(w.cell(name).getMeta("fragment_npub"), out.runId, 2));
     const r2 = await inst2.run();
     assert.equal(r2.ok, true);
     assert.equal(r2.output.deduped, false);

@@ -1,8 +1,14 @@
 // GENERATED from runtime/ts - run scripts/build-runtime after editing sources.
 const WF_PARAM_LIMIT = 64 * 1024;
 const WF_REPORT_TRIES = 5;
-function wfInstanceId(runId, attempt) {
-  return `r${runId}a${attempt}`;
+const NPUB_RE = /^npub1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{58}$/;
+function wfInstanceId(fragmentNpub, runId, attempt) {
+  if (!NPUB_RE.test(String(fragmentNpub))) throw new Error(`corrupt state: fragment npub ${JSON.stringify(fragmentNpub)} is not a bech32 npub`);
+  if (!(Number.isSafeInteger(runId) && runId > 0)) throw new Error(`corrupt state: run id ${runId} is not a positive integer`);
+  if (!(Number.isSafeInteger(attempt) && attempt > 0)) throw new Error(`corrupt state: attempt ${attempt} is not a positive integer`);
+  const id = `f${fragmentNpub.slice(5, 21)}r${runId}a${attempt}`;
+  if (!(id.length <= 100 && /^[a-z0-9]+$/.test(id))) throw new Error(`instance id ${id} is outside the Workflows id alphabet`);
+  return id;
 }
 async function runNativeAttempt(event, step, env) {
   const call = async (route, body) => {
@@ -52,7 +58,7 @@ async function launchNativeRun(cell, runId, attempt) {
   };
   const encoded = JSON.stringify(event);
   if (encoded.length > WF_PARAM_LIMIT) throw new Error("workflow params exceed sanity limit");
-  const id = wfInstanceId(runId, attempt);
+  const id = wfInstanceId(cell.getMeta("fragment_npub"), runId, attempt);
   await binding.create({ id, params: JSON.parse(encoded) });
   return id;
 }

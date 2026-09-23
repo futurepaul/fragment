@@ -21,8 +21,17 @@
 // boundary bounds HOW MUCH work re-runs. The flagship test exercises
 // exactly this: success, replay (memoized steps), and crash-mid-attempt.
 //
-// Instance IDs are `r<runId>a<attempt>` — unique per attempt, so a
-// retried attempt never collides with a live one (celld's create()
+// Instance IDs are `f<key>r<runId>a<attempt>`. The native Workflows
+// binding is ONE namespace for the whole fleet while run ids restart at 1
+// in every fragment, so the id must name the fragment as well as the
+// attempt: an id of only `r1a1` made two fragments' first runs collide
+// (the later launch was refused while the earlier ran) and let one
+// fragment's run replace another's terminal instance, whose status the
+// crash sweep then read back. The key is the first 16 data characters of
+// the fragment's own npub, which is generated per creation, so a fragment
+// recreated under the same name gets fresh ids too. Within a fragment,
+// `r<runId>a<attempt>` is unique per attempt, so a retried attempt never
+// collides with a live one (celld's create() refuses a live duplicate and
 // replaces only TERMINAL instances with the same id).
 
 // Workflow params are bounded at 1 MiB by the platform; we only ship ids
@@ -36,8 +45,19 @@ export const WF_PARAM_LIMIT = 64 * 1024;
 // the cell's crash sweep reconciles from instance status instead.
 export const WF_REPORT_TRIES = 5;
 
-export function wfInstanceId(runId: number, attempt: number): string {
-  return `r${runId}a${attempt}`;
+const NPUB_RE = /^npub1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{58}$/;
+
+export function wfInstanceId(fragmentNpub: string, runId: number, attempt: number): string {
+  // A cell reaches this only after create stored its npub; anything else is
+  // corrupt state, and a guessed id could address another fragment's run.
+  if (!NPUB_RE.test(String(fragmentNpub))) throw new Error(`corrupt state: fragment npub ${JSON.stringify(fragmentNpub)} is not a bech32 npub`);
+  if (!(Number.isSafeInteger(runId) && runId > 0)) throw new Error(`corrupt state: run id ${runId} is not a positive integer`);
+  if (!(Number.isSafeInteger(attempt) && attempt > 0)) throw new Error(`corrupt state: attempt ${attempt} is not a positive integer`);
+  // The key is fixed-width, so no separator is needed; plain alphanumerics
+  // are the id alphabet celld is proven to accept (Workflows allows <= 100).
+  const id = `f${fragmentNpub.slice(5, 21)}r${runId}a${attempt}`;
+  if (!(id.length <= 100 && /^[a-z0-9]+$/.test(id))) throw new Error(`instance id ${id} is outside the Workflows id alphabet`);
+  return id;
 }
 
 // The one body FragmentWorkflow.run delegates to (exported so tests drive
@@ -114,7 +134,7 @@ export async function launchNativeRun(cell, runId: number, attempt: number): Pro
   };
   const encoded = JSON.stringify(event);
   if (encoded.length > WF_PARAM_LIMIT) throw new Error("workflow params exceed sanity limit");
-  const id = wfInstanceId(runId, attempt);
+  const id = wfInstanceId(cell.getMeta("fragment_npub"), runId, attempt);
   await binding.create({ id, params: JSON.parse(encoded) });
   return id;
 }
