@@ -122,13 +122,14 @@ time; read it before touching the matching phase.
 
 - code.storage key (org `finite`):
   `~/.config/finite-next/secrets/codestorage-private-key.pem`
-- OpenRouter key: `~/.config/finite-next/secrets/openrouter-api-key`
-  (Paul adds it).
+- OpenRouter key: `~/.config/finite-next/secrets/openrouter-api-key`.
 - Fly Sprites token (org `paul-miller`): `~/Downloads/sprite-token.txt`.
-- A Fly deploy token is needed for phase 3 (not yet requested).
-- Leftover test Sprites (all cold): `ws-058a…`, `ws-1ffc…`, `ws-76fd…`,
-  `ws-874f…`, `ws-8dc9…`, and the Habit Tracker demo `ws-c2fe…`;
-  deletion waits for Paul.
+- Fly API token, org-scoped (org `personal`, name `fragment-next`, expires
+  2026-12-22): `~/.config/finite-next/secrets/fly-api-token`. flyctl on
+  this Mac is also signed in to Paul's account.
+- The six test Sprites were deleted 2026-09-23. `ws-d519eb416e04407c85ee825b`
+  (created 2026-09-23 12:32 UTC) is from Paul's own session on the
+  finite-next stack; it stays until Paul says otherwise.
 - GCP project `finite-next-test` was deleted 2026-09-23 (recoverable for
   30 days); its budget lives on the billing account.
 - The fragment.club VPS still serves the old fragments until the cutover.
