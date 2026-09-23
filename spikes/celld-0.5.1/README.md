@@ -83,7 +83,29 @@ The handler already settled its claim and replied with its final snapshot
 in the completion turn; a failed or cancelled alarm still awaits the drive.
 With the patched release build, `node scripts/e2e.mjs --only paused`
 passes 10 of 10 (the unpatched source build: 0 of 3), and the full e2e
-passes 312 of 312.
+passes 312 of 312. Pushed as
+[futurepaul/celld@b5f57ea](https://github.com/futurepaul/celld/tree/fix/alarm-completion).
+
+Red/green from the sibling session's minimal repro (a DO whose `alarm()`
+re-arms itself +100 ms; firings in ms from the first):
+
+| Build | No timer left | `AbortSignal.timeout(60 s)` left pending |
+|---|---|---|
+| v0.4.1 release | 0, 104, 206 | 0, 103, 205 |
+| v0.5.1 release | 0, 104, 206 | 0, 15503, 31008 |
+| v0.5.1 + fix | 0, 103, 206 | 0, 104, 208 |
+
+A request that re-arms to now 500 ms after a firing waited 14.5 s on
+0.5.0 and 0.5.1 with a 60 s timer left in `alarm()` (2–6 ms on 0.4.x and
+with the fix); a 3 s timer cost 2.5 s. Leftover work still runs after the
+fix (a 1 s timer from `alarm()` wrote its row at 1,010 ms). On an unfixed
+0.5.1, an `AbortController` with `clearTimeout` in `finally` avoids the
+stall (3 ms, against 14.5 s for `AbortSignal.timeout` on the same fetch).
+At the deadline celld settles the firing as `Failure::Ambiguous`, so a
+successful handler is booked as a stuck one; no duplicate firing was seen.
+celld's own suite does not run from the public tree (`cargo test -p celld`
+runs 0 tests; `--cfg celld_internal_tests` does not compile), which the
+upstream issue says.
 
 **Our exposure.** The model multiplexes every schedule and retry on one
 alarm per fragment (`docs/MODEL.md`), so a 15 s stall on a re-arm right
