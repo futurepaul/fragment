@@ -24,8 +24,8 @@ weight.
    Resource permissions belong to the service that owns the resource,
    never to BANKS.
 2. **Fragment.** A place: one code.storage repo (files, history, `main`
-   and `live`), one cell (SQLite, rooms, workflows, inbox, events), URLs,
-   and members (key → role). **Apps, chats, and desktops are all
+   and `live`), one supervisor cell (members, operations, channels) with
+   the app's own SQLite in a facet, URLs, and members (key → role). **Apps, chats, and desktops are all
    fragments; they differ only in their files.** Sharing anything is a
    grant. Opening any fragment URL shows it under a platform share
    header.
@@ -36,8 +36,8 @@ weight.
    so a fragment can own a computer.
 
 The verbs are the CLI's: create, sync, deploy (preview, rollback),
-grant/revoke, call (typed operations), run (workflows), send (rooms,
-inbox), and a computer's wake/exec.
+grant/revoke, call (operations), append/read (channels), and a
+computer's wake/exec.
 
 ## Decisions (made 2026-09-23)
 
@@ -45,10 +45,12 @@ inbox), and a computer's wake/exec.
    are rebuilt on it. finite-next's app cell, repo layer, and workspace
    sync/publish plumbing are hard-cut (provenance: finite-next
    `claude/cell-agent` @ `6545f08`).
-2. Fragments get **typed operations** (declared in `fragment.json` with
-   input schemas and a minimum role) and **author-facing SQL** (`ctx.db`
-   over the fragment's cell SQLite, with forbidden statements and
-   limits). Agents use apps through operations, not file edits.
+2. The core model is `docs/MODEL.md`: code in git, state in SQL, bytes in
+   R2, history in channels; one execution primitive (the typed, durable
+   **operation**); one log (**channels**); membership as live cell state
+   with every actor a key; agents and computers as participants.
+   Author-facing SQL is a Durable Object Facet (the app's own SQLite).
+   File-based apps (a vault) stay first-class.
 3. **Chats are fragments.** The transcript is an append-only, paged room
    history (rooms today persist one document, which a transcript
    outgrows). A chat guest is a member with the owner's full authority
@@ -72,11 +74,11 @@ inbox), and a computer's wake/exec.
    key: text `z-ai/glm-5.3-flash` (reads images and video, so
    screenshots work), images `google/gemini-3.1-flash-lite-image`, video
    `minimax/hailuo-3-max` (H3 Max). fal is removed.
-8. **Rust for everything except the cell runtime.** The runtime stays
-   TypeScript because celld runs Workers-style JavaScript (ledgered).
-   Tooling, e2e, mocks, the machine front door, the ACP runner, and
-   deploy are Rust. No shell or Python. The Cloudflare host path is
-   deleted (celld only).
+8. **Rust wherever it runs.** Tooling, e2e, mocks, the ACP runner, and
+   deploy are Rust; platform cells become Rust (workers-rs on celld) if
+   the spike in `docs/MODEL.md` holds, otherwise they stay TypeScript
+   (ledgered). Author code stays JavaScript. No shell or Python. The
+   Cloudflare host path is deleted (celld only, v0.5.1).
 9. fragment.club's published fragments are not migrated; every primitive
    they used stays expressible and proven (`docs/published-fragments.md`).
 
@@ -86,10 +88,11 @@ inbox), and a computer's wake/exec.
 |---|---|---|
 | File bytes + history + live pointer | code.storage git | local folder = disposable working copy; cell RAM = LRU cache, never persisted |
 | Tree index (path, size, sha per pinned commit) | derived from git | cell SQLite; names its pinned SHA; invalidated by webhook/poll; serves pinned until refreshed |
-| Manifest, grants (editors/viewers), declared operations | `fragment.json` in git | cell caches the pinned copy; an invalid manifest at a new pin keeps the last good cache and records an event |
-| Cell state (WAL, registry, events, runs, author SQL, room history) | the S3 bucket (Tigris) | — |
+| Manifest and declared operations | `fragment.json` in git | cell caches the pinned copy; an invalid manifest at a new pin keeps the last good cache and records an event |
+| Members, roles, invites | the fragment's supervisor cell | grants and revokes are transactional; the `events` channel records each change |
+| Cell state (supervisor tables, operation ledger, channels, the app facet's SQL) | the S3 bucket (Tigris), via celld replication | — |
+| Large bytes (uploads, generated media) | R2 (the fleet bucket under `r2/`) | referenced by content hash; never in git or cell SQL |
 | Identities ↔ keys, designated owners | BANKS registry cell | sessions and caches name it and never outlive a revocation |
-| Pending invites | the inviter's platform cell | acceptance commits the grant to `fragment.json`; the invite is then history |
 | Browser sessions | platform session cookie (platform origin only) | maps to one identity key; re-checked against grants per request |
 | Agent turns and operation log | the agent's cell | effects dedupe at their owners by operation id |
 | Computer disks | Sprites durable storage | the front door's registry records ownership only |
@@ -117,7 +120,7 @@ Hard rule kept: **no file bytes persist in cell SQLite or the bucket.**
 ## Phases
 
 Each phase lands as hard cuts with its tests. A phase is done when its
-acceptance checks pass in CI and, from phase 2 on, against the hosted
+acceptance checks pass in CI and, from phase 3 on, against the hosted
 deployment.
 
 ### 0. Foundation (done 2026-09-23)
@@ -131,62 +134,68 @@ deployment.
   fail on the old ids.
 - Published-fragment inventory and its coverage gaps recorded.
 
-### 1. Rust tooling and the OpenRouter cut
-- An `xtask` crate: `dev up|down|wipe`, `build-runtime`, `e2e`,
-  `deploy`. The e2e harness is Rust, drives the real server and the real
-  CLI, and covers every row of the published-fragment table, closing its
-  gaps (room presence, web push against a fake push service, the inbox
-  cap).
-- The code.storage mock and an OpenRouter fake become Rust (no spend in
-  CI). `fragment:ai` moves to OpenRouter for text, image, and video; the
-  fal client and fake are deleted.
-- Delete `scripts/*` (shell and Node), `deploy/` (Caddy, Python,
-  systemd), and the Cloudflare path.
-- **Acceptance:** `cargo xtask e2e` green with at least today's coverage
-  plus the gap rows; no `.sh` or `.py` in the repo; JavaScript only in
-  `runtime/`, its tests, templates, and fragment code.
+### 1. Model spikes
+- The four spikes in `docs/MODEL.md`: Rust platform cells (workers-rs,
+  with Worker Loader and facets), the app facet as author SQL,
+  deterministic agent turns in Workflows, and celld v0.5.1.
+- **Acceptance:** each spike ends with a written verdict and numbers
+  (bundle size, cold activation, facet image cost at 1/16/64 MiB, replay
+  without repeated effects); `docs/MODEL.md` updated to match; Paul's
+  open questions answered.
 
-### 2. Hosted on Fly
-- `celld diagnose` against a new Tigris `ord` bucket (conditional
-  writes, latency) before any state lands there. celld (2 Machines,
-  always on) and the platform in Fly `ord`; real code.storage (org
-  `finite`); secrets set from files, never printed. A staging hostname
-  until the cutover (phase 8).
+### 2. The core cut
+- Operations, channels, membership, the app facet, R2 bytes, and
+  OpenRouter (text, image, video) replace workflows-as-files, rooms
+  documents, inbox tables, `ctx.state`, git grants, and fal, in hard
+  cuts. Every published-fragment primitive is re-expressed on the new
+  model and proven.
+- The tooling moves to Rust in the same phase, because the new harness
+  is written against the new model: an `xtask` crate (`dev`, `build`,
+  `e2e`, `deploy`), a Rust e2e that drives the real server, CLI, and a
+  browser, and Rust fakes for code.storage, OpenRouter, and a push
+  service. `scripts/`, `deploy/`, and the Cloudflare path are deleted;
+  the JavaScript e2e is the safety net until the Rust one supersedes it.
+- `fragment call`, `fragment channel`, `fragment members` in the CLI; a
+  todo template and a vault template as the reference apps.
+- **Acceptance:** valid, invalid, replay, and conflicting-body tests for
+  every mutation; restart tests for the supervisor and facet storage;
+  the published-fragment table fully green with no gap rows; no `.sh` or
+  `.py` in the repo.
+
+### 3. Hosted on Fly
+- `celld diagnose` against a new Tigris `ord` bucket before any state
+  lands there. celld v0.5.1 on two always-on Fly Machines in `ord` with a
+  restart-always policy (celld self-fences and must be restarted),
+  peers on Fly's private network; real code.storage (org `finite`);
+  secrets set from files, never printed. A staging hostname until the
+  cutover.
 - **Acceptance:** the e2e suite passes against the hosted URL; durable
-  write latency, cold cell load, and cell-to-Sprite latency recorded;
-  an operator runbook.
+  write latency (fleet proof), cold cell load, and cell-to-Sprite
+  latency recorded; an operator runbook.
 
-### 3. Identity and browser sessions
-- BANKS registry cell: identities (human, agent, fragment) ↔ npub and
+### 4. Identity and browser sessions
+- BANKS registry cell: identities (person, agent, fragment) ↔ npub and
   designated owners. Dev login (`dev:<handle>`, WorkOS later) creates a
-  human with a custodial key wrapped under `FRAGMENT_HOST_SECRET`.
-- A platform session maps a browser to that identity, so `viewers` and
-  `editors` grants work in browsers exactly as NIP-98 does for the CLI.
-  Per-fragment subdomains give each fragment its own origin.
+  person with a custodial key wrapped under `FRAGMENT_HOST_SECRET`. A
+  platform session maps a browser to that principal; each fragment is
+  served from its own origin (`<name>.fragment.club`), with the hostname
+  checked before it is trusted.
 - **Acceptance:** identical allow/deny decisions for CLI and browser
-  across public/link/viewers/editors; negative tests (no session,
-  revoked grant, cross-fragment cookie) and a session restart test.
-
-### 4. Typed operations and author SQL
-- `fragment.json` `operations` (input schema, minimum role); handlers in
-  `app.mjs` run in the loader isolate with `ctx.db`; calls carry an
-  operation id and are idempotent; rooms get a change signal.
-  `fragment call <name> <op>` in the CLI. A todo template built on it.
-- **Acceptance:** valid, invalid, replay, and conflicting-body tests per
-  operation; a schema-setup restart test; forbidden SQL refused; the
-  same call from the CLI, a browser, and an agent key.
+  across public, link, and members; negative tests (no session, revoked
+  member, cross-fragment cookie) and a session restart test.
 
 ### 5. Agents as members
-- The agent cell (libfx WASM, durable turns, operation log, effect
-  dedupe; ported from finite-next) with its own key. Its tools are the
-  fragment API (list, call, files, rooms, deploy through a workspace).
-  Inference goes through the host's OpenRouter route.
+- The agent cell (libfx WASM, memory in SQL with `sqlite_vec`) with its
+  own key; a turn is a Workflow (or finite-next's lease-and-ledger turn
+  if the determinism spike fails). Its tools are the operations of the
+  fragments it belongs to. Inference goes through the host's OpenRouter
+  route.
 - **Acceptance:** finite-next's crash-mid-tool and replay checks,
   ported; an agent uses the todo fragment only through its operations.
 
 ### 6. Chats, desktops, sharing
-- Room history (append-only, paged). A chat template whose agent member
-  answers new messages. The desktop as the user's home fragment (from an
+- A chat template (a `chat` channel) whose agent member answers new
+  messages. The desktop as the user's home fragment (from an
   upstream template; forkable and resettable). Platform shell: share
   sheet, invites, direct URLs with the share header, shared badges.
 - **Acceptance:** two users, one chat: invite, accept, both see messages
@@ -195,8 +204,9 @@ deployment.
   desktop cannot share without the sheet click.
 
 ### 7. Computers and builder workspaces on Sprites
-- The Rust machine front door (Sprites backend; ownership by identity,
-  fragments included). The personal computer as Sprite services
+- A `Computer` cell per Sprite (ownership by principal, fragments
+  included; lifecycle and idle policy on its alarm; the only holder of
+  the Fly token). The personal computer as Sprite services
   (Chrome, display, control). Builder workspaces: the precompiled
   `fragment` CLI and fx over ACP (a Rust runner), with an editor key
   delegated for one fragment; the host proxies inference so no model

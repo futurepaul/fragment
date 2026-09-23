@@ -30,10 +30,12 @@ without a delete condition is unfinished design, not debt.
   strings, not typed enums, at the cell boundary.
 - **First proof:** a bug class the Rust type system or typed errors
   would have caught, found in the runtime.
-- **Delete when:** celld runs Rust-to-WASM Workers with Durable Object
-  and Worker Loader APIs at parity, and a one-module spike shows the
-  port is cheaper than the bugs it prevents; or the runtime passes 10k
-  lines, whichever comes first, at which point this is re-decided.
+- **Delete when:** the Rust-cells spike (`docs/MODEL.md`, spike 1)
+  shows workers-rs on celld covers the supervisor (SQL, hibernatable
+  WebSockets, alarms, Worker Loader and facets, with at most a thin
+  JavaScript shim) at acceptable bundle size and cold activation; the
+  platform cells are then rewritten in Rust during the core cut. celld
+  documents workers-rs support (https://celld.dev/docs/wasm).
 
 ## Primitives with no check: web push, room presence, the inbox cap
 
