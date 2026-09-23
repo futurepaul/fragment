@@ -126,7 +126,13 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   channel records every change. Membership leaves `fragment.json` (a git
   commit can no longer grant access).
 - Visibility: `public`, `link` (a token that is a capability), or
-  `members`.
+  `members`. **A public fragment is a website anyone can use, writes
+  included** (a public chat, a guestbook): an operation may declare
+  `"role": "public"`, callable by anyone who can see the fragment. An
+  anonymous visitor gets an ephemeral principal (a key minted per browser
+  and held in a cookie on the fragment's origin), so their writes are
+  attributed and rate-limited like anyone else's. On a `link` fragment
+  the link holder counts as a viewer.
 - Origins: each fragment is served from `<name>.fragment.club`; the
   platform (login, share sheet, invites, the share header) from
   `fragment.club`. celld does not vouch for `Host`, so the router checks
@@ -170,6 +176,7 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
 | `subRequests` per invocation | 50 | bounds fan-out |
 | inbox pending | 1000 | overload is a 429, not memory pressure |
 | hop depth | 16 | carried from fragment's loop guard |
+| `public`-role calls | 60 per minute per anonymous principal, 600 per minute per fragment | public writes must not become an abuse amplifier; tunable per operation |
 
 ## Capacity notes (from the celld docs)
 
@@ -202,11 +209,13 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
 4. **celld v0.5.1.** Move dev and CI from v0.4.0 to v0.5.1 (a wake-format
    upgrade; dev state resets with `celld dev --clean`).
 
-## Open questions for Paul
+## Answered (2026-09-23)
 
-- Authoring shape: one `app.mjs` with an `App` class whose methods are the
-  operations (proposed), or one file per operation?
-- Anonymous callers on `public` fragments: may they run `viewer`
-  operations?
-- Default channel retention (proposed: `events` 90 days, `inbox` until
-  acknowledged, app channels forever).
+- **Authoring shape:** one `app.mjs` whose exported `App` class (a
+  Durable Object class the supervisor starts as the `app` facet) has one
+  method per operation, plus an optional `fetch` for custom routes.
+- **Anonymous callers:** public fragments are websites; anonymous
+  visitors may read and write through `public`-role operations, with an
+  ephemeral principal each (above).
+- **Channel retention:** `events` 90 days, `inbox` until acknowledged,
+  app-declared channels forever.
