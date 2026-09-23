@@ -63,6 +63,7 @@ impl FragmentCell {
                 return Ok(PinMove { changed: false, to: None, paths: vec![] });
             }
             self.exec("DELETE FROM tree WHERE ref = ?", vec![which.into()])?;
+            self.exec("DELETE FROM pointers WHERE ref = ?", vec![which.into()])?;
             self.del_meta(&format!("pin_{which}"))?;
             self.event("git.refresh", &format!("{which}: the branch is gone; pin cleared"), json!({ "ref": which, "from": from }));
             return Ok(PinMove { changed: true, to: None, paths: vec![] });
@@ -83,6 +84,8 @@ impl FragmentCell {
             .collect();
         let now: std::collections::BTreeSet<&str> = entries.iter().map(|e| e.path.as_str()).collect();
         paths.extend(prior.keys().filter(|p| !now.contains(p.as_str())).cloned());
+        let sizes: std::collections::HashMap<&str, u64> = entries.iter().map(|e| (e.path.as_str(), e.size)).collect();
+        self.track_pointers(which, &to, &paths, &sizes).await?;
         self.write_tree(which, &entries)?;
         self.set_meta(&format!("pin_{which}"), &to)?;
         self.event(
@@ -298,7 +301,8 @@ impl FragmentCell {
             let moved = self.refresh_pin(which).await?;
             if *which == "main" && moved.changed {
                 self.broadcast_change(moved.to.as_deref(), &moved.paths);
-                self.fire_files(moved.to.as_deref(), &moved.paths)?;
+                let depth = self.commit_depth(moved.to.as_deref())?;
+                self.fire_files(moved.to.as_deref(), &moved.paths, depth)?;
             }
             self.follow(which).await?;
             out.push((which.to_string(), moved));
@@ -409,19 +413,29 @@ impl FragmentCell {
     pub(crate) async fn files(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
         self.ensure_pins().await?;
+        let blobs = self.pointer_sizes("main")?;
         let files: Vec<Value> = self
             .tree_rows("main")?
             .into_iter()
             .map(|r| {
                 let path = r["path"].as_str().unwrap_or("").to_string();
-                json!({ "path": path, "size": r["size"], "mode": r["mode"], "lastCommitSha": r["last_commit"], "machinery": site::is_machinery(&path) })
+                let mut f = json!({ "path": path, "size": r["size"], "mode": r["mode"], "lastCommitSha": r["last_commit"], "machinery": site::is_machinery(&path) });
+                if let Some(size) = blobs.get(&path) {
+                    f["size"] = json!(size);
+                    f["blob"] = json!(true);
+                }
+                f
             })
             .collect();
         json_response(&json!({ "ref": self.pin("main")?, "files": files }))
     }
 
-    /// Streams a file from a pin (`main` for the API, `live` for the site).
-    pub(crate) async fn stream_file(&self, which: &str, path: &str) -> CellResult<Response> {
+    /// Streams a file from a pin (`main` for the API, `live` for the site);
+    /// a pointer's bytes come from the blob store.
+    pub(crate) async fn stream_file(&self, which: &str, path: &str, range: Option<&str>) -> CellResult<Response> {
+        if let Some(resp) = self.serve_pointer(which, path, range).await? {
+            return Ok(resp);
+        }
         let pin = self.pin(which)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no {which} pin yet")))?;
         let upstream = self.cs()?.stream(&self.must("repo")?, &pin, path).await?;
         let headers = Headers::new();
@@ -443,7 +457,7 @@ impl FragmentCell {
         if self.tree_row("main", path)?.is_none() {
             return Err(CellError::new(ErrorCode::NotFound, format!("no file {path} at main")));
         }
-        let mut resp = self.stream_file("main", path).await?;
+        let mut resp = self.stream_file("main", path, None).await?;
         resp.headers_mut().set("cache-control", "no-store")?;
         Ok(resp)
     }

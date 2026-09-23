@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>notes</title>
+<link rel="stylesheet" href="assets/viewer.css">
+<script type="module">
+  // The viewer (assets/viewer.js, built for the old runtime) asks for a
+  // "vault" room whose state changes when files do; here that is the
+  // last_change query, re-run live by the browser library.
+  import * as fragment from "./__fragment.js";
+  window.fragment = {
+    room: () => ({
+      on(event, handler) {
+        if (event === "state") fragment.live("last_change", {}, (change) => change && handler(change));
+      },
+    }),
+  };
+</script>
+<script type="module" src="assets/viewer.js"></script>
+</head>
+<body>
+<div id="side">
+  <div id="brand">△ notes</div>
+  <input id="filter" type="search" placeholder="filter…" autocomplete="off">
+  <nav id="tree" aria-label="files"></nav>
+  <div id="recent-label">recent</div>
+  <nav id="recent" aria-label="recently changed"></nav>
+</div>
+<main id="main"><div id="content"></div></main>
+</body>
+</html>

@@ -11,7 +11,10 @@
 // Every method receives (input, call): `call.principal` and `call.role`
 // name the caller; in a mutation, `call.publish(channel, body, kind)`
 // appends a record to a channel declared in fragment.json once the
-// mutation commits.
+// mutation commits, and `call.files.write(path, content)` /
+// `call.files.remove(path)` change files on `main` then (one commit).
+// `this.files.read / readBytes / list / stat` read files at `main` from
+// anything async (queries, fetch, jobs).
 //
 // A job's method gets (input, job) and runs as a Workflow: each `await
 // job.call / job.fetch / job.publish / job.sleep` is a durable step. The
@@ -31,6 +34,9 @@ const RECORD_MAX_BYTES = 64 * 1024;
 const EFFECTS_MAX = 64;
 const RESULT_MAX_BYTES = 1024 * 1024;
 const KIND = /^[a-z][a-z0-9._-]{0,63}$/;
+const FILE_WRITE_MAX_BYTES = 256 * 1024;
+const FILE_WRITES_MAX = 16;
+const PATH = /^(?!\/)(?!.*\/$)(?!.*(^|\/)\.{1,2}(\/|$))(?!.*\/\/)[^\\\x00-\x1f]{1,300}$/;
 const RESERVED = new Set(["constructor", "fetch", "alarm", "webSocketMessage", "webSocketClose", "webSocketError"]);
 // A step not yet taken never settles: the body stops there, and a try/catch
 // or Promise.all in author code cannot swallow the suspension.
@@ -47,6 +53,85 @@ function bytes(text) {
   return new TextEncoder().encode(text).length;
 }
 
+function base64(data) {
+  let s = "";
+  for (let i = 0; i < data.length; i += 0x8000) s += String.fromCharCode(...data.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+function checkPath(path) {
+  if (typeof path !== "string" || !PATH.test(path)) throw new Error(`${JSON.stringify(path)} is not a file path (relative, no . or .. segments)`);
+}
+
+// A file's content as a step or effect carries it: { text } or { base64 }.
+function content(data) {
+  if (typeof data === "string") return { text: data };
+  if (data instanceof Uint8Array) return { base64: base64(data) };
+  if (data instanceof ArrayBuffer) return { base64: base64(new Uint8Array(data)) };
+  throw new TypeError("a file's content is a string, a Uint8Array, or an ArrayBuffer");
+}
+
+function contentSize(c) {
+  return c.text !== undefined ? bytes(c.text) : Math.floor((c.base64.length * 3) / 4);
+}
+
+// A mutation's file changes, applied to `main` as one commit after it commits.
+class FileEffects {
+  #effects;
+  #size = 0;
+  #count = 0;
+
+  constructor(effects) {
+    this.#effects = effects;
+  }
+
+  #push(effect, size) {
+    if (this.#count >= FILE_WRITES_MAX) throw new Error(`a mutation writes at most ${FILE_WRITES_MAX} files`);
+    if (this.#size + size > FILE_WRITE_MAX_BYTES) throw new Error(`a mutation writes at most ${FILE_WRITE_MAX_BYTES} bytes of files`);
+    if (this.#effects.length >= EFFECTS_MAX) throw new Error(`a mutation has at most ${EFFECTS_MAX} effects`);
+    this.#count++;
+    this.#size += size;
+    this.#effects.push(effect);
+  }
+
+  write(path, data) {
+    checkPath(path);
+    const c = content(data);
+    this.#push({ file: path, ...c }, contentSize(c));
+  }
+
+  remove(path) {
+    checkPath(path);
+    this.#push({ file: path }, 0);
+  }
+}
+
+// Reads at `main` through the FILES capability.
+class FilesReader {
+  #cap;
+
+  constructor(cap) {
+    this.#cap = cap;
+  }
+
+  readBytes(path) {
+    return this.#cap.read(path);
+  }
+
+  async read(path) {
+    const data = await this.#cap.read(path);
+    return data === null ? null : new TextDecoder().decode(data);
+  }
+
+  list(prefix = "") {
+    return this.#cap.list(prefix);
+  }
+
+  stat(path) {
+    return this.#cap.stat(path);
+  }
+}
+
 function authorMethod(name) {
   return !name.startsWith("__") && !RESERVED.has(name) && typeof AuthorApp.prototype[name] === "function";
 }
@@ -60,6 +145,14 @@ class Call {
     this.role = meta.role;
     this.#channels = new Set(meta.channels || []);
     this.#effects = mutation ? [] : null;
+  }
+
+  #files = null;
+
+  get files() {
+    if (this.#effects === null) throw new Error("call.files is for mutations; read files with this.files");
+    this.#files ??= new FileEffects(this.#effects);
+    return this.#files;
   }
 
   publish(channel, body, kind = "message") {
@@ -163,6 +256,25 @@ class Job {
     return this.#step("publish", { channel, kind, body: JSON.parse(text) });
   }
 
+  // Files at `main`, as steps: reads are recorded, writes are one commit
+  // each; `{ expect }` names the blob sha the file must have (`stat`'s
+  // `sha`), or null for "must not exist", and a mismatch fails the step.
+  get files() {
+    const step = (kind, args) => this.#step(kind, args);
+    return {
+      read: (path) => (checkPath(path), step("files.read", { path })).then((v) => (v === null ? null : v.text ?? Uint8Array.from(atob(v.base64), (c) => c.charCodeAt(0)))),
+      list: (prefix = "") => step("files.list", { prefix: String(prefix) }),
+      stat: (path) => (checkPath(path), step("files.stat", { path })),
+      write: (path, data, { expect } = {}) => {
+        checkPath(path);
+        const c = content(data);
+        if (contentSize(c) > FILE_WRITE_MAX_BYTES) throw new Error(`a job step writes at most ${FILE_WRITE_MAX_BYTES} bytes`);
+        return step("files.write", { path, ...c, ...(expect !== undefined ? { expect } : {}) });
+      },
+      remove: (path, { expect } = {}) => (checkPath(path), step("files.remove", { path, ...(expect !== undefined ? { expect } : {}) })),
+    };
+  }
+
   // Milliseconds, or "N seconds|minutes|hours|days"; up to 30 days.
   sleep(duration) {
     let ms = duration;
@@ -188,6 +300,10 @@ export class App extends AuthorApp {
     if (!sql.exec(`PRAGMA table_info(${LEDGER})`).toArray().some((c) => c.name === "effects")) {
       sql.exec(`ALTER TABLE ${LEDGER} ADD COLUMN effects TEXT NOT NULL DEFAULT '[]'`);
     }
+  }
+
+  get files() {
+    return new FilesReader(this.env.FILES);
   }
 
   __mutate(id, name, inputSha, input, meta) {

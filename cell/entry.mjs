@@ -4,7 +4,7 @@
 // workers-rs classes do not, so these classes do and forward each handler.
 // workers-rs 0.8.5 has no Workflows, so the job driver is here too; it
 // only loops and calls back: every decision is the supervisor's (jobs.rs).
-import { DurableObject, WorkflowEntrypoint } from "cloudflare:workers";
+import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:workers";
 import * as rs from "./build/index.js";
 
 export default rs.default;
@@ -27,6 +27,38 @@ export class Principal extends DurableObject {
     this.rs = new rs.PrincipalCell(ctx, env);
   }
   fetch(request) { return this.rs.fetch(request); }
+}
+
+// The app's read access to its files (files.rs), handed to its facet as
+// `env.FILES` bound to one fragment by `props`: the app cannot name another.
+export class Files extends WorkerEntrypoint {
+  async #ask(op, body) {
+    const { fragment } = this.ctx.props;
+    return this.env.FRAGMENT.getByName(fragment).fetch(`https://fragment.internal/cap/files/${op}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-fragment-cap": "files",
+        "x-fragment-name": fragment,
+        "x-fragment-url": "https://fragment.internal/",
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  async #answer(op, body) {
+    const resp = await this.#ask(op, body);
+    if (resp.status === 404 && op === "read") return null;
+    if (!resp.ok) {
+      const e = await resp.json().catch(() => ({}));
+      throw new Error(e.message || `files.${op} answered ${resp.status}`);
+    }
+    return op === "read" ? new Uint8Array(await resp.arrayBuffer()) : resp.json();
+  }
+
+  read(path) { return this.#answer("read", { path: String(path) }); }
+  list(prefix = "") { return this.#answer("list", { prefix: String(prefix) }); }
+  stat(path) { return this.#answer("stat", { path: String(path) }); }
 }
 
 // One run of an operation (docs/MODEL.md, Operations: job). Each round asks

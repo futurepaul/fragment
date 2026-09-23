@@ -22,6 +22,8 @@
 //!   POST   /api/refresh                   editor
 //!   POST   /api/webhook                   code.storage (HMAC)
 //!   GET    /api/files  /api/file?path=  /api/file/stat?path=   viewer
+//!   PUT    /api/blobs/<sha256>            editor (the body, streamed and hashed)
+//!   GET|HEAD /api/blobs/<sha256>          viewer
 //!   GET    /api/events?since=             viewer
 //!   POST   /api/ops/<operation>           the operation's role (a job answers its run)
 //!   GET    /api/runs?status=&op=  /api/runs/<id>   viewer
@@ -30,6 +32,7 @@
 //!   POST   /api/inbox                     the inbox token (no signature)
 //!   *      /serve/<path>                  the site, `__tree`, `__file`, `__op`, `__watch`
 //!   POST   /job/advance|effect|finish     a run's Workflow (jobs.rs); never routed from outside
+//!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
 
 use std::cell::{Cell, RefCell};
 
@@ -85,6 +88,11 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE UNIQUE INDEX IF NOT EXISTS runs_call ON runs (principal, call_id) WHERE call_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS runs_status ON runs (status, op);
 CREATE TABLE IF NOT EXISTS schedules (idx INTEGER PRIMARY KEY, op TEXT NOT NULL, cron TEXT NOT NULL, next_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS file_commits (key TEXT PRIMARY KEY, sha TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS own_commits (sha TEXT PRIMARY KEY, depth INTEGER NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS blobs (sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS pointers (
+  ref TEXT NOT NULL, path TEXT NOT NULL, sha TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY (ref, path));
 ";
 
 #[durable_object]
@@ -302,6 +310,15 @@ impl FragmentCell {
             };
             return json_response(&answer);
         }
+        if let Some(op) = path.strip_prefix("/cap/files/") {
+            // Only the `Files` capability sets the header; the router never passes it.
+            if req.headers().get(crate::files::CAP_HEADER)?.as_deref() != Some("files") {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            let op = op.to_string();
+            let body: Value = body_json(&mut req).await?;
+            return self.cap_files(&op, &body).await;
+        }
         if let Some(rest) = path.strip_prefix("/serve/") {
             let rest = rest.to_string();
             return self.serve(req, &caller, &routed_name, &rest).await;
@@ -375,6 +392,14 @@ impl FragmentCell {
                 let body = body_json(&mut req).await?;
                 let op = op.to_string();
                 self.api_op(&caller, &op, body).await
+            }
+            (Method::Put, ["api", "blobs", sha]) => {
+                let sha = sha.to_string();
+                self.put_blob(&caller, &sha, &req).await
+            }
+            (method @ (Method::Get | Method::Head), ["api", "blobs", sha]) => {
+                let range = req.headers().get("range")?;
+                self.get_blob(&caller, sha, method == Method::Head, range.as_deref()).await
             }
             (Method::Get, ["api", "runs"]) => {
                 let limit = query("limit").and_then(|s| s.parse().ok()).unwrap_or(30);
@@ -488,6 +513,7 @@ impl FragmentCell {
             let _ = ws.close(Some(4004), Some("the fragment was deleted"));
         }
         js::delete_app_facet(&self.raw)?;
+        self.delete_blobs().await?;
         self.state.storage().delete_all().await?;
         self.sql().exec(SCHEMA, None)?;
         json_response(&json!({ "ok": true, "deleted": name }))
@@ -524,6 +550,7 @@ impl FragmentCell {
             view_token: Some(self.must("view_token")?),
             inbox_token: if role >= Role::Editor { Some(self.must("inbox_token")?) } else { None },
             urls: Urls { canonical: self.cfg.canonical(&caller.url, &name) },
+            blob_min_bytes: Some(fragment_core::blob::BLOB_MIN_BYTES as u64),
             name,
         })
     }
@@ -557,7 +584,11 @@ impl FragmentCell {
         if poll_at <= js::now_ms() {
             self.trim_audit()?;
             self.trim_runs()?;
+            self.trim_writes()?;
             self.poll().await;
+            if let Err(e) = self.collect_blobs().await {
+                self.event("blobs.collect-failed", &e.message, json!({ "code": e.code }));
+            }
             self.reconcile_runs().await;
             self.launch_queued().await;
             self.set_meta("poll_at", &(js::now_ms() + self.cfg.poll_interval_ms).to_string())?;

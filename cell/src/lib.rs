@@ -10,7 +10,7 @@
 //!   DELETE /api/f/<name>                   delete (owner)
 //!   *      /api/f/<name>/<route>           the control API (signed; the code.storage webhook is HMAC,
 //!                                          the inbox is its token)
-//!   *      <name>.<suffix>/<path>          the fragment's site, on its own origin
+//!   *      <name>.<suffix>/<path>          the fragment's site, on its own origin (every path)
 //!   *      /f/<name>/<path>                the same, when no suffix is configured (dev)
 //!
 //! With a suffix configured, `/f/<name>/…` redirects to the fragment's own
@@ -18,10 +18,12 @@
 //! `__watch` and `__live` stay reachable there for the CLI, which carries
 //! no cookies.
 
+mod blobs;
 mod config;
 mod channels;
 mod cs;
 mod error;
+mod files;
 mod fragment;
 mod jobs;
 mod js;
@@ -101,7 +103,12 @@ struct Forward<'a> {
 }
 
 /// Hands a request to the fragment's supervisor.
-async fn forward(env: &Env, req: &Request, url: &Url, body: Vec<u8>, f: Forward<'_>) -> CellResult<Response> {
+/// Bytes the router read, as a body to forward.
+fn bytes_body(body: Vec<u8>) -> Option<worker::wasm_bindgen::JsValue> {
+    (!body.is_empty()).then(|| worker::js_sys::Uint8Array::from(body.as_slice()).into())
+}
+
+async fn forward(env: &Env, req: &Request, url: &Url, body: Option<worker::wasm_bindgen::JsValue>, f: Forward<'_>) -> CellResult<Response> {
     let headers = Headers::new();
     for k in PASSED_HEADERS {
         if let Some(v) = req.headers().get(k)? {
@@ -121,8 +128,8 @@ async fn forward(env: &Env, req: &Request, url: &Url, body: Vec<u8>, f: Forward<
     }
     let mut init = RequestInit::new();
     init.with_method(req.method()).with_headers(headers);
-    if !body.is_empty() {
-        init.with_body(Some(worker::js_sys::Uint8Array::from(body.as_slice()).into()));
+    if body.is_some() {
+        init.with_body(body);
     }
     let query = url.query().map(|q| format!("?{q}")).unwrap_or_default();
     let inner = Request::new_with_init(&format!("https://fragment.internal{}{query}", f.inner), &init)?;
@@ -135,19 +142,18 @@ async fn serve(mut req: Request, env: &Env, url: &Url, name: &str, rest: &str, m
     let body = read_body(&mut req).await?;
     let principal = authenticate_if_signed(&req, url, &body)?;
     let f = Forward { name, inner: format!("/serve/{rest}"), principal, mode: Some(mode), extra: vec![] };
-    forward(env, &req, url, body, f).await
+    forward(env, &req, url, bytes_body(body), f).await
 }
 
 async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     let url = req.url()?;
     let path = url.path().to_string();
-    // A fragment's own host: everything but the platform API is its site.
+    // A fragment's own host is all its own (`/api/…` included: apps have
+    // routes there); the platform API answers on the platform's host.
     if let Some(name) = url.host_str().and_then(|h| cfg.fragment_of_host(h)) {
-        if !path.starts_with("/api/") {
-            let rest = path.trim_start_matches('/').to_string();
-            return serve(req, env, &url, &name, &rest, "host").await;
-        }
+        let rest = path.trim_start_matches('/').to_string();
+        return serve(req, env, &url, &name, &rest, "host").await;
     }
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     match (req.method(), segments.as_slice()) {
@@ -158,12 +164,28 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             check_name(&create.name)?;
             let principal = authenticate(&req, &url, &body)?;
             let f = Forward { name: &create.name, inner: "/create".into(), principal: Some(principal), mode: None, extra: vec![] };
-            forward(env, &req, &url, body, f).await
+            forward(env, &req, &url, bytes_body(body), f).await
         }
         (Method::Get, ["api", "fragments"]) => {
             let principal = authenticate(&req, &url, &[])?;
             let list = Request::new("https://principal.internal/list", Method::Get)?;
             Ok(env.durable_object("PRINCIPAL")?.get_by_name(&principal)?.fetch_with_request(list).await?)
+        }
+        // A blob's bytes stream through: the router never holds them. The
+        // signature covers the URL, which names the bytes' hash; the
+        // fragment checks the hash as they arrive.
+        (Method::Put, ["api", "f", name, "blobs", sha]) => {
+            check_name(name)?;
+            let declared: Option<u64> = req.headers().get("content-length")?.and_then(|l| l.parse().ok());
+            match declared {
+                None => return Err(CellError::invalid("a blob upload declares its content-length")),
+                Some(n) if n > limits::BLOB_MAX_BYTES => return Err(CellError::too_large("a blob", n as usize, limits::BLOB_MAX_BYTES as usize)),
+                Some(_) => {}
+            }
+            let principal = authenticate(&req, &url, &[])?;
+            let body = req.inner().body().map(worker::wasm_bindgen::JsValue::from);
+            let f = Forward { name, inner: format!("/api/blobs/{sha}"), principal: Some(principal), mode: None, extra: vec![] };
+            forward(env, &req, &url, body, f).await
         }
         (method, ["api", "f", name, rest @ ..]) => {
             check_name(name)?;
@@ -189,7 +211,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
                 _ => Some(authenticate(&req, &url, &body)?),
             };
             let f = Forward { name, inner, principal, mode: None, extra };
-            forward(env, &req, &url, body, f).await
+            forward(env, &req, &url, bytes_body(body), f).await
         }
         (_, ["f", name]) => {
             check_name(name)?;

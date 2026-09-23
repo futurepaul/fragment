@@ -54,12 +54,27 @@ fn main() {
     dz.sort();
     groups.push(("dropzone", dz));
 
+    // notes (the Rust cell's vault) = its own files + the vault's built
+    // viewer, served from site/assets/ instead of assets/
+    let mut notes = Vec::new();
+    collect(&tdir.join("notes"), &tdir, "notes", &mut notes);
+    let mut viewer = Vec::new();
+    collect(&tdir.join("vault/assets"), &tdir, "vault", &mut viewer);
+    let mut files: Vec<(String, String)> = notes.into_iter().map(|(rel, origin)| (rel.clone(), format!("{origin}/{rel}"))).collect();
+    files.extend(viewer.into_iter().map(|(rel, origin)| (format!("site/{rel}"), format!("{origin}/{rel}"))));
+    files.sort();
+
+    // (scaffold path, source path under templates/)
+    let mut sourced: Vec<(&str, Vec<(String, String)>)> =
+        groups.iter().map(|(name, files)| (*name, files.iter().map(|(rel, origin)| (rel.clone(), format!("{origin}/{rel}"))).collect())).collect();
+    sourced.push(("notes", files));
+
     let mut src = String::from("#[allow(clippy::type_complexity)] // generated table of template files\npub static TEMPLATES: &[(&str, &[(&str, &[u8])])] = &[\n");
-    for (name, files) in &groups {
+    for (name, files) in &sourced {
         src.push_str(&format!("    ({name:?}, &[\n"));
-        for (rel, origin) in files {
+        for (rel, source) in files {
             src.push_str(&format!(
-                "        ({rel:?}, include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../templates/{origin}/{rel}\"))),\n"
+                "        ({rel:?}, include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../templates/{source}\"))),\n"
             ));
         }
         src.push_str("    ]),\n");

@@ -102,14 +102,20 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
     s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir), "--apply-mass-delete"]);
     s.ok("--apply-mass-delete proceeds", s.fake.paths(&repo, "main").len() == 5, s.fake.paths(&repo, "main").len());
 
-    // a file larger than one commit-pack chunk
+    // a file of 1 MiB or more: its bytes a blob, a pointer in git (section `blobs` has the rest)
     let (name, c) = create(s, "sync-big")?;
     let dir = s.dir("sync-big");
     let big: Vec<u8> = (0..5 * 1024 * 1024 + 1234).map(|i| (i % 251) as u8).collect();
     std::fs::write(dir.join("big.bin"), &big)?;
     s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir)]);
     let repo = c["repo"].as_str().unwrap_or("").to_string();
-    s.ok("a 5 MiB file round-trips through chunked commit packs", s.fake.file_at(&repo, "main", "big.bin").as_deref() == Some(&big[..]), "");
+    let in_git = s.fake.file_at(&repo, "main", "big.bin").unwrap_or_default();
+    let pointer = fragment_core::blob::parse(&in_git);
+    s.ok(
+        "a 5 MiB file syncs as a pointer to its bytes",
+        pointer.is_some_and(|p| p.size == big.len() as u64 && p.sha256 == fragment_core::blob::sha256_hex(&big)),
+        String::from_utf8_lossy(&in_git),
+    );
 
     // continuous: the change feed pulls a remote write; a local edit pushes
     let (name, c) = create(s, "sync-watch")?;

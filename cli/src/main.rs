@@ -1,5 +1,6 @@
 mod api;
 mod auth;
+mod blobs;
 mod builder;
 mod codestorage;
 mod sync;

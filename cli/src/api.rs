@@ -119,6 +119,7 @@ impl Client {
                 "POST" => self.http.post(&url),
                 "PUT" => self.http.put(&url),
                 "DELETE" => self.http.delete(&url),
+                "HEAD" => self.http.head(&url),
                 _ => return Err(anyhow!("bad method")),
             };
             req = req.header("authorization", auth);
@@ -172,6 +173,9 @@ impl Client {
     }
     pub fn put_bytes(&self, path: &str, bytes: Vec<u8>) -> Result<Resp> {
         self.request("PUT", path, Some(bytes))
+    }
+    pub fn head(&self, path: &str) -> Result<Resp> {
+        self.request("HEAD", path, None)
     }
     pub fn delete(&self, path: &str) -> Result<Resp> {
         self.request("DELETE", path, None)

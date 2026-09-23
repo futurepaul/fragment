@@ -589,6 +589,7 @@ dependencies = [
  "bech32",
  "clap",
  "dirs",
+ "fragment-core",
  "fragment-fakes",
  "fs2",
  "hex",

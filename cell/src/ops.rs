@@ -52,11 +52,15 @@ impl FragmentCell {
         let cpu_ms = row["cpu_ms"].as_u64().expect("code.cpu_ms is INTEGER");
         assert!(cpu_ms > 0 && cpu_ms <= limits::APP_CPU_MS as u64, "stored cpu_ms is within the limit");
         let modules: BTreeMap<String, String> = serde_json::from_str(row["modules"].as_str().unwrap_or("{}")).expect("stored modules parse");
+        // One loaded worker per fragment: its env holds this fragment's
+        // capabilities, and its module state is this fragment's alone.
+        let id = format!("{}:{}", row["loader_id"].as_str().expect("code.loader_id is TEXT"), self.must("npub")?);
         js::app_facet(
             &self.raw,
             self.env.as_ref(),
+            &self.name()?,
             &AppCode {
-                id: row["loader_id"].as_str().expect("code.loader_id is TEXT"),
+                id: &id,
                 platform: PLATFORM_JS,
                 source: row["source"].as_str().expect("code.source is TEXT"),
                 modules: &modules,
@@ -157,7 +161,7 @@ impl FragmentCell {
         if inv.decl.kind == OpKind::Mutation {
             // The facet committed; its effects apply now (again, harmlessly, on a replay).
             let effects: Vec<Effect> = serde_json::from_value(answer["effects"].clone()).map_err(|e| CellError::host(format!("effects: {e}")))?;
-            self.apply(&ledger_id, inv.op, &effects, inv.depth)?;
+            self.apply(&ledger_id, inv.op, &effects, inv.depth).await?;
         }
         // A mutation's result was bounded inside its transaction; a query's is bounded here.
         let text = result.result.to_string();

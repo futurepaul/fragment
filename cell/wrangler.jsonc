@@ -8,6 +8,8 @@
   "worker_loaders": [{ "binding": "LOADER" }],
   // One Workflow instance per run of a job or triggered operation (jobs.rs).
   "workflows": [{ "name": "fragment-jobs", "binding": "JOBS", "class_name": "Job" }],
+  // Blobs: the bytes of files of 1 MiB or more (blobs.rs), in the fleet bucket.
+  "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "fragment-blobs" }],
   "durable_objects": {
     "bindings": [
       { "name": "FRAGMENT", "class_name": "Fragment" },

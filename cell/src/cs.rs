@@ -234,6 +234,29 @@ impl<'a> Cs<'a> {
         }
     }
 
+    /// Commits an NDJSON pack (`fragment_core::codestorage::commit_pack`).
+    /// Answers the new head, or `None` when the branch moved from the head
+    /// the pack expected (409: read the head again and rebuild).
+    pub async fn commit(&self, repo: &str, pack: String) -> CellResult<Option<String>> {
+        let headers = Headers::new();
+        headers.set("authorization", &format!("Bearer {}", self.runtime_token(repo, &["git:write"])?))?;
+        headers.set("content-type", "application/x-ndjson")?;
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post).with_headers(headers).with_body(Some(pack.into()));
+        let req = Request::new_with_init(&format!("{}/api/repos/{}/commit-pack", self.cfg.api, seg(repo)), &init)?;
+        let mut resp = fetch(req, CALL_TIMEOUT).await?;
+        let status = resp.status_code();
+        let bytes = resp.bytes().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("reading commit-pack: {e}")))?;
+        match status {
+            409 => Ok(None),
+            200 | 201 => {
+                let v: Value = serde_json::from_slice(&bytes).map_err(|e| upstream("commit-pack", status, format!("not JSON: {e}").as_bytes()))?;
+                core_cs::committed(&v).map(Some).ok_or_else(|| upstream("commit-pack", status, &bytes))
+            }
+            _ => Err(upstream("commit-pack", status, &bytes)),
+        }
+    }
+
     /// A token for an editor's own client: this repo only, git read and
     /// write, fifteen minutes. The claims are checked after signing.
     pub fn storage_token(&self, repo: &str, principal: &str) -> CellResult<StorageToken> {

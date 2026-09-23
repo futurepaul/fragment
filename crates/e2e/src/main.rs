@@ -1,6 +1,8 @@
 //! The fragment end-to-end suite: a real `celld dev` node serving the real
-//! cell, the code.storage fake from `crates/fakes` (webhooks included), the
-//! real CLI, and signed HTTP the way the CLI and a browser send it.
+//! cell (from a staged copy under `target/e2e/cell`, so a running `xtask
+//! dev` is never touched), the code.storage fake from `crates/fakes`
+//! (webhooks included), the real CLI, and signed HTTP the way the CLI and
+//! a browser send it.
 //!
 //! `cargo xtask e2e [--only <section>]`. Each section makes its own
 //! fragments, so any one can run alone. Every check prints `ok` or `FAIL`;
@@ -26,6 +28,8 @@ pub const SUFFIX: &str = "fragment.localhost";
 const ORG: &str = "fragment-e2e";
 /// The poll backstop runs this often here (5 minutes in production).
 pub const POLL_S: u32 = 2;
+/// Blobs no branch names are kept this long here (7 days in production).
+pub const BLOB_GRACE_S: u32 = 4;
 
 pub struct Suite {
     only: Option<String>,
@@ -41,6 +45,8 @@ pub struct Suite {
     host_secret: String,
     pub cli: PathBuf,
     pub scratch: PathBuf,
+    /// The node's own copy of the cell project (never `cell/`, where `xtask dev` runs).
+    project: PathBuf,
 }
 
 impl Suite {
@@ -78,9 +84,10 @@ impl Suite {
             poll_interval_s: POLL_S,
             egress_local: true,
             job_retry_delay_s: 1,
+            blob_grace_s: Some(BLOB_GRACE_S),
         }
-        .write_vars()?;
-        let opts = devstack::NodeOptions { port: self.port, clean, watch: false, env: vec![] };
+        .write_vars(&self.project)?;
+        let opts = devstack::NodeOptions { project: self.project.clone(), port: self.port, clean, watch: false, env: vec![] };
         let (node, _) = devstack::Node::start(&self.tools, &opts)?;
         self.node = Some(node);
         Ok(Api::new(self.port, suffix.then_some(SUFFIX)))
@@ -197,6 +204,7 @@ fn main() -> Result<()> {
     let fake = CodeStorage::start(fake::Options { org: ORG.into(), org_key_pem: Some(org_key.clone()), ..Default::default() })?;
     let scratch = root.join("target/e2e");
     std::fs::create_dir_all(&scratch)?;
+    let project = devstack::stage_project(&scratch.join("cell"))?;
     let run = format!("{:x}", api::now_s() % 0xffffff);
     let mut s = Suite {
         only,
@@ -211,6 +219,7 @@ fn main() -> Result<()> {
         host_secret: devstack::random_hex(32),
         cli,
         scratch,
+        project,
     };
     let api = s.start(true, true)?;
     lanes::run(&mut s, api)?;

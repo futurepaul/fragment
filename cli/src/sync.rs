@@ -468,6 +468,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
         }
     }
     let author = Author::writer(&opts.writer_id);
+    let blobs = crate::blobs::Blobs::new(client, name);
     let mut report = Report { scan: stats, mode: format!("{:?}", opts.mode).to_lowercase(), ..Default::default() };
 
     let remote = list_main(&storage)?;
@@ -483,11 +484,11 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
             continue;
         }
         let Some(lf) = local.get(p) else { continue };
-        if lf.size != rf.size {
+        if lf.size != rf.size && !crate::blobs::could_point(rf.size, lf.size) {
             continue;
         }
         let bytes = storage.read_file(p, MAIN)?;
-        if sha256_hex(&bytes) == lf.sha256 {
+        if crate::blobs::content_sha(&bytes) == lf.sha256 {
             state.files.insert(
                 p.clone(),
                 FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: rf.last_commit_sha.clone() },
@@ -535,7 +536,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
             };
             let plan = push_plan(&local, &remote_now, &state);
             record_conflicts(
-                ConflictCtx { storage: &storage, dir, local: &local, remote: &remote_now, state: &mut state, report: &mut report, writer_id: &opts.writer_id },
+                ConflictCtx { storage: &storage, blobs: &blobs, dir, local: &local, remote: &remote_now, state: &mut state, report: &mut report, writer_id: &opts.writer_id },
                 &plan.conflicts,
             )?;
             if plan.upserts.is_empty() && plan.deletes.is_empty() {
@@ -544,6 +545,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
             let mut changes: Vec<Change> = Vec::with_capacity(plan.upserts.len() + plan.deletes.len());
             for p in &plan.upserts {
                 let bytes = fs::read(dir.join(p)).map_err(|e| SyncError::Io(format!("read {p}: {e}")))?;
+                let bytes = blobs.store(bytes).map_err(|e| SyncError::Io(format!("{p}: {e:#}")))?;
                 changes.push(Change::Upsert { path: p.clone(), bytes });
             }
             for p in &plan.deletes {
@@ -610,7 +612,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
                         // both changed and push didn't resolve it (push
                         // modes off, or a race) — same conflict treatment
                         record_conflicts(
-                            ConflictCtx { storage: &storage, dir, local: &local, remote: &remote, state: &mut state, report: &mut report, writer_id: &opts.writer_id },
+                            ConflictCtx { storage: &storage, blobs: &blobs, dir, local: &local, remote: &remote, state: &mut state, report: &mut report, writer_id: &opts.writer_id },
                             std::slice::from_ref(&rf.path),
                         )?;
                         false
@@ -620,7 +622,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
                 }
             };
             if fetch {
-                pull_file(&storage, dir, &rf.path, &rf.last_commit_sha, &mut state, &mut report)?;
+                pull_file(&storage, &blobs, dir, &rf.path, &rf.last_commit_sha, &mut state, &mut report)?;
             }
         }
         // remote deletions: known before, gone now, local copy untouched
@@ -699,7 +701,7 @@ fn record_conflicts(
             _ => (path.as_str(), ""),
         };
         let conflict_path = format!("{stem}.conflict-{ts}-{}{ext}", ctx.writer_id);
-        match ctx.storage.read_file(path, MAIN) {
+        match ctx.storage.read_file(path, MAIN).map_err(anyhow::Error::from).and_then(|b| ctx.blobs.resolve(b)) {
             Ok(bytes) => {
                 atomic_write(&ctx.dir.join(&conflict_path), &bytes).map_err(|e| SyncError::Io(e.to_string()))?;
                 ctx.report.conflicts.push(format!("{path} (remote copy: {conflict_path})"));
@@ -723,6 +725,7 @@ fn record_conflicts(
 /// Everything record_conflicts needs; keeps it at one argument.
 struct ConflictCtx<'a> {
     storage: &'a CodeStorage,
+    blobs: &'a crate::blobs::Blobs<'a>,
     dir: &'a Path,
     local: &'a BTreeMap<String, LocalFile>,
     remote: &'a HashMap<String, RemoteFile>,
@@ -733,13 +736,14 @@ struct ConflictCtx<'a> {
 
 fn pull_file(
     storage: &CodeStorage,
+    blobs: &crate::blobs::Blobs<'_>,
     dir: &Path,
     path: &str,
     commit: &str,
     state: &mut SyncState,
     report: &mut Report,
 ) -> Result<(), SyncError> {
-    let bytes = storage.read_file(path, MAIN)?;
+    let bytes = blobs.resolve(storage.read_file(path, MAIN)?).map_err(|e| SyncError::Io(format!("{path}: {e:#}")))?;
     let sha = sha256_hex(&bytes);
     atomic_write(&dir.join(path), &bytes).map_err(|e| SyncError::Io(e.to_string()))?;
     let md = fs::metadata(dir.join(path)).map_err(|e| SyncError::Io(e.to_string()))?;
@@ -765,7 +769,7 @@ pub fn verify(client: &Client, name: &str, dir: &Path, codestorage: Option<&str>
             None => drift.conflicts.push(format!("{p}: in the repo, missing locally")),
             Some(lf) => {
                 let bytes = storage.read_file(p, MAIN)?;
-                if sha256_hex(&bytes) != lf.sha256 {
+                if crate::blobs::content_sha(&bytes) != lf.sha256 {
                     drift.conflicts.push(format!("{p}: content differs from the repo"));
                 }
                 let _ = rf;

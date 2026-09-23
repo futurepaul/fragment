@@ -1,0 +1,9 @@
+{
+  "name": "notes",
+  "operations": {
+    "changed": { "kind": "mutation" },
+    "last_change": { "kind": "query" }
+  },
+  "triggers": [{ "files": "**", "run": "changed" }],
+  "meta": { "title": "Notes", "description": "A folder of markdown, live: edit it, sync it, and open pages follow." }
+}

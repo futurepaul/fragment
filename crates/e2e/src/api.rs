@@ -16,6 +16,7 @@ pub struct Reply {
     pub status: u16,
     pub body: Value,
     pub text: String,
+    pub bytes: Vec<u8>,
     pub headers: reqwest::header::HeaderMap,
 }
 
@@ -114,9 +115,10 @@ impl Api {
         let resp = req.send().with_context(|| format!("{} {}", c.method, c.url))?;
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
-        let text = resp.text()?;
+        let bytes = resp.bytes()?.to_vec();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
         let body = serde_json::from_str(&text).unwrap_or(Value::Null);
-        Ok(Reply { status, body, text, headers })
+        Ok(Reply { status, body, text, bytes, headers })
     }
 
     /// The control API, signed by `keys`.

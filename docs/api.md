@@ -8,7 +8,7 @@ keeps has the same route and body, and the cell's errors are
 
 # The Rust cell (phase 2)
 
-Status: slices B, C, and D (2026-09-23). `cargo xtask e2e` proves every
+Status: slices B through E (2026-09-23). `cargo xtask e2e` proves every
 route below.
 
 ## Configuration
@@ -26,6 +26,11 @@ Worker variables, rendered from the fleet's settings (ROADMAP decision
 | `FRAGMENT_POLL_INTERVAL_S` | the webhook backstop (default 300); also how often running runs are checked against their Workflows |
 | `FRAGMENT_JOB_RETRY_DELAY_S` | a failed job step's first retry delay, doubling over 4 retries (default 10) |
 | `FRAGMENT_EGRESS_LOCAL` | `allow` lets jobs fetch loopback and private addresses (dev and e2e fakes); never on a shared fleet |
+| `FRAGMENT_BLOB_GRACE_S` | how long a blob no branch names is kept before it is deleted (default 7 days) |
+
+Bindings (`cell/wrangler.jsonc`): `FRAGMENT` and `PRINCIPAL` (Durable
+Objects), `LOADER` (the Worker Loader), `JOBS` (the Workflow that runs
+jobs), `BLOBS` (R2 over the fleet bucket: the bytes of large files).
 
 ## Principals and access
 
@@ -55,7 +60,7 @@ member may leave. Each person's list of fragments is kept in their
 | `POST /api/fragments` | any signer | `{name, fragmentSecret, visibility?}` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}`. `fragmentSecret` is the fragment's own key, made by the client; it is stored sealed. The cell creates (or, for a name deleted before, finds) the code.storage repo. |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role}]}` |
 | `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
-| `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}}` |
+| `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes}` |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt}]}` |
 | `PUT /api/f/{name}/members/{npub}` | owner | `{role: viewer\|editor}` → the member |
@@ -72,8 +77,10 @@ member may leave. Each person's list of fragments is kept in their
 | `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt}`: ES256, this repo, `git:read`+`git:write`, 15 minutes |
 | `POST /api/f/{name}/refresh` | editor | → `{ok, refs: {main: {pin, moved} \| {absent}, live: ...}}` |
 | `POST /api/f/{name}/webhook` | code.storage | signed with the fragment's webhook secret (`X-Pierre-Signature`, 5 minutes); validate, remember (redeliveries are acknowledged), then move the pin to the branch's head as read now |
-| `GET /api/f/{name}/files` | viewer | → `{ref, files: [{path, size, mode, lastCommitSha, machinery}]}` at main |
-| `GET /api/f/{name}/file?path=` | viewer | → the bytes at main (`x-fragment-ref`) |
+| `GET /api/f/{name}/files` | viewer | → `{ref, files: [{path, size, mode, lastCommitSha, machinery, blob?}]}` at main; a pointer's `size` is its bytes' |
+| `GET /api/f/{name}/file?path=` | viewer | → the bytes at main (`x-fragment-ref`); a pointer's come from the blob store |
+| `PUT /api/f/{name}/blobs/{sha256}` | editor | the bytes as the body (`content-length` required, at most 256 MiB), streamed through and hashed on the way in: → `{ok, sha, size, stored}`; bytes that hash to anything else are deleted and refused (400) |
+| `GET`, `HEAD /api/f/{name}/blobs/{sha256}` | viewer | → the bytes (ranges answer 206) |
 | `GET /api/f/{name}/file/stat?path=` | viewer | → `{stat: {path, size, blobSha, lastCommitSha, present}, ref}` |
 | `GET /api/f/{name}/events?since=` | viewer | → `{events: [{id, at, kind, summary, data}]}` (500 a page; 5000 kept) |
 | `POST /api/f/{name}/ops/{op}` | the operation's role | `{id, input}` → `{result, replayed}`; for a job, `result` is `{run, status}` (the same id answers the same run) |
@@ -136,6 +143,47 @@ applied mutation also appends `{op, id}` to `ops`. An optional
 `fetch(request)` answers every path that is not a site file (any
 method), with `x-fragment-principal` and `x-fragment-role` set.
 
+### Files
+
+The app's files are the fragment's files in git. Reads come from `main`
+(the working copy) at its pin; writes land on `main` as commits the cell
+makes, and move the pin at once.
+
+- `this.files.read(path)` (text) / `readBytes(path)` / `list(prefix)`
+  (`[{path, size, blob?}]`) / `stat(path)` (`{path, size, sha, commit}`,
+  `sha` the git blob) from anything async: queries, `fetch`, jobs. A
+  file over 1 MiB (a blob) is not read into the app (413); the site
+  serves it. An absent file reads as `null`.
+- In a mutation, `call.files.write(path, content)` / `remove(path)`
+  (content a string, `Uint8Array`, or `ArrayBuffer`; at most 16 files and
+  256 KiB): applied once the mutation commits, as one commit, once (a
+  replay commits nothing). Last writer wins.
+- In a job, `job.files.read / list / stat / write / remove` are steps.
+  `write(path, content, {expect})` and `remove(path, {expect})` compare
+  and swap: `expect` is the blob `sha` the file must have, or `null` for
+  "must not exist"; a mismatch fails the step with a `conflict`.
+- A move of `main` the cell's own commit made carries its writer's depth:
+  a file trigger started by it is one hop deeper.
+
+Each fragment's app runs in its own loaded worker: its env holds only its
+own capabilities (`FILES`, bound to it), and no module state is shared
+with another fragment running the same code.
+
+### Blobs
+
+A file of 1 MiB or more is a git-lfs v1 pointer in git (`version
+https://git-lfs.github.com/spec/v1`, `oid sha256:…`, `size …`), and its
+bytes are a blob in the fleet's blob store under the fragment and the
+hash. The CLI uploads a large file's bytes before it commits the pointer,
+and downloads them when it pulls one, so a synced folder holds real
+files; it does so only where status answers `blobMinBytes` (the
+TypeScript runtime keeps large files in git). The site (`/`, `__file`)
+and `GET file` serve a pointer's bytes, with ranges. A blob that no
+pointer at `main` or `live` has named for `FRAGMENT_BLOB_GRACE_S` (7
+days) is deleted, so only the latest versions' bytes are kept: a
+rollback older than that has pointers without bytes. A deleted
+fragment's blobs go with it.
+
 ### Jobs and triggers
 
 A job is a method called `(input, job)` that runs as a celld Workflow,
@@ -188,7 +236,9 @@ CLI: `fragment runs <name> [<run>] [--status S]`, `fragment triggers
 ## Serving
 
 `<name>.<suffix>/<path>` (or `/f/<name>/<path>` without a suffix; with
-one, those redirect to the fragment's host, except `__watch`):
+one, those redirect to the fragment's host, except `__watch`). Every path
+on a fragment's host is the fragment's, `/api/…` included (the platform
+API answers on the platform's host):
 
 | path | |
 | --- | --- |

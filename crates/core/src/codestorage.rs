@@ -116,6 +116,64 @@ pub fn listed_repo_url(v: &Value, name: &str) -> Option<String> {
     v["repos"].as_array()?.iter().find(|r| r["repo_name"] == name).and_then(repo_url)
 }
 
+/// One change in a commit pack.
+pub enum FileChange<'a> {
+    Upsert { path: &'a str, bytes: &'a [u8] },
+    Delete { path: &'a str },
+}
+
+/// Decoded bytes per `blob_chunk` line (the service's limit).
+pub const CHUNK_MAX: usize = 4 * 1024 * 1024;
+
+/// An NDJSON commit pack for `POST /api/repos/<repo>/commit-pack`:
+/// metadata first, then each file's content as base64 chunks, each stream
+/// ending with an `eof` chunk. `expected` is the branch head the commit
+/// must land on (the service answers 409 when it moved).
+pub fn commit_pack(branch: &str, expected: Option<&str>, message: &str, author: (&str, &str), changes: &[FileChange]) -> String {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let mut files = Vec::with_capacity(changes.len());
+    let mut chunks = String::new();
+    let mut chunk = |id: &str, data: &[u8], eof: bool| {
+        chunks.push_str(&serde_json::json!({ "blob_chunk": { "content_id": id, "data": b64.encode(data), "eof": eof } }).to_string());
+        chunks.push('\n');
+    };
+    for (i, change) in changes.iter().enumerate() {
+        let id = format!("c{i}");
+        match change {
+            FileChange::Upsert { path, bytes } => {
+                files.push(serde_json::json!({ "path": path, "operation": "upsert", "content_id": id, "mode": "100644" }));
+                let pieces: Vec<&[u8]> = bytes.chunks(CHUNK_MAX).collect();
+                if pieces.is_empty() {
+                    chunk(&id, b"", true);
+                }
+                for (j, piece) in pieces.iter().enumerate() {
+                    chunk(&id, piece, j + 1 == pieces.len());
+                }
+            }
+            FileChange::Delete { path } => {
+                files.push(serde_json::json!({ "path": path, "operation": "delete", "content_id": id, "mode": "100644" }));
+                chunk(&id, b"", true);
+            }
+        }
+    }
+    let mut meta = serde_json::json!({
+        "target_branch": branch,
+        "commit_message": message,
+        "author": { "name": author.0, "email": author.1 },
+        "files": files,
+    });
+    if let Some(sha) = expected {
+        meta["expected_target_sha"] = Value::String(sha.to_string());
+    }
+    format!("{}\n{chunks}", serde_json::json!({ "metadata": meta }))
+}
+
+/// The new head from a commit pack's answer.
+pub fn committed(v: &Value) -> Option<String> {
+    (v["result"]["success"] == true).then(|| v["result"]["new_sha"].as_str().map(str::to_string)).flatten().filter(|s| is_sha(s))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

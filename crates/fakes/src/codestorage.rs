@@ -356,7 +356,10 @@ impl Inner {
         Ok(())
     }
 
-    fn handle(&self, req: &Request) -> Response {
+    /// Webhooks for a push over HTTP go out after the answer, as the real
+    /// service queues them: a caller may see its push announced while it is
+    /// still reading the answer, or after.
+    fn handle(self: &Arc<Self>, req: &Request) -> Response {
         let mut deliveries = Vec::new();
         let resp = {
             let mut st = self.state.lock().expect("fake state lock");
@@ -366,9 +369,13 @@ impl Inner {
             }
             resp
         };
-        for d in deliveries {
-            let inner_state = &self.state;
-            deliver(&d, inner_state);
+        if !deliveries.is_empty() {
+            let me = Arc::clone(self);
+            std::thread::spawn(move || {
+                for d in deliveries {
+                    deliver(&d, &me.state);
+                }
+            });
         }
         resp
     }

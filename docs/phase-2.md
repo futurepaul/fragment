@@ -286,6 +286,62 @@ Decisions made in D (each in `docs/api.md`):
 reachability from branch tips; the CLI resolves pointers when it syncs;
 the vault template.
 
+*Done 2026-09-23* (Paul away; he asked for the well-scoped work to go
+on). `cargo xtask e2e` passes 415 of 415 checks in 25 sections (slice E
+added `appfiles`, `blobs`, and `notes`); the old JS e2e still passes 312
+of 312; `cargo xtask check` is clean. The contract is in `docs/api.md`
+(Files, Blobs). What landed:
+
+- **The app's files** (`cell/src/files.rs`): `this.files` reads at
+  `main` through a `FILES` capability in the facet's env (the `Files`
+  class in `cell/entry.mjs`, bound to one fragment by `props`); a
+  mutation's `call.files.write/remove` become one commit after it
+  commits; a job's `job.files.*` are steps, and its writes may
+  compare-and-swap on a file's blob sha. The cell commits to code.storage
+  itself (`crates/core` builds the commit pack).
+- **Blobs** (`cell/src/blobs.rs`, `cli/src/blobs.rs`): files of 1 MiB or
+  more are git-lfs pointers with their bytes in `BLOBS` (celld's R2 over
+  the fleet bucket); uploads stream through the router and are hashed on
+  the way in; the site serves pointers (with ranges); unreferenced blobs
+  are collected after a grace period; `fragment sync` uploads and
+  resolves them.
+- **`templates/notes`**: the vault viewer on the new model: notes read at
+  `main` through `App.fetch`, a file trigger and a live query refresh
+  open pages (`fragment new --template notes`, `cargo xtask try notes`).
+- **Tooling**: `cargo xtask try <template>`; the e2e runs its node from a
+  staged copy of the cell (`target/e2e/cell`), so it can never touch a
+  running `cargo xtask dev` (it did once this slice, wiping Paul's dev
+  state); the code.storage fake delivers webhooks after answering, as
+  the real service queues them.
+
+Decisions made in E (each in `docs/api.md`):
+
+- **Apps read files at `main`**, the working copy, not `live`: content
+  changes without a deploy; code still comes from `live`.
+- **One loaded worker per fragment.** The loader id includes the
+  fragment's npub, so an app's env holds only its own capabilities and
+  two fragments running the same template share no module state (before
+  E they shared an isolate's globals). The cost: no sharing of loaded
+  code across fragments.
+- **Mutations write last-writer-wins; jobs compare-and-swap.** A
+  mutation's file effects apply after it committed, when a conflict can
+  no longer refuse it; a job step can fail and let the job decide.
+- **The cell's own commits carry their writer's depth**, so a job that
+  writes the files its trigger watches stops at the hop budget (e2e
+  proves it).
+- **Blob pointers are git-lfs v1 pointers**, so git tools recognize them;
+  the bytes are the platform's (no LFS server). Blobs are at most
+  256 MiB; only the latest versions' bytes are kept (7 days' grace, so
+  a recent rollback keeps its large files).
+- **Every path on a fragment's own host is the fragment's**, `/api/…`
+  included; the platform API answers on the platform's host.
+- **The new-model vault is `templates/notes`**: the old `vault` stays
+  until slice G because the JS e2e deploys it to the TypeScript runtime;
+  both share one copy of the viewer bundle (`cli/build.rs`).
+- **Not now**: large files written by apps (slice F's generated images
+  and video will need job steps that store blobs), file reads inside
+  mutations, per-file history.
+
 **F. Deliveries and AI.** Web push and outbound webhooks through a Queue;
 OpenRouter text, image (`google/gemini-3.1-flash-lite-image`), and video
 (`minimax/hailuo-3-max`) with the fake in e2e. The published-fragment

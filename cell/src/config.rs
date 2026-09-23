@@ -29,6 +29,9 @@ pub struct Config {
     /// addresses (dev and e2e fleets, which call local fakes). Never on a
     /// shared fleet.
     pub egress_local: bool,
+    /// `FRAGMENT_BLOB_GRACE_S`: how long a blob no branch names is kept
+    /// (default 7 days: a rollback within it still has its bytes).
+    pub blob_grace_ms: i64,
 }
 
 fn var(env: &Env, name: &str) -> Option<String> {
@@ -50,7 +53,8 @@ impl Config {
         let host_suffix = var(env, "FRAGMENT_HOST_SUFFIX").map(|s| s.trim_start_matches('.').to_ascii_lowercase());
         let poll_interval_ms = var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000;
         let egress_local = var(env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow");
-        Config { host_secrets, codestorage, host_suffix, poll_interval_ms, egress_local }
+        let blob_grace_ms = var(env, "FRAGMENT_BLOB_GRACE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(7 * 24 * 3600) * 1000;
+        Config { host_secrets, codestorage, host_suffix, poll_interval_ms, egress_local, blob_grace_ms }
     }
 
     /// The current host secret and any previous one, current first.

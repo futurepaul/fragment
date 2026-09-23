@@ -31,6 +31,33 @@ pub fn cell_dir() -> PathBuf {
     repo_root().join("cell")
 }
 
+/// A copy of the built cell project at `dir` (its config, shim, and build),
+/// so a node run from it keeps its state and variables apart from `cell/`,
+/// where `xtask dev` runs.
+pub fn stage_project(dir: &Path) -> Result<PathBuf> {
+    fn copy_dir(from: &Path, to: &Path) -> Result<()> {
+        fs::create_dir_all(to)?;
+        for entry in fs::read_dir(from)? {
+            let entry = entry?;
+            let target = to.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_dir(&entry.path(), &target)?;
+            } else {
+                fs::copy(entry.path(), &target)?;
+            }
+        }
+        Ok(())
+    }
+    let cell = cell_dir();
+    fs::create_dir_all(dir)?;
+    for f in ["wrangler.jsonc", "entry.mjs"] {
+        fs::copy(cell.join(f), dir.join(f)).with_context(|| format!("stage {f}"))?;
+    }
+    let _ = fs::remove_dir_all(dir.join("build"));
+    copy_dir(&cell.join("build"), &dir.join("build")).context("stage cell/build (run `cargo xtask build`)")?;
+    Ok(dir.to_path_buf())
+}
+
 /// Where `xtask celld` installs the fork's binary.
 pub fn fork_celld_path() -> PathBuf {
     repo_root().join("target/celld/bin/celld")
@@ -83,9 +110,9 @@ pub fn free_port() -> Result<u16> {
     Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
 }
 
-/// Writes `cell/.dev.vars` (dotenv, one line per value, mode 600).
-pub fn write_dev_vars(vars: &[(&str, &str)]) -> Result<()> {
-    let path = cell_dir().join(".dev.vars");
+/// Writes a project's `.dev.vars` (dotenv, one line per value, mode 600).
+pub fn write_dev_vars(project: &Path, vars: &[(&str, &str)]) -> Result<()> {
+    let path = project.join(".dev.vars");
     let mut f = fs::OpenOptions::new().create(true).truncate(true).write(true).mode(0o600).open(&path)?;
     for (k, v) in vars {
         assert!(!k.is_empty() && k.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'), "var name {k}");
@@ -109,11 +136,13 @@ pub struct Fleet {
     pub egress_local: bool,
     /// The first retry delay of a failed job step (it doubles each time).
     pub job_retry_delay_s: u32,
+    /// How long a blob no branch names is kept (`None`: the cell's 7 days).
+    pub blob_grace_s: Option<u32>,
 }
 
 impl Fleet {
-    /// Renders the fleet into `cell/.dev.vars`.
-    pub fn write_vars(&self) -> Result<()> {
+    /// Renders the fleet into the project's `.dev.vars`.
+    pub fn write_vars(&self, project: &Path) -> Result<()> {
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
         let mut vars = vec![
@@ -127,10 +156,14 @@ impl Fleet {
         if self.egress_local {
             vars.push(("FRAGMENT_EGRESS_LOCAL", "allow"));
         }
+        let grace = self.blob_grace_s.map(|g| g.to_string());
+        if let Some(g) = &grace {
+            vars.push(("FRAGMENT_BLOB_GRACE_S", g.as_str()));
+        }
         if let Some(s) = &self.host_suffix {
             vars.push(("FRAGMENT_HOST_SUFFIX", s.as_str()));
         }
-        write_dev_vars(&vars)
+        write_dev_vars(project, &vars)
     }
 }
 
@@ -158,6 +191,9 @@ pub fn dev_secret(name: &str, make: impl FnOnce() -> String) -> Result<String> {
 }
 
 pub struct NodeOptions {
+    /// The celld project the node runs: `cell/` for `xtask dev`, a staged
+    /// copy for the e2e. Its state (`.celld/dev`) and variables live there.
+    pub project: PathBuf,
     pub port: u16,
     /// Discard the local state first.
     pub clean: bool,
@@ -183,7 +219,7 @@ impl Node {
         let log = logs.join(format!("celld-{}.log", opts.port));
         let out = fs::File::create(&log)?;
         let mut cmd = Command::new(&tools.celld);
-        cmd.arg("dev").arg(cell_dir()).args(["--port", &opts.port.to_string()]);
+        cmd.arg("dev").arg(&opts.project).args(["--port", &opts.port.to_string()]);
         if opts.clean {
             cmd.arg("--clean");
         }

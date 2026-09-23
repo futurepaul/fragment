@@ -1,10 +1,13 @@
 //! The sections, in the order they run.
 
 mod app;
+mod appfiles;
+mod blobs;
 mod author;
 mod control;
 mod jobs;
 mod members;
+mod notes;
 mod plane;
 mod restart;
 mod site;
@@ -35,6 +38,9 @@ pub fn run(s: &mut Suite, api: Api) -> Result<()> {
     author::browser(s, &api)?;
     jobs::jobs(s, &api)?;
     jobs::triggers(s, &api)?;
+    appfiles::appfiles(s, &api)?;
+    blobs::blobs(s, &api)?;
+    notes::notes(s, &api)?;
     sync::folder_sync(s, &api)?;
     let api = restart::restart(s, api)?;
     restart::pathmode(s, api)?;

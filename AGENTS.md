@@ -32,21 +32,24 @@ The new runtime (`cell/`, Rust; phase 2, `docs/phase-2.md`):
   runs `crates/e2e` against a fresh `celld dev` node and the in-process
   code.storage fake (sections: auth, create, lockdown, members, secrets,
   files, deploy, ops, public, site, watch, schemas, channels, live,
-  routes, cli, browser, jobs, triggers, sync, restart, pathmode). The
-  browser section drives headless Chrome (`CHROME_BIN` to choose one);
-  `triggers` waits for a cron minute (about a minute).
+  routes, cli, browser, jobs, triggers, appfiles, blobs, notes, sync,
+  restart, pathmode). The browser and notes sections drive headless
+  Chrome (`CHROME_BIN` to choose one); `triggers` waits for a cron
+  minute (about a minute). The node runs from a staged copy of the cell
+  (`target/e2e/cell`), so the e2e and `cargo xtask dev` can run at once.
 - `cargo xtask dev [--clean]`: the new stack in the foreground: the cell
   on :8790 with fragments at `http://<name>.fragment.localhost:8790/`, and
   the code.storage fake on :8792 (state in `target/devstack/`; its org
   key and the host secret are made there on first run). Point the CLI at
   it with `FRAGMENT_HOST=http://127.0.0.1:8790`. Dev fleets let jobs
   fetch local addresses (`FRAGMENT_EGRESS_LOCAL=allow`).
-- `cargo xtask try <todo|inbox> [name]` (with `cargo xtask dev` running):
+- `cargo xtask try <todo|inbox|notes> [name]` (with `cargo xtask dev` running):
   creates and deploys a fragment from a template under
   `target/devstack/try/` (never in the repo) and prints the link to open,
   a curl for the inbox, and a `fragment` alias for the dev stack. The
   templates on the new model: `todo` (operations, channels, the browser
-  library) and `inbox` (a trigger, a job, the inbox).
+  library), `inbox` (a trigger, a job, the inbox), and `notes` (files as
+  the state, read through `App.fetch`, refreshed by a file trigger).
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
   logic, host-tested), `crates/nip98`, `crates/fakes` (code.storage),
   `crates/devstack`, `crates/e2e`.

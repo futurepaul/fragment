@@ -397,6 +397,7 @@ impl FragmentCell {
             "call" => self.step_call(&run, index, args).await,
             "fetch" => self.step_fetch(&run, args).await,
             "publish" => self.step_publish(&run, index, args),
+            "files.read" | "files.list" | "files.stat" | "files.write" | "files.remove" => self.step_files(&run, index, &kind, args).await,
             other => Err(permanent(format!("unknown step kind {other:?}"))),
         };
         let answer = match out {
@@ -554,6 +555,41 @@ impl FragmentCell {
         }
     }
 
+    /// `job.files.*`: reads at `main`'s pin, recorded as the step's result;
+    /// writes as one commit per step, compare-and-swapped when the step
+    /// names what it expects (`expect`: a blob sha, or `null` for absent).
+    async fn step_files(&self, run: &Value, index: i64, kind: &str, args: &Value) -> Result<Value, StepFail> {
+        let settle = |e: CellError| match e.code {
+            ErrorCode::HostFailed | ErrorCode::UpstreamFailed => StepFail::Retry(e.message),
+            _ => permanent(e.message),
+        };
+        let path = args["path"].as_str().unwrap_or("");
+        match kind {
+            "files.read" => Ok(self.read_main(path).await.map_err(settle)?.map_or(Value::Null, crate::files::content_json)),
+            "files.list" => Ok(Value::Array(self.list_main(args["prefix"].as_str().unwrap_or("")).map_err(settle)?)),
+            "files.stat" => Ok(self.stat_main(path).await.map_err(settle)?.unwrap_or(Value::Null)),
+            _ => {
+                let bytes = match kind {
+                    "files.write" => Some(crate::files::content_of(args).map_err(permanent)?),
+                    _ => None,
+                };
+                let mut expect = BTreeMap::new();
+                if let Some(e) = args.get("expect") {
+                    expect.insert(path.to_string(), e.as_str().map(str::to_string));
+                }
+                let run_id = run["id"].as_i64().unwrap_or(0);
+                let key = format!("{JOB_ID_PREFIX}{run_id}:{index}");
+                let message = format!("{} run {run_id}: {} {path}", run["op"].as_str().unwrap_or(""), if bytes.is_some() { "write" } else { "remove" });
+                let writes = [crate::files::FileWrite { path: path.to_string(), bytes }];
+                let depth = run["depth"].as_u64().unwrap_or(0) as u32;
+                match self.commit_files(&key, &writes, &expect, &message, run["principal"].as_str().unwrap_or(""), depth).await.map_err(settle)? {
+                    crate::files::Wrote::Commit(sha) => Ok(json!({ "commit": sha })),
+                    crate::files::Wrote::Conflict(why) => Err(permanent(format!("conflict: {why}"))),
+                }
+            }
+        }
+    }
+
     /// Starts the runs a new record on a channel triggers.
     pub(crate) fn fire_channel(&self, record: &ChannelRecord, depth: u32) -> CellResult<Vec<i64>> {
         let mut started = vec![];
@@ -576,7 +612,7 @@ impl FragmentCell {
     }
 
     /// Starts the runs a move of `main` triggers.
-    pub(crate) fn fire_files(&self, commit: Option<&str>, paths: &[String]) -> CellResult<()> {
+    pub(crate) fn fire_files(&self, commit: Option<&str>, paths: &[String], depth: u32) -> CellResult<()> {
         for t in self.triggers()? {
             let TriggerOn::Files(pattern) = &t.on else { continue };
             let matched: Vec<&String> = paths.iter().filter(|p| glob::matches_path(pattern, p)).collect();
@@ -589,7 +625,7 @@ impl FragmentCell {
                 trigger: Some(pattern.clone()),
                 principal: &self.own_key()?,
                 role: Role::Editor,
-                depth: 0,
+                depth,
                 call: None,
                 input: json!({
                     "ref": "main",

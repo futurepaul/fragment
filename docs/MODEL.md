@@ -17,7 +17,8 @@ mechanism names the celld primitive it uses; read with the celld docs
    real files. App state lives in SQL. What happened lives in channels.
    File-based apps (a vault, a wiki) stay first-class: for them the files
    *are* the state, and operations read and write them through
-   `ctx.files`.
+   `this.files`, `call.files`, and `job.files` (phase 2 slice E; reads at
+   `main`, the working copy).
 2. **One execution primitive: the operation.** Named, schema-typed,
    role-checked, idempotent by operation id, ledgered. Every trigger
    (browser, CLI, agent tool call, cron, webhook, channel message, file

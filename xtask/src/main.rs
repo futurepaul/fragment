@@ -91,9 +91,10 @@ fn dev(args: &[String]) -> Result<()> {
         poll_interval_s: 10,
         egress_local: true,
         job_retry_delay_s: 2,
+        blob_grace_s: None,
     }
-    .write_vars()?;
-    let opts = devstack::NodeOptions { port: DEV_PORT, clean, watch: true, env: vec![] };
+    .write_vars(&devstack::cell_dir())?;
+    let opts = devstack::NodeOptions { project: devstack::cell_dir(), port: DEV_PORT, clean, watch: true, env: vec![] };
     let (node, took) = devstack::Node::start(&tools, &opts)?;
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
     println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
@@ -105,7 +106,7 @@ fn dev(args: &[String]) -> Result<()> {
 }
 
 /// Templates written for the Rust cell (the others are the TypeScript runtime's).
-const TRY_TEMPLATES: [&str; 2] = ["todo", "inbox"];
+const TRY_TEMPLATES: [&str; 3] = ["todo", "inbox", "notes"];
 
 fn try_template(args: &[String]) -> Result<()> {
     let usage = || format!("usage: cargo xtask try <{}> [name]", TRY_TEMPLATES.join("|"));

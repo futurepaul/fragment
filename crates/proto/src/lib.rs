@@ -96,6 +96,13 @@ pub mod limits {
     pub const AUTO_PAUSE_WINDOW_MS: i64 = 10 * 60 * 1000;
     /// … or after this many triggered runs within an hour.
     pub const TRIGGERED_RUNS_PER_HOUR: u64 = 120;
+    /// A file an app reads (a larger one is served from the site).
+    pub const FILE_READ_MAX_BYTES: usize = 1024 * 1024;
+    /// What one mutation or one job step may write to files, and in how many.
+    pub const FILE_WRITE_MAX_BYTES: usize = 256 * 1024;
+    pub const FILE_WRITES_MAX: usize = 16;
+    /// The largest blob an upload may carry (files of 1 MiB or more are blobs).
+    pub const BLOB_MAX_BYTES: u64 = 256 * 1024 * 1024;
     /// Finished runs are kept this long, and at most this many.
     pub const RUN_RETENTION_MS: i64 = 30 * 24 * 3600 * 1000;
     pub const RUNS_KEPT: i64 = 10_000;
@@ -329,6 +336,10 @@ pub struct FragmentStatus {
     /// Editors and up see the inbox token.
     pub inbox_token: Option<String>,
     pub urls: Urls,
+    /// Files this large or larger are stored as blobs, their pointers in
+    /// git (absent from hosts without blobs: the TypeScript runtime).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob_min_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

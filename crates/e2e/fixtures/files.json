@@ -1,0 +1,18 @@
+{
+  "operations": {
+    "add_note": { "kind": "mutation", "input": { "type": "object", "required": ["slug", "text"], "properties": { "slug": { "type": "string" }, "text": { "type": "string" } } } },
+    "drop_note": { "kind": "mutation" },
+    "pair": { "kind": "mutation" },
+    "bad_path": { "kind": "mutation" },
+    "read": { "kind": "query" },
+    "bytes": { "kind": "query" },
+    "list": { "kind": "query" },
+    "stat": { "kind": "query" },
+    "append": { "kind": "job" },
+    "stale": { "kind": "job" },
+    "again": { "kind": "job" },
+    "whoami": { "kind": "query" }
+  },
+  "channels": { "changes": {} },
+  "triggers": [{ "files": "loop/", "run": "again" }]
+}

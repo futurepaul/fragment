@@ -74,8 +74,22 @@ pub struct Facet {
 
 pub const APP_FACET: &str = "app";
 
+/// The capabilities an app's env holds: `FILES`, bound to `fragment`
+/// (`ctx.exports.Files({ props })`, the class in entry.mjs).
+fn app_env(ctx: &JsValue, fragment: &str) -> CellResult<Object> {
+    let props = Object::new();
+    set(&props, "fragment", fragment);
+    let options = Object::new();
+    set(&options, "props", props);
+    let exports = get(ctx, "exports")?;
+    let files = call(&exports, "Files", &[options.into()]).map_err(|e| CellError::host(format!("ctx.exports.Files: {}", js_message(&e))))?;
+    let env = Object::new();
+    set(&env, "FILES", files);
+    Ok(env)
+}
+
 /// Starts the `app` facet from `code` (or reaches the running one).
-pub fn app_facet(ctx: &JsValue, env: &JsValue, code: &AppCode<'_>) -> CellResult<Facet> {
+pub fn app_facet(ctx: &JsValue, env: &JsValue, fragment: &str, code: &AppCode<'_>) -> CellResult<Facet> {
     let modules = Object::new();
     set(&modules, "platform.js", code.platform);
     set(&modules, "app.js", code.source);
@@ -89,7 +103,7 @@ pub fn app_facet(ctx: &JsValue, env: &JsValue, code: &AppCode<'_>) -> CellResult
     set(&worker_code, "compatibilityDate", "2026-01-01");
     set(&worker_code, "mainModule", "platform.js");
     set(&worker_code, "modules", modules);
-    set(&worker_code, "env", Object::new());
+    set(&worker_code, "env", app_env(ctx, fragment)?);
     set(&worker_code, "globalOutbound", JsValue::NULL);
     set(&worker_code, "limits", limits);
 
@@ -127,7 +141,14 @@ impl Facet {
         let out = settle(pending).await.map_err(|e| CellError::new(fragment_proto::ErrorCode::AppFailed, js_message(&e)))?;
         let resp: worker_sys::web_sys::Response =
             out.dyn_into().map_err(|_| CellError::new(fragment_proto::ErrorCode::AppFailed, "the app's fetch did not return a Response"))?;
-        Ok(worker::Response::from(resp))
+        // The app's response has immutable headers; the platform adds its
+        // own (cookies), so it answers a copy around the same body.
+        let headers = worker_sys::web_sys::Headers::new_with_headers(&resp.headers()).map_err(|e| CellError::host(js_message(&e)))?;
+        let init = worker_sys::web_sys::ResponseInit::new();
+        init.set_status(resp.status());
+        init.set_headers(&headers);
+        let copy = worker_sys::web_sys::Response::new_with_opt_readable_stream_and_init(resp.body().as_ref(), &init).map_err(|e| CellError::host(js_message(&e)))?;
+        Ok(worker::Response::from(copy))
     }
 
     /// Calls a platform method on the facet (`__query`, `__mutate`). An
@@ -174,6 +195,104 @@ pub async fn jobs_status(env: &JsValue, id: &str) -> Result<serde_json::Value, S
     let instance = settle(call(&binding, "get", &[id.into()]).map_err(|e| js_message(&e))?).await.map_err(|e| js_message(&e))?;
     let status = settle(call(&instance, "status", &[]).map_err(|e| js_message(&e))?).await.map_err(|e| js_message(&e))?;
     from_js(&status)
+}
+
+/// The fleet's blob store (`BLOBS`, an R2 binding over the fleet bucket).
+fn blobs(env: &JsValue) -> CellResult<JsValue> {
+    let binding = get(env, "BLOBS")?;
+    if binding.is_undefined() {
+        return Err(CellError::host("this node has no BLOBS bucket binding (wrangler.jsonc `r2_buckets`)"));
+    }
+    Ok(binding)
+}
+
+async fn await_js(v: Result<JsValue, JsValue>, what: &str) -> CellResult<JsValue> {
+    let pending = v.map_err(|e| CellError::host(format!("{what}: {}", js_message(&e))))?;
+    settle(pending).await.map_err(|e| CellError::host(format!("{what}: {}", js_message(&e))))
+}
+
+/// Streams `body` into the blob store at `key` while hashing it
+/// (`crypto.DigestStream`): answers (bytes stored, SHA-256 hex).
+pub async fn blob_put(env: &JsValue, key: &str, body: JsValue) -> CellResult<(u64, String)> {
+    let bucket = blobs(env)?;
+    let pair: Array = call(&body, "tee", &[]).map_err(|e| CellError::host(format!("tee: {}", js_message(&e))))?.unchecked_into();
+    let crypto = get(&js_sys::global(), "crypto")?;
+    let digest_class: Function = get(&crypto, "DigestStream")?.dyn_into().map_err(|_| CellError::host("crypto.DigestStream is missing"))?;
+    let args = Array::of1(&JsValue::from_str("SHA-256"));
+    let digest = Reflect::construct(&digest_class, &args).map_err(|e| CellError::host(format!("DigestStream: {}", js_message(&e))))?;
+    let put = call(&bucket, "put", &[key.into(), pair.get(0)]);
+    let pipe = call(&pair.get(1), "pipeTo", std::slice::from_ref(&digest));
+    let both = Array::of2(&put.map_err(|e| CellError::host(format!("put: {}", js_message(&e))))?, &pipe.map_err(|e| CellError::host(format!("pipeTo: {}", js_message(&e))))?);
+    let done = JsFuture::from(Promise::all(&both)).await.map_err(|e| CellError::host(format!("storing the blob: {}", js_message(&e))))?;
+    let object = Array::from(&done).get(0);
+    let size = get(&object, "size")?.as_f64().unwrap_or(0.0) as u64;
+    let hash = await_js(Ok(get(&digest, "digest")?), "digest").await?;
+    let bytes = js_sys::Uint8Array::new(&hash).to_vec();
+    Ok((size, hex::encode(bytes)))
+}
+
+/// A blob's size, or `None` when absent.
+pub async fn blob_head(env: &JsValue, key: &str) -> CellResult<Option<u64>> {
+    let object = await_js(call(&blobs(env)?, "head", &[key.into()]), "head").await?;
+    if object.is_null() || object.is_undefined() {
+        return Ok(None);
+    }
+    Ok(Some(get(&object, "size")?.as_f64().unwrap_or(0.0) as u64))
+}
+
+/// A blob's bytes as a stream: (body, whole size, the served range as
+/// (offset, length) when `range` asked for one), or `None` when absent.
+pub struct BlobBody {
+    pub body: worker_sys::web_sys::ReadableStream,
+    pub size: u64,
+    pub range: Option<(u64, u64)>,
+}
+
+pub async fn blob_get(env: &JsValue, key: &str, range: Option<&str>) -> CellResult<Option<BlobBody>> {
+    let options = Object::new();
+    if let Some(r) = range {
+        let headers = worker_sys::web_sys::Headers::new().map_err(|e| CellError::host(js_message(&e)))?;
+        headers.set("range", r).map_err(|e| CellError::host(js_message(&e)))?;
+        set(&options, "range", JsValue::from(headers));
+    }
+    let object = await_js(call(&blobs(env)?, "get", &[key.into(), options.into()]), "get").await?;
+    if object.is_null() || object.is_undefined() {
+        return Ok(None);
+    }
+    let size = get(&object, "size")?.as_f64().unwrap_or(0.0) as u64;
+    let served = get(&object, "range")?;
+    let range = if range.is_some() && !served.is_undefined() && !served.is_null() {
+        let offset = get(&served, "offset")?.as_f64().unwrap_or(0.0) as u64;
+        let length = get(&served, "length")?.as_f64().map_or(size.saturating_sub(offset), |l| l as u64);
+        Some((offset, length))
+    } else {
+        None
+    };
+    let body = get(&object, "body")?.dyn_into().map_err(|_| CellError::host("a blob without a body stream"))?;
+    Ok(Some(BlobBody { body, size, range }))
+}
+
+pub async fn blob_delete(env: &JsValue, keys: &[String]) -> CellResult<()> {
+    let list = Array::new();
+    for k in keys {
+        list.push(&JsValue::from_str(k));
+    }
+    await_js(call(&blobs(env)?, "delete", &[list.into()]), "delete").await?;
+    Ok(())
+}
+
+/// Keys under `prefix`, a page at a time: (keys, the cursor for the next page).
+pub async fn blob_list(env: &JsValue, prefix: &str, cursor: Option<&str>) -> CellResult<(Vec<String>, Option<String>)> {
+    let options = Object::new();
+    set(&options, "prefix", prefix);
+    if let Some(c) = cursor {
+        set(&options, "cursor", c);
+    }
+    let listed = await_js(call(&blobs(env)?, "list", &[options.into()]), "list").await?;
+    let objects = Array::from(&get(&listed, "objects")?);
+    let keys = objects.iter().filter_map(|o| get(&o, "key").ok().and_then(|k| k.as_string())).collect();
+    let next = if get(&listed, "truncated")?.as_bool() == Some(true) { get(&listed, "cursor")?.as_string() } else { None };
+    Ok((keys, next))
 }
 
 pub fn now_ms() -> i64 {

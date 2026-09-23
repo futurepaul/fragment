@@ -202,3 +202,43 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** runs record when they were last checked and the pass
   takes the least recently checked, or the Workflow reports its own end
   from a `finally` step.
+
+## A blob upload is not resumable, and whole files pass through memory
+
+- **Observed:** phase 2 slice E. A blob upload is one request (at most
+  256 MiB) streamed through the router into R2; celld cannot resume a
+  multipart upload on another node or after a restart, so a node that
+  restarts mid-upload fails it, and the CLI retries the whole file. The
+  CLI also reads each file whole (as sync always has) and holds it while
+  it uploads.
+- **Risk:** large media over slow links, and memory spikes on the
+  machine that syncs.
+- **First proof:** a video over a few hundred MB, or a laptop syncing a
+  folder of them.
+- **Delete when:** uploads go in resumable parts the cell tracks (or
+  straight to the bucket with a signed URL once the fleet bucket offers
+  one), and the CLI streams files from disk.
+
+## A bad upload can delete a good copy of the same blob
+
+- **Observed:** phase 2 slice E. When uploaded bytes do not hash to the
+  sha they claim, the cell deletes the key they were stored under. An
+  editor uploading wrong bytes for a sha at the same moment someone
+  uploads the right ones can delete the right ones.
+- **Risk:** a pointer whose bytes are gone until the file is synced
+  again. Only an editor of the fragment can do it.
+- **First proof:** a report of a blob gone right after an upload.
+- **Delete when:** uploads land under a temporary key and move to the
+  content key only once verified (R2 has no rename: this needs a copy,
+  or celld's native blob API).
+
+## Blobs in git history lose their bytes after the grace period
+
+- **Observed:** phase 2 slice E, as MODEL decided (latest versions only).
+  A rollback of `live` to a commit older than the grace period (7 days)
+  that named a large file serves pointers whose bytes are gone (404).
+- **Risk:** surprise when rolling far back a fragment with large media.
+- **First proof:** a rollback past a week in a fragment with media.
+- **Delete when:** someone needs old versions of large files (the
+  "Photoshop file" exception in MODEL), and a per-fragment policy keeps
+  the bytes named by the last N live commits.

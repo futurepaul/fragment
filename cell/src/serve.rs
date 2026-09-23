@@ -188,11 +188,15 @@ impl FragmentCell {
                 return Ok(Response::ok(svg)?.with_headers(headers("image/svg+xml", if public { "public, max-age=3600" } else { "private, max-age=3600" })?));
             }
             "__tree" => {
+                let blobs = self.pointer_sizes("live")?;
                 let files: Vec<Value> = self
                     .tree_rows("live")?
                     .into_iter()
                     .filter(|r| !site::is_machinery(r["path"].as_str().unwrap_or("")))
-                    .map(|r| json!({ "path": r["path"], "size": r["size"], "mode": r["mode"], "lastCommitSha": r["last_commit"] }))
+                    .map(|r| {
+                        let size = r["path"].as_str().and_then(|p| blobs.get(p)).map_or(r["size"].clone(), |s| json!(s));
+                        json!({ "path": r["path"], "size": size, "mode": r["mode"], "lastCommitSha": r["last_commit"] })
+                    })
                     .collect();
                 return json_response(&json!({ "type": "tree", "ref": "live", "sha": live, "count": files.len(), "files": files }));
             }
@@ -212,7 +216,8 @@ impl FragmentCell {
                 if head {
                     return Ok(Response::empty()?.with_headers(headers(site::mime_for_path(&p), "no-store")?));
                 }
-                let mut resp = self.stream_file(which, &p).await?;
+                let range = req.headers().get("range")?;
+                let mut resp = self.stream_file(which, &p, range.as_deref()).await?;
                 resp.headers_mut().set("cache-control", "no-store")?;
                 return Ok(resp);
             }
@@ -231,7 +236,11 @@ impl FragmentCell {
         let cache = site::cache_control(&file, public);
         if head {
             let h = headers(mime, cache)?;
-            h.set("content-length", &row["size"].as_u64().unwrap_or(0).to_string())?;
+            let size = match self.pointer("live", &file)? {
+                Some((_, size)) => size,
+                None => row["size"].as_u64().unwrap_or(0),
+            };
+            h.set("content-length", &size.to_string())?;
             return Ok(Response::empty()?.with_headers(h));
         }
         let meta: Option<fragment_core::manifest::Meta> = self.meta("meta_live")?.and_then(|m| serde_json::from_str(&m).ok());
@@ -243,7 +252,8 @@ impl FragmentCell {
                 return Ok(Response::from_html(page)?.with_headers(headers(mime, cache)?));
             }
         }
-        let mut resp = self.stream_file("live", &file).await?;
+        let range = req.headers().get("range")?;
+        let mut resp = self.stream_file("live", &file, range.as_deref()).await?;
         resp.headers_mut().set("content-type", mime)?;
         resp.headers_mut().set("cache-control", cache)?;
         Ok(resp)

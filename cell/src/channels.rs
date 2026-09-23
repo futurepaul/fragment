@@ -27,11 +27,13 @@ const SWEEP_ROWS: u32 = 200;
 /// `events` and `ops` keep at most this many records each.
 const AUDIT_KEPT: i64 = 10_000;
 
+/// What a mutation asked for, applied once it committed: a record, or a
+/// file written to `main` (all of one mutation's files are one commit).
 #[derive(Deserialize)]
-pub struct Effect {
-    pub channel: String,
-    pub kind: String,
-    pub body: Value,
+#[serde(untagged)]
+pub enum Effect {
+    Record { channel: String, kind: String, body: Value },
+    File { file: String, #[serde(default)] text: Option<String>, #[serde(default)] base64: Option<String> },
 }
 
 fn record_json(r: &Value) -> ChannelRecord {
@@ -140,14 +142,34 @@ impl FragmentCell {
     /// Applies a committed mutation's effects, then its `ops` record. Each
     /// new record starts the runs its channel triggers, one hop deeper than
     /// the mutation (`depth`).
-    pub(crate) fn apply(&self, ledger_id: &str, op: &str, effects: &[Effect], depth: u32) -> CellResult<()> {
+    pub(crate) async fn apply(&self, ledger_id: &str, op: &str, effects: &[Effect], depth: u32) -> CellResult<()> {
         let principal = ledger_id.split_once('/').map(|(p, _)| p).unwrap_or("unknown");
+        let id = ledger_id.split_once('/').map(|(_, id)| id).unwrap_or(ledger_id);
+        let mut writes = vec![];
         for (i, e) in effects.iter().enumerate() {
-            if let Some(record) = self.append(&e.channel, principal, &e.kind, &e.body, Some((ledger_id, i as i64)))? {
-                self.fire_channel(&record, depth + 1)?;
+            match e {
+                Effect::Record { channel, kind, body } => {
+                    if let Some(record) = self.append(channel, principal, kind, body, Some((ledger_id, i as i64)))? {
+                        self.fire_channel(&record, depth + 1)?;
+                    }
+                }
+                Effect::File { file, text, base64 } => {
+                    let bytes = match (text, base64) {
+                        (None, None) => None,
+                        _ => Some(crate::files::content_of(&serde_json::json!({ "text": text, "base64": base64 })).map_err(CellError::host)?),
+                    };
+                    writes.push(crate::files::FileWrite { path: file.clone(), bytes });
+                }
             }
         }
-        let id = ledger_id.split_once('/').map(|(_, id)| id).unwrap_or(ledger_id);
+        if !writes.is_empty() {
+            let message = format!("{op} {id}");
+            if let Err(e) = self.commit_files(ledger_id, &writes, &BTreeMap::new(), &message, principal, depth).await {
+                // not applied: the next activation's sweep tries again
+                self.swept.set(false);
+                return Err(e);
+            }
+        }
         if self.append("ops", principal, "mutation", &json!({ "op": op, "id": id }), Some((ledger_id, -1)))?.is_some() {
             self.broadcast_changed(op);
         }
@@ -169,7 +191,7 @@ impl FragmentCell {
             if !done && !id.is_empty() {
                 let effects: Vec<Effect> = serde_json::from_value(row["effects"].clone()).unwrap_or_default();
                 // The depth the mutation ran at is not kept; a swept chain restarts at 0.
-                self.apply(id, row["name"].as_str().unwrap_or(""), &effects, 0)?;
+                self.apply(id, row["name"].as_str().unwrap_or(""), &effects, 0).await?;
                 applied += 1;
             }
         }
