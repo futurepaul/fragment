@@ -60,9 +60,18 @@ start_fal_fake() {
   echo "fal-fake: started on :$FAL_FAKE_PORT (stand-in fal queue for e2e)"
 }
 
+# celld 0.5 takes Worker variables from runtime/.dev.vars (dotenv, one line
+# per value; the runtime turns literal \n back into newlines for the PEM).
+# The file holds secrets: mode 600, gitignored, rewritten on every `up`.
+DEV_VARS=runtime/.dev.vars
+devvar() {
+  local value="${2//$'\n'/\\n}"
+  printf '%s=%s\n' "$1" "$value" >> "$DEV_VARS.tmp"
+}
+
 celld_env() {
-  export CELLD_WORKER_LOADER=LOADER
-  export CELLD_VAR_FRAGMENT_INTERNAL_URL="http://127.0.0.1:$CELLD_PORT"
+  rm -f "$DEV_VARS.tmp"; ( umask 077; : > "$DEV_VARS.tmp" )
+  devvar FRAGMENT_INTERNAL_URL "http://127.0.0.1:$CELLD_PORT"
   export CELLD_ESBUILD="$PWD/$TOOLS/node_modules/.bin/esbuild"
   # wrapped-secret storage (level-c) REQUIRES a host secret; a throwaway
   # persisted next to the org key so restarts keep cells decryptable.
@@ -74,7 +83,7 @@ celld_env() {
     fi
     export FRAGMENT_HOST_SECRET="$(cat "$DEV/host-secret")"
   fi
-  export CELLD_VAR_FRAGMENT_HOST_SECRET="$FRAGMENT_HOST_SECRET"
+  devvar FRAGMENT_HOST_SECRET "$FRAGMENT_HOST_SECRET"
   # code.storage file plane: the local mock + a throwaway org key. The
   # mock gets the PRIVATE half (MOCK_ORG_PRIV) so it actually verifies the
   # JWTs the runtime mints — the same discipline the real service has.
@@ -82,33 +91,34 @@ celld_env() {
     node -e "const {generateKeyPairSync}=require('node:crypto');const {privateKey}=generateKeyPairSync('ec',{namedCurve:'P-256'});require('node:fs').writeFileSync(process.argv[1],privateKey.export({type:'pkcs8',format:'pem'}))" "$DEV/cs-org-key.pem"
   fi
   start_cs_mock
-  export CELLD_VAR_CODESTORAGE_API_URL="http://127.0.0.1:$CS_MOCK_PORT"
-  export CELLD_VAR_CODESTORAGE_ORG_NAME="fragment-dev"
-  export CELLD_VAR_PIERRE_PRIVATE_KEY="$(cat "$DEV/cs-org-key.pem")"
+  devvar CODESTORAGE_API_URL "http://127.0.0.1:$CS_MOCK_PORT"
+  devvar CODESTORAGE_ORG_NAME "fragment-dev"
+  devvar PIERRE_PRIVATE_KEY "$(cat "$DEV/cs-org-key.pem")"
   if [ -n "${OPENROUTER_API_KEY:-}" ]; then
-    export CELLD_VAR_OPENROUTER_API_KEY="$OPENROUTER_API_KEY"
+    devvar OPENROUTER_API_KEY "$OPENROUTER_API_KEY"
   fi
   # generation tools (ctx.image/ctx.video): fal.ai key + optional defaults
   if [ -n "${FAL_API_KEY:-}" ]; then
-    export CELLD_VAR_FAL_API_KEY="$FAL_API_KEY"
+    devvar FAL_API_KEY "$FAL_API_KEY"
   fi
   if [ -n "${FRAGMENT_IMAGE_MODEL:-}" ]; then
-    export CELLD_VAR_FRAGMENT_IMAGE_MODEL="$FRAGMENT_IMAGE_MODEL"
+    devvar FRAGMENT_IMAGE_MODEL "$FRAGMENT_IMAGE_MODEL"
   fi
   if [ -n "${FRAGMENT_VIDEO_MODEL:-}" ]; then
-    export CELLD_VAR_FRAGMENT_VIDEO_MODEL="$FRAGMENT_VIDEO_MODEL"
+    devvar FRAGMENT_VIDEO_MODEL "$FRAGMENT_VIDEO_MODEL"
   fi
   # e2e fake lane: E2E_FAL_FAKE=1 starts a local stand-in fal queue and
   # points the runtime at it with a dummy key, so the gen pipeline gets
   # full coverage in CI without spending money (or a key)
   if [ -n "${E2E_FAL_FAKE:-}" ]; then
     start_fal_fake
-    export CELLD_VAR_FAL_API_KEY="${E2E_FAL_KEY:-e2e-fal-key-0123456789abcdef}"
-    export CELLD_VAR_FRAGMENT_FAL_BASE="http://127.0.0.1:$FAL_FAKE_PORT"
+    devvar FAL_API_KEY "${E2E_FAL_KEY:-e2e-fal-key-0123456789abcdef}"
+    devvar FRAGMENT_FAL_BASE "http://127.0.0.1:$FAL_FAKE_PORT"
   fi
   if [ -n "${FRAGMENT_HOST_SECRET:-}" ]; then
-    export CELLD_VAR_FRAGMENT_HOST_SECRET="$FRAGMENT_HOST_SECRET"
+    devvar FRAGMENT_HOST_SECRET "$FRAGMENT_HOST_SECRET"
   fi
+  mv "$DEV_VARS.tmp" "$DEV_VARS"
 }
 
 start_celld() {

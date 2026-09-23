@@ -40,6 +40,15 @@ time; read it before touching the matching phase.
   needs a restart-always supervisor anyway (celld docs, guarantees).
 - `atob` needs padded base64; `Referrer-Policy: no-referrer` makes
   `Origin: null` on same-origin form posts.
+- celld 0.5 removed `CELLD_WORKER_LOADER` and the `CELLD_VAR_*`
+  passthrough: loaders are `worker_loaders` in the config; variables are
+  `vars` in the config or `.dev.vars` (dotenv, one line per value) under
+  `celld dev`. `celld deploy` never reads `.dev.vars`, so production
+  secrets are `vars` rendered into the deployed config
+  (`spikes/celld-0.5.1/README.md`).
+- A process started with `nohup … &` from a tool shell can die when that
+  shell exits; long-lived dev servers run as background tasks or through
+  `scripts/dev`.
 
 ## libfx (0.0.10, WASM in the cell)
 

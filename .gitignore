@@ -5,3 +5,5 @@ target/
 runtime/.celld/
 runtime/.celld
 .DS_Store
+runtime/.dev.vars
+runtime/.dev.vars.tmp

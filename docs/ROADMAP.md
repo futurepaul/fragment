@@ -137,7 +137,10 @@ deployment.
 ### 1. Model spikes
 - The four spikes in `docs/MODEL.md`: Rust platform cells (workers-rs,
   with Worker Loader and facets), the app facet as author SQL,
-  deterministic agent turns in Workflows, and celld v0.5.1.
+  deterministic agent turns in Workflows, and celld v0.5.1. Verdicts live
+  in `spikes/<name>/README.md`.
+- Done: celld v0.5.1 (adopted; 311/312, the one red check is a celld
+  alarm regression recorded in the ledger).
 - **Acceptance:** each spike ends with a written verdict and numbers
   (bundle size, cold activation, facet image cost at 1/16/64 MiB, replay
   without repeated effects); `docs/MODEL.md` updated to match; Paul's
