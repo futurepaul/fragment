@@ -1,0 +1,70 @@
+# Technical debt ledger
+
+Shortcuts are allowed only through this ledger (engineering style §1).
+Each entry names where it was observed, the risk, the first proof that
+would show it biting, and the condition that deletes it. An entry
+without a delete condition is unfinished design, not debt.
+
+## Author code shares a process with every fragment and the host secrets
+
+- **Observed:** workflow bodies, `app.mjs`, and `rooms.mjs` run in loader
+  isolates inside the same celld process that holds
+  `FRAGMENT_HOST_SECRET`, the code.storage org key, and every other
+  fragment's cells. fragment's README lists hostile multi-tenant
+  isolation as a non-goal while celld is alpha.
+- **Risk:** an isolate escape or side channel reads other fragments' data
+  and the host's secrets.
+- **First proof:** any author able to publish code they did not write
+  themselves (public signup, agent-written code for strangers).
+- **Delete when:** before strangers can publish code, author code runs
+  somewhere that holds no platform secrets and no other tenant's state
+  (a separate fleet reached only through per-fragment capability
+  tokens), proven by a test that an author isolate cannot reach another
+  fragment or a host secret.
+
+## The cell runtime is TypeScript, not Rust
+
+- **Observed:** celld runs Workers-style JavaScript; `runtime/ts` is
+  ~5.2k lines compiled with esbuild and type-checked with tsc.
+- **Risk:** two languages in the product core; runtime errors are
+  strings, not typed enums, at the cell boundary.
+- **First proof:** a bug class the Rust type system or typed errors
+  would have caught, found in the runtime.
+- **Delete when:** celld runs Rust-to-WASM Workers with Durable Object
+  and Worker Loader APIs at parity, and a one-module spike shows the
+  port is cheaper than the bugs it prevents; or the runtime passes 10k
+  lines, whichever comes first, at which point this is re-decided.
+
+## Primitives with no check: web push, room presence, the inbox cap
+
+- **Observed:** `docs/published-fragments.md` (2026-09-23). Web push
+  (`webpush.ts`, 336 lines) has no test anywhere; presence and the
+  1000-message inbox cap have no e2e.
+- **Risk:** linecount- and meatproxy-style notifications, presence
+  lists, or overload behavior break silently.
+- **First proof:** any change to `webpush.ts`, `rooms.ts`, or the inbox
+  route.
+- **Delete when:** the Rust e2e (phase 1) proves subscribe → `ctx.push`
+  → an encrypted delivery accepted by a fake push service, presence
+  join/leave frames, and a 1001st pending message answered with 429 and
+  a `queue.rejected` event.
+
+## Shell, Node, and Python tooling
+
+- **Observed:** `scripts/dev` and `scripts/build-runtime` (bash),
+  `scripts/*.mjs` (e2e, fakes, helpers), `deploy/caddy-ask.py`, systemd
+  units for the VPS.
+- **Risk:** infrastructure in languages the engineering style excludes;
+  untyped glue that fails at runtime.
+- **First proof:** already present.
+- **Delete when:** phase 1 lands the `xtask` crate and the Rust e2e, and
+  phase 2 replaces the VPS deploy with Fly.
+
+## The e2e generation lane needs a fake host flag
+
+- **Observed:** the `gen` lane only passes when the dev stack starts
+  with `E2E_FAL_FAKE=1`; otherwise it fails for lack of a fal key.
+- **Risk:** a red suite that is only red because of how it was started.
+- **First proof:** 2026-09-23 baseline (10 failures without the flag).
+- **Delete when:** phase 1 moves generation to OpenRouter and the Rust
+  harness always starts its own OpenRouter fake.
