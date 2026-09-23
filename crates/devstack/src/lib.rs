@@ -138,6 +138,10 @@ pub struct Fleet {
     pub job_retry_delay_s: u32,
     /// How long a blob no branch names is kept (`None`: the cell's 7 days).
     pub blob_grace_s: Option<u32>,
+    /// Where AI calls go (`None`: OpenRouter itself).
+    pub openrouter_url: Option<String>,
+    /// The shortest wait before a delivery is retried (`None`: the cell's 10 s).
+    pub delivery_retry_s: Option<u32>,
 }
 
 impl Fleet {
@@ -159,6 +163,13 @@ impl Fleet {
         let grace = self.blob_grace_s.map(|g| g.to_string());
         if let Some(g) = &grace {
             vars.push(("FRAGMENT_BLOB_GRACE_S", g.as_str()));
+        }
+        if let Some(u) = &self.openrouter_url {
+            vars.push(("OPENROUTER_API_URL", u.as_str()));
+        }
+        let retry = self.delivery_retry_s.map(|r| r.to_string());
+        if let Some(r) = &retry {
+            vars.push(("FRAGMENT_DELIVERY_RETRY_S", r.as_str()));
         }
         if let Some(s) = &self.host_suffix {
             vars.push(("FRAGMENT_HOST_SUFFIX", s.as_str()));

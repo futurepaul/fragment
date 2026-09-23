@@ -69,6 +69,16 @@ impl FragmentCell {
         json_response(&json!({ "ok": true, "sha": sha, "size": size, "stored": true }))
     }
 
+    /// Stores bytes the platform made (generated media) as a blob.
+    pub(crate) async fn put_blob_bytes(&self, sha: &str, bytes: Vec<u8>) -> CellResult<()> {
+        let key = self.blob_key(sha)?;
+        let size = bytes.len() as u64;
+        if js::blob_head(self.env.as_ref(), &key).await?.is_none() {
+            js::blob_put_bytes(self.env.as_ref(), &key, &bytes).await?;
+        }
+        self.record_blob(sha, size)
+    }
+
     /// `GET|HEAD /api/f/<name>/blobs/<sha256>` (viewer)
     pub(crate) async fn get_blob(&self, caller: &Caller, sha: &str, head: bool, range: Option<&str>) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;

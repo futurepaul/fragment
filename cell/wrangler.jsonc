@@ -10,6 +10,14 @@
   "workflows": [{ "name": "fragment-jobs", "binding": "JOBS", "class_name": "Job" }],
   // Blobs: the bytes of files of 1 MiB or more (blobs.rs), in the fleet bucket.
   "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "fragment-blobs" }],
+  // Deliveries: web push and notifyUrls, sent outside any request (deliveries.rs).
+  "queues": {
+    "producers": [{ "binding": "DELIVERIES", "queue": "fragment-deliveries" }],
+    "consumers": [
+      { "queue": "fragment-deliveries", "max_batch_size": 20, "max_batch_timeout": 1, "max_retries": 5, "dead_letter_queue": "fragment-deliveries-dead" },
+      { "queue": "fragment-deliveries-dead", "max_batch_timeout": 1 }
+    ]
+  },
   "durable_objects": {
     "bindings": [
       { "name": "FRAGMENT", "class_name": "Fragment" },

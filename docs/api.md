@@ -8,7 +8,7 @@ keeps has the same route and body, and the cell's errors are
 
 # The Rust cell (phase 2)
 
-Status: slices B through E (2026-09-23). `cargo xtask e2e` proves every
+Status: slices B through F (2026-09-23). `cargo xtask e2e` proves every
 route below.
 
 ## Configuration
@@ -27,10 +27,15 @@ Worker variables, rendered from the fleet's settings (ROADMAP decision
 | `FRAGMENT_JOB_RETRY_DELAY_S` | a failed job step's first retry delay, doubling over 4 retries (default 10) |
 | `FRAGMENT_EGRESS_LOCAL` | `allow` lets jobs fetch loopback and private addresses (dev and e2e fakes); never on a shared fleet |
 | `FRAGMENT_BLOB_GRACE_S` | how long a blob no branch names is kept before it is deleted (default 7 days) |
+| `FRAGMENT_PUSH_SUBJECT` | who push services may contact about this fleet's pushes (a `mailto:` or https URL; RFC 8292) |
+| `FRAGMENT_DELIVERY_RETRY_S` | the shortest wait before a delivery is retried (default 10; the wait grows with the delivery's age, up to an hour) |
+| `OPENROUTER_API_URL` | where AI calls go (default https://openrouter.ai) |
 
 Bindings (`cell/wrangler.jsonc`): `FRAGMENT` and `PRINCIPAL` (Durable
 Objects), `LOADER` (the Worker Loader), `JOBS` (the Workflow that runs
-jobs), `BLOBS` (R2 over the fleet bucket: the bytes of large files).
+jobs), `BLOBS` (R2 over the fleet bucket: the bytes of large files),
+`DELIVERIES` (the `fragment-deliveries` queue, and its dead-letter queue
+`fragment-deliveries-dead`, both consumed by the cell).
 
 ## Principals and access
 
@@ -183,6 +188,50 @@ pointer at `main` or `live` has named for `FRAGMENT_BLOB_GRACE_S` (7
 days) is deleted, so only the latest versions' bytes are kept: a
 rollback older than that has pointers without bytes. A deleted
 fragment's blobs go with it.
+
+### Deliveries: web push and notifyUrls
+
+A page subscribes with `await fragment.push.register(who)` (from a click:
+it registers `./__sw.js`, reads the fragment's VAPID key from
+`./__push-key`, and stores the subscription at `./__push-sub` tagged with
+`who`); `fragment.push.unregister()` drops it (`./__push-unsub`, by its
+endpoint). Anyone who can see the fragment may subscribe (at most 10 000
+subscriptions). `call.push(who, payload)` in a mutation (sent once it
+commits) and `job.push(who, payload)` in a job (a step, answering
+`{queued}`) push `payload` (`{title, body, tag, url}`, at most 3800 bytes)
+to the subscriptions tagged `who`, or all of them with `*`, once per
+mutation or step. `fragment.notify.{supported, permission, ask, show}`
+wrap the Notification API.
+
+`fragment.json`'s `notifyUrls` (at most 3) receive `{type: "changed",
+fragment, sha, paths}` (JSON POST, unsigned, as before) on each move of
+`main`.
+
+Every delivery is built whole by the fragment (a push is encrypted for
+its browser, RFC 8291, and signed with the fragment's VAPID key, RFC
+8292) and sent from the `fragment-deliveries` queue: a 429, 5xx, or
+network failure is retried with a growing wait; a push service's 404 or
+410 drops the subscription (`push.gone`); a delivery out of retries is
+reported (`delivery.failed`).
+
+### AI
+
+A job calls OpenRouter with the fragment's own `OPENROUTER_API_KEY`
+secret (added at the egress point; without it the step fails saying so):
+
+- `job.ai.text({model, prompt | messages, max_tokens})` → `{text, model,
+  usage}` (chat completions).
+- `job.ai.image({prompt, path, model?, aspect_ratio?})` (default
+  `google/gemini-3.1-flash-lite-image`) → `{path, size, sha256,
+  mediaType}`: the image is written to `main` at `path` (a blob when 1 MiB
+  or more).
+- `job.ai.video({prompt, path, model?, duration?, resolution?,
+  aspect_ratio?})` (default `minimax/hailuo-3-max`) → the same, for the
+  video: the job starts it, polls every 20 seconds (up to about 15
+  minutes) as steps, and saves it as a blob.
+
+An OpenRouter 429 or 5xx is retried; 402 (out of credits) and other
+refusals fail the step with OpenRouter's message.
 
 ### Jobs and triggers
 

@@ -347,6 +347,64 @@ OpenRouter text, image (`google/gemini-3.1-flash-lite-image`), and video
 (`minimax/hailuo-3-max`) with the fake in e2e. The published-fragment
 table all green. **Checkpoint F**: before the cut.
 
+*Done 2026-09-23* (Paul away). `cargo xtask e2e` passes 443 of 443 checks
+in 27 sections (slice F added `push` and `ai`); the old JS e2e still
+passes 312 of 312; `cargo xtask check` is clean. Every row of
+`docs/published-fragments.md` has a Rust check (the browser half of web
+push is driven by hand only: debt ledger). The contract is in
+`docs/api.md` (Deliveries, AI). What landed:
+
+- **Deliveries** (`cell/src/deliveries.rs`): one queue,
+  `fragment-deliveries`, consumed by the cell itself; the fragment builds
+  each request whole, the consumer sends it, retries with a wait that
+  grows with its age, drops gone push subscriptions, and reports what runs
+  out of retries (its dead-letter queue).
+- **Web push** (`cell/src/push.rs`, `crates/core/src/webpush.rs`,
+  `cell/sw.js`): RFC 8291 encryption and RFC 8292 VAPID in Rust (checked
+  against the old runtime's encryption), per-fragment VAPID keys sealed
+  like secrets, the old routes and browser API (`fragment.push`,
+  `fragment.notify`), `call.push` and `job.push`.
+- **`notifyUrls`**: the old `changed` frames, through the queue.
+- **AI** (`cell/src/ai.rs`): `job.ai.text`, `image`, and `video` on
+  OpenRouter's documented APIs (chat completions, `/images`, the
+  asynchronous `/videos`), with the fragment's key; media stored as files.
+- **Fakes** (`crates/fakes`): OpenRouter (text, images, videos, the
+  bearer key, failure levers) and a push service that checks VAPID and
+  decrypts, plus a `notifyUrls` receiver.
+
+Decisions made in F (each in `docs/api.md`):
+
+- **AI spends the fragment's own `OPENROUTER_API_KEY`** (docs/secrets.md:
+  an app's key lives in its fragment); a person's own key, connected with
+  OpenRouter's OAuth, replaces it in phase 4. No platform key.
+- **Images go through OpenRouter's `/images` API**, not chat
+  completions: OpenRouter adds new image models to it only.
+- **A video is a job's steps**: start, poll every 20 seconds, save. The
+  wait is durable (a crash resumes it) and holds nothing.
+- **Push subscriptions are tagged by `who`** as before, and unsubscribing
+  names the browser's own endpoint (the old runtime dropped every
+  subscription with a `who`, which let anyone unsubscribe anyone).
+- **`notifyUrls` stay unsigned**, as they were; a receiver that needs to
+  trust them can be given a signature when one exists.
+- **Not now**: a live check against OpenRouter and a real push service
+  (both cost or need a hosted fleet: Paul's call), spend limits (debt
+  ledger).
+
+**Checkpoint F: what to review** (before slice G deletes the TypeScript
+runtime, `scripts/`, `deploy/`, `notify-relay/`, and the old templates):
+
+1. The published-fragment table: is every primitive you care about
+   expressed? (Each row names its Rust check.)
+2. The author API as it stands: `(input, call)` with `call.publish`,
+   `call.files`, `call.push`; jobs with `job.call/fetch/publish/sleep/
+   files/push/ai`; `this.files`; triggers in `fragment.json`.
+3. AI on the fragment's own key until people connect theirs (phase 4).
+4. Whether to spend a few cents on one live OpenRouter call (text, one
+   small image) with your key before the cut, to prove the real API
+   shape against the fake.
+5. Slice G deletes the old runtime and its JS e2e; the Rust e2e is the
+   only suite after it.
+
 **G. The cut.** Delete `runtime/`, `scripts/`, `deploy/`,
 `notify-relay/`, `runtime/wrangler.cf.jsonc`, and the old templates;
 update `AGENTS.md`, the README, and the docs; the debt ledger drops the

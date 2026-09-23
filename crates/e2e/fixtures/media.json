@@ -1,0 +1,9 @@
+{
+  "operations": {
+    "notify_all": { "kind": "mutation" },
+    "announce": { "kind": "job" },
+    "summarize": { "kind": "job" },
+    "draw": { "kind": "job" },
+    "film": { "kind": "job" }
+  }
+}

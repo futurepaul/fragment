@@ -33,6 +33,7 @@
 //!   *      /serve/<path>                  the site, `__tree`, `__file`, `__op`, `__watch`
 //!   POST   /job/advance|effect|finish     a run's Workflow (jobs.rs); never routed from outside
 //!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
+//!   POST   /deliver/report                the delivery consumer (deliveries.rs); never routed from outside
 
 use std::cell::{Cell, RefCell};
 
@@ -80,7 +81,8 @@ CREATE TABLE IF NOT EXISTS deliveries (key TEXT PRIMARY KEY, at INTEGER NOT NULL
 CREATE TABLE IF NOT EXISTS code (
   id INTEGER PRIMARY KEY CHECK (id = 1), sha TEXT NOT NULL, loader_id TEXT NOT NULL, source TEXT NOT NULL,
   operations TEXT NOT NULL, cpu_ms INTEGER NOT NULL, installed_at INTEGER NOT NULL,
-  channels TEXT NOT NULL DEFAULT '{}', modules TEXT NOT NULL DEFAULT '{}', triggers TEXT NOT NULL DEFAULT '[]');
+  channels TEXT NOT NULL DEFAULT '{}', modules TEXT NOT NULL DEFAULT '{}', triggers TEXT NOT NULL DEFAULT '[]',
+  notify TEXT NOT NULL DEFAULT '[]');
 CREATE TABLE IF NOT EXISTS runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, via TEXT NOT NULL, trigger TEXT, principal TEXT NOT NULL,
   role TEXT NOT NULL, depth INTEGER NOT NULL, call_id TEXT, input_sha TEXT, input TEXT NOT NULL, status TEXT NOT NULL,
@@ -93,6 +95,10 @@ CREATE TABLE IF NOT EXISTS own_commits (sha TEXT PRIMARY KEY, depth INTEGER NOT 
 CREATE TABLE IF NOT EXISTS blobs (sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS pointers (
   ref TEXT NOT NULL, path TEXT NOT NULL, sha TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY (ref, path));
+CREATE TABLE IF NOT EXISTS push_subs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL,
+  who TEXT NOT NULL, principal TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS sent (key TEXT PRIMARY KEY, at INTEGER NOT NULL);
 ";
 
 #[durable_object]
@@ -120,6 +126,7 @@ impl DurableObject for FragmentCell {
             ("channels", "channels TEXT NOT NULL DEFAULT '{}'"),
             ("modules", "modules TEXT NOT NULL DEFAULT '{}'"),
             ("triggers", "triggers TEXT NOT NULL DEFAULT '[]'"),
+            ("notify", "notify TEXT NOT NULL DEFAULT '[]'"),
         ] {
             if !cols.iter().any(|c| c["name"] == col) {
                 sql.exec(&format!("ALTER TABLE code ADD COLUMN {decl}"), None).expect("the code table migrates");
@@ -309,6 +316,14 @@ impl FragmentCell {
                 _ => return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
             };
             return json_response(&answer);
+        }
+        if path == "/deliver/report" {
+            // Only the delivery consumer sets the header; the router never passes it.
+            if req.headers().get(crate::deliveries::REPORT_HEADER)?.is_none() {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            let body: Value = body_json(&mut req).await?;
+            return json_response(&self.delivery_report(&body)?);
         }
         if let Some(op) = path.strip_prefix("/cap/files/") {
             // Only the `Files` capability sets the header; the router never passes it.

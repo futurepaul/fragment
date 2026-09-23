@@ -13,7 +13,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # 0.8.5, not 0.8.6: 0.8.6 is younger than the two-week dependency cooldown.
-worker = "=0.8.5"
+worker = { version = "=0.8.5", features = ["queue"] }
 worker-sys = "=0.8.5"
 worker-macros = "=0.8.5"
 serde = { version = "1", features = ["derive"] }

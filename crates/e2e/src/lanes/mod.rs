@@ -5,6 +5,7 @@ mod appfiles;
 mod blobs;
 mod author;
 mod control;
+mod deliver;
 mod jobs;
 mod members;
 mod notes;
@@ -41,6 +42,8 @@ pub fn run(s: &mut Suite, api: Api) -> Result<()> {
     appfiles::appfiles(s, &api)?;
     blobs::blobs(s, &api)?;
     notes::notes(s, &api)?;
+    deliver::push(s, &api)?;
+    deliver::ai(s, &api)?;
     sync::folder_sync(s, &api)?;
     let api = restart::restart(s, api)?;
     restart::pathmode(s, api)?;

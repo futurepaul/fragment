@@ -19,7 +19,7 @@ hkdf = "0.12"
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 # No `std`: it enables rand_core's getrandom, which does not build for the
 # cell. ECDSA signing is deterministic (RFC 6979) and needs no randomness.
-p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "pkcs8"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "ecdh", "pem", "pkcs8"] }
 
 [dev-dependencies]
 p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }

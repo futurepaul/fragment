@@ -32,6 +32,14 @@ pub struct Config {
     /// `FRAGMENT_BLOB_GRACE_S`: how long a blob no branch names is kept
     /// (default 7 days: a rollback within it still has its bytes).
     pub blob_grace_ms: i64,
+    /// `FRAGMENT_PUSH_SUBJECT`: who push services may contact about this
+    /// fleet's pushes (a `mailto:` or https URL, RFC 8292).
+    pub push_subject: String,
+    /// `FRAGMENT_DELIVERY_RETRY_S`: the shortest wait before a delivery is
+    /// tried again (default 10; the wait grows with the delivery's age).
+    pub delivery_retry_s: u32,
+    /// `OPENROUTER_API_URL`: where AI calls go (default https://openrouter.ai; the e2e's fake).
+    pub openrouter_url: String,
 }
 
 fn var(env: &Env, name: &str) -> Option<String> {
@@ -54,7 +62,10 @@ impl Config {
         let poll_interval_ms = var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000;
         let egress_local = var(env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow");
         let blob_grace_ms = var(env, "FRAGMENT_BLOB_GRACE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(7 * 24 * 3600) * 1000;
-        Config { host_secrets, codestorage, host_suffix, poll_interval_ms, egress_local, blob_grace_ms }
+        let push_subject = var(env, "FRAGMENT_PUSH_SUBJECT").unwrap_or_else(|| "mailto:webpush@fragment.invalid".into());
+        let delivery_retry_s = var(env, "FRAGMENT_DELIVERY_RETRY_S").and_then(|s| s.parse::<u32>().ok()).filter(|s| *s >= 1).unwrap_or(10);
+        let openrouter_url = var(env, "OPENROUTER_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://openrouter.ai".into());
+        Config { host_secrets, codestorage, host_suffix, poll_interval_ms, egress_local, blob_grace_ms, push_subject, delivery_retry_s, openrouter_url }
     }
 
     /// The current host secret and any previous one, current first.

@@ -83,8 +83,8 @@ pub mod limits {
     pub const HOP_DEPTH_MAX: u32 = 16;
     /// Inbox records whose runs have not succeeded; past this a post is 429.
     pub const INBOX_PENDING_MAX: u64 = 1000;
-    /// Steps one job run may take.
-    pub const JOB_STEPS_MAX: usize = 100;
+    /// Steps one job run may take (a video waits in polls and sleeps).
+    pub const JOB_STEPS_MAX: usize = 256;
     /// Every step result of one run together (the job re-reads them at each step).
     pub const JOB_RESULTS_MAX_BYTES: usize = 4 * 1024 * 1024;
     /// A job's `fetch`: its request body, its response body, and how long it may take.
@@ -101,6 +101,10 @@ pub mod limits {
     /// What one mutation or one job step may write to files, and in how many.
     pub const FILE_WRITE_MAX_BYTES: usize = 256 * 1024;
     pub const FILE_WRITES_MAX: usize = 16;
+    /// Push subscriptions a fragment holds.
+    pub const PUSH_SUBS_MAX: u64 = 10_000;
+    /// URLs `fragment.json`'s `notifyUrls` may name.
+    pub const NOTIFY_URLS_MAX: usize = 3;
     /// The largest blob an upload may carry (files of 1 MiB or more are blobs).
     pub const BLOB_MAX_BYTES: u64 = 256 * 1024 * 1024;
     /// Finished runs are kept this long, and at most this many.

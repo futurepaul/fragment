@@ -32,8 +32,8 @@ The new runtime (`cell/`, Rust; phase 2, `docs/phase-2.md`):
   runs `crates/e2e` against a fresh `celld dev` node and the in-process
   code.storage fake (sections: auth, create, lockdown, members, secrets,
   files, deploy, ops, public, site, watch, schemas, channels, live,
-  routes, cli, browser, jobs, triggers, appfiles, blobs, notes, sync,
-  restart, pathmode). The browser and notes sections drive headless
+  routes, cli, browser, jobs, triggers, appfiles, blobs, notes, push,
+  ai, sync, restart, pathmode). The browser and notes sections drive headless
   Chrome (`CHROME_BIN` to choose one); `triggers` waits for a cron
   minute (about a minute). The node runs from a staged copy of the cell
   (`target/e2e/cell`), so the e2e and `cargo xtask dev` can run at once.

@@ -243,12 +243,13 @@ impl FragmentCell {
         let operations = serde_json::to_string(&manifest.operations).expect("operations serialize");
         let channels = serde_json::to_string(&manifest.channels).expect("channels serialize");
         let triggers = serde_json::to_string(&manifest.triggers).expect("triggers serialize");
+        let notify = serde_json::to_string(&manifest.notify_urls).expect("urls serialize");
         let module_count = modules.len();
         self.exec(
-            "INSERT INTO code (id, sha, loader_id, source, operations, cpu_ms, installed_at, channels, modules, triggers) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO code (id, sha, loader_id, source, operations, cpu_ms, installed_at, channels, modules, triggers, notify) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (id) DO UPDATE SET sha = excluded.sha, loader_id = excluded.loader_id, source = excluded.source,
                operations = excluded.operations, cpu_ms = excluded.cpu_ms, installed_at = excluded.installed_at,
-               channels = excluded.channels, modules = excluded.modules, triggers = excluded.triggers",
+               channels = excluded.channels, modules = excluded.modules, triggers = excluded.triggers, notify = excluded.notify",
             vec![
                 sha.into(),
                 loader_id.into(),
@@ -259,6 +260,7 @@ impl FragmentCell {
                 channels.into(),
                 serde_json::to_string(&modules).expect("modules serialize").into(),
                 triggers.into(),
+                notify.into(),
             ],
         )?;
         self.sync_schedules(&manifest.triggers)?;
@@ -288,8 +290,15 @@ impl FragmentCell {
     /// the runs its file triggers name.
     pub(crate) async fn interpret(&self, refs: &[&str]) -> CellResult<Vec<(String, PinMove)>> {
         let out = self.interpret_locked(refs).await?;
-        // the file triggers' runs, and the alarm for newly installed schedules
+        // the file triggers' runs, the notifyUrls, and the alarm for newly installed schedules
         self.launch_queued().await;
+        for (which, moved) in &out {
+            if which == "main" && moved.changed {
+                if let Err(e) = self.notify_urls(moved.to.as_deref(), &moved.paths).await {
+                    self.event("notify.failed", &e.message, json!({ "code": e.code }));
+                }
+            }
+        }
         self.schedule().await?;
         Ok(out)
     }

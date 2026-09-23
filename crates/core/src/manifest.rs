@@ -22,6 +22,8 @@ pub struct Manifest {
     pub channels: BTreeMap<String, ChannelDecl>,
     pub meta: Option<Meta>,
     pub triggers: Vec<TriggerDecl>,
+    /// Where a `changed` frame goes on each move of `main`.
+    pub notify_urls: Vec<String>,
     /// Top-level keys that no longer do anything here.
     pub ignored: Vec<&'static str>,
 }
@@ -172,6 +174,23 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
             })
         }
         Some(_) => return Err("meta must be an object".into()),
+    }
+    match obj.get("notifyUrls") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(urls)) => {
+            if urls.len() > limits::NOTIFY_URLS_MAX {
+                return Err(format!("at most {} notifyUrls", limits::NOTIFY_URLS_MAX));
+            }
+            for u in urls {
+                let u = u.as_str().ok_or("notifyUrls are strings")?;
+                let parsed = url::Url::parse(u).map_err(|e| format!("notifyUrls: {u:?}: {e}"))?;
+                if !matches!(parsed.scheme(), "http" | "https") {
+                    return Err(format!("notifyUrls: {u:?} is not http(s)"));
+                }
+                m.notify_urls.push(u.to_string());
+            }
+        }
+        Some(_) => return Err("notifyUrls must be an array of URLs".into()),
     }
     match obj.get("triggers") {
         None | Some(Value::Null) => {}

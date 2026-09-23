@@ -18,9 +18,11 @@
 //! `__watch` and `__live` stay reachable there for the CLI, which carries
 //! no cookies.
 
+mod ai;
 mod blobs;
 mod config;
 mod channels;
+mod deliveries;
 mod cs;
 mod error;
 mod files;
@@ -32,6 +34,7 @@ mod members;
 mod ops;
 mod plane;
 mod principal;
+mod push;
 mod serve;
 
 use fragment_proto::{limits, valid_fragment_name, CreateFragment, ErrorCode};
@@ -49,6 +52,11 @@ pub use principal::PrincipalCell;
 /// `x-fragment-*` a client sends, stays at the router.
 const PASSED_HEADERS: [&str; 8] =
     ["content-type", "cookie", "accept", "if-none-match", "upgrade", "x-pierre-event", "x-pierre-signature", "range"];
+
+#[event(queue)]
+async fn queue(batch: MessageBatch<deliveries::Delivery>, env: Env, _ctx: Context) -> Result<()> {
+    deliveries::consume(batch, env).await
+}
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {

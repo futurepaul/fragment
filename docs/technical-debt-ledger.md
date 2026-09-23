@@ -36,15 +36,19 @@ without a delete condition is unfinished design, not debt.
   hibernatable WebSockets, the Worker Loader, and facets, with a ~35-line
   JavaScript shim, 181 KB of gzipped wasm, and ~9 ms once per isolate.
 
-## A primitive with no check: web push
+## The browser half of web push is not driven by a test
 
-- **Observed:** `docs/published-fragments.md` (2026-09-23). Web push
-  (`webpush.ts`, 336 lines) has no test anywhere. (Presence: proven in
-  the Rust e2e, slice C; the inbox cap: slice D, e2e `triggers`.)
-- **Risk:** linecount- and meatproxy-style notifications break silently.
-- **First proof:** any change to `webpush.ts`.
-- **Delete when:** the Rust e2e (slice F) proves a subscription → a
-  delivery → an encrypted push accepted by a fake push service.
+- **Observed:** phase 2 slice F. The e2e proves the server half end to end
+  (subscriptions, VAPID, RFC 8291 encryption decrypted by a fake push
+  service, the queue, retries, drops), and the encryption agrees with the
+  old runtime's (checked once by hand). `fragment.push.register` and
+  `__sw.js` run only in a real browser with a real push service.
+- **Risk:** a page's subscribe or the service worker's display breaks
+  unnoticed.
+- **First proof:** subscribing from a phone or desktop browser to a
+  hosted fragment.
+- **Delete when:** a manual check on a hosted fleet (phase 3) is recorded,
+  or a browser test can run with a local push service.
 
 ## Shell, Node, and Python tooling
 
@@ -242,3 +246,28 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** someone needs old versions of large files (the
   "Photoshop file" exception in MODEL), and a per-fragment policy keeps
   the bytes named by the last N live commits.
+
+## AI spend has no limit of the platform's own
+
+- **Observed:** phase 2 slice F. `job.ai.*` spend the fragment's own
+  OpenRouter key; a video is about $0.05 to $0.08 a second. Triggered
+  runs have the hop budget and 120 runs an hour, but a job an editor calls
+  in a loop, or a public job, spends until the key's own limit.
+- **Risk:** a surprise bill on the owner's key (their money, their key's
+  limits: OpenRouter lets a key carry a spend cap).
+- **First proof:** a public fragment whose job generates media.
+- **Delete when:** the platform counts spend per fragment (OpenRouter
+  answers `usage.cost`) and an owner can cap it, or people connect their
+  own keys with caps (phase 4).
+
+## workers-rs cannot take celld's queue binding
+
+- **Observed:** phase 2 slice F. `env.queue()` in workers-rs 0.8.5 checks
+  the binding's constructor name (`WorkerQueue`); celld's is `Queue`, so
+  the cell sends through the binding with `Reflect` (`js::queue_send`).
+  The service-binding spike found the same kind of mismatch.
+- **Risk:** none today; a surprise when another binding type is added.
+- **First proof:** already present.
+- **Delete when:** workers-rs or celld agree on the names (a one-line
+  upstream change on either side).
+

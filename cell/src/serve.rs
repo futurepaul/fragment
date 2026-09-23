@@ -95,6 +95,29 @@ impl FragmentCell {
             };
             let result = self.call_op(caller, &principal, link, op, body).await?;
             json_response(&result)?
+        } else if let Some(op) = path.strip_prefix("__push-").filter(|op| matches!(*op, "key" | "sub" | "unsub")) {
+            // web push: anyone who can see the fragment (push.rs)
+            self.require(caller, link, Role::Public)?;
+            let answer = if op == "key" {
+                self.push_key()?
+            } else {
+                if req.method() != Method::Post || !req.headers().get("content-type")?.is_some_and(|c| c.starts_with("application/json")) {
+                    return Err(CellError::invalid("POST the subscription as application/json"));
+                }
+                let body: Value = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                let principal = caller.principal.clone().or(anon).unwrap_or_else(|| "anonymous".into());
+                if op == "sub" {
+                    self.push_subscribe(&body, &principal)?
+                } else {
+                    self.push_unsubscribe(&body)?
+                }
+            };
+            json_response(&answer)?
+        } else if path == "__sw.js" {
+            let h = Headers::new();
+            h.set("content-type", "text/javascript; charset=utf-8")?;
+            h.set("cache-control", "no-cache")?;
+            Response::ok(crate::push::SW_JS)?.with_headers(h)
         } else if path == "__watch" {
             self.watch(&req, caller, link)?
         } else if path == "__live" {

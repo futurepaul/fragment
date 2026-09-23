@@ -36,7 +36,8 @@ uses it reads it from there.
   Built in slice D: a job's `job.fetch` names a secret as `{{NAME}}` in a
   header, and the supervisor opens it only as the request leaves
   (`step_fetch` in `cell/src/jobs.rs`). That one function is the egress
-  point a native egress in the celld fork would take over.
+  point a native egress in the celld fork would take over. `job.ai.*`
+  (slice F) uses the same path for the fragment's `OPENROUTER_API_KEY`.
 - **Agents in cells** call models through the platform, which attaches
   the user's own model credential.
 - **Computers** (Sprites) use **Sprites connectors**, Fly's credential

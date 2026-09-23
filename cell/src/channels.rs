@@ -34,6 +34,7 @@ const AUDIT_KEPT: i64 = 10_000;
 pub enum Effect {
     Record { channel: String, kind: String, body: Value },
     File { file: String, #[serde(default)] text: Option<String>, #[serde(default)] base64: Option<String> },
+    Push { push: String, payload: Value },
 }
 
 fn record_json(r: &Value) -> ChannelRecord {
@@ -158,7 +159,16 @@ impl FragmentCell {
                         (None, None) => None,
                         _ => Some(crate::files::content_of(&serde_json::json!({ "text": text, "base64": base64 })).map_err(CellError::host)?),
                     };
+                    if bytes.as_deref().is_some_and(|b| fragment_core::blob::parse(b).is_some()) {
+                        return Err(CellError::invalid(format!("{file}: an app does not write blob pointers")));
+                    }
                     writes.push(crate::files::FileWrite { path: file.clone(), bytes });
+                }
+                Effect::Push { push, payload } => {
+                    if let Err(e) = self.send_push(&format!("{ledger_id}:{i}"), push, payload).await {
+                        self.swept.set(false);
+                        return Err(e);
+                    }
                 }
             }
         }

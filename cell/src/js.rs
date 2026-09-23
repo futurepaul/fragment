@@ -231,6 +231,33 @@ pub async fn blob_put(env: &JsValue, key: &str, body: JsValue) -> CellResult<(u6
     Ok((size, hex::encode(bytes)))
 }
 
+/// Sends messages to a queue binding (`sendBatch`, at most 100 a call).
+/// workers-rs 0.8.5 refuses celld's queue binding (its constructor is not
+/// named `WorkerQueue`), so this goes to the binding itself.
+pub async fn queue_send(env: &JsValue, binding: &str, bodies: &[serde_json::Value]) -> CellResult<()> {
+    let queue = get(env, binding)?;
+    if queue.is_undefined() {
+        return Err(CellError::host(format!("this node has no {binding} queue binding (wrangler.jsonc `queues`)")));
+    }
+    for chunk in bodies.chunks(100) {
+        let list = Array::new();
+        for b in chunk {
+            let m = Object::new();
+            set(&m, "body", to_js(b));
+            list.push(&m);
+        }
+        await_js(call(&queue, "sendBatch", &[list.into()]), "sendBatch").await?;
+    }
+    Ok(())
+}
+
+/// Stores bytes at `key`.
+pub async fn blob_put_bytes(env: &JsValue, key: &str, bytes: &[u8]) -> CellResult<()> {
+    let data = js_sys::Uint8Array::from(bytes);
+    await_js(call(&blobs(env)?, "put", &[key.into(), data.into()]), "put").await?;
+    Ok(())
+}
+
 /// A blob's size, or `None` when absent.
 pub async fn blob_head(env: &JsValue, key: &str) -> CellResult<Option<u64>> {
     let object = await_js(call(&blobs(env)?, "head", &[key.into()]), "head").await?;

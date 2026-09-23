@@ -59,6 +59,16 @@ function base64(data) {
   return btoa(s);
 }
 
+const PUSH_MAX_BYTES = 3800;
+// 20 seconds apart: a video has about 15 minutes to finish.
+const VIDEO_POLLS_MAX = 45;
+
+function checkPush(who, payload) {
+  if (typeof who !== "string" || who.length > 64) throw new Error("push(who, payload): who is a string of at most 64 characters");
+  if (bytes(JSON.stringify(payload ?? {})) > PUSH_MAX_BYTES) throw new Error(`a push payload is at most ${PUSH_MAX_BYTES} bytes`);
+  return payload ?? {};
+}
+
 function checkPath(path) {
   if (typeof path !== "string" || !PATH.test(path)) throw new Error(`${JSON.stringify(path)} is not a file path (relative, no . or .. segments)`);
 }
@@ -153,6 +163,16 @@ class Call {
     if (this.#effects === null) throw new Error("call.files is for mutations; read files with this.files");
     this.#files ??= new FileEffects(this.#effects);
     return this.#files;
+  }
+
+  // A web push to the subscriptions tagged `who` ("*": all), sent once
+  // the mutation commits. `payload` is shown by the service worker:
+  // { title, body, tag, url }.
+  push(who, payload) {
+    if (this.#effects === null) throw new Error("push is for mutations; a query cannot push");
+    const text = JSON.stringify(checkPush(who, payload));
+    if (this.#effects.length >= EFFECTS_MAX) throw new Error(`a mutation has at most ${EFFECTS_MAX} effects`);
+    this.#effects.push({ push: who, payload: JSON.parse(text) });
   }
 
   publish(channel, body, kind = "message") {
@@ -273,6 +293,37 @@ class Job {
       },
       remove: (path, { expect } = {}) => (checkPath(path), step("files.remove", { path, ...(expect !== undefined ? { expect } : {}) })),
     };
+  }
+
+  // OpenRouter, with the fragment's OPENROUTER_API_KEY secret:
+  //   ai.text({ model, prompt | messages, max_tokens })   → { text, model, usage }
+  //   ai.image({ prompt, path, model?, aspect_ratio? })  → { path, size, sha256 }: a file on main
+  //   ai.video({ prompt, path, model?, duration?, resolution?, aspect_ratio? })
+  // A video takes minutes: the job polls it and sleeps between polls, all as steps.
+  get ai() {
+    const step = (kind, args) => this.#step(kind, args);
+    const clean = (o) => JSON.parse(JSON.stringify(o ?? {}));
+    return {
+      text: (opts) => step("ai.text", clean(opts)),
+      image: (opts = {}) => (checkPath(opts.path), step("ai.image", clean(opts))),
+      video: async (opts = {}) => {
+        checkPath(opts.path);
+        const { path, ...rest } = clean(opts);
+        const { id } = await step("ai.video.start", rest);
+        for (let i = 0; i < VIDEO_POLLS_MAX; i++) {
+          const st = await step("ai.video.poll", { id });
+          if (st.status === "completed") return step("ai.video.save", { id, path, url: st.urls?.[0] });
+          if (["failed", "cancelled", "expired"].includes(st.status)) throw new Error(`video ${id} ${st.status}${st.error ? `: ${st.error}` : ""}`);
+          await this.sleep("20 seconds");
+        }
+        throw new Error(`video ${id} was not ready after ${VIDEO_POLLS_MAX} polls`);
+      },
+    };
+  }
+
+  // A web push to the subscriptions tagged `who` ("*": all).
+  push(who, payload) {
+    return this.#step("push", { who, payload: JSON.parse(JSON.stringify(checkPush(who, payload))) });
   }
 
   // Milliseconds, or "N seconds|minutes|hours|days"; up to 30 days.

@@ -92,6 +92,8 @@ fn dev(args: &[String]) -> Result<()> {
         egress_local: true,
         job_retry_delay_s: 2,
         blob_grace_s: None,
+        openrouter_url: None,
+        delivery_retry_s: None,
     }
     .write_vars(&devstack::cell_dir())?;
     let opts = devstack::NodeOptions { project: devstack::cell_dir(), port: DEV_PORT, clean, watch: true, env: vec![] };

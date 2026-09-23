@@ -96,9 +96,6 @@ impl FragmentCell {
             if !valid_repo_path(&w.path) {
                 return Err(CellError::invalid(format!("{:?} is not a file path (relative, no . or .. segments)", w.path)));
             }
-            if w.bytes.as_deref().is_some_and(|b| blob::parse(b).is_some()) {
-                return Err(CellError::invalid(format!("{}: an app does not write blob pointers", w.path)));
-            }
         }
         let repo = self.must("repo")?;
         let cs = self.cs()?;
@@ -153,7 +150,8 @@ impl FragmentCell {
     pub(crate) fn trim_writes(&self) -> CellResult<()> {
         let before = SqlStorageValue::Integer(js::now_ms() - WRITES_KEPT_MS);
         self.exec("DELETE FROM file_commits WHERE at < ?", vec![before.clone()])?;
-        self.exec("DELETE FROM own_commits WHERE at < ?", vec![before])
+        self.exec("DELETE FROM own_commits WHERE at < ?", vec![before.clone()])?;
+        self.exec("DELETE FROM sent WHERE at < ?", vec![before])
     }
 
     /// A file's bytes at `main`'s pin, up to the read limit; `None` when absent.

@@ -78,12 +78,12 @@ pub(crate) struct Started {
 
 /// Why a step did not produce a value: for good (the job sees an error it
 /// may catch), or for now (the Workflow retries the step).
-enum StepFail {
+pub(crate) enum StepFail {
     Permanent(String),
     Retry(String),
 }
 
-fn permanent(m: impl Into<String>) -> StepFail {
+pub(crate) fn permanent(m: impl Into<String>) -> StepFail {
     StepFail::Permanent(m.into())
 }
 
@@ -397,7 +397,16 @@ impl FragmentCell {
             "call" => self.step_call(&run, index, args).await,
             "fetch" => self.step_fetch(&run, args).await,
             "publish" => self.step_publish(&run, index, args),
+            "push" => {
+                let key = format!("{JOB_ID_PREFIX}{run_id}:{index}");
+                match self.send_push(&key, args["who"].as_str().unwrap_or(""), &args["payload"]).await {
+                    Ok(n) => Ok(json!({ "queued": n })),
+                    Err(e) if e.code == ErrorCode::HostFailed => Err(StepFail::Retry(e.message)),
+                    Err(e) => Err(permanent(e.message)),
+                }
+            }
             "files.read" | "files.list" | "files.stat" | "files.write" | "files.remove" => self.step_files(&run, index, &kind, args).await,
+            k if k.starts_with("ai.") => self.step_ai(&run, index, k, args).await,
             other => Err(permanent(format!("unknown step kind {other:?}"))),
         };
         let answer = match out {
@@ -573,6 +582,9 @@ impl FragmentCell {
                     "files.write" => Some(crate::files::content_of(args).map_err(permanent)?),
                     _ => None,
                 };
+                if bytes.as_deref().is_some_and(|b| fragment_core::blob::parse(b).is_some()) {
+                    return Err(permanent(format!("{path}: an app does not write blob pointers")));
+                }
                 let mut expect = BTreeMap::new();
                 if let Some(e) = args.get("expect") {
                     expect.insert(path.to_string(), e.as_str().map(str::to_string));

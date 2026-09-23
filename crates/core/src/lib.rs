@@ -13,5 +13,6 @@ pub mod npub;
 pub mod ratelimit;
 pub mod schema;
 pub mod secrets;
+pub mod webpush;
 pub mod site;
 pub mod webhook;

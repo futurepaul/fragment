@@ -28,6 +28,8 @@ pub const SUFFIX: &str = "fragment.localhost";
 const ORG: &str = "fragment-e2e";
 /// The poll backstop runs this often here (5 minutes in production).
 pub const POLL_S: u32 = 2;
+/// The key the OpenRouter fake takes (a fragment's OPENROUTER_API_KEY secret here).
+pub const OPENROUTER_KEY: &str = "sk-or-e2e-7c1d";
 /// Blobs no branch names are kept this long here (7 days in production).
 pub const BLOB_GRACE_S: u32 = 4;
 
@@ -41,6 +43,8 @@ pub struct Suite {
     /// Distinguishes this run's fragment names from any earlier state.
     run: String,
     pub fake: CodeStorage,
+    pub openrouter: fragment_fakes::openrouter::OpenRouter,
+    pub push: fragment_fakes::push::PushService,
     org_key: String,
     host_secret: String,
     pub cli: PathBuf,
@@ -85,6 +89,8 @@ impl Suite {
             egress_local: true,
             job_retry_delay_s: 1,
             blob_grace_s: Some(BLOB_GRACE_S),
+            openrouter_url: Some(self.openrouter.url.clone()),
+            delivery_retry_s: Some(1),
         }
         .write_vars(&self.project)?;
         let opts = devstack::NodeOptions { project: self.project.clone(), port: self.port, clean, watch: false, env: vec![] };
@@ -215,6 +221,8 @@ fn main() -> Result<()> {
         port: devstack::free_port()?,
         run,
         fake,
+        openrouter: fragment_fakes::openrouter::OpenRouter::start(OPENROUTER_KEY)?,
+        push: fragment_fakes::push::PushService::start()?,
         org_key,
         host_secret: devstack::random_hex(32),
         cli,

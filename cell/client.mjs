@@ -7,6 +7,7 @@
 //   fragment.subscribe("activity", (rec) => log(rec.body));    // a channel, from a cursor
 //   fragment.presence.set({ name: "paul" });                   // who is here
 //   fragment.presence.on((list) => showWho(list));
+//   await fragment.push.register("everyone");                  // web push (after a click)
 //
 // One socket per page carries subscriptions, presence, and change signals;
 // it reconnects by itself and resumes each channel after its last record.
@@ -162,3 +163,115 @@ export function me() {
   connect();
   return hello ? Promise.resolve(hello) : new Promise((resolve) => helloWaiters.push(resolve));
 }
+
+// ---- notifications: thin, defensive wrappers. ask() only prompts from a
+// click (browsers ignore it otherwise); show() fires only while the page
+// is hidden. Nothing here throws or rejects.
+function notifySupported() {
+  try {
+    return typeof Notification !== "undefined";
+  } catch (e) {
+    return false;
+  }
+}
+
+export const notify = {
+  supported: notifySupported,
+  permission() {
+    if (!notifySupported()) return "unsupported";
+    try {
+      return Notification.permission;
+    } catch (e) {
+      return "unsupported";
+    }
+  },
+  ask() {
+    return new Promise((resolve) => {
+      if (!notifySupported()) return resolve("unsupported");
+      let done = false;
+      const settle = (p) => {
+        if (!done) {
+          done = true;
+          clearTimeout(t);
+          resolve(p);
+        }
+      };
+      const t = setTimeout(() => settle("default"), 60000);
+      try {
+        const r = Notification.requestPermission((p) => settle(p));
+        if (r && typeof r.then === "function") r.then(settle, () => settle("denied"));
+      } catch (e) {
+        settle("denied");
+      }
+    });
+  },
+  show(title, opts = {}) {
+    try {
+      if (!notifySupported() || Notification.permission !== "granted" || !document.hidden) return false;
+      const n = new Notification(String(title ?? ""), { body: opts.body == null ? undefined : String(opts.body), tag: opts.tag == null ? undefined : String(opts.tag) });
+      n.onclick = () => {
+        window.focus();
+        n.close();
+        if (opts.url) location.assign(String(opts.url));
+      };
+      return true;
+    } catch (e) {
+      return false;
+    }
+  },
+};
+
+// ---- web push: the fragment's service worker (./__sw.js) and VAPID key
+// (./__push-key); a subscription is stored tagged `who`, and the app
+// pushes to a tag (call.push / job.push). Every failure resolves to
+// { ok: false, reason }.
+const b64u = {
+  decode(s) {
+    let b = String(s || "").replaceAll("-", "+").replaceAll("_", "/");
+    while (b.length % 4) b += "=";
+    return Uint8Array.from(atob(b), (c) => c.charCodeAt(0));
+  },
+  encode(buf) {
+    return btoa(String.fromCharCode(...new Uint8Array(buf))).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+  },
+};
+
+async function post(path, body) {
+  const resp = await fetch(new URL(path, base), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), credentials: "same-origin" });
+  const j = await resp.json().catch(() => ({}));
+  return resp.ok ? j : { ok: false, reason: "server", error: j.message || `http ${resp.status}`, status: resp.status };
+}
+
+export const push = {
+  async register(who = "") {
+    const sw = navigator.serviceWorker;
+    if (!sw || typeof PushManager === "undefined") return { ok: false, reason: "unsupported" };
+    if (notifySupported() && Notification.permission === "denied") return { ok: false, reason: "denied" };
+    try {
+      await sw.register(new URL("__sw.js", base));
+      const reg = await sw.ready;
+      const { key } = await (await fetch(new URL("__push-key", base), { credentials: "same-origin" })).json();
+      if (!key) return { ok: false, reason: "no-key" };
+      const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u.decode(key) });
+      const answer = await post("__push-sub", { who, endpoint: sub.endpoint, p256dh: b64u.encode(sub.getKey("p256dh")), auth: b64u.encode(sub.getKey("auth")) });
+      if (answer.ok === false) await sub.unsubscribe().catch(() => {});
+      return answer;
+    } catch (e) {
+      const denied = e && (e.name === "NotAllowedError" || e.name === "PermissionDeniedError");
+      return denied ? { ok: false, reason: "denied" } : { ok: false, reason: "error", error: String((e && e.message) || e) };
+    }
+  },
+  async unregister() {
+    const sw = navigator.serviceWorker;
+    if (!sw) return { ok: false, reason: "unsupported" };
+    try {
+      const sub = await (await sw.ready).pushManager.getSubscription();
+      if (!sub) return { ok: true, removed: 0 };
+      const answer = await post("__push-unsub", { endpoint: sub.endpoint });
+      await sub.unsubscribe().catch(() => {});
+      return answer;
+    } catch (e) {
+      return { ok: false, reason: "error", error: String((e && e.message) || e) };
+    }
+  },
+};
