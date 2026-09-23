@@ -28,12 +28,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: build
-        run: cargo build --release --target ${{ matrix.target }}
-        working-directory: cli
+        run: cargo build --release -p fragment-cli --target ${{ matrix.target }}
       - name: package
         run: |
           v="${GITHUB_REF_NAME#v}"
-          cd "cli/target/${{ matrix.target }}/release"
+          cd "target/${{ matrix.target }}/release"
           cp fragment "fragment-${v}-${{ matrix.target }}"
           tar -czf "$RUNNER_TEMP/fragment-${v}-${{ matrix.target }}.tar.gz" "fragment-${v}-${{ matrix.target }}"
       - uses: actions/upload-artifact@v4

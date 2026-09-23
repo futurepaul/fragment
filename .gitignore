@@ -1,12 +1,7 @@
-.dev/
-node_modules/
-.env
 target/
-runtime/.celld/
-runtime/.celld
+.env
 .DS_Store
-runtime/.dev.vars
-runtime/.dev.vars.tmp
+node_modules/
 cell/.celld/
 cell/.dev.vars
 cell/build/

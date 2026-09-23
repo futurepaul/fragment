@@ -23,9 +23,9 @@ use std::path::{Path, PathBuf};
 const GUIDE: &str = include_str!("../GUIDE.md");
 
 #[derive(Parser)]
-#[command(name = "fragment", version, about = "make and run fragments: folder + sqlite + urls + workflows, on celld")]
+#[command(name = "fragment", version, about = "make and run fragments: a folder in git, an app of operations and jobs, channels, members; on celld")]
 struct Cli {
-    /// Host base URL (else FRAGMENT_HOST, else config, else http://127.0.0.1:8789)
+    /// Host base URL (else FRAGMENT_HOST, else config, else http://127.0.0.1:8790)
     #[arg(long, global = true)]
     host: Option<String>,
     /// Machine-readable output: one-line {"ok":true/false} envelope on stdout
@@ -50,7 +50,7 @@ enum Cmd {
     Whoami,
     /// Set the default host (or show it, with no argument)
     Host {
-        /// Base URL, e.g. https://fragment.club
+        /// Base URL, e.g. http://127.0.0.1:8790
         url: Option<String>,
     },
     /// Create a fragment
@@ -62,7 +62,7 @@ enum Cmd {
     },
     /// List fragments you have a role on
     List,
-    /// Status of a fragment (counts, live snapshot, crons, share link)
+    /// Status of a fragment (pins, urls, tokens, counts)
     Status { name: String },
     /// Read the event log (--since is an event ID cursor; --tail shows the last N)
     Events {
@@ -116,13 +116,8 @@ enum Cmd {
     },
     /// Full-hash audit of the folder against the fragment (no shortcuts)
     Verify { name: String, #[arg(long, default_value = ".")] dir: PathBuf },
-    /// Delete a fragment you own (registry row + all cell data; name reusable)
-    Rm {
-        name: String,
-        /// drop just the registry row when the cell itself is unwedgeable
-        #[arg(long)]
-        force_registry: bool,
-    },
+    /// Delete a fragment you own (its cell data and blobs; the repo stays; the name is reusable)
+    Rm { name: String },
     /// Deploy: sync (if --dir), then move the `live` ref to main's tip.
     /// Prints the canonical URL. History is git history (`fragment drafts`).
     Deploy {
@@ -154,11 +149,10 @@ enum Cmd {
     Init {
         /// Fragment name (also the folder name, created in the current dir)
         name: String,
+        /// Template name: todo (default) | inbox | notes
         #[arg(long)]
         template: Option<String>,
     },
-    /// Run a workflow now
-    Run { name: String, workflow: String, #[arg(long)] input: Option<String> },
     /// List runs (jobs and triggered operations; --status held shows parked failures), or show one
     Runs {
         name: String,
@@ -173,12 +167,12 @@ enum Cmd {
     /// List a fragment's triggers (cron, channel, files) and what is paused
     Triggers { name: String },
     /// Pause an operation's triggers (calls still work)
-    Pause { name: String, workflow: String },
+    Pause { name: String, op: String },
     /// Unpause an operation's triggers (also after an auto-pause)
-    Unpause { name: String, workflow: String },
+    Unpause { name: String, op: String },
     /// Re-run a held or blocked run with its original input (after fixing the code)
     Replay { name: String, run: u64 },
-    /// Rotate a fragment's tokens (owner-only; default rotates both scopes)
+    /// Rotate a fragment's tokens (owner-only; default: the inbox token and the share link)
     Rotate {
         name: String,
         /// rotate only the inbox token
@@ -188,25 +182,11 @@ enum Cmd {
         #[arg(long)]
         view: bool,
     },
-    /// List a fragment's rooms, or read one room's recent messages
-    Rooms {
-        name: String,
-        /// Room to read; omit to list all rooms with counts
-        room: Option<String>,
-        /// How many recent messages to show (with ROOM)
-        #[arg(long, default_value = "30")]
-        tail: u64,
-    },
     /// Manage secrets (values via env var of same name, or stdin)
     Secret {
         #[command(subcommand)]
         sub: SecretCmd,
     },
-    /// Grant a role to an npub
-    /// Grant a role to an npub or NIP-05 name (name@domain)
-    Grant { name: String, #[arg(long)] editor: Vec<String>, #[arg(long)] viewer: Vec<String> },
-    /// Revoke a role from an npub or NIP-05 name
-    Revoke { name: String, #[arg(long)] editor: Vec<String>, #[arg(long)] viewer: Vec<String> },
     /// A fragment's members: list, add, remove, or leave
     Members {
         #[command(subcommand)]
@@ -261,7 +241,7 @@ enum Cmd {
     New {
         /// Target directory (created if missing)
         dir: Option<PathBuf>,
-        /// Template name (basic | vault | dropzone)
+        /// Template name: todo (default) | inbox | notes
         #[arg(long)]
         template: Option<String>,
         /// List available templates
@@ -361,7 +341,7 @@ fn resolve_host(cli_host: &Option<String>, cfg: &Config) -> String {
         .clone()
         .or_else(|| std::env::var("FRAGMENT_HOST").ok())
         .or_else(|| cfg.host.clone())
-        .unwrap_or_else(|| "http://127.0.0.1:8789".to_string())
+        .unwrap_or_else(|| "http://127.0.0.1:8790".to_string())
 }
 
 fn require_client(cli_host: &Option<String>, verbose: bool) -> Result<api::Client> {
@@ -435,11 +415,11 @@ fn summary_of(v: &Value) -> String {
 fn default_hint(code: &str) -> Option<&'static str> {
     match code {
         "auth_failed" => Some("run `fragment login`, or point at another host with --host / `fragment host <url>`"),
-        "forbidden" => Some("your npub lacks a role here — ask the owner to `fragment grant` you"),
+        "forbidden" => Some("your npub lacks a role here — ask the owner for an invite (`fragment invite create`) or to add you (`fragment members add`)"),
         "not_found" => Some("check the name with `fragment list`"),
         "name_taken" => Some("pick another name, or remove the existing fragment with `fragment rm <name>`"),
         "conflict" => Some("re-sync (`fragment sync`) and reapply your change"),
-        "too_large" => Some("cell bodies cap at 1 MB — keep media in a bucket/CDN and link it"),
+        "too_large" => Some("see the limit in the message; files of 1 MiB and up sync as blobs"),
         "rate_limited" => Some("back off and retry shortly"),
         "unavailable" => Some("usually transient; retrying is safe"),
         "server_error" => Some("see `fragment events <name>` if it persists"),
@@ -551,7 +531,7 @@ fn run(cli: Cli) -> Result<()> {
                 Some(url) => {
                     let url = url.trim_end_matches('/').to_string();
                     if !url.starts_with("https://") && !url.starts_with("http://") {
-                        anyhow::bail!("host must be an http(s) URL, e.g. https://fragment.club");
+                        anyhow::bail!("host must be an http(s) URL, e.g. http://127.0.0.1:8790");
                     }
                     let p = config_path();
                     std::fs::create_dir_all(p.parent().unwrap())?;
@@ -594,17 +574,16 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::New { dir, template, list } => {
             if list {
-                for (name, files) in TEMPLATES.iter().filter(|(n, _)| *n != "libs") {
+                for (name, files) in TEMPLATES {
                     println!("{name} ({} files)", files.len());
                 }
                 return Ok(());
             }
             let dir = dir.ok_or_else(|| anyhow!("usage: fragment new <dir> [--template <name>]"))?;
-            let tpl_name = template.as_deref().unwrap_or("basic");
+            let tpl_name = template.as_deref().unwrap_or("todo");
             let tpl = TEMPLATES
                 .iter()
                 .find(|(n, _)| *n == tpl_name)
-                .filter(|(n, _)| *n != "libs")
                 .ok_or_else(|| anyhow!("unknown template '{tpl_name}' (use --list)"))?;
             if dir.exists() && !dir.is_dir() {
                 anyhow::bail!("{} exists and is not a directory", dir.display());
@@ -770,28 +749,12 @@ fn run(cli: Cli) -> Result<()> {
             report.print();
             std::process::exit(report.exit_code());
         }
-        Cmd::Rm { name, force_registry } => {
-            match c.call(c.delete(&format!("/api/f/{name}"))?) {
-                Ok(_) => {}
-                Err(_) if force_registry => {
-                    // the cell is unwedgeable (poisoned state from an older
-                    // era); drop the registry row and leave whatever cell
-                    // data exists to the bucket's own GC
-                    c.call(c.post_json(
-                        "/api/f/_registry/__registry/delete",
-                        &serde_json::json!({ "name": name }),
-                    )?)
-                    .context("registry delete request failed")?;
-                    if j { ok_exit(&json!({ "deleted": true, "name": name, "mode": "registry-only" })); }
-                    println!("deleted registry row for {name} (cell data left to GC; the name is reusable)");
-                    return Ok(());
-                }
-                Err(e) => return Err(e),
-            }
+        Cmd::Rm { name } => {
+            c.call(c.delete(&format!("/api/f/{name}"))?)?;
             if j {
                 ok_exit(&json!({ "deleted": true, "name": name }));
             }
-            println!("deleted fragment {name} (registry row + all data; the name is reusable)");
+            println!("deleted fragment {name} (the repo stays; the name is reusable)");
         }
         Cmd::Verify { name, dir } => {
             let report = sync::verify(&c, &name, &dir, codestorage_override().as_deref()).map_err(cs_anyhow)?;
@@ -816,38 +779,6 @@ fn run(cli: Cli) -> Result<()> {
                 report.print();
                 // fragment.json rides the commit (it is a git file at the
                 // repo root) — files and machinery go live together
-            }
-            // secrets declared in code but never set: the 3-round news
-            // failure — workflows reference ctx.secrets.X, nobody runs
-            // `fragment secret set`, every run holds. Catch it at deploy.
-            if let Some(d) = &dir {
-                let mut referenced: Vec<String> = Vec::new();
-                let wf_dir = d.join("workflows");
-                if wf_dir.exists() {
-                    for entry in walkdir::WalkDir::new(&wf_dir).max_depth(2) {
-                        let entry = match entry { Ok(e) => e, Err(_) => continue };
-                        if !entry.file_type().is_file() { continue; }
-                        let body = match std::fs::read_to_string(entry.path()) { Ok(b) => b, Err(_) => continue };
-                        for cap in body.match_indices("ctx.secrets.").map(|(i, _)| i) {
-                            let rest = &body[cap + "ctx.secrets.".len()..];
-                            let name: String = rest.chars().take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_').collect();
-                            if name.len() > 1 && !referenced.contains(&name) {
-                                referenced.push(name);
-                            }
-                        }
-                    }
-                }
-                if !referenced.is_empty() {
-                    let listed = c.get(&format!("/api/f/{name}/secrets"))?;
-                    let set = c.call(listed)?;
-                    let have: Vec<String> = set["names"].as_array().cloned().unwrap_or_default().iter()
-                        .map(|v| v.as_str().unwrap_or("").to_string()).collect();
-                    for r in referenced {
-                        if !have.contains(&r) {
-                            eprintln!("WARNING: workflows reference ctx.secrets.{r} but it is NOT set — every run will fail until you do:\n  fragment secret set {name} {r}");
-                        }
-                    }
-                }
             }
             let storage = CodeStorage::connect(&c, &name, cs.as_deref()).map_err(cs_anyhow)?;
             let main_tip = storage.branch_head(MAIN).map_err(cs_anyhow)?
@@ -969,11 +900,10 @@ fn run(cli: Cli) -> Result<()> {
             if dir.exists() {
                 anyhow::bail!("{} already exists", dir.display());
             }
-            let tpl_name = template.as_deref().unwrap_or("basic");
+            let tpl_name = template.as_deref().unwrap_or("todo");
             let tpl = TEMPLATES
                 .iter()
                 .find(|(n, _)| *n == tpl_name)
-                .filter(|(n, _)| *n != "libs")
                 .ok_or_else(|| anyhow!("unknown template '{tpl_name}' (use `fragment new --list`)"))?;
             std::fs::create_dir_all(&dir)?;
             for (rel, bytes) in tpl.1 {
@@ -1047,24 +977,6 @@ fn run(cli: Cli) -> Result<()> {
             }
             println!("folder: {}", dir.display());
         }
-        Cmd::Run { name, workflow, input } => {
-            let input_v: Value = match input.as_deref() {
-                Some(s) => serde_json::from_str(s).context("--input must be valid JSON")?,
-                None => Value::Null,
-            };
-            let v = c.call(c.post_json(&format!("/api/f/{name}/run"), &json!({ "workflow": workflow, "input": input_v }))?)?;
-            if j {
-                ok_exit(&v);
-            }
-            if v["ok"].as_bool().unwrap_or(false) {
-                println!("ok. output: {}", serde_json::to_string_pretty(&v["output"])?);
-            } else {
-                println!("FAILED: {}", v["error"].as_str().unwrap_or(""));
-            }
-            for e in v["events"].as_array().cloned().unwrap_or_default() {
-                println!("  [{}] {}", e["kind"].as_str().unwrap_or(""), e["summary"].as_str().unwrap_or(""));
-            }
-        }
         Cmd::Runs { name, run: Some(id), .. } => {
             let v = c.call(c.get(&format!("/api/f/{name}/runs/{id}"))?)?;
             if j {
@@ -1129,30 +1041,26 @@ fn run(cli: Cli) -> Result<()> {
                 println!("\n{held} held run(s) — `fragment replay {name} <run-id>` after fixing");
             }
         }
-        Cmd::Pause { name, workflow } => {
-            let v = c.call(c.post_json(&format!("/api/f/{name}/pause"), &json!({ "workflow": workflow, "paused": true }))?)?;
+        Cmd::Pause { name, op } => {
+            let v = c.call(c.post_json(&format!("/api/f/{name}/pause"), &json!({ "op": op, "paused": true }))?)?;
             if j {
                 ok_exit(&v);
             }
-            println!("paused '{workflow}' (manual runs still work; unpause with `fragment unpause`)");
+            println!("paused the triggers of '{op}' (calls still work; unpause with `fragment unpause`)");
         }
-        Cmd::Unpause { name, workflow } => {
-            let v = c.call(c.post_json(&format!("/api/f/{name}/pause"), &json!({ "workflow": workflow, "paused": false }))?)?;
+        Cmd::Unpause { name, op } => {
+            let v = c.call(c.post_json(&format!("/api/f/{name}/pause"), &json!({ "op": op, "paused": false }))?)?;
             if j {
                 ok_exit(&v);
             }
-            println!("unpaused '{workflow}'");
+            println!("unpaused '{op}'");
         }
         Cmd::Replay { name, run } => {
             let v = c.call(c.post_json(&format!("/api/f/{name}/replay"), &json!({ "run": run }))?)?;
             if j {
                 ok_exit(&v);
             }
-            if v["ok"].as_bool().unwrap_or(false) {
-                println!("replayed run #{run} → ok");
-            } else {
-                println!("replayed run #{run} → error: {}", v["error"].as_str().unwrap_or("unknown"));
-            }
+            println!("run #{run} queued again (attempt {}); follow it with `fragment runs {name} {run}`", v["attempt"]);
         }
         Cmd::Rotate { name, inbox, view } => {
             // flags narrow the default both-scopes rotation
@@ -1163,7 +1071,11 @@ fn run(cli: Cli) -> Result<()> {
             if view {
                 scopes.push("view");
             }
-            let body = if scopes.is_empty() { json!({}) } else { json!({ "scopes": scopes }) };
+            if scopes.is_empty() {
+                // the webhook secret is code.storage's to know: rotate it only by asking the cell
+                scopes = vec!["inbox", "view"];
+            }
+            let body = json!({ "scopes": scopes });
             let v = c.call(c.post_json(&format!("/api/f/{name}/rotate"), &body)?)?;
             let it = jstr_any(&v, &["inbox_token", "inboxToken"]);
             let vt = jstr_any(&v, &["view_token", "viewToken"]);
@@ -1182,44 +1094,6 @@ fn run(cli: Cli) -> Result<()> {
             println!("rotated: {rotated}");
             println!("New webhook URL: {}/api/f/{}/inbox?t={}", c.host.trim_end_matches('/'), name, it);
             println!("New share link: {}?view={}", canon.trim_end_matches('/'), vt);
-        }
-        Cmd::Rooms { name, room, tail } => {
-            match room {
-                None => {
-                    let v = c.call(c.get(&format!("/api/f/{name}/rooms"))?)?;
-                    if j {
-                        ok_exit(&v);
-                    }
-                    for r in v["rooms"].as_array().cloned().unwrap_or_default() {
-                        let last = r["last_at"].as_u64().unwrap_or(0);
-                        println!(
-                            "{}\t{}\t{}",
-                            r["room"].as_str().unwrap_or(""),
-                            r["count"].as_u64().unwrap_or(0),
-                            chrono_like(last / 1000),
-                        );
-                    }
-                }
-                Some(room) => {
-                    let enc = encode_q(&room).replace('/', "%2F");
-                    let v = c.call(c.get(&format!("/api/f/{name}/rooms/{enc}/messages?limit={tail}"))?)?;
-                    if j {
-                        ok_exit(&v);
-                    }
-                    for m in v["messages"].as_array().cloned().unwrap_or_default() {
-                        let data = serde_json::to_string(&m["data"]).unwrap_or_default();
-                        let preview: String = data.chars().take(80).collect::<String>();
-                        let preview = if data.chars().count() > 80 { format!("{preview}…") } else { preview };
-                        let at = m["at"].as_u64().unwrap_or(0);
-                        println!(
-                            "{}\t{}  {}",
-                            m["sender"].as_str().unwrap_or("-"),
-                            chrono_like(at / 1000),
-                            preview,
-                        );
-                    }
-                }
-            }
         }
         Cmd::Secret { sub } => match sub {
             SecretCmd::Set { name, key, value: argv_value } => {
@@ -1264,8 +1138,6 @@ fn run(cli: Cli) -> Result<()> {
                 println!("secret {key} removed");
             }
         },
-        Cmd::Grant { name, editor, viewer } => edit_roles(&c, &name, editor, viewer, true, j),
-        Cmd::Revoke { name, editor, viewer } => edit_roles(&c, &name, editor, viewer, false, j),
         Cmd::Inbox { name, token, payload, source } => {
             let payload_v: Value = serde_json::from_str(&payload).unwrap_or(Value::String(payload));
             // inbox is token-gated, no nostr signature
@@ -1465,85 +1337,6 @@ fn cs_anyhow(e: impl Into<crate::sync::SyncError>) -> anyhow::Error {
             msg: e.to_string(),
         }),
         other => anyhow!("{other}"),
-    }
-}
-
-fn edit_roles(c: &api::Client, name: &str, editors: Vec<String>, viewers: Vec<String>, add: bool, j: bool) {
-    // The Rust cell keeps members in the cell (fragment.json no longer
-    // grants access): grant and revoke become member changes there. The
-    // TypeScript runtime has no members route and keeps the manifest path.
-    if c.get(&format!("/api/f/{name}/members")).map(|r| r.ok()).unwrap_or(false) {
-        if let Err(e) = (|| -> Result<()> {
-            let mut changed = Vec::new();
-            for (list, role) in [(editors, "editor"), (viewers, "viewer")] {
-                for who in list {
-                    let who = auth::resolve_npub(&who)?;
-                    if add {
-                        c.call(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&json!({ "role": role }))?)?)?;
-                    } else {
-                        c.call(c.delete(&format!("/api/f/{name}/members/{who}"))?)?;
-                    }
-                    changed.push(json!({ "principal": who, "role": if add { role } else { "removed" } }));
-                }
-            }
-            if j {
-                ok_exit(&json!({ "members": changed }));
-            }
-            println!("members updated on {name}");
-            Ok(())
-        })() {
-            eprintln!("error: {e}");
-            std::process::exit(1);
-        }
-        return;
-    }
-    if let Err(e) = (|| -> Result<()> {
-        // fragment.json is a git file at the repo root: grant/revoke is
-        // read-manifest, edit roles, commit — the same edit-and-commit
-        // shape manifest-set uses (the PUT /manifest route is gone)
-        let mut m = c.call(c.get(&format!("/api/f/{name}/manifest"))?)?;
-        for (list, key) in [(editors, "editors"), (viewers, "viewers")] {
-            let mut cur: Vec<String> = m[key]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect();
-            for npub in list {
-                // npubs or NIP-05 names (name@domain); resolved to canonical
-                // npubs via the well-known path before touching the manifest.
-                let npub = auth::resolve_npub(&npub)?;
-                if add {
-                    if !cur.contains(&npub) {
-                        cur.push(npub);
-                    }
-                } else {
-                    cur.retain(|x| x != &npub);
-                }
-            }
-            m[key] = json!(cur);
-        }
-        let writer = writer_id(c);
-        let tip = sync::commit_single_file(
-            c,
-            name,
-            "fragment.json",
-            serde_json::to_vec(&m)?,
-            &format!("roles {name}"),
-            &writer,
-            codestorage_override().as_deref(),
-        )
-        .map_err(cs_anyhow)?;
-        if j {
-            ok_exit(&m);
-        } else {
-            println!("roles updated on {name} (commit {})", &tip[..8.min(tip.len())]);
-        }
-        Ok(())
-    })() {
-        eprintln!("error: {e}");
-        std::process::exit(1);
     }
 }
 

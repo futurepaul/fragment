@@ -1,15 +1,10 @@
-# fragment wire contract (CLI ↔ runtime)
+# fragment wire contract
 
-Two runtimes answer this contract during phase 2: the Rust cell (`cell/`,
-this first part) and the TypeScript runtime (`runtime/`, the second part,
-deleted in slice G). The CLI talks to both: every command the Rust cell
-keeps has the same route and body, and the cell's errors are
-`{"error": "<code>", "message": "..."}` (codes in `crates/proto`).
-
-# The Rust cell (phase 2)
-
-Status: slices B through F (2026-09-23). `cargo xtask e2e` proves every
-route below.
+The cell (`cell/`, Rust on celld) answers everything below; the CLI and
+the browser library are its clients. Errors are `{"error": "<code>",
+"message": "..."}` (codes in `crates/proto`). `cargo xtask e2e` proves
+every route. The TypeScript runtime this replaced was deleted in phase 2
+slice G (its contract is in git history, last at `35f5e18`).
 
 ## Configuration
 
@@ -41,8 +36,16 @@ jobs), `BLOBS` (R2 over the fleet bucket: the bytes of large files),
 
 A principal is a key (64 hex inside, an npub in answers; requests may use
 either) or an anonymous visitor (`anon:` + 32 hex, the hash of a random
-cookie on the fragment's origin). Control routes need NIP-98 (as the
-second part describes); site requests may carry it.
+cookie on the fragment's origin). Control routes need NIP-98; site
+requests may carry it.
+
+NIP-98 (`crates/nip98`): `Authorization: Nostr <base64 of the event>`, an
+event of kind 27235 with empty content and the tags `["u", <the absolute
+request URL>]`, `["method", <the method>]`, and, when the body is not
+empty, `["payload", <hex SHA-256 of the body>]`; `created_at` within 60
+seconds of the cell's clock; `id` and a BIP-340 `sig` as NIP-01 defines.
+A blob upload is signed without `payload`: its URL names the bytes' hash,
+which the cell checks as they arrive.
 
 Roles, weakest first: `public`, `viewer`, `editor`, `owner`. A member's
 role is their membership. Otherwise visibility decides: on a `public`
@@ -92,7 +95,7 @@ member may leave. Each person's list of fragments is kept in their
 | `GET /api/f/{name}/runs?status=&op=&limit=` | viewer | → `{runs: [{id, op, via, trigger, principal, status, attempt, depth, createdAt, finishedAt, error}], counts: {<status>: n}, paused}` newest first (30, at most 200) |
 | `GET /api/f/{name}/runs/{id}` | viewer | → one run with its `input` and `output` |
 | `POST /api/f/{name}/replay` | editor | `{run}` → `{ok, run, attempt}`: a `held` or `blocked` run again, as its next attempt, with its input |
-| `POST /api/f/{name}/pause` | editor | `{op, paused}` (`workflow` is accepted for `op`) → `{ok, op, paused}`: the operation's triggers stop or start; calls are never paused |
+| `POST /api/f/{name}/pause` | editor | `{op, paused}` → `{ok, op, paused}`: the operation's triggers stop or start; calls are never paused |
 | `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron\|channel\|files, run, paused, nextAt?}], paused}` |
 | `POST /api/f/{name}/inbox` | the inbox token | token in `x-fragment-inbox-token` or `?t=`; a JSON body `{source?, payload}` (any other JSON, or text, is the payload), at most 64 KiB → `{ok, seq, runs}`. Bad token 403; 1000 pending, 429 |
 
@@ -181,8 +184,7 @@ https://git-lfs.github.com/spec/v1`, `oid sha256:…`, `size …`), and its
 bytes are a blob in the fleet's blob store under the fragment and the
 hash. The CLI uploads a large file's bytes before it commits the pointer,
 and downloads them when it pulls one, so a synced folder holds real
-files; it does so only where status answers `blobMinBytes` (the
-TypeScript runtime keeps large files in git). The site (`/`, `__file`)
+files; it does so where status answers `blobMinBytes`. The site (`/`, `__file`)
 and `GET file` serve a pointer's bytes, with ranges. A blob that no
 pointer at `main` or `live` has named for `FRAGMENT_BLOB_GRACE_S` (7
 days) is deleted, so only the latest versions' bytes are kept: a
@@ -326,179 +328,3 @@ channel, onRecord, {after?})`, `presence.set(data)`, `presence.on(fn)`,
 
 CLI: `fragment call <name> <op> --input '{...}' [--id ID]`, `fragment
 channel <name> [<channel>] [--after N] [--follow]`.
-
-# The TypeScript runtime (deleted in slice G)
-
-Base URL: the celld public listener, e.g. `http://127.0.0.1:8789`.
-
-Files live in code.storage (one git repo per fragment, repo name =
-fragment name, `main` = working files, `live` = blessed serve point).
-The runtime talks to code.storage with JWTs signed by the host's org key
-(`CELLD_VAR_PIERRE_PRIVATE_KEY`, PKCS8 PEM; org id
-`CELLD_VAR_CODESTORAGE_ORG_NAME`; API base override
-`CELLD_VAR_CODESTORAGE_API_URL`). The cell pins `main@SHA` for
-working-copy reads and `live@SHA` for serving; the tree index (metadata
-only) lives in cell SQLite and refreshes on webhook, poll, and the cell's
-own commits.
-
-## Auth — NIP-98 HTTP auth
-
-Control endpoints require header:
-
-```
-Authorization: Nostr <base64(JSON event)>
-```
-
-Event: kind `27235`, `content: ""`, tags:
-
-- `["u", "<absolute request URL, no fragment>"]`
-- `["method", "<uppercase HTTP method>"]`
-- `["payload", "<hex sha256 of raw request body>"]` — required iff body non-empty
-
-`created_at` within ±60s of server time. `pubkey` is the x-only secp256k1
-key (64 hex chars). `id` = sha256 of the JSON serialization of
-`[0, pubkey, created_at, kind, tags, content]` (NIP-01). `sig` = BIP-340
-schnorr signature over `id`.
-
-Errors: `401` missing/invalid signature, `403` valid signature but the npub
-lacks the role.
-
-Roles per fragment: `owner` (creator; can do everything), `editor`
-(everything except owner transfer), `viewer` (read-only control + site when
-visibility=viewers).
-
-Fragment identity (level-c): the npub secret is generated CLIENT-side and
-supplied at create; the cell stores it wrapped (HKDF+AES-GCM under
-`FRAGMENT_HOST_SECRET`, salted by the fragment npub). There is no
-server-side generation path.
-
-## Control API (prefix `/api`)
-
-| method & path | role | body → result |
-| --- | --- | --- |
-| `POST /api/fragments` | any npub | `{name, fragmentSecret}` → `{name, npub, viewToken, inboxToken, webhookSecret, repo, canonical}`. `fragmentSecret` = 64-hex secp256k1 secret generated by the CLI. The cell creates the code.storage repo (idempotent). |
-| `GET /api/fragments` | any npub | → `{fragments: [{name, role}]}` (where requester has a role) |
-| `GET /api/f/{name}/status` | viewer+ | → `{name, npub, repo, pins: {main, live}, counts, crons:[{name,nextAt,paused}]}` |
-| `GET /api/f/{name}/manifest` | viewer+ | → manifest JSON — read from the repo (pinned `fragment.json`), cached in the cell; `manifest-set` is an ordinary commit made by the CLI |
-| `GET /api/f/{name}/storage-token` | editor+ | → `{token, repo, api}` — a short-lived (15 min) code.storage JWT scoped to exactly this fragment's repo with `["git:read","git:write"]` (no org scope). `api` is the code.storage API base; all endpoint paths append under it (`/api/repos/{repo}/...`). Every mint writes a `storage-token.minted` ledger event (actor npub, repo, scopes, expiry). The repo claim is built server-side from the validated fragment name and asserted on egress. |
-| `POST /api/f/{name}/refresh` | editor+ | `→ {ok, refs: {main, live}}` — re-reads both refs from code.storage and moves the pins (the authenticated equivalent of a push webhook's interpret step; external commits schedule `trigger:"files"` workflows + notify exactly like a delivery). The CLI fires it after landing syncs, deploys, and rollbacks so its own commits are visible immediately instead of waiting out the 5-minute poll backstop. A never-pushed ref reports `{absent: true}`. |
-| `GET /api/f/{name}/files` | viewer+ | → `{ref: <pinned main sha>, files:[{path, size, mode, lastCommitSha, machinery}]}` — metadata only, no bytes |
-| `GET /api/f/{name}/file?path={p}` | viewer+ | → raw bytes streamed from the pinned main ref (+ `x-fragment-ref`) |
-| `GET /api/f/{name}/file/stat?path={p}` | viewer+ | → `{stat: {path, size, sha, lastCommitSha, present}, ref}` — the ifSha read half |
-| `POST /api/f/{name}/run` | editor+ | `{workflow, input?}` → `{ok, runId, status, events}` — launches the run on the native Workflows engine, waits (bounded 5 min) for the attempt, then reports from the ledger; the output lands in the `run.succeeded` event |
-| `POST /api/f/{name}/replay` | editor+ | `{run: id}` → re-runs a held run with its original input → `{ok, launched, runId}` |
-| `GET /api/f/{name}/runs?status=&wf=&limit=&include=input` | viewer+ | → `{runs:[{id, wf, via, status, attempt, maxAttempts, error?, timings, cause}], counts}`. Statuses: `running \| backoff \| success \| held \| skipped \| blocked` |
-| `POST /api/f/{name}/pause` | editor+ | `{workflow, paused}` → pause/unpause a workflow (clears the auto-pause breaker) |
-| `POST /api/f/{name}/rotate` | owner | `{"scopes": ["inbox","view","webhook"]?}` → `{ok, inbox_token?, view_token?, webhook_secret?, rotated}` (default all three; omitted scopes keep their old values). Callers treat all spellings as opaque. |
-| `GET /api/f/{name}/rooms` | editor+ | → `{rooms:[{room, count, last_at}]}` |
-| `GET /api/f/{name}/rooms/{room}/messages?limit=&before=` | editor+ | → `{room, messages:[{id, at, sender, data}]}` ascending (most recent `limit`, default 100 max 200; `before=<id>` pages further back) |
-| `PUT /api/f/{name}/secrets/{KEY}` | editor+ | raw body = value → `{ok}` — stored WRAPPED at rest (HKDF+AES-GCM under `FRAGMENT_HOST_SECRET`); fails loudly if the host secret is unset |
-| `GET /api/f/{name}/secrets` | editor+ | → `{names: [...]}` (never values) |
-| `DELETE /api/f/{name}/secrets/{KEY}` | editor+ | → `{ok}` |
-| `GET /api/f/{name}/events?since={id}` | viewer+ | → `{events:[{id, at, kind, summary, data?}]}` |
-| `POST /api/f/{name}/inbox?t={inboxToken}` | token only | `{source?, payload}` → `{ok, id, scheduled}`; enqueues + schedules `trigger:"inbox"` workflows. Prefer the `x-fragment-inbox-token` header — `?t=` lands in access logs. Optional headers: `x-fragment-hops`/`x-fragment-cause` (over-budget hops refuse with a `cycle.detected` event). Pending cap 1000 → `429`. |
-| `POST /api/f/{name}/webhook` | HMAC only | code.storage webhook delivery. Verified with the fragment's `webhook_secret` (`X-Pierre-Signature: t=<unix>,sha256=HMAC-SHA256(secret, "<t>.<body>")`, 5-min freshness). Order is validate → persist (dedupe row + ledger event; redeliveries ack without re-interpreting) → interpret (refresh the pin from the branch HEAD — a late delivery can never regress it; external pushes fire `trigger:"files"` workflows + notify, the cell's own commits never do). |
-
-Deleted at the code.storage hard cut (editors write directly with storage
-tokens): `PUT/DELETE /api/f/{name}/file`, `PUT /api/f/{name}/manifest`,
-`POST /api/f/{name}/manifest/check`, the draft plane (`POST/GET /drafts`,
-`POST /bless`), `/file/history`, `/file/at`. File history is git history;
-previews are ephemeral refs; deploy = commit + move `live`; rollback =
-re-point `live`.
-
-**Notify-on-change** (manifest `notifyUrls: ["https://…"]`, max 3): external
-changes enqueue one message per URL onto the celld Queues binding
-(`NOTIFY`); the separate notify-relay deployment consumes and POSTs
-`{type:"changed", fragment, sha, paths}` frames (at-least-once, hop headers
-stamped so notify loops die at the receiving inbox's cycle guard). Delivery
-and retries are queue-owned; `notify.sent`/`notify.enqueue-failed` land on
-the ledger.
-
-## Serving (no NIP-98)
-
-| path | behavior |
-| --- | --- |
-| `GET /f/{name}/...` | serves from the LIVE ref (`live@SHA`). If the repo has `app.mjs`, requests go to its `fetch(req, ctx)`; else static files from `site/` (index.html default, 404 otherwise). By default app data reads (`ctx.files`) ride the working copy (`main@SHA`, code frozen at the live pin, data live); `"freeze": true` pins app reads to the live ref instead. Token visibility: a valid `?view=` mints a `fragview_{name}` cookie so subresources pass the gate. No `live` ref yet → a clear 404 telling you to deploy. |
-| `GET /f/{name}/__rt.js` | browser client for rooms (see below). |
-| `GET /f/{name}/__tree` | machine-readable tree FROM THE LIVE REF: `{ref:"live", sha, files:[{path,size,mode,lastCommitSha}]}` — content paths only (the fragment's own organs are excluded). Gated exactly like the site. |
-| `GET /f/{name}/__file?path=P` | raw file content from the live ref under the same gate. The read API for watchers, feeds and other fragments — a view link is all a reader needs. |
-| `WS  /f/{name}/__room/{room}` | realtime room. |
-| view token | `visibility:"link"`: append `?view={viewToken}` (mints the cookie). `"viewers"`: NIP-98 header on the GET. `public` needs nothing. |
-
-Canonical subdomains (`<name>.<host>`, when `FRAGMENT_SUBDOMAIN_HOST` is
-set) serve the fragment's site. The one carve-out: `/api/f/*` — the control
-namespace — is passed through un-rewritten, so a served app can reach its
-own inbox, storage-token, and refresh routes same-origin from its
-subdomain. Control routes carry their own auth (tokens / NIP-98), which is
-why widening reachability this way widens nothing else. An app's OWN
-`/api/*` routes are unaffected (they stay on the site plane; don't name an
-app route `api/f/…`).
-
-Previews (`fragment deploy --preview`) are ephemeral refs in code.storage;
-they are not runtime URLs — the CLI serves/mints them with a storage token.
-
-## Rooms protocol (WS, JSON both ways)
-
-Client → server: `{type:"msg", data}`, `{type:"state:set", value}`,
-`{type:"presence", data}`.
-Server → client: on join `{type:"hello", state, presence:[...], history:[...last 50]}`
-then `{type:"msg", from, data, at}`, `{type:"state", value}`,
-`{type:"presence", list}`.
-
-If the fragment ships `rooms.mjs` exporting `onMessage(room, msg, ctx)`, the
-cell calls it (via loader isolate) per message; it may return
-`{broadcast, state}` to shape what happens.
-
-## Workflow execution (runtime-internal, not for the CLI)
-
-Workflow (`workflows/*.mjs`) and app (`app.mjs`, `rooms.mjs`) code runs in
-Worker-Loader isolates. Runs execute on the host's NATIVE WORKFLOWS engine:
-
-- `runs` rows, guards (pause/hops/rate/single-flight), retry
-  classification, held, and the circuit breaker stay in the cell
-  (`runtime/ts/runs.ts`) — the ledger is the product layer.
-- Each attempt is a native Workflow instance (`FragmentWorkflow`, binding
-  `WORKFLOWS`, instance id `r<runId>a<attempt>`). Its `step.do("attempt")`
-  drives the author body inside the cell over the loopback; the completion
-  report is its own `step.do` with bounded `step.sleep` backoff between
-  tries; a report that ultimately fails throws and the cell's crash sweep
-  reconciles from `instance.status()`.
-- Exactly-once commits: `ctx.files.write` lands as a commit-pack with
-  expected-parent CAS (`expected_target_sha`), blob-identity dedup, and
-  idempotent-replay healing — a replayed or crashed-then-retried step
-  commits each logical change exactly once (the flagship test in
-  `runtime/test/flagship-replay.test.mjs`).
-
-The cell injects a sibling module `fragment-ctx.mjs` plus plain-JSON env:
-
-- `FRAGMENT_INTERNAL_URL` — e.g. `http://127.0.0.1:8789/__internal`
-- `FRAGMENT_RUN_TOKEN` — per-run/per-draft random token (cell validates; sent
-  as the `x-fragment-token` header — never a query param, so it stays out of
-  access logs)
-- `FRAGMENT_HOST_SECRET` — only present when the host sets it; ctx forwards
-  it as `x-fragment-host-secret`
-
-`fragment-ctx.mjs` implements `ctx` over fetch against `/__internal`:
-
-- `ctx.http(url, init)` → plain fetch (egress)
-- `ctx.files.read / readBytes / write({ifSha}) / delete / ingest / stat / list / index` → `/__internal/files/...`
-- `ctx.secrets` → `GET /__internal/secrets/all` (unwrapped in-flight; wrapped at rest)
-- `ctx.inbox()` → pending inbox messages; `ctx.inboxAck(ids)`
-- `ctx.events.append(kind, data)`, `ctx.log(msg)`
-- `ANY /__internal/egress/<host>/<path…>` — keyed egress proxy (run token via
-  `x-fragment-token` OR Bearer). Allowlist from the node's keys
-  (`CELLD_VAR_FAL_API_KEY` → the FRAGMENT_FAL_BASE host; `CELLD_VAR_OPENROUTER_API_KEY`
-  → openrouter.ai); unconfigured hosts fail closed with a 403 naming what IS
-  configured.
-- `ctx.state` → per-workflow kv via `/__internal/wstate`
-- `ctx.push(who, payload)` → Web Push (`/__internal/push/send`)
-
-The native-workflow driver routes (token-gated, `wf-run` scope):
-`POST /__internal/wf/attempt` (execute the attempt body) and
-`POST /__internal/wf/complete` (apply the outcome through the runs state
-machine; duplicate reports are ignored and ledgered).
-
-A workflow file exports `async run(ctx)`. Code limit 64 MiB per loaded
-worker; env 1 MiB. Workflow writes cap at 32 MiB per file (explicit,
-`WRITE_CEILING`) — bigger media belongs to the CLI's direct commit path,
-which streams the same commit-pack chunks client-side.

@@ -1,4 +1,4 @@
-// Nostr keys and NIP-98 HTTP auth (kind 27235), matching runtime/src/auth.js.
+// Nostr keys and NIP-98 HTTP auth (kind 27235), as the cell verifies it (crates/nip98).
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use secp256k1::{Keypair, Message, Secp256k1, XOnlyPublicKey};

@@ -544,7 +544,6 @@ pub struct Run {
 /// `op`; calls still work.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SetPaused {
-    #[serde(alias = "workflow")]
     pub op: String,
     pub paused: bool,
 }

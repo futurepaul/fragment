@@ -17,5 +17,5 @@ are files in git, and the viewer follows them.
 - `app.mjs` answers `api/tree` and `api/file` from `this.files`, the
   app's read access to its files at `main`.
 
-The viewer (`site/assets/`) is the vault viewer, built from
-`templates/vault/src/viewer.mjs`.
+The viewer (`site/assets/`) is a prebuilt bundle of marked and
+@pierre/diffs.

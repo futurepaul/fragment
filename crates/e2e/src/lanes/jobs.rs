@@ -372,8 +372,8 @@ pub fn triggers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a paused operation's trigger records a blocked run", blocked[0]["status"] == "blocked", json!(blocked[0]));
     let r = api.op(&owner, &name, "boom", "manual", json!({}))?;
     s.ok("a paused operation can still be called", r.status == 200 && r.body["result"]["status"] == "queued", &r);
-    let r = api.signed(&owner, "POST", &format!("/api/f/{name}/pause"), Some(&json!({ "workflow": "boom", "paused": false })))?;
-    s.ok("unpausing takes the old CLI's body", r.status == 200 && r.body["paused"] == false, &r);
+    let r = api.signed(&owner, "POST", &format!("/api/f/{name}/pause"), Some(&json!({ "op": "boom", "paused": false })))?;
+    s.ok("unpausing starts triggered runs again", r.status == 200 && r.body["paused"] == false, &r);
     let r = api.signed(&owner, "POST", &format!("/api/f/{name}/pause"), Some(&json!({ "op": "nope", "paused": true })))?;
     s.ok("pausing an unknown operation is 404", r.status == 404, &r);
 

@@ -6,9 +6,9 @@
 <title>notes</title>
 <link rel="stylesheet" href="assets/viewer.css">
 <script type="module">
-  // The viewer (assets/viewer.js, built for the old runtime) asks for a
-  // "vault" room whose state changes when files do; here that is the
-  // last_change query, re-run live by the browser library.
+  // The viewer (assets/viewer.js) asks for a room whose state changes
+  // when files do; here that is the last_change query, re-run live by the
+  // browser library.
   import * as fragment from "./__fragment.js";
   window.fragment = {
     room: () => ({

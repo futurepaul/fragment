@@ -19,31 +19,31 @@ Inventory taken 2026-09-23 from `fragment list` (owner npub
 
 ## Primitive coverage
 
-"Proven by" names the check that exercises the primitive today: an
-`scripts/e2e.mjs` section (312/312 green once the workflow-instance fix
-landed) or a `runtime/test` file. Rows marked **gap** have no check; each
-gets one before its primitive is touched, and the Rust harness that
-replaces `scripts/e2e.mjs` must cover every row.
+"Proven by" names the Rust e2e sections (`crates/e2e`, `cargo xtask
+e2e`) that drive the primitive on the new model. Every row had a Rust
+check before phase 2 slice G deleted the old runtime and its checks
+(`scripts/e2e.mjs`, `runtime/test`; in git history at `35f5e18`). A new
+primitive gets a row and a check in the same commit.
 
 | Primitive | Used by | Proven by |
 |---|---|---|
-| Rooms: browser `fragment.room` (`__rt.js`), messages, persisted document | linecount, strategy-vault, events-rfc, sycamore | e2e `rooms`, `runtime`. Rust: channels + live queries + `__fragment.js` (e2e `channels`, `live`, `browser`) |
-| Room state from workflows: `ctx.rooms.getState/setState` on a named room | linecount, strategy-vault, events-rfc, sycamore | `runtime/test/rooms-state.test.mjs`. Rust: a triggered run's mutation changes the app's state and open pages' live queries follow (e2e `notes`: a file trigger refreshes an open page in a browser; `jobs`: call steps) |
-| Room presence | (rooms clients) | Rust: e2e `live` (join, leave, size limit) and `browser` (two tabs) |
-| Web push: browser `fragment.push`/`fragment.notify`, server `ctx.push`, VAPID keys | linecount, meatproxy | Rust: e2e `push` (VAPID key, `__sw.js`, subscriptions tagged by who, `call.push` and `job.push` through the delivery queue to a push service that checks VAPID and decrypts, 410 drops, 503 retries, the dead-letter report). The browser's own subscribe path is not driven (no push service in headless Chrome) |
-| Inbox webhooks: token (query or `x-fragment-inbox-token`), `ctx.inbox`/`ctx.inboxAck` | linecount, meatproxy, events-rfc, sycamore | e2e `workflows`, `runs`, `paused`. Rust: the `inbox` channel and its trigger (e2e `triggers`: both token forms, text bodies, the `{source, payload}` shape, the CLI's `fragment inbox`, `templates/inbox`) |
-| Inbox pending cap (1000, then 429 + `queue.rejected`) | all inbox fragments | Rust: e2e `triggers` (the 1001st pending delivery is 429, `inbox.rejected`) |
-| Workflow triggers: `cron`, `inbox`, `files`/`sync`, manual `run` | all | e2e `cron`, `workflows`, `filesync`, `runs`. Rust: triggers name an operation (e2e `triggers`: cron, inbox, channel, files); a manual run is a call to a job (e2e `jobs`) |
-| Runs ledger: retry classes, held runs, replay, auto-pause, hop budget | meatproxy | e2e `runs`, `paused`; `runtime/test/runs.test.mjs`, `flagship-replay.test.mjs`. Rust: runs as Workflows (e2e `jobs`: retries, held, replay; `triggers`: auto-pause, the rate ceiling, the hop budget; `restart`: a job sleeping through a SIGKILL) |
-| Dynamic `app.mjs` + `applib/` from the live pin | meatproxy, strategy-vault, events-rfc, sycamore | e2e `app`, `static-root`, `build`. Rust: e2e `site` (static `site/` from live), `routes` (`App.fetch`, `applib/` imports), and `notes` (a viewer's `/api/` routes on the fragment's own host) |
-| Files: `ctx.files` read/write/list/stat/index/readBytes/ingest, CAS, write suppression | all | e2e `files`, `workflows`; `runtime/test/git-plane.test.mjs`. Rust: e2e `appfiles` (reads at main, mutation writes as one commit, job steps with compare-and-swap, a self-feeding file trigger stopped by the hop budget, per-fragment isolation), `blobs` (files of 1 MiB or more), `notes` (a vault read through `App.fetch`, live in a browser) |
-| Event ledger: `ctx.events.append`, `fragment events` | meatproxy, events-rfc, sycamore | e2e `runs`, `workflows`, `platform`. Rust: the `events` channel (e2e `channels`, `members`); app-side appends are channel publishes |
-| Per-workflow state: `ctx.state` | meatproxy | e2e `app`, `workflows`. Rust: the app's SQL, read and written through a job's call steps (e2e `jobs`) |
-| Secrets: declared by name, wrapped at rest, injected into runs | meatproxy, events-rfc, sycamore | e2e `auth`, `lockdown`, `workflows`; `runtime/test/secretwrap.test.mjs`. Rust: e2e `secrets` (set, list by name, never returned, limits), `crates/core` sealing tests, and e2e `jobs` (`{{NAME}}` in a fetch header reaches the upstream and appears in no run, record, or event) |
-| Platform AI: `fragment:ai` text, image, video | meatproxy | e2e `gen`, `cron`. Rust: e2e `ai` (OpenRouter text, image, and video with the fake: the fragment's key, the plan's models, images and videos stored as files and blobs, retries, out of credits) |
-| Visibility: `public`, `link` (view token → per-fragment cookie), `viewers` (now `members`) | all | e2e `platform`, `lockdown`, `auth`. Rust: e2e `site`, `public`, `members`, `lockdown` |
-| Deploy, preview, rollback, drafts (git `main`/`live`) | all | e2e `deploy`. Rust: e2e `deploy` (the CLI against the cell), `ops` (code installs from live) |
-| Folder sync: conflict copies, mass-delete guard, journals bound to repo identity | all (authoring) | e2e `filesync`, `cli-lane`, `converge`; CLI unit tests. Rust: e2e `sync` (conflict, modes, verify, mirror, guard, large files as pointers, continuous with the change feed) and `blobs`; the CLI unit tests run on `crates/fakes` |
+| Rooms: browser `fragment.room` (`__rt.js`), messages, persisted document | linecount, strategy-vault, events-rfc, sycamore | Channels + live queries + `__fragment.js` (e2e `channels`, `live`, `browser`) |
+| Room state from workflows: `ctx.rooms.getState/setState` on a named room | linecount, strategy-vault, events-rfc, sycamore | A triggered run's mutation changes the app's state and open pages' live queries follow (e2e `notes`: a file trigger refreshes an open page in a browser; `jobs`: call steps) |
+| Room presence | (rooms clients) | e2e `live` (join, leave, size limit) and `browser` (two tabs) |
+| Web push: browser `fragment.push`/`fragment.notify`, server `ctx.push`, VAPID keys | linecount, meatproxy | e2e `push` (VAPID key, `__sw.js`, subscriptions tagged by who, `call.push` and `job.push` through the delivery queue to a push service that checks VAPID and decrypts, 410 drops, 503 retries, the dead-letter report). The browser's own subscribe path is not driven (no push service in headless Chrome) |
+| Inbox webhooks: token (query or `x-fragment-inbox-token`), `ctx.inbox`/`ctx.inboxAck` | linecount, meatproxy, events-rfc, sycamore | The `inbox` channel and its trigger (e2e `triggers`: both token forms, text bodies, the `{source, payload}` shape, the CLI's `fragment inbox`, `templates/inbox`) |
+| Inbox pending cap (1000, then 429 + `queue.rejected`) | all inbox fragments | e2e `triggers` (the 1001st pending delivery is 429, `inbox.rejected`) |
+| Workflow triggers: `cron`, `inbox`, `files`/`sync`, manual `run` | all | Triggers name an operation (e2e `triggers`: cron, inbox, channel, files); a manual run is a call to a job (e2e `jobs`) |
+| Runs ledger: retry classes, held runs, replay, auto-pause, hop budget | meatproxy | Runs as Workflows (e2e `jobs`: retries, held, replay; `triggers`: auto-pause, the rate ceiling, the hop budget; `restart`: a job sleeping through a SIGKILL) |
+| Dynamic `app.mjs` + `applib/` from the live pin | meatproxy, strategy-vault, events-rfc, sycamore | e2e `site` (static `site/` from live), `routes` (`App.fetch`, `applib/` imports), and `notes` (a viewer's `/api/` routes on the fragment's own host) |
+| Files: `ctx.files` read/write/list/stat/index/readBytes/ingest, CAS, write suppression | all | e2e `appfiles` (reads at main, mutation writes as one commit, job steps with compare-and-swap, a self-feeding file trigger stopped by the hop budget, per-fragment isolation), `blobs` (files of 1 MiB or more), `notes` (a vault read through `App.fetch`, live in a browser) |
+| Event ledger: `ctx.events.append`, `fragment events` | meatproxy, events-rfc, sycamore | The `events` channel (e2e `channels`, `members`); app-side appends are channel publishes |
+| Per-workflow state: `ctx.state` | meatproxy | The app's SQL, read and written through a job's call steps (e2e `jobs`) |
+| Secrets: declared by name, wrapped at rest, injected into runs | meatproxy, events-rfc, sycamore | e2e `secrets` (set, list by name, never returned, limits), `crates/core` sealing tests, and e2e `jobs` (`{{NAME}}` in a fetch header reaches the upstream and appears in no run, record, or event) |
+| Platform AI: `fragment:ai` text, image, video | meatproxy | e2e `ai` (OpenRouter text, image, and video with the fake: the fragment's key, the plan's models, images and videos stored as files and blobs, retries, out of credits) |
+| Visibility: `public`, `link` (view token → per-fragment cookie), `viewers` (now `members`) | all | e2e `site`, `public`, `members`, `lockdown` |
+| Deploy, preview, rollback, drafts (git `main`/`live`) | all | e2e `deploy` (the CLI against the cell), `ops` (code installs from live) |
+| Folder sync: conflict copies, mass-delete guard, journals bound to repo identity | all (authoring) | e2e `sync` (conflict, modes, verify, mirror, guard, large files as pointers, continuous with the change feed) and `blobs`; the CLI unit tests run on `crates/fakes` |
 
 Note: inbox `Idempotency-Key` handling was deliberately removed in
 `5a53bb5` (content-hash naming makes redeliveries harmless); linecount's

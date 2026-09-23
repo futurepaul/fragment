@@ -2,14 +2,17 @@
 
 Places for people and agents: apps, chats, and desktops are all
 fragments; agents join them as members; computers are Fly Sprites.
-Built on fragment (this repo carries fragment's full history) and on
-celld (https://celld.dev/docs/).
+Built on fragment (this repo carries fragment's full history; its
+TypeScript runtime was cut in phase 2, and fragment.club still runs it
+from github.com/futurepaul/fragment) and on celld
+(https://celld.dev/docs/).
 
 ## Read first
 
 1. `docs/ROADMAP.md` — decisions, truth map, phases, escalations.
 2. `docs/MODEL.md` — the core model on celld primitives and the spikes.
-   `docs/phase-2.md` — the current phase's slices and checkpoints.
+   `docs/api.md` — the wire contract the cell answers.
+   `docs/phase-2.md` — the record of the core cut (slices A–G).
 3. `docs/finite-next-lessons.md` — what to port from finite-next and the
    gotchas (celld, libfx, fx over ACP, Sprites), prices, resources.
 4. `docs/published-fragments.md` — primitives that must stay expressible.
@@ -21,7 +24,10 @@ celld (https://celld.dev/docs/).
 
 ## Commands
 
-The new runtime (`cell/`, Rust; phase 2, `docs/phase-2.md`):
+The cell (`cell/`, Rust on celld), the CLI (`cli/`), and the harness
+(`xtask/`, `crates/`). All tooling is Rust; the repo has no shell,
+Python, or Node tooling (the notes viewer's prebuilt bundle is in the
+debt ledger).
 
 - One-time setup: `cargo install worker-build --version 0.8.5 --locked`,
   `rustup target add wasm32-unknown-unknown`, then `cargo xtask celld`
@@ -37,7 +43,7 @@ The new runtime (`cell/`, Rust; phase 2, `docs/phase-2.md`):
   Chrome (`CHROME_BIN` to choose one); `triggers` waits for a cron
   minute (about a minute). The node runs from a staged copy of the cell
   (`target/e2e/cell`), so the e2e and `cargo xtask dev` can run at once.
-- `cargo xtask dev [--clean]`: the new stack in the foreground: the cell
+- `cargo xtask dev [--clean]`: the dev stack in the foreground: the cell
   on :8790 with fragments at `http://<name>.fragment.localhost:8790/`, and
   the code.storage fake on :8792 (state in `target/devstack/`; its org
   key and the host secret are made there on first run). Point the CLI at
@@ -50,27 +56,21 @@ The new runtime (`cell/`, Rust; phase 2, `docs/phase-2.md`):
   templates on the new model: `todo` (operations, channels, the browser
   library), `inbox` (a trigger, a job, the inbox), and `notes` (files as
   the state, read through `App.fetch`, refreshed by a file trigger).
+  `fragment new|init --template` scaffolds the same three.
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
-  logic, host-tested), `crates/nip98`, `crates/fakes` (code.storage),
-  `crates/devstack`, `crates/e2e`.
-
-The old runtime (`runtime/`, TypeScript), until slice G deletes it:
-
-- Runtime tests: `npm run test:runtime` (after `scripts/build-runtime`
-  when `runtime/ts` changes; `runtime/src` is committed build output).
-- Local stack: `E2E_FAL_FAKE=1 scripts/dev up` (celld :8789, code.storage
-  mock :9940, fal fake :9942), then `node scripts/e2e.mjs` (needs
-  `cargo build -p fragment-cli` first). `scripts/dev down` stops it.
-  `CELLD_BIN=target/celld/bin/celld` runs it on the celld fork.
+  logic, host-tested), `crates/nip98`, `crates/fakes` (code.storage,
+  OpenRouter, a push service), `crates/devstack`, `crates/e2e`.
+- `.github/workflows/ci.yml` runs `check` and `e2e`; it has not run yet
+  (no remote).
 
 ## Rules
 
 - Secrets are files read by path (`docs/finite-next-lessons.md`,
   Resources); never print them, pass them on a command line, or commit
   them.
-- Do not edit files under `runtime/` while an e2e run is in flight:
-  `celld dev` rebuilds on change. The Rust e2e and `xtask dev` both write
-  `cell/.dev.vars`: run one at a time.
+- `cargo xtask dev` runs `celld dev` on `cell/`, which rebuilds when it
+  changes; the e2e runs a staged copy (`target/e2e/cell`) with its own
+  variables, so the two can run at once.
 - No remote of its own yet; `fragment-rs` is a fetch-only pointer to
   github.com/futurepaul/fragment. Ask Paul before adding or pushing to a
   remote, deleting Sprites, or anything else irreversible.

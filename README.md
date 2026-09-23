@@ -1,249 +1,75 @@
-# fragment
+# fragment-next
 
-A fragment is a folder of files, a SQLite database, some URLs, and an inbox —
-wrapped around exactly one problem. This repo holds two things:
+A fragment is one small place on the web: a folder of files in git, an
+app of named operations over its own SQLite, channels that pages follow
+live, and members with roles. Fragments run on
+[celld](https://celld.dev) (self-hosted Durable Objects that keep their
+state in a bucket); each is a cell that sleeps when idle.
 
-- **`fragment`** — a Rust CLI (`cli/`). The whole control surface, designed to
-  be driven by agents (`fragment guide` prints the agent doc).
-- **the runtime** (`runtime/`) — a JavaScript Worker+Durable Object bundle that
-  runs on [celld](https://celld.dev), self-hosted Durable Objects that keep
-  their state in a bucket you own. Every fragment is one cell with its own
-  SQLite; cells sleep when idle and cost nothing asleep.
+This repo holds:
 
-## Vaults and dropzones (recipes, not modes)
+- **the cell** (`cell/`): Rust (workers-rs) on celld, with a small
+  JavaScript shim. It answers the control API, serves sites, runs each
+  fragment's app in its own loaded worker, and runs jobs as Workflows.
+- **the `fragment` CLI** (`cli/`): the whole control surface, built for
+  agents. `fragment guide` prints the agent guide.
+- **the harness** (`xtask/`, `crates/`): the dev stack, Rust fakes for
+  code.storage, OpenRouter, and a push service, and the e2e suite that
+  drives the real cell, CLI, and a browser.
 
-`fragment new --template` scaffolds two compositions from ordinary parts:
+Read [docs/MODEL.md](docs/MODEL.md) for the model,
+[docs/api.md](docs/api.md) for the wire contract, and
+[docs/ROADMAP.md](docs/ROADMAP.md) for where it is going. fragment.club
+still runs the previous runtime, from
+[futurepaul/fragment](https://github.com/futurepaul/fragment). MIT
+licensed; see [LICENSE](LICENSE).
 
-- **vault** — any folder of text files becomes a live, URL-bearing,
-  Obsidian-like site: file tree, `[[wikilinks]]`, syntax-highlighted code
-  (via [@pierre/diffs](https://diffs.com)), a recent rail. The viewer is
-  code (frozen in the deployed snapshot); notes are data (live via
-  `"liveFiles": true` — synced edits appear on reload, no redeploy).
-- **dropzone** — the vault plus a `drop/` folder and an `ingest` workflow
-  (`trigger: "files"`): drop a file, watch `output/` appear on the webview
-  and sync back into your folder seconds later.
-- **gen** — a prompt box that makes images and videos (`generateImage` /
-  `generateVideo` from the platform `ai` module, fal.ai behind the host's
-  key): no dials, cheap defaults, and every generation lands in `gen/` as
-  an ordinary file that syncs to your folder.
+## Try it locally
 
-Both are just folders — read the scaffolded code, edit it, re-deploy. See
-the Recipes section of `fragment guide`.
-
-Read [ARCHITECTURE.md](ARCHITECTURE.md) for the design and
-[docs/api.md](docs/api.md) for the wire contract. MIT licensed — see
-[LICENSE](LICENSE).
-
-## Install
-
-Grab a prebuilt binary from the [releases page](../../releases)
-(macOS arm64, Linux x86_64), put it on your `PATH`, then:
+One-time setup:
 
 ```
-fragment host https://fragment.club   # point at a host (once)
-fragment login                        # generate your nostr keypair (once)
-fragment guide                        # the full manual — start here
+rustup target add wasm32-unknown-unknown
+cargo install worker-build --version 0.8.5 --locked
+cargo xtask celld          # builds the celld fork into target/celld/bin
 ```
 
-Or build from source (Rust 1.75+):
+Then:
 
 ```
-git clone https://github.com/futurepaul/fragment
-cd cli && cargo install --path .
+cargo xtask dev            # the cell on :8790 and the code.storage fake on :8792
+cargo xtask try todo       # in another terminal: todo | inbox | notes
 ```
 
-## Quickstart (local, no cloud account, no docker)
+`try` creates and deploys a fragment from a template under
+`target/devstack/try/`, and prints the link to open and a `fragment`
+alias pointed at the dev stack. Fragments are served at
+`http://<name>.fragment.localhost:8790/`.
+
+## Tests
 
 ```
-scripts/dev up        # celld dev (local object store) + the mock code.storage on
-                      # :8789/:9940 — two native processes, no docker
-scripts/dev deploy    # rebuild the runtime + restart the dev host
-fragment login        # generate your nostr keypair (once)
-fragment create hello
-mkdir hello && cd hello
-# …add site/index.html, app.ts, workflows/*.ts…
-fragment build        # TS → runnable files, hashed site assets, parse gate
-fragment deploy hello --dir . --note v1   # sync, snapshot, GO LIVE → /f/hello/
-fragment rollback hello                   # step back to the previous snapshot
-fragment open hello   # prints URLs incl. the ?view= token
+cargo xtask check          # host tests, clippy on host and wasm, warnings denied
+cargo xtask e2e            # the full suite against a fresh celld node (--only <section>)
 ```
 
-Dev state lives in `.dev/` (`scripts/dev wipe` resets the world). For a real
-server, [docs/deploy-vps.md](docs/deploy-vps.md) is the production runbook
-(celld node + real bucket + Caddy); nothing else changes.
-
-## Deploy to Cloudflare
-
-The same runtime bundle also deploys to Cloudflare Workers (paid plan — the
-Worker Loader is the one exotic binding). Same code, different bindings:
-
-```
-cd runtime && npx wrangler login        # once, browser OAuth
-../scripts/deploy-cf deploy             # deploys + bakes in the worker URL
-../scripts/deploy-cf secret             # OPENROUTER_API_KEY + FAL_API_KEY
-                                        # from .env, plus FRAGMENT_HOST_SECRET
-                                        # (generated) that locks /__internal
-fragment --host https://<you>.workers.dev create hello
-```
-
-The CF footprint is deliberately tiny: Workers + Durable Object SQLite + the
-Worker Loader. No D1, no R2, no KV — one stateful primitive, one consistency
-model. Verified live (2026-08-20, wrangler 4.93.1): create/sync/deploy,
-token-gated serving, rooms over wss (presence + state + history), dynamic
-`app.mjs` in a loaded isolate, and workflows via the Worker Loader with the
-ctx loopback over the public hostname — including state persistence across
-runs.
-
-Two honest caveats:
-
-- **The Worker Loader is beta on CF.** Its module rules differ slightly from
-  celld's (string modules must be `.js`/`.py`; we wrap as `{js: …}` objects,
-  selected by the `FRAGMENT_HOST_KIND=cf` var). If CF changes the API, that
-  var is the single place to adapt.
-- **No backup export on CF.** DO storage has no dump API; on celld your
-  bucket *is* the backup (`sqlite3`-readable). If exportable state matters to
-  an org, that's the argument for the celld host.
-
-## What's verified
-
-These claims are executable: `scripts/e2e.mjs` runs them against a live host
-and fails loudly if any regress.
-
-```
-scripts/dev up && scripts/dev deploy
-node scripts/e2e.mjs        # add --all for the slow cron-fire check
-```
-
-The suite runs in CI on every push (macOS runner; Linux can't host it —
-see the celld caveats below). Snapshot from the last full pass
-(2026-08-29, celld v0.4.0, 386 checks):
-
-- NIP-98 auth end-to-end: create/list/status with signed requests; unsigned →
-  401; valid signature without role → 403. Rust CLI signatures verify against
-  the JS runtime (@noble/curves) and vice versa (cross-implementation pinned
-  npub test).
-- Files: read via the git plane (tree/stat/stream against `main@SHA`);
-  writes are commits to the code.storage repo (storage-token auth, CAS).
-- Deploy: `deploy --preview` creates an ephemeral ref (no served URL —
-  the ref is the preview); going live moves `live` and serves
-  `/f/<name>/`; token-gated canonical (`?view=`); rollback = re-pointing
-  `live` at a prior commit.
-- Dynamic apps: the deployed `app.mjs` (from the `live` ref) serves
-  computed responses in a loader isolate, with a persistent counter via
-  `ctx.state`.
-- Rooms: two websocket clients exchange messages; `state:set` persists; a
-  third client reconnecting gets `hello` with state + history; room without
-  the view token → 403; `rooms.mjs` errors → `room-error` events, drops →
-  `room-drop` events (both visible in `fragment events`).
-- Workflows: manual `run` (ctx.files/state/log all work); **cron fires via
-  durable alarm — including after the node was SIGKILLed and failed over
-  (~20s, per celld's documented failover), and after graceful restarts**;
-  inbox POST with token runs the inbox-triggered workflow; bad token → 403.
-- Sync: push, pull, remote-delete propagation, wrong-dir guard, and the
-  conflict path (both sides changed → if the contents are identical it
-  auto-resolves by adopting the remote rev; otherwise the remote copy is
-  saved as `<path>.remote-<ts>`, local kept, reported); git-init'd folders
-  honor `.gitignore` — ignored files and `.git/` never upload.
-- Write-CAS: `ctx.files.write(path, data, {ifRev})` conflicts on moved
-  rows; `ctx.files.stat` exposes live row + tombstones. Sync converges on
-  tombstones — remote deletions propagate instead of resurrecting; a
-  modified local copy beats the deletion.
-- Large files: chunked commit-packs to code.storage (≤4 MiB chunks, no
-  total cap); reads stream through with no size ceiling.
-- The static+API shape and `fragment build`: `site/index.html` owns the
-  root beside an `app.mjs` API; TS sources compile with sources kept,
-  hashed asset references rewritten (including stale hashes), and the
-  parse gate refusing broken bytes.
-- Web push: subscribe/unsubscribe routes register real browser
-  subscriptions against the fragment's VAPID key; the crypto stack
-  self-tests per cell before the first send (RFC 8291/8292, live-proven
-  against both Apple's and Google's push services).
-- Secrets: set/list/rm via CLI; values never leave the cell except into
-  workflow isolates at run time.
-- Grants: grant viewer → dev key can read; revoke → 403.
-- The loader loopback spike: a Worker-Loader isolate can fetch the host's own
-  listener (this is what makes `ctx.*` possible).
-
-## Web-hosting conventions
-
-How served fragments behave for browsers (details in `cli/GUIDE.md`, "Blob-first
-pushes"):
-
-- **Hashed asset naming**: files named `name.<hash8>.ext` — 8 lowercase hex
-  chars derived from the content, e.g. `app.a1b2c3d4.css` — are served with
-  `cache-control: public, max-age=31536000, immutable`, so deploys can churn
-  freely without cache-busting worries. Everything else gets `max-age=300`
-  (blessed snapshots change; short TTL keeps staleness boring).
-- **Fonts**: emit `woff2` and let the runtime serve it as `font/woff2`
-  (`font/woff`, `font/ttf`, `font/otf` likewise); the MIME map also covers
-  `webmanifest`, `svg`, and friends. Preload with `<link rel="preload"
-  as="font" type="font/woff2" crossorigin>`.
-- **Big media rides the repo**: files of any size commit to code.storage
-  in ≤4 MiB chunks and stream back on demand — the cell never buffers or
-  persists file bytes (a 64 MiB RAM cache covers the small/hot end; the
-  rest streams through). Keep genuinely huge media on a bucket/CDN only
-  for cost/taste reasons, not because the system requires it.
-
-## Contract decisions worth knowing
-
-- **Workflows read the pinned working copy** (`main@SHA`, refreshed by
-  webhook + poll). **Sites serve from `live@SHA`.** `app.mjs`/`rooms.mjs`
-  come from the `live` ref.
-- **Write-CAS is content-addressed**: `ctx.files.write` accepts `{ifSha}`
-  (from `ctx.files.stat`) and conflicts when the path's content sha moved;
-  `stat` returns `{sha, lastCommitSha, size, present}` — read-modify-write
-  loops pin their writes instead of clobbering.
-- **No tombstones**: under git, deleted and never-existed are the same
-  thing at a ref (`present: false`); history lives in the repo, and a
-  modified local copy beats a remote deletion at sync.
-- Cron subset: 5 fields, `*` lists ranges steps, month/day names; no
-  `L W # ?`; day-of-week 1=Sunday..7=Saturday (0 refused) — matches celld.
-- `fragment.json` is a git file — the manifest's authority is the repo;
-  `fragment manifest-set` is an edit-and-commit like any other.
-- `ctx.files.write` from `app.mjs` (blessed scope) → 403 — the serving
-  plane doesn't mutate the working copy.
-
-## celld alpha caveats observed
-
-- On 0.4.0, `celld deploy` no longer needs a node restart: running nodes
-  poll the deployment pointer and adopt the new version in ~30–40s
-  (observed across the prod fleet).
-- **`celld dev` on Linux restarts the worker on its own state writes** —
-  the dev watcher doesn't exclude `PROJECT/.celld`, so every cell write
-  bounces the host (~1s outage; macOS/FSEvents is quiet). This is why the
-  e2e job runs on a macOS runner. Repro and dead ends:
-  `wedge-repro/CELLD-DEV-WATCHER-SELF-RESTART.md` (upstream candidate).
-- Graceful shutdown can stall past its 25s drain deadline when a cell holds
-  hibernated websockets. Dev handles it with a force-kill fallback in
-  `scripts/dev`; for production rollouts, expect connected rooms clients to
-  ride out a failover (the `__rt.js` client auto-reconnects).
-- After a hard kill, cells show "owner unreachable" until the lease expires
-  (~20s), then restore from the bucket with zero acknowledged writes lost.
-- Restarting both fleet nodes at once wedges their peer tunnels (409s, all
-  500s until recovered). Safe order: full stop → wait for real process
-  exit → start main → start witness (the VPS units encode this ordering).
-- Not safe for hostile multi-tenant use (celld's own security page says so).
-  One fleet = one trust domain.
-- **The watch dir is paired to the bucket.** celld keeps local cell state in
-  `CELLD_WATCH`; pointing a node with an old watch dir at a fresh/empty
-  bucket can resurrect zombie cells whose bucket chain then fails restore
-  (`RestoreFailed`, bricking the name). `scripts/dev wipe` throws state and
-  tier away together for exactly this reason.
+The e2e stages its own copy of the cell, so it runs alongside
+`cargo xtask dev`. Its browser sections drive headless Chrome
+(`CHROME_BIN` to choose one).
 
 ## Layout
 
 ```
-ARCHITECTURE.md      the design, in plain language
-docs/api.md          CLI ↔ runtime wire contract (NIP-98, endpoints, rooms, ctx)
-docs/deploy-vps.md   production runbook: VPS + bucket + Caddy
-deploy/              systemd unit, Caddyfile, env template for the above
-cli/                 the Rust CLI (fragment) + GUIDE.md (agent doc)
-notify-relay/        the NOTIFY queue consumer (celld forbids fetch + queue
-                     consumer in one deployment)
-runtime/             the celld deployment (router + FragmentCell)
-scripts/dev          up | down | deploy | status | logs | wipe
-scripts/build-runtime  typecheck + compile runtime/ts → runtime/src
-scripts/e2e.mjs      the executable claims behind "What's verified"
-scripts/req.mjs      dev NIP-98 request helper (node)
-scripts/rooms-test.mjs  two-client rooms smoke test
+cell/          the cell: router, fragment supervisor, jobs, files, blobs, deliveries
+cli/           the fragment CLI and GUIDE.md (the agent guide)
+crates/proto   wire types and limits
+crates/core    the cell's pure logic, host-tested (schemas, cron, globs, sealing, web push)
+crates/nip98   NIP-98 signing and verification
+crates/fakes   code.storage, OpenRouter, and push-service fakes
+crates/devstack  runs a celld node and the fakes
+crates/e2e     the end-to-end suite
+templates/     todo, inbox, notes
+xtask/         build, celld, dev, try, check, e2e
+docs/          model, contract, roadmap, phase records, the debt ledger
+spikes/        the phase 1 spikes and their verdicts
 ```

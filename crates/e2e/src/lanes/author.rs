@@ -224,7 +224,7 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     let home = s.dir("cli-home");
     s.cli(api, &home, &["login"]);
     let keys = s.cli_keys(&home).expect("the CLI logged in");
-    let (name, _) = chat(s, api, &keys, "cli")?;
+    let (name, c) = chat(s, api, &keys, "cli")?;
     let r = s.cli_json(api, &home, &["call", &name, "say", "--input", r#"{"text":"from the cli"}"#, "--id", "cli-1", "--json"])?;
     s.ok("fragment call runs an operation", r["result"]["id"] == 1 && r["replayed"] == false, &r);
     let r = s.cli_json(api, &home, &["call", &name, "say", "--input", r#"{"text":"from the cli"}"#, "--id", "cli-1", "--json"])?;
@@ -250,6 +250,14 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = follow.kill();
     let _ = follow.wait();
     s.ok("fragment channel --follow streams new records", seen, std::fs::read_to_string(&log).unwrap_or_default());
+
+    // rotate renews what the CLI names; the webhook secret is code.storage's and changes only when asked
+    let r = s.cli_json(api, &home, &["rotate", &name, "--json"])?;
+    s.ok(
+        "fragment rotate renews the inbox token and the share link, not the webhook secret",
+        r["rotated"] == json!(["inbox", "view"]) && r["view_token"] != c["viewToken"] && r["webhook_secret"] == c["webhookSecret"],
+        json!({ "rotated": r["rotated"], "view_changed": r["view_token"] != c["viewToken"], "webhook_kept": r["webhook_secret"] == c["webhookSecret"] }),
+    );
     Ok(())
 }
 

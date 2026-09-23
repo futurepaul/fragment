@@ -1,423 +1,155 @@
-# Phase 2: the core cut
+# Phase 2: the core cut (done 2026-09-23)
 
-Status: started 2026-09-23 on Paul's go. This is the working plan for
-ROADMAP phase 2; the ROADMAP keeps the acceptance, this file keeps the
-slices. Update it in the same commit as the work.
+The TypeScript runtime was replaced by a Rust cell on the model in
+`docs/MODEL.md`, and the shell, Node, and Python tooling by `cargo
+xtask`, a Rust e2e, and Rust fakes. Every primitive in
+`docs/published-fragments.md` is re-expressed and has a Rust check. The
+contract is `docs/api.md`; this file is the record of how it got there
+and what was decided. The deleted tree is in git history at `35f5e18`.
 
-## Goal
+**Acceptance (ROADMAP), met:** valid, invalid, replay, and
+conflicting-body tests for every mutation (e2e `ops`, `schemas`);
+restart tests for the supervisor and facet storage (e2e `restart`: a
+graceful stop, a SIGKILL, a job sleeping through a SIGKILL); the
+published-fragment table green with no gap rows; no `.sh` or `.py` in the
+repo. The one gap: CI is written but has never run (no remote yet).
 
-Replace the TypeScript runtime with a Rust runtime on the model in
-`docs/MODEL.md` (operations, channels, live membership, the app facet,
-files in git with blob pointers, OpenRouter), and replace the shell, Node,
-and Python tooling with Rust (`cargo xtask`, a Rust e2e, Rust fakes).
-Every primitive in `docs/published-fragments.md` is re-expressed and
-proven.
-
-**Acceptance** (from the ROADMAP): valid, invalid, replay, and
-conflicting-body tests for every mutation; restart tests for the
-supervisor and facet storage; the published-fragment table green with no
-gap rows; no `.sh` or `.py` in the repo; `runtime/`, `scripts/`,
-`deploy/`, `notify-relay/`, and the Cloudflare path deleted.
-
-## Target layout
-
-```
-Cargo.toml            workspace
-cell/                 the celld project: wrangler.jsonc, entry.mjs (the JS
-                      shim), platform.mjs (runs in the facet), src/ (Rust)
-cli/                  the fragment CLI (existing), gains call/channel/members
-crates/proto/         wire types shared by cell, CLI, and e2e: operations,
-                      channel records, errors, limits
-crates/nip98/         NIP-98 auth: verify in the cell (wasm), sign on hosts
-crates/devstack/      starts, stops, and crashes celld dev nodes for xtask
-                      and the e2e
-crates/e2e/           the Rust e2e: drives the real node, the CLI, a browser
-crates/fakes/         code.storage (from cli/src/mockcs.rs), OpenRouter,
-                      a web push service
-xtask/                cargo xtask build | celld | dev | e2e | check
-templates/            todo, vault (reference apps on the new model)
-```
-
-`xtask celld` builds celld from `futurepaul/celld` at a pinned commit (the
-alarm fix) until a denoland release carries it.
-
-## What each old primitive becomes
-
-| Today (TS runtime) | Phase 2 |
-|---|---|
-| workflows as files (`workflows/*.mjs`), triggers, runs ledger | `job` operations run as Workflows; triggers in `fragment.json` name an operation; the ledger and job status replace the runs table; held runs, replay, auto-pause, hop budget move onto jobs |
-| rooms: messages, persisted document, presence | channels (WebSocket subscribe from a cursor), queries with change signals, presence per socket |
-| inbox table, `ctx.inbox` | the `inbox` channel; a webhook appends a record and triggers an operation; 1000 pending, then 429 |
-| `ctx.state` | the app's SQL (the facet) |
-| editors/viewers in `fragment.json` (git grants) | members and invites in the supervisor; `fragment members` |
-| event ledger, `fragment events` | the `events` channel |
-| `ctx.files` | a read capability for queries and jobs; writes are mutation effects or job steps; files of 1 MiB or more are pointers to blobs in Tigris |
-| web push (`webpush.ts`), notify relay | deliveries through a Queue, with a push-service fake in e2e |
-| fal image and video | OpenRouter text, image, video through a platform capability, with an OpenRouter fake in e2e |
-| dynamic `app.mjs` routes | the `App` class's optional `fetch` in the facet |
-| `scripts/dev`, `build-runtime`, JS e2e, `fal-fake.mjs`, JS code.storage mock | `cargo xtask`, `crates/e2e`, `crates/fakes` |
+**At the end:** `cargo xtask e2e` passes 444 of 444 checks in 27
+sections; `cargo xtask check` is clean (host tests, clippy on host and
+wasm). The cell is 5,227 lines of Rust and 539 KB of gzipped wasm. The
+cut deleted 22,086 lines (adding 652), 10.8k of them hand-written
+TypeScript and JavaScript (the runtime 5.5k, its tests 2.2k, `scripts/`
+2.8k, the old templates' code).
 
 ## Slices
 
-Each slice lands with its tests; the old runtime and `scripts/e2e.mjs`
-stay green until slice G deletes them together. **Checkpoints** are where
-Paul reviews before the next slice starts.
+| Slice | What landed | e2e |
+|---|---|---|
+| A. Workspace and harness | the Cargo workspace, `crates/proto`, `crates/nip98`, the cell from the spike, `crates/devstack`, `xtask` | 35 |
+| B. Identity, membership, the file plane | `crates/core`, the code.storage fake, members, invites, visibility, sealed secrets, pins and webhooks, deploy and sync against the cell | 246 |
+| C. Operations, the facet, channels | schemas, `(input, call)`, the effects outbox, channels over `__live`, `__fragment.js`, `App.fetch`, `fragment call` and `channel`, `templates/todo` | 310 |
+| D. Jobs, triggers, schedules | jobs as Workflows, runs, cron, channel and file triggers, the inbox channel, egress checks, `templates/inbox` | 371 |
+| E. Files and blobs | `this.files`, file effects and job steps with CAS, git-lfs pointers with bytes in R2, blob GC, `templates/notes`, `xtask try` | 415 |
+| F. Deliveries and AI | the delivery queue, web push (RFC 8291/8292 in Rust), `notifyUrls`, OpenRouter text, image, and video | 443 |
+| G. The cut | deleted `runtime/`, `scripts/`, `deploy/`, `notify-relay/`, the Node packages, and the old templates; the CLI lost `run`, `rooms`, `grant`, `revoke`; a new `fragment guide`; `rotate` leaves the webhook secret unless asked; CI on `cargo xtask` | 444 |
 
-**A. Workspace and harness.** The Cargo workspace, `crates/proto` (wire
-types), `crates/nip98`, `cell/` from the spike (router, supervisor, shim,
-`platform.mjs`), `crates/devstack`, `xtask` (`build`, `celld`, `dev`,
-`e2e`, `check`), and the first e2e cases: create, install an app, call a
-mutation, replay it, conflict it, restart and crash the node.
-**Checkpoint A**: the layout and the harness shape.
+Checkpoint A was approved by Paul; checkpoint C was approved with slice
+B's decisions ("no gold-plating before a usable demo"); checkpoint F
+passed on Paul's review of D–F ("nothing obviously wrong"), and he
+approved slice G. The live OpenRouter call it asked about moved to
+phase 3, with the hosted fleet.
 
-*Done 2026-09-23.* `cargo xtask check` is clean (host and wasm clippy,
-warnings denied); `cargo xtask e2e` passes 35/35 (auth, create, ops,
-restart with a graceful stop and a SIGKILL). The cell is 615 KB of wasm
-(215 KB gzipped) with NIP-98 verification in `k256`, which agrees with the
-CLI's `secp256k1` signer in both directions. Loaded app code is keyed by
-the SHA-256 of the platform wrapper plus the author's source, because the
-Worker Loader memoizes by id across every fragment in an isolate. `PUT
-code` is in the debt ledger until slice B, and the code.storage mock
-moves to `crates/fakes` in slice B, where the cell first needs it.
-**Checkpoint A approved by Paul (2026-09-23).**
+## What each old primitive became
 
-**B. Identity, membership, the file plane.** NIP-98 in the cell;
-fragment create/list; members, invites, roles; visibility (`public`,
-`link`, `members`) and anonymous principals for `public`-role operations;
-secrets wrapped at rest; the code.storage plane (storage tokens,
-`main`/`live` pins, the tree index, webhooks and the poll backstop);
-deploy, preview, rollback, drafts. e2e: the auth, lockdown, platform,
-deploy, and folder-sync lanes against the new cell. The hostname suffix
-and the fleet's settings are configuration, never constants (ROADMAP
-decision 13).
+| The TypeScript runtime | Now |
+|---|---|
+| workflows as files, triggers, the runs ledger | `job` operations run as Workflows; triggers in `fragment.json` name an operation; runs keep held, replay, auto-pause, and the hop budget |
+| rooms: messages, a persisted document, presence | channels from a cursor, live queries, presence per socket |
+| the inbox table, `ctx.inbox` | the `inbox` channel and its trigger |
+| `ctx.state` | the app's own SQLite (the facet) |
+| editors and viewers in `fragment.json` | members and invites in the cell |
+| the event ledger | the `events` channel |
+| `ctx.files` | `this.files` reads; writes as mutation effects or job steps; blobs for 1 MiB and up |
+| web push, the notify relay | deliveries through a Queue |
+| fal image and video | OpenRouter text, image, and video as job steps |
+| dynamic `app.mjs` | `App.fetch` in the facet |
+| `scripts/`, the JS e2e and mocks | `cargo xtask`, `crates/e2e`, `crates/fakes` |
 
-*Done 2026-09-23* (Paul away; its decisions below were approved with
-checkpoint C). `cargo xtask e2e` passes 246 of
-246 checks in 14 sections (auth, create, lockdown, members, secrets,
-files, deploy, ops, public, site, watch, sync, restart, pathmode) against
-a real node, the real CLI, and the code.storage fake; `cargo xtask check`
-is clean. The old JS e2e still passes against the TypeScript runtime with
-the changed CLI. The contract is in `docs/api.md` (first part).
+## Decisions
 
-What landed: `crates/core` (the cell's pure logic, host-tested: access,
-`fragment.json`, npub, sealed secrets, ES256 storage tokens, webhook
-signatures, serving helpers, the public-call rate limit);
-`crates/fakes` (a Rust code.storage fake, ported from the JS mock with
-the CLI mock's test hooks: url-form repo identity, ES256 JWT checks,
-per-commit trees, merges and restore commits, signed push webhooks; the
-CLI's unit tests run on it and `cli/src/mockcs.rs` is a 20-line shim);
-the cell's members, invites, visibility, secrets, file plane, serving,
-and a `Principal` cell per key that indexes "my fragments"; the CLI's
-`members`, `invite`, `join`, `visibility`, and `create --visibility`
-(and `grant`/`revoke` become member changes against the Rust cell);
-`cargo xtask dev` runs the fake beside the node with fragments at
-`<name>.fragment.localhost:8790`. `PUT code` is gone (e2e proves 404):
-code installs from the live commit. The cell is 1.06 MB of wasm (375 KB
-gzipped; P-256, AES-GCM, and `url` added 160 KB gzipped).
+Each is in `docs/api.md`.
 
-Decisions made in B (each in `docs/api.md`):
+Access (B):
+- Only the owner manages members, invites, visibility, and tokens; any
+  member may leave; no ownership transfer yet.
+- A share link counts as a viewer on `link` and `public` fragments,
+  and for nothing on `members` ones.
+- `fragment.json`'s `visibility`, `editors`, and `viewers` grant nothing
+  (`manifest.ignored`).
+- Anonymous visitors are `anon:` + a cookie's hash; browser calls must be
+  JSON; `public`-only callers get 60 calls a minute each, 600 per
+  fragment.
+- With a hostname suffix, `/f/<name>/…` redirects to the fragment's own
+  host; every path there is the fragment's, `/api/…` included (E).
+- Invites are single-use by default, last 7 days (30 at most), and are
+  kept only as hashes.
+- Secrets name the host secret that sealed them, so the fleet rotates
+  with `FRAGMENT_HOST_SECRET_PREVIOUS`.
+- Webhooks stay per fragment, signed with its own secret.
+- The manifest and the code follow their pins, so a read that failed in
+  an outage is retried by the next refresh.
 
-- **Only the owner manages access**: members, invites, visibility, and
-  token rotation. Editors can write files and secrets but cannot widen
-  who sees the fragment. Any member may leave; the owner cannot (no
-  ownership transfer yet).
-- **A share link counts as a viewer on `link` and `public` fragments**
-  (MODEL said `link`; on `public` it lifts a visitor from `public` to
-  `viewer`). On `members` fragments it counts for nothing.
-- **Operation ids belong to their caller**: the facet ledger keys a
-  mutation by principal and id, so one caller can neither replay nor
-  block another's id (anonymous visitors made this matter).
-- **Anonymous visitors** get an HttpOnly, SameSite=Lax cookie on the
-  fragment's origin; their principal is `anon:` + a hash of it. Browser
-  calls must be `application/json` (no cross-site forms). Callers holding
-  only `public` get 60 calls a minute each, 600 per fragment, in memory.
-- **With a hostname suffix, `/f/<name>/…` redirects** to the fragment's
-  own host (fragments sharing one origin could act as each other's
-  visitors); `__watch` stays there for the CLI.
-- **Invites** are single-use by default, last 7 days (30 at most), show
-  their token once, and keep only its hash.
-- **Secrets name their host secret** (`w1.<key id>.…`), so the fleet
-  rotates with `FRAGMENT_HOST_SECRET_PREVIOUS`; sealed per cell with
-  HKDF(host secret, the cell's npub).
-- **`fragment.json`'s `visibility`, `editors`, `viewers` grant nothing**;
-  the cell records a `manifest.ignored` event when they appear.
-- **Webhooks stay per fragment** (signed with its own secret, the old
-  contract). How code.storage registers them in production is open
-  (below).
-- **The manifest and the code follow their pins**: each records the
-  commit it was read from, so a read that failed during a code.storage
-  outage is retried by the next refresh, webhook, or poll (e2e `ops`
-  drives an outage through the fake).
-- **Deferred**: the public gallery (`/api/gallery`) to phase 7 (sharing);
-  `notifyUrls` to slice F (deliveries); `App.fetch` routes to slice C.
+Operations and channels (C):
+- `(input, call)` with `call.publish`; effects apply after the commit and
+  are swept after a restart.
+- Operation ids belong to their caller; the replay window is seven days.
+- Templates use the `public` role until sign-in exists (phase 4).
+- Channel records come only from the platform and from mutations; app
+  channels keep everything; `events` and `ops` keep 90 days and 10 000.
+- The browser library's names: `call`, `live`, `subscribe`,
+  `presence.set/on`, `me`.
 
-**C. Operations, the app facet, channels.** Operations declared in
-`fragment.json` with input schemas (a bounded JSON Schema subset in Rust);
-the facet with `platform.mjs`, the effects outbox and its sweep; channels
-(`events`, `inbox`, `ops`, app-declared) with retention; WebSocket
-subscriptions from a cursor, presence, change signals for live queries;
-the browser library (`fragment.call`, `fragment.subscribe`) that replaces
-`__rt.js`; `fragment call` and `fragment channel`; the todo template.
-e2e drives a browser. **Checkpoint C**: the author-facing API, reviewed on
-the todo app.
+Jobs (D):
+- Author code never runs in the Workflow: the job's body re-runs in the
+  facet by deterministic replay, and the Workflow only loops and calls
+  back. A step whose kind changed under a run fails it.
+- Secrets are opened only at the egress point (`{{NAME}}` in a fetch
+  header, the OpenRouter key), never in the facet, a step result, or a
+  run.
+- A triggered mutation is a one-step run; triggered runs act as the
+  fragment's own key with an editor's role.
+- The inbox is a channel; its pending records are its unfinished runs
+  (1000, then 429).
+- Pausing stops triggers, never calls; auto-pause after 5 held runs in
+  10 minutes or 120 triggered runs in an hour.
+- The hop budget (16) counts through channels, job calls, file commits,
+  and other fragments (`x-fragment-hops`).
+- A 429, 5xx, timeout, or platform error is retried 4 times with doubling
+  delays; anything else is final and catchable.
 
-*Done 2026-09-23.* **Checkpoint C approved by Paul (2026-09-23)**, with
-slice B's decisions: keep `(input, call)` and `call.publish`; templates
-use the `public` role until sign-in exists (no solving later phases
-early); the browser library's names stand; channels and the replay window
-as below. His direction: no gold-plating before a usable demo. `cargo xtask e2e`
-passes 310 of 310 checks in 20 sections (slice C added schemas, channels, live,
-routes, cli, browser; the browser section drives headless Chrome over
-the DevTools protocol, two tabs on the todo template). What landed:
+Files (E):
+- Apps read files at `main`; code comes from `live`.
+- One loaded worker per fragment: its env holds only its own
+  capabilities, and no module state is shared across fragments.
+- Mutations write last-writer-wins; jobs compare-and-swap.
+- The cell's own commits carry their writer's depth.
+- Blob pointers are git-lfs v1 pointers; blobs are at most 256 MiB; only
+  the latest versions' bytes are kept (7 days' grace).
 
-- **Operations**: `fragment.json` declares each operation's kind, role,
-  and input schema (a bounded JSON Schema subset, `crates/core/src/
-  schema.rs`, refused at deploy when it steps outside); inputs are checked
-  before the app runs and a refusal names the JSON pointer.
-- **The call context**: every method gets `(input, call)`: who is calling
-  (`call.principal`, `call.role`) and, in a mutation, `call.publish(
-  channel, body, kind)`. Published records are the mutation's effects,
-  kept in its ledger row, applied after the commit keyed by (ledger id,
-  index), and swept after a restart. The ledger keeps a mutation seven
-  days.
-- **Channels**: `events` (the audit trail moved here), `ops` (one record
-  per applied mutation), and app channels declared with a reader role.
-  Read a page over the API or live over `__live` from a cursor, with
-  presence and a change signal after every mutation.
-- **The browser library** `./__fragment.js`: `call`, `live`,
-  `subscribe`, `presence`, `me`, over one reconnecting socket.
-  The old JS e2e still passes 312 of 312 against the TypeScript runtime.
-- **Custom routes**: `App.fetch` answers every path that is not a site
-  file; `applib/` modules load with `app.mjs`.
-- **CLI**: `fragment call` and `fragment channel [--follow]`; `fragment
-  init` refreshes the cell so code installs at once.
-- **The todo template** (`templates/todo`, `fragment new --template
-  todo`).
+Deliveries and AI (F):
+- AI spends the fragment's own `OPENROUTER_API_KEY` until people
+  connect their own (phase 4); no platform key.
+- Images use OpenRouter's `/images` API; a video is a job's steps
+  (start, poll every 20 seconds, save).
+- Push subscriptions are tagged by `who`; unsubscribing names the
+  browser's own endpoint.
+- `notifyUrls` stay unsigned, as before.
 
-**Checkpoint C: what to review** (the author-facing API, on
-`templates/todo`):
+The cut (G):
+- `runs` stays (it lists the new runs); `run` is a call to a job;
+  `grant`/`revoke` are `members add`/`rm`; `rooms` are channels.
+- The pause body is `{op, paused}` (the `workflow` alias is gone).
+- `fragment rotate` renews the inbox token and the share link; the
+  webhook secret is code.storage's to know and rotates only when named
+  (`scopes: ["webhook"]`), since the cell's default is all three.
+- New fragments start from `todo`; the templates are `todo`, `inbox`,
+  and `notes`.
+- The notes viewer ships as a committed bundle with its source beside it
+  (debt ledger).
+- fragment.club keeps running the old runtime from
+  github.com/futurepaul/fragment, whose `docs/deploy-vps.md` is its
+  runbook, until phase 3's cutover.
 
-1. The shape of an app: `fragment.json` (operations, roles, schemas,
-   channels) plus an `App` class with one method per operation. Is
-   `(input, call)` with `call.publish` the right surface, or should
-   effects be returned (`return { result, publish: [...] }`)?
-2. Roles on the todo template are `public` (anyone who can open it can
-   change it) because browsers cannot act as members until sign-in
-   (phase 4). Keep that default for templates, or keep `editor` and
-   accept that the template is read-only in a browser until phase 4?
-3. The browser library's names: `call`, `live`, `subscribe`,
-   `presence.set/on`, `me`.
-4. Channel records are written only by the platform and by mutations
-   (never directly by clients), and app channels keep their records
-   forever (MODEL); `events` and `ops` keep 90 days and 10 000 records.
-5. A mutation's replay window is seven days (the facet's ledger is pruned
-   after that, keeping the 16 MiB facet budget for the app).
+## Deferred, with owners
 
-**D. Jobs, triggers, schedules.** `job` operations as Workflows whose
-steps call back into the supervisor; triggers (cron, inbox webhook, file
-change, channel message); schedules multiplexed on the supervisor's
-alarm; held runs, replay, auto-pause, the hop budget; secrets for jobs;
-the inbox cap.
-
-*Done 2026-09-23.* `cargo xtask e2e` passes 371 of 371 checks in 22 sections
-(slice D added `jobs` and `triggers`, and a job sleeping through a SIGKILL
-in `restart`); `cargo xtask check` is clean; the old JS e2e still passes
-312 of 312. The contract is in
-`docs/api.md` (Jobs and triggers). What landed:
-
-- **Jobs** (`cell/src/jobs.rs`, the `Job` Workflow in `cell/entry.mjs`,
-  `__job` in `platform.mjs`): a `job` method gets `(input, job)` with
-  four durable steps, `job.call`, `job.fetch`, `job.publish`,
-  `job.sleep`. Each run is a Workflow instance that asks the supervisor
-  to advance the job (the facet re-runs its body over the step results so
-  far, up to the next step) and then to perform that step; both answers
-  are Workflow step results, so a crash resumes at the step it was on.
-- **Runs**: every job call and every trigger is a run (`queued`,
-  `running`, `succeeded`, `held`, `blocked`) with `fragment runs`,
-  `replay`, `pause`, `unpause`, `triggers`, and `inbox` in the CLI (the
-  old commands keep their routes and bodies).
-- **Triggers** in `fragment.json`: cron (on the supervisor's alarm),
-  channel records (the `inbox` is a built-in channel), and file changes
-  on `main`.
-- **`crates/core`**: `cron` (five fields, Cloudflare's day numbering),
-  `glob` (file patterns), `egress` (which URLs a job may fetch), secret
-  placeholders.
-- **`templates/inbox`**: a webhook inbox whose deliveries a job turns
-  into lines on a live page (`fragment new --template inbox`).
-- The cell is 1.33 MB of wasm (470 KB gzipped, +95 KB).
-
-Decisions made in D (each in `docs/api.md`):
-
-- **Author code never runs in the Workflow.** A Workflow class must live
-  in the platform's script, so the job's body runs in the app facet by
-  deterministic replay and the Workflow only loops and calls back. A
-  body must reach its steps in the same order each time; a step whose
-  kind changed under a run (new code) fails it.
-- **Secrets reach only the egress point**: `{{NAME}}` in a fetch header
-  is opened in the supervisor as the request leaves, never in the facet,
-  a step result, or a run. This is the seam the "fork forever?" thread's
-  native egress would replace, with no change to apps.
-- **A triggered mutation is a one-step run**, so retries, held runs, and
-  replays work the same for mutations and jobs. Triggered runs act as
-  the fragment's own key with an editor's role (a trigger cannot run an
-  owner operation).
-- **The inbox is a channel** (`inbox`, the third built-in); its pending
-  records are its runs that have not succeeded (1000, then 429). The old
-  wire contract stands (`{source, payload}`, the token in
-  `x-fragment-inbox-token` or `?t=`).
-- **Pausing is per operation and stops only triggers**; calls always
-  run. Auto-pause after 5 held runs in 10 minutes or 120 triggered runs
-  in an hour; unpausing forgives the held runs before it.
-- **The hop budget counts through channels, job-to-job calls, and other
-  fragments** (`x-fragment-hops` on every fetch, read by the inbox); past
-  16 a run is blocked.
-- **Retries**: an upstream 429 or 5xx, a timeout, or a platform error is
-  retried 4 times with doubling delays (10 s first in production); any
-  other failure is final and the job may catch it. A replay re-runs the
-  job from the start: its call steps replay (same ids), its fetches run
-  again.
-- **Not now**: cancelling a run, `waitForEvent` (approvals arrive with
-  agents), per-operation retry policy, binary fetch bodies, per-secret
-  host allowlists. Each is in the debt ledger or waits for the phase
-  that needs it.
-
-**E. Files and blobs.** The files capability; CAS; pointers for files of
-1 MiB or more with bytes in Tigris (celld's R2 binding); blob deletion by
-reachability from branch tips; the CLI resolves pointers when it syncs;
-the vault template.
-
-*Done 2026-09-23* (Paul away; he asked for the well-scoped work to go
-on). `cargo xtask e2e` passes 415 of 415 checks in 25 sections (slice E
-added `appfiles`, `blobs`, and `notes`); the old JS e2e still passes 312
-of 312; `cargo xtask check` is clean. The contract is in `docs/api.md`
-(Files, Blobs). What landed:
-
-- **The app's files** (`cell/src/files.rs`): `this.files` reads at
-  `main` through a `FILES` capability in the facet's env (the `Files`
-  class in `cell/entry.mjs`, bound to one fragment by `props`); a
-  mutation's `call.files.write/remove` become one commit after it
-  commits; a job's `job.files.*` are steps, and its writes may
-  compare-and-swap on a file's blob sha. The cell commits to code.storage
-  itself (`crates/core` builds the commit pack).
-- **Blobs** (`cell/src/blobs.rs`, `cli/src/blobs.rs`): files of 1 MiB or
-  more are git-lfs pointers with their bytes in `BLOBS` (celld's R2 over
-  the fleet bucket); uploads stream through the router and are hashed on
-  the way in; the site serves pointers (with ranges); unreferenced blobs
-  are collected after a grace period; `fragment sync` uploads and
-  resolves them.
-- **`templates/notes`**: the vault viewer on the new model: notes read at
-  `main` through `App.fetch`, a file trigger and a live query refresh
-  open pages (`fragment new --template notes`, `cargo xtask try notes`).
-- **Tooling**: `cargo xtask try <template>`; the e2e runs its node from a
-  staged copy of the cell (`target/e2e/cell`), so it can never touch a
-  running `cargo xtask dev` (it did once this slice, wiping Paul's dev
-  state); the code.storage fake delivers webhooks after answering, as
-  the real service queues them.
-
-Decisions made in E (each in `docs/api.md`):
-
-- **Apps read files at `main`**, the working copy, not `live`: content
-  changes without a deploy; code still comes from `live`.
-- **One loaded worker per fragment.** The loader id includes the
-  fragment's npub, so an app's env holds only its own capabilities and
-  two fragments running the same template share no module state (before
-  E they shared an isolate's globals). The cost: no sharing of loaded
-  code across fragments.
-- **Mutations write last-writer-wins; jobs compare-and-swap.** A
-  mutation's file effects apply after it committed, when a conflict can
-  no longer refuse it; a job step can fail and let the job decide.
-- **The cell's own commits carry their writer's depth**, so a job that
-  writes the files its trigger watches stops at the hop budget (e2e
-  proves it).
-- **Blob pointers are git-lfs v1 pointers**, so git tools recognize them;
-  the bytes are the platform's (no LFS server). Blobs are at most
-  256 MiB; only the latest versions' bytes are kept (7 days' grace, so
-  a recent rollback keeps its large files).
-- **Every path on a fragment's own host is the fragment's**, `/api/…`
-  included; the platform API answers on the platform's host.
-- **The new-model vault is `templates/notes`**: the old `vault` stays
-  until slice G because the JS e2e deploys it to the TypeScript runtime;
-  both share one copy of the viewer bundle (`cli/build.rs`).
-- **Not now**: large files written by apps (slice F's generated images
-  and video will need job steps that store blobs), file reads inside
-  mutations, per-file history.
-
-**F. Deliveries and AI.** Web push and outbound webhooks through a Queue;
-OpenRouter text, image (`google/gemini-3.1-flash-lite-image`), and video
-(`minimax/hailuo-3-max`) with the fake in e2e. The published-fragment
-table all green. **Checkpoint F**: before the cut.
-
-*Done 2026-09-23* (Paul away). `cargo xtask e2e` passes 443 of 443 checks
-in 27 sections (slice F added `push` and `ai`); the old JS e2e still
-passes 312 of 312; `cargo xtask check` is clean. Every row of
-`docs/published-fragments.md` has a Rust check (the browser half of web
-push is driven by hand only: debt ledger). The contract is in
-`docs/api.md` (Deliveries, AI). What landed:
-
-- **Deliveries** (`cell/src/deliveries.rs`): one queue,
-  `fragment-deliveries`, consumed by the cell itself; the fragment builds
-  each request whole, the consumer sends it, retries with a wait that
-  grows with its age, drops gone push subscriptions, and reports what runs
-  out of retries (its dead-letter queue).
-- **Web push** (`cell/src/push.rs`, `crates/core/src/webpush.rs`,
-  `cell/sw.js`): RFC 8291 encryption and RFC 8292 VAPID in Rust (checked
-  against the old runtime's encryption), per-fragment VAPID keys sealed
-  like secrets, the old routes and browser API (`fragment.push`,
-  `fragment.notify`), `call.push` and `job.push`.
-- **`notifyUrls`**: the old `changed` frames, through the queue.
-- **AI** (`cell/src/ai.rs`): `job.ai.text`, `image`, and `video` on
-  OpenRouter's documented APIs (chat completions, `/images`, the
-  asynchronous `/videos`), with the fragment's key; media stored as files.
-- **Fakes** (`crates/fakes`): OpenRouter (text, images, videos, the
-  bearer key, failure levers) and a push service that checks VAPID and
-  decrypts, plus a `notifyUrls` receiver.
-
-Decisions made in F (each in `docs/api.md`):
-
-- **AI spends the fragment's own `OPENROUTER_API_KEY`** (docs/secrets.md:
-  an app's key lives in its fragment); a person's own key, connected with
-  OpenRouter's OAuth, replaces it in phase 4. No platform key.
-- **Images go through OpenRouter's `/images` API**, not chat
-  completions: OpenRouter adds new image models to it only.
-- **A video is a job's steps**: start, poll every 20 seconds, save. The
-  wait is durable (a crash resumes it) and holds nothing.
-- **Push subscriptions are tagged by `who`** as before, and unsubscribing
-  names the browser's own endpoint (the old runtime dropped every
-  subscription with a `who`, which let anyone unsubscribe anyone).
-- **`notifyUrls` stay unsigned**, as they were; a receiver that needs to
-  trust them can be given a signature when one exists.
-- **Not now**: a live check against OpenRouter and a real push service
-  (both cost or need a hosted fleet: Paul's call), spend limits (debt
-  ledger).
-
-**Checkpoint F: what to review** (before slice G deletes the TypeScript
-runtime, `scripts/`, `deploy/`, `notify-relay/`, and the old templates):
-
-1. The published-fragment table: is every primitive you care about
-   expressed? (Each row names its Rust check.)
-2. The author API as it stands: `(input, call)` with `call.publish`,
-   `call.files`, `call.push`; jobs with `job.call/fetch/publish/sleep/
-   files/push/ai`; `this.files`; triggers in `fragment.json`.
-3. AI on the fragment's own key until people connect theirs (phase 4).
-4. Whether to spend a few cents on one live OpenRouter call (text, one
-   small image) with your key before the cut, to prove the real API
-   shape against the fake.
-5. Slice G deletes the old runtime and its JS e2e; the Rust e2e is the
-   only suite after it.
-
-**G. The cut.** Delete `runtime/`, `scripts/`, `deploy/`,
-`notify-relay/`, `runtime/wrangler.cf.jsonc`, and the old templates;
-update `AGENTS.md`, the README, and the docs; the debt ledger drops the
-TypeScript-runtime and tooling entries.
-
-## Open inside the phase (decided in the slice that needs them)
-
-- How code.storage webhooks are registered on the real service (the docs
-  describe deliveries, not registration). If registration is per org,
-  phase 3 adds one org route that verifies the org's secret and routes by
-  `repository.url`; if per repo, the cell registers its own at create.
-
-- The browser driver for the e2e (slice C): Chrome over CDP from Rust.
-- How the CLI keeps working against both runtimes during slices B–F:
-  the wire contract stays; commands that only the old model had (`run`,
-  `runs`, `rooms`, `grant`) are cut in slice G.
+- **Phase 3:** how code.storage registers webhooks on the real service
+  (per org: one org route that routes by `repository.url`; per repo: the
+  cell registers its own at create); an outbound firewall for job egress;
+  a live OpenRouter call and a real phone's push; CI's first run.
+- **Debt ledger:** spend limits, per-secret host allowlists, resumable
+  blob uploads, channel retention, the effects-sweep fault test, the
+  browser half of web push, the viewer bundle.
+- **When a phase needs them:** cancelling a run, `waitForEvent`
+  (approvals, with agents), per-operation retry policy, binary fetch
+  bodies, file reads inside mutations, per-file history, the public
+  gallery (phase 7).

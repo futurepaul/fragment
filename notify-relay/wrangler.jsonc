@@ -1,8 +1,0 @@
-{
-  "name": "fragment-notify-relay",
-  "main": "index.js",
-  "compatibility_date": "2026-01-01",
-  "queues": {
-    "consumers": [{ "queue": "fragment-notify" }]
-  }
-}

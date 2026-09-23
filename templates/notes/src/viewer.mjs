@@ -1,5 +1,17 @@
-// vault viewer client — hash routing, markdown via marked, code files via
+// The notes viewer: hash routing, markdown via marked, code files via
 // @pierre/diffs' File component (Shiki highlighting), plain <pre> fallback.
+//
+// The template ships the bundle this builds (`site/assets/`, committed);
+// the repo has no Node tooling, so rebuilding is by hand, in a scratch
+// folder with marked 18.0.4, @pierre/diffs 1.2.2, and esbuild 0.25.12:
+//   esbuild viewer.mjs --bundle --format=esm --splitting --minify
+//     --target=es2022 --outdir=assets --entry-names=[name]
+//     --chunk-names=chunks/[name]-[hash]
+// then keep only the shared chunks and the languages the viewer names
+// (markdown, json, javascript, typescript, rust, python, bash, yaml, css,
+// html, xml, diff, sql, toml, c, cpp, go, java, ruby, swift, lua, and the
+// pierre-dark and pierre-light themes); a missing chunk falls back to
+// <pre>. The last build script is `scripts/build-templates.mjs` at 35f5e18.
 import { marked } from "marked";
 import { File as PierreFile, preloadHighlighter } from "@pierre/diffs";
 

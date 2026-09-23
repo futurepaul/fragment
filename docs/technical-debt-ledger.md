@@ -7,11 +7,12 @@ without a delete condition is unfinished design, not debt.
 
 ## Author code shares a process with every fragment and the host secrets
 
-- **Observed:** workflow bodies, `app.mjs`, and `rooms.mjs` run in loader
-  isolates inside the same celld process that holds
-  `FRAGMENT_HOST_SECRET`, the code.storage org key, and every other
-  fragment's cells. fragment's README lists hostile multi-tenant
-  isolation as a non-goal while celld is alpha.
+- **Observed:** each fragment's `app.mjs` (its operations, jobs, and
+  `fetch`) runs in a loaded worker inside the same celld process that
+  holds `FRAGMENT_HOST_SECRET`, the code.storage org key, and every other
+  fragment's cells. Its env holds only its own capabilities, but an
+  isolate escape is not ruled out: celld's own security page calls it
+  not safe for hostile multi-tenant use while it is alpha.
 - **Risk:** an isolate escape or side channel reads other fragments' data
   and the host's secrets.
 - **First proof:** any author able to publish code they did not write
@@ -21,20 +22,6 @@ without a delete condition is unfinished design, not debt.
   (a separate fleet reached only through per-fragment capability
   tokens), proven by a test that an author isolate cannot reach another
   fragment or a host secret.
-
-## The cell runtime is TypeScript, not Rust
-
-- **Observed:** celld runs Workers-style JavaScript; `runtime/ts` is
-  ~5.2k lines compiled with esbuild and type-checked with tsc.
-- **Risk:** two languages in the product core; runtime errors are
-  strings, not typed enums, at the cell boundary.
-- **First proof:** a bug class the Rust type system or typed errors
-  would have caught, found in the runtime.
-- **Delete when:** the platform cells are rewritten in Rust during the
-  core cut. The spike that gated this passed on 2026-09-23
-  (`spikes/cells-rs/README.md`): workers-rs 0.8.5 covers SQL, alarms,
-  hibernatable WebSockets, the Worker Loader, and facets, with a ~35-line
-  JavaScript shim, 181 KB of gzipped wasm, and ~9 ms once per isolate.
 
 ## The browser half of web push is not driven by a test
 
@@ -49,29 +36,6 @@ without a delete condition is unfinished design, not debt.
   hosted fragment.
 - **Delete when:** a manual check on a hosted fleet (phase 3) is recorded,
   or a browser test can run with a local push service.
-
-## Shell, Node, and Python tooling
-
-- **Observed:** `scripts/dev` and `scripts/build-runtime` (bash),
-  `scripts/*.mjs` (e2e, fakes, helpers), `deploy/caddy-ask.py`, systemd
-  units for the VPS.
-- **Risk:** infrastructure in languages the engineering style excludes;
-  untyped glue that fails at runtime.
-- **First proof:** already present.
-- **Delete when:** phase 2 lands the `xtask` crate and the Rust e2e, and
-  phase 3 replaces the VPS deploy with Fly. Slice A landed `xtask` and the
-  Rust e2e; slice B landed the Rust code.storage fake (`crates/fakes`),
-  which the CLI's tests use. The JS mock and `scripts/` remain only for the
-  TypeScript runtime until slice G.
-
-## The e2e generation lane needs a fake host flag
-
-- **Observed:** the `gen` lane only passes when the dev stack starts
-  with `E2E_FAL_FAKE=1`; otherwise it fails for lack of a fal key.
-- **Risk:** a red suite that is only red because of how it was started.
-- **First proof:** 2026-09-23 baseline (10 failures without the flag).
-- **Delete when:** phase 1 moves generation to OpenRouter and the Rust
-  harness always starts its own OpenRouter fake.
 
 ## celld 0.5.1 holds an alarm open while its handler's timers run
 
@@ -125,7 +89,7 @@ without a delete condition is unfinished design, not debt.
 
 ## The poll backstop wakes every fragment every five minutes
 
-- **Observed:** phase 2 slice B, as in the TypeScript runtime: each
+- **Observed:** phase 2 slice B, as in the old runtime: each
   fragment's alarm re-reads both branch heads every
   `FRAGMENT_POLL_INTERVAL_S` (300 s) in case a webhook was lost.
 - **Risk:** cost and code.storage traffic grow with the number of
@@ -271,3 +235,17 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** workers-rs or celld agree on the names (a one-line
   upstream change on either side).
 
+## The notes viewer is a prebuilt bundle
+
+- **Observed:** phase 2 slice G. `templates/notes/site/assets/` is
+  committed esbuild output (marked 18.0.4 and @pierre/diffs 1.2.2, with
+  Shiki's language chunks trimmed to a list); its source is
+  `templates/notes/src/viewer.mjs`. The repo has no Node tooling, so a
+  rebuild is by hand (the recipe is at the top of the source).
+- **Risk:** a viewer change needs a toolchain the repo no longer has;
+  third-party code ships in every notes fragment without a build the
+  repo can reproduce.
+- **First proof:** the first change to the viewer, or an advisory
+  against marked or Shiki.
+- **Delete when:** the viewer is small enough to ship as source (no
+  bundler), or the desktop phase replaces it with its own file viewer.

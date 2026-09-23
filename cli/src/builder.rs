@@ -7,8 +7,7 @@
 //! at build time instead of discovered by users.
 //!
 //! The compiled outputs are plain, inspectable files, committed to the
-//! folder and synced like any other content: same contract as the
-//! platform's own `runtime/src` (generated, but readable).
+//! folder and synced like any other content (generated, but readable).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

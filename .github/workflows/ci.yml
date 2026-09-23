@@ -1,105 +1,50 @@
-# fragment CI: unit tests for the Rust CLI, the runtime unit suite (node
-# --test against the mock code.storage server), and the e2e suite against
-# celld 0.4.0's `celld dev` (local object store).
+# fragment-next CI: `cargo xtask check` and `cargo xtask e2e`, as run
+# locally. The e2e runs on macOS, where it has been proven; it builds the
+# celld fork (`cargo xtask celld`) and drives the Chrome the runner has.
 name: ci
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CELLD_VERSION: v0.4.0
-
 jobs:
-  rust:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
       - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            cli/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('cli/Cargo.lock') }}
-      - name: unit tests
-        run: cargo test
-        working-directory: cli
+            target
+          key: check-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - run: cargo xtask check
 
-  # e2e runs on macOS on purpose: celld dev's watcher restarts the worker when
-  # its own state writes land under PROJECT/.celld on linux/inotify (FSEvents
-  # on macOS is path-rooted and stays quiet — the same suite is green locally
-  # and churns in a linux container; repro in wedge-repro/). Until celld
-  # excludes its state from the watch set, the suite needs the mac watcher.
   e2e:
     runs-on: macos-14
-
-    env:
-      # optional: with this secret set, the guide's ai blocks run in CI too
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
       - uses: dtolnay/rust-toolchain@stable
-
-      - name: install celld (pinned)
-        run: |
-          mkdir -p ~/.local/bin
-          curl -fsSL "https://github.com/denoland/celld/releases/download/${CELLD_VERSION}/celld-aarch64-apple-darwin.gz" \
-            | gunzip > ~/.local/bin/celld
-          chmod +x ~/.local/bin/celld
-          ~/.local/bin/celld --version
-
-      - name: root deps (@noble for signing)
-        run: npm install --no-audit --no-fund
-
-      - name: runtime typecheck + build freshness
-        run: |
-          scripts/build-runtime
-          git diff --exit-code --quiet runtime/src || {
-            echo "runtime/src is stale — run scripts/build-runtime and commit"; exit 1; }
-
+        with:
+          targets: wasm32-unknown-unknown
       - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            cli/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('cli/Cargo.lock') }}
-
-      - name: build CLI
-        run: cargo build
-        working-directory: cli
-
-      - name: runtime unit tests (mock code.storage)
-        run: node --test runtime/test/
-
-      - name: bring up the native stack (celld dev + mock code.storage)
-        run: |
-          export FRAGMENT_HOST_SECRET="$(openssl rand -hex 32)"
-          # E2E_FAL_FAKE stands in a local fal queue with a dummy key, so
-          # the gen tools (ctx.image/ctx.video) get full-pipeline coverage
-          # in CI without spending money or holding a key
-          export E2E_FAL_FAKE=1
-          scripts/dev up
-
-      - name: e2e suite
-        run: >
-          FRAGMENT_BIN="$PWD/cli/target/debug/fragment"
-          node scripts/e2e.mjs --all
-
-      - name: host logs on failure
-        if: failure()
-        run: |
-          grep -E "change detected|watch" -A2 .dev/celld-dev.log 2>/dev/null | tail -60 || true
-          tail -80 .dev/celld-dev.log 2>/dev/null || true
-          tail -40 .dev/cs-mock.log 2>/dev/null || true
+            ~/.cargo/bin
+            target
+          key: e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - run: cargo install worker-build --version 0.8.5 --locked
+      - run: cargo xtask celld
+      - run: cargo xtask e2e

@@ -36,8 +36,8 @@ weight.
    so a fragment can own a computer.
 
 The verbs are the CLI's: create, sync, deploy (preview, rollback),
-grant/revoke, call (operations), append/read (channels), and a
-computer's wake/exec.
+members and invites, call (operations), read and follow (channels), and
+a computer's wake/exec.
 
 ## Decisions (made 2026-09-23)
 
@@ -119,7 +119,7 @@ computer's wake/exec.
 | Agent conversations and turns | the agent's cell (goose's conversation in SQL) | a computer holds a working copy and a tool journal; effects dedupe at their owners by tool-call id |
 | Computer disks | Sprites durable storage | the front door's registry records ownership only |
 | Secrets (personal, fragment, host, OpenRouter, code.storage, Sprites) | the owning cell, encrypted; fleet secrets in the deployed config (`docs/secrets.md`) | never in a repo, a bucket in plaintext, a log, a command line, or a computer's disk; computers use Sprites connectors |
-| Compute/audit trail | events ledger | webhook deliveries recorded as events, deduped by delivery key |
+| Compute/audit trail | the `events` channel | webhook deliveries recorded as events, deduped by delivery key |
 
 Hard rule kept: **no file bytes persist in cell SQLite.** File bytes live
 in git, or, at 1 MiB and above, in the bucket as content-addressed blobs
@@ -178,9 +178,12 @@ deployment.
   without repeated effects); `docs/MODEL.md` updated to match; Paul's
   open questions answered.
 
-### 2. The core cut
-- Started 2026-09-23 on Paul's go; slices, checkpoints, and the
-  primitive mapping live in `docs/phase-2.md`.
+### 2. The core cut (done 2026-09-23)
+- Done in seven slices on Paul's go; the record (what landed, every
+  decision, what was deferred and to whom) is `docs/phase-2.md`. The
+  Rust e2e passes 444 of 444; the TypeScript runtime, `scripts/`,
+  `deploy/`, `notify-relay/`, and the Node packages are deleted; CI is
+  written for `cargo xtask` but has not run (no remote).
 - Operations, channels, membership, the app facet, blob pointers, and
   OpenRouter (text, image, video) replace workflows-as-files, rooms
   documents, inbox tables, `ctx.state`, git grants, and fal, in hard
@@ -191,9 +194,10 @@ deployment.
   `e2e`, `deploy`), a Rust e2e that drives the real server, CLI, and a
   browser, and Rust fakes for code.storage, OpenRouter, and a push
   service. `scripts/`, `deploy/`, and the Cloudflare path are deleted;
-  the JavaScript e2e is the safety net until the Rust one supersedes it.
-- `fragment call`, `fragment channel`, `fragment members` in the CLI; a
-  todo template and a vault template as the reference apps.
+  the JavaScript e2e was the safety net until the Rust one superseded
+  it (slice G).
+- `fragment call`, `fragment channel`, `fragment members` in the CLI;
+  the `todo`, `inbox`, and `notes` templates as the reference apps.
 - **Acceptance:** valid, invalid, replay, and conflicting-body tests for
   every mutation; restart tests for the supervisor and facet storage;
   the published-fragment table fully green with no gap rows; no `.sh` or
