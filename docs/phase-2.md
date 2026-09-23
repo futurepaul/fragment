@@ -91,8 +91,8 @@ deploy, and folder-sync lanes against the new cell. The hostname suffix
 and the fleet's settings are configuration, never constants (ROADMAP
 decision 13).
 
-*Done 2026-09-23* (Paul away; no checkpoint on B, so the decisions below
-are open to his review at checkpoint C). `cargo xtask e2e` passes 246 of
+*Done 2026-09-23* (Paul away; its decisions below were approved with
+checkpoint C). `cargo xtask e2e` passes 246 of
 246 checks in 14 sections (auth, create, lockdown, members, secrets,
 files, deploy, ops, public, site, watch, sync, restart, pathmode) against
 a real node, the real CLI, and the code.storage fake; `cargo xtask check`
@@ -161,7 +161,11 @@ the browser library (`fragment.call`, `fragment.subscribe`) that replaces
 e2e drives a browser. **Checkpoint C**: the author-facing API, reviewed on
 the todo app.
 
-*Done 2026-09-23 (Paul away); waiting at checkpoint C.* `cargo xtask e2e`
+*Done 2026-09-23.* **Checkpoint C approved by Paul (2026-09-23)**, with
+slice B's decisions: keep `(input, call)` and `call.publish`; templates
+use the `public` role until sign-in exists (no solving later phases
+early); the browser library's names stand; channels and the replay window
+as below. His direction: no gold-plating before a usable demo. `cargo xtask e2e`
 passes 310 of 310 checks in 20 sections (slice C added schemas, channels, live,
 routes, cli, browser; the browser section drives headless Chrome over
 the DevTools protocol, two tabs on the todo template). What landed:
