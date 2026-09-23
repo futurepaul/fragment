@@ -124,6 +124,27 @@ impl Facet {
     }
 }
 
+/// Stops the `app` facet and deletes its database (a deleted fragment).
+pub fn delete_app_facet(ctx: &JsValue) -> CellResult<()> {
+    let facets = get(ctx, "facets")?;
+    call(&facets, "delete", &[APP_FACET.into()]).map_err(|e| CellError::host(format!("facets.delete: {}", js_message(&e))))?;
+    Ok(())
+}
+
 pub fn now_ms() -> i64 {
     js_sys::Date::now() as i64
+}
+
+/// Cryptographically random bytes (`crypto.getRandomValues`).
+pub fn random_bytes<const N: usize>() -> [u8; N] {
+    let crypto = Reflect::get(&js_sys::global(), &JsValue::from_str("crypto")).expect("globalThis.crypto");
+    let buf = js_sys::Uint8Array::new_with_length(N as u32);
+    call(&crypto, "getRandomValues", &[buf.clone().into()]).expect("crypto.getRandomValues");
+    let mut out = [0u8; N];
+    buf.copy_to(&mut out);
+    out
+}
+
+pub fn random_hex<const N: usize>() -> String {
+    hex::encode(random_bytes::<N>())
 }

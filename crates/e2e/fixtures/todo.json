@@ -1,0 +1,10 @@
+{
+  "name": "todo",
+  "operations": {
+    "add_todo": { "kind": "mutation", "input": { "type": "object" } },
+    "add_then_throw": { "kind": "mutation" },
+    "add_async": { "kind": "mutation" },
+    "list": { "kind": "query" },
+    "count": { "kind": "query" }
+  }
+}

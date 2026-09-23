@@ -108,6 +108,15 @@ pub fn verify(header: Option<&str>, method: &str, url: &str, body: &[u8], now_s:
     Ok(pubkey.to_string())
 }
 
+/// The x-only public key (64 hex) of a 64-hex secret key, or `None` when
+/// the secret is not a valid secp256k1 scalar. Needs no randomness, so the
+/// cell uses it to check a fragment secret a client generated.
+pub fn pubkey_of_secret(secret_hex: &str) -> Option<String> {
+    let bytes = hex::decode(secret_hex).ok().filter(|b| b.len() == 32)?;
+    let key = k256::schnorr::SigningKey::from_bytes(&bytes).ok()?;
+    Some(hex::encode(key.verifying_key().to_bytes()))
+}
+
 /// A signing identity (hosts only).
 #[cfg(feature = "sign")]
 pub struct Keys {
@@ -158,6 +167,14 @@ impl Keys {
 
 #[cfg(all(test, feature = "sign"))]
 mod tests {
+    #[test]
+    fn pubkey_of_secret_matches_keys() {
+        let k = super::Keys::generate();
+        assert_eq!(super::pubkey_of_secret(&k.secret_hex()).as_deref(), Some(k.pubkey_hex()));
+        assert_eq!(super::pubkey_of_secret(&"0".repeat(64)), None);
+        assert_eq!(super::pubkey_of_secret("abc"), None);
+    }
+
     use super::*;
     use secp256k1::{Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
 

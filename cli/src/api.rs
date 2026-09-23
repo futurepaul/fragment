@@ -27,7 +27,7 @@ pub fn code_for(status: u16, summary: &str) -> &'static str {
         404 => "not_found",
         // base-rev mismatch and other racing writes are conflicts; the
         // registry's duplicate-name response gets its own sharper code
-        409 if summary.contains("name taken") => "name_taken",
+        409 if summary.contains("name taken") || summary.contains("already exists") => "name_taken",
         409 => "conflict",
         413 => "too_large",
         429 => "rate_limited",
@@ -68,9 +68,11 @@ impl Resp {
     pub fn ok(&self) -> bool {
         (200..300).contains(&self.status)
     }
+    /// The server's explanation: `message` (the Rust cell's
+    /// `{error: code, message}`), else `error` (the TypeScript runtime's).
     pub fn err_summary(&self) -> String {
         match self.json() {
-            Ok(v) => v["error"].as_str().unwrap_or("unknown error").to_string(),
+            Ok(v) => v["message"].as_str().or_else(|| v["error"].as_str()).unwrap_or("unknown error").to_string(),
             Err(_) => String::from_utf8_lossy(&self.body).chars().take(200).collect(),
         }
     }

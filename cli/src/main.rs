@@ -53,7 +53,12 @@ enum Cmd {
         url: Option<String>,
     },
     /// Create a fragment
-    Create { name: String },
+    Create {
+        name: String,
+        /// public | link (default) | members
+        #[arg(long)]
+        visibility: Option<String>,
+    },
     /// List fragments you have a role on
     List,
     /// Status of a fragment (counts, live snapshot, crons, share link)
@@ -197,6 +202,20 @@ enum Cmd {
     Grant { name: String, #[arg(long)] editor: Vec<String>, #[arg(long)] viewer: Vec<String> },
     /// Revoke a role from an npub or NIP-05 name
     Revoke { name: String, #[arg(long)] editor: Vec<String>, #[arg(long)] viewer: Vec<String> },
+    /// A fragment's members: list, add, remove, or leave
+    Members {
+        #[command(subcommand)]
+        sub: MembersCmd,
+    },
+    /// Invites: a token that makes whoever redeems it a member
+    Invite {
+        #[command(subcommand)]
+        sub: InviteCmd,
+    },
+    /// Join a fragment with an invite token
+    Join { name: String, token: String },
+    /// Show or set who can see a fragment: public | link | members
+    Visibility { name: String, value: Option<String> },
     /// Post to a fragment's inbox (webhook-style, token auth)
     Inbox {
         name: String,
@@ -222,6 +241,46 @@ enum Cmd {
         #[arg(long)]
         list: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum MembersCmd {
+    /// List members and their roles
+    List { name: String },
+    /// Add a member, or change their role (owner only)
+    Add {
+        name: String,
+        /// npub, 64-hex key, or NIP-05 name (name@domain)
+        who: String,
+        /// viewer | editor
+        #[arg(long, default_value = "viewer")]
+        role: String,
+    },
+    /// Remove a member (owner only)
+    Rm { name: String, who: String },
+    /// Leave a fragment you are a member of
+    Leave { name: String },
+}
+
+#[derive(Subcommand)]
+enum InviteCmd {
+    /// Make an invite (owner only); prints the token once
+    Create {
+        name: String,
+        /// viewer | editor
+        #[arg(long, default_value = "viewer")]
+        role: String,
+        /// how many people may join with it
+        #[arg(long, default_value = "1")]
+        uses: u32,
+        /// lifetime in seconds (default 7 days, at most 30)
+        #[arg(long)]
+        ttl: Option<i64>,
+    },
+    /// List open invites (owner only; tokens are never shown again)
+    List { name: String },
+    /// Revoke an invite by id (owner only)
+    Revoke { name: String, id: String },
 }
 
 #[derive(Subcommand)]
@@ -550,14 +609,18 @@ fn run(cli: Cli) -> Result<()> {
     let c = require_client(&cli.host, cli.verbose)?;
 
     match cli.cmd {
-        Cmd::Create { name } => {
+        Cmd::Create { name, visibility } => {
             // Client-side fragment identity (ROADMAP level-c fix): the
             // npub keypair is generated HERE, and the secret crosses the
             // wire exactly once as `fragmentSecret` (the field the create
             // route reads), inside the creator's NIP-98-authenticated
             // request; the runtime stores it wrapped and the CLI drops it.
             let fid = auth::Identity::generate();
-            let v = c.call(c.post_json("/api/fragments", &json!({ "name": name, "fragmentSecret": hex::encode(fid.secret) }))?)?;
+            let mut body = json!({ "name": name, "fragmentSecret": hex::encode(fid.secret) });
+            if let Some(vis) = &visibility {
+                body["visibility"] = json!(vis);
+            }
+            let v = c.call(c.post_json("/api/fragments", &body)?)?;
             let npub = v["npub"].as_str().unwrap_or_default().to_string();
             let npub = if npub.is_empty() { fid.npub() } else { npub };
             if j {
@@ -801,18 +864,19 @@ fn run(cli: Cli) -> Result<()> {
                     landed.ok_or_else(|| anyhow!("live kept moving under {MAX_CAS_ATTEMPTS} deploy attempts; re-run"))?
                 }
             };
-            let live_url = format!("{}/f/{}/", c.host.trim_end_matches('/'), name);
             // the live move is an external ref change from the cell's
             // perspective — nudge the pins so serving sees THIS deploy now,
             // not at the next poll backstop (best-effort; the poll covers)
             if let Err(e) = c.post_json(&format!("/api/f/{name}/refresh"), &json!({})) {
                 eprintln!("warning: cell pin refresh failed ({e:#}); the poll backstop will catch up");
             }
+            let st = c.call(c.get(&format!("/api/f/{name}/status"))?)?;
+            let live_url = st["urls"]["canonical"].as_str().filter(|s| s.starts_with("http")).map(|s| s.to_string())
+                .unwrap_or_else(|| format!("{}/f/{}/", c.host.trim_end_matches('/'), name));
             if j {
                 ok_exit(&json!({ "live": live_url, "liveTip": live_tip, "mainTip": main_tip }));
             }
             println!("live: {live_url}");
-            let st = c.call(c.get(&format!("/api/f/{name}/status"))?)?;
             if st["visibility"].as_str() == Some("link") {
                 if let Some(tok) = st["viewToken"].as_str() {
                     let canon = st["urls"]["canonical"].as_str().filter(|s| s.starts_with("http"))
@@ -1181,6 +1245,102 @@ fn run(cli: Cli) -> Result<()> {
             println!("webhook URL:  {}/api/f/{}/inbox?t={}", c.host, name, inbox);
             println!("rooms:       {}/f/{}/__room/<room>{}{}", c.host, name, suffix, view_part);
         }
+        Cmd::Members { sub } => match sub {
+            MembersCmd::List { name } => {
+                let v = c.call(c.get(&format!("/api/f/{name}/members"))?)?;
+                if j {
+                    ok_exit(&v);
+                }
+                for m in v["members"].as_array().cloned().unwrap_or_default() {
+                    println!("{}\t{}", m["role"].as_str().unwrap_or(""), m["principal"].as_str().unwrap_or(""));
+                }
+            }
+            MembersCmd::Add { name, who, role } => {
+                let who = auth::resolve_npub(&who)?;
+                let v = c.call(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&json!({ "role": role }))?)?)?;
+                if j {
+                    ok_exit(&v);
+                }
+                println!("{who} is now {role} on {name}");
+            }
+            MembersCmd::Rm { name, who } => {
+                let who = auth::resolve_npub(&who)?;
+                let v = c.call(c.delete(&format!("/api/f/{name}/members/{who}"))?)?;
+                if j {
+                    ok_exit(&v);
+                }
+                println!("removed {who} from {name}");
+            }
+            MembersCmd::Leave { name } => {
+                let me = c.id.npub();
+                let v = c.call(c.delete(&format!("/api/f/{name}/members/{me}"))?)?;
+                if j {
+                    ok_exit(&v);
+                }
+                println!("left {name}");
+            }
+        },
+        Cmd::Invite { sub } => match sub {
+            InviteCmd::Create { name, role, uses, ttl } => {
+                let mut body = json!({ "role": role, "uses": uses });
+                if let Some(t) = ttl {
+                    body["ttlS"] = json!(t);
+                }
+                let v = c.call(c.post_json(&format!("/api/f/{name}/invites"), &body)?)?;
+                if j {
+                    ok_exit(&v);
+                }
+                let token = v["token"].as_str().unwrap_or("");
+                println!("invite {} ({role}, {uses} use{})", v["id"].as_str().unwrap_or(""), if uses == 1 { "" } else { "s" });
+                println!("join with: fragment join {name} {token}");
+            }
+            InviteCmd::List { name } => {
+                let v = c.call(c.get(&format!("/api/f/{name}/invites"))?)?;
+                if j {
+                    ok_exit(&v);
+                }
+                for i in v["invites"].as_array().cloned().unwrap_or_default() {
+                    println!(
+                        "{}\t{}\t{} left\texpires {}",
+                        i["id"].as_str().unwrap_or(""),
+                        i["role"].as_str().unwrap_or(""),
+                        i["usesLeft"].as_u64().unwrap_or(0),
+                        chrono_like(i["expiresAt"].as_u64().unwrap_or(0) / 1000),
+                    );
+                }
+            }
+            InviteCmd::Revoke { name, id } => {
+                let v = c.call(c.delete(&format!("/api/f/{name}/invites/{id}"))?)?;
+                if j {
+                    ok_exit(&v);
+                }
+                println!("revoked invite {id}");
+            }
+        },
+        Cmd::Join { name, token } => {
+            let v = c.call(c.post_json(&format!("/api/f/{name}/join"), &json!({ "token": token }))?)?;
+            if j {
+                ok_exit(&v);
+            }
+            if v["joined"].as_bool().unwrap_or(false) {
+                println!("joined {name} as {}", v["role"].as_str().unwrap_or(""));
+            } else {
+                println!("already a member of {name} ({})", v["role"].as_str().unwrap_or(""));
+            }
+        }
+        Cmd::Visibility { name, value } => {
+            let v = match value {
+                None => {
+                    let st = c.call(c.get(&format!("/api/f/{name}/status"))?)?;
+                    json!({ "visibility": st["visibility"] })
+                }
+                Some(vis) => c.call(c.put_bytes(&format!("/api/f/{name}/visibility"), serde_json::to_vec(&json!({ "visibility": vis }))?)?)?,
+            };
+            if j {
+                ok_exit(&v);
+            }
+            println!("{name}: {}", v["visibility"].as_str().unwrap_or(""));
+        }
         Cmd::Login { .. } | Cmd::Whoami | Cmd::Host { .. } | Cmd::Guide | Cmd::New { .. } => unreachable!(),
     }
     Ok(())
@@ -1206,6 +1366,34 @@ fn cs_anyhow(e: impl Into<crate::sync::SyncError>) -> anyhow::Error {
 }
 
 fn edit_roles(c: &api::Client, name: &str, editors: Vec<String>, viewers: Vec<String>, add: bool, j: bool) {
+    // The Rust cell keeps members in the cell (fragment.json no longer
+    // grants access): grant and revoke become member changes there. The
+    // TypeScript runtime has no members route and keeps the manifest path.
+    if c.get(&format!("/api/f/{name}/members")).map(|r| r.ok()).unwrap_or(false) {
+        if let Err(e) = (|| -> Result<()> {
+            let mut changed = Vec::new();
+            for (list, role) in [(editors, "editor"), (viewers, "viewer")] {
+                for who in list {
+                    let who = auth::resolve_npub(&who)?;
+                    if add {
+                        c.call(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&json!({ "role": role }))?)?)?;
+                    } else {
+                        c.call(c.delete(&format!("/api/f/{name}/members/{who}"))?)?;
+                    }
+                    changed.push(json!({ "principal": who, "role": if add { role } else { "removed" } }));
+                }
+            }
+            if j {
+                ok_exit(&json!({ "members": changed }));
+            }
+            println!("members updated on {name}");
+            Ok(())
+        })() {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Err(e) = (|| -> Result<()> {
         // fragment.json is a git file at the repo root: grant/revoke is
         // read-manifest, edit roles, commit — the same edit-and-commit

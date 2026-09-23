@@ -146,15 +146,20 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
 - Members and invites are supervisor tables. A grant or revoke is one
   transaction; a revoke closes that principal's sockets. The `events`
   channel records every change. Membership leaves `fragment.json` (a git
-  commit can no longer grant access).
+  commit can no longer grant access). Only the owner manages members,
+  invites, visibility, and tokens; a member may leave. Each key's list of
+  fragments is an index in its own `Principal` cell, fed from the
+  fragment's outbox (phase 2 slice B).
 - Visibility: `public`, `link` (a token that is a capability), or
   `members`. **A public fragment is a website anyone can use, writes
   included** (a public chat, a guestbook): an operation may declare
   `"role": "public"`, callable by anyone who can see the fragment. An
-  anonymous visitor gets an ephemeral principal (a key minted per browser
-  and held in a cookie on the fragment's origin), so their writes are
-  attributed and rate-limited like anyone else's. On a `link` fragment
-  the link holder counts as a viewer.
+  anonymous visitor gets an ephemeral principal (a random value held in
+  an HttpOnly cookie on the fragment's origin; the principal is `anon:`
+  plus its hash), so their writes are attributed and rate-limited like
+  anyone else's. On a `link` or `public` fragment the link holder counts
+  as a viewer. Operation ids belong to their caller: the ledger keys a
+  mutation by principal and id.
 - Origins: each fragment is served from `<name>.fragment.club`; the
   platform (login, share sheet, invites, the share header) from
   `fragment.club`. celld does not vouch for `Host`, so the router checks

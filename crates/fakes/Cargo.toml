@@ -1,0 +1,17 @@
+[package]
+name = "fragment-fakes"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Local stand-ins for the services the platform calls: code.storage (and, from slice F, OpenRouter and a web push service)."
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
+fragment-core = { path = "../core" }

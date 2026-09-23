@@ -1,5 +1,103 @@
 # fragment wire contract (CLI ↔ runtime)
 
+Two runtimes answer this contract during phase 2: the Rust cell (`cell/`,
+this first part) and the TypeScript runtime (`runtime/`, the second part,
+deleted in slice G). The CLI talks to both: every command the Rust cell
+keeps has the same route and body, and the cell's errors are
+`{"error": "<code>", "message": "..."}` (codes in `crates/proto`).
+
+# The Rust cell (phase 2)
+
+Status: slice B (2026-09-23). `cargo xtask e2e` proves every route below.
+
+## Configuration
+
+Worker variables, rendered from the fleet's settings (ROADMAP decision
+13; `cell/.dev.vars` in dev):
+
+| Variable | Meaning |
+|---|---|
+| `FRAGMENT_HOST_SECRET` | seals secrets at rest (at least 32 bytes); required to create |
+| `FRAGMENT_HOST_SECRET_PREVIOUS` | the secret before a rotation; values sealed under it still open |
+| `CODESTORAGE_ORG`, `CODESTORAGE_PRIVATE_KEY` | the org and its PKCS#8 P-256 key (a one-line PEM may carry literal `\n`) |
+| `CODESTORAGE_API_URL` | the API base (default `https://api.<org>.code.storage`) |
+| `FRAGMENT_HOST_SUFFIX` | fragments are served from `<name>.<suffix>`; unset, from `/f/<name>/` |
+| `FRAGMENT_POLL_INTERVAL_S` | the webhook backstop (default 300) |
+
+## Principals and access
+
+A principal is a key (64 hex inside, an npub in answers; requests may use
+either) or an anonymous visitor (`anon:` + 32 hex, the hash of a random
+cookie on the fragment's origin). Control routes need NIP-98 (as the
+second part describes); site requests may carry it.
+
+Roles, weakest first: `public`, `viewer`, `editor`, `owner`. A member's
+role is their membership. Otherwise visibility decides: on a `public`
+fragment everyone holds `public`; on a `public` or `link` fragment the
+share link (`?view=<token>`, which sets an HttpOnly cookie on the
+fragment's origin) counts as `viewer`; a `members` fragment gives
+non-members nothing. A refusal is 401 for an unsigned caller and 403 for
+a signed one.
+
+Membership is cell state: `fragment.json`'s `visibility`, `editors`, and
+`viewers` grant nothing (the cell records a `manifest.ignored` event).
+Only the owner manages members, invites, visibility, and tokens; a
+member may leave. Each person's list of fragments is kept in their
+`Principal` cell, fed from each fragment's outbox.
+
+## Control API
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `POST /api/fragments` | any signer | `{name, fragmentSecret, visibility?}` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}`. `fragmentSecret` is the fragment's own key, made by the client; it is stored sealed. The cell creates (or, for a name deleted before, finds) the code.storage repo. |
+| `GET /api/fragments` | any signer | → `{fragments: [{name, role}]}` |
+| `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
+| `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}}` |
+| `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
+| `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt}]}` |
+| `PUT /api/f/{name}/members/{npub}` | owner | `{role: viewer\|editor}` → the member |
+| `DELETE /api/f/{name}/members/{npub}` | owner, or the member | → `{ok, removed}`; closes that member's change feeds |
+| `POST /api/f/{name}/invites` | owner | `{role, uses? (1), ttlS? (7 days, at most 30)}` → `{id, role, usesLeft, expiresAt, createdBy, token}`; the token is shown once |
+| `GET /api/f/{name}/invites` | owner | → `{invites: [...]}` without tokens |
+| `DELETE /api/f/{name}/invites/{id}` | owner | → `{ok, revoked}` |
+| `POST /api/f/{name}/join` | any signer | `{token}` → `{name, role, joined}`; a stronger existing role is kept |
+| `PUT /api/f/{name}/visibility` | owner | `{visibility}` → `{ok, visibility}` |
+| `POST /api/f/{name}/rotate` | owner | `{scopes?: [inbox, view, webhook]}` → `{ok, inbox_token, view_token, webhook_secret, rotated}`; a new view token closes link holders' feeds |
+| `PUT /api/f/{name}/secrets/{KEY}` | editor | raw body (at most 64 KiB) → `{ok, name}`; sealed (AES-256-GCM, key HKDF'd from the host secret and the fragment's npub) |
+| `GET /api/f/{name}/secrets` | editor | → `{names}`; values never leave |
+| `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |
+| `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt}`: ES256, this repo, `git:read`+`git:write`, 15 minutes |
+| `POST /api/f/{name}/refresh` | editor | → `{ok, refs: {main: {pin, moved} \| {absent}, live: ...}}` |
+| `POST /api/f/{name}/webhook` | code.storage | signed with the fragment's webhook secret (`X-Pierre-Signature`, 5 minutes); validate, remember (redeliveries are acknowledged), then move the pin to the branch's head as read now |
+| `GET /api/f/{name}/files` | viewer | → `{ref, files: [{path, size, mode, lastCommitSha, machinery}]}` at main |
+| `GET /api/f/{name}/file?path=` | viewer | → the bytes at main (`x-fragment-ref`) |
+| `GET /api/f/{name}/file/stat?path=` | viewer | → `{stat: {path, size, blobSha, lastCommitSha, present}, ref}` |
+| `GET /api/f/{name}/events?since=` | viewer | → `{events: [{id, at, kind, summary, data}]}` (500 a page; 5000 kept) |
+| `POST /api/f/{name}/ops/{op}` | the operation's role | `{id, input}` → `{result, replayed}` |
+
+Code comes from git: when `live` moves, the cell reads `fragment.json`
+(`operations: {name: {kind: query\|mutation, role?, input?}}`; a query
+defaults to `viewer`, a mutation to `editor`) and `app.mjs` from the live
+commit. A live commit with an invalid `fragment.json` keeps the last good
+code and says why in `status.code.error`. Operation ids belong to their
+caller: the ledger keys them by principal.
+
+## Serving
+
+`<name>.<suffix>/<path>` (or `/f/<name>/<path>` without a suffix; with
+one, those redirect to the fragment's host, except `__watch`):
+
+| path | |
+| --- | --- |
+| `/`, `/<page>` | `site/` in the live commit (`index.html` for directories); Open Graph tags from `fragment.json`'s `meta` |
+| `__tree` | `{type, ref: "live", sha, count, files}`, content only |
+| `__file?path=` | a content file from live, else main |
+| `__preview.svg` | the placeholder preview image |
+| `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; an unsigned caller gets an anonymous principal cookie; callers holding only `public` get 60 calls a minute each, 600 per fragment |
+| `__watch` | WebSocket, viewers and up (the share link, or a signed upgrade): `{type: "hello", ref, sha}`, then `{type: "changed", ref: "main", sha, paths}` per external move of main |
+
+# The TypeScript runtime (deleted in slice G)
+
 Base URL: the celld public listener, e.g. `http://127.0.0.1:8789`.
 
 Files live in code.storage (one git repo per fragment, repo name =

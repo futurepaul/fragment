@@ -8,3 +8,4 @@ publish = false
 [dependencies]
 anyhow = "1"
 fragment-devstack = { path = "../crates/devstack" }
+fragment-fakes = { path = "../crates/fakes" }

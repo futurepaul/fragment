@@ -1,0 +1,81 @@
+//! State survives a graceful restart and a crash of the node; then the
+//! node runs without hostnames and serves fragments from `/f/<name>/`.
+
+use anyhow::Result;
+use fragment_nip98::Keys;
+use serde_json::json;
+
+use super::app::ship;
+use crate::api::{Api, Call};
+use crate::Suite;
+
+const TODO_APP: &[u8] = include_bytes!("../../fixtures/todo.mjs");
+const TODO_JSON: &[u8] = include_bytes!("../../fixtures/todo.json");
+
+fn count(api: &Api, keys: &Keys, name: &str) -> i64 {
+    api.op(keys, name, "count", "q", json!({})).ok().and_then(|r| r.body["result"]["n"].as_i64()).unwrap_or(-1)
+}
+
+pub fn restart(s: &mut Suite, api: Api) -> Result<Api> {
+    if !s.section("restart") {
+        return Ok(api);
+    }
+    let owner = Keys::generate();
+    let member = Keys::generate();
+    let name = s.name("restart");
+    let c = s.create(&api, &owner, &name)?;
+    api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", member.pubkey_hex()), Some(&json!({ "role": "editor" })))?;
+    api.signed(&owner, "PUT", &format!("/api/f/{name}/secrets/TOKEN"), None)?;
+    let live = ship(s, &c, TODO_APP, TODO_JSON);
+    let first = api.op(&owner, &name, "add_todo", "r1", json!({ "text": "survives" }))?;
+
+    s.stop()?;
+    let api = s.start(false, true)?;
+    let r = api.op(&owner, &name, "add_todo", "r1", json!({ "text": "survives" }))?;
+    s.ok("after a restart the replay returns the stored result", r.body["replayed"] == true && r.body["result"] == first.body["result"], &r);
+    s.ok("after a restart the app's rows survive", count(&api, &owner, &name) == 1, "count");
+    let r = api.status(&member, &name)?;
+    s.ok("after a restart members survive", r.status == 200 && r.body["role"] == "editor", &r);
+
+    let r = api.op(&owner, &name, "add_todo", "r2", json!({ "text": "before the crash" }))?;
+    s.ok("a mutation before the crash", r.status == 200, &r);
+    s.crash()?;
+    let api = s.start(false, true)?;
+    let r = api.op(&owner, &name, "add_todo", "r2", json!({ "text": "before the crash" }))?;
+    s.ok("after a crash an acknowledged mutation replays", r.body["replayed"] == true, &r);
+    s.ok("after a crash no acknowledged write is lost", count(&api, &owner, &name) == 2, "count");
+    let r = api.status(&owner, &name)?;
+    s.ok("after a crash pins and code survive", r.body["pins"]["live"] == live.as_str() && r.body["code"]["sha"] == live.as_str(), &r);
+    let r = api.signed(&member, "GET", "/api/fragments", None)?;
+    s.ok("after a crash the member's list survives", r.text.contains(&name), &r);
+    s.commit(&c, &[("after.md", Some(b"webhooks still land"))]);
+    let r = api.signed(&owner, "GET", &format!("/api/f/{name}/file?path=after.md"), None)?;
+    s.ok("after a crash webhooks still move the pins", r.status == 200 && r.text == "webhooks still land", &r);
+    Ok(api)
+}
+
+/// A fleet without a hostname suffix serves fragments under `/f/<name>/`.
+pub fn pathmode(s: &mut Suite, api: Api) -> Result<()> {
+    if !s.section("pathmode") {
+        return Ok(());
+    }
+    drop(api);
+    s.stop()?;
+    let api = s.start(false, false)?;
+    let owner = Keys::generate();
+    let name = s.name("paths");
+    let c = s.create(&api, &owner, &name)?;
+    s.ok("without a suffix the canonical URL is a path", c["canonical"] == format!("{}/f/{name}/", api.base), &c);
+    api.signed(&owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "public" })))?;
+    s.commit(&c, &[("site/index.html", Some(b"<p>by path</p>")), ("app.mjs", Some(include_bytes!("../../fixtures/guestbook.mjs"))), ("fragment.json", Some(include_bytes!("../../fixtures/guestbook.json")))]);
+    s.deploy(&c);
+    let r = api.page(&name, "", None)?;
+    s.ok("a page is served by path", r.status == 200 && r.text.contains("by path"), &r);
+    let r = api.browser_op(&name, "sign", "p1", json!({ "text": "hi" }), None)?;
+    s.ok("a browser call works by path", r.status == 200, &r);
+    s.ok("its cookie is scoped to the fragment's path", r.header("set-cookie").contains(&format!("Path=/f/{name}/;")), r.header("set-cookie"));
+    let r = api.call(Call { method: "GET", url: format!("{}/f/{name}", api.base), ..Call::default() })?;
+    s.ok("the bare path redirects to the trailing slash", r.status == 308 && r.header("location") == format!("{}/f/{name}/", api.base), &r);
+    s.stop()?;
+    Ok(())
+}

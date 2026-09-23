@@ -28,9 +28,18 @@ The new runtime (`cell/`, Rust; phase 2, `docs/phase-2.md`):
   (builds the celld fork with the alarm fix into `target/celld/bin`).
 - `cargo xtask check`: host tests and clippy (host and wasm), warnings
   denied.
-- `cargo xtask e2e [--only <section>]`: builds `cell/` and runs
-  `crates/e2e` against a fresh `celld dev` node.
-- `cargo xtask dev [--clean]`: the new stack in the foreground on :8790.
+- `cargo xtask e2e [--only <section>]`: builds `cell/` and the CLI, then
+  runs `crates/e2e` against a fresh `celld dev` node and the in-process
+  code.storage fake (sections: auth, create, lockdown, members, secrets,
+  files, deploy, ops, public, site, watch, sync, restart, pathmode).
+- `cargo xtask dev [--clean]`: the new stack in the foreground: the cell
+  on :8790 with fragments at `http://<name>.fragment.localhost:8790/`, and
+  the code.storage fake on :8792 (state in `target/devstack/`; its org
+  key and the host secret are made there on first run). Point the CLI at
+  it with `FRAGMENT_HOST=http://127.0.0.1:8790`.
+- Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
+  logic, host-tested), `crates/nip98`, `crates/fakes` (code.storage),
+  `crates/devstack`, `crates/e2e`.
 
 The old runtime (`runtime/`, TypeScript), until slice G deletes it:
 
@@ -47,7 +56,8 @@ The old runtime (`runtime/`, TypeScript), until slice G deletes it:
   Resources); never print them, pass them on a command line, or commit
   them.
 - Do not edit files under `runtime/` while an e2e run is in flight:
-  `celld dev` rebuilds on change.
+  `celld dev` rebuilds on change. The Rust e2e and `xtask dev` both write
+  `cell/.dev.vars`: run one at a time.
 - No remote of its own yet; `fragment-rs` is a fetch-only pointer to
   github.com/futurepaul/fragment. Ask Paul before adding or pushing to a
   remote, deleting Sprites, or anything else irreversible.

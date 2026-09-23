@@ -6,9 +6,15 @@ capability, never a key.**
 
 ## Where secrets live
 
-Each secret is stored in the cell that owns it, encrypted at rest (AES-GCM
-under a key derived from the fleet's host secret for that cell), and
-nowhere else:
+Each secret is stored in the cell that owns it, encrypted at rest, and
+nowhere else. The key is HKDF-SHA256 of the fleet's host secret salted
+with the cell's npub; the value is AES-256-GCM sealed as
+`w1.<key id>.<nonce‖ciphertext>`, where the key id names which host
+secret sealed it. Rotating the host secret: set the new one as
+`FRAGMENT_HOST_SECRET` and the old as `FRAGMENT_HOST_SECRET_PREVIOUS`;
+values sealed under the old one still open (phase 2 slice B,
+`crates/core/src/secrets.rs`). The cell reseals such a value when it
+first reads it, from slice D, where jobs read secrets.
 
 | Secret | Home |
 |---|---|
@@ -62,5 +68,4 @@ home and reaches computers through the same connector.
   calls (a 96 s reasoning step was seen in the goose spike): whether a
   streaming response stays open past it (phase 8).
 - How many connectors one Sprites org holds (phase 8).
-- The per-cell key derivation and rotation of the host secret (phase 2,
-  slice B, which ports the TypeScript runtime's wrapped secrets).
+

@@ -1,0 +1,10 @@
+{
+  "name": "guestbook",
+  "operations": {
+    "sign": { "kind": "mutation", "role": "public" },
+    "entries": { "kind": "query", "role": "public" },
+    "peek": { "kind": "query", "role": "viewer" },
+    "clear": { "kind": "mutation", "role": "editor" }
+  },
+  "meta": { "title": "The Guestbook", "description": "sign it" }
+}

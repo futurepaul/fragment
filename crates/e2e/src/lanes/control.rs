@@ -1,0 +1,176 @@
+//! Identity at the router (NIP-98), fragment create and delete, and what the
+//! router refuses to let through.
+
+use anyhow::Result;
+use fragment_nip98::Keys;
+use serde_json::json;
+
+use crate::api::{now_s, Api, Call};
+use crate::Suite;
+
+pub fn auth(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("auth") {
+        return Ok(());
+    }
+    let keys = Keys::generate();
+    let name = s.name("auth");
+    let body = json!({ "name": name, "fragmentSecret": Keys::generate().secret_hex() });
+    let bytes = body.to_string().into_bytes();
+    let r = api.unsigned("POST", "/api/fragments", Some(&body))?;
+    s.ok("an unsigned create is 401", r.status == 401 && r.error() == "unauthenticated", &r);
+    let signed_as = |url: String, body: &[u8], at: i64| keys.header("POST", &url, body, at);
+    let send = |auth: String| {
+        api.call(Call {
+            method: "POST",
+            url: format!("{}/api/fragments", api.base),
+            body: Some(bytes.clone()),
+            content_type: Some("application/json"),
+            extra: vec![("authorization", auth)],
+            ..Call::default()
+        })
+    };
+    let r = send(signed_as(format!("{}/api/f/{name}/status", api.base), &bytes, now_s()))?;
+    s.ok("a signature for another URL is 401", r.status == 401, &r);
+    let r = send(signed_as(format!("{}/api/fragments", api.base), &bytes, now_s() - 120))?;
+    s.ok("a two-minute-old signature is 401", r.status == 401, &r);
+    let r = send(signed_as(format!("{}/api/fragments", api.base), br#"{"name":"x"}"#, now_s()))?;
+    s.ok("a signature over another body is 401", r.status == 401, &r);
+    let r = api.unsigned("GET", "/api/fragments", None)?;
+    s.ok("an unsigned list is 401", r.status == 401, &r);
+    let r = api.signed(&keys, "GET", "/api/fragments", None)?;
+    s.ok("a new key lists no fragments", r.status == 200 && r.body["fragments"] == json!([]), &r);
+    Ok(())
+}
+
+pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("create") {
+        return Ok(());
+    }
+    let owner = Keys::generate();
+    let other = Keys::generate();
+    let name = s.name("create");
+    let r = api.create(&owner, &name)?;
+    let c = &r.body;
+    s.ok("a signed create succeeds", r.status == 200, &r);
+    s.ok("create names the owner by npub", c["owner"] == fragment_core::npub::encode(owner.pubkey_hex()), &r);
+    s.ok("create returns the fragment's own npub", c["npub"].as_str().is_some_and(|n| n.starts_with("npub1")), &r);
+    s.ok("create defaults to link visibility", c["visibility"] == "link", &r);
+    s.ok(
+        "create returns the share, inbox, and webhook tokens",
+        c["viewToken"].as_str().is_some_and(|t| t.len() == 24)
+            && c["inboxToken"].as_str().is_some_and(|t| t.len() == 32)
+            && c["webhookSecret"].as_str().is_some_and(|t| t.len() == 32),
+        &r,
+    );
+    let repo = c["repo"].as_str().unwrap_or("").to_string();
+    s.ok("create returns the url-form repo identity", repo.len() == 36 && repo.matches('-').count() == 4, &r);
+    s.ok("the repo exists in code.storage under the name", s.fake.repo_url(&name).as_deref() == Some(repo.as_str()), &repo);
+    s.ok(
+        "create returns the fragment's own origin",
+        c["canonical"] == format!("http://{name}.{}:{}/", crate::SUFFIX, api.port),
+        &r,
+    );
+    s.hook(api, c);
+
+    let r = api.create(&other, &name)?;
+    s.ok("creating an existing name is 409", r.status == 409 && r.error() == "already_exists", &r);
+    let r = api.create(&owner, "Bad_Name")?;
+    s.ok("an invalid name is 400", r.status == 400 && r.error() == "invalid_request", &r);
+    let r = api.create_with(&owner, json!({ "name": s.name("nosecret") }))?;
+    s.ok("a create without fragmentSecret is refused naming it", r.status == 400 && r.message().contains("fragmentSecret"), &r);
+    let r = api.create_with(&owner, json!({ "name": s.name("badsecret"), "fragmentSecret": "0".repeat(64) }))?;
+    s.ok("an invalid fragment secret is 400", r.status == 400 && r.message().contains("fragmentSecret"), &r);
+    let public = s.name("create-pub");
+    let r = api.create_with(&owner, json!({ "name": public, "fragmentSecret": Keys::generate().secret_hex(), "visibility": "public" }))?;
+    s.ok("create takes a visibility", r.status == 200 && r.body["visibility"] == "public", &r);
+
+    let r = api.status(&owner, &name)?;
+    s.ok(
+        "the owner reads status",
+        r.status == 200 && r.body["role"] == "owner" && r.body["pins"]["main"].is_null() && r.body["code"]["sha"].is_null()
+            && r.body["counts"]["members"] == 1,
+        &r,
+    );
+    s.ok("the owner sees the inbox token", r.body["inboxToken"] == c["inboxToken"], &r);
+    let r = api.status(&other, &name)?;
+    s.ok("another key reading status is 403", r.status == 403 && r.error() == "forbidden", &r);
+    let r = api.status(&owner, &s.name("nobody"))?;
+    s.ok("an unknown fragment is 404", r.status == 404 && r.error() == "not_found", &r);
+    let r = api.signed(&owner, "GET", "/api/fragments", None)?;
+    let listed = r.body["fragments"].as_array().cloned().unwrap_or_default();
+    s.ok(
+        "the owner's list has both fragments as owner",
+        [&name, &public].iter().all(|n| listed.iter().any(|f| f["name"] == **n && f["role"] == "owner")),
+        &r,
+    );
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{name}/code"), Some(&json!({ "sha": "x", "source": "", "operations": {} })))?;
+    s.ok("installing code by PUT is gone (code comes from live)", r.status == 404, &r);
+    let r = api.op(&owner, &name, "add_todo", "a1", json!({ "text": "x" }))?;
+    s.ok("an operation before any deploy is 404 no_code", r.status == 404 && r.error() == "no_code", &r);
+
+    let r = api.signed(&other, "DELETE", &format!("/api/f/{name}"), None)?;
+    s.ok("another key deleting is 403", r.status == 403, &r);
+    let r = api.signed(&owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    s.ok("the owner deletes", r.status == 200 && r.body["deleted"] == name.as_str(), &r);
+    let r = api.status(&owner, &name)?;
+    s.ok("a deleted fragment is 404", r.status == 404, &r);
+    let r = api.signed(&owner, "GET", "/api/fragments", None)?;
+    s.ok("a deleted fragment leaves the owner's list", !r.text.contains(&format!("\"{name}\"")), &r);
+    let r = api.create(&other, &name)?;
+    s.ok("a deleted name can be created again", r.status == 200 && r.body["owner"] == fragment_core::npub::encode(other.pubkey_hex()), &r);
+    s.ok("created again, it keeps its repo", r.body["repo"] == repo.as_str(), &r);
+    Ok(())
+}
+
+pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("lockdown") {
+        return Ok(());
+    }
+    let owner = Keys::generate();
+    let stranger = Keys::generate();
+    let name = s.name("lock");
+    s.create(api, &owner, &name)?;
+    let forged = |keys: Option<&Keys>| {
+        api.call(Call {
+            method: "GET",
+            url: format!("{}/api/f/{name}/status", api.base),
+            keys,
+            extra: vec![("x-fragment-principal", owner.pubkey_hex().to_string())],
+            ..Call::default()
+        })
+    };
+    let r = forged(Some(&stranger))?;
+    s.ok("a client's x-fragment-principal is ignored (signed: 403)", r.status == 403, &r);
+    let r = forged(None)?;
+    s.ok("a client's x-fragment-principal is ignored (unsigned: 401)", r.status == 401, &r);
+    let r = api.signed(&owner, "POST", &format!("/api/f/{name}/create"), Some(&json!({ "name": name })))?;
+    s.ok("the supervisor's create is not a public route", r.status == 404, &r);
+    let r = api.signed(&owner, "GET", &format!("/api/f/{name}"), None)?;
+    s.ok("GET on a fragment's root is 404", r.status == 404, &r);
+    let r = api.call(Call { method: "GET", url: format!("http://evil.example.com:{}/", api.port), ..Call::default() })?;
+    s.ok("a host outside the suffix is the platform, not a fragment", r.status == 404 && r.message().contains("no route"), &r);
+    for host in ["Bad_Name", "a.b"] {
+        let r = api.call(Call { method: "GET", url: format!("http://{host}.{}:{}/", crate::SUFFIX, api.port), ..Call::default() })?;
+        s.ok(&format!("host {host}.<suffix> is not a fragment"), r.status == 404 && r.message().contains("no route"), &r);
+    }
+    let r = api.call(Call {
+        method: "POST",
+        url: format!("{}/api/f/{name}/webhook", api.base),
+        body: Some(br#"{"ref":"refs/heads/main"}"#.to_vec()),
+        content_type: Some("application/json"),
+        extra: vec![("x-pierre-event", "push".into())],
+        ..Call::default()
+    })?;
+    s.ok("an unsigned webhook is 401", r.status == 401, &r);
+    let big = json!({ "name": s.name("big"), "fragmentSecret": "x".repeat(3 * 1024 * 1024) });
+    let r = api.create_with(&owner, big)?;
+    s.ok("a body over 2 MiB is 413", r.status == 413 && r.error() == "too_large", &r);
+    let r = api.call(Call {
+        method: "GET",
+        url: api.site_url(&name, ""),
+        extra: vec![("authorization", "Nostr garbage".into())],
+        ..Call::default()
+    })?;
+    s.ok("a bad signature on a site request is 401, not anonymous", r.status == 401, &r);
+    Ok(())
+}

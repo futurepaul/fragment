@@ -20,8 +20,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 hex = "0.4"
+base64 = "0.22"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+url = "2.5"
 fragment-proto = { path = "../crates/proto" }
 fragment-nip98 = { path = "../crates/nip98" }
+fragment-core = { path = "../crates/core" }
 
 [profile.release]
 lto = true

@@ -94,6 +94,60 @@ pub fn write_dev_vars(vars: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
+/// What a fleet is configured with (ROADMAP decision 13): the cell reads
+/// these as Worker variables. A dev or test fleet points code.storage at the
+/// fake in `crates/fakes`.
+pub struct Fleet {
+    pub host_secret: String,
+    pub codestorage_org: String,
+    pub codestorage_key_pem: String,
+    pub codestorage_url: String,
+    /// Fragments are served from `<name>.<suffix>` when set.
+    pub host_suffix: Option<String>,
+    pub poll_interval_s: u32,
+}
+
+impl Fleet {
+    /// Renders the fleet into `cell/.dev.vars`.
+    pub fn write_vars(&self) -> Result<()> {
+        let poll = self.poll_interval_s.to_string();
+        let mut vars = vec![
+            ("FRAGMENT_HOST_SECRET", self.host_secret.as_str()),
+            ("CODESTORAGE_ORG", self.codestorage_org.as_str()),
+            ("CODESTORAGE_PRIVATE_KEY", self.codestorage_key_pem.as_str()),
+            ("CODESTORAGE_API_URL", self.codestorage_url.as_str()),
+            ("FRAGMENT_POLL_INTERVAL_S", poll.as_str()),
+        ];
+        if let Some(s) = &self.host_suffix {
+            vars.push(("FRAGMENT_HOST_SUFFIX", s.as_str()));
+        }
+        write_dev_vars(&vars)
+    }
+}
+
+/// Random hex from the OS.
+pub fn random_hex(bytes: usize) -> String {
+    use std::io::Read;
+    let mut buf = vec![0u8; bytes];
+    fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut buf)).expect("read /dev/urandom");
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A dev-only secret kept in `target/devstack/<name>` (mode 600), made on
+/// first use: restarts of `xtask dev` keep cells and repos readable.
+pub fn dev_secret(name: &str, make: impl FnOnce() -> String) -> Result<String> {
+    let dir = repo_root().join("target/devstack");
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(name);
+    if let Ok(s) = fs::read_to_string(&path) {
+        return Ok(s);
+    }
+    let value = make();
+    let mut f = fs::OpenOptions::new().create_new(true).write(true).mode(0o600).open(&path)?;
+    f.write_all(value.as_bytes())?;
+    Ok(value)
+}
+
 pub struct NodeOptions {
     pub port: u16,
     /// Discard the local state first.

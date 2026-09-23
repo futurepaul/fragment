@@ -91,6 +91,66 @@ deploy, and folder-sync lanes against the new cell. The hostname suffix
 and the fleet's settings are configuration, never constants (ROADMAP
 decision 13).
 
+*Done 2026-09-23* (Paul away; no checkpoint on B, so the decisions below
+are open to his review at checkpoint C). `cargo xtask e2e` passes 246 of
+246 checks in 14 sections (auth, create, lockdown, members, secrets,
+files, deploy, ops, public, site, watch, sync, restart, pathmode) against
+a real node, the real CLI, and the code.storage fake; `cargo xtask check`
+is clean. The old JS e2e still passes against the TypeScript runtime with
+the changed CLI. The contract is in `docs/api.md` (first part).
+
+What landed: `crates/core` (the cell's pure logic, host-tested: access,
+`fragment.json`, npub, sealed secrets, ES256 storage tokens, webhook
+signatures, serving helpers, the public-call rate limit);
+`crates/fakes` (a Rust code.storage fake, ported from the JS mock with
+the CLI mock's test hooks: url-form repo identity, ES256 JWT checks,
+per-commit trees, merges and restore commits, signed push webhooks; the
+CLI's unit tests run on it and `cli/src/mockcs.rs` is a 20-line shim);
+the cell's members, invites, visibility, secrets, file plane, serving,
+and a `Principal` cell per key that indexes "my fragments"; the CLI's
+`members`, `invite`, `join`, `visibility`, and `create --visibility`
+(and `grant`/`revoke` become member changes against the Rust cell);
+`cargo xtask dev` runs the fake beside the node with fragments at
+`<name>.fragment.localhost:8790`. `PUT code` is gone (e2e proves 404):
+code installs from the live commit. The cell is 1.06 MB of wasm (375 KB
+gzipped; P-256, AES-GCM, and `url` added 160 KB gzipped).
+
+Decisions made in B (each in `docs/api.md`):
+
+- **Only the owner manages access**: members, invites, visibility, and
+  token rotation. Editors can write files and secrets but cannot widen
+  who sees the fragment. Any member may leave; the owner cannot (no
+  ownership transfer yet).
+- **A share link counts as a viewer on `link` and `public` fragments**
+  (MODEL said `link`; on `public` it lifts a visitor from `public` to
+  `viewer`). On `members` fragments it counts for nothing.
+- **Operation ids belong to their caller**: the facet ledger keys a
+  mutation by principal and id, so one caller can neither replay nor
+  block another's id (anonymous visitors made this matter).
+- **Anonymous visitors** get an HttpOnly, SameSite=Lax cookie on the
+  fragment's origin; their principal is `anon:` + a hash of it. Browser
+  calls must be `application/json` (no cross-site forms). Callers holding
+  only `public` get 60 calls a minute each, 600 per fragment, in memory.
+- **With a hostname suffix, `/f/<name>/…` redirects** to the fragment's
+  own host (fragments sharing one origin could act as each other's
+  visitors); `__watch` stays there for the CLI.
+- **Invites** are single-use by default, last 7 days (30 at most), show
+  their token once, and keep only its hash.
+- **Secrets name their host secret** (`w1.<key id>.…`), so the fleet
+  rotates with `FRAGMENT_HOST_SECRET_PREVIOUS`; sealed per cell with
+  HKDF(host secret, the cell's npub).
+- **`fragment.json`'s `visibility`, `editors`, `viewers` grant nothing**;
+  the cell records a `manifest.ignored` event when they appear.
+- **Webhooks stay per fragment** (signed with its own secret, the old
+  contract). How code.storage registers them in production is open
+  (below).
+- **The manifest and the code follow their pins**: each records the
+  commit it was read from, so a read that failed during a code.storage
+  outage is retried by the next refresh, webhook, or poll (e2e `ops`
+  drives an outage through the fake).
+- **Deferred**: the public gallery (`/api/gallery`) to phase 7 (sharing);
+  `notifyUrls` to slice F (deliveries); `App.fetch` routes to slice C.
+
 **C. Operations, the app facet, channels.** Operations declared in
 `fragment.json` with input schemas (a bounded JSON Schema subset in Rust);
 the facet with `platform.mjs`, the effects outbox and its sweep; channels
@@ -123,6 +183,11 @@ update `AGENTS.md`, the README, and the docs; the debt ledger drops the
 TypeScript-runtime and tooling entries.
 
 ## Open inside the phase (decided in the slice that needs them)
+
+- How code.storage webhooks are registered on the real service (the docs
+  describe deliveries, not registration). If registration is per org,
+  phase 3 adds one org route that verifies the org's secret and routes by
+  `repository.url`; if per repo, the cell registers its own at create.
 
 - The browser driver for the e2e (slice C): Chrome over CDP from Rust.
 - How the CLI keeps working against both runtimes during slices B–F:

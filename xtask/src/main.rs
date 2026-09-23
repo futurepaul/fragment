@@ -2,7 +2,9 @@
 //!
 //!   build            build cell/ for wasm32 (worker-build 0.8.5)
 //!   celld            build the pinned celld fork into target/celld/bin
-//!   dev [--clean]    build, then run the stack in the foreground on :8790
+//!   dev [--clean]    build, then run the stack in the foreground: the cell on
+//!                    :8790 (fragments at <name>.fragment.localhost:8790) and
+//!                    the code.storage fake on :8792
 //!   e2e [args...]    build, then run crates/e2e (args pass through: --only <case>)
 //!   check            host tests and clippy, warnings denied
 
@@ -14,6 +16,8 @@ use fragment_devstack as devstack;
 
 const WORKER_BUILD_VERSION: &str = "0.8.5";
 const DEV_PORT: u16 = 8790;
+const DEV_CODESTORAGE_PORT: u16 = 8792;
+const DEV_ORG: &str = "fragment-dev";
 
 fn run(cmd: &mut Command) -> Result<()> {
     let shown = format!("{cmd:?}");
@@ -59,15 +63,34 @@ fn celld() -> Result<()> {
 fn dev(args: &[String]) -> Result<()> {
     build()?;
     let tools = devstack::Tools::locate()?;
-    devstack::write_dev_vars(&[])?;
-    let opts = devstack::NodeOptions {
-        port: DEV_PORT,
-        clean: args.iter().any(|a| a == "--clean"),
-        watch: true,
-        env: vec![],
-    };
+    let clean = args.iter().any(|a| a == "--clean");
+    let state = devstack::repo_root().join("target/devstack/codestorage.json");
+    if clean {
+        let _ = std::fs::remove_file(&state);
+    }
+    let key = devstack::dev_secret("codestorage-org-key.pem", fragment_fakes::codestorage::generate_org_key_pem)?;
+    let fake = fragment_fakes::codestorage::CodeStorage::start(fragment_fakes::codestorage::Options {
+        org: DEV_ORG.into(),
+        org_key_pem: Some(key.clone()),
+        state_file: Some(state),
+        port: DEV_CODESTORAGE_PORT,
+        ..Default::default()
+    })?;
+    devstack::Fleet {
+        host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
+        codestorage_org: DEV_ORG.into(),
+        codestorage_key_pem: key,
+        codestorage_url: fake.url.clone(),
+        host_suffix: Some("fragment.localhost".into()),
+        // No webhooks reach dev fragments (the CLI's refresh and this poll do).
+        poll_interval_s: 10,
+    }
+    .write_vars()?;
+    let opts = devstack::NodeOptions { port: DEV_PORT, clean, watch: true, env: vec![] };
     let (node, took) = devstack::Node::start(&tools, &opts)?;
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
+    println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
+    println!("  code.storage: {} (the fake)", fake.url);
     let status = node.wait()?;
     println!("celld dev exited: {status}");
     Ok(())
@@ -76,6 +99,8 @@ fn dev(args: &[String]) -> Result<()> {
 fn e2e(args: &[String]) -> Result<()> {
     build()?;
     let manifest = devstack::repo_root().join("Cargo.toml");
+    // the e2e drives the CLI too
+    run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli"]))?;
     run(Command::new("cargo")
         .args(["run", "--quiet", "--release", "--manifest-path"])
         .arg(&manifest)

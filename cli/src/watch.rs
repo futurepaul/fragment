@@ -114,7 +114,8 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, cfg: &Wa
             Some(t) => format!("{}/f/{}/__watch?view={}", host.replace("http", "ws"), name, t),
             None => format!("{}/f/{}/__watch", host.replace("http", "ws"), name),
         };
-        std::thread::spawn(move || live_listener(&url, tx3));
+        let signer = crate::auth::Identity::from_secret(client.id.secret);
+        std::thread::spawn(move || live_listener(&url, &signer, tx3));
         live_state = "connecting";
     }
 
@@ -199,16 +200,23 @@ fn spawn_native(dir: &Path, tx: std::sync::mpsc::Sender<Wakeup>, pending: Arc<At
 
 /// the cell's change channel: frames arrive per remote mutation; reconnect
 /// with backoff forever (degradation is reported by the sweep still working)
-fn live_listener(url: &str, tx: std::sync::mpsc::Sender<Wakeup>) {
+fn live_listener(url: &str, signer: &crate::auth::Identity, tx: std::sync::mpsc::Sender<Wakeup>) {
     use tungstenite::client::IntoClientRequest;
     let mut backoff = 1u64;
     loop {
         // build from the URL so tungstenite generates the handshake headers;
         // a hand-built Request skips them and the server rejects the upgrade
-        let req = match url.into_client_request() {
+        let mut req = match url.into_client_request() {
             Ok(r) => r,
             Err(_) => return,
         };
+        // signed fresh on every connect (NIP-98 events are good for a
+        // minute): members-only fragments have no share link to present.
+        // The server sees the upgrade as a GET of the http(s) URL.
+        let http = url.replacen("ws", "http", 1);
+        if let Ok(v) = signer.nip98_header("GET", &http, &[]).parse() {
+            req.headers_mut().insert("authorization", v);
+        }
         if let Ok((mut socket, _)) = tungstenite::connect(req) {
             backoff = 1;
             loop {

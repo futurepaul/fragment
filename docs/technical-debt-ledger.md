@@ -59,9 +59,10 @@ without a delete condition is unfinished design, not debt.
   untyped glue that fails at runtime.
 - **First proof:** already present.
 - **Delete when:** phase 2 lands the `xtask` crate and the Rust e2e, and
-  phase 3 replaces the VPS deploy with Fly. The spike drivers
-  (`spikes/driver`) are the first Rust harness pieces; `scripts/dev` now
-  also writes `runtime/.dev.vars` for celld 0.5.
+  phase 3 replaces the VPS deploy with Fly. Slice A landed `xtask` and the
+  Rust e2e; slice B landed the Rust code.storage fake (`crates/fakes`),
+  which the CLI's tests use. The JS mock and `scripts/` remain only for the
+  TypeScript runtime until slice G.
 
 ## The e2e generation lane needs a fake host flag
 
@@ -91,14 +92,46 @@ without a delete condition is unfinished design, not debt.
   passes `--only paused` 10 of 10; until then dev and hosting run the fork
   build, and its timeout is not widened to hide a regression.
 
-## App code arrives by `PUT /api/f/<name>/code`
+## Fragments share one origin when no hostname suffix is configured
 
-- **Observed:** phase 2 slice A (`cell/src/fragment.rs`). The owner
-  uploads `app.mjs` and its declared operations directly; nothing reads
-  them from git yet, and only the owner may act (no members).
-- **Risk:** a second path for code that bypasses git history, review, and
-  the `live` pin.
-- **First proof:** already present.
-- **Delete when:** slice B serves code from the fragment's `live` pin in
-  code.storage and the route is removed, with an e2e case proving a
-  `PUT code` is a 404.
+- **Observed:** phase 2 slice B. Without `FRAGMENT_HOST_SUFFIX` the cell
+  serves every fragment from `/f/<name>/` on one origin. Cookies are
+  scoped by path, but a page on one fragment can still send same-origin
+  requests to another's `__op` and `__file` with the visitor's cookies.
+- **Risk:** a fragment acts as its visitors on another fragment they have
+  a share link or anonymous identity for.
+- **First proof:** a fleet serving strangers' fragments without a suffix.
+- **Mitigated:** with a suffix configured, `/f/<name>/…` redirects to the
+  fragment's own host and refuses writes (e2e `site`); `xtask dev` and
+  the e2e run with a suffix.
+- **Delete when:** phase 3 fleets always configure a suffix and path-mode
+  serving is removed (keeping `/f/<name>/__watch`, which carries no
+  cookies), with the `pathmode` e2e section replaced by a check that the
+  cell refuses to start serving without a suffix.
+
+## A deleted fragment can linger in a person's list
+
+- **Observed:** phase 2 slice B. Each person's list of fragments is an
+  index in their `Principal` cell, fed from the fragment's outbox with
+  retries. Deleting a fragment delivers the removals once and then wipes
+  the fragment, outbox included: a delivery that fails then is never
+  retried.
+- **Risk:** `fragment list` shows a fragment the person no longer has
+  (calls to it answer 404; nothing leaks).
+- **First proof:** a Principal cell unreachable during a delete.
+- **Delete when:** phase 4 grows the person cell; its list checks each
+  entry against the fragment (or the platform keeps delete tombstones and
+  retries them), with an e2e that fails a delivery during a delete.
+
+## The poll backstop wakes every fragment every five minutes
+
+- **Observed:** phase 2 slice B, as in the TypeScript runtime: each
+  fragment's alarm re-reads both branch heads every
+  `FRAGMENT_POLL_INTERVAL_S` (300 s) in case a webhook was lost.
+- **Risk:** cost and code.storage traffic grow with the number of
+  fragments, not with their activity (1000 fragments: ~7 wakes and ~13
+  calls a second).
+- **First proof:** phase 3 load numbers on Fly.
+- **Delete when:** the interval backs off for fragments with no recent
+  pushes (or webhooks are proven reliable enough to poll daily), with a
+  test that an idle fragment's alarm spacing grows.
