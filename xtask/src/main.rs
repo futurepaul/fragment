@@ -5,9 +5,14 @@
 //!   dev [--clean]    build, then run the stack in the foreground: the cell on
 //!                    :8790 (fragments at <name>.fragment.localhost:8790) and
 //!                    the code.storage fake on :8792
+//!   try <template> [name]
+//!                    on the running dev stack: a fragment from a template
+//!                    (todo, inbox), scaffolded under target/devstack/try so
+//!                    nothing lands in the repo; prints what to open and paste
 //!   e2e [args...]    build, then run crates/e2e (args pass through: --only <case>)
 //!   check            host tests and clippy, warnings denied
 
+use std::net::TcpStream;
 use std::path::Path;
 use std::process::Command;
 
@@ -93,8 +98,50 @@ fn dev(args: &[String]) -> Result<()> {
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
     println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
     println!("  code.storage: {} (the fake)", fake.url);
+    println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");
     let status = node.wait()?;
     println!("celld dev exited: {status}");
+    Ok(())
+}
+
+/// Templates written for the Rust cell (the others are the TypeScript runtime's).
+const TRY_TEMPLATES: [&str; 2] = ["todo", "inbox"];
+
+fn try_template(args: &[String]) -> Result<()> {
+    let usage = || format!("usage: cargo xtask try <{}> [name]", TRY_TEMPLATES.join("|"));
+    let tpl = args.first().ok_or_else(|| anyhow::anyhow!(usage()))?;
+    if !TRY_TEMPLATES.contains(&tpl.as_str()) {
+        bail!("{}", usage());
+    }
+    if TcpStream::connect(("127.0.0.1", DEV_PORT)).is_err() {
+        bail!("nothing answers on :{DEV_PORT}: start `cargo xtask dev` in another terminal, wait for `ready`, then try again");
+    }
+    let root = devstack::repo_root();
+    run(Command::new("cargo").args(["build", "--quiet", "--manifest-path"]).arg(root.join("Cargo.toml")).args(["-p", "fragment-cli"]))?;
+    let cli = root.join("target/debug/fragment");
+    let host = format!("http://127.0.0.1:{DEV_PORT}");
+    let name = args.get(1).cloned().unwrap_or_else(|| format!("{tpl}-{}", devstack::random_hex(2)));
+    let dir = root.join("target/devstack/try");
+    std::fs::create_dir_all(&dir)?;
+    let out = Command::new(&cli).args(["init", &name, "--template", tpl]).env("FRAGMENT_HOST", &host).current_dir(&dir).output()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    print!("{text}");
+    eprint!("{}", String::from_utf8_lossy(&out.stderr));
+    if !out.status.success() {
+        bail!("fragment init failed (a name already taken? pass another: cargo xtask try {tpl} <name>)");
+    }
+    let line = |prefix: &str| text.lines().find_map(|l| l.strip_prefix(prefix)).map(str::trim).unwrap_or("").to_string();
+    let alias = format!("alias fragment='FRAGMENT_HOST={host} {}'", cli.display());
+    println!("\nnext:");
+    println!("  open it      {}", line("share link:"));
+    if tpl == "inbox" {
+        let hook = line("webhook URL:");
+        println!("  post to it   curl -s -X POST '{hook}' -H 'content-type: application/json' -d '{{\"payload\":{{\"text\":\"hi\"}}}}'");
+        println!("  or a page    curl -s -X POST '{hook}' -H 'content-type: application/json' -d '{{\"payload\":{{\"url\":\"https://example.com\"}}}}'");
+    }
+    println!("  the CLI      {alias}");
+    println!("               fragment runs {name} | fragment channel {name} | fragment call {name} list");
+    println!("  change it    edit {}, then: fragment deploy {name} --dir {}", dir.join(&name).display(), dir.join(&name).display());
     Ok(())
 }
 
@@ -127,8 +174,9 @@ fn main() -> Result<()> {
         Some("build") => build(),
         Some("celld") => celld(),
         Some("dev") => dev(&args[1..]),
+        Some("try") => try_template(&args[1..]),
         Some("e2e") => e2e(&args[1..]),
         Some("check") => check(),
-        _ => bail!("usage: cargo xtask build | celld | dev [--clean] | e2e [--only <case>] | check"),
+        _ => bail!("usage: cargo xtask build | celld | dev [--clean] | try <template> [name] | e2e [--only <case>] | check"),
     }
 }

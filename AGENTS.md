@@ -41,9 +41,12 @@ The new runtime (`cell/`, Rust; phase 2, `docs/phase-2.md`):
   key and the host secret are made there on first run). Point the CLI at
   it with `FRAGMENT_HOST=http://127.0.0.1:8790`. Dev fleets let jobs
   fetch local addresses (`FRAGMENT_EGRESS_LOCAL=allow`).
-- Templates on the new model: `fragment new --template todo` (operations,
-  channels, the browser library) and `--template inbox` (a trigger, a
-  job, the inbox).
+- `cargo xtask try <todo|inbox> [name]` (with `cargo xtask dev` running):
+  creates and deploys a fragment from a template under
+  `target/devstack/try/` (never in the repo) and prints the link to open,
+  a curl for the inbox, and a `fragment` alias for the dev stack. The
+  templates on the new model: `todo` (operations, channels, the browser
+  library) and `inbox` (a trigger, a job, the inbox).
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
   logic, host-tested), `crates/nip98`, `crates/fakes` (code.storage),
   `crates/devstack`, `crates/e2e`.
