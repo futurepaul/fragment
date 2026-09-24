@@ -293,32 +293,59 @@ pub(crate) struct LocalFile {
     pub(crate) mtime_ns: i128,
 }
 
+/// Whether a path in the folder (relative, `/`-separated) takes part in
+/// sync, in either direction. One rule for the scan, the watcher, the
+/// mirror source, and the repo's listing (a repo file that is out is never
+/// pulled, and never deleted for being absent here), checked on every
+/// segment, so a folder that is out takes everything under it:
+/// - dot files and folders: sync's own `.fragment/`, `.git/`, an editor's
+///   workspace state (`.obsidian/`), `.DS_Store`, `.#` lock files;
+/// - `node_modules/`: the platform never loads or serves it (an app's
+///   modules are `applib/`), and one install writes thousands of files;
+/// - editor droppings: `~` backups, `~$` lock files, `.swp` swap files;
+/// - sync's own `.conflict-` copies and `.fragment-partial` temp files.
+pub fn syncable(rel: &str) -> bool {
+    // bounded by the path's segments
+    for seg in rel.split('/') {
+        let hidden = seg.starts_with('.');
+        let dropping = seg.ends_with('~') || seg.starts_with("~$") || seg.ends_with(".swp");
+        let ours = seg.contains(".conflict-") || seg.contains(".fragment-partial");
+        if hidden || seg == "node_modules" || dropping || ours {
+            return false;
+        }
+    }
+    true
+}
+
+/// `path` relative to `root`, `/`-separated ("" for the root itself).
+fn relative(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root).map(|rel| rel.to_string_lossy().replace('\\', "/")).unwrap_or_default()
+}
+
 /// Walk the folder. With state, a size+mtime match adopts the cached hash
-/// (O(changes)); with verify, everything is read and hashed. Skips
-/// dotfiles, .fragment/, symlinks, and editor droppings. Honors
-/// .gitignore exactly when git would (only inside a repo).
+/// (O(changes)); with verify, everything is read and hashed. Takes the
+/// `syncable` paths, never following symlinks, and honors .gitignore
+/// exactly when git would (only inside a repo).
 pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result<(BTreeMap<String, LocalFile>, ScanStats)> {
     let mut out = BTreeMap::new();
     let mut stats = ScanStats::default();
+    let root = dir.to_path_buf();
     let walker = ignore::WalkBuilder::new(dir)
+        // `syncable` owns the dotfile rule, as it does for the watcher
+        .hidden(false)
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
         .parents(true)
+        // a folder that is out is never entered
+        .filter_entry(move |e| e.depth() == 0 || syncable(&relative(&root, e.path())))
         .build();
     for entry in walker {
         let entry = entry?;
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.ends_with("~") || name.starts_with("~$") || name.starts_with(".#") || name.ends_with(".swp") {
-            continue;
-        }
-        let rel = entry.path().strip_prefix(dir).unwrap().to_string_lossy().replace('\\', "/");
-        if rel.contains(".conflict-") || rel.contains(".fragment-partial") {
-            continue;
-        }
+        let rel = relative(dir, entry.path());
         let md = fs::metadata(entry.path())?;
         let size = md.len();
         let mtime_ns = md
@@ -344,20 +371,14 @@ pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result
 /// The target's own identity is never overlaid: a source folder carrying
 /// its own fragment.json must not stomp the corrected one.
 fn mirror_overlay(src: &Path, dir: &Path) -> Result<()> {
-    for entry in walkdir::WalkDir::new(src).follow_links(false) {
+    let walker = walkdir::WalkDir::new(src).follow_links(false).into_iter().filter_entry(|e| e.depth() == 0 || syncable(&relative(src, e.path())));
+    for entry in walker {
         let entry = entry?;
         if !entry.file_type().is_file() {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || name.ends_with("~") || name.starts_with(".#") || name.ends_with(".swp") {
-            continue;
-        }
-        let rel = entry.path().strip_prefix(src).unwrap().to_string_lossy().replace('\\', "/");
-        if rel.split('/').any(|seg| seg.starts_with('.') && seg != ".") {
-            continue;
-        }
-        if rel == "fragment.json" || rel.starts_with(".fragment/") {
+        let rel = relative(src, entry.path());
+        if rel == "fragment.json" {
             continue;
         }
         let target = dir.join(&rel);
@@ -737,7 +758,7 @@ fn list_main(storage: &CodeStorage) -> Result<Listing, SyncError> {
     let Some(head) = storage.branch_head(MAIN)? else {
         return Ok(Listing { head: None, files: HashMap::new() }); // empty repo: everything local is new
     };
-    let files = storage.list_files(&head)?.into_iter().map(|f| (f.path.clone(), f)).collect();
+    let files = storage.list_files(&head)?.into_iter().filter(|f| syncable(&f.path)).map(|f| (f.path.clone(), f)).collect();
     Ok(Listing { head: Some(head), files })
 }
 
@@ -967,6 +988,71 @@ mod tests {
         st.files.insert("site/index.html".into(), FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: "c".into() });
         let (_, s2) = scan_local(&dir, Some(&st), false).unwrap();
         assert_eq!(s2.hashed, 0);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: one rule says what syncs. Method: the paths each old list
+    /// disagreed on, and ordinary ones.
+    #[test]
+    fn what_syncs() {
+        for rel in ["a.md", "site/index.html", "notes/2026/x.md", "a.b/c.d.md", "applib/x.mjs", "fragment.json"] {
+            assert!(syncable(rel), "{rel} syncs");
+        }
+        for rel in [
+            ".obsidian/workspace.json", // the watcher's old rule tested one segment for a two-segment path
+            ".DS_Store",
+            "site/.DS_Store",
+            ".git/HEAD",
+            ".fragment/state.json",
+            ".trash/old.md",
+            "node_modules/x/index.js", // the scan uploaded it while the watcher ignored it
+            "site/node_modules/y.js",
+            "a.md~",
+            "~$report.docx",
+            "notes.swp",
+            ".#notes.md",
+            "a.conflict-1700000000-deadbeef.md",
+            "doc.fragment-partial-4242",
+        ] {
+            assert!(!syncable(rel), "{rel} does not sync");
+        }
+    }
+
+    /// Goal: the scan and the mirror source take what `syncable` takes.
+    /// Method: a folder with one file of each kind.
+    #[test]
+    fn the_scan_and_the_mirror_source_share_the_rule() {
+        let src = tmpdir("rule-src");
+        let dir = tmpdir("rule-dir");
+        for (rel, bytes) in [("a.md", "a"), (".obsidian/workspace.json", "{}"), ("node_modules/x/index.js", "x"), ("b.md~", "b"), ("sub/.DS_Store", "d"), ("sub/c.md", "c")] {
+            fs::create_dir_all(src.join(rel).parent().unwrap()).unwrap();
+            fs::write(src.join(rel), bytes).unwrap();
+        }
+        let (scanned, _) = scan_local(&src, None, true).unwrap();
+        assert_eq!(scanned.keys().collect::<Vec<_>>(), ["a.md", "sub/c.md"]);
+        mirror_overlay(&src, &dir).unwrap();
+        let (overlaid, _) = scan_local(&dir, None, true).unwrap();
+        assert_eq!(overlaid.keys().collect::<Vec<_>>(), ["a.md", "sub/c.md"]);
+        assert!(!dir.join("node_modules").exists() && !dir.join(".obsidian").exists(), "the overlay copies only what syncs");
+        fs::remove_dir_all(&src).ok();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: a repo file that does not sync is left alone both ways: never
+    /// pulled, and never deleted for being absent from the folder (the
+    /// scan skips it). Method: a repo with a dotfile and a node_modules
+    /// file; a mirror pass, then another.
+    #[test]
+    fn repo_files_that_do_not_sync_are_left_alone() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("a.md", b"a"), (".env.example", b"X=1"), ("node_modules/x.js", b"x")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("left-alone");
+        let first = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(first.pulled, ["a.md"]);
+        let second = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        assert!(second.deleted_remote.is_empty() && second.pushed.is_empty(), "{second:?}");
+        assert_eq!(mock.paths("t", "main"), [".env.example", "a.md", "node_modules/x.js"]);
         fs::remove_dir_all(&dir).ok();
     }
 

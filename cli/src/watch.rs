@@ -27,15 +27,18 @@ const DEBOUNCE_MS: u64 = 300;
 const POLL_INTERVAL_SECS: u64 = 5;
 const RESCAN_SECS: u64 = 60;
 
-/// paths that never count as content changes
-fn ignored(path: &str) -> bool {
-    let segs: Vec<&str> = path.split('/').collect();
-    segs.iter().any(|&s| {
-        s == ".git" || s == "node_modules" || s == ".trash" || s == ".fragment"
-    }) || segs.iter().any(|&s| {
-        s.starts_with(".#") || s.ends_with("~") || s.starts_with("~$") || s.ends_with(".swp")
-            || s.starts_with(".obsidian/workspace")
-    }) || path.contains(".fragment-partial")
+/// Whether an OS event touched a path that syncs (`sync::syncable`): any
+/// of its paths, taken relative to the folder. An event that names no path
+/// (the OS asking for a rescan), or a path outside the folder (a root the
+/// OS reports by its real path), counts.
+fn relevant(roots: &[PathBuf], paths: &[PathBuf]) -> bool {
+    if paths.is_empty() {
+        return true;
+    }
+    paths.iter().any(|p| match roots.iter().find_map(|root| p.strip_prefix(root).ok()) {
+        Some(rel) => sync::syncable(&rel.to_string_lossy().replace('\\', "/")),
+        None => true,
+    })
 }
 
 /// The debounce window: hold the latest wakeups until things go quiet (or
@@ -174,16 +177,15 @@ fn view_token(client: &Client, name: &str) -> Option<String> {
 fn spawn_native(dir: &Path, tx: std::sync::mpsc::Sender<Wakeup>, pending: Arc<AtomicBool>) -> Result<Box<dyn Send>> {
     use notify_debouncer_full::{new_debouncer, DebounceEventResult};
     let dir_owned: PathBuf = dir.to_path_buf();
+    // the folder as given, and as the OS may report it (macOS names
+    // /var/… by its real path, /private/var/…)
+    let roots = vec![dir.to_path_buf(), dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())];
     let mut debouncer = new_debouncer(
         Duration::from_millis(200),
         None,
         move |res: DebounceEventResult| {
             if let Ok(events) = res {
-                let relevant = events.iter().any(|e| {
-                    let p = e.paths.first().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-                    !ignored(&p)
-                });
-                if relevant {
+                if events.iter().any(|e| relevant(&roots, &e.paths)) {
                     pending.store(true, Ordering::Relaxed);
                     let _ = tx.send(Wakeup::Events);
                 }
@@ -297,5 +299,26 @@ pub fn follow_channel(client: &Client, name: &str, channel: &str, after: i64) ->
         }
         std::thread::sleep(Duration::from_secs(backoff));
         backoff = (backoff * 2).min(30);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Goal: an editor's own state is not a change, however an event
+    /// names it. Method: `relevant` over events' path lists; the old rule
+    /// tested `.obsidian/workspace` against one path segment, so it never
+    /// matched, and it read only an event's first path.
+    #[test]
+    fn an_editors_workspace_write_is_not_a_change() {
+        let root = PathBuf::from("/tmp/folder");
+        let roots = [root.clone()];
+        assert!(!relevant(&roots, &[root.join(".obsidian/workspace.json")]));
+        assert!(!relevant(&roots, &[root.join(".DS_Store"), root.join("node_modules/a/b.js"), root.join(".fragment/state.json")]));
+        assert!(relevant(&roots, &[root.join(".obsidian/workspace.json"), root.join("notes/a.md")]), "every path of an event counts");
+        assert!(relevant(&roots, &[root.join("notes/a.md")]));
+        assert!(relevant(&roots, &[]), "a rescan names no path");
+        assert!(relevant(&roots, &[PathBuf::from("/elsewhere/a.md")]), "a path outside the folder counts");
     }
 }

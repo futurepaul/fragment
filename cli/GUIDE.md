@@ -115,8 +115,13 @@ fragment verify my-thing --dir .            # full-content audit
   max(3, 30%) of known files, or all of them, is refused (exit 4) until
   `--apply-mass-delete`.
 - **Deletions converge**; a locally modified copy wins over a remote
-  delete. Dotfiles, `.fragment/`, and (in a git repo) `.gitignore`d
-  files never upload.
+  delete.
+- **What syncs**: everything but dot files and folders (`.fragment/`,
+  `.git/`, `.obsidian/`, `.DS_Store`), `node_modules/`, editor droppings
+  (`~` backups, `~$` locks, `.swp`), and sync's own `.conflict-` copies.
+  One rule for both directions: such a file in the repo is never pulled,
+  and never deleted for being absent from your folder. In a git repo,
+  `.gitignore`d files never upload.
 - **Exit codes**: 0 clean, 1 failure, 3 conflicts, 4 guard tripped.
 
 ## The app
