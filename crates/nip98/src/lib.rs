@@ -101,9 +101,10 @@ fn check(header: Option<&str>, method: &str, url: &str, body: &[u8], now_s: i64,
         return Err(AuthError::BadPubkey);
     }
     let created_at = ev["created_at"].as_i64().ok_or(AuthError::Malformed("created_at"))?;
-    let skew_s = created_at - now_s;
-    if skew_s.abs() > window_s {
-        return Err(AuthError::Stale { skew_s });
+    // abs_diff, not `created_at - now_s`: that subtraction wraps in release
+    // builds for a created_at near i64::MIN, and the wrapped skew passed as fresh
+    if created_at.abs_diff(now_s) > window_s.unsigned_abs() {
+        return Err(AuthError::Stale { skew_s: created_at.saturating_sub(now_s) });
     }
     let tags = &ev["tags"];
     let signed_url = tag(tags, "u").and_then(canonical_url).ok_or(AuthError::UrlMismatch)?;
@@ -121,9 +122,16 @@ fn check(header: Option<&str>, method: &str, url: &str, body: &[u8], now_s: i64,
     if ev["id"].as_str() != Some(hex::encode(id).as_str()) {
         return Err(AuthError::IdMismatch);
     }
-    let sig_bytes = ev["sig"].as_str().and_then(|s| hex::decode(s).ok()).ok_or(AuthError::BadSignature)?;
+    // Exact sizes before k256 sees them: its Signature::try_from panics on
+    // fewer than 32 bytes, which crashed the router for anyone who sent a
+    // short `sig` (no key needed to get this far).
+    let sig_bytes: [u8; 64] = ev["sig"]
+        .as_str()
+        .and_then(|s| hex::decode(s).ok())
+        .and_then(|b| b.try_into().ok())
+        .ok_or(AuthError::BadSignature)?;
     let sig = Signature::try_from(sig_bytes.as_slice()).map_err(|_| AuthError::BadSignature)?;
-    let key_bytes = hex::decode(pubkey).map_err(|_| AuthError::BadPubkey)?;
+    let key_bytes: [u8; 32] = hex::decode(pubkey).ok().and_then(|b| b.try_into().ok()).ok_or(AuthError::BadPubkey)?;
     let key = VerifyingKey::from_bytes(&key_bytes).map_err(|_| AuthError::BadPubkey)?;
     key.verify_raw(&id, &sig).map_err(|_| AuthError::BadSignature)?;
     Ok((pubkey.to_string(), tags.clone()))
@@ -207,6 +215,56 @@ impl Keys {
             "kind": KIND, "tags": tags, "content": "", "sig": hex::encode(sig.to_bytes()),
         });
         format!("Nostr {}", base64::engine::general_purpose::STANDARD.encode(ev.to_string()))
+    }
+}
+
+/// These need no signing key, so they run in every `cargo test`.
+#[cfg(test)]
+mod refusals {
+    use super::*;
+
+    const NOW: i64 = 1_790_000_000;
+    const URL: &str = "https://fragment.club/api/fragments";
+    const PUBKEY: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    /// A well-formed event for GET URL whose id is right, with `sig` and
+    /// `created_at` as given: everything a stranger can build without a key.
+    fn header(sig: &str, created_at: i64) -> String {
+        let tags = serde_json::json!([["u", URL], ["method", "GET"]]);
+        let id = event_id(PUBKEY, created_at, KIND, &tags, "");
+        let ev = serde_json::json!({
+            "id": hex::encode(id), "pubkey": PUBKEY, "created_at": created_at,
+            "kind": KIND, "tags": tags, "content": "", "sig": sig,
+        });
+        format!("Nostr {}", base64::engine::general_purpose::STANDARD.encode(ev.to_string()))
+    }
+
+    /// Goal: a signature of the wrong size is refused, never a panic (k256
+    /// panicked below 32 bytes). Method: every short and long length, and
+    /// the right length that simply does not verify.
+    #[test]
+    fn a_signature_of_any_size_is_refused_not_a_panic() {
+        for n in [0usize, 1, 2, 31, 32, 63, 65, 128] {
+            let h = header(&"ab".repeat(n), NOW);
+            assert_eq!(verify(Some(&h), "GET", URL, &[], NOW, 60), Err(AuthError::BadSignature), "{n} bytes");
+        }
+        assert_eq!(verify(Some(&header(&"ab".repeat(64), NOW)), "GET", URL, &[], NOW, 60), Err(AuthError::BadSignature));
+        assert_eq!(verify(Some(&header("not hex", NOW)), "GET", URL, &[], NOW, 60), Err(AuthError::BadSignature));
+    }
+
+    /// Goal: a created_at at the ends of i64 is stale, not fresh (the
+    /// subtraction wrapped in release builds). Method: both ends, and the
+    /// window's own edges.
+    #[test]
+    fn a_created_at_at_the_ends_of_i64_is_stale() {
+        for created_at in [i64::MIN, i64::MIN + NOW, i64::MAX] {
+            let h = header(&"ab".repeat(64), created_at);
+            assert!(matches!(verify(Some(&h), "GET", URL, &[], NOW, 60), Err(AuthError::Stale { .. })), "{created_at}");
+        }
+        let edge = header(&"ab".repeat(64), NOW - 60);
+        assert_eq!(verify(Some(&edge), "GET", URL, &[], NOW, 60), Err(AuthError::BadSignature), "60 s old is inside the window");
+        let past = header(&"ab".repeat(64), NOW - 61);
+        assert_eq!(verify(Some(&past), "GET", URL, &[], NOW, 60), Err(AuthError::Stale { skew_s: -61 }));
     }
 }
 
