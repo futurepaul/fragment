@@ -751,7 +751,6 @@ name = "fragment-cli"
 version = "0.8.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
  "clap",
  "dirs",
  "fragment-computer",
