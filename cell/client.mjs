@@ -5,12 +5,16 @@
 //   await fragment.call("add_todo", { text: "milk" });        // an operation
 //   fragment.live("list", {}, (r) => render(r.todos));         // a query, re-run on changes
 //   fragment.subscribe("activity", (rec) => log(rec.body));    // a channel, from a cursor
+//   fragment.subscribe("chat", show, { last: 100 });           // or from near its end
 //   fragment.presence.set({ name: "paul" });                   // who is here
 //   fragment.presence.on((list) => showWho(list));
 //   await fragment.push.register("everyone");                  // web push (after a click)
 //
 // One socket per page carries subscriptions, presence, and change signals;
 // it reconnects by itself and resumes each channel after its last record.
+// A channel's backlog comes a page at a time: the library asks for the next
+// page until the last one, which makes the channel live, so no record is
+// skipped however far behind the page starts.
 // A call keeps its id across retries, so a retried mutation is a replay,
 // never a second write.
 
@@ -55,12 +59,18 @@ let rerun = null;
 let hello = null;
 let presenceData = null;
 const helloWaiters = [];
-const subs = new Map(); // channel -> { after, handlers }
+const subs = new Map(); // channel -> { after, last, handlers }
 const lives = new Set(); // { op, input, onResult, onError }
 const presenceHandlers = new Set();
 
 function send(message) {
   if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+}
+
+// Resumes after the cursor; a subscription that asked for the last N
+// records starts there until its first page says where that is.
+function subscribeFrame(channel, s) {
+  return s.last != null ? { type: "subscribe", channel, last: s.last } : { type: "subscribe", channel, after: s.after };
 }
 
 function wanted() {
@@ -75,7 +85,7 @@ function connect() {
   socket = ws;
   ws.onopen = () => {
     backoff = 1000;
-    for (const [channel, s] of subs) send({ type: "subscribe", channel, after: s.after });
+    for (const [channel, s] of subs) send(subscribeFrame(channel, s));
     if (presenceData !== null) send({ type: "presence", data: presenceData });
     for (const l of lives) run(l);
   };
@@ -89,6 +99,14 @@ function connect() {
       if (s && m.seq > s.after) {
         s.after = m.seq;
         for (const h of s.handlers) h(m);
+      }
+    } else if (m.type === "subscribed") {
+      const s = subs.get(m.channel);
+      if (s) {
+        if (m.next > s.after) s.after = m.next;
+        s.last = null;
+        // not live yet: the next page, from the cursor
+        if (m.more) send(subscribeFrame(m.channel, s));
       }
     } else if (m.type === "presence") {
       for (const h of presenceHandlers) h(m.list);
@@ -124,13 +142,14 @@ export function live(op, input, onResult, onError) {
   return () => lives.delete(l);
 }
 
-/// Follows a channel from after `after` (0: from the start); returns a stop function.
-export function subscribe(channel, onRecord, { after = 0 } = {}) {
+/// Follows a channel from after `after` (0: from the start), or from its
+/// last `last` records (at most 1000); returns a stop function.
+export function subscribe(channel, onRecord, { after = 0, last = null } = {}) {
   let s = subs.get(channel);
   if (!s) {
-    s = { after, handlers: new Set() };
+    s = { after, last, handlers: new Set() };
     subs.set(channel, s);
-    send({ type: "subscribe", channel, after });
+    send(subscribeFrame(channel, s));
   }
   s.handlers.add(onRecord);
   connect();

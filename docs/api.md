@@ -516,15 +516,23 @@ API answers on the platform's host):
 `__live` and `__watch` are also served in place at `/f/<name>/…` for the
 CLI. The `__live` protocol (JSON frames):
 
-- client → server: `{type: "subscribe", channel, after}`,
-  `{type: "unsubscribe", channel}`, `{type: "presence", data}` (at most
-  4 KiB; `null` clears), `{type: "ping"}`
+- client → server: `{type: "subscribe", channel, after}` (records with
+  `seq` after `after`) or `{type: "subscribe", channel, last}` (the last
+  `last` records, at most 1000), `{type: "unsubscribe", channel}`,
+  `{type: "presence", data}` (at most 4 KiB; `null` clears),
+  `{type: "ping"}`
 - server → client: `{type: "hello", id, principal, role}`,
   `{type: "record", channel, seq, at, principal, kind, body}`,
-  `{type: "subscribed", channel, next, more}` (after the backlog),
+  `{type: "subscribed", channel, next, more}` (after each page),
   `{type: "presence", list: [{id, principal, data}]}`,
   `{type: "changed", op}` (after every applied mutation),
   `{type: "error", message}`
+
+A subscribe answers one page of the backlog: at most 1000 records and
+about 1 MiB of record frames. With `more: true` the socket is not yet
+live on the channel: subscribe again from `next`. The page that reaches
+the end (`more: false`) makes it live, so a record appended while a
+client pages arrives in its turn, never ahead of the records before it.
 
 A socket's role is fixed when it connects. Removing a member closes their
 sockets; rotating the share link closes link holders'; a fragment that
@@ -533,8 +541,9 @@ stops being public closes its anonymous visitors'.
 The browser library (`import * as fragment from "./__fragment.js"`):
 `call(op, input, {id?})` (retries keep the id), `live(op, input,
 onResult, onError?)` (re-runs a query after every change), `subscribe(
-channel, onRecord, {after?})`, `presence.set(data)`, `presence.on(fn)`,
-`me()`.
+channel, onRecord, {after?, last?})` (pages through the backlog, then
+follows live; after a reconnect it resumes after the last record),
+`presence.set(data)`, `presence.on(fn)`, `me()`.
 
 CLI: `fragment call <name> <op> --input '{...}' [--id ID]`, `fragment
 channel <name> [<channel>] [--after N] [--follow]`.

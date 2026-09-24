@@ -100,7 +100,8 @@
       $("here").textContent = others <= 0 ? "just you here" : `you and ${others} other${others === 1 ? "" : "s"} here`;
     });
     fragment.presence.set({});
-    fragment.subscribe("chat", add, { after: 0 });
+    // the last 200 messages, then live: a long chat opens near its end
+    fragment.subscribe("chat", add, { last: 200 });
 
     $("say").addEventListener("submit", async (e) => {
       e.preventDefault();

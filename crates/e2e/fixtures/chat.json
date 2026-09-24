@@ -15,6 +15,7 @@
     "huge": { "kind": "mutation", "role": "public" },
     "reach": { "kind": "mutation" },
     "patched": { "kind": "mutation" },
+    "bulk": { "kind": "mutation" },
     "count": { "kind": "query", "role": "public" },
     "whoami": { "kind": "query", "role": "public" }
   },

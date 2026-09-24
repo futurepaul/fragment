@@ -68,11 +68,13 @@
       }
     };
 
+    // the last 20 lines of activity, then live
     fragment.subscribe("activity", (r) => {
       const line = document.createElement("div");
       line.textContent = `${r.body.did} “${r.body.text}”`;
       $("activity").prepend(line);
-    });
+      while ($("activity").children.length > 20) $("activity").lastChild.remove();
+    }, { last: 20 });
 
     const me = await fragment.me();
     fragment.presence.set({ joined: Date.now() });

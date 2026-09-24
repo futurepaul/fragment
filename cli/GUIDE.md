@@ -269,7 +269,7 @@ An operation pauses its own triggers after 5 held runs in 10 minutes or
 ```
 fragment call my-thing add --input '{"text":"hi"}' [--id ID]   # a retry with the same --id is a replay
 fragment channel my-thing                                      # list channels
-fragment channel my-thing activity --follow                     # stream records as JSON lines
+fragment channel my-thing activity --follow                     # the backlog a page at a time, then new records, as JSON lines
 ```
 
 ## People

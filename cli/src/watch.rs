@@ -250,7 +250,8 @@ fn chrono_like() -> String {
 }
 
 /// Streams a channel's records as JSON lines from the fragment's live
-/// socket, resuming after the last record seen when the socket drops.
+/// socket, a page of backlog at a time until it is live, resuming after
+/// the last record seen when the socket drops.
 pub fn follow_channel(client: &Client, name: &str, channel: &str, after: i64) -> Result<()> {
     use tungstenite::client::IntoClientRequest;
     let http = format!("{}/f/{name}/__live", client.host.trim_end_matches('/'));
@@ -273,6 +274,13 @@ pub fn follow_channel(client: &Client, name: &str, channel: &str, after: i64) ->
                                 Some("record") if v["channel"] == channel => {
                                     last = v["seq"].as_i64().unwrap_or(last);
                                     println!("{t}");
+                                }
+                                // a page at a time: the socket follows the channel live
+                                // only once a page reaches the end
+                                Some("subscribed") if v["channel"] == channel && v["more"] == true => {
+                                    last = v["next"].as_i64().unwrap_or(last).max(last);
+                                    let sub = serde_json::json!({ "type": "subscribe", "channel": channel, "after": last });
+                                    socket.send(tungstenite::Message::Text(sub.to_string().into()))?;
                                 }
                                 Some("error") => anyhow::bail!("{}", v["message"].as_str().unwrap_or("the live socket refused")),
                                 _ => {}

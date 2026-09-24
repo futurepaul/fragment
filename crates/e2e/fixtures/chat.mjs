@@ -26,6 +26,12 @@ export class App extends DurableObject {
     call.publish("nowhere", { text });
   }
 
+  // `n` records of `size` bytes each, to fill a channel past a page
+  bulk({ n, size }, call) {
+    for (let i = 0; i < n; i++) call.publish("room", { i, pad: "x".repeat(size) }, "bulk");
+    return { n };
+  }
+
   huge(_input, call) {
     call.publish("room", { blob: "x".repeat(70 * 1024) });
   }
