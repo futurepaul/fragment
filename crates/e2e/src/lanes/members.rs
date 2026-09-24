@@ -127,6 +127,8 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     let (open, open_id) = (r.body["token"].as_str().unwrap_or("").to_string(), r.body["id"].as_str().unwrap_or("").to_string());
     let below = limits::MEMBERS_MAX as u64 - 1;
     let r = api.signed(&owner, "POST", &path("test/members"), Some(&json!({ "fill": below })))?;
+    s.ok("(a fragment's test levers are the router's /api/test/fragment alone: no signed route)", r.status == 404, &r);
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "members", "fill": below })))?;
     s.ok("(a test hook fills the fragment to one below the member cap)", r.status == 200 && r.body["members"] == below, &r);
     let r = join(&erin, &open)?;
     s.ok("an invite admits the member that reaches the cap", r.status == 200 && r.body["joined"] == true, &r);

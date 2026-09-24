@@ -112,7 +112,7 @@ pub fn appfiles(s: &mut Suite, api: &crate::api::Api) -> Result<()> {
     let r2 = call("add_note", "k2", json!({ "slug": "kept", "text": "new\n" }))?;
     s.ok("(two writes to one note)", r.status == 200 && r2.status == 200 && kept(s).as_deref() == Some(&b"new\n"[..]), format!("{r} {r2}"));
     let week = 7 * 24 * 3600 * 1000;
-    let r = api.signed(&owner, "POST", &format!("/api/f/{name}/test/age"), Some(&json!({ "ms": week + 3_600_000 })))?;
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "age", "ms": week + 3_600_000 })))?;
     s.ok("(a test hook ages the write keys past their week)", r.status == 200, &r);
     let packs = s.fake.commit_pack_count();
     let r = call("add_note", "k1", json!({ "slug": "kept", "text": "old\n" }))?;
@@ -124,7 +124,7 @@ pub fn appfiles(s: &mut Suite, api: &crate::api::Api) -> Result<()> {
 
     // past the ledger's window (shortened by a test hook) the same id is a
     // new run, with effects of its own; within it, a replay
-    let window = |ms: Value| api.signed(&owner, "POST", &format!("/api/f/{name}/test/ledger"), Some(&json!({ "ms": ms })));
+    let window = |ms: Value| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "ledger", "ms": ms })));
     let changes = || {
         api.signed(&owner, "GET", &format!("/api/f/{name}/channels/changes"), None)
             .map(|r| r.body["records"].as_array().map_or(0, |a| a.iter().filter(|x| x["body"]["slug"] == "window").count()))

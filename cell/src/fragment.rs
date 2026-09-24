@@ -32,11 +32,11 @@
 //!   POST   /api/replay  POST /api/pause   editor
 //!   GET    /api/triggers                  viewer
 //!   POST   /api/inbox                     the inbox token (no signature)
-//!   POST   /api/test/ledger|age|members   owner, on fleets with test hooks only (ops.rs)
 //!   *      /serve/<path>                  the site, `__tree`, `__file`, `__op`, `__watch`
 //!   POST   /job/advance|effect|finish     a run's Workflow (jobs.rs); never routed from outside
 //!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
 //!   POST   /deliver/report                the delivery consumer (deliveries.rs); never routed from outside
+//!   POST   /test/keys  /test/fragment     the router's `/api/test/*`, on fleets with test hooks only (ops.rs)
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -405,22 +405,8 @@ impl FragmentCell {
             return json_response(&answer);
         }
         if path == "/test/fragment" && self.cfg.test_hooks {
-            // levers the e2e pulls on one fragment
             let body: Value = body_json(&mut req).await?;
-            match body["op"].as_str() {
-                Some("fail-deliveries") => {
-                    let times = body["times"].as_u64().ok_or_else(|| CellError::invalid("fail-deliveries names how many times"))?;
-                    self.set_meta(crate::deliveries::TEST_FAILURES_KEY, &times.to_string())?;
-                }
-                Some("drop-live") => {
-                    let code = body["code"].as_u64().and_then(|c| u16::try_from(c).ok()).ok_or_else(|| CellError::invalid("drop-live names a close code"))?;
-                    for ws in self.state.get_websockets_with_tag("live") {
-                        let _ = ws.close(Some(code), Some("dropped by a test hook"));
-                    }
-                }
-                _ => return Err(CellError::invalid("op is fail-deliveries {times} or drop-live {code}")),
-            }
-            return json_response(&json!({ "ok": true }));
+            return json_response(&self.test_fragment(&body)?);
         }
         if let Some(step) = path.strip_prefix("/job/") {
             // Only this script's Workflow sets the header; the router never passes it.
@@ -570,10 +556,6 @@ impl FragmentCell {
             }
             (Method::Get, ["api", "subscriptions"]) => self.subscriptions(&caller),
             (Method::Delete, ["api", "subscriptions", id]) => self.unsubscribe(&caller, id),
-            (Method::Post, ["api", "test", hook]) if self.cfg.test_hooks => {
-                let body: Value = body_json(&mut req).await?;
-                self.test_hook(&caller, hook, &body)
-            }
             (Method::Post, ["api", "inbox"]) => {
                 let token = match req.headers().get("x-fragment-inbox-token")? {
                     Some(t) => t,
