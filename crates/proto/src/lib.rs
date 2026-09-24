@@ -690,6 +690,19 @@ pub struct Join {
     pub token: String,
 }
 
+/// The answer to `POST /api/f/<name>/rotate` (owner): the tokens as they
+/// are now, and which of them this rotation renewed. The webhook secret is
+/// shown only here and in `Created`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Rotated {
+    pub inbox_token: String,
+    pub view_token: String,
+    pub webhook_secret: String,
+    /// The scopes renewed: `inbox`, `view`, `webhook`.
+    pub rotated: Vec<String>,
+}
+
 /// `PUT /api/f/<name>/visibility` (owner)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1228,6 +1241,22 @@ mod tests {
         let mut other = wire.clone();
         other["type"] = serde_json::json!("push");
         assert!(serde_json::from_value::<Delivery>(other).is_err());
+    }
+
+    /// The contract states the step limit with the code's number (it said
+    /// 100 while the code kept 256).
+    #[test]
+    fn the_contract_names_the_step_limit() {
+        let api = include_str!("../../../docs/api.md").split_whitespace().collect::<Vec<_>>().join(" ");
+        let rule = format!("At most {} steps (`limits::JOB_STEPS_MAX`", limits::JOB_STEPS_MAX);
+        assert!(api.contains(&rule), "docs/api.md should say: {rule}");
+    }
+
+    /// A rotation answers in the contract's camelCase, like every answer.
+    #[test]
+    fn a_rotation_answers_in_camel_case() {
+        let r = Rotated { inbox_token: "i".into(), view_token: "v".into(), webhook_secret: "w".into(), rotated: vec!["view".into()] };
+        assert_eq!(serde_json::to_value(&r).unwrap(), serde_json::json!({ "inboxToken": "i", "viewToken": "v", "webhookSecret": "w", "rotated": ["view"] }));
     }
 
     #[test]

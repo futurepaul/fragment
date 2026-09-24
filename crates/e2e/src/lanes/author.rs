@@ -443,8 +443,8 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     let r = s.cli_json(api, &home, &["rotate", &name, "--json"])?;
     s.ok(
         "fragment rotate renews the inbox token and the share link, not the webhook secret",
-        r["rotated"] == json!(["inbox", "view"]) && r["view_token"] != c["viewToken"] && r["webhook_secret"] == c["webhookSecret"],
-        json!({ "rotated": r["rotated"], "view_changed": r["view_token"] != c["viewToken"], "webhook_kept": r["webhook_secret"] == c["webhookSecret"] }),
+        r["rotated"] == json!(["inbox", "view"]) && r["viewToken"] != c["viewToken"] && r["webhookSecret"] == c["webhookSecret"],
+        json!({ "rotated": r["rotated"], "view_changed": r["viewToken"] != c["viewToken"], "webhook_kept": r["webhookSecret"] == c["webhookSecret"] }),
     );
     Ok(())
 }
