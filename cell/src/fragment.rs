@@ -184,7 +184,7 @@ impl DurableObject for FragmentCell {
             self.event("alarm.failed", &e.message, json!({ "code": e.code }));
             // Whatever is due, a failing alarm tries again no sooner than
             // this, so a lasting failure never spins.
-            let _ = self.schedule_after(ALARM_RETRY_MS).await;
+            let _ = self.arm(None, ALARM_RETRY_MS).await;
         }
         Response::ok("")
     }
@@ -799,17 +799,23 @@ impl FragmentCell {
 
     /// Arms the alarm for the earliest due work.
     pub(crate) async fn schedule(&self) -> CellResult<()> {
-        self.schedule_after(ALARM_SOON_MS).await
+        self.arm(None, ALARM_SOON_MS).await
     }
 
-    /// Arms the alarm for the earliest due work, but no sooner than `min_ms` from now.
-    async fn schedule_after(&self, min_ms: i64) -> CellResult<()> {
+    /// Arms the alarm for the earliest due work, or `at` if that is sooner.
+    pub(crate) async fn schedule_by(&self, at: i64) -> CellResult<()> {
+        self.arm(Some(at), ALARM_SOON_MS).await
+    }
+
+    /// Arms the alarm for the earliest due work (or `also`), but no sooner
+    /// than `min_ms` from now.
+    async fn arm(&self, also: Option<i64>, min_ms: i64) -> CellResult<()> {
         if self.meta("created_at")?.is_none() {
             return Ok(());
         }
         let poll_at: i64 = self.meta("poll_at")?.and_then(|s| s.parse().ok()).unwrap_or_else(|| js::now_ms() + self.cfg.poll_interval_ms);
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
-        let due = [outbox, self.runs_due_at()?, self.pending_due_at()?];
+        let due = [outbox, self.runs_due_at()?, self.pending_due_at()?, also];
         let at = due.into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + min_ms);
         self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;
         Ok(())

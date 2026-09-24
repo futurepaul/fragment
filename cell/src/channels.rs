@@ -311,9 +311,18 @@ impl FragmentCell {
         self.exec("DELETE FROM pending WHERE seq = ?", vec![SqlStorageValue::Integer(p.seq)])
     }
 
-    /// When the next try after a passing failure is due (for the alarm).
+    /// When the next try after a passing failure is due (for the alarm). A
+    /// row a call is settling now is that call's: counting it would re-arm
+    /// the alarm every 50 ms until the call ends. At most as many rows as
+    /// there are ids in flight are passed over, so one more is enough.
     pub(crate) fn pending_due_at(&self) -> CellResult<Option<i64>> {
-        Ok(self.rows("SELECT MIN(next_at) AS at FROM pending WHERE tries > 0", vec![])?.first().and_then(|r| r["at"].as_i64()))
+        let settling = self.settling.borrow();
+        let limit = i64::try_from(settling.len() + 1).expect("ids in flight are few");
+        let rows = self.rows("SELECT ledger_id, next_at FROM pending WHERE tries > 0 ORDER BY next_at LIMIT ?", vec![SqlStorageValue::Integer(limit)])?;
+        Ok(rows
+            .iter()
+            .find(|r| !settling.contains_key(r["ledger_id"].as_str().expect("pending.ledger_id is TEXT")))
+            .map(|r| r["next_at"].as_i64().expect("pending.next_at is INTEGER")))
     }
 
     /// Settles a run the facet committed: applies its effects, or refuses
@@ -402,14 +411,17 @@ impl FragmentCell {
             return self.forget(p);
         }
         let wait = retry_after_ms(tries);
+        let next_at = js::now_ms() + wait;
         self.exec(
             "UPDATE pending SET tries = ?, next_at = ? WHERE seq = ?",
-            vec![SqlStorageValue::Integer(tries), SqlStorageValue::Integer(js::now_ms() + wait), SqlStorageValue::Integer(p.seq)],
+            vec![SqlStorageValue::Integer(tries), SqlStorageValue::Integer(next_at), SqlStorageValue::Integer(p.seq)],
         )?;
         if tries == 1 {
             self.event("effects.delayed", &format!("{} {}: {why}; trying again", p.op, p.id()), data(Some(wait)));
         }
-        self.schedule().await
+        // By this row's own time: while its caller still holds it, the
+        // alarm's own reckoning passes it over.
+        self.schedule_by(next_at).await
     }
 
     /// Settles one pending run from the facet's ledger: its effects when
