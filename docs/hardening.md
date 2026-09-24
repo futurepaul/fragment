@@ -103,3 +103,35 @@ H1 is the largest (the fork seam, a crate, the cell's key paths, a node
 deploy). H2 is small and needs nothing from Paul. H3 is fork work in the
 same rebuild as H1. H4 is configuration. Suggested: H2 and H1 together
 (one node deploy), then H3 (a second), then H4.
+
+## Starting points (for whoever picks this up)
+
+- **Paul's go:** asked 2026-09-24 ("are you ready to do the h1-h4?")
+  after fragment.club went live on phase 4 and the live-socket fix
+  (3b1fbc3). Order: H2 with H1 (one node deploy), then H3, then H4. Each
+  node image deploy, the Fly secrets, and the Fly network and Tigris
+  changes are still his to approve at the moment they happen.
+- **The fork today:** `futurepaul/celld` at `cd3a68b` (branch
+  `egress/public-only`: the alarm fix plus public-only egress), pinned in
+  `crates/devstack/src/lib.rs` (`CELLD_FORK_REV`) and built by
+  `cargo xtask celld`; the node image by `cargo xtask deploy fragment-club
+  --nodes` (local OrbStack build, rolling update).
+- **The seam:** `celld-worktrees/native-services` at `f373feb` ("fork
+  seam: service bindings to native:<name> reach fragment-native"), based
+  on `b5f57ea`; rebase it onto `cd3a68b`.
+- **The crate:** `fragment-next-worktrees/native-services` at `cd1d6d8`,
+  `crates/native` (`lib.rs`, `keys.rs`, `scope.rs`, `echo.rs`) and the
+  probe in `spikes/native-services/`; bring it onto `main` (it predates
+  phase 2's later slices and phase 4).
+- **The isolation probes** to rerun for H3: `spike/isolation` (dadbadb)
+  and `spike/cell-isolation` (35c51f1), `spikes/isolation/probe/`.
+- **Keys in the cell now:** `crates/core/src/secrets.rs` (sealing),
+  `cell/src/cs.rs` (the code.storage JWT), `cell/src/js.rs`
+  (`random_bytes`), `cell/src/registry/signin.rs` (session and
+  redemption tokens), `cell/src/ledger.rs` (the org's OpenRouter key,
+  sealed), `cell/src/auth.rs` (the WorkOS exchange), `agent/src/lib.rs`
+  (agent keys, sealed; NIP-98 signing in `agent/src/fleet.rs`).
+- **Fleet secrets now:** `fleets/fragment-club.json` `secret_vars`
+  (host secret, code.storage key, WorkOS client ID and key, OpenRouter
+  management key): rendered into `vars` by `xtask/src/deploy.rs`, which
+  H1 changes to Fly secrets on the node.
