@@ -1,4 +1,6 @@
-//! The app facet's `limits.js`: the limits and rules the platform code
+//! The boundary with the app facet, both ways.
+//!
+//! In: `limits.js`, the limits and rules the platform code
 //! (`cell/platform.mjs`) checks in the author's realm, generated from their
 //! Rust definitions so the two cannot drift. Each rule's JavaScript sits
 //! beside the Rust function it mirrors (`fragment_proto`, `blob`); this
@@ -7,10 +9,18 @@
 //! own checks after the commit (`effects`) are the ones that hold. The
 //! module is part of the platform code: the cell hashes it into the loader
 //! id with `platform.js` (`cell/src/ops.rs`).
+//!
+//! Out: the platform code's answers, decoded once into types. That code
+//! shares a realm with the author's, which can patch it, so an answer is
+//! app-shaped data: one that is not what the platform code answers is the
+//! app's failure, never a panic or a guess.
 
 use std::fmt::Write;
 
-use fragment_proto::{limits, RESERVED_OP_NAMES, VALID_KIND_JS, VALID_REPO_PATH_JS};
+use fragment_proto::{limits, ErrorCode, RESERVED_OP_NAMES, VALID_KIND_JS, VALID_REPO_PATH_JS};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer};
+use serde_json::Value;
 
 use crate::{blob, webpush};
 
@@ -56,6 +66,118 @@ pub fn limits_js() -> String {
         out.push('\n');
     }
     out
+}
+
+/// Why the platform code refused a call without running it: nothing of
+/// the call committed. It answers `{"error": code}` with the code's wire
+/// name (`ErrorCode`'s), and only these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "ErrorCode")]
+pub enum Refusal {
+    /// The app class has no such method (or a reserved one was named).
+    UnknownOperation,
+    /// A mutation's id was already used with a different input.
+    ConflictingBody,
+    /// The mutation left the app's database over its cap and rolled back.
+    StorageFull,
+}
+
+impl TryFrom<ErrorCode> for Refusal {
+    type Error = String;
+
+    fn try_from(code: ErrorCode) -> Result<Refusal, String> {
+        match code {
+            ErrorCode::UnknownOperation => Ok(Refusal::UnknownOperation),
+            ErrorCode::ConflictingBody => Ok(Refusal::ConflictingBody),
+            ErrorCode::StorageFull => Ok(Refusal::StorageFull),
+            other => Err(format!("the platform code refuses with no {other:?}")),
+        }
+    }
+}
+
+impl Refusal {
+    pub fn code(self) -> ErrorCode {
+        match self {
+            Refusal::UnknownOperation => ErrorCode::UnknownOperation,
+            Refusal::ConflictingBody => ErrorCode::ConflictingBody,
+            Refusal::StorageFull => ErrorCode::StorageFull,
+        }
+    }
+}
+
+/// The answer to a query or a mutation: it ran, or it was refused.
+#[derive(Debug)]
+pub enum Answer<T> {
+    Ran(T),
+    Refused(Refusal),
+}
+
+/// A query ran (`__query`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Queried {
+    pub result: Value,
+}
+
+/// A mutation ran, now or before (`__mutate`): its result and effects, and
+/// the run its ledger row holds (`None` for a row from before runs were
+/// numbered).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Mutated {
+    pub replayed: bool,
+    pub result: Value,
+    pub effects: Value,
+    #[serde(deserialize_with = "present")]
+    pub run: Option<i64>,
+}
+
+/// One ledger row (`__ledger`), or `None` when the ledger has none for the id.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Ledger {
+    #[serde(deserialize_with = "present")]
+    result: Option<LedgerRow>,
+}
+
+/// A ledger row as the platform code reads it back: the run it holds, and
+/// its effects (`null` when the row does not read as JSON, which the
+/// supervisor refuses).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LedgerRow {
+    #[serde(deserialize_with = "present")]
+    pub run: Option<i64>,
+    pub effects: Value,
+}
+
+/// A nullable field that must be there: `null` is `None`, and a missing
+/// key is refused (serde would take it for `None`).
+fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
+    Option::<T>::deserialize(d)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Refused {
+    error: Refusal,
+}
+
+/// A query's or a mutation's answer, from its JSON text. A refusal is
+/// tried first: it fails at its first key otherwise, before reading on.
+pub fn decode<T: DeserializeOwned>(text: &str) -> Result<Answer<T>, String> {
+    match serde_json::from_str::<Refused>(text) {
+        Ok(r) => Ok(Answer::Refused(r.error)),
+        Err(as_refusal) => match serde_json::from_str::<T>(text) {
+            Ok(ran) => Ok(Answer::Ran(ran)),
+            Err(as_answer) => Err(format!("neither a refusal ({as_refusal}) nor an answer ({as_answer})")),
+        },
+    }
+}
+
+/// A ledger lookup's answer, from its JSON text.
+pub fn decode_ledger(text: &str) -> Result<Option<LedgerRow>, String> {
+    serde_json::from_str::<Ledger>(text).map(|l| l.result).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -117,6 +239,57 @@ mod tests {
             r#"export const RESERVED_OP_NAMES = new Set(["constructor","fetch","alarm","webSocketMessage","webSocketClose","webSocketError"]);"#,
         ] {
             assert!(module.lines().any(|l| l == line), "{line}");
+        }
+    }
+
+    #[test]
+    fn refusals_decode_to_their_codes() {
+        for (text, code) in [
+            (r#"{"error":"unknown_operation"}"#, ErrorCode::UnknownOperation),
+            (r#"{"error":"conflicting_body"}"#, ErrorCode::ConflictingBody),
+            (r#"{"error":"storage_full"}"#, ErrorCode::StorageFull),
+        ] {
+            match decode::<Mutated>(text) {
+                Ok(Answer::Refused(r)) => assert_eq!(r.code(), code, "{text}"),
+                other => panic!("{text}: {other:?}"),
+            }
+        }
+        // a code the platform code never refuses with is not a refusal
+        assert!(decode::<Queried>(r#"{"error":"app_failed"}"#).is_err());
+        assert!(decode::<Queried>(r#"{"error":"conflicting_body","result":1}"#).is_err());
+    }
+
+    #[test]
+    fn answers_decode_strictly() {
+        let Ok(Answer::Ran(m)) = decode::<Mutated>(r#"{"replayed":true,"result":{"id":1},"effects":[],"run":null}"#) else { panic!("a replay") };
+        assert!(m.replayed && m.run.is_none() && m.result["id"] == 1);
+        let Ok(Answer::Ran(m)) = decode::<Mutated>(r#"{"replayed":false,"result":null,"effects":[{"push":"*","payload":{}}],"run":7}"#) else { panic!("a run") };
+        assert_eq!((m.replayed, m.run, m.result.is_null()), (false, Some(7), true));
+        // what the author's realm could make of it: a missing key, a wrong type, an extra key, not JSON
+        for bad in [
+            r#"{"result":1,"effects":[],"run":7}"#,
+            r#"{"replayed":false,"result":1,"effects":[]}"#,
+            r#"{"replayed":"no","result":1,"effects":[],"run":7}"#,
+            r#"{"replayed":false,"result":1,"effects":[],"run":7,"principal":"x"}"#,
+            r#"{"replayed":false,"effects":[],"run":7}"#,
+            "[]",
+            "",
+        ] {
+            assert!(decode::<Mutated>(bad).is_err(), "{bad}");
+        }
+        let Ok(Answer::Ran(q)) = decode::<Queried>(r#"{"result":[1,2]}"#) else { panic!("a query") };
+        assert_eq!(q.result, serde_json::json!([1, 2]));
+        assert!(decode::<Queried>(r#"{"replayed":false,"result":1}"#).is_err());
+    }
+
+    #[test]
+    fn ledger_rows_decode_strictly() {
+        assert!(decode_ledger(r#"{"result":null}"#).unwrap().is_none());
+        let row = decode_ledger(r#"{"result":{"run":3,"effects":null}}"#).unwrap().unwrap();
+        assert_eq!((row.run, row.effects.is_null()), (Some(3), true));
+        assert!(decode_ledger(r#"{"result":{"run":null,"effects":[]}}"#).unwrap().unwrap().run.is_none());
+        for bad in [r#"{}"#, r#"{"result":{"effects":[]}}"#, r#"{"result":{"run":3}}"#, r#"{"result":{"id":"x","run":3,"effects":[]}}"#] {
+            assert!(decode_ledger(bad).is_err(), "{bad}");
         }
     }
 }

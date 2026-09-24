@@ -23,10 +23,12 @@
 // except through steps (docs/api.md, Jobs).
 //
 // Every answer is an envelope, so no value an author returns can be
-// mistaken for a platform answer: { result, replayed, effects, run } or
-// { error }; for a job, { next } (its next step), { done, output }, or
-// { failed }. Answers are plain JSON, so nothing about one can fail after
-// its mutation committed.
+// mistaken for a platform answer: a query's { result }, a mutation's
+// { result, replayed, effects, run }, or either's { error } (the
+// supervisor decodes each into its type once: cell/src/js.rs); for a
+// job, { next } (its next step), { done, output }, or { failed }. Answers
+// are plain JSON, so nothing about one can fail after its mutation
+// committed.
 //
 // The checks here run in the author's realm, which can patch what they
 // rely on: they exist so an author sees a refusal while the mutation can
@@ -456,7 +458,7 @@ export class App extends AuthorApp {
   async __query(name, input, meta) {
     if (!authorMethod(name)) return { error: "unknown_operation" };
     const result = await AuthorApp.prototype[name].call(this, input, new Call(meta, false));
-    return { replayed: false, result: result ?? null };
+    return { result: result ?? null };
   }
 
   // Runs a job's body over the results of the steps it has taken, up to
@@ -492,7 +494,7 @@ export class App extends AuthorApp {
   // supervisor asks only about ids it recorded, and trusts the run number
   // it gave, never an id or principal from this table.
   __ledger(id) {
-    const row = this.ctx.storage.sql.exec(`SELECT id, run, effects FROM ${LEDGER} WHERE id = ?`, String(id)).toArray()[0];
+    const row = this.ctx.storage.sql.exec(`SELECT run, effects FROM ${LEDGER} WHERE id = ?`, String(id)).toArray()[0];
     if (!row) return { result: null };
     // A row the supervisor could not read (the app garbled it, or wrote half
     // a character) goes as null, which the supervisor refuses.
@@ -502,7 +504,7 @@ export class App extends AuthorApp {
     } catch {
       effects = null;
     }
-    return { result: { id: row.id, run: row.run ?? null, effects } };
+    return { result: { run: row.run ?? null, effects } };
   }
 
   // Custom routes: the author's fetch, when there is one.
