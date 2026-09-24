@@ -204,12 +204,22 @@ pub async fn jobs_create(env: &JsValue, id: &str, params: &serde_json::Value) ->
     Ok(())
 }
 
-/// A Workflow instance's `status()`: `{status, error?, output?}`.
-pub async fn jobs_status(env: &JsValue, id: &str) -> Result<serde_json::Value, String> {
+/// celld's Workflows binding rejects `get(id)` for an instance it has no
+/// record of with an Error whose message ends so (`WORKFLOW_ERROR:
+/// instance does not exist`, as Cloudflare's does).
+const NO_INSTANCE: &str = "instance does not exist";
+
+/// A Workflow instance's `status()`: `{status, error?, output?}`, or
+/// `None` when the binding has no such instance.
+pub async fn jobs_status(env: &JsValue, id: &str) -> Result<Option<serde_json::Value>, String> {
     let binding = jobs(env).map_err(|e| e.message)?;
-    let instance = settle(call(&binding, "get", &[id.into()]).map_err(|e| js_message(&e))?).await.map_err(|e| js_message(&e))?;
+    let instance = match settle(call(&binding, "get", &[id.into()]).map_err(|e| js_message(&e))?).await {
+        Ok(instance) => instance,
+        Err(e) if js_message(&e).ends_with(NO_INSTANCE) => return Ok(None),
+        Err(e) => return Err(js_message(&e)),
+    };
     let status = settle(call(&instance, "status", &[]).map_err(|e| js_message(&e))?).await.map_err(|e| js_message(&e))?;
-    from_js(&status)
+    from_js(&status).map(Some)
 }
 
 /// The fleet's blob store (`BLOBS`, an R2 binding over the fleet bucket).

@@ -36,6 +36,7 @@ use serde_json::{json, Map, Value};
 use worker::wasm_bindgen::JsValue;
 use worker::*;
 
+use crate::cs::FetchError;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, Caller, FragmentCell};
 use crate::ops::{Invocation, JOB_ID_PREFIX};
@@ -521,14 +522,10 @@ impl FragmentCell {
         }
         let req = Request::new_with_init(url.as_str(), &init).map_err(|e| permanent(e.to_string()))?;
         let host = url.host_str().unwrap_or("").to_string();
-        let mut resp = crate::cs::fetch(req, Duration::from_millis(limits::FETCH_TIMEOUT_MS)).await.map_err(|e| {
-            let why = format!("{host}: {}", e.message);
+        let mut resp = crate::cs::fetch(req, Duration::from_millis(limits::FETCH_TIMEOUT_MS)).await.map_err(|e| match e {
             // the node refused the address (CELLD_EGRESS_PUBLIC_ONLY): no retry passes
-            if e.message.contains("egress refused") {
-                permanent(why)
-            } else {
-                StepFail::Retry(why)
-            }
+            FetchError::Refused(why) => permanent(format!("{host}: {why}")),
+            FetchError::Failed(why) => StepFail::Retry(format!("{host}: {why}")),
         })?;
         let status = resp.status_code();
         if status == 429 || status >= 500 {
@@ -734,11 +731,12 @@ impl FragmentCell {
         for run in rows {
             let Ok(instance) = self.instance_id(run["id"].as_i64().unwrap_or(0), run["attempt"].as_i64().unwrap_or(1)) else { return };
             let why = match js::jobs_status(self.env.as_ref(), &instance).await {
-                Ok(st) => match st["status"].as_str() {
+                Ok(Some(st)) => match st["status"].as_str() {
                     Some(s @ ("errored" | "terminated" | "complete")) => format!("its Workflow ended ({s}) without reporting: {}", st["error"]),
                     _ => continue,
                 },
-                Err(m) if m.contains("does not exist") => "its Workflow is gone".to_string(),
+                Ok(None) => "its Workflow is gone".to_string(),
+                // the binding did not answer: ask again on the next pass
                 Err(_) => continue,
             };
             let _ = self.finish_run(&run, Err(why));

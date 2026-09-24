@@ -20,6 +20,7 @@ use fragment_proto::ErrorCode;
 use serde_json::{json, Value};
 use worker::*;
 
+use crate::cs::FetchError;
 use crate::error::CellError;
 use crate::ledger;
 use crate::files::FileWrite;
@@ -172,7 +173,10 @@ impl FragmentCell {
             init.with_body(Some(b.to_string().into()));
         }
         let req = Request::new_with_init(url, &init).map_err(|e| permanent(e.to_string()))?;
-        let mut resp = crate::cs::fetch(req, CALL_TIMEOUT).await.map_err(|e| StepFail::Retry(format!("OpenRouter: {}", e.message)))?;
+        let mut resp = crate::cs::fetch(req, CALL_TIMEOUT).await.map_err(|e| match e {
+            FetchError::Refused(m) => permanent(format!("OpenRouter: {m}")),
+            FetchError::Failed(m) => StepFail::Retry(format!("OpenRouter: {m}")),
+        })?;
         let status = resp.status_code();
         let bytes = resp.bytes().await.map_err(|e| StepFail::Retry(format!("OpenRouter: {e}")))?;
         Ok((status, bytes))
