@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use fragment_core::secrets::placeholders;
-use fragment_core::{cron::Cron, egress, glob, npub};
+use fragment_core::{cron::Cron, egress, glob, npub, trigger_state};
 use fragment_proto::{
     limits, valid_secret_name, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunStatus, SetPaused, TriggerDecl, TriggerOn,
 };
@@ -128,44 +128,40 @@ fn ids(body: &Value) -> CellResult<(i64, i64)> {
 
 /// Paused operations were a JSON array in meta (`paused`), and each
 /// operation's breaker a meta key (`breaker_since:<op>`); both move into
-/// their tables once, in place. A `paused` that does not parse pauses every
-/// operation a trigger names (it fails closed), and a breaker that does not
-/// parse counts every held run in the window. Answers the operations paused
-/// that way, for the caller's event.
+/// their tables once, in place (`fragment_core::trigger_state` decides
+/// what they get). Answers the operations paused because `paused` did not
+/// parse (it fails closed), for the caller's event.
 pub(crate) fn migrate_trigger_state(sql: &SqlStorage, now: i64) -> Vec<String> {
-    let rows = |q: &str| -> Vec<Value> { sql.exec(q, None).and_then(|c| c.to_array()).expect("the trigger state migration reads meta") };
+    let rows = |q: &str| -> Vec<Value> { sql.exec(q, None).and_then(|c| c.to_array()).expect("the trigger state migration reads") };
     let exec = |q: &str, binds: Vec<SqlStorageValue>| {
         sql.exec(q, binds).expect("the trigger state migration writes");
     };
-    let mut failed_closed = vec![];
-    if let Some(stored) = rows("SELECT value FROM meta WHERE key = 'paused'").first().and_then(|r| r["value"].as_str().map(str::to_string)) {
-        let ops = match serde_json::from_str::<Vec<String>>(&stored) {
-            Ok(ops) => ops,
-            Err(_) => {
-                let triggers = rows("SELECT triggers FROM code WHERE id = 1");
-                let declared: Vec<TriggerDecl> = triggers.first().and_then(|r| r["triggers"].as_str()).and_then(|t| serde_json::from_str(t).ok()).unwrap_or_default();
-                failed_closed = declared.into_iter().map(|t| t.run).collect();
-                failed_closed.sort();
-                failed_closed.dedup();
-                failed_closed.clone()
-            }
-        };
-        for op in ops {
-            exec("INSERT INTO paused_ops (op, by, at) VALUES (?, 'migrated', ?) ON CONFLICT (op) DO NOTHING", vec![op.into(), SqlStorageValue::Integer(now)]);
-        }
-        exec("DELETE FROM meta WHERE key = 'paused'", vec![]);
+    let text = |r: &Value, k: &str| r[k].as_str().map(str::to_string);
+    let paused = rows("SELECT value FROM meta WHERE key = 'paused'").first().and_then(|r| text(r, "value"));
+    let breakers: Vec<(String, String)> = rows("SELECT key, value FROM meta WHERE key LIKE 'breaker_since:%'")
+        .iter()
+        .map(|r| (text(r, "key").expect("meta.key is TEXT"), text(r, "value").expect("meta.value is TEXT")))
+        .collect();
+    if paused.is_none() && breakers.is_empty() {
+        return vec![];
     }
-    for row in rows("SELECT key, value FROM meta WHERE key LIKE 'breaker_since:%'") {
-        let key = row["key"].as_str().expect("meta.key is TEXT");
-        let reset_at: i64 = row["value"].as_str().and_then(|v| v.parse().ok()).unwrap_or(0);
-        let op = key.trim_start_matches("breaker_since:");
-        exec(
-            "INSERT INTO op_breakers (op, reset_at) VALUES (?, ?) ON CONFLICT (op) DO NOTHING",
-            vec![op.into(), SqlStorageValue::Integer(reset_at)],
-        );
-        exec("DELETE FROM meta WHERE key = ?", vec![key.into()]);
+    let triggers = rows("SELECT triggers FROM code WHERE id = 1").first().and_then(|r| text(r, "triggers"));
+    let moved = trigger_state::migrate(paused.as_deref(), triggers.as_deref(), &breakers);
+    for op in &moved.paused {
+        exec("INSERT INTO paused_ops (op, by, at) VALUES (?, 'migrated', ?) ON CONFLICT (op) DO NOTHING", vec![op.as_str().into(), SqlStorageValue::Integer(now)]);
     }
-    failed_closed
+    for (op, reset_at) in &moved.breakers {
+        exec("INSERT INTO op_breakers (op, reset_at) VALUES (?, ?) ON CONFLICT (op) DO NOTHING", vec![op.as_str().into(), SqlStorageValue::Integer(*reset_at)]);
+    }
+    exec("DELETE FROM meta WHERE key = 'paused'", vec![]);
+    for (key, _) in &breakers {
+        exec("DELETE FROM meta WHERE key = ?", vec![key.as_str().into()]);
+    }
+    if moved.failed_closed {
+        moved.paused
+    } else {
+        vec![]
+    }
 }
 
 impl FragmentCell {
