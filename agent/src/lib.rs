@@ -43,6 +43,7 @@ use std::rc::Rc;
 
 use fragment_core::npub;
 use fragment_proto::{valid_channel_name, valid_fragment_name, valid_op_name, ErrorCode};
+use futures::TryStreamExt;
 use goose_provider_types::conversation::message::{Message, MessageContent};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -149,6 +150,31 @@ async fn forward_with(env: &Env, name: &str, action: &str, method: Method, heade
     Ok(stub.fetch_with_request(inner).await?)
 }
 
+/// A request body of at most `BODY_MAX` bytes, read as it arrives: a
+/// declared length over it is refused unread, and a body without one
+/// (chunked) at the chunk that crosses it, before anyone is authenticated.
+async fn read_body(req: &mut Request) -> Answer<Vec<u8>> {
+    let too_large = || Fail::new(ErrorCode::TooLarge, format!("a request body is at most {BODY_MAX} bytes"));
+    let declared: Option<usize> = req.headers().get("content-length")?.and_then(|l| l.parse().ok());
+    if declared.is_some_and(|n| n > BODY_MAX) {
+        return Err(too_large());
+    }
+    if req.inner().body().is_none() {
+        return Ok(vec![]);
+    }
+    let mut stream = req.stream()?;
+    let mut body = Vec::with_capacity(declared.unwrap_or(0));
+    // bounded: each chunk is counted before it is kept, and past BODY_MAX the read stops
+    while let Some(chunk) = stream.try_next().await? {
+        if chunk.len() > BODY_MAX - body.len() {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    assert!(body.len() <= BODY_MAX, "a body read stays within its limit");
+    Ok(body)
+}
+
 async fn route(mut req: Request, env: &Env) -> Answer<Response> {
     let url = arrived_url(&req)?;
     let path = url.path().to_string();
@@ -162,10 +188,7 @@ async fn route(mut req: Request, env: &Env) -> Answer<Response> {
             return Err(Fail::new(ErrorCode::NotFound, "no such inbox"));
         }
         let (name, action) = (name.to_string(), format!("inbox/{token}"));
-        let body = req.bytes().await?;
-        if body.len() > BODY_MAX {
-            return Err(Fail::new(ErrorCode::TooLarge, format!("a delivery is at most {BODY_MAX} bytes")));
-        }
+        let body = read_body(&mut req).await?;
         return forward(env, &name, &action, Method::Post, None, body).await;
     }
     // a computer that connects out: its connect token is the capability
@@ -188,10 +211,7 @@ async fn route(mut req: Request, env: &Env) -> Answer<Response> {
         (_, ["api", "a", name, action]) => (Some(name.to_string()), action.to_string()),
         _ => return Err(Fail::new(ErrorCode::NotFound, format!("no route {} {path}", req.method().as_ref()))),
     };
-    let body = req.bytes().await?;
-    if body.len() > BODY_MAX {
-        return Err(Fail::new(ErrorCode::TooLarge, format!("a request body is at most {BODY_MAX} bytes")));
-    }
+    let body = read_body(&mut req).await?;
     let name = match name {
         Some(n) => n,
         None => serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["name"].as_str().map(str::to_string)).unwrap_or_default(),

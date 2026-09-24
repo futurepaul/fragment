@@ -1,12 +1,43 @@
 //! Identity at the router (NIP-98), fragment create and delete, who may
 //! create, and what the router refuses to let through.
 
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::time::Duration;
+
 use anyhow::Result;
 use fragment_nip98::Keys;
+use fragment_proto::limits;
 use serde_json::json;
 
 use crate::api::{now_s, Api, Call};
 use crate::Suite;
+
+/// A POST whose body is sent chunked (no length) and never finished:
+/// `total` bytes in 64 KiB chunks, then silence. Answers the status line
+/// the node sent while the body was still open, if one came within `wait`
+/// (a router that buffers a body before measuring it sends none).
+fn unfinished_chunked(api: &Api, path: &str, total: usize, wait: Duration) -> Result<Option<String>> {
+    let mut sock = TcpStream::connect(("127.0.0.1", api.port))?;
+    sock.set_read_timeout(Some(wait))?;
+    sock.set_write_timeout(Some(wait))?;
+    write!(sock, "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/x-www-form-urlencoded\r\nTransfer-Encoding: chunked\r\n\r\n", api.port)?;
+    let chunk = vec![b'x'; 64 * 1024];
+    let mut sent = 0;
+    // bounded: `total` bytes at most; a node that answered and closed early stops it sooner
+    while sent < total {
+        let wrote = write!(sock, "{:x}\r\n", chunk.len()).and_then(|_| sock.write_all(&chunk)).and_then(|_| sock.write_all(b"\r\n"));
+        if wrote.is_err() {
+            break;
+        }
+        sent += chunk.len();
+    }
+    let mut head = [0u8; 512];
+    match sock.read(&mut head) {
+        Ok(n) if n > 0 => Ok(String::from_utf8_lossy(&head[..n]).lines().next().map(str::to_string)),
+        _ => Ok(None),
+    }
+}
 
 pub fn auth(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("auth") {
@@ -238,6 +269,15 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
         Err(e) => format!("{e:#}").contains("reset") || format!("{e:#}").contains("Broken pipe"),
     };
     s.ok("a body over 2 MiB is refused unread (413)", refused, "");
+    // a body without a length is measured as it arrives: refused at the
+    // chunk that crosses the limit, not after it has all been buffered
+    let wait = Duration::from_secs(15);
+    let line = unfinished_chunked(api, "/api/fragments", limits::BODY_MAX_BYTES + 128 * 1024, wait)?;
+    s.ok("a chunked body over 2 MiB is refused as it arrives (413 before it ends)", line.as_deref().is_some_and(|l| l.contains(" 413 ")), format!("{line:?}"));
+    let line = unfinished_chunked(api, "/cli/approve", 64 * 1024, wait)?;
+    s.ok("and so is a chunked approval form past its limit, before anyone is signed in", line.as_deref().is_some_and(|l| l.contains(" 413 ")), format!("{line:?}"));
+    let r = api.unsigned("GET", "/healthz", None)?;
+    s.ok("the node stays healthy", r.status == 200, &r);
     let r = api.call(Call {
         method: "GET",
         url: api.site_url(&name, ""),

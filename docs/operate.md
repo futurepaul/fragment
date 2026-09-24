@@ -19,7 +19,10 @@ paths of files that hold them, all under `~/.config/finite-next/secrets/`).
   fork's settings: `CELLD_EGRESS_PUBLIC_ONLY=1` keeps every Worker fetch
   off the private network, `CELLD_INTERNAL_PEER_ONLY=1` has the internal
   listener serve only fleet-signed peers, `CELLD_DYNAMIC_LOCKDOWN=1` and
-  `CELLD_FACET_MAX_BYTES` bound what an app can do (docs/hardening.md).
+  `CELLD_FACET_MAX_BYTES` bound what an app can do (docs/hardening.md),
+  and `CELLD_MAX_REQUEST_BODY_BYTES` (256 MiB, a blob's limit) replaces
+  celld's 1 GiB default for any request body. The live Machines take it
+  at the next `cargo xtask deploy --nodes`.
 - **Two scripts, one application:** the cell (`fragment`, the fleet's
   application: the fleet-wide pointer names it) and the agents'
   (`fragment-agent`, from `agent/`), which the cell's `AGENTS` binding

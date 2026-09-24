@@ -41,6 +41,10 @@ const INVITATION_TOKEN_MAX: usize = 256;
 const LINK_PROOF_WINDOW_S: i64 = 600;
 const LINK_PROOF_MAX: usize = 4096;
 
+/// The approval form: a key, and a proof of at most `LINK_PROOF_MAX` bytes
+/// that form encoding may triple.
+const APPROVE_FORM_MAX_BYTES: usize = 16 * 1024;
+const _: () = assert!(APPROVE_FORM_MAX_BYTES >= 3 * LINK_PROOF_MAX + 256, "the form holds the longest proof, encoded");
 /// The key an approval link's proof is by, if it is good: a NIP-98 event
 /// by that key for `POST <platform>/cli/approve`, made within ten minutes.
 fn link_proof(platform: &str, key_hex: &str, proof: &str) -> CellResult<()> {
@@ -413,7 +417,8 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
             }
             (Method::Post, ["cli", "approve"]) => {
                 same_origin(&req, &platform)?;
-                let bytes = req.bytes().await?;
+                // read before anyone is known to be signed in: bounded as it arrives
+                let bytes = crate::read_body(&mut req, APPROVE_FORM_MAX_BYTES).await?;
                 let field = |name: &str| url::form_urlencoded::parse(&bytes).find(|(k, _)| k == name).map(|(_, v)| v.into_owned()).unwrap_or_default();
                 let hex = npub::parse(&field("key")).ok_or_else(|| CellError::invalid("the form names no key"))?;
                 let Some((token, _)) = platform_session(&req, env).await? else {
