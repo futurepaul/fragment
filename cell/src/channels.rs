@@ -21,7 +21,10 @@
 //! mutation's effects are dropped, `events` says why, and the mutation
 //! still counts as applied, so one bad effect never blocks the app. A
 //! passing failure (code.storage, the delivery queue) leaves the row
-//! pending, and the alarm tries it again later.
+//! pending, and the alarm tries it again later. A try again appends no
+//! record twice, and for a record an earlier try appended it writes no
+//! delivery twice but starts whatever of its triggered runs did not start
+//! (`published`).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -187,6 +190,40 @@ impl FragmentCell {
         let record = record_json(row);
         self.broadcast_record(&record);
         Ok(Some(record))
+    }
+
+    /// Appends a keyed record, or finds the one an earlier try of the same
+    /// (op, index) appended. Answers the record and whether this call
+    /// appended it.
+    pub(crate) fn append_once(&self, channel: &str, principal: &str, kind: &str, body: &Value, key: &str, index: i64) -> CellResult<(ChannelRecord, bool)> {
+        if let Some(record) = self.append(channel, principal, kind, body, Some((key, index)))? {
+            return Ok((record, true));
+        }
+        let rows = self.rows(
+            "SELECT channel, seq, at, principal, kind, body FROM records WHERE op = ? AND idx = ?",
+            vec![key.into(), SqlStorageValue::Integer(index)],
+        )?;
+        // the insert conflicted on (op, idx), so a row holds them, and one effect names one channel
+        let record = rows.first().map(record_json).ok_or_else(|| CellError::host(format!("record ({key}, {index}) conflicted, and no record holds it")))?;
+        if record.channel != channel {
+            return Err(CellError::host(format!("record ({key}, {index}) is on {:?}, not {channel:?}", record.channel)));
+        }
+        Ok((record, false))
+    }
+
+    /// What follows a record, in order. Its deliveries are written to the
+    /// outbox in the same step as its append, before anything that can
+    /// fail (a record found already appended has them). Then the runs its
+    /// channel's triggers start, each once per record (`fire_channel`), so
+    /// a try after a failure here starts only what did not start; then the
+    /// outbox is drained, whatever the triggers did. Answers the runs.
+    pub(crate) async fn published(&self, record: &ChannelRecord, appended: bool, depth: u32) -> CellResult<Vec<i64>> {
+        let queued = appended && self.outbox_record(record)?;
+        let fired = self.fire_channel(record, depth);
+        if queued {
+            self.drain_deliveries().await;
+        }
+        fired
     }
 
     /// Drops audit records older than their retention (from the alarm).
@@ -368,10 +405,8 @@ impl FragmentCell {
     }
 
     async fn apply_record(&self, p: &Pending, key: &str, index: i64, channel: &str, kind: &str, body: &Value) -> CellResult<()> {
-        if let Some(record) = self.append(channel, &p.principal, kind, body, Some((key, index)))? {
-            self.fire_channel(&record, p.depth + 1)?;
-            self.deliver_record(&record).await?;
-        }
+        let (record, appended) = self.append_once(channel, &p.principal, kind, body, key, index)?;
+        self.published(&record, appended, p.depth + 1).await?;
         Ok(())
     }
 

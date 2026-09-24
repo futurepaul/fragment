@@ -395,6 +395,35 @@ pub fn triggers(s: &mut Suite, api: &Api) -> Result<()> {
     let cron = runs(api, &owner, &name, "&op=tick").into_iter().find(|r| r["via"] == "cron").unwrap_or(Value::Null);
     s.ok("a cron trigger runs on its minute", ticked && cron["trigger"] == "* * * * *", &cron);
 
+    // a trigger step that fails after its record is appended (here after
+    // its first run started, before its last): the call fails visibly, the
+    // record's delivery goes out, and the same call again starts the rest
+    let (fails, _) = jobs_fragment(s, api, &owner, "trigfail", |m| {
+        m["triggers"] = json!([{ "channel": "alarms", "run": "tick" }, { "channel": "alarms", "run": "boom" }])
+    })?;
+    let hook = Upstream::start()?;
+    let r = api.signed(&owner, "POST", &format!("/api/f/{fails}/subscriptions"), Some(&json!({ "channel": "alarms", "url": hook.url("/data") })))?;
+    s.ok("(the owner subscribes to alarms)", r.status == 200, &r);
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": fails, "op": "fail-triggers", "times": 1 })))?;
+    s.ok("(the test fleet fails the fragment's next trigger step before its last run)", r.status == 200, &r);
+    let counts = || (records(api, &owner, &fails, "alarms").len(), runs(api, &owner, &fails, "&op=tick").len(), runs(api, &owner, &fails, "&op=boom").len());
+    let r = api.op(&owner, &fails, "raise", "once", json!({}))?;
+    let after = counts();
+    s.ok(
+        "a trigger step that fails after the append fails the call: the record stands, its first run started, its last not",
+        r.status >= 500 && after == (1, 1, 0),
+        format!("{r}; records, tick runs, boom runs: {after:?}"),
+    );
+    let delivered = s.eventually(Duration::from_secs(10), || !hook.hits("/data").is_empty());
+    s.ok("the record's delivery was written before its triggers: it goes out all the same", delivered, hook.hits("/data").len());
+    let r = api.op(&owner, &fails, "raise", "once", json!({}))?;
+    let after = counts();
+    s.ok(
+        "the same call again starts the run that did not start, and nothing twice",
+        r.status == 200 && r.body["replayed"] == true && after == (1, 1, 1),
+        format!("{r}; records, tick runs, boom runs: {after:?}"),
+    );
+
     // the rate ceiling: an operation's triggers start at most 120 runs an hour
     let (busy, busy_c) = jobs_fragment(s, api, &owner, "ceiling", |m| m["triggers"] = json!([{ "channel": "alarms", "run": "tick" }]))?;
     for i in 0..121 {
