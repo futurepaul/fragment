@@ -148,6 +148,13 @@ clears it. A request with that cookie is its person, exactly as the same
 request signed by one of their keys: the same decision either way. A
 cookie for another fragment, or whose platform session ended, is nobody.
 
+`return` is a path on the origin it returns to, kept only when it begins
+with one `/` and holds no byte at or below 0x20, no DEL, and no
+backslash, and when, percent-decoded once more, it still does not begin
+with `//`, `/\`, or `/` and a control byte; anything else returns to `/`.
+A path with a space in it arrives encoded (`return=%2Fa%2520b` returns to
+`/a%20b`). The way back is always an absolute URL on that origin.
+
 ## Control API
 
 | method & path | who | body → answer |

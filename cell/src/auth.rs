@@ -79,18 +79,11 @@ fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-/// A path on this origin to come back to (never another origin).
-pub fn safe_return(r: Option<String>) -> String {
-    match r {
-        Some(p) if p.starts_with('/') && !p.starts_with("//") && !p.contains('\\') && p.len() <= 2048 => p,
-        _ => "/".into(),
-    }
-}
-
-/// `back` (a path from `safe_return`) under `base`, percent-encoded.
-fn under(base: &str, back: &str) -> CellResult<String> {
-    let base = Url::parse(base).map_err(|e| CellError::host(e.to_string()))?;
-    Ok(base.join(back.trim_start_matches('/')).map_err(|e| CellError::invalid(format!("return: {e}")))?.to_string())
+/// Where a browser that signed in goes back to: the path it brought, on
+/// `base`'s origin and never another (`site::return_url`).
+fn back_to(base: &str, raw: Option<&str>) -> CellResult<String> {
+    let base = Url::parse(base).map_err(|e| CellError::host(format!("{base}: {e}")))?;
+    Ok(site::return_url(&base, raw).into())
 }
 
 fn redirect(to: &str, cookies: &[String]) -> CellResult<Response> {
@@ -191,7 +184,7 @@ fn to_login(platform: &str, back: &str) -> CellResult<Response> {
 async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>) -> CellResult<Response> {
     let workos = cfg.workos()?;
     let platform = cfg.platform(url);
-    let return_to = safe_return(query(url, "return"));
+    let return_to = site::return_path(query(url, "return").as_deref());
     let v = ask_registry(env, "/login/begin", &json!({ "returnTo": return_to, "linkTo": link })).await?;
     let state = v["state"].as_str().ok_or_else(|| CellError::host("the registry answered no state"))?;
     let mut to = format!(
@@ -226,9 +219,8 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
     // the registry exchanges the code: WorkOS's API key is the node's (KEYS)
     let done = ask_registry(env, "/login/exchange", &json!({ "state": state, "code": code, "clientId": workos.client_id, "issuer": workos.issuer() })).await?;
     let token = done["token"].as_str().ok_or_else(|| CellError::host("the registry answered no session"))?;
-    let back = safe_return(done["returnTo"].as_str().map(str::to_string));
     redirect(
-        &under(&format!("{}/", cfg.platform(url)), &back)?,
+        &back_to(&format!("{}/", cfg.platform(url)), done["returnTo"].as_str())?,
         &[
             set_cookie(SESSION_COOKIE, token, "/", crate::registry::SESSION_TTL_MS / 1000, secure(url)),
             set_cookie(LOGIN_COOKIE, "", "/auth", 0, secure(url)),
@@ -283,7 +275,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
             }
             (Method::Get, ["auth", "fragment"]) => {
                 let name = query(url, "name").filter(|n| fragment_proto::valid_fragment_name(n)).ok_or_else(|| CellError::invalid("name a fragment"))?;
-                let back = safe_return(query(url, "return"));
+                let back = site::return_path(query(url, "return").as_deref());
                 let Some((token, _)) = platform_session(&req, env).await? else {
                     return to_login(&platform, &format!("/auth/fragment?name={name}&return={}", enc(&back)));
                 };
@@ -347,15 +339,14 @@ pub async fn fragment(env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str
         match rest {
             "__signin" => match query(url, "token") {
                 None => {
-                    let back = safe_return(query(url, "return"));
+                    let back = site::return_path(query(url, "return").as_deref());
                     redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(url), enc(&back)), &[])
                 }
                 Some(redeem) => {
                     let v = ask_registry(env, "/redeem", &json!({ "redeem": redeem, "fragment": name })).await?;
                     let token = v["token"].as_str().ok_or_else(|| CellError::host("the registry answered no session"))?;
-                    let back = safe_return(v["returnTo"].as_str().map(str::to_string));
                     redirect(
-                        &under(&base, &back)?,
+                        &back_to(&base, v["returnTo"].as_str())?,
                         &[set_cookie(SITE_COOKIE, token, &cookie_path, crate::registry::SESSION_TTL_MS / 1000, secure(url))],
                     )
                 }
