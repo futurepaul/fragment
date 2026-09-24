@@ -5,7 +5,9 @@
 //! Platform origin:
 //!
 //!   GET  /                        who is signed in, and links to sign in or out
-//!   GET  /auth/login?return=&login_hint=   → WorkOS (a state cookie binds the round trip)
+//!   GET  /auth/login?return=&login_hint=&invitation_token=   → WorkOS (a state cookie binds the
+//!                                 round trip; an invitation's token lets its invitee sign up, since
+//!                                 sign-up is off: WorkOS's "User invitation URL" points here)
 //!   GET  /auth/link?return=       the same, adding a second sign-in to the signed-in person
 //!   GET  /auth/callback           WorkOS → the code exchanged here → a session cookie
 //!   GET  /auth/logout             a button; POST ends the session (and its site sessions)
@@ -31,6 +33,7 @@ pub const SESSION_COOKIE: &str = "fragment_session";
 pub const SITE_COOKIE: &str = "fragment_site";
 const LOGIN_COOKIE: &str = "fragment_login";
 const LOGIN_HINT_MAX: usize = 320;
+const INVITATION_TOKEN_MAX: usize = 256;
 
 fn secure(url: &Url) -> bool {
     url.scheme() == "https"
@@ -177,6 +180,11 @@ async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>) -> Cell
     );
     if let Some(hint) = query(url, "login_hint").filter(|h| !h.is_empty() && h.len() <= LOGIN_HINT_MAX) {
         to += &format!("&login_hint={}", enc(&hint));
+    }
+    let token = query(url, "invitation_token")
+        .filter(|t| !t.is_empty() && t.len() <= INVITATION_TOKEN_MAX && t.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
+    if let Some(token) = token {
+        to += &format!("&invitation_token={token}");
     }
     redirect(&to, &[set_cookie(LOGIN_COOKIE, state, "/auth", 600, secure(url))])
 }

@@ -86,6 +86,10 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = api.call(Call { method: "GET", url: callback, cookie: Some(bound), ..Call::default() })?;
     s.ok("the same callback again signs no one in", r.status != 302 && cookie_line(&r, "fragment_session").is_empty(), &r);
+    let r = api.unsigned("GET", "/auth/login?invitation_token=Z1uX3Rbw_cIl-5fIG", None)?;
+    s.ok("an invitation's token rides along to WorkOS (it lets its invitee sign up)", r.header("location").contains("&invitation_token=Z1uX3Rbw_cIl-5fIG"), &r);
+    let r = api.unsigned("GET", "/auth/login?invitation_token=%22%3E%3Cscript%3E", None)?;
+    s.ok("and a malformed one does not", r.status == 302 && !r.header("location").contains("invitation_token"), &r);
     s.workos.fail_next("access_denied");
     let r = api.unsigned("GET", "/auth/login", None)?;
     let back = api.external(&format!("{}&login_hint=denied@e2e.test", r.header("location")))?;
