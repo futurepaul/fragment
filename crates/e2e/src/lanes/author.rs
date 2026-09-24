@@ -20,7 +20,7 @@ const FORMAT_MJS: &[u8] = include_bytes!("../../fixtures/format.mjs");
 
 /// A public chat fragment with its applib module deployed.
 fn chat(s: &Suite, api: &Api, owner: &Keys, base: &str) -> Result<(String, Value)> {
-    let name = s.name(base);
+    let name = s.named(api, owner, base)?;
     let c = s.create(api, owner, &name)?;
     api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "public" })))?;
     s.commit(&c, &[("applib/format.mjs", Some(FORMAT_MJS))]);
@@ -277,7 +277,7 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     };
     let owner = api.person()?;
-    let name = s.name("todo");
+    let name = s.named(api, &owner, "todo")?;
     let c = s.create(api, &owner, &name)?;
     let changes: Vec<(&str, Option<&[u8]>)> = TODO_FILES.iter().map(|(p, b)| (*p, Some(*b))).collect();
     s.commit(&c, &changes);

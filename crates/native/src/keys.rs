@@ -25,6 +25,10 @@
 //!   answer's refresh token is dropped.
 //! - `openrouter/keys {method, hash?, body?}` → `{status, body}`:
 //!   OpenRouter's key API with the management key, for `Ledger` cells only.
+//! - `fly/certificate {name}` → `{status, body}`: asks Fly for the TLS
+//!   certificate of the fragment's host (`<name>.<suffix>`), for the
+//!   `Fragment` cell of that name only (its scope is derived from the name
+//!   and compared with the caller's), with the app-scoped Fly token.
 //!
 //! The outbound calls go straight from the node to the operator-configured
 //! hosts (`FRAGMENT_KEYS_*_URL`), not through a Worker's egress.
@@ -59,6 +63,18 @@ pub struct Outbound {
     pub base: String,
 }
 
+/// Fly's API, for the fragments' certificates.
+pub struct Fly {
+    pub token: String,
+    pub app: String,
+    /// The API base (`https://api.machines.dev`).
+    pub api: String,
+    /// The fleet's host suffix (`fragment.club`): a fragment is served at `<name>.<suffix>`.
+    pub suffix: String,
+    /// The celld script the fragments run in (a scope names it).
+    pub script: String,
+}
+
 pub struct Config {
     /// The current host secret, then previous ones during a rotation.
     pub host_secrets: Vec<String>,
@@ -66,6 +82,7 @@ pub struct Config {
     pub codestorage: Option<Result<(String, OrgKey), String>>,
     pub workos: Option<Outbound>,
     pub openrouter: Option<Outbound>,
+    pub fly: Option<Fly>,
 }
 
 pub struct Keys {
@@ -123,6 +140,16 @@ impl Keys {
             codestorage,
             workos: outbound_from_env("FRAGMENT_KEYS_WORKOS_API_KEY", "FRAGMENT_KEYS_WORKOS_URL", "https://api.workos.com"),
             openrouter: outbound_from_env("FRAGMENT_KEYS_OPENROUTER_MANAGEMENT_KEY", "FRAGMENT_KEYS_OPENROUTER_URL", "https://openrouter.ai"),
+            fly: match (env("FRAGMENT_KEYS_FLY_API_TOKEN"), env("FRAGMENT_KEYS_FLY_APP"), env("FRAGMENT_KEYS_HOST_SUFFIX")) {
+                (Some(token), Some(app), Some(suffix)) => Some(Fly {
+                    token,
+                    app,
+                    api: env("FRAGMENT_KEYS_FLY_API_URL").unwrap_or_else(|| "https://api.machines.dev".into()).trim_end_matches('/').to_string(),
+                    suffix: suffix.trim_start_matches('.').to_string(),
+                    script: env("FRAGMENT_KEYS_SCRIPT").unwrap_or_else(|| "fragment".into()),
+                }),
+                _ => None,
+            },
         })
     }
 
@@ -166,6 +193,7 @@ impl Config {
             "codestorage/token" => self.codestorage_token(caller, &body),
             "workos/authenticate" => self.workos(caller, &body).await,
             "openrouter/keys" => self.openrouter_keys(caller, &body).await,
+            "fly/certificate" => self.fly_certificate(caller, &body).await,
             p => Err(Response::error(404, format!("no route POST /{p}"))),
         };
         answer.unwrap_or_else(|r| r)
@@ -309,6 +337,34 @@ impl Config {
     }
 }
 
+impl Config {
+    async fn fly_certificate(&self, caller: &str, body: &Value) -> Result<Response, Response> {
+        only(caller, CODESTORAGE_CLASS, "a fragment's certificate")?;
+        let name = str_field(body, "name")?;
+        if !fragment_core_name_ok(name) {
+            return Err(Response::error(400, "name is a fragment's <label>.<username>"));
+        }
+        // the caller asks for its own host only (checked before the config,
+        // so a node without Fly still proves the caller is who it says)
+        let script = self.fly.as_ref().map_or("fragment", |f| f.script.as_str());
+        if crate::scope::of_name(script, CODESTORAGE_CLASS, name) != caller {
+            return Err(Response::error(403, format!("the caller is not fragment {name}")));
+        }
+        let fly = self.fly.as_ref().ok_or_else(|| Response::error(503, "FRAGMENT_KEYS_FLY_API_TOKEN, _FLY_APP, and _HOST_SUFFIX are not set on this node"))?;
+        let url = format!("{}/v1/apps/{}/certificates/acme", fly.api, fly.app);
+        let req = client().post(url).bearer_auth(&fly.token).json_body(&json!({ "hostname": format!("{name}.{}", fly.suffix) }));
+        let (status, answer) = send(req, "Fly").await?;
+        Ok(Response::json(200, &json!({ "status": status, "body": answer })))
+    }
+}
+
+/// A fragment's name, as the cell names it (`<label>.<username>`).
+fn fragment_core_name_ok(name: &str) -> bool {
+    let Some((label, username)) = name.split_once('.') else { return false };
+    let ok = |s: &str| !s.is_empty() && s.len() <= 63 && !s.contains("--") && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    ok(label) && ok(username)
+}
+
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| reqwest::Client::builder().timeout(OUTBOUND_TIMEOUT).build().expect("a reqwest client builds"))
@@ -352,6 +408,7 @@ mod tests {
             codestorage: Some(OrgKey::from_pem(&pem).map(|k| ("org".to_string(), k))),
             workos: None,
             openrouter: None,
+            fly: None,
         })
     }
 
@@ -452,6 +509,17 @@ mod tests {
         let mut long = ask;
         long["ttlS"] = json!(901);
         assert_eq!(call(&k, Some(ALICE), "POST", "codestorage/token", long).0, 400);
+    }
+
+    #[test]
+    fn a_fragment_asks_for_its_own_certificate_only() {
+        let k = keys(&[HOST]);
+        let me = crate::scope::of_name("fragment", "Fragment", "todo.paul");
+        // its own name: past the check, and this node has no Fly
+        assert_eq!(call(&k, Some(&me), "POST", "fly/certificate", json!({ "name": "todo.paul" })).0, 503);
+        assert_eq!(call(&k, Some(&me), "POST", "fly/certificate", json!({ "name": "other.paul" })).0, 403);
+        assert_eq!(call(&k, Some(LEDGER), "POST", "fly/certificate", json!({ "name": "todo.paul" })).0, 403);
+        assert_eq!(call(&k, Some(&me), "POST", "fly/certificate", json!({ "name": "todo" })).0, 400);
     }
 
     #[test]

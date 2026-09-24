@@ -64,12 +64,39 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("create") {
         return Ok(());
     }
+    // a person takes a username before they make anything (decision 16)
+    let nameless = api.person_without_username()?;
+    let r = api.create(&nameless, &s.name("nameless"))?;
+    s.ok("a person without a username cannot create", r.status == 400 && r.message().contains("username"), &r);
+    let r = api.signed(&nameless, "PUT", "/api/identities/me/username", Some(&json!({ "username": "www" })))?;
+    s.ok("a reserved word is not a username", r.status == 400, &r);
+    let r = api.signed(&nameless, "PUT", "/api/identities/me/username", Some(&json!({ "username": "to--do" })))?;
+    s.ok("a username has no double dash", r.status == 400, &r);
     let owner = api.person()?;
     let other = api.person()?;
-    let name = s.name("create");
-    let r = api.create(&owner, &name)?;
+    let (owner_u, other_u) = (api.username(&owner)?, api.username(&other)?);
+    let r = api.signed(&nameless, "PUT", "/api/identities/me/username", Some(&json!({ "username": owner_u })))?;
+    s.ok("a taken username is 409", r.status == 409, &r);
+    let r = api.signed(&owner, "PUT", "/api/identities/me/username", Some(&json!({ "username": format!("{owner_u}x") })))?;
+    s.ok("a username is chosen once", r.status == 409 && r.message().contains("once"), &r);
+    let r = api.signed(&owner, "PUT", "/api/identities/me/username", Some(&json!({ "username": owner_u })))?;
+    s.ok("taking your own username again is a no-op", r.status == 200 && r.body["claimed"] == false, &r);
+    let r = api.unsigned("GET", &format!("/api/users/{owner_u}"), None)?;
+    s.ok("anyone sees who a username is", r.status == 200 && r.body["id"] == api.identity(&owner)?.as_str() && r.body["picture"].is_null(), &r);
+    let png: &[u8] = b"\x89PNG\r\n\x1a\n-a-tiny-picture";
+    let r = api.call(Call { method: "PUT", url: format!("{}/api/identities/me/picture", api.base), body: Some(png.to_vec()), keys: Some(&owner), ..Call::default() })?;
+    s.ok("a person sets a picture", r.status == 200 && r.body["mime"] == "image/png", &r);
+    let r = api.unsigned("GET", &format!("/api/users/{owner_u}/picture"), None)?;
+    s.ok("and anyone sees it", r.status == 200 && r.bytes == png && r.header("content-type") == "image/png", &r);
+    let r = api.call(Call { method: "PUT", url: format!("{}/api/identities/me/picture", api.base), body: Some(b"<svg/>".to_vec()), keys: Some(&owner), ..Call::default() })?;
+    s.ok("a picture that is not an image is refused", r.status == 400, &r);
+
+    let label = s.name("create");
+    let name = fragment_proto::fragment_name(&label, &owner_u);
+    let r = api.create(&owner, &label)?;
     let c = &r.body;
     s.ok("a signed create succeeds", r.status == 200, &r);
+    s.ok("a bare label goes under the creator's username", c["name"] == name.as_str(), &r);
     s.ok("create names the owner by identity", c["owner"] == api.identity(&owner)?.as_str(), &r);
     s.ok("create returns the fragment's own npub", c["npub"].as_str().is_some_and(|n| n.starts_with("npub1")), &r);
     s.ok("create defaults to link visibility", c["visibility"] == "link", &r);
@@ -82,22 +109,43 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let repo = c["repo"].as_str().unwrap_or("").to_string();
     s.ok("create returns the url-form repo identity", repo.len() == 36 && repo.matches('-').count() == 4, &r);
-    s.ok("the repo exists in code.storage under the name", s.fake.repo_url(&name).as_deref() == Some(repo.as_str()), &repo);
+    s.ok(
+        "the repo exists in code.storage as <label>--<username>",
+        s.fake.repo_url(&format!("{label}--{owner_u}")).as_deref() == Some(repo.as_str()),
+        &repo,
+    );
     s.ok(
         "create returns the fragment's own origin",
         c["canonical"] == format!("http://{name}.{}:{}/", crate::SUFFIX, api.port),
         &r,
     );
     s.hook(api, c);
+    // KEYS checks that the fragment asking for a certificate is the one it
+    // names (a scope it derives from the name, against the host's): here
+    // the check passes, and this node has no Fly to ask
+    let events = api.signed(&owner, "GET", &format!("/api/f/{name}/events"), None)?.text;
+    s.ok(
+        "a new fragment asks for its own host's certificate (KEYS knows it is that fragment)",
+        events.contains("certificate.skipped") && !events.contains("certificate.failed"),
+        &events,
+    );
 
-    let r = api.create(&other, &name)?;
+    let r = api.create(&owner, &label)?;
     s.ok("creating an existing name is 409", r.status == 409 && r.error() == "already_exists", &r);
+    let r = api.create(&other, &name)?;
+    s.ok("no one makes a fragment under someone else's username", r.status == 403, &r);
+    let r = api.create(&other, &label)?;
+    s.ok(
+        "two people each make the same label: two fragments",
+        r.status == 200 && r.body["name"] == fragment_proto::fragment_name(&label, &other_u).as_str(),
+        &r,
+    );
     let r = api.create(&owner, "Bad_Name")?;
     s.ok("an invalid name is 400", r.status == 400 && r.error() == "invalid_request", &r);
     // the fragment's own key is made by the node's KEYS; no client sends one
     let r = api.create_with(&owner, json!({ "name": s.name("oldsecret"), "fragmentSecret": Keys::generate().secret_hex() }))?;
     s.ok("a create that sends a fragmentSecret is refused naming it", r.status == 400 && r.message().contains("fragmentSecret"), &r);
-    let public = s.name("create-pub");
+    let public = fragment_proto::fragment_name(&s.name("create-pub"), &owner_u);
     let r = api.create_with(&owner, json!({ "name": public, "visibility": "public" }))?;
     s.ok("create takes a visibility", r.status == 200 && r.body["visibility"] == "public", &r);
 
@@ -135,8 +183,8 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a deleted fragment leaves the owner's list", !r.text.contains(&format!("\"{name}\"")), &r);
     // a busy org: the repo is on a later page of the org's newest-first list
     s.fake.seed_filler(150);
-    let r = api.create(&other, &name)?;
-    s.ok("a deleted name can be created again", r.status == 200 && r.body["owner"] == api.identity(&other)?.as_str(), &r);
+    let r = api.create(&owner, &label)?;
+    s.ok("a deleted name can be created again", r.status == 200 && r.body["owner"] == api.identity(&owner)?.as_str(), &r);
     s.ok("created again, it keeps its repo (found past the list's first page)", r.body["repo"] == repo.as_str(), &r);
     Ok(())
 }
@@ -147,7 +195,7 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let owner = api.person()?;
     let stranger = api.person()?;
-    let name = s.name("lock");
+    let name = s.named(api, &owner, "lock")?;
     s.create(api, &owner, &name)?;
     let forged = |keys: Option<&Keys>| {
         api.call(Call {
@@ -168,7 +216,8 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("GET on a fragment's root is 404", r.status == 404, &r);
     let r = api.call(Call { method: "GET", url: format!("http://evil.example.com:{}/index.html", api.port), ..Call::default() })?;
     s.ok("a host outside the suffix is the platform, not a fragment", r.status == 404 && r.message().contains("no route"), &r);
-    for host in ["Bad_Name", "a.b"] {
+    let label = name.split('.').next().unwrap_or("");
+    for host in ["Bad_Name", "a.b", label] {
         let r = api.call(Call { method: "GET", url: format!("http://{host}.{}:{}/index.html", crate::SUFFIX, api.port), ..Call::default() })?;
         s.ok(&format!("host {host}.<suffix> is not a fragment"), r.status == 404 && r.message().contains("no route"), &r);
     }

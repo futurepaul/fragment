@@ -19,7 +19,13 @@
 //!   POST /revoke  {identity, key, by}     revoke one
 //!   POST /view    {identity, by}          the identity, as it or its owner sees it
 //!   POST /check   {identity, key, by}     → {active}: is `key` one of `identity`'s?
+//!   POST /username/claim  {identity, username}    a person's username, chosen once
+//!   POST /username/lookup {username}              → the facts of whoever holds it
+//!   POST /picture/set     {identity, sha, mime}   a person's picture (its bytes are in BLOBS)
 //!   POST /test    {down}                  dev fleets: answer 503 to everything else
+//!
+//! Facts (`/resolve`, `/lookup`, a session) carry the identity's username,
+//! and an agent's carry its owner's (the namespace it makes fragments in).
 //!
 //! People come from sign-in, and browsers hold sessions: `signin.rs`.
 
@@ -50,6 +56,10 @@ CREATE TABLE IF NOT EXISTS subjects (
   PRIMARY KEY (issuer, subject));
 CREATE INDEX IF NOT EXISTS subjects_identity ON subjects (identity);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS usernames (
+  username TEXT PRIMARY KEY, identity TEXT NOT NULL UNIQUE, claimed_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS pictures (
+  identity TEXT PRIMARY KEY, sha TEXT NOT NULL, mime TEXT NOT NULL, set_at INTEGER NOT NULL);
 ";
 
 #[durable_object]
@@ -78,11 +88,13 @@ struct Facts {
     id: String,
     kind: IdentityKind,
     owner: Option<String>,
+    /// A person's username; an agent's owner's (where it makes fragments).
+    username: Option<String>,
 }
 
 impl Facts {
     fn json(&self) -> Value {
-        json!({ "id": self.id, "kind": self.kind, "owner": self.owner })
+        json!({ "id": self.id, "kind": self.kind, "owner": self.owner, "username": self.username })
     }
 }
 
@@ -113,6 +125,24 @@ struct ChangeBody {
 struct ViewBody {
     identity: String,
     by: String,
+}
+
+#[derive(Deserialize)]
+struct ClaimBody {
+    identity: String,
+    username: String,
+}
+
+#[derive(Deserialize)]
+struct UsernameBody {
+    username: String,
+}
+
+#[derive(Deserialize)]
+struct PictureBody {
+    identity: String,
+    sha: String,
+    mime: String,
 }
 
 fn unauthenticated(m: impl Into<String>) -> CellError {
@@ -149,7 +179,67 @@ impl RegistryCell {
         let rows = self.rows("SELECT id, kind, owner FROM identities WHERE id = ?", vec![id.into()])?;
         let Some(r) = rows.first() else { return Ok(None) };
         let kind = r["kind"].as_str().and_then(IdentityKind::parse).ok_or_else(|| CellError::host("identities.kind"))?;
-        Ok(Some(Facts { id: id.to_string(), kind, owner: r["owner"].as_str().map(str::to_string) }))
+        let owner = r["owner"].as_str().map(str::to_string);
+        let username = self.username_of(owner.as_deref().unwrap_or(id))?;
+        Ok(Some(Facts { id: id.to_string(), kind, owner, username }))
+    }
+
+    fn username_of(&self, id: &str) -> CellResult<Option<String>> {
+        Ok(self.rows("SELECT username FROM usernames WHERE identity = ?", vec![id.into()])?.first().and_then(|r| r["username"].as_str()).map(str::to_string))
+    }
+
+    /// A person's username, chosen once: taken names and reserved words are refused.
+    fn claim_username(&self, b: ClaimBody) -> CellResult<Value> {
+        let facts = self.must_facts(&b.identity)?;
+        if facts.kind != IdentityKind::Person {
+            return Err(CellError::new(ErrorCode::Forbidden, "only a person chooses a username (an agent makes fragments under its owner's)"));
+        }
+        if !fragment_proto::valid_username(&b.username) {
+            return Err(CellError::invalid(format!(
+                "a username is {}-{} lowercase letters, digits, and single dashes, not starting or ending with one, and not a reserved word",
+                limits::USERNAME_MIN_BYTES,
+                limits::USERNAME_MAX_BYTES
+            )));
+        }
+        match facts.username {
+            Some(u) if u == b.username => return Ok(json!({ "username": u, "claimed": false })),
+            Some(u) => return Err(conflict(format!("you are {u}: a username is chosen once"))),
+            None => {}
+        }
+        if !self.rows("SELECT identity FROM usernames WHERE username = ?", vec![b.username.as_str().into()])?.is_empty() {
+            return Err(conflict(format!("{} is taken", b.username)));
+        }
+        self.exec(
+            "INSERT INTO usernames (username, identity, claimed_at) VALUES (?, ?, ?)",
+            vec![b.username.as_str().into(), facts.id.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
+        )?;
+        Ok(json!({ "username": b.username, "claimed": true }))
+    }
+
+    /// Whoever holds a username, and their picture (sha, mime).
+    fn username_lookup(&self, username: &str) -> CellResult<Value> {
+        let rows = self.rows("SELECT identity FROM usernames WHERE username = ?", vec![username.into()])?;
+        let id = rows.first().and_then(|r| r["identity"].as_str()).ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no one is {username}")))?.to_string();
+        let mut v = self.must_facts(&id)?.json();
+        let pic = self.rows("SELECT sha, mime FROM pictures WHERE identity = ?", vec![id.as_str().into()])?;
+        v["picture"] = pic.first().map_or(Value::Null, |r| json!({ "sha": r["sha"], "mime": r["mime"] }));
+        Ok(v)
+    }
+
+    fn set_picture(&self, b: PictureBody) -> CellResult<Value> {
+        let facts = self.must_facts(&b.identity)?;
+        if facts.kind != IdentityKind::Person || facts.username.is_none() {
+            return Err(CellError::invalid("choose a username before a picture"));
+        }
+        if b.sha.len() != 64 || !b.sha.bytes().all(|c| c.is_ascii_hexdigit()) || !matches!(b.mime.as_str(), "image/png" | "image/jpeg" | "image/webp" | "image/gif") {
+            return Err(CellError::invalid("a picture is a PNG, JPEG, WebP, or GIF, named by its SHA-256"));
+        }
+        self.exec(
+            "INSERT INTO pictures (identity, sha, mime, set_at) VALUES (?, ?, ?, ?)
+             ON CONFLICT (identity) DO UPDATE SET sha = excluded.sha, mime = excluded.mime, set_at = excluded.set_at",
+            vec![facts.id.as_str().into(), b.sha.as_str().into(), b.mime.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
+        )?;
+        Ok(json!({ "sha": b.sha, "mime": b.mime }))
     }
 
     fn must_facts(&self, id: &str) -> CellResult<Facts> {
@@ -191,10 +281,22 @@ impl RegistryCell {
             .filter_map(|r| r["id"].as_str().map(str::to_string))
             .collect();
         let created_at = self.rows("SELECT created_at FROM identities WHERE id = ?", vec![facts.id.as_str().into()])?;
+        // a person's own username (an agent's facts carry its owner's)
+        let username = if facts.kind == IdentityKind::Person { facts.username.clone() } else { None };
+        let picture = match &username {
+            Some(u) => self
+                .rows("SELECT sha FROM pictures WHERE identity = ?", vec![facts.id.as_str().into()])?
+                .first()
+                .and_then(|r| r["sha"].as_str())
+                .map(|sha| format!("/api/users/{u}/picture?v={}", &sha[..12])),
+            None => None,
+        };
         Ok(IdentityView {
             id: facts.id.clone(),
             kind: facts.kind,
             owner: facts.owner.clone(),
+            username,
+            picture,
             created_at: created_at.first().and_then(|r| r["created_at"].as_i64()).unwrap_or(0),
             keys,
             agents,
@@ -219,7 +321,8 @@ impl RegistryCell {
             "INSERT INTO keys (key, identity, added_at, added_by) VALUES (?, ?, ?, ?)",
             vec![key.into(), id.as_str().into(), SqlStorageValue::Integer(now), added_by.into()],
         )?;
-        Ok(Facts { id, kind, owner: owner.map(str::to_string) })
+        let username = owner.map(|o| self.username_of(o)).transpose()?.flatten();
+        Ok(Facts { id, kind, owner: owner.map(str::to_string), username })
     }
 
     fn register_agent(&self, body: AgentBody) -> CellResult<IdentityView> {
@@ -347,6 +450,12 @@ impl RegistryCell {
             return Ok(v);
         }
         match path.as_str() {
+            "/username/claim" => self.claim_username(from(body)?),
+            "/username/lookup" => {
+                let b: UsernameBody = from(body)?;
+                self.username_lookup(&b.username)
+            }
+            "/picture/set" => self.set_picture(from(body)?),
             "/resolve" => {
                 let b: KeyBody = from(body)?;
                 Ok(self.resolve(&b.key)?.json())

@@ -28,7 +28,7 @@ pub fn push(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     let owner = api.person()?;
-    let name = s.name("push");
+    let name = s.named(api, &owner, "push")?;
     let c = s.create(api, &owner, &name)?;
     let mut manifest: Value = serde_json::from_slice(MEDIA_JSON)?;
     manifest["notifyUrls"] = json!([format!("{}/notify", s.push.url)]);
@@ -115,7 +115,7 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     let owner = api.person()?;
-    let name = s.name("ai");
+    let name = s.named(api, &owner, "ai")?;
     let c = s.create(api, &owner, &name)?;
     ship(s, &c, MEDIA_APP, MEDIA_JSON);
     let repo = c["repo"].as_str().unwrap_or("").to_string();

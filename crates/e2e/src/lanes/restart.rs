@@ -28,7 +28,7 @@ pub fn restart(s: &mut Suite, api: Api) -> Result<Api> {
     }
     let owner = api.person()?;
     let member = api.person()?;
-    let name = s.name("restart");
+    let name = s.named(&api, &owner, "restart")?;
     let c = s.create(&api, &owner, &name)?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", member.pubkey_hex()), Some(&json!({ "role": "editor" })))?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/secrets/TOKEN"), None)?;
@@ -41,7 +41,7 @@ pub fn restart(s: &mut Suite, api: Api) -> Result<Api> {
     let r2 = api.signed(&added, "DELETE", &format!("/api/identities/me/keys/{}", revoked.pubkey_hex()), None)?;
     anyhow::ensure!(r.status == 200 && r2.status == 200, "registry setup: {r} {r2}");
     // a ledger: a month with something spent
-    let paid = s.name("restart-paid");
+    let paid = s.named(&api, &owner, "restart-paid")?;
     let pc = s.create(&api, &owner, &paid)?;
     ship(s, &pc, BUDGET_APP, BUDGET_JSON);
     let r = api.op(&owner, &paid, "summarize", "before", json!({ "text": "before the restart" }))?;
@@ -95,7 +95,7 @@ pub fn pathmode(s: &mut Suite, api: Api) -> Result<()> {
     s.stop()?;
     let api = s.start(false, false)?;
     let owner = api.person()?;
-    let name = s.name("paths");
+    let name = s.named(&api, &owner, "paths")?;
     let c = s.create(&api, &owner, &name)?;
     s.ok("without a suffix the canonical URL is a path", c["canonical"] == format!("{}/f/{name}/", api.base), &c);
     api.signed(&owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "public" })))?;

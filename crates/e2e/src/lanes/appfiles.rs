@@ -20,7 +20,7 @@ pub fn appfiles(s: &mut Suite, api: &crate::api::Api) -> Result<()> {
         return Ok(());
     }
     let owner = api.person()?;
-    let name = s.name("appfiles");
+    let name = s.named(api, &owner, "appfiles")?;
     let c = s.create(api, &owner, &name)?;
     ship(s, &c, FILES_APP, FILES_JSON);
     let repo = c["repo"].as_str().unwrap_or("").to_string();
@@ -96,7 +96,7 @@ pub fn appfiles(s: &mut Suite, api: &crate::api::Api) -> Result<()> {
     );
 
     // one loaded worker per fragment: the same code reads its own files
-    let other = s.name("appfiles2");
+    let other = s.named(api, &owner, "appfiles2")?;
     let c2 = s.create(api, &owner, &other)?;
     ship(s, &c2, FILES_APP, FILES_JSON);
     s.commit(&c, &[("whoami.txt", Some(b"first"))]);

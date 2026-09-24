@@ -41,7 +41,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use fragment_core::npub;
-use fragment_proto::{limits, valid_channel_name, valid_fragment_name, valid_op_name, ErrorCode};
+use fragment_proto::{limits, valid_channel_name, valid_fragment_name, valid_label, valid_op_name, ErrorCode};
 use goose_provider_types::conversation::message::{Message, MessageContent};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -141,7 +141,7 @@ async fn route(mut req: Request, env: &Env) -> Answer<Response> {
     }
     // a fragment's delivery to a listening agent: unsigned, the token is the capability
     if let (Method::Post, ["api", "a", name, "inbox", token]) = (req.method(), segments.as_slice()) {
-        if !valid_fragment_name(name) || token.len() != 32 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if !valid_label(name) || token.len() != 32 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(Fail::new(ErrorCode::NotFound, "no such inbox"));
         }
         let (name, action) = (name.to_string(), format!("inbox/{token}"));
@@ -169,8 +169,8 @@ async fn route(mut req: Request, env: &Env) -> Answer<Response> {
         Some(n) => n,
         None => serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["name"].as_str().map(str::to_string)).unwrap_or_default(),
     };
-    if !valid_fragment_name(&name) {
-        return Err(Fail::invalid("an agent name must match ^[a-z0-9][a-z0-9-]{0,62}$"));
+    if !valid_label(&name) {
+        return Err(Fail::invalid("an agent's name is lowercase letters, digits, and single dashes (at most 63)"));
     }
     forward(env, &name, &action, req.method(), Some(&principal), body).await
 }

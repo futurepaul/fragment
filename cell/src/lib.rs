@@ -125,6 +125,8 @@ pub(crate) struct Signer {
     pub id: String,
     pub kind: IdentityKind,
     pub owner: Option<String>,
+    /// A person's username; an agent's owner's: where its fragments go.
+    pub username: Option<String>,
 }
 
 /// Asks the registry cell. Its refusals pass through; not reaching it, or
@@ -160,10 +162,15 @@ pub(crate) fn facts_of(v: &Value) -> CellResult<(String, IdentityKind, Option<St
     Ok((id.to_string(), kind, v["owner"].as_str().map(str::to_string)))
 }
 
+/// The signer the registry's facts describe.
+pub(crate) fn signer_of(v: &Value, key: Option<String>) -> CellResult<Signer> {
+    let (id, kind, owner) = facts_of(v)?;
+    Ok(Signer { key, id, kind, owner, username: v["username"].as_str().map(str::to_string) })
+}
+
 async fn resolve(env: &Env, key: String) -> CellResult<Signer> {
     let v = ask_registry(env, "/resolve", &json!({ "key": key })).await?;
-    let (id, kind, owner) = facts_of(&v)?;
-    Ok(Signer { key: Some(key), id, kind, owner })
+    signer_of(&v, Some(key))
 }
 
 /// The signer of a request that must be signed, resolved.
@@ -193,6 +200,58 @@ fn named_identity(who: &str, signer: &Signer) -> CellResult<String> {
         return Ok(who.to_string());
     }
     Err(CellError::invalid(format!("{who:?} is not an identity (id:…) or `me`")))
+}
+
+/// A create's name under the creator's username: a bare label goes under
+/// it, and a qualified name must already be under it.
+fn qualify(name: &str, username: &str) -> CellResult<String> {
+    if fragment_proto::valid_label(name) {
+        return Ok(fragment_proto::fragment_name(name, username));
+    }
+    match fragment_proto::split_fragment_name(name) {
+        Some((_, u)) if u == username => Ok(name.to_string()),
+        Some(_) => Err(CellError::new(ErrorCode::Forbidden, format!("you make fragments under your own username ({username})"))),
+        None => Err(CellError::invalid(
+            "a fragment's name is a label (lowercase letters, digits, and single dashes, at most 63), optionally followed by .<your username>",
+        )),
+    }
+}
+
+/// A picture's type from its first bytes (a request's content-type is not trusted).
+pub(crate) fn picture_type(bytes: &[u8]) -> Option<&'static str> {
+    match bytes {
+        [0x89, b'P', b'N', b'G', ..] => Some("image/png"),
+        [0xFF, 0xD8, 0xFF, ..] => Some("image/jpeg"),
+        [b'G', b'I', b'F', b'8', ..] => Some("image/gif"),
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("image/webp"),
+        _ => None,
+    }
+}
+
+/// `GET /api/users/<username>` and `.../picture`: anyone may see who a
+/// username is, and their picture.
+async fn users(env: &Env, rest: &[&str]) -> CellResult<Response> {
+    let [username, tail @ ..] = rest else { return Err(CellError::new(ErrorCode::NotFound, "name a username")) };
+    if !fragment_proto::valid_username(username) {
+        return Err(CellError::new(ErrorCode::NotFound, format!("no one is {username}")));
+    }
+    let v = ask_registry(env, "/username/lookup", &json!({ "username": username })).await?;
+    let picture = v["picture"]["sha"].as_str().map(|sha| format!("/api/users/{username}/picture?v={}", &sha[..12]));
+    match tail {
+        [] => json_answer(&json!({ "id": v["id"], "kind": v["kind"], "username": username, "picture": picture })),
+        ["picture"] => {
+            let (Some(sha), Some(mime)) = (v["picture"]["sha"].as_str(), v["picture"]["mime"].as_str()) else {
+                return Err(CellError::new(ErrorCode::NotFound, format!("{username} has no picture")));
+            };
+            let blob = js::blob_get(env.as_ref(), &format!("pictures/{sha}"), None).await?.ok_or_else(|| CellError::host("a picture's bytes are missing"))?;
+            let headers = Headers::new();
+            headers.set("content-type", mime)?;
+            headers.set("cache-control", "public, max-age=300")?;
+            headers.set("x-content-type-options", "nosniff")?;
+            Ok(Response::from_body(ResponseBody::Stream(blob.body))?.with_headers(headers))
+        }
+        _ => Err(CellError::new(ErrorCode::NotFound, "no such route")),
+    }
 }
 
 fn key_in_path(k: &str) -> CellResult<String> {
@@ -274,6 +333,20 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
     }
     let who = signer(env, &req, url, &body).await?;
     match (method, rest) {
+        (Method::Put, ["me", "username"]) => {
+            let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let username = v["username"].as_str().ok_or_else(|| CellError::invalid("{username}"))?;
+            json_answer(&ask_registry(env, "/username/claim", &json!({ "identity": who.id, "username": username })).await?)
+        }
+        (Method::Put, ["me", "picture"]) => {
+            if body.len() > limits::PICTURE_MAX_BYTES {
+                return Err(CellError::too_large("a picture", body.len(), limits::PICTURE_MAX_BYTES));
+            }
+            let mime = picture_type(&body).ok_or_else(|| CellError::invalid("a picture is a PNG, JPEG, WebP, or GIF"))?;
+            let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&body));
+            js::blob_put_bytes(env.as_ref(), &format!("pictures/{sha}"), &body).await?;
+            json_answer(&ask_registry(env, "/picture/set", &json!({ "identity": who.id, "sha": sha, "mime": mime })).await?)
+        }
         (Method::Get, [id]) => {
             let id = named_identity(id, &who)?;
             json_answer(&ask_registry(env, "/view", &json!({ "identity": id, "by": who.id })).await?)
@@ -298,11 +371,26 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
     }
 }
 
+/// A fragment named in an API path: `<label>.<username>`, or a bare label
+/// for a signed caller's own (under its username; an agent's owner's).
+fn named_fragment(name: &str, signer: Option<&Signer>) -> CellResult<String> {
+    if valid_fragment_name(name) {
+        return Ok(name.to_string());
+    }
+    if !fragment_proto::valid_label(name) {
+        return Err(CellError::invalid("a fragment's name is <label>.<username>"));
+    }
+    match signer.and_then(|s| s.username.as_deref()) {
+        Some(username) => Ok(fragment_proto::fragment_name(name, username)),
+        None => Err(CellError::new(ErrorCode::NotFound, format!("no fragment {name}: name it as {name}.<username>"))),
+    }
+}
+
 fn check_name(name: &str) -> CellResult<()> {
     if valid_fragment_name(name) {
         Ok(())
     } else {
-        Err(CellError::invalid("a fragment name must match ^[a-z0-9][a-z0-9-]{0,62}$"))
+        Err(CellError::invalid("a fragment's name is <label>.<username>"))
     }
 }
 
@@ -414,12 +502,17 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
         }
         (Method::Post, ["api", "fragments"]) => {
             let body = read_body(&mut req).await?;
-            let create: CreateFragment = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            check_name(&create.name)?;
+            let mut create: CreateFragment = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let principal = signer(env, &req, &url, &body).await?;
             if principal.kind != IdentityKind::Person {
                 return Err(CellError::new(ErrorCode::Forbidden, "fragments are made by people"));
             }
+            let username = principal
+                .username
+                .clone()
+                .ok_or_else(|| CellError::invalid(format!("choose a username first (sign in at {}/)", cfg.platform(&url))))?;
+            create.name = qualify(&create.name, &username)?;
+            let body = serde_json::to_vec(&create).map_err(|e| CellError::host(e.to_string()))?;
             let f = Forward { name: &create.name, inner: "/create".into(), principal: Some(principal), mode: None, extra: vec![] };
             forward(env, &req, &url, bytes_body(body), f).await
         }
@@ -437,6 +530,10 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let org = v["identity"].as_str().and_then(ledger::org_of).ok_or_else(|| CellError::invalid("name an identity"))?;
             json_answer(&ledger::ask(env, &org, Method::Post, "/test", Some(&json!({ "offsetMs": v["offsetMs"] }))).await?)
+        }
+        (Method::Get, ["api", "users", rest @ ..]) => {
+            let rest = rest.to_vec();
+            users(env, &rest).await
         }
         (_, ["api", "identities", rest @ ..]) => {
             let rest = rest.to_vec();
@@ -465,7 +562,6 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
         // signature covers the URL, which names the bytes' hash; the
         // fragment checks the hash as they arrive.
         (Method::Put, ["api", "f", name, "blobs", sha]) => {
-            check_name(name)?;
             let declared: Option<u64> = req.headers().get("content-length")?.and_then(|l| l.parse().ok());
             match declared {
                 None => return Err(CellError::invalid("a blob upload declares its content-length")),
@@ -473,12 +569,15 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
                 Some(_) => {}
             }
             let principal = signer(env, &req, &url, &[]).await?;
+            let name = named_fragment(name, Some(&principal))?;
             let body = req.inner().body().map(worker::wasm_bindgen::JsValue::from);
-            let f = Forward { name, inner: format!("/api/blobs/{sha}"), principal: Some(principal), mode: None, extra: vec![] };
+            let f = Forward { name: &name, inner: format!("/api/blobs/{sha}"), principal: Some(principal), mode: None, extra: vec![] };
             forward(env, &req, &url, body, f).await
         }
         (method, ["api", "f", name, rest @ ..]) => {
-            check_name(name)?;
+            if !valid_fragment_name(name) && !fragment_proto::valid_label(name) {
+                return Err(CellError::invalid("a fragment's name is <label>.<username>"));
+            }
             let inner = match (method, rest) {
                 (Method::Delete, [] | [""]) => "/delete".to_string(),
                 (_, [] | [""]) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
@@ -500,7 +599,8 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
                 }
                 _ => Some(signer(env, &req, &url, &body).await?),
             };
-            let f = Forward { name, inner, principal, mode: None, extra };
+            let name = named_fragment(name, principal.as_ref())?;
+            let f = Forward { name: &name, inner, principal, mode: None, extra };
             forward(env, &req, &url, bytes_body(body), f).await
         }
         (_, ["f", name]) => {

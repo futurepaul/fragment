@@ -544,7 +544,8 @@ impl FragmentCell {
         self.set_meta("claimed_at", &js::now_ms().to_string())?;
         // the fragment's own key is made by KEYS; its secret stays sealed there
         let made = async {
-            let repo = Cs::new(cs_cfg, &self.env).ensure_repo(&body.name).await?;
+            let repo_name = fragment_proto::repo_name(&body.name).ok_or_else(|| CellError::invalid("a fragment's name is <label>.<username>"))?;
+            let repo = Cs::new(cs_cfg, &self.env).ensure_repo(&repo_name).await?;
             let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env).await?;
             Ok::<_, CellError>((repo, pubkey, sealed))
         };
@@ -591,6 +592,7 @@ impl FragmentCell {
         self.index_change(&owner, Some(Role::Owner))?;
         self.event("create", &format!("fragment {} created by {owner} (repo {repo})", body.name), json!({ "repo": repo, "key": caller.key.as_deref().map(npub::display) }));
         self.flush_index().await;
+        self.certificate().await?;
         self.schedule().await?;
         json_response(&Created {
             name: body.name.clone(),
@@ -678,6 +680,9 @@ impl FragmentCell {
             return Ok(());
         }
         self.flush_index().await;
+        if self.meta("cert_pending")?.is_some() {
+            self.certificate().await?;
+        }
         if !self.swept.get() {
             if let Ok(facet) = self.facet() {
                 self.sweep(&facet).await?;
@@ -699,6 +704,33 @@ impl FragmentCell {
             self.set_meta("poll_at", &(js::now_ms() + self.cfg.poll_interval_ms).to_string())?;
         }
         self.schedule().await
+    }
+
+    /// Asks for the certificate of this fragment's host (decision 16: one
+    /// per host, from Fly), once; a failure is retried at the next alarm.
+    async fn certificate(&self) -> CellResult<()> {
+        let name = self.name()?;
+        let outcome = crate::keys::fly_certificate(&self.env, &name).await;
+        let asked = match &outcome {
+            Ok(None) => {
+                self.event("certificate.skipped", "this node asks no one for certificates (no Fly)", json!({}));
+                true
+            }
+            // Fly answers a host it already has with an error that says so
+            Ok(Some((status, body))) if (200..300).contains(status) || body.to_string().contains("already") => {
+                self.event("certificate.requested", &format!("asked Fly for {name}'s certificate"), json!({ "status": status }));
+                true
+            }
+            Ok(Some((status, body))) => {
+                self.event("certificate.failed", &format!("Fly answered {status}: {body}"), json!({ "status": status }));
+                false
+            }
+            Err(e) => {
+                self.event("certificate.failed", &e.message, json!({ "code": e.code }));
+                false
+            }
+        };
+        if asked { self.del_meta("cert_pending") } else { self.set_meta("cert_pending", "1") }
     }
 
     /// Arms the alarm for the earliest due work.

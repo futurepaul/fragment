@@ -15,7 +15,7 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     let owner = api.person()?;
     let viewer = api.person()?;
     let stranger = api.person()?;
-    let name = s.name("site");
+    let name = s.named(api, &owner, "site")?;
     let c = s.create(api, &owner, &name)?;
     let view = c["viewToken"].as_str().unwrap_or("").to_string();
     let r = api.page(&name, "", None)?;
@@ -134,7 +134,7 @@ pub fn watch(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     let owner = api.person()?;
-    let name = s.name("watch");
+    let name = s.named(api, &owner, "watch")?;
     let c = s.create(api, &owner, &name)?;
     let view = c["viewToken"].as_str().unwrap_or("").to_string();
     s.commit(&c, &[("a.md", Some(b"1"))]);

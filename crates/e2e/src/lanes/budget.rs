@@ -40,7 +40,7 @@ pub fn budget(s: &mut Suite, api: &Api) -> Result<()> {
     let owner = Keys::generate();
     let owner_id = api.approve(&session, &owner)?.body["id"].as_str().unwrap_or("").to_string();
     let org = format!("org:{}", owner_id.trim_start_matches("id:"));
-    let name = s.name("budget");
+    let name = s.named(api, &owner, "budget")?;
     let c = s.create(api, &owner, &name)?;
     ship(s, &c, BUDGET_APP, BUDGET_JSON);
     let run = |keys: &Keys, op: &str, id: &str, input: Value| -> Result<Value> {
@@ -152,7 +152,7 @@ pub fn budget(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // a fragment with its own key pays for itself
-    let own = s.name("budget-own");
+    let own = s.named(api, &owner, "budget-own")?;
     let c = s.create(api, &owner, &own)?;
     ship(s, &c, BUDGET_APP, BUDGET_JSON);
     api.call(crate::api::Call {

@@ -64,9 +64,9 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
     let paul = api.person()?;
     let paul_id = api.identity(&paul)?;
     let friend = api.person()?;
-    let mine = s.name("mine");
+    let mine = s.named(api, &paul, "mine")?;
     s.create(api, &paul, &mine)?;
-    let theirs = s.name("theirs");
+    let theirs = s.named(api, &friend, "theirs")?;
     s.create(api, &friend, &theirs)?;
     api.signed(&friend, "PUT", &format!("/api/f/{theirs}/members/{}", npub::encode(paul.pubkey_hex())), Some(&json!({ "role": "editor" })))?;
     let before = api.signed(&friend, "GET", &format!("/api/f/{theirs}/members"), None)?;
@@ -147,7 +147,7 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "DELETE", &format!("/api/identities/{agent_id}/keys/{}", agent.pubkey_hex()), None)?;
     s.ok("an agent's last key cannot be revoked", r.status == 400, &r);
 
-    let room = s.name("room");
+    let room = s.named(api, &friend, "room")?;
     let c = s.create(api, &friend, &room)?;
     s.commit(&c, &[("applib/format.mjs", Some(FORMAT_MJS))]);
     ship(s, &c, CHAT_APP, CHAT_JSON);

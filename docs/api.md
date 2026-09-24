@@ -119,6 +119,25 @@ the new key and meant it for this signer.
 | `POST /api/identities/{id\|me}/keys` | a person for themselves; an owner for their agent | `{proof}` → the identity with the key added (at most 64 keys, revoked ones included); a key someone else holds, or a revoked one, is 409 |
 | `DELETE /api/identities/{id\|me}/keys/{npub}` | the same | → the identity; the key is 401 from the next request and never comes back; an agent's last active key cannot be revoked (400); a person who signs in may hold none |
 | `GET /api/identities/{id}/keys/{npub}` | the identity, or an agent it owns | → `{active}` (an agent's runtime checks its owner's keys with it) |
+| `PUT /api/identities/me/username` | a person | `{username}` → `{username, claimed}`: chosen once (3 to 32 of lowercase letters, digits, and single dashes, not starting or ending with one, and not a reserved word); taken 409, another after yours 409, yours again `claimed: false` |
+| `PUT /api/identities/me/picture` | a person with a username | the image (PNG, JPEG, WebP, or GIF, told by its bytes; at most 256 KiB) → `{sha, mime}` |
+| `GET /api/users/{username}` | anyone | → `{id, kind, username, picture}` (`picture`: its URL, or null) |
+| `GET /api/users/{username}/picture` | anyone | the picture's bytes |
+
+## Names (decision 16)
+
+A person chooses a **username** once (above; the platform's page asks
+after the first sign-in, and `fragment username <name>` does too). A
+fragment's **name** is `<label>.<username>`: `desktop.futurepaul`,
+served at `desktop.futurepaul.<suffix>` (or `/f/desktop.futurepaul/` on
+a fleet without a suffix), its code.storage repo `desktop--futurepaul`.
+A label and a username never contain `--`. Creating with a bare label
+puts it under the creator's username; creating under someone else's is
+403. In a signed request's path, a bare label names the signer's own
+fragment (`/api/f/todo/status` is `todo.<your username>`); anything
+unsigned (an inbox, a webhook, a site) names it in full. Each new
+fragment asks for its host's TLS certificate (`KEYS` asks Fly, for the
+fragment of that name only).
 
 ## Sign-in (phase 4 slice B)
 
@@ -159,7 +178,7 @@ A path with a space in it arrives encoded (`return=%2Fa%2520b` returns to
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/fragments` | a person (an agent is 403) | `{name, visibility?}` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}`. The fragment's own key is made by the node's `KEYS` and stays sealed there. The cell creates (or, for a name deleted before, finds) the code.storage repo. |
+| `POST /api/fragments` | a person with a username (an agent is 403) | `{name, visibility?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). The fragment's own key is made by the node's `KEYS` and stays sealed there. The cell creates (or, for a name deleted before, finds) the code.storage repo. |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role}]}` |
 | `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes}` |

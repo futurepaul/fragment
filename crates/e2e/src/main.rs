@@ -102,8 +102,14 @@ impl Suite {
         }
     }
 
+    /// A label for this run (a fragment's full name adds its owner's username).
     pub fn name(&self, base: &str) -> String {
         format!("{base}-{}", self.run)
+    }
+
+    /// `base`'s full name for this run, under `owner`'s username.
+    pub fn named(&self, api: &Api, owner: &Keys, base: &str) -> Result<String> {
+        api.qualified(owner, &self.name(base))
     }
 
     /// Starts the node; `suffix` serves fragments from their own hosts.
@@ -249,7 +255,15 @@ impl Suite {
                 }
             }
         }
-        self.cli(api, home, &["login", "--no-browser"])
+        let out = self.cli(api, home, &["login", "--no-browser"]);
+        // and takes a username through the CLI, as a person does once
+        if let Ok(me) = self.cli_json(api, home, &["whoami", "--json"]) {
+            if me["identity"]["username"].is_null() {
+                let npub = me["npub"].as_str().unwrap_or("npub1xxxxxxxxxxxxxxx");
+                let _ = self.cli_json(api, home, &["username", &format!("c{}", &npub[5..15]), "--json"]);
+            }
+        }
+        out
     }
 
     /// The `data` of a `--json` CLI answer.

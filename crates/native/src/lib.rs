@@ -17,6 +17,7 @@ use std::pin::Pin;
 use std::sync::OnceLock;
 
 pub mod keys;
+pub mod scope;
 pub mod seal;
 
 /// The service-binding target prefix the seam routes here.

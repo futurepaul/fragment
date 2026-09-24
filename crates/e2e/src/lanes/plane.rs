@@ -41,7 +41,7 @@ fn signed_webhook(api: &Api, name: &str, secret: &str, body: &Value, at: i64, ev
 
 fn files_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let owner = api.person()?;
-    let name = s.name("files");
+    let name = s.named(api, &owner, "files")?;
     let c = s.create(api, &owner, &name)?;
     let repo = c["repo"].as_str().unwrap_or("").to_string();
 
@@ -139,8 +139,8 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
     let site = s.dir("deploy-site");
     std::fs::create_dir_all(site.join("site"))?;
     s.login(api, &home);
-    let name = s.name("deploy");
-    let created = s.cli_json(api, &home, &["create", &name, "--json"])?;
+    let created = s.cli_json(api, &home, &["create", &s.name("deploy"), "--json"])?;
+    let name = created["name"].as_str().unwrap_or("").to_string();
     s.hook(api, &created);
     let view = created["viewToken"].as_str().unwrap_or("").to_string();
     let cookie = format!("fragview={view}");

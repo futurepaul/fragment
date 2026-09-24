@@ -20,7 +20,7 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let owner = api.person()?;
     let (bob, carol, dave, erin) = (api.person()?, api.person()?, api.person()?, api.person()?);
-    let name = s.name("members");
+    let name = s.named(api, &owner, "members")?;
     s.create(api, &owner, &name)?;
     let path = |rest: &str| format!("/api/f/{name}/{rest}");
     let npub_of = |k: &Keys| npub::encode(k.pubkey_hex());
@@ -129,7 +129,7 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let owner = api.person()?;
     let viewer = api.person()?;
-    let name = s.name("secrets");
+    let name = s.named(api, &owner, "secrets")?;
     s.create(api, &owner, &name)?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", viewer.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
     let value = "sk-or-v1-e2e-never-shown-again";

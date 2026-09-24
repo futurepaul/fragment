@@ -26,7 +26,7 @@ pub fn keys(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the rendered variables file holds none either", rendered_held.is_empty(), format!("{rendered_held:?}"));
 
     let owner = api.person()?;
-    let (a, b) = (s.name("keys-a"), s.name("keys-b"));
+    let (a, b) = (s.named(api, &owner, "keys-a")?, s.named(api, &owner, "keys-b")?);
     for name in [&a, &b] {
         let r = api.create(&owner, name)?;
         s.ok("a fragment is made (its key by KEYS)", r.status == 200 && r.body["npub"].as_str().is_some_and(|n| n.starts_with("npub1")), &r);

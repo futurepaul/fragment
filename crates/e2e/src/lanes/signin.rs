@@ -230,7 +230,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let outsider = Keys::generate();
     let outsider_session = api.sign_in("outsider@e2e.test")?;
     api.approve(&outsider_session, &outsider)?;
-    let (f, g) = (s.name("signin-f"), s.name("signin-g"));
+    let (f, g) = (s.named(api, &owner, "signin-f")?, s.named(api, &owner, "signin-g")?);
     for name in [&f, &g] {
         let c = s.create(api, &owner, name)?;
         s.commit(&c, &[("applib/format.mjs", Some(FORMAT_MJS)), ("site/index.html", Some(b"<p>inside</p>"))]);

@@ -29,7 +29,8 @@
     "FRAGMENT_KEYS_HOST_SECRET_PREVIOUS": "~/.config/finite-next/secrets/fragment-club-host-secret-previous",
     "FRAGMENT_KEYS_CODESTORAGE_PRIVATE_KEY": "~/.config/finite-next/secrets/codestorage-private-key.pem",
     "FRAGMENT_KEYS_WORKOS_API_KEY": "~/.config/finite-next/secrets/fragment-workos-api-key",
-    "FRAGMENT_KEYS_OPENROUTER_MANAGEMENT_KEY": "~/.config/finite-next/secrets/openrouter-management-key"
+    "FRAGMENT_KEYS_OPENROUTER_MANAGEMENT_KEY": "~/.config/finite-next/secrets/openrouter-management-key",
+    "FRAGMENT_KEYS_FLY_API_TOKEN": "~/.config/finite-next/secrets/fragment-club-fly-deploy-token"
   },
   "e2e": {
     "key": "~/.config/finite-next/secrets/fragment-club-e2e-key",

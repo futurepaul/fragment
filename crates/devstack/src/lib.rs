@@ -25,7 +25,7 @@ pub const STOP_TIMEOUT: Duration = Duration::from_secs(60);
 /// `CELLD_LOADED_WORKERS_MAX`, `CELLD_DYNAMIC_LOCKDOWN`,
 /// `CELLD_INTERNAL_PEER_ONLY`, and a hard heap ceiling.
 pub const CELLD_FORK_URL: &str = "https://github.com/futurepaul/celld.git";
-pub const CELLD_FORK_REV: &str = "27794184bebc453e3086680fcfd9f995fc04dc68";
+pub const CELLD_FORK_REV: &str = "43c323838881d0deb4218d6b4c4e5f312348c811";
 
 pub fn repo_root() -> PathBuf {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));

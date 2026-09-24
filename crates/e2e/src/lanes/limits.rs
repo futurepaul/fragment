@@ -20,10 +20,10 @@ pub fn facet_cap(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     let owner = api.person()?;
-    let name = s.name("hoard");
+    let name = s.named(api, &owner, "hoard")?;
     let c = s.create(api, &owner, &name)?;
     ship(s, &c, HOARD_APP, HOARD_JSON);
-    let neighbor = s.name("hoard-neighbor");
+    let neighbor = s.named(api, &owner, "hoard-neighbor")?;
     let n = s.create(api, &owner, &neighbor)?;
     ship(s, &n, GUESTBOOK_APP, GUESTBOOK_JSON);
     let size = |api: &Api| -> Value { api.op(&owner, &name, "size", "q", json!({})).map(|r| r.body["result"].clone()).unwrap_or(Value::Null) };
@@ -72,10 +72,10 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     let owner = api.person()?;
-    let name = s.name("probe");
+    let name = s.named(api, &owner, "probe")?;
     let c = s.create(api, &owner, &name)?;
     ship(s, &c, PROBE_APP, PROBE_JSON);
-    let neighbor = s.name("probe-neighbor");
+    let neighbor = s.named(api, &owner, "probe-neighbor")?;
     let n = s.create(api, &owner, &neighbor)?;
     ship(s, &n, GUESTBOOK_APP, GUESTBOOK_JSON);
     let r = api.status(&owner, &name)?;
@@ -112,7 +112,7 @@ pub fn node_full(s: &mut Suite) -> Result<()> {
     s.node_env_extra = vec![("CELLD_LOADED_WORKERS_MAX".into(), "3".into())];
     let api = s.start(true, true)?;
     let owner = api.person()?;
-    let names: Vec<String> = (0..3).map(|i| s.name(&format!("full{i}"))).collect();
+    let names: Vec<String> = (0..3).map(|i| s.named(&api, &owner, &format!("full{i}"))).collect::<Result<_>>()?;
     for name in &names {
         let c = s.create(&api, &owner, name)?;
         ship(s, &c, GUESTBOOK_APP, GUESTBOOK_JSON);

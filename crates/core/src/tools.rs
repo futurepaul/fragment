@@ -5,10 +5,11 @@ use sha2::{Digest, Sha256};
 /// OpenAI-style tool names: 1-64 of [a-zA-Z0-9_-].
 pub const TOOL_NAME_MAX: usize = 64;
 
-/// A tool's name: the fragment and the operation, joined by `__` (`None`
-/// when it would not be a valid tool name).
+/// A tool's name: the fragment (its `.` as `--`, which no label holds) and
+/// the operation, joined by `__` (`None` when it would not be a valid tool
+/// name).
 pub fn tool_name(fragment: &str, op: &str) -> Option<String> {
-    let name = format!("{fragment}__{op}");
+    let name = format!("{}__{op}", fragment.replace('.', "--"));
     let ok = name.len() <= TOOL_NAME_MAX && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
     ok.then_some(name)
 }
@@ -39,7 +40,7 @@ mod tests {
 
     #[test]
     fn names_and_ids() {
-        assert_eq!(tool_name("todo-1", "add").as_deref(), Some("todo-1__add"));
+        assert_eq!(tool_name("todo-1.paul", "add").as_deref(), Some("todo-1--paul__add"));
         assert_eq!(tool_name(&"x".repeat(62), "add"), None);
         let id = op_id("call_abc123");
         assert_eq!(id, op_id("call_abc123"));

@@ -30,7 +30,7 @@ pub fn ops(s: &mut Suite, api: &Api) -> Result<()> {
     let owner = api.person()?;
     let editor = api.person()?;
     let other = api.person()?;
-    let name = s.name("ops");
+    let name = s.named(api, &owner, "ops")?;
     let c = s.create(api, &owner, &name)?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", editor.pubkey_hex()), Some(&json!({ "role": "editor" })))?;
     let live = ship(s, &c, TODO_APP, TODO_JSON);
@@ -103,7 +103,7 @@ pub fn public(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     let owner = api.person()?;
-    let name = s.name("guestbook");
+    let name = s.named(api, &owner, "guestbook")?;
     let c = s.create(api, &owner, &name)?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "public" })))?;
     ship(s, &c, GUESTBOOK_APP, GUESTBOOK_JSON);
@@ -155,7 +155,7 @@ pub fn public(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("members are not limited by the public floor", r.status == 200, &r);
 
     // a link fragment's visitors hold the link; a members fragment's hold nothing
-    let link = s.name("guestbook-link");
+    let link = s.named(api, &owner, "guestbook-link")?;
     let lc = s.create(api, &owner, &link)?;
     ship(s, &lc, GUESTBOOK_APP, GUESTBOOK_JSON);
     let r = api.browser_op(&link, "sign", "l1", json!({ "text": "x" }), None)?;

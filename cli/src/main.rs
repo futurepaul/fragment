@@ -54,8 +54,11 @@ enum Cmd {
         #[arg(long)]
         no_browser: bool,
     },
-    /// Who the host says you are: your identity, this key, your other keys
+    /// Who the host says you are: your identity, username, this key, your other keys
     Whoami,
+    /// Your username, chosen once: your fragments live at
+    /// <name>.<username>.<host>
+    Username { username: Option<String> },
     /// Your keys: list them, rotate this one (a new key replaces it and
     /// keeps every grant), or revoke one
     Keys {
@@ -465,6 +468,11 @@ fn save_secret_key(secret_hex: &str) -> Result<PathBuf> {
 /// What a person's identity looks like in a terminal.
 fn print_identity(v: &Value, this_key: &str) {
     println!("identity: {} ({})", v["id"].as_str().unwrap_or(""), v["kind"].as_str().unwrap_or(""));
+    match v["username"].as_str() {
+        Some(u) => println!("username: {u} (your fragments are <name>.{u})"),
+        None if v["kind"] == "person" => println!("username: none yet (fragment username <name>, or on the host's page)"),
+        None => {}
+    }
     for k in v["keys"].as_array().cloned().unwrap_or_default() {
         let npub = k["npub"].as_str().unwrap_or("");
         let state = match (npub == this_key, k["revokedAt"].is_null()) {
@@ -727,6 +735,21 @@ fn run(cli: Cli) -> Result<()> {
             }
             println!("logged in as {} on {}", v["id"].as_str().unwrap_or(""), c.host);
             println!("key: {}", c.id.npub());
+            return Ok(());
+        }
+        Cmd::Username { username } => {
+            let c = require_client(&cli.host, cli.verbose)?;
+            let v = match username {
+                Some(u) => c.call(c.put_json("/api/identities/me/username", &json!({ "username": u }))?)?,
+                None => c.call(c.get("/api/identities/me")?)?,
+            };
+            if j {
+                ok_exit(&v);
+            }
+            match v["username"].as_str() {
+                Some(u) => println!("username: {u}"),
+                None => println!("no username yet: fragment username <name>"),
+            }
             return Ok(());
         }
         Cmd::Whoami | Cmd::Keys { sub: None | Some(KeysCmd::List) } => {
@@ -1761,7 +1784,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             println!("{name}: {}", v["visibility"].as_str().unwrap_or(""));
         }
-        Cmd::Login { .. } | Cmd::Whoami | Cmd::Keys { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::New { .. } | Cmd::Computer { .. } => unreachable!(),
+        Cmd::Login { .. } | Cmd::Whoami | Cmd::Username { .. } | Cmd::Keys { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::New { .. } | Cmd::Computer { .. } => unreachable!(),
     }
     Ok(())
 }

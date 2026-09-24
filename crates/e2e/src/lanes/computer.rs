@@ -140,11 +140,11 @@ pub fn computer(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("fragment agent computer attaches it, and names its tools", attached, format!("{r:?}"));
 
     // the agent is also in a todo list: both kinds of tool, one turn
-    let todo = s.name("computer-todo");
+    let todo = s.named(api, &owner, "computer-todo")?;
     let c = s.create(api, &owner, &todo)?;
     ship(s, &c, TODO_APP, TODO_JSON);
     api.signed(&owner, "PUT", &format!("/api/f/{todo}/members/{bot_id}"), Some(&json!({ "role": "editor" })))?;
-    let add = format!("{todo}__add_todo");
+    let add = fragment_core::tools::tool_name(&todo, "add_todo").expect("a tool name");
     let r = agents.signed(&owner, "GET", &format!("/api/a/{bot}/tools"), None)?;
     let tools: Vec<&str> = r.body["tools"].as_array().into_iter().flatten().filter_map(|t| t.as_str()).collect();
     s.ok("its tools are its fragments' operations and its computer's", tools.contains(&add.as_str()) && tools.contains(&"shell") && tools.contains(&"write"), &r);

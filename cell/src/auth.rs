@@ -24,13 +24,13 @@
 //! the cookie. The session cookie is looked up live on every request.
 
 use fragment_core::{npub, site};
-use fragment_proto::ErrorCode;
+use fragment_proto::{ErrorCode, IdentityKind};
 use serde_json::json;
 use worker::*;
 
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
-use crate::{ask_registry, facts_of, Signer};
+use crate::{ask_registry, signer_of, Signer};
 
 pub const SESSION_COOKIE: &str = "fragment_session";
 pub const SITE_COOKIE: &str = "fragment_site";
@@ -119,10 +119,7 @@ fn query(url: &Url, k: &str) -> Option<String> {
 async fn platform_session(req: &Request, env: &Env) -> CellResult<Option<(String, Signer)>> {
     let Some(token) = cookie_of(req, SESSION_COOKIE)? else { return Ok(None) };
     match ask_registry(env, "/session", &json!({ "token": token })).await {
-        Ok(v) => {
-            let (id, kind, owner) = facts_of(&v)?;
-            Ok(Some((token, Signer { key: None, id, kind, owner })))
-        }
+        Ok(v) => Ok(Some((token, signer_of(&v, None)?))),
         Err(e) if e.code == ErrorCode::Unauthenticated => Ok(None),
         Err(e) => Err(e),
     }
@@ -132,10 +129,7 @@ async fn platform_session(req: &Request, env: &Env) -> CellResult<Option<(String
 pub async fn site_session(req: &Request, env: &Env, name: &str) -> CellResult<Option<Signer>> {
     let Some(token) = cookie_of(req, SITE_COOKIE)? else { return Ok(None) };
     match ask_registry(env, "/session", &json!({ "token": token, "fragment": name })).await {
-        Ok(v) => {
-            let (id, kind, owner) = facts_of(&v)?;
-            Ok(Some(Signer { key: None, id, kind, owner }))
-        }
+        Ok(v) => Ok(Some(signer_of(&v, None)?)),
         // a stale cookie is no session: the request goes on unsigned
         Err(e) if e.code == ErrorCode::Unauthenticated => Ok(None),
         Err(e) => Err(e),
@@ -236,13 +230,28 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
         match (method, segments) {
             (Method::Get, [""]) => {
                 let body = match platform_session(&req, env).await? {
-                    Some((_, who)) => {
+                    // a username first: fragments live under it (decision 16)
+                    Some((_, who)) if who.username.is_none() && who.kind == IdentityKind::Person => {
                         let email = email_of(env, &who.id).await;
                         format!(
-                            "<p>Signed in as <b>{}</b> (<code>{}</code>).</p>{}<p><a href=\"/auth/logout\">Sign out</a> · <a href=\"/auth/link\">Add another sign-in to you</a></p>",
+                            "<h1>Choose your username</h1><p>Signed in as <b>{}</b>. Your fragments will live at <code>&lt;name&gt;.<i>username</i>.{}</code>; a username is chosen once.</p>\
+                             <form method=\"post\" action=\"/auth/username\"><p><input name=\"username\" required minlength=\"3\" maxlength=\"32\" pattern=\"[a-z0-9]([a-z0-9-]*[a-z0-9])?\" autocomplete=\"username\" style=\"font:inherit;padding:.4em .6em;border-radius:8px;border:1px solid #aab\"> <button>Take it</button></p></form>\
+                             <p><a href=\"/auth/logout\">Sign out</a></p>",
                             esc(&email),
-                            esc(&who.id),
-                            budget_line(env, &who.id).await
+                            esc(cfg.platform(url).split("://").nth(1).unwrap_or("fragment.club")),
+                        )
+                    }
+                    Some((_, who)) => {
+                        let email = email_of(env, &who.id).await;
+                        let username = who.username.clone().unwrap_or_default();
+                        format!(
+                            "<p><img src=\"/api/users/{u}/picture\" alt=\"\" width=\"48\" height=\"48\" style=\"border-radius:50%;vertical-align:middle;object-fit:cover\" onerror=\"this.remove()\"> Signed in as <b>{u}</b> ({e}, <code>{id}</code>).</p>{b}\
+                             <form method=\"post\" action=\"/auth/picture\" enctype=\"multipart/form-data\"><p>Picture: <input type=\"file\" name=\"picture\" accept=\"image/png,image/jpeg,image/webp,image/gif\" required> <button>Set</button></p></form>\
+                             <p><a href=\"/auth/logout\">Sign out</a> · <a href=\"/auth/link\">Add another sign-in to you</a></p>",
+                            u = esc(&username),
+                            e = esc(&email),
+                            id = esc(&who.id),
+                            b = budget_line(env, &who.id).await
                         )
                     }
                     None => "<p>Places for people and agents.</p><p><a href=\"/auth/login\">Sign in</a></p>".to_string(),
@@ -255,6 +264,34 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 None => to_login(&platform, "/auth/link"),
             },
             (Method::Get, ["auth", "callback"]) => callback(&req, env, cfg, url).await,
+            (Method::Post, ["auth", "username"]) => {
+                let Some((_, who)) = platform_session(&req, env).await? else { return to_login(&platform, "/") };
+                let form = req.form_data().await?;
+                let Some(FormEntry::Field(username)) = form.get("username") else { return Err(CellError::invalid("choose a username")) };
+                match ask_registry(env, "/username/claim", &json!({ "identity": who.id, "username": username.trim() })).await {
+                    Ok(_) => redirect("/", &[]),
+                    Err(e) if matches!(e.code, ErrorCode::AlreadyExists | ErrorCode::InvalidRequest) => {
+                        page(400, "Choose your username", &format!("<p>{}</p><p><a href=\"/\">Try another</a></p>", esc(&e.message)))
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            (Method::Post, ["auth", "picture"]) => {
+                let Some((_, who)) = platform_session(&req, env).await? else { return to_login(&platform, "/") };
+                let form = req.form_data().await?;
+                let Some(FormEntry::File(file)) = form.get("picture") else { return Err(CellError::invalid("choose a picture")) };
+                let bytes = file.bytes().await?;
+                if bytes.len() > fragment_proto::limits::PICTURE_MAX_BYTES {
+                    return page(400, "Picture", &format!("<p>A picture is at most {} KiB.</p><p><a href=\"/\">Back</a></p>", fragment_proto::limits::PICTURE_MAX_BYTES / 1024));
+                }
+                let Some(mime) = crate::picture_type(&bytes) else {
+                    return page(400, "Picture", "<p>A picture is a PNG, JPEG, WebP, or GIF.</p><p><a href=\"/\">Back</a></p>");
+                };
+                let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+                crate::js::blob_put_bytes(env.as_ref(), &format!("pictures/{sha}"), &bytes).await?;
+                ask_registry(env, "/picture/set", &json!({ "identity": who.id, "sha": sha, "mime": mime })).await?;
+                redirect("/", &[])
+            }
             (Method::Get, ["auth", "logout"]) => page(200, "Sign out", "<form method=\"post\" action=\"/auth/logout\"><button>Sign out</button></form>"),
             (Method::Post, ["auth", "logout"]) => {
                 same_origin(&req, &platform)?;

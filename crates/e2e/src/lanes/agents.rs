@@ -84,10 +84,10 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an agent in no fragment has no tools", r.status == 200 && r.body["tools"] == json!([]), &r);
 
     // a todo fragment the owner makes, with the agent as an editor
-    let todo = s.name("agent-todo");
+    let todo = s.named(api, &owner, "agent-todo")?;
     let c = s.create(api, &owner, &todo)?;
     ship(s, &c, TODO_APP, TODO_JSON);
-    let other = s.name("agent-other");
+    let other = s.named(api, &owner, "agent-other")?;
     let o = s.create(api, &owner, &other)?;
     ship(s, &o, TODO_APP, TODO_JSON);
     let r = api.signed(&owner, "PUT", &format!("/api/f/{todo}/members/{agent_npub}"), Some(&json!({ "role": "editor" })))?;
@@ -96,11 +96,11 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && r.body["principal"] == agent_id.as_str() && r.body["kind"] == "agent" && r.body["owner"] == owner_id.as_str(),
         &r,
     );
-    let add = format!("{todo}__add_todo");
+    let add = fragment_core::tools::tool_name(&todo, "add_todo").expect("a tool name");
     let r = agents.signed(&owner, "GET", &format!("/api/a/{name}/tools"), None)?;
     let tools: Vec<String> = r.body["tools"].as_array().into_iter().flatten().filter_map(|t| t.as_str().map(str::to_string)).collect();
-    s.ok("a membership gives it that fragment's operations as tools", tools.contains(&add) && tools.contains(&format!("{todo}__list")), &r);
-    s.ok("and nothing of a fragment it is not in", !tools.iter().any(|t| t.starts_with(&format!("{other}__"))), &r);
+    s.ok("a membership gives it that fragment's operations as tools", tools.contains(&add) && tools.contains(&fragment_core::tools::tool_name(&todo, "list").expect("a tool name")), &r);
+    s.ok("and nothing of a fragment it is not in", !tools.iter().any(|t| t.starts_with(&format!("{}__", other.replace('.', "--")))), &r);
 
     // a turn: the model calls the operation, then answers
     s.openrouter.clear_script();
@@ -137,8 +137,8 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
 
     // stop: a held tool call ends at once, interrupted
     agents.signed(&owner, "POST", &format!("/api/a/{name}/test"), Some(&json!({ "hold_in_tool_ms": 8000 })))?;
-    s.openrouter.script(&[Reply::Tools(vec![(format!("{todo}__list"), json!({}))]), Reply::Text("unused".into())]);
-    let list = format!("{todo}__list");
+    s.openrouter.script(&[Reply::Tools(vec![(fragment_core::tools::tool_name(&todo, "list").expect("a tool name"), json!({}))]), Reply::Text("unused".into())]);
+    let list = fragment_core::tools::tool_name(&todo, "list").expect("a tool name");
     let before = runs_of(&view(&agents, &owner, &name), &list).len();
     agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "read my list slowly" })))?;
     s.eventually(wait, || runs_of(&view(&agents, &owner, &name), &list).len() > before);
@@ -207,11 +207,11 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let owner = s.cli_keys(&home).expect("the CLI logged in");
     let wait = Duration::from_secs(30);
 
-    let chat = s.name("chat");
     let dir = s.dir("chat").join("room");
     let dir_s = dir.to_str().expect("utf-8 path").to_string();
     let out = s.cli(api, &home, &["new", &dir_s, "--template", "chat"]);
-    let room = s.cli_json(api, &home, &["create", &chat, "--json"])?;
+    let room = s.cli_json(api, &home, &["create", &s.name("chat"), "--json"])?;
+    let chat = room["name"].as_str().unwrap_or("").to_string();
     s.hook(api, &room);
     let deployed = s.cli(api, &home, &["deploy", &chat, "--dir", &dir_s]);
     s.ok("the chat template scaffolds and deploys", out.status.success() && deployed.status.success(), String::from_utf8_lossy(&deployed.stderr));
@@ -241,11 +241,11 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the agent does not answer itself", records.len() == 2, json!(records));
 
     // a chat that works an app: the agent is also in a todo list
-    let todo = s.name("chat-todo");
+    let todo = s.named(api, &owner, "chat-todo")?;
     let c = s.create(api, &owner, &todo)?;
     ship(s, &c, TODO_APP, TODO_JSON);
     api.signed(&owner, "PUT", &format!("/api/f/{todo}/members/{bot_id}"), Some(&json!({ "role": "editor" })))?;
-    s.openrouter.script(&[Reply::Tools(vec![(format!("{todo}__add_todo"), json!({ "text": "bread" }))]), Reply::Text("Added bread to your list.".into())]);
+    s.openrouter.script(&[Reply::Tools(vec![(fragment_core::tools::tool_name(&todo, "add_todo").expect("a tool name"), json!({ "text": "bread" }))]), Reply::Text("Added bread to your list.".into())]);
     api.op(&owner, &chat, "say", "c2", json!({ "text": "please add bread to my todo list" }))?;
     let done = s.eventually(wait, || said_by(&chat_records(api, &owner, &chat), &who, "Added bread to your list."));
     s.ok("asked in the chat, the agent changes the todo list through its operation, and says so", done && todos(api, &owner, &todo) == ["bread"], json!(chat_records(api, &owner, &chat)));

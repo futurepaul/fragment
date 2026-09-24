@@ -64,7 +64,7 @@ impl Upstream {
 
 /// A fragment running the jobs fixture, with `manifest` edits applied.
 pub(super) fn jobs_fragment(s: &Suite, api: &Api, owner: &Keys, base: &str, edit: impl FnOnce(&mut Value)) -> Result<(String, Value)> {
-    let name = s.name(base);
+    let name = s.named(api, owner, base)?;
     let c = s.create(api, owner, &name)?;
     let mut manifest: Value = serde_json::from_slice(JOBS_JSON)?;
     edit(&mut manifest);
@@ -281,7 +281,7 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("fragment call on a job answers its run", r["result"]["run"].as_i64().is_some(), &r);
 
     // the inbox template: deliveries in, lines out
-    let tpl = s.name("inboxtpl");
+    let tpl = s.named(api, &cli, "inboxtpl")?;
     let c = s.create(api, &cli, &tpl)?;
     let files: Vec<(&str, Option<&[u8]>)> = INBOX_FILES.iter().map(|(p, b)| (*p, Some(*b))).collect();
     s.commit(&c, &files);
@@ -409,7 +409,7 @@ pub fn triggers(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // the inbox cap: records whose runs have not succeeded
-    let full = s.name("inboxcap");
+    let full = s.named(api, &owner, "inboxcap")?;
     let c2 = s.create(api, &owner, &full)?;
     ship(s, &c2, JOBS_APP, JOBS_JSON);
     api.signed(&owner, "POST", &format!("/api/f/{full}/pause"), Some(&json!({ "op": "ingest", "paused": true })))?;

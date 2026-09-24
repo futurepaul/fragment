@@ -9,8 +9,14 @@ use serde_json::Value;
 
 /// Limits every side enforces the same way (docs/MODEL.md, Limits).
 pub mod limits {
-    /// A fragment name: `^[a-z0-9][a-z0-9-]{0,62}$`.
+    /// A label: one part of a name (a fragment's label, a username, an
+    /// agent's name), `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$` with no `--`.
     pub const NAME_MAX_BYTES: usize = 63;
+    /// A username: a label of 3 to 32 bytes, not a reserved word.
+    pub const USERNAME_MIN_BYTES: usize = 3;
+    pub const USERNAME_MAX_BYTES: usize = 32;
+    /// A profile picture (PNG, JPEG, WebP, or GIF).
+    pub const PICTURE_MAX_BYTES: usize = 256 * 1024;
     /// An operation id: `^[A-Za-z0-9._:-]{1,128}$`.
     pub const OP_ID_MAX_BYTES: usize = 128;
     /// An operation name: `^[a-z][a-z0-9_]{0,63}$`.
@@ -134,12 +140,54 @@ pub fn valid_repo_path(path: &str) -> bool {
         && !path.bytes().any(|b| b < 0x20 || b == b'\\')
 }
 
-pub fn valid_fragment_name(name: &str) -> bool {
-    let b = name.as_bytes();
+/// One part of a name, and one DNS label: a fragment's label, a username,
+/// an agent's name. Never `--` (a repo's name joins two with it).
+pub fn valid_label(label: &str) -> bool {
+    let b = label.as_bytes();
+    let alnum = |c: &u8| c.is_ascii_lowercase() || c.is_ascii_digit();
     !b.is_empty()
         && b.len() <= limits::NAME_MAX_BYTES
-        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
-        && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+        && alnum(&b[0])
+        && alnum(&b[b.len() - 1])
+        && b.iter().all(|c| alnum(c) || *c == b'-')
+        && !label.contains("--")
+}
+
+/// Words no one may take as a username: the platform's own hosts and paths.
+pub const RESERVED_USERNAMES: [&str; 24] = [
+    "www", "api", "app", "apps", "auth", "admin", "root", "system", "platform", "fragment", "fragments", "static", "assets",
+    "cdn", "mail", "docs", "blog", "help", "support", "status", "new", "cli", "anonymous", "operator",
+];
+
+/// A username: chosen once, a label of 3 to 32 bytes, not reserved.
+pub fn valid_username(username: &str) -> bool {
+    (limits::USERNAME_MIN_BYTES..=limits::USERNAME_MAX_BYTES).contains(&username.len())
+        && valid_label(username)
+        && !RESERVED_USERNAMES.contains(&username)
+}
+
+/// A fragment's name: `<label>.<username>` (decision 16), served at
+/// `<label>.<username>.<suffix>`.
+pub fn valid_fragment_name(name: &str) -> bool {
+    split_fragment_name(name).is_some()
+}
+
+/// (label, username) of a fragment's name.
+pub fn split_fragment_name(name: &str) -> Option<(&str, &str)> {
+    let (label, username) = name.split_once('.')?;
+    (valid_label(label) && valid_username(username)).then_some((label, username))
+}
+
+/// A fragment's name from its label and its owner's username.
+pub fn fragment_name(label: &str, username: &str) -> String {
+    format!("{label}.{username}")
+}
+
+/// A fragment's code.storage repo: `<label>--<username>` (repo names are
+/// global in the org; neither part contains `--`).
+pub fn repo_name(name: &str) -> Option<String> {
+    let (label, username) = split_fragment_name(name)?;
+    Some(format!("{label}--{username}"))
 }
 
 pub fn valid_op_id(id: &str) -> bool {
@@ -446,6 +494,13 @@ pub struct IdentityView {
     /// An agent's owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// A person's username (decision 16): their fragments are
+    /// `<label>.<username>`. An agent's fragments go under its owner's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Where a person's picture is served (`/api/users/<username>/picture`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
     pub created_at: i64,
     pub keys: Vec<KeyView>,
     /// A person's agents.
@@ -771,10 +826,24 @@ mod tests {
 
     #[test]
     fn names() {
-        assert!(valid_fragment_name("todo-1"));
-        assert!(!valid_fragment_name("-todo"));
-        assert!(!valid_fragment_name("Todo"));
-        assert!(!valid_fragment_name(&"a".repeat(64)));
+        assert!(valid_label("todo-1"));
+        assert!(!valid_label("-todo"));
+        assert!(!valid_label("todo-"));
+        assert!(!valid_label("to--do"));
+        assert!(!valid_label("Todo"));
+        assert!(!valid_label(&"a".repeat(64)));
+        assert!(valid_username("futurepaul"));
+        assert!(!valid_username("ab"));
+        assert!(!valid_username("www"));
+        assert!(!valid_username(&"a".repeat(33)));
+        assert!(valid_fragment_name("desktop.futurepaul"));
+        assert!(!valid_fragment_name("desktop"));
+        assert!(!valid_fragment_name("desktop.www"));
+        assert!(!valid_fragment_name("a.b.futurepaul"));
+        assert_eq!(split_fragment_name("todo-1.futurepaul"), Some(("todo-1", "futurepaul")));
+        assert_eq!(fragment_name("todo", "paul"), "todo.paul");
+        assert_eq!(repo_name("todo-1.futurepaul").as_deref(), Some("todo-1--futurepaul"));
+        assert_eq!(repo_name("todo"), None);
         assert!(valid_op_name("add_todo"));
         assert!(!valid_op_name("__mutate"));
         assert!(!valid_op_name("Add"));

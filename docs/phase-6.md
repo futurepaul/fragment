@@ -55,6 +55,13 @@ session's layout (`finite-next-worktrees/desktop-ui`, `d8d5c26`).
    make `todo` and get two fragments; a nested host serves its fragment;
    a username is taken once; the picture round-trips; the e2e runs on
    qualified names throughout.
+   **Built 2026-09-24:** local e2e 671 passed, 0 failed (fork `43c3238`:
+   its lockfile gained `KEYS`'s `hmac`, which `native::scope` uses to
+   derive the Fragment's address it checks a certificate request
+   against). The hosted e2e's fragments now keep their names across runs
+   (`todo.e2e`, …) under the username `e2e`, so each host's certificate
+   is asked for once, and a run waits for a new host's certificate.
+   Deploying it is a hard cut: fragments made before it are not served.
 2. **Templates and one-click deploy.** A server-side create from a
    template (chat, todo, desktop, a blank app), server-side commit and
    deploy routes (which the agent's tools also use), the platform's "new"
