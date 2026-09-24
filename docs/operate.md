@@ -96,9 +96,11 @@ of starts meets: a sign-in is good for ten minutes and is kept through
 the next cap's worth of starts, so people's sign-ins in progress are let
 go only while starts outrun the cap over ten minutes (cap / 600 s: about
 166 a second at the default, 1.7 at 1000). At the cap, the registry holds
-that many rows of a 64-hex state, a return path (at most 2 KiB, usually
-`/`), and a time, about 200 bytes each with its indexes: some 20 MB at
-the default, swept once they expire. Each start costs one insert and one
+that many rows of a 64-hex state, a return path, and a time: about
+200 bytes each with its indexes when the path is `/` (some 20 MB at the
+default), and up to about 2.2 KB when a flood picks the longest return
+path it may (2 KiB), some 220 MB at the default, swept once they
+expire. Each start costs one insert and one
 delete of the oldest by rowid, whatever the cap. Raise it when people
 must keep signing in through a heavier flood; lower it when the
 registry's storage matters more.
