@@ -20,8 +20,9 @@
 //!
 //! A fragment's origin: `__signin?token=&return=` redeems the platform's
 //! redemption for this fragment only and sets its own session cookie;
-//! `__signin` without a token starts at the platform; `__signout` drops
-//! the cookie. The session cookie is looked up live on every request.
+//! `__signin` without a token starts at the platform; `__signout` ends
+//! that session in the registry and drops the cookie. The session cookie
+//! is looked up live on every request.
 
 use fragment_core::{npub, site};
 use fragment_proto::{ErrorCode, IdentityKind};
@@ -40,11 +41,11 @@ const INVITATION_TOKEN_MAX: usize = 256;
 /// How long an approval link's proof is good.
 const LINK_PROOF_WINDOW_S: i64 = 600;
 const LINK_PROOF_MAX: usize = 4096;
-
 /// The approval form: a key, and a proof of at most `LINK_PROOF_MAX` bytes
 /// that form encoding may triple.
 const APPROVE_FORM_MAX_BYTES: usize = 16 * 1024;
 const _: () = assert!(APPROVE_FORM_MAX_BYTES >= 3 * LINK_PROOF_MAX + 256, "the form holds the longest proof, encoded");
+
 /// The key an approval link's proof is by, if it is good: a NIP-98 event
 /// by that key for `POST <platform>/cli/approve`, made within ten minutes.
 fn link_proof(platform: &str, key_hex: &str, proof: &str) -> CellResult<()> {
@@ -461,7 +462,13 @@ pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &
                     )
                 }
             },
-            "__signout" => redirect(&base, &[set_cookie(SITE_COOKIE, "", &cookie_path, 0, secure(url))]),
+            "__signout" => {
+                // the session ends in the registry: a copy of the cookie is nobody too
+                if let Some(token) = cookie_of(req, SITE_COOKIE)? {
+                    ask_registry(env, "/session/end", &json!({ "token": token, "fragment": name })).await?;
+                }
+                redirect(&base, &[set_cookie(SITE_COOKIE, "", &cookie_path, 0, secure(url))])
+            }
             _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {rest}"))),
         }
     }

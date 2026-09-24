@@ -12,12 +12,21 @@
 //!
 //! Tokens and states are 32 random bytes; the cell keeps their SHA-256.
 //!
+//! Every sign-in table is bounded (`fragment_proto::limits`): the newest
+//! `SIGNINS_PENDING_MAX` pending sign-ins are kept, and a platform session
+//! keeps its newest `REDEMPTIONS_PER_SESSION_MAX` unspent redemptions and
+//! its newest `SITE_SESSIONS_PER_FRAGMENT_MAX` sessions on each fragment.
+//! Expired rows go in batches on the Registry's alarm, never on a request:
+//! an anonymous `/auth/login` must not scan the tables every signed
+//! request waits on.
+//!
 //!   POST /login/begin   {returnTo, linkTo?}                 → {state}
 //!   POST /login/exchange {state, code, clientId, issuer}    → {token, id, created, linked, returnTo}:
 //!                                                            WorkOS's code exchanged through KEYS
 //!                                                            (the API key is the node's), then the
 //!                                                            sign-in finished
 //!   POST /session       {token, fragment?}                  → {id, kind, owner} (401 when not live)
+//!   POST /session/end   {token, fragment}                   → {ended}: a fragment's `__signout`
 //!   POST /logout        {token}                             → {workosSid}
 //!   POST /redeem/mint   {token, fragment, returnTo}         → {redeem}
 //!   POST /redeem        {redeem, fragment}                  → {token, returnTo}
@@ -35,17 +44,33 @@ const REDEEM_TTL_MS: i64 = 60 * 1000;
 /// Subjects one person may link, and an email's length.
 const SUBJECTS_MAX: u64 = 8;
 const EMAIL_MAX: usize = 320;
+/// The sweep of expired rows: at most this many from each table a run, a
+/// run this long after the earliest row expires (so one run takes many),
+/// and the next run this soon when a table held more than a batch.
+const SWEEP_BATCH: u64 = 256;
+const SWEEP_SLACK_MS: i64 = 60 * 1000;
+const SWEEP_AGAIN_MS: i64 = 1000;
 
+const _: () = assert!(limits::SIGNINS_PENDING_MAX >= 1 && limits::SITE_SESSIONS_PER_FRAGMENT_MAX >= 1 && limits::REDEMPTIONS_PER_SESSION_MAX >= 1);
+
+/// The expiry columns are indexed for the sweep, and a site session's
+/// `(parent, fragment, created_at)` for its bound (that index replaced the
+/// parent-only one the fleet made first).
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS logins (
   state TEXT PRIMARY KEY, return_to TEXT NOT NULL, link_to TEXT, created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS logins_created ON logins (created_at);
 CREATE TABLE IF NOT EXISTS sessions (
   hash TEXT PRIMARY KEY, identity TEXT NOT NULL, fragment TEXT, parent TEXT, workos_sid TEXT,
   created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked_at INTEGER);
-CREATE INDEX IF NOT EXISTS sessions_parent ON sessions (parent) WHERE parent IS NOT NULL;
+DROP INDEX IF EXISTS sessions_parent;
+CREATE INDEX IF NOT EXISTS sessions_parent_fragment ON sessions (parent, fragment, created_at) WHERE parent IS NOT NULL;
+CREATE INDEX IF NOT EXISTS sessions_expires ON sessions (expires_at);
 CREATE TABLE IF NOT EXISTS redemptions (
   hash TEXT PRIMARY KEY, session TEXT NOT NULL, fragment TEXT NOT NULL, return_to TEXT NOT NULL,
   expires_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS redemptions_session ON redemptions (session, expires_at);
+CREATE INDEX IF NOT EXISTS redemptions_expires ON redemptions (expires_at);
 ";
 
 fn sha(token: &str) -> String {
@@ -124,12 +149,113 @@ pub(super) struct Approve {
     key: String,
 }
 
+/// Dev fleets' controls over sign-in's rows (`FRAGMENT_TEST_HOOKS=allow`).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) enum SigninsHook {
+    /// How many rows each table holds.
+    Count,
+    /// Every pending sign-in and unspent redemption expires now (sessions stay).
+    Expire,
+    /// The sweep runs now.
+    Sweep,
+}
+
+/// An alarm at `at_ms`, a time since the epoch.
+fn alarm_at(at_ms: i64) -> ScheduledTime {
+    ScheduledTime::new(js_sys::Date::new(&worker::wasm_bindgen::JsValue::from_f64(at_ms as f64)))
+}
+
 impl RegistryCell {
-    fn sweep_signin(&self) -> CellResult<()> {
-        let now = SqlStorageValue::Integer(js::now_ms());
-        self.exec("DELETE FROM logins WHERE created_at < ?", vec![SqlStorageValue::Integer(js::now_ms() - LOGIN_TTL_MS)])?;
-        self.exec("DELETE FROM redemptions WHERE expires_at < ?", vec![now.clone()])?;
-        self.exec("DELETE FROM sessions WHERE expires_at < ?", vec![now])
+    /// Deletes a batch of expired rows from each sign-in table (by their
+    /// indexed expiry); answers whether any table held more.
+    fn sweep_signin(&self, now: i64) -> CellResult<bool> {
+        let batch = SqlStorageValue::Integer(SWEEP_BATCH as i64);
+        let swept = [
+            self.rows(
+                "DELETE FROM logins WHERE state IN (SELECT state FROM logins WHERE created_at <= ? LIMIT ?) RETURNING state",
+                vec![SqlStorageValue::Integer(now - LOGIN_TTL_MS), batch.clone()],
+            )?
+            .len(),
+            self.rows(
+                "DELETE FROM redemptions WHERE hash IN (SELECT hash FROM redemptions WHERE expires_at <= ? LIMIT ?) RETURNING hash",
+                vec![SqlStorageValue::Integer(now), batch.clone()],
+            )?
+            .len(),
+            self.rows(
+                "DELETE FROM sessions WHERE hash IN (SELECT hash FROM sessions WHERE expires_at <= ? LIMIT ?) RETURNING hash",
+                vec![SqlStorageValue::Integer(now), batch],
+            )?
+            .len(),
+        ];
+        assert!(swept.iter().all(|n| *n as u64 <= SWEEP_BATCH), "a sweep deletes at most a batch from a table");
+        Ok(swept.iter().any(|n| *n as u64 == SWEEP_BATCH))
+    }
+
+    /// When the next sweep is due: a slack after the earliest row in any
+    /// sign-in table expires (`None`: they are empty). Each is an indexed MIN.
+    fn sweep_due(&self) -> CellResult<Option<i64>> {
+        let rows = self.rows(
+            "SELECT (SELECT MIN(created_at) FROM logins) AS login, (SELECT MIN(expires_at) FROM redemptions) AS redeem,
+                    (SELECT MIN(expires_at) FROM sessions) AS session",
+            vec![],
+        )?;
+        let Some(r) = rows.first() else { return Err(CellError::host("the sweep's MIN answered no row")) };
+        let earliest = [r["login"].as_i64().map(|c| c + LOGIN_TTL_MS), r["redeem"].as_i64(), r["session"].as_i64()].into_iter().flatten().min();
+        Ok(earliest.map(|at| at + SWEEP_SLACK_MS))
+    }
+
+    /// Arms the sweep to run by the time a new row expires (and its slack),
+    /// unless it is armed sooner already: one read of the alarm, and most
+    /// calls change nothing. Called before a row's writes, so a failure
+    /// leaves no row unswept.
+    async fn sweep_by(&self, expires_at: i64) -> CellResult<()> {
+        let due = expires_at + SWEEP_SLACK_MS;
+        let storage = self.state.storage();
+        match storage.get_alarm().await? {
+            Some(armed) if armed <= due => Ok(()),
+            _ => Ok(storage.set_alarm(alarm_at(due)).await?),
+        }
+    }
+
+    /// The Registry's alarm: a sweep, then the next one armed (soon when a
+    /// table held more than a batch, else by the earliest expiry).
+    pub(super) async fn sweep_alarm(&self) -> CellResult<()> {
+        let now = js::now_ms();
+        let more = self.sweep_signin(now)?;
+        let next = if more { Some(now + SWEEP_AGAIN_MS) } else { self.sweep_due()? };
+        if let Some(due) = next {
+            self.state.storage().set_alarm(alarm_at(due.max(now + SWEEP_AGAIN_MS))).await?;
+        }
+        Ok(())
+    }
+
+    /// After a failed sweep: the next one, a slack from now, so a failure
+    /// never ends the sweeping.
+    pub(super) async fn sweep_later(&self) -> CellResult<()> {
+        Ok(self.state.storage().set_alarm(alarm_at(js::now_ms() + SWEEP_SLACK_MS)).await?)
+    }
+
+    fn signin_counts(&self) -> CellResult<Value> {
+        let rows = self.rows(
+            "SELECT (SELECT COUNT(*) FROM logins) AS logins, (SELECT COUNT(*) FROM redemptions) AS redemptions,
+                    (SELECT COUNT(*) FROM sessions) AS sessions",
+            vec![],
+        )?;
+        rows.into_iter().next().ok_or_else(|| CellError::host("COUNT answered no row"))
+    }
+
+    pub(super) async fn signins_hook(&self, hook: SigninsHook) -> CellResult<Value> {
+        match hook {
+            SigninsHook::Count => {}
+            SigninsHook::Expire => {
+                let now = js::now_ms();
+                self.exec("UPDATE logins SET created_at = ?", vec![SqlStorageValue::Integer(now - LOGIN_TTL_MS)])?;
+                self.exec("UPDATE redemptions SET expires_at = ?", vec![SqlStorageValue::Integer(now)])?;
+            }
+            SigninsHook::Sweep => self.state.storage().set_alarm(alarm_at(js::now_ms())).await?,
+        }
+        self.signin_counts()
     }
 
     /// The live session a token names: not revoked, not expired, for this
@@ -180,8 +306,7 @@ impl RegistryCell {
         Ok(token)
     }
 
-    pub(super) fn begin(&self, b: Begin) -> CellResult<Value> {
-        self.sweep_signin()?;
+    pub(super) async fn begin(&self, b: Begin) -> CellResult<Value> {
         let link_to = match &b.link_to {
             Some(token) => Some(self.live_session(token, None)?.1),
             None => None,
@@ -191,15 +316,25 @@ impl RegistryCell {
                 return Err(CellError::new(ErrorCode::Forbidden, "only a person links a sign-in"));
             }
         }
+        let now = js::now_ms();
+        self.sweep_by(now + LOGIN_TTL_MS).await?;
         let state = fresh_token();
+        let hash = sha(&state);
         self.exec(
             "INSERT INTO logins (state, return_to, link_to, created_at) VALUES (?, ?, ?, ?)",
             vec![
-                sha(&state).into(),
+                hash.as_str().into(),
                 b.return_to.as_str().into(),
                 link_to.map_or(SqlStorageValue::Null, |p| p.id.into()),
-                SqlStorageValue::Integer(js::now_ms()),
+                SqlStorageValue::Integer(now),
             ],
+        )?;
+        // bounded: this sign-in and the newest others are kept, the oldest go
+        // (a walk of the created_at index, at most the cap's rows long; which
+        // of two made in the same millisecond goes first does not matter)
+        self.exec(
+            "DELETE FROM logins WHERE state IN (SELECT state FROM logins WHERE state != ? ORDER BY created_at DESC LIMIT -1 OFFSET ?)",
+            vec![hash.as_str().into(), SqlStorageValue::Integer(limits::SIGNINS_PENDING_MAX as i64 - 1)],
         )?;
         Ok(json!({ "state": state }))
     }
@@ -216,6 +351,7 @@ impl RegistryCell {
             return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS refused the sign-in ({status}): {why}")));
         }
         let subject = answer["user"]["id"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "WorkOS answered no user id"))?;
+        self.sweep_by(js::now_ms() + SESSION_TTL_MS).await?;
         self.finish(Finish {
             state: b.state,
             issuer: b.issuer,
@@ -272,6 +408,19 @@ impl RegistryCell {
         Ok(self.live_session(&b.token, b.fragment.as_deref())?.1.json())
     }
 
+    /// A fragment's `__signout`: the site session its cookie carries ends
+    /// (its row goes; the platform session and its other sessions stay).
+    /// Answers whether there was one, so a second sign-out is no error.
+    pub(super) fn end_site_session(&self, b: SessionBody) -> CellResult<Value> {
+        let fragment = b.fragment.ok_or_else(|| CellError::invalid("a site session ends on its fragment"))?;
+        if !well_formed(&b.token) {
+            return Ok(json!({ "ended": false }));
+        }
+        let rows = self.rows("DELETE FROM sessions WHERE hash = ? AND fragment = ? RETURNING hash", vec![sha(&b.token).into(), fragment.as_str().into()])?;
+        assert!(rows.len() <= 1, "a token names one session");
+        Ok(json!({ "ended": !rows.is_empty() }))
+    }
+
     pub(super) fn logout(&self, b: SessionBody) -> CellResult<Value> {
         let (hash, _) = self.live_session(&b.token, None)?;
         let now = SqlStorageValue::Integer(js::now_ms());
@@ -280,23 +429,33 @@ impl RegistryCell {
         Ok(json!({ "workosSid": sid.first().map(|r| r["workos_sid"].clone()).unwrap_or(Value::Null) }))
     }
 
-    pub(super) fn mint(&self, b: Mint) -> CellResult<Value> {
-        self.sweep_signin()?;
+    pub(super) async fn mint(&self, b: Mint) -> CellResult<Value> {
         let (hash, _) = self.live_session(&b.token, None)?;
+        let expires_at = js::now_ms() + REDEEM_TTL_MS;
+        self.sweep_by(expires_at).await?;
         let redeem = fresh_token();
+        let redeem_hash = sha(&redeem);
         self.exec(
             "INSERT INTO redemptions (hash, session, fragment, return_to, expires_at) VALUES (?, ?, ?, ?, ?)",
             vec![
-                sha(&redeem).into(),
-                hash.into(),
+                redeem_hash.as_str().into(),
+                hash.as_str().into(),
                 b.fragment.as_str().into(),
                 b.return_to.as_str().into(),
-                SqlStorageValue::Integer(js::now_ms() + REDEEM_TTL_MS),
+                SqlStorageValue::Integer(expires_at),
             ],
+        )?;
+        // bounded: the session keeps this redemption and its newest others (a
+        // browser opening several fragments at once needs a few, never more)
+        self.exec(
+            "DELETE FROM redemptions WHERE hash IN (SELECT hash FROM redemptions WHERE session = ? AND hash != ? ORDER BY expires_at DESC LIMIT -1 OFFSET ?)",
+            vec![hash.as_str().into(), redeem_hash.as_str().into(), SqlStorageValue::Integer(limits::REDEMPTIONS_PER_SESSION_MAX as i64 - 1)],
         )?;
         Ok(json!({ "redeem": redeem }))
     }
 
+    /// A redemption spent on its fragment: a site session, expiring with
+    /// its parent (whose row already armed the sweep for that time).
     pub(super) fn redeem(&self, b: Redeem) -> CellResult<Value> {
         let refused = || CellError::new(ErrorCode::Unauthenticated, "this sign-in link expired, was used, or is for another fragment; sign in again");
         if !well_formed(&b.redeem) {
@@ -314,7 +473,19 @@ impl RegistryCell {
             vec![parent.into(), SqlStorageValue::Integer(js::now_ms())],
         )?;
         let p = live.first().ok_or_else(refused)?;
-        let token = self.new_session(p["identity"].as_str().unwrap_or(""), Some(&b.fragment), Some(parent), None, p["expires_at"].as_i64().unwrap_or(0))?;
+        let expires_at = p["expires_at"].as_i64().ok_or_else(|| CellError::host("sessions.expires_at"))?;
+        let token = self.new_session(p["identity"].as_str().unwrap_or(""), Some(&b.fragment), Some(parent), None, expires_at)?;
+        // bounded: this session and the newest others on this fragment are
+        // kept, the oldest end (a browser holds one cookie an origin)
+        self.exec(
+            "DELETE FROM sessions WHERE hash IN (SELECT hash FROM sessions WHERE parent = ? AND fragment = ? AND hash != ? ORDER BY created_at DESC LIMIT -1 OFFSET ?)",
+            vec![
+                parent.into(),
+                b.fragment.as_str().into(),
+                sha(&token).into(),
+                SqlStorageValue::Integer(limits::SITE_SESSIONS_PER_FRAGMENT_MAX as i64 - 1),
+            ],
+        )?;
         Ok(json!({ "token": token, "returnTo": row["return_to"] }))
     }
 
@@ -352,12 +523,14 @@ impl RegistryCell {
             .collect())
     }
 
-    pub(super) fn route_signin(&self, path: &str, body: Value) -> CellResult<Option<Value>> {
+    pub(super) async fn route_signin(&self, path: &str, body: Value) -> CellResult<Option<Value>> {
         Ok(Some(match path {
-            "/login/begin" => self.begin(from(body)?)?,
+            "/login/begin" => self.begin(from(body)?).await?,
+            "/login/exchange" => self.exchange(from(body)?).await?,
             "/session" => self.session(from(body)?)?,
+            "/session/end" => self.end_site_session(from(body)?)?,
             "/logout" => self.logout(from(body)?)?,
-            "/redeem/mint" => self.mint(from(body)?)?,
+            "/redeem/mint" => self.mint(from(body)?).await?,
             "/redeem" => self.redeem(from(body)?)?,
             "/cli/add" => self.add_by_session(from(body)?)?,
             _ => return Ok(None),

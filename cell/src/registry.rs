@@ -22,7 +22,8 @@
 //!   POST /username/claim  {identity, username}    a person's username, chosen once
 //!   POST /username/lookup {username}              → the facts of whoever holds it
 //!   POST /picture/set     {identity, sha, mime}   a person's picture (its bytes are in BLOBS)
-//!   POST /test    {down}                  dev fleets: answer 503 to everything else
+//!   POST /test    {down} | {signins}      dev fleets: answer 503 to everything else, or count,
+//!                                         expire, or sweep sign-in's rows
 //!
 //! Facts (`/resolve`, `/lookup`, a session) carry the identity's username,
 //! and an agent's carry its owner's (the namespace it makes fragments in).
@@ -83,6 +84,17 @@ impl DurableObject for RegistryCell {
             Ok(v) => Response::from_json(&v),
             Err(e) => e.response(),
         }
+    }
+
+    /// Sign-in's sweep of expired rows (signin.rs), off every request. A
+    /// failed sweep is logged and arms the next itself; failing that too,
+    /// the alarm fails and the node retries it.
+    async fn alarm(&self) -> Result<Response> {
+        if let Err(e) = self.sweep_alarm().await {
+            console_error!("the registry's sweep failed ({:?}): {}", e.code, e.message);
+            self.sweep_later().await.map_err(|e| Error::RustError(e.message))?;
+        }
+        Response::ok("")
     }
 }
 
@@ -146,6 +158,15 @@ struct PictureBody {
     identity: String,
     sha: String,
     mime: String,
+}
+
+/// Dev fleets' controls (`FRAGMENT_TEST_HOOKS=allow`).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum TestHook {
+    /// Answer 503 to everything else (`true`), or answer again.
+    Down(bool),
+    Signins(signin::SigninsHook),
 }
 
 fn unauthenticated(m: impl Into<String>) -> CellError {
@@ -460,17 +481,21 @@ impl RegistryCell {
             if self.env.var("FRAGMENT_TEST_HOOKS").map(|v| v.to_string()).ok().as_deref() != Some("allow") {
                 return Err(CellError::new(ErrorCode::NotFound, "no route /test"));
             }
-            let down = body["down"].as_bool().ok_or_else(|| CellError::invalid("down is a boolean"))?;
-            self.exec("INSERT INTO meta (key, value) VALUES ('down', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", vec![if down { "1" } else { "0" }.into()])?;
-            return Ok(json!({ "down": down }));
+            return match from::<TestHook>(body)? {
+                TestHook::Down(down) => {
+                    self.exec(
+                        "INSERT INTO meta (key, value) VALUES ('down', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                        vec![if down { "1" } else { "0" }.into()],
+                    )?;
+                    Ok(json!({ "down": down }))
+                }
+                TestHook::Signins(hook) => self.signins_hook(hook).await,
+            };
         }
         if self.down()? {
             return Err(CellError::new(ErrorCode::RegistryUnavailable, "the registry is down (a test hook)"));
         }
-        if path == "/login/exchange" {
-            return self.exchange(from(body)?).await;
-        }
-        if let Some(v) = self.route_signin(&path, body.clone())? {
+        if let Some(v) = self.route_signin(&path, body.clone()).await? {
             return Ok(v);
         }
         match path.as_str() {

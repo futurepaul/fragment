@@ -109,6 +109,15 @@ pub mod limits {
     pub const AUTO_PAUSE_WINDOW_MS: i64 = 10 * 60 * 1000;
     /// … or after this many triggered runs within an hour.
     pub const TRIGGERED_RUNS_PER_HOUR: u64 = 120;
+    /// Sign-ins begun and not yet finished that the platform keeps (each
+    /// for ten minutes; past this, the oldest go first), and the sessions
+    /// one browser's platform session keeps on one fragment's origin (past
+    /// this, the oldest go first).
+    pub const SIGNINS_PENDING_MAX: u64 = 1000;
+    pub const SITE_SESSIONS_PER_FRAGMENT_MAX: u64 = 4;
+    /// Unspent single-use redemptions (a fragment origin's way in) one
+    /// platform session holds: past this, the oldest go first.
+    pub const REDEMPTIONS_PER_SESSION_MAX: u64 = 16;
     /// Keys one identity has held (active and revoked), and agents one person owns.
     pub const KEYS_PER_IDENTITY_MAX: u64 = 64;
     pub const AGENTS_PER_OWNER_MAX: u64 = 100;
