@@ -120,14 +120,16 @@ What it found, against the real services:
   redirect that could drop the token). Both fixed.
 
 **D. The real code.storage.** *Deferred to phase 8 (2026-09-23).*
-Webhooks are one subscription per org, made in code.storage's dashboard,
-signed with its secret, and each delivery names its repo by the opaque
-url form (`repository.url`), so an org route needs an index from that
-form to a fragment. Nothing needs it yet: the CLI refreshes a fragment
-after every sync and deploy, the cell learns of its own commits, and the
-five-minute poll catches the rest. The first writer outside those is a
-computer pushing with git (phase 8), which brings the index and the
-route.
+Webhooks are one subscription per org, made in code.storage's dashboard
+and signed with its secret; each delivery names its repo
+(`repository.url`), which in the `finite` org is the repo's name (probed
+2026-09-23: `url` equals `repo_name`), so an org route can hand a push to
+the fragment of that name after checking the fragment's own `repo`.
+Nothing needs it yet: the CLI refreshes a fragment after every sync and
+deploy, the cell learns of its own commits, and the five-minute poll
+catches the rest. The first writer outside those is a computer pushing
+with git (phase 8), which brings the route and Paul's dashboard
+subscription.
 
 **E. Egress by address.** A job's fetch must not reach the fleet's
 private network even through a public name that resolves to a private
