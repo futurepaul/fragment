@@ -225,7 +225,7 @@ deleted in batches on the registry's alarm, never on a request.
 | `DELETE /api/f/{name}/invites/{id}` | owner | → `{ok, revoked}` |
 | `POST /api/f/{name}/join` | any signer | `{token}` → `{name, role, joined}`; a stronger existing role is kept; a fragment at its 1000 members is 400, and the invite keeps its use |
 | `PUT /api/f/{name}/visibility` | owner | `{visibility}` → `{ok, visibility}` |
-| `POST /api/f/{name}/rotate` | owner | `{scopes?: [inbox, view, webhook]}` → `{ok, inbox_token, view_token, webhook_secret, rotated}`; a new view token closes link holders' feeds |
+| `POST /api/f/{name}/rotate` | owner | `{scopes?: [inbox, view, webhook]}` → `{inboxToken, viewToken, webhookSecret, rotated}` (`Rotated`): every token as it is now, and the scopes renewed; a new view token closes link holders' feeds |
 | `PUT /api/f/{name}/secrets/{KEY}` | editor | raw body (at most 64 KiB) → `{ok, name}`; sealed (AES-256-GCM, key HKDF'd from the host secret and the fragment's npub) |
 | `GET /api/f/{name}/secrets` | editor | → `{names}`; values never leave |
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |
@@ -472,7 +472,9 @@ recorded once.
 ### Jobs and triggers
 
 A job is a method called `(input, job)` that runs as a celld Workflow,
-outside any request. Each `await` on the job's four steps is durable:
+outside any request. Each `await` on a `job.*` step is durable. The
+steps are the four below, the files steps (`job.files.*`), `job.push`,
+and the AI steps (`job.ai.*`), all above:
 
 - `job.call(op, input)`: an operation of this fragment as the run's
   principal, with `job:<run>:<step>` as its id (a retried or replayed
@@ -502,8 +504,8 @@ arguments do not fit its kind (`job.ai.text` without a model, say), with
 what does not fit. Every kind of step and its arguments are defined once,
 as `Step` in `crates/core/src/steps.rs`. A job that throws is
 **held**: its run keeps the input and error until someone replays it. At
-most 100 steps and 4 MiB of step results per run; a result of at most
-1 MiB.
+most 256 steps (`limits::JOB_STEPS_MAX`; a video waits in polls and
+sleeps) and 4 MiB of step results per run; a result of at most 1 MiB.
 
 Every job call and every trigger is a **run**: `queued`, `running`,
 `succeeded`, `held`, or `blocked`. A triggered mutation is a run of one

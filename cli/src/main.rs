@@ -17,8 +17,8 @@ use crate::sync::{Mode, SyncOptions};
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use fragment_proto::{
-    BudgetView, ChannelPage, Created, FragmentList, FragmentStatus, IdentityView, Invite, InviteList, Member, MemberList, OpResult, Run, RunList,
-    Visibility,
+    BudgetView, ChannelPage, Created, FragmentList, FragmentStatus, IdentityView, Invite, InviteList, Member, MemberList, OpResult, Rotated, Run,
+    RunList, Visibility,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -1438,20 +1438,17 @@ fn run(cli: Cli) -> Result<()> {
                 scopes = vec!["inbox", "view"];
             }
             let body = json!({ "scopes": scopes });
-            let v = c.call(c.post_json(&format!("/api/f/{name}/rotate"), &body)?)?;
-            let text = |k: &str| v[k].as_str().unwrap_or_default().to_string();
-            let (it, vt, wh) = (text("inbox_token"), text("view_token"), text("webhook_secret"));
-            let rotated = v["rotated"].as_array().into_iter().flatten().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ");
-            let canon = format!("{}/f/{}/", c.host.trim_end_matches('/'), name);
+            let v: Rotated = c.call_as(c.post_json(&format!("/api/f/{name}/rotate"), &body)?)?;
             if j {
-                // webhook_secret included: the code.storage push HMAC is
-                // only ever visible at create/rotate, and machine consumers
-                // (dev harnesses registering push webhooks) need it back
-                ok_exit(&json!({ "inbox_token": it, "view_token": vt, "webhook_secret": wh, "rotated": v["rotated"].clone() }));
+                // the whole answer, webhook secret included: the code.storage
+                // push HMAC is only ever visible at create/rotate, and machine
+                // consumers (dev harnesses registering push webhooks) need it
+                ok_exit(&v);
             }
-            println!("rotated: {rotated}");
-            println!("New webhook URL: {}/api/f/{}/inbox?t={}", c.host.trim_end_matches('/'), name, it);
-            println!("New share link: {}", share_link(&canon, &vt));
+            let canon = format!("{}/f/{}/", c.host, name);
+            println!("rotated: {}", v.rotated.join(", "));
+            println!("New webhook URL: {}/api/f/{}/inbox?t={}", c.host, name, v.inbox_token);
+            println!("New share link: {}", share_link(&canon, &v.view_token));
         }
         Cmd::Secret { sub } => match sub {
             SecretCmd::Set { name, key, value: argv_value } => {

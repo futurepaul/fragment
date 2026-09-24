@@ -15,7 +15,7 @@
 
 use fragment_core::access;
 use fragment_core::npub;
-use fragment_proto::{limits, CreateInvite, ErrorCode, Identity, IdentityKind, Invite, Join, Member, Role, SetRole, SetVisibility, Visibility};
+use fragment_proto::{limits, CreateInvite, ErrorCode, Identity, IdentityKind, Invite, Join, Member, Role, Rotated, SetRole, SetVisibility, Visibility};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use worker::*;
@@ -395,13 +395,12 @@ impl FragmentCell {
         }
         let rotated: Vec<&str> = all.into_iter().filter(|s| want.iter().any(|w| w == s)).collect();
         self.event("tokens.rotated", &rotated.join("+"), json!({ "scopes": rotated }));
-        json_response(&json!({
-            "ok": true,
-            "inbox_token": self.must("inbox_token")?,
-            "view_token": self.must("view_token")?,
-            "webhook_secret": self.must("webhook_secret")?,
-            "rotated": rotated,
-        }))
+        json_response(&Rotated {
+            inbox_token: self.must("inbox_token")?,
+            view_token: self.must("view_token")?,
+            webhook_secret: self.must("webhook_secret")?,
+            rotated: rotated.iter().map(|s| s.to_string()).collect(),
+        })
     }
 
     pub(crate) async fn put_secret(&self, caller: &Caller, key: &str, value: Vec<u8>) -> CellResult<Response> {

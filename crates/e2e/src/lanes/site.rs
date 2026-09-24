@@ -86,7 +86,7 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
 
     // rotating the link
     let r = api.signed(&owner, "POST", &format!("/api/f/{name}/rotate"), Some(&json!({ "scopes": ["view"] })))?;
-    let fresh = r.body["view_token"].as_str().unwrap_or("").to_string();
+    let fresh = r.body["viewToken"].as_str().unwrap_or("").to_string();
     s.ok("the owner rotates the share link", r.status == 200 && fresh != view && r.body["rotated"] == json!(["view"]), &r);
     let r = api.page(&name, "", Some(&cookie))?;
     s.ok("the old link stops working", r.status == 401, &r);

@@ -437,21 +437,29 @@ fn push_plan(
     plan
 }
 
+/// The mass-deletion guard's floor: a pass may always delete this many
+/// files. It is 3, not 10: with a floor of 10, deleting 8 of a 10-file
+/// fragment (a whole world change, found live) sailed through because
+/// 8 ≤ 10 while being 80% of the folder. Small folders deserve the
+/// percent protection most.
+pub const MASS_DELETE_FLOOR: usize = 3;
+/// Past the floor, the share of the known files (percent) a pass may delete.
+pub const MASS_DELETE_PERCENT: usize = 30;
+
 /// Mass-deletion guard (ported): a pass that would delete more than
-/// max(3, 30%) of the known files, or ALL of them (the unmounted-disk /
-/// replaced-folder case the old root-identity check covered), is refused
-/// until --apply-mass-delete. Counts both directions — deletions pushed
-/// remotely and deletions applied locally. The floor is 3, not 10: with a
-/// floor of 10, deleting 8 of a 10-file fragment (a whole world change,
-/// found live) sailed through because 8 ≤ 10 while being 80% of the
-/// folder. Small folders deserve the percent protection most.
+/// max(MASS_DELETE_FLOOR, MASS_DELETE_PERCENT%) of the known files, or ALL
+/// of them (the unmounted-disk / replaced-folder case the old
+/// root-identity check covered), is refused until --apply-mass-delete.
+/// Counts both directions — deletions pushed remotely and deletions
+/// applied locally.
 fn mass_delete_trips(push_deletes: usize, local_deletes: usize, known: usize, apply: bool) -> Option<usize> {
     if apply {
         return None;
     }
     let pending = push_deletes + local_deletes;
     let known = known.max(1);
-    if (pending > 3 && pending * 10 > known * 3) || (pending == known && pending > 0) {
+    let over_share = pending > MASS_DELETE_FLOOR && pending * 100 > known * MASS_DELETE_PERCENT;
+    if over_share || (pending == known && pending > 0) {
         Some(pending)
     } else {
         None
@@ -934,6 +942,14 @@ mod tests {
         assert!(st.files.is_empty()); // v2 → fresh
         assert_eq!(st.schema_version, 3);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The guide states the guard with the code's own numbers.
+    #[test]
+    fn the_guide_names_the_guards_numbers() {
+        let guide = include_str!("../GUIDE.md").split_whitespace().collect::<Vec<_>>().join(" ");
+        let rule = format!("more than max({MASS_DELETE_FLOOR}, {MASS_DELETE_PERCENT}%) of known files, or all of them");
+        assert!(guide.contains(&rule), "GUIDE.md should say: {rule}");
     }
 
     #[test]

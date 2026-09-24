@@ -112,7 +112,7 @@ fragment verify my-thing --dir .            # full-content audit
   `<path>.conflict-<time>-<writer>` (exit 3). Both stay in git history.
   Both sides changed to the same bytes is no conflict.
 - **Mass-deletion guard**: a pass that would delete more than
-  max(10, 30%) of known files, or all of them, is refused (exit 4) until
+  max(3, 30%) of known files, or all of them, is refused (exit 4) until
   `--apply-mass-delete`.
 - **Deletions converge**; a locally modified copy wins over a remote
   delete. Dotfiles, `.fragment/`, and (in a git repo) `.gitignore`d
