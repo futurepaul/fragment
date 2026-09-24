@@ -1,10 +1,12 @@
 //! The `Fragment` supervisor: one Durable Object per fragment. It owns the
 //! fragment's identity, members, visibility, secrets, file-plane pins, and
 //! code record, and it answers every call into the app. The router has
-//! already verified the caller and resolved their identity; it passes the
-//! identity (with the key it signed with, its kind, and an agent's owner),
-//! the fragment's name, and the URL the request arrived on in headers only
-//! it sets.
+//! already verified the caller and resolved their identity; it hands over
+//! a `Routed` (routed.rs: the fragment's name, the URL the request arrived
+//! on, how its site was addressed, and who is asking, with the key they
+//! signed with) in headers only it sets, decoded once here into a
+//! `Caller`. Calls from inside the platform (the internal routes below)
+//! are answered before that decode: they carry no caller.
 //!
 //! Routes (inner paths; the router maps the public ones onto them):
 //!
@@ -57,15 +59,8 @@ use crate::config::Config;
 use crate::cs::Cs;
 use crate::error::{CellError, CellResult};
 use crate::js;
+use crate::routed::{Mode, Routed, Signed};
 
-/// The caller's identity (`id:…`), the key it signed with, the identity's
-/// kind, and an agent's owner.
-pub const PRINCIPAL_HEADER: &str = "x-fragment-principal";
-pub const KEY_HEADER: &str = "x-fragment-key";
-pub const KIND_HEADER: &str = "x-fragment-kind";
-pub const OWNER_HEADER: &str = "x-fragment-owner";
-pub const NAME_HEADER: &str = "x-fragment-name";
-pub const URL_HEADER: &str = "x-fragment-url";
 /// How long a create in progress holds its name.
 const CLAIM_TTL_MS: i64 = 120_000;
 /// The alarm fires no sooner than this after it is armed …
@@ -236,17 +231,37 @@ impl DurableObject for FragmentCell {
     }
 }
 
-/// Who is calling, as the router established it.
+/// Who is calling, as the router established it (`Routed`, less the name).
 pub struct Caller {
-    /// The signer's identity (`id:…`), when the request was signed.
-    pub principal: Option<String>,
-    /// The key it signed with (64 hex).
-    pub key: Option<String>,
-    pub kind: Option<IdentityKind>,
-    /// An agent's owner.
-    pub owner: Option<String>,
-    /// The URL the request arrived on (canonical URLs and cookies derive from it).
+    /// Who signed, or whose session this is (`None`: anonymous): an
+    /// identity always with its kind, and the key when one signed.
+    pub signed: Option<Signed>,
+    /// The URL the request arrived on: canonical URLs, cookies, and the
+    /// query string derive from it.
     pub url: url::Url,
+    /// How a site request addressed the fragment (`None` off the site).
+    pub mode: Option<Mode>,
+}
+
+impl Caller {
+    /// The caller's identity (`id:…`), when someone signed or has a session.
+    pub fn principal(&self) -> Option<&str> {
+        self.signed.as_ref().map(|s| s.id.as_str())
+    }
+
+    /// The key it signed with (64 hex).
+    pub fn key(&self) -> Option<&str> {
+        self.signed.as_ref().and_then(|s| s.key.as_deref())
+    }
+
+    pub fn kind(&self) -> Option<IdentityKind> {
+        self.signed.as_ref().map(|s| s.kind)
+    }
+
+    /// An agent's owner.
+    pub fn owner(&self) -> Option<&str> {
+        self.signed.as_ref().and_then(|s| s.owner.as_deref())
+    }
 }
 
 pub(crate) async fn body_json<T: DeserializeOwned>(req: &mut Request) -> CellResult<T> {
@@ -332,15 +347,15 @@ impl FragmentCell {
     /// What the caller brings: their membership, or an agent of theirs that
     /// is a member (they read what it reads).
     fn standing(&self, caller: &Caller, link: bool) -> CellResult<Standing> {
-        let member = match &caller.principal {
+        let member = match caller.principal() {
             Some(p) => self.member_role(p)?,
             None => None,
         };
-        let owns_member_agent = match (&caller.principal, member) {
-            (Some(p), None) => !self.rows("SELECT principal FROM members WHERE owner = ? LIMIT 1", vec![p.as_str().into()])?.is_empty(),
+        let owns_member_agent = match (caller.principal(), member) {
+            (Some(p), None) => !self.rows("SELECT principal FROM members WHERE owner = ? LIMIT 1", vec![p.into()])?.is_empty(),
             _ => false,
         };
-        Ok(Standing { member, owns_member_agent, link, signed: caller.principal.is_some() })
+        Ok(Standing { member, owns_member_agent, link, signed: caller.principal().is_some() })
     }
 
     /// Whether the caller sees the fragment as themselves (a member, or an
@@ -384,22 +399,10 @@ impl FragmentCell {
 
     /// The signer's identity.
     pub(crate) fn caller_id<'a>(&self, caller: &'a Caller) -> CellResult<&'a str> {
-        caller.principal.as_deref().ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "sign the request"))
+        caller.principal().ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "sign the request"))
     }
 
     async fn route(&self, mut req: Request) -> CellResult<Response> {
-        // Only the router reaches a Durable Object's fetch; it sets these.
-        let principal = req.headers().get(PRINCIPAL_HEADER)?;
-        let key = req.headers().get(KEY_HEADER)?;
-        let kind = req.headers().get(KIND_HEADER)?.and_then(|k| IdentityKind::parse(&k));
-        let owner = req.headers().get(OWNER_HEADER)?;
-        let arrived =
-            req.headers().get(URL_HEADER)?.and_then(|u| url::Url::parse(&u).ok()).ok_or_else(|| CellError::host("no URL from the router"))?;
-        let routed_name = req.headers().get(NAME_HEADER)?.ok_or_else(|| CellError::host("no fragment name from the router"))?;
-        if principal.is_some() && kind.is_none() {
-            return Err(CellError::host("the router named an identity without its kind"));
-        }
-        let caller = Caller { principal, key, kind, owner, url: arrived };
         let path = req.path();
         if path == "/test/keys" && self.cfg.test_hooks {
             // this cell's own use of KEYS: the e2e checks that what one
@@ -452,12 +455,14 @@ impl FragmentCell {
             let body: Value = body_json(&mut req).await?;
             return self.cap_files(&op, &body).await;
         }
+        // Every route below is the router's: decoded once, from headers only it sets.
+        let Routed { name: routed_name, url, mode, signed } = Routed::from_headers(req.headers())?;
+        let caller = Caller { signed, url, mode };
         if let Some(rest) = path.strip_prefix("/serve/") {
             let rest = rest.to_string();
             return self.serve(req, &caller, &routed_name, &rest).await;
         }
-        let url = req.url()?;
-        let query = |k: &str| url.query_pairs().find(|(q, _)| q == k).map(|(_, v)| v.into_owned());
+        let query = |k: &str| caller.url.query_pairs().find(|(q, _)| q == k).map(|(_, v)| v.into_owned());
         let segments: Vec<String> = path.trim_start_matches('/').split('/').map(decode_segment).collect();
         let segs: Vec<&str> = segments.iter().map(String::as_str).collect();
         match (req.method(), segs.as_slice()) {
@@ -639,15 +644,15 @@ impl FragmentCell {
                 owner.as_str().into(),
                 owner.as_str().into(),
                 SqlStorageValue::Integer(now),
-                caller.kind.map_or(SqlStorageValue::Null, |k| k.as_str().into()),
-                caller.owner.as_deref().map_or(SqlStorageValue::Null, |o| o.into()),
+                caller.kind().map_or(SqlStorageValue::Null, |k| k.as_str().into()),
+                caller.owner().map_or(SqlStorageValue::Null, |o| o.into()),
             ],
         )?;
         self.index_change(&owner, Some(Role::Owner))?;
         if let Some(t) = &body.template {
             self.set_meta("template_pending", t)?;
         }
-        self.event("create", &format!("fragment {} created by {owner} (repo {repo})", body.name), json!({ "repo": repo, "key": caller.key.as_deref().map(npub::display) }));
+        self.event("create", &format!("fragment {} created by {owner} (repo {repo})", body.name), json!({ "repo": repo, "key": caller.key().map(npub::display) }));
         self.flush_index().await;
         // a template that did not land, or a chat's agent that did not
         // join, is retried by the alarm

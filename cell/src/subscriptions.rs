@@ -24,7 +24,7 @@ pub const TEST_OUTBOX_FAILURES_KEY: &str = "test_fail_outbox";
 impl FragmentCell {
     /// The subscriber: a member whose role may read `channel`.
     fn subscriber(&self, caller: &Caller, channel: &str) -> CellResult<String> {
-        let principal = caller.principal.clone().ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "subscribing needs a signed request"))?;
+        let principal = caller.principal().map(str::to_string).ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "subscribing needs a signed request"))?;
         let Some(role) = self.member_role(&principal)? else {
             return Err(CellError::new(ErrorCode::Forbidden, "only a member subscribes to a channel"));
         };
@@ -67,7 +67,7 @@ impl FragmentCell {
 
     /// `GET /api/subscriptions`: the caller's (the owner sees every one).
     pub(crate) fn subscriptions(&self, caller: &Caller) -> CellResult<Response> {
-        let principal = caller.principal.clone().ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "listing subscriptions needs a signed request"))?;
+        let principal = caller.principal().map(str::to_string).ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "listing subscriptions needs a signed request"))?;
         let owner = self.must("owner")? == principal;
         let rows = if owner {
             self.rows("SELECT id, principal, channel, url, created_at FROM subs ORDER BY id", vec![])?
@@ -83,7 +83,7 @@ impl FragmentCell {
 
     /// `DELETE /api/subscriptions/{id}`: its subscriber or the owner.
     pub(crate) fn unsubscribe(&self, caller: &Caller, id: &str) -> CellResult<Response> {
-        let principal = caller.principal.clone().ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "unsubscribing needs a signed request"))?;
+        let principal = caller.principal().map(str::to_string).ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "unsubscribing needs a signed request"))?;
         let id: i64 = id.parse().map_err(|_| CellError::invalid("a subscription id is a number"))?;
         let owner = self.must("owner")? == principal;
         let gone = self.rows("DELETE FROM subs WHERE id = ? AND (principal = ? OR ?) RETURNING id", vec![SqlStorageValue::Integer(id), principal.as_str().into(), SqlStorageValue::Integer(owner as i64)])?;

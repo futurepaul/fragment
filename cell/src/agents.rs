@@ -16,10 +16,13 @@ use fragment_core::npub;
 use fragment_proto::{split_fragment_name, valid_fragment_name, valid_label, ErrorCode, IdentityKind};
 
 use crate::error::{CellError, CellResult};
-use crate::{ask_registry, js, read_body, signer, Signer};
+use crate::registry::calls;
+use crate::routed::Signed;
+use crate::{ask_registry, js, read_body, signer};
 
-/// The caller's identity, set by this router only (the script has no other way in).
-pub(crate) const PRINCIPAL_HEADER: &str = "x-agent-principal";
+/// The caller's identity, set by this router only (the script has no other
+/// way in); one name for both ends (`fragment_proto::routed`).
+pub(crate) const PRINCIPAL_HEADER: &str = fragment_proto::routed::AGENT_PRINCIPAL;
 /// Each person's own agent, made on first need (a chat's).
 pub(crate) const DEFAULT_LABEL: &str = "agent";
 
@@ -53,7 +56,7 @@ fn json_answer(v: &Value) -> CellResult<Response> {
 
 /// An agent's full name: `<label>.<username>`, or a bare label under the
 /// signer's username (an agent's: its owner's).
-fn named(name: &str, who: &Signer) -> CellResult<String> {
+fn named(name: &str, who: &Signed) -> CellResult<String> {
     if valid_fragment_name(name) {
         return Ok(name.to_string());
     }
@@ -95,7 +98,7 @@ pub(crate) async fn ask_json(env: &Env, method: Method, path: &str, principal: &
 /// `model` and `instructions`) and registers its key as theirs: `{name,
 /// npub, model, id}`. Asking again for one already theirs answers it
 /// (`replayed`), registered.
-pub(crate) async fn create(env: &Env, who: &Signer, label: &str, options: &Value) -> CellResult<Value> {
+pub(crate) async fn create(env: &Env, who: &Signed, label: &str, options: &Value) -> CellResult<Value> {
     if who.kind != IdentityKind::Person {
         return Err(CellError::new(ErrorCode::Forbidden, "agents are made by people"));
     }
@@ -106,15 +109,16 @@ pub(crate) async fn create(env: &Env, who: &Signer, label: &str, options: &Value
     let body = json!({ "name": name, "model": options["model"], "instructions": options["instructions"] });
     let mut made = ask_json(env, Method::Post, "/api/agents", &who.id, &body).await?;
     let hex = made["npub"].as_str().and_then(npub::parse).ok_or_else(|| CellError::host("the agents' script answered no key"))?;
-    let registered = ask_registry(env, "/agents", &json!({ "owner": who.id, "key": hex })).await?;
-    made["id"] = registered["id"].clone();
+    let registered = ask_registry(env, &calls::RegisterAgent { owner: who.id.clone(), key: hex }).await?;
+    made["id"] = json!(registered.id);
     Ok(made)
 }
 
 /// The person's own agent, `agent.<username>`, made on first need:
 /// `(identity, npub, name)`.
 pub(crate) async fn own_agent(env: &Env, owner: &str, username: &str) -> CellResult<(String, String, String)> {
-    let who = Signer { key: None, id: owner.to_string(), kind: IdentityKind::Person, owner: None, username: Some(username.to_string()) };
+    let identity = fragment_proto::Identity { id: owner.to_string(), kind: IdentityKind::Person, owner: None, username: Some(username.to_string()) };
+    let who = Signed { identity, key: None };
     let made = create(env, &who, DEFAULT_LABEL, &Value::Null).await?;
     let text = |k: &str| made[k].as_str().map(str::to_string).ok_or_else(|| CellError::host(format!("the agent answered no {k}")));
     Ok((text("id")?, text("npub")?, text("name")?))

@@ -278,8 +278,6 @@ async fn report(env: &Env, d: &Delivery, outcome: &str, status: u16, error: &str
     let headers = Headers::new();
     headers.set("content-type", "application/json")?;
     headers.set(REPORT_HEADER, "1")?;
-    headers.set(crate::fragment::NAME_HEADER, &d.fragment)?;
-    headers.set(crate::fragment::URL_HEADER, "https://fragment.internal/")?;
     let body = json!({ "incarnation": d.incarnation, "kind": d.kind, "url": d.url, "sub": d.sub, "outcome": outcome, "status": status, "error": error });
     let mut init = RequestInit::new();
     init.with_method(Method::Post).with_headers(headers).with_body(Some(body.to_string().into()));

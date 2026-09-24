@@ -57,7 +57,7 @@ use crate::fleet::Fleet;
 use crate::store::{kv_get, kv_set, kv_u64, last_message, recent_messages};
 use crate::turn::{Attached, Driver, Model, WATCHDOG_MS_DEFAULT, WATCHDOG_MS_MIN};
 
-const PRINCIPAL_HEADER: &str = "x-agent-principal";
+const PRINCIPAL_HEADER: &str = fragment_proto::routed::AGENT_PRINCIPAL;
 /// A computer that connects out presents its connect token here.
 const COMPUTER_TOKEN_HEADER: &str = "x-computer-token";
 /// A computer's long poll waits this long, and a request it fetched but

@@ -15,7 +15,7 @@
 
 use fragment_core::access;
 use fragment_core::npub;
-use fragment_proto::{limits, CreateInvite, ErrorCode, IdentityKind, Invite, Join, Member, Role, SetRole, SetVisibility, Visibility};
+use fragment_proto::{limits, CreateInvite, ErrorCode, Identity, IdentityKind, Invite, Join, Member, Role, SetRole, SetVisibility, Visibility};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use worker::*;
@@ -44,13 +44,6 @@ fn member_json(r: &Value) -> CellResult<Member> {
         kind: r["kind"].as_str().and_then(IdentityKind::parse),
         owner: r["owner"].as_str().map(str::to_string),
     })
-}
-
-/// Who a request names, as the registry knows them.
-struct Named {
-    id: String,
-    kind: IdentityKind,
-    owner: Option<String>,
 }
 
 fn opt(v: Option<&str>) -> SqlStorageValue {
@@ -133,20 +126,18 @@ impl FragmentCell {
 
     fn actor_role(&self, caller: &Caller) -> CellResult<Option<Role>> {
         self.name()?;
-        match &caller.principal {
+        match caller.principal() {
             Some(p) => self.member_role(p),
             None => Err(CellError::new(ErrorCode::Unauthenticated, "sign the request")),
         }
     }
 
     /// The identity `who` (an `id:`, an npub, or 64 hex) names.
-    async fn named(&self, who: &str) -> CellResult<Named> {
+    async fn named(&self, who: &str) -> CellResult<Identity> {
         if npub::parse_named(who).is_none() {
             return Err(CellError::invalid(format!("{who:?} is not an identity (id:…), an npub, or a 64-hex key")));
         }
-        let v = crate::ask_registry(&self.env, "/lookup", &json!({ "who": who })).await?;
-        let (id, kind, owner) = crate::facts_of(&v)?;
-        Ok(Named { id, kind, owner })
+        crate::ask_registry(&self.env, &crate::registry::calls::Lookup { who: who.to_string() }).await
     }
 
     pub(crate) fn members(&self, caller: &Caller) -> CellResult<Response> {
@@ -231,7 +222,7 @@ impl FragmentCell {
             Some(npub::Named::Key(_)) => self.named(who).await?.id,
             None => return Err(CellError::invalid(format!("{who:?} is not an identity (id:…), an npub, or a 64-hex key"))),
         };
-        let is_self = caller.principal.as_deref() == Some(target.as_str());
+        let is_self = caller.principal() == Some(target.as_str());
         let current = self.member_role(&target)?;
         if let Some(why) = access::refuse_remove(actor, is_self, current) {
             return Err(match current {
@@ -352,8 +343,8 @@ impl FragmentCell {
                 role.as_str().into(),
                 format!("invite:{id}").into(),
                 SqlStorageValue::Integer(js::now_ms()),
-                opt(caller.kind.map(IdentityKind::as_str)),
-                opt(caller.owner.as_deref()),
+                opt(caller.kind().map(IdentityKind::as_str)),
+                opt(caller.owner()),
             ],
         )?;
         self.exec("UPDATE invites SET uses_left = uses_left - 1 WHERE id = ?", vec![id.as_str().into()])?;

@@ -18,8 +18,8 @@ use worker::*;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{decode_segment, json_response, Caller, FragmentCell};
 use crate::js;
+use crate::routed::Mode;
 
-pub const MODE_HEADER: &str = "x-fragment-mode";
 /// The browser library pages import as `./__fragment.js`.
 const CLIENT_JS: &str = include_str!("../client.mjs");
 const VIEW_COOKIE: &str = "fragview";
@@ -60,9 +60,10 @@ fn with_cookies(mut resp: Response, cookies: &[String]) -> CellResult<Response> 
 impl FragmentCell {
     pub(crate) async fn serve(&self, mut req: Request, caller: &Caller, name: &str, rest: &str) -> CellResult<Response> {
         self.name()?;
-        let url = req.url()?;
+        // the query string, as the request arrived (the router's URL)
+        let url = caller.url.clone();
         let origin = Origin {
-            cookie_path: if req.headers().get(MODE_HEADER)?.as_deref() == Some("host") { "/".into() } else { format!("/f/{name}/") },
+            cookie_path: if caller.mode == Some(Mode::Host) { "/".into() } else { format!("/f/{name}/") },
             secure: caller.url.scheme() == "https",
         };
         let cookies = req.headers().get("cookie")?.unwrap_or_default();
@@ -86,8 +87,8 @@ impl FragmentCell {
                 return Err(CellError::invalid("send the call as application/json"));
             }
             let body: OpCall = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            let principal = match (&caller.principal, anon) {
-                (Some(p), _) => p.clone(),
+            let principal = match (caller.principal(), anon) {
+                (Some(p), _) => p.to_string(),
                 (None, Some(a)) => a,
                 (None, None) => {
                     let fresh = js::random_hex::<32>();
@@ -107,7 +108,7 @@ impl FragmentCell {
                     return Err(CellError::invalid("POST the subscription as application/json"));
                 }
                 let body: Value = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-                let principal = caller.principal.clone().or(anon).unwrap_or_else(|| "anonymous".into());
+                let principal = caller.principal().map(str::to_string).or(anon).unwrap_or_else(|| "anonymous".into());
                 if op == "sub" {
                     self.push_subscribe(&body, &principal)?
                 } else {
@@ -131,16 +132,12 @@ impl FragmentCell {
             // names for a page: a person's username and picture, or whose agent
             self.require(caller, link, Role::Public)?;
             let ids: Vec<String> = url.query_pairs().filter(|(k, _)| k == "id").map(|(_, v)| v.into_owned()).collect();
-            let mut v = crate::ask_registry(&self.env, "/profiles", &json!({ "ids": ids })).await?;
+            let mut answer = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids }).await?;
             let platform = self.cfg.platform(&caller.url);
-            if let Some(profiles) = v["profiles"].as_object_mut() {
-                for p in profiles.values_mut() {
-                    if let Some(pic) = p["picture"].as_str().map(|s| format!("{platform}{s}")) {
-                        p["picture"] = json!(pic);
-                    }
-                }
+            for p in answer.profiles.values_mut() {
+                p.picture = p.picture.take().map(|path| format!("{platform}{path}"));
             }
-            json_response(&v)?
+            json_response(&answer)?
         } else if path == "__sw.js" {
             let h = Headers::new();
             h.set("content-type", "text/javascript; charset=utf-8")?;
@@ -152,11 +149,11 @@ impl FragmentCell {
             self.watch(&req, caller, link)?
         } else if path == "__live" {
             // an unsigned visitor without a cookie yet is anonymous for this socket only
-            let principal = caller.principal.clone().or(anon).unwrap_or_else(|| anon_principal(&js::random_hex::<32>()));
+            let principal = caller.principal().map(str::to_string).or(anon).unwrap_or_else(|| anon_principal(&js::random_hex::<32>()));
             self.live(&req, caller, &principal, link)?
         } else {
             let role = self.require(caller, link, Role::Public)?;
-            let who = caller.principal.as_deref().map(npub::display).or(anon).unwrap_or_else(|| "anonymous".into());
+            let who = caller.principal().map(npub::display).or(anon).unwrap_or_else(|| "anonymous".into());
             match req.method() {
                 Method::Get | Method::Head => self.site(&mut req, caller, name, &path, &url, role, &who).await?,
                 // Only the app's own routes take other methods.
@@ -174,7 +171,7 @@ impl FragmentCell {
         match req.method() {
             Method::Get => {
                 let invite = url.query_pairs().find(|(k, _)| k == "invite").map(|(_, v)| v.into_owned()).unwrap_or_default();
-                if caller.principal.is_none() {
+                if caller.principal().is_none() {
                     let back: String = url::form_urlencoded::byte_serialize(format!("/__join?invite={invite}").as_bytes()).collect();
                     let mut resp = Response::empty()?.with_status(302);
                     resp.headers_mut().set("location", &format!("{base}__signin?return={back}"))?;
@@ -249,7 +246,7 @@ impl FragmentCell {
         }
         self.require(caller, link, Role::Viewer)?;
         let pair = WebSocketPair::new()?;
-        let who = match &caller.principal {
+        let who = match caller.principal() {
             Some(p) if self.has_standing(caller)? => format!("p:{p}"),
             _ => "view".to_string(),
         };

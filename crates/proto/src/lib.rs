@@ -483,6 +483,52 @@ impl IdentityKind {
     }
 }
 
+/// Who a key, a browser's session, or a lookup names, as the registry
+/// holds them: the one description of an identity every hop shares (the
+/// router's signer, a fragment's caller, a member being added).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Identity {
+    /// `id:` and 32 hex.
+    pub id: String,
+    pub kind: IdentityKind,
+    /// An agent's owner.
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// A person's username; an agent's owner's (the namespace its fragments
+    /// go in). `None` until a person chooses one.
+    #[serde(default)]
+    pub username: Option<String>,
+}
+
+/// One of a person's sign-ins, as their identity shows it: the email is an
+/// attribute, refreshed at each sign-in and never the key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Subject {
+    /// `workos:<client id>`: the environment that vouches for it.
+    pub issuer: String,
+    pub email: Option<String>,
+    pub linked_at: i64,
+}
+
+/// Headers only the router sets on a request it hands a fragment's
+/// supervisor (the cell's `routed.rs` writes and reads them) or the
+/// agents' script; the router drops any a client sends.
+pub mod routed {
+    /// The fragment's full name.
+    pub const NAME: &str = "x-fragment-name";
+    /// The URL the request arrived on.
+    pub const URL: &str = "x-fragment-url";
+    /// How the site was addressed: `host` (its own origin) or `path` (`/f/<name>/`).
+    pub const MODE: &str = "x-fragment-mode";
+    /// Who is asking (JSON: the identity and the key it signed with).
+    pub const SIGNED: &str = "x-fragment-signed";
+    pub const ALL: [&str; 4] = [NAME, URL, MODE, SIGNED];
+    /// The caller's identity on a request the router hands the agents'
+    /// script (`agent/`), which trusts nothing else.
+    pub const AGENT_PRINCIPAL: &str = "x-agent-principal";
+}
+
 /// `POST /api/identities`: register an agent the signer owns, with a key
 /// proof by the agent's key. People come from sign-in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -532,10 +578,9 @@ pub struct IdentityView {
     /// A person's agents.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<String>,
-    /// A person's sign-ins: `{issuer, email, linkedAt}` (the email is an
-    /// attribute, never the key).
+    /// A person's sign-ins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub subjects: Vec<Value>,
+    pub subjects: Vec<Subject>,
     /// Whether this answer made it (a registration's replay answers false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<bool>,
@@ -849,6 +894,23 @@ fn write_canonical(v: &Value, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: the typed identity and sign-in reads the same JSON the
+    /// registry and `GET /api/identities/me` carried before (T4: the wire
+    /// is unchanged). Method: the literal old forms, decoded and encoded.
+    #[test]
+    fn identity_and_subject_keep_their_wire_form() {
+        let facts = r#"{"id":"id:0123456789abcdef0123456789abcdef","kind":"agent","owner":"id:ffffffffffffffffffffffffffffffff","username":null}"#;
+        let who: Identity = serde_json::from_str(facts).unwrap();
+        assert_eq!(who.kind, IdentityKind::Agent);
+        assert_eq!(who.owner.as_deref(), Some("id:ffffffffffffffffffffffffffffffff"));
+        assert_eq!(who.username, None);
+        let bare: Identity = serde_json::from_str(r#"{"id":"id:0123456789abcdef0123456789abcdef","kind":"person"}"#).unwrap();
+        assert_eq!((bare.owner, bare.username), (None, None));
+        assert!(serde_json::from_str::<Identity>(r#"{"id":"id:0123456789abcdef0123456789abcdef","kind":"robot"}"#).is_err(), "an unknown kind is refused");
+        let subject = Subject { issuer: "workos:client_1".into(), email: None, linked_at: 7 };
+        assert_eq!(serde_json::to_value(&subject).unwrap(), serde_json::json!({ "issuer": "workos:client_1", "email": null, "linkedAt": 7 }));
+    }
 
     #[test]
     fn names() {

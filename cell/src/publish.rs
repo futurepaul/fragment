@@ -15,7 +15,8 @@ use worker::*;
 use crate::error::{CellError, CellResult};
 use crate::files::{content_of, FileWrite, Wrote};
 use crate::fragment::{json_response, Caller, FragmentCell};
-use crate::{js, Signer};
+use crate::js;
+use crate::routed::Signed;
 
 /// The templates a fragment can start from. `notes` stays with the CLI
 /// (`fragment new --template notes`): at 3 MiB it would double the cell.
@@ -90,12 +91,11 @@ impl FragmentCell {
         let (_, username) = fragment_proto::split_fragment_name(&name).ok_or_else(|| CellError::host(format!("{name} is not <label>.<username>")))?;
         let (agent, _, agent_name) = crate::agents::own_agent(&self.env, &owner, username).await?;
         if self.member_role(&agent)?.is_none() {
+            let identity = fragment_proto::Identity { id: owner.clone(), kind: IdentityKind::Person, owner: None, username: Some(username.to_string()) };
             let as_owner = Caller {
-                principal: Some(owner.clone()),
-                key: None,
-                kind: Some(IdentityKind::Person),
-                owner: None,
+                signed: Some(Signed { identity, key: None }),
                 url: url::Url::parse("https://fragment.internal/").expect("a URL"),
+                mode: None,
             };
             self.set_member(&as_owner, &agent, fragment_proto::SetRole { role: Role::Editor }).await?;
         }
@@ -176,7 +176,7 @@ impl FragmentCell {
     /// refused, even an editor.
     fn owner_granted(&self, caller: &Caller) -> CellResult<String> {
         let owner = self.must("owner")?;
-        if caller.principal.as_deref() != Some(owner.as_str()) {
+        if caller.principal() != Some(owner.as_str()) {
             return Err(CellError::new(ErrorCode::Forbidden, "only this fragment's owner, signed in here, has its fragments"));
         }
         let caps: Vec<String> = self.meta("capabilities_live")?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
@@ -213,7 +213,8 @@ impl FragmentCell {
         let (_, username) = fragment_proto::split_fragment_name(&name).ok_or_else(|| CellError::host(format!("{name} is not <label>.<username>")))?;
         let text = |k: &str| body[k].as_str().map(str::to_string).ok_or_else(|| CellError::invalid(format!("{k} is a string")));
         let create = CreateFragment { name: text("label")?, visibility: None, template: Some(text("template")?) };
-        let signer = Signer { key: None, id: owner, kind: IdentityKind::Person, owner: None, username: Some(username.to_string()) };
+        let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: Some(username.to_string()) };
+        let signer = Signed { identity, key: None };
         let mut made = crate::create_fragment(&self.env, &self.cfg, &caller.url, create, signer).await?;
         let status = made.status_code();
         let v: Value = made.json().await?;

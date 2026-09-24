@@ -34,9 +34,14 @@
 //!   POST /cli/add       {token, key}                        → {id, key, added}: the key joins the
 //!                                                            session's person (its proof was checked)
 
-use serde::Deserialize;
+use fragment_proto::Subject;
+use serde::de::IgnoredAny;
 use sha2::{Digest, Sha256};
 
+use super::calls::{
+    ApproveKey, Approved, Began, Begin, EndSession, Ended, Exchange, Exchanged, LoggedOut, Logout, Mint, Minted, Redeem, Redeemed, Session,
+    SigninCounts, SigninsHook,
+};
 use super::*;
 
 const LOGIN_TTL_MS: i64 = 10 * 60 * 1000;
@@ -90,20 +95,30 @@ fn not_signed_in() -> CellError {
     CellError::new(ErrorCode::Unauthenticated, "not signed in (the session ended or never began)")
 }
 
+/// What the sign-in reads of WorkOS's answer to a code.
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct Begin {
-    return_to: String,
-    link_to: Option<String>,
+struct Authenticated {
+    user: WorkOsUser,
+    access_token: Option<String>,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct Exchange {
-    state: String,
-    code: String,
-    client_id: String,
-    issuer: String,
+struct WorkOsUser {
+    id: String,
+    email: Option<String>,
+}
+
+/// WorkOS's refusal, as far as it says why.
+#[derive(Deserialize)]
+struct Refusal {
+    error_description: Option<String>,
+    message: Option<String>,
+}
+
+/// The claim of WorkOS's access token the sign-out needs.
+#[derive(Deserialize)]
+struct Claims {
+    sid: Option<String>,
 }
 
 /// The `sid` claim of an access token WorkOS answered the exchange with
@@ -112,8 +127,7 @@ fn sid_of(access_token: &str) -> Option<String> {
     use base64::Engine;
     let payload = access_token.split('.').nth(1)?;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?;
-    let claims: Value = serde_json::from_slice(&bytes).ok()?;
-    claims["sid"].as_str().map(str::to_string)
+    serde_json::from_slice::<Claims>(&bytes).ok()?.sid
 }
 
 pub(super) struct Finish {
@@ -124,42 +138,51 @@ pub(super) struct Finish {
     workos_sid: Option<String>,
 }
 
+/// `sessions` (the row for a hash, when it is live).
 #[derive(Deserialize)]
-pub(super) struct SessionBody {
-    token: String,
+struct SessionRow {
+    identity: String,
     fragment: Option<String>,
+    parent: Option<String>,
 }
 
+/// `logins` (a pending sign-in, spent).
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct Mint {
-    token: String,
-    fragment: String,
+struct LoginRow {
+    return_to: String,
+    link_to: Option<String>,
+}
+
+/// `redemptions` (one spent).
+#[derive(Deserialize)]
+struct RedemptionRow {
+    session: String,
     return_to: String,
 }
 
+/// A live platform session, as a redemption spends it.
 #[derive(Deserialize)]
-pub(super) struct Redeem {
-    redeem: String,
-    fragment: String,
+struct ParentRow {
+    identity: String,
+    expires_at: i64,
 }
 
 #[derive(Deserialize)]
-pub(super) struct Approve {
-    token: String,
-    key: String,
+struct SidRow {
+    workos_sid: Option<String>,
 }
 
-/// Dev fleets' controls over sign-in's rows (`FRAGMENT_TEST_HOOKS=allow`).
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) enum SigninsHook {
-    /// How many rows each table holds.
-    Count,
-    /// Every pending sign-in and unspent redemption expires now (sessions stay).
-    Expire,
-    /// The sweep runs now.
-    Sweep,
+struct RowidRow {
+    n: i64,
+}
+
+/// The earliest expiry in each sign-in table (`None`: it is empty).
+#[derive(Deserialize)]
+struct EarliestRow {
+    login: Option<i64>,
+    redeem: Option<i64>,
+    session: Option<i64>,
 }
 
 /// An alarm at `at_ms`, a time since the epoch.
@@ -172,18 +195,19 @@ impl RegistryCell {
     /// indexed expiry); answers whether any table held more.
     fn sweep_signin(&self, now: i64) -> CellResult<bool> {
         let batch = SqlStorageValue::Integer(SWEEP_BATCH as i64);
+        // only how many went matters: each deleted row is read as nothing
         let swept = [
-            self.rows(
+            self.rows::<IgnoredAny>(
                 "DELETE FROM logins WHERE state IN (SELECT state FROM logins WHERE created_at <= ? LIMIT ?) RETURNING state",
                 vec![SqlStorageValue::Integer(now - LOGIN_TTL_MS), batch.clone()],
             )?
             .len(),
-            self.rows(
+            self.rows::<IgnoredAny>(
                 "DELETE FROM redemptions WHERE hash IN (SELECT hash FROM redemptions WHERE expires_at <= ? LIMIT ?) RETURNING hash",
                 vec![SqlStorageValue::Integer(now), batch.clone()],
             )?
             .len(),
-            self.rows(
+            self.rows::<IgnoredAny>(
                 "DELETE FROM sessions WHERE hash IN (SELECT hash FROM sessions WHERE expires_at <= ? LIMIT ?) RETURNING hash",
                 vec![SqlStorageValue::Integer(now), batch],
             )?
@@ -196,13 +220,14 @@ impl RegistryCell {
     /// When the next sweep is due: a slack after the earliest row in any
     /// sign-in table expires (`None`: they are empty). Each is an indexed MIN.
     fn sweep_due(&self) -> CellResult<Option<i64>> {
-        let rows = self.rows(
-            "SELECT (SELECT MIN(created_at) FROM logins) AS login, (SELECT MIN(expires_at) FROM redemptions) AS redeem,
-                    (SELECT MIN(expires_at) FROM sessions) AS session",
-            vec![],
-        )?;
-        let Some(r) = rows.first() else { return Err(CellError::host("the sweep's MIN answered no row")) };
-        let earliest = [r["login"].as_i64().map(|c| c + LOGIN_TTL_MS), r["redeem"].as_i64(), r["session"].as_i64()].into_iter().flatten().min();
+        let r = self
+            .row::<EarliestRow>(
+                "SELECT (SELECT MIN(created_at) FROM logins) AS login, (SELECT MIN(expires_at) FROM redemptions) AS redeem,
+                        (SELECT MIN(expires_at) FROM sessions) AS session",
+                vec![],
+            )?
+            .ok_or_else(|| CellError::host("the sweep's MIN answered no row"))?;
+        let earliest = [r.login.map(|c| c + LOGIN_TTL_MS), r.redeem, r.session].into_iter().flatten().min();
         Ok(earliest.map(|at| at + SWEEP_SLACK_MS))
     }
 
@@ -237,16 +262,16 @@ impl RegistryCell {
         Ok(self.state.storage().set_alarm(alarm_at(js::now_ms() + SWEEP_SLACK_MS)).await?)
     }
 
-    fn signin_counts(&self) -> CellResult<Value> {
-        let rows = self.rows(
+    fn signin_counts(&self) -> CellResult<SigninCounts> {
+        self.row::<SigninCounts>(
             "SELECT (SELECT COUNT(*) FROM logins) AS logins, (SELECT COUNT(*) FROM redemptions) AS redemptions,
                     (SELECT COUNT(*) FROM sessions) AS sessions",
             vec![],
-        )?;
-        rows.into_iter().next().ok_or_else(|| CellError::host("COUNT answered no row"))
+        )?
+        .ok_or_else(|| CellError::host("COUNT answered no row"))
     }
 
-    pub(super) async fn signins_hook(&self, hook: SigninsHook) -> CellResult<Value> {
+    pub(super) async fn signins_hook(&self, hook: SigninsHook) -> CellResult<SigninCounts> {
         match hook {
             SigninsHook::Count => {}
             SigninsHook::Expire => {
@@ -262,31 +287,32 @@ impl RegistryCell {
     /// The live session a token names: not revoked, not expired, for this
     /// fragment (`None`: a platform session), its parent live too. Answers
     /// the session's hash and its identity.
-    fn live_session(&self, token: &str, fragment: Option<&str>) -> CellResult<(String, Facts)> {
+    fn live_session(&self, token: &str, fragment: Option<&str>) -> CellResult<(String, Identity)> {
         if !well_formed(token) {
             return Err(not_signed_in());
         }
         let hash = sha(token);
         let now = js::now_ms();
-        let rows = self.rows(
-            "SELECT identity, fragment, parent FROM sessions WHERE hash = ? AND revoked_at IS NULL AND expires_at > ?",
-            vec![hash.as_str().into(), SqlStorageValue::Integer(now)],
-        )?;
-        let row = rows.first().ok_or_else(not_signed_in)?;
-        if row["fragment"].as_str() != fragment {
+        let row = self
+            .row::<SessionRow>(
+                "SELECT identity, fragment, parent FROM sessions WHERE hash = ? AND revoked_at IS NULL AND expires_at > ?",
+                vec![hash.as_str().into(), SqlStorageValue::Integer(now)],
+            )?
+            .ok_or_else(not_signed_in)?;
+        if row.fragment.as_deref() != fragment {
             return Err(not_signed_in());
         }
-        if let Some(parent) = row["parent"].as_str() {
-            let live = self.rows(
+        if let Some(parent) = &row.parent {
+            let live = self.row::<IgnoredAny>(
                 "SELECT hash FROM sessions WHERE hash = ? AND revoked_at IS NULL AND expires_at > ?",
-                vec![parent.into(), SqlStorageValue::Integer(now)],
+                vec![parent.as_str().into(), SqlStorageValue::Integer(now)],
             )?;
-            if live.is_empty() {
+            if live.is_none() {
                 return Err(not_signed_in());
             }
         }
-        let facts = self.must_facts(row["identity"].as_str().unwrap_or(""))?;
-        Ok((hash, facts))
+        let who = self.stored_identity(&row.identity, "a session")?;
+        Ok((hash, who))
     }
 
     fn new_session(&self, identity: &str, fragment: Option<&str>, parent: Option<&str>, sid: Option<&str>, expires_at: i64) -> CellResult<String> {
@@ -307,7 +333,7 @@ impl RegistryCell {
         Ok(token)
     }
 
-    pub(super) async fn begin(&self, b: Begin) -> CellResult<Value> {
+    pub(super) async fn begin(&self, b: Begin) -> CellResult<Began> {
         let link_to = match &b.link_to {
             Some(token) => Some(self.live_session(token, None)?.1),
             None => None,
@@ -320,16 +346,18 @@ impl RegistryCell {
         let now = js::now_ms();
         self.sweep_by(now + LOGIN_TTL_MS).await?;
         let state = fresh_token();
-        let rows = self.rows(
-            "INSERT INTO logins (state, return_to, link_to, created_at) VALUES (?, ?, ?, ?) RETURNING rowid AS n",
-            vec![
-                sha(&state).into(),
-                b.return_to.as_str().into(),
-                link_to.map_or(SqlStorageValue::Null, |p| p.id.into()),
-                SqlStorageValue::Integer(now),
-            ],
-        )?;
-        let n = rows.first().and_then(|r| r["n"].as_i64()).ok_or_else(|| CellError::host("a sign-in's insert answered no rowid"))?;
+        let n = self
+            .row::<RowidRow>(
+                "INSERT INTO logins (state, return_to, link_to, created_at) VALUES (?, ?, ?, ?) RETURNING rowid AS n",
+                vec![
+                    sha(&state).into(),
+                    b.return_to.as_str().into(),
+                    link_to.map_or(SqlStorageValue::Null, |p| p.id.into()),
+                    SqlStorageValue::Integer(now),
+                ],
+            )?
+            .ok_or_else(|| CellError::host("a sign-in's insert answered no rowid"))?
+            .n;
         // Bounded: a new row's rowid is one past the largest left, so the
         // rows within the cap's rowids of it are the newest starts, and the
         // older go (this one never: the cap is at least 1). A range of the
@@ -338,45 +366,50 @@ impl RegistryCell {
         // filled the table.
         let cap = i64::try_from(self.signins_pending_max).expect("the cap fits a rowid");
         self.exec("DELETE FROM logins WHERE rowid <= ?", vec![SqlStorageValue::Integer(n.saturating_sub(cap))])?;
-        Ok(json!({ "state": state }))
+        Ok(Began { state })
     }
 
     /// WorkOS's code, exchanged by `KEYS` for the Registry, then the sign-in
     /// finished. A code is single-use at WorkOS; the state here.
-    pub(super) async fn exchange(&self, b: Exchange) -> CellResult<Value> {
+    pub(super) async fn exchange(&self, b: Exchange) -> CellResult<Exchanged> {
         if b.state.is_empty() || b.code.is_empty() || b.client_id.is_empty() {
             return Err(CellError::invalid("an exchange names its state, code, and client"));
         }
         let (status, answer) = crate::keys::workos_authenticate(&self.env, &b.client_id, &b.code).await?;
         if status != 200 {
-            let why = answer["error_description"].as_str().or(answer["message"].as_str()).unwrap_or("no reason given");
+            let refusal = serde_json::from_value::<Refusal>(answer).ok();
+            let why = refusal.and_then(|r| r.error_description.or(r.message)).unwrap_or_else(|| "no reason given".into());
             return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS refused the sign-in ({status}): {why}")));
         }
-        let subject = answer["user"]["id"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "WorkOS answered no user id"))?;
+        let signed_in = serde_json::from_value::<Authenticated>(answer)
+            .ok()
+            .filter(|a| !a.user.id.is_empty())
+            .ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "WorkOS answered no user id"))?;
         self.sweep_by(js::now_ms() + SESSION_TTL_MS).await?;
         self.finish(Finish {
             state: b.state,
             issuer: b.issuer,
-            subject: subject.to_string(),
-            email: answer["user"]["email"].as_str().unwrap_or("").to_string(),
-            workos_sid: answer["access_token"].as_str().and_then(sid_of),
+            subject: signed_in.user.id,
+            email: signed_in.user.email.unwrap_or_default(),
+            workos_sid: signed_in.access_token.as_deref().and_then(sid_of),
         })
     }
 
-    fn finish(&self, b: Finish) -> CellResult<Value> {
+    fn finish(&self, b: Finish) -> CellResult<Exchanged> {
         if b.issuer.is_empty() || b.subject.is_empty() || b.email.len() > EMAIL_MAX {
             return Err(CellError::invalid("a sign-in names its issuer and subject"));
         }
-        let rows = self.rows(
-            "DELETE FROM logins WHERE state = ? AND created_at > ? RETURNING return_to, link_to",
-            vec![sha(&b.state).into(), SqlStorageValue::Integer(js::now_ms() - LOGIN_TTL_MS)],
-        )?;
-        let login = rows.first().ok_or_else(|| CellError::invalid("this sign-in expired or was used; start again"))?;
-        let return_to = login["return_to"].as_str().unwrap_or("/").to_string();
+        let login = self
+            .row::<LoginRow>(
+                "DELETE FROM logins WHERE state = ? AND created_at > ? RETURNING return_to, link_to",
+                vec![sha(&b.state).into(), SqlStorageValue::Integer(js::now_ms() - LOGIN_TTL_MS)],
+            )?
+            .ok_or_else(|| CellError::invalid("this sign-in expired or was used; start again"))?;
         let now = SqlStorageValue::Integer(js::now_ms());
-        let known = self.rows("SELECT identity FROM subjects WHERE issuer = ? AND subject = ?", vec![b.issuer.as_str().into(), b.subject.as_str().into()])?;
-        let known = known.first().and_then(|r| r["identity"].as_str()).map(str::to_string);
-        let (id, created, linked) = match (login["link_to"].as_str(), known) {
+        let known = self
+            .row::<HolderRow>("SELECT identity FROM subjects WHERE issuer = ? AND subject = ?", vec![b.issuer.as_str().into(), b.subject.as_str().into()])?
+            .map(|r| r.identity);
+        let (id, created, linked) = match (login.link_to.as_deref(), known) {
             // linking: explicit, from a signed-in session, never by email
             (Some(to), Some(owner)) if owner == to => (owner, false, false),
             (Some(_), Some(_)) => return Err(conflict("that sign-in already belongs to someone else")),
@@ -403,35 +436,35 @@ impl RegistryCell {
             vec![b.issuer.as_str().into(), b.subject.as_str().into(), id.as_str().into(), now, b.email.as_str().into()],
         )?;
         let token = self.new_session(&id, None, None, b.workos_sid.as_deref(), js::now_ms() + SESSION_TTL_MS)?;
-        Ok(json!({ "token": token, "id": id, "created": created, "linked": linked, "returnTo": return_to }))
+        Ok(Exchanged { token, id, created, linked, return_to: login.return_to })
     }
 
-    pub(super) fn session(&self, b: SessionBody) -> CellResult<Value> {
-        Ok(self.live_session(&b.token, b.fragment.as_deref())?.1.json())
+    pub(super) fn session(&self, b: Session) -> CellResult<Identity> {
+        Ok(self.live_session(&b.token, b.fragment.as_deref())?.1)
     }
 
     /// A fragment's `__signout`: the site session its cookie carries ends
     /// (its row goes; the platform session and its other sessions stay).
     /// Answers whether there was one, so a second sign-out is no error.
-    pub(super) fn end_site_session(&self, b: SessionBody) -> CellResult<Value> {
-        let fragment = b.fragment.ok_or_else(|| CellError::invalid("a site session ends on its fragment"))?;
+    pub(super) fn end_site_session(&self, b: EndSession) -> CellResult<Ended> {
         if !well_formed(&b.token) {
-            return Ok(json!({ "ended": false }));
+            return Ok(Ended { ended: false });
         }
-        let rows = self.rows("DELETE FROM sessions WHERE hash = ? AND fragment = ? RETURNING hash", vec![sha(&b.token).into(), fragment.as_str().into()])?;
-        assert!(rows.len() <= 1, "a token names one session");
-        Ok(json!({ "ended": !rows.is_empty() }))
+        let ended = self.row::<IgnoredAny>("DELETE FROM sessions WHERE hash = ? AND fragment = ? RETURNING hash", vec![sha(&b.token).into(), b.fragment.as_str().into()])?;
+        Ok(Ended { ended: ended.is_some() })
     }
 
-    pub(super) fn logout(&self, b: SessionBody) -> CellResult<Value> {
+    pub(super) fn logout(&self, b: Logout) -> CellResult<LoggedOut> {
         let (hash, _) = self.live_session(&b.token, None)?;
         let now = SqlStorageValue::Integer(js::now_ms());
-        let sid = self.rows("SELECT workos_sid FROM sessions WHERE hash = ?", vec![hash.as_str().into()])?;
+        let sid = self
+            .row::<SidRow>("SELECT workos_sid FROM sessions WHERE hash = ?", vec![hash.as_str().into()])?
+            .ok_or_else(|| CellError::host("a live session went missing during its logout"))?;
         self.exec("UPDATE sessions SET revoked_at = ? WHERE (hash = ? OR parent = ?) AND revoked_at IS NULL", vec![now, hash.as_str().into(), hash.as_str().into()])?;
-        Ok(json!({ "workosSid": sid.first().map(|r| r["workos_sid"].clone()).unwrap_or(Value::Null) }))
+        Ok(LoggedOut { workos_sid: sid.workos_sid })
     }
 
-    pub(super) async fn mint(&self, b: Mint) -> CellResult<Value> {
+    pub(super) async fn mint(&self, b: Mint) -> CellResult<Minted> {
         let (hash, _) = self.live_session(&b.token, None)?;
         let expires_at = js::now_ms() + REDEEM_TTL_MS;
         self.sweep_by(expires_at).await?;
@@ -453,30 +486,31 @@ impl RegistryCell {
             "DELETE FROM redemptions WHERE hash IN (SELECT hash FROM redemptions WHERE session = ? AND hash != ? ORDER BY expires_at DESC LIMIT -1 OFFSET ?)",
             vec![hash.as_str().into(), redeem_hash.as_str().into(), SqlStorageValue::Integer(limits::REDEMPTIONS_PER_SESSION_MAX as i64 - 1)],
         )?;
-        Ok(json!({ "redeem": redeem }))
+        Ok(Minted { redeem })
     }
 
     /// A redemption spent on its fragment: a site session, expiring with
     /// its parent (whose row already armed the sweep for that time).
-    pub(super) fn redeem(&self, b: Redeem) -> CellResult<Value> {
+    pub(super) fn redeem(&self, b: Redeem) -> CellResult<Redeemed> {
         let refused = || CellError::new(ErrorCode::Unauthenticated, "this sign-in link expired, was used, or is for another fragment; sign in again");
         if !well_formed(&b.redeem) {
             return Err(refused());
         }
         // shown to another fragment, it is refused and stays unspent
-        let rows = self.rows(
-            "DELETE FROM redemptions WHERE hash = ? AND fragment = ? AND expires_at > ? RETURNING session, return_to",
-            vec![sha(&b.redeem).into(), b.fragment.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
-        )?;
-        let row = rows.first().ok_or_else(refused)?;
-        let parent = row["session"].as_str().unwrap_or("");
-        let live = self.rows(
-            "SELECT identity, expires_at FROM sessions WHERE hash = ? AND fragment IS NULL AND revoked_at IS NULL AND expires_at > ?",
-            vec![parent.into(), SqlStorageValue::Integer(js::now_ms())],
-        )?;
-        let p = live.first().ok_or_else(refused)?;
-        let expires_at = p["expires_at"].as_i64().ok_or_else(|| CellError::host("sessions.expires_at"))?;
-        let token = self.new_session(p["identity"].as_str().unwrap_or(""), Some(&b.fragment), Some(parent), None, expires_at)?;
+        let row = self
+            .row::<RedemptionRow>(
+                "DELETE FROM redemptions WHERE hash = ? AND fragment = ? AND expires_at > ? RETURNING session, return_to",
+                vec![sha(&b.redeem).into(), b.fragment.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
+            )?
+            .ok_or_else(refused)?;
+        let parent = row.session.as_str();
+        let p = self
+            .row::<ParentRow>(
+                "SELECT identity, expires_at FROM sessions WHERE hash = ? AND fragment IS NULL AND revoked_at IS NULL AND expires_at > ?",
+                vec![parent.into(), SqlStorageValue::Integer(js::now_ms())],
+            )?
+            .ok_or_else(refused)?;
+        let token = self.new_session(&p.identity, Some(&b.fragment), Some(parent), None, p.expires_at)?;
         // bounded: this session and the newest others on this fragment are
         // kept, the oldest end (a browser holds one cookie an origin)
         self.exec(
@@ -488,16 +522,16 @@ impl RegistryCell {
                 SqlStorageValue::Integer(limits::SITE_SESSIONS_PER_FRAGMENT_MAX as i64 - 1),
             ],
         )?;
-        Ok(json!({ "token": token, "returnTo": row["return_to"] }))
+        Ok(Redeemed { token, return_to: row.return_to })
     }
 
     /// A key the signed-in person approved joins them (the router checked
     /// the key's own proof in the approval link).
-    pub(super) fn add_by_session(&self, b: Approve) -> CellResult<Value> {
+    pub(super) fn add_by_session(&self, b: ApproveKey) -> CellResult<Approved> {
         check_key(&b.key)?;
         let (_, person) = self.live_session(&b.token, None)?;
         match self.key_row(&b.key)? {
-            Some((id, false)) if id == person.id => return Ok(json!({ "id": person.id, "key": npub::encode(&b.key), "added": false })),
+            Some(row) if row.identity == person.id && row.active() => return Ok(Approved { id: person.id, key: npub::encode(&b.key), added: false }),
             Some(_) => return Err(conflict("this key already belongs to someone (or was revoked)")),
             None => {}
         }
@@ -509,7 +543,7 @@ impl RegistryCell {
             "INSERT INTO keys (key, identity, added_at, added_by) VALUES (?, ?, ?, ?)",
             vec![b.key.as_str().into(), person.id.as_str().into(), SqlStorageValue::Integer(js::now_ms()), person.id.as_str().into()],
         )?;
-        Ok(json!({ "id": person.id, "key": npub::encode(&b.key), "added": true }))
+        Ok(Approved { id: person.id, key: npub::encode(&b.key), added: true })
     }
 
     /// Whether a person signs in (and so may hold no key).
@@ -517,24 +551,22 @@ impl RegistryCell {
         Ok(self.count("SELECT COUNT(*) AS n FROM subjects WHERE identity = ?", vec![id.into()])? > 0)
     }
 
-    pub(super) fn subjects_of(&self, id: &str) -> CellResult<Vec<Value>> {
-        Ok(self
-            .rows("SELECT issuer, email, linked_at FROM subjects WHERE identity = ? ORDER BY linked_at", vec![id.into()])?
-            .into_iter()
-            .map(|r| json!({ "issuer": r["issuer"], "email": r["email"], "linkedAt": r["linked_at"] }))
-            .collect())
+    /// A person's sign-ins (at most `SUBJECTS_MAX`), read straight into
+    /// the wire type.
+    pub(super) fn subjects_of(&self, id: &str) -> CellResult<Vec<Subject>> {
+        self.rows::<Subject>("SELECT issuer, email, linked_at AS linkedAt FROM subjects WHERE identity = ? ORDER BY linked_at", vec![id.into()])
     }
 
-    pub(super) async fn route_signin(&self, path: &str, body: Value) -> CellResult<Option<Value>> {
+    pub(super) async fn route_signin(&self, path: &str, bytes: &[u8]) -> CellResult<Option<Response>> {
         Ok(Some(match path {
-            "/login/begin" => self.begin(from(body)?).await?,
-            "/login/exchange" => self.exchange(from(body)?).await?,
-            "/session" => self.session(from(body)?)?,
-            "/session/end" => self.end_site_session(from(body)?)?,
-            "/logout" => self.logout(from(body)?)?,
-            "/redeem/mint" => self.mint(from(body)?).await?,
-            "/redeem" => self.redeem(from(body)?)?,
-            "/cli/add" => self.add_by_session(from(body)?)?,
+            Begin::PATH => reply::<Begin>(self.begin(body(bytes)?).await)?,
+            Exchange::PATH => reply::<Exchange>(self.exchange(body(bytes)?).await)?,
+            Session::PATH => reply::<Session>(self.session(body(bytes)?))?,
+            EndSession::PATH => reply::<EndSession>(self.end_site_session(body(bytes)?))?,
+            Logout::PATH => reply::<Logout>(self.logout(body(bytes)?))?,
+            Mint::PATH => reply::<Mint>(self.mint(body(bytes)?).await)?,
+            Redeem::PATH => reply::<Redeem>(self.redeem(body(bytes)?))?,
+            ApproveKey::PATH => reply::<ApproveKey>(self.add_by_session(body(bytes)?))?,
             _ => return Ok(None),
         }))
     }

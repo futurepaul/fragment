@@ -141,7 +141,7 @@ impl FragmentCell {
             OpKind::Query => self.require(caller, link, decl.role)?,
             _ => self.require_to_act(caller, link, decl.role)?,
         };
-        let is_member = caller.principal.as_deref().map(|p| self.member_role(p)).transpose()?.flatten().is_some();
+        let is_member = caller.principal().map(|p| self.member_role(p)).transpose()?.flatten().is_some();
         if role == Role::Public && !is_member && !self.rate.borrow_mut().allow(principal, js::now_ms()) {
             return Err(CellError::new(ErrorCode::RateLimited, "too many public calls this minute; retry shortly"));
         }
