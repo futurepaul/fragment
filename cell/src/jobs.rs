@@ -188,7 +188,7 @@ fn run_view(row: RunRow, cost_micros: Option<i64>, detail: Option<(Value, Option
 
 /// `POST /job/advance`
 #[derive(Deserialize)]
-pub(crate) struct AdvanceCall {
+struct AdvanceCall {
     incarnation: String,
     run: i64,
     attempt: u32,
@@ -200,7 +200,7 @@ pub(crate) struct AdvanceCall {
 /// `POST /job/effect`: the step as the Workflow carries it, whose kind and
 /// args decode into a `Step` (a step that does not is the job's failure).
 #[derive(Deserialize)]
-pub(crate) struct EffectCall {
+struct EffectCall {
     incarnation: String,
     run: i64,
     attempt: u32,
@@ -211,7 +211,7 @@ pub(crate) struct EffectCall {
 
 /// `POST /job/finish`
 #[derive(Deserialize)]
-pub(crate) struct FinishCall {
+struct FinishCall {
     incarnation: String,
     run: i64,
     attempt: u32,

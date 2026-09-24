@@ -304,7 +304,7 @@ impl LedgerCell {
     }
 
     fn sum(&self, q: &str, binds: Vec<SqlStorageValue>) -> CellResult<i64> {
-        Ok(self.rows(q, binds)?.first().and_then(|r| r["n"].as_i64()).unwrap_or(0))
+        Ok(self.rows(q, binds)?.first().and_then(|r| r["n"].as_i64()).expect("a COALESCE(SUM(…), 0) answers one integer"))
     }
 
     fn meta(&self, k: &str) -> CellResult<Option<String>> {
@@ -520,24 +520,26 @@ impl LedgerCell {
             )?
             .iter()
             .map(|r| {
+                // only the ledger writes usage: a NOT NULL column that is missing is corruption
+                let text = |k: &str| r[k].as_str().unwrap_or_else(|| panic!("usage.{k} is TEXT NOT NULL")).to_string();
                 let state = r["state"].as_str().and_then(UsageState::parse).expect("usage.state is one the ledger wrote");
                 let quantity = match state {
                     UsageState::Settled => r["cost"].as_i64().expect("a settled usage row has its cost"),
                     UsageState::Reserved => r["reserved"].as_i64().expect("usage.reserved is INTEGER"),
                 };
                 UsageRow {
-                    source_ref: r["ref"].as_str().unwrap_or("").to_string(),
+                    source_ref: text("ref"),
                     agent: r["agent"].as_str().map(str::to_string),
                     billing_org: org.clone(),
-                    period: r["period"].as_str().unwrap_or("").to_string(),
+                    period: text("period"),
                     unit: UsageUnit::UsdMicro,
                     quantity,
                     state,
-                    kind: r["kind"].as_str().unwrap_or("").to_string(),
+                    kind: text("kind"),
                     model: r["model"].as_str().map(str::to_string),
-                    fragment: r["fragment"].as_str().unwrap_or("").to_string(),
-                    principal: r["principal"].as_str().unwrap_or("").to_string(),
-                    at: r["created_at"].as_i64().unwrap_or(0),
+                    fragment: text("fragment"),
+                    principal: text("principal"),
+                    at: r["created_at"].as_i64().expect("usage.created_at is INTEGER NOT NULL"),
                 }
             })
             .collect();
