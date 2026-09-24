@@ -236,7 +236,7 @@ deleted in batches on the registry's alarm, never on a request.
 | `PUT /api/f/{name}/blobs/{sha256}` | editor | the bytes as the body (`content-length` required, at most 256 MiB), streamed through and hashed on the way in: → `{ok, sha, size, stored}`; bytes that hash to anything else are deleted and refused (400) |
 | `GET`, `HEAD /api/f/{name}/blobs/{sha256}` | viewer | → the bytes (ranges answer 206) |
 | `GET /api/f/{name}/file/stat?path=` | viewer | → `{stat: {path, size, blobSha, lastCommitSha, present}, ref}` |
-| `GET /api/f/{name}/events?since=` or `?tail=` | viewer | → `{events: [{id, at, kind, summary, data}]}`, oldest first: the page after `since`, or the newest `tail` (1-500; 400 otherwise, or with `since`) (500 a page; 5000 kept) |
+| `GET /api/f/{name}/events?since=` or `?tail=` | viewer | → `{events: [{id, at, kind, summary, data}]}`, oldest first: the page after `since`, or the newest `tail` (1-500; 400 otherwise, or with `since`) (500 a page; 10 000 kept, as for `ops`: `limits::AUDIT_KEPT`) |
 | `POST /api/f/{name}/ops/{op}` | the operation's role | `{id, input}` → `{result, replayed}`; for a job, `result` is `{run, status}` (the same id answers the same run) |
 | `GET /api/f/{name}/runs?status=&op=&limit=` | viewer | → `{runs: [{id, op, via, trigger, principal, status, attempt, depth, createdAt, finishedAt, error}], counts: {<status>: n}, paused}` newest first (30, at most 200) |
 | `GET /api/f/{name}/runs/{id}` | viewer | → one run with its `input` and `output` |
@@ -271,7 +271,9 @@ keeps the last good code and says why in `status.code.error`.
 ```
 
 - `role` defaults to `viewer` for a query and `editor` for a mutation.
-  `fetch` and `alarm` are not operation names.
+  `constructor`, `fetch`, and `alarm` are not operation names (the App
+  class's own; `fragment_proto::RESERVED_OP_NAMES`): a manifest naming one
+  is refused at deploy.
 - `capabilities` asks the platform for powers the page uses, each granted
   only to the fragment's owner viewing it. The one there is:
   `"fragments"` (`__fragments`, Serving). Any other name is refused at
@@ -381,9 +383,9 @@ endpoint). Anyone who can see the fragment may subscribe (at most 10 000
 subscriptions). `call.push(who, payload)` in a mutation (sent once it
 commits) and `job.push(who, payload)` in a job (a step, answering
 `{queued}`) push `payload` (`{title, body, tag, url}`, at most 3800 bytes)
-to the subscriptions tagged `who`, or all of them with `*`, once per
-mutation or step. `fragment.notify.{supported, permission, ask, show}`
-wrap the Notification API.
+to the subscriptions tagged `who` (at most 64 characters), or all of them
+with `*`, once per mutation or step. `fragment.notify.{supported,
+permission, ask, show}` wrap the Notification API.
 
 `fragment.json`'s `notifyUrls` (at most 3) receive `{type: "changed",
 fragment, sha, paths}` (JSON POST, unsigned, as before) on each move of

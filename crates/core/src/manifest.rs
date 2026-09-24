@@ -5,7 +5,9 @@
 
 use std::collections::BTreeMap;
 
-use fragment_proto::{limits, valid_channel_name, valid_op_name, ChannelDecl, OpDecl, OpKind, Role, TriggerDecl, TriggerOn, BUILTIN_CHANNELS};
+use fragment_proto::{
+    limits, valid_channel_name, valid_op_name, ChannelDecl, OpDecl, OpKind, Role, TriggerDecl, TriggerOn, BUILTIN_CHANNELS, RESERVED_OP_NAMES,
+};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
@@ -35,8 +37,6 @@ const ACCESS_KEYS: [&str; 3] = ["visibility", "editors", "viewers"];
 /// The capabilities a manifest may declare. `fragments`: the page may list
 /// the fragments its owner belongs to (`__fragments`), as a dashboard does.
 pub const CAPABILITIES: [&str; 1] = ["fragments"];
-/// Method names the App class answers for the platform, never operations.
-const RESERVED_OPS: [&str; 2] = ["fetch", "alarm"];
 
 fn text(v: &Value, key: &str, max: usize) -> Result<Option<String>, String> {
     match &v[key] {
@@ -147,7 +147,7 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
                 if !valid_op_name(name) {
                     return Err(format!("operation name {name:?} must match ^[a-z][a-z0-9_]{{0,63}}$"));
                 }
-                if RESERVED_OPS.contains(&name.as_str()) {
+                if RESERVED_OP_NAMES.contains(&name.as_str()) {
                     return Err(format!("operation name {name:?} is reserved (the App class's own handlers)"));
                 }
                 m.operations.insert(name.clone(), operation(name, decl)?);
@@ -284,6 +284,7 @@ mod tests {
             br#"{"operations":{"x":{"kind":"query","input":{"pattern":"^a"}}}}"#,
             br#"{"channels":{"events":{}}}"#,
             br#"{"operations":{"fetch":{"kind":"query"}}}"#,
+            br#"{"operations":{"constructor":{"kind":"mutation"}}}"#,
             br#"{"channels":{"Chat":{}}}"#,
             br#"{"channels":{"chat":{"write":"public"}}}"#,
         ] {

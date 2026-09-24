@@ -64,8 +64,8 @@ pub mod limits {
     pub const WEBHOOK_WINDOW_S: i64 = 300;
     /// Events per page of `GET events`.
     pub const EVENTS_PAGE: usize = 500;
-    /// Events a fragment keeps (the oldest go first).
-    pub const EVENTS_KEPT: i64 = 5000;
+    /// Records `events` and `ops` each keep (the oldest go first).
+    pub const AUDIT_KEPT: i64 = 10_000;
     /// `public`-role calls per minute by one principal that is not a member.
     pub const PUBLIC_CALLS_PER_MIN: u32 = 60;
     /// `public`-role calls per minute into one fragment by non-members.
@@ -130,6 +130,9 @@ pub mod limits {
     pub const FILE_WRITES_MAX: usize = 16;
     /// Push subscriptions a fragment holds.
     pub const PUSH_SUBS_MAX: u64 = 10_000;
+    /// A push's `who`, the tag a page subscribed with, in characters
+    /// (Unicode scalar values: `chars()` here, `[...who]` in JavaScript).
+    pub const PUSH_WHO_MAX_CHARS: usize = 64;
     /// URLs `fragment.json`'s `notifyUrls` may name.
     pub const NOTIFY_URLS_MAX: usize = 3;
     /// The largest blob an upload may carry (files of 1 MiB or more are blobs).
@@ -145,7 +148,9 @@ pub fn valid_secret_name(name: &str) -> bool {
     !b.is_empty() && b.len() <= 64 && b[0].is_ascii_uppercase() && b.iter().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
 }
 
-/// A repo path the platform reads: relative, no `..`, no empty segments.
+/// A repo path the platform reads: relative, no `.` or `..` segments, no
+/// empty segments, no control bytes or backslashes, at most
+/// `PATH_MAX_BYTES` bytes of UTF-8.
 pub fn valid_repo_path(path: &str) -> bool {
     !path.is_empty()
         && path.len() <= limits::PATH_MAX_BYTES
@@ -153,6 +158,16 @@ pub fn valid_repo_path(path: &str) -> bool {
         && path.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
         && !path.bytes().any(|b| b < 0x20 || b == b'\\')
 }
+
+/// `valid_repo_path` for the app facet's in-app check (its `limits.js`,
+/// `fragment_core::facet`), branch for branch: bytes are counted in UTF-8
+/// as here, not in UTF-16 units, and a control byte of UTF-8 is a control
+/// unit of UTF-16.
+pub const VALID_REPO_PATH_JS: &str = r#"export function validRepoPath(path) {
+  if (typeof path !== "string" || path.length === 0 || utf8Bytes(path) > PATH_MAX_BYTES || path.startsWith("/")) return false;
+  if (!path.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..")) return false;
+  return !/[\x00-\x1f\\]/.test(path);
+}"#;
 
 /// One part of a name, and one DNS label: a fragment's label, a username,
 /// an agent's name. Never `--` (a repo's name joins two with it).
@@ -225,6 +240,29 @@ pub fn valid_op_name(name: &str) -> bool {
         && b[0].is_ascii_lowercase()
         && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
 }
+
+/// Names the App class answers for the runtime or the platform, never
+/// operations: `fragment.json` may not declare one (a name that could not
+/// match `valid_op_name` is listed too, since the facet's platform code
+/// refuses to call any of them), and the facet never calls one as a
+/// method (its `limits.js`). Methods beginning `__` are the platform's.
+pub const RESERVED_OP_NAMES: [&str; 6] = ["constructor", "fetch", "alarm", "webSocketMessage", "webSocketClose", "webSocketError"];
+
+/// A record's kind: `^[a-z][a-z0-9._-]{0,63}$`.
+pub fn valid_kind(kind: &str) -> bool {
+    let b = kind.as_bytes();
+    !b.is_empty()
+        && b.len() <= 64
+        && b[0].is_ascii_lowercase()
+        && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"._-".contains(c))
+}
+
+/// `valid_kind` for the app facet's in-app check (its `limits.js`): the
+/// pattern is ASCII, so a string of UTF-16 units matches it exactly when
+/// its UTF-8 bytes do.
+pub const VALID_KIND_JS: &str = r#"export function validKind(kind) {
+  return typeof kind === "string" && /^[a-z][a-z0-9._-]{0,63}$/.test(kind);
+}"#;
 
 /// Every refusal the platform answers with, as `{"error": code, "message"}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -950,6 +988,20 @@ mod tests {
         assert!(!valid_repo_path("/abs"));
         assert!(!valid_repo_path("a//b"));
         assert!(!valid_repo_path("a/./b"));
+    }
+
+    #[test]
+    fn kinds() {
+        assert!(valid_kind("said") && valid_kind("a.b_c-9") && valid_kind(&"k".repeat(64)));
+        assert!(!valid_kind("Said") && !valid_kind("9a") && !valid_kind("") && !valid_kind(&"k".repeat(65)) && !valid_kind("k\u{e9}"));
+    }
+
+    #[test]
+    fn reserved_names_cover_the_app_class_handlers() {
+        // `constructor` once deployed as an operation the facet then refused
+        for name in ["constructor", "fetch", "alarm"] {
+            assert!(valid_op_name(name) && RESERVED_OP_NAMES.contains(&name), "{name}");
+        }
     }
 
     #[test]
