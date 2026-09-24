@@ -1336,7 +1336,7 @@ fn run(cli: Cli) -> Result<()> {
                     println!("most of this month's budget is used: paid steps stop when it runs out");
                 }
                 for u in v.usage.iter().take(10) {
-                    println!("  {}\t{}\t{}\t{}", usd(u.quantity), u.kind, u.fragment, u.state);
+                    println!("  {}\t{}\t{}\t{}", usd(u.quantity), u.kind, u.fragment, u.state.as_str());
                 }
             }
             Some(BudgetCmd::Usage { period }) => {
@@ -1349,7 +1349,7 @@ fn run(cli: Cli) -> Result<()> {
                     ok_exit(&v);
                 }
                 for u in &v.usage {
-                    println!("{}\t{}\t{}\t{}\t{}", usd(u.quantity), u.state, u.kind, u.model.as_deref().unwrap_or(""), u.source_ref);
+                    println!("{}\t{}\t{}\t{}\t{}", usd(u.quantity), u.state.as_str(), u.kind, u.model.as_deref().unwrap_or(""), u.source_ref);
                 }
             }
             Some(BudgetCmd::TopUp { who, usd: dollars }) => {
@@ -1390,7 +1390,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             for r in &v.runs {
                 let cost = r.cost_micros.map(usd).unwrap_or_default();
-                println!("#{}\t{}\t{}\t{}\tattempt {}\t{cost}", r.id, r.via, r.op, r.status.as_str(), r.attempt);
+                println!("#{}\t{}\t{}\t{}\tattempt {}\t{cost}", r.id, r.via.as_str(), r.op, r.status.as_str(), r.attempt);
                 if let Some(e) = &r.error {
                     println!("  {}", e.chars().take(120).collect::<String>());
                 }

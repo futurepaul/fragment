@@ -363,7 +363,7 @@ async fn budget_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
             if who.kind != IdentityKind::Agent {
                 return Err(CellError::new(ErrorCode::Forbidden, "only an agent asks for its owner's model key"));
             }
-            json_answer(&ledger::ask(env, &billing_org(&who)?, Method::Post, "/key", None).await?)
+            json_answer(&ledger::ask(env, &billing_org(&who)?, &ledger::Key {}).await?)
         }
         (Method::Post, [id, "top-up"]) => {
             if !cfg.is_operator(who.key.as_deref(), &who.id)? {

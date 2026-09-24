@@ -642,7 +642,7 @@ impl Agent {
     /// turn (or steers the running one); the agent's own, and a record heard
     /// before, are acknowledged and ignored.
     fn inbox(&self, token: &str, delivery: Delivery) -> Answer<Value> {
-        let Delivery::Record { fragment: sent_from, channel: sent_on, record } = delivery;
+        let Delivery { kind: _, fragment: sent_from, channel: sent_on, record } = delivery;
         let sql = self.sql();
         let rows: Vec<Value> = sql.exec("SELECT fragment, channel FROM listens WHERE token = ?", vec![token.into()])?.to_array()?;
         let Some(listen) = rows.first() else {
@@ -664,9 +664,14 @@ impl Agent {
         if fresh.is_empty() {
             return Ok(json!({ "ignored": "heard" }));
         }
-        let said = match record.body["text"].as_str() {
-            Some(t) => t.to_string(),
-            None => record.body.to_string(),
+        // a chat's record says `{text}`; any other body is heard as its JSON
+        #[derive(Deserialize)]
+        struct Said {
+            text: String,
+        }
+        let said = match serde_json::from_str::<Said>(record.body.get()) {
+            Ok(s) => s.text,
+            Err(_) => record.body.get().to_string(),
         };
         let who: String = record.principal.chars().take(12).collect();
         let mut text = format!("[{fragment} · {who}] {said}");
@@ -778,13 +783,16 @@ impl Agent {
             serde_json::from_slice(bytes).map_err(|e| Fail::invalid(format!("body: {e}")))
         };
         let computer_token = req.headers().get(COMPUTER_TOKEN_HEADER)?.unwrap_or_default();
-        let body = parse(&req.bytes().await?)?;
-        let from = |v: Value| -> Answer<Value> { Ok(v) };
+        let bytes = req.bytes().await?;
         if let Some(token) = action.strip_prefix("inbox/") {
-            // decoded whole at the door: a delivery without its record's seq is refused, never keyed `…/null`
-            let delivery: Delivery = serde_json::from_value(body).map_err(|e| Fail::invalid(format!("delivery: {e}")))?;
+            // decoded whole at the door, from its text (a record's body is
+            // raw JSON, which decodes from text only): a delivery without its
+            // record's seq is refused, never keyed `…/null`
+            let delivery: Delivery = serde_json::from_slice(&bytes).map_err(|e| Fail::invalid(format!("delivery: {e}")))?;
             return Ok(Response::from_json(&self.inbox(token, delivery)?)?);
         }
+        let body = parse(&bytes)?;
+        let from = |v: Value| -> Answer<Value> { Ok(v) };
         match action.as_str() {
             "computer/poll" => return Ok(Response::from_json(&self.computer_poll(&computer_token).await?)?),
             "computer/answer" => return Ok(Response::from_json(&self.computer_answer(&computer_token, body)?)?),

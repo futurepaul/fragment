@@ -175,7 +175,7 @@ mod tests {
     /// The JSON the browser library reads: the field names are the contract.
     #[test]
     fn the_fragment_sends_these_frames() {
-        let record = ChannelRecord { channel: "chat".into(), seq: 3, at: 9, principal: "platform".into(), kind: "said".into(), body: json!({ "text": "hi" }) };
+        let record = ChannelRecord { channel: "chat".into(), seq: 3, at: 9, principal: "platform".into(), kind: "said".into(), body: serde_json::value::to_raw_value(&json!({ "text": "hi" })).unwrap() };
         let frames = [
             (LiveOut::Hello { id: "ab".into(), principal: "anon:x".into(), role: Role::Public }, json!({ "type": "hello", "id": "ab", "principal": "anon:x", "role": "public" })),
             (
