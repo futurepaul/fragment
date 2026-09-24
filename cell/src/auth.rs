@@ -45,6 +45,8 @@ const LINK_PROOF_MAX: usize = 4096;
 /// that form encoding may triple.
 const APPROVE_FORM_MAX_BYTES: usize = 16 * 1024;
 const _: () = assert!(APPROVE_FORM_MAX_BYTES >= 3 * LINK_PROOF_MAX + 256, "the form holds the longest proof, encoded");
+/// The new-fragment form: a label and a template's name.
+const NEW_FORM_MAX_BYTES: usize = 4 * 1024;
 
 /// The key an approval link's proof is by, if it is good: a NIP-98 event
 /// by that key for `POST <platform>/cli/approve`, made within ten minutes.
@@ -331,7 +333,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
             (Method::Post, ["auth", "new"]) => {
                 same_origin(&req, &platform)?;
                 let Some((_, who)) = platform_session(&req, env).await? else { return to_login(&platform, "/") };
-                let bytes = req.bytes().await?;
+                let bytes = crate::read_body(&mut req, NEW_FORM_MAX_BYTES).await?;
                 let field = |name: &str| url::form_urlencoded::parse(&bytes).find(|(k, _)| k == name).map(|(_, v)| v.trim().to_string()).unwrap_or_default();
                 let create = fragment_proto::CreateFragment { name: field("label"), visibility: None, template: Some(field("template")) };
                 let v: serde_json::Value = match crate::create_fragment(env, cfg, url, create, who).await {
