@@ -238,7 +238,9 @@ pub fn effects(s: &mut Suite, api: &Api) -> Result<()> {
     let r = call("note", "n3", json!({ "slug": "three", "text": "three" }))?;
     s.ok("a commit that keeps failing answers a passing failure", r.status == 502 && r.error() == "upstream_failed", &r);
     s.ok("an unrelated call answers meanwhile", notes() == 4, notes());
-    let landed = s.eventually(Duration::from_secs(45), || note(s, "three").is_some());
+    // The file is on main as soon as the commit lands; the `ops` record
+    // follows once the cell has moved its pin.
+    let landed = s.eventually(Duration::from_secs(45), || note(s, "three").is_some() && applied("n3") > 0);
     s.ok("the alarm applies it on a later try", landed && note(s, "three").as_deref() == Some(&b"three"[..]), "");
     s.ok("its record is published once, and it is applied once", slugs("three") == 1 && applied("n3") == 1, json!(channel("feed")));
     let packs = s.fake.commit_pack_count();
