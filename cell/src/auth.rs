@@ -183,15 +183,14 @@ fn same_origin(req: &Request, platform: &str) -> CellResult<()> {
 async fn budget_line(env: &Env, id: &str) -> String {
     use fragment_core::budget::dollars;
     let Some(org) = crate::ledger::org_of(id) else { return String::new() };
-    match crate::ledger::ask(env, &org, Method::Get, "/status", None).await {
-        Ok(v) => {
-            let (allowance, used) = (v["allowanceMicros"].as_i64().unwrap_or(0), v["spentMicros"].as_i64().unwrap_or(0) + v["reservedMicros"].as_i64().unwrap_or(0));
-            let warn = if v["warn"] == true { " <b>Most of it is used.</b>" } else { "" };
+    match crate::ledger::ask(env, &org, &crate::ledger::Status {}).await {
+        Ok(month) => {
+            let warn = if month.warn { " <b>Most of it is used.</b>" } else { "" };
             format!(
                 "<p>AI this month ({}): <b>{}</b> of {} left.{warn}</p>",
-                esc(v["period"].as_str().unwrap_or("")),
-                dollars((allowance - used).max(0)),
-                dollars(allowance)
+                esc(&month.period),
+                dollars(month.remaining_micros.max(0)),
+                dollars(month.allowance_micros)
             )
         }
         Err(_) => String::new(),

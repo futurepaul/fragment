@@ -29,7 +29,7 @@ use worker::*;
 
 use crate::cs::FetchError;
 use crate::error::CellError;
-use crate::ledger;
+use crate::ledger::{self, ReleaseAnswer, Reserved, VideoSettlement};
 use crate::files::FileWrite;
 use crate::fragment::FragmentCell;
 use crate::jobs::{permanent, RunRow, StepFail};
@@ -116,8 +116,7 @@ impl FragmentCell {
         let owner = self.must("owner").map_err(|e| StepFail::Retry(e.message))?;
         let org = ledger::org_of(&owner).ok_or_else(|| permanent("the fragment's owner has no billing org"))?;
         let Some(amount) = budget::reservation(step) else {
-            let v = ledger::ask(&self.env, &org, Method::Post, "/key", Some(&json!({}))).await.map_err(ledger_fail)?;
-            let key = v["key"].as_str().ok_or_else(|| StepFail::Retry("the ledger answered no key".into()))?.to_string();
+            let key = ledger::ask(&self.env, &org, &ledger::Key {}).await.map_err(ledger_fail)?.key;
             return Ok(Paying::Payer(Payer::Org { org, key, reference: None }));
         };
         let reference = self.step_ref(run, index)?;
@@ -127,16 +126,20 @@ impl FragmentCell {
             .map_err(|e| StepFail::Retry(e.message))?
             .first()
             .map(|_| principal.clone());
-        let body = json!({
-            "ref": reference, "kind": step.kind(), "model": model_of(step), "amount": amount, "fragment": self.name().map_err(|e| StepFail::Retry(e.message))?,
-            "run": run.id, "principal": principal, "agent": agent,
-        });
-        let v = ledger::ask(&self.env, &org, Method::Post, "/reserve", Some(&body)).await.map_err(ledger_fail)?;
-        if v["replay"] == true {
-            return Ok(Paying::Replay(v["result"].clone()));
+        let reserve = ledger::Reserve {
+            reference: reference.clone(),
+            kind: step.kind().to_string(),
+            model: model_of(step).map(str::to_string),
+            amount,
+            fragment: self.name().map_err(|e| StepFail::Retry(e.message))?,
+            run: run.id,
+            principal,
+            agent,
+        };
+        match ledger::ask(&self.env, &org, &reserve).await.map_err(ledger_fail)? {
+            Reserved::Replay { result } => Ok(Paying::Replay(result)),
+            Reserved::Held { key } => Ok(Paying::Payer(Payer::Org { org, key, reference: Some(reference) })),
         }
-        let key = v["key"].as_str().ok_or_else(|| StepFail::Retry("the ledger answered no key".into()))?.to_string();
-        Ok(Paying::Payer(Payer::Org { org, key, reference: Some(reference) }))
     }
 
     /// A paid step's answer: settled to its cost (a video's comes with its
@@ -151,17 +154,17 @@ impl FragmentCell {
         if video.is_none() && cost.is_none() {
             self.event("ai.cost-missing", &format!("{reference}: OpenRouter reported no cost; the step is charged its reservation"), json!({ "ref": reference }));
         }
-        let body = json!({ "ref": reference, "cost": cost, "result": result, "video": video });
+        let settle = ledger::Settle { reference: reference.clone(), cost, result: result.clone(), video: video.map(str::to_string) };
         let mut tries = 0;
-        let answer = loop {
-            match ledger::ask(&self.env, org, Method::Post, "/settle", Some(&body)).await {
-                Ok(v) => break v,
+        let settlement = loop {
+            match ledger::ask(&self.env, org, &settle).await {
+                Ok(s) => break s,
                 Err(e) if tries < 2 && e.code != ErrorCode::NotFound => tries += 1,
                 Err(e) => return Err(StepFail::Retry(format!("settling the step's cost: {}", e.message))),
             }
         };
         // what the ledger charged (nothing yet for a video waiting on its cost)
-        let charged = answer["cost"].as_i64().unwrap_or(0);
+        let charged = settlement.charged();
         let _ = self.exec(
             "INSERT INTO spend (ref, run, micros, at, video) VALUES (?, ?, ?, ?, ?)
              ON CONFLICT (ref) DO UPDATE SET micros = excluded.micros, video = excluded.video",
@@ -179,7 +182,7 @@ impl FragmentCell {
     /// A reservation a failed step no longer needs.
     async fn release(&self, payer: &Payer) {
         if let Payer::Org { org, reference: Some(reference), .. } = payer {
-            let _ = ledger::ask(&self.env, org, Method::Post, "/release", Some(&json!({ "ref": reference }))).await;
+            let _ = ledger::ask(&self.env, org, &ledger::Release { reference: reference.clone() }).await;
         }
     }
 
@@ -200,12 +203,12 @@ impl FragmentCell {
         let Some(org) = self.must("owner").ok().and_then(|o| ledger::org_of(&o)) else { return };
         for row in rows {
             let reference = row["ref"].as_str().expect("spend.ref is TEXT");
-            let Ok(answer) = ledger::ask(&self.env, &org, Method::Post, "/release", Some(&json!({ "ref": reference }))).await else { continue };
-            let _ = match answer["cost"].as_i64() {
-                Some(cost) => self.exec("UPDATE spend SET micros = ?, video = NULL WHERE ref = ?", vec![SqlStorageValue::Integer(cost), reference.into()]),
-                None => self.exec("DELETE FROM spend WHERE ref = ?", vec![reference.into()]),
+            let Ok(released) = ledger::ask(&self.env, &org, &ledger::Release { reference: reference.to_string() }).await else { continue };
+            let _ = match released {
+                ReleaseAnswer::Settled { cost } => self.exec("UPDATE spend SET micros = ?, video = NULL WHERE ref = ?", vec![SqlStorageValue::Integer(cost), reference.into()]),
+                ReleaseAnswer::Released | ReleaseAnswer::Gone => self.exec("DELETE FROM spend WHERE ref = ?", vec![reference.into()]),
             };
-            if answer["released"] == true {
+            if matches!(released, ReleaseAnswer::Released) {
                 self.event("ai.video-released", &format!("{reference}: its run was held before the video's cost came; the reservation goes back"), json!({ "ref": reference }));
             }
         }
@@ -293,9 +296,12 @@ impl FragmentCell {
             ),
             (VideoEnd::Completed, Some(_)) => {}
         }
-        let v = ledger::ask(&self.env, org, Method::Post, "/settle-video", Some(&json!({ "video": id, "cost": cost }))).await.map_err(ledger_fail)?;
-        if let Some(charged) = v["cost"].as_i64() {
-            let _ = self.exec("UPDATE spend SET micros = ?, video = NULL WHERE video = ?", vec![SqlStorageValue::Integer(charged), id.into()]);
+        match ledger::ask(&self.env, org, &ledger::SettleVideo { video: id.to_string(), cost }).await.map_err(ledger_fail)? {
+            VideoSettlement::Now { cost: charged } | VideoSettlement::Before { cost: charged } => {
+                let _ = self.exec("UPDATE spend SET micros = ?, video = NULL WHERE video = ?", vec![SqlStorageValue::Integer(charged), id.into()]);
+            }
+            // its reservation went back when its run was held
+            VideoSettlement::NoReservation => {}
         }
         Ok(())
     }
