@@ -142,6 +142,13 @@ a computer's wake/exec.
     Visibility keeps fragment's own link: `link` means anyone holding the
     unguessable link is a viewer; `public` means anyone, no link needed.
 
+### 16. Usernames, and fragments under them (Paul, 2026-09-24)
+
+A person chooses a username once (with a profile picture). A fragment's
+name is `<label>.<username>`, served at `<label>.<username>.<suffix>`
+with a certificate per host from Fly (custom domains can follow). The
+fragments made before this were not migrated (a hard cut).
+
 ## Truth map (every change is checked against this)
 
 | Thing | Source of truth | Derived/copies must be |
@@ -310,6 +317,12 @@ deployment.
   steps); an agent uses the todo fragment only through its operations.
 
 ### 6. The desktop
+- **Reframed 2026-09-24 (Paul): `docs/phase-6.md` is the plan.** Fragment
+  is the core product and the desktop is a template anyone deploys with a
+  click; people get usernames and fragments live at
+  `<label>.<username>.fragment.club` (decision 16); the phase also brings
+  back chatting with goose, the agent making apps, and computer
+  screenshots.
 - The person's home fragment, laid out as the Desktop UI session designed
   it (`finite-next-worktrees/desktop-ui`, branch `claude/desktop-ui`):
   a collapsible sidebar of chats and apps, the chat in the middle, and a
