@@ -347,15 +347,15 @@ async fn budget_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     let who = signer(env, &req, url, &body).await?;
     match (req.method(), rest) {
-        (Method::Get, []) => json_answer(&ledger::ask(env, &billing_org(&who)?, Method::Get, "/status", None).await?),
+        (Method::Get, []) => json_answer(&ledger::ask(env, &billing_org(&who)?, &ledger::Status {}).await?),
         (Method::Get, ["usage"]) => {
             let period = url.query_pairs().find(|(k, _)| k == "period").map(|(_, v)| v.into_owned());
-            let path = match period {
-                Some(p) if p.len() == 7 && p.as_bytes()[4] == b'-' && p.bytes().enumerate().all(|(i, b)| i == 4 || b.is_ascii_digit()) => format!("/usage?period={p}"),
+            let period = match period {
+                Some(p) if p.len() == 7 && p.as_bytes()[4] == b'-' && p.bytes().enumerate().all(|(i, b)| i == 4 || b.is_ascii_digit()) => Some(p),
                 Some(_) => return Err(CellError::invalid("period is YYYY-MM")),
-                None => "/usage".to_string(),
+                None => None,
             };
-            json_answer(&ledger::ask(env, &billing_org(&who)?, Method::Get, &path, None).await?)
+            json_answer(&ledger::ask(env, &billing_org(&who)?, &ledger::Usage { period }).await?)
         }
         // an agent's turns spend its owner's month: their org's OpenRouter
         // key, whose limit is the allowance (OpenRouter stops it there)
@@ -374,7 +374,7 @@ async fn budget_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
             let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let usd = v["usd"].as_f64().filter(|u| u.is_finite() && *u > 0.0).ok_or_else(|| CellError::invalid("usd is a positive number of dollars"))?;
             let micros = fragment_core::budget::micros(usd);
-            json_answer(&ledger::ask(env, &org, Method::Post, "/top-up", Some(&json!({ "micros": micros, "by": who.id }))).await?)
+            json_answer(&ledger::ask(env, &org, &ledger::TopUp { micros, by: who.id.clone() }).await?)
         }
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
     }
@@ -586,7 +586,8 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let org = v["identity"].as_str().and_then(ledger::org_of).ok_or_else(|| CellError::invalid("name an identity"))?;
-            json_answer(&ledger::ask(env, &org, Method::Post, "/test", Some(&json!({ "offsetMs": v["offsetMs"] }))).await?)
+            let offset_ms = v["offsetMs"].as_i64().ok_or_else(|| CellError::invalid("offsetMs"))?;
+            json_answer(&ledger::ask(env, &org, &ledger::SetClock { offset_ms }).await?)
         }
         (Method::Get, ["api", "users", rest @ ..]) => {
             let rest = rest.to_vec();
