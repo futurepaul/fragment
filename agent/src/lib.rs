@@ -151,18 +151,18 @@ async fn forward_with(env: &Env, name: &str, action: &str, method: Method, heade
     Ok(stub.fetch_with_request(inner).await?)
 }
 
-/// A request body of at most `BODY_MAX` bytes, read as it arrives: a
-/// declared length over it is refused unread, and a body without one
-/// (chunked) at the chunk that crosses it, before anyone is authenticated.
-async fn read_body(req: &mut Request) -> Answer<Vec<u8>> {
-    let too_large = |_: TooLarge| Fail::new(ErrorCode::TooLarge, format!("a request body is at most {BODY_MAX} bytes"));
+/// A request body of at most `max` bytes, read as it arrives: a declared
+/// length over it is refused unread, and a body without one (chunked) at
+/// the chunk that crosses it, before anyone is authenticated.
+async fn read_body(req: &mut Request, max: usize) -> Answer<Vec<u8>> {
+    let too_large = |_: TooLarge| Fail::new(ErrorCode::TooLarge, format!("a request body is at most {max} bytes"));
     let declared: Option<usize> = req.headers().get("content-length")?.and_then(|l| l.parse().ok());
-    let mut body = LimitedBody::new(BODY_MAX, declared).map_err(too_large)?;
+    let mut body = LimitedBody::new(max, declared).map_err(too_large)?;
     if req.inner().body().is_none() {
         return Ok(body.finish());
     }
     let mut stream = req.stream()?;
-    // bounded: LimitedBody refuses the chunk that would cross BODY_MAX, and the read stops
+    // bounded: LimitedBody refuses the chunk that would cross `max`, and the read stops
     while let Some(chunk) = stream.try_next().await? {
         body.push(&chunk).map_err(too_large)?;
     }
@@ -182,7 +182,7 @@ async fn route(mut req: Request, env: &Env) -> Answer<Response> {
             return Err(Fail::new(ErrorCode::NotFound, "no such inbox"));
         }
         let (name, action) = (name.to_string(), format!("inbox/{token}"));
-        let body = read_body(&mut req).await?;
+        let body = read_body(&mut req, BODY_MAX).await?;
         return forward(env, &name, &action, Method::Post, None, body).await;
     }
     // a computer that connects out: its connect token is the capability
@@ -191,10 +191,7 @@ async fn route(mut req: Request, env: &Env) -> Answer<Response> {
             return Err(Fail::new(ErrorCode::NotFound, "no such agent"));
         }
         let token = req.headers().get(COMPUTER_TOKEN_HEADER)?.unwrap_or_default();
-        let body = req.bytes().await?;
-        if body.len() > ANSWER_BODY_MAX {
-            return Err(Fail::new(ErrorCode::TooLarge, format!("a computer's answer is at most {ANSWER_BODY_MAX} bytes")));
-        }
+        let body = read_body(&mut req, ANSWER_BODY_MAX).await?;
         return forward_with(env, name, &format!("computer/{op}"), Method::Post, Some((COMPUTER_TOKEN_HEADER, &token)), body).await;
     }
     // the platform's router, the only way in, names who is calling
@@ -205,7 +202,7 @@ async fn route(mut req: Request, env: &Env) -> Answer<Response> {
         (_, ["api", "a", name, action]) => (Some(name.to_string()), action.to_string()),
         _ => return Err(Fail::new(ErrorCode::NotFound, format!("no route {} {path}", req.method().as_ref()))),
     };
-    let body = read_body(&mut req).await?;
+    let body = read_body(&mut req, BODY_MAX).await?;
     let name = match name {
         Some(n) => n,
         None => serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["name"].as_str().map(str::to_string)).unwrap_or_default(),
