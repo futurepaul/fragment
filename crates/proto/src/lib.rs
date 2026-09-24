@@ -5,6 +5,7 @@
 //! wasm32, so it holds data and pure functions only.
 
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use serde_json::Value;
 
 /// Limits every side enforces the same way (docs/MODEL.md, Limits).
@@ -711,7 +712,7 @@ pub struct ChannelDecl {
 
 /// One record in a channel. Records are appended by the platform (`events`,
 /// `ops`) or by mutations' effects (app channels), never by clients.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelRecord {
     pub channel: String,
     pub seq: i64,
@@ -719,7 +720,9 @@ pub struct ChannelRecord {
     /// npub, `anon:…`, or `platform`
     pub principal: String,
     pub kind: String,
-    pub body: Value,
+    /// The JSON text the cell stored, passed through as it is: the cell
+    /// neither parses a body it just wrote nor one it reads back.
+    pub body: Box<RawValue>,
 }
 
 /// Channel names: `^[a-z][a-z0-9_-]{0,63}$`.
@@ -1002,6 +1005,23 @@ mod tests {
         for name in ["constructor", "fetch", "alarm"] {
             assert!(valid_op_name(name) && RESERVED_OP_NAMES.contains(&name), "{name}");
         }
+    }
+
+    #[test]
+    fn a_record_body_passes_through_as_stored() {
+        // keys out of order and a float's spelling: a parsed body would sort
+        // the keys and could respell the number; the stored text is kept
+        let stored = r#"{"z":1,"a":[1.50,"x"]}"#;
+        let record = ChannelRecord {
+            channel: "room".into(),
+            seq: 7,
+            at: 1,
+            principal: "platform".into(),
+            kind: "said".into(),
+            body: RawValue::from_string(stored.into()).unwrap(),
+        };
+        let text = serde_json::to_string(&record).unwrap();
+        assert_eq!(text, format!(r#"{{"channel":"room","seq":7,"at":1,"principal":"platform","kind":"said","body":{stored}}}"#));
     }
 
     #[test]

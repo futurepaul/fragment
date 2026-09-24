@@ -7,4 +7,5 @@ description = "Wire types shared by the fragment cell, the CLI, and the e2e."
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# raw_value: a channel record's body passes through as the text the cell stored.
+serde_json = { version = "1", features = ["raw_value"] }
