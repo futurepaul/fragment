@@ -13,6 +13,7 @@
 use std::collections::BTreeMap;
 
 use fragment_core::codestorage::{commit_pack, FileChange};
+use fragment_core::effects::FileContent;
 use fragment_core::{blob, npub};
 use fragment_proto::{limits, valid_repo_path, ErrorCode};
 use serde_json::{json, Value};
@@ -58,21 +59,15 @@ pub(crate) fn author(principal: &str) -> (String, String) {
     (name, email)
 }
 
-/// Bytes as a step or capability answer: text when it is UTF-8.
+/// Bytes as a step's answer: `{text}` when they are UTF-8, `{base64}` otherwise.
 pub(crate) fn content_json(bytes: Vec<u8>) -> Value {
-    match String::from_utf8(bytes) {
-        Ok(text) => json!({ "text": text }),
-        Err(e) => {
-            use base64::Engine;
-            json!({ "base64": base64::engine::general_purpose::STANDARD.encode(e.into_bytes()) })
-        }
-    }
+    serde_json::to_value(FileContent::of(bytes)).expect("file content serializes")
 }
 
 /// Bytes from `{text}` or `{base64}` (a job step's write).
 pub(crate) fn content_of(v: &Value) -> Result<Vec<u8>, String> {
     let obj = v.as_object().ok_or("a file's content is text or base64")?;
-    fragment_core::effects::file_content(obj)?.ok_or_else(|| "a file's content is text or base64".into())
+    FileContent::from_fields(obj)?.ok_or("a file's content is text or base64")?.into_bytes()
 }
 
 impl FragmentCell {

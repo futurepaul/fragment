@@ -7,13 +7,54 @@
 
 use std::collections::BTreeMap;
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use fragment_proto::{limits, valid_repo_path, ChannelDecl, BUILTIN_CHANNELS};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::{blob, webpush};
 
 /// A push's `who`: the tag a page subscribed with.
 pub const PUSH_WHO_MAX_CHARS: usize = 64;
+
+/// A file's content as an effect, a job step, or a read carries it:
+/// `{"text": …}` when it is UTF-8, `{"base64": …}` otherwise.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileContent {
+    Text(String),
+    Base64(String),
+}
+
+impl FileContent {
+    /// Bytes as they travel: text when they are UTF-8.
+    pub fn of(bytes: Vec<u8>) -> FileContent {
+        match String::from_utf8(bytes) {
+            Ok(text) => FileContent::Text(text),
+            Err(e) => FileContent::Base64(STANDARD.encode(e.into_bytes())),
+        }
+    }
+
+    /// The content an object's `text` or `base64` names; `None` when it
+    /// names neither (an effect's removal). Both, or either not a string,
+    /// is refused.
+    pub fn from_fields(obj: &Map<String, Value>) -> Result<Option<FileContent>, String> {
+        match (obj.get("text"), obj.get("base64")) {
+            (None, None) => Ok(None),
+            (Some(Value::String(t)), None) => Ok(Some(FileContent::Text(t.clone()))),
+            (None, Some(Value::String(b))) => Ok(Some(FileContent::Base64(b.clone()))),
+            _ => Err("a file's content is text or base64".into()),
+        }
+    }
+
+    pub fn into_bytes(self) -> Result<Vec<u8>, String> {
+        match self {
+            FileContent::Text(t) => Ok(t.into_bytes()),
+            FileContent::Base64(b) => STANDARD.decode(b).map_err(|e| format!("base64: {e}")),
+        }
+    }
+}
 
 /// One thing a committed mutation asked for.
 #[derive(Debug, Clone, PartialEq)]
@@ -55,18 +96,6 @@ pub fn check_record(channel: &str, kind: &str, body: &Value, declared: &BTreeMap
     Ok(())
 }
 
-/// A file's bytes from `{text}` or `{base64}`; `None` when it names neither
-/// (a removal).
-pub fn file_content(obj: &Map<String, Value>) -> Result<Option<Vec<u8>>, String> {
-    use base64::Engine;
-    match (obj.get("text"), obj.get("base64")) {
-        (None, None) => Ok(None),
-        (Some(Value::String(t)), None) => Ok(Some(t.as_bytes().to_vec())),
-        (None, Some(Value::String(b))) => base64::engine::general_purpose::STANDARD.decode(b).map(Some).map_err(|e| format!("base64: {e}")),
-        _ => Err("a file's content is text or base64".into()),
-    }
-}
-
 fn string<'a>(obj: &'a Map<String, Value>, key: &str) -> Result<&'a str, String> {
     match obj.get(key) {
         Some(Value::String(s)) => Ok(s),
@@ -96,7 +125,7 @@ fn decode_one(v: &Value, declared: &BTreeMap<String, ChannelDecl>) -> Result<Eff
         if !valid_repo_path(path) {
             return Err(format!("{path:?} is not a file path (relative, no . or .. segments, at most {} bytes)", limits::PATH_MAX_BYTES));
         }
-        let bytes = file_content(obj)?;
+        let bytes = FileContent::from_fields(obj)?.map(FileContent::into_bytes).transpose()?;
         if bytes.as_deref().is_some_and(|b| blob::parse(b).is_some()) {
             return Err(format!("{path}: an app does not write blob pointers"));
         }
@@ -226,6 +255,21 @@ mod tests {
         assert!(refusal(json!([{ "file": "a", "text": "x", "base64": "eA==" }])).contains("text or base64"));
         assert!(refusal(json!([{ "file": "a", "base64": "not base64!" }])).contains("base64"));
         assert!(refusal(json!([{ "file": "a", "text": 7 }])).contains("text or base64"));
+    }
+
+    #[test]
+    fn file_content_travels_as_text_or_base64() {
+        assert_eq!(serde_json::to_value(FileContent::of(b"# A\n".to_vec())).unwrap(), json!({ "text": "# A\n" }));
+        let bin = vec![0u8, 159, 146, 150];
+        assert_eq!(serde_json::to_value(FileContent::of(bin.clone())).unwrap(), json!({ "base64": "AJ+Slg==" }));
+        let back: FileContent = serde_json::from_value(json!({ "base64": "AJ+Slg==" })).unwrap();
+        assert_eq!(back.into_bytes().unwrap(), bin);
+        let fields = |v: Value| FileContent::from_fields(v.as_object().unwrap());
+        assert_eq!(fields(json!({ "file": "a" })).unwrap(), None);
+        assert_eq!(fields(json!({ "text": "x" })).unwrap(), Some(FileContent::Text("x".into())));
+        assert!(fields(json!({ "text": "x", "base64": "eA==" })).is_err());
+        assert!(fields(json!({ "base64": 7 })).is_err());
+        assert!(FileContent::Base64("not base64!".into()).into_bytes().is_err());
     }
 
     #[test]
