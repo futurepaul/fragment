@@ -123,6 +123,48 @@ fn ids(body: &Value) -> CellResult<(i64, i64)> {
     }
 }
 
+/// Paused operations were a JSON array in meta (`paused`), and each
+/// operation's breaker a meta key (`breaker_since:<op>`); both move into
+/// their tables once, in place. A `paused` that does not parse pauses every
+/// operation a trigger names (it fails closed), and a breaker that does not
+/// parse counts every held run in the window. Answers the operations paused
+/// that way, for the caller's event.
+pub(crate) fn migrate_trigger_state(sql: &SqlStorage, now: i64) -> Vec<String> {
+    let rows = |q: &str| -> Vec<Value> { sql.exec(q, None).and_then(|c| c.to_array()).expect("the trigger state migration reads meta") };
+    let exec = |q: &str, binds: Vec<SqlStorageValue>| {
+        sql.exec(q, binds).expect("the trigger state migration writes");
+    };
+    let mut failed_closed = vec![];
+    if let Some(stored) = rows("SELECT value FROM meta WHERE key = 'paused'").first().and_then(|r| r["value"].as_str().map(str::to_string)) {
+        let ops = match serde_json::from_str::<Vec<String>>(&stored) {
+            Ok(ops) => ops,
+            Err(_) => {
+                let triggers = rows("SELECT triggers FROM code WHERE id = 1");
+                let declared: Vec<TriggerDecl> = triggers.first().and_then(|r| r["triggers"].as_str()).and_then(|t| serde_json::from_str(t).ok()).unwrap_or_default();
+                failed_closed = declared.into_iter().map(|t| t.run).collect();
+                failed_closed.sort();
+                failed_closed.dedup();
+                failed_closed.clone()
+            }
+        };
+        for op in ops {
+            exec("INSERT INTO paused_ops (op, by, at) VALUES (?, 'migrated', ?) ON CONFLICT (op) DO NOTHING", vec![op.into(), SqlStorageValue::Integer(now)]);
+        }
+        exec("DELETE FROM meta WHERE key = 'paused'", vec![]);
+    }
+    for row in rows("SELECT key, value FROM meta WHERE key LIKE 'breaker_since:%'") {
+        let key = row["key"].as_str().expect("meta.key is TEXT");
+        let reset_at: i64 = row["value"].as_str().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let op = key.trim_start_matches("breaker_since:");
+        exec(
+            "INSERT INTO op_breakers (op, reset_at) VALUES (?, ?) ON CONFLICT (op) DO NOTHING",
+            vec![op.into(), SqlStorageValue::Integer(reset_at)],
+        );
+        exec("DELETE FROM meta WHERE key = ?", vec![key.into()]);
+    }
+    failed_closed
+}
+
 impl FragmentCell {
     /// The fragment's own key: who triggered runs act as.
     fn own_key(&self) -> CellResult<String> {
@@ -135,29 +177,44 @@ impl FragmentCell {
         Ok(rows.first().and_then(|r| r["triggers"].as_str()).and_then(|t| serde_json::from_str(t).ok()).unwrap_or_default())
     }
 
+    /// The operations whose triggers are paused, in the order they were.
     pub(crate) fn paused_ops(&self) -> CellResult<Vec<String>> {
-        Ok(self.meta("paused")?.and_then(|p| serde_json::from_str(&p).ok()).unwrap_or_default())
+        let rows = self.rows("SELECT op FROM paused_ops ORDER BY at, op", vec![])?;
+        Ok(rows.iter().map(|r| r["op"].as_str().expect("paused_ops.op is TEXT").to_string()).collect())
     }
 
     fn is_paused(&self, op: &str) -> CellResult<bool> {
-        Ok(self.paused_ops()?.iter().any(|p| p == op))
+        Ok(!self.rows("SELECT op FROM paused_ops WHERE op = ?", vec![op.into()])?.is_empty())
+    }
+
+    /// Where an operation's auto-pause count starts: held runs finished
+    /// before its last unpause do not count.
+    fn breaker_reset_at(&self, op: &str) -> CellResult<i64> {
+        let rows = self.rows("SELECT reset_at FROM op_breakers WHERE op = ?", vec![op.into()])?;
+        Ok(rows.first().map_or(0, |r| r["reset_at"].as_i64().expect("op_breakers.reset_at is INTEGER")))
     }
 
     /// Pauses or unpauses an operation's triggers; `by` is an npub or `auto`.
+    /// Answers whether that changed anything.
     fn set_paused(&self, op: &str, paused: bool, by: &str, why: &str) -> CellResult<bool> {
-        let mut ops = self.paused_ops()?;
-        if ops.iter().any(|p| p == op) == paused {
+        let now = SqlStorageValue::Integer(js::now_ms());
+        let changed = if paused {
+            self.rows("INSERT INTO paused_ops (op, by, at) VALUES (?, ?, ?) ON CONFLICT (op) DO NOTHING RETURNING op", vec![op.into(), by.into(), now])?
+        } else {
+            let gone = self.rows("DELETE FROM paused_ops WHERE op = ? RETURNING op", vec![op.into()])?;
+            if !gone.is_empty() {
+                // held runs from before the unpause no longer count toward the next auto-pause
+                self.exec(
+                    "INSERT INTO op_breakers (op, reset_at) VALUES (?, ?) ON CONFLICT (op) DO UPDATE SET reset_at = excluded.reset_at",
+                    vec![op.into(), now],
+                )?;
+            }
+            gone
+        };
+        if changed.is_empty() {
             return Ok(false);
         }
-        ops.retain(|p| p != op);
-        if paused {
-            ops.push(op.to_string());
-        }
-        self.set_meta("paused", &serde_json::to_string(&ops).expect("names serialize"))?;
-        if !paused {
-            // held runs from before the unpause no longer count toward the next auto-pause
-            self.set_meta(&format!("breaker_since:{op}"), &js::now_ms().to_string())?;
-        }
+        assert_eq!(self.is_paused(op)?, paused, "the pause of {op} was written");
         let kind = match (paused, by) {
             (true, "auto") => "op.auto-paused",
             (true, _) => "op.paused",
@@ -312,7 +369,7 @@ impl FragmentCell {
             Ok(_) => self.event("run.succeeded", &format!("{op} run #{id}"), json!({ "op": op, "run": id })),
             Err(e) => {
                 self.event("run.held", &format!("{op} run #{id}: {}", clip(&e)), json!({ "op": op, "run": id, "attempt": attempt }));
-                let since: i64 = self.meta(&format!("breaker_since:{op}"))?.and_then(|s| s.parse().ok()).unwrap_or(0);
+                let since = self.breaker_reset_at(op)?;
                 let held = self.count_of(
                     "SELECT COUNT(*) AS n FROM runs WHERE op = ? AND status = 'held' AND finished_at > ?",
                     vec![op.into(), SqlStorageValue::Integer((now - limits::AUTO_PAUSE_WINDOW_MS).max(since))],
@@ -656,8 +713,18 @@ impl FragmentCell {
 
     /// Rebuilds the cron schedules from newly installed triggers. A schedule
     /// that did not change keeps its next time, so a redeploy neither skips
-    /// nor repeats a tick.
+    /// nor repeats a tick. An operation the installed code no longer has
+    /// loses its pause and its breaker (one of that name later starts clean).
     pub(crate) fn sync_schedules(&self, triggers: &[TriggerDecl]) -> CellResult<()> {
+        let declared = self.code_status()?.operations;
+        for table in ["paused_ops", "op_breakers"] {
+            for row in self.rows(&format!("SELECT op FROM {table}"), vec![])? {
+                let op = row["op"].as_str().expect("op is TEXT");
+                if !declared.contains_key(op) {
+                    self.exec(&format!("DELETE FROM {table} WHERE op = ?"), vec![op.into()])?;
+                }
+            }
+        }
         let prior: BTreeMap<(String, String), i64> = self
             .rows("SELECT op, cron, next_at FROM schedules", vec![])?
             .iter()

@@ -105,6 +105,8 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE UNIQUE INDEX IF NOT EXISTS runs_call ON runs (principal, call_id) WHERE call_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS runs_status ON runs (status, op);
 CREATE TABLE IF NOT EXISTS schedules (idx INTEGER PRIMARY KEY, op TEXT NOT NULL, cron TEXT NOT NULL, next_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS paused_ops (op TEXT PRIMARY KEY, by TEXT NOT NULL, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS op_breakers (op TEXT PRIMARY KEY, reset_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS file_commits (key TEXT PRIMARY KEY, sha TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS own_commits (sha TEXT PRIMARY KEY, depth INTEGER NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS blobs (sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL);
@@ -167,9 +169,15 @@ impl DurableObject for FragmentCell {
         // after the migration: a members table from before phase 4 has no
         // owner column until it runs (the index in SCHEMA broke those cells)
         sql.exec("CREATE INDEX IF NOT EXISTS members_owner ON members (owner) WHERE owner IS NOT NULL", None).expect("the members index applies");
+        let paused_by_migration = crate::jobs::migrate_trigger_state(&sql, js::now_ms());
         let cfg = Config::from_env(&env);
         let rate = fragment_core::ratelimit::Rate::new(limits::PUBLIC_CALLS_PER_MIN, limits::PUBLIC_CALLS_PER_MIN_FRAGMENT);
-        FragmentCell { state, raw, env, cfg, plane: futures_util::lock::Mutex::new(()), rate: RefCell::new(rate), swept: Cell::new(false), settling: RefCell::default() }
+        let cell = FragmentCell { state, raw, env, cfg, plane: futures_util::lock::Mutex::new(()), rate: RefCell::new(rate), swept: Cell::new(false), settling: RefCell::default() };
+        if !paused_by_migration.is_empty() {
+            let summary = format!("the stored pause list did not parse; paused every triggered operation: {}", paused_by_migration.join(", "));
+            cell.event("op.paused", &summary, json!({ "ops": paused_by_migration, "by": "migration" }));
+        }
+        cell
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {

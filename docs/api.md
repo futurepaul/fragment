@@ -463,7 +463,10 @@ delivery's `x-fragment-hops` is its depth. Deeper than 16 is `blocked`
 (`cycle.detected`). An operation's triggers pause themselves (`op.
 auto-paused`) after 5 held runs in 10 minutes or 120 triggered runs in
 an hour (blocked runs do not count); while paused, a trigger records a
-`blocked` run and cron skips.
+`blocked` run and cron skips. Held runs from before an unpause do not
+count toward the next auto-pause. A deploy whose code no longer has an
+operation drops its pause (an operation of that name later starts
+unpaused).
 A cron tick whose previous run is still going is skipped. The inbox's
 pending records are its runs that have not succeeded; at 1000 a post is
 429 (`inbox.rejected`). Finished runs are kept 30 days (at most 10 000).

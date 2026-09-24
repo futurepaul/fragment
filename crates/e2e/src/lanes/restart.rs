@@ -47,6 +47,9 @@ pub fn restart(s: &mut Suite, api: Api) -> Result<Api> {
     let r = api.op(&owner, &paid, "summarize", "before", json!({ "text": "before the restart" }))?;
     jobs::settle(&api, &owner, &paid, jobs::started(&r), &["succeeded"], Duration::from_secs(40));
     let spent = api.signed(&owner, "GET", "/api/budget", None)?.body["spentMicros"].clone();
+    // a paused operation: its pause is a row, not a cached list
+    let r = api.signed(&owner, "POST", &format!("/api/f/{paid}/pause"), Some(&json!({ "op": "summarize", "paused": true })))?;
+    anyhow::ensure!(r.status == 200, "pause setup: {r}");
 
     s.stop()?;
     let api = s.start(false, true)?;
@@ -61,6 +64,8 @@ pub fn restart(s: &mut Suite, api: Api) -> Result<Api> {
     s.ok("and a revoked key stays revoked", r.status == 401, &r);
     let r = api.signed(&owner, "GET", "/api/budget", None)?;
     s.ok("after a restart the month's spend is what it was", r.status == 200 && r.body["spentMicros"] == spent && spent.as_i64().unwrap_or(0) > 0, &r);
+    let r = api.signed(&owner, "GET", &format!("/api/f/{paid}/runs?limit=1"), None)?;
+    s.ok("after a restart a paused operation is still paused", r.status == 200 && r.body["paused"] == json!(["summarize"]), &r);
 
     let r = api.op(&owner, &name, "add_todo", "r2", json!({ "text": "before the crash" }))?;
     s.ok("a mutation before the crash", r.status == 200, &r);
