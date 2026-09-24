@@ -304,6 +304,7 @@ dependencies = [
  "base64",
  "hex",
  "k256",
+ "serde",
  "serde_json",
  "sha2",
  "url",

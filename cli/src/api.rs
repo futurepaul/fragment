@@ -104,6 +104,18 @@ impl Replay {
     }
 }
 
+/// What a request's NIP-98 signature binds besides its method and URL.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Signed {
+    /// The body, by its hash (the `payload` tag): the host reads it whole.
+    Body,
+    /// The URL alone: a blob's bytes stream past the router, and its URL
+    /// names their hash, which the fragment checks as they arrive. The
+    /// router holds no body to check a payload tag against, so one would
+    /// be refused.
+    Url,
+}
+
 pub struct Client {
     pub host: String,
     pub id: Identity,
@@ -156,14 +168,14 @@ impl Client {
     fn request(&self, method: &str, path: &str, body: Option<Vec<u8>>) -> Result<Resp> {
         let body = body.unwrap_or_default();
         let timeout = timeout_for(body.len() as u64);
-        self.send(method, path, body, Replay::of(method), timeout)
+        self.send(method, path, body, Replay::of(method), Signed::Body, timeout)
     }
 
     /// One signed request, retried within [`REQUEST_ATTEMPTS`] as `replay`
     /// allows: long-lived sync clients hold keep-alive pools that go stale
     /// when the host restarts, and without retries a watcher wedges until
     /// its process is restarted (observed live on relay-vault).
-    fn send(&self, method: &str, path: &str, body: Vec<u8>, replay: Replay, timeout: Duration) -> Result<Resp> {
+    fn send(&self, method: &str, path: &str, body: Vec<u8>, replay: Replay, signed: Signed, timeout: Duration) -> Result<Resp> {
         let url = format!("{}{}", self.host, path);
         let mut last_err = None;
         // whether any try's connection opened: its request may have landed
@@ -172,7 +184,10 @@ impl Client {
             if attempt > 0 {
                 std::thread::sleep(Duration::from_millis(300 * attempt as u64));
             }
-            let auth = self.id.nip98_header(method, &url, &body);
+            let auth = match signed {
+                Signed::Body => self.id.nip98_header(method, &url, &body),
+                Signed::Url => self.id.nip98_header(method, &url, &[]),
+            };
             let t0 = std::time::Instant::now();
             let mut req = match method {
                 "GET" => self.http.get(&url),
@@ -255,7 +270,7 @@ impl Client {
     pub fn post_json_by_id(&self, path: &str, v: &Value) -> Result<Resp> {
         let body = serde_json::to_vec(v)?;
         let timeout = timeout_for(body.len() as u64);
-        self.send("POST", path, body, Replay::ById, timeout)
+        self.send("POST", path, body, Replay::ById, Signed::Body, timeout)
     }
     pub fn put_json(&self, path: &str, v: &Value) -> Result<Resp> {
         self.request("PUT", path, Some(serde_json::to_vec(v)?))
@@ -264,15 +279,15 @@ impl Client {
         self.request("PUT", path, Some(bytes))
     }
     /// A PUT to a content address (a blob named by its bytes' hash): safe
-    /// to send again whatever became of the first.
+    /// to send again whatever became of the first, and signed over its URL.
     pub fn put_blob(&self, path: &str, bytes: Vec<u8>) -> Result<Resp> {
         let timeout = timeout_for(bytes.len() as u64);
-        self.send("PUT", path, bytes, Replay::Safe, timeout)
+        self.send("PUT", path, bytes, Replay::Safe, Signed::Url, timeout)
     }
     /// A GET whose answer is known to be about `bytes` long (a blob), given
     /// the time that takes.
     pub fn get_sized(&self, path: &str, bytes: u64) -> Result<Resp> {
-        self.send("GET", path, Vec::new(), Replay::Safe, timeout_for(bytes))
+        self.send("GET", path, Vec::new(), Replay::Safe, Signed::Body, timeout_for(bytes))
     }
     pub fn head(&self, path: &str) -> Result<Resp> {
         self.request("HEAD", path, None)

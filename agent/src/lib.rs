@@ -50,7 +50,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 use worker::wasm_bindgen;
-use worker::{durable_object, event, DurableObject, Env, Headers, Method, Request, RequestInit, Response, State, Url};
+use worker::{durable_object, event, DurableObject, Env, Headers, Method, Request, RequestInit, Response, State};
 
 use crate::computer::Computer;
 use crate::fleet::Fleet;
@@ -120,16 +120,6 @@ type Answer<T> = Result<T, Fail>;
 
 // ---------------------------------------------------------------- the router
 
-/// The URL a request arrived on as its client named it (a proxy that ends
-/// TLS forwards plain HTTP and says so in `x-forwarded-proto`).
-fn arrived_url(req: &Request) -> Answer<Url> {
-    let mut url = req.url()?;
-    if url.scheme() == "http" && req.headers().get("x-forwarded-proto")?.as_deref() == Some("https") {
-        url.set_scheme("https").map_err(|_| Fail::host("could not name the https URL"))?;
-    }
-    Ok(url)
-}
-
 /// Hands a request to an agent's cell, as `principal` (none for an inbox delivery).
 async fn forward(env: &Env, name: &str, action: &str, method: Method, principal: Option<&str>, body: Vec<u8>) -> Answer<Response> {
     forward_with(env, name, action, method, principal.map(|p| (PRINCIPAL_HEADER, p)), body).await
@@ -170,7 +160,7 @@ async fn read_body(req: &mut Request, max: usize) -> Answer<Vec<u8>> {
 }
 
 async fn route(mut req: Request, env: &Env) -> Answer<Response> {
-    let url = arrived_url(&req)?;
+    let url = fragment_nip98::arrived_url(req.url()?, req.headers().get("x-forwarded-proto")?.as_deref());
     let path = url.path().to_string();
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     if req.method() == Method::Get && segments == ["healthz"] {

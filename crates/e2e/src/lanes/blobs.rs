@@ -12,7 +12,7 @@ use fragment_core::blob::{self, sha256_hex};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
-use crate::api::{Api, Call};
+use crate::api::{now_s, Api, Call};
 use crate::Suite;
 
 fn bytes_of(n: usize, seed: u8) -> Vec<u8> {
@@ -92,13 +92,19 @@ pub fn blobs(s: &mut Suite, api: &Api) -> Result<()> {
     // uploads are checked
     let wrong = bytes_of(1024, 9);
     let claimed = sha256_hex(b"something else");
+    // an upload is signed over its URL, which names the bytes' hash: the
+    // router never holds the bytes, so a payload tag has nothing to bind
     let put = |keys: Option<&Keys>, sha: &str, body: Vec<u8>| {
-        api.call(Call { method: "PUT", url: format!("{}{}", api.base, blob_path(sha)), body: Some(body), keys, ..Call::default() })
+        let url = format!("{}{}", api.base, blob_path(sha));
+        let auth: Vec<(&str, String)> = keys.map(|k| ("authorization", k.header("PUT", &url, b"", now_s()))).into_iter().collect();
+        api.call(Call { method: "PUT", url, body: Some(body), extra: auth, ..Call::default() })
     };
     let r = put(Some(&keys), &claimed, wrong.clone())?;
     s.ok("bytes that are not what they claim are refused", r.status == 400 && r.message().contains("hash to"), &r);
     let r = api.signed(&keys, "HEAD", &blob_path(&claimed), None)?;
     s.ok("and not kept", r.status == 404, &r);
+    let r = api.call(Call { method: "PUT", url: format!("{}{}", api.base, blob_path(&sha256_hex(&wrong))), body: Some(wrong.clone()), keys: Some(&keys), ..Call::default() })?;
+    s.ok("an upload signed with a payload tag is 401 (there is no body at the router to bind)", r.status == 401, &r);
     let r = put(None, &sha256_hex(&wrong), wrong.clone())?;
     s.ok("an unsigned upload is 401", r.status == 401, &r);
     let viewer = api.person()?;
