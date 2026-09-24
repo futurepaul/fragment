@@ -101,13 +101,16 @@ fragment verify my-thing --dir .            # full-content audit
 
 - **One commit per pass**, against the branch head it read. If `main`
   moved underneath, sync rereads and retries (at most 3 times), then
-  fails loudly. An unchanged folder commits nothing.
+  fails loudly. An unchanged folder commits nothing. A commit whose
+  answer is lost is never sent again blind: sync rereads the branch, and
+  if the commit landed, what it wrote matches the folder and is adopted.
 - **Large files**: 1 MiB and up upload to the blob store first, then
   their pointer is committed; a pull downloads the bytes, so the folder
   always holds real files.
-- **Conflicts**: when both sides changed a file, yours stays and the
-  remote copy lands beside it as `<path>.conflict-<time>-<writer>`
-  (exit 3). Both stay in git history.
+- **Conflicts**: when both sides changed a file to different bytes,
+  yours stays and the remote copy lands beside it as
+  `<path>.conflict-<time>-<writer>` (exit 3). Both stay in git history.
+  Both sides changed to the same bytes is no conflict.
 - **Mass-deletion guard**: a pass that would delete more than
   max(10, 30%) of known files, or all of them, is refused (exit 4) until
   `--apply-mass-delete`.
@@ -405,9 +408,16 @@ Global flags: `--host <url>` (or `FRAGMENT_HOST`, or `fragment host
 `FRAGMENT_OUTPUT=json`), stdout is exactly one line: `{"ok":true,
 "data":…}` or `{"ok":false,"error":{"code","message","hint"}}`, with
 stable codes (`invalid_usage auth_failed forbidden not_found name_taken
-conflict too_large rate_limited unavailable server_error`). Exit codes:
-0 ok, 1 failure, 2 usage. `-v` logs each signed request to stderr and
-leaves stdout clean.
+conflict too_large rate_limited unavailable outcome_unknown
+server_error`). Exit codes: 0 ok, 1 failure, 2 usage. `-v` logs each
+signed request to stderr and leaves stdout clean.
+
+A network failure is retried (three attempts in all) for reads and blob
+uploads, which are safe to repeat; any other write is retried only when
+the connection never opened. A write that reached the host but lost its
+answer fails with `outcome_unknown`: it may have been applied, so check
+before repeating it. A request may take 30 s plus a second for every
+32 KiB it uploads.
 
 The code.storage server is named by the host; to point the CLI at
 another, set `FRAGMENT_CODESTORAGE_URL` or `"codestorage"` in

@@ -120,6 +120,9 @@ struct State {
     counter: u64,
     #[serde(skip)]
     sabotage: u32,
+    /// Per repo url: commit packs still to land with their answer dropped.
+    #[serde(skip)]
+    unanswered: BTreeMap<String, u32>,
     #[serde(skip)]
     commit_packs: u32,
     #[serde(skip)]
@@ -581,6 +584,10 @@ impl Inner {
         let author = meta["author"]["name"].as_str().unwrap_or("unknown");
         let message = meta["commit_message"].as_str().unwrap_or("");
         let (old, new) = st.commit(url, Write { branch, message, author, changes: &changes, from: None }, out);
+        if let Some(left @ 1..) = st.unanswered.get_mut(url) {
+            *left -= 1;
+            return Response::unanswered();
+        }
         Response::json(
             201,
             &json!({
@@ -925,6 +932,16 @@ impl CodeStorage {
     /// The next `n` commit packs each lose to a competitor commit (409).
     pub fn sabotage_commit_packs(&self, n: u32) {
         self.with(|st| st.sabotage = n);
+    }
+
+    /// The next `n` commit packs that land on `repo` lose their answer: the
+    /// commit is applied, then the connection closes without a response (a
+    /// timeout, or a link that dropped on the way back).
+    pub fn drop_commit_answers(&self, repo: &str, n: u32) {
+        self.with(|st| {
+            let url = st.url_of(repo).expect("drop_commit_answers on a known repo");
+            st.unanswered.insert(url, n);
+        });
     }
 
     pub fn commit_pack_count(&self) -> u32 {

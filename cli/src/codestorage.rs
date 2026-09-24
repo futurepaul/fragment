@@ -5,7 +5,7 @@
 //
 // Per the engineering style: no anyhow in here — CsError is matchable at
 // the boundary, and every retry/loop has an explicit bound.
-use crate::api::Client as HostClient;
+use crate::api::{timeout_for, Client as HostClient, Replay, CONNECT_TIMEOUT, REQUEST_ATTEMPTS};
 use serde_json::Value;
 use std::fmt;
 
@@ -33,6 +33,9 @@ const LIST_PAGE: u64 = 1000;
 pub enum CsError {
     /// connection-level failure (after the bounded connect retries)
     Transport(String),
+    /// a write reached the server but its answer was lost: it may have
+    /// been applied, so the caller re-reads before deciding anything
+    OutcomeUnknown(String),
     /// 401/403: token rejected, or a ref policy refused this write
     Auth(String),
     /// 404
@@ -53,6 +56,7 @@ impl fmt::Display for CsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CsError::Transport(d) => write!(f, "code.storage unreachable: {d}"),
+            CsError::OutcomeUnknown(d) => write!(f, "code.storage may have applied the request, but its answer was lost: {d}"),
             CsError::Auth(d) => write!(f, "code.storage refused the token (auth/ref policy): {d}"),
             CsError::NotFound(d) => write!(f, "not found on code.storage: {d}"),
             CsError::CasRejected { detail } => write!(f, "branch moved under us (expected-parent CAS rejected): {detail}"),
@@ -92,8 +96,9 @@ fn mint_from_host(host: &HostClient, name: &str, override_url: Option<&str>) -> 
         server,
         repo,
         token,
+        // every request sets its own total timeout (`timeout_for`)
         http: reqwest::blocking::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(15))
+            .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .map_err(|e| CsError::Transport(e.to_string()))?,
     })
@@ -165,21 +170,19 @@ impl CodeStorage {
         out
     }
 
-    /// One request against the spec server. Connect-level failures retry
-    /// a bounded 3 times (stale keep-alive pools must not wedge watchers);
+    /// One request against the spec server: its status and body. A
+    /// transport failure is retried within `REQUEST_ATTEMPTS` as
+    /// `Replay::of(method)` allows (a stale keep-alive pool must not wedge a
+    /// watcher, and a POST that may have landed is never sent again blind);
     /// payload-level failures NEVER retry here — CAS semantics belong to
     /// the callers' bounded retry loops.
-    fn req(
-        &self,
-        method: &str,
-        path: &str,
-        body: Option<Vec<u8>>,
-        content_type: Option<&str>,
-    ) -> Result<reqwest::blocking::Response, CsError> {
+    fn req(&self, method: &str, path: &str, body: Option<Vec<u8>>, content_type: Option<&str>) -> Result<(u16, Vec<u8>), CsError> {
         let url = format!("{}/api/repos/{}{}", self.server, self.repo_seg(), path);
         let body = body.unwrap_or_default();
+        let replay = Replay::of(method);
+        let timeout = timeout_for(body.len() as u64);
         let mut last_err: Option<String> = None;
-        for attempt in 0..3u32 {
+        for attempt in 0..REQUEST_ATTEMPTS {
             if attempt > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(300 * attempt as u64));
             }
@@ -189,20 +192,23 @@ impl CodeStorage {
                 "POST" => self.http.post(&url),
                 _ => return Err(CsError::Malformed(format!("bad method {method}"))),
             };
-            r = r.bearer_auth(&self.token);
+            r = r.bearer_auth(&self.token).timeout(timeout);
             if let Some(ct) = content_type {
                 r = r.header("content-type", ct);
             }
             if !body.is_empty() {
                 r = r.body(body.clone());
             }
-            match r.send() {
-                Ok(resp) => return Ok(resp),
-                Err(e) if e.is_connect() || e.is_request() => {
-                    last_err = Some(e.to_string());
-                    continue;
-                }
-                Err(e) => return Err(CsError::Transport(e.to_string())),
+            // the body is read here too: an answer cut off mid-body is as
+            // lost as one that never came
+            let answer = r.send().and_then(|resp| {
+                let status = resp.status().as_u16();
+                resp.bytes().map(|b| (status, b.to_vec()))
+            });
+            match answer {
+                Ok(answer) => return Ok(answer),
+                Err(e) if replay.allows_retry(!e.is_connect()) => last_err = Some(e.to_string()),
+                Err(e) => return Err(CsError::OutcomeUnknown(format!("{method} {path}: {e}"))),
             }
         }
         Err(CsError::Transport(last_err.unwrap_or_else(|| "no error recorded".into())))
@@ -231,12 +237,10 @@ impl CodeStorage {
 
     /// Branch head SHA; Ok(None) when the branch does not exist (404).
     pub fn branch_head(&self, branch: &str) -> Result<Option<String>, CsError> {
-        let resp = self.req("GET", &format!("/branch?name={}", q(branch)), None, None)?;
-        let status = resp.status().as_u16();
+        let (status, body) = self.req("GET", &format!("/branch?name={}", q(branch)), None, None)?;
         if status == 404 {
             return Ok(None);
         }
-        let body = resp.bytes().map_err(|e| CsError::Transport(e.to_string()))?.to_vec();
         self.check(status, &body)?;
         let v: Value = serde_json::from_slice(&body).map_err(|e| CsError::Malformed(e.to_string()))?;
         let sha = v["branch"]["head_sha"].as_str().unwrap_or_default().to_string();
@@ -255,9 +259,7 @@ impl CodeStorage {
             if let Some(c) = &cursor {
                 path.push_str(&format!("&cursor={}", q(c)));
             }
-            let resp = self.req("GET", &path, None, None)?;
-            let status = resp.status().as_u16();
-            let body = resp.bytes().map_err(|e| CsError::Transport(e.to_string()))?.to_vec();
+            let (status, body) = self.req("GET", &path, None, None)?;
             self.check(status, &body)?;
             let v: Value = serde_json::from_slice(&body).map_err(|e| CsError::Malformed(e.to_string()))?;
             let files = v["files"].as_array().cloned().unwrap_or_default();
@@ -282,9 +284,7 @@ impl CodeStorage {
 
     /// Raw file bytes at a ref.
     pub fn read_file(&self, path: &str, git_ref: &str) -> Result<Vec<u8>, CsError> {
-        let resp = self.req("GET", &format!("/file?path={}&ref={}", q(path), q(git_ref)), None, None)?;
-        let status = resp.status().as_u16();
-        let body = resp.bytes().map_err(|e| CsError::Transport(e.to_string()))?.to_vec();
+        let (status, body) = self.req("GET", &format!("/file?path={}&ref={}", q(path), q(git_ref)), None, None)?;
         self.check(status, &body)?;
         Ok(body)
     }
@@ -342,9 +342,7 @@ impl CodeStorage {
         for c in chunks {
             body.push_str(&c);
         }
-        let resp = self.req("POST", "/commit-pack", Some(body.into_bytes()), Some("application/x-ndjson"))?;
-        let status = resp.status().as_u16();
-        let rbody = resp.bytes().map_err(|e| CsError::Transport(e.to_string()))?.to_vec();
+        let (status, rbody) = self.req("POST", "/commit-pack", Some(body.into_bytes()), Some("application/x-ndjson"))?;
         self.check(status, &rbody)?;
         let v: Value = serde_json::from_slice(&rbody).map_err(|e| CsError::Malformed(e.to_string()))?;
         let tip = v["result"]["new_sha"].as_str().unwrap_or_default().to_string();
@@ -361,9 +359,7 @@ impl CodeStorage {
             "target_branch": target_branch,
             "target_is_ephemeral": ephemeral,
         });
-        let resp = self.req("POST", "/branches/create", Some(body.to_string().into_bytes()), Some("application/json"))?;
-        let status = resp.status().as_u16();
-        let rbody = resp.bytes().map_err(|e| CsError::Transport(e.to_string()))?.to_vec();
+        let (status, rbody) = self.req("POST", "/branches/create", Some(body.to_string().into_bytes()), Some("application/json"))?;
         self.check(status, &rbody)?;
         let v: Value = serde_json::from_slice(&rbody).map_err(|e| CsError::Malformed(e.to_string()))?;
         let sha = v["commit_sha"].as_str().unwrap_or_default().to_string();
@@ -385,9 +381,7 @@ impl CodeStorage {
             "commit_message": message,
             "author": { "name": author.name, "email": author.email },
         });
-        let resp = self.req("POST", "/merge", Some(body.to_string().into_bytes()), Some("application/json"))?;
-        let status = resp.status().as_u16();
-        let rbody = resp.bytes().map_err(|e| CsError::Transport(e.to_string()))?.to_vec();
+        let (status, rbody) = self.req("POST", "/merge", Some(body.to_string().into_bytes()), Some("application/json"))?;
         self.check(status, &rbody)?;
         let v: Value = serde_json::from_slice(&rbody).map_err(|e| CsError::Malformed(e.to_string()))?;
         let tip = v["target"]["new_sha"].as_str().unwrap_or_default().to_string();
@@ -410,9 +404,7 @@ impl CodeStorage {
             }
         });
         let body = format!("{meta}\n");
-        let resp = self.req("POST", "/restore-commit", Some(body.into_bytes()), Some("application/x-ndjson"))?;
-        let status = resp.status().as_u16();
-        let rbody = resp.bytes().map_err(|e| CsError::Transport(e.to_string()))?.to_vec();
+        let (status, rbody) = self.req("POST", "/restore-commit", Some(body.into_bytes()), Some("application/x-ndjson"))?;
         self.check(status, &rbody)?;
         let v: Value = serde_json::from_slice(&rbody).map_err(|e| CsError::Malformed(e.to_string()))?;
         let tip = v["result"]["new_sha"].as_str().unwrap_or_default().to_string();
@@ -424,9 +416,7 @@ impl CodeStorage {
 
     /// Commit history of a ref, newest first (deploy history on `live`).
     pub fn list_commits(&self, git_ref: &str, limit: u64) -> Result<Vec<CommitInfo>, CsError> {
-        let resp = self.req("GET", &format!("/commits?ref={}&limit={}", q(git_ref), limit), None, None)?;
-        let status = resp.status().as_u16();
-        let body = resp.bytes().map_err(|e| CsError::Transport(e.to_string()))?.to_vec();
+        let (status, body) = self.req("GET", &format!("/commits?ref={}&limit={}", q(git_ref), limit), None, None)?;
         self.check(status, &body)?;
         let v: Value = serde_json::from_slice(&body).map_err(|e| CsError::Malformed(e.to_string()))?;
         let mut out = Vec::new();
@@ -515,6 +505,24 @@ mod tests {
         assert_eq!(cs.read_file("a.txt", MAIN).unwrap(), b"A2");
         assert_eq!(cs.read_file("b.txt", MAIN).unwrap(), b"B");
         assert_ne!(tip3, tip2);
+    }
+
+    /// Goal: a commit pack that landed but lost its answer is not sent
+    /// again. Method: the fake applies the next pack and drops its answer;
+    /// the client reports an unknown outcome after exactly one pack, and
+    /// the commit is on the branch.
+    #[test]
+    fn a_commit_whose_answer_is_lost_is_not_resent() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("base.txt", b"base")]);
+        let cs = cs_for(&mock, "t");
+        let head0 = cs.branch_head(MAIN).unwrap().unwrap();
+        mock.drop_commit_answers("t", 1);
+        let err = cs.commit(Some(&head0), "one", &author(), &[upsert("a.txt", b"A")]).unwrap_err();
+        assert!(matches!(err, CsError::OutcomeUnknown(_)), "got: {err}");
+        assert_eq!(mock.commit_pack_count(), 1, "sent once");
+        assert_ne!(cs.branch_head(MAIN).unwrap().unwrap(), head0, "and it landed");
+        assert_eq!(cs.read_file("a.txt", MAIN).unwrap(), b"A");
     }
 
     #[test]
