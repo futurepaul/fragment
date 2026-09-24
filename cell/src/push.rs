@@ -17,7 +17,7 @@ use fragment_proto::{limits, ErrorCode};
 use serde_json::{json, Value};
 use worker::*;
 
-use crate::deliveries::Delivery;
+use crate::deliveries::{Delivery, DeliveryKind};
 use crate::error::{CellError, CellResult};
 use crate::fragment::FragmentCell;
 use crate::keys;
@@ -145,7 +145,7 @@ impl FragmentCell {
             deliveries.push(Delivery {
                 fragment: fragment.to_string(),
                 incarnation: incarnation.to_string(),
-                kind: "push".into(),
+                kind: DeliveryKind::Push,
                 url: sub.endpoint.to_string(),
                 headers: vec![
                     ("content-type".into(), "application/octet-stream".into()),

@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use worker::*;
 
-use crate::deliveries::Delivery;
+use crate::deliveries::{Delivery, DeliveryKind};
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, Caller, FragmentCell};
 
@@ -159,7 +159,7 @@ impl FragmentCell {
         Ok(Some(Delivery {
             fragment: fragment.to_string(),
             incarnation: incarnation.to_string(),
-            kind: "record".into(),
+            kind: DeliveryKind::Record,
             url,
             headers: vec![("content-type".into(), "application/json".into())],
             body: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, body),

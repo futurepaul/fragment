@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::facet::{self, Answer, Refusal};
 use fragment_core::npub;
-use fragment_proto::{canonical_json, limits, valid_op_id, ErrorCode, OpCall, OpDecl, OpKind, OpResult, Role};
+use fragment_proto::{canonical_json, limits, valid_op_id, ErrorCode, OpCall, OpDecl, OpKind, OpResult, Role, Via};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use worker::*;
@@ -66,8 +66,8 @@ pub(crate) struct Invocation<'a> {
     pub id: String,
     pub input: Value,
     pub depth: u32,
-    /// How a job started this way is recorded: `call`, or `job` with its parent run.
-    pub via: &'a str,
+    /// How a job started this way is recorded: a call, or a step of its parent run.
+    pub via: Via,
     pub trigger: Option<String>,
 }
 
@@ -155,7 +155,7 @@ impl FragmentCell {
         if !valid_op_id(&body.id) || body.id.starts_with(JOB_ID_PREFIX) {
             return Err(CellError::invalid("operation id must match ^[A-Za-z0-9._:-]{1,128}$ and not start with job:"));
         }
-        let inv = Invocation { principal, role, op, decl, id: body.id, input: body.input, depth: 0, via: "call", trigger: None };
+        let inv = Invocation { principal, role, op, decl, id: body.id, input: body.input, depth: 0, via: Via::Call, trigger: None };
         let result = self.invoke(inv).await?;
         self.launch_queued().await;
         Ok(result)

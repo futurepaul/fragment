@@ -78,16 +78,41 @@ struct PendingPush {
     upto: i64,
 }
 
+/// What a delivery carries: a record to a channel subscriber, a web push,
+/// or a `changed` frame to one of `notifyUrls`. The outbox's `kind` column,
+/// a queued delivery, and the consumer's report all name it this way.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryKind {
+    Record,
+    Push,
+    Notify,
+}
+
+impl DeliveryKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeliveryKind::Record => "record",
+            DeliveryKind::Push => "push",
+            DeliveryKind::Notify => "notify",
+        }
+    }
+
+    fn parse(s: &str) -> Option<DeliveryKind> {
+        [DeliveryKind::Record, DeliveryKind::Push, DeliveryKind::Notify].into_iter().find(|k| k.as_str() == s)
+    }
+}
+
 /// Only this module and its callers write the outbox: a row that does not
 /// decode is corruption, not input.
 fn decode(row: &Value) -> Pending {
     let text = |k: &str| row[k].as_str().unwrap_or_else(|| panic!("a delivery_outbox row has no {k}: {row}")).to_string();
     let int = |k: &str| row[k].as_i64().unwrap_or_else(|| panic!("a delivery_outbox row has no {k}: {row}"));
-    match row["kind"].as_str() {
-        Some("record") => Pending::Record { sub: int("sub"), channel: text("channel"), seq: int("seq") },
-        Some("push") => Pending::Push(PendingPush { who: text("who"), payload: text("body"), after: int("after_sub"), upto: int("upto_sub") }),
-        Some("notify") => Pending::Notify { url: text("url"), frame: text("body") },
-        other => panic!("a delivery_outbox row of kind {other:?}"),
+    let kind = row["kind"].as_str().and_then(DeliveryKind::parse);
+    match kind.unwrap_or_else(|| panic!("a delivery_outbox row of kind {}", row["kind"])) {
+        DeliveryKind::Record => Pending::Record { sub: int("sub"), channel: text("channel"), seq: int("seq") },
+        DeliveryKind::Push => Pending::Push(PendingPush { who: text("who"), payload: text("body"), after: int("after_sub"), upto: int("upto_sub") }),
+        DeliveryKind::Notify => Pending::Notify { url: text("url"), frame: text("body") },
     }
 }
 
@@ -96,8 +121,7 @@ fn decode(row: &Value) -> Pending {
 pub struct Delivery {
     pub fragment: String,
     pub incarnation: String,
-    /// `push` or `notify`
-    pub kind: String,
+    pub kind: DeliveryKind,
     pub url: String,
     pub headers: Vec<(String, String)>,
     /// base64
@@ -164,7 +188,8 @@ impl FragmentCell {
                 Pending::Notify { url, frame } => {
                     let body = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, frame);
                     let headers = vec![("content-type".into(), "application/json".into())];
-                    singles.push((id, attempts, Delivery { fragment: fragment.clone(), incarnation: incarnation.clone(), kind: "notify".into(), url, headers, body, sub: None }));
+                    let d = Delivery { fragment: fragment.clone(), incarnation: incarnation.clone(), kind: DeliveryKind::Notify, url, headers, body, sub: None };
+                    singles.push((id, attempts, d));
                 }
                 Pending::Push(push) => self.drain_push(&mut failures, id, attempts, push, &fragment, &incarnation).await,
             }
@@ -250,37 +275,61 @@ impl FragmentCell {
 
     /// `POST /deliver/report` from the consumer: a subscription is gone, or
     /// a delivery failed for good.
-    pub(crate) fn delivery_report(&self, body: &Value) -> CellResult<Value> {
-        if body["incarnation"].as_str() != self.meta("created_at")?.as_deref() {
+    pub(crate) fn delivery_report(&self, report: &Report) -> CellResult<Value> {
+        if Some(report.incarnation.as_str()) != self.meta("created_at")?.as_deref() {
             return Ok(json!({ "ok": true }));
         }
-        let (kind, url) = (body["kind"].as_str().unwrap_or(""), body["url"].as_str().unwrap_or(""));
+        let (kind, url) = (report.kind.as_str(), report.url.as_str());
         let host = url::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
-        match body["outcome"].as_str() {
-            Some("gone") => {
-                if let Some(sub) = body["sub"].as_i64() {
-                    let (table, event) = if kind == "record" { ("subs", "subscription.gone") } else { ("push_subs", "push.gone") };
-                    self.exec(&format!("DELETE FROM {table} WHERE id = ?"), vec![SqlStorageValue::Integer(sub)])?;
-                    self.event(event, &format!("a subscription at {host} is gone; dropped"), json!({ "sub": sub }));
-                }
+        match report.outcome {
+            Outcome::Gone => {
+                let (table, event) = match report.kind {
+                    DeliveryKind::Record => ("subs", "subscription.gone"),
+                    DeliveryKind::Push => ("push_subs", "push.gone"),
+                    // a notify URL is no subscription; `send` never reports one gone
+                    DeliveryKind::Notify => return Err(CellError::invalid("a notifyUrls delivery has no subscription to drop")),
+                };
+                let sub = report.sub.ok_or_else(|| CellError::invalid(format!("a {kind} delivery reported gone names its subscription")))?;
+                self.exec(&format!("DELETE FROM {table} WHERE id = ?"), vec![SqlStorageValue::Integer(sub)])?;
+                self.event(event, &format!("a subscription at {host} is gone; dropped"), json!({ "sub": sub }));
             }
-            _ => self.event(
-                "delivery.failed",
-                &format!("{kind} to {host}: {}", body["error"].as_str().unwrap_or("failed")),
-                json!({ "kind": kind, "status": body["status"] }),
-            ),
+            Outcome::Failed => self.event("delivery.failed", &format!("{kind} to {host}: {}", report.error), json!({ "kind": kind, "status": report.status })),
         }
         Ok(json!({ "ok": true }))
     }
 }
 
-async fn report(env: &Env, d: &Delivery, outcome: &str, status: u16, error: &str) -> Result<()> {
+/// What the consumer tells a fragment about one of its deliveries
+/// (`POST /deliver/report`).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Report {
+    incarnation: String,
+    kind: DeliveryKind,
+    url: String,
+    sub: Option<i64>,
+    outcome: Outcome,
+    /// The receiver's answer (0: none came).
+    status: u16,
+    error: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum Outcome {
+    /// The receiver dropped the subscription (404 or 410): the fragment drops it too.
+    Gone,
+    /// The delivery failed for good.
+    Failed,
+}
+
+async fn report(env: &Env, d: &Delivery, outcome: Outcome, status: u16, error: &str) -> Result<()> {
     let headers = Headers::new();
     headers.set("content-type", "application/json")?;
     headers.set(REPORT_HEADER, "1")?;
-    let body = json!({ "incarnation": d.incarnation, "kind": d.kind, "url": d.url, "sub": d.sub, "outcome": outcome, "status": status, "error": error });
+    let body = Report { incarnation: d.incarnation.clone(), kind: d.kind, url: d.url.clone(), sub: d.sub, outcome, status, error: error.to_string() };
+    let body = serde_json::to_string(&body).map_err(|e| Error::RustError(e.to_string()))?;
     let mut init = RequestInit::new();
-    init.with_method(Method::Post).with_headers(headers).with_body(Some(body.to_string().into()));
+    init.with_method(Method::Post).with_headers(headers).with_body(Some(body.into()));
     let req = Request::new_with_init("https://fragment.internal/deliver/report", &init)?;
     env.durable_object("FRAGMENT")?.get_by_name(&d.fragment)?.fetch_with_request(req).await?;
     Ok(())
@@ -302,20 +351,20 @@ async fn send(env: &Env, d: &Delivery) -> Result<Option<String>> {
         Err(FetchError::Failed(why)) => return Ok(Some(why)),
         // the node refused the address: no retry passes
         Err(FetchError::Refused(why)) => {
-            report(env, d, "failed", 0, &why).await?;
+            report(env, d, Outcome::Failed, 0, &why).await?;
             return Ok(None);
         }
     };
     let status = resp.status_code();
     Ok(match status {
         200..=299 => None,
-        404 | 410 if d.kind == "push" || d.kind == "record" => {
-            report(env, d, "gone", status, "").await?;
+        404 | 410 if matches!(d.kind, DeliveryKind::Push | DeliveryKind::Record) => {
+            report(env, d, Outcome::Gone, status, "").await?;
             None
         }
         429 | 500..=599 => Some(format!("answered {status}")),
         _ => {
-            report(env, d, "failed", status, &format!("answered {status}")).await?;
+            report(env, d, Outcome::Failed, status, &format!("answered {status}")).await?;
             None
         }
     })
@@ -328,7 +377,7 @@ pub async fn consume(batch: MessageBatch<Delivery>, env: Env) -> Result<()> {
     for message in batch.messages()? {
         let d = message.body().clone();
         if dead {
-            let _ = report(&env, &d, "failed", 0, "out of retries").await;
+            let _ = report(&env, &d, Outcome::Failed, 0, "out of retries").await;
             message.ack();
             continue;
         }

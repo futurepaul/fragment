@@ -31,7 +31,7 @@
 
 use fragment_core::budget::{self, Month};
 use fragment_core::npub;
-use fragment_proto::{BudgetView, ErrorCode, UsageRow};
+use fragment_proto::{BudgetView, ErrorCode, UsageRow, UsageState, UsageUnit};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
@@ -278,15 +278,19 @@ impl LedgerCell {
             )?
             .iter()
             .map(|r| {
-                let settled = r["state"] == "settled";
+                let state = r["state"].as_str().and_then(UsageState::parse).expect("usage.state is one the ledger wrote");
+                let quantity = match state {
+                    UsageState::Settled => r["cost"].as_i64().expect("a settled usage row has its cost"),
+                    UsageState::Reserved => r["reserved"].as_i64().expect("usage.reserved is INTEGER"),
+                };
                 UsageRow {
                     source_ref: r["ref"].as_str().unwrap_or("").to_string(),
                     agent: r["agent"].as_str().map(str::to_string),
                     billing_org: org.clone(),
                     period: r["period"].as_str().unwrap_or("").to_string(),
-                    unit: "usd_micro".into(),
-                    quantity: if settled { r["cost"].as_i64().unwrap_or(0) } else { r["reserved"].as_i64().unwrap_or(0) },
-                    state: r["state"].as_str().unwrap_or("").to_string(),
+                    unit: UsageUnit::UsdMicro,
+                    quantity,
+                    state,
                     kind: r["kind"].as_str().unwrap_or("").to_string(),
                     model: r["model"].as_str().map(str::to_string),
                     fragment: r["fragment"].as_str().unwrap_or("").to_string(),
