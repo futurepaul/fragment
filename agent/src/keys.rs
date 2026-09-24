@@ -55,8 +55,6 @@ pub async fn nostr_keypair(env: &Env) -> anyhow::Result<(String, String)> {
 pub enum Sign<'a> {
     /// A NIP-98 `Authorization` value; `payload` is the body's SHA-256 hex.
     Header { method: &'a str, url: &'a str, payload: Option<String> },
-    /// A key proof for `signer`'s request.
-    Proof { method: &'a str, url: &'a str, signer: &'a str },
 }
 
 pub struct Signed {
@@ -73,12 +71,6 @@ pub async fn nostr_sign(env: &Env, sealed: &str, legacy_salt: &str, what: Sign<'
             body["method"] = json!(method);
             body["url"] = json!(url);
             body["payload"] = json!(payload);
-        }
-        Sign::Proof { method, url, signer } => {
-            body["kind"] = json!("proof");
-            body["method"] = json!(method);
-            body["url"] = json!(url);
-            body["signer"] = json!(signer);
         }
     }
     let answer = call(env, "nostr/sign", &body).await?;

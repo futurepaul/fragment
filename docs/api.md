@@ -506,25 +506,29 @@ channel, onRecord, {after?})`, `presence.set(data)`, `presence.on(fn)`,
 CLI: `fragment call <name> <op> --input '{...}' [--id ID]`, `fragment
 channel <name> [<channel>] [--after N] [--follow]`.
 
-## Agents (`agent/`, phase 5)
+## Agents (`agent/`, phase 5; co-hosted since phase 6)
 
-A separate celld project: agents act on fragments through the API above,
-signing with their own keys. An agent is an identity its owner registers:
-`POST /api/agents` answers a key proof by the agent's key, and the owner
-sends it in `POST /api/identities {kind: "agent", proof}` (the CLI's
-`fragment agent create` does both). Every owner route checks, live, that
-the signing key is one of the owner's active keys
-(`GET /api/identities/{owner}/keys/{npub}`, signed by the agent). Each
-agent's key is made by the node's `KEYS` and signs there
-(`FRAGMENT_KEYS_HOST_SECRET` in the node's environment seals it for the
-agent's cell). Its variables: `FRAGMENT_API` (the platform it acts on),
-`OPENROUTER_API_KEY` and `OPENROUTER_API_URL` (its model service),
-`AGENT_URL` (its own base, for the inboxes it hands out),
+A second script in the platform's fleet, with no ingress of its own: the
+router authenticates `/api/agents` and `/api/a/*` like any signed
+request and hands them on with the caller's identity
+(`x-agent-principal`), which is all the script trusts; an inbox delivery
+passes as it came. Agents act on fragments through the API above,
+signing with their own keys. An agent's name is `<label>.<username>`,
+its owner's (a bare label is one of the signer's own); making one also
+registers it as its maker's, in the same request. Owner routes check the
+caller is the agent's registered owner. Each agent's key is made by the
+node's `KEYS` and signs there. Its turns spend its owner's month: as a
+turn starts it asks for its owner's org key (`POST /api/budget/key`,
+signed by the agent). Every person has their own agent,
+`agent.<username>`, made on first need: a chat made from the `chat`
+template has it as an editor that listens. Its variables: `FRAGMENT_API`
+(the platform it acts on), `OPENROUTER_API_URL` (its model service),
+`AGENT_URL` (the base of the inboxes it hands out: the platform's),
 `AGENT_TEST_HOOKS=allow` (dev and e2e only).
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/agents` | any signer | `{name, model? ("z-ai/glm-5.3-flash"), instructions?}` → `{name, npub, model, proof}`; its maker asking again before it is registered gets a fresh proof (`replayed`); otherwise 409 when taken; owner routes answer 400 until it is registered |
+| `POST /api/agents` | a person with a username | `{name, model? ("z-ai/glm-5.3-flash"), instructions?}` → `{name, npub, model, id}`: made and registered as the caller's; again by its owner, the same answer (`replayed`); a name under someone else's username is 403 |
 | `GET /api/a/{name}` | owner | → `{name, id, owner, npub, model, active, driving, outcome (running, idle, stopped, error), error, tokens, watchdogRestarts, messages: [{id, role, text, tool_requests, tool_responses, steer}], steer, toolRuns, steps}` |
 | `POST /api/a/{name}/turns` | owner | `{text}` (at most 16 KiB) → `{started}`; during a turn, `{steered: true}` (read between steps) |
 | `POST /api/a/{name}/stop` | owner | → `{active, driving}`; a tool in flight is interrupted |

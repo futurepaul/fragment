@@ -69,7 +69,35 @@ impl FragmentCell {
         }
         self.go_live(&owner, &format!("deploy {name}")).await?;
         self.event("template", &format!("{name} starts from the {which} template"), json!({ "template": which }));
+        if which == "chat" {
+            self.set_meta("agent_pending", "1")?;
+        }
         self.del_meta("template_pending")
+    }
+
+    /// A chat made from the template has its owner's own agent in it
+    /// (`agent.<username>`, made on first need), as an editor that listens.
+    /// The alarm retries one that did not finish.
+    pub(crate) async fn join_owners_agent(&self) -> CellResult<()> {
+        if self.meta("agent_pending")?.is_none() {
+            return Ok(());
+        }
+        let (name, owner) = (self.name()?, self.must("owner")?);
+        let (_, username) = fragment_proto::split_fragment_name(&name).ok_or_else(|| CellError::host(format!("{name} is not <label>.<username>")))?;
+        let (agent, _, agent_name) = crate::agents::own_agent(&self.env, &owner, username).await?;
+        if self.member_role(&agent)?.is_none() {
+            let as_owner = Caller {
+                principal: Some(owner.clone()),
+                key: None,
+                kind: Some(IdentityKind::Person),
+                owner: None,
+                url: url::Url::parse("https://fragment.internal/").expect("a URL"),
+            };
+            self.set_member(&as_owner, &agent, fragment_proto::SetRole { role: Role::Editor }).await?;
+        }
+        crate::agents::ask_json(&self.env, Method::Post, &format!("/api/a/{agent_name}/listen"), &owner, &json!({ "fragment": name })).await?;
+        self.event("agent.joined", &format!("{agent_name}, its owner's agent, listens here"), json!({ "agent": agent }));
+        self.del_meta("agent_pending")
     }
 
     /// Moves `live` to `main`'s tip: the first deploy makes the branch,

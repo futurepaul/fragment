@@ -610,9 +610,12 @@ impl FragmentCell {
         self.event("create", &format!("fragment {} created by {owner} (repo {repo})", body.name), json!({ "repo": repo, "key": caller.key.as_deref().map(npub::display) }));
         self.flush_index().await;
         self.certificate().await?;
-        // a template that did not land is retried by the alarm
+        // a template that did not land, or a chat's agent that did not
+        // join, is retried by the alarm
         if let Err(e) = self.seed().await {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
+        } else if let Err(e) = self.join_owners_agent().await {
+            self.event("agent.join-failed", &e.message, json!({ "code": e.code }));
         }
         self.schedule().await?;
         json_response(&Created {
@@ -706,6 +709,8 @@ impl FragmentCell {
         }
         if let Err(e) = self.seed().await {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
+        } else if let Err(e) = self.join_owners_agent().await {
+            self.event("agent.join-failed", &e.message, json!({ "code": e.code }));
         }
         if !self.swept.get() {
             if let Ok(facet) = self.facet() {

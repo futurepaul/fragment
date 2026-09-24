@@ -5,16 +5,17 @@
 //! acts on a fragment exactly as its membership lets it.
 //!
 //! An agent is an identity in the platform's registry, owned by the person
-//! who made it (docs/finite-integration.md). Making one takes two signed
-//! requests: this service makes the agent and its key and answers a key
-//! proof by that key; the owner's CLI registers the agent with the platform
-//! (`POST /api/identities {kind: agent, proof}`), vouching for it. From
-//! then on, "the owner" is an identity: any of the owner's active keys
-//! controls the agent, checked live with the registry on each request.
+//! who made it (docs/finite-integration.md). This script is co-hosted in
+//! the platform's fleet and has no ingress of its own (docs/phase-6.md,
+//! step 4): the platform's router authenticates each request, as it does
+//! its own, and names the caller's identity in `x-agent-principal`, which
+//! is all this script trusts. Making an agent makes its key here; the
+//! router then registers it as its maker's in the same request. An agent's
+//! name is `<label>.<username>`, its owner's username.
 //!
-//! The owner's API (NIP-98, one of the owner's keys):
-//!   POST /api/agents                  {name, model?, instructions?} → {name, npub, model, proof}
-//!                                     (again, by the same key, until it is registered: a fresh proof)
+//! The owner's API (through the platform; the router checks the signature):
+//!   POST /api/agents                  {name, model?, instructions?} → {name, npub, model}
+//!                                     (again, by its owner: the same answer, `replayed`)
 //!   GET  /api/a/{name}                the conversation and the turn's state
 //!   POST /api/a/{name}/turns          {text}: start a turn, or steer the running one
 //!   POST /api/a/{name}/stop           stop the running turn
@@ -41,7 +42,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use fragment_core::npub;
-use fragment_proto::{limits, valid_channel_name, valid_fragment_name, valid_label, valid_op_name, ErrorCode};
+use fragment_proto::{valid_channel_name, valid_fragment_name, valid_op_name, ErrorCode};
 use goose_provider_types::conversation::message::{Message, MessageContent};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -141,7 +142,7 @@ async fn route(mut req: Request, env: &Env) -> Answer<Response> {
     }
     // a fragment's delivery to a listening agent: unsigned, the token is the capability
     if let (Method::Post, ["api", "a", name, "inbox", token]) = (req.method(), segments.as_slice()) {
-        if !valid_label(name) || token.len() != 32 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if !valid_fragment_name(name) || token.len() != 32 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(Fail::new(ErrorCode::NotFound, "no such inbox"));
         }
         let (name, action) = (name.to_string(), format!("inbox/{token}"));
@@ -151,6 +152,8 @@ async fn route(mut req: Request, env: &Env) -> Answer<Response> {
         }
         return forward(env, &name, &action, Method::Post, None, body).await;
     }
+    // the platform's router, the only way in, names who is calling
+    let principal = req.headers().get(PRINCIPAL_HEADER)?.filter(|p| npub::is_identity(p)).ok_or_else(|| Fail::new(ErrorCode::Unauthenticated, "reach agents through the platform"))?;
     let (name, action) = match (req.method(), segments.as_slice()) {
         (Method::Post, ["api", "agents"]) => (None, "create".to_string()),
         (_, ["api", "a", name]) => (Some(name.to_string()), "view".to_string()),
@@ -161,16 +164,12 @@ async fn route(mut req: Request, env: &Env) -> Answer<Response> {
     if body.len() > BODY_MAX {
         return Err(Fail::new(ErrorCode::TooLarge, format!("a request body is at most {BODY_MAX} bytes")));
     }
-    let header = req.headers().get("authorization")?;
-    let now_s = (js::now_ms() / 1000) as i64;
-    let principal = fragment_nip98::verify(header.as_deref(), req.method().as_ref(), url.as_str(), &body, now_s, limits::AUTH_WINDOW_S)
-        .map_err(|e| Fail::new(ErrorCode::Unauthenticated, e.to_string()))?;
     let name = match name {
         Some(n) => n,
         None => serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["name"].as_str().map(str::to_string)).unwrap_or_default(),
     };
-    if !valid_label(&name) {
-        return Err(Fail::invalid("an agent's name is lowercase letters, digits, and single dashes (at most 63)"));
+    if !valid_fragment_name(&name) {
+        return Err(Fail::invalid("an agent's name is <label>.<username>"));
     }
     forward(env, &name, &action, req.method(), Some(&principal), body).await
 }
@@ -250,6 +249,7 @@ async fn owners_key(fleet: &Fleet) -> anyhow::Result<String> {
 }
 
 fn default_instructions(name: &str) -> String {
+    let name = name.split('.').next().unwrap_or(name);
     format!(
         "You are {name}, an agent. Each of your tools is an operation of a fragment you belong to: a shared place such as \
          an app, a list, or a chat. Use them to do what you are asked, one call at a time, and when the work is done \
@@ -284,30 +284,20 @@ impl Agent {
             }
             401 => {
                 let name = kv_get(&sql, "name")?.unwrap_or_default();
-                Err(Fail::new(ErrorCode::InvalidRequest, format!("agent {name} is not registered yet: finish with `fragment agent create {name}`")))
+                Err(Fail::new(ErrorCode::InvalidRequest, format!("agent {name} is not registered yet: make it again (`fragment agent create {name}`) to finish")))
             }
             _ => Err(Fail::new(ErrorCode::RegistryUnavailable, format!("the platform answered {status}: {}", fleet::message(&me)))),
         }
     }
 
-    /// Whether `key` (the request's signer) is one of the owner's active
-    /// keys, asked live (a replaced key keeps control; a revoked one loses it).
-    async fn require_owner(&self, key: &str) -> Answer<()> {
+    /// Whether `principal` (the identity the router resolved) is the
+    /// agent's owner.
+    async fn require_owner(&self, principal: &str) -> Answer<()> {
         let (_, owner) = self.registration().await?;
-        let path = format!("/api/identities/{owner}/keys/{key}");
-        let (status, answer) = self.fleet()?.call(Method::Get, &path, None).await.map_err(|e| Fail::new(ErrorCode::RegistryUnavailable, e.to_string()))?;
-        match status {
-            200 if answer["active"] == true => Ok(()),
-            200 => Err(Fail::new(ErrorCode::Forbidden, "only the agent's owner may do that")),
-            _ => Err(Fail::new(ErrorCode::RegistryUnavailable, format!("the platform answered {status}: {}", fleet::message(&answer)))),
+        if principal != owner {
+            return Err(Fail::new(ErrorCode::Forbidden, "only the agent's owner may do that"));
         }
-    }
-
-    /// A key proof by the agent's key for its registration, meant for `creator`.
-    async fn registration_proof(&self, creator: &str) -> Answer<String> {
-        let url = format!("{}/api/identities", fleet::base(&self.env)?);
-        let proof = self.fleet()?.signer.sign(keys::Sign::Proof { method: "POST", url: &url, signer: creator }).await.map_err(Fail::host)?;
-        Ok(proof)
+        Ok(())
     }
 
     fn fleet(&self) -> Answer<Fleet> {
@@ -359,14 +349,13 @@ impl Agent {
     async fn create(&self, principal: &str, body: CreateBody) -> Answer<Value> {
         let sql = self.sql();
         if kv_get(&sql, "created_at")?.is_some() {
-            // the maker, again, before the registration went through: a fresh proof
-            let unregistered = kv_get(&sql, "creator")?.as_deref() == Some(principal)
-                && matches!(self.registration().await, Err(Fail { code: ErrorCode::InvalidRequest, .. }));
-            if !unregistered {
+            // its maker, again (the router registers it once more, which
+            // answers the same identity): the same agent
+            if kv_get(&sql, "creator")?.as_deref() != Some(principal) {
                 return Err(Fail::new(ErrorCode::AlreadyExists, format!("agent {} already exists", body.name)));
             }
             let get = |k: &str| kv_get(&sql, k).map(|v| v.unwrap_or_default());
-            return Ok(json!({ "name": get("name")?, "npub": get("npub")?, "model": get("model")?, "proof": self.registration_proof(principal).await?, "replayed": true }));
+            return Ok(json!({ "name": get("name")?, "npub": get("npub")?, "model": get("model")?, "replayed": true }));
         }
         let model = body.model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
         if model.is_empty() || model.len() > MODEL_MAX {
@@ -384,7 +373,7 @@ impl Agent {
         let agent_npub = npub::encode(&pubkey);
         for (k, v) in [
             ("name", body.name.as_str()),
-            // who made it (a key), until the registry names its owner
+            // who made it (an identity), until the registry names its owner
             ("creator", principal),
             ("npub", agent_npub.as_str()),
             ("secret", sealed.as_str()),
@@ -394,7 +383,7 @@ impl Agent {
             kv_set(&sql, k, v)?;
         }
         kv_set(&sql, "created_at", js::now_ms())?;
-        Ok(json!({ "name": body.name, "npub": agent_npub, "model": model, "proof": self.registration_proof(principal).await? }))
+        Ok(json!({ "name": body.name, "npub": agent_npub, "model": model }))
     }
 
     fn start_driver(&self, reason: &str) -> Answer<bool> {

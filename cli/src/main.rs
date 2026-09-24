@@ -1524,17 +1524,8 @@ fn run(cli: Cli) -> Result<()> {
                     if let Some(i) = instructions {
                         body["instructions"] = json!(i);
                     }
-                    let mut v = a.call(a.post_json("/api/agents", &body)?)?;
-                    // register it with the platform as yours: you sign, its key's proof is inside
-                    let proof = v["proof"].as_str().ok_or_else(|| anyhow!("the agent fleet answered no registration proof"))?.to_string();
-                    let reg = c.call(c.post_json("/api/identities", &json!({ "kind": "agent", "proof": proof }))?).map_err(|e| {
-                        anyhow!("{e}\nthe agent exists but is not registered: run `fragment agent create {name}` again to finish")
-                    })?;
-                    v["id"] = reg["id"].clone();
-                    v["owner"] = reg["owner"].clone();
-                    if let Some(o) = v.as_object_mut() {
-                        o.remove("proof");
-                    }
+                    // made and registered as yours in one request (the platform does both)
+                    let v = a.call(a.post_json("/api/agents", &body)?)?;
                     if j {
                         ok_exit(&v);
                     }

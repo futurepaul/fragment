@@ -3,8 +3,11 @@
 //! agent's tools use them too), the platform's "new" page, and the
 //! `fragments` capability, which only the fragment's owner is granted.
 
+use std::time::Duration;
+
 use anyhow::Result;
 use fragment_core::npub;
+use fragment_fakes::openrouter::Reply as Say;
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
@@ -54,8 +57,32 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its fragment.json carries the fragment's own name", m.body["name"] == chat.as_str(), &m);
     let page = api.page(&chat, "", Some(&chat_cookie))?;
     s.ok("its site serves the template's page", page.status == 200 && page.text.contains("<title>Chat"), &page);
+    // a chat made from the template has its owner's own agent in it
+    let members = api.signed(&owner, "GET", &format!("/api/f/{chat}/members"), None)?;
+    let agent = members.body["members"].as_array().into_iter().flatten().find(|m| m["kind"] == "agent").cloned().unwrap_or_default();
+    let owner_id = api.identity(&owner)?;
+    s.ok("a chat from the template has its owner's agent in it, as an editor", agent["role"] == "editor" && agent["owner"] == owner_id.as_str(), &members);
+    let subs = api.signed(&owner, "GET", &format!("/api/f/{chat}/subscriptions"), None)?;
+    s.ok("listening to the chat", subs.body["subscriptions"].as_array().is_some_and(|a| a.iter().any(|x| x["principal"] == agent["principal"] && x["channel"] == "chat")), &subs);
+    let mine = api.signed(&owner, "GET", "/api/a/agent", None)?;
+    s.ok("it is agent.<username>, made on first need", mine.status == 200 && mine.body["name"] == api.qualified(&owner, "agent")?.as_str(), &mine);
+    s.openrouter.clear_script();
+    s.openrouter.script(&[Say::Text("Hello! I'm here.".into())]);
     let said = api.op(&owner, &chat, "say", "t1", json!({ "text": "hello from a template" }))?;
-    s.ok("and its operations answer", said.status == 200, &said);
+    s.ok("its operations answer", said.status == 200, &said);
+    let answered = s.eventually(Duration::from_secs(30), || {
+        api.signed(&owner, "GET", &format!("/api/f/{chat}/channels/chat"), None)
+            .is_ok_and(|r| r.body["records"].as_array().is_some_and(|a| a.iter().any(|x| x["principal"] == agent["principal"] && x["body"]["text"] == "Hello! I'm here.")))
+    });
+    s.ok("and the agent answers in the chat", answered, "");
+    let r = api.create_with(&owner, json!({ "name": s.name("tchat2"), "template": "chat" }))?;
+    let second = r.body["name"].as_str().unwrap_or("").to_string();
+    let members = api.signed(&owner, "GET", &format!("/api/f/{second}/members"), None)?;
+    s.ok(
+        "a second chat has the same agent",
+        members.body["members"].as_array().is_some_and(|a| a.iter().any(|m| m["principal"] == agent["principal"])),
+        &members,
+    );
 
     let none = s.name("tnone");
     let r = api.create_with(&owner, json!({ "name": none, "template": "nope" }))?;

@@ -19,7 +19,7 @@
 //!   POST   /api/budget/key                 an agent: its owner's org OpenRouter key, for its turns
 //!   POST   /api/fragments                  create (signed; the signer owns it)
 //!   GET    /api/fragments                  the fragments the signer belongs to
-//!   *      /api/agents, /api/a/...         the agents' script (agent/), co-hosted: passed through
+//!   *      /api/agents, /api/a/...         the agents' script (agent/), co-hosted (agents.rs)
 //!   DELETE /api/f/<name>                   delete (owner)
 //!   *      /api/f/<name>/<route>           the control API (signed; the code.storage webhook is HMAC,
 //!                                          the inbox is its token)
@@ -35,6 +35,7 @@
 //! `__watch` and `__live` stay reachable there for the CLI, which carries
 //! no cookies.
 
+mod agents;
 mod ai;
 mod auth;
 mod blobs;
@@ -101,7 +102,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     }
 }
 
-async fn read_body(req: &mut Request) -> CellResult<Vec<u8>> {
+pub(crate) async fn read_body(req: &mut Request) -> CellResult<Vec<u8>> {
     let declared: usize = req.headers().get("content-length")?.and_then(|l| l.parse().ok()).unwrap_or(0);
     if declared > limits::BODY_MAX_BYTES {
         return Err(CellError::too_large("request body", declared, limits::BODY_MAX_BYTES));
@@ -177,7 +178,7 @@ async fn resolve(env: &Env, key: String) -> CellResult<Signer> {
 }
 
 /// The signer of a request that must be signed, resolved.
-async fn signer(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Signer> {
+pub(crate) async fn signer(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Signer> {
     let key = authenticate(req, url, body)?;
     resolve(env, key).await
 }
@@ -532,9 +533,11 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             let principal = signer(env, &req, &url, &body).await?;
             create_fragment(env, &cfg, &url, create, principal).await
         }
-        // the agents' script, co-hosted: it checks its own requests (NIP-98
-        // by the owner, or an inbox's token), so they pass through as they came
-        (_, ["api", "agents"]) | (_, ["api", "a", ..]) => js::service_fetch(env.as_ref(), "AGENTS", req).await,
+        // the agents' script, co-hosted: authenticated here, like the rest
+        (_, ["api", "agents"]) | (_, ["api", "a", ..]) => {
+            let segs = segments.clone();
+            agents::route(req, env, &url, &segs).await
+        }
         (Method::Get, ["api", "fragments"]) => {
             let principal = signer(env, &req, &url, &[]).await?;
             let list = Request::new("https://principal.internal/list", Method::Get)?;

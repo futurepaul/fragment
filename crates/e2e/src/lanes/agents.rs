@@ -59,27 +59,26 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an unsigned create is 401", r.status == 401, &r);
     let r = agents.signed(&owner, "POST", "/api/agents", Some(&json!({ "name": name })))?;
     let agent_npub = r.body["npub"].as_str().unwrap_or("").to_string();
+    let agent_id = r.body["id"].as_str().unwrap_or("").to_string();
+    let owner_id = api.identity(&owner)?;
+    let username = api.username(&owner)?;
+    let full = format!("{name}.{username}");
     s.ok(
-        "the owner makes an agent: its own key, and a proof by it for the registration",
-        r.status == 200 && agent_npub.starts_with("npub1") && r.body["model"] == "z-ai/glm-5.3-flash" && r.body["proof"].is_string(),
+        "the owner makes an agent under their username: its own key, registered as theirs at once",
+        r.status == 200 && agent_npub.starts_with("npub1") && r.body["name"] == full.as_str() && r.body["model"] == "z-ai/glm-5.3-flash" && agent_id.starts_with("id:"),
         &r,
     );
-    let r = agents.signed(&owner, "GET", &format!("/api/a/{name}/tools"), None)?;
-    s.ok("until it is registered, it says so", r.status == 400 && r.message().contains("not registered"), &r);
-    let r = agents.signed(&api.person()?, "POST", "/api/agents", Some(&json!({ "name": name })))?;
-    s.ok("someone else cannot take the name meanwhile", r.status == 409, &r);
+    let reg = api.signed(&owner, "GET", &format!("/api/identities/{agent_id}"), None)?;
+    s.ok("an agent identity its owner owns", reg.status == 200 && reg.body["kind"] == "agent" && reg.body["owner"] == owner_id.as_str(), &reg);
     let again = agents.signed(&owner, "POST", "/api/agents", Some(&json!({ "name": name })))?;
-    s.ok("its maker asking again gets a fresh proof", again.status == 200 && again.body["replayed"] == true && again.body["npub"] == agent_npub.as_str(), &again);
-    let reg = api.signed(&owner, "POST", "/api/identities", Some(&json!({ "kind": "agent", "proof": again.body["proof"] })))?;
-    let agent_id = reg.body["id"].as_str().unwrap_or("").to_string();
-    let owner_id = api.identity(&owner)?;
-    s.ok("the owner registers it with the platform: an agent identity they own", reg.status == 200 && reg.body["kind"] == "agent" && reg.body["owner"] == owner_id.as_str(), &reg);
-    let r = agents.signed(&owner, "POST", "/api/agents", Some(&json!({ "name": name })))?;
-    s.ok("the name is taken after", r.status == 409, &r);
-    let r = agents.signed(&api.person()?, "GET", &format!("/api/a/{name}"), None)?;
+    s.ok("its owner asking again gets the same agent", again.status == 200 && again.body["replayed"] == true && again.body["id"] == agent_id.as_str(), &again);
+    let stranger = api.person()?;
+    let r = agents.signed(&stranger, "POST", "/api/agents", Some(&json!({ "name": full })))?;
+    s.ok("no one else makes an agent under that username", r.status == 403, &r);
+    let r = agents.signed(&stranger, "GET", &format!("/api/a/{full}"), None)?;
     s.ok("only its owner may see it", r.status == 403, &r);
-    let r = agents.signed(&Keys::generate(), "GET", &format!("/api/a/{name}"), None)?;
-    s.ok("nor a key no one registered", r.status == 403, &r);
+    let r = agents.signed(&Keys::generate(), "GET", &format!("/api/a/{full}"), None)?;
+    s.ok("nor a key no one registered", r.status == 401, &r);
     let r = agents.signed(&owner, "GET", &format!("/api/a/{name}/tools"), None)?;
     s.ok("an agent in no fragment has no tools", r.status == 200 && r.body["tools"] == json!([]), &r);
 
