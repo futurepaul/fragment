@@ -385,6 +385,15 @@ impl FragmentCell {
 
     /// `POST /job/advance`
     pub(crate) async fn job_advance(&self, body: Value, size: usize) -> CellResult<Value> {
+        let answer = self.advance(body, size).await?;
+        if answer.get("failed").is_some() {
+            // the held run polls its videos no more: their reservations go back
+            self.release_held_videos().await;
+        }
+        Ok(answer)
+    }
+
+    async fn advance(&self, body: Value, size: usize) -> CellResult<Value> {
         let (run_id, attempt) = ids(&body)?;
         let Some(run) = self.current_run(run_id, attempt)? else { return Ok(json!({ "stop": true })) };
         let fail = |why: String| -> CellResult<Value> {

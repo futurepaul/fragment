@@ -441,6 +441,21 @@ without a delete condition is unfinished design, not debt.
   (`/api/v1/models`) and the step's `max_tokens`, with a test that a
   month never passes its allowance.
 
+## A held run's video that finishes anyway is not charged to the month
+
+- **Observed:** the reliability pass (audit R13). A run held while its
+  video still waits for its cost gives the reservation back, since
+  nothing polls the video any more. OpenRouter may still finish it and
+  charge the org's key; the ledger never learns that cost.
+- **Risk:** the ledger's month under what the key really spent, by at
+  most one video per held run. OpenRouter cannot pass the allowance: the
+  key carries it as its limit.
+- **First proof:** the key's usage (`GET /api/v1/key`) above the month's
+  `spentMicros`.
+- **Delete when:** a released video is polled once more on the alarm
+  until OpenRouter says it ended, and settled at what it reports, with a
+  budget check that holds a run mid-video and sees the cost arrive.
+
 ## A paid step whose result was not stored is paid again
 
 - **Observed:** phase 4 slice C. A paid step settles once its whole

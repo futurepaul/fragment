@@ -17,4 +17,9 @@ export class App extends DurableObject {
   async ask({ text }, job) {
     return await job.ai.text({ model: "openai/gpt-5-mini", prompt: text });
   }
+
+  // a one-second video: the fake decides from the prompt how it ends
+  async film({ prompt, path }, job) {
+    return await job.ai.video({ prompt, path, duration: 1 });
+  }
 }

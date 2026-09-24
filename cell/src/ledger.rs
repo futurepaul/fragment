@@ -18,9 +18,12 @@
 //!   POST /reserve      {ref, kind, model?, amount, fragment, run, principal, agent?}
 //!                      → {reserved, key} | {replay, result} | 402 budget_used_up
 //!   POST /key          → {key}: for steps that cost nothing (a video's polls)
-//!   POST /settle       {ref, cost?, result?, video?}   (a video waits for its cost)
-//!   POST /settle-video {video, cost}
-//!   POST /release      {ref}
+//!   POST /settle       {ref, cost?, result?, video?}   (a video waits for its cost;
+//!                      any other step without a cost is charged its reservation)
+//!   POST /settle-video {video, cost?}   (without a cost: its reservation)
+//!                      → {settled, cost}: the cost it is settled at, now or before
+//!   POST /release      {ref} → {released} | {released: false, cost}: a
+//!                      reservation that was settled answers its cost
 //!   GET  /status       → the month (BudgetView) with the newest usage
 //!   GET  /usage?period=
 //!   POST /top-up       {micros, by}
@@ -238,12 +241,12 @@ impl LedgerCell {
     }
 
     fn settle(&self, b: Settle) -> CellResult<Value> {
-        let rows = self.rows("SELECT state FROM usage WHERE ref = ?", vec![b.reference.as_str().into()])?;
-        match rows.first().and_then(|r| r["state"].as_str()) {
-            None => return Err(CellError::new(ErrorCode::NotFound, "no such reservation")),
-            Some("settled") => return Ok(json!({ "settled": false })),
-            Some(_) => {}
+        let rows = self.rows("SELECT state, reserved, cost FROM usage WHERE ref = ?", vec![b.reference.as_str().into()])?;
+        let Some(row) = rows.first() else { return Err(CellError::new(ErrorCode::NotFound, "no such reservation")) };
+        if row["state"] == "settled" {
+            return Ok(json!({ "settled": false, "cost": row["cost"] }));
         }
+        let reserved = row["reserved"].as_i64().expect("usage.reserved is INTEGER");
         let result = b.result.map_or(SqlStorageValue::Null, |r| r.to_string().into());
         match (b.cost, &b.video) {
             // a video's cost comes with its last poll
@@ -252,7 +255,9 @@ impl LedgerCell {
                 Ok(json!({ "settled": false, "waiting": video }))
             }
             (cost, _) => {
-                let cost = cost.unwrap_or(0).max(0);
+                // a step whose answer named no cost is charged its worst
+                // case: the money path fails closed, never at zero
+                let cost = cost.map_or(reserved, |c| c.max(0));
                 self.exec(
                     "UPDATE usage SET state = 'settled', cost = ?, result = ?, settled_at = ? WHERE ref = ? AND state = 'reserved'",
                     vec![SqlStorageValue::Integer(cost), result, SqlStorageValue::Integer(self.now()?), b.reference.as_str().into()],
@@ -338,17 +343,27 @@ impl LedgerCell {
             (Method::Post, "/settle") => self.settle(from(body)?),
             (Method::Post, "/settle-video") => {
                 let video = body["video"].as_str().ok_or_else(|| CellError::invalid("name the video"))?;
-                let cost = body["cost"].as_i64().unwrap_or(0).max(0);
+                // without a cost, the video is charged its reservation (it fails closed)
+                let cost = body["cost"].as_i64().map_or(SqlStorageValue::Null, |c| SqlStorageValue::Integer(c.max(0)));
                 let settled = self.rows(
-                    "UPDATE usage SET state = 'settled', cost = ?, settled_at = ? WHERE video = ? AND state = 'reserved' RETURNING ref",
-                    vec![SqlStorageValue::Integer(cost), SqlStorageValue::Integer(self.now()?), video.into()],
+                    "UPDATE usage SET state = 'settled', cost = COALESCE(?, reserved), settled_at = ? WHERE video = ? AND state = 'reserved' RETURNING cost",
+                    vec![cost, SqlStorageValue::Integer(self.now()?), video.into()],
                 )?;
-                Ok(json!({ "settled": !settled.is_empty(), "cost": cost }))
+                if let Some(row) = settled.first() {
+                    return Ok(json!({ "settled": true, "cost": row["cost"] }));
+                }
+                // settled before (a poll step run again): the cost it settled at
+                let before = self.rows("SELECT cost FROM usage WHERE video = ? AND state = 'settled'", vec![video.into()])?;
+                Ok(json!({ "settled": false, "cost": before.first().map_or(Value::Null, |r| r["cost"].clone()) }))
             }
             (Method::Post, "/release") => {
                 let reference = body["ref"].as_str().ok_or_else(|| CellError::invalid("name the step"))?;
-                self.exec("DELETE FROM usage WHERE ref = ? AND state = 'reserved' AND video IS NULL", vec![reference.into()])?;
-                Ok(json!({ "released": true }))
+                let released = self.rows("DELETE FROM usage WHERE ref = ? AND state = 'reserved' RETURNING ref", vec![reference.into()])?;
+                if !released.is_empty() {
+                    return Ok(json!({ "released": true }));
+                }
+                let settled = self.rows("SELECT cost FROM usage WHERE ref = ? AND state = 'settled'", vec![reference.into()])?;
+                Ok(json!({ "released": false, "cost": settled.first().map_or(Value::Null, |r| r["cost"].clone()) }))
             }
             (Method::Get, "/status") => to(self.view(&budget::period_of(self.now()?), 20)?),
             (Method::Get, "/usage") => {

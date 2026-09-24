@@ -772,6 +772,7 @@ impl FragmentCell {
                 self.event("blobs.collect-failed", &e.message, json!({ "code": e.code }));
             }
             self.reconcile_runs().await;
+            self.release_held_videos().await;
             self.launch_queued().await;
             self.set_meta("poll_at", &(js::now_ms() + self.cfg.poll_interval_ms).to_string())?;
         }

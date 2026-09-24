@@ -11,10 +11,16 @@
 //! top-up). A step the ledger already settled answers its stored result:
 //! a replayed run is not paid twice. Keys are opened here, at the egress
 //! point, and never reach the app.
+//!
+//! A step's cost goes on its run in `spend`. A video's row keeps its
+//! OpenRouter id (`video`) while it waits for the cost its last poll
+//! reports; settling clears it. A run held with a video still waiting
+//! gives that reservation back: nothing polls the video any more.
 
 use std::time::Duration;
 
 use base64::Engine;
+use fragment_core::budget::VideoEnd;
 use fragment_core::{blob, budget};
 use fragment_proto::ErrorCode;
 use serde_json::{json, Value};
@@ -34,6 +40,8 @@ pub const VIDEO_MODEL: &str = "minimax/hailuo-3-max";
 const MEDIA_MAX_BYTES: usize = 64 * 1024 * 1024;
 const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 const KEY_SECRET: &str = "OPENROUTER_API_KEY";
+/// Held runs' waiting videos released per pass.
+const RELEASE_BATCH: i64 = 25;
 
 /// A failed OpenRouter answer: passing (429, 5xx) or lasting.
 fn failure(status: u16, body: &[u8]) -> StepFail {
@@ -125,28 +133,35 @@ impl FragmentCell {
     }
 
     /// A paid step's answer: settled to its cost (a video's comes with its
-    /// last poll), and the cost recorded on its run.
+    /// last poll; any other step that reported none is charged its
+    /// reservation), and the cost recorded on its run.
     async fn settle(&self, run: &Value, payer: &Payer, cost_usd: Option<f64>, result: &Value, video: Option<&str>) -> Result<(), StepFail> {
         let Payer::Org { org, reference: Some(reference), .. } = payer else { return Ok(()) };
         let cost = match video {
             Some(_) => None,
-            None => Some(budget::micros(cost_usd.unwrap_or(0.0))),
+            None => budget::charge(cost_usd, None),
         };
+        if video.is_none() && cost.is_none() {
+            self.event("ai.cost-missing", &format!("{reference}: OpenRouter reported no cost; the step is charged its reservation"), json!({ "ref": reference }));
+        }
         let body = json!({ "ref": reference, "cost": cost, "result": result, "video": video });
         let mut tries = 0;
-        loop {
+        let answer = loop {
             match ledger::ask(&self.env, org, Method::Post, "/settle", Some(&body)).await {
-                Ok(_) => break,
+                Ok(v) => break v,
                 Err(e) if tries < 2 && e.code != ErrorCode::NotFound => tries += 1,
                 Err(e) => return Err(StepFail::Retry(format!("settling the step's cost: {}", e.message))),
             }
-        }
+        };
+        // what the ledger charged (nothing yet for a video waiting on its cost)
+        let charged = answer["cost"].as_i64().unwrap_or(0);
         let _ = self.exec(
-            "INSERT OR IGNORE INTO spend (ref, run, micros, at, video) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO spend (ref, run, micros, at, video) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (ref) DO UPDATE SET micros = excluded.micros, video = excluded.video",
             vec![
                 reference.as_str().into(),
                 SqlStorageValue::Integer(run["id"].as_i64().unwrap_or(0)),
-                SqlStorageValue::Integer(cost.unwrap_or(0)),
+                SqlStorageValue::Integer(charged),
                 SqlStorageValue::Integer(crate::js::now_ms()),
                 video.map_or(SqlStorageValue::Null, |v| v.into()),
             ],
@@ -158,6 +173,34 @@ impl FragmentCell {
     async fn release(&self, payer: &Payer) {
         if let Payer::Org { org, reference: Some(reference), .. } = payer {
             let _ = ledger::ask(&self.env, org, Method::Post, "/release", Some(&json!({ "ref": reference }))).await;
+        }
+    }
+
+    /// Held runs' videos still waiting for their cost: nothing polls them
+    /// any more, so their reservations go back (a replay starts them
+    /// again). A video that settled meanwhile keeps its cost. From a job
+    /// that just failed, and from the alarm for runs held any other way.
+    pub(crate) async fn release_held_videos(&self) {
+        let Ok(rows) = self.rows(
+            "SELECT ref FROM spend WHERE video IS NOT NULL AND run IN (SELECT id FROM runs WHERE status = 'held') LIMIT ?",
+            vec![SqlStorageValue::Integer(RELEASE_BATCH)],
+        ) else {
+            return;
+        };
+        if rows.is_empty() {
+            return;
+        }
+        let Some(org) = self.must("owner").ok().and_then(|o| ledger::org_of(&o)) else { return };
+        for row in rows {
+            let reference = row["ref"].as_str().expect("spend.ref is TEXT");
+            let Ok(answer) = ledger::ask(&self.env, &org, Method::Post, "/release", Some(&json!({ "ref": reference }))).await else { continue };
+            let _ = match answer["cost"].as_i64() {
+                Some(cost) => self.exec("UPDATE spend SET micros = ?, video = NULL WHERE ref = ?", vec![SqlStorageValue::Integer(cost), reference.into()]),
+                None => self.exec("DELETE FROM spend WHERE ref = ?", vec![reference.into()]),
+            };
+            if answer["released"] == true {
+                self.event("ai.video-released", &format!("{reference}: its run was held before the video's cost came; the reservation goes back"), json!({ "ref": reference }));
+            }
         }
     }
 
@@ -231,12 +274,27 @@ impl FragmentCell {
         }
     }
 
-    /// Settles a video's cost when its last poll reports it.
-    async fn video_done(&self, payer: &Payer, id: &str, cost_usd: Option<f64>) -> Result<(), StepFail> {
+    /// Settles a video once its poll says it ended: completed, at the cost
+    /// reported (its reservation when none is); not delivered, at nothing
+    /// unless a cost is reported.
+    async fn video_done(&self, payer: &Payer, id: &str, status: &str, end: VideoEnd, cost_usd: Option<f64>) -> Result<(), StepFail> {
         let Payer::Org { org, .. } = payer else { return Ok(()) };
-        let cost = budget::micros(cost_usd.unwrap_or(0.0));
-        ledger::ask(&self.env, org, Method::Post, "/settle-video", Some(&json!({ "video": id, "cost": cost }))).await.map_err(ledger_fail)?;
-        let _ = self.exec("UPDATE spend SET micros = ? WHERE video = ?", vec![SqlStorageValue::Integer(cost), id.into()]);
+        let cost = budget::charge(cost_usd, Some(end));
+        match (end, cost) {
+            (VideoEnd::Completed, None) => {
+                self.event("ai.cost-missing", &format!("video {id}: OpenRouter reported no cost; it is charged its reservation"), json!({ "video": id }))
+            }
+            (VideoEnd::Undelivered, _) => self.event(
+                "ai.video-undelivered",
+                &format!("video {id} {status}; charged {}", budget::dollars(cost.unwrap_or(0))),
+                json!({ "video": id, "status": status }),
+            ),
+            (VideoEnd::Completed, Some(_)) => {}
+        }
+        let v = ledger::ask(&self.env, org, Method::Post, "/settle-video", Some(&json!({ "video": id, "cost": cost }))).await.map_err(ledger_fail)?;
+        if let Some(charged) = v["cost"].as_i64() {
+            let _ = self.exec("UPDATE spend SET micros = ?, video = NULL WHERE video = ?", vec![SqlStorageValue::Integer(charged), id.into()]);
+        }
         Ok(())
     }
 
@@ -311,10 +369,13 @@ impl FragmentCell {
                     return Err(failure(status, &bytes));
                 }
                 let v: Value = serde_json::from_slice(&bytes).map_err(|e| StepFail::Retry(format!("OpenRouter videos: {e}")))?;
-                if matches!(v["status"].as_str(), Some("completed" | "failed")) {
-                    self.video_done(payer, id, v["usage"]["cost"].as_f64()).await?;
+                let status = v["status"].as_str().unwrap_or("");
+                let end = budget::video_end(status);
+                if let Some(end) = end {
+                    self.video_done(payer, id, status, end, v["usage"]["cost"].as_f64()).await?;
                 }
-                Ok((json!({ "status": v["status"], "error": v["error"], "urls": v["unsigned_urls"], "usage": v["usage"] }), None, None))
+                let answer = json!({ "status": v["status"], "ended": end.is_some(), "error": v["error"], "urls": v["unsigned_urls"], "usage": v["usage"] });
+                Ok((answer, None, None))
             }
             "ai.video.save" => {
                 let (id, path) = (args["id"].as_str().unwrap_or(""), args["path"].as_str().unwrap_or(""));

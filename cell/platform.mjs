@@ -370,7 +370,8 @@ class Job {
         for (let i = 0; i < VIDEO_POLLS_MAX; i++) {
           const st = await step("ai.video.poll", { id });
           if (st.status === "completed") return step("ai.video.save", { id, path, url: st.urls?.[0] });
-          if (["failed", "cancelled", "expired"].includes(st.status)) throw new Error(`video ${id} ${st.status}${st.error ? `: ${st.error}` : ""}`);
+          // which statuses are final is the platform's (ai.rs): the step says
+          if (st.ended) throw new Error(`video ${id} ${st.status}${st.error ? `: ${st.error}` : ""}`);
           await this.sleep("20 seconds");
         }
         throw new Error(`video ${id} was not ready after ${VIDEO_POLLS_MAX} polls`);

@@ -70,6 +70,40 @@ pub fn reservation(kind: &str, args: &Value) -> Option<i64> {
     }
 }
 
+/// How an OpenRouter video generation ended, once it has. This list is the
+/// platform's one definition of a video's final statuses: the job's poll
+/// loop reads `ended` from the poll step's answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoEnd {
+    /// The video is ready to save.
+    Completed,
+    /// It failed, was cancelled, or expired: there is nothing to save.
+    Undelivered,
+}
+
+/// A video job's status as OpenRouter reports it; `None` while it is
+/// still going (or a status this list does not know, which is polled on).
+pub fn video_end(status: &str) -> Option<VideoEnd> {
+    match status {
+        "completed" => Some(VideoEnd::Completed),
+        "failed" | "cancelled" | "expired" => Some(VideoEnd::Undelivered),
+        _ => None,
+    }
+}
+
+/// What a finished paid step is charged, in micro-dollars: the cost
+/// OpenRouter reported. An answer that reported none is `None`, which the
+/// ledger settles at the step's reservation, so a missing cost fails
+/// closed; a video that was never delivered and reported none costs
+/// nothing.
+pub fn charge(reported_usd: Option<f64>, video: Option<VideoEnd>) -> Option<i64> {
+    match (reported_usd, video) {
+        (Some(usd), _) => Some(micros(usd)),
+        (None, Some(VideoEnd::Undelivered)) => Some(0),
+        (None, Some(VideoEnd::Completed) | None) => None,
+    }
+}
+
 /// A month's standing: the allowance (the budget plus top-ups), what has
 /// been spent (settled), and what is reserved by steps still running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +165,26 @@ mod tests {
         assert_eq!(reservation("ai.video.start", &json!({ "duration": 999 })), Some(VIDEO_MAX_S * VIDEO_RESERVE_PER_S));
         assert_eq!(reservation("ai.video.poll", &json!({})), None);
         assert_eq!(reservation("ai.video.save", &json!({})), None);
+    }
+
+    #[test]
+    fn a_videos_final_statuses() {
+        assert_eq!(video_end("completed"), Some(VideoEnd::Completed));
+        for s in ["failed", "cancelled", "expired"] {
+            assert_eq!(video_end(s), Some(VideoEnd::Undelivered), "{s}");
+        }
+        for s in ["pending", "in_progress", "queued", ""] {
+            assert_eq!(video_end(s), None, "{s}");
+        }
+    }
+
+    #[test]
+    fn a_missing_cost_is_charged_the_reservation() {
+        assert_eq!(charge(Some(0.04), None), Some(40_000));
+        assert_eq!(charge(None, None), None, "a text or image step that reported no cost");
+        assert_eq!(charge(None, Some(VideoEnd::Completed)), None, "a delivered video that reported no cost");
+        assert_eq!(charge(None, Some(VideoEnd::Undelivered)), Some(0));
+        assert_eq!(charge(Some(0.01), Some(VideoEnd::Undelivered)), Some(10_000), "a reported cost is charged, delivered or not");
     }
 
     #[test]
