@@ -543,7 +543,12 @@ The browser library (`import * as fragment from "./__fragment.js"`):
 onResult, onError?)` (re-runs a query after every change), `subscribe(
 channel, onRecord, {after?, last?})` (pages through the backlog, then
 follows live; after a reconnect it resumes after the last record),
-`presence.set(data)`, `presence.on(fn)`, `me()`.
+`presence.set(data)`, `presence.on(fn)`, `me()`, `closed(fn)`. The page's
+socket reconnects by itself after a jittered wait (half to one and a
+half times a backoff that doubles from 1 to 30 seconds), except after a
+close the fragment means for good: 4003 (the page's access was revoked)
+or 4004 (the fragment was deleted) ends it, and `closed` handlers get
+`{code, reason}`.
 
 CLI: `fragment call <name> <op> --input '{...}' [--id ID]`, `fragment
 channel <name> [<channel>] [--after N] [--follow]`.

@@ -100,6 +100,10 @@
       $("here").textContent = others <= 0 ? "just you here" : `you and ${others} other${others === 1 ? "" : "s"} here`;
     });
     fragment.presence.set({});
+    // the fragment ended this page's connection for good
+    fragment.closed(({ code }) => {
+      $("here").textContent = code === 4004 ? "this chat was deleted" : "this page's access changed: reload it";
+    });
     // the last 200 messages, then live: a long chat opens near its end
     fragment.subscribe("chat", add, { last: 200 });
 
