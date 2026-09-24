@@ -51,6 +51,15 @@ pub const TEST_FAILURES_KEY: &str = "test_fail_deliveries";
 
 const _: () = assert!(QUEUE_BATCH * (PUSH_BATCHES_MAX - 1) >= limits::PUSH_SUBS_MAX as usize, "a push's batches cover every subscription");
 
+/// One drain's failures. The first asks once whether any row already
+/// waited: if none did, an outage begins here and `delivery.deferred`
+/// says so (one event an outage, and one indexed lookup a drain, never a
+/// count of the outbox for each row that fails).
+#[derive(Default)]
+struct Failures {
+    seen: bool,
+}
+
 /// One outbox row, decoded once.
 enum Pending {
     /// Record `seq` of `channel`, to the channel subscription `sub`.
@@ -116,7 +125,8 @@ impl FragmentCell {
         js::queue_send(self.env.as_ref(), "DELIVERIES", &bodies).await
     }
 
-    /// When the outbox next has a row due (for the alarm).
+    /// When the outbox next has a row due (for the alarm): the MIN of the
+    /// `next_at` index, not a scan.
     pub(crate) fn outbox_due_at(&self) -> CellResult<Option<i64>> {
         Ok(self.rows("SELECT MIN(next_at) AS at FROM delivery_outbox", vec![])?.first().and_then(|r| r["at"].as_i64()))
     }
@@ -140,7 +150,7 @@ impl FragmentCell {
         }
         rows.sort_by_key(|r| r["id"].as_i64());
         let (Ok(fragment), Ok(incarnation)) = (self.must("name"), self.must("created_at")) else { return };
-        let mut failed = false;
+        let mut failures = Failures::default();
         // records and frames go a queue batch at a time; each push goes on its own
         let mut singles: Vec<(i64, i64, Delivery)> = vec![];
         for row in &rows {
@@ -149,20 +159,14 @@ impl FragmentCell {
                 Pending::Record { sub, channel, seq } => match self.record_delivery(sub, &channel, seq, &fragment, &incarnation) {
                     Ok(Some(d)) => singles.push((id, attempts, d)),
                     Ok(None) => self.outbox_done(id),
-                    Err(e) => {
-                        self.outbox_failed(id, attempts, &e.message);
-                        failed = true;
-                    }
+                    Err(e) => self.outbox_failed(&mut failures, id, attempts, &e.message),
                 },
                 Pending::Notify { url, frame } => {
                     let body = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, frame);
                     let headers = vec![("content-type".into(), "application/json".into())];
                     singles.push((id, attempts, Delivery { fragment: fragment.clone(), incarnation: incarnation.clone(), kind: "notify".into(), url, headers, body, sub: None }));
                 }
-                Pending::Push(push) => {
-                    let done = self.drain_push(id, attempts, push, &fragment, &incarnation).await;
-                    failed |= !done;
-                }
+                Pending::Push(push) => self.drain_push(&mut failures, id, attempts, push, &fragment, &incarnation).await,
             }
         }
         let mut chunks = singles.chunks(QUEUE_BATCH);
@@ -171,32 +175,28 @@ impl FragmentCell {
             match self.enqueue(&deliveries).await {
                 Ok(()) => chunk.iter().for_each(|(id, ..)| self.outbox_done(*id)),
                 Err(e) => {
-                    chunk.iter().for_each(|(id, attempts, _)| self.outbox_failed(*id, *attempts, &e.message));
-                    failed = true;
+                    chunk.iter().for_each(|(id, attempts, _)| self.outbox_failed(&mut failures, *id, *attempts, &e.message));
                     break;
                 }
             }
         }
         // after a failure the rest wait too: the queue is refusing
         for chunk in chunks {
-            chunk.iter().for_each(|(id, attempts, _)| self.outbox_failed(*id, *attempts, "an earlier batch was refused"));
+            chunk.iter().for_each(|(id, attempts, _)| self.outbox_failed(&mut failures, *id, *attempts, "an earlier batch was refused"));
         }
-        if failed || rows.len() as i64 == DRAIN_ROWS {
+        if failures.seen || rows.len() as i64 == DRAIN_ROWS {
             let _ = self.schedule().await;
         }
     }
 
     /// One push row: its subscriptions a batch at a time, the cursor
     /// moving as each batch is queued, so a failure re-sends none of the
-    /// batches before it. Answers whether the row is done.
-    async fn drain_push(&self, id: i64, attempts: i64, push: PendingPush, fragment: &str, incarnation: &str) -> bool {
+    /// batches before it. A row not done is in `failures`.
+    async fn drain_push(&self, failures: &mut Failures, id: i64, attempts: i64, push: PendingPush, fragment: &str, incarnation: &str) {
         let PendingPush { who, payload, mut after, upto } = push;
         let vapid = match self.vapid().await {
             Ok(v) => v,
-            Err(e) => {
-                self.outbox_failed(id, attempts, &e.message);
-                return false;
-            }
+            Err(e) => return self.outbox_failed(failures, id, attempts, &e.message),
         };
         for _ in 0..PUSH_BATCHES_MAX {
             let subs = match self.rows(
@@ -204,20 +204,15 @@ impl FragmentCell {
                 vec![SqlStorageValue::Integer(after), SqlStorageValue::Integer(upto), who.as_str().into(), who.as_str().into(), SqlStorageValue::Integer(QUEUE_BATCH as i64)],
             ) {
                 Ok(s) => s,
-                Err(e) => {
-                    self.outbox_failed(id, attempts, &e.message);
-                    return false;
-                }
+                Err(e) => return self.outbox_failed(failures, id, attempts, &e.message),
             };
             let Some(last) = subs.last().map(|s| s["id"].as_i64().expect("push_subs.id")) else {
-                self.outbox_done(id);
-                return true;
+                return self.outbox_done(id);
             };
             assert!(last > after, "a push's cursor moves forward");
             let deliveries = self.push_deliveries(&vapid, &subs, &payload, fragment, incarnation);
             if let Err(e) = self.enqueue(&deliveries).await {
-                self.outbox_failed(id, attempts, &e.message);
-                return false;
+                return self.outbox_failed(failures, id, attempts, &e.message);
             }
             after = last;
             let _ = self.exec("UPDATE delivery_outbox SET after_sub = ? WHERE id = ?", vec![SqlStorageValue::Integer(after), SqlStorageValue::Integer(id)]);
@@ -230,21 +225,25 @@ impl FragmentCell {
     }
 
     /// A row the queue did not take: it waits, or after its last try it
-    /// goes, with an event. The first row to wait while no other does says
-    /// so once (an outage is one event, not one per delivery).
-    fn outbox_failed(&self, id: i64, attempts: i64, why: &str) {
+    /// goes, with an event. The drain's first failure asks, before it
+    /// writes, whether any row waits already (the partial index of waiting
+    /// rows: one lookup, not a scan); when none does, this row's first
+    /// failure begins an outage and says so once (an outage is one event,
+    /// not one per delivery).
+    fn outbox_failed(&self, failures: &mut Failures, id: i64, attempts: i64, why: &str) {
+        let begins_outage = !failures.seen && self.rows("SELECT id FROM delivery_outbox WHERE attempts > 0 LIMIT 1", vec![]).is_ok_and(|w| w.is_empty());
+        failures.seen = true;
         let attempts = attempts + 1;
         if attempts >= OUTBOX_ATTEMPTS_MAX {
             self.outbox_done(id);
             self.event("delivery.failed", &format!("a delivery the queue did not take in {attempts} tries was dropped: {why}"), json!({ "outbox": id }));
             return;
         }
-        let waiting = self.count(&format!("SELECT COUNT(*) AS n FROM delivery_outbox WHERE attempts > 0 AND id != {id}")).unwrap_or(0);
         let _ = self.exec(
             "UPDATE delivery_outbox SET attempts = ?, next_at = ? WHERE id = ?",
             vec![SqlStorageValue::Integer(attempts), SqlStorageValue::Integer(js::now_ms() + fragment_core::backoff::outbox_retry_ms(attempts)), SqlStorageValue::Integer(id)],
         );
-        if attempts == 1 && waiting == 0 {
+        if attempts == 1 && begins_outage {
             self.event("delivery.deferred", &format!("deliveries wait in the outbox: {why}"), json!({ "outbox": id }));
         }
     }

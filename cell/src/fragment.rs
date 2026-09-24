@@ -128,6 +128,8 @@ CREATE TABLE IF NOT EXISTS delivery_outbox (
   sub INTEGER, channel TEXT, seq INTEGER, who TEXT, url TEXT, body TEXT,
   after_sub INTEGER NOT NULL DEFAULT 0, upto_sub INTEGER NOT NULL DEFAULT 0,
   attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS delivery_outbox_due ON delivery_outbox (next_at);
+CREATE INDEX IF NOT EXISTS delivery_outbox_waiting ON delivery_outbox (id) WHERE attempts > 0;
 CREATE TABLE IF NOT EXISTS spend (ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, at INTEGER NOT NULL, video TEXT);
 CREATE INDEX IF NOT EXISTS spend_run ON spend (run);
 ";
