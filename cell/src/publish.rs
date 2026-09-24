@@ -215,7 +215,7 @@ impl FragmentCell {
         let create = CreateFragment { name: text("label")?, visibility: None, template: Some(text("template")?) };
         let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: Some(username.to_string()) };
         let signer = Signed { identity, key: None };
-        let mut made = crate::create_fragment(&self.env, &self.cfg, &caller.url, create, signer).await?;
+        let mut made = crate::create_fragment(&self.env, self.cfg, &caller.url, create, signer).await?;
         let status = made.status_code();
         let v: Value = made.json().await?;
         if status != 200 {

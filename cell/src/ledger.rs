@@ -72,6 +72,8 @@ pub fn valid_org(org: &str) -> bool {
 pub struct LedgerCell {
     state: State,
     env: Env,
+    /// The isolate's settings (config.rs: built once per isolate).
+    cfg: &'static Config,
     /// One mint (or limit change) of the org's key at a time.
     keying: futures_util::lock::Mutex<()>,
 }
@@ -79,7 +81,8 @@ pub struct LedgerCell {
 impl DurableObject for LedgerCell {
     fn new(state: State, env: Env) -> Self {
         state.storage().sql().exec(SCHEMA, None).expect("the Ledger schema applies");
-        LedgerCell { state, env, keying: futures_util::lock::Mutex::new(()) }
+        let cfg = Config::from_env(&env);
+        LedgerCell { state, env, cfg, keying: futures_util::lock::Mutex::new(()) }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -325,14 +328,24 @@ impl LedgerCell {
         Ok(js::now_ms() + offset)
     }
 
+    /// A month's allowance, spent, and reserved, in one statement (each sum
+    /// an index range of its own table).
     fn month(&self, period: &str) -> CellResult<Month> {
-        let cfg = Config::from_env(&self.env);
+        let rows = self.rows(
+            "SELECT (SELECT COALESCE(SUM(micros), 0) FROM topups WHERE period = ?) AS topped,
+                    (SELECT COALESCE(SUM(cost), 0) FROM usage WHERE period = ? AND state = 'settled') AS spent,
+                    (SELECT COALESCE(SUM(reserved), 0) FROM usage WHERE period = ? AND state = 'reserved') AS reserved",
+            vec![period.into(), period.into(), period.into()],
+        )?;
+        let row = rows.first().expect("a SELECT of sums answers one row");
+        let sum = |k: &str| row[k].as_i64().unwrap_or_else(|| panic!("a COALESCE(SUM(…), 0) answers an integer ({k})"));
+        Ok(Month { allowance: self.cfg.budget_micros + sum("topped"), spent: sum("spent"), reserved: sum("reserved") })
+    }
+
+    /// A month's allowance alone: the budget and that month's top-ups.
+    fn allowance(&self, period: &str) -> CellResult<i64> {
         let topped = self.sum("SELECT COALESCE(SUM(micros), 0) AS n FROM topups WHERE period = ?", vec![period.into()])?;
-        Ok(Month {
-            allowance: cfg.budget_micros + topped,
-            spent: self.sum("SELECT COALESCE(SUM(cost), 0) AS n FROM usage WHERE period = ? AND state = 'settled'", vec![period.into()])?,
-            reserved: self.sum("SELECT COALESCE(SUM(reserved), 0) AS n FROM usage WHERE period = ? AND state = 'reserved'", vec![period.into()])?,
-        })
+        Ok(self.cfg.budget_micros + topped)
     }
 
     /// Holds a step's reservation; answers the stored result instead when
@@ -412,8 +425,10 @@ impl LedgerCell {
         };
         let _one = self.keying.lock().await;
         let org = self.org()?;
+        // Read under the lock, not handed in by a reservation: one that
+        // waited here behind a top-up's key change would set its limit back.
         let period = budget::period_of(self.now()?);
-        let allowance = self.month(&period)?.allowance;
+        let allowance = self.allowance(&period)?;
         let usd = allowance as f64 / budget::USD as f64;
         if let (Some(sealed), Some(hash)) = (self.meta("or_key")?, self.meta("or_hash")?) {
             let set = format!("{period}:{allowance}");
@@ -510,7 +525,7 @@ impl LedgerCell {
     }
 
     fn view(&self, period: &str, limit: i64) -> CellResult<BudgetView> {
-        let cfg = Config::from_env(&self.env);
+        let cfg = self.cfg;
         let org = self.org()?;
         let month = self.month(period)?;
         let usage = self
@@ -591,7 +606,7 @@ impl LedgerCell {
                 reply::<Usage>(self.view(&period, USAGE_PAGE))
             }
             TopUp::PATH => reply::<TopUp>(self.top_up(decode(&body)?).await),
-            SetClock::PATH if Config::from_env(&self.env).test_hooks => {
+            SetClock::PATH if self.cfg.test_hooks => {
                 let clock: SetClock = decode(&body)?;
                 self.set_meta("clock_offset", &clock.offset_ms.to_string())?;
                 reply::<SetClock>(Ok(Clock { offset_ms: clock.offset_ms, period: budget::period_of(self.now()?) }))

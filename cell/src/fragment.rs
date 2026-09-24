@@ -138,7 +138,8 @@ pub struct FragmentCell {
     pub(crate) state: State,
     pub(crate) raw: JsValue,
     pub(crate) env: Env,
-    pub(crate) cfg: Config,
+    /// The isolate's settings (config.rs: built once per isolate).
+    pub(crate) cfg: &'static Config,
     /// Serializes pin refreshes: two refreshes racing could leave the older head pinned.
     pub(crate) plane: futures_util::lock::Mutex<()>,
     pub(crate) rate: RefCell<fragment_core::ratelimit::Rate>,

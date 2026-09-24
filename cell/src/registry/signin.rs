@@ -364,7 +364,7 @@ impl RegistryCell {
         // rowid, one row a start while a flood lasts; ranking the pending
         // rows instead walked all of them on every start once a flood had
         // filled the table.
-        let cap = i64::try_from(self.signins_pending_max).expect("the cap fits a rowid");
+        let cap = i64::try_from(self.cfg.signins_pending_max).expect("the cap fits a rowid");
         self.exec("DELETE FROM logins WHERE rowid <= ?", vec![SqlStorageValue::Integer(n.saturating_sub(cap))])?;
         Ok(Began { state })
     }
