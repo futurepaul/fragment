@@ -411,7 +411,7 @@ impl FragmentCell {
         self.event(
             "storage-token.minted",
             &format!("{} → repo {repo}, git:read+git:write, {}s", npub::display(who), limits::STORAGE_TOKEN_TTL_S),
-            json!({ "actor": npub::display(who), "key": caller.key.as_deref().map(npub::display), "repo": repo, "expiresAt": token.expires_at }),
+            json!({ "actor": npub::display(who), "key": caller.key().map(npub::display), "repo": repo, "expiresAt": token.expires_at }),
         );
         json_response(&token)
     }

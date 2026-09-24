@@ -25,13 +25,14 @@
 //! is looked up live on every request.
 
 use fragment_core::{npub, site};
-use fragment_proto::{ErrorCode, IdentityKind};
-use serde_json::json;
+use fragment_proto::{ErrorCode, Identity, IdentityKind};
 use worker::*;
 
+use crate::ask_registry;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
-use crate::{ask_registry, signer_of, Signer};
+use crate::registry::calls;
+use crate::routed::Signed;
 
 pub const SESSION_COOKIE: &str = "fragment_session";
 pub const SITE_COOKIE: &str = "fragment_site";
@@ -138,11 +139,11 @@ fn query(url: &Url, k: &str) -> Option<String> {
     url.query_pairs().find(|(q, _)| q == k).map(|(_, v)| v.into_owned())
 }
 
-/// The signed-in person on the platform origin, or `None`.
-async fn platform_session(req: &Request, env: &Env, url: &Url) -> CellResult<Option<(String, Signer)>> {
+/// The signed-in person on the platform origin, and their session's token, or `None`.
+async fn platform_session(req: &Request, env: &Env, url: &Url) -> CellResult<Option<(String, Identity)>> {
     let Some(token) = cookie_of(req, SESSION_COOKIE, secure(url), "/")? else { return Ok(None) };
-    match ask_registry(env, "/session", &json!({ "token": token })).await {
-        Ok(v) => Ok(Some((token, signer_of(&v, None)?))),
+    match ask_registry(env, &calls::Session { token: token.clone(), fragment: None }).await {
+        Ok(identity) => Ok(Some((token, identity))),
         Err(e) if e.code == ErrorCode::Unauthenticated => Ok(None),
         Err(e) => Err(e),
     }
@@ -158,11 +159,12 @@ fn site_cookie_path(name: &str, path_mode: bool) -> String {
     }
 }
 
-/// The session a fragment's own cookie carries, for that fragment only.
-pub async fn site_session(req: &Request, env: &Env, name: &str, url: &Url, path_mode: bool) -> CellResult<Option<Signer>> {
+/// The session a fragment's own cookie carries, for that fragment only (a
+/// session holds no key).
+pub async fn site_session(req: &Request, env: &Env, name: &str, url: &Url, path_mode: bool) -> CellResult<Option<Signed>> {
     let Some(token) = cookie_of(req, SITE_COOKIE, secure(url), &site_cookie_path(name, path_mode))? else { return Ok(None) };
-    match ask_registry(env, "/session", &json!({ "token": token, "fragment": name })).await {
-        Ok(v) => Ok(Some(signer_of(&v, None)?)),
+    match ask_registry(env, &calls::Session { token, fragment: Some(name.to_string()) }).await {
+        Ok(identity) => Ok(Some(Signed { identity, key: None })),
         // a stale cookie is no session: the request goes on unsigned
         Err(e) if e.code == ErrorCode::Unauthenticated => Ok(None),
         Err(e) => Err(e),
@@ -196,11 +198,13 @@ async fn budget_line(env: &Env, id: &str) -> String {
     }
 }
 
+/// The email of a person's first sign-in, for the platform's pages.
 async fn email_of(env: &Env, id: &str) -> String {
-    ask_registry(env, "/view", &json!({ "identity": id, "by": id }))
+    ask_registry(env, &calls::View { identity: id.to_string(), by: id.to_string() })
         .await
         .ok()
-        .and_then(|v| v["subjects"][0]["email"].as_str().map(str::to_string))
+        .and_then(|view| view.subjects.into_iter().next())
+        .and_then(|subject| subject.email)
         .unwrap_or_default()
 }
 
@@ -257,8 +261,8 @@ async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>) -> Cell
     let workos = cfg.workos()?;
     let platform = cfg.platform(url);
     let return_to = site::return_path(query(url, "return").as_deref());
-    let v = ask_registry(env, "/login/begin", &json!({ "returnTo": return_to, "linkTo": link })).await?;
-    let state = v["state"].as_str().ok_or_else(|| CellError::host("the registry answered no state"))?;
+    let began = ask_registry(env, &calls::Begin { return_to, link_to: link }).await?;
+    let state = began.state;
     let mut to = format!(
         "{}/user_management/authorize?client_id={}&redirect_uri={}&response_type=code&provider=authkit&state={state}",
         workos.api,
@@ -273,7 +277,7 @@ async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>) -> Cell
     if let Some(token) = token {
         to += &format!("&invitation_token={token}");
     }
-    redirect(&to, &[set_cookie(LOGIN_COOKIE, state, "/", 600, secure(url))])
+    redirect(&to, &[set_cookie(LOGIN_COOKIE, &state, "/", 600, secure(url))])
 }
 
 async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
@@ -289,12 +293,11 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
     }
     let code = query(url, "code").ok_or_else(|| CellError::invalid("the callback carries no code"))?;
     // the registry exchanges the code: WorkOS's API key is the node's (KEYS)
-    let done = ask_registry(env, "/login/exchange", &json!({ "state": state, "code": code, "clientId": workos.client_id, "issuer": workos.issuer() })).await?;
-    let token = done["token"].as_str().ok_or_else(|| CellError::host("the registry answered no session"))?;
+    let done = ask_registry(env, &calls::Exchange { state, code, client_id: workos.client_id.clone(), issuer: workos.issuer() }).await?;
     redirect(
-        &back_to(&format!("{}/", cfg.platform(url)), done["returnTo"].as_str())?,
+        &back_to(&format!("{}/", cfg.platform(url)), Some(&done.return_to))?,
         &[
-            set_cookie(SESSION_COOKIE, token, "/", crate::registry::SESSION_TTL_MS / 1000, secure(url)),
+            set_cookie(SESSION_COOKIE, &done.token, "/", crate::registry::SESSION_TTL_MS / 1000, secure(url)),
             set_cookie(LOGIN_COOKIE, "", "/", 0, secure(url)),
         ],
     )
@@ -348,7 +351,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 let Some((_, who)) = platform_session(&req, env, url).await? else { return to_login(&platform, "/") };
                 let form = req.form_data().await?;
                 let Some(FormEntry::Field(username)) = form.get("username") else { return Err(CellError::invalid("choose a username")) };
-                match ask_registry(env, "/username/claim", &json!({ "identity": who.id, "username": username.trim() })).await {
+                match ask_registry(env, &calls::ClaimUsername { identity: who.id.clone(), username: username.trim().to_string() }).await {
                     Ok(_) => redirect("/", &[]),
                     Err(e) if matches!(e.code, ErrorCode::AlreadyExists | ErrorCode::InvalidRequest) => {
                         page(400, "Choose your username", &format!("<p>{}</p><p><a href=\"/\">Try another</a></p>", esc(&e.message)))
@@ -362,7 +365,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 let bytes = crate::read_body(&mut req, NEW_FORM_MAX_BYTES).await?;
                 let field = |name: &str| url::form_urlencoded::parse(&bytes).find(|(k, _)| k == name).map(|(_, v)| v.trim().to_string()).unwrap_or_default();
                 let create = fragment_proto::CreateFragment { name: field("label"), visibility: None, template: Some(field("template")) };
-                let v: serde_json::Value = match crate::create_fragment(env, cfg, url, create, who).await {
+                let v: serde_json::Value = match crate::create_fragment(env, cfg, url, create, Signed { identity: who, key: None }).await {
                     Ok(mut made) if made.status_code() == 200 => made.json().await?,
                     Ok(mut made) => {
                         let v: serde_json::Value = made.json().await.unwrap_or_default();
@@ -387,7 +390,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 };
                 let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes));
                 crate::js::blob_put_bytes(env.as_ref(), &format!("pictures/{sha}"), &bytes).await?;
-                ask_registry(env, "/picture/set", &json!({ "identity": who.id, "sha": sha, "mime": mime })).await?;
+                ask_registry(env, &calls::SetPicture { identity: who.id.clone(), sha, mime: mime.to_string() }).await?;
                 redirect("/", &[])
             }
             (Method::Get, ["auth", "logout"]) => page(200, "Sign out", "<form method=\"post\" action=\"/auth/logout\"><button>Sign out</button></form>"),
@@ -395,8 +398,8 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 same_origin(&req, &platform)?;
                 let clear = set_cookie(SESSION_COOKIE, "", "/", 0, secure(url));
                 let Some(token) = cookie_of(&req, SESSION_COOKIE, secure(url), "/")? else { return redirect("/", &[clear]) };
-                let sid = match ask_registry(env, "/logout", &json!({ "token": token })).await {
-                    Ok(v) => v["workosSid"].as_str().map(str::to_string),
+                let sid = match ask_registry(env, &calls::Logout { token }).await {
+                    Ok(out) => out.workos_sid,
                     Err(e) if e.code == ErrorCode::Unauthenticated => None,
                     Err(e) => return Err(e),
                 };
@@ -414,9 +417,8 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 let Some((token, _)) = platform_session(&req, env, url).await? else {
                     return to_login(&platform, &format!("/auth/fragment?name={name}&return={}", enc(&back)));
                 };
-                let v = ask_registry(env, "/redeem/mint", &json!({ "token": token, "fragment": name, "returnTo": back })).await?;
-                let redeem = v["redeem"].as_str().ok_or_else(|| CellError::host("the registry answered no redemption"))?;
-                redirect(&format!("{}__signin?token={redeem}", cfg.canonical(url, &name)), &[])
+                let minted = ask_registry(env, &calls::Mint { token, fragment: name.clone(), return_to: back }).await?;
+                redirect(&format!("{}__signin?token={}", cfg.canonical(url, &name), minted.redeem), &[])
             }
             (Method::Get, ["cli"]) => {
                 let key = query(url, "key").unwrap_or_default();
@@ -454,7 +456,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                     return Err(CellError::new(ErrorCode::Unauthenticated, "sign in first"));
                 };
                 link_proof(&platform, &hex, &field("proof"))?;
-                ask_registry(env, "/cli/add", &json!({ "token": token, "key": hex })).await?;
+                ask_registry(env, &calls::ApproveKey { token, key: hex }).await?;
                 page(200, "Key added", "<p>This key is yours now. A <code>fragment login</code> waiting in a terminal finishes on its own.</p>")
             }
             (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
@@ -482,11 +484,10 @@ pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &
                     redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(url), enc(&back)), &[])
                 }
                 Some(redeem) => {
-                    let v = ask_registry(env, "/redeem", &json!({ "redeem": redeem, "fragment": name })).await?;
-                    let token = v["token"].as_str().ok_or_else(|| CellError::host("the registry answered no session"))?;
+                    let redeemed = ask_registry(env, &calls::Redeem { redeem, fragment: name.to_string() }).await?;
                     redirect(
-                        &back_to(&base, v["returnTo"].as_str())?,
-                        &[set_cookie(SITE_COOKIE, token, &cookie_path, crate::registry::SESSION_TTL_MS / 1000, secure(url))],
+                        &back_to(&base, Some(&redeemed.return_to))?,
+                        &[set_cookie(SITE_COOKIE, &redeemed.token, &cookie_path, crate::registry::SESSION_TTL_MS / 1000, secure(url))],
                     )
                 }
             },
@@ -497,7 +498,7 @@ pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &
                 // is logged, and the session lasts until it expires or the
                 // platform session ends (`/auth/logout` ends every one).
                 if let Some(token) = cookie_of(req, SITE_COOKIE, secure(url), &cookie_path)? {
-                    if let Err(e) = ask_registry(env, "/session/end", &json!({ "token": token, "fragment": name })).await {
+                    if let Err(e) = ask_registry(env, &calls::EndSession { token, fragment: name.to_string() }).await {
                         console_error!("__signout on {name}: the registry did not end the session ({:?}): {}", e.code, e.message);
                     }
                 }

@@ -48,19 +48,13 @@ export class Registry extends DurableObject {
 
 // The app's read access to its files (files.rs), handed to its facet as
 // `env.FILES` bound to one fragment by `props`: the app cannot name another.
+// Both it and the job driver call the supervisor's internal routes through
+// `rs.InternalRoute.request` (routed.rs), which marks the request as that route
+// expects: the JavaScript names no header.
 export class Files extends WorkerEntrypoint {
   async #ask(op, body) {
     const { fragment } = this.ctx.props;
-    return this.env.FRAGMENT.getByName(fragment).fetch(`https://fragment.internal/cap/files/${op}`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-fragment-cap": "files",
-        "x-fragment-name": fragment,
-        "x-fragment-url": "https://fragment.internal/",
-      },
-      body: JSON.stringify(body),
-    });
+    return this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(`cap/files/${op}`, JSON.stringify(body)));
   }
 
   async #answer(op, body) {
@@ -90,16 +84,8 @@ export class Job extends WorkflowEntrypoint {
     const delay = Math.max(1, Number(this.env.FRAGMENT_JOB_RETRY_DELAY_S) || 10);
     const retrying = { retries: { limit: 4, delay: `${delay} seconds`, backoff: "exponential" }, timeout: "5 minutes" };
     const post = async (path, body) => {
-      const resp = await this.env.FRAGMENT.getByName(fragment).fetch(`https://fragment.internal/job/${path}`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-fragment-job": "1",
-          "x-fragment-name": fragment,
-          "x-fragment-url": "https://fragment.internal/",
-        },
-        body: JSON.stringify({ incarnation, run, attempt, ...body }),
-      });
+      const call = rs.InternalRoute.request(`job/${path}`, JSON.stringify({ incarnation, run, attempt, ...body }));
+      const resp = await this.env.FRAGMENT.getByName(fragment).fetch(call);
       const out = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(out.message || `job/${path} answered ${resp.status}`);
       return out;

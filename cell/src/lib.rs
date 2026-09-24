@@ -58,20 +58,22 @@ mod principal;
 mod publish;
 mod push;
 mod registry;
+mod routed;
 mod serve;
 mod subscriptions;
 
 use fragment_core::body::{LimitedBody, TooLarge};
 use fragment_core::npub;
-use fragment_proto::{limits, valid_fragment_name, AddKey, CreateFragment, ErrorBody, ErrorCode, IdentityKind, Register};
+use fragment_proto::{limits, valid_fragment_name, CreateFragment, ErrorBody, ErrorCode, IdentityKind, Register};
 use futures_util::TryStreamExt;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
 
 use config::Config;
 use error::{CellError, CellResult};
-use fragment::{KEY_HEADER, KIND_HEADER, NAME_HEADER, OWNER_HEADER, PRINCIPAL_HEADER, URL_HEADER};
-use serve::MODE_HEADER;
+use registry::calls::{self, Call};
+use routed::{Mode, Routed, Signed};
 
 pub use fragment::FragmentCell;
 pub use principal::PrincipalCell;
@@ -131,35 +133,26 @@ fn authenticate(req: &Request, url: &Url, body: &[u8]) -> CellResult<String> {
         .map_err(|e| CellError::new(ErrorCode::Unauthenticated, e.to_string()))
 }
 
-/// Who is asking: the identity the registry says holds the signing key,
-/// or a browser's session names (no key then).
-#[derive(Clone)]
-pub(crate) struct Signer {
-    pub key: Option<String>,
-    pub id: String,
-    pub kind: IdentityKind,
-    pub owner: Option<String>,
-    /// A person's username; an agent's owner's: where its fragments go.
-    pub username: Option<String>,
-}
-
 /// Tries at reaching the registry: a route the node refused for now (a
 /// cell queued too long behind the others waking after a restart) is
 /// asked again after a pause.
 const REGISTRY_ATTEMPTS: u32 = 3;
 const REGISTRY_RETRY_MS: u64 = 250;
 
-/// Asks the registry cell. Its refusals pass through; not reaching it, or
-/// a failure inside it, is `registry_unavailable`: nothing signed is
-/// decided without it (docs/finite-integration.md, rule 7).
-pub(crate) async fn ask_registry(env: &Env, path: &str, body: &Value) -> CellResult<Value> {
+/// Asks the registry cell one of its calls (`registry/calls.rs`: the path,
+/// the body, and the answer are one definition both ends compile against).
+/// Its refusals pass through; not reaching it, a failure inside it, or an
+/// answer that does not decode is `registry_unavailable`: nothing signed
+/// is decided without it (docs/finite-integration.md, rule 7).
+pub(crate) async fn ask_registry<C: Call>(env: &Env, call: &C) -> CellResult<C::Answer> {
     let unavailable = |why: String| CellError::new(ErrorCode::RegistryUnavailable, format!("the identity registry did not answer ({why}); try again shortly"));
+    let body = serde_json::to_string(call).map_err(|e| CellError::host(format!("a registry call: {e}")))?;
     let ask = || async {
         let headers = Headers::new();
         headers.set("content-type", "application/json")?;
         let mut init = RequestInit::new();
-        init.with_method(Method::Post).with_headers(headers).with_body(Some(body.to_string().into()));
-        let req = Request::new_with_init(&format!("https://registry.internal{path}"), &init)?;
+        init.with_method(Method::Post).with_headers(headers).with_body(Some(body.as_str().into()));
+        let req = Request::new_with_init(&format!("https://registry.internal{}", C::PATH), &init)?;
         let mut resp = env.durable_object("REGISTRY")?.get_by_name(registry::NAME)?.fetch_with_request(req).await?;
         let status = resp.status_code();
         let bytes = resp.bytes().await?;
@@ -177,7 +170,8 @@ pub(crate) async fn ask_registry(env: &Env, path: &str, body: &Value) -> CellRes
         }
     };
     if status == 200 {
-        return serde_json::from_slice(&bytes).map_err(|e| unavailable(format!("its answer: {e}")));
+        let answer = serde_json::from_slice::<C::Answer>(&bytes).map_err(|e| unavailable(format!("its answer: {e}")))?;
+        return C::checked(answer);
     }
     match serde_json::from_slice::<ErrorBody>(&bytes) {
         Ok(e) if status < 500 => Err(CellError::new(e.error, e.message)),
@@ -186,31 +180,15 @@ pub(crate) async fn ask_registry(env: &Env, path: &str, body: &Value) -> CellRes
     }
 }
 
-pub(crate) fn facts_of(v: &Value) -> CellResult<(String, IdentityKind, Option<String>)> {
-    let id = v["id"].as_str().filter(|i| npub::is_identity(i)).ok_or_else(|| CellError::host("the registry named no identity"))?;
-    let kind = v["kind"].as_str().and_then(IdentityKind::parse).ok_or_else(|| CellError::host("the registry named no kind"))?;
-    Ok((id.to_string(), kind, v["owner"].as_str().map(str::to_string)))
-}
-
-/// The signer the registry's facts describe.
-pub(crate) fn signer_of(v: &Value, key: Option<String>) -> CellResult<Signer> {
-    let (id, kind, owner) = facts_of(v)?;
-    Ok(Signer { key, id, kind, owner, username: v["username"].as_str().map(str::to_string) })
-}
-
-async fn resolve(env: &Env, key: String) -> CellResult<Signer> {
-    let v = ask_registry(env, "/resolve", &json!({ "key": key })).await?;
-    signer_of(&v, Some(key))
-}
-
 /// The signer of a request that must be signed, resolved.
-pub(crate) async fn signer(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Signer> {
+pub(crate) async fn signer(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Signed> {
     let key = authenticate(req, url, body)?;
-    resolve(env, key).await
+    let identity = ask_registry(env, &calls::Resolve { key: key.clone() }).await?;
+    Ok(Signed { identity, key: Some(key) })
 }
 
 /// The signer when the request carries a signature (a bad one is still a 401).
-async fn signer_if_signed(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Option<Signer>> {
+async fn signer_if_signed(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Option<Signed>> {
     match req.headers().get("authorization")? {
         Some(_) => signer(env, req, url, body).await.map(Some),
         None => Ok(None),
@@ -222,7 +200,7 @@ fn test_hooks(env: &Env) -> bool {
 }
 
 /// The identity a path names: `me` is the signer.
-fn named_identity(who: &str, signer: &Signer) -> CellResult<String> {
+fn named_identity(who: &str, signer: &Signed) -> CellResult<String> {
     if who == "me" {
         return Ok(signer.id.clone());
     }
@@ -232,15 +210,12 @@ fn named_identity(who: &str, signer: &Signer) -> CellResult<String> {
     Err(CellError::invalid(format!("{who:?} is not an identity (id:…) or `me`")))
 }
 
-/// A create's name under the creator's username: a bare label goes under
-/// it, and a qualified name must already be under it.
 /// An operator's undo of a username taken by mistake (it was chosen once,
 /// and URLs name it): refused while its person owns a fragment under it.
 async fn release_username(env: &Env, username: &str) -> CellResult<Response> {
-    let person = ask_registry(env, "/username/lookup", &json!({ "username": username })).await?;
-    let id = person["id"].as_str().ok_or_else(|| CellError::host("the registry answered no identity"))?;
+    let holder = ask_registry(env, &calls::FindUsername { username: username.to_string() }).await?;
     let list = Request::new("https://principal.internal/list", Method::Get)?;
-    let v: Value = env.durable_object("PRINCIPAL")?.get_by_name(id)?.fetch_with_request(list).await?.json().await?;
+    let v: Value = env.durable_object("PRINCIPAL")?.get_by_name(&holder.identity.id)?.fetch_with_request(list).await?.json().await?;
     let owned: Vec<&str> = v["fragments"]
         .as_array()
         .into_iter()
@@ -252,18 +227,19 @@ async fn release_username(env: &Env, username: &str) -> CellResult<Response> {
     if !owned.is_empty() {
         return Err(CellError::new(ErrorCode::AlreadyExists, format!("{username} owns fragments under it ({}): its URLs name it", owned.join(", "))));
     }
-    json_answer(&ask_registry(env, "/username/release", &json!({ "username": username })).await?)
+    json_answer(&ask_registry(env, &calls::ReleaseUsername { username: username.to_string() }).await?)
 }
 
 /// Makes a fragment for a person, under their username: the API's create
 /// and the platform's "new" page. An agent makes one for its owner: the
 /// owner's, under their username, with the agent an editor of it.
-pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut create: CreateFragment, principal: Signer) -> CellResult<Response> {
+pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut create: CreateFragment, principal: Signed) -> CellResult<Response> {
     let (maker, agent) = match principal.kind {
         IdentityKind::Person => (principal, None),
         IdentityKind::Agent => {
             let owner = principal.owner.clone().ok_or_else(|| CellError::host("an agent without an owner"))?;
-            (Signer { key: None, id: owner, kind: IdentityKind::Person, owner: None, username: principal.username.clone() }, Some(principal.id))
+            let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: principal.username.clone() };
+            (Signed { identity, key: None }, Some(principal.identity.id))
         }
     };
     let username = maker.username.clone().ok_or_else(|| CellError::invalid(format!("choose a username first (sign in at {}/)", cfg.platform(url))))?;
@@ -271,13 +247,13 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
     let body = serde_json::to_vec(&create).map_err(|e| CellError::host(e.to_string()))?;
     // a fresh request: nothing of the caller's but what the router decided
     let bare = Request::new(url.as_str(), Method::Post)?;
-    let f = Forward { name: &create.name, inner: "/create".into(), principal: Some(maker.clone()), mode: None, extra: vec![] };
-    let made = forward(env, &bare, url, bytes_body(body), f).await?;
+    let routed = Routed { name: create.name.clone(), url: url.clone(), mode: None, signed: Some(maker.clone()) };
+    let made = forward(env, &bare, bytes_body(body), Forward { routed, inner: "/create".into(), extra: vec![] }).await?;
     if let (Some(agent), 200) = (agent, made.status_code()) {
         let put = Request::new(url.as_str(), Method::Put)?;
         let role = serde_json::to_vec(&json!({ "role": "editor" })).map_err(|e| CellError::host(e.to_string()))?;
-        let f = Forward { name: &create.name, inner: format!("/api/members/{agent}"), principal: Some(maker), mode: None, extra: vec![] };
-        let mut added = forward(env, &put, url, bytes_body(role), f).await?;
+        let routed = Routed { name: create.name.clone(), url: url.clone(), mode: None, signed: Some(maker) };
+        let mut added = forward(env, &put, bytes_body(role), Forward { routed, inner: format!("/api/members/{agent}"), extra: vec![] }).await?;
         if added.status_code() != 200 {
             return Err(CellError::host(format!("{} was made, but its agent was not made an editor: {}", create.name, added.text().await.unwrap_or_default())));
         }
@@ -316,17 +292,20 @@ async fn users(env: &Env, rest: &[&str]) -> CellResult<Response> {
     if !fragment_proto::valid_username(username) {
         return Err(CellError::new(ErrorCode::NotFound, format!("no one is {username}")));
     }
-    let v = ask_registry(env, "/username/lookup", &json!({ "username": username })).await?;
-    let picture = v["picture"]["sha"].as_str().map(|sha| format!("/api/users/{username}/picture?v={}", &sha[..12]));
+    let holder = ask_registry(env, &calls::FindUsername { username: username.to_string() }).await?;
     match tail {
-        [] => json_answer(&json!({ "id": v["id"], "kind": v["kind"], "username": username, "picture": picture })),
+        [] => {
+            let picture = holder.picture.as_ref().map(|p| format!("/api/users/{username}/picture?v={}", &p.sha[..12]));
+            json_answer(&json!({ "id": holder.identity.id, "kind": holder.identity.kind, "username": username, "picture": picture }))
+        }
         ["picture"] => {
-            let (Some(sha), Some(mime)) = (v["picture"]["sha"].as_str(), v["picture"]["mime"].as_str()) else {
+            let Some(picture) = holder.picture else {
                 return Err(CellError::new(ErrorCode::NotFound, format!("{username} has no picture")));
             };
-            let blob = js::blob_get(env.as_ref(), &format!("pictures/{sha}"), None).await?.ok_or_else(|| CellError::host("a picture's bytes are missing"))?;
+            let blob =
+                js::blob_get(env.as_ref(), &format!("pictures/{}", picture.sha), None).await?.ok_or_else(|| CellError::host("a picture's bytes are missing"))?;
             let headers = Headers::new();
-            headers.set("content-type", mime)?;
+            headers.set("content-type", &picture.mime)?;
             headers.set("cache-control", "public, max-age=300")?;
             headers.set("x-content-type-options", "nosniff")?;
             Ok(Response::from_body(ResponseBody::Stream(blob.body))?.with_headers(headers))
@@ -350,12 +329,12 @@ fn proven_key(proof: &str, req: &Request, url: &Url, signer_key: &str) -> CellRe
     Ok(key)
 }
 
-fn json_answer(v: &Value) -> CellResult<Response> {
+fn json_answer<T: serde::Serialize>(v: &T) -> CellResult<Response> {
     Ok(Response::from_json(v)?)
 }
 
 /// Whose budget a signer sees: a person's own org; an agent's owner's.
-fn billing_org(who: &Signer) -> CellResult<String> {
+fn billing_org(who: &Signed) -> CellResult<String> {
     let person = match who.kind {
         IdentityKind::Person => who.id.as_str(),
         IdentityKind::Agent => who.owner.as_deref().ok_or_else(|| CellError::host("an agent without an owner"))?,
@@ -416,16 +395,20 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
                 let owner_key = owner.key.clone().expect("a signed request has a key");
                 let proof = reg.proof.ok_or_else(|| CellError::invalid("registering an agent needs a proof by its key"))?;
                 let key = proven_key(&proof, &req, url, &owner_key)?;
-                json_answer(&ask_registry(env, "/agents", &json!({ "owner": owner.id, "key": key })).await?)
+                json_answer(&ask_registry(env, &calls::RegisterAgent { owner: owner.id.clone(), key }).await?)
             }
         };
     }
     let who = signer(env, &req, url, &body).await?;
     match (method, rest) {
         (Method::Put, ["me", "username"]) => {
-            let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            let username = v["username"].as_str().ok_or_else(|| CellError::invalid("{username}"))?;
-            json_answer(&ask_registry(env, "/username/claim", &json!({ "identity": who.id, "username": username })).await?)
+            /// `PUT /api/identities/me/username`'s body.
+            #[derive(Deserialize)]
+            struct Choose {
+                username: String,
+            }
+            let choose: Choose = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            json_answer(&ask_registry(env, &calls::ClaimUsername { identity: who.id.clone(), username: choose.username }).await?)
         }
         (Method::Put, ["me", "picture"]) => {
             if body.len() > limits::PICTURE_MAX_BYTES {
@@ -434,27 +417,27 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
             let mime = picture_type(&body).ok_or_else(|| CellError::invalid("a picture is a PNG, JPEG, WebP, or GIF"))?;
             let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&body));
             js::blob_put_bytes(env.as_ref(), &format!("pictures/{sha}"), &body).await?;
-            json_answer(&ask_registry(env, "/picture/set", &json!({ "identity": who.id, "sha": sha, "mime": mime })).await?)
+            json_answer(&ask_registry(env, &calls::SetPicture { identity: who.id.clone(), sha, mime: mime.to_string() }).await?)
         }
         (Method::Get, [id]) => {
-            let id = named_identity(id, &who)?;
-            json_answer(&ask_registry(env, "/view", &json!({ "identity": id, "by": who.id })).await?)
+            let identity = named_identity(id, &who)?;
+            json_answer(&ask_registry(env, &calls::View { identity, by: who.id.clone() }).await?)
         }
         (Method::Post, [id, "keys"]) => {
-            let id = named_identity(id, &who)?;
-            let add: AddKey = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let identity = named_identity(id, &who)?;
+            let add: fragment_proto::AddKey = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let key = proven_key(&add.proof, &req, url, who.key.as_deref().expect("a signed request has a key"))?;
-            json_answer(&ask_registry(env, "/keys", &json!({ "identity": id, "key": key, "by": who.id })).await?)
+            json_answer(&ask_registry(env, &calls::AddKey(calls::KeyChange { identity, key, by: who.id.clone() })).await?)
         }
         (Method::Delete, [id, "keys", k]) => {
-            let id = named_identity(id, &who)?;
+            let identity = named_identity(id, &who)?;
             let key = key_in_path(k)?;
-            json_answer(&ask_registry(env, "/revoke", &json!({ "identity": id, "key": key, "by": who.id })).await?)
+            json_answer(&ask_registry(env, &calls::RevokeKey(calls::KeyChange { identity, key, by: who.id.clone() })).await?)
         }
         (Method::Get, [id, "keys", k]) => {
-            let id = named_identity(id, &who)?;
+            let identity = named_identity(id, &who)?;
             let key = key_in_path(k)?;
-            json_answer(&ask_registry(env, "/check", &json!({ "identity": id, "key": key, "by": who.id })).await?)
+            json_answer(&ask_registry(env, &calls::CheckKey(calls::KeyChange { identity, key, by: who.id.clone() })).await?)
         }
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
     }
@@ -462,7 +445,7 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
 
 /// A fragment named in an API path: `<label>.<username>`, or a bare label
 /// for a signed caller's own (under its username; an agent's owner's).
-fn named_fragment(name: &str, signer: Option<&Signer>) -> CellResult<String> {
+fn named_fragment(name: &str, signer: Option<&Signed>) -> CellResult<String> {
     if valid_fragment_name(name) {
         return Ok(name.to_string());
     }
@@ -483,22 +466,23 @@ fn check_name(name: &str) -> CellResult<()> {
     }
 }
 
-struct Forward<'a> {
-    name: &'a str,
+/// A request for a fragment's supervisor: what the router decided, and
+/// where it goes inside.
+struct Forward {
+    routed: Routed,
+    /// The inner path; the query string travels only in `routed.url`.
     inner: String,
-    principal: Option<Signer>,
-    mode: Option<&'a str>,
     /// Headers this route passes on purpose (the inbox's token and hop count).
     extra: Vec<(&'static str, String)>,
 }
 
-/// Hands a request to the fragment's supervisor.
 /// Bytes the router read, as a body to forward.
 fn bytes_body(body: Vec<u8>) -> Option<worker::wasm_bindgen::JsValue> {
     (!body.is_empty()).then(|| worker::js_sys::Uint8Array::from(body.as_slice()).into())
 }
 
-async fn forward(env: &Env, req: &Request, url: &Url, body: Option<worker::wasm_bindgen::JsValue>, f: Forward<'_>) -> CellResult<Response> {
+/// Hands a request to the fragment's supervisor.
+async fn forward(env: &Env, req: &Request, body: Option<worker::wasm_bindgen::JsValue>, f: Forward) -> CellResult<Response> {
     let headers = Headers::new();
     for k in PASSED_HEADERS {
         if let Some(v) = req.headers().get(k)? {
@@ -513,21 +497,7 @@ async fn forward(env: &Env, req: &Request, url: &Url, body: Option<worker::wasm_
             }
         }
     }
-    headers.set(NAME_HEADER, f.name)?;
-    headers.set(URL_HEADER, url.as_str())?;
-    if let Some(p) = &f.principal {
-        headers.set(PRINCIPAL_HEADER, &p.id)?;
-        if let Some(k) = &p.key {
-            headers.set(KEY_HEADER, k)?;
-        }
-        headers.set(KIND_HEADER, p.kind.as_str())?;
-        if let Some(o) = &p.owner {
-            headers.set(OWNER_HEADER, o)?;
-        }
-    }
-    if let Some(m) = f.mode {
-        headers.set(MODE_HEADER, m)?;
-    }
+    f.routed.to_headers(&headers)?;
     for (k, v) in &f.extra {
         headers.set(k, v)?;
     }
@@ -536,25 +506,24 @@ async fn forward(env: &Env, req: &Request, url: &Url, body: Option<worker::wasm_
     if body.is_some() {
         init.with_body(body);
     }
-    let query = url.query().map(|q| format!("?{q}")).unwrap_or_default();
-    let inner = Request::new_with_init(&format!("https://fragment.internal{}{query}", f.inner), &init)?;
-    let stub = env.durable_object("FRAGMENT")?.get_by_name(f.name)?;
+    let inner = Request::new_with_init(&format!("https://fragment.internal{}", f.inner), &init)?;
+    let stub = env.durable_object("FRAGMENT")?.get_by_name(&f.routed.name)?;
     Ok(stub.fetch_with_request(inner).await?)
 }
 
-async fn serve(mut req: Request, env: &Env, url: &Url, name: &str, rest: &str, mode: &'static str) -> CellResult<Response> {
+async fn serve(mut req: Request, env: &Env, url: &Url, name: &str, rest: &str, mode: Mode) -> CellResult<Response> {
     check_name(name)?;
     if auth::is_fragment_route(rest) {
-        return auth::fragment(&req, env, &Config::from_env(env), url, name, rest, mode == "path").await;
+        return auth::fragment(&req, env, &Config::from_env(env), url, name, rest, mode == Mode::Path).await;
     }
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     // a signature names its key's identity; a browser, its session here
-    let principal = match signer_if_signed(env, &req, url, &body).await? {
+    let signed = match signer_if_signed(env, &req, url, &body).await? {
         Some(s) => Some(s),
         None => auth::site_session(&req, env, name, url, mode == "path").await?,
     };
-    let f = Forward { name, inner: format!("/serve/{rest}"), principal, mode: Some(mode), extra: vec![] };
-    forward(env, &req, url, bytes_body(body), f).await
+    let routed = Routed { name: name.to_string(), url: url.clone(), mode: Some(mode), signed };
+    forward(env, &req, bytes_body(body), Forward { routed, inner: format!("/serve/{rest}"), extra: vec![] }).await
 }
 
 /// The URL a request arrived on, as its client named it. A proxy that ends
@@ -576,7 +545,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
     // routes there); the platform API answers on the platform's host.
     if let Some(name) = url.host_str().and_then(|h| cfg.fragment_of_host(h)) {
         let rest = path.trim_start_matches('/').to_string();
-        return serve(req, env, &url, &name, &rest, "host").await;
+        return serve(req, env, &url, &name, &rest, Mode::Host).await;
     }
     // any other name under the suffix is no one's: the platform answers on its own host only
     if url.host_str().and_then(|h| cfg.subdomain(h)).is_some() {
@@ -636,22 +605,22 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
         }
         (Method::Get, ["api", "test", "env"]) if test_hooks(env) => json_answer(&Value::Object(js::env_vars(env.as_ref())?)),
         (Method::Post, ["api", "test", hook @ ("keys" | "fragment")]) if test_hooks(env) => {
+            /// The fragment a test hook's body names (the rest is the fragment's to read).
+            #[derive(Deserialize)]
+            struct TestTarget {
+                fragment: String,
+            }
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
-            let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            let name = v["fragment"].as_str().unwrap_or("");
-            check_name(name)?;
-            let headers = Headers::new();
-            headers.set(fragment::NAME_HEADER, name)?;
-            headers.set(fragment::URL_HEADER, url.as_str())?;
-            let mut init = RequestInit::new();
-            init.with_method(Method::Post).with_headers(headers).with_body(Some(v.to_string().into()));
-            let inner = Request::new_with_init(&format!("https://fragment.internal/test/{hook}"), &init)?;
-            Ok(env.durable_object("FRAGMENT")?.get_by_name(name)?.fetch_with_request(inner).await?)
+            let target: TestTarget = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            check_name(&target.fragment)?;
+            let body = String::from_utf8(body).map_err(|_| CellError::invalid("body: not UTF-8"))?;
+            let inner = routed::internal_request(&format!("test/{hook}"), &body)?;
+            Ok(env.durable_object("FRAGMENT")?.get_by_name(&target.fragment)?.fetch_with_request(inner).await?)
         }
         (Method::Post, ["api", "test", "registry"]) if test_hooks(env) => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
-            let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            json_answer(&ask_registry(env, "/test", &v).await?)
+            let hook: calls::TestHook = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            json_answer(&ask_registry(env, &hook).await?)
         }
         // A blob's bytes stream through: the router never holds them. The
         // signature covers the URL, which names the bytes' hash; the
@@ -666,8 +635,8 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             let principal = signer(env, &req, &url, &[]).await?;
             let name = named_fragment(name, Some(&principal))?;
             let body = req.inner().body().map(worker::wasm_bindgen::JsValue::from);
-            let f = Forward { name: &name, inner: format!("/api/blobs/{sha}"), principal: Some(principal), mode: None, extra: vec![] };
-            forward(env, &req, &url, body, f).await
+            let routed = Routed { name, url: url.clone(), mode: None, signed: Some(principal) };
+            forward(env, &req, body, Forward { routed, inner: format!("/api/blobs/{sha}"), extra: vec![] }).await
         }
         (method, ["api", "f", name, rest @ ..]) => {
             if !valid_fragment_name(name) && !fragment_proto::valid_label(name) {
@@ -695,8 +664,8 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
                 _ => Some(signer(env, &req, &url, &body).await?),
             };
             let name = named_fragment(name, principal.as_ref())?;
-            let f = Forward { name: &name, inner, principal, mode: None, extra };
-            forward(env, &req, &url, bytes_body(body), f).await
+            let routed = Routed { name, url: url.clone(), mode: None, signed: principal };
+            forward(env, &req, bytes_body(body), Forward { routed, inner, extra }).await
         }
         (_, ["f", name]) => {
             check_name(name)?;
@@ -715,7 +684,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
                 to.set_query(url.query());
                 return Ok(Response::redirect_with_status(to, 308)?);
             }
-            serve(req, env, &url, name, &rest, "path").await
+            serve(req, env, &url, name, &rest, Mode::Path).await
         }
         _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
     }

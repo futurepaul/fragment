@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use fragment_nip98::Keys;
-use fragment_proto::limits;
+use fragment_proto::{limits, routed};
 use serde_json::json;
 
 use crate::api::{now_s, Api, Call};
@@ -236,19 +236,33 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
     let stranger = api.person()?;
     let name = s.named(api, &owner, "lock")?;
     s.create(api, &owner, &name)?;
-    let forged = |keys: Option<&Keys>| {
-        api.call(Call {
-            method: "GET",
-            url: format!("{}/api/f/{name}/status", api.base),
-            keys,
-            extra: vec![("x-fragment-principal", owner.pubkey_hex().to_string())],
-            ..Call::default()
-        })
+    api.signed(&owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    // every header the router sets for a fragment, forged to name the owner
+    let owner_id = api.identity(&owner)?;
+    let username = name.split_once('.').map_or("", |(_, u)| u);
+    let claims_owner = json!({ "id": owner_id, "kind": "person", "owner": null, "username": username, "key": owner.pubkey_hex() }).to_string();
+    let forged_headers = || {
+        routed::ALL
+            .iter()
+            .map(|h| {
+                let v = match *h {
+                    routed::NAME => name.clone(),
+                    routed::URL => format!("https://{name}.{}/", crate::SUFFIX),
+                    routed::MODE => "host".to_string(),
+                    _ => claims_owner.clone(),
+                };
+                (*h, v)
+            })
+            .collect::<Vec<_>>()
     };
-    let r = forged(Some(&stranger))?;
-    s.ok("a client's x-fragment-principal is ignored (signed: 403)", r.status == 403, &r);
-    let r = forged(None)?;
-    s.ok("a client's x-fragment-principal is ignored (unsigned: 401)", r.status == 401, &r);
+    let forged = |keys: Option<&Keys>, url: String| api.call(Call { method: "GET", url, keys, extra: forged_headers(), ..Call::default() });
+    let status_url = format!("{}/api/f/{name}/status", api.base);
+    let r = forged(Some(&stranger), status_url.clone())?;
+    s.ok("a client's routing headers are dropped: the router's own say who signed (403)", r.status == 403, &r);
+    let r = forged(None, status_url)?;
+    s.ok("and an unsigned request stays unsigned (401)", r.status == 401, &r);
+    let r = forged(None, api.site_url(&name, ""))?;
+    s.ok("and a browser on the fragment's own origin is nobody (members only: 401)", r.status == 401, &r);
     let r = api.signed(&owner, "POST", &format!("/api/f/{name}/create"), Some(&json!({ "name": name })))?;
     s.ok("the supervisor's create is not a public route", r.status == 404, &r);
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}"), None)?;
