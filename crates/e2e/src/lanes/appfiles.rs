@@ -104,5 +104,46 @@ pub fn appfiles(s: &mut Suite, api: &crate::api::Api) -> Result<()> {
     let a = api.op(&owner, &name, "whoami", "w1", json!({}))?;
     let b = api.op(&owner, &other, "whoami", "w1", json!({}))?;
     s.ok("two fragments running the same code each read their own files", a.body["result"]["text"] == "first" && b.body["result"]["text"] == "second", format!("{a} {b}"));
+
+    // a replay never applies its effects again, even once the keys that
+    // made its commit happen once are forgotten (a test hook ages them)
+    let kept = |s: &Suite| s.fake.file_at(&repo, "main", "notes/kept.md");
+    let r = call("add_note", "k1", json!({ "slug": "kept", "text": "old\n" }))?;
+    let r2 = call("add_note", "k2", json!({ "slug": "kept", "text": "new\n" }))?;
+    s.ok("(two writes to one note)", r.status == 200 && r2.status == 200 && kept(s).as_deref() == Some(&b"new\n"[..]), format!("{r} {r2}"));
+    let week = 7 * 24 * 3600 * 1000;
+    let r = api.signed(&owner, "POST", &format!("/api/f/{name}/test/age"), Some(&json!({ "ms": week + 3_600_000 })))?;
+    s.ok("(a test hook ages the write keys past their week)", r.status == 200, &r);
+    let packs = s.fake.commit_pack_count();
+    let r = call("add_note", "k1", json!({ "slug": "kept", "text": "old\n" }))?;
+    s.ok(
+        "a replay after its write keys are gone commits nothing: no stale overwrite",
+        r.body["replayed"] == true && kept(s).as_deref() == Some(&b"new\n"[..]) && s.fake.commit_pack_count() == packs,
+        &r,
+    );
+
+    // past the ledger's window (shortened by a test hook) the same id is a
+    // new run, with effects of its own; within it, a replay
+    let window = |ms: Value| api.signed(&owner, "POST", &format!("/api/f/{name}/test/ledger"), Some(&json!({ "ms": ms })));
+    let changes = || {
+        api.signed(&owner, "GET", &format!("/api/f/{name}/channels/changes"), None)
+            .map(|r| r.body["records"].as_array().map_or(0, |a| a.iter().filter(|x| x["body"]["slug"] == "window").count()))
+            .unwrap_or(0)
+    };
+    let r = window(json!(1500))?;
+    s.ok("(a test hook shortens the ledger's window)", r.status == 200 && r.body["ledgerMs"] == 1500, &r);
+    let r = call("add_note", "w1", json!({ "slug": "window", "text": "first\n" }))?;
+    s.ok("(a note inside the window)", r.status == 200 && changes() == 1, &r);
+    std::thread::sleep(Duration::from_millis(2000));
+    let r = call("add_note", "w1", json!({ "slug": "window", "text": "second\n" }))?;
+    s.ok(
+        "past the window the same id runs again, as a new run whose effects apply",
+        r.status == 200 && r.body["replayed"] == false && changes() == 2 && s.fake.file_at(&repo, "main", "notes/window.md").as_deref() == Some(&b"second\n"[..]),
+        &r,
+    );
+    let r = call("add_note", "w1", json!({ "slug": "window", "text": "second\n" }))?;
+    s.ok("inside it the same call is a replay again", r.body["replayed"] == true && changes() == 2, &r);
+    let r = window(Value::Null)?;
+    s.ok("(the window is a week again)", r.status == 200 && r.body["ledgerMs"] == week, &r);
     Ok(())
 }

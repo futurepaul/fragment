@@ -105,14 +105,20 @@ without a delete condition is unfinished design, not debt.
 
 ## The effects sweep has no fault-injection test
 
-- **Observed:** phase 2 slice C. A mutation's effects apply after the
-  facet commits it; if the supervisor dies in between, the next
-  activation sweeps the newest 200 ledger rows and applies what has no
-  `ops` record. The e2e proves re-application is idempotent (a replay
-  appends nothing twice) but cannot stop the node between the two
-  commits.
+- **Observed:** phase 2 slice C; reworked in the reliability pass. A
+  mutation's effects apply after the facet commits it. The supervisor
+  records the mutation as pending before it calls the facet; if it dies
+  before applying, the next activation (or the alarm) asks the facet
+  about each pending id and applies the run it recorded. The e2e proves a
+  passing failure is applied by the alarm, a refusal settles for good,
+  a replay applies nothing again, and a ledger row the app forges is
+  never applied across a restart, but it cannot stop the node between
+  the facet's commit and the supervisor's apply.
 - **Risk:** a mutation whose records never appear (and no `changed`
-  signal) after a crash in that window, if the sweep is wrong.
+  signal) after a crash in that window, if the sweep is wrong. The
+  pending row must be stored before the facet commits: that rests on the
+  runtime's output gate holding the facet call until the row is written,
+  which no test shows.
 - **First proof:** a crash in production between facet commit and apply.
 - **Delete when:** celld (or a test build of the cell) offers a fault
   point after the facet call, and an e2e kills the node there and finds

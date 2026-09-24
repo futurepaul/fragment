@@ -23,13 +23,18 @@
 // except through steps (docs/api.md, Jobs).
 //
 // Every answer is an envelope, so no value an author returns can be
-// mistaken for a platform answer: { result, replayed, effects } or { error };
-// for a job, { next } (its next step), { done, output }, or { failed }.
+// mistaken for a platform answer: { result, replayed, effects, run } or
+// { error }; for a job, { next } (its next step), { done, output }, or
+// { failed }. Answers are plain JSON, so nothing about one can fail after
+// its mutation committed.
+//
+// The checks here run in the author's realm, which can patch what they
+// rely on: they exist so an author sees a refusal while the mutation can
+// still roll back. The supervisor checks every effect again in Rust
+// (fragment_core::effects) before it applies any.
 import { App as AuthorApp } from "./app.js";
 
 const LEDGER = "_fragment_ops";
-// Replays are recognized for a week; older ledger rows are pruned.
-const LEDGER_TTL_MS = 7 * 24 * 3600 * 1000;
 const RECORD_MAX_BYTES = 64 * 1024;
 const EFFECTS_MAX = 64;
 const RESULT_MAX_BYTES = 1024 * 1024;
@@ -42,6 +47,19 @@ const KIND = /^[a-z][a-z0-9._-]{0,63}$/;
 const FILE_WRITE_MAX_BYTES = 256 * 1024;
 const FILE_WRITES_MAX = 16;
 const PATH = /^(?!\/)(?!.*\/$)(?!.*(^|\/)\.{1,2}(\/|$))(?!.*\/\/)[^\\\x00-\x1f]{1,300}$/;
+// limits::PATH_MAX_BYTES: in bytes, as git and the supervisor count them.
+const PATH_MAX_BYTES = 300;
+// A git-lfs pointer (fragment_core::blob): the platform writes these for
+// large files; an app never does.
+const POINTER_MAX_BYTES = 200;
+const POINTER = /^version https:\/\/git-lfs\.github\.com\/spec\/v1\noid sha256:[0-9a-f]{64}\nsize \+?(\d+)\n$/;
+const U64_MAX = 18446744073709551615n;
+// Half of a character (a lone surrogate, as from cutting a string inside an
+// emoji) in JSON text: JSON.stringify escapes one as \udXXX (lowercase), and
+// the supervisor's JSON reader refuses it, so it is refused here while the
+// mutation can still roll back. An even run of backslashes before it is
+// escaped backslashes, not the escape.
+const LONE_SURROGATE = /(?<!\\)(?:\\\\)*\\ud[89a-f]/;
 const RESERVED = new Set(["constructor", "fetch", "alarm", "webSocketMessage", "webSocketClose", "webSocketError"]);
 // A step not yet taken never settles: the body stops there, and a try/catch
 // or Promise.all in author code cannot swallow the suspension.
@@ -75,7 +93,35 @@ function checkPush(who, payload) {
 }
 
 function checkPath(path) {
-  if (typeof path !== "string" || !PATH.test(path)) throw new Error(`${JSON.stringify(path)} is not a file path (relative, no . or .. segments)`);
+  if (typeof path !== "string" || !PATH.test(path) || bytes(path) > PATH_MAX_BYTES) {
+    throw new Error(`${JSON.stringify(path)} is not a file path (relative, no . or .. segments, at most ${PATH_MAX_BYTES} bytes)`);
+  }
+}
+
+function isPointer(data) {
+  if (data.length > POINTER_MAX_BYTES) return false;
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(data);
+  } catch {
+    return false;
+  }
+  const m = POINTER.exec(text);
+  return m !== null && BigInt(m[1]) <= U64_MAX;
+}
+
+// A file's content may not be a large-file pointer.
+function checkContent(path, data) {
+  let raw = null;
+  if (typeof data === "string") {
+    // more UTF-16 units than a pointer's bytes: more bytes, too
+    if (data.length <= POINTER_MAX_BYTES) raw = new TextEncoder().encode(data);
+  } else if (data instanceof Uint8Array) {
+    raw = data;
+  } else if (data instanceof ArrayBuffer) {
+    raw = new Uint8Array(data);
+  }
+  if (raw !== null && isPointer(raw)) throw new Error(`${path}: an app does not write blob pointers`);
 }
 
 // A file's content as a step or effect carries it: { text } or { base64 }.
@@ -111,6 +157,7 @@ class FileEffects {
 
   write(path, data) {
     checkPath(path);
+    checkContent(path, data);
     const c = content(data);
     this.#push({ file: path, ...c }, contentSize(c));
   }
@@ -151,9 +198,17 @@ function authorMethod(name) {
   return !name.startsWith("__") && !RESERVED.has(name) && typeof AuthorApp.prototype[name] === "function";
 }
 
+// The platform's own read of a call's effects: author code gets no
+// reference to the list, only publish, push, and files.
+let effectsOf;
+
 class Call {
   #channels;
   #effects;
+
+  static {
+    effectsOf = (call) => call.#effects;
+  }
 
   constructor(meta, mutation) {
     this.principal = meta.principal;
@@ -188,10 +243,6 @@ class Call {
     if (new TextEncoder().encode(text).length > RECORD_MAX_BYTES) throw new Error(`a record's body is at most ${RECORD_MAX_BYTES} bytes`);
     if (this.#effects.length >= EFFECTS_MAX) throw new Error(`a mutation publishes at most ${EFFECTS_MAX} records`);
     this.#effects.push({ channel, kind, body: JSON.parse(text) });
-  }
-
-  get effects() {
-    return this.#effects;
   }
 }
 
@@ -292,6 +343,7 @@ class Job {
       stat: (path) => (checkPath(path), step("files.stat", { path })),
       write: (path, data, { expect } = {}) => {
         checkPath(path);
+        checkContent(path, data);
         const c = content(data);
         if (contentSize(c) > FILE_WRITE_MAX_BYTES) throw new Error(`a job step writes at most ${FILE_WRITE_MAX_BYTES} bytes`);
         return step("files.write", { path, ...c, ...(expect !== undefined ? { expect } : {}) });
@@ -351,11 +403,12 @@ export class App extends AuthorApp {
     const sql = ctx.storage.sql;
     sql.exec(`CREATE TABLE IF NOT EXISTS ${LEDGER} (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, input_sha TEXT NOT NULL, result TEXT NOT NULL, at INTEGER NOT NULL,
-      effects TEXT NOT NULL DEFAULT '[]')`);
-    // a ledger made before effects existed (phase 2 slice B)
-    if (!sql.exec(`PRAGMA table_info(${LEDGER})`).toArray().some((c) => c.name === "effects")) {
-      sql.exec(`ALTER TABLE ${LEDGER} ADD COLUMN effects TEXT NOT NULL DEFAULT '[]'`);
-    }
+      effects TEXT NOT NULL DEFAULT '[]', run INTEGER)`);
+    // a ledger made before effects (phase 2 slice B), or before the
+    // supervisor numbered runs (older rows have none, and are never applied again)
+    const cols = sql.exec(`PRAGMA table_info(${LEDGER})`).toArray();
+    if (!cols.some((c) => c.name === "effects")) sql.exec(`ALTER TABLE ${LEDGER} ADD COLUMN effects TEXT NOT NULL DEFAULT '[]'`);
+    if (!cols.some((c) => c.name === "run")) sql.exec(`ALTER TABLE ${LEDGER} ADD COLUMN run INTEGER`);
   }
 
   get files() {
@@ -373,31 +426,41 @@ export class App extends AuthorApp {
     }
   }
 
+  // meta.run is the supervisor's number for this run, kept with the row;
+  // meta.ledgerMs is how long an id is a replay (ops::LEDGER_KEPT_MS).
   #mutate(id, name, inputSha, input, meta) {
     const sql = this.ctx.storage.sql;
+    if (!Number.isSafeInteger(meta.run) || !Number.isSafeInteger(meta.ledgerMs) || meta.ledgerMs <= 0) {
+      throw new Error("the supervisor names the run and the ledger's window");
+    }
+    const now = Date.now();
     return this.ctx.storage.transactionSync(() => {
-      const prior = sql.exec(`SELECT input_sha, result, effects FROM ${LEDGER} WHERE id = ?`, id).toArray()[0];
-      if (prior) {
+      const prior = sql.exec(`SELECT input_sha, result, effects, run, at FROM ${LEDGER} WHERE id = ?`, id).toArray()[0];
+      if (prior && prior.at >= now - meta.ledgerMs) {
         if (prior.input_sha !== inputSha) return { error: "conflicting_body" };
-        return { replayed: true, result: JSON.parse(prior.result), effects: JSON.parse(prior.effects) };
+        return { replayed: true, result: JSON.parse(prior.result), effects: JSON.parse(prior.effects), run: prior.run ?? null };
       }
+      // Older than the window, the id runs again: a new run, keyed anew.
+      if (prior) sql.exec(`DELETE FROM ${LEDGER} WHERE id = ?`, id);
       const call = new Call(meta, true);
       const out = AuthorApp.prototype[name].call(this, input, call);
       if (out && typeof out.then === "function") {
         out.catch(() => {});
         throw new Error(`mutation ${name} returned a promise; mutations are synchronous`);
       }
-      const result = out ?? null;
-      const text = JSON.stringify(result);
-      if (new TextEncoder().encode(text).length > RESULT_MAX_BYTES) throw new Error(`a result is at most ${RESULT_MAX_BYTES} bytes`);
-      const now = Date.now();
-      sql.exec(`INSERT INTO ${LEDGER} (id, name, input_sha, result, at, effects) VALUES (?, ?, ?, ?, ?, ?)`,
-        id, name, inputSha, text, now, JSON.stringify(call.effects));
+      const text = JSON.stringify(out ?? null) ?? "null";
+      if (bytes(text) > RESULT_MAX_BYTES) throw new Error(`a result is at most ${RESULT_MAX_BYTES} bytes`);
+      const effects = JSON.stringify(effectsOf(call));
+      if (LONE_SURROGATE.test(text) || LONE_SURROGATE.test(effects)) {
+        throw new Error("a mutation's result and effects hold whole characters: this text holds half of one (a lone surrogate)");
+      }
+      sql.exec(`INSERT INTO ${LEDGER} (id, name, input_sha, result, at, effects, run) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        id, name, inputSha, text, now, effects, meta.run);
       if (sql.exec("SELECT last_insert_rowid() AS r").one().r % 100 === 0) {
-        sql.exec(`DELETE FROM ${LEDGER} WHERE at < ?`, now - LEDGER_TTL_MS);
+        sql.exec(`DELETE FROM ${LEDGER} WHERE at < ?`, now - meta.ledgerMs);
       }
       if (sql.databaseSize > APP_DB_MAX_BYTES) throw STORAGE_FULL;
-      return { replayed: false, result, effects: call.effects };
+      return { replayed: false, result: JSON.parse(text), effects: JSON.parse(effects), run: meta.run };
     });
   }
 
@@ -435,13 +498,22 @@ export class App extends AuthorApp {
     return { done: true, output: JSON.parse(text) };
   }
 
-  // The newest ledger rows, for the supervisor's sweep of effects it may
-  // not have applied (it died between the facet's commit and its own).
-  __recent(limit) {
-    const rows = this.ctx.storage.sql
-      .exec(`SELECT id, name, effects FROM ${LEDGER} ORDER BY rowid DESC LIMIT ?`, limit)
-      .toArray();
-    return { result: rows.map((r) => ({ id: r.id, name: r.name, effects: JSON.parse(r.effects) })) };
+  // One ledger row, for the supervisor settling a run it recorded as
+  // pending: whether the facet committed that run, and its effects. The
+  // supervisor asks only about ids it recorded, and trusts the run number
+  // it gave, never an id or principal from this table.
+  __ledger(id) {
+    const row = this.ctx.storage.sql.exec(`SELECT id, run, effects FROM ${LEDGER} WHERE id = ?`, String(id)).toArray()[0];
+    if (!row) return { result: null };
+    // A row the supervisor could not read (the app garbled it, or wrote half
+    // a character) goes as null, which the supervisor refuses.
+    let effects = null;
+    try {
+      if (!LONE_SURROGATE.test(row.effects)) effects = JSON.parse(row.effects);
+    } catch {
+      effects = null;
+    }
+    return { result: { id: row.id, run: row.run ?? null, effects } };
   }
 
   // Custom routes: the author's fetch, when there is one.

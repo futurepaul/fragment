@@ -30,7 +30,7 @@ the node's environment, where only `KEYS` reads them (below).
 | `WORKOS_CLIENT_ID` | sign-in: fragment's WorkOS environment; unset, sign-in answers 500 |
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake) |
 | `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (default: the hostname suffix itself, e.g. https://fragment.club) |
-| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503; `GET /api/test/env` answers the Worker variables; `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens through `KEYS` as that fragment |
+| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503; `GET /api/test/env` answers the Worker variables; `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens through `KEYS` as that fragment; and, the owner of a fragment, `POST /api/f/{name}/test/ledger {ms \| null}` shortens (or restores) its ledger's window, `test/age {ms}` forgets its write keys as if `ms` had passed |
 
 The node's environment (Fly secrets on a fleet; `devstack` in dev and
 the e2e), read by `KEYS`, the native service in our celld fork
@@ -271,8 +271,22 @@ SQLite; `call.publish(channel, body, kind = "message")` appends a record
 (body at most 64 KiB, 64 per mutation) once the mutation commits, and an
 exception rolls back its writes and its records (422). The ledger keys a
 mutation by (principal, id) for seven days: a retry with the same id
-returns the stored result; the same id with another input is 409. Every
-applied mutation also appends `{op, id}` to `ops`. An optional
+returns the stored result and applies nothing again; the same id with
+another input is 409; after seven days the same id runs again, as a new
+run. Every applied mutation also appends `{op, id}` to `ops`.
+
+The platform checks a mutation's effects twice: in the app, where a
+refusal rolls the mutation back (422), and again in the cell before it
+applies any, since the app's own code can defeat the first check. A
+refusal there (an undeclared or built-in channel, a bad kind, a size or
+count over its limit, a bad path, a blob pointer) drops all of the
+mutation's effects, answers 422 `app_failed` (the mutation's own writes
+stand), records `effects.refused` in `events`, and still counts the
+mutation as applied. A passing failure while applying them (code.storage,
+the delivery queue) answers 502 or 500; the mutation stays pending, and the
+cell tries again, waiting 10 s and doubling to an hour, for about two days
+(`effects.delayed` on the first failure, `effects.abandoned` if it gives
+up). A replay of a pending mutation tries at once. An optional
 `fetch(request)` answers every path that is not a site file (any
 method), with `x-fragment-principal` and `x-fragment-role` set.
 
@@ -300,8 +314,9 @@ makes, and move the pin at once.
   serves it. An absent file reads as `null`.
 - In a mutation, `call.files.write(path, content)` / `remove(path)`
   (content a string, `Uint8Array`, or `ArrayBuffer`; at most 16 files and
-  256 KiB): applied once the mutation commits, as one commit, once (a
-  replay commits nothing). Last writer wins.
+  256 KiB; a path of at most 300 bytes; never a blob pointer's text):
+  applied once the mutation commits, as one commit, once (a replay
+  commits nothing). Last writer wins.
 - In a job, `job.files.read / list / stat / write / remove` are steps.
   `write(path, content, {expect})` and `remove(path, {expect})` compare
   and swap: `expect` is the blob `sha` the file must have, or `null` for

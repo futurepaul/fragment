@@ -30,6 +30,25 @@ export class App extends DurableObject {
     call.publish("room", { blob: "x".repeat(70 * 1024) });
   }
 
+  // reaches for the list of effects itself, to add one no check saw
+  reach(_input, call) {
+    this.ctx.storage.sql.exec("INSERT INTO said (text) VALUES ('reach')");
+    call.effects.push({ channel: "events", kind: "forged", body: { summary: "forged" } });
+  }
+
+  // patches what the in-app check relies on, so a record for the audit
+  // trail passes it; the supervisor's own check comes after the commit
+  patched(_input, call) {
+    const has = Set.prototype.has;
+    Set.prototype.has = () => true;
+    try {
+      this.ctx.storage.sql.exec("INSERT INTO said (text) VALUES ('patched')");
+      call.publish("events", { summary: "forged" }, "forged");
+    } finally {
+      Set.prototype.has = has;
+    }
+  }
+
   count() {
     return { n: this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM said").one().n };
   }

@@ -101,6 +101,30 @@ pub fn channels(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.op(&owner, &name, "count", "q", json!({}))?;
     s.ok("a refused mutation's writes roll back", r.body["result"]["n"] == 2, &r);
 
+    // author code shares a realm with the in-app checks; the supervisor's hold
+    let r = api.op(&owner, &name, "reach", "x1", json!({}))?;
+    s.ok("author code gets no reference to the effects list (the mutation fails and rolls back)", r.status == 422 && r.error() == "app_failed", &r);
+    let r = api.op(&owner, &name, "count", "q", json!({}))?;
+    s.ok("and writes nothing", r.body["result"]["n"] == 2, &r);
+    let r = api.op(&owner, &name, "patched", "x2", json!({}))?;
+    s.ok(
+        "a record for events that passes a patched in-app check is refused by the supervisor",
+        r.status == 422 && r.message().contains("refused its effects") && r.message().contains("\"events\" is the platform's"),
+        &r,
+    );
+    let r = api.signed(&owner, "GET", &format!("/api/f/{name}/events"), None)?;
+    let events = r.body["events"].as_array().cloned().unwrap_or_default();
+    s.ok(
+        "nothing forged reaches the audit trail, and the refusal is in it",
+        !events.iter().any(|e| e["kind"] == "forged" || e["summary"] == "forged")
+            && events.iter().any(|e| e["kind"] == "effects.refused" && e["data"]["op"] == "patched" && e["data"]["id"] == "x2"),
+        &r,
+    );
+    let r = api.op(&owner, &name, "patched", "x2", json!({}))?;
+    s.ok("its replay answers the committed result and refuses nothing again", r.status == 200 && r.body["replayed"] == true, &r);
+    let r = api.op(&owner, &name, "say", "c3", json!({ "text": "still here" }))?;
+    s.ok("the app goes on after a refusal", r.status == 200 && records(api, &owner, &name, "room", 2)?.body["records"][0]["body"]["text"] == "still here", &r);
+
     api.op(&owner, &name, "note", "n1", json!({ "text": "staff only" }))?;
     let r = records(api, &viewer, &name, "staff", 0)?;
     s.ok("an editors channel is refused to a viewer", r.status == 403, &r);
@@ -117,7 +141,7 @@ pub fn channels(s: &mut Suite, api: &Api) -> Result<()> {
     let read_of = |n: &str| list.iter().find(|c| c["name"] == n).map(|c| c["read"].clone()).unwrap_or(Value::Null);
     s.ok(
         "the channel list names each channel's reader and position",
-        read_of("room") == "public" && read_of("staff") == "editor" && read_of("events") == "viewer" && list.iter().any(|c| c["name"] == "room" && c["seq"] == 2),
+        read_of("room") == "public" && read_of("staff") == "editor" && read_of("events") == "viewer" && list.iter().any(|c| c["name"] == "room" && c["seq"] == 3),
         &r,
     );
     let r = api.op(&viewer, &name, "whoami", "w", json!({}))?;

@@ -1,0 +1,15 @@
+{
+  "operations": {
+    "note": {
+      "kind": "mutation",
+      "input": { "type": "object", "required": ["slug", "text"], "properties": { "slug": { "type": "string" }, "text": { "type": "string" } } }
+    },
+    "count": { "kind": "query" },
+    "pointer": { "kind": "mutation" },
+    "wide": { "kind": "mutation" },
+    "half": { "kind": "mutation" },
+    "sneaky": { "kind": "mutation" },
+    "forge": { "kind": "mutation" }
+  },
+  "channels": { "feed": {} }
+}

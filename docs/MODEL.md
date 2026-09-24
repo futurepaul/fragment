@@ -111,19 +111,25 @@ The call path, for every trigger:
 
 ```
 trigger ─▶ principal + op id + input ─▶ Fragment (supervisor)
-   role check ─▶ schema check ─▶ App facet __mutate(id, name, sha(input), input)
-      facet transactionSync: ledger lookup
-        ├─ same id, same input      → the stored result (a replay)
+   role check ─▶ schema check ─▶ pending row (principal, op, depth; its seq is the run)
+   ─▶ App facet __mutate(id, name, sha(input), input, run)
+      facet transactionSync: ledger lookup (a week's window)
+        ├─ same id, same input      → the stored result and run (a replay)
         ├─ same id, different input → reject (conflicting body)
-        └─ new                      → the author's method, then its ledger row
-   ─▶ apply returned effects keyed by (op id, index) ─▶ mark the row applied
-   ─▶ append to channels ─▶ change signal to subscribers
+        └─ new                      → the author's method, then its ledger row with the run
+   ─▶ the pending run's effects, checked in Rust, applied keyed by (id#run, index)
+   ─▶ `ops` record + pending row dropped ─▶ change signal to subscribers
 ```
 
-A supervisor that dies after the facet committed loses nothing: the
-caller's retry is a replay that returns the same effects, and on
-activation the supervisor sweeps ledger rows the facet committed but it
-never marked applied.
+A supervisor that dies after the facet committed loses nothing: its
+pending row outlives it, and on activation the supervisor asks the facet
+about each pending id and applies the run it recorded (or drops the row
+when the facet never committed that run). Who called, and what, are the
+pending row's facts, never the app's: the app can write its own ledger
+table, so a row it writes there is never applied. A replay applies
+nothing again, since only a pending run is applied; a refused effect
+settles its run for good, so it cannot block the app; a passing failure
+leaves the run pending for a later try (docs/api.md, Apps).
 
 Triggers: an HTTP call from the UI (`POST /__op/<name>`), `fragment call`
 from the CLI, an agent tool call (an operation's schema *is* its tool
