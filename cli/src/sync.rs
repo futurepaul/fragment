@@ -20,7 +20,7 @@ use anyhow::{anyhow, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -470,6 +470,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
     let author = Author::writer(&opts.writer_id);
     let blobs = crate::blobs::Blobs::new(client, name);
     let mut report = Report { scan: stats, mode: format!("{:?}", opts.mode).to_lowercase(), ..Default::default() };
+    let mut recorded: HashSet<String> = HashSet::new();
 
     let remote = list_main(&storage)?;
     // stateless bootstrap (journal-absent files present on both sides):
@@ -536,7 +537,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
             };
             let plan = push_plan(&local, &remote_now, &state);
             record_conflicts(
-                ConflictCtx { storage: &storage, blobs: &blobs, dir, local: &local, remote: &remote_now, state: &mut state, report: &mut report, writer_id: &opts.writer_id },
+                ConflictCtx { storage: &storage, blobs: &blobs, dir, local: &local, remote: &remote_now, state: &mut state, report: &mut report, recorded: &mut recorded, writer_id: &opts.writer_id },
                 &plan.conflicts,
             )?;
             if plan.upserts.is_empty() && plan.deletes.is_empty() {
@@ -612,7 +613,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
                         // both changed and push didn't resolve it (push
                         // modes off, or a race) — same conflict treatment
                         record_conflicts(
-                            ConflictCtx { storage: &storage, blobs: &blobs, dir, local: &local, remote: &remote, state: &mut state, report: &mut report, writer_id: &opts.writer_id },
+                            ConflictCtx { storage: &storage, blobs: &blobs, dir, local: &local, remote: &remote, state: &mut state, report: &mut report, recorded: &mut recorded, writer_id: &opts.writer_id },
                             std::slice::from_ref(&rf.path),
                         )?;
                         false
@@ -691,7 +692,10 @@ fn record_conflicts(
     conflicts: &[String],
 ) -> Result<(), SyncError> {
     for path in conflicts {
-        if ctx.report.conflicts.iter().any(|c| c.starts_with(path.as_str())) {
+        // by path, not by report line: `a.md`'s line starts with "a", so
+        // matching the text skipped a real conflict on `a` whenever `a.md`
+        // was recorded first
+        if !ctx.recorded.insert(path.clone()) {
             continue; // already recorded this pass
         }
         let rf_commit = ctx.remote.get(path).map(|r| r.last_commit_sha.clone()).unwrap_or_default();
@@ -731,6 +735,9 @@ struct ConflictCtx<'a> {
     remote: &'a HashMap<String, RemoteFile>,
     state: &'a mut SyncState,
     report: &'a mut Report,
+    /// the paths recorded as conflicts this pass (the push plan and the
+    /// pull can both name one)
+    recorded: &'a mut HashSet<String>,
     writer_id: &'a str,
 }
 
@@ -1155,6 +1162,58 @@ mod tests {
         assert_eq!(mock.file_at("t", "main", "shared.txt").unwrap(), b"theirs", "remote untouched by our conflict");
         fs::remove_dir_all(&dir).ok();
         fs::remove_dir_all(&other).ok();
+    }
+
+    /// Goal: a conflict on `a` is recorded even when one on `a.md` was
+    /// recorded first. Method: record them in that order within one pass
+    /// (the pull walks a HashMap, so in a real pass the order is chance);
+    /// matching report text found "a.md (remote copy: …)" starting with "a"
+    /// and skipped `a` silently, on every pass.
+    #[test]
+    fn conflicts_are_tracked_by_path_not_report_text() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("a", b"theirs a"), ("a.md", b"theirs a.md")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("conflict-paths");
+        fs::write(dir.join("a"), b"ours a").unwrap();
+        fs::write(dir.join("a.md"), b"ours a.md").unwrap();
+        let storage = CodeStorage::connect(&c, "t", None).unwrap();
+        let blobs = crate::blobs::Blobs::new(&c, "t");
+        let remote = list_main(&storage).unwrap();
+        let (local, _) = scan_local(&dir, None, true).unwrap();
+        let mut state = SyncState { schema_version: 3, name: "t".into(), host: None, repo: None, files: HashMap::new() };
+        let mut report = Report::default();
+        let mut recorded = HashSet::new();
+        for path in ["a.md", "a", "a.md", "a"] {
+            let ctx = ConflictCtx { storage: &storage, blobs: &blobs, dir: &dir, local: &local, remote: &remote, state: &mut state, report: &mut report, recorded: &mut recorded, writer_id: "deadbeef" };
+            record_conflicts(ctx, &[path.to_string()]).unwrap();
+        }
+        assert_eq!(report.conflicts.len(), 2, "each path once: {:?}", report.conflicts);
+        assert!(report.conflicts[0].starts_with("a.md (remote copy: a.conflict-"), "{:?}", report.conflicts);
+        assert!(report.conflicts[1].starts_with("a (remote copy: a.conflict-"), "{:?}", report.conflicts);
+        let copies: Vec<Vec<u8>> = fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains(".conflict-")).map(|e| fs::read(e.path()).unwrap()).collect();
+        assert!(copies.contains(&b"theirs a".to_vec()) && copies.contains(&b"theirs a.md".to_vec()), "both remote copies saved");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pull_records_both_a_and_a_md_conflicts() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("a", b"base a"), ("a.md", b"base a.md")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("pull-conflict-paths");
+        sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
+        mock.external_commit("t", "main", &[("a", Some(b"theirs a")), ("a.md", Some(b"theirs a.md"))], "theirs");
+        // a different size, so the scan re-hashes whatever the mtime says
+        fs::write(dir.join("a"), b"ours, a").unwrap();
+        fs::write(dir.join("a.md"), b"ours, a.md").unwrap();
+        let report = sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
+        let mut paths: Vec<&str> = report.conflicts.iter().filter_map(|c| c.split(' ').next()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["a", "a.md"], "{:?}", report.conflicts);
+        assert_eq!(fs::read(dir.join("a")).unwrap(), b"ours, a");
+        assert_eq!(fs::read(dir.join("a.md")).unwrap(), b"ours, a.md");
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
