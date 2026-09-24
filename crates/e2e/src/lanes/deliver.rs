@@ -109,6 +109,21 @@ pub fn push(s: &mut Suite, api: &Api) -> Result<()> {
     api.op(&owner, &name, "notify_all", "n4", json!({ "title": "past a failed queue" }))?;
     let pushed = s.eventually(wait, || s.push.received("a").len() == before + 1);
     s.ok("a push whose queue send failed still reaches the browser", pushed && s.push.received("a").last() == Some(&json!({ "title": "past a failed queue", "body": "from a mutation" })), format!("{:?}", s.push.received("a")));
+    // an outage is one event: the second failed send finds the first row
+    // still waiting (one lookup a drain), and says nothing more
+    let deferred = || {
+        api.signed(&owner, "GET", &format!("/api/f/{name}/events?tail=200"), None).map(|r| r.text.matches("\"delivery.deferred\"").count()).unwrap_or(0)
+    };
+    let before = deferred();
+    fail_queue(2)?;
+    api.op(&owner, &name, "headline", "o1", json!({ "text": "outage one" }))?;
+    api.op(&owner, &name, "headline", "o2", json!({ "text": "outage two" }))?;
+    let both = s.eventually(wait, || {
+        let frames = s.push.notified();
+        ["outage one", "outage two"].iter().all(|t| frames.iter().any(|f| f["record"]["body"]["text"] == *t))
+    });
+    let after = deferred();
+    s.ok("two deliveries that wait through one outage say so once", both && after == before + 1, format!("arrived {both}; deferred events {before} then {after}"));
 
     let r = site("__push-unsub", Some(json!({ "endpoint": format!("{}/push/a", s.push.url) })))?;
     s.ok("a page unsubscribes by its endpoint", r.status == 200 && r.body["removed"] == 1, &r);
