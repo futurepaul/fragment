@@ -3,7 +3,9 @@
 //! runs it as wasm and the host tests it.
 
 pub mod access;
+pub mod backoff;
 pub mod blob;
+pub mod body;
 pub mod budget;
 pub mod codestorage;
 pub mod cron;

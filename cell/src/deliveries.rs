@@ -51,10 +51,6 @@ pub const TEST_FAILURES_KEY: &str = "test_fail_deliveries";
 
 const _: () = assert!(QUEUE_BATCH * (PUSH_BATCHES_MAX - 1) >= limits::PUSH_SUBS_MAX as usize, "a push's batches cover every subscription");
 
-fn outbox_backoff_ms(attempts: i64) -> i64 {
-    1000 * (1i64 << attempts.clamp(0, 10)).min(600)
-}
-
 /// One outbox row, decoded once.
 enum Pending {
     /// Record `seq` of `channel`, to the channel subscription `sub`.
@@ -246,7 +242,7 @@ impl FragmentCell {
         let waiting = self.count(&format!("SELECT COUNT(*) AS n FROM delivery_outbox WHERE attempts > 0 AND id != {id}")).unwrap_or(0);
         let _ = self.exec(
             "UPDATE delivery_outbox SET attempts = ?, next_at = ? WHERE id = ?",
-            vec![SqlStorageValue::Integer(attempts), SqlStorageValue::Integer(js::now_ms() + outbox_backoff_ms(attempts)), SqlStorageValue::Integer(id)],
+            vec![SqlStorageValue::Integer(attempts), SqlStorageValue::Integer(js::now_ms() + fragment_core::backoff::outbox_retry_ms(attempts)), SqlStorageValue::Integer(id)],
         );
         if attempts == 1 && waiting == 0 {
             self.event("delivery.deferred", &format!("deliveries wait in the outbox: {why}"), json!({ "outbox": id }));

@@ -41,6 +41,7 @@ mod turn;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use fragment_core::body::{LimitedBody, TooLarge};
 use fragment_core::npub;
 use fragment_proto::{valid_channel_name, valid_fragment_name, valid_op_name, ErrorCode};
 use futures::TryStreamExt;
@@ -154,25 +155,18 @@ async fn forward_with(env: &Env, name: &str, action: &str, method: Method, heade
 /// declared length over it is refused unread, and a body without one
 /// (chunked) at the chunk that crosses it, before anyone is authenticated.
 async fn read_body(req: &mut Request) -> Answer<Vec<u8>> {
-    let too_large = || Fail::new(ErrorCode::TooLarge, format!("a request body is at most {BODY_MAX} bytes"));
+    let too_large = |_: TooLarge| Fail::new(ErrorCode::TooLarge, format!("a request body is at most {BODY_MAX} bytes"));
     let declared: Option<usize> = req.headers().get("content-length")?.and_then(|l| l.parse().ok());
-    if declared.is_some_and(|n| n > BODY_MAX) {
-        return Err(too_large());
-    }
+    let mut body = LimitedBody::new(BODY_MAX, declared).map_err(too_large)?;
     if req.inner().body().is_none() {
-        return Ok(vec![]);
+        return Ok(body.finish());
     }
     let mut stream = req.stream()?;
-    let mut body = Vec::with_capacity(declared.unwrap_or(0));
-    // bounded: each chunk is counted before it is kept, and past BODY_MAX the read stops
+    // bounded: LimitedBody refuses the chunk that would cross BODY_MAX, and the read stops
     while let Some(chunk) = stream.try_next().await? {
-        if chunk.len() > BODY_MAX - body.len() {
-            return Err(too_large());
-        }
-        body.extend_from_slice(&chunk);
+        body.push(&chunk).map_err(too_large)?;
     }
-    assert!(body.len() <= BODY_MAX, "a body read stays within its limit");
-    Ok(body)
+    Ok(body.finish())
 }
 
 async fn route(mut req: Request, env: &Env) -> Answer<Response> {

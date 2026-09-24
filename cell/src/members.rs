@@ -24,11 +24,6 @@ use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, Caller, FragmentCell};
 use crate::js;
 
-/// Retry backoff for index deliveries: 2^attempts seconds, at most ten minutes.
-fn backoff_ms(attempts: i64) -> i64 {
-    1000 * (1i64 << attempts.clamp(0, 10)).min(600)
-}
-
 fn refusal(actor_is_owner: bool, why: &str) -> CellError {
     if actor_is_owner {
         CellError::invalid(why)
@@ -127,7 +122,7 @@ impl FragmentCell {
                     "UPDATE index_outbox SET attempts = ?, next_at = ? WHERE principal = ? AND version = ?",
                     vec![
                         SqlStorageValue::Integer(attempts),
-                        SqlStorageValue::Integer(js::now_ms() + backoff_ms(attempts)),
+                        SqlStorageValue::Integer(js::now_ms() + fragment_core::backoff::outbox_retry_ms(attempts)),
                         principal.as_str().into(),
                         SqlStorageValue::Integer(version),
                     ],

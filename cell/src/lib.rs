@@ -61,6 +61,7 @@ mod registry;
 mod serve;
 mod subscriptions;
 
+use fragment_core::body::{LimitedBody, TooLarge};
 use fragment_core::npub;
 use fragment_proto::{limits, valid_fragment_name, AddKey, CreateFragment, ErrorBody, ErrorCode, IdentityKind, Register};
 use futures_util::TryStreamExt;
@@ -108,24 +109,18 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 /// is refused at the chunk that crosses `max`, so an upload never fills
 /// the router's memory before it is measured.
 pub(crate) async fn read_body(req: &mut Request, max: usize) -> CellResult<Vec<u8>> {
+    let too_large = |e: TooLarge| CellError::too_large("request body", e.bytes, e.max);
     let declared: Option<usize> = req.headers().get("content-length")?.and_then(|l| l.parse().ok());
-    if let Some(n) = declared.filter(|n| *n > max) {
-        return Err(CellError::too_large("request body", n, max));
-    }
+    let mut body = LimitedBody::new(max, declared).map_err(too_large)?;
     if req.inner().body().is_none() {
-        return Ok(vec![]);
+        return Ok(body.finish());
     }
     let mut stream = req.stream()?;
-    let mut body = Vec::with_capacity(declared.unwrap_or(0));
-    // bounded: each chunk is counted before it is kept, and past `max` the read stops
+    // bounded: LimitedBody refuses the chunk that would cross `max`, and the read stops
     while let Some(chunk) = stream.try_next().await? {
-        if chunk.len() > max - body.len() {
-            return Err(CellError::too_large("request body", body.len() + chunk.len(), max));
-        }
-        body.extend_from_slice(&chunk);
+        body.push(&chunk).map_err(too_large)?;
     }
-    assert!(body.len() <= max, "a body read stays within its limit");
-    Ok(body)
+    Ok(body.finish())
 }
 
 /// The key that signed the request (NIP-98), not yet resolved.
