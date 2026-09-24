@@ -97,6 +97,37 @@ session's layout (`finite-next-worktrees/desktop-ui`, `d8d5c26`).
    owner's agent in it; the agent's platform tools.
    Acceptance: in a browser, a person asks their agent for an app; the
    agent makes, deploys, and uses it; it appears in the desktop's sidebar.
+   **The plan (2026-09-24):**
+   - **4a. The agent is a second script in the cell's fleet**, not a
+     second fleet: celld already loads a script a service binding names,
+     from that script's own pointer. Our fork adds `celld deploy --named`
+     (publish a script without making it the fleet's application) and
+     `celld dev --with PROJECT` (co-host it locally the same way), fork
+     `0d80ead`. The cell binds `AGENTS` and its router hands
+     `/api/agents` and `/api/a/*` to it; the agent's script has no
+     ingress of its own, so it can trust who the router says is calling
+     (the router already resolves every signed request's identity), and
+     it stops verifying signatures and asking the registry itself. Dev,
+     the e2e, and fragment.club all co-host (one node, one deploy order:
+     the agent `--named`, then the cell).
+   - **4b. Metering:** an agent's model calls use its owner's org
+     OpenRouter key (the one the `Ledger` mints, whose limit is the
+     month's allowance), fetched per turn through the platform. The
+     fleet's own OpenRouter key for agents goes away. Usage rows per step
+     come later (debt ledger); the hard stop is OpenRouter's.
+   - **4c. Your agent:** each person has one default agent,
+     `agent.<username>` (agent names are qualified like fragments). The
+     platform makes it on first need and registers it for its owner. A
+     chat made from the desktop, or with `agent: true`, gets the owner's
+     agent as an editor that listens.
+   - **4d. The agent makes apps:** its tools gain the platform's verbs,
+     through the same signed API: make a fragment (under its owner's
+     username, the owner as its owner and the agent an editor), write
+     files, deploy, read files. The chat template shows agents' answers
+     as markdown and names people by username.
+   - **4e.** The desktop notices new fragments (it asks again when the
+     page regains focus and after a chat's message), so an app the agent
+     made appears in the sidebar.
 5. **A computer with screenshots.** `fragment computer connect` (outbound),
    a `screenshot` tool (headless Chromium on the computer), the image in
    the chat. Acceptance: a turn opens a page on the computer and the chat

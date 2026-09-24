@@ -21,7 +21,9 @@
   // The node's keys (crates/native, docs/hardening.md H1): sealing, the
   // code.storage JWT, WorkOS's exchange, OpenRouter's key API. Needs our
   // celld fork, which routes `native:*` targets to that crate.
-  "services": [{ "binding": "KEYS", "service": "native:keys" }],
+  // AGENTS is the agents' script (agent/), co-hosted in this fleet: it has
+  // no ingress of its own, and the router hands it /api/agents and /api/a/*.
+  "services": [{ "binding": "KEYS", "service": "native:keys" }, { "binding": "AGENTS", "service": "fragment-agent" }],
   "durable_objects": {
     "bindings": [
       { "name": "FRAGMENT", "class_name": "Fragment" },

@@ -64,9 +64,7 @@ pub struct Suite {
     pub scratch: PathBuf,
     /// The node's own copy of the cell project (never `cell/`, where `xtask dev` runs).
     project: PathBuf,
-    /// The agents' node (phase 5), started by the lanes that need it.
-    agents: Option<devstack::Node>,
-    agents_port: u16,
+    /// The agents' script (phase 5), co-hosted on the node.
     agents_project: PathBuf,
     /// More environment for the next node started (celld settings a lane tries).
     pub node_env_extra: Vec<(String, String)>,
@@ -157,39 +155,32 @@ impl Suite {
             test_hooks: true,
         }
         .configure(&self.project)?;
-        let env = env.into_iter().chain(self.node_env_extra.iter().cloned()).collect();
-        let opts = devstack::NodeOptions { project: self.project.clone(), port: self.port, clean, watch: false, env };
-        let (node, _) = devstack::Node::start(&self.tools, &opts)?;
-        self.node = Some(node);
-        Ok(Api::new(self.port, suffix.then_some(SUFFIX)))
-    }
-
-    /// Starts the agents' node, acting on this suite's cell node, with the
-    /// OpenRouter fake as its model service and test controls on.
-    pub fn start_agents(&mut self, clean: bool) -> Result<Api> {
-        assert!(self.agents.is_none(), "one agents node at a time");
-        let env = devstack::AgentFleet {
+        // the agents' script is co-hosted, as the fleet runs it: the
+        // router hands it /api/agents and /api/a/*, its inboxes included
+        devstack::AgentFleet {
             host_secret: self.host_secret.clone(),
             fragment_api: format!("http://127.0.0.1:{}", self.port),
-            agent_url: format!("http://127.0.0.1:{}", self.agents_port),
+            agent_url: format!("http://127.0.0.1:{}", self.port),
             openrouter_url: Some(self.openrouter.url.clone()),
             openrouter_key: OPENROUTER_KEY.into(),
             test_hooks: true,
             egress_local: true,
         }
         .configure(&self.agents_project)?;
-        let opts = devstack::NodeOptions { project: self.agents_project.clone(), port: self.agents_port, clean, watch: false, env };
+        let env = env.into_iter().chain(self.node_env_extra.iter().cloned()).collect();
+        let opts = devstack::NodeOptions { project: self.project.clone(), port: self.port, clean, watch: false, env, with: vec![self.agents_project.clone()] };
         let (node, _) = devstack::Node::start(&self.tools, &opts)?;
-        self.agents = Some(node);
-        Ok(Api::new(self.agents_port, None))
+        self.node = Some(node);
+        Ok(Api::new(self.port, suffix.then_some(SUFFIX)))
     }
 
-    pub fn stop_agents(&mut self) -> Result<()> {
-        self.agents.take().expect("a running agents node").stop()
-    }
-
-    pub fn crash_agents(&mut self) -> Result<()> {
-        self.agents.take().expect("a running agents node").crash()
+    /// The agents' API: the node's own (the agents' script is co-hosted),
+    /// started again after `crash`. Its state is the node's.
+    pub fn agents(&mut self) -> Result<Api> {
+        if self.node.is_none() {
+            self.start(false, true)?;
+        }
+        Ok(Api::new(self.port, None))
     }
 
     pub fn stop(&mut self) -> Result<()> {
@@ -360,8 +351,6 @@ fn main() -> Result<()> {
         cli,
         scratch,
         project,
-        agents: None,
-        agents_port: devstack::free_port()?,
         agents_project,
         node_env_extra: vec![],
         platform_on_suffix: false,
@@ -370,9 +359,6 @@ fn main() -> Result<()> {
     lanes::run(&mut s, api)?;
     if s.node.is_some() {
         s.stop()?;
-    }
-    if s.agents.is_some() {
-        s.stop_agents()?;
     }
     println!("\n{} passed, {} failed", s.passed, s.failed.len());
     if !s.failed.is_empty() {

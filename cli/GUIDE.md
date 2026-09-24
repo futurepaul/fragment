@@ -329,8 +329,8 @@ fragment agent stop my-bot
 A message sent while it works steers the running turn. A chat (the
 `chat` template) with the agent as a member, after `fragment agent listen
 my-bot my-chat`, gets an answer to every message from someone else. The
-agent fleet is `FRAGMENT_AGENTS` (default `http://127.0.0.1:8793`, the
-dev stack's).
+agents answer on the platform's own host (their script is co-hosted in
+its fleet); `FRAGMENT_AGENTS` names another.
 
 An agent with a computer also gets goose's developer tools (shell,
 write, edit, tree) there. On the computer (a CLI built with

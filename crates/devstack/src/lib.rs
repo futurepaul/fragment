@@ -25,7 +25,7 @@ pub const STOP_TIMEOUT: Duration = Duration::from_secs(60);
 /// `CELLD_LOADED_WORKERS_MAX`, `CELLD_DYNAMIC_LOCKDOWN`,
 /// `CELLD_INTERNAL_PEER_ONLY`, and a hard heap ceiling.
 pub const CELLD_FORK_URL: &str = "https://github.com/futurepaul/celld.git";
-pub const CELLD_FORK_REV: &str = "43c323838881d0deb4218d6b4c4e5f312348c811";
+pub const CELLD_FORK_REV: &str = "0d80ead99b7da0da755c8f8ed52d83df371c4db3";
 
 pub fn repo_root() -> PathBuf {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -350,6 +350,9 @@ pub struct NodeOptions {
     pub watch: bool,
     /// Extra environment for the node (celld tuning variables).
     pub env: Vec<(String, String)>,
+    /// Projects co-hosted beside it for its service bindings (`celld dev
+    /// --with`): the agents' script, as the fleet runs it.
+    pub with: Vec<PathBuf>,
 }
 
 /// One `celld dev` node. `celld dev` runs the node as a child process, so
@@ -369,6 +372,9 @@ impl Node {
         let out = fs::File::create(&log)?;
         let mut cmd = Command::new(&tools.celld);
         cmd.arg("dev").arg(&opts.project).args(["--port", &opts.port.to_string()]);
+        for other in &opts.with {
+            cmd.arg("--with").arg(other);
+        }
         if opts.clean {
             cmd.arg("--clean");
         }

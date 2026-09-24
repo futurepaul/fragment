@@ -57,7 +57,8 @@ debt ledger).
   (`target/e2e/cell`), so the e2e and `cargo xtask dev` can run at once.
 - `cargo xtask dev [--clean]`: the dev stack in the foreground: the cell
   on :8790 with fragments at `http://<name>.fragment.localhost:8790/`,
-  agents (`agent/`, goose's loop) on :8793 with their model key from the
+  agents (`agent/`, goose's loop) co-hosted on the same node (the router
+  hands them `/api/agents` and `/api/a/*`) with their model key from the
   file `OPENROUTER_API_KEY_FILE` names, the code.storage fake on :8792 (state in `target/devstack/`; its org
   key and the host secret are made there on first run), and sign-in at
   http://127.0.0.1:8790/ through the WorkOS fake on :8794 (any email), or

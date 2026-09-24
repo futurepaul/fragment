@@ -286,6 +286,18 @@ pub async fn service_post(env: &JsValue, binding: &str, url: &str, body: &str) -
     Ok((status, text))
 }
 
+/// Hands a request, as it came (method, URL, headers, body), to a service
+/// binding: the agents' script, co-hosted in this fleet.
+pub async fn service_fetch(env: &JsValue, binding: &str, req: worker::Request) -> CellResult<worker::Response> {
+    let service = get(env, binding)?;
+    if service.is_undefined() {
+        return Err(CellError::host(format!("this node has no {binding} binding (wrangler.jsonc `services`)")));
+    }
+    let out = await_js(call(&service, "fetch", &[JsValue::from(req.inner())]), binding).await?;
+    let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host(format!("{binding} answered no Response")))?;
+    Ok(worker::Response::from(resp))
+}
+
 /// The Worker variables in `env` (its string values): the e2e checks that
 /// no fleet secret is one (a test hook).
 pub fn env_vars(env: &JsValue) -> CellResult<serde_json::Map<String, serde_json::Value>> {

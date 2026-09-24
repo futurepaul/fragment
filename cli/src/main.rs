@@ -210,8 +210,8 @@ enum Cmd {
         #[command(subcommand)]
         sub: SecretCmd,
     },
-    /// Agents: make one, talk to it, point it at a chat (FRAGMENT_AGENTS
-    /// names the agent fleet; default http://127.0.0.1:8793)
+    /// Agents: make one, talk to it, point it at a chat (on the platform's
+    /// host; FRAGMENT_AGENTS names another)
     Agent {
         #[command(subcommand)]
         sub: AgentCmd,
@@ -521,14 +521,14 @@ fn resolve_host(cli_host: &Option<String>, cfg: &Config) -> String {
         .unwrap_or_else(|| "http://127.0.0.1:8790".to_string())
 }
 
-/// The agent fleet: FRAGMENT_AGENTS, else the config's `agents`, else the dev stack's.
+/// Where agents answer: FRAGMENT_AGENTS, else the config's `agents`, else
+/// the platform itself (the agents' script is co-hosted in its fleet).
 fn agents_client(verbose: bool) -> Result<api::Client> {
     let host = std::env::var("FRAGMENT_AGENTS")
         .ok()
         .filter(|h| !h.trim().is_empty())
-        .or_else(|| std::fs::read(config_path()).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).and_then(|v| v["agents"].as_str().map(str::to_string)))
-        .unwrap_or_else(|| "http://127.0.0.1:8793".to_string());
-    require_client(&Some(host), verbose)
+        .or_else(|| std::fs::read(config_path()).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).and_then(|v| v["agents"].as_str().map(str::to_string)));
+    require_client(&host, verbose)
 }
 
 /// The last thing an agent said in its view.

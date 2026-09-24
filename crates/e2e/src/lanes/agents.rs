@@ -50,7 +50,7 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("agents") {
         return Ok(());
     }
-    let agents = s.start_agents(true)?;
+    let agents = s.agents()?;
     let owner = api.person()?;
     let name = s.name("bot");
     let wait = Duration::from_secs(30);
@@ -157,8 +157,8 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "add once" })))?;
     s.eventually(wait, || runs_of(&view(&agents, &owner, &name), &add).len() > before);
     std::thread::sleep(Duration::from_millis(1000));
-    s.crash_agents()?;
-    let agents = s.start_agents(false)?;
+    s.crash()?;
+    let agents = s.agents()?;
     let v = settle(s, &agents, &owner, &name, Duration::from_secs(60));
     let runs = runs_of(&v, &add);
     let replayed = runs.len() >= before + 2 && runs[runs.len() - 1] == runs[runs.len() - 2];
@@ -173,14 +173,13 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     let steps_before = tools_steps(&view(&agents, &owner, &name));
     agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "add between" })))?;
     s.eventually(wait, || tools_steps(&view(&agents, &owner, &name)) > steps_before);
-    s.crash_agents()?;
-    let agents = s.start_agents(false)?;
+    s.crash()?;
+    let agents = s.agents()?;
     let v = settle(s, &agents, &owner, &name, Duration::from_secs(60));
     let list = todos(api, &owner, &todo);
     let calls = runs_of(&v, &add);
     let last_call_once = calls.last().is_some_and(|last| calls.iter().filter(|c| *c == last).count() == 1);
     s.ok("killed between steps, the turn resumes and nothing runs again", v["outcome"] == "idle" && last_call_once && list.iter().filter(|t| *t == "between").count() == 1, &v);
-    s.stop_agents()?;
     Ok(())
 }
 
@@ -199,7 +198,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("chat") {
         return Ok(());
     }
-    let agents = s.start_agents(true)?;
+    let agents = s.agents()?;
     // the CLI finds the agent fleet here (the suite's children inherit it)
     std::env::set_var("FRAGMENT_AGENTS", &agents.base);
     let home = s.dir("chat-home");
@@ -278,6 +277,5 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let landed = s.eventually(wait, || chat_records(api, &owner, &chat).iter().any(|r| r["body"]["text"] == "from the page"));
     s.ok("a message sent from the page lands in the channel, and shows", landed && chrome.until(&page, "document.getElementById('messages').textContent.includes('from the page')", wait), "");
     std::env::remove_var("FRAGMENT_AGENTS");
-    s.stop_agents()?;
     Ok(())
 }

@@ -4,8 +4,9 @@
 //!   celld            build the pinned celld fork into target/celld/bin
 //!   dev [--clean]    build, then run the stack in the foreground: the cell on
 //!                    :8790 (fragments at <name>.fragment.localhost:8790), the
-//!                    code.storage fake on :8792, and agents on :8793 (their
-//!                    model key from the file OPENROUTER_API_KEY_FILE names)
+//!                    code.storage fake on :8792, and agents co-hosted on the
+//!                    cell's node (their model key from the file
+//!                    OPENROUTER_API_KEY_FILE names)
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -34,7 +35,6 @@ mod deploy;
 const WORKER_BUILD_VERSION: &str = "0.8.5";
 const DEV_PORT: u16 = 8790;
 const DEV_CODESTORAGE_PORT: u16 = 8792;
-const DEV_AGENT_PORT: u16 = 8793;
 const DEV_WORKOS_PORT: u16 = 8794;
 /// The WorkOS fake's environment in dev.
 const DEV_WORKOS_CLIENT: &str = "client_fragment_dev";
@@ -159,28 +159,27 @@ fn dev(args: &[String]) -> Result<()> {
         test_hooks: false,
     }
     .configure(&devstack::cell_dir())?;
-    let opts = devstack::NodeOptions { project: devstack::cell_dir(), port: DEV_PORT, clean, watch: true, env: node_env };
-    let (node, took) = devstack::Node::start(&tools, &opts)?;
     // agents act on the dev fragments; their model key is a file's (never the repo's)
     let model_key = match std::env::var_os("OPENROUTER_API_KEY_FILE") {
         Some(path) => std::fs::read_to_string(&path).with_context(|| format!("reading {}", Path::new(&path).display()))?.trim().to_string(),
         None => "unset: point OPENROUTER_API_KEY_FILE at a key file".to_string(),
     };
-    let agent_env = devstack::AgentFleet {
+    // the agents' script is co-hosted on the same node, as the fleet runs it
+    devstack::AgentFleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
         fragment_api: format!("http://127.0.0.1:{DEV_PORT}"),
-        agent_url: format!("http://127.0.0.1:{DEV_AGENT_PORT}"),
+        agent_url: format!("http://127.0.0.1:{DEV_PORT}"),
         openrouter_url: None,
         openrouter_key: model_key,
         test_hooks: false,
         egress_local: true,
     }
     .configure(&devstack::agent_dir())?;
-    let agent_opts = devstack::NodeOptions { project: devstack::agent_dir(), port: DEV_AGENT_PORT, clean, watch: true, env: agent_env };
-    let (agents, _) = devstack::Node::start(&tools, &agent_opts)?;
+    let opts = devstack::NodeOptions { project: devstack::cell_dir(), port: DEV_PORT, clean, watch: true, env: node_env, with: vec![devstack::agent_dir()] };
+    let (node, took) = devstack::Node::start(&tools, &opts)?;
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
     println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
-    println!("  agents:       {} (POST /api/agents, signed)", agents.base);
+    println!("  agents:       {}/api/agents (co-hosted; signed)", node.base);
     println!("  code.storage: {} (the fake)", fake.url);
     println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
     println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");

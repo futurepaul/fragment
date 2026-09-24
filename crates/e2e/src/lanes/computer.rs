@@ -107,7 +107,7 @@ pub fn computer(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("computer") {
         return Ok(());
     }
-    let agents = s.start_agents(true)?;
+    let agents = s.agents()?;
     std::env::set_var("FRAGMENT_AGENTS", &agents.base);
     let home = s.dir("computer-home");
     s.login(api, &home);
@@ -185,8 +185,8 @@ pub fn computer(s: &mut Suite, api: &Api) -> Result<()> {
     agents.signed(&owner, "POST", &format!("/api/a/{bot}/turns"), Some(&json!({ "text": "run it once" })))?;
     s.eventually(wait, || runs_of(&view(&agents, &owner, &bot), "shell").len() > before);
     std::thread::sleep(Duration::from_millis(1000));
-    s.crash_agents()?;
-    let agents = s.start_agents(false)?;
+    s.crash()?;
+    let agents = s.agents()?;
     let v = settle(s, &agents, &owner, &bot, Duration::from_secs(60));
     let runs = runs_of(&v, "shell");
     let replayed = runs.len() >= before + 2 && runs[runs.len() - 1] == runs[runs.len() - 2];
@@ -218,6 +218,5 @@ pub fn computer(s: &mut Suite, api: &Api) -> Result<()> {
 
     computer.kill();
     std::env::remove_var("FRAGMENT_AGENTS");
-    s.stop_agents()?;
     Ok(())
 }

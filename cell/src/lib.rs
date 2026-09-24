@@ -18,6 +18,7 @@
 //!   POST   /api/budget/<id>/top-up         {usd}: operators (FRAGMENT_OPERATORS)
 //!   POST   /api/fragments                  create (signed; the signer owns it)
 //!   GET    /api/fragments                  the fragments the signer belongs to
+//!   *      /api/agents, /api/a/...         the agents' script (agent/), co-hosted: passed through
 //!   DELETE /api/f/<name>                   delete (owner)
 //!   *      /api/f/<name>/<route>           the control API (signed; the code.storage webhook is HMAC,
 //!                                          the inbox is its token)
@@ -522,6 +523,9 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             let principal = signer(env, &req, &url, &body).await?;
             create_fragment(env, &cfg, &url, create, principal).await
         }
+        // the agents' script, co-hosted: it checks its own requests (NIP-98
+        // by the owner, or an inbox's token), so they pass through as they came
+        (_, ["api", "agents"]) | (_, ["api", "a", ..]) => js::service_fetch(env.as_ref(), "AGENTS", req).await,
         (Method::Get, ["api", "fragments"]) => {
             let principal = signer(env, &req, &url, &[]).await?;
             let list = Request::new("https://principal.internal/list", Method::Get)?;
