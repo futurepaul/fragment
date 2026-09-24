@@ -18,10 +18,10 @@ first reads it (slice D: a job's fetch).
 
 | Secret | Home |
 |---|---|
-| A person's model credential (their OpenRouter key), their GitHub token, other personal keys | the person's own cell |
+| A person's model credential (their OpenRouter key, minted by the platform with their budget as its limit), their GitHub token, other personal keys | the person's own cell |
 | A key an app needs (a third-party API key, a webhook signing key) | the fragment's supervisor |
 | The Sprites org token a person's computers run under | the person's own cell (ours by default; theirs if they bring their own Sprites org) |
-| The fleet's host secret, the code.storage org key | the fleet's own configuration (`vars` rendered at deploy) |
+| The fleet's host secret, the code.storage org key, the OpenRouter management key | the fleet's own configuration (`vars` rendered at deploy) |
 
 Never in git, a log, a command line, a channel record, or a computer's
 disk. Rotating a secret means changing it in its home; everything that
@@ -56,8 +56,14 @@ uses it reads it from there.
 
 ## Model credentials are per person
 
-fragment.club does not run everyone on one shared key. A person
-**connects OpenRouter** (OpenRouter's OAuth PKCE flow,
+*Amended 2026-09-23 (ROADMAP decision 14):* for now the platform pays for
+AI up to each person's monthly budget. Each person still gets a key of
+their own: the platform's OpenRouter management key mints one per person
+with a credit limit equal to their budget, kept in the person's cell, so
+OpenRouter itself stops them at the limit. Connecting their own account,
+below, comes back later as the way past it.
+
+Later, a person **connects OpenRouter** (OpenRouter's OAuth PKCE flow,
 https://openrouter.ai/docs/guides/overview/auth/oauth): they approve, and
 the platform receives a key on their own OpenRouter account, billed to
 them, which they can revoke there. The key's origin stays pluggable:

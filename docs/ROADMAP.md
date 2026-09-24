@@ -69,7 +69,9 @@ a computer's wake/exec.
    Tigris single-region bucket in `ord` (conditional writes, strongly
    consistent); one shared fleet (cross-user sharing needs cells to call
    each other; crons need an always-on fleet). Domain: `fragment.club`,
-   per-fragment subdomains for origin isolation.
+   per-fragment subdomains for origin isolation. The new fleet takes
+   `fragment.club` itself in phase 3, with no staging name: only Paul
+   publishes there (Paul, 2026-09-23).
 7. **Inference is OpenRouter for everything**: text `z-ai/glm-5.3-flash`
    (reads images and video, so screenshots work), images
    `google/gemini-3.1-flash-lite-image`, video `minimax/hailuo-3-max`
@@ -90,9 +92,10 @@ a computer's wake/exec.
     shim, ACP event mapping, the cancel file) is not ported.
 11. **Secrets have one home, and code holds capabilities, not keys**
     (`docs/secrets.md`): encrypted in the owning cell; computers reach
-    credentials through Sprites connectors; each person connects their own
-    OpenRouter account (OAuth PKCE), with Stripe Projects as a later
-    origin if it gains a platform API.
+    credentials through Sprites connectors. *Amended 2026-09-23 by
+    decision 14:* the platform pays for AI up to each person's budget;
+    connecting your own OpenRouter account (OAuth PKCE) comes back later
+    as the way past the limit.
 12. **Sign-in for fragment.club is WorkOS** (phase 4): WorkOS
     authenticates people; the platform holds one key per person behind
     it; the CLI and agents keep signing with NIP-98.
@@ -103,6 +106,22 @@ a computer's wake/exec.
     so this needs no migration: the hostname suffix, the fleet's bucket,
     the Sprites org and token per owner, and the fleet `xtask deploy`
     targets.
+14. **Every person has a monthly budget, with a hard stop** (Paul,
+    2026-09-23): $20 a month by default, reset on the 1st (UTC), kept in
+    the person's cell. People spin up AI calls, image and video
+    generations, and (phase 8) computers freely within it and always see
+    what they have spent: remaining budget in the platform bar and in
+    `fragment budget`, a cost on every run, a warning at 80%. A
+    fragment's owner pays for everything the fragment spends, whoever
+    triggered it. A paid step reserves its worst case before it runs and
+    settles to the reported cost after; a step whose reservation does
+    not fit fails ("budget used up", the run held, replayable after a
+    top-up), so spend never passes the budget. Running out stops only
+    paid steps, never sites or mutations. As a backstop, each person's
+    AI runs on their own OpenRouter key, minted by the platform's with a
+    credit limit equal to their budget. A fragment that sets its own
+    `OPENROUTER_API_KEY` pays for itself and is not metered. Paul's
+    exposure is at most $20 a month per invited person, plus hosting.
 
 ## Truth map (every change is checked against this)
 
@@ -208,26 +227,46 @@ deployment.
   lands there. celld v0.5.1 on two always-on Fly Machines in `ord` with a
   restart-always policy (celld self-fences and must be restarted),
   peers on Fly's private network; real code.storage (org `finite`);
-  secrets set from files, never printed. A staging hostname until the
-  cutover. `cargo xtask deploy <fleet>` reads that fleet's configuration
+  secrets set from files, never printed. No staging name: the fleet
+  passes the e2e on its `fly.dev` address, then `fragment.club` and
+  `*.fragment.club` move to it (Paul adds the records at Namecheap; the
+  VPS keeps running until he retires it). Until sign-in exists, only
+  Paul's key may create fragments. An outbound firewall keeps jobs off
+  the fleet's private network. Live checks: one OpenRouter call (text,
+  one small image) and a push to a real phone.
+  `cargo xtask deploy <fleet>` reads that fleet's configuration
   (hostname suffix, bucket, Sprites org) rather than constants, so
   phase 10 adds fleets without a migration.
 - **Acceptance:** the e2e suite passes against the hosted URL; durable
   write latency (fleet proof), cold cell load, and cell-to-Sprite
   latency recorded; an operator runbook.
 
-### 4. Identity and browser sessions
-- BANKS registry cell: identities (person, agent, fragment) ↔ npub and
-  designated owners. Sign-in is WorkOS (decision 12; a dev login stands in
-  locally), creating a person with a custodial key encrypted in their
-  cell. A platform session maps a browser to that principal; each
-  fragment is served from its own origin (`<name>.fragment.club`, the
-  suffix from configuration), with the hostname checked before it is
-  trusted. "Connect OpenRouter" (OAuth PKCE) stores the person's model
-  credential (`docs/secrets.md`).
+### 4. Friends alpha: invite-only sign-in and budgets
+- Pulled forward so Paul can share fragment.club with friends without an
+  obvious problem (2026-09-23). BANKS registry cell: identities (person,
+  agent, fragment) ↔ npub and designated owners. Sign-in is WorkOS
+  AuthKit with sign-up switched off; Paul invites people from the WorkOS
+  dashboard (decision 12; a dev login stands in locally). Signing in
+  creates a person with a custodial key encrypted in their cell. A
+  platform session maps a browser to that principal; each fragment is
+  served from its own origin (`<name>.fragment.club`, the suffix from
+  configuration), with the hostname checked before it is trusted.
+  `fragment login` becomes a browser sign-in that ties the CLI's key to
+  the person; creating a fragment needs a person (replacing phase 3's
+  allowlist).
+- Budgets (decision 14): the ledger in the person's cell, reservations
+  and settlement on every `job.ai` step, per-person OpenRouter keys with
+  credit limits, the monthly reset, `fragment budget`, the platform bar,
+  per-run costs. Computers join the same ledger in phase 8.
 - **Acceptance:** identical allow/deny decisions for CLI and browser
-  across public, link, and members; negative tests (no session, revoked
-  member, cross-fragment cookie) and a session restart test.
+  across public, link, and members; negative tests (no session, not
+  invited, revoked member, cross-fragment cookie) and a session restart
+  test. Budgets, against the OpenRouter fake: a step over the remaining
+  budget is held and succeeds on replay after a top-up; spend matches
+  the fake's reported costs; two jobs racing for the last dollar cannot
+  both run; the monthly reset; a public visitor's call bills the owner;
+  a fragment with its own key is not metered; the person's OpenRouter
+  key carries their limit.
 
 ### 5. Agents as members
 - The agent cell: goose's loop as a workers-rs Durable Object in its own
@@ -277,8 +316,9 @@ deployment.
   Sprite's disk.
 
 ### 9. Cutover
-- `fragment.club` DNS to Fly (owner action), the VPS retired, and the
-  example fragments re-created from templates.
+- `fragment.club` moves to Fly in phase 3. What remains: the VPS
+  retired (Paul's call) and the example fragments re-created from
+  templates.
 
 ### 10. Bring your own compute (after everything above)
 - An org signs up and gets its own deployment under `<org>.fragment.club`:
