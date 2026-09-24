@@ -76,6 +76,11 @@
       while ($("activity").children.length > 20) $("activity").lastChild.remove();
     }, { last: 20 });
 
+    // the fragment ended this page's connection for good
+    fragment.closed(({ code }) => {
+      $("here").textContent = code === 4004 ? "this list was deleted" : "this page's access changed: reload it";
+    });
+
     const me = await fragment.me();
     fragment.presence.set({ joined: Date.now() });
     fragment.presence.on((list) => {

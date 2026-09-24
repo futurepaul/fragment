@@ -9,9 +9,14 @@
 //   fragment.presence.set({ name: "paul" });                   // who is here
 //   fragment.presence.on((list) => showWho(list));
 //   await fragment.push.register("everyone");                  // web push (after a click)
+//   fragment.closed(({ code }) => showGone(code));             // the fragment ended this page's socket
 //
 // One socket per page carries subscriptions, presence, and change signals;
-// it reconnects by itself and resumes each channel after its last record.
+// it reconnects by itself, after a jittered wait (a deploy drops every page
+// at once; they should not all come back in the same second), and resumes
+// each channel after its last record. A close the fragment means for good
+// (4003: this page's access was revoked; 4004: the fragment was deleted)
+// ends it: the page stops reconnecting and `closed` handlers hear why.
 // A channel's backlog comes a page at a time: the library asks for the next
 // page until the last one, which makes the channel live, so no record is
 // skipped however far behind the page starts.
@@ -58,7 +63,11 @@ let backoff = 1000;
 let rerun = null;
 let hello = null;
 let presenceData = null;
+let ended = null; // { code, reason } once the fragment closed the socket for good
 const helloWaiters = [];
+const closedHandlers = new Set();
+// Close codes after which reconnecting cannot help (live.rs, fragment.rs).
+const FINAL_CLOSE_CODES = [4003, 4004];
 const subs = new Map(); // channel -> { after, last, handlers }
 const lives = new Set(); // { op, input, onResult, onError }
 const presenceHandlers = new Set();
@@ -78,7 +87,7 @@ function wanted() {
 }
 
 function connect() {
-  if (socket) return;
+  if (socket || ended) return;
   const url = new URL("__live", base);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(url);
@@ -117,9 +126,15 @@ function connect() {
       console.warn("fragment:", m.message);
     }
   };
-  ws.onclose = () => {
+  ws.onclose = (event) => {
     socket = null;
-    if (wanted()) setTimeout(connect, backoff);
+    if (FINAL_CLOSE_CODES.includes(event.code)) {
+      ended = { code: event.code, reason: event.reason };
+      closedHandlers.forEach((h) => h(ended));
+      return;
+    }
+    // between half and one and a half times the backoff
+    if (wanted()) setTimeout(connect, backoff * (0.5 + Math.random()));
     backoff = Math.min(backoff * 2, 30000);
   };
 }
@@ -176,6 +191,15 @@ export const presence = {
     return () => presenceHandlers.delete(handler);
   },
 };
+
+/// Calls `handler({ code, reason })` if the fragment ends this page's socket
+/// for good (4003: its access was revoked; 4004: the fragment was deleted);
+/// the page no longer reconnects. Returns a stop function.
+export function closed(handler) {
+  closedHandlers.add(handler);
+  if (ended) handler(ended);
+  return () => closedHandlers.delete(handler);
+}
 
 /// Who this page is to the fragment: { id, principal, role }.
 export function me() {

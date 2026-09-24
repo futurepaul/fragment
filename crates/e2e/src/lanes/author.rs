@@ -437,5 +437,26 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a reload finds the list and the activity where they were", chrome.until(&a, "document.querySelectorAll('#todos li.done').length === 1 && document.getElementById('activity').children.length === 2", wait), "");
     let n = api.op(&owner, &name, "list", "q", json!({}))?;
     s.ok("the browser's writes are the app's data", n.body["result"]["todos"].as_array().is_some_and(|t| t.len() == 1 && t[0]["done"] == true), &n);
+
+    // the server drops the page's socket: it comes back by itself and
+    // catches up on what it missed (counted from here on)
+    chrome.eval(&a, "(() => { window.__sockets = 0; const W = window.WebSocket; window.WebSocket = class extends W { constructor(...args) { super(...args); window.__sockets += 1; } }; return true; })()")?;
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "drop-live", "code": 4000 })))?;
+    s.ok("(the test fleet drops the fragment's live sockets)", r.status == 200, &r);
+    api.op(&owner, &name, "add", "while-dropped", json!({ "text": "bread" }))?;
+    let bread = "[...document.querySelectorAll('#todos li span')].some(s => s.textContent === 'bread') && document.getElementById('activity').textContent.includes('added “bread”')";
+    s.ok("a page whose socket the server dropped reconnects by itself and catches up", chrome.until(&a, &format!("window.__sockets === 1 && {bread}"), wait), "");
+    let lines = chrome.eval(&a, "[...document.getElementById('activity').children].filter((d) => d.textContent === 'added “bread”').length")?;
+    s.ok("and shows the record it missed once", lines == 1, &lines);
+
+    // a close the fragment means for good (4003: rotating the share link
+    // ends link holders' sockets): the page stops and says why
+    chrome.eval(&a, "import(new URL('./__fragment.js', location.href).href).then((f) => { f.closed((e) => { window.__ended = e.code; }); return true; })")?;
+    let r = api.signed(&owner, "POST", &format!("/api/f/{name}/rotate"), Some(&json!({ "scopes": ["view"] })))?;
+    s.ok("(the share link rotates)", r.status == 200, &r);
+    s.ok("a page closed for good (4003) is told so", chrome.until(&a, "window.__ended === 4003 && document.getElementById('here').textContent.includes('reload')", wait), "");
+    // following a channel would open a socket at once if the page still tried
+    let sockets = chrome.eval(&a, "import(new URL('./__fragment.js', location.href).href).then((f) => { f.subscribe('activity', () => {}); return window.__sockets; })")?;
+    s.ok("and opens no socket again, even to follow a channel", sockets == 1, &sockets);
     Ok(())
 }
