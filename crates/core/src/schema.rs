@@ -13,6 +13,8 @@
 //! are allowed and ignored. Anything else is refused at deploy rather than
 //! silently not enforced.
 
+use std::collections::HashSet;
+
 use serde_json::{Map, Value};
 
 /// A schema's JSON text.
@@ -203,10 +205,8 @@ fn validate_at(schema: &Value, v: &Value, at: &str) -> Result<(), String> {
                 return fail(format!("must have at most {}", plural(m, "item")));
             }
             if s.get("uniqueItems") == Some(&Value::Bool(true)) {
-                for (i, a) in items.iter().enumerate() {
-                    if items[..i].contains(a) {
-                        return fail(format!("item {i} repeats an earlier item"));
-                    }
+                if let Some(i) = first_repeat(items) {
+                    return fail(format!("item {i} repeats an earlier item"));
                 }
             }
             if let Some(item_schema) = s.get("items") {
@@ -219,6 +219,56 @@ fn validate_at(schema: &Value, v: &Value, at: &str) -> Result<(), String> {
         _ => {}
     }
     Ok(())
+}
+
+/// The first item equal to an earlier one. Public callers reach this with
+/// up to 256 KiB of input, so each item is keyed once by its canonical
+/// JSON (a set lookup each) rather than compared with every earlier item.
+fn first_repeat(items: &[Value]) -> Option<usize> {
+    let mut seen = HashSet::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let mut key = String::new();
+        unique_key(item, &mut key);
+        if !seen.insert(key) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// A key equal for two values exactly when they are equal as JSON values
+/// (`Value`'s own equality): object keys in order, and a float zero written
+/// one way, since `-0.0 == 0.0`. Recursion is bounded by the input's
+/// nesting, which parsing already limits.
+fn unique_key(v: &Value, out: &mut String) {
+    match v {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (i, k) in keys.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&Value::String((*k).clone()).to_string());
+                out.push(':');
+                unique_key(&map[k.as_str()], out);
+            }
+            out.push('}');
+        }
+        Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                unique_key(item, out);
+            }
+            out.push(']');
+        }
+        Value::Number(n) if n.is_f64() && n.as_f64() == Some(0.0) => out.push_str("0.0"),
+        other => out.push_str(&other.to_string()),
+    }
 }
 
 fn validate_object(s: &Map<String, Value>, fields: &Map<String, Value>, at: &str) -> Result<(), String> {
@@ -308,5 +358,49 @@ mod tests {
         assert_eq!(err(json!({ "text": "x", "priority": 9 })), "/priority: must be at most 3");
         assert_eq!(err(json!("x")), "the input: must be object, not string");
         assert_eq!(err(json!({ "text": 3 })), "/text: must be string, not integer");
+    }
+
+    /// The quadratic check `uniqueItems` used to run: the meaning kept.
+    fn first_repeat_reference(items: &[Value]) -> Option<usize> {
+        (0..items.len()).find(|&i| items[..i].contains(&items[i]))
+    }
+
+    #[test]
+    fn unique_items_keeps_value_equality() {
+        let cases = [
+            json!([1, 2, 3]),
+            json!([1, 2, 1]),
+            json!([1, 1.0]),
+            json!([0.0, -0.0]),
+            json!([2.5, 2.5]),
+            json!(["a", "b", "a"]),
+            json!([{ "a": 1, "b": [1, 2] }, { "b": [1, 2], "a": 1 }]),
+            json!([{ "a": 1 }, { "a": 2 }, [1], [1]]),
+            json!([null, false, 0, "", [], {}]),
+            json!([null, false, 0, "", [], {}, {}]),
+            json!(["1", 1]),
+            json!([[0.0], [-0.0]]),
+        ];
+        for c in &cases {
+            let items = c.as_array().expect("an array");
+            assert_eq!(first_repeat(items), first_repeat_reference(items), "{c}");
+        }
+        assert_eq!(first_repeat(&[json!(1), json!(2), json!(1)]), Some(2));
+    }
+
+    #[test]
+    fn unique_items_is_linear_at_the_input_limit() {
+        // About 43,000 small distinct items fill 256 KiB; the quadratic
+        // check made about 10^9 comparisons for one call.
+        let items: Vec<Value> = (0..43_000).map(|i| json!(i)).collect();
+        let input = Value::Array(items);
+        assert!(input.to_string().len() <= fragment_proto::limits::INPUT_MAX_BYTES);
+        let schema = json!({ "type": "array", "uniqueItems": true });
+        let t0 = std::time::Instant::now();
+        validate(&schema, &input).unwrap();
+        let mut repeated = input.as_array().cloned().unwrap_or_default();
+        repeated.push(json!(42_999));
+        assert_eq!(validate(&schema, &Value::Array(repeated)).unwrap_err(), "the input: item 43000 repeats an earlier item");
+        assert!(t0.elapsed() < std::time::Duration::from_secs(2), "{:?}", t0.elapsed());
     }
 }
