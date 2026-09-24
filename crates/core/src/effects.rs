@@ -53,6 +53,25 @@ impl FileContent {
     }
 }
 
+/// A file's content as an effect, a job step, or a read carries it:
+/// `{"text": …}` when it is UTF-8, `{"base64": …}` otherwise.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileContent {
+    Text(String),
+    Base64(String),
+}
+
+impl FileContent {
+    pub fn into_bytes(self) -> Result<Vec<u8>, String> {
+        use base64::Engine;
+        match self {
+            FileContent::Text(t) => Ok(t.into_bytes()),
+            FileContent::Base64(b) => base64::engine::general_purpose::STANDARD.decode(b).map_err(|e| format!("base64: {e}")),
+        }
+    }
+}
+
 /// One thing a committed mutation asked for.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {

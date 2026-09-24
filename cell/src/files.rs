@@ -64,7 +64,7 @@ pub(crate) fn content_json(bytes: Vec<u8>) -> Value {
     serde_json::to_value(FileContent::of(bytes)).expect("file content serializes")
 }
 
-/// Bytes from `{text}` or `{base64}` (a job step's write).
+/// Bytes from `{text}` or `{base64}` (a file in `POST /api/files`).
 pub(crate) fn content_of(v: &Value) -> Result<Vec<u8>, String> {
     let obj = v.as_object().ok_or("a file's content is text or base64")?;
     FileContent::from_fields(obj)?.ok_or("a file's content is text or base64")?.into_bytes()

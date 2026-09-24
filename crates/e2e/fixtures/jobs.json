@@ -19,6 +19,7 @@
     "probe": { "kind": "job" },
     "parent": { "kind": "job" },
     "wrong": { "kind": "job" },
+    "misfit": { "kind": "job" },
     "ping": { "kind": "mutation" },
     "raise": { "kind": "mutation" },
     "boom": { "kind": "job" },

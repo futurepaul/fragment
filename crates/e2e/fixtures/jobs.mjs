@@ -88,6 +88,17 @@ export class App extends DurableObject {
     return await job.call("no_such_op", {});
   }
 
+  // A step whose args do not fit (a text step names no model): the
+  // platform says why, and the job may catch it.
+  async misfit(_input, job) {
+    try {
+      await job.ai.text({ prompt: "which model?" });
+      return { caught: false };
+    } catch (e) {
+      return { caught: true, name: e.name, message: e.message };
+    }
+  }
+
   ping(_input, call) {
     call.publish("loop", { ping: true }, "ping");
     return { ok: true };

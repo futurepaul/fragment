@@ -6,7 +6,7 @@
 //! model's price times its tokens; the person's own OpenRouter key, whose
 //! limit is their allowance, is the hard stop behind it.
 
-use serde_json::Value;
+use crate::steps::Step;
 
 /// One US dollar in micro-dollars.
 pub const USD: i64 = 1_000_000;
@@ -57,13 +57,13 @@ pub fn period_of(ms: i64) -> String {
 }
 
 /// What a step reserves, or `None` for a step that costs nothing (a
-/// video's polls and download).
-pub fn reservation(kind: &str, args: &Value) -> Option<i64> {
-    match kind {
-        "ai.text" => Some(TEXT_RESERVE),
-        "ai.image" => Some(IMAGE_RESERVE),
-        "ai.video.start" => {
-            let s = args["duration"].as_i64().unwrap_or(VIDEO_DEFAULT_S).clamp(1, VIDEO_MAX_S);
+/// video's polls and download, and every step that is not AI).
+pub fn reservation(step: &Step) -> Option<i64> {
+    match step {
+        Step::AiText(_) => Some(TEXT_RESERVE),
+        Step::AiImage(_) => Some(IMAGE_RESERVE),
+        Step::AiVideoStart(v) => {
+            let s = v.duration.unwrap_or(VIDEO_DEFAULT_S).clamp(1, VIDEO_MAX_S);
             Some(s * VIDEO_RESERVE_PER_S)
         }
         _ => None,
@@ -159,12 +159,16 @@ mod tests {
 
     #[test]
     fn reservations() {
-        assert_eq!(reservation("ai.text", &json!({})), Some(TEXT_RESERVE));
-        assert_eq!(reservation("ai.image", &json!({})), Some(IMAGE_RESERVE));
-        assert_eq!(reservation("ai.video.start", &json!({ "duration": 6 })), Some(600_000));
-        assert_eq!(reservation("ai.video.start", &json!({ "duration": 999 })), Some(VIDEO_MAX_S * VIDEO_RESERVE_PER_S));
-        assert_eq!(reservation("ai.video.poll", &json!({})), None);
-        assert_eq!(reservation("ai.video.save", &json!({})), None);
+        let reserves = |kind: &str, args: serde_json::Value| reservation(&Step::from_parts(kind, args).unwrap());
+        assert_eq!(reserves("ai.text", json!({ "model": "m", "prompt": "hi" })), Some(TEXT_RESERVE));
+        assert_eq!(reserves("ai.image", json!({ "prompt": "p", "path": "a.png" })), Some(IMAGE_RESERVE));
+        assert_eq!(reserves("ai.video.start", json!({ "prompt": "p", "duration": 6 })), Some(600_000));
+        assert_eq!(reserves("ai.video.start", json!({ "prompt": "p" })), Some(VIDEO_DEFAULT_S * VIDEO_RESERVE_PER_S));
+        assert_eq!(reserves("ai.video.start", json!({ "prompt": "p", "duration": 999 })), Some(VIDEO_MAX_S * VIDEO_RESERVE_PER_S));
+        assert_eq!(reserves("ai.video.start", json!({ "prompt": "p", "duration": -3 })), Some(VIDEO_RESERVE_PER_S));
+        assert_eq!(reserves("ai.video.poll", json!({ "id": "v" })), None);
+        assert_eq!(reserves("ai.video.save", json!({ "id": "v", "path": "v.mp4" })), None);
+        assert_eq!(reserves("fetch", json!({ "url": "https://x/", "method": "GET", "headers": {} })), None);
     }
 
     #[test]

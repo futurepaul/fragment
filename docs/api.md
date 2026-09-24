@@ -494,7 +494,10 @@ nothing except through steps. A step that fails for a reason that may
 pass (an upstream 429 or 5xx, a timeout, a platform error) is retried 4
 times with doubling delays; one that fails for good (a refused URL, an
 unknown operation, a call that threw), or runs out of retries, makes the
-`await` throw a `StepError` the job may catch. A job that throws is
+`await` throw a `StepError` the job may catch; so does a step whose
+arguments do not fit its kind (`job.ai.text` without a model, say), with
+what does not fit. Every kind of step and its arguments are defined once,
+as `Step` in `crates/core/src/steps.rs`. A job that throws is
 **held**: its run keeps the input and error until someone replays it. At
 most 100 steps and 4 MiB of step results per run; a result of at most
 1 MiB.

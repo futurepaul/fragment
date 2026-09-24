@@ -248,6 +248,16 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.op(&owner, &name, "wrong", "w1", json!({}))?;
     let wrong = settle(api, &owner, &name, started(&r), &["succeeded", "held"], long);
     s.ok("a call step to an unknown operation fails the job", wrong["status"] == "held" && wrong["error"].as_str().is_some_and(|e| e.contains("no_such_op")), &wrong);
+    let r = api.op(&owner, &name, "misfit", "m1", json!({}))?;
+    let misfit = settle(api, &owner, &name, started(&r), &["succeeded", "held"], long);
+    s.ok(
+        "a step whose args do not decode fails for good, naming what is missing, and the job may catch it",
+        misfit["status"] == "succeeded"
+            && misfit["output"]["caught"] == true
+            && misfit["output"]["name"] == "StepError"
+            && misfit["output"]["message"].as_str().is_some_and(|m| m.contains("ai.text") && m.contains("missing field `model`")),
+        &misfit,
+    );
 
     // the step that kept failing: retried with backoff, then the job caught it
     let careful = settle(api, &owner, &name, careful_id, &["succeeded", "held"], Duration::from_secs(60));

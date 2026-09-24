@@ -12,6 +12,10 @@
 //!        call an operation, fetch (secrets are added here), or publish
 //!   POST /job/finish  {run, attempt, error}     the Workflow gave up
 //!
+//! Every callback also names the fragment's incarnation, and each is
+//! decoded once into its struct below; a step's kind and args decode into
+//! `fragment_core::steps::Step`, and a run's row into `RunRow`.
+//!
 //! The Workflow records every answer, so a crash resumes at the step it
 //! was on, and a step that fails for a reason that may pass (an upstream
 //! 5xx, a network error) is retried with backoff. A run that fails for
@@ -28,10 +32,12 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use fragment_core::secrets::placeholders;
+use fragment_core::steps::{Fetch, NextStep, Step, StepOutcome, StepResult};
 use fragment_core::{cron::Cron, egress, glob, npub, trigger_state};
 use fragment_proto::{
     limits, valid_secret_name, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunStatus, SetPaused, TriggerDecl, TriggerOn, Via,
 };
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use worker::wasm_bindgen::JsValue;
 use worker::*;
@@ -90,39 +96,126 @@ pub(crate) fn permanent(m: impl Into<String>) -> StepFail {
     StepFail::Permanent(m.into())
 }
 
+/// A file step's failure: `main` or code.storage not answering passes;
+/// anything else (a bad path, a file too large) is for good.
+fn settle_files(e: CellError) -> StepFail {
+    match e.code {
+        ErrorCode::HostFailed | ErrorCode::UpstreamFailed => StepFail::Retry(e.message),
+        _ => permanent(e.message),
+    }
+}
+
 fn clip(s: &str) -> String {
     s.chars().take(ERROR_MAX_CHARS).collect()
 }
 
-fn run_of(r: &Value, full: bool) -> Run {
-    let text = |k: &str| r[k].as_str().map(str::to_string);
-    let parsed = |k: &str| if full { r[k].as_str().and_then(|s| serde_json::from_str(s).ok()) } else { None };
-    Run {
-        id: r["id"].as_i64().unwrap_or(0),
-        op: text("op").unwrap_or_default(),
-        via: r["via"].as_str().and_then(Via::parse).expect("runs.via is one the cell wrote"),
-        trigger: text("trigger"),
-        principal: r["principal"].as_str().map(npub::display).unwrap_or_default(),
-        status: r["status"].as_str().and_then(RunStatus::parse).unwrap_or(RunStatus::Held),
-        attempt: r["attempt"].as_u64().unwrap_or(1) as u32,
-        depth: r["depth"].as_u64().unwrap_or(0) as u32,
-        created_at: r["created_at"].as_i64().unwrap_or(0),
+/// A `runs` row as the cell wrote it (`RUN_COLUMNS`), decoded once. Its
+/// input and output are read where they are needed.
+pub(crate) struct RunRow {
+    pub id: i64,
+    pub op: String,
+    pub via: Via,
+    /// The cron schedule, channel, file pattern, or parent run.
+    pub trigger: Option<String>,
+    /// Who it acts as: an identity, an anonymous visitor, or the fragment's own key.
+    pub principal: String,
+    pub role: Role,
+    pub depth: u32,
+    pub status: RunStatus,
+    pub attempt: u32,
+    pub created_at: i64,
+    pub finished_at: Option<i64>,
+    pub error: Option<String>,
+}
+
+const RUN_COLUMNS: &str = "id, op, via, trigger, principal, role, depth, status, attempt, created_at, finished_at, error";
+/// What a run's paid steps cost (`spend`, ai.rs).
+const RUN_COST: &str = "(SELECT SUM(micros) FROM spend WHERE spend.run = runs.id) AS cost_micros";
+
+/// Only the cell writes `runs`: a NOT NULL column that is missing, or a
+/// stored state that does not parse, is corruption, never a default.
+fn run_row(r: &Value) -> RunRow {
+    let text = |k: &str| r[k].as_str().unwrap_or_else(|| panic!("runs.{k} is TEXT NOT NULL: {r}"));
+    let int = |k: &str| r[k].as_i64().unwrap_or_else(|| panic!("runs.{k} is INTEGER NOT NULL: {r}"));
+    let count = |k: &str| u32::try_from(int(k)).unwrap_or_else(|_| panic!("runs.{k} is a small count: {r}"));
+    let row = RunRow {
+        id: int("id"),
+        op: text("op").to_string(),
+        via: Via::parse(text("via")).unwrap_or_else(|| panic!("runs.via is one the cell writes: {r}")),
+        trigger: r["trigger"].as_str().map(str::to_string),
+        principal: text("principal").to_string(),
+        role: Role::parse(text("role")).unwrap_or_else(|| panic!("runs.role is a role: {r}")),
+        depth: count("depth"),
+        status: RunStatus::parse(text("status")).unwrap_or_else(|| panic!("runs.status is a run status: {r}")),
+        attempt: count("attempt"),
+        created_at: int("created_at"),
         finished_at: r["finished_at"].as_i64(),
-        error: text("error"),
-        input: parsed("input"),
-        output: parsed("output"),
-        cost_micros: r["cost_micros"].as_i64(),
+        error: r["error"].as_str().map(str::to_string),
+    };
+    assert!(row.attempt >= 1, "a run's attempts count from 1: {r}");
+    row
+}
+
+/// A JSON column the cell wrote from a value.
+fn stored_json(r: &Value, column: &str) -> Value {
+    let text = r[column].as_str().unwrap_or_else(|| panic!("runs.{column} is TEXT: {r}"));
+    serde_json::from_str(text).unwrap_or_else(|e| panic!("runs.{column} is the JSON the cell wrote: {e}"))
+}
+
+/// A run as `GET runs` shows it; `detail` is its input and output, when one run is read.
+fn run_view(row: RunRow, cost_micros: Option<i64>, detail: Option<(Value, Option<Value>)>) -> Run {
+    let (input, output) = match detail {
+        Some((input, output)) => (Some(input), output),
+        None => (None, None),
+    };
+    Run {
+        id: row.id,
+        op: row.op,
+        via: row.via,
+        trigger: row.trigger,
+        principal: npub::display(&row.principal),
+        status: row.status,
+        attempt: row.attempt,
+        depth: row.depth,
+        created_at: row.created_at,
+        finished_at: row.finished_at,
+        error: row.error,
+        input,
+        output,
+        cost_micros,
     }
 }
 
-/// A run's columns and what its paid steps cost (`spend`, ai.rs).
-const RUN_COLUMNS: &str = "*, (SELECT SUM(micros) FROM spend WHERE spend.run = runs.id) AS cost_micros";
+/// `POST /job/advance`
+#[derive(Deserialize)]
+pub(crate) struct AdvanceCall {
+    incarnation: String,
+    run: i64,
+    attempt: u32,
+    /// The step results so far, as the Workflow recorded them: the job's
+    /// body reads them back (`StepResult`); only a mutation's run reads its one.
+    results: Vec<Value>,
+}
 
-fn ids(body: &Value) -> CellResult<(i64, i64)> {
-    match (body["run"].as_i64(), body["attempt"].as_i64()) {
-        (Some(r), Some(a)) => Ok((r, a)),
-        _ => Err(CellError::invalid("a job callback names its run and attempt")),
-    }
+/// `POST /job/effect`: the step as the Workflow carries it, whose kind and
+/// args decode into a `Step` (a step that does not is the job's failure).
+#[derive(Deserialize)]
+pub(crate) struct EffectCall {
+    incarnation: String,
+    run: i64,
+    attempt: u32,
+    index: u32,
+    kind: String,
+    args: Value,
+}
+
+/// `POST /job/finish`
+#[derive(Deserialize)]
+pub(crate) struct FinishCall {
+    incarnation: String,
+    run: i64,
+    attempt: u32,
+    error: String,
 }
 
 /// Paused operations were a JSON array in meta (`paused`), and each
@@ -227,8 +320,8 @@ impl FragmentCell {
                 if p["input_sha"].as_str() != Some(sha) {
                     return Err(CellError::new(ErrorCode::ConflictingBody, "this operation id was already used with a different input"));
                 }
-                let status = p["status"].as_str().and_then(RunStatus::parse).unwrap_or(RunStatus::Held);
-                return Ok(Started { id: p["id"].as_i64().unwrap_or(0), status, replayed: true });
+                let status = p["status"].as_str().and_then(RunStatus::parse).expect("runs.status is a run status");
+                return Ok(Started { id: p["id"].as_i64().expect("runs.id is INTEGER"), status, replayed: true });
             }
         }
         let triggered = r.via.triggered();
@@ -283,12 +376,12 @@ impl FragmentCell {
     }
 
     fn count_of(&self, q: &str, binds: Vec<SqlStorageValue>) -> CellResult<u64> {
-        Ok(self.rows(q, binds)?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0))
+        Ok(self.rows(q, binds)?.first().and_then(|r| r["n"].as_u64()).expect("COUNT(*) answers one integer"))
     }
 
     /// A Workflow instance id: unique across the fleet (the binding is shared
     /// by every fragment) and across a deleted fragment's reincarnations.
-    fn instance_id(&self, run: i64, attempt: i64) -> CellResult<String> {
+    fn instance_id(&self, run: i64, attempt: u32) -> CellResult<String> {
         let npub = self.must("npub")?;
         Ok(format!("{}-{}-r{run}-a{attempt}", &npub[5..25], self.must("created_at")?))
     }
@@ -296,26 +389,23 @@ impl FragmentCell {
     /// Starts the Workflows of queued runs. A failure leaves them queued for
     /// the alarm to try again.
     pub(crate) async fn launch_queued(&self) {
-        let Ok(rows) = self.rows("SELECT id, op, via, attempt FROM runs WHERE status = 'queued' ORDER BY id LIMIT ?", vec![SqlStorageValue::Integer(LAUNCH_BATCH as i64)])
+        let Ok(rows) =
+            self.rows(&format!("SELECT {RUN_COLUMNS} FROM runs WHERE status = 'queued' ORDER BY id LIMIT ?"), vec![SqlStorageValue::Integer(LAUNCH_BATCH as i64)])
         else {
             return;
         };
         let (Ok(name), Ok(incarnation)) = (self.name(), self.must("created_at")) else { return };
-        for r in rows {
-            let (id, attempt) = (r["id"].as_i64().unwrap_or(0), r["attempt"].as_i64().unwrap_or(1));
+        for run in rows.iter().map(run_row) {
+            let (id, attempt) = (run.id, run.attempt);
             let Ok(instance) = self.instance_id(id, attempt) else { return };
             let params = json!({ "fragment": name, "incarnation": incarnation, "run": id, "attempt": attempt });
             match js::jobs_create(self.env.as_ref(), &instance, &params).await {
                 Ok(()) => {
                     let _ = self.exec(
                         "UPDATE runs SET status = 'running', launched_at = ? WHERE id = ? AND attempt = ? AND status = 'queued'",
-                        vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(id), SqlStorageValue::Integer(attempt)],
+                        vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(id), SqlStorageValue::Integer(attempt.into())],
                     );
-                    self.event(
-                        "run.started",
-                        &format!("{} run #{id} (attempt {attempt}, via {})", r["op"].as_str().unwrap_or(""), r["via"].as_str().unwrap_or("")),
-                        json!({ "run": id, "attempt": attempt }),
-                    );
+                    self.event("run.started", &format!("{} run #{id} (attempt {attempt}, via {})", run.op, run.via.as_str()), json!({ "run": id, "attempt": attempt }));
                 }
                 Err(e) => {
                     self.event("run.launch-failed", &format!("run #{id}: its Workflow did not start: {}", e.message), json!({ "run": id }));
@@ -328,24 +418,32 @@ impl FragmentCell {
 
     /// The run a Workflow callback is for, if it is still that attempt and
     /// unfinished (a replay or a finish makes older instances stop).
-    fn current_run(&self, run: i64, attempt: i64) -> CellResult<Option<Value>> {
+    fn current_run(&self, run: i64, attempt: u32) -> CellResult<Option<RunRow>> {
         let rows = self.rows(
-            "SELECT * FROM runs WHERE id = ? AND attempt = ? AND status IN ('queued', 'running')",
-            vec![SqlStorageValue::Integer(run), SqlStorageValue::Integer(attempt)],
+            &format!("SELECT {RUN_COLUMNS} FROM runs WHERE id = ? AND attempt = ? AND status IN ('queued', 'running')"),
+            vec![SqlStorageValue::Integer(run), SqlStorageValue::Integer(attempt.into())],
         )?;
-        if rows.first().is_some_and(|r| r["status"] == "queued") {
+        let Some(mut current) = rows.first().map(run_row) else { return Ok(None) };
+        if current.status == RunStatus::Queued {
             // its Workflow called before the launch that created it returned
             self.exec(
                 "UPDATE runs SET status = 'running', launched_at = ? WHERE id = ? AND status = 'queued'",
                 vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(run)],
             )?;
+            current.status = RunStatus::Running;
         }
-        Ok(rows.into_iter().next())
+        Ok(Some(current))
+    }
+
+    /// Whether a callback is from this fragment's life: a Workflow from a
+    /// deleted fragment's earlier life stops.
+    fn this_life(&self, incarnation: &str) -> CellResult<bool> {
+        Ok(self.meta("created_at")?.as_deref() == Some(incarnation))
     }
 
     /// Records a run's outcome (once: a second report is ignored).
-    fn finish_run(&self, run: &Value, outcome: Result<Value, String>) -> CellResult<()> {
-        let (id, attempt, op) = (run["id"].as_i64().unwrap_or(0), run["attempt"].as_i64().unwrap_or(1), run["op"].as_str().unwrap_or(""));
+    fn finish_run(&self, run: &RunRow, outcome: Result<Value, String>) -> CellResult<()> {
+        let (id, attempt, op) = (run.id, run.attempt, run.op.as_str());
         let (status, output, error) = match &outcome {
             Ok(v) => (RunStatus::Succeeded, SqlStorageValue::from(v.to_string()), SqlStorageValue::Null),
             Err(e) => (RunStatus::Held, SqlStorageValue::Null, SqlStorageValue::from(clip(e))),
@@ -353,7 +451,7 @@ impl FragmentCell {
         let now = js::now_ms();
         let changed = self.rows(
             "UPDATE runs SET status = ?, output = ?, error = ?, finished_at = ? WHERE id = ? AND attempt = ? AND status IN ('queued', 'running') RETURNING id",
-            vec![status.as_str().into(), output, error, SqlStorageValue::Integer(now), SqlStorageValue::Integer(id), SqlStorageValue::Integer(attempt)],
+            vec![status.as_str().into(), output, error, SqlStorageValue::Integer(now), SqlStorageValue::Integer(id), SqlStorageValue::Integer(attempt.into())],
         )?;
         if changed.is_empty() {
             return Ok(());
@@ -376,18 +474,49 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// `POST /job/advance`
-    pub(crate) async fn job_advance(&self, body: Value, size: usize) -> CellResult<Value> {
-        let answer = self.advance(body, size).await?;
-        if answer.get("failed").is_some() {
-            // the held run polls its videos no more: their reservations go back
-            self.release_held_videos().await;
+    /// A callback from a run's Workflow (`/job/<route>`), decoded once.
+    pub(crate) async fn job_callback(&self, route: &str, body: &[u8]) -> CellResult<Value> {
+        fn decode<'a, T: Deserialize<'a>>(body: &'a [u8]) -> CellResult<T> {
+            serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("a job callback: {e}")))
         }
-        Ok(answer)
+        let stop = json!({ "stop": true });
+        match route {
+            "advance" => {
+                let call: AdvanceCall = decode(body)?;
+                if !self.this_life(&call.incarnation)? {
+                    return Ok(stop);
+                }
+                let answer = self.advance(call, body.len()).await?;
+                if answer.get("failed").is_some() {
+                    // the held run polls its videos no more: their reservations go back
+                    self.release_held_videos().await;
+                }
+                Ok(answer)
+            }
+            "effect" => {
+                let call: EffectCall = decode(body)?;
+                if !self.this_life(&call.incarnation)? {
+                    return Ok(stop);
+                }
+                self.job_effect(call).await
+            }
+            "finish" => {
+                let call: FinishCall = decode(body)?;
+                if !self.this_life(&call.incarnation)? {
+                    return Ok(stop);
+                }
+                if let Some(run) = self.current_run(call.run, call.attempt)? {
+                    self.finish_run(&run, Err(call.error))?;
+                }
+                Ok(json!({ "ok": true }))
+            }
+            _ => Err(CellError::new(ErrorCode::NotFound, format!("no route /job/{route}"))),
+        }
     }
 
-    async fn advance(&self, body: Value, size: usize) -> CellResult<Value> {
-        let (run_id, attempt) = ids(&body)?;
+    /// `POST /job/advance`
+    async fn advance(&self, call: AdvanceCall, size: usize) -> CellResult<Value> {
+        let (run_id, attempt) = (call.run, call.attempt);
         let Some(run) = self.current_run(run_id, attempt)? else { return Ok(json!({ "stop": true })) };
         let fail = |why: String| -> CellResult<Value> {
             self.finish_run(&run, Err(why.clone()))?;
@@ -396,9 +525,9 @@ impl FragmentCell {
         if size > limits::JOB_RESULTS_MAX_BYTES {
             return fail(format!("its step results are over {} bytes together", limits::JOB_RESULTS_MAX_BYTES));
         }
-        let results = body["results"].as_array().cloned().unwrap_or_default();
-        let op = run["op"].as_str().unwrap_or("").to_string();
-        let input: Value = run["input"].as_str().and_then(|s| serde_json::from_str(s).ok()).unwrap_or(Value::Null);
+        let results = call.results;
+        let op = run.op.clone();
+        let input = self.run_input(run_id)?;
         let decl = match self.declared(&op) {
             Ok(d) => d,
             Err(e) => return fail(format!("{op}: {}", e.message)),
@@ -406,22 +535,24 @@ impl FragmentCell {
         match decl.kind {
             // A triggered mutation is a run of one step: the call.
             OpKind::Mutation => match results.first() {
-                None => Ok(json!({ "step": { "index": 0, "kind": "call", "args": { "op": op, "input": input } } })),
-                Some(r) => match r.get("error") {
-                    Some(e) => fail(e.as_str().unwrap_or("the call failed").to_string()),
-                    None => {
-                        self.finish_run(&run, Ok(r["value"].clone()))?;
-                        Ok(json!({ "done": true }))
+                None => Ok(json!({ "step": NextStep { index: 0, step: Step::Call { op, input } } })),
+                Some(r) => {
+                    let result = StepResult::deserialize(r).map_err(|e| CellError::invalid(format!("the call step's result: {e}")))?;
+                    match result.outcome {
+                        StepOutcome::Error(e) => fail(e),
+                        StepOutcome::Value(v) => {
+                            self.finish_run(&run, Ok(v))?;
+                            Ok(json!({ "done": true }))
+                        }
                     }
-                },
+                }
             },
             OpKind::Job => {
                 let facet = self.facet()?;
                 self.sweep(&facet).await?;
-                let principal = run["principal"].as_str().unwrap_or("");
                 let meta = json!({
-                    "principal": npub::display(principal),
-                    "role": run["role"],
+                    "principal": npub::display(&run.principal),
+                    "role": run.role,
                     "run": run_id,
                     "attempt": attempt,
                     "channels": self.declared_channels()?.keys().collect::<Vec<_>>(),
@@ -452,76 +583,88 @@ impl FragmentCell {
         }
     }
 
+    /// A run's input, as the call or trigger that started it gave it.
+    fn run_input(&self, run: i64) -> CellResult<Value> {
+        let rows = self.rows("SELECT input FROM runs WHERE id = ?", vec![SqlStorageValue::Integer(run)])?;
+        let row = rows.first().ok_or_else(|| CellError::host(format!("run #{run} went while it ran")))?;
+        Ok(stored_json(row, "input"))
+    }
+
     /// `POST /job/effect`: one step. A value or a lasting failure is the
     /// step's result; a passing failure is a 502, which the Workflow retries.
-    pub(crate) async fn job_effect(&self, body: Value) -> CellResult<Value> {
-        let (run_id, attempt) = ids(&body)?;
-        let Some(run) = self.current_run(run_id, attempt)? else { return Ok(json!({ "stop": true })) };
-        let index = body["index"].as_i64().ok_or_else(|| CellError::invalid("a step has an index"))?;
-        let kind = body["kind"].as_str().unwrap_or("").to_string();
-        let args = &body["args"];
-        let out = match kind.as_str() {
-            "call" => self.step_call(&run, index, args).await,
-            "fetch" => self.step_fetch(&run, args).await,
-            "publish" => self.step_publish(&run, index, args).await,
-            "push" => {
-                let key = format!("{JOB_ID_PREFIX}{run_id}:{index}");
-                match self.send_push(&key, args["who"].as_str().unwrap_or(""), &args["payload"]).await {
+    async fn job_effect(&self, call: EffectCall) -> CellResult<Value> {
+        let Some(run) = self.current_run(call.run, call.attempt)? else { return Ok(json!({ "stop": true })) };
+        let index = call.index;
+        let out = match Step::from_parts(&call.kind, call.args) {
+            Ok(step) => self.perform(&run, index, step).await,
+            // the args come from the app's realm: the job sees why, and may catch it
+            Err(why) => Err(permanent(format!("step {index} ({}): {why}", call.kind))),
+        };
+        let outcome = match out {
+            Ok(v) => StepOutcome::Value(v),
+            Err(StepFail::Permanent(m)) => StepOutcome::Error(clip(&m)),
+            Err(StepFail::Retry(m)) => return Err(CellError::new(ErrorCode::UpstreamFailed, m)),
+        };
+        let mut answer = StepResult { kind: call.kind, outcome };
+        // The Workflow stores each step result, up to 1 MiB.
+        let size = serde_json::to_string(&answer).expect("a step result serializes").len();
+        if size > limits::RESULT_MAX_BYTES - 4096 {
+            answer.outcome = StepOutcome::Error(format!("the step's result is over {} bytes", limits::RESULT_MAX_BYTES - 4096));
+        }
+        self.launch_queued().await;
+        Ok(serde_json::to_value(answer).expect("a step result serializes"))
+    }
+
+    /// Performs one step of `run`.
+    async fn perform(&self, run: &RunRow, index: u32, step: Step) -> Result<Value, StepFail> {
+        match step {
+            Step::Call { op, input } => self.step_call(run, index, &op, input).await,
+            Step::Fetch(f) => self.step_fetch(run, f).await,
+            Step::Publish { channel, kind, body } => self.step_publish(run, index, &channel, &kind, body).await,
+            Step::Push { who, payload } => {
+                let key = format!("{JOB_ID_PREFIX}{}:{index}", run.id);
+                match self.send_push(&key, &who, &payload).await {
                     Ok(n) => Ok(json!({ "queued": n })),
                     Err(e) if e.code == ErrorCode::HostFailed => Err(StepFail::Retry(e.message)),
                     Err(e) => Err(permanent(e.message)),
                 }
             }
-            "files.read" | "files.list" | "files.stat" | "files.write" | "files.remove" => self.step_files(&run, index, &kind, args).await,
-            k if k.starts_with("ai.") => self.step_ai(&run, index, k, args).await,
-            other => Err(permanent(format!("unknown step kind {other:?}"))),
-        };
-        let answer = match out {
-            Ok(v) => json!({ "kind": kind, "value": v }),
-            Err(StepFail::Permanent(m)) => json!({ "kind": kind, "error": clip(&m) }),
-            Err(StepFail::Retry(m)) => return Err(CellError::new(ErrorCode::UpstreamFailed, m)),
-        };
-        // The Workflow stores each step result, up to 1 MiB.
-        let answer = if answer.to_string().len() > limits::RESULT_MAX_BYTES - 4096 {
-            json!({ "kind": kind, "error": format!("the step's result is over {} bytes", limits::RESULT_MAX_BYTES - 4096) })
-        } else {
-            answer
-        };
-        self.launch_queued().await;
-        Ok(answer)
-    }
-
-    /// `POST /job/finish`: the Workflow ran out of retries outside a step.
-    pub(crate) fn job_finish(&self, body: Value) -> CellResult<Value> {
-        let (run_id, attempt) = ids(&body)?;
-        if let Some(run) = self.current_run(run_id, attempt)? {
-            self.finish_run(&run, Err(body["error"].as_str().unwrap_or("the Workflow failed").to_string()))?;
+            Step::Sleep { .. } => Err(permanent("a sleep is the Workflow's own step; the platform performs none")),
+            Step::FilesRead { path } => self.read_main(&path).await.map_err(settle_files).map(|f| f.map_or(Value::Null, crate::files::content_json)),
+            Step::FilesList { prefix } => self.list_main(&prefix).map(Value::Array).map_err(settle_files),
+            Step::FilesStat { path } => Ok(self.stat_main(&path).await.map_err(settle_files)?.unwrap_or(Value::Null)),
+            Step::FilesWrite(w) => {
+                let bytes = w.content.into_bytes().map_err(permanent)?;
+                if fragment_core::blob::parse(&bytes).is_some() {
+                    return Err(permanent(format!("{}: an app does not write blob pointers", w.path)));
+                }
+                self.step_write(run, index, &w.path, Some(bytes), w.expect).await
+            }
+            Step::FilesRemove { path, expect } => self.step_write(run, index, &path, None, expect).await,
+            ai @ (Step::AiText(_) | Step::AiImage(_) | Step::AiVideoStart(_) | Step::AiVideoPoll { .. } | Step::AiVideoSave { .. }) => {
+                self.step_ai(run, index, &ai).await
+            }
         }
-        Ok(json!({ "ok": true }))
     }
 
     /// `job.call(op, input)`: as the run's principal, with the step as its
     /// operation id, so a retried or replayed step is a replay.
-    async fn step_call(&self, run: &Value, index: i64, args: &Value) -> Result<Value, StepFail> {
-        let op = args["op"].as_str().ok_or_else(|| permanent("call names an operation"))?;
+    async fn step_call(&self, run: &RunRow, index: u32, op: &str, input: Value) -> Result<Value, StepFail> {
         let decl = self.declared(op).map_err(|e| permanent(e.message))?;
-        let role = run["role"].as_str().and_then(Role::parse).unwrap_or(Role::Public);
-        if role < decl.role {
-            return Err(permanent(format!("{op} needs the {} role; this run acts as {}", decl.role.as_str(), role.as_str())));
+        if run.role < decl.role {
+            return Err(permanent(format!("{op} needs the {} role; this run acts as {}", decl.role.as_str(), run.role.as_str())));
         }
-        let run_id = run["id"].as_i64().unwrap_or(0);
-        let depth = run["depth"].as_u64().unwrap_or(0) as u32;
         let child = decl.kind == OpKind::Job;
         let inv = Invocation {
-            principal: run["principal"].as_str().unwrap_or(""),
-            role,
+            principal: &run.principal,
+            role: run.role,
             op,
             decl,
-            id: format!("{JOB_ID_PREFIX}{run_id}:{index}"),
-            input: args["input"].clone(),
-            depth: if child { depth + 1 } else { depth },
+            id: format!("{JOB_ID_PREFIX}{}:{index}", run.id),
+            input,
+            depth: if child { run.depth + 1 } else { run.depth },
             via: Via::Job,
-            trigger: Some(format!("run {run_id}")),
+            trigger: Some(format!("run {}", run.id)),
         };
         match self.invoke(inv).await {
             Ok(r) => Ok(r.result),
@@ -535,9 +678,9 @@ impl FragmentCell {
     /// `job.fetch(url, init)`: the fragment's one way out. Header values
     /// may name secrets as `{{NAME}}`; they are opened here, at the egress
     /// point, and never reach the app.
-    async fn step_fetch(&self, run: &Value, args: &Value) -> Result<Value, StepFail> {
-        let url = egress::check(args["url"].as_str().unwrap_or(""), self.cfg.egress_local).map_err(permanent)?;
-        let method = match args["method"].as_str().unwrap_or("GET").to_ascii_uppercase().as_str() {
+    async fn step_fetch(&self, run: &RunRow, f: Fetch) -> Result<Value, StepFail> {
+        let url = egress::check(&f.url, self.cfg.egress_local).map_err(permanent)?;
+        let method = match f.method.to_ascii_uppercase().as_str() {
             "GET" => Method::Get,
             "POST" => Method::Post,
             "PUT" => Method::Put,
@@ -546,14 +689,13 @@ impl FragmentCell {
             "HEAD" => Method::Head,
             other => return Err(permanent(format!("method {other} is not supported"))),
         };
-        let headers = Headers::new();
-        let given = args["headers"].as_object().cloned().unwrap_or_default();
-        if given.len() > FETCH_HEADERS_MAX {
+        if f.headers.len() > FETCH_HEADERS_MAX {
             return Err(permanent(format!("at most {FETCH_HEADERS_MAX} headers")));
         }
-        for (k, v) in &given {
-            let mut value = v.as_str().ok_or_else(|| permanent(format!("header {k} must be a string")))?.to_string();
-            for name in placeholders(&value.clone()) {
+        let headers = Headers::new();
+        for (k, given) in &f.headers {
+            let mut value = given.clone();
+            for name in placeholders(given) {
                 if !valid_secret_name(name) {
                     return Err(permanent(format!("{{{{{name}}}}} is not a secret name (^[A-Z][A-Z0-9_]*$)")));
                 }
@@ -567,17 +709,16 @@ impl FragmentCell {
             }
             headers.set(k, &value).map_err(|e| permanent(format!("header {k}: {e}")))?;
         }
-        let depth = run["depth"].as_u64().unwrap_or(0);
-        headers.set(HOPS_HEADER, &(depth + 1).to_string()).map_err(|e| permanent(e.to_string()))?;
+        headers.set(HOPS_HEADER, &(run.depth + 1).to_string()).map_err(|e| permanent(e.to_string()))?;
         let mut init = RequestInit::new();
         // A redirect comes back to the job as its 3xx: following it here
         // would skip the egress check for where it points.
         init.with_method(method).with_headers(headers).with_redirect(RequestRedirect::Manual);
-        if let Some(body) = args["body"].as_str() {
+        if let Some(body) = f.body {
             if body.len() > limits::FETCH_BODY_MAX_BYTES {
                 return Err(permanent(format!("a fetch body is at most {} bytes", limits::FETCH_BODY_MAX_BYTES)));
             }
-            init.with_body(Some(JsValue::from_str(body)));
+            init.with_body(Some(JsValue::from_str(&body)));
         }
         let req = Request::new_with_init(url.as_str(), &init).map_err(|e| permanent(e.to_string()))?;
         let host = url.host_str().unwrap_or("").to_string();
@@ -605,56 +746,29 @@ impl FragmentCell {
     /// `job.publish(channel, body, kind)`: keyed by (run, step), so a
     /// retried step appends nothing twice, and starts what its record's
     /// triggers did not start before.
-    async fn step_publish(&self, run: &Value, index: i64, args: &Value) -> Result<Value, StepFail> {
+    async fn step_publish(&self, run: &RunRow, index: u32, channel: &str, kind: &str, body: Value) -> Result<Value, StepFail> {
         let retry = |e: CellError| StepFail::Retry(e.message);
-        let channel = args["channel"].as_str().unwrap_or("");
-        let kind = args["kind"].as_str().unwrap_or("message");
-        let body = args.get("body").cloned().unwrap_or(Value::Null);
         // the one check a mutation's records meet too
         fragment_core::effects::check_record(channel, kind, &body, &self.declared_channels().map_err(retry)?).map_err(permanent)?;
-        let key = format!("{JOB_ID_PREFIX}{}", run["id"].as_i64().unwrap_or(0));
-        let principal = run["principal"].as_str().unwrap_or("");
-        let (record, appended) = self.append_once(channel, principal, kind, &body, &key, index).map_err(retry)?;
-        let depth = run["depth"].as_u64().unwrap_or(0) as u32;
-        self.published(&record, appended, depth + 1).await.map_err(retry)?;
+        let key = format!("{JOB_ID_PREFIX}{}", run.id);
+        let (record, appended) = self.append_once(channel, &run.principal, kind, &body, &key, i64::from(index)).map_err(retry)?;
+        self.published(&record, appended, run.depth + 1).await.map_err(retry)?;
         Ok(json!({ "seq": record.seq }))
     }
 
-    /// `job.files.*`: reads at `main`'s pin, recorded as the step's result;
-    /// writes as one commit per step, compare-and-swapped when the step
-    /// names what it expects (`expect`: a blob sha, or `null` for absent).
-    async fn step_files(&self, run: &Value, index: i64, kind: &str, args: &Value) -> Result<Value, StepFail> {
-        let settle = |e: CellError| match e.code {
-            ErrorCode::HostFailed | ErrorCode::UpstreamFailed => StepFail::Retry(e.message),
-            _ => permanent(e.message),
-        };
-        let path = args["path"].as_str().unwrap_or("");
-        match kind {
-            "files.read" => Ok(self.read_main(path).await.map_err(settle)?.map_or(Value::Null, crate::files::content_json)),
-            "files.list" => Ok(Value::Array(self.list_main(args["prefix"].as_str().unwrap_or("")).map_err(settle)?)),
-            "files.stat" => Ok(self.stat_main(path).await.map_err(settle)?.unwrap_or(Value::Null)),
-            _ => {
-                let bytes = match kind {
-                    "files.write" => Some(crate::files::content_of(args).map_err(permanent)?),
-                    _ => None,
-                };
-                if bytes.as_deref().is_some_and(|b| fragment_core::blob::parse(b).is_some()) {
-                    return Err(permanent(format!("{path}: an app does not write blob pointers")));
-                }
-                let mut expect = BTreeMap::new();
-                if let Some(e) = args.get("expect") {
-                    expect.insert(path.to_string(), e.as_str().map(str::to_string));
-                }
-                let run_id = run["id"].as_i64().unwrap_or(0);
-                let key = format!("{JOB_ID_PREFIX}{run_id}:{index}");
-                let message = format!("{} run {run_id}: {} {path}", run["op"].as_str().unwrap_or(""), if bytes.is_some() { "write" } else { "remove" });
-                let writes = [crate::files::FileWrite { path: path.to_string(), bytes }];
-                let depth = run["depth"].as_u64().unwrap_or(0) as u32;
-                match self.commit_files(&key, &writes, &expect, &message, run["principal"].as_str().unwrap_or(""), depth).await.map_err(settle)? {
-                    crate::files::Wrote::Commit(sha) => Ok(json!({ "commit": sha })),
-                    crate::files::Wrote::Conflict(why) => Err(permanent(format!("conflict: {why}"))),
-                }
-            }
+    /// `job.files.write` and `remove` (`bytes: None`): one commit per step,
+    /// compare-and-swapped when the step names what it expects.
+    async fn step_write(&self, run: &RunRow, index: u32, path: &str, bytes: Option<Vec<u8>>, expect: Option<Option<String>>) -> Result<Value, StepFail> {
+        let mut expected = BTreeMap::new();
+        if let Some(e) = expect {
+            expected.insert(path.to_string(), e);
+        }
+        let key = format!("{JOB_ID_PREFIX}{}:{index}", run.id);
+        let message = format!("{} run {}: {} {path}", run.op, run.id, if bytes.is_some() { "write" } else { "remove" });
+        let writes = [crate::files::FileWrite { path: path.to_string(), bytes }];
+        match self.commit_files(&key, &writes, &expected, &message, &run.principal, run.depth).await.map_err(settle_files)? {
+            crate::files::Wrote::Commit(sha) => Ok(json!({ "commit": sha })),
+            crate::files::Wrote::Conflict(why) => Err(permanent(format!("conflict: {why}"))),
         }
     }
 
@@ -778,7 +892,8 @@ impl FragmentCell {
     pub(crate) fn fire_cron(&self) -> CellResult<()> {
         let now = js::now_ms();
         for row in self.rows("SELECT idx, op, cron, next_at FROM schedules WHERE next_at <= ?", vec![SqlStorageValue::Integer(now)])? {
-            let (op, expr, at) = (row["op"].as_str().unwrap_or(""), row["cron"].as_str().unwrap_or(""), row["next_at"].as_i64().unwrap_or(now));
+            let (op, expr) = (row["op"].as_str().expect("schedules.op is TEXT NOT NULL"), row["cron"].as_str().expect("schedules.cron is TEXT NOT NULL"));
+            let (idx, at) = (row["idx"].as_i64().expect("schedules.idx is INTEGER"), row["next_at"].as_i64().expect("schedules.next_at is INTEGER NOT NULL"));
             let busy = self.count_of(
                 "SELECT COUNT(*) AS n FROM runs WHERE op = ? AND via = 'cron' AND status IN ('queued', 'running')",
                 vec![op.into()],
@@ -798,8 +913,8 @@ impl FragmentCell {
                 })?;
             }
             match Cron::parse(expr).ok().and_then(|c| c.next_after(now.max(at))) {
-                Some(next) => self.exec("UPDATE schedules SET next_at = ? WHERE idx = ?", vec![SqlStorageValue::Integer(next), row["idx"].as_i64().unwrap_or(0).into()])?,
-                None => self.exec("DELETE FROM schedules WHERE idx = ?", vec![row["idx"].as_i64().unwrap_or(0).into()])?,
+                Some(next) => self.exec("UPDATE schedules SET next_at = ? WHERE idx = ?", vec![SqlStorageValue::Integer(next), SqlStorageValue::Integer(idx)])?,
+                None => self.exec("DELETE FROM schedules WHERE idx = ?", vec![SqlStorageValue::Integer(idx)])?,
             }
         }
         Ok(())
@@ -818,13 +933,13 @@ impl FragmentCell {
     /// (it errored outside a step, or it is gone) is held.
     pub(crate) async fn reconcile_runs(&self) {
         let Ok(rows) = self.rows(
-            "SELECT * FROM runs WHERE status = 'running' AND launched_at < ? ORDER BY launched_at LIMIT ?",
+            &format!("SELECT {RUN_COLUMNS} FROM runs WHERE status = 'running' AND launched_at < ? ORDER BY launched_at LIMIT ?"),
             vec![SqlStorageValue::Integer(js::now_ms() - RECONCILE_AFTER_MS), SqlStorageValue::Integer(RECONCILE_BATCH)],
         ) else {
             return;
         };
-        for run in rows {
-            let Ok(instance) = self.instance_id(run["id"].as_i64().unwrap_or(0), run["attempt"].as_i64().unwrap_or(1)) else { return };
+        for run in rows.iter().map(run_row) {
+            let Ok(instance) = self.instance_id(run.id, run.attempt) else { return };
             let why = match js::jobs_status(self.env.as_ref(), &instance).await {
                 Ok(Some(st)) => match st["status"].as_str() {
                     Some(s @ ("errored" | "terminated" | "complete")) => format!("its Workflow ended ({s}) without reporting: {}", st["error"]),
@@ -851,7 +966,7 @@ impl FragmentCell {
     /// `GET /api/f/<name>/runs?status=&op=&limit=`
     pub(crate) fn runs_api(&self, caller: &Caller, status: Option<String>, op: Option<String>, limit: usize) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
-        let mut q = format!("SELECT {RUN_COLUMNS} FROM runs WHERE 1 = 1");
+        let mut q = format!("SELECT {RUN_COLUMNS}, {RUN_COST} FROM runs WHERE 1 = 1");
         let mut binds: Vec<SqlStorageValue> = vec![];
         if let Some(s) = status {
             let s = RunStatus::parse(&s).ok_or_else(|| CellError::invalid("status is queued, running, succeeded, held, or blocked"))?;
@@ -864,10 +979,10 @@ impl FragmentCell {
         }
         q.push_str(" ORDER BY id DESC LIMIT ?");
         binds.push(SqlStorageValue::Integer(limit.clamp(1, 200) as i64));
-        let runs: Vec<Run> = self.rows(&q, binds)?.iter().map(|r| run_of(r, false)).collect();
+        let runs: Vec<Run> = self.rows(&q, binds)?.iter().map(|r| run_view(run_row(r), r["cost_micros"].as_i64(), None)).collect();
         let mut counts = Map::new();
         for r in self.rows("SELECT status, COUNT(*) AS n FROM runs GROUP BY status", vec![])? {
-            counts.insert(r["status"].as_str().unwrap_or("").to_string(), r["n"].clone());
+            counts.insert(r["status"].as_str().expect("runs.status is TEXT NOT NULL").to_string(), r["n"].clone());
         }
         json_response(&json!({ "runs": runs, "counts": counts, "paused": self.paused_ops()? }))
     }
@@ -876,9 +991,11 @@ impl FragmentCell {
     pub(crate) fn run_api(&self, caller: &Caller, id: &str) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
         let id: i64 = id.parse().map_err(|_| CellError::invalid("a run id is a number"))?;
-        let rows = self.rows(&format!("SELECT {RUN_COLUMNS} FROM runs WHERE id = ?"), vec![SqlStorageValue::Integer(id)])?;
-        let run = rows.first().ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no run #{id}")))?;
-        json_response(&run_of(run, true))
+        let rows = self.rows(&format!("SELECT {RUN_COLUMNS}, {RUN_COST}, input, output FROM runs WHERE id = ?"), vec![SqlStorageValue::Integer(id)])?;
+        let r = rows.first().ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no run #{id}")))?;
+        // a run has its output once it succeeded
+        let output = r["output"].is_string().then(|| stored_json(r, "output"));
+        json_response(&run_view(run_row(r), r["cost_micros"].as_i64(), Some((stored_json(r, "input"), output))))
     }
 
     /// `POST /api/f/<name>/replay` (editor): a held or blocked run again, as
@@ -899,7 +1016,8 @@ impl FragmentCell {
             });
         };
         let by = npub::display(self.caller_id(caller)?);
-        self.event("run.replayed", &format!("{} run #{} by {by}", row["op"].as_str().unwrap_or(""), body.run), json!({ "run": body.run }));
+        let op = row["op"].as_str().expect("runs.op is TEXT NOT NULL");
+        self.event("run.replayed", &format!("{op} run #{} by {by}", body.run), json!({ "run": body.run }));
         self.launch_queued().await;
         json_response(&json!({ "ok": true, "run": body.run, "attempt": row["attempt"] }))
     }
