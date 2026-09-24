@@ -10,10 +10,12 @@ paths of files that hold them, all under `~/.config/finite-next/secrets/`).
 - **Fly app `fragment-club`** (org `personal`, region `ord`): two
   `shared-cpu-2x` 2 GB Machines, each with a 3 GB volume `celld_data` at
   `/data`. Each runs the node image: the celld fork at the rev in
-  `crates/devstack` (`CELLD_FORK_REV`) and `fragment-node`
-  (`crates/node`), which binds celld's peer listener to the Machine's
-  private address (`[fdaa:…]:8081`, never a Fly service) and pairs the
-  volume with the bucket for life (`/data/bucket`).
+  `crates/devstack` (`CELLD_FORK_REV`: v0.5.1, the alarm fix, and
+  public-only Worker egress) and `fragment-node` (`crates/node`), which
+  binds celld's peer listener to the Machine's private address
+  (`[fdaa:…]:8081`, never a Fly service) and pairs the volume with the
+  bucket for life (`/data/bucket`). `CELLD_EGRESS_PUBLIC_ONLY=1` (in the
+  rendered fly.toml) keeps every Worker fetch off the private network.
 - **Bucket `fragment-club-ord`** (Tigris, single-region `ord`): the
   deployments, every cell's replicas, the node leases, the peer secret,
   and blobs under `r2/`. Its keys are Fly secrets on the app (the nodes)

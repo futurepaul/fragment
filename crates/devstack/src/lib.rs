@@ -17,10 +17,11 @@ pub const READY_TIMEOUT: Duration = Duration::from_secs(120);
 /// A graceful stop must finish within this.
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The fork of celld with the alarm fix (spikes/celld-0.5.1/README.md),
-/// until a denoland release carries it.
+/// The fork of celld: v0.5.1 with the alarm fix (spikes/celld-0.5.1/README.md)
+/// and public-only Worker egress (`CELLD_EGRESS_PUBLIC_ONLY`, branch
+/// `egress/public-only`, docs/phase-3.md slice E), until denoland carries them.
 pub const CELLD_FORK_URL: &str = "https://github.com/futurepaul/celld.git";
-pub const CELLD_FORK_REV: &str = "b5f57ea156ad5443dc66ebce08d7732be193cc46";
+pub const CELLD_FORK_REV: &str = "cd3a68be5826a5a86594ab65e7dbe018952490fc";
 
 pub fn repo_root() -> PathBuf {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));

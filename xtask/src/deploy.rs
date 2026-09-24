@@ -289,6 +289,9 @@ kill_timeout = "60s"
   CELLD_BUCKET = "{bucket}"
   S3_ENDPOINT = "{endpoint}"
   AWS_REGION = "{bucket_region}"
+  # a Worker's fetch reaches public addresses only: the private network
+  # carries the internal listener (docs/phase-3.md slice E)
+  CELLD_EGRESS_PUBLIC_ONLY = "1"
 
 [mounts]
   source = "celld_data"

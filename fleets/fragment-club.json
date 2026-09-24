@@ -1,5 +1,5 @@
 {
-  "url": "https://fragment-club.fly.dev",
+  "url": "https://fragment.club",
   "fly": {
     "app": "fragment-club",
     "org": "personal",
@@ -17,6 +17,7 @@
   },
   "vars": {
     "CODESTORAGE_ORG": "finite",
+    "FRAGMENT_HOST_SUFFIX": "fragment.club",
     "FRAGMENT_PUSH_SUBJECT": "https://fragment.club",
     "FRAGMENT_CREATORS": "npub1w352vpm92yvdlar2vunk8ctjrz609jwtdf8svfr3hnequ52agv9qeqf9h2, npub1gwx5n6u248vlnfcujt68fdn923nt7alp3ray69hhzc257quhs8ls6zwzqs"
   },

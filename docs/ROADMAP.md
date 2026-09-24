@@ -230,7 +230,8 @@ deployment.
   secrets set from files, never printed. No staging name: the fleet
   passes the e2e on its `fly.dev` address, then `fragment.club` and
   `*.fragment.club` move to it (Paul adds the records at Namecheap; the
-  VPS keeps running until he retires it). Until sign-in exists, only
+  VPS keeps running until he retires it). *Cut over 2026-09-23; the
+  record is `docs/phase-3.md`.* Until sign-in exists, only
   Paul's key may create fragments. An outbound firewall keeps jobs off
   the fleet's private network. Live checks: one OpenRouter call (text,
   one small image) and a push to a real phone.

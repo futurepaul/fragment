@@ -22,6 +22,8 @@ use serde_json::{json, Value};
 use crate::api::{now_s, Api, Call, Reply};
 use crate::browser::Browser;
 
+const EGRESS_APP: &[u8] = include_bytes!("../fixtures/hosted_egress.mjs");
+const EGRESS_JSON: &[u8] = include_bytes!("../fixtures/hosted_egress.json");
 const AI_APP: &[u8] = include_bytes!("../fixtures/hosted_ai.mjs");
 const AI_JSON: &[u8] = include_bytes!("../fixtures/hosted_ai.json");
 const RUN_WAIT: Duration = Duration::from_secs(120);
@@ -188,6 +190,7 @@ pub fn run(cli: PathBuf, scratch: PathBuf, only: Option<String>) -> Result<()> {
         todo(&mut h)?;
         inbox(&mut h)?;
         blobs(&mut h)?;
+        egress(&mut h)?;
         ai(&mut h)?;
         Ok(())
     })();
@@ -337,6 +340,36 @@ fn blobs(h: &mut Hosted) -> Result<()> {
     let pulled = h.dir("blobs-pull");
     let out = h.cli(&pulled, &["sync", &name, "--dir", pulled.to_str().context("utf-8 path")?]);
     h.ok("another folder pulls the real bytes", out.status.success() && std::fs::read(pulled.join("site/big.bin")).is_ok_and(|b| b == big), String::from_utf8_lossy(&out.stderr));
+    Ok(())
+}
+
+/// A job's fetch reaches the internet, never the fleet's private side, even
+/// through a public name that resolves there (nip.io and sslip.io answer
+/// the address a name spells).
+fn egress(h: &mut Hosted) -> Result<()> {
+    if !h.section("egress") {
+        return Ok(());
+    }
+    let name = h.name("egress");
+    let dir = h.dir("egress");
+    std::fs::write(dir.join("app.mjs"), EGRESS_APP)?;
+    std::fs::write(dir.join("fragment.json"), EGRESS_JSON)?;
+    let created = h.cli_json(&dir, &["create", &name, "--json"]);
+    h.remember(&name);
+    created?;
+    let out = h.cli(&dir, &["deploy", &name, "--dir", dir.to_str().context("utf-8 path")?]);
+    h.ok("the probe app deploys", out.status.success(), String::from_utf8_lossy(&out.stderr));
+    let probe = |h: &Hosted, id: &str, url: &str| -> Result<Value> {
+        let started = h.api.op(&h.key, &name, "probe", id, json!({ "url": url }))?;
+        Ok(h.settle(&name, &started))
+    };
+    let refused = |run: &Value| run["status"] == "succeeded" && run["output"]["error"].as_str().is_some_and(|e| e.contains("egress refused"));
+    let run = probe(h, "loopback", "http://127.0.0.1.nip.io:8080/healthz")?;
+    h.ok("a public name that resolves to loopback is refused, at once", refused(&run), &run);
+    let run = probe(h, "6pn", "http://fdaa--3.sslip.io/")?;
+    h.ok("a public name that resolves into Fly's private network is refused", refused(&run), &run);
+    let run = probe(h, "public", "https://example.com/")?;
+    h.ok("a public site is reached", run["output"]["status"] == 200, &run);
     Ok(())
 }
 

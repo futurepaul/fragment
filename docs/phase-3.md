@@ -144,6 +144,16 @@ set on hosted fleets only. It is a fork change (upstreamable), and the
 image builds the fork from GitHub, so it needs a push to
 `futurepaul/celld`.
 
+*Done 2026-09-23 (Paul approved the push).* `futurepaul/celld` branch
+`egress/public-only` (`cd3a68b`, on the alarm fix): `crates/celld/
+egress.rs` (the resolver, the literal and redirect checks, host tests);
+the error reads `egress refused: …`, which the cell treats as final (no
+retries). The rendered fly.toml sets `CELLD_EGRESS_PUBLIC_ONLY=1`. The
+hosted e2e's `egress` section proves it both ways: before the node
+upgrade a job fetched `http://127.0.0.1.nip.io:8080/healthz` and reached
+the node's own listener (200), and a name for `fdaa::3` hung; after it,
+both are refused at once and a public site is still reached.
+
 **F. Cutover.** Certificates for `fragment.club` and `*.fragment.club`;
 Paul points the records at Fly (Namecheap); the suffix goes on; one live
 OpenRouter call (text and a small image); a push to Paul's phone; the
@@ -156,3 +166,11 @@ at Namecheap: first `CNAME _acme-challenge → fragment.club.nwd56j0.flydns.net.
 `152.236.5.66`). After that the fleet file gains `FRAGMENT_HOST_SUFFIX`
 and the URL `https://fragment.club`, the cell is redeployed, and the
 hosted e2e runs on fragment hosts.
+
+*Cut over 2026-09-23.* Paul set the records; both certificates issued;
+the fleet serves `https://fragment.club` and `<name>.fragment.club`, and
+the hosted e2e passes 28 of 28 there (its `egress` section included).
+Paul made a new Fly token; the leaked one (`fragment-next`) still
+lists as valid until it is revoked. Left: the push to Paul's phone
+(`https://push-check.fragment.club/`, a public fragment made by the e2e
+key: subscribe, then send), and retiring the VPS (Paul's call).

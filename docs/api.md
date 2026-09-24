@@ -253,7 +253,9 @@ outside any request. Each `await` on the job's four steps is durable:
   text(), json()}`: the app's one way out. `{{NAME}}` in a header value
   is the fragment's secret `NAME`, added by the platform at the egress
   point; the app never holds it. http(s) only; loopback, private, and
-  `.internal` addresses are refused; redirects are answered, not
+  `.internal` addresses are refused (on hosted fleets celld also checks
+  where a name resolves: a name with no public address fails the step
+  for good, `egress refused: …`); redirects are answered, not
   followed; a body of at most 256 KiB, a response of at most 1 MiB, 120
   seconds. Every fetch carries `x-fragment-hops`.
 - `job.publish(channel, body, kind)`: a record, once per step.

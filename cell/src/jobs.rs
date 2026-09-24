@@ -513,7 +513,15 @@ impl FragmentCell {
         }
         let req = Request::new_with_init(url.as_str(), &init).map_err(|e| permanent(e.to_string()))?;
         let host = url.host_str().unwrap_or("").to_string();
-        let mut resp = crate::cs::fetch(req, Duration::from_millis(limits::FETCH_TIMEOUT_MS)).await.map_err(|e| StepFail::Retry(format!("{host}: {}", e.message)))?;
+        let mut resp = crate::cs::fetch(req, Duration::from_millis(limits::FETCH_TIMEOUT_MS)).await.map_err(|e| {
+            let why = format!("{host}: {}", e.message);
+            // the node refused the address (CELLD_EGRESS_PUBLIC_ONLY): no retry passes
+            if e.message.contains("egress refused") {
+                permanent(why)
+            } else {
+                StepFail::Retry(why)
+            }
+        })?;
         let status = resp.status_code();
         if status == 429 || status >= 500 {
             return Err(StepFail::Retry(format!("{host} answered {status}")));

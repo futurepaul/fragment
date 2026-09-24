@@ -127,24 +127,6 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** `fragment.json` can declare a channel's retention
   (count or age) with a platform ceiling, enforced and tested.
 
-## Job egress is checked by URL, not by address
-
-- **Observed:** phase 2 slice D. A job's fetch leaves from the fragment's
-  supervisor; `crates/core/src/egress.rs` refuses loopback, private,
-  link-local, and `.internal`/`.flycast` hosts by the URL. A public name
-  that resolves to a private address (DNS rebinding, or a record someone
-  points at the fleet) is not caught there. (Redirects are not followed:
-  the job gets the 3xx and a fetch of its target is checked again.)
-- **Risk:** an author's job reaches the fleet's private network: celld's
-  unauthenticated internal listener, other services on Fly's 6PN.
-- **First proof:** a hosted fleet running strangers' jobs.
-- **Delete when:** the fork's worker fetch resolves names through a
-  resolver that refuses private, loopback, link-local, and ULA addresses
-  on hosted fleets (phase 3 slice E: a firewall cannot separate a job's
-  fetch from celld's own peer traffic on 8081), with a test that a name
-  resolving to 127.0.0.1 is refused. Until then only Paul's key and the
-  e2e key may create fragments on the hosted fleet.
-
 ## A secret can go anywhere its fragment's code sends it
 
 - **Observed:** phase 2 slice D. `{{NAME}}` in a job's fetch header is
