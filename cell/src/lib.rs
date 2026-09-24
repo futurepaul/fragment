@@ -578,7 +578,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             identities(req, env, &url, &rest).await
         }
         (Method::Get, ["api", "test", "env"]) if test_hooks(env) => json_answer(&Value::Object(js::env_vars(env.as_ref())?)),
-        (Method::Post, ["api", "test", "keys"]) if test_hooks(env) => {
+        (Method::Post, ["api", "test", hook @ ("keys" | "fragment")]) if test_hooks(env) => {
             let body = read_body(&mut req).await?;
             let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let name = v["fragment"].as_str().unwrap_or("");
@@ -588,7 +588,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             headers.set(fragment::URL_HEADER, url.as_str())?;
             let mut init = RequestInit::new();
             init.with_method(Method::Post).with_headers(headers).with_body(Some(v.to_string().into()));
-            let inner = Request::new_with_init("https://fragment.internal/test/keys", &init)?;
+            let inner = Request::new_with_init(&format!("https://fragment.internal/test/{hook}"), &init)?;
             Ok(env.durable_object("FRAGMENT")?.get_by_name(name)?.fetch_with_request(inner).await?)
         }
         (Method::Post, ["api", "test", "registry"]) if test_hooks(env) => {

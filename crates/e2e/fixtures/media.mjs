@@ -8,6 +8,12 @@ export class App extends DurableObject {
     return { ok: true };
   }
 
+  // a record on a channel a member may subscribe a URL to
+  headline({ text }, call) {
+    call.publish("news", { text });
+    return { ok: true };
+  }
+
   async announce({ who, title }, job) {
     return await job.push(who, { title, body: "from a job" });
   }

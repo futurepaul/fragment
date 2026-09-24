@@ -4,8 +4,10 @@
 //! (`__push-key`), and stores the subscription (`__push-sub`), tagged with
 //! a `who` of the page's choosing. `call.push(who, payload)` in a mutation
 //! and `job.push(who, payload)` in a job send to that tag's subscriptions
-//! (`*`: all): each payload is encrypted for its browser and signed with
-//! the fragment's VAPID key here, then queued (`deliveries.rs`).
+//! (`*`: all): the push is written to the delivery outbox as it is
+//! accepted, and as the outbox drains, each payload is encrypted for its
+//! browser and signed with the fragment's VAPID key here, then queued
+//! (`deliveries.rs`).
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
@@ -31,7 +33,7 @@ pub const SW_JS: &str = include_str!("../sw.js");
 impl FragmentCell {
     /// The fragment's VAPID key, made on first use and sealed like a secret
     /// (`KEYS` opens it for this cell alone).
-    async fn vapid(&self) -> CellResult<Vapid> {
+    pub(crate) async fn vapid(&self) -> CellResult<Vapid> {
         if self.meta("vapid")?.is_none() {
             let key = Vapid::draw(js::random_bytes);
             let sealed = keys::seal(&self.env, &key.to_bytes()).await?;
@@ -85,38 +87,65 @@ impl FragmentCell {
         Ok(json!({ "ok": true, "removed": gone.len() }))
     }
 
-    /// Queues a push to every subscription tagged `who` (`*`: all), once per
-    /// `key` (a mutation's effect or a job's step). Answers how many.
+    /// Accepts a push to every subscription tagged `who` (`*`: all), once
+    /// per `key` (a mutation's effect or a job's step): written to the
+    /// delivery outbox, then sent (deliveries.rs). Answers how many
+    /// subscriptions it goes to.
     pub(crate) async fn send_push(&self, key: &str, who: &str, payload: &Value) -> CellResult<usize> {
-        if !self.rows("SELECT key FROM sent WHERE key = ?", vec![key.into()])?.is_empty() {
-            return Ok(0);
+        let n = self.outbox_push(key, who, payload)?;
+        if n > 0 {
+            self.drain_deliveries().await;
         }
+        Ok(n)
+    }
+
+    /// The push's outbox row, in this turn: the subscriptions tagged `who`
+    /// now (up to the newest id), each sent once however the sending goes.
+    fn outbox_push(&self, key: &str, who: &str, payload: &Value) -> CellResult<usize> {
         let text = payload.to_string();
         if text.len() > webpush::PAYLOAD_MAX_BYTES {
             return Err(CellError::too_large("a push payload", text.len(), webpush::PAYLOAD_MAX_BYTES));
         }
-        let subs = if who == "*" {
-            self.rows("SELECT id, endpoint, p256dh, auth FROM push_subs", vec![])?
-        } else {
-            self.rows("SELECT id, endpoint, p256dh, auth FROM push_subs WHERE who = ?", vec![who.into()])?
+        let now = SqlStorageValue::Integer(js::now_ms());
+        let accepted = self.rows("INSERT INTO sent (key, at) VALUES (?, ?) ON CONFLICT (key) DO NOTHING RETURNING key", vec![key.into(), now.clone()])?;
+        if accepted.is_empty() {
+            return Ok(0);
+        }
+        let rows = self.rows(
+            "SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS upto FROM push_subs WHERE ? = '*' OR who = ?",
+            vec![who.into(), who.into()],
+        )?;
+        let (n, upto) = match rows.first() {
+            Some(r) => (r["n"].as_u64().expect("COUNT is an integer"), r["upto"].as_i64().expect("MAX(id) is an integer")),
+            None => (0, 0),
         };
-        let vapid = self.vapid().await?;
-        let (fragment, incarnation) = (self.must("name")?, self.must("created_at")?);
+        if n > 0 {
+            self.exec(
+                "INSERT INTO delivery_outbox (kind, who, body, after_sub, upto_sub, next_at) VALUES ('push', ?, ?, 0, ?, ?)",
+                vec![who.into(), text.into(), SqlStorageValue::Integer(upto), now],
+            )?;
+        }
+        Ok(n as usize)
+    }
+
+    /// The deliveries of one push to `subs` (rows of `push_subs`), each
+    /// encrypted for its browser and signed with the fragment's VAPID key.
+    /// A subscription that no longer checks out is skipped, not fatal.
+    pub(crate) fn push_deliveries(&self, vapid: &Vapid, subs: &[Value], payload: &str, fragment: &str, incarnation: &str) -> Vec<Delivery> {
         let now_s = js::now_ms() / 1000;
         let mut deliveries = Vec::with_capacity(subs.len());
-        for s in &subs {
+        for s in subs {
             let sub = Subscription {
                 endpoint: s["endpoint"].as_str().unwrap_or(""),
                 p256dh: s["p256dh"].as_str().unwrap_or(""),
                 auth: s["auth"].as_str().unwrap_or(""),
             };
-            // a subscription that no longer checks out is skipped, not fatal
             let Ok(auth) = vapid.authorization(sub.endpoint, &self.cfg.push_subject, now_s) else { continue };
             let ephemeral = webpush::Ephemeral::draw(js::random_bytes);
-            let Ok(body) = webpush::encrypt(&sub, text.as_bytes(), &ephemeral, js::random_bytes()) else { continue };
+            let Ok(body) = webpush::encrypt(&sub, payload.as_bytes(), &ephemeral, js::random_bytes()) else { continue };
             deliveries.push(Delivery {
-                fragment: fragment.clone(),
-                incarnation: incarnation.clone(),
+                fragment: fragment.to_string(),
+                incarnation: incarnation.to_string(),
                 kind: "push".into(),
                 url: sub.endpoint.to_string(),
                 headers: vec![
@@ -130,36 +159,32 @@ impl FragmentCell {
                 sub: s["id"].as_i64(),
             });
         }
-        let n = self.enqueue(deliveries).await?;
-        self.exec("INSERT OR IGNORE INTO sent (key, at) VALUES (?, ?)", vec![key.into(), SqlStorageValue::Integer(js::now_ms())])?;
-        Ok(n)
+        deliveries
     }
 
-    /// `notifyUrls`: a `changed` frame per move of `main`, as the old runtime sent.
+    /// `notifyUrls`: a `changed` frame per move of `main`, as the old
+    /// runtime sent, through the delivery outbox.
     pub(crate) async fn notify_urls(&self, sha: Option<&str>, paths: &[String]) -> CellResult<()> {
         let urls = self.notify_list()?;
         if urls.is_empty() {
             return Ok(());
         }
-        let (fragment, incarnation) = (self.must("name")?, self.must("created_at")?);
-        let frame = json!({ "type": "changed", "fragment": fragment, "sha": sha, "paths": paths.iter().take(50).collect::<Vec<_>>() });
-        let mut deliveries = vec![];
+        let frame = json!({ "type": "changed", "fragment": self.must("name")?, "sha": sha, "paths": paths.iter().take(50).collect::<Vec<_>>() });
+        let mut queued = 0;
         for url in urls {
             if egress::check(&url, self.cfg.egress_local).is_err() {
                 self.event("notify.refused", &format!("{url}: not a public address"), Value::Null);
                 continue;
             }
-            deliveries.push(Delivery {
-                fragment: fragment.clone(),
-                incarnation: incarnation.clone(),
-                kind: "notify".into(),
-                url,
-                headers: vec![("content-type".into(), "application/json".into())],
-                body: B64.encode(frame.to_string()),
-                sub: None,
-            });
+            self.exec(
+                "INSERT INTO delivery_outbox (kind, url, body, next_at) VALUES ('notify', ?, ?, ?)",
+                vec![url.into(), frame.to_string().into(), SqlStorageValue::Integer(js::now_ms())],
+            )?;
+            queued += 1;
         }
-        self.enqueue(deliveries).await?;
+        if queued > 0 {
+            self.drain_deliveries().await;
+        }
         Ok(())
     }
 
