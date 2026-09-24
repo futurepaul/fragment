@@ -41,7 +41,7 @@
     <div id="messages"></div>
     <div id="error"></div>
   </main>
-  <form id="say"><input type="text" id="text" placeholder="Say something" maxlength="4000" autocomplete="off"><button>Send</button></form>
+  <form id="say" onsubmit="event.preventDefault()"><input type="text" id="text" placeholder="Say something" maxlength="4000" autocomplete="off"><button>Send</button></form>
   <script type="module">
     import * as fragment from "./__fragment.js";
     import { renderMarkdown } from "./markdown.js";

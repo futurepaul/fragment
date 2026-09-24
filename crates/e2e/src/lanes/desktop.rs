@@ -97,9 +97,12 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("New chat makes a chat fragment and opens it in the middle", chatted && !chat.is_empty(), &mine);
     let chat_title = s.eventually(wait, || chrome.eval_in_frame(&page, &format!("{}.", label(&chat)), "document.title").ok() == Some(json!("Chat")));
     s.ok("the chat's own page shows there, signed in on its origin", chat_title, "");
-    let said = s.eventually(wait, || {
-        chrome.eval_in_frame(&page, &format!("{}.", label(&chat)), "document.getElementById('text').value = 'hi from the desktop'; document.getElementById('say').requestSubmit(); true").is_ok()
+    // the page is ready once it is connected (its module has run)
+    let ready = s.eventually(wait, || {
+        chrome.eval_in_frame(&page, &format!("{}.", label(&chat)), "document.getElementById('here').textContent !== 'connecting…'").ok() == Some(json!(true))
     });
+    let said = ready
+        && chrome.eval_in_frame(&page, &format!("{}.", label(&chat)), "document.getElementById('text').value = 'hi from the desktop'; document.getElementById('say').requestSubmit(); true").is_ok();
     let me = api.identity(&owner)?;
     let landed = s.eventually(wait, || {
         api.signed(&owner, "GET", &format!("/api/f/{chat}/channels/chat"), None)
