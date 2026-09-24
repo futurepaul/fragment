@@ -10,7 +10,8 @@ use std::collections::BTreeMap;
 
 use fragment_core::codestorage::TreeEntry;
 use fragment_core::{manifest, npub, site, webhook};
-use fragment_proto::{limits, valid_repo_path, ErrorCode, OpDecl, Role};
+use fragment_proto::{limits, valid_repo_path, ChannelDecl, ErrorCode, OpDecl, OpKind, Role, TriggerDecl, TriggerOn};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use worker::*;
@@ -33,6 +34,153 @@ pub struct PinMove {
     pub changed: bool,
     pub to: Option<String>,
     pub paths: Vec<String>,
+}
+
+/// What the installed code declares, as its tables hold it: written with
+/// the code row in one step (no await between), and read by key.
+struct Installed<'a> {
+    operations: &'a BTreeMap<String, OpDecl>,
+    channels: &'a BTreeMap<String, ChannelDecl>,
+    triggers: &'a [TriggerDecl],
+}
+
+/// Replaces the code tables' rows. The caller writes the code row in the
+/// same step.
+fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
+    assert!(code.operations.len() <= limits::OPERATIONS_MAX, "a manifest's operations are bounded");
+    assert!(code.channels.len() <= limits::CHANNELS_MAX, "a manifest's channels are bounded");
+    assert!(code.triggers.len() <= limits::TRIGGERS_MAX, "a manifest's triggers are bounded");
+    clear_installed(sql)?;
+    for (op, d) in code.operations {
+        let input = match &d.input {
+            Some(schema) => SqlStorageValue::from(schema.to_string()),
+            None => SqlStorageValue::Null,
+        };
+        sql.exec("INSERT INTO code_ops (op, kind, role, input) VALUES (?, ?, ?, ?)", vec![op.as_str().into(), d.kind.as_str().into(), d.role.as_str().into(), input])?;
+    }
+    for (channel, d) in code.channels {
+        sql.exec("INSERT INTO code_channels (channel, read) VALUES (?, ?)", vec![channel.as_str().into(), d.read.as_str().into()])?;
+    }
+    for (i, t) in code.triggers.iter().enumerate() {
+        let (kind, target) = t.on.parts();
+        let idx = SqlStorageValue::Integer(i64::try_from(i).expect("triggers are few"));
+        sql.exec("INSERT INTO code_triggers (idx, kind, target, run) VALUES (?, ?, ?, ?)", vec![idx, kind.into(), target.into(), t.run.as_str().into()])?;
+    }
+    let count = |table: &str| -> Result<usize> {
+        let rows: Vec<Value> = sql.exec(&format!("SELECT COUNT(*) AS n FROM {table}"), None)?.to_array()?;
+        Ok(rows.first().and_then(|r| r["n"].as_u64()).expect("COUNT answers a row") as usize)
+    };
+    assert_eq!(count("code_ops")?, code.operations.len(), "every operation is stored");
+    assert_eq!(count("code_channels")?, code.channels.len(), "every channel is stored");
+    assert_eq!(count("code_triggers")?, code.triggers.len(), "every trigger is stored");
+    Ok(())
+}
+
+fn clear_installed(sql: &SqlStorage) -> Result<()> {
+    for table in ["code_ops", "code_channels", "code_triggers"] {
+        sql.exec(&format!("DELETE FROM {table}"), None)?;
+    }
+    Ok(())
+}
+
+/// The columns the code row held before its tables: JSON text each.
+const CODE_JSON_COLUMNS: [&str; 3] = ["operations", "channels", "triggers"];
+
+/// A fragment stored before the code tables kept its operations, channels,
+/// and triggers as JSON columns of the code row (and one from before
+/// applib and notifyUrls, phase 2 slices B and C, lacks those columns).
+/// Activation moves them into their tables in place, in one step, and
+/// drops the columns. Stored JSON that does not decode (the cell wrote it,
+/// so it always has) fails closed: the code goes, and the next refresh or
+/// poll installs live again. Answers why, then.
+pub(crate) fn migrate_code(sql: &SqlStorage) -> Option<String> {
+    let cols: Vec<Value> = sql.exec("PRAGMA table_info(code)", None).and_then(|c| c.to_array()).expect("the code table's columns read");
+    let has = |col: &str| cols.iter().any(|c| c["name"] == col);
+    for (col, decl) in [("modules", "modules TEXT NOT NULL DEFAULT '{}'"), ("notify", "notify TEXT NOT NULL DEFAULT '[]'")] {
+        if !has(col) {
+            sql.exec(&format!("ALTER TABLE code ADD COLUMN {decl}"), None).expect("the code table migrates");
+        }
+    }
+    let json_columns: Vec<&str> = CODE_JSON_COLUMNS.into_iter().filter(|c| has(c)).collect();
+    if json_columns.is_empty() {
+        return None;
+    }
+    let read: Vec<String> = CODE_JSON_COLUMNS.iter().map(|c| if has(c) { (*c).to_string() } else { format!("NULL AS {c}") }).collect();
+    let rows: Vec<Value> = sql.exec(&format!("SELECT {} FROM code WHERE id = 1", read.join(", ")), None).and_then(|c| c.to_array()).expect("the code row reads");
+    let outcome = match rows.first() {
+        None => {
+            clear_installed(sql).expect("the code tables clear");
+            None
+        }
+        Some(row) => {
+            let text = |col: &str, empty: &'static str| row[col].as_str().unwrap_or(empty).to_string();
+            let decoded = (|| -> std::result::Result<_, String> {
+                let operations: BTreeMap<String, OpDecl> = serde_json::from_str(&text("operations", "{}")).map_err(|e| format!("operations: {e}"))?;
+                let channels: BTreeMap<String, ChannelDecl> = serde_json::from_str(&text("channels", "{}")).map_err(|e| format!("channels: {e}"))?;
+                let triggers: Vec<TriggerDecl> = serde_json::from_str(&text("triggers", "[]")).map_err(|e| format!("triggers: {e}"))?;
+                Ok((operations, channels, triggers))
+            })();
+            match decoded {
+                Ok((operations, channels, triggers)) => {
+                    store_installed(sql, &Installed { operations: &operations, channels: &channels, triggers: &triggers }).expect("the code tables fill");
+                    None
+                }
+                Err(why) => {
+                    sql.exec("DELETE FROM code", None).expect("the code row goes");
+                    clear_installed(sql).expect("the code tables clear");
+                    sql.exec("DELETE FROM meta WHERE key = 'live_read_at'", None).expect("live is read again");
+                    Some(why)
+                }
+            }
+        }
+    };
+    for col in json_columns {
+        sql.exec(&format!("ALTER TABLE code DROP COLUMN {col}"), None).expect("the code table drops its JSON column");
+    }
+    outcome
+}
+
+#[derive(Deserialize)]
+struct OpRow {
+    op: String,
+    kind: String,
+    role: String,
+    input: Option<String>,
+}
+
+/// One way to fail for a stored row that does not decode: the cell wrote
+/// it from a checked manifest, so it is corruption.
+fn stored(what: &str, why: impl std::fmt::Display) -> CellError {
+    CellError::host(format!("the installed code's {what} does not decode: {why}"))
+}
+
+fn op_decl(row: OpRow) -> CellResult<(String, OpDecl)> {
+    let kind = OpKind::parse(&row.kind).ok_or_else(|| stored(&format!("operation {}", row.op), format!("kind {:?}", row.kind)))?;
+    let role = Role::parse(&row.role).ok_or_else(|| stored(&format!("operation {}", row.op), format!("role {:?}", row.role)))?;
+    let input = match row.input {
+        Some(text) => Some(serde_json::from_str(&text).map_err(|e| stored(&format!("operation {}", row.op), e))?),
+        None => None,
+    };
+    Ok((row.op, OpDecl { kind, role, input }))
+}
+
+#[derive(Deserialize)]
+struct ChannelRow {
+    channel: String,
+    read: String,
+}
+
+fn channel_decl(row: ChannelRow) -> CellResult<(String, ChannelDecl)> {
+    let read = Role::parse(&row.read).ok_or_else(|| stored(&format!("channel {}", row.channel), format!("read {:?}", row.read)))?;
+    Ok((row.channel, ChannelDecl { read }))
+}
+
+#[derive(Deserialize)]
+struct TriggerRow {
+    idx: i64,
+    kind: String,
+    target: String,
+    run: String,
 }
 
 impl FragmentCell {
@@ -166,6 +314,7 @@ impl FragmentCell {
         let repo = self.must("repo")?;
         let Some(sha) = live else {
             self.exec("DELETE FROM code", vec![])?;
+            clear_installed(&self.sql())?;
             self.sync_schedules(&[])?;
             self.del_meta("meta_live")?;
             self.del_meta("capabilities_live")?;
@@ -191,6 +340,7 @@ impl FragmentCell {
         self.set_meta("capabilities_live", &serde_json::to_string(&manifest.capabilities).expect("a list serializes"))?;
         if self.tree_row("live", "app.mjs")?.is_none() {
             self.exec("DELETE FROM code", vec![])?;
+            clear_installed(&self.sql())?;
             self.sync_schedules(&[])?;
             self.del_meta("code_error")?;
             js::abort_app_facet(&self.raw, "live has no app.mjs")?;
@@ -244,29 +394,25 @@ impl FragmentCell {
             modules.insert(path, text);
         }
         let loader_id = format!("app:{}", hex::encode(hasher.finalize()));
-        let operations = serde_json::to_string(&manifest.operations).expect("operations serialize");
-        let channels = serde_json::to_string(&manifest.channels).expect("channels serialize");
-        let triggers = serde_json::to_string(&manifest.triggers).expect("triggers serialize");
         let notify = serde_json::to_string(&manifest.notify_urls).expect("urls serialize");
         let module_count = modules.len();
+        // The code row and its tables, in one step: no await until they are all written.
         self.exec(
-            "INSERT INTO code (id, sha, loader_id, source, operations, cpu_ms, installed_at, channels, modules, triggers, notify) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO code (id, sha, loader_id, source, cpu_ms, installed_at, modules, notify) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (id) DO UPDATE SET sha = excluded.sha, loader_id = excluded.loader_id, source = excluded.source,
-               operations = excluded.operations, cpu_ms = excluded.cpu_ms, installed_at = excluded.installed_at,
-               channels = excluded.channels, modules = excluded.modules, triggers = excluded.triggers, notify = excluded.notify",
+               cpu_ms = excluded.cpu_ms, installed_at = excluded.installed_at, modules = excluded.modules, notify = excluded.notify",
             vec![
                 sha.into(),
                 loader_id.into(),
                 source.into(),
-                operations.into(),
                 SqlStorageValue::Integer(limits::APP_CPU_MS.into()),
                 SqlStorageValue::Integer(js::now_ms()),
-                channels.into(),
                 serde_json::to_string(&modules).expect("modules serialize").into(),
-                triggers.into(),
                 notify.into(),
             ],
         )?;
+        let installed = Installed { operations: &manifest.operations, channels: &manifest.channels, triggers: &manifest.triggers };
+        store_installed(&self.sql(), &installed)?;
         self.sync_schedules(&manifest.triggers)?;
         self.forget_undeclared_pauses()?;
         self.del_meta("code_error")?;
@@ -494,10 +640,93 @@ impl FragmentCell {
         json_response(&json!({ "stat": stat, "ref": pin }))
     }
 
-    /// The installed operations (from the live commit).
-    pub(crate) fn operations(&self) -> CellResult<Option<BTreeMap<String, OpDecl>>> {
-        let rows = self.rows("SELECT operations FROM code WHERE id = 1", vec![])?;
-        Ok(rows.first().map(|r| serde_json::from_str(r["operations"].as_str().unwrap_or("{}")).expect("stored operations parse")))
+    /// The installed operations (from the live commit); none without code.
+    pub(crate) fn operations(&self) -> CellResult<BTreeMap<String, OpDecl>> {
+        self.typed::<OpRow>("SELECT op, kind, role, input FROM code_ops ORDER BY op", vec![])?.into_iter().map(op_decl).collect()
+    }
+
+    /// The declared operation, or why there is none: no code, or no such
+    /// operation in it. One keyed read, whatever the manifest holds.
+    pub(crate) fn declared(&self, op: &str) -> CellResult<OpDecl> {
+        #[derive(Deserialize)]
+        struct Found {
+            op: Option<String>,
+            kind: Option<String>,
+            role: Option<String>,
+            input: Option<String>,
+        }
+        let rows: Vec<Found> =
+            self.typed("SELECT o.op, o.kind, o.role, o.input FROM code c LEFT JOIN code_ops o ON o.op = ? WHERE c.id = 1", vec![op.into()])?;
+        let Some(found) = rows.into_iter().next() else {
+            return Err(CellError::new(ErrorCode::NoCode, "the live commit has no app.mjs (deploy one)"));
+        };
+        match (found.op, found.kind, found.role) {
+            (Some(op), Some(kind), Some(role)) => Ok(op_decl(OpRow { op, kind, role, input: found.input })?.1),
+            (None, None, None) => Err(CellError::new(ErrorCode::UnknownOperation, format!("no operation named {op:?}"))),
+            _ => Err(stored(&format!("operation {op}"), "a partial row")),
+        }
+    }
+
+    /// The app channels the live code declares.
+    pub(crate) fn declared_channels(&self) -> CellResult<BTreeMap<String, ChannelDecl>> {
+        self.typed::<ChannelRow>("SELECT channel, read FROM code_channels ORDER BY channel", vec![])?.into_iter().map(channel_decl).collect()
+    }
+
+    /// Who may read an app channel the live code declares; `None` when it declares no such channel.
+    pub(crate) fn declared_channel(&self, channel: &str) -> CellResult<Option<Role>> {
+        let rows: Vec<ChannelRow> = self.typed("SELECT channel, read FROM code_channels WHERE channel = ?", vec![channel.into()])?;
+        Ok(rows.into_iter().next().map(channel_decl).transpose()?.map(|(_, d)| d.read))
+    }
+
+    /// The installed triggers, in their manifest's order (a cron trigger's
+    /// schedule is keyed by that index).
+    pub(crate) fn triggers(&self) -> CellResult<Vec<TriggerDecl>> {
+        let rows: Vec<TriggerRow> = self.typed("SELECT idx, kind, target, run FROM code_triggers ORDER BY idx", vec![])?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (i, row) in rows.into_iter().enumerate() {
+            if row.idx != i64::try_from(i).expect("triggers are few") {
+                return Err(stored(&format!("trigger {i}"), format!("it is stored at index {}", row.idx)));
+            }
+            let on = TriggerOn::from_parts(&row.kind, row.target).ok_or_else(|| stored(&format!("trigger {i}"), format!("kind {:?}", row.kind)))?;
+            out.push(TriggerDecl { on, run: row.run });
+        }
+        Ok(out)
+    }
+
+    /// The operations a record on `channel` starts: each once (two triggers
+    /// that run one operation start it once), in their first trigger's order.
+    pub(crate) fn channel_triggers(&self, channel: &str) -> CellResult<Vec<String>> {
+        #[derive(Deserialize)]
+        struct Run {
+            run: String,
+        }
+        let on = TriggerOn::Channel(channel.to_string());
+        let (kind, target) = on.parts();
+        let rows: Vec<Run> = self.typed("SELECT run FROM code_triggers WHERE kind = ? AND target = ? GROUP BY run ORDER BY MIN(idx)", vec![kind.into(), target.into()])?;
+        Ok(rows.into_iter().map(|r| r.run).collect())
+    }
+
+    /// A test hook (fleets with test hooks only): puts the installed code
+    /// back into the shape fragments stored before the code tables (JSON
+    /// columns of the code row), so the e2e can restart the node and watch
+    /// `migrate_code` move it.
+    pub(crate) fn code_before_tables(&self) -> CellResult<()> {
+        assert!(self.cfg.test_hooks, "the hook answers only on fleets with test hooks");
+        let (operations, channels, triggers) = (self.operations()?, self.declared_channels()?, self.triggers()?);
+        for (col, empty) in CODE_JSON_COLUMNS.into_iter().zip(["{}", "{}", "[]"]) {
+            self.exec(&format!("ALTER TABLE code ADD COLUMN {col} TEXT NOT NULL DEFAULT '{empty}'"), vec![])?;
+        }
+        let text = |v: serde_json::Result<String>| v.map_err(|e| CellError::host(e.to_string()));
+        self.exec(
+            "UPDATE code SET operations = ?, channels = ?, triggers = ? WHERE id = 1",
+            vec![
+                text(serde_json::to_string(&operations))?.into(),
+                text(serde_json::to_string(&channels))?.into(),
+                text(serde_json::to_string(&triggers))?.into(),
+            ],
+        )?;
+        clear_installed(&self.sql())?;
+        Ok(())
     }
 }
 

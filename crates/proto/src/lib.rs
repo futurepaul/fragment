@@ -692,6 +692,20 @@ pub enum OpKind {
     Job,
 }
 
+impl OpKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OpKind::Query => "query",
+            OpKind::Mutation => "mutation",
+            OpKind::Job => "job",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<OpKind> {
+        [OpKind::Query, OpKind::Mutation, OpKind::Job].into_iter().find(|k| k.as_str() == s)
+    }
+}
+
 /// An operation as `fragment.json` declares it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpDecl {
@@ -744,6 +758,27 @@ pub enum TriggerOn {
     Channel(String),
     /// A move of `main` that changes a path matching this pattern.
     Files(String),
+}
+
+impl TriggerOn {
+    /// What starts it, and on what: `("cron", schedule)`, `("channel",
+    /// channel)`, or `("files", pattern)`; the names are its wire keys.
+    pub fn parts(&self) -> (&'static str, &str) {
+        match self {
+            TriggerOn::Cron(c) => ("cron", c),
+            TriggerOn::Channel(c) => ("channel", c),
+            TriggerOn::Files(f) => ("files", f),
+        }
+    }
+
+    pub fn from_parts(kind: &str, target: String) -> Option<TriggerOn> {
+        match kind {
+            "cron" => Some(TriggerOn::Cron(target)),
+            "channel" => Some(TriggerOn::Channel(target)),
+            "files" => Some(TriggerOn::Files(target)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -991,6 +1026,20 @@ mod tests {
         assert!(!valid_repo_path("/abs"));
         assert!(!valid_repo_path("a//b"));
         assert!(!valid_repo_path("a/./b"));
+    }
+
+    #[test]
+    fn stored_names_are_the_wire_names() {
+        for k in [OpKind::Query, OpKind::Mutation, OpKind::Job] {
+            assert_eq!(OpKind::parse(k.as_str()), Some(k));
+            assert_eq!(serde_json::to_value(k).unwrap(), k.as_str());
+        }
+        for on in [TriggerOn::Cron("0 9 * * *".into()), TriggerOn::Channel("inbox".into()), TriggerOn::Files("notes/**".into())] {
+            let (kind, target) = on.parts();
+            assert_eq!(TriggerOn::from_parts(kind, target.to_string()), Some(on.clone()));
+            assert_eq!(serde_json::to_value(&on).unwrap(), serde_json::json!({ kind: target }));
+        }
+        assert_eq!(TriggerOn::from_parts("webhook", "x".into()), None);
     }
 
     #[test]

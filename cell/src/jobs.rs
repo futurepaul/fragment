@@ -145,8 +145,9 @@ pub(crate) fn migrate_trigger_state(sql: &SqlStorage, now: i64) -> Vec<String> {
     if paused.is_none() && breakers.is_empty() {
         return vec![];
     }
-    let triggers = rows("SELECT triggers FROM code WHERE id = 1").first().and_then(|r| text(r, "triggers"));
-    let moved = trigger_state::migrate(paused.as_deref(), triggers.as_deref(), &breakers);
+    // the installed code's tables, which migrate_code filled first (plane.rs)
+    let triggered: Vec<String> = rows("SELECT run FROM code_triggers ORDER BY idx").iter().map(|r| text(r, "run").expect("code_triggers.run is TEXT")).collect();
+    let moved = trigger_state::migrate(paused.as_deref(), &triggered, &breakers);
     for op in &moved.paused {
         exec("INSERT INTO paused_ops (op, by, at) VALUES (?, 'migrated', ?) ON CONFLICT (op) DO NOTHING", vec![op.as_str().into(), SqlStorageValue::Integer(now)]);
     }
@@ -168,12 +169,6 @@ impl FragmentCell {
     /// The fragment's own key: who triggered runs act as.
     fn own_key(&self) -> CellResult<String> {
         npub::parse(&self.must("npub")?).ok_or_else(|| CellError::host("the stored npub does not parse"))
-    }
-
-    /// The installed triggers (from the live commit).
-    pub(crate) fn triggers(&self) -> CellResult<Vec<TriggerDecl>> {
-        let rows = self.rows("SELECT triggers FROM code WHERE id = 1", vec![])?;
-        Ok(rows.first().and_then(|r| r["triggers"].as_str()).and_then(|t| serde_json::from_str(t).ok()).unwrap_or_default())
     }
 
     /// The operations whose triggers are paused, in the order they were.
@@ -670,19 +665,18 @@ impl FragmentCell {
     /// same record answers the runs it started: a try after a failure part
     /// way starts only the rest, never one twice.
     pub(crate) fn fire_channel(&self, record: &ChannelRecord, depth: u32) -> CellResult<Vec<i64>> {
-        let on = TriggerOn::Channel(record.channel.clone());
-        let matching: Vec<TriggerDecl> = self.triggers()?.into_iter().filter(|t| t.on == on).collect();
+        let ops = self.channel_triggers(&record.channel)?;
         let own = self.own_key()?;
         let input = json!({ "channel": record.channel, "record": record });
         let mut started = vec![];
-        for (i, t) in matching.iter().enumerate() {
-            if i + 1 == matching.len() {
+        for (i, op) in ops.iter().enumerate() {
+            if i + 1 == ops.len() {
                 self.test_trigger_failure()?;
             }
-            let call_id = format!("record:{}:{}:{}", record.channel, record.seq, t.run);
-            let sha = crate::ops::input_sha(&t.run, &input);
+            let call_id = format!("record:{}:{}:{op}", record.channel, record.seq);
+            let sha = crate::ops::input_sha(op, &input);
             let s = self.start_run(NewRun {
-                op: &t.run,
+                op,
                 via: "channel",
                 trigger: Some(record.channel.clone()),
                 principal: &own,
@@ -693,9 +687,6 @@ impl FragmentCell {
             })?;
             started.push(s.id);
         }
-        // two triggers that run one operation started it once
-        started.sort_unstable();
-        started.dedup();
         Ok(started)
     }
 
@@ -746,7 +737,8 @@ impl FragmentCell {
     /// installed code says an operation is gone; a live commit with no app
     /// says nothing about the next one, so it keeps them (plane.rs).
     pub(crate) fn forget_undeclared_pauses(&self) -> CellResult<()> {
-        let declared = self.operations()?.expect("pauses are forgotten only against installed code");
+        assert!(!self.rows("SELECT id FROM code WHERE id = 1", vec![])?.is_empty(), "pauses are forgotten only against installed code");
+        let declared = self.operations()?;
         for table in ["paused_ops", "op_breakers"] {
             for row in self.rows(&format!("SELECT op FROM {table}"), vec![])? {
                 let op = row["op"].as_str().expect("op is TEXT");

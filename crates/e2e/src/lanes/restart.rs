@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use fragment_nip98::Keys;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::app::ship;
 use super::jobs;
@@ -50,6 +50,11 @@ pub fn restart(s: &mut Suite, api: Api) -> Result<Api> {
     // a paused operation: its pause is a row, not a cached list
     let r = api.signed(&owner, "POST", &format!("/api/f/{paid}/pause"), Some(&json!({ "op": "summarize", "paused": true })))?;
     anyhow::ensure!(r.status == 200, "pause setup: {r}");
+    // code stored as the fleet stored it before the code tables: JSON in the code row
+    let (stored, sc) = jobs::jobs_fragment(s, &api, &owner, "restart-code", |_| {})?;
+    let code_before = api.status(&owner, &stored)?.body["code"].clone();
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": stored, "op": "code-before-tables" })))?;
+    anyhow::ensure!(r.status == 200 && code_before["operations"]["save"]["kind"] == "mutation", "code-before-tables setup: {r} {code_before}");
 
     s.stop()?;
     let api = s.start(false, true)?;
@@ -66,6 +71,23 @@ pub fn restart(s: &mut Suite, api: Api) -> Result<Api> {
     s.ok("after a restart the month's spend is what it was", r.status == 200 && r.body["spentMicros"] == spent && spent.as_i64().unwrap_or(0) > 0, &r);
     let r = api.signed(&owner, "GET", &format!("/api/f/{paid}/runs?limit=1"), None)?;
     s.ok("after a restart a paused operation is still paused", r.status == 200 && r.body["paused"] == json!(["summarize"]), &r);
+    let r = api.status(&owner, &stored)?;
+    s.ok("code stored before the code tables moves into them: its operations and schemas are the same", r.body["code"] == code_before, &r.body["code"]);
+    let r = api.signed(&owner, "GET", &format!("/api/f/{stored}/triggers"), None)?;
+    let on: Vec<Value> = r.body["triggers"].as_array().into_iter().flatten().map(|t| t["run"].clone()).collect();
+    s.ok("and its triggers, in their order", on == vec![json!("ingest"), json!("ping"), json!("boom"), json!("tick")], &r);
+    let r = api.signed(&owner, "GET", &format!("/api/f/{stored}/channels/feed"), None)?;
+    s.ok("and its channels", r.status == 200, &r);
+    let token = sc["inboxToken"].as_str().unwrap_or("");
+    let r = jobs::inbox(&api, &stored, token, &json!({ "source": "migrated", "payload": { "items": ["after the move"] } }), None)?;
+    let run = r.body["runs"][0].as_i64().unwrap_or(0);
+    let ran = jobs::settle(&api, &owner, &stored, run, &["succeeded", "held"], Duration::from_secs(40));
+    let items = api.op(&owner, &stored, "items", "q", json!({}))?;
+    s.ok(
+        "and its channel trigger starts its run",
+        ran["status"] == "succeeded" && items.body["result"].as_array().is_some_and(|a| a.iter().any(|i| i["text"] == "after the move" && i["source"] == "migrated")),
+        &items,
+    );
 
     let r = api.op(&owner, &name, "add_todo", "r2", json!({ "text": "before the crash" }))?;
     s.ok("a mutation before the crash", r.status == 200, &r);

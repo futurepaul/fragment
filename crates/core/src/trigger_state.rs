@@ -6,8 +6,6 @@
 //! what `meta` held; the cell's SQL reads the keys, writes the rows, and
 //! deletes the keys around it (jobs.rs).
 
-use fragment_proto::TriggerDecl;
-
 /// The legacy breaker keys: this, then the operation's name.
 pub const BREAKER_KEY_PREFIX: &str = "breaker_since:";
 
@@ -26,21 +24,18 @@ pub struct Migration {
     pub breakers: Vec<(String, i64)>,
 }
 
-/// `paused`: `meta`'s `paused` value, if the fragment has one. `triggers`:
-/// the installed code's `triggers` column (a JSON array of
-/// `TriggerDecl`), if code is installed. `breakers`: each `meta` key that
-/// begins with `BREAKER_KEY_PREFIX`, with its value.
-pub fn migrate(paused: Option<&str>, triggers: Option<&str>, breakers: &[(String, String)]) -> Migration {
+/// `paused`: `meta`'s `paused` value, if the fragment has one.
+/// `triggered`: the operations the installed code's triggers run
+/// (`code_triggers`, in their order; none without code). `breakers`: each
+/// `meta` key that begins with `BREAKER_KEY_PREFIX`, with its value.
+pub fn migrate(paused: Option<&str>, triggered: &[String], breakers: &[(String, String)]) -> Migration {
     let mut out = Migration::default();
     match paused.map(serde_json::from_str::<Vec<String>>) {
         None => {}
         Some(Ok(ops)) => out.paused = ops,
         Some(Err(_)) => {
             out.failed_closed = true;
-            // A triggers column that does not parse runs no trigger (the
-            // cell reads it the same way), so it has nothing to pause.
-            let declared: Vec<TriggerDecl> = triggers.and_then(|t| serde_json::from_str(t).ok()).unwrap_or_default();
-            out.paused = declared.into_iter().map(|t| t.run).collect();
+            out.paused = triggered.to_vec();
         }
     }
     out.paused.retain(|op| !op.is_empty());
@@ -62,7 +57,10 @@ pub fn migrate(paused: Option<&str>, triggers: Option<&str>, breakers: &[(String
 mod tests {
     use super::*;
 
-    const TRIGGERS: &str = r#"[{"channel":"inbox","run":"ingest"},{"cron":"* * * * *","run":"tick"},{"channel":"loop","run":"ingest"}]"#;
+    /// What `[{"channel":"inbox","run":"ingest"},{"cron":"* * * * *","run":"tick"},{"channel":"loop","run":"ingest"}]` runs.
+    fn triggered() -> Vec<String> {
+        ["ingest", "tick", "ingest"].map(String::from).to_vec()
+    }
 
     fn keys(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
@@ -70,9 +68,9 @@ mod tests {
 
     #[test]
     fn a_good_list_pauses_exactly_its_operations() {
-        let m = migrate(Some(r#"["tick","boom","tick"]"#), Some(TRIGGERS), &[]);
+        let m = migrate(Some(r#"["tick","boom","tick"]"#), &triggered(), &[]);
         assert_eq!(m, Migration { paused: vec!["boom".into(), "tick".into()], failed_closed: false, breakers: vec![] });
-        assert_eq!(migrate(Some("[]"), Some(TRIGGERS), &[]), Migration::default(), "an empty list pauses nothing");
+        assert_eq!(migrate(Some("[]"), &triggered(), &[]), Migration::default(), "an empty list pauses nothing");
     }
 
     /// A list the cell cannot read pauses every triggered operation, once
@@ -81,13 +79,11 @@ mod tests {
     #[test]
     fn a_corrupt_list_fails_closed() {
         for corrupt in ["not json", r#"{"tick":true}"#, "[1, 2]", ""] {
-            let m = migrate(Some(corrupt), Some(TRIGGERS), &[]);
+            let m = migrate(Some(corrupt), &triggered(), &[]);
             assert_eq!(m.paused, ["ingest", "tick"], "{corrupt:?}");
             assert!(m.failed_closed, "{corrupt:?}");
         }
-        let m = migrate(Some("not json"), None, &[]);
-        assert!(m.failed_closed && m.paused.is_empty());
-        let m = migrate(Some("not json"), Some("also not json"), &[]);
+        let m = migrate(Some("not json"), &[], &[]);
         assert!(m.failed_closed && m.paused.is_empty());
     }
 
@@ -95,7 +91,7 @@ mod tests {
     fn breaker_keys_become_rows() {
         let m = migrate(
             None,
-            None,
+            &[],
             &keys(&[
                 ("breaker_since:boom", "1700000000000"),
                 ("breaker_since:junk", "yesterday"),
@@ -109,7 +105,7 @@ mod tests {
 
     #[test]
     fn nothing_stored_moves_nothing() {
-        assert_eq!(migrate(None, Some(TRIGGERS), &[]), Migration::default());
-        assert_eq!(migrate(None, None, &[]), Migration::default());
+        assert_eq!(migrate(None, &triggered(), &[]), Migration::default());
+        assert_eq!(migrate(None, &[], &[]), Migration::default());
     }
 }

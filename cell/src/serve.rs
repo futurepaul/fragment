@@ -349,8 +349,10 @@ impl FragmentCell {
             h.set("content-length", &size.to_string())?;
             return Ok(Response::empty()?.with_headers(h));
         }
-        let meta: Option<fragment_core::manifest::Meta> = self.meta("meta_live")?.and_then(|m| serde_json::from_str(&m).ok());
-        if let (Some(meta), true) = (meta, mime.starts_with("text/html") && row["size"].as_u64().unwrap_or(u64::MAX) <= OG_MAX_BYTES) {
+        // Only a page gets Open Graph tags, so only a page reads `meta`.
+        let page = mime.starts_with("text/html") && row["size"].as_u64().unwrap_or(u64::MAX) <= OG_MAX_BYTES;
+        if let (true, Some(stored)) = (page, self.meta("meta_live")?) {
+            let meta: fragment_core::manifest::Meta = serde_json::from_str(&stored).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?;
             if let Some(bytes) = self.cs()?.read(&self.must("repo")?, &live, &file, OG_MAX_BYTES as usize).await? {
                 let html = String::from_utf8_lossy(&bytes);
                 let image = format!("{}__preview.svg", self.cfg.canonical(&caller.url, name));
