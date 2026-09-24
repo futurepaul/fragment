@@ -396,7 +396,7 @@ pub fn triggers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a cron trigger runs on its minute", ticked && cron["trigger"] == "* * * * *", &cron);
 
     // the rate ceiling: an operation's triggers start at most 120 runs an hour
-    let (busy, _) = jobs_fragment(s, api, &owner, "ceiling", |m| m["triggers"] = json!([{ "channel": "alarms", "run": "tick" }]))?;
+    let (busy, busy_c) = jobs_fragment(s, api, &owner, "ceiling", |m| m["triggers"] = json!([{ "channel": "alarms", "run": "tick" }]))?;
     for i in 0..121 {
         api.op(&owner, &busy, "raise", &format!("b{i}"), json!({}))?;
     }
@@ -407,6 +407,22 @@ pub fn triggers(s: &mut Suite, api: &Api) -> Result<()> {
         ticks.len() == 121 && ticks[0]["status"] == "blocked" && ticks[1]["status"] != "blocked" && r.body["paused"] == json!(["tick"]),
         &r,
     );
+    let r = api.signed(&owner, "GET", &format!("/api/f/{busy}/triggers"), None)?;
+    s.ok("the triggers list shows the pause on the trigger", r.body["paused"] == json!(["tick"]) && r.body["triggers"][0]["paused"] == true, &r);
+
+    // an operation the installed code no longer has loses its pause; one
+    // of that name later starts clean
+    let mut without: Value = serde_json::from_slice(JOBS_JSON)?;
+    without["operations"].as_object_mut().expect("operations").remove("tick");
+    without["triggers"] = json!([]);
+    ship(s, &busy_c, JOBS_APP, without.to_string().as_bytes());
+    let r = api.signed(&owner, "GET", &format!("/api/f/{busy}/runs?limit=1"), None)?;
+    s.ok("an operation removed at install is no longer paused", r.status == 200 && r.body["paused"] == json!([]), &r);
+    let mut again: Value = serde_json::from_slice(JOBS_JSON)?;
+    again["triggers"] = json!([{ "channel": "alarms", "run": "tick" }]);
+    ship(s, &busy_c, JOBS_APP, again.to_string().as_bytes());
+    let r = api.signed(&owner, "GET", &format!("/api/f/{busy}/triggers"), None)?;
+    s.ok("and put back, it starts unpaused", r.body["paused"] == json!([]) && r.body["triggers"][0]["paused"] == false, &r);
 
     // the inbox cap: records whose runs have not succeeded
     let full = s.named(api, &owner, "inboxcap")?;
