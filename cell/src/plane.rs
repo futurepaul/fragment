@@ -159,7 +159,8 @@ impl FragmentCell {
 
     /// Installs the app from the live commit: `fragment.json` declares the
     /// operations and `app.mjs` is the code. A live commit without
-    /// `app.mjs` has no app; one with an invalid manifest keeps the last
+    /// `app.mjs` has no app (its schedules go; pauses and breakers stay for
+    /// the next code to judge); one with an invalid manifest keeps the last
     /// good code and records why.
     async fn install_code(&self, live: Option<&str>) -> CellResult<()> {
         let repo = self.must("repo")?;
@@ -266,6 +267,7 @@ impl FragmentCell {
             ],
         )?;
         self.sync_schedules(&manifest.triggers)?;
+        self.forget_undeclared_pauses()?;
         self.del_meta("code_error")?;
         js::abort_app_facet(&self.raw, "new code from live")?;
         self.event(

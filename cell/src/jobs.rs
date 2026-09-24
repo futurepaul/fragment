@@ -720,12 +720,12 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// Rebuilds the cron schedules from newly installed triggers. A schedule
-    /// that did not change keeps its next time, so a redeploy neither skips
-    /// nor repeats a tick. An operation the installed code no longer has
-    /// loses its pause and its breaker (one of that name later starts clean).
-    pub(crate) fn sync_schedules(&self, triggers: &[TriggerDecl]) -> CellResult<()> {
-        let declared = self.code_status()?.operations;
+    /// After code is installed: an operation it does not have loses its
+    /// pause and its breaker (one of that name later starts clean). Only
+    /// installed code says an operation is gone; a live commit with no app
+    /// says nothing about the next one, so it keeps them (plane.rs).
+    pub(crate) fn forget_undeclared_pauses(&self) -> CellResult<()> {
+        let declared = self.operations()?.expect("pauses are forgotten only against installed code");
         for table in ["paused_ops", "op_breakers"] {
             for row in self.rows(&format!("SELECT op FROM {table}"), vec![])? {
                 let op = row["op"].as_str().expect("op is TEXT");
@@ -734,6 +734,13 @@ impl FragmentCell {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Rebuilds the cron schedules from newly installed triggers (none,
+    /// when the live commit has no app). A schedule that did not change
+    /// keeps its next time, so a redeploy neither skips nor repeats a tick.
+    pub(crate) fn sync_schedules(&self, triggers: &[TriggerDecl]) -> CellResult<()> {
         let prior: BTreeMap<(String, String), i64> = self
             .rows("SELECT op, cron, next_at FROM schedules", vec![])?
             .iter()
