@@ -1,9 +1,11 @@
 //! The agent's SQL: its settings, its conversation (the replay ledger), the
 //! steer queue, and what each step did. goose reloads the conversation
-//! before every step and hands every result back here to persist.
+//! before every step (a bounded window of it, fragment_core::history) and
+//! hands every result back here to persist.
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use fragment_core::history;
 use goose_agent::inference::InferenceEffect;
 use goose_agent::machine::{EffectHandler, MachineSession, SessionLoader};
 use goose_agent::operation::{Emitter, MachineEffect};
@@ -66,13 +68,60 @@ pub fn kv_set(sql: &SqlStorage, key: &str, value: impl ToString) -> anyhow::Resu
     Ok(())
 }
 
-pub fn load_messages(sql: &SqlStorage) -> anyhow::Result<Vec<Message>> {
+/// A message that starts a turn's span, as goose reads one
+/// (`messages_since_kickoff`): from the user, visible to them, and not a
+/// tool result. A steer is one too.
+pub fn is_kickoff(message: &Message) -> bool {
+    message.role == rmcp::model::Role::User && message.is_user_visible() && !message.is_tool_response()
+}
+
+/// The newest `limit` messages, oldest first, each with its stored size.
+fn recent_rows(sql: &SqlStorage, limit: usize) -> anyhow::Result<Vec<(Message, usize)>> {
     #[derive(Deserialize)]
     struct Row {
         json: String,
     }
-    let rows: Vec<Row> = ah(ah(sql.exec("SELECT json FROM messages ORDER BY seq", None))?.to_array())?;
-    rows.iter().map(|row| serde_json::from_str(&row.json).map_err(|e| anyhow!("corrupt message: {e}"))).collect()
+    let rows: Vec<Row> = ah(ah(sql.exec("SELECT json FROM messages ORDER BY seq DESC LIMIT ?", vec![(limit as i64).into()]))?.to_array())?;
+    assert!(rows.len() <= limit, "the query's limit holds");
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows.iter().rev() {
+        let message: Message = serde_json::from_str(&row.json).map_err(|e| anyhow!("corrupt message: {e}"))?;
+        out.push((message, row.json.len()));
+    }
+    Ok(out)
+}
+
+/// The newest `limit` messages, oldest first (the owner's view).
+pub fn recent_messages(sql: &SqlStorage, limit: usize) -> anyhow::Result<Vec<Message>> {
+    Ok(recent_rows(sql, limit)?.into_iter().map(|(message, _)| message).collect())
+}
+
+/// The newest message (a turn's answer, once the turn is idle).
+pub fn last_message(sql: &SqlStorage) -> anyhow::Result<Option<Message>> {
+    Ok(recent_rows(sql, 1)?.pop().map(|(message, _)| message))
+}
+
+/// The conversation a step sees: the newest `messages_max` messages, cut
+/// to start at a kickoff, with the running turn whole and earlier turns
+/// while they fit (fragment_core::history). A running turn longer than
+/// the window fails its step; the next message starts a turn that fits.
+pub fn load_window(sql: &SqlStorage, messages_max: usize) -> anyhow::Result<Vec<Message>> {
+    let mut rows = recent_rows(sql, messages_max)?;
+    let shape: Vec<history::Row> = rows.iter().map(|(message, bytes)| history::Row { kickoff: is_kickoff(message), bytes: *bytes }).collect();
+    let start = history::window_start(&shape, history::WINDOW_EARLIER_BYTES_MAX)
+        .ok_or_else(|| anyhow!("the running turn outgrew the conversation window ({messages_max} messages); send a new message to start a turn"))?;
+    let window: Vec<Message> = rows.drain(start..).map(|(message, _)| message).collect();
+    assert!(window.first().is_some_and(is_kickoff), "the window starts at a kickoff");
+    Ok(window)
+}
+
+/// How many messages a step loads: the product's window, or a smaller one
+/// a dev fleet's test controls set.
+pub fn window_messages(sql: &SqlStorage) -> anyhow::Result<usize> {
+    Ok(match kv_u64(sql, "test_window_messages")? {
+        0 => history::WINDOW_MESSAGES_MAX,
+        n => (n as usize).min(history::WINDOW_MESSAGES_MAX),
+    })
 }
 
 /// Appends a message once: the same message applied again (a replayed
@@ -156,7 +205,8 @@ pub struct Store {
 #[async_trait]
 impl SessionLoader<Session> for Store {
     async fn load(&self, session_id: &str) -> anyhow::Result<Session> {
-        Ok(Session { id: session_id.to_string(), conversation: Conversation::new_unvalidated(load_messages(&self.sql)?) })
+        let window = load_window(&self.sql, window_messages(&self.sql)?)?;
+        Ok(Session { id: session_id.to_string(), conversation: Conversation::new_unvalidated(window) })
     }
 }
 

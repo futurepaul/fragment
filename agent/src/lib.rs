@@ -52,7 +52,7 @@ use worker::{durable_object, event, DurableObject, Env, Headers, Method, Request
 
 use crate::computer::Computer;
 use crate::fleet::Fleet;
-use crate::store::{kv_get, kv_set, kv_u64, load_messages};
+use crate::store::{kv_get, kv_set, kv_u64, last_message, recent_messages};
 use crate::turn::{Attached, Driver, Model, WATCHDOG_MS_DEFAULT, WATCHDOG_MS_MIN};
 
 const PRINCIPAL_HEADER: &str = "x-agent-principal";
@@ -76,6 +76,9 @@ const DEFAULT_MODEL: &str = "z-ai/glm-5.3-flash";
 /// A computer's URL, and its token.
 const COMPUTER_URL_MAX: usize = 1024;
 const COMPUTER_TOKEN_MAX: usize = 256;
+/// The newest rows of each list the owner's view shows (messages, steers,
+/// tool runs, steps): the view grew with the agent's age.
+const VIEW_ROWS_MAX: usize = fragment_core::history::WINDOW_MESSAGES_MAX;
 
 // ---------------------------------------------------------------- errors
 
@@ -252,6 +255,8 @@ struct TestControls {
     hold_in_tool_ms: Option<u64>,
     hold_after_tool_ms: Option<u64>,
     watchdog_ms: Option<u64>,
+    /// A smaller conversation window, so a test can outgrow it in a few turns.
+    window_messages: Option<u64>,
 }
 
 fn var(env: &Env, name: &str) -> Option<String> {
@@ -702,12 +707,17 @@ impl Agent {
             return Err(Fail::invalid(format!("watchdog_ms is at least {WATCHDOG_MS_MIN}")));
         }
         kv_set(&sql, "watchdog_ms", watchdog)?;
+        let window = body.window_messages.unwrap_or(0);
+        if window == 1 || window > fragment_core::history::WINDOW_MESSAGES_MAX as u64 {
+            return Err(Fail::invalid(format!("window_messages is 2-{} (0: the product's)", fragment_core::history::WINDOW_MESSAGES_MAX)));
+        }
+        kv_set(&sql, "test_window_messages", window)?;
         Ok(json!({ "ok": true }))
     }
 
     fn view(&self) -> Answer<Value> {
         let sql = self.sql();
-        let messages: Vec<Value> = load_messages(&sql)?
+        let messages: Vec<Value> = recent_messages(&sql, VIEW_ROWS_MAX)?
             .iter()
             .map(|message| {
                 let requests: Vec<Value> = message
@@ -726,7 +736,11 @@ impl Agent {
                 })
             })
             .collect();
-        let table = |query: &str| -> Answer<Vec<Value>> { Ok(sql.exec(query, None)?.to_array::<Value>()?) };
+        // the newest rows of a table, oldest first
+        let table = |columns: &str, table: &str| -> Answer<Vec<Value>> {
+            let query = format!("SELECT {columns} FROM (SELECT * FROM {table} ORDER BY seq DESC LIMIT ?) ORDER BY seq");
+            Ok(sql.exec(&query, vec![(VIEW_ROWS_MAX as i64).into()])?.to_array::<Value>()?)
+        };
         let get = |k: &str| kv_get(&sql, k).map(|v| v.unwrap_or_default());
         Ok(json!({
             "name": get("name")?,
@@ -746,9 +760,9 @@ impl Agent {
             },
             "watchdogRestarts": kv_u64(&sql, "watchdog_restarts")?,
             "messages": messages,
-            "steer": table("SELECT seq, text, consumed FROM steer ORDER BY seq")?,
-            "toolRuns": table("SELECT tool_call_id, tool, at, driver FROM tool_runs ORDER BY seq")?,
-            "steps": table("SELECT step, effects, ms, at, driver FROM steps ORDER BY seq")?,
+            "steer": table("seq, text, consumed", "steer")?,
+            "toolRuns": table("tool_call_id, tool, at, driver", "tool_runs")?,
+            "steps": table("step, effects, ms, at, driver", "steps")?,
         }))
     }
 
@@ -832,10 +846,10 @@ async fn reply(sql: &worker::SqlStorage, fleet: &Fleet) -> anyhow::Result<()> {
     let Some(token) = kv_get(sql, "reply_to")?.filter(|t| !t.is_empty()) else { return Ok(()) };
     let rows: Vec<Value> = sql.exec("SELECT fragment, reply FROM listens WHERE token = ?", vec![token.as_str().into()]).and_then(|c| c.to_array()).map_err(|e| anyhow::anyhow!("{e}"))?;
     let Some(listen) = rows.first() else { return Ok(()) };
-    let answer = load_messages(sql)?
-        .into_iter()
-        .rev()
-        .find(|m| m.role == rmcp::model::Role::Assistant && !m.as_concat_text().trim().is_empty());
+    // an idle turn ends with its answer: the newest message, read alone
+    // (reading the whole history for it grew with the agent's age). A turn
+    // that ended without text has nothing to say.
+    let answer = last_message(sql)?.filter(|m| m.role == rmcp::model::Role::Assistant && !m.as_concat_text().trim().is_empty());
     let Some(answer) = answer else { return Ok(()) };
     let id = fragment_core::tools::reply_id(answer.id.as_deref().unwrap_or(""));
     let fragment = listen["fragment"].as_str().unwrap_or("");

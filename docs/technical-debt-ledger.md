@@ -366,6 +366,23 @@ without a delete condition is unfinished design, not debt.
   the stream's `usage.cost`, one usage row per step keyed by agent, turn,
   and step).
 
+## An agent forgets what falls out of its conversation window
+
+- **Observed:** the reliability pass (audit R10). Each step loads the
+  newest 256 messages, cut to start at a turn's first message: the
+  running turn whole, and earlier turns while they total 256 KiB
+  (`fragment_core::history`). Nothing summarizes what falls out, and the
+  agent's tables (`messages`, `steps`, `tool_runs`, `steer`, `heard`)
+  keep every row; the owner's view shows the newest 256 of each.
+- **Risk:** an agent answers without context it had long ago, with no
+  sign that it lost it; its database grows with its age.
+- **First proof:** an agent asked about something said before its
+  window.
+- **Delete when:** goose's compaction runs on the window's edge (a
+  summary message stands in for what falls out), and rows older than
+  the summary are deleted, with a test that a fact from before the
+  window survives in the summary.
+
 ## The computer kills a shell command's tree itself
 
 - **Observed:** phase 8. `goose-developer`'s shell runs `$SHELL -c

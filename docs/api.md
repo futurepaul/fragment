@@ -530,7 +530,7 @@ template has it as an editor that listens. Its variables: `FRAGMENT_API`
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/agents` | a person with a username | `{name, model? ("z-ai/glm-5.3-flash"), instructions?}` → `{name, npub, model, id}`: made and registered as the caller's; again by its owner, the same answer (`replayed`); a name under someone else's username is 403 |
-| `GET /api/a/{name}` | owner | → `{name, id, owner, npub, model, active, driving, outcome (running, idle, stopped, error), error, tokens, watchdogRestarts, messages: [{id, role, text, tool_requests, tool_responses, steer}], steer, toolRuns, steps}` |
+| `GET /api/a/{name}` | owner | → `{name, id, owner, npub, model, active, driving, outcome (running, idle, stopped, error), error, tokens, watchdogRestarts, messages: [{id, role, text, tool_requests, tool_responses, steer}], steer, toolRuns, steps}` (each list its newest 256, oldest first) |
 | `POST /api/a/{name}/turns` | owner | `{text}` (at most 16 KiB) → `{started}`; during a turn, `{steered: true}` (read between steps) |
 | `POST /api/a/{name}/stop` | owner | → `{active, driving}`; a tool in flight is interrupted |
 | `GET /api/a/{name}/tools` | owner | → `{tools: ["platform__create_fragment", "platform__list_files", "platform__read_file", "platform__write_files", "platform__deploy", "<fragment>__<op>", ...]}`: the platform's verbs (a fragment the agent makes is its owner's, the agent an editor; a file write's key is the tool call's), then its fragments' operations |
@@ -541,14 +541,20 @@ template has it as an editor that listens. Its variables: `FRAGMENT_API`
 | `POST /api/a/{name}/computer/poll` | the connect token (`x-computer-token`) | → `{requests: [{rid, method, path, body}]}`: what the agent asks of its computer (the routes `fragment computer serve` answers), at once or within 25 s; one fetched and not answered in 40 s is handed out again; a wrong token 403 |
 | `POST /api/a/{name}/computer/answer` | the connect token | `{rid, status, body}` (at most 6 MiB) → `{ok}`. A turn leaves out a computer that has not polled in 60 s |
 | `DELETE /api/a/{name}/computer` | owner | → `{detached}` |
-| `POST /api/a/{name}/test` | owner, test fleets | `{hold_in_tool_ms?, hold_after_tool_ms?, watchdog_ms?}` |
+| `POST /api/a/{name}/test` | owner, test fleets | `{hold_in_tool_ms?, hold_after_tool_ms?, watchdog_ms?, window_messages? (2-256)}` |
 
 An agent's tools are the operations of the fragments whose members include
 it, those its role there may call (at most 16 fragments, 128
 tools), named `<fragment>__<op>` with the operation's input schema. A call
 is `POST /api/f/<fragment>/ops/<op>` signed by the agent with the id
 `tc:<40 hex of SHA-256 of the tool-call id>`: a replayed call replays the
-operation. At most 64 steps a turn.
+operation. At most 64 steps a turn. Each step sends the model a window
+of the conversation, not all of it: the newest 256 messages, cut to
+start at a turn's first message (so a tool call and its result stay
+together), with the running turn whole and earlier turns while they
+total 256 KiB. A turn that alone outgrows the window ends in an error;
+the next message starts a turn that fits. A channel-started turn's
+answer is its last message, when that is the model's text.
 
 ### Computers (`fragment computer serve`, phase 8)
 
