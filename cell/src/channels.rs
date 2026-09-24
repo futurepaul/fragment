@@ -33,6 +33,8 @@ use fragment_core::effects::{self, Effect};
 use fragment_core::npub;
 use fragment_proto::{limits, valid_channel_name, ChannelDecl, ChannelRecord, ErrorCode, Role, BUILTIN_CHANNELS};
 use futures_util::lock::{Mutex, OwnedMutexGuard};
+use serde::Deserialize;
+use serde_json::value::RawValue;
 use serde_json::{json, Value};
 use worker::*;
 
@@ -152,40 +154,54 @@ fn is_refusal(code: ErrorCode) -> bool {
     matches!(code, ErrorCode::InvalidRequest | ErrorCode::TooLarge)
 }
 
-fn record_json(r: &Value) -> ChannelRecord {
-    ChannelRecord {
-        channel: r["channel"].as_str().unwrap_or("").to_string(),
-        seq: r["seq"].as_i64().unwrap_or(0),
-        at: r["at"].as_i64().unwrap_or(0),
-        principal: r["principal"].as_str().map(npub::display).unwrap_or_default(),
-        kind: r["kind"].as_str().unwrap_or("").to_string(),
-        body: r["body"].as_str().and_then(|b| serde_json::from_str(b).ok()).unwrap_or(Value::Null),
+/// A stored record as its row holds it.
+#[derive(Deserialize)]
+struct RecordRow {
+    channel: String,
+    seq: i64,
+    at: i64,
+    principal: String,
+    kind: String,
+    body: String,
+}
+
+impl RecordRow {
+    /// The body stays the text the cell stored: checked to be JSON (a scan,
+    /// no tree built), never parsed into a value only to be written again.
+    fn record(self) -> CellResult<ChannelRecord> {
+        let body = RawValue::from_string(self.body).map_err(|e| CellError::host(format!("record {}#{}: its stored body is not JSON: {e}", self.channel, self.seq)))?;
+        Ok(ChannelRecord { principal: npub::display(&self.principal), channel: self.channel, seq: self.seq, at: self.at, kind: self.kind, body })
     }
 }
 
 impl FragmentCell {
     /// Appends a record; `op` = (ledger id, index) makes it idempotent.
     /// Answers the record, or `None` when that (op, index) already exists.
+    /// The record answered is the body given, as it was stored: nothing is
+    /// read back but its place.
     pub(crate) fn append(&self, channel: &str, principal: &str, kind: &str, body: &Value, op: Option<(&str, i64)>) -> CellResult<Option<ChannelRecord>> {
         let now = js::now_ms();
         let (op_id, idx) = match op {
             Some((id, i)) => (SqlStorageValue::from(id), SqlStorageValue::Integer(i)),
             None => (SqlStorageValue::Null, SqlStorageValue::Null),
         };
+        let body = serde_json::value::to_raw_value(body).expect("a JSON value serializes");
         let rows = self.rows(
             "INSERT INTO records (channel, seq, at, principal, kind, body, op, idx, outboxed)
              VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM records WHERE channel = ?), ?, ?, ?, ?, ?, ?, 0)
-             ON CONFLICT DO NOTHING RETURNING channel, seq, at, principal, kind, body",
-            vec![channel.into(), channel.into(), SqlStorageValue::Integer(now), principal.into(), kind.into(), body.to_string().into(), op_id, idx],
+             ON CONFLICT DO NOTHING RETURNING seq",
+            vec![channel.into(), channel.into(), SqlStorageValue::Integer(now), principal.into(), kind.into(), body.get().into(), op_id, idx],
         )?;
         let Some(row) = rows.first() else { return Ok(None) };
+        let seq = row["seq"].as_i64().expect("records.seq is INTEGER");
+        assert!(seq > 0, "a channel's records number from 1");
         if BUILTIN_CHANNELS.contains(&channel) {
             self.exec(
                 "DELETE FROM records WHERE channel = ? AND seq <= (SELECT MAX(seq) FROM records WHERE channel = ?) - ?",
                 vec![channel.into(), channel.into(), SqlStorageValue::Integer(limits::AUDIT_KEPT)],
             )?;
         }
-        let record = record_json(row);
+        let record = ChannelRecord { channel: channel.to_string(), seq, at: now, principal: npub::display(principal), kind: kind.to_string(), body };
         self.broadcast_record(&record);
         Ok(Some(record))
     }
@@ -197,12 +213,13 @@ impl FragmentCell {
         if let Some(record) = self.append(channel, principal, kind, body, Some((key, index)))? {
             return Ok((record, true));
         }
-        let rows = self.rows(
+        let rows: Vec<RecordRow> = self.typed(
             "SELECT channel, seq, at, principal, kind, body FROM records WHERE op = ? AND idx = ?",
             vec![key.into(), SqlStorageValue::Integer(index)],
         )?;
         // the insert conflicted on (op, idx), so a row holds them, and one effect names one channel
-        let record = rows.first().map(record_json).ok_or_else(|| CellError::host(format!("record ({key}, {index}) conflicted, and no record holds it")))?;
+        let row = rows.into_iter().next().ok_or_else(|| CellError::host(format!("record ({key}, {index}) conflicted, and no record holds it")))?;
+        let record = row.record()?;
         if record.channel != channel {
             return Err(CellError::host(format!("record ({key}, {index}) is on {:?}, not {channel:?}", record.channel)));
         }
@@ -254,11 +271,11 @@ impl FragmentCell {
 
     /// A page of records after `after`.
     pub(crate) fn read_channel(&self, channel: &str, after: i64, limit: usize) -> CellResult<Vec<ChannelRecord>> {
-        let rows = self.rows(
+        let rows: Vec<RecordRow> = self.typed(
             "SELECT channel, seq, at, principal, kind, body FROM records WHERE channel = ? AND seq > ? ORDER BY seq LIMIT ?",
             vec![channel.into(), SqlStorageValue::Integer(after), SqlStorageValue::Integer(limit.clamp(1, limits::CHANNEL_PAGE) as i64)],
         )?;
-        Ok(rows.iter().map(record_json).collect())
+        rows.into_iter().map(RecordRow::record).collect()
     }
 
     /// `GET /api/f/<name>/channels`

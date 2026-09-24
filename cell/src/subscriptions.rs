@@ -8,12 +8,23 @@
 
 use fragment_core::{egress, npub};
 use fragment_proto::{valid_channel_name, ChannelRecord, ErrorCode};
+use serde::Serialize;
 use serde_json::{json, Value};
 use worker::*;
 
 use crate::deliveries::Delivery;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, Caller, FragmentCell};
+
+/// A record's delivery: `{type: "record", fragment, channel, record}`.
+#[derive(Serialize)]
+struct RecordDelivery<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    fragment: &'a str,
+    channel: &'a str,
+    record: &'a ChannelRecord,
+}
 
 /// The subscriptions one fragment holds, and a URL's length.
 const SUBS_MAX: u64 = 32;
@@ -143,14 +154,15 @@ impl FragmentCell {
         let subs = self.rows("SELECT url FROM subs WHERE id = ?", vec![SqlStorageValue::Integer(sub)])?;
         let Some(url) = subs.first().map(|r| r["url"].as_str().expect("subs.url is TEXT").to_string()) else { return Ok(None) };
         let Some(record) = self.read_channel(channel, seq - 1, 1)?.into_iter().next().filter(|r| r.seq == seq) else { return Ok(None) };
-        let body = json!({ "type": "record", "fragment": fragment, "channel": channel, "record": record });
+        // serialized as it is: the record's body goes out as the text the cell stored
+        let body = serde_json::to_string(&RecordDelivery { kind: "record", fragment, channel, record: &record }).expect("a delivery serializes");
         Ok(Some(Delivery {
             fragment: fragment.to_string(),
             incarnation: incarnation.to_string(),
             kind: "record".into(),
             url,
             headers: vec![("content-type".into(), "application/json".into())],
-            body: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, body.to_string()),
+            body: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, body),
             sub: Some(sub),
         }))
     }

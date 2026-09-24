@@ -51,6 +51,7 @@ use fragment_proto::{
     Urls, Visibility,
 };
 use serde::de::DeserializeOwned;
+use serde_json::value::RawValue;
 use serde_json::{json, Value};
 use worker::wasm_bindgen::{JsCast, JsValue};
 use worker::*;
@@ -231,6 +232,29 @@ impl DurableObject for FragmentCell {
     }
 }
 
+/// An `events` record's body as `event` writes it.
+#[derive(serde::Deserialize)]
+struct EventBody<'a> {
+    #[serde(borrow)]
+    summary: &'a RawValue,
+    #[serde(borrow)]
+    data: &'a RawValue,
+}
+
+#[derive(serde::Serialize)]
+struct EventView<'a> {
+    id: i64,
+    at: i64,
+    kind: &'a str,
+    summary: &'a RawValue,
+    data: &'a RawValue,
+}
+
+#[derive(serde::Serialize)]
+struct Events<'a> {
+    events: Vec<EventView<'a>>,
+}
+
 /// Who is calling, as the router established it (`Routed`, less the name).
 pub struct Caller {
     /// Who signed, or whose session this is (`None`: anonymous): an
@@ -291,6 +315,11 @@ impl FragmentCell {
 
     pub(crate) fn rows(&self, q: &str, binds: Vec<SqlStorageValue>) -> CellResult<Vec<Value>> {
         Ok(self.sql().exec(q, binds)?.to_array::<Value>()?)
+    }
+
+    /// Rows decoded into `T`: a row that does not fit is a host fault.
+    pub(crate) fn typed<T: DeserializeOwned>(&self, q: &str, binds: Vec<SqlStorageValue>) -> CellResult<Vec<T>> {
+        Ok(self.sql().exec(q, binds)?.to_array::<T>()?)
     }
 
     pub(crate) fn exec(&self, q: &str, binds: Vec<SqlStorageValue>) -> CellResult<()> {
@@ -751,12 +780,14 @@ impl FragmentCell {
                 (oldest.first().and_then(|r| r["seq"].as_i64()).map_or(0, |seq| seq - 1), n)
             }
         };
-        let events: Vec<Value> = self
-            .read_channel("events", after, limit)?
-            .into_iter()
-            .map(|r| json!({ "id": r.seq, "at": r.at, "kind": r.kind, "summary": r.body["summary"], "data": r.body["data"] }))
-            .collect();
-        json_response(&json!({ "events": events }))
+        let records = self.read_channel("events", after, limit)?;
+        let mut events = Vec::with_capacity(records.len());
+        for r in &records {
+            // the platform's own body, `{summary, data}`, taken apart without building it
+            let body: EventBody = serde_json::from_str(r.body.get()).map_err(|e| CellError::host(format!("event {}: {e}", r.seq)))?;
+            events.push(EventView { id: r.seq, at: r.at, kind: &r.kind, summary: body.summary, data: body.data });
+        }
+        json_response(&Events { events })
     }
 
     /// The alarm runs the index and delivery outboxes, due schedules,
