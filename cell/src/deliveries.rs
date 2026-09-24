@@ -106,15 +106,15 @@ impl FragmentCell {
     /// Puts deliveries on the queue (at most `QUEUE_BATCH` a call).
     async fn enqueue(&self, deliveries: &[Delivery]) -> CellResult<()> {
         assert!(deliveries.len() <= QUEUE_BATCH, "a queue send takes at most {QUEUE_BATCH} messages");
+        if deliveries.is_empty() {
+            return Ok(());
+        }
         if self.cfg.test_hooks {
             let failures: i64 = self.meta(TEST_FAILURES_KEY)?.and_then(|n| n.parse().ok()).unwrap_or(0);
             if failures > 0 {
                 self.set_meta(TEST_FAILURES_KEY, &(failures - 1).to_string())?;
                 return Err(CellError::host("the queue send failed (a test hook)"));
             }
-        }
-        if deliveries.is_empty() {
-            return Ok(());
         }
         let bodies: Vec<Value> = deliveries.iter().map(|d| serde_json::to_value(d).expect("a delivery serializes")).collect();
         js::queue_send(self.env.as_ref(), "DELIVERIES", &bodies).await
@@ -234,20 +234,22 @@ impl FragmentCell {
     }
 
     /// A row the queue did not take: it waits, or after its last try it
-    /// goes, with an event.
+    /// goes, with an event. The first row to wait while no other does says
+    /// so once (an outage is one event, not one per delivery).
     fn outbox_failed(&self, id: i64, attempts: i64, why: &str) {
         let attempts = attempts + 1;
         if attempts >= OUTBOX_ATTEMPTS_MAX {
             self.outbox_done(id);
             self.event("delivery.failed", &format!("a delivery the queue did not take in {attempts} tries was dropped: {why}"), json!({ "outbox": id }));
-        } else {
-            let _ = self.exec(
-                "UPDATE delivery_outbox SET attempts = ?, next_at = ? WHERE id = ?",
-                vec![SqlStorageValue::Integer(attempts), SqlStorageValue::Integer(js::now_ms() + outbox_backoff_ms(attempts)), SqlStorageValue::Integer(id)],
-            );
-            if attempts == 1 {
-                self.event("delivery.deferred", &format!("a delivery waits in the outbox: {why}"), json!({ "outbox": id }));
-            }
+            return;
+        }
+        let waiting = self.count(&format!("SELECT COUNT(*) AS n FROM delivery_outbox WHERE attempts > 0 AND id != {id}")).unwrap_or(0);
+        let _ = self.exec(
+            "UPDATE delivery_outbox SET attempts = ?, next_at = ? WHERE id = ?",
+            vec![SqlStorageValue::Integer(attempts), SqlStorageValue::Integer(js::now_ms() + outbox_backoff_ms(attempts)), SqlStorageValue::Integer(id)],
+        );
+        if attempts == 1 && waiting == 0 {
+            self.event("delivery.deferred", &format!("deliveries wait in the outbox: {why}"), json!({ "outbox": id }));
         }
     }
 
