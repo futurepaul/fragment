@@ -1,9 +1,10 @@
 //! Channel subscriptions (phase 7): a member asks the fragment to deliver
 //! each new record of a channel it may read to a URL, such as an agent's
 //! inbox (MODEL.md, Agents: "the agent member subscribes"). Records go out
-//! through the delivery queue (deliveries.rs) as `{type: "record",
-//! fragment, channel, record}`, unsigned: the URL is the subscriber's
-//! capability. A member's subscriptions end with its membership.
+//! through the delivery outbox and queue (deliveries.rs) as `{type:
+//! "record", fragment, channel, record}`, unsigned: the URL is the
+//! subscriber's capability. A member's subscriptions end with its
+//! membership.
 
 use fragment_core::{egress, npub};
 use fragment_proto::{valid_channel_name, ChannelRecord, ErrorCode};
@@ -92,28 +93,36 @@ impl FragmentCell {
         self.exec("DELETE FROM subs WHERE principal = ?", vec![principal.into()])
     }
 
-    /// Queues a new record to the channel's subscribers.
+    /// A new record's deliveries, one per subscription to its channel:
+    /// written to the delivery outbox in the same turn as the record (the
+    /// callers append, then call this, with no await between), then sent.
     pub(crate) async fn deliver_record(&self, record: &ChannelRecord) -> CellResult<()> {
-        let rows = self.rows("SELECT id, url FROM subs WHERE channel = ?", vec![record.channel.as_str().into()])?;
-        if rows.is_empty() {
-            return Ok(());
+        let rows = self.rows(
+            "INSERT INTO delivery_outbox (kind, sub, channel, seq, next_at) SELECT 'record', id, channel, ?, ? FROM subs WHERE channel = ? RETURNING id",
+            vec![SqlStorageValue::Integer(record.seq), SqlStorageValue::Integer(crate::js::now_ms()), record.channel.as_str().into()],
+        )?;
+        if !rows.is_empty() {
+            self.drain_deliveries().await;
         }
-        let (fragment, incarnation) = (self.must("name")?, self.must("created_at")?);
-        let body = json!({ "type": "record", "fragment": fragment, "channel": record.channel, "record": record });
-        let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, body.to_string());
-        let deliveries = rows
-            .iter()
-            .map(|r| Delivery {
-                fragment: fragment.clone(),
-                incarnation: incarnation.clone(),
-                kind: "record".into(),
-                url: r["url"].as_str().unwrap_or("").to_string(),
-                headers: vec![("content-type".into(), "application/json".into())],
-                body: encoded.clone(),
-                sub: r["id"].as_i64(),
-            })
-            .collect();
-        self.enqueue(deliveries).await?;
         Ok(())
+    }
+
+    /// The delivery of record `seq` of `channel` to subscription `sub`, or
+    /// `None` when there is nothing to send: the subscription ended, or the
+    /// record is past its retention.
+    pub(crate) fn record_delivery(&self, sub: i64, channel: &str, seq: i64, fragment: &str, incarnation: &str) -> CellResult<Option<Delivery>> {
+        let subs = self.rows("SELECT url FROM subs WHERE id = ?", vec![SqlStorageValue::Integer(sub)])?;
+        let Some(url) = subs.first().map(|r| r["url"].as_str().expect("subs.url is TEXT").to_string()) else { return Ok(None) };
+        let Some(record) = self.read_channel(channel, seq - 1, 1)?.into_iter().next().filter(|r| r.seq == seq) else { return Ok(None) };
+        let body = json!({ "type": "record", "fragment": fragment, "channel": channel, "record": record });
+        Ok(Some(Delivery {
+            fragment: fragment.to_string(),
+            incarnation: incarnation.to_string(),
+            kind: "record".into(),
+            url,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, body.to_string()),
+            sub: Some(sub),
+        }))
     }
 }

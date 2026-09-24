@@ -123,6 +123,11 @@ CREATE TABLE IF NOT EXISTS pending (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, ledger_id TEXT NOT NULL UNIQUE, op TEXT NOT NULL, principal TEXT NOT NULL,
   depth INTEGER NOT NULL, tries INTEGER NOT NULL, next_at INTEGER NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS pending_due ON pending (next_at);
+CREATE TABLE IF NOT EXISTS delivery_outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL CHECK (kind IN ('record', 'push', 'notify')),
+  sub INTEGER, channel TEXT, seq INTEGER, who TEXT, url TEXT, body TEXT,
+  after_sub INTEGER NOT NULL DEFAULT 0, upto_sub INTEGER NOT NULL DEFAULT 0,
+  attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS spend (ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, at INTEGER NOT NULL, video TEXT);
 CREATE INDEX IF NOT EXISTS spend_run ON spend (run);
 ";
@@ -398,6 +403,24 @@ impl FragmentCell {
                 _ => return Err(CellError::invalid("op is seal {plaintext} or open {sealed}")),
             };
             return json_response(&answer);
+        }
+        if path == "/test/fragment" && self.cfg.test_hooks {
+            // levers the e2e pulls on one fragment
+            let body: Value = body_json(&mut req).await?;
+            match body["op"].as_str() {
+                Some("fail-deliveries") => {
+                    let times = body["times"].as_u64().ok_or_else(|| CellError::invalid("fail-deliveries names how many times"))?;
+                    self.set_meta(crate::deliveries::TEST_FAILURES_KEY, &times.to_string())?;
+                }
+                Some("drop-live") => {
+                    let code = body["code"].as_u64().and_then(|c| u16::try_from(c).ok()).ok_or_else(|| CellError::invalid("drop-live names a close code"))?;
+                    for ws in self.state.get_websockets_with_tag("live") {
+                        let _ = ws.close(Some(code), Some("dropped by a test hook"));
+                    }
+                }
+                _ => return Err(CellError::invalid("op is fail-deliveries {times} or drop-live {code}")),
+            }
+            return json_response(&json!({ "ok": true }));
         }
         if let Some(step) = path.strip_prefix("/job/") {
             // Only this script's Workflow sets the header; the router never passes it.
@@ -742,8 +765,9 @@ impl FragmentCell {
         json_response(&json!({ "events": events }))
     }
 
-    /// The alarm runs the index outbox, due schedules, queued runs, and the
-    /// poll backstop (which also checks running runs), then re-arms.
+    /// The alarm runs the index and delivery outboxes, due schedules,
+    /// queued runs, and the poll backstop (which also checks running runs),
+    /// then re-arms.
     async fn on_alarm(&self) -> CellResult<()> {
         if self.meta("created_at")?.is_none() {
             return Ok(());
@@ -757,6 +781,7 @@ impl FragmentCell {
         } else if let Err(e) = self.join_owners_agent().await {
             self.event("agent.join-failed", &e.message, json!({ "code": e.code }));
         }
+        self.drain_deliveries().await;
         // Settles pending mutations that are due; one that fails waits for
         // its own next try and never fails the alarm.
         self.sweep_due().await?;
@@ -824,7 +849,7 @@ impl FragmentCell {
         }
         let poll_at: i64 = self.meta("poll_at")?.and_then(|s| s.parse().ok()).unwrap_or_else(|| js::now_ms() + self.cfg.poll_interval_ms);
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
-        let due = [outbox, self.runs_due_at()?, self.pending_due_at()?, also];
+        let due = [outbox, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, also];
         let at = due.into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + min_ms);
         self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;
         Ok(())

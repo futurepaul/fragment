@@ -92,6 +92,24 @@ pub fn push(s: &mut Suite, api: &Api) -> Result<()> {
     let before = s.push.received("a").len();
     api.op(&owner, &name, "notify_all", "n3", json!({ "title": "flaky" }))?;
     s.ok("a push service's 503 is retried until it lands", s.eventually(Duration::from_secs(60), || s.push.received("a").len() == before + 2), "");
+
+    // the outbox: a record or a push whose queue send fails is still
+    // delivered, since it was written down with what caused it
+    let fail_queue = |times: u32| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "fail-deliveries", "times": times })));
+    let r = api.signed(&owner, "POST", &format!("/api/f/{name}/subscriptions"), Some(&json!({ "channel": "news", "url": format!("{}/notify", s.push.url) })))?;
+    s.ok("a member subscribes a URL to a channel", r.status == 200, &r);
+    let r = fail_queue(1)?;
+    s.ok("(the test fleet fails the next queue send)", r.status == 200, &r);
+    api.op(&owner, &name, "headline", "h1", json!({ "text": "past a failed queue" }))?;
+    let arrived = s.eventually(wait, || s.push.notified().iter().any(|f| f["type"] == "record" && f["record"]["body"]["text"] == "past a failed queue"));
+    let deferred = events(api, &owner, &name).contains("delivery.deferred");
+    s.ok("a record whose queue send failed still reaches its subscriber, from the outbox", arrived && deferred, format!("deferred: {deferred}"));
+    let before = s.push.received("a").len();
+    fail_queue(1)?;
+    api.op(&owner, &name, "notify_all", "n4", json!({ "title": "past a failed queue" }))?;
+    let pushed = s.eventually(wait, || s.push.received("a").len() == before + 1);
+    s.ok("a push whose queue send failed still reaches the browser", pushed && s.push.received("a").last() == Some(&json!({ "title": "past a failed queue", "body": "from a mutation" })), format!("{:?}", s.push.received("a")));
+
     let r = site("__push-unsub", Some(json!({ "endpoint": format!("{}/push/a", s.push.url) })))?;
     s.ok("a page unsubscribes by its endpoint", r.status == 200 && r.body["removed"] == 1, &r);
 
