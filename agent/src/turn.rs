@@ -32,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 use worker::send::SendFuture;
 use worker::{Delay, Fetch, Headers, Method, Request, RequestInit, SqlStorage, Storage};
 
+use crate::computer::{self, Computer, ComputerTools};
 use crate::fleet::Fleet;
 use crate::js;
 use crate::store::{self, kv_get, kv_set, kv_u64, Effect, Session, Store, SESSION_ID};
@@ -51,11 +52,18 @@ pub struct Model {
     pub name: String,
 }
 
+/// A computer attached to the agent, and the project directory its tools work in.
+pub struct Attached {
+    pub computer: Computer,
+    pub cwd: String,
+}
+
 pub struct Driver {
     pub storage: Storage,
     pub model: Model,
     pub fleet: Fleet,
     pub instructions: String,
+    pub computer: Option<Attached>,
     pub cancel: CancellationToken,
     pub id: String,
 }
@@ -256,14 +264,37 @@ async fn run_steps(driver: &Driver, machine: &StateMachine<'_, Session, Effect>,
 /// (the model answered), "yielded", or an error.
 pub async fn drive(driver: Driver) -> anyhow::Result<&'static str> {
     let sql = driver.storage.sql();
+    // armed before reaching a computer, which can take its retries
+    arm_watchdog(&driver.storage, &sql).await?;
     let store = Store { sql: driver.storage.sql() };
     let provider: Arc<dyn Provider> = Arc::new(OpenRouter { base: driver.model.base.clone(), key: driver.model.key.clone() });
     let tools = FragmentTools::new(driver.fleet.clone(), driver.storage.sql(), driver.id.clone());
+    let mut operation = ToolOperation::new().with_provider(Arc::new(tools));
+    let mut instructions = driver.instructions.clone();
+    let in_flight = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
+    if let Some(attached) = &driver.computer {
+        // the computer's tools join the fragments' for this turn
+        let c = attached.computer.clone();
+        let manifest = SendFuture::new(async move { c.get("/tools").await }).await?;
+        instructions.push_str(&format!(
+            "\n\nYou also have a computer. Its tools (shell, write, edit, tree) work in the project directory `{}` there.\n\n{}",
+            attached.cwd,
+            manifest["instructions"].as_str().unwrap_or("")
+        ));
+        operation = operation.with_provider(Arc::new(ComputerTools {
+            computer: attached.computer.clone(),
+            cwd: attached.cwd.clone(),
+            tools: computer::tools_of(&manifest)?,
+            sql: driver.storage.sql(),
+            driver: driver.id.clone(),
+            in_flight: in_flight.clone(),
+        }));
+    }
     let machine: StateMachine<Session, Effect> = StateMachine::new(
         vec![
-            Step::Operation(Arc::new(ToolOperation::new().with_provider(Arc::new(tools)))),
+            Step::Operation(Arc::new(operation)),
             Step::Operation(Arc::new(Steer { sql: driver.storage.sql() })),
-            Step::Operation(Arc::new(Instructions(driver.instructions.clone()))),
+            Step::Operation(Arc::new(Instructions(instructions))),
             Step::Inference(Arc::new(InferenceRunner::new(provider, ModelConfig::new(&driver.model.name)))),
         ],
         driver.cancel.clone(),
@@ -279,6 +310,11 @@ pub async fn drive(driver: Driver) -> anyhow::Result<&'static str> {
     };
     let (outcome, events) = futures::join!(run_steps(&driver, &machine, &store, emit), drain);
     kv_set(&sql, "events", kv_u64(&sql, "events")? + events)?;
+    let left: Vec<String> = std::mem::take(&mut *in_flight.lock().expect("in-flight lock")).into_iter().collect();
+    if let (Some(attached), false) = (&driver.computer, left.is_empty()) {
+        let c = attached.computer.clone();
+        SendFuture::new(async move { c.cancel_all(left).await }).await;
+    }
     if kv_get(&sql, "cancel")?.as_deref() == Some("1") && outcome.is_ok() {
         return Ok("stopped");
     }

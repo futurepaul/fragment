@@ -118,6 +118,7 @@ impl Suite {
             openrouter_url: Some(self.openrouter.url.clone()),
             openrouter_key: OPENROUTER_KEY.into(),
             test_hooks: true,
+            egress_local: true,
         }
         .write_vars(&self.agents_project)?;
         let opts = devstack::NodeOptions { project: self.agents_project.clone(), port: self.agents_port, clean, watch: false, env: vec![] };

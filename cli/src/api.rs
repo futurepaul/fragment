@@ -171,6 +171,9 @@ impl Client {
     pub fn post_json(&self, path: &str, v: &Value) -> Result<Resp> {
         self.request("POST", path, Some(serde_json::to_vec(v)?))
     }
+    pub fn put_json(&self, path: &str, v: &Value) -> Result<Resp> {
+        self.request("PUT", path, Some(serde_json::to_vec(v)?))
+    }
     pub fn put_bytes(&self, path: &str, bytes: Vec<u8>) -> Result<Resp> {
         self.request("PUT", path, Some(bytes))
     }

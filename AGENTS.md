@@ -13,6 +13,7 @@ from github.com/futurepaul/fragment) and on celld
 2. `docs/MODEL.md` — the core model on celld primitives and the spikes.
    `docs/api.md` — the wire contract the cell answers.
    `docs/phase-5.md` — agents (built overnight; choices for review);
+   `docs/phase-8.md` — computers, first part (the same night);
    `docs/phase-3.md` — hosting on fragment.club;
    `docs/phase-2.md` — the record of the core cut (slices A–G);
    `docs/operate.md` — the operator runbook.
@@ -37,12 +38,13 @@ debt ledger).
   (builds the celld fork with the alarm fix into `target/celld/bin`).
 - `cargo xtask check`: host tests and clippy (host and wasm), warnings
   denied.
-- `cargo xtask e2e [--only <section>]`: builds `cell/` and the CLI, then
+- `cargo xtask e2e [--only <section>]`: builds `cell/` and the CLI (with
+  its `computer` feature), then
   runs `crates/e2e` against a fresh `celld dev` node and the in-process
   code.storage fake (sections: auth, create, lockdown, members, secrets,
   files, deploy, ops, public, site, watch, schemas, channels, live,
   routes, cli, browser, jobs, triggers, appfiles, blobs, notes, push,
-  ai, agents, chat, sync, restart, pathmode, creators). The browser and notes sections drive headless
+  ai, agents, chat, computer, sync, restart, pathmode, creators). The browser and notes sections drive headless
   Chrome (`CHROME_BIN` to choose one); `triggers` waits for a cron
   minute (about a minute). The node runs from a staged copy of the cell
   (`target/e2e/cell`), so the e2e and `cargo xtask dev` can run at once.

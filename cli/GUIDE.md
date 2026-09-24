@@ -301,6 +301,25 @@ my-bot my-chat`, gets an answer to every message from someone else. The
 agent fleet is `FRAGMENT_AGENTS` (default `http://127.0.0.1:8793`, the
 dev stack's).
 
+An agent with a computer also gets goose's developer tools (shell,
+write, edit, tree) there. On the computer (a CLI built with
+`--features computer`):
+
+```
+fragment computer serve --listen 0.0.0.0:8080   # makes .fragment-computer/token the first time
+```
+
+and from anywhere, with a copy of that token file:
+
+```
+fragment agent computer my-bot --url https://my-computer.example --token-file token --cwd site
+fragment agent computer my-bot --detach
+```
+
+Its commands run in `work/<cwd>` on the computer. Stop kills a running
+command; a replayed call never runs twice, and one the computer's own
+restart cut off comes back "interrupted".
+
 ## Secrets
 
 ```
@@ -344,7 +363,8 @@ fragment verify <name> [--dir D]         fragment secret set|list|rm ...
 fragment deploy <name> [--dir D] [--preview] [--note N]
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment build [DIR]                     fragment rm <name>
-fragment guide
+fragment agent create|show|say|stop|tools|listen|computer ...
+fragment computer serve [--listen A]     fragment guide
 ```
 
 Global flags: `--host <url>` (or `FRAGMENT_HOST`, or `fragment host

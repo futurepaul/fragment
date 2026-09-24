@@ -357,6 +357,8 @@ each agent's key), `FRAGMENT_API` (the platform it acts on),
 | `GET /api/a/{name}/tools` | owner | → `{tools: ["<fragment>__<op>", ...]}` |
 | `POST /api/a/{name}/listen` | owner | `{fragment, channel? ("chat"), reply? ("say")}` → `{fragment, channel, reply, subscription}`: the agent subscribes itself to the channel (it must be a member) with an inbox URL of its own (`AGENT_URL`); at most 16 |
 | `POST /api/a/{name}/inbox/{token}` | the fragment's delivery (the token is the capability) | a record: someone else's starts a turn (or steers the running one); the agent's own, and one heard before, are ignored; the turn's last answer goes back as `POST /api/f/{fragment}/ops/{reply}` `{text}` with the id `rp:<40 hex of SHA-256 of its message id>`; an unknown token is 404 |
+| `PUT /api/a/{name}/computer` | owner | `{url, token, cwd? ("work")}` → `{url, cwd, tools}`: attaches a computer once it answers `GET /tools` with that token (400 when it refuses it, 502 when it does not answer); the token is sealed like the agent's key |
+| `DELETE /api/a/{name}/computer` | owner | → `{detached}` |
 | `POST /api/a/{name}/test` | owner, test fleets | `{hold_in_tool_ms?, hold_after_tool_ms?, watchdog_ms?}` |
 
 An agent's tools are the operations of the fragments whose members include
@@ -365,3 +367,23 @@ tools), named `<fragment>__<op>` with the operation's input schema. A call
 is `POST /api/f/<fragment>/ops/<op>` signed by the agent with the id
 `tc:<40 hex of SHA-256 of the tool-call id>`: a replayed call replays the
 operation. At most 64 steps a turn.
+
+### Computers (`fragment computer serve`, phase 8)
+
+A computer answers its agent with goose's developer tools. Every route
+but `/health` takes `authorization: Bearer <its token>` (the file
+`--token-file` names, made 0600 on first start).
+
+| method & path | body → answer |
+| --- | --- |
+| `GET /health` | → `ok` |
+| `GET /tools` | → `{tools: [shell, write, edit, tree as MCP tools], instructions}` |
+| `POST /calls` | `{id, name, arguments, cwd, wait_ms? (at most 25000)}` → the call's record `{id, name, cwd, status (running, done, interrupted), started_at, finished_at, runs, result}`: starts the call, or re-attaches to the one with that id; waits up to `wait_ms` for it |
+| `GET /calls/{id}?wait_ms=` | → the record; 404 for an unknown id |
+| `POST /calls/{id}/cancel` | → `{cancelled}`; a shell command's process tree is killed |
+
+The agent names a call `tc-<40 hex of SHA-256 of the tool-call id>` and
+sends the attached `cwd` (`[a-z0-9-]{1,64}`, a directory under `--work`).
+Records live under `--state`: a record still `running` when the computer
+restarts answers `interrupted` and does not run again. While a computer is
+attached, a turn offers its tools beside the fragments' operations.

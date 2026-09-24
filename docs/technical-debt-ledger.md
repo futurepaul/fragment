@@ -270,3 +270,21 @@ without a delete condition is unfinished design, not debt.
 - **First proof:** the agent fleet hosted with people other than Paul.
 - **Delete when:** phase 4's budgets (decision 14) meter model calls per
   owner, with the person's own OpenRouter key and its limit.
+
+## The computer kills a shell command's tree itself
+
+- **Observed:** phase 8. `goose-developer`'s shell runs `$SHELL -c
+  <command>` in the computer's own process group and, on cancel or
+  timeout, kills only that shell: the command's children run on.
+  `fragment computer serve` starts each command with a no-op naming its
+  call (`: fragment-call-<id>;`) and, on cancel, finds that shell with
+  `pgrep` and kills its tree first (`crates/computer`).
+- **Risk:** a command that detaches into its own session escapes the
+  kill; a timed-out command's children still run on, since the timeout
+  is goose's.
+- **First proof:** a builder's dev server, or a runaway build, still
+  running after its turn was stopped or its call timed out.
+- **Delete when:** `goose-developer` gives each command its own process
+  group and kills the group on cancel and on timeout (a commit on
+  `futurepaul/goose`, and upstream), proven by the unit test
+  `cancelling_a_shell_call_kills_its_children` with the tag removed.

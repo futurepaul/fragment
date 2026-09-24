@@ -68,7 +68,8 @@ once); SIGKILL between steps (nothing runs again).
   (its own bucket prefix and Machines, or a process beside each node).
   Infrastructure and spend: Paul's call.
 - Streaming a turn's tokens to viewers; an owner's list of their agents.
-- The computer shape (phase 8): the loop on the agent's Sprite.
+- The computer shape: its first part (tools on an attached computer, the
+  loop still in the cell) is in `docs/phase-8.md`.
 
 ## Phase 7's first part: chats with an agent in them
 

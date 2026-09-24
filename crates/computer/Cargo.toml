@@ -1,0 +1,20 @@
+[package]
+name = "fragment-computer"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "`fragment computer serve`: goose's developer tools over HTTP, with a journal keyed by tool-call id (the CLI's `computer` feature)."
+
+[dependencies]
+# goose's GDK from the fork (wasm fixes and goose-developer), pinned by commit
+# as agent/ pins it: https://github.com/futurepaul/goose/commit/12922e7
+goose-developer = { git = "https://github.com/futurepaul/goose", rev = "12922e73ce9f8a36ec157813305ee33be0896873" }
+rmcp = { version = "3.2.0", default-features = false }
+tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "signal", "net", "io-util"] }
+tokio-util = "0.7.12"
+axum = "=0.8.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+rand = "0.8"
+hex = "0.4"

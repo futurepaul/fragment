@@ -8,8 +8,14 @@ license = "MIT"
 name = "fragment"
 path = "src/main.rs"
 
+[features]
+# `fragment computer serve` (goose's developer tools): built for computers
+# and by the e2e; left out of the everyday CLI.
+computer = ["dep:fragment-computer"]
+
 [dependencies]
 fragment-core = { path = "../crates/core" }
+fragment-computer = { path = "../crates/computer", optional = true }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -11,6 +11,8 @@
 //!   POST /api/a/{name}/stop           stop the running turn
 //!   GET  /api/a/{name}/tools          the tools its memberships give it now
 //!   POST /api/a/{name}/listen         {fragment, channel? ("chat"), reply? ("say")}: follow a channel
+//!   PUT  /api/a/{name}/computer       {url, token, cwd? ("work")}: attach a computer (`fragment computer serve`)
+//!   DELETE /api/a/{name}/computer     detach it
 //!   POST /api/a/{name}/test           test controls (dev fleets: AGENT_TEST_HOOKS=allow)
 //!
 //! A listened-to channel's records arrive at `POST /api/a/{name}/inbox/{token}`
@@ -18,6 +20,7 @@
 //! someone else starts a turn (or steers the running one), and the turn's
 //! last answer goes back through the fragment's reply operation.
 
+mod computer;
 mod fleet;
 mod js;
 mod store;
@@ -38,9 +41,10 @@ use tokio_util::sync::CancellationToken;
 use worker::wasm_bindgen;
 use worker::{durable_object, event, DurableObject, Env, Headers, Method, Request, RequestInit, Response, State, Url};
 
+use crate::computer::Computer;
 use crate::fleet::Fleet;
 use crate::store::{kv_get, kv_set, kv_u64, load_messages};
-use crate::turn::{Driver, Model, WATCHDOG_MS_DEFAULT, WATCHDOG_MS_MIN};
+use crate::turn::{Attached, Driver, Model, WATCHDOG_MS_DEFAULT, WATCHDOG_MS_MIN};
 
 const PRINCIPAL_HEADER: &str = "x-agent-principal";
 const MESSAGE_TEXT_MAX: usize = 16 * 1024;
@@ -52,6 +56,9 @@ const BODY_MAX: usize = 64 * 1024;
 const LISTENS_MAX: usize = 16;
 /// The platform's default model (ROADMAP decision 7).
 const DEFAULT_MODEL: &str = "z-ai/glm-5.3-flash";
+/// A computer's URL, and its token.
+const COMPUTER_URL_MAX: usize = 1024;
+const COMPUTER_TOKEN_MAX: usize = 256;
 
 // ---------------------------------------------------------------- errors
 
@@ -198,6 +205,13 @@ struct ListenBody {
     reply: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct ComputerBody {
+    url: String,
+    token: String,
+    cwd: Option<String>,
+}
+
 #[derive(Deserialize, Default)]
 struct TestControls {
     hold_in_tool_ms: Option<u64>,
@@ -214,6 +228,13 @@ fn host_secrets(env: &Env) -> Answer<Vec<String>> {
     match all.first() {
         Some(s) if s.len() >= secrets::HOST_SECRET_MIN_BYTES => Ok(all),
         _ => Err(Fail::host("FRAGMENT_HOST_SECRET is not set on this fleet (at least 32 bytes)")),
+    }
+}
+
+fn unanswered(why: computer::Unanswered) -> Fail {
+    match why {
+        computer::Unanswered::Refused => Fail::invalid("the computer refused this token (it is in the file `fragment computer serve --token-file` names)"),
+        computer::Unanswered::Unreachable(e) => Fail::new(ErrorCode::UpstreamFailed, format!("the computer did not answer: {e}")),
     }
 }
 
@@ -251,6 +272,59 @@ impl Agent {
 
     fn fleet(&self) -> Answer<Fleet> {
         Ok(Fleet { base: fleet::base(&self.env)?, keys: self.keys()? })
+    }
+
+    /// The attached computer, its token opened (sealed under the fleet's
+    /// host secret, salted with the agent's npub).
+    fn computer(&self) -> Answer<Option<Attached>> {
+        let sql = self.sql();
+        let Some(url) = kv_get(&sql, "computer_url")?.filter(|u| !u.is_empty()) else { return Ok(None) };
+        let sealed = kv_get(&sql, "computer_token")?.ok_or_else(|| Fail::host("the computer has no token"))?;
+        let npub = kv_get(&sql, "npub")?.unwrap_or_default();
+        let hosts = host_secrets(&self.env)?;
+        let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
+        let opened = secrets::open(&hosts, &format!("{npub}/computer"), &sealed).map_err(|e| Fail::host(format!("the computer's token: {e}")))?;
+        let token = String::from_utf8(opened.plaintext).map_err(|_| Fail::host("the computer's token is not text"))?;
+        let cwd = kv_get(&sql, "computer_cwd")?.unwrap_or_else(|| "work".into());
+        Ok(Some(Attached { computer: Computer { url, token }, cwd }))
+    }
+
+    /// Attaches a computer once it answers with this token: its tools join
+    /// the agent's next turns.
+    async fn attach(&self, body: ComputerBody) -> Answer<Value> {
+        let url = body.url.trim().trim_end_matches('/').to_string();
+        if url.len() > COMPUTER_URL_MAX {
+            return Err(Fail::invalid(format!("a computer URL is at most {COMPUTER_URL_MAX} bytes")));
+        }
+        let local = var(&self.env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow");
+        fragment_core::egress::check(&url, local).map_err(|e| Fail::invalid(format!("url: {e}")))?;
+        if body.token.len() < 16 || body.token.len() > COMPUTER_TOKEN_MAX {
+            return Err(Fail::invalid(format!("a computer token is 16-{COMPUTER_TOKEN_MAX} bytes")));
+        }
+        let cwd = body.cwd.unwrap_or_else(|| "work".into());
+        if !computer::valid_cwd(&cwd) {
+            return Err(Fail::invalid(format!("cwd is 1-{} of [a-z0-9-]", computer::CWD_MAX)));
+        }
+        let c = Computer { url: url.clone(), token: body.token.clone() };
+        let manifest = c.check().await.map_err(unanswered)?;
+        let tools: Vec<String> = computer::tools_of(&manifest)?.iter().map(|t| t.name.to_string()).collect();
+        let sql = self.sql();
+        let npub = kv_get(&sql, "npub")?.unwrap_or_default();
+        let hosts = host_secrets(&self.env)?;
+        let sealed = secrets::seal(&hosts[0], &format!("{npub}/computer"), body.token.as_bytes(), js::random_bytes()).map_err(Fail::host)?;
+        kv_set(&sql, "computer_url", &url)?;
+        kv_set(&sql, "computer_token", sealed)?;
+        kv_set(&sql, "computer_cwd", &cwd)?;
+        Ok(json!({ "url": url, "cwd": cwd, "tools": tools }))
+    }
+
+    fn detach(&self) -> Answer<Value> {
+        let sql = self.sql();
+        let attached = kv_get(&sql, "computer_url")?.is_some_and(|u| !u.is_empty());
+        for k in ["computer_url", "computer_token", "computer_cwd"] {
+            kv_set(&sql, k, "")?;
+        }
+        Ok(json!({ "detached": attached }))
     }
 
     fn create(&self, principal: &str, body: CreateBody) -> Answer<Value> {
@@ -309,6 +383,7 @@ impl Agent {
             model,
             fleet: fleet.clone(),
             instructions,
+            computer: self.computer()?,
             cancel: token.clone(),
             id: format!("{}:{reason}", self.booted_at),
         };
@@ -524,6 +599,10 @@ impl Agent {
             "outcome": get("outcome")?,
             "error": get("last_error")?,
             "tokens": { "input": kv_u64(&sql, "tokens_in")?, "output": kv_u64(&sql, "tokens_out")? },
+            "computer": match get("computer_url")? {
+                url if url.is_empty() => Value::Null,
+                url => json!({ "url": url, "cwd": get("computer_cwd")? }),
+            },
             "watchdogRestarts": kv_u64(&sql, "watchdog_restarts")?,
             "messages": messages,
             "steer": table("SELECT seq, text, consumed FROM steer ORDER BY seq")?,
@@ -558,7 +637,16 @@ impl Agent {
                     (Method::Post, "turns") => self.turn(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?),
                     (Method::Post, "stop") => self.stop(),
                     (Method::Post, "listen") => self.listen(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?).await,
-                    (Method::Get, "tools") => from(json!({ "tools": tools::list(self.fleet()?).await? })),
+                    (Method::Get, "tools") => {
+                        let mut names = tools::list(self.fleet()?).await?;
+                        if let Some(attached) = self.computer()? {
+                            let manifest = attached.computer.check().await.map_err(unanswered)?;
+                            names.extend(computer::tools_of(&manifest)?.iter().map(|t| t.name.to_string()));
+                        }
+                        from(json!({ "tools": names }))
+                    }
+                    (Method::Put, "computer") => self.attach(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?).await,
+                    (Method::Delete, "computer") => self.detach(),
                     (Method::Post, "test") => self.test(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?),
                     _ => Err(Fail::new(ErrorCode::NotFound, format!("no route {} {action}", method.as_ref()))),
                 }

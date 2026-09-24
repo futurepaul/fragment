@@ -18,12 +18,12 @@ use crate::Suite;
 const TODO_APP: &[u8] = include_bytes!("../../fixtures/todo.mjs");
 const TODO_JSON: &[u8] = include_bytes!("../../fixtures/todo.json");
 
-fn view(agents: &Api, owner: &Keys, name: &str) -> Value {
+pub(super) fn view(agents: &Api, owner: &Keys, name: &str) -> Value {
     agents.signed(owner, "GET", &format!("/api/a/{name}"), None).map(|r| r.body).unwrap_or_default()
 }
 
 /// The agent's view once its turn has ended (or the last view seen).
-fn settle(s: &Suite, agents: &Api, owner: &Keys, name: &str, wait: Duration) -> Value {
+pub(super) fn settle(s: &Suite, agents: &Api, owner: &Keys, name: &str, wait: Duration) -> Value {
     let mut last = Value::Null;
     s.eventually(wait, || {
         last = view(agents, owner, name);
@@ -32,7 +32,7 @@ fn settle(s: &Suite, agents: &Api, owner: &Keys, name: &str, wait: Duration) -> 
     last
 }
 
-fn todos(api: &Api, owner: &Keys, name: &str) -> Vec<String> {
+pub(super) fn todos(api: &Api, owner: &Keys, name: &str) -> Vec<String> {
     api.op(owner, name, "list", "q", json!({}))
         .ok()
         .and_then(|r| r.body["result"]["todos"].as_array().cloned())
@@ -42,7 +42,7 @@ fn todos(api: &Api, owner: &Keys, name: &str) -> Vec<String> {
         .collect()
 }
 
-fn runs_of(v: &Value, tool: &str) -> Vec<String> {
+pub(super) fn runs_of(v: &Value, tool: &str) -> Vec<String> {
     v["toolRuns"].as_array().into_iter().flatten().filter(|r| r["tool"] == tool).filter_map(|r| r["tool_call_id"].as_str().map(str::to_string)).collect()
 }
 

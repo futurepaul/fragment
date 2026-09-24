@@ -5,6 +5,7 @@ mod app;
 mod appfiles;
 mod blobs;
 mod author;
+mod computer;
 mod control;
 mod deliver;
 mod jobs;
@@ -47,6 +48,7 @@ pub fn run(s: &mut Suite, api: Api) -> Result<()> {
     deliver::ai(s, &api)?;
     agents::agents(s, &api)?;
     agents::chat(s, &api)?;
+    computer::computer(s, &api)?;
     sync::folder_sync(s, &api)?;
     let api = restart::restart(s, api)?;
     restart::pathmode(s, api)?;

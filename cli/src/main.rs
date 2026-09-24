@@ -193,6 +193,12 @@ enum Cmd {
         #[command(subcommand)]
         sub: AgentCmd,
     },
+    /// A computer an agent works on: `fragment computer serve` runs goose's
+    /// developer tools for the agent that attaches it (`fragment agent computer`)
+    Computer {
+        #[command(subcommand)]
+        sub: ComputerCmd,
+    },
     /// A fragment's members: list, add, remove, or leave
     Members {
         #[command(subcommand)]
@@ -281,6 +287,22 @@ enum AgentCmd {
     Stop { name: String },
     /// The tools its memberships give it (fragment operations)
     Tools { name: String },
+    /// Attach a computer (`fragment computer serve`): its shell and file tools join the agent's turns
+    Computer {
+        name: String,
+        /// The computer's URL
+        #[arg(long, required_unless_present = "detach")]
+        url: Option<String>,
+        /// A file holding its token (the one `fragment computer serve` made)
+        #[arg(long, required_unless_present = "detach")]
+        token_file: Option<PathBuf>,
+        /// The project directory its tools work in, on the computer
+        #[arg(long, default_value = "work")]
+        cwd: String,
+        /// Detach the computer instead
+        #[arg(long, conflicts_with_all = ["url", "token_file"])]
+        detach: bool,
+    },
     /// Follow a fragment's channel: others' messages start turns, answers go back through the reply operation
     Listen {
         name: String,
@@ -289,6 +311,24 @@ enum AgentCmd {
         channel: String,
         #[arg(long, default_value = "say")]
         reply: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ComputerCmd {
+    /// Serve goose's developer tools (shell, write, edit, tree) over HTTP to the agent that attaches this computer
+    Serve {
+        #[arg(long, default_value = "0.0.0.0:8080")]
+        listen: std::net::SocketAddr,
+        /// Projects live under this directory, one per attached cwd
+        #[arg(long, default_value = "work")]
+        work: PathBuf,
+        /// The call journal
+        #[arg(long, default_value = ".fragment-computer")]
+        state: PathBuf,
+        /// The bearer token an agent presents; made here (0600) if missing
+        #[arg(long, default_value = ".fragment-computer/token")]
+        token_file: PathBuf,
     },
 }
 
@@ -670,6 +710,15 @@ fn run(cli: Cli) -> Result<()> {
             println!("next:");
             println!("  fragment init <name> --template <tpl>  (scaffold + create + deploy in one step)");
             return Ok(());
+        }
+        Cmd::Computer { sub: ComputerCmd::Serve { listen, work, state, token_file } } => {
+            #[cfg(feature = "computer")]
+            return fragment_computer::serve(fragment_computer::ServeArgs { listen, work, state, token_file });
+            #[cfg(not(feature = "computer"))]
+            {
+                let _ = (listen, work, state, token_file);
+                anyhow::bail!("this fragment was built without computers: cargo install --path cli --features computer");
+            }
         }
         _ => {}
     }
@@ -1343,6 +1392,25 @@ fn run(cli: Cli) -> Result<()> {
                     }
                     println!("{name} follows {fragment}'s {channel} channel and answers through {reply}");
                 }
+                AgentCmd::Computer { name, url, token_file, cwd, detach } => {
+                    let path = format!("/api/a/{name}/computer");
+                    if detach {
+                        let v = a.call(a.delete(&path)?)?;
+                        if j {
+                            ok_exit(&v);
+                        }
+                        println!("{}", if v["detached"] == true { "detached" } else { "no computer was attached" });
+                        return Ok(());
+                    }
+                    let (url, token_file) = (url.unwrap_or_default(), token_file.unwrap_or_default());
+                    let token = std::fs::read_to_string(&token_file).with_context(|| format!("reading {}", token_file.display()))?.trim().to_string();
+                    let v = a.call(a.put_json(&path, &json!({ "url": url, "token": token, "cwd": cwd }))?)?;
+                    if j {
+                        ok_exit(&v);
+                    }
+                    let tools: Vec<&str> = v["tools"].as_array().into_iter().flatten().filter_map(|t| t.as_str()).collect();
+                    println!("{name} works on {} in {} ({})", v["url"].as_str().unwrap_or(""), v["cwd"].as_str().unwrap_or(""), tools.join(", "));
+                }
             }
         }
         Cmd::Members { sub } => match sub {
@@ -1478,7 +1546,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             println!("{name}: {}", v["visibility"].as_str().unwrap_or(""));
         }
-        Cmd::Login { .. } | Cmd::Whoami | Cmd::Host { .. } | Cmd::Guide | Cmd::New { .. } => unreachable!(),
+        Cmd::Login { .. } | Cmd::Whoami | Cmd::Host { .. } | Cmd::Guide | Cmd::New { .. } | Cmd::Computer { .. } => unreachable!(),
     }
     Ok(())
 }

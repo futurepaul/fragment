@@ -20,6 +20,13 @@ pub fn op_id(tool_call_id: &str) -> String {
     format!("tc:{}", &hex::encode(Sha256::digest(tool_call_id.as_bytes()))[..40])
 }
 
+/// A computer call's id (`fragment computer serve` journals calls by it,
+/// in `[A-Za-z0-9_-]`): the same tool call always names the same id, so a
+/// replayed call re-attaches to its run instead of starting another.
+pub fn call_id(tool_call_id: &str) -> String {
+    format!("tc-{}", &hex::encode(Sha256::digest(tool_call_id.as_bytes()))[..40])
+}
+
 /// The operation id of an agent's reply to a chat, from its message id:
 /// the same message is posted once, however often the post is retried.
 pub fn reply_id(message_id: &str) -> String {
@@ -40,5 +47,8 @@ mod tests {
         assert!(fragment_proto::valid_op_id(&id));
         assert!(fragment_proto::valid_op_id(&reply_id("msg_0b6e7e3c-1d2f-4c55-9d0e-4f7b1d2a3c4e")));
         assert_ne!(reply_id("a"), op_id("a"));
+        let call = call_id("call_abc123");
+        assert_eq!(call, call_id("call_abc123"));
+        assert!(call.len() == 43 && call.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
     }
 }

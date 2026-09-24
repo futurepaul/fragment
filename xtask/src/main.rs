@@ -131,6 +131,7 @@ fn dev(args: &[String]) -> Result<()> {
         openrouter_url: None,
         openrouter_key: model_key,
         test_hooks: false,
+        egress_local: true,
     }
     .write_vars(&devstack::agent_dir())?;
     let agent_opts = devstack::NodeOptions { project: devstack::agent_dir(), port: DEV_AGENT_PORT, clean, watch: true, env: vec![] };
@@ -201,8 +202,8 @@ fn e2e(args: &[String]) -> Result<()> {
         }
     }
     build()?;
-    // the e2e drives the CLI too
-    run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli"]))?;
+    // the e2e drives the CLI too, computers included
+    run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli", "--features", "computer"]))?;
     run(Command::new("cargo")
         .args(["run", "--quiet", "--release", "--manifest-path"])
         .arg(&manifest)

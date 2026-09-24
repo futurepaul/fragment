@@ -214,6 +214,9 @@ pub struct AgentFleet {
     pub openrouter_key: String,
     /// The owner's test controls (holds, the watchdog period): dev and e2e only.
     pub test_hooks: bool,
+    /// `FRAGMENT_EGRESS_LOCAL=allow`: computers on loopback or a private
+    /// network may be attached (dev and e2e only).
+    pub egress_local: bool,
 }
 
 impl AgentFleet {
@@ -230,6 +233,9 @@ impl AgentFleet {
         }
         if self.test_hooks {
             vars.push(("AGENT_TEST_HOOKS", "allow"));
+        }
+        if self.egress_local {
+            vars.push(("FRAGMENT_EGRESS_LOCAL", "allow"));
         }
         write_dev_vars(project, &vars)
     }
