@@ -15,8 +15,10 @@ from github.com/futurepaul/fragment) and on celld
    `docs/finite-integration.md` — how fragment will move into
    finite.computer (Finite V3): every Core concern, its stand-in here,
    and the swap; update its row with any change that touches one;
-   `docs/phase-4.md` — sign-in, identities, budgets (slice A built:
-   the registry, identities, key proofs);
+   `docs/phase-4.md` — sign-in, identities, budgets (slices A–C built;
+   live on fragment.club);
+   `docs/hardening.md` — the hardening pass (proposed): native keys,
+   the isolation findings;
    `docs/phase-5.md` — agents (built overnight; choices for review);
    `docs/phase-8.md` — computers, first part (the same night);
    `docs/phase-3.md` — hosting on fragment.club;
