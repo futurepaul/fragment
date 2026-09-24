@@ -237,26 +237,29 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** a remote build pushes (a newer flyctl, or a token the
   builders accept), or CI builds the image once a remote exists.
 
-## The fleet's old secrets are still in the bucket's deployment history
+## Three fleet secrets that sat in the bucket are not rotated yet
 
 - **Observed:** phase 3 slice A until the hardening pass (H1). The fleet's
-  secrets were Worker `vars`, which celld stores in each deployment's
-  manifest (`deploy/fragment/<version>/` in the bucket) in plaintext, and
-  writes into every isolate's source. H1 moved them to the node's
-  environment, where only `KEYS` reads them; a cell deploy now refuses a
-  var that holds one (`xtask/src/deploy.rs`, `check_vars`). But the
-  manifests of every earlier deployment stay in the bucket (celld keeps
-  them; it has no clean-up), and the values were in isolate heaps.
-- **Risk:** a leak of the bucket (or a backup of it) reveals the host
-  secret, the code.storage org key, the WorkOS API key, and the
-  OpenRouter management key. celld already makes the bucket the fleet's
-  root of authority, so this adds no new holder, but it is a copy.
-- **First proof:** a bucket copy outside the fleet (a backup, a
-  migration).
-- **Delete when:** fragment.club runs H1, the earlier deployments'
-  manifests are deleted from the bucket, and the four secrets are rotated
-  (the host secret through `FRAGMENT_KEYS_HOST_SECRET_PREVIOUS`; the
-  other three at their issuers). All Paul's to approve.
+  secrets were Worker `vars`, stored in each deployment's manifest in the
+  bucket in plaintext and written into every isolate. H1 moved them to
+  the node's environment (only `KEYS` reads them; a cell deploy refuses a
+  var that holds one). On 2026-09-24 Paul deleted the earlier
+  deployments' manifests from the bucket, and the host secret was rotated
+  (the old one stays as `FRAGMENT_KEYS_HOST_SECRET_PREVIOUS`, so values
+  sealed under it still open and are resealed as they are read). The
+  WorkOS API key, the OpenRouter management key, and the code.storage org
+  key are the same values that sat in those manifests; the node's Tigris
+  key is the project-wide one `flyctl storage create` made.
+- **Risk:** a copy of the bucket taken before the clean-up (a backup, a
+  replica) still reveals those three keys; a leak of the node's Tigris
+  key reaches every bucket in the Tigris project.
+- **First proof:** any bucket copy outside the fleet, or a node compromise.
+- **Delete when:** new values for the three keys at their issuers (written
+  over their files, then `cargo xtask deploy fragment-club --secrets`,
+  then the old ones revoked), and a Tigris key scoped to
+  `fragment-club-ord` in the credentials file the same way. Drop
+  `FRAGMENT_KEYS_HOST_SECRET_PREVIOUS` only once no value sealed under it
+  is left (a sweep that reseals every cell's values, then a check).
 
 ## The fleet shares Fly's default private network
 

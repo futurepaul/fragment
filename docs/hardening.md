@@ -141,16 +141,12 @@ rotations wait on Paul (below). The celld fork is branch `hardening` at
    so other fragments' AI steps never finished; fixed in the next commit
    and redeployed.) From inside both Machines, the internal listener
    answers 403 to `GET /state` and `GET /do/<scope>`.
-4. **Waiting on Paul** (the permission checks refuse these to Claude):
-   - delete the nine earlier deployments (27 objects, listed exactly;
-     their manifests hold the old secrets): the script Claude wrote,
-     `delete-old-deployments.py`, run from its scratchpad;
-   - the host secret is rotated in its file (the old value kept as
-     `fragment-club-host-secret-previous`, named in `node_secrets`): set it
-     on the fleet with `cargo xtask deploy fragment-club --secrets`;
-   - the WorkOS API key, the OpenRouter management key, and the
-     code.storage org key: new ones at their issuers, written over the
-     same files, then `--secrets` again, then the old ones revoked.
+4. **Done by Paul:** the nine earlier deployments deleted from the bucket
+   (27 objects), and the rotated host secret set (`--secrets`). The
+   hosted e2e passes after it, 29/29.
+5. **Open:** new WorkOS, OpenRouter management, and code.storage keys,
+   and the bucket-scoped Tigris key (debt ledger: "Three fleet secrets
+   that sat in the bucket are not rotated yet").
 
 ## H4. Deployment (decided with Paul, 2026-09-24)
 
