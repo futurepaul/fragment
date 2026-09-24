@@ -36,9 +36,13 @@ export class App extends DurableObject {
     return { id };
   }
 
-  // the first LIST_MAX todos: a query's answer is bounded like everything else
+  // the newest LIST_MAX todos, oldest first as the page shows them: a
+  // query's answer is bounded like everything else, and what is new is
+  // what someone just added
   list() {
-    const todos = this.ctx.storage.sql.exec("SELECT id, text, done FROM todos ORDER BY id LIMIT ?", LIST_MAX).toArray();
+    const todos = this.ctx.storage.sql
+      .exec("SELECT id, text, done FROM (SELECT id, text, done FROM todos ORDER BY id DESC LIMIT ?) ORDER BY id", LIST_MAX)
+      .toArray();
     return { todos: todos.map((t) => ({ ...t, done: t.done === 1 })) };
   }
 
