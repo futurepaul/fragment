@@ -345,6 +345,21 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.page(&g, "__signout", Some(&format!("fragment_site={newest}")))?;
     s.ok("signing out again is no error", r.status == 302, &r);
 
+    // the registry down: the browser is signed out all the same
+    let kept = site_cookie(api, &member_session, &g)?;
+    api.unsigned("POST", "/api/test/registry", Some(&json!({ "down": true })))?;
+    let r = api.page(&g, "__signout", Some(&format!("fragment_site={kept}")));
+    api.unsigned("POST", "/api/test/registry", Some(&json!({ "down": false })))?;
+    let r = r?;
+    s.ok(
+        "__signout clears the cookie even when the registry cannot answer",
+        r.status == 302 && cookie_line(&r, "fragment_site").contains("Max-Age=0"),
+        &r,
+    );
+    let copy = reads(&kept)?;
+    s.ok("(the registry never heard: a copy of that cookie lasts until its session ends)", copy == 200, copy);
+    api.page(&g, "__signout", Some(&format!("fragment_site={kept}")))?;
+
     // revoking: a member removed, a person signed out
     api.signed(&owner, "DELETE", &format!("/api/f/{f}/members/{}", member.pubkey_hex()), None)?;
     let r = api.page(&f, "", Some(&format!("fragment_site={member_f2}")))?;

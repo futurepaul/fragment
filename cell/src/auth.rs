@@ -463,9 +463,15 @@ pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &
                 }
             },
             "__signout" => {
-                // the session ends in the registry: a copy of the cookie is nobody too
+                // The session ends in the registry, so a copy of the cookie
+                // is nobody too. The browser is signed out whatever the
+                // registry answers: a registry that cannot end the session
+                // is logged, and the session lasts until it expires or the
+                // platform session ends (`/auth/logout` ends every one).
                 if let Some(token) = cookie_of(req, SITE_COOKIE)? {
-                    ask_registry(env, "/session/end", &json!({ "token": token, "fragment": name })).await?;
+                    if let Err(e) = ask_registry(env, "/session/end", &json!({ "token": token, "fragment": name })).await {
+                        console_error!("__signout on {name}: the registry did not end the session ({:?}): {}", e.code, e.message);
+                    }
                 }
                 redirect(&base, &[set_cookie(SITE_COOKIE, "", &cookie_path, 0, secure(url))])
             }
