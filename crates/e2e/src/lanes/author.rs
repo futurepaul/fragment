@@ -405,14 +405,31 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("browser") {
         return Ok(());
     }
+    // the template's list is bounded to its newest 500, oldest first as the page shows them
+    let owner = api.person()?;
+    let name = s.name("todo-cap");
+    let c = s.create(api, &owner, &name)?;
+    let changes: Vec<(&str, Option<&[u8]>)> = TODO_FILES.iter().map(|(p, b)| (*p, Some(*b))).collect();
+    s.commit(&c, &changes);
+    s.deploy(&c);
+    for i in 1..=501 {
+        let r = api.op(&owner, &name, "add", &format!("t{i}"), json!({ "text": format!("todo {i}") }))?;
+        anyhow::ensure!(r.status == 200, "add {i}: {r}");
+    }
+    let r = api.op(&owner, &name, "list", "q", json!({}))?;
+    let texts: Vec<&str> = r.body["result"]["todos"].as_array().map(|t| t.iter().filter_map(|t| t["text"].as_str()).collect()).unwrap_or_default();
+    s.ok(
+        "the todo template lists its newest 500, oldest first: the 501st todo shows, the first does not",
+        texts.len() == 500 && texts.first() == Some(&"todo 2") && texts.last() == Some(&"todo 501"),
+        format!("{} todos, first {:?}, last {:?}", texts.len(), texts.first(), texts.last()),
+    );
+
     let Some(mut chrome) = Browser::launch(&s.scratch)? else {
         s.ok("Chrome is installed for the browser lane (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());
     };
-    let owner = api.person()?;
     let name = s.named(api, &owner, "todo")?;
     let c = s.create(api, &owner, &name)?;
-    let changes: Vec<(&str, Option<&[u8]>)> = TODO_FILES.iter().map(|(p, b)| (*p, Some(*b))).collect();
     s.commit(&c, &changes);
     s.deploy(&c);
     let url = api.site_url(&name, &format!("?view={}", c["viewToken"].as_str().unwrap_or("")));
