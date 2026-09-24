@@ -967,6 +967,8 @@ fn write_canonical(v: &Value, out: &mut String) {
     }
 }
 
+pub mod live;
+
 #[cfg(test)]
 mod tests {
     use super::*;

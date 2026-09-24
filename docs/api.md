@@ -545,19 +545,23 @@ API answers on the platform's host):
 | anything else | the app's `fetch`, when it has one |
 
 `__live` and `__watch` are also served in place at `/f/<name>/…` for the
-CLI. The `__live` protocol (JSON frames):
+CLI. The `__live` protocol is JSON frames tagged by `type`, defined once
+as `LiveIn` (client → server) and `LiveOut` (server → client) in
+`crates/proto/src/live.rs`; the cell and the CLI decode through them:
 
 - client → server: `{type: "subscribe", channel, after}` (records with
   `seq` after `after`) or `{type: "subscribe", channel, last}` (the last
-  `last` records, at most 1000), `{type: "unsubscribe", channel}`,
-  `{type: "presence", data}` (at most 4 KiB; `null` clears),
-  `{type: "ping"}`
+  `last` records, at most 1000): exactly one of `after` and `last`;
+  `{type: "unsubscribe", channel}`, `{type: "presence", data}` (at most
+  4 KiB; `null` or no `data` clears), `{type: "ping"}`
 - server → client: `{type: "hello", id, principal, role}`,
   `{type: "record", channel, seq, at, principal, kind, body}`,
   `{type: "subscribed", channel, next, more}` (after each page),
   `{type: "presence", list: [{id, principal, data}]}`,
   `{type: "changed", op}` (after every applied mutation),
-  `{type: "error", message}`
+  `{type: "pong"}` (to a ping), `{type: "error", message}` (a frame
+  that does not decode, with what was wrong, or a refusal; the socket
+  stays open)
 
 A subscribe answers one page of the backlog: at most 1000 records and
 about 1 MiB of record frames. With `more: true` the socket is not yet

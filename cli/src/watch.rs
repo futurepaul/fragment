@@ -251,11 +251,14 @@ fn chrono_like() -> String {
 
 /// Streams a channel's records as JSON lines from the fragment's live
 /// socket, a page of backlog at a time until it is live, resuming after
-/// the last record seen when the socket drops.
+/// the last record seen when the socket drops. Frames are
+/// `fragment_proto::live`'s: each line printed is a record frame as sent.
 pub fn follow_channel(client: &Client, name: &str, channel: &str, after: i64) -> Result<()> {
+    use fragment_proto::live::{Cursor, LiveIn, LiveOut, Subscribe};
     use tungstenite::client::IntoClientRequest;
     let http = format!("{}/f/{name}/__live", client.host.trim_end_matches('/'));
     let ws_url = http.replacen("http", "ws", 1);
+    let subscribe = |after: i64| LiveIn::Subscribe(Subscribe { channel: channel.to_string(), from: Cursor::After(after) }).encode();
     let mut last = after;
     let mut backoff = 1u64;
     loop {
@@ -264,28 +267,25 @@ pub fn follow_channel(client: &Client, name: &str, channel: &str, after: i64) ->
         match tungstenite::connect(req) {
             Ok((mut socket, _)) => {
                 backoff = 1;
-                let sub = serde_json::json!({ "type": "subscribe", "channel": channel, "after": last });
-                socket.send(tungstenite::Message::Text(sub.to_string().into()))?;
+                socket.send(tungstenite::Message::Text(subscribe(last).into()))?;
                 loop {
                     match socket.read() {
-                        Ok(tungstenite::Message::Text(t)) => {
-                            let v: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
-                            match v["type"].as_str() {
-                                Some("record") if v["channel"] == channel => {
-                                    last = v["seq"].as_i64().unwrap_or(last);
-                                    println!("{t}");
-                                }
-                                // a page at a time: the socket follows the channel live
-                                // only once a page reaches the end
-                                Some("subscribed") if v["channel"] == channel && v["more"] == true => {
-                                    last = v["next"].as_i64().unwrap_or(last).max(last);
-                                    let sub = serde_json::json!({ "type": "subscribe", "channel": channel, "after": last });
-                                    socket.send(tungstenite::Message::Text(sub.to_string().into()))?;
-                                }
-                                Some("error") => anyhow::bail!("{}", v["message"].as_str().unwrap_or("the live socket refused")),
-                                _ => {}
+                        Ok(tungstenite::Message::Text(t)) => match serde_json::from_str::<LiveOut>(&t) {
+                            Ok(LiveOut::Record(r)) if r.channel == channel => {
+                                last = r.seq;
+                                println!("{t}");
                             }
-                        }
+                            // a page at a time: the socket follows the channel live
+                            // only once a page reaches the end
+                            Ok(LiveOut::Subscribed { channel: c, next, more: true }) if c == channel => {
+                                last = next.max(last);
+                                socket.send(tungstenite::Message::Text(subscribe(last).into()))?;
+                            }
+                            Ok(LiveOut::Error { message }) => anyhow::bail!("the live socket refused: {message}"),
+                            Ok(_) => {}
+                            // a frame from a newer fragment: records still come as records
+                            Err(e) => eprintln!("warning: a live frame this CLI does not read: {e}"),
+                        },
                         Ok(tungstenite::Message::Close(_)) | Err(_) => break,
                         Ok(_) => {}
                     }

@@ -758,6 +758,7 @@ dependencies = [
  "fragment-computer",
  "fragment-core",
  "fragment-fakes",
+ "fragment-proto",
  "fragment-templates",
  "fs2",
  "hex",
