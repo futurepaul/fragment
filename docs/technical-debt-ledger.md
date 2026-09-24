@@ -138,10 +138,12 @@ without a delete condition is unfinished design, not debt.
 - **Risk:** an author's job reaches the fleet's private network: celld's
   unauthenticated internal listener, other services on Fly's 6PN.
 - **First proof:** a hosted fleet running strangers' jobs.
-- **Delete when:** phase 3 gives the nodes an outbound firewall that
-  drops private destinations from the worker process (or the fork's
-  native egress resolves and pins the address, and refuses redirects),
-  with a test that a name resolving to 127.0.0.1 is refused.
+- **Delete when:** the fork's worker fetch resolves names through a
+  resolver that refuses private, loopback, link-local, and ULA addresses
+  on hosted fleets (phase 3 slice E: a firewall cannot separate a job's
+  fetch from celld's own peer traffic on 8081), with a test that a name
+  resolving to 127.0.0.1 is refused. Until then only Paul's key and the
+  e2e key may create fragments on the hosted fleet.
 
 ## A secret can go anywhere its fragment's code sends it
 
@@ -249,3 +251,30 @@ without a delete condition is unfinished design, not debt.
   against marked or Shiki.
 - **Delete when:** the viewer is small enough to ship as source (no
   bundler), or the desktop phase replaces it with its own file viewer.
+
+## Fly's remote builders cannot push the node image
+
+- **Observed:** phase 3 slice B. `flyctl deploy` (0.3.145) builds the
+  image on Fly's builder and on Depot, and both pushes to the registry
+  are refused (401 from the builder's registry proxy) with the org token
+  that pushes fine from this machine. `cargo xtask deploy --nodes` builds
+  with the local Docker (OrbStack, `linux/amd64` under Rosetta: a cold
+  build is about 20 minutes) and pushes directly.
+- **Risk:** a node deploy needs this machine (or one like it) with Docker.
+- **First proof:** already present.
+- **Delete when:** a remote build pushes (a newer flyctl, or a token the
+  builders accept), or CI builds the image once a remote exists.
+
+## The fleet's secrets live in the bucket
+
+- **Observed:** phase 3 slice A. celld 0.5.1 removed the environment
+  passthrough for Worker variables (`CELLD_VAR_`): they come only from
+  the deployed config, which celld stores in the bucket. The host secret
+  and the code.storage org key are there in plaintext.
+- **Risk:** a leak of the bucket (or a backup of it) reveals them.
+  celld already makes the bucket the fleet's root of authority (its keys
+  can deploy code that reads any variable), so this adds no new holder.
+- **First proof:** a bucket copy outside the fleet (a backup, a
+  migration).
+- **Delete when:** celld (or the fork) gives Workers node-held secrets,
+  as the "fork forever?" thread proposes.

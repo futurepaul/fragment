@@ -47,5 +47,6 @@ pub fn run(s: &mut Suite, api: Api) -> Result<()> {
     sync::folder_sync(s, &api)?;
     let api = restart::restart(s, api)?;
     restart::pathmode(s, api)?;
+    control::creators(s)?;
     Ok(())
 }

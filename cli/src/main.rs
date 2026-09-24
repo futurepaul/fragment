@@ -636,7 +636,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("  npub:         {npub}");
             let canon2 = v["canonical"].as_str().filter(|s| s.starts_with("http")).map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}/f/{}/", c.host, name));
-            println!("  share link:   {}?view={}", canon2.trim_end_matches('/'), v["viewToken"].as_str().unwrap_or(""));
+            println!("  share link:   {}", share_link(&canon2, v["viewToken"].as_str().unwrap_or("")));
             println!("  webhook URL:  {}/api/f/{}/inbox?t={}", c.host.trim_end_matches('/'), name, v["inboxToken"].as_str().unwrap_or(""));
             let canon = v["canonical"].as_str().filter(|s| s.starts_with("http")).map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{}/f/{}/", c.host, name));
@@ -773,10 +773,14 @@ fn run(cli: Cli) -> Result<()> {
                 let report = sync::sync_once(&c, &name, dir, &SyncOptions { writer_id: writer.clone(), codestorage: cs.clone(), ..Default::default() })
                     .map_err(cs_anyhow)?;
                 if report.mass_delete_guard.is_some() {
-                    report.print();
+                    if !j {
+                        report.print();
+                    }
                     anyhow::bail!("sync refused a mass deletion — deploy aborted before moving live. If the deletions are intended, run `fragment sync {} --dir {} --apply-mass-delete` first, then deploy again.", name, dir.display());
                 }
-                report.print();
+                if !j {
+                    report.print();
+                }
                 // fragment.json rides the commit (it is a git file at the
                 // repo root) — files and machinery go live together
             }
@@ -840,7 +844,7 @@ fn run(cli: Cli) -> Result<()> {
                     let canon = st["urls"]["canonical"].as_str().filter(|s| s.starts_with("http"))
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| format!("{}/f/{}/", c.host, name));
-                    println!("share link: {}?view={}", canon.trim_end_matches('/'), tok);
+                    println!("share link: {}", share_link(&canon, tok));
                 }
             }
         }
@@ -923,7 +927,9 @@ fn run(cli: Cli) -> Result<()> {
                 }
                 std::fs::write(&mf, serde_json::to_vec_pretty(&m)?)?;
             }
-            println!("scaffolded '{tpl_name}' into {}", dir.display());
+            if !j {
+                println!("scaffolded '{tpl_name}' into {}", dir.display());
+            }
             // client-side npub; secret crosses the wire once (fragmentSecret),
             // wrapped at rest
             let fid = auth::Identity::generate();
@@ -939,7 +945,9 @@ fn run(cli: Cli) -> Result<()> {
             let cs = codestorage_override();
             let report = sync::sync_once(&c, &name, &dir, &SyncOptions { writer_id: writer.clone(), codestorage: cs.clone(), ..Default::default() })
                 .map_err(cs_anyhow)?;
-            report.print();
+            if !j {
+                report.print();
+            }
             let storage = CodeStorage::connect(&c, &name, cs.as_deref()).map_err(cs_anyhow)?;
             let main_tip = storage.branch_head(MAIN).map_err(cs_anyhow)?
                 .ok_or_else(|| anyhow!("first sync produced no commits"))?;
@@ -956,7 +964,7 @@ fn run(cli: Cli) -> Result<()> {
                 // synthesized composite: the human output's three URLs plus the full status
                 let mut data = json!({
                     "canonical": canon,
-                    "shareLink": format!("{}?view={}", canon.trim_end_matches('/'), st["viewToken"].as_str().unwrap_or("")),
+                    "shareLink": share_link(&canon, st["viewToken"].as_str().unwrap_or("")),
                     "webhookUrl": format!("{}/api/f/{}/inbox?t={}", c.host.trim_end_matches('/'), name, st["inboxToken"].as_str().unwrap_or("")),
                     "folder": dir.display().to_string(),
                     "status": st,
@@ -969,7 +977,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("live: {}", canon);
             if st["visibility"].as_str() == Some("link") {
                 if let Some(tok) = st["viewToken"].as_str() {
-                    println!("share link: {}?view={}", canon.trim_end_matches('/'), tok);
+                    println!("share link: {}", share_link(&canon, tok));
                 }
             }
             if let Some(tok) = st["inboxToken"].as_str() {
@@ -1093,7 +1101,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             println!("rotated: {rotated}");
             println!("New webhook URL: {}/api/f/{}/inbox?t={}", c.host.trim_end_matches('/'), name, it);
-            println!("New share link: {}?view={}", canon.trim_end_matches('/'), vt);
+            println!("New share link: {}", share_link(&canon, &vt));
         }
         Cmd::Secret { sub } => match sub {
             SecretCmd::Set { name, key, value: argv_value } => {
@@ -1175,13 +1183,11 @@ fn run(cli: Cli) -> Result<()> {
                     "canonical": format!("{}{}{}", canon, suffix, view_part),
                     "shareLink": format!("{}{}{}", canon, suffix, view_part),
                     "webhookUrl": format!("{}/api/f/{}/inbox?t={}", c.host, name, inbox),
-                    "rooms": format!("{}/f/{}/__room/<room>{}{}", c.host, name, suffix, view_part),
                 }));
             }
             println!("canonical:   {}{}{}", canon, suffix, view_part);
-            println!("share link:   {}{}{}", canon, suffix, view_part);
-            println!("webhook URL:  {}/api/f/{}/inbox?t={}", c.host, name, inbox);
-            println!("rooms:       {}/f/{}/__room/<room>{}{}", c.host, name, suffix, view_part);
+            println!("share link:  {}{}{}", canon, suffix, view_part);
+            println!("webhook URL: {}/api/f/{}/inbox?t={}", c.host, name, inbox);
         }
         Cmd::Members { sub } => match sub {
             MembersCmd::List { name } => {
@@ -1319,6 +1325,13 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Login { .. } | Cmd::Whoami | Cmd::Host { .. } | Cmd::Guide | Cmd::New { .. } => unreachable!(),
     }
     Ok(())
+}
+
+/// A share link: the canonical URL (with its trailing slash: a path-mode
+/// URL without one redirects) and the view token.
+fn share_link(canonical: &str, token: &str) -> String {
+    let base = if canonical.ends_with('/') { canonical.to_string() } else { format!("{canonical}/") };
+    format!("{base}?view={token}")
 }
 
 /// 8 hex chars of the user's pubkey — the writer identity that names

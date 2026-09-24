@@ -55,7 +55,9 @@ cargo xtask e2e            # the full suite against a fresh celld node (--only <
 
 The e2e stages its own copy of the cell, so it runs alongside
 `cargo xtask dev`. Its browser sections drive headless Chrome
-(`CHROME_BIN` to choose one).
+(`CHROME_BIN` to choose one). `cargo xtask e2e --fleet fragment-club`
+runs the hosted sections against the live fleet (see
+[docs/operate.md](docs/operate.md)).
 
 ## Layout
 
@@ -69,7 +71,9 @@ crates/fakes   code.storage, OpenRouter, and push-service fakes
 crates/devstack  runs a celld node and the fakes
 crates/e2e     the end-to-end suite
 templates/     todo, inbox, notes
-xtask/         build, celld, dev, try, check, e2e
+fleets/        hosted fleets' settings (no secrets) and the node image's Dockerfile
+crates/node    the launcher that starts celld on a fleet Machine
+xtask/         build, celld, dev, try, check, e2e, deploy, fleet
 docs/          model, contract, roadmap, phase records, the debt ledger
 spikes/        the phase 1 spikes and their verdicts
 ```

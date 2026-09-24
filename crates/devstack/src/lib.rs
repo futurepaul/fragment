@@ -142,6 +142,8 @@ pub struct Fleet {
     pub openrouter_url: Option<String>,
     /// The shortest wait before a delivery is retried (`None`: the cell's 10 s).
     pub delivery_retry_s: Option<u32>,
+    /// The keys that may create fragments (`None`: anyone who signs).
+    pub creators: Option<String>,
 }
 
 impl Fleet {
@@ -173,6 +175,9 @@ impl Fleet {
         }
         if let Some(s) = &self.host_suffix {
             vars.push(("FRAGMENT_HOST_SUFFIX", s.as_str()));
+        }
+        if let Some(c) = &self.creators {
+            vars.push(("FRAGMENT_CREATORS", c.as_str()));
         }
         write_dev_vars(project, &vars)
     }

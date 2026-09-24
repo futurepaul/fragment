@@ -25,6 +25,8 @@ Worker variables, rendered from the fleet's settings (ROADMAP decision
 | `FRAGMENT_PUSH_SUBJECT` | who push services may contact about this fleet's pushes (a `mailto:` or https URL; RFC 8292) |
 | `FRAGMENT_DELIVERY_RETRY_S` | the shortest wait before a delivery is retried (default 10; the wait grows with the delivery's age, up to an hour) |
 | `OPENROUTER_API_URL` | where AI calls go (default https://openrouter.ai) |
+| `FRAGMENT_DEPLOY_ID` | which deployment this is (`cargo xtask deploy` sets it); `GET /healthz` answers it in `x-fragment-deploy` |
+| `FRAGMENT_CREATORS` | until sign-in exists, the keys (npubs or hex, comma-separated) that may create fragments; unset, anyone who signs; a list that does not parse lets nobody create (500) |
 
 Bindings (`cell/wrangler.jsonc`): `FRAGMENT` and `PRINCIPAL` (Durable
 Objects), `LOADER` (the Worker Loader), `JOBS` (the Workflow that runs
@@ -65,7 +67,7 @@ member may leave. Each person's list of fragments is kept in their
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/fragments` | any signer | `{name, fragmentSecret, visibility?}` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}`. `fragmentSecret` is the fragment's own key, made by the client; it is stored sealed. The cell creates (or, for a name deleted before, finds) the code.storage repo. |
+| `POST /api/fragments` | any signer (on a fleet with `FRAGMENT_CREATORS`, a listed key; others 403) | `{name, fragmentSecret, visibility?}` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}`. `fragmentSecret` is the fragment's own key, made by the client; it is stored sealed. The cell creates (or, for a name deleted before, finds) the code.storage repo. |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role}]}` |
 | `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes}` |
@@ -221,8 +223,11 @@ reported (`delivery.failed`).
 A job calls OpenRouter with the fragment's own `OPENROUTER_API_KEY`
 secret (added at the egress point; without it the step fails saying so):
 
-- `job.ai.text({model, prompt | messages, max_tokens})` → `{text, model,
-  usage}` (chat completions).
+- `job.ai.text({model, prompt | messages, max_tokens, reasoning})` →
+  `{text, model, usage}` (chat completions). `reasoning` is OpenRouter's
+  (`{effort: "low"}`, `{enabled: false}`, `{max_tokens}`), passed as
+  given: a reasoning model can spend a small `max_tokens` thinking and
+  answer nothing.
 - `job.ai.image({prompt, path, model?, aspect_ratio?})` (default
   `google/gemini-3.1-flash-lite-image`) → `{path, size, sha256,
   mediaType}`: the image is written to `main` at `path` (a blob when 1 MiB

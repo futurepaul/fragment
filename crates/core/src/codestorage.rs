@@ -116,6 +116,11 @@ pub fn listed_repo_url(v: &Value, name: &str) -> Option<String> {
     v["repos"].as_array()?.iter().find(|r| r["repo_name"] == name).and_then(repo_url)
 }
 
+/// `GET /api/repos` → the cursor of the next page, when there is one.
+pub fn next_repos_cursor(v: &Value) -> Option<String> {
+    (v["has_more"] == true).then(|| v["next_cursor"].as_str().map(str::to_string)).flatten().filter(|c| !c.is_empty())
+}
+
 /// One change in a commit pack.
 pub enum FileChange<'a> {
     Upsert { path: &'a str, bytes: &'a [u8] },
@@ -176,6 +181,17 @@ pub fn committed(v: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn repo_list_pages() {
+        use super::{listed_repo_url, next_repos_cursor};
+        let page = serde_json::json!({ "repos": [{ "repo_name": "a", "url": "u-a" }], "has_more": true, "next_cursor": "c2" });
+        assert_eq!(listed_repo_url(&page, "a").as_deref(), Some("u-a"));
+        assert_eq!(listed_repo_url(&page, "b"), None);
+        assert_eq!(next_repos_cursor(&page).as_deref(), Some("c2"));
+        assert_eq!(next_repos_cursor(&serde_json::json!({ "repos": [], "has_more": false, "next_cursor": "c3" })), None);
+        assert_eq!(next_repos_cursor(&serde_json::json!({ "repos": [], "has_more": true })), None);
+    }
+
     use super::*;
     use p256::ecdsa::signature::Verifier;
     use p256::ecdsa::VerifyingKey;

@@ -12,7 +12,9 @@ from github.com/futurepaul/fragment) and on celld
 1. `docs/ROADMAP.md` — decisions, truth map, phases, escalations.
 2. `docs/MODEL.md` — the core model on celld primitives and the spikes.
    `docs/api.md` — the wire contract the cell answers.
-   `docs/phase-2.md` — the record of the core cut (slices A–G).
+   `docs/phase-3.md` — the current phase (hosting on fragment.club);
+   `docs/phase-2.md` — the record of the core cut (slices A–G);
+   `docs/operate.md` — the operator runbook.
 3. `docs/finite-next-lessons.md` — what to port from finite-next and the
    gotchas (celld, libfx, fx over ACP, Sprites), prices, resources.
 4. `docs/published-fragments.md` — primitives that must stay expressible.
@@ -39,7 +41,7 @@ debt ledger).
   code.storage fake (sections: auth, create, lockdown, members, secrets,
   files, deploy, ops, public, site, watch, schemas, channels, live,
   routes, cli, browser, jobs, triggers, appfiles, blobs, notes, push,
-  ai, sync, restart, pathmode). The browser and notes sections drive headless
+  ai, sync, restart, pathmode, creators). The browser and notes sections drive headless
   Chrome (`CHROME_BIN` to choose one); `triggers` waits for a cron
   minute (about a minute). The node runs from a staged copy of the cell
   (`target/e2e/cell`), so the e2e and `cargo xtask dev` can run at once.
@@ -62,6 +64,14 @@ debt ledger).
   OpenRouter, a push service), `crates/devstack`, `crates/e2e`.
 - `.github/workflows/ci.yml` runs `check` and `e2e`; it has not run yet
   (no remote).
+- The hosted fleet (`fleets/fragment-club.json`, `docs/operate.md`):
+  `cargo xtask deploy fragment-club` ships the cell; `--nodes` ships the
+  node image (local Docker); `cargo xtask e2e --fleet fragment-club` runs
+  the hosted e2e (live OpenRouter: a few cents); `cargo xtask fleet
+  fragment-club <celld command>` runs celld's operator commands
+  (`diagnose`, `cell list`, `queue info <q>`) with the bucket's keys.
+  Deploys to the hosted fleet and changes to its Fly app, bucket, or DNS
+  are Paul's to approve.
 
 ## Rules
 

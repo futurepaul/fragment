@@ -20,6 +20,9 @@ use crate::js;
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Listing pages per tree read (1000 entries each).
 const TREE_PAGES_MAX: usize = 500;
+/// The org's repo list: 100 a page (the service's cap), 10 000 repos at most.
+const REPO_LIST_PAGE: usize = 100;
+const REPO_LIST_PAGES_MAX: usize = 100;
 const RUNTIME_SUB: &str = "fragment-runtime";
 /// How long the cell's own tokens live, and how long before expiry a cached one is replaced.
 const RUNTIME_TOKEN_TTL_S: i64 = 300;
@@ -139,16 +142,35 @@ impl<'a> Cs<'a> {
     /// deleted and created again keeps its repo). Answers the url-form id.
     pub async fn ensure_repo(&self, name: &str) -> CellResult<String> {
         let org = self.cfg.org.clone();
-        let (status, v) =
-            self.json(Method::Post, "/api/repos", &org, &["repo:write"], Some(serde_json::json!({ "id": name, "default_branch": "main" }))).await?;
+        // the service names a new repo by the token's repo claim (the body's
+        // repo_name must equal it); signing with the org's claim names the
+        // repo after the org
+        let body = serde_json::json!({ "repo_name": name, "default_branch": "main" });
+        let (status, v) = self.json(Method::Post, "/api/repos", name, &["repo:write"], Some(body)).await?;
         let repo_id = match status {
             200 | 201 => core_cs::created_repo_id(&v).ok_or_else(|| upstream("create repo", status, v.to_string().as_bytes()))?,
+            // the org lists repos a page at a time (newest first), and a
+            // name is not searchable (`q` matches the opaque url form)
             409 => {
-                let (status, list) = self.json(Method::Get, "/api/repos", &org, &["org:read"], None).await?;
-                if status != 200 {
-                    return Err(upstream("list repos", status, list.to_string().as_bytes()));
+                let mut cursor: Option<String> = None;
+                for _ in 0..REPO_LIST_PAGES_MAX {
+                    let path = match &cursor {
+                        None => format!("/api/repos?limit={REPO_LIST_PAGE}"),
+                        Some(c) => format!("/api/repos?limit={REPO_LIST_PAGE}&cursor={}", encode_q(c)),
+                    };
+                    let (status, list) = self.json(Method::Get, &path, &org, &["org:read"], None).await?;
+                    if status != 200 {
+                        return Err(upstream("list repos", status, list.to_string().as_bytes()));
+                    }
+                    if let Some(url) = core_cs::listed_repo_url(&list, name) {
+                        return Ok(url);
+                    }
+                    match core_cs::next_repos_cursor(&list) {
+                        Some(c) => cursor = Some(c),
+                        None => break,
+                    }
                 }
-                return core_cs::listed_repo_url(&list, name).ok_or_else(|| upstream("list repos", status, b"the existing repo is not listed"));
+                return Err(upstream("list repos", 200, b"the existing repo is not listed"));
             }
             _ => return Err(upstream("create repo", status, v.to_string().as_bytes())),
         };

@@ -13,7 +13,8 @@ use serde_json::{json, Value};
 use crate::http::{Handler, Request, Response, Server};
 
 /// A recorded call: (method, path, model, authorization).
-pub type Call = (String, String, String, String);
+/// (method, path, model, authorization, the body's `reasoning` as JSON or "").
+pub type Call = (String, String, String, String, String);
 
 #[derive(Default)]
 struct State {
@@ -57,7 +58,8 @@ impl OpenRouter {
             let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
             let auth = req.header("authorization").unwrap_or("").to_string();
             let mut s = st.lock().expect("openrouter state");
-            s.calls.push((req.method.clone(), req.path.clone(), body["model"].as_str().unwrap_or("").to_string(), auth.clone()));
+            let reasoning = if body["reasoning"].is_null() { String::new() } else { body["reasoning"].to_string() };
+            s.calls.push((req.method.clone(), req.path.clone(), body["model"].as_str().unwrap_or("").to_string(), auth.clone(), reasoning));
             if auth != expected {
                 return problem(401, "No auth credentials found");
             }

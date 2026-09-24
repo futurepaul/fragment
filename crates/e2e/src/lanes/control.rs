@@ -1,5 +1,5 @@
-//! Identity at the router (NIP-98), fragment create and delete, and what the
-//! router refuses to let through.
+//! Identity at the router (NIP-98), fragment create and delete, who may
+//! create, and what the router refuses to let through.
 
 use anyhow::Result;
 use fragment_nip98::Keys;
@@ -7,6 +7,38 @@ use serde_json::json;
 
 use crate::api::{now_s, Api, Call};
 use crate::Suite;
+
+/// Until sign-in exists, a fleet lets only the keys it lists create
+/// fragments (`FRAGMENT_CREATORS`); a list that does not parse lets nobody.
+/// Runs last: it restarts the node twice.
+pub fn creators(s: &mut Suite) -> Result<()> {
+    if !s.section("creators") {
+        return Ok(());
+    }
+    if s.node.is_some() {
+        s.stop()?;
+    }
+    let (invited, other) = (Keys::generate(), Keys::generate());
+    s.creators = Some(format!("{}, {}", fragment_core::npub::encode(other.pubkey_hex()), invited.pubkey_hex()));
+    let api = s.start(false, true)?;
+    let name = s.name("invited");
+    let r = api.create(&invited, &name)?;
+    s.ok("a listed key creates a fragment (npubs and hex both name keys)", r.status == 200, &r);
+    let stranger = Keys::generate();
+    let r = api.create(&stranger, &s.name("uninvited"))?;
+    s.ok("anyone else is refused, saying why", r.status == 403 && r.message().contains("by invitation"), &r);
+    let r = api.signed(&invited, "PUT", &format!("/api/f/{name}/members/{}", stranger.pubkey_hex()), Some(&json!({ "role": "editor" })))?;
+    let joined = api.status(&stranger, &name)?;
+    s.ok("the list governs creating only: a stranger can still be a member", r.status == 200 && joined.status == 200, &joined);
+    s.stop()?;
+    s.creators = Some("npub1notakey".into());
+    let api = s.start(false, true)?;
+    let r = api.create(&invited, &s.name("misconfigured"))?;
+    s.ok("a list that does not parse lets nobody create", r.status == 500 && r.message().contains("FRAGMENT_CREATORS"), &r);
+    s.stop()?;
+    s.creators = None;
+    Ok(())
+}
 
 pub fn auth(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("auth") {
@@ -18,6 +50,24 @@ pub fn auth(s: &mut Suite, api: &Api) -> Result<()> {
     let bytes = body.to_string().into_bytes();
     let r = api.unsigned("POST", "/api/fragments", Some(&body))?;
     s.ok("an unsigned create is 401", r.status == 401 && r.error() == "unauthenticated", &r);
+    // behind a proxy that ends TLS (Fly's), the client signed the https URL
+    let proxied = Keys::generate();
+    let https = format!("{}/api/fragments", api.base.replacen("http://", "https://", 1));
+    let pbody = json!({ "name": s.name("proxied"), "fragmentSecret": Keys::generate().secret_hex() });
+    let pbytes = pbody.to_string().into_bytes();
+    let r = api.call(Call {
+        method: "POST",
+        url: format!("{}/api/fragments", api.base),
+        body: Some(pbytes.clone()),
+        content_type: Some("application/json"),
+        extra: vec![("authorization", proxied.header("POST", &https, &pbytes, now_s())), ("x-forwarded-proto", "https".into())],
+        ..Call::default()
+    })?;
+    s.ok(
+        "behind a TLS proxy (x-forwarded-proto) the https URL is the signed one, and links are https",
+        r.status == 200 && r.body["canonical"].as_str().is_some_and(|c| c.starts_with("https://")),
+        &r,
+    );
     let signed_as = |url: String, body: &[u8], at: i64| keys.header("POST", &url, body, at);
     let send = |auth: String| {
         api.call(Call {
@@ -116,9 +166,11 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a deleted fragment is 404", r.status == 404, &r);
     let r = api.signed(&owner, "GET", "/api/fragments", None)?;
     s.ok("a deleted fragment leaves the owner's list", !r.text.contains(&format!("\"{name}\"")), &r);
+    // a busy org: the repo is on a later page of the org's newest-first list
+    s.fake.seed_filler(150);
     let r = api.create(&other, &name)?;
     s.ok("a deleted name can be created again", r.status == 200 && r.body["owner"] == fragment_core::npub::encode(other.pubkey_hex()), &r);
-    s.ok("created again, it keeps its repo", r.body["repo"] == repo.as_str(), &r);
+    s.ok("created again, it keeps its repo (found past the list's first page)", r.body["repo"] == repo.as_str(), &r);
     Ok(())
 }
 

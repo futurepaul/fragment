@@ -40,6 +40,13 @@ pub struct Config {
     pub delivery_retry_s: u32,
     /// `OPENROUTER_API_URL`: where AI calls go (default https://openrouter.ai; the e2e's fake).
     pub openrouter_url: String,
+    /// `FRAGMENT_CREATORS`: until sign-in exists, the keys (npubs or hex,
+    /// comma-separated) that may create fragments. Unset: anyone who signs
+    /// (dev). A list that does not parse lets nobody create.
+    creators: Option<Result<Vec<String>, String>>,
+    /// `FRAGMENT_DEPLOY_ID`: which deployment this is (`cargo xtask deploy`
+    /// sets it; `/healthz` answers it in `x-fragment-deploy`).
+    pub deploy_id: String,
 }
 
 fn var(env: &Env, name: &str) -> Option<String> {
@@ -65,7 +72,19 @@ impl Config {
         let push_subject = var(env, "FRAGMENT_PUSH_SUBJECT").unwrap_or_else(|| "mailto:webpush@fragment.invalid".into());
         let delivery_retry_s = var(env, "FRAGMENT_DELIVERY_RETRY_S").and_then(|s| s.parse::<u32>().ok()).filter(|s| *s >= 1).unwrap_or(10);
         let openrouter_url = var(env, "OPENROUTER_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://openrouter.ai".into());
-        Config { host_secrets, codestorage, host_suffix, poll_interval_ms, egress_local, blob_grace_ms, push_subject, delivery_retry_s, openrouter_url }
+        let creators = var(env, "FRAGMENT_CREATORS").map(|list| fragment_core::npub::parse_list(&list));
+        let deploy_id = var(env, "FRAGMENT_DEPLOY_ID").unwrap_or_else(|| "dev".into());
+        Config { host_secrets, codestorage, host_suffix, poll_interval_ms, egress_local, blob_grace_ms, push_subject, delivery_retry_s, openrouter_url, creators, deploy_id }
+    }
+
+    /// Whether `principal` (64 hex) may create a fragment on this fleet.
+    pub fn may_create(&self, principal: &str) -> CellResult<()> {
+        match &self.creators {
+            None => Ok(()),
+            Some(Err(e)) => Err(CellError::host(format!("FRAGMENT_CREATORS: {e}"))),
+            Some(Ok(keys)) if keys.iter().any(|k| k == principal) => Ok(()),
+            Some(Ok(_)) => Err(CellError::new(ErrorCode::Forbidden, "creating fragments on this fleet is by invitation for now")),
+        }
     }
 
     /// The current host secret and any previous one, current first.

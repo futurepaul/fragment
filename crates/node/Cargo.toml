@@ -1,0 +1,10 @@
+[package]
+name = "fragment-node"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Starts celld on a fleet Machine: its listeners on the Machine's private address, its work directory on the Machine's volume."
+
+[[bin]]
+name = "fragment-node"
+path = "src/main.rs"

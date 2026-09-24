@@ -149,6 +149,11 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
         r["output"]["path"] == "art/lighthouse.png" && s.fake.file_at(&repo, "main", "art/lighthouse.png") == Some(image_bytes("a lighthouse")),
         &r,
     );
+    s.ok(
+        "the job's reasoning option reaches OpenRouter as given",
+        calls.iter().any(|c| c.1 == "/api/v1/chat/completions" && c.4 == r#"{"effort":"low"}"#),
+        format!("{calls:?}"),
+    );
     s.ok("with the image model the plan names", s.openrouter.calls().iter().any(|c| c.1 == "/api/v1/images" && c.2 == "google/gemini-3.1-flash-lite-image"), "");
     let big = image_bytes("a large mural");
     let r = run("i2", "draw", json!({ "prompt": "a large mural", "path": "art/mural.png" }))?;

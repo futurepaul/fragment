@@ -36,6 +36,16 @@ pub fn parse(s: &str) -> Option<String> {
     (bytes.len() == 32).then(|| hex::encode(bytes))
 }
 
+/// A list of keys as configuration names them (npubs or 64 hex,
+/// separated by commas or whitespace) → 64 lowercase hex each; the first
+/// entry that is not a key is the error.
+pub fn parse_list(s: &str) -> Result<Vec<String>, String> {
+    s.split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|e| !e.is_empty())
+        .map(|e| parse(e).ok_or_else(|| format!("{e:?} is not an npub or a 64-hex key")))
+        .collect()
+}
+
 /// How a principal appears in answers: an npub for a key, the id itself
 /// for an anonymous visitor.
 pub fn display(principal: &str) -> String {
@@ -63,5 +73,14 @@ mod tests {
         assert!(is_anon("anon:0123456789abcdef0123456789abcdef"));
         assert!(!is_anon("anon:xyz"));
         assert_eq!(display("anon:0123456789abcdef0123456789abcdef"), "anon:0123456789abcdef0123456789abcdef");
+    }
+
+    #[test]
+    fn lists() {
+        let hex = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
+        let npub = "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6";
+        assert_eq!(parse_list(&format!(" {npub},\n{} ", hex.to_uppercase())), Ok(vec![hex.to_string(), hex.to_string()]));
+        assert_eq!(parse_list(""), Ok(vec![]));
+        assert!(parse_list(&format!("{npub}, paul")).unwrap_err().contains("\"paul\""));
     }
 }

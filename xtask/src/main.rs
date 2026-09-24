@@ -7,10 +7,18 @@
 //!                    the code.storage fake on :8792
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
-//!                    (todo, inbox), scaffolded under target/devstack/try so
-//!                    nothing lands in the repo; prints what to open and paste
-//!   e2e [args...]    build, then run crates/e2e (args pass through: --only <case>)
+//!                    (todo, inbox, notes), scaffolded under target/devstack/try
+//!                    so nothing lands in the repo; prints what to open and paste
+//!   e2e [args...]    build, then run crates/e2e (args pass through: --only <case>);
+//!                    with --fleet <fleet> first, run its hosted sections against
+//!                    that fleet instead
 //!   check            host tests and clippy, warnings denied
+//!   deploy <fleet> [--nodes]
+//!                    ship the cell to a hosted fleet (fleets/<fleet>.json), or
+//!                    with --nodes roll its Machines to a new node image
+//!   fleet <fleet> <celld command...>
+//!                    a celld operator command against the fleet's bucket
+//!                    (diagnose, cell list, queue info <queue>, ...)
 
 use std::net::TcpStream;
 use std::path::Path;
@@ -19,13 +27,22 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use fragment_devstack as devstack;
 
+mod deploy;
+
 const WORKER_BUILD_VERSION: &str = "0.8.5";
 const DEV_PORT: u16 = 8790;
 const DEV_CODESTORAGE_PORT: u16 = 8792;
 const DEV_ORG: &str = "fragment-dev";
 
+/// A command as errors show it: the program and its arguments only
+/// (`{cmd:?}` would print the environment set on it, and a deploy sets
+/// tokens there).
+fn shown(cmd: &Command) -> String {
+    std::iter::once(cmd.get_program()).chain(cmd.get_args()).map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" ")
+}
+
 fn run(cmd: &mut Command) -> Result<()> {
-    let shown = format!("{cmd:?}");
+    let shown = shown(cmd);
     let status = cmd.status().with_context(|| format!("could not start {shown}"))?;
     if !status.success() {
         bail!("{shown} failed: {status}");
@@ -94,6 +111,7 @@ fn dev(args: &[String]) -> Result<()> {
         blob_grace_s: None,
         openrouter_url: None,
         delivery_retry_s: None,
+        creators: None,
     }
     .write_vars(&devstack::cell_dir())?;
     let opts = devstack::NodeOptions { project: devstack::cell_dir(), port: DEV_PORT, clean, watch: true, env: vec![] };
@@ -107,7 +125,7 @@ fn dev(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Templates written for the Rust cell (the others are the TypeScript runtime's).
+/// The templates `try` scaffolds.
 const TRY_TEMPLATES: [&str; 3] = ["todo", "inbox", "notes"];
 
 fn try_template(args: &[String]) -> Result<()> {
@@ -149,8 +167,20 @@ fn try_template(args: &[String]) -> Result<()> {
 }
 
 fn e2e(args: &[String]) -> Result<()> {
-    build()?;
     let manifest = devstack::repo_root().join("Cargo.toml");
+    // against a hosted fleet: its deployed cell, the CLI built here
+    if let [flag, fleet, rest @ ..] = args {
+        if flag == "--fleet" {
+            run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli"]))?;
+            return run(Command::new("cargo")
+                .args(["run", "--quiet", "--release", "--manifest-path"])
+                .arg(&manifest)
+                .args(["-p", "fragment-e2e", "--", "--hosted"])
+                .args(rest)
+                .envs(deploy::hosted_e2e_env(fleet)?));
+        }
+    }
+    build()?;
     // the e2e drives the CLI too
     run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli"]))?;
     run(Command::new("cargo")
@@ -180,6 +210,18 @@ fn main() -> Result<()> {
         Some("try") => try_template(&args[1..]),
         Some("e2e") => e2e(&args[1..]),
         Some("check") => check(),
-        _ => bail!("usage: cargo xtask build | celld | dev [--clean] | try <template> [name] | e2e [--only <case>] | check"),
+        Some("deploy") => deploy::run(&args[1..]),
+        Some("fleet") => deploy::operate(&args[1..]),
+        _ => bail!("usage: cargo xtask build | celld | dev [--clean] | try <template> [name] | e2e [--fleet <fleet>] [--only <case>] | check | deploy <fleet> [--nodes] | fleet <fleet> <celld command...>"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_failed_command_never_shows_its_environment() {
+        let mut cmd = std::process::Command::new("flyctl");
+        cmd.args(["deploy", "--remote-only"]).env("FLY_API_TOKEN", "FlyV1 not-a-real-token");
+        assert_eq!(super::shown(&cmd), "flyctl deploy --remote-only");
     }
 }

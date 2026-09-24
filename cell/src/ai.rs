@@ -96,6 +96,11 @@ impl FragmentCell {
                     _ => return Err(permanent("ai.text needs messages or a prompt")),
                 };
                 let mut body = json!({ "model": model, "messages": messages });
+                // OpenRouter's reasoning control, as the job gave it (a
+                // reasoning model can spend a small cap thinking)
+                if args["reasoning"].is_object() {
+                    body["reasoning"] = args["reasoning"].clone();
+                }
                 if let Some(n) = args["max_tokens"].as_u64() {
                     body["max_tokens"] = json!(n);
                 }

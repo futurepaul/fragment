@@ -70,6 +70,9 @@ pub struct Api {
     pub base: String,
     pub port: u16,
     pub suffix: Option<String>,
+    /// A hosted fleet: requests go to their URLs as they are (a local node
+    /// is reached at 127.0.0.1 with the site in `Host`).
+    remote: bool,
 }
 
 impl Api {
@@ -79,13 +82,25 @@ impl Api {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("http client");
-        Api { http, base: format!("http://127.0.0.1:{port}"), port, suffix: suffix.map(str::to_string) }
+        Api { http, base: format!("http://127.0.0.1:{port}"), port, suffix: suffix.map(str::to_string), remote: false }
+    }
+
+    /// A hosted fleet at `base` (https), its fragments on `<name>.<suffix>`
+    /// when it has a suffix.
+    pub fn remote(base: &str, suffix: Option<&str>) -> Api {
+        let http = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(120))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("http client");
+        Api { http, base: base.trim_end_matches('/').to_string(), port: 443, suffix: suffix.map(str::to_string), remote: true }
     }
 
     /// The URL of `path` on a fragment's own host (or its `/f/<name>/` path
     /// when the fleet has no suffix).
     pub fn site_url(&self, name: &str, path: &str) -> String {
         match &self.suffix {
+            Some(s) if self.remote => format!("https://{name}.{s}/{path}"),
             Some(s) => format!("http://{name}.{s}:{}/{path}", self.port),
             None => format!("{}/f/{name}/{path}", self.base),
         }
@@ -93,13 +108,17 @@ impl Api {
 
     pub fn call(&self, c: Call<'_>) -> Result<Reply> {
         let url = reqwest::Url::parse(&c.url)?;
-        let host = format!("{}:{}", url.host_str().unwrap_or(""), url.port().unwrap_or(80));
-        // Everything goes to the node; the Host header names the site.
-        let mut to = url.clone();
-        to.set_host(Some("127.0.0.1")).expect("an http URL takes a host");
-        to.set_port(Some(self.port)).expect("an http URL takes a port");
         let body = c.body.unwrap_or_default();
-        let mut req = self.http.request(c.method.parse()?, to).header("host", host).body(body.clone());
+        let mut req = if self.remote {
+            self.http.request(c.method.parse()?, url.clone()).body(body.clone())
+        } else {
+            // Everything goes to the node; the Host header names the site.
+            let host = format!("{}:{}", url.host_str().unwrap_or(""), url.port().unwrap_or(80));
+            let mut to = url.clone();
+            to.set_host(Some("127.0.0.1")).expect("an http URL takes a host");
+            to.set_port(Some(self.port)).expect("an http URL takes a port");
+            self.http.request(c.method.parse()?, to).header("host", host).body(body.clone())
+        };
         if let Some(ct) = c.content_type {
             req = req.header("content-type", ct);
         }

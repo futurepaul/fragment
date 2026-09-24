@@ -191,10 +191,11 @@ export class App extends DurableObject {
 - **`fetch(request)`**, if the App has one, answers every site path that
   is not a file in `site/` (any method); `x-fragment-principal` and
   `x-fragment-role` say who.
-- **AI** (jobs): `job.ai.text({model, prompt})`, `job.ai.image({prompt,
-  path})`, `job.ai.video({prompt, path})` call OpenRouter with the
-  fragment's `OPENROUTER_API_KEY` secret; images and video are written
-  to `path` on `main`.
+- **AI** (jobs): `job.ai.text({model, prompt, max_tokens, reasoning})`,
+  `job.ai.image({prompt, path})`, `job.ai.video({prompt, path})` call
+  OpenRouter with the fragment's `OPENROUTER_API_KEY` secret; images and
+  video are written to `path` on `main`. A reasoning model can spend a
+  small `max_tokens` thinking: pass `reasoning: {effort: "low"}`.
 
 `fragment build [dir]` compiles `.ts` sources to `.mjs` beside them,
 hashes site assets, and refuses files that would not parse. It is

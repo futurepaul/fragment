@@ -153,9 +153,20 @@ async fn serve(mut req: Request, env: &Env, url: &Url, name: &str, rest: &str, m
     forward(env, &req, url, bytes_body(body), f).await
 }
 
+/// The URL a request arrived on, as its client named it. A proxy that ends
+/// TLS in front of celld (Fly's) forwards plain HTTP and says so in
+/// `x-forwarded-proto`; signatures, links, and cookies name the https URL.
+fn arrived_url(req: &Request) -> CellResult<Url> {
+    let mut url = req.url()?;
+    if url.scheme() == "http" && req.headers().get("x-forwarded-proto")?.as_deref() == Some("https") {
+        url.set_scheme("https").map_err(|_| CellError::host("could not name the https URL"))?;
+    }
+    Ok(url)
+}
+
 async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
     let cfg = Config::from_env(env);
-    let url = req.url()?;
+    let url = arrived_url(&req)?;
     let path = url.path().to_string();
     // A fragment's own host is all its own (`/api/…` included: apps have
     // routes there); the platform API answers on the platform's host.
@@ -165,12 +176,17 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
     }
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     match (req.method(), segments.as_slice()) {
-        (Method::Get, ["healthz"]) => Ok(Response::ok("ok")?),
+        (Method::Get, ["healthz"]) => {
+            let mut resp = Response::ok("ok")?;
+            resp.headers_mut().set("x-fragment-deploy", &cfg.deploy_id)?;
+            Ok(resp)
+        }
         (Method::Post, ["api", "fragments"]) => {
             let body = read_body(&mut req).await?;
             let create: CreateFragment = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             check_name(&create.name)?;
             let principal = authenticate(&req, &url, &body)?;
+            cfg.may_create(&principal)?;
             let f = Forward { name: &create.name, inner: "/create".into(), principal: Some(principal), mode: None, extra: vec![] };
             forward(env, &req, &url, bytes_body(body), f).await
         }

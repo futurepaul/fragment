@@ -13,7 +13,7 @@ export class App extends DurableObject {
   }
 
   async summarize({ text }, job) {
-    return await job.ai.text({ model: "openai/gpt-5-mini", prompt: text });
+    return await job.ai.text({ model: "openai/gpt-5-mini", prompt: text, reasoning: { effort: "low" } });
   }
 
   async draw({ prompt, path }, job) {

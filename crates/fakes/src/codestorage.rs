@@ -338,8 +338,10 @@ impl Inner {
     }
 
     /// Checks the bearer token for `scope` (and the repo, on repo-scoped calls).
-    fn authorize(&self, req: &Request, scope: &str, repo_url: Option<&str>) -> Result<(), Response> {
-        let Some(key) = &self.signing else { return Ok(()) };
+    /// Checks the bearer token; answers its repo claim ("" when the fake
+    /// verifies no tokens).
+    fn authorize(&self, req: &Request, scope: &str, repo_url: Option<&str>) -> Result<String, Response> {
+        let Some(key) = &self.signing else { return Ok(String::new()) };
         let token = req.header("authorization").and_then(|h| h.strip_prefix("Bearer ")).ok_or_else(|| problem(401, "missing bearer token"))?;
         let jwt = verify_jwt(token, &VerifyingKey::from(key), &self.org).map_err(|e| problem(401, &e))?;
         if jwt.repo.is_empty() {
@@ -353,7 +355,7 @@ impl Inner {
                 return Err(problem(403, "the token's repo claim names another repo"));
             }
         }
-        Ok(())
+        Ok(jwt.repo)
     }
 
     /// Webhooks for a push over HTTP go out after the answer, as the real
@@ -405,11 +407,24 @@ impl Inner {
             }
         }
         if path == "/api/repos" && m == "POST" {
-            if let Err(r) = self.authorize(req, "repo:write", None) {
-                return r;
-            }
+            // the service names a new repo by the token's repo claim; the
+            // body's optional repo_name must equal it
+            let claim = match self.authorize(req, "repo:write", None) {
+                Ok(c) => c,
+                Err(r) => return r,
+            };
             let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
-            let Some(name) = body["id"].as_str().filter(|s| !s.is_empty()) else { return problem(400, "id is required") };
+            let named = body["repo_name"].as_str().filter(|s| !s.is_empty());
+            if let Some(n) = named {
+                if !claim.is_empty() && n != claim {
+                    return problem(400, "repo_name must equal the JWT repo claim");
+                }
+            }
+            let name = if claim.is_empty() { named.unwrap_or("").to_string() } else { claim };
+            if name.is_empty() {
+                return problem(400, "the repository name is required");
+            }
+            let name = name.as_str();
             if st.repo_by(name).is_some() {
                 return problem(409, "repository already exists");
             }
@@ -425,12 +440,31 @@ impl Inner {
             if let Err(r) = self.authorize(req, "org:read", None) {
                 return r;
             }
-            let repos: Vec<Value> = st
-                .repos
-                .values()
+            // the service's paging: newest first, 20 a page by default, at
+            // most 100, an opaque cursor; `q` matches the url form
+            let limit = req.query.get("limit").and_then(|l| l.parse().ok()).unwrap_or(20usize).clamp(1, 100);
+            let start: usize = match req.query.get("cursor") {
+                None => 0,
+                Some(c) => match c.strip_prefix("page-").and_then(|n| n.parse().ok()) {
+                    Some(n) => n,
+                    None => return problem(400, "invalid cursor"),
+                },
+            };
+            let q = req.query.get("q").map(|q| q.trim().to_ascii_lowercase()).unwrap_or_default();
+            let mut all: Vec<&Repo> = st.repos.values().filter(|r| q.is_empty() || r.url.to_ascii_lowercase().contains(&q)).collect();
+            all.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms).then(b.repo_id.cmp(&a.repo_id)));
+            let page: Vec<Value> = all
+                .iter()
+                .skip(start)
+                .take(limit)
                 .map(|r| json!({ "repo_id": r.repo_id, "repo_name": r.name, "url": r.url, "default_branch": "main", "created_at": iso(r.created_at_ms) }))
                 .collect();
-            return Response::json(200, &json!({ "repos": repos, "has_more": false }));
+            let more = start + limit < all.len();
+            let mut body = json!({ "repos": page, "has_more": more });
+            if more {
+                body["next_cursor"] = json!(format!("page-{}", start + limit));
+            }
+            return Response::json(200, &body);
         }
         if let Some(id) = path.strip_prefix("/api/repo-urls/") {
             if let Err(r) = self.authorize(req, "org:read", None) {
@@ -768,6 +802,22 @@ impl CodeStorage {
             st.repos.insert(name.into(), Repo::new(name, name, &format!("repo_{name}")));
             let changes: Vec<OwnedChange> = files.iter().map(|(p, b)| (p.to_string(), Some(b.to_vec()))).collect();
             st.commit(name, Write { branch: "main", message: "seed", author: "seed", changes: &changes, from: None }, &mut out);
+        });
+    }
+
+    /// `n` empty repos made after every existing one (a busy org, so a
+    /// lookup by name must page).
+    pub fn seed_filler(&self, n: usize) {
+        self.with(|st| {
+            let base = st.repos.values().map(|r| r.created_at_ms).max().unwrap_or(0).max(now_ms());
+            for i in 0..n {
+                let id = fresh_sha(&mut st.counter, "filler");
+                let name = format!("filler-{}", &id[..12]);
+                let url = uuid_like(&id);
+                let mut repo = Repo::new(&name, &url, &format!("repo_{}", &id[..20]));
+                repo.created_at_ms = base + 1 + i as i64;
+                st.repos.insert(url, repo);
+            }
         });
     }
 

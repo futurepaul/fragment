@@ -10,6 +10,7 @@
 
 mod api;
 mod browser;
+mod hosted;
 mod lanes;
 
 use std::path::{Path, PathBuf};
@@ -47,6 +48,8 @@ pub struct Suite {
     pub push: fragment_fakes::push::PushService,
     org_key: String,
     host_secret: String,
+    /// Who may create fragments from the next start (`FRAGMENT_CREATORS`).
+    creators: Option<String>,
     pub cli: PathBuf,
     pub scratch: PathBuf,
     /// The node's own copy of the cell project (never `cell/`, where `xtask dev` runs).
@@ -91,6 +94,7 @@ impl Suite {
             blob_grace_s: Some(BLOB_GRACE_S),
             openrouter_url: Some(self.openrouter.url.clone()),
             delivery_retry_s: Some(1),
+            creators: self.creators.clone(),
         }
         .write_vars(&self.project)?;
         let opts = devstack::NodeOptions { project: self.project.clone(), port: self.port, clean, watch: false, env: vec![] };
@@ -195,17 +199,26 @@ impl Suite {
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let only = match args.as_slice() {
+    let (hosted, rest) = match args.split_first() {
+        Some((flag, rest)) if flag == "--hosted" => (true, rest),
+        _ => (false, args.as_slice()),
+    };
+    let only = match rest {
         [] => None,
         [flag, section] if flag == "--only" => Some(section.clone()),
-        _ => bail!("usage: fragment-e2e [--only <section>]"),
+        _ => bail!("usage: fragment-e2e [--hosted] [--only <section>]"),
     };
-    let tools = devstack::Tools::locate()?;
     let root = devstack::repo_root();
     let cli = std::env::var_os("FRAGMENT_BIN").map(PathBuf::from).unwrap_or_else(|| root.join("target/release/fragment"));
     if !cli.is_file() {
         bail!("no CLI at {} (cargo build --release -p fragment-cli, or set FRAGMENT_BIN)", cli.display());
     }
+    if hosted {
+        let scratch = root.join("target/e2e-hosted");
+        std::fs::create_dir_all(&scratch)?;
+        return hosted::run(cli, scratch, only);
+    }
+    let tools = devstack::Tools::locate()?;
     let org_key = fake::generate_org_key_pem();
     let fake = CodeStorage::start(fake::Options { org: ORG.into(), org_key_pem: Some(org_key.clone()), ..Default::default() })?;
     let scratch = root.join("target/e2e");
@@ -225,6 +238,7 @@ fn main() -> Result<()> {
         push: fragment_fakes::push::PushService::start()?,
         org_key,
         host_secret: devstack::random_hex(32),
+        creators: None,
         cli,
         scratch,
         project,

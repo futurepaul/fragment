@@ -685,6 +685,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fragment-node"
+version = "0.1.0"
+
+[[package]]
 name = "fragment-proto"
 version = "0.1.0"
 dependencies = [
@@ -3127,6 +3131,9 @@ dependencies = [
  "anyhow",
  "fragment-devstack",
  "fragment-fakes",
+ "reqwest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

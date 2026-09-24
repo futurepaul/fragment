@@ -1,0 +1,31 @@
+{
+  "url": "https://fragment-club.fly.dev",
+  "fly": {
+    "app": "fragment-club",
+    "org": "personal",
+    "region": "ord",
+    "size": "shared-cpu-2x",
+    "memory": "2gb",
+    "volume": "3gb",
+    "token": "~/.config/finite-next/secrets/fly-api-token"
+  },
+  "bucket": {
+    "url": "s3://fragment-club-ord",
+    "endpoint": "https://fly.storage.tigris.dev",
+    "region": "auto",
+    "credentials": "~/.config/finite-next/secrets/fragment-club-bucket.env"
+  },
+  "vars": {
+    "CODESTORAGE_ORG": "finite",
+    "FRAGMENT_PUSH_SUBJECT": "https://fragment.club",
+    "FRAGMENT_CREATORS": "npub1w352vpm92yvdlar2vunk8ctjrz609jwtdf8svfr3hnequ52agv9qeqf9h2, npub1gwx5n6u248vlnfcujt68fdn923nt7alp3ray69hhzc257quhs8ls6zwzqs"
+  },
+  "secret_vars": {
+    "FRAGMENT_HOST_SECRET": "~/.config/finite-next/secrets/fragment-club-host-secret",
+    "CODESTORAGE_PRIVATE_KEY": "~/.config/finite-next/secrets/codestorage-private-key.pem"
+  },
+  "e2e": {
+    "key": "~/.config/finite-next/secrets/fragment-club-e2e-key",
+    "openrouter_key": "~/.config/finite-next/secrets/openrouter-api-key"
+  }
+}

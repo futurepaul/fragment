@@ -1,0 +1,9 @@
+.git
+**/target
+spikes
+myinbox
+mytodo
+cell/.celld
+cell/.dev.vars
+cell/build
+**/node_modules

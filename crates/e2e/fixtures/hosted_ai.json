@@ -1,0 +1,6 @@
+{
+  "operations": {
+    "summarize": { "kind": "job" },
+    "draw": { "kind": "job" }
+  }
+}
