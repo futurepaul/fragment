@@ -124,6 +124,7 @@ fn authenticate(req: &Request, url: &Url, body: &[u8]) -> CellResult<String> {
 
 /// Who is asking: the identity the registry says holds the signing key,
 /// or a browser's session names (no key then).
+#[derive(Clone)]
 pub(crate) struct Signer {
     pub key: Option<String>,
     pub id: String,
@@ -209,18 +210,33 @@ fn named_identity(who: &str, signer: &Signer) -> CellResult<String> {
 /// A create's name under the creator's username: a bare label goes under
 /// it, and a qualified name must already be under it.
 /// Makes a fragment for a person, under their username: the API's create
-/// and the platform's "new" page.
+/// and the platform's "new" page. An agent makes one for its owner: the
+/// owner's, under their username, with the agent an editor of it.
 pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut create: CreateFragment, principal: Signer) -> CellResult<Response> {
-    if principal.kind != IdentityKind::Person {
-        return Err(CellError::new(ErrorCode::Forbidden, "fragments are made by people"));
-    }
-    let username = principal.username.clone().ok_or_else(|| CellError::invalid(format!("choose a username first (sign in at {}/)", cfg.platform(url))))?;
+    let (maker, agent) = match principal.kind {
+        IdentityKind::Person => (principal, None),
+        IdentityKind::Agent => {
+            let owner = principal.owner.clone().ok_or_else(|| CellError::host("an agent without an owner"))?;
+            (Signer { key: None, id: owner, kind: IdentityKind::Person, owner: None, username: principal.username.clone() }, Some(principal.id))
+        }
+    };
+    let username = maker.username.clone().ok_or_else(|| CellError::invalid(format!("choose a username first (sign in at {}/)", cfg.platform(url))))?;
     create.name = qualify(&create.name, &username)?;
     let body = serde_json::to_vec(&create).map_err(|e| CellError::host(e.to_string()))?;
     // a fresh request: nothing of the caller's but what the router decided
     let bare = Request::new(url.as_str(), Method::Post)?;
-    let f = Forward { name: &create.name, inner: "/create".into(), principal: Some(principal), mode: None, extra: vec![] };
-    forward(env, &bare, url, bytes_body(body), f).await
+    let f = Forward { name: &create.name, inner: "/create".into(), principal: Some(maker.clone()), mode: None, extra: vec![] };
+    let made = forward(env, &bare, url, bytes_body(body), f).await?;
+    if let (Some(agent), 200) = (agent, made.status_code()) {
+        let put = Request::new(url.as_str(), Method::Put)?;
+        let role = serde_json::to_vec(&json!({ "role": "editor" })).map_err(|e| CellError::host(e.to_string()))?;
+        let f = Forward { name: &create.name, inner: format!("/api/members/{agent}"), principal: Some(maker), mode: None, extra: vec![] };
+        let mut added = forward(env, &put, url, bytes_body(role), f).await?;
+        if added.status_code() != 200 {
+            return Err(CellError::host(format!("{} was made, but its agent was not made an editor: {}", create.name, added.text().await.unwrap_or_default())));
+        }
+    }
+    Ok(made)
 }
 
 fn qualify(name: &str, username: &str) -> CellResult<String> {

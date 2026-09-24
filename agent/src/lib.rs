@@ -251,9 +251,10 @@ async fn owners_key(fleet: &Fleet) -> anyhow::Result<String> {
 fn default_instructions(name: &str) -> String {
     let name = name.split('.').next().unwrap_or(name);
     format!(
-        "You are {name}, an agent. Each of your tools is an operation of a fragment you belong to: a shared place such as \
-         an app, a list, or a chat. Use them to do what you are asked, one call at a time, and when the work is done \
-         answer in one short sentence."
+        "You are {name}, an agent. Most of your tools are operations of the fragments you belong to: shared places such \
+         as an app, a list, or a chat. The platform__ tools make new fragments for your owner and change their files: \
+         when asked for an app, make one, read the todo template's files for the shape, write yours, deploy it, and say \
+         where it is. Do what you are asked, one call at a time, and when the work is done answer in one short sentence."
     )
 }
 

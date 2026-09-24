@@ -80,7 +80,8 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     let r = agents.signed(&Keys::generate(), "GET", &format!("/api/a/{full}"), None)?;
     s.ok("nor a key no one registered", r.status == 401, &r);
     let r = agents.signed(&owner, "GET", &format!("/api/a/{name}/tools"), None)?;
-    s.ok("an agent in no fragment has no tools", r.status == 200 && r.body["tools"] == json!([]), &r);
+    let platform = ["platform__create_fragment", "platform__list_files", "platform__read_file", "platform__write_files", "platform__deploy"];
+    s.ok("an agent in no fragment has only the platform's verbs", r.status == 200 && r.body["tools"] == json!(platform), &r);
 
     // a todo fragment the owner makes, with the agent as an editor
     let todo = s.named(api, &owner, "agent-todo")?;
@@ -130,6 +131,31 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
         .find(|t| t["function"]["name"] == add.as_str())
         .map(|t| t["function"]["parameters"].clone());
     s.ok("the model was offered the operation, with its input schema", schema.as_ref().is_some_and(|p| p["type"] == "object"), json!(schema));
+
+    // it makes an app for its owner: a fragment, its page, a deploy
+    let label = s.name("counter");
+    let app = format!("{label}.{username}");
+    s.openrouter.clear_script();
+    s.openrouter.script(&[
+        Reply::Tools(vec![("platform__create_fragment".into(), json!({ "label": label, "template": "blank" }))]),
+        Reply::Tools(vec![("platform__write_files".into(), json!({ "fragment": app, "files": [{ "path": "site/index.html", "text": "<h1>Counter, by an agent</h1>" }] }))]),
+        Reply::Tools(vec![("platform__deploy".into(), json!({ "fragment": app, "note": "first" }))]),
+        Reply::Text("Your counter is up.".into()),
+    ]);
+    agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "make me a counter app" })))?;
+    let v = settle(s, &agents, &owner, &name, wait);
+    s.ok("asked for an app, it makes one and says so", v["outcome"] == "idle" && v["messages"].as_array().and_then(|m| m.last()).is_some_and(|m| m["text"] == "Your counter is up."), &v);
+    let mine = api.signed(&owner, "GET", "/api/fragments", None)?;
+    s.ok(
+        "the app is its owner's, under their username",
+        mine.body["fragments"].as_array().is_some_and(|a| a.iter().any(|f| f["name"] == app.as_str() && f["role"] == "owner")),
+        &mine,
+    );
+    let members = api.signed(&owner, "GET", &format!("/api/f/{app}/members"), None)?;
+    s.ok("and the agent is its editor", members.body["members"].as_array().is_some_and(|a| a.iter().any(|m| m["principal"] == agent_id.as_str() && m["role"] == "editor")), &members);
+    let st = api.status(&owner, &app)?;
+    let page = api.page(&app, "", Some(&format!("fragview={}", st.body["viewToken"].as_str().unwrap_or(""))))?;
+    s.ok("its page, written and deployed by the agent, is live", page.status == 200 && page.text.contains("Counter, by an agent"), &page);
 
     // steer mid-tool: the message waits for the tool, then joins the turn
     agents.signed(&owner, "POST", &format!("/api/a/{name}/test"), Some(&json!({ "hold_in_tool_ms": 3000 })))?;

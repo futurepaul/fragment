@@ -6,6 +6,12 @@
 //! is the operation itself, signed by the agent, with an id made from the
 //! model's tool-call id: a replayed step replays the operation, and the
 //! fragment's ledger answers it without running it again.
+//!
+//! Beside them, the platform's own verbs (`platform__*`, phase 6 step 4d):
+//! make a fragment for the owner, list and read its files, write files,
+//! and deploy, each the signed API the CLI uses, so the agent can make an
+//! app. A file write's key comes from the tool-call id, so a replayed step
+//! commits nothing twice.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -42,9 +48,91 @@ fn describe(fragment: &str, op: &str, decl: &OpDecl) -> String {
 }
 
 #[derive(Clone)]
-struct Route {
-    fragment: String,
-    op: String,
+enum Route {
+    Op { fragment: String, op: String },
+    Platform(&'static str),
+}
+
+/// The platform's verbs: (name, description, input schema).
+fn platform_tools() -> Vec<(&'static str, &'static str, Value)> {
+    let fragment = json!({ "type": "string", "description": "the fragment's full name, <label>.<username>" });
+    vec![
+        (
+            "platform__create_fragment",
+            "Makes a new fragment (an app, a page, a list) for your owner, named <label>.<their username>, from a \
+             template: blank (one page), todo (a live list: a working example of an app), inbox, or chat. You become \
+             its editor. Answers its name and URL. An app is fragment.json (its operations), app.mjs (their code), \
+             and site/index.html (its page, which imports ./__fragment.js to call them): read the todo template's \
+             files to see the shape before you write your own.",
+            json!({ "type": "object", "required": ["label"], "additionalProperties": false, "properties": {
+                "label": { "type": "string", "description": "lowercase letters, digits, and single dashes" },
+                "template": { "type": "string", "enum": ["blank", "todo", "inbox", "chat"] },
+            } }),
+        ),
+        (
+            "platform__list_files",
+            "Lists a fragment's files (at main, what the next deploy ships).",
+            json!({ "type": "object", "required": ["fragment"], "additionalProperties": false, "properties": { "fragment": fragment } }),
+        ),
+        (
+            "platform__read_file",
+            "Reads one of a fragment's files as text.",
+            json!({ "type": "object", "required": ["fragment", "path"], "additionalProperties": false, "properties": {
+                "fragment": fragment, "path": { "type": "string" },
+            } }),
+        ),
+        (
+            "platform__write_files",
+            "Writes files to a fragment in one commit (at most 16 files and 256 KiB). A file whose text is null is removed. \
+             Nothing changes for its visitors until you deploy.",
+            json!({ "type": "object", "required": ["fragment", "files"], "additionalProperties": false, "properties": {
+                "fragment": fragment,
+                "files": { "type": "array", "items": { "type": "object", "required": ["path", "text"], "properties": {
+                    "path": { "type": "string" }, "text": { "type": ["string", "null"] },
+                } } },
+                "message": { "type": "string" },
+            } }),
+        ),
+        (
+            "platform__deploy",
+            "Deploys a fragment: what its files are now goes live for everyone who opens it. Answers its URL.",
+            json!({ "type": "object", "required": ["fragment"], "additionalProperties": false, "properties": {
+                "fragment": fragment, "note": { "type": "string" },
+            } }),
+        ),
+    ]
+}
+
+/// A platform verb's request: (method, path, body).
+fn platform_request(tool: &str, args: &Value, request_id: &str) -> Result<(Method, String, Option<Value>), String> {
+    let text = |k: &str| args[k].as_str().map(str::to_string).ok_or_else(|| format!("{k} is required"));
+    let q = |s: &str| {
+        let mut u = worker::Url::parse("https://q/").expect("a URL");
+        u.query_pairs_mut().append_pair("path", s);
+        u.query().unwrap_or_default().to_string()
+    };
+    Ok(match tool {
+        "platform__create_fragment" => {
+            (Method::Post, "/api/fragments".into(), Some(json!({ "name": text("label")?, "template": args["template"].as_str().unwrap_or("blank") })))
+        }
+        "platform__list_files" => (Method::Get, format!("/api/f/{}/files", text("fragment")?), None),
+        "platform__read_file" => (Method::Get, format!("/api/f/{}/file?{}", text("fragment")?, q(&text("path")?)), None),
+        "platform__write_files" => {
+            let files: Vec<Value> = args["files"]
+                .as_array()
+                .ok_or("files is a list")?
+                .iter()
+                .map(|f| match f["text"].as_str() {
+                    Some(t) => json!({ "path": f["path"], "text": t }),
+                    None => json!({ "path": f["path"], "delete": true }),
+                })
+                .collect();
+            let body = json!({ "files": files, "message": args["message"].as_str().unwrap_or("written by an agent"), "key": op_id(request_id) });
+            (Method::Post, format!("/api/f/{}/files", text("fragment")?), Some(body))
+        }
+        "platform__deploy" => (Method::Post, format!("/api/f/{}/deploy", text("fragment")?), Some(json!({ "note": args["note"] }))),
+        other => return Err(format!("no tool named {other}")),
+    })
 }
 
 struct Catalog {
@@ -72,6 +160,11 @@ impl FragmentTools {
         let listed = fleet.get("/api/fragments").await?;
         let mut tools = Vec::new();
         let mut routes = HashMap::new();
+        for (name, description, schema) in platform_tools() {
+            let schema: rmcp::model::JsonObject = serde_json::from_value(schema)?;
+            tools.push(Tool::new(name, description, Arc::new(schema)));
+            routes.insert(name.to_string(), Route::Platform(name));
+        }
         for f in listed["fragments"].as_array().into_iter().flatten().take(FRAGMENTS_MAX) {
             let (Some(name), Some(role)) = (f["name"].as_str(), f["role"].as_str()) else { continue };
             let role: Role = serde_json::from_value(json!(role))?;
@@ -89,7 +182,7 @@ impl FragmentTools {
                 let schema = decl.input.clone().filter(Value::is_object).unwrap_or_else(|| json!({ "type": "object" }));
                 let schema: rmcp::model::JsonObject = serde_json::from_value(schema)?;
                 tools.push(Tool::new(tool.clone(), describe(name, &op, &decl), Arc::new(schema)));
-                routes.insert(tool, Route { fragment: name.to_string(), op });
+                routes.insert(tool, Route::Op { fragment: name.to_string(), op });
             }
         }
         Ok(Catalog { tools, routes })
@@ -129,10 +222,16 @@ impl ToolProvider<Session> for FragmentTools {
         let Some(route) = catalog.routes.get(call.name.as_ref()).cloned() else {
             return Ok(CallToolResult::error(vec![ContentBlock::text(format!("no tool named {}", call.name))]));
         };
-        let body = json!({ "id": op_id(request_id), "input": Value::Object(call.arguments.unwrap_or_default()) });
+        let args = Value::Object(call.arguments.unwrap_or_default());
+        let (method, path, body) = match &route {
+            Route::Op { fragment, op } => (Method::Post, format!("/api/f/{fragment}/ops/{op}"), Some(json!({ "id": op_id(request_id), "input": args }))),
+            Route::Platform(tool) => match platform_request(tool, &args, request_id) {
+                Ok(r) => r,
+                Err(why) => return Ok(CallToolResult::error(vec![ContentBlock::text(why)])),
+            },
+        };
         let fleet = self.fleet.clone();
-        let path = format!("/api/f/{}/ops/{}", route.fragment, route.op);
-        let (status, answer) = SendFuture::new(async move { fleet.call(Method::Post, &path, Some(&body)).await }).await.map_err(internal)?;
+        let (status, answer) = SendFuture::new(async move { fleet.call(method, &path, body.as_ref()).await }).await.map_err(internal)?;
         // Test hook: hold after the operation ran and before its result is
         // persisted, so a kill lands in the at-least-once window.
         let hold = kv_u64(&self.sql, "test_hold_in_tool_ms").map_err(internal)?;
@@ -142,7 +241,12 @@ impl ToolProvider<Session> for FragmentTools {
         if status != 200 {
             return Ok(CallToolResult::error(vec![ContentBlock::text(format!("{status}: {}", fleet::message(&answer)))]));
         }
-        let mut text = answer["result"].to_string();
+        let mut text = match (&route, &answer) {
+            (Route::Op { .. }, _) => answer["result"].to_string(),
+            // a file's bytes come back as text; the rest are JSON
+            (Route::Platform(_), Value::String(s)) => s.clone(),
+            (Route::Platform(_), v) => v.to_string(),
+        };
         if text.len() > RESULT_TEXT_MAX {
             text.truncate(text.floor_char_boundary(RESULT_TEXT_MAX));
             text.push_str(" …(truncated)");
