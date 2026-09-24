@@ -160,9 +160,13 @@ Decided with Paul on 2026-09-24:
 ### Trying it locally (Paul)
 
 ```
-cargo xtask dev
+cargo xtask dev --clean
 FRAGMENT_HOST=http://127.0.0.1:8790 fragment login
 ```
+
+(`--clean` starts the dev fleet fresh: fragments made there before
+identities have members named by keys, which no one holds now. Without
+it they stay, unreachable.)
 
 The login opens http://127.0.0.1:8790/cli?key=…: sign in on the fake's
 page with any email, compare the key ending, approve; the terminal
