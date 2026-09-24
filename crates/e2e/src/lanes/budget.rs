@@ -9,6 +9,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use fragment_core::budget;
 use fragment_fakes::openrouter::Costs;
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
@@ -193,6 +194,50 @@ pub fn budget(s: &mut Suite, api: &Api) -> Result<()> {
     let r = run(&owner, "summarize", "next-month", json!({ "text": "again" }))?;
     let patched = patches_of(s);
     s.ok("and the key's limit goes back with it", r["status"] == "succeeded" && patched.last().is_some_and(|b| b["limit"] == 0.1), format!("{r} {patched:?}"));
+
+    // an answer that names no cost is charged the step's reservation: the
+    // money path fails closed, never at zero
+    let before = month(api, &owner);
+    s.openrouter.omit_costs(true);
+    let r = run(&owner, "summarize", "unpriced", json!({ "text": "no price" }));
+    s.openrouter.omit_costs(false);
+    let r = r?;
+    let v = month(api, &owner);
+    s.ok(
+        "a step whose answer names no cost is charged its reservation",
+        r["status"] == "succeeded" && m(&v, "spentMicros") == m(&before, "spentMicros") + budget::TEXT_RESERVE && m(&v, "reservedMicros") == 0,
+        format!("{before} then {v}"),
+    );
+    s.ok("and the event log says so", events(api, &owner, &name).contains("ai.cost-missing"), "no ai.cost-missing");
+
+    // a video that ends undelivered is charged nothing, and its
+    // reservation comes back; so does one whose run is held while it waits
+    api.signed(&s.operator, "POST", &top, Some(&json!({ "usd": 1.0 })))?;
+    let before = month(api, &owner);
+    let r = run(&owner, "film", "expired", json!({ "prompt": "a video that will expire", "path": "v/expired.mp4" }))?;
+    let v = month(api, &owner);
+    s.ok("a video that expires holds its run, saying so", r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("expired")), &r);
+    s.ok(
+        "and is charged nothing: its reservation comes back",
+        m(&v, "spentMicros") == m(&before, "spentMicros") && m(&v, "reservedMicros") == 0 && r["costMicros"] == 0,
+        format!("{before} then {v}"),
+    );
+    s.ok("the event log says the video was not delivered", events(api, &owner, &name).contains("ai.video-undelivered"), "no ai.video-undelivered");
+    let r = run(&owner, "film", "vanished", json!({ "prompt": "a video that will vanish", "path": "v/vanished.mp4" }))?;
+    let mut v = Value::Null;
+    let released = s.eventually(wait, || {
+        v = month(api, &owner);
+        m(&v, "reservedMicros") == 0
+    });
+    s.ok(
+        "a run held while its video waits for its cost gives the reservation back",
+        r["status"] == "held" && released && m(&v, "spentMicros") == m(&before, "spentMicros"),
+        format!("{r} {v}"),
+    );
     s.openrouter.set_costs(Costs::default());
     Ok(())
+}
+
+fn events(api: &Api, keys: &Keys, name: &str) -> String {
+    api.signed(keys, "GET", &format!("/api/f/{name}/events?since=0"), None).map(|r| r.text).unwrap_or_default()
 }

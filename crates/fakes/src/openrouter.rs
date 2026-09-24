@@ -5,11 +5,14 @@
 //! Chat completions stream (server-sent events, OpenAI's chunk format) when
 //! asked to, and answer scripted replies (text, or tool calls) in order
 //! before falling back to an echo. Every answer reports its cost
-//! (`usage.cost`, dollars). The management key mints keys with a credit
-//! limit (`POST /api/v1/keys`, `PATCH /api/v1/keys/{hash}`), and a call on a
+//! (`usage.cost`, dollars) unless told to leave it out. A video's prompt
+//! decides how it ends: one naming "expire" expires (no cost, nothing to
+//! save), one naming "vanish" is forgotten (its polls answer 404); any
+//! other completes. The management key mints keys with a credit limit
+//! (`POST /api/v1/keys`, `PATCH /api/v1/keys/{hash}`), and a call on a
 //! minted key past its limit is 402. Levers: the calls made, the chat
-//! requests, failures queued for the next calls, the script, the costs, and
-//! the keys minted.
+//! requests, failures queued for the next calls, the script, the costs,
+//! whether costs are reported, and the keys minted.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -63,11 +66,14 @@ impl Default for Costs {
 struct State {
     calls: Vec<Call>,
     failures: VecDeque<u16>,
-    /// video id → (seconds, cost)
-    videos: HashMap<String, (usize, f64)>,
+    /// video id → (seconds, cost, status)
+    videos: HashMap<String, (usize, f64, &'static str)>,
+    /// Answers leave out `usage.cost`.
+    costless: bool,
     script: VecDeque<Reply>,
     chats: Vec<Value>,
     tool_calls: u64,
+    video_ids: usize,
     costs: Costs,
     minted: Vec<Minted>,
     /// (hash, body) of each PATCH.
@@ -105,14 +111,14 @@ fn chunk(id: &str, model: &Value, delta: Value, finish: Option<&str>, usage: Opt
 
 /// A reply as server-sent events (OpenAI's streaming format); each reply
 /// has its own id, as the service's generations do.
-fn stream(model: &Value, reply: &Reply, ids: &mut u64, cost: f64) -> String {
+fn stream(model: &Value, reply: &Reply, ids: &mut u64, cost: Option<f64>) -> String {
     let mut out = String::new();
     *ids += 1;
     let id = format!("chatcmpl-fake-{ids}");
     match reply {
         Reply::Text(text) => {
             out += &chunk(&id, model, json!({ "role": "assistant", "content": text }), None, None);
-            out += &chunk(&id, model, json!({}), Some("stop"), Some(cost));
+            out += &chunk(&id, model, json!({}), Some("stop"), cost);
         }
         Reply::Tools(calls) => {
             let calls: Vec<Value> = calls
@@ -124,7 +130,7 @@ fn stream(model: &Value, reply: &Reply, ids: &mut u64, cost: f64) -> String {
                 })
                 .collect();
             out += &chunk(&id, model, json!({ "role": "assistant", "tool_calls": calls }), None, None);
-            out += &chunk(&id, model, json!({}), Some("tool_calls"), Some(cost));
+            out += &chunk(&id, model, json!({}), Some("tool_calls"), cost);
         }
     }
     out + "data: [DONE]\n\n"
@@ -148,6 +154,14 @@ pub fn image_bytes(prompt: &str) -> Vec<u8> {
 /// The bytes a video of `seconds` makes (always over 1 MiB: a blob).
 pub fn video_bytes(seconds: usize) -> Vec<u8> {
     (0..seconds.max(1) * 256 * 1024).map(|i| (i % 251) as u8).collect()
+}
+
+/// An answer's `usage`, with its cost unless costs are left out.
+fn with_cost(mut usage: Value, cost: f64, costless: bool) -> Value {
+    if !costless {
+        usage["cost"] = json!(cost);
+    }
+    usage
 }
 
 fn problem(status: u16, message: &str) -> Response {
@@ -213,6 +227,7 @@ impl OpenRouter {
             }
             let base = base_in.lock().expect("base").clone();
             let costs = s.costs;
+            let costless = s.costless;
             match (req.method.as_str(), path) {
                 ("POST", "/api/v1/chat/completions") => {
                     if let Err(r) = s.charge(&auth, costs.text) {
@@ -223,15 +238,17 @@ impl OpenRouter {
                     let scripted = s.script.pop_front();
                     if body["stream"] == true {
                         let reply = scripted.unwrap_or_else(|| Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))));
-                        let events = stream(&body["model"], &reply, &mut s.tool_calls, costs.text);
+                        let cost = (!costless).then_some(costs.text);
+                        let events = stream(&body["model"], &reply, &mut s.tool_calls, cost);
                         return Response::bytes(200, "text/event-stream", events.into_bytes());
                     }
+                    let usage = with_cost(json!({ "prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6 }), costs.text, costless);
                     Response::json(
                         200,
                         &json!({
                             "id": "chatcmpl-fake", "object": "chat.completion", "created": 0, "model": body["model"],
                             "choices": [{ "index": 0, "finish_reason": "stop", "message": { "role": "assistant", "content": format!("echo: {}", last.as_str().unwrap_or("")) } }],
-                            "usage": { "prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6, "cost": costs.text },
+                            "usage": usage,
                         }),
                     )
                 }
@@ -240,9 +257,10 @@ impl OpenRouter {
                         return r;
                     }
                     let bytes = image_bytes(body["prompt"].as_str().unwrap_or(""));
+                    let usage = with_cost(json!({}), costs.image, costless);
                     Response::json(
                         200,
-                        &json!({ "created": 0, "data": [{ "b64_json": base64::engine::general_purpose::STANDARD.encode(bytes), "media_type": "image/png" }], "usage": { "cost": costs.image } }),
+                        &json!({ "created": 0, "data": [{ "b64_json": base64::engine::general_purpose::STANDARD.encode(bytes), "media_type": "image/png" }], "usage": usage }),
                     )
                 }
                 ("POST", "/api/v1/videos") => {
@@ -251,8 +269,13 @@ impl OpenRouter {
                     if let Err(r) = s.charge(&auth, cost) {
                         return r;
                     }
-                    let id = format!("gen-vid-{}", s.videos.len() + 1);
-                    s.videos.insert(id.clone(), (seconds, cost));
+                    s.video_ids += 1;
+                    let id = format!("gen-vid-{}", s.video_ids);
+                    let prompt = body["prompt"].as_str().unwrap_or("");
+                    if !prompt.contains("vanish") {
+                        let status = if prompt.contains("expire") { "expired" } else { "completed" };
+                        s.videos.insert(id.clone(), (seconds, cost, status));
+                    }
                     Response::json(202, &json!({ "id": id, "generation_id": id, "polling_url": format!("/api/v1/videos/{id}"), "status": "pending" }))
                 }
                 ("GET", p) if p.starts_with("/api/v1/videos/") => {
@@ -261,16 +284,20 @@ impl OpenRouter {
                         Some(id) => (id, true),
                         None => (rest, false),
                     };
-                    let Some((seconds, cost)) = s.videos.get(id).copied() else { return problem(404, "no such video job") };
+                    let Some((seconds, cost, status)) = s.videos.get(id).copied() else { return problem(404, "no such video job") };
+                    if status != "completed" {
+                        return Response::json(200, &json!({ "id": id, "status": status, "error": "the generation expired" }));
+                    }
                     if content {
                         return Response::bytes(200, "video/mp4", video_bytes(seconds));
                     }
+                    let usage = with_cost(json!({ "is_byok": false }), cost, costless);
                     Response::json(
                         200,
                         &json!({
                             "id": id, "status": "completed",
                             "unsigned_urls": [format!("{base}/api/v1/videos/{id}/content?index=0")],
-                            "usage": { "cost": cost, "is_byok": false },
+                            "usage": usage,
                         }),
                     )
                 }
@@ -309,6 +336,11 @@ impl OpenRouter {
     /// What the next answers cost.
     pub fn set_costs(&self, costs: Costs) {
         self.state.lock().expect("openrouter state").costs = costs;
+    }
+
+    /// Whether answers leave out `usage.cost` (a provider that reports none).
+    pub fn omit_costs(&self, omit: bool) {
+        self.state.lock().expect("openrouter state").costless = omit;
     }
 
     /// The keys the management key minted, with what each has spent.

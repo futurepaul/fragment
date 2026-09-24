@@ -374,7 +374,12 @@ A job calls OpenRouter as its steps. Who pays: a fragment with its own
 does, from their monthly budget (Budgets, below): each paid step reserves
 its worst case in the owner's ledger before it runs (text $0.05, an
 image $0.10, a video $0.10 a second), runs on the owner's own OpenRouter
-key, and settles to the cost OpenRouter reports (`usage.cost`). A step
+key, and settles to the cost OpenRouter reports (`usage.cost`). An
+answer that reports no cost is charged the step's reservation
+(`ai.cost-missing`), never nothing. A video that fails, is cancelled, or
+expires is charged nothing unless a cost is reported
+(`ai.video-undelivered`), and a run held while its video still waits for
+its cost gives that reservation back (`ai.video-released`). A step
 the month cannot cover fails with `budget used up` (uncaught, the run is
 held; replay it after a top-up or in a new month). A step the ledger
 already settled answers its stored result, so a replayed run is not paid
@@ -393,7 +398,10 @@ The steps:
 - `job.ai.video({prompt, path, model?, duration?, resolution?,
   aspect_ratio?})` (default `minimax/hailuo-3-max`) → the same, for the
   video: the job starts it, polls every 20 seconds (up to about 15
-  minutes) as steps, and saves it as a blob.
+  minutes) as steps, and saves it as a blob. Each poll step answers
+  `{status, ended, error, urls, usage}`; `ended` is the platform's list
+  of final statuses (completed, failed, cancelled, expired), and a video
+  that ended any way but completed throws.
 
 An OpenRouter 429 or 5xx is retried; 402 (out of credits, or past the
 key's limit) and other refusals fail the step with OpenRouter's message.
