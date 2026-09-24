@@ -16,6 +16,7 @@ computer = ["dep:fragment-computer"]
 [dependencies]
 fragment-templates = { path = "../crates/templates" }
 fragment-core = { path = "../crates/core" }
+fragment-proto = { path = "../crates/proto" }
 fragment-computer = { path = "../crates/computer", optional = true }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

@@ -8,6 +8,7 @@ use std::time::Duration;
 use anyhow::Result;
 use fragment_nip98::Keys;
 use fragment_proto::limits;
+use fragment_proto::live::LiveOut;
 use serde_json::{json, Value};
 
 use super::app::ship;
@@ -184,6 +185,35 @@ pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
     a.send(&json!({ "type": "subscribe", "channel": "staff", "after": 0 }))?;
     let err = a.until("error", 5)?;
     s.ok("a channel above the socket's role is refused", err["message"].as_str().is_some_and(|m| m.contains("editor")), &err);
+    a.send(&json!({ "type": "ping" }))?;
+    let pong = a.until("pong", 5)?;
+    s.ok("a ping is answered with a pong", pong == json!({ "type": "pong" }), &pong);
+    // each malformed frame is refused by its decode, naming what is wrong
+    let mut refusals = vec![];
+    for (frame, says) in [
+        (json!({ "type": "subscribe", "after": 0 }), "missing field `channel`"),
+        (json!({ "type": "subscribe", "channel": "room" }), "after or last"),
+        (json!({ "type": "subscribe", "channel": "room", "after": 0, "last": 5 }), "not both"),
+        (json!({ "type": "unsubscribe" }), "missing field `channel`"),
+        (json!({ "type": "shout" }), "unknown variant `shout`"),
+    ] {
+        a.send(&frame)?;
+        let err = a.until("error", 5)?;
+        refusals.push((err["message"].as_str().is_some_and(|m| m.contains(says)), err));
+    }
+    a.send(&json!({ "type": "ping" }))?;
+    let still = a.until("pong", 5)?;
+    s.ok(
+        "a malformed frame is an error naming what is wrong, and the socket stays open",
+        refusals.iter().all(|(ok, _)| *ok) && still["type"] == "pong",
+        format!("{refusals:?}"),
+    );
+    let sent = [&hello, &first, &sub, &rec, &changed, &err, &pong];
+    s.ok(
+        "every frame the socket sent decodes as the protocol's LiveOut",
+        sent.iter().all(|f| serde_json::from_value::<LiveOut>((*f).clone()).is_ok()) && refusals.iter().all(|(_, f)| serde_json::from_value::<LiveOut>(f.clone()).is_ok()),
+        format!("{sent:?}"),
+    );
     a.close();
 
     // resume from a cursor
@@ -207,6 +237,11 @@ pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
     c.close();
     let gone = b.until("presence", 10)?;
     s.ok("presence leaves when the socket closes", gone["list"] == json!([]), &gone);
+    s.ok(
+        "presence frames decode as LiveOut too",
+        [&seen, &gone].iter().all(|f| serde_json::from_value::<LiveOut>((*f).clone()).is_ok()),
+        format!("{seen} {gone}"),
+    );
     b.send(&json!({ "type": "unsubscribe", "channel": "room" }))?;
     api.op(&owner, &name, "say", "l4", json!({ "text": "after unsubscribe" }))?;
     let next = b.until("changed", 5)?;

@@ -1,21 +1,10 @@
 //! The fragment's live socket (`__live`), one per page: channel
 //! subscriptions resumed from a cursor, presence, and change signals for
 //! live queries. Each socket's state lives in its hibernation attachment,
-//! so a hibernated object still knows who subscribed to what.
-//!
-//! Client → server:
-//!   {type: "subscribe", channel, after}   a page of records with seq > after
-//!   {type: "subscribe", channel, last}    a page of the last `last` records
-//!   {type: "unsubscribe", channel}
-//!   {type: "presence", data}             null clears it
-//!   {type: "ping"}
-//! Server → client:
-//!   {type: "hello", id, principal, role}
-//!   {type: "record", channel, seq, at, principal, kind, body}
-//!   {type: "subscribed", channel, next, more}   after each page
-//!   {type: "presence", list: [{id, principal, data}]}
-//!   {type: "changed", op}                 a mutation applied: re-run live queries
-//!   {type: "error", message}
+//! so a hibernated object still knows who subscribed to what. The frames
+//! are `fragment_proto::live::{LiveIn, LiveOut}`: every message is decoded
+//! into one before anything reads it, and a frame that does not decode is
+//! answered with an error naming why.
 //!
 //! A subscribe answers one page: at most `CHANNEL_PAGE` records and about
 //! `CHANNEL_PAGE_MAX_BYTES` of frames. With `more`, the socket is not live
@@ -30,9 +19,10 @@
 //! final: the browser library does not reconnect after them.
 
 use fragment_core::npub;
-use fragment_proto::{limits, ChannelRecord, Role};
+use fragment_proto::live::{Cursor, LiveIn, LiveOut, Present, Subscribe};
+use fragment_proto::{limits, ChannelRecord, ErrorCode, Role};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use worker::*;
 
 use crate::error::{CellError, CellResult};
@@ -58,12 +48,8 @@ fn state_of(ws: &WebSocket) -> Option<LiveState> {
     ws.deserialize_attachment::<LiveState>().ok().flatten()
 }
 
-fn send(ws: &WebSocket, v: &Value) {
-    let _ = ws.send_with_str(v.to_string());
-}
-
-fn record_frame(r: &ChannelRecord) -> Value {
-    json!({ "type": "record", "channel": r.channel, "seq": r.seq, "at": r.at, "principal": r.principal, "kind": r.kind, "body": r.body })
+fn send(ws: &WebSocket, frame: &LiveOut) {
+    let _ = ws.send_with_str(frame.encode());
 }
 
 impl FragmentCell {
@@ -82,73 +68,75 @@ impl FragmentCell {
         self.state.accept_websocket_with_tags(&pair.server, &["live", &tag]);
         let st = LiveState { id: js::random_hex::<8>(), principal: npub::display(principal), role, subs: vec![], presence: None };
         pair.server.serialize_attachment(&st)?;
-        send(&pair.server, &json!({ "type": "hello", "id": st.id, "principal": st.principal, "role": role }));
-        send(&pair.server, &json!({ "type": "presence", "list": self.presence_list(None) }));
+        send(&pair.server, &LiveOut::Hello { id: st.id, principal: st.principal, role });
+        send(&pair.server, &LiveOut::Presence { list: self.presence_list(None) });
         Ok(Response::from_websocket(pair.client)?)
     }
 
-    fn presence_list(&self, leaving: Option<&str>) -> Vec<Value> {
+    fn presence_list(&self, leaving: Option<&str>) -> Vec<Present> {
         self.state
             .get_websockets_with_tag("live")
             .iter()
             .filter_map(state_of)
-            .filter(|s| s.presence.is_some() && Some(s.id.as_str()) != leaving)
-            .map(|s| json!({ "id": s.id, "principal": s.principal, "data": s.presence }))
+            .filter(|s| Some(s.id.as_str()) != leaving)
+            .filter_map(|s| Some(Present { id: s.id, principal: s.principal, data: s.presence? }))
             .collect()
     }
 
     fn broadcast_presence(&self, leaving: Option<&str>) {
-        let frame = json!({ "type": "presence", "list": self.presence_list(leaving) });
+        let frame = LiveOut::Presence { list: self.presence_list(leaving) }.encode();
         for ws in self.state.get_websockets_with_tag("live") {
             if state_of(&ws).is_some_and(|s| Some(s.id.as_str()) != leaving) {
-                send(&ws, &frame);
+                let _ = ws.send_with_str(&frame);
             }
         }
     }
 
     pub(crate) fn broadcast_record(&self, r: &ChannelRecord) {
-        let frame = record_frame(r);
+        let frame = LiveOut::Record(r.clone()).encode();
         for ws in self.state.get_websockets_with_tag("live") {
             if state_of(&ws).is_some_and(|s| s.subs.contains(&r.channel)) {
-                send(&ws, &frame);
+                let _ = ws.send_with_str(&frame);
             }
         }
     }
 
     pub(crate) fn broadcast_changed(&self, op: &str) {
-        let frame = json!({ "type": "changed", "op": op });
+        let frame = LiveOut::Changed { op: op.to_string() }.encode();
         for ws in self.state.get_websockets_with_tag("live") {
-            send(&ws, &frame);
+            let _ = ws.send_with_str(&frame);
         }
     }
 
-    /// One message on a live socket.
-    pub(crate) fn live_message(&self, ws: &WebSocket, text: &str) -> CellResult<()> {
-        let Some(mut st) = state_of(ws) else { return Ok(()) };
-        let msg: Value = serde_json::from_str(text).unwrap_or(Value::Null);
-        let error = |m: String| -> CellResult<()> {
-            send(ws, &json!({ "type": "error", "message": m }));
-            Ok(())
+    /// One message on a live socket: decoded, then answered. A refusal
+    /// goes back on the socket as an error frame; the socket stays open.
+    pub(crate) fn live_message(&self, ws: &WebSocket, text: &str) {
+        let Some(st) = state_of(ws) else { return };
+        let answered = match serde_json::from_str::<LiveIn>(text) {
+            Ok(frame) => self.live_frame(ws, st, frame),
+            Err(e) => Err(CellError::invalid(format!("a live frame: {e}"))),
         };
-        match msg["type"].as_str() {
-            Some("ping") => send(ws, &json!({ "type": "pong" })),
-            Some("subscribe") => {
-                let channel = msg["channel"].as_str().unwrap_or("").to_string();
-                let read = match self.channel_read_role(&channel) {
-                    Ok(r) => r,
-                    Err(e) => return error(e.message),
-                };
+        if let Err(e) = answered {
+            send(ws, &LiveOut::Error { message: e.message });
+        }
+    }
+
+    fn live_frame(&self, ws: &WebSocket, mut st: LiveState, frame: LiveIn) -> CellResult<()> {
+        match frame {
+            LiveIn::Ping => send(ws, &LiveOut::Pong),
+            LiveIn::Subscribe(Subscribe { channel, from }) => {
+                let read = self.channel_read_role(&channel)?;
                 if st.role < read {
-                    return error(format!("channel {channel} needs the {} role", read.as_str()));
+                    return Err(CellError::new(ErrorCode::Forbidden, format!("channel {channel} needs the {} role", read.as_str())));
                 }
                 let live = st.subs.contains(&channel);
                 if !live && st.subs.len() >= SUBSCRIPTIONS_MAX {
-                    return error(format!("a socket follows at most {SUBSCRIPTIONS_MAX} channels"));
+                    return Err(CellError::invalid(format!("a socket follows at most {SUBSCRIPTIONS_MAX} channels")));
                 }
-                let after = match msg["last"].as_i64() {
+                let after = match from {
                     // a page opening near the end of a long channel
-                    Some(n) => (self.channel_head(&channel)? - n.clamp(0, limits::CHANNEL_PAGE as i64)).max(0),
-                    None => msg["after"].as_i64().unwrap_or(0).max(0),
+                    Cursor::Last(n) => (self.channel_head(&channel)? - n.clamp(0, limits::CHANNEL_PAGE as i64)).max(0),
+                    Cursor::After(n) => n.max(0),
                 };
                 let (frames, next, more) = self.live_page(&channel, after)?;
                 // Live only with the last page: a record appended while the
@@ -164,23 +152,21 @@ impl FragmentCell {
                 for f in &frames {
                     let _ = ws.send_with_str(f);
                 }
-                send(ws, &json!({ "type": "subscribed", "channel": channel, "next": next, "more": more }));
+                send(ws, &LiveOut::Subscribed { channel, next, more });
             }
-            Some("unsubscribe") => {
-                let channel = msg["channel"].as_str().unwrap_or("");
-                st.subs.retain(|c| c != channel);
+            LiveIn::Unsubscribe { channel } => {
+                st.subs.retain(|c| c != &channel);
                 ws.serialize_attachment(&st)?;
             }
-            Some("presence") => {
-                let data = msg.get("data").cloned().unwrap_or(Value::Null);
-                if data.to_string().len() > limits::PRESENCE_MAX_BYTES {
-                    return error(format!("presence data is at most {} bytes", limits::PRESENCE_MAX_BYTES));
+            LiveIn::Presence { data } => {
+                let size = data.to_string().len();
+                if size > limits::PRESENCE_MAX_BYTES {
+                    return Err(CellError::too_large("presence data", size, limits::PRESENCE_MAX_BYTES));
                 }
                 st.presence = (!data.is_null()).then_some(data);
                 ws.serialize_attachment(&st)?;
                 self.broadcast_presence(None);
             }
-            _ => return error("unknown message type".into()),
         }
         Ok(())
     }
@@ -203,12 +189,13 @@ impl FragmentCell {
             let end = batch.len() < PAGE_READ_BATCH;
             for r in batch {
                 assert!(r.seq > next, "a channel reads in order");
-                let frame = record_frame(&r).to_string();
+                let seq = r.seq;
+                let frame = LiveOut::Record(r).encode();
                 if !frames.is_empty() && bytes + frame.len() > limits::CHANNEL_PAGE_MAX_BYTES {
                     return Ok((frames, next, true));
                 }
                 bytes += frame.len();
-                next = r.seq;
+                next = seq;
                 frames.push(frame);
                 if frames.len() == limits::CHANNEL_PAGE {
                     return Ok((frames, next, true));
