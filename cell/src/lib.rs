@@ -129,7 +129,7 @@ pub(crate) async fn read_body(req: &mut Request, max: usize) -> CellResult<Vec<u
 fn authenticate(req: &Request, url: &Url, body: &[u8]) -> CellResult<String> {
     let header = req.headers().get("authorization")?;
     let now_s = js::now_ms() / 1000;
-    fragment_nip98::verify(header.as_deref(), req.method().as_ref(), url.as_str(), body, now_s, limits::AUTH_WINDOW_S)
+    fragment_nip98::verify_request(header.as_deref(), req.method().as_ref(), url, body, now_s, limits::AUTH_WINDOW_S)
         .map_err(|e| CellError::new(ErrorCode::Unauthenticated, e.to_string()))
 }
 

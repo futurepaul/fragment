@@ -81,8 +81,11 @@ event of kind 27235 with empty content and the tags `["u", <the absolute
 request URL>]`, `["method", <the method>]`, and, when the body is not
 empty, `["payload", <hex SHA-256 of the body>]`; `created_at` within 60
 seconds of the cell's clock; `id` and a BIP-340 `sig` as NIP-01 defines.
-A blob upload is signed without `payload`: its URL names the bytes' hash,
-which the cell checks as they arrive. Every other body the router reads
+Every field is required and typed (a tag is an array of strings). A
+`payload` tag binds the body even when it is empty: a signature over a
+body, sent without one, is 401. A blob upload is signed without
+`payload` (with one, 401): its URL names the bytes' hash, which the cell
+checks as they arrive. Every other body the router reads
 is at most 2 MiB, measured as it arrives: a longer declared
 `content-length`, or a chunked body that runs past it, is 413 before
 anything is authenticated.

@@ -6,6 +6,7 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use anyhow::Result;
+use base64::Engine;
 use fragment_nip98::Keys;
 use fragment_proto::{limits, routed};
 use serde_json::json;
@@ -84,6 +85,18 @@ pub fn auth(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a two-minute-old signature is 401", r.status == 401, &r);
     let r = send(signed_as(format!("{}/api/fragments", api.base), br#"{"name":"x"}"#, now_s()))?;
     s.ok("a signature over another body is 401", r.status == 401, &r);
+    // a signature over a body, replayed without it (to a route that reads
+    // no body before it authenticates): the payload tag binds an empty body too
+    let refresh = format!("{}/api/f/{}/refresh", api.base, s.named(api, &keys, "auth")?);
+    let r = api.call(Call { method: "POST", url: refresh.clone(), extra: vec![("authorization", signed_as(refresh, b"{}", now_s()))], ..Call::default() })?;
+    s.ok("a signature over a body, sent without one, is 401", r.status == 401 && r.message().contains("payload"), &r);
+    // a signature too short to be one is refused, and the router lives on (k256 panicked on it)
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let good = signed_as(format!("{}/api/fragments", api.base), &bytes, now_s());
+    let mut event: serde_json::Value = serde_json::from_slice(&b64.decode(&good["Nostr ".len()..])?)?;
+    event["sig"] = json!("abcd");
+    let r = send(format!("Nostr {}", b64.encode(event.to_string())))?;
+    s.ok("a two-byte signature is 401", r.status == 401 && r.message().contains("signature"), &r);
     let r = api.unsigned("GET", "/api/fragments", None)?;
     s.ok("an unsigned list is 401", r.status == 401, &r);
     let r = api.signed(&keys, "GET", "/api/fragments", None)?;

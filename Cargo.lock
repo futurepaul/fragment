@@ -879,10 +879,12 @@ name = "fragment-nip98"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "fragment-nip98",
  "hex",
  "k256",
  "rand_core 0.6.4",
  "secp256k1",
+ "serde",
  "serde_json",
  "sha2",
  "url",
