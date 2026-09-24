@@ -4,10 +4,9 @@
 //! the org key never reaches the cell (keys.rs).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::time::Duration;
 
-use fragment_core::codestorage::{self as core_cs, TreeEntry};
+use fragment_core::codestorage::{self as core_cs, TokenCache, TreeEntry};
 use fragment_proto::{limits, ErrorCode, StorageToken};
 use futures_util::future::{select, Either};
 use serde_json::Value;
@@ -28,10 +27,14 @@ const RUNTIME_SUB: &str = "fragment-runtime";
 /// How long the cell's own tokens live, and how long before expiry a cached one is replaced.
 const RUNTIME_TOKEN_TTL_S: i64 = 300;
 const RUNTIME_TOKEN_MARGIN_S: i64 = 60;
+/// Tokens one isolate keeps: one per (repo, scopes) in use in the last
+/// five minutes, across every fragment the isolate serves.
+const RUNTIME_TOKENS_MAX: usize = 1024;
 
 thread_local! {
-    /// The cell's own tokens by (repo, scopes), per isolate.
-    static TOKENS: RefCell<HashMap<(String, String), (String, i64)>> = RefCell::new(HashMap::new());
+    /// The cell's own tokens, per isolate: its contract (source,
+    /// invalidation, stale reads) is `TokenCache`'s.
+    static TOKENS: RefCell<TokenCache> = const { RefCell::new(TokenCache::new(RUNTIME_TOKENS_MAX)) };
 }
 
 pub struct Cs<'a> {
@@ -118,12 +121,11 @@ impl<'a> Cs<'a> {
 
     async fn runtime_token(&self, repo: &str, scopes: &[&str]) -> CellResult<String> {
         let now = js::now_ms() / 1000;
-        let cache_key = (repo.to_string(), scopes.join(","));
-        if let Some(t) = TOKENS.with(|t| t.borrow().get(&cache_key).filter(|(_, exp)| exp - RUNTIME_TOKEN_MARGIN_S > now).map(|(t, _)| t.clone())) {
+        if let Some(t) = TOKENS.with(|t| t.borrow().get(repo, scopes, now, RUNTIME_TOKEN_MARGIN_S).map(str::to_string)) {
             return Ok(t);
         }
         let (token, expires_ms) = keys::codestorage_token(self.env, repo, RUNTIME_SUB, scopes, RUNTIME_TOKEN_TTL_S).await?;
-        TOKENS.with(|t| t.borrow_mut().insert(cache_key, (token.clone(), expires_ms / 1000)));
+        TOKENS.with(|t| t.borrow_mut().insert(repo, scopes, token.clone(), expires_ms / 1000, now));
         Ok(token)
     }
 

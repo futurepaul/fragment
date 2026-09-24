@@ -2,6 +2,8 @@
 //! fleet's org key, and the response shapes the cell reads (the documented
 //! HTTP API; the fake in `crates/fakes` serves the same shapes).
 
+use std::collections::BTreeMap;
+
 use base64::Engine;
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{Signature, SigningKey};
@@ -51,6 +53,65 @@ pub struct Claims<'a> {
     pub scopes: &'a [&'a str],
     pub iat: i64,
     pub exp: i64,
+}
+
+/// The cell's own code.storage tokens, per isolate (`cell/src/cs.rs`),
+/// keyed by (repo, scopes).
+///
+/// - Source: `KEYS`' `codestorage/token`, signed with the org key the node
+///   read from its environment when it started.
+/// - Invalidation: a token is served until `margin_s` before its expiry,
+///   and a new one is minted after that. Each insert drops the expired
+///   entries, and at `max` entries the one nearest its expiry as well, so
+///   the map never holds more than `max`.
+/// - Why not keyed by the signing key: the key never reaches the cell, and
+///   the node takes a new one only by restarting, which starts new
+///   isolates and so empty caches.
+/// - A stale read: a token is at most its lifetime less the margin old
+///   when served, and valid for the margin after. A token code.storage
+///   refuses anyway (the key revoked on its side) fails that call as
+///   `upstream_failed`, as a freshly minted one would.
+pub struct TokenCache {
+    entries: BTreeMap<(String, String), (String, i64)>,
+    max: usize,
+}
+
+impl TokenCache {
+    pub const fn new(max: usize) -> TokenCache {
+        assert!(max > 0, "a cache holds at least one token");
+        TokenCache { entries: BTreeMap::new(), max }
+    }
+
+    fn key(repo: &str, scopes: &[&str]) -> (String, String) {
+        (repo.to_string(), scopes.join(","))
+    }
+
+    /// A token for (repo, scopes) valid for at least `margin_s` more seconds.
+    pub fn get(&self, repo: &str, scopes: &[&str], now_s: i64, margin_s: i64) -> Option<&str> {
+        match self.entries.get(&TokenCache::key(repo, scopes)) {
+            Some((token, expires_s)) if *expires_s - margin_s > now_s => Some(token),
+            _ => None,
+        }
+    }
+
+    pub fn insert(&mut self, repo: &str, scopes: &[&str], token: String, expires_s: i64, now_s: i64) {
+        self.entries.retain(|_, (_, exp)| *exp > now_s);
+        let key = TokenCache::key(repo, scopes);
+        if self.entries.len() >= self.max && !self.entries.contains_key(&key) {
+            let nearest = self.entries.iter().min_by_key(|(_, (_, exp))| *exp).map(|(k, _)| k.clone()).expect("a full cache has an entry");
+            self.entries.remove(&nearest);
+        }
+        self.entries.insert(key, (token, expires_s));
+        assert!(self.entries.len() <= self.max, "the cache is bounded");
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 /// The API base when the fleet does not override it.
@@ -216,6 +277,30 @@ mod tests {
         let vk = VerifyingKey::from(&SigningKey::from_pkcs8_pem(&pem).unwrap());
         vk.verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &sig).unwrap();
         assert!(OrgKey::from_pem("not a key").is_err());
+    }
+
+    #[test]
+    fn the_token_cache_serves_fresh_tokens_and_stays_bounded() {
+        let mut cache = TokenCache::new(3);
+        cache.insert("r1", &["git:read"], "t1".into(), 1_000, 0);
+        assert_eq!(cache.get("r1", &["git:read"], 900, 60), Some("t1"));
+        assert_eq!(cache.get("r1", &["git:read"], 940, 60), None, "within the margin of its expiry");
+        assert_eq!(cache.get("r1", &["git:write"], 0, 60), None, "keyed by its scopes");
+        cache.insert("r2", &["git:read"], "t2".into(), 500, 0);
+        cache.insert("r3", &["git:read"], "t3".into(), 2_000, 0);
+        assert_eq!(cache.len(), 3);
+        // full: the entry nearest its expiry goes
+        cache.insert("r4", &["git:read"], "t4".into(), 3_000, 0);
+        assert_eq!(cache.len(), 3);
+        assert_eq!(cache.get("r2", &["git:read"], 0, 60), None);
+        assert_eq!(cache.get("r1", &["git:read"], 0, 60), Some("t1"));
+        // replacing a present key evicts nothing
+        cache.insert("r4", &["git:read"], "t4b".into(), 3_100, 0);
+        assert_eq!((cache.len(), cache.get("r4", &["git:read"], 0, 60)), (3, Some("t4b")));
+        // an insert drops every expired entry first
+        cache.insert("r5", &["git:read"], "t5".into(), 5_000, 2_500);
+        assert_eq!(cache.len(), 2, "r1 (1000) and r3 (2000) expired by 2500");
+        assert_eq!(cache.get("r4", &["git:read"], 2_500, 60), Some("t4b"));
     }
 
     #[test]
