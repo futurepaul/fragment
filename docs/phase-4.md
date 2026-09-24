@@ -86,7 +86,7 @@ Decided with Paul on 2026-09-24:
 - Usage rows carry FIN-10's report fields (source reference, agent,
   billing org, period, unit, quantity) and are recorded idempotently.
 - Per-person OpenRouter keys with a credit limit, minted with a
-  provisioning key; `fragment budget`; costs on runs; the platform bar.
+  management key; `fragment budget`; costs on runs; the platform bar.
 - e2e: the ROADMAP's budget list, against the OpenRouter fake.
 
 ## Slice D: hosted
@@ -107,9 +107,9 @@ Decided with Paul on 2026-09-24:
    `http://127.0.0.1:8790/auth/callback` lets you try the real sign-in
    locally. AuthKit is free for the first million monthly active users
    (workos.com/pricing, checked 2026-09-24).
-2. **Before slice C goes live:** an OpenRouter provisioning key (it mints
+2. **Before slice C goes live:** an OpenRouter management key (it mints
    the per-person keys), saved to
-   `~/.config/finite-next/secrets/openrouter-provisioning-key`. Exposure
+   `~/.config/finite-next/secrets/openrouter-management-key`. Exposure
    stays at most $20 a month per invited person (decision 14).
 
 ## Numbers
