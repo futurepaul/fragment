@@ -46,6 +46,9 @@ use crate::{js, keys};
 pub const JOB_HEADER: &str = "x-fragment-job";
 /// How far a fetch carries the chain it is part of (another fragment's inbox reads it).
 pub const HOPS_HEADER: &str = "x-fragment-hops";
+/// Test fleets: this many trigger steps from this fragment fail (a lever
+/// the e2e pulls through `/test/fragment`).
+pub const TEST_TRIGGER_FAILURES_KEY: &str = "test_fail_triggers";
 /// A run whose Workflow could not be started is tried again this soon.
 const QUEUED_RETRY_MS: i64 = 10_000;
 const LAUNCH_BATCH: usize = 25;
@@ -610,7 +613,8 @@ impl FragmentCell {
     }
 
     /// `job.publish(channel, body, kind)`: keyed by (run, step), so a
-    /// retried step appends nothing twice.
+    /// retried step appends nothing twice, and starts what its record's
+    /// triggers did not start before.
     async fn step_publish(&self, run: &Value, index: i64, args: &Value) -> Result<Value, StepFail> {
         let retry = |e: CellError| StepFail::Retry(e.message);
         let channel = args["channel"].as_str().unwrap_or("");
@@ -620,18 +624,10 @@ impl FragmentCell {
         fragment_core::effects::check_record(channel, kind, &body, &self.declared_channels().map_err(retry)?).map_err(permanent)?;
         let key = format!("{JOB_ID_PREFIX}{}", run["id"].as_i64().unwrap_or(0));
         let principal = run["principal"].as_str().unwrap_or("");
-        match self.append(channel, principal, kind, &body, Some((&key, index))).map_err(retry)? {
-            Some(record) => {
-                let depth = run["depth"].as_u64().unwrap_or(0) as u32;
-                self.fire_channel(&record, depth + 1).map_err(retry)?;
-                self.deliver_record(&record).await.map_err(retry)?;
-                Ok(json!({ "seq": record.seq }))
-            }
-            None => {
-                let rows = self.rows("SELECT seq FROM records WHERE op = ? AND idx = ?", vec![key.into(), SqlStorageValue::Integer(index)]).map_err(retry)?;
-                Ok(json!({ "seq": rows.first().and_then(|r| r["seq"].as_i64()) }))
-            }
-        }
+        let (record, appended) = self.append_once(channel, principal, kind, &body, &key, index).map_err(retry)?;
+        let depth = run["depth"].as_u64().unwrap_or(0) as u32;
+        self.published(&record, appended, depth + 1).await.map_err(retry)?;
+        Ok(json!({ "seq": record.seq }))
     }
 
     /// `job.files.*`: reads at `main`'s pin, recorded as the step's result;
@@ -672,25 +668,54 @@ impl FragmentCell {
         }
     }
 
-    /// Starts the runs a new record on a channel triggers.
+    /// Starts the runs a record on a channel triggers, one for each
+    /// operation its triggers run. Each is the fragment's own call, its id
+    /// the record's (`record:<channel>:<seq>:<op>`), so this again for the
+    /// same record answers the runs it started: a try after a failure part
+    /// way starts only the rest, never one twice.
     pub(crate) fn fire_channel(&self, record: &ChannelRecord, depth: u32) -> CellResult<Vec<i64>> {
+        let on = TriggerOn::Channel(record.channel.clone());
+        let matching: Vec<TriggerDecl> = self.triggers()?.into_iter().filter(|t| t.on == on).collect();
+        let own = self.own_key()?;
+        let input = json!({ "channel": record.channel, "record": record });
         let mut started = vec![];
-        for t in self.triggers()? {
-            if t.on == TriggerOn::Channel(record.channel.clone()) {
-                let s = self.start_run(NewRun {
-                    op: &t.run,
-                    via: "channel",
-                    trigger: Some(record.channel.clone()),
-                    principal: &self.own_key()?,
-                    role: Role::Editor,
-                    depth,
-                    call: None,
-                    input: json!({ "channel": record.channel, "record": record }),
-                })?;
-                started.push(s.id);
+        for (i, t) in matching.iter().enumerate() {
+            if i + 1 == matching.len() {
+                self.test_trigger_failure()?;
             }
+            let call_id = format!("record:{}:{}:{}", record.channel, record.seq, t.run);
+            let sha = crate::ops::input_sha(&t.run, &input);
+            let s = self.start_run(NewRun {
+                op: &t.run,
+                via: "channel",
+                trigger: Some(record.channel.clone()),
+                principal: &own,
+                role: Role::Editor,
+                depth,
+                call: Some((&call_id, &sha)),
+                input: input.clone(),
+            })?;
+            started.push(s.id);
         }
+        // two triggers that run one operation started it once
+        started.sort_unstable();
+        started.dedup();
         Ok(started)
+    }
+
+    /// Test fleets: the next `times` trigger steps fail just before their
+    /// last run starts (`/api/test/fragment` `fail-triggers`), after the
+    /// record and its deliveries, and any runs before it, are written.
+    fn test_trigger_failure(&self) -> CellResult<()> {
+        if !self.cfg.test_hooks {
+            return Ok(());
+        }
+        let left: u64 = self.meta(TEST_TRIGGER_FAILURES_KEY)?.and_then(|n| n.parse().ok()).unwrap_or(0);
+        if left == 0 {
+            return Ok(());
+        }
+        self.set_meta(TEST_TRIGGER_FAILURES_KEY, &(left - 1).to_string())?;
+        Err(CellError::host("the trigger step failed before its last run started (a test hook)"))
     }
 
     /// Starts the runs a move of `main` triggers.
@@ -951,9 +976,10 @@ impl FragmentCell {
             Some(payload) => json!({ "source": parsed["source"].as_str().unwrap_or("external"), "payload": payload }),
             None => json!({ "source": "external", "payload": parsed }),
         };
+        // unkeyed: a sender's retry is a new record, so a failure of its
+        // triggers is the sender's error to see, never a silent 200
         let record = self.append("inbox", "inbox", "message", &record_body, None)?.ok_or_else(|| CellError::host("an inbox append returned nothing"))?;
-        let runs = self.fire_channel(&record, hops)?;
-        self.deliver_record(&record).await?;
+        let runs = self.published(&record, true, hops).await?;
         self.launch_queued().await;
         json_response(&json!({ "ok": true, "seq": record.seq, "runs": runs }))
     }

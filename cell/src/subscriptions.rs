@@ -93,18 +93,16 @@ impl FragmentCell {
         self.exec("DELETE FROM subs WHERE principal = ?", vec![principal.into()])
     }
 
-    /// A new record's deliveries, one per subscription to its channel:
-    /// written to the delivery outbox in the same turn as the record (the
-    /// callers append, then call this, with no await between), then sent.
-    pub(crate) async fn deliver_record(&self, record: &ChannelRecord) -> CellResult<()> {
+    /// A new record's deliveries, one per subscription to its channel,
+    /// written to the delivery outbox in the same step as the record (the
+    /// caller appends, then calls this, with no await between; channels.rs
+    /// `published`). Answers whether there are any to drain.
+    pub(crate) fn outbox_record(&self, record: &ChannelRecord) -> CellResult<bool> {
         let rows = self.rows(
             "INSERT INTO delivery_outbox (kind, sub, channel, seq, next_at) SELECT 'record', id, channel, ?, ? FROM subs WHERE channel = ? RETURNING id",
             vec![SqlStorageValue::Integer(record.seq), SqlStorageValue::Integer(crate::js::now_ms()), record.channel.as_str().into()],
         )?;
-        if !rows.is_empty() {
-            self.drain_deliveries().await;
-        }
-        Ok(())
+        Ok(!rows.is_empty())
     }
 
     /// The delivery of record `seq` of `channel` to subscription `sub`, or
