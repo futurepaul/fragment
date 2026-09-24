@@ -135,10 +135,14 @@ Decided with Paul on 2026-09-24:
   fragment it is refused and stays unspent; a cookie from one fragment is
   nobody on another.
 - **The CLI:** `fragment login` makes a key and opens
-  `<host>/cli?key=<npub>`; the signed-in person compares the key's last
-  eight characters with the terminal's and approves; the CLI's claim
-  (signed by the key: the proof of possession) joins it to them.
-  `--no-wait` prints the link for a headless machine. A person who signs
+  `<host>/cli?key=<npub>&proof=…`, the proof a NIP-98 event by the key
+  itself (the proof of possession, ten minutes good); the signed-in
+  person compares the key's last eight characters with the terminal's
+  and approves, which adds the key at once; the CLI waits until its key
+  answers `GET /api/identities/me`. `--no-wait` prints the link for a
+  headless machine. *Changed after the first try on fragment.club:* the
+  first version recorded an approval for the key to claim within ten
+  minutes, which a key with no CLI waiting (the e2e's) never did. A person who signs
   in may revoke their last key; an agent keeps one.
 - **People make fragments**; an agent is 403. `FRAGMENT_CREATORS` is gone
   (sign-up is off in WorkOS, so everyone who signs in was invited).

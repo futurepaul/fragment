@@ -9,8 +9,6 @@
 //!
 //!   POST   /api/identities                 register an agent the signer owns
 //!                                          ({kind: agent, proof}: a key proof by its key)
-//!   POST   /api/identities/claim           signed by a CLI key a signed-in person approved
-//!                                          (`/cli`): the key joins them (202 until then)
 //!   GET    /api/identities/<id|me>         an identity, as it or its owner sees it
 //!   POST   /api/identities/<id|me>/keys    add a key ({proof}: a key proof by the new key)
 //!   DELETE /api/identities/<id|me>/keys/<npub>   revoke one
@@ -263,15 +261,6 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
                 let key = proven_key(&proof, &req, url, &owner_key)?;
                 json_answer(&ask_registry(env, "/agents", &json!({ "owner": owner.id, "key": key })).await?)
             }
-        };
-    }
-    // a CLI key a signed-in person approved: its signature proves it
-    if let (Method::Post, ["claim"]) = (&method, rest) {
-        let key = authenticate(&req, url, &body)?;
-        return match ask_registry(env, "/cli/claim", &json!({ "key": key })).await {
-            Ok(v) => json_answer(&v),
-            Err(e) if e.code == ErrorCode::NotFound => Ok(Response::from_json(&json!({ "pending": true, "message": e.message }))?.with_status(202)),
-            Err(e) => Err(e),
         };
     }
     let who = signer(env, &req, url, &body).await?;

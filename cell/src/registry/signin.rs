@@ -6,8 +6,9 @@
 //! another. Every session is looked up live on each request, and logging
 //! out ends the platform session and every site session made from it.
 //! A CLI key joins a person when the person approves it in a signed-in
-//! browser and the key then claims the approval (its signature is the
-//! proof of possession).
+//! browser: the approval link carries a proof by the key itself (checked
+//! by the router), so approving adds the key at once, and the CLI only
+//! waits until its key works.
 //!
 //! Tokens and states are 32 random bytes; the cell keeps their SHA-256.
 //!
@@ -17,8 +18,8 @@
 //!   POST /logout        {token}                             → {workosSid}
 //!   POST /redeem/mint   {token, fragment, returnTo}         → {redeem}
 //!   POST /redeem        {redeem, fragment}                  → {token, returnTo}
-//!   POST /cli/approve   {token, key}                        → {id, key}
-//!   POST /cli/claim     {key}                               → {id, claimed} (404 until approved)
+//!   POST /cli/add       {token, key}                        → {id, key, added}: the key joins the
+//!                                                            session's person (its proof was checked)
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -28,7 +29,6 @@ use super::*;
 const LOGIN_TTL_MS: i64 = 10 * 60 * 1000;
 pub const SESSION_TTL_MS: i64 = 30 * 24 * 3600 * 1000;
 const REDEEM_TTL_MS: i64 = 60 * 1000;
-const APPROVAL_TTL_MS: i64 = 10 * 60 * 1000;
 /// Subjects one person may link, and an email's length.
 const SUBJECTS_MAX: u64 = 8;
 const EMAIL_MAX: usize = 320;
@@ -43,8 +43,6 @@ CREATE INDEX IF NOT EXISTS sessions_parent ON sessions (parent) WHERE parent IS 
 CREATE TABLE IF NOT EXISTS redemptions (
   hash TEXT PRIMARY KEY, session TEXT NOT NULL, fragment TEXT NOT NULL, return_to TEXT NOT NULL,
   expires_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS approvals (
-  key TEXT PRIMARY KEY, identity TEXT NOT NULL, session TEXT NOT NULL, expires_at INTEGER NOT NULL);
 ";
 
 fn sha(token: &str) -> String {
@@ -111,7 +109,6 @@ impl RegistryCell {
         let now = SqlStorageValue::Integer(js::now_ms());
         self.exec("DELETE FROM logins WHERE created_at < ?", vec![SqlStorageValue::Integer(js::now_ms() - LOGIN_TTL_MS)])?;
         self.exec("DELETE FROM redemptions WHERE expires_at < ?", vec![now.clone()])?;
-        self.exec("DELETE FROM approvals WHERE expires_at < ?", vec![now.clone()])?;
         self.exec("DELETE FROM sessions WHERE expires_at < ?", vec![now])
     }
 
@@ -280,53 +277,25 @@ impl RegistryCell {
         Ok(json!({ "token": token, "returnTo": row["return_to"] }))
     }
 
-    pub(super) fn approve(&self, b: Approve) -> CellResult<Value> {
-        self.sweep_signin()?;
+    /// A key the signed-in person approved joins them (the router checked
+    /// the key's own proof in the approval link).
+    pub(super) fn add_by_session(&self, b: Approve) -> CellResult<Value> {
         check_key(&b.key)?;
-        let (hash, person) = self.live_session(&b.token, None)?;
+        let (_, person) = self.live_session(&b.token, None)?;
         match self.key_row(&b.key)? {
-            Some((id, false)) if id == person.id => return Ok(json!({ "id": person.id, "key": npub::encode(&b.key), "already": true })),
+            Some((id, false)) if id == person.id => return Ok(json!({ "id": person.id, "key": npub::encode(&b.key), "added": false })),
             Some(_) => return Err(conflict("this key already belongs to someone (or was revoked)")),
             None => {}
         }
-        self.exec(
-            "INSERT INTO approvals (key, identity, session, expires_at) VALUES (?, ?, ?, ?)
-             ON CONFLICT (key) DO UPDATE SET identity = excluded.identity, session = excluded.session, expires_at = excluded.expires_at",
-            vec![b.key.as_str().into(), person.id.as_str().into(), hash.into(), SqlStorageValue::Integer(js::now_ms() + APPROVAL_TTL_MS)],
-        )?;
-        Ok(json!({ "id": person.id, "key": npub::encode(&b.key), "already": false }))
-    }
-
-    pub(super) fn claim(&self, key: &str) -> CellResult<Value> {
-        check_key(key)?;
-        match self.key_row(key)? {
-            Some((_, true)) => return Err(unauthenticated(format!("the key {} was revoked", npub::encode(key)))),
-            Some((id, false)) => return Ok(json!({ "id": id, "claimed": false })),
-            None => {}
-        }
-        let rows = self.rows(
-            "SELECT identity, session FROM approvals WHERE key = ? AND expires_at > ?",
-            vec![key.into(), SqlStorageValue::Integer(js::now_ms())],
-        )?;
-        let row = rows.first().ok_or_else(|| CellError::new(ErrorCode::NotFound, "not approved yet"))?;
-        let (id, session) = (row["identity"].as_str().unwrap_or("").to_string(), row["session"].as_str().unwrap_or(""));
-        let live = self.rows(
-            "SELECT hash FROM sessions WHERE hash = ? AND revoked_at IS NULL AND expires_at > ?",
-            vec![session.into(), SqlStorageValue::Integer(js::now_ms())],
-        )?;
-        if live.is_empty() {
-            return Err(CellError::new(ErrorCode::NotFound, "the approval's session ended; approve again"));
-        }
-        let n = self.count("SELECT COUNT(*) AS n FROM keys WHERE identity = ?", vec![id.as_str().into()])?;
+        let n = self.count("SELECT COUNT(*) AS n FROM keys WHERE identity = ?", vec![person.id.as_str().into()])?;
         if n >= limits::KEYS_PER_IDENTITY_MAX {
             return Err(CellError::invalid(format!("an identity holds at most {} keys, revoked ones included", limits::KEYS_PER_IDENTITY_MAX)));
         }
         self.exec(
             "INSERT INTO keys (key, identity, added_at, added_by) VALUES (?, ?, ?, ?)",
-            vec![key.into(), id.as_str().into(), SqlStorageValue::Integer(js::now_ms()), id.as_str().into()],
+            vec![b.key.as_str().into(), person.id.as_str().into(), SqlStorageValue::Integer(js::now_ms()), person.id.as_str().into()],
         )?;
-        self.exec("DELETE FROM approvals WHERE key = ?", vec![key.into()])?;
-        Ok(json!({ "id": id, "claimed": true }))
+        Ok(json!({ "id": person.id, "key": npub::encode(&b.key), "added": true }))
     }
 
     /// Whether a person signs in (and so may hold no key).
@@ -350,11 +319,7 @@ impl RegistryCell {
             "/logout" => self.logout(from(body)?)?,
             "/redeem/mint" => self.mint(from(body)?)?,
             "/redeem" => self.redeem(from(body)?)?,
-            "/cli/approve" => self.approve(from(body)?)?,
-            "/cli/claim" => {
-                let b: KeyBody = from(body)?;
-                self.claim(&b.key)?
-            }
+            "/cli/add" => self.add_by_session(from(body)?)?,
             _ => return Ok(None),
         }))
     }

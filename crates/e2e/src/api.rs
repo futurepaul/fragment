@@ -196,12 +196,24 @@ impl Api {
         Ok(session)
     }
 
-    /// The signed-in browser approves a CLI key (`/cli`'s form).
-    pub fn approve_key(&self, session: &str, npub: &str) -> Result<Reply> {
+    /// The link `fragment login` prints for `keys`: its npub and its own
+    /// proof for `POST /cli/approve` (made `age_s` ago).
+    pub fn approval_link(&self, keys: &Keys, age_s: i64) -> String {
+        let proof = keys.header("POST", &format!("{}/cli/approve", self.base), b"", now_s() - age_s);
+        let proof = proof.strip_prefix("Nostr ").unwrap_or(&proof).to_string();
+        format!("{}/cli?key={}&proof={}", self.base, fragment_core::npub::encode(keys.pubkey_hex()), url_enc(&proof))
+    }
+
+    /// The signed-in browser approves the key an approval link names
+    /// (`/cli`'s form, with the link's key and proof).
+    pub fn approve_link(&self, session: &str, link: &str) -> Result<Reply> {
+        let url = reqwest::Url::parse(link)?;
+        let field = |k: &str| url.query_pairs().find(|(q, _)| q == k).map(|(_, v)| v.into_owned()).unwrap_or_default();
+        let body = format!("key={}&proof={}", url_enc(&field("key")), url_enc(&field("proof")));
         self.call(Call {
             method: "POST",
             url: format!("{}/cli/approve", self.base),
-            body: Some(format!("key={npub}").into_bytes()),
+            body: Some(body.into_bytes()),
             content_type: Some("application/x-www-form-urlencoded"),
             cookie: Some(format!("fragment_session={session}")),
             extra: vec![("origin", self.base.clone())],
@@ -209,11 +221,12 @@ impl Api {
         })
     }
 
-    /// The signed-in browser approves `keys`, and the key claims it.
+    /// The signed-in browser approves `keys` (its own link), and it works:
+    /// the answer is the key's `GET /api/identities/me`.
     pub fn approve(&self, session: &str, keys: &Keys) -> Result<Reply> {
-        let r = self.approve_key(session, &fragment_core::npub::encode(keys.pubkey_hex()))?;
+        let r = self.approve_link(session, &self.approval_link(keys, 0))?;
         anyhow::ensure!(r.status == 200, "approving a key: {r}");
-        self.signed(keys, "POST", "/api/identities/claim", None)
+        self.signed(keys, "GET", "/api/identities/me", None)
     }
 
     /// Someone who signs: a person signed in through WorkOS (the fake),
@@ -222,8 +235,8 @@ impl Api {
         let keys = Keys::generate();
         let email = format!("p-{}@e2e.test", &keys.pubkey_hex()[..12]);
         let session = self.sign_in(&email)?;
-        let claimed = self.approve(&session, &keys)?;
-        anyhow::ensure!(claimed.status == 200 && claimed.body["claimed"] == true, "claiming an approved key: {claimed}");
+        let me = self.approve(&session, &keys)?;
+        anyhow::ensure!(me.status == 200 && me.body["id"].is_string(), "an approved key works: {me}");
         Ok(keys)
     }
 

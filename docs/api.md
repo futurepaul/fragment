@@ -95,7 +95,6 @@ the new key and meant it for this signer.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/identities/claim` | a key a signed-in person approved (`/cli?key=<npub>`) | → `{id, claimed}`: the key joins the person who approved it (the signature is the proof of possession); again, `claimed: false`; 202 `{pending}` until someone approves it (ten minutes); people themselves come only from sign-in (`{kind: "person"}` is 400) |
 | `POST /api/identities` | a person | `{kind: "agent", proof}` → a new agent identity they own, holding the proof's key (FIN-11's trusted initial registration); again, the same one; a key someone else holds is 409; an agent owns no agents (403) |
 | `GET /api/identities/{id\|me}` | the identity, or its owner | → `{id, kind, owner?, createdAt, keys: [{npub, addedAt, addedBy, revokedAt?}], agents: [id], subjects: [{issuer, email, linkedAt}]}`; anyone else 404 |
 | `POST /api/identities/{id\|me}/keys` | a person for themselves; an owner for their agent | `{proof}` → the identity with the key added (at most 64 keys, revoked ones included); a key someone else holds, or a revoked one, is 409 |
@@ -119,8 +118,8 @@ random bytes, the registry keeps their SHA-256).
 | `GET /auth/callback?code=&state=` | the state must match the browser's cookie (400 otherwise); the code is exchanged server-side; → `fragment_session` (HttpOnly, SameSite=Lax, `Path=/`) and back to `return`; a WorkOS `error` is shown (400) |
 | `POST /auth/logout` | ends the session and every fragment session made from it, clears the cookie, and sends the browser to WorkOS's logout (`session_id` from the access token's `sid`); from another origin, 403 (`GET` shows the button) |
 | `GET /auth/fragment?name=&return=` | signed in: → `<fragment origin>/__signin?token=<a single-use redemption, 60 s, for that fragment only>`; signed out: → sign in first |
-| `GET /cli?key=<npub>` | signed in: a page showing the key's last eight characters, to compare with the terminal, and an Add button; signed out: → sign in first |
-| `POST /cli/approve` | the page's form (`key`): approves the key for ten minutes (a key someone else holds is 409; another origin 403) |
+| `GET /cli?key=<npub>&proof=` | the link `fragment login` prints: `proof` is the key's own NIP-98 event for `POST <platform>/cli/approve`, good for ten minutes (the proof of possession; without it, stale, or by another key: 400). Signed in: a page showing the key's last eight characters, to compare with the terminal, and an Add button; signed out: → sign in first, keeping the link |
+| `POST /cli/approve` | the page's form (`key`, `proof`): the key joins the signed-in person at once (a key someone else holds, or a revoked one, is 409; another origin 403); the CLI waits for `GET /api/identities/me` to answer. People themselves come only from sign-in (`POST /api/identities {kind: "person"}` is 400) |
 
 On a fragment's origin, `GET __signin?token=` redeems the redemption for
 this fragment only (another fragment's is 401 and stays unspent) and sets

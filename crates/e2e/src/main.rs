@@ -227,8 +227,9 @@ impl Suite {
         if let Ok(p) = &pending {
             if p["pending"] == true {
                 let npub = p["npub"].as_str().unwrap_or("").to_string();
+                let link = p["approve"].as_str().unwrap_or("").to_string();
                 let email = format!("cli-{}@e2e.test", &npub[5..17]);
-                let approved = api.sign_in(&email).and_then(|session| api.approve_key(&session, &npub));
+                let approved = api.sign_in(&email).and_then(|session| api.approve_link(&session, &link));
                 if let Err(e) = approved {
                     println!("      the browser's approval failed: {e}");
                 }

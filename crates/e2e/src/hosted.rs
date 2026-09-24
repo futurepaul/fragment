@@ -186,9 +186,17 @@ pub fn run(cli: PathBuf, scratch: PathBuf, only: Option<String>) -> Result<()> {
     println!("hosted e2e against {base} (run {})", h.run);
     let result = (|| -> Result<()> {
         health(&mut h)?;
-        // the enrolled key is a person's: someone signed in and approved it once
-        let npub = fragment_core::npub::encode(h.key.pubkey_hex());
-        let id = h.api.identity(&h.key).with_context(|| format!("the e2e key belongs to no one on the fleet: sign in at {base} and open {base}/cli?key={npub}"))?;
+        // the e2e key is a person's: someone signed in approves it once, from
+        // the link this run prints (its own proof inside, ten minutes good)
+        if h.api.signed(&h.key, "GET", "/api/identities/me", None)?.status == 401 {
+            println!("\nthe e2e key is no one's on this fleet yet. Signed in at {base}, open:\n  {}\n(waiting up to ten minutes)", h.api.approval_link(&h.key, 0));
+            let t0 = std::time::Instant::now();
+            while h.api.signed(&h.key, "GET", "/api/identities/me", None)?.status == 401 {
+                anyhow::ensure!(t0.elapsed() < std::time::Duration::from_secs(600), "no approval in ten minutes");
+                std::thread::sleep(std::time::Duration::from_secs(3));
+            }
+        }
+        let id = h.api.identity(&h.key)?;
         h.note("identity", id);
         creators(&mut h)?;
         todo(&mut h)?;

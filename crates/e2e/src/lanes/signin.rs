@@ -137,14 +137,28 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.call(Call { method: "GET", url: back.header("location"), cookie: bound, ..Call::default() })?;
     s.ok("a sign-in that is someone else's cannot be linked", r.status == 409, &r);
 
-    // a CLI key: approved in the browser, claimed by the key
+    // a CLI key: its link carries its own proof; approving it adds it at once
     let cli = Keys::generate();
     let cli_npub = npub::encode(cli.pubkey_hex());
-    let r = api.unsigned("GET", &format!("/cli?key={cli_npub}"), None)?;
-    s.ok("the approval page sends a signed-out browser to sign in first", r.status == 302 && r.header("location").contains("/auth/login?return="), &r);
-    let r = with_session(api, "GET", &format!("/cli?key={cli_npub}"), &paul)?;
+    let link = api.approval_link(&cli, 0);
+    let path = link.trim_start_matches(&api.base).to_string();
+    let r = api.unsigned("GET", &path, None)?;
+    s.ok(
+        "the approval page sends a signed-out browser to sign in first, keeping the link",
+        r.status == 302 && r.header("location").contains("/auth/login?return=") && r.header("location").contains("proof"),
+        &r,
+    );
+    let r = with_session(api, "GET", &path, &paul)?;
     s.ok("signed in, it shows the key's ending to compare with the terminal", r.status == 200 && r.text.contains(&cli_npub[cli_npub.len() - 8..]), &r);
-    let r = api.approve_key("0".repeat(64).as_str(), &cli_npub)?;
+    let r = with_session(api, "GET", &format!("/cli?key={cli_npub}"), &paul)?;
+    s.ok("a link without the key's proof is refused", r.status == 400, &r);
+    let stale = api.approval_link(&cli, 11 * 60);
+    let r = with_session(api, "GET", stale.trim_start_matches(&api.base), &paul)?;
+    s.ok("and one whose proof is older than ten minutes", r.status == 400 && r.text.contains("fragment login"), &r);
+    let forged = link.replace(&cli_npub, &npub::encode(Keys::generate().pubkey_hex()));
+    let r = api.approve_link(&paul, &forged)?;
+    s.ok("and a proof by another key than the one named", r.status == 400, &r);
+    let r = api.approve_link(&"0".repeat(64), &link)?;
     s.ok("approving without a session is 401", r.status == 401, &r);
     let r = api.call(Call {
         method: "POST",
@@ -156,10 +170,15 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         ..Call::default()
     })?;
     s.ok("a form posted from another site is refused", r.status == 403, &r);
-    let r = api.approve_key(&paul, &npub::encode(k4.pubkey_hex()))?;
+    let r = api.approve_link(&paul, &api.approval_link(&k4, 0))?;
     s.ok("a key someone else holds cannot be approved", r.status == 409, &r);
-    let r = api.approve(&paul, &cli)?;
-    s.ok("approved, the key joins the person", r.status == 200 && r.body["id"] == paul_id.as_str(), &r);
+    let r = api.signed(&cli, "GET", "/api/identities/me", None)?;
+    s.ok("until approved, the key is no one's", r.status == 401, &r);
+    let r = api.approve_link(&paul, &link)?;
+    let me = api.signed(&cli, "GET", "/api/identities/me", None)?;
+    s.ok("approved, the key is the person's at once: nothing waits to claim it", r.status == 200 && me.status == 200 && me.body["id"] == paul_id.as_str(), &me);
+    let r = api.approve_link(&paul, &link)?;
+    s.ok("approving it again changes nothing", r.status == 200, &r);
     // a person who signs in may hold no key at all
     let lone = api.sign_in("lone@e2e.test")?;
     let lone_key = Keys::generate();

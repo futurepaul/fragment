@@ -680,27 +680,33 @@ fn run(cli: Cli) -> Result<()> {
                 save_secret_key(&hex::encode(auth::Identity::generate().secret))?;
             }
             let c = require_client(&cli.host, cli.verbose)?;
-            let claim = || -> Result<Option<Value>> {
-                let r = c.post_json("/api/identities/claim", &json!({}))?;
+            // whose is this key? (401 until someone signed in approves it)
+            let me = || -> Result<Option<Value>> {
+                let r = c.get("/api/identities/me")?;
                 match r.status {
                     200 => Ok(Some(r.json()?)),
-                    202 => Ok(None),
+                    401 => Ok(None),
                     _ => c.call(r).map(Some),
                 }
             };
-            let mut done = claim()?;
+            let mut done = me()?;
             if done.is_none() {
+                // the link carries this key's own proof (ten minutes good):
+                // approving it in a signed-in browser adds the key at once
                 let npub = c.id.npub();
-                let url = format!("{}/cli?key={npub}", c.host);
+                let proof = c.id.nip98_header("POST", &format!("{}/cli/approve", c.host), &[]);
+                let proof = proof.strip_prefix("Nostr ").unwrap_or(&proof);
+                let url = format!("{}/cli?key={npub}&proof={}", c.host, encode_q(proof));
+                let tail = &npub[npub.len() - 8..];
                 if no_wait {
                     if j {
                         ok_exit(&json!({ "npub": npub, "pending": true, "approve": url }));
                     }
-                    println!("approve this key in a browser where you are signed in:\n  {url}");
-                    println!("its key ends in {}; then run `fragment login` again", &npub[npub.len() - 8..]);
+                    println!("approve this key in a browser where you are signed in (the link is good for ten minutes):\n  {url}");
+                    println!("its key ends in {tail}; then run `fragment login` again");
                     return Ok(());
                 }
-                eprintln!("sign in and approve this key:\n  {url}\nthe page should show a key ending in {}", &npub[npub.len() - 8..]);
+                eprintln!("sign in and approve this key (the link is good for ten minutes):\n  {url}\nthe page should show a key ending in {tail}");
                 if !no_browser {
                     let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
                     let _ = std::process::Command::new(opener).arg(&url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
@@ -708,13 +714,13 @@ fn run(cli: Cli) -> Result<()> {
                 let t0 = std::time::Instant::now();
                 while done.is_none() {
                     if t0.elapsed() > std::time::Duration::from_secs(600) {
-                        anyhow::bail!("no approval in ten minutes; run `fragment login` again");
+                        anyhow::bail!("no approval in ten minutes; run `fragment login` again for a fresh link");
                     }
                     std::thread::sleep(std::time::Duration::from_secs(2));
-                    done = claim()?;
+                    done = me()?;
                 }
             }
-            let v = done.expect("claimed");
+            let v = done.expect("approved");
             if j {
                 // never echo the key itself
                 ok_exit(&json!({ "npub": c.id.npub(), "id": v["id"], "host": c.host, "config": config_path().display().to_string(), "existing": key_existed }));

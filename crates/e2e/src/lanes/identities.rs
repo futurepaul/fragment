@@ -47,14 +47,10 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a key no one approved is 401, saying how to add it", r.status == 401 && r.message().contains("fragment login"), &r);
     let r = api.signed(&stray, "POST", "/api/identities", Some(&json!({ "kind": "person" })))?;
     s.ok("a key does not make a person: people sign in", r.status == 400 && r.message().contains("sign in"), &r);
-    let r = api.signed(&stray, "POST", "/api/identities/claim", None)?;
-    s.ok("claiming before anyone approved is pending (202)", r.status == 202 && r.body["pending"] == true, &r);
     let session = api.sign_in("stray@e2e.test")?;
     let r = api.approve(&session, &stray)?;
     let stray_id = r.body["id"].as_str().unwrap_or("").to_string();
-    s.ok("approved in a signed-in browser, the key's claim joins it to that person", r.status == 200 && r.body["claimed"] == true && npub::is_identity(&stray_id), &r);
-    let r = api.signed(&stray, "POST", "/api/identities/claim", None)?;
-    s.ok("claiming again answers the same person", r.status == 200 && r.body["id"] == stray_id.as_str() && r.body["claimed"] == false, &r);
+    s.ok("approved in a signed-in browser, the key is that person's", r.status == 200 && npub::is_identity(&stray_id), &r);
     let r = api.signed(&stray, "GET", "/api/identities/me", None)?;
     s.ok(
         "the person is keyed by their sign-in, and the email is shown beside it",
@@ -111,8 +107,9 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("no grant was rewritten: the members are the same identities", after.body["members"] == before.body["members"], &after);
     let r = api.signed(&paul, "GET", "/api/fragments", None)?;
     s.ok("the revoked key is 401 from the next request", r.status == 401 && r.message().contains("revoked"), &r);
-    let r = api.signed(&paul, "POST", "/api/identities/claim", None)?;
-    s.ok("a revoked key cannot be claimed again", r.status == 401, &r);
+    let session = api.sign_in("paul-revoked@e2e.test")?;
+    let r = api.approve_link(&session, &api.approval_link(&paul, 0))?;
+    s.ok("a revoked key cannot be approved again, by anyone", r.status == 409, &r);
     let r = api.signed(&new, "POST", add, Some(&json!({ "proof": api.proof(&paul, "POST", add, &new) })))?;
     s.ok("a revoked key stays revoked", r.status == 409, &r);
     let r = api.signed(&new, "DELETE", &format!("/api/identities/me/keys/{old_hex}"), None)?;

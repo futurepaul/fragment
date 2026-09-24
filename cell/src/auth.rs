@@ -12,7 +12,10 @@
 //!   GET  /auth/callback           WorkOS → the code exchanged here → a session cookie
 //!   GET  /auth/logout             a button; POST ends the session (and its site sessions)
 //!   GET  /auth/fragment?name=&return=      a single-use redemption for one fragment's origin
-//!   GET  /cli?key=<npub>          the signed-in person approves a CLI key
+//!   GET  /cli?key=<npub>&proof=   the signed-in person approves a CLI key: the link
+//!                                 carries the key's own proof (a NIP-98 event by it for
+//!                                 `POST <platform>/cli/approve`, ten minutes good), so
+//!                                 approving adds the key at once
 //!   POST /cli/approve             (the form)
 //!
 //! A fragment's origin: `__signin?token=&return=` redeems the platform's
@@ -34,6 +37,25 @@ pub const SITE_COOKIE: &str = "fragment_site";
 const LOGIN_COOKIE: &str = "fragment_login";
 const LOGIN_HINT_MAX: usize = 320;
 const INVITATION_TOKEN_MAX: usize = 256;
+/// How long an approval link's proof is good.
+const LINK_PROOF_WINDOW_S: i64 = 600;
+const LINK_PROOF_MAX: usize = 4096;
+
+/// The key an approval link's proof is by, if it is good: a NIP-98 event
+/// by that key for `POST <platform>/cli/approve`, made within ten minutes.
+fn link_proof(platform: &str, key_hex: &str, proof: &str) -> CellResult<()> {
+    let stale = || CellError::invalid("this approval link is not good (it is older than ten minutes, or for another key): run `fragment login` again for a fresh one");
+    if proof.is_empty() || proof.len() > LINK_PROOF_MAX {
+        return Err(stale());
+    }
+    let now_s = crate::js::now_ms() / 1000;
+    let signer = fragment_nip98::verify(Some(&format!("Nostr {proof}")), "POST", &format!("{platform}/cli/approve"), &[], now_s, LINK_PROOF_WINDOW_S)
+        .map_err(|_| stale())?;
+    if signer != key_hex {
+        return Err(stale());
+    }
+    Ok(())
+}
 
 fn secure(url: &Url) -> bool {
     url.scheme() == "https"
@@ -301,8 +323,14 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
             }
             (Method::Get, ["cli"]) => {
                 let key = query(url, "key").unwrap_or_default();
+                let proof = query(url, "proof").unwrap_or_default();
                 let Some(hex) = npub::parse(&key) else { return page(400, "Not a key", "<p>This link names no key. Run <code>fragment login</code> again.</p>") };
-                let Some((_, who)) = platform_session(&req, env).await? else { return to_login(&platform, &format!("/cli?key={}", enc(&key))) };
+                if let Err(e) = link_proof(&platform, &hex, &proof) {
+                    return page(400, "This link has expired", &format!("<p>{}</p>", esc(&e.message)));
+                }
+                let Some((_, who)) = platform_session(&req, env).await? else {
+                    return to_login(&platform, &format!("/cli?key={}&proof={}", enc(&key), enc(&proof)));
+                };
                 let email = email_of(env, &who.id).await;
                 let npub = npub::encode(&hex);
                 let tail = &npub[npub.len() - 8..];
@@ -311,23 +339,25 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                     "Add a key to you",
                     &format!(
                         "<p>A <code>fragment</code> CLI wants to act as <b>{}</b>. Its key ends in <code>{tail}</code>; check that your terminal shows the same ending.</p>
-<form method=\"post\" action=\"/cli/approve\"><input type=\"hidden\" name=\"key\" value=\"{}\"><button>Add this key</button></form>
+<form method=\"post\" action=\"/cli/approve\"><input type=\"hidden\" name=\"key\" value=\"{}\"><input type=\"hidden\" name=\"proof\" value=\"{}\"><button>Add this key</button></form>
 <p>Didn't run <code>fragment login</code>? Close this page.</p>",
                         esc(if email.is_empty() { &who.id } else { &email }),
-                        esc(&npub)
+                        esc(&npub),
+                        esc(&proof)
                     ),
                 )
             }
             (Method::Post, ["cli", "approve"]) => {
                 same_origin(&req, &platform)?;
                 let bytes = req.bytes().await?;
-                let key = url::form_urlencoded::parse(&bytes).find(|(k, _)| k == "key").map(|(_, v)| v.into_owned()).unwrap_or_default();
-                let hex = npub::parse(&key).ok_or_else(|| CellError::invalid("the form names no key"))?;
+                let field = |name: &str| url::form_urlencoded::parse(&bytes).find(|(k, _)| k == name).map(|(_, v)| v.into_owned()).unwrap_or_default();
+                let hex = npub::parse(&field("key")).ok_or_else(|| CellError::invalid("the form names no key"))?;
                 let Some((token, _)) = platform_session(&req, env).await? else {
                     return Err(CellError::new(ErrorCode::Unauthenticated, "sign in first"));
                 };
-                ask_registry(env, "/cli/approve", &json!({ "token": token, "key": hex })).await?;
-                page(200, "Key added", "<p>Go back to your terminal: <code>fragment login</code> finishes on its own.</p>")
+                link_proof(&platform, &hex, &field("proof"))?;
+                ask_registry(env, "/cli/add", &json!({ "token": token, "key": hex })).await?;
+                page(200, "Key added", "<p>This key is yours now. A <code>fragment login</code> waiting in a terminal finishes on its own.</p>")
             }
             (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
         }
