@@ -1,0 +1,26 @@
+{
+  "name": "desktop",
+  "capabilities": ["fragments"],
+  "operations": {
+    "chats": { "kind": "query" },
+    "add_chat": {
+      "kind": "mutation",
+      "input": {
+        "type": "object",
+        "required": ["name"],
+        "additionalProperties": false,
+        "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 200 } }
+      }
+    },
+    "remove_chat": {
+      "kind": "mutation",
+      "input": {
+        "type": "object",
+        "required": ["name"],
+        "additionalProperties": false,
+        "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 200 } }
+      }
+    }
+  },
+  "meta": { "title": "Desktop", "description": "Your chats and apps side by side: every one of them a fragment of yours." }
+}

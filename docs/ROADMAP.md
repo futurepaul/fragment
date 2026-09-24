@@ -332,7 +332,8 @@ deployment.
   through the fragment file API. Forkable and resettable.
 - **Acceptance:** a browser e2e opens apps and files into the viewer,
   reorders and closes panes, collapses both sides, and works at phone
-  width; the layout survives a reload.
+  width; the layout survives a reload. **Met 2026-09-24** (e2e lane
+  `desktop`, 17 checks; the desktop is `templates/desktop`).
 
 ### 7. Chats and sharing
 - A chat template (a `chat` channel) whose agent member answers new

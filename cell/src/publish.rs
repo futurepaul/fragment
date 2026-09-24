@@ -3,23 +3,23 @@
 //! `POST /api/files` (one commit to `main`, as a CLI sync makes), and
 //! `POST /api/deploy` (`live` to `main`'s tip, as `fragment deploy` does).
 //! An agent's tools use the same two routes. Also `__fragments`, the one
-//! capability a page can ask for.
+//! capability a page can ask for: its owner's fragments, listed and made.
 
 use std::collections::BTreeMap;
 
-use fragment_proto::{ErrorCode, Role};
-use fragment_templates::{Template, BLANK, CHAT, INBOX, TODO};
+use fragment_proto::{CreateFragment, ErrorBody, ErrorCode, IdentityKind, Role};
+use fragment_templates::{Template, BLANK, CHAT, DESKTOP, INBOX, TODO};
 use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
 use crate::files::{content_of, FileWrite, Wrote};
 use crate::fragment::{json_response, Caller, FragmentCell};
-use crate::js;
+use crate::{js, Signer};
 
 /// The templates a fragment can start from. `notes` stays with the CLI
 /// (`fragment new --template notes`): at 3 MiB it would double the cell.
-pub(crate) const TEMPLATES: [(&str, Template); 4] = [("blank", BLANK), ("chat", CHAT), ("todo", TODO), ("inbox", INBOX)];
+pub(crate) const TEMPLATES: [(&str, Template); 5] = [("desktop", DESKTOP), ("chat", CHAT), ("todo", TODO), ("inbox", INBOX), ("blank", BLANK)];
 
 /// `live` moving under a deploy this many times is an error.
 const DEPLOY_ATTEMPTS: usize = 5;
@@ -132,18 +132,24 @@ impl FragmentCell {
         json_response(&json!({ "live": live, "canonical": self.cfg.canonical(&caller.url, &name) }))
     }
 
-    /// `__fragments`: the fragments this fragment's owner belongs to, for
-    /// the owner viewing a page whose fragment.json (at live) asks for the
-    /// `fragments` capability. Anyone else is refused, even an editor.
-    pub(crate) async fn owner_fragments(&self, caller: &Caller) -> CellResult<Value> {
+    /// The owner, when they are the one viewing a page whose fragment.json
+    /// (at live) asks for the `fragments` capability. Anyone else is
+    /// refused, even an editor.
+    fn owner_granted(&self, caller: &Caller) -> CellResult<String> {
         let owner = self.must("owner")?;
         if caller.principal.as_deref() != Some(owner.as_str()) {
-            return Err(CellError::new(ErrorCode::Forbidden, "only this fragment's owner, signed in here, sees their fragments"));
+            return Err(CellError::new(ErrorCode::Forbidden, "only this fragment's owner, signed in here, has its fragments"));
         }
         let caps: Vec<String> = self.meta("capabilities_live")?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         if !caps.iter().any(|c| c == "fragments") {
             return Err(CellError::new(ErrorCode::Forbidden, "this fragment's fragment.json does not ask for the fragments capability"));
         }
+        Ok(owner)
+    }
+
+    /// `GET __fragments`: the fragments the owner belongs to.
+    pub(crate) async fn owner_fragments(&self, caller: &Caller) -> CellResult<Value> {
+        let owner = self.owner_granted(caller)?;
         let list = Request::new("https://principal.internal/list", Method::Get)?;
         let v: Value = self.env.durable_object("PRINCIPAL")?.get_by_name(&owner)?.fetch_with_request(list).await?.json().await?;
         let fragments: Vec<Value> = v["fragments"]
@@ -156,5 +162,26 @@ impl FragmentCell {
             })
             .collect();
         Ok(json!({ "fragments": fragments }))
+    }
+
+    /// `POST __fragments {label, template}`: makes `<label>.<username>` from
+    /// a template for the owner, as `POST /api/fragments` would for them
+    /// (this fragment's username is its owner's: people create under their
+    /// own).
+    pub(crate) async fn owner_create(&self, caller: &Caller, body: Value) -> CellResult<Value> {
+        let owner = self.owner_granted(caller)?;
+        let name = self.name()?;
+        let (_, username) = fragment_proto::split_fragment_name(&name).ok_or_else(|| CellError::host(format!("{name} is not <label>.<username>")))?;
+        let text = |k: &str| body[k].as_str().map(str::to_string).ok_or_else(|| CellError::invalid(format!("{k} is a string")));
+        let create = CreateFragment { name: text("label")?, visibility: None, template: Some(text("template")?) };
+        let signer = Signer { key: None, id: owner, kind: IdentityKind::Person, owner: None, username: Some(username.to_string()) };
+        let mut made = crate::create_fragment(&self.env, &self.cfg, &caller.url, create, signer).await?;
+        let status = made.status_code();
+        let v: Value = made.json().await?;
+        if status != 200 {
+            let e: ErrorBody = serde_json::from_value(v).map_err(|e| CellError::host(format!("the create answered {status}: {e}")))?;
+            return Err(CellError::new(e.error, e.message));
+        }
+        Ok(json!({ "name": v["name"], "url": v["canonical"] }))
     }
 }

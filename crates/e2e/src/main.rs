@@ -70,6 +70,8 @@ pub struct Suite {
     agents_project: PathBuf,
     /// More environment for the next node started (celld settings a lane tries).
     pub node_env_extra: Vec<(String, String)>,
+    /// The next node's platform is on the fragments' domain (`start_as_browsers_see_it`).
+    platform_on_suffix: bool,
 }
 
 impl Suite {
@@ -112,6 +114,19 @@ impl Suite {
         api.qualified(owner, &self.name(base))
     }
 
+    /// Starts the node as fragment.club is shaped: the platform on the
+    /// fragments' own domain (`fragment.localhost`), so a browser treats
+    /// the platform and every fragment as one site. A fragment framed in
+    /// another's page signs in through the platform only then (the desktop).
+    pub fn start_as_browsers_see_it(&mut self) -> Result<Api> {
+        self.platform_on_suffix = true;
+        let started = self.start(false, true);
+        self.platform_on_suffix = false;
+        let mut api = started?;
+        api.base = format!("http://{SUFFIX}:{}", self.port);
+        Ok(api)
+    }
+
     /// Starts the node; `suffix` serves fragments from their own hosts.
     pub fn start(&mut self, clean: bool, suffix: bool) -> Result<Api> {
         assert!(self.node.is_none(), "one node at a time");
@@ -132,7 +147,10 @@ impl Suite {
                 api_key: WORKOS_KEY.into(),
                 api_url: Some(self.workos.url.clone()),
             }),
-            platform_url: Some(format!("http://127.0.0.1:{}", self.port)),
+            platform_url: Some(match self.platform_on_suffix && suffix {
+                true => format!("http://{SUFFIX}:{}", self.port),
+                false => format!("http://127.0.0.1:{}", self.port),
+            }),
             openrouter_management: Some(OPENROUTER_MANAGEMENT.into()),
             budget_usd: Some(BUDGET_USD.into()),
             operators: Some(fragment_core::npub::encode(self.operator.pubkey_hex())),
@@ -346,6 +364,7 @@ fn main() -> Result<()> {
         agents_port: devstack::free_port()?,
         agents_project,
         node_env_extra: vec![],
+        platform_on_suffix: false,
     };
     let api = s.start(true, true)?;
     lanes::run(&mut s, api)?;

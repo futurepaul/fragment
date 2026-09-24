@@ -434,12 +434,15 @@ pub fn is_fragment_route(rest: &str) -> bool {
 }
 
 /// `__signin` and `__signout` on a fragment's own origin.
-pub async fn fragment(env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, path_mode: bool) -> CellResult<Response> {
+pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, path_mode: bool) -> CellResult<Response> {
     let cookie_path = if path_mode { format!("/f/{name}/") } else { "/".to_string() };
     let base = cfg.canonical(url, name);
     {
         match rest {
             "__signin" => match query(url, "token") {
+                // signed in here already (a page that embeds this one sends
+                // every frame through __signin): straight back
+                None if site_session(req, env, name).await?.is_some() => redirect(&back_to(&base, query(url, "return").as_deref())?, &[]),
                 None => {
                     let back = site::return_path(query(url, "return").as_deref());
                     redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(url), enc(&back)), &[])

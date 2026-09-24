@@ -140,6 +140,66 @@ impl Browser {
         self.send("Page.reload", json!({}), Some(&page.session))?;
         Ok(())
     }
+
+    /// The page as it looks now, a PNG at `path` (evidence for a person).
+    pub fn screenshot(&mut self, page: &Page, path: &std::path::Path) -> Result<()> {
+        use base64::Engine;
+        let shot = self.send("Page.captureScreenshot", json!({ "format": "png" }), Some(&page.session))?;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(shot["data"].as_str().unwrap_or_default())?;
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
+
+    /// A cookie the browser holds for `url`, as if a response had set it.
+    pub fn set_cookie(&mut self, url: &str, name: &str, value: &str) -> Result<()> {
+        self.send("Storage.setCookies", json!({ "cookies": [{ "name": name, "value": value, "url": url, "httpOnly": true, "sameSite": "Lax" }] }), None)?;
+        Ok(())
+    }
+
+    /// The page's viewport, as a phone's (`mobile`) or a desktop's.
+    pub fn viewport(&mut self, page: &Page, width: u32, height: u32, mobile: bool) -> Result<()> {
+        let params = json!({ "width": width, "height": height, "deviceScaleFactor": 1, "mobile": mobile });
+        self.send("Emulation.setDeviceMetricsOverride", params, Some(&page.session))?;
+        Ok(())
+    }
+
+    /// Evaluates `expr` inside the page's first frame whose URL contains
+    /// `url_part` (a same-site frame shares the page's process), in a world
+    /// of its own that shares the frame's DOM.
+    pub fn eval_in_frame(&mut self, page: &Page, url_part: &str, expr: &str) -> Result<Value> {
+        fn find(tree: &Value, part: &str) -> Option<String> {
+            if tree["frame"]["url"].as_str().is_some_and(|u| u.contains(part)) {
+                return tree["frame"]["id"].as_str().map(str::to_string);
+            }
+            tree["childFrames"].as_array()?.iter().find_map(|c| find(c, part))
+        }
+        let tree = self.send("Page.getFrameTree", json!({}), Some(&page.session))?;
+        let frame = find(&tree["frameTree"], url_part).with_context(|| format!("no frame at {url_part}"))?;
+        let world = self.send("Page.createIsolatedWorld", json!({ "frameId": frame }), Some(&page.session))?;
+        let r = self.send(
+            "Runtime.evaluate",
+            json!({ "expression": expr, "contextId": world["executionContextId"], "awaitPromise": true, "returnByValue": true }),
+            Some(&page.session),
+        )?;
+        if let Some(e) = r.get("exceptionDetails") {
+            bail!("the frame threw: {}", e["exception"]["description"].as_str().unwrap_or(&e.to_string()));
+        }
+        Ok(r["result"]["value"].clone())
+    }
+
+    /// A mouse drag from one point to another, in steps, as a hand makes it.
+    pub fn drag(&mut self, page: &Page, from: (f64, f64), to: (f64, f64)) -> Result<()> {
+        let mouse = |kind: &str, (x, y): (f64, f64), buttons: u8| json!({ "type": kind, "x": x, "y": y, "button": "left", "buttons": buttons, "clickCount": 1 });
+        self.send("Input.dispatchMouseEvent", mouse("mouseMoved", from, 0), Some(&page.session))?;
+        self.send("Input.dispatchMouseEvent", mouse("mousePressed", from, 1), Some(&page.session))?;
+        for i in 1..=10 {
+            let t = i as f64 / 10.0;
+            let at = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+            self.send("Input.dispatchMouseEvent", mouse("mouseMoved", at, 1), Some(&page.session))?;
+        }
+        self.send("Input.dispatchMouseEvent", mouse("mouseReleased", to, 0), Some(&page.session))?;
+        Ok(())
+    }
 }
 
 impl Drop for Browser {

@@ -472,7 +472,7 @@ async fn forward(env: &Env, req: &Request, url: &Url, body: Option<worker::wasm_
 async fn serve(mut req: Request, env: &Env, url: &Url, name: &str, rest: &str, mode: &'static str) -> CellResult<Response> {
     check_name(name)?;
     if auth::is_fragment_route(rest) {
-        return auth::fragment(env, &Config::from_env(env), url, name, rest, mode == "path").await;
+        return auth::fragment(&req, env, &Config::from_env(env), url, name, rest, mode == "path").await;
     }
     let body = read_body(&mut req).await?;
     // a signature names its key's identity; a browser, its session here

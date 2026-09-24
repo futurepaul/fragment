@@ -13,7 +13,7 @@ use crate::api::{url_enc, Api, Call, Reply};
 use crate::Suite;
 
 /// A person with a CLI key and a platform session.
-fn person(api: &Api) -> Result<(Keys, String)> {
+pub(super) fn person(api: &Api) -> Result<(Keys, String)> {
     let keys = Keys::generate();
     let session = api.sign_in(&format!("t-{}@e2e.test", &keys.pubkey_hex()[..12]))?;
     api.approve(&session, &keys)?;
@@ -59,7 +59,7 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
 
     let none = s.name("tnone");
     let r = api.create_with(&owner, json!({ "name": none, "template": "nope" }))?;
-    s.ok("an unknown template is refused, naming the templates", r.status == 400 && r.message().contains("blank, chat, todo, inbox"), &r);
+    s.ok("an unknown template is refused, naming the templates", r.status == 400 && r.message().contains("desktop, chat, todo, inbox, blank"), &r);
     let r = api.status(&owner, &api.qualified(&owner, &none)?)?;
     s.ok("and nothing is made", r.status == 404, &r);
 

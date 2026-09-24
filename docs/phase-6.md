@@ -78,6 +78,20 @@ session's layout (`finite-next-worktrees/desktop-ui`, `d8d5c26`).
    Acceptance (ROADMAP phase 6): a browser e2e opens apps and files into
    the viewer, reorders and closes panes, collapses both sides, works at
    phone width, and keeps the layout across a reload.
+   **Built 2026-09-24** (`templates/desktop`): `layout.js`, `viewer.js`,
+   and split-grid as the Desktop UI session made them; `desktop.js`
+   rewritten for fragments. The chats are chat fragments (the desktop's
+   own app keeps which), every other fragment of the owner's is an app,
+   and each shows in its own frame, which signs in on its own origin
+   (`__signin` now comes straight back when it is signed in already).
+   The capability grew a second half: the owner's page may also make a
+   fragment (`POST __fragments`), so "New chat" and "Add an app" work
+   from the desktop. Every fragment has a `__files` page; framed, its
+   links ask the page around it to open a file (only a frame of one of
+   the owner's fragments is heard). The e2e lane `desktop` (17 checks,
+   Chrome) runs on a node whose platform is on the fragments' domain, as
+   fragment.club is: a framed fragment can sign in through the platform
+   only when a browser counts both as one site.
 4. **Your agent in your chats, making apps.** The agent service runs in
    the fleet; turns are metered in the owner's ledger; a new chat has the
    owner's agent in it; the agent's platform tools.

@@ -9,6 +9,7 @@ mod budget;
 mod computer;
 mod control;
 mod deliver;
+mod desktop;
 mod identities;
 mod jobs;
 mod keys;
@@ -39,6 +40,7 @@ pub fn run(s: &mut Suite, api: Api) -> Result<()> {
     plane::files(s, &api)?;
     plane::deploy(s, &api)?;
     templates::templates(s, &api)?;
+    let api = desktop::desktop(s, api)?;
     app::ops(s, &api)?;
     app::public(s, &api)?;
     limits::facet_cap(s, &api)?;

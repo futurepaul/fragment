@@ -163,7 +163,8 @@ random bytes, the registry keeps their SHA-256).
 On a fragment's origin, `GET __signin?token=` redeems the redemption for
 this fragment only (another fragment's is 401 and stays unspent) and sets
 `fragment_site` (HttpOnly, SameSite=Lax, host-only, `Path=/` or
-`/f/<name>/`); without a token it starts at the platform. `__signout`
+`/f/<name>/`); without a token it starts at the platform, unless this
+origin's session is live already (then straight back). `__signout`
 clears it. A request with that cookie is its person, exactly as the same
 request signed by one of their keys: the same decision either way. A
 cookie for another fragment, or whose platform session ended, is nobody.
@@ -179,7 +180,7 @@ A path with a space in it arrives encoded (`return=%2Fa%2520b` returns to
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/fragments` | a person with a username (an agent is 403) | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). The fragment's own key is made by the node's `KEYS` and stays sealed there. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`blank`, `chat`, `todo`, `inbox`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
+| `POST /api/fragments` | a person with a username (an agent is 403) | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). The fragment's own key is made by the node's `KEYS` and stays sealed there. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`desktop`, `chat`, `todo`, `inbox`, `blank`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role}]}` |
 | `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes}` |
@@ -473,7 +474,8 @@ API answers on the platform's host):
 | `__signin`, `__signout` | this origin's session (Sign-in, above) |
 | `__join?invite=<token>` | an invite in a browser: signed out, → `__signin` and back; signed in, a Join button that posts `invite` here (form-encoded; another origin 403) and joins as the person |
 | `__fragment.js` | the browser library (below) |
-| `__fragments` | `{fragments: [{name, role, url}]}`: the fragments this fragment's owner belongs to, only to the owner signed in here, and only when `fragment.json` at live declares `"capabilities": ["fragments"]` (anyone else, or a page that does not ask, 403). A dashboard's page, such as the desktop's |
+| `__fragments` | `{fragments: [{name, role, url}]}`: the fragments this fragment's owner belongs to, only to the owner signed in here, and only when `fragment.json` at live declares `"capabilities": ["fragments"]` (anyone else, or a page that does not ask, 403). A dashboard's page, such as the desktop's. `POST` `application/json` `{label, template}` → `{name, url}` makes `<label>.<username>` for the owner, as `POST /api/fragments` would, under the same conditions |
+| `__files` | an HTML list of the content files (live and main) linking to `__file`; framed, a click asks the page around it to open the file (`postMessage({fragment: "open", url, title})`) |
 | `__live` | WebSocket, anyone who can see the fragment: channel subscriptions from a cursor, presence, change signals (below) |
 | `__watch` | WebSocket, viewers and up (the share link, or a signed upgrade): `{type: "hello", ref, sha}`, then `{type: "changed", ref: "main", sha, paths}` per external move of main |
 | anything else | the app's `fetch`, when it has one |

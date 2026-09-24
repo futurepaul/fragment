@@ -116,7 +116,17 @@ impl FragmentCell {
             };
             json_response(&answer)?
         } else if path == "__fragments" {
-            json_response(&self.owner_fragments(caller).await?)?
+            let answer = if req.method() == Method::Post {
+                // a cross-site form cannot send JSON without a preflight
+                if !req.headers().get("content-type")?.is_some_and(|c| c.starts_with("application/json")) {
+                    return Err(CellError::invalid("send the fragment to make as application/json"));
+                }
+                let body: Value = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                self.owner_create(caller, body).await?
+            } else {
+                self.owner_fragments(caller).await?
+            };
+            json_response(&answer)?
         } else if path == "__sw.js" {
             let h = Headers::new();
             h.set("content-type", "text/javascript; charset=utf-8")?;
@@ -271,6 +281,20 @@ impl FragmentCell {
                     .collect();
                 return json_response(&json!({ "type": "tree", "ref": "live", "sha": live, "count": files.len(), "files": files }));
             }
+            "__files" => {
+                let mut paths: Vec<String> = ["live", "main"]
+                    .into_iter()
+                    .map(|r| self.tree_rows(r))
+                    .collect::<CellResult<Vec<_>>>()?
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|r| r["path"].as_str().map(str::to_string))
+                    .filter(|p| !site::is_machinery(p))
+                    .collect();
+                paths.sort();
+                paths.dedup();
+                return Ok(Response::ok(files_page(name, &paths))?.with_headers(headers("text/html; charset=utf-8", "no-store")?));
+            }
             "__file" => {
                 let p = url.query_pairs().find(|(k, _)| k == "path").map(|(_, v)| v.into_owned()).unwrap_or_default();
                 if !valid_repo_path(&p) || site::is_machinery(&p) {
@@ -329,4 +353,26 @@ impl FragmentCell {
         resp.headers_mut().set("cache-control", cache)?;
         Ok(resp)
     }
+}
+
+/// `__files`: a fragment's content files as links to `__file`. Framed (a
+/// desktop's pane), a click asks the page around it to open the file
+/// instead, as `{fragment: "open", url, title}`.
+fn files_page(name: &str, paths: &[String]) -> String {
+    let items: String = paths
+        .iter()
+        .map(|p| {
+            let href = format!("__file?path={}", url::form_urlencoded::byte_serialize(p.as_bytes()).collect::<String>());
+            format!("<li><a href=\"{}\">{}</a></li>", site::html_escape(&href), site::html_escape(p))
+        })
+        .collect();
+    let list = if items.is_empty() { "<p>No files yet.</p>".to_string() } else { format!("<ul>{items}</ul>") };
+    format!(
+        r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{n}: files</title>
+<style>body{{font:14px/1.5 ui-sans-serif,system-ui,sans-serif;margin:0;padding:12px 16px;color:#1d2126;background:#fff}}ul{{list-style:none;padding:0;margin:0}}li{{padding:3px 0}}a{{color:#2a5bd7;text-decoration:none;font-family:ui-monospace,monospace}}a:hover{{text-decoration:underline}}p{{color:#6b7280}}
+@media (prefers-color-scheme:dark){{body{{background:#15181b;color:#e6e8ea}}a{{color:#7aa2f7}}}}</style>
+{list}
+<script>if (parent !== window) document.addEventListener("click", (e) => {{ const a = e.target.closest("a"); if (!a) return; e.preventDefault(); parent.postMessage({{ fragment: "open", url: a.href, title: a.textContent }}, "*"); }});</script>"#,
+        n = site::html_escape(name)
+    )
 }
