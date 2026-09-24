@@ -158,6 +158,12 @@ pub struct Report {
     pub mass_delete_guard: Option<usize>,
     pub scan: ScanStats,
     pub mode: String,
+    /// main's head as the pass left it (its own commit, when one landed)
+    #[serde(skip)]
+    pub head: Option<String>,
+    /// a commit of this pass landed (or may have: its answer was lost)
+    #[serde(skip)]
+    pub landed: bool,
 }
 
 #[derive(Default, Serialize, Clone, Copy, Debug)]
@@ -496,20 +502,23 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
     let mut report = Report { scan: stats, mode: format!("{:?}", opts.mode).to_lowercase(), ..Default::default() };
     let mut recorded: HashSet<String> = HashSet::new();
 
-    let remote = list_main(&storage)?;
-    adopt_identical(&storage, &local, &remote, &mut state)?;
+    // main as this pass sees it: read once, reused by the push's first
+    // attempt and by the pull, and after our own commit derived rather than
+    // listed again
+    let mut listing = list_main(&storage)?;
+    adopt_identical(&storage, &local, &listing, &mut state)?;
     // candidate local deletions: known remotely before, gone from the
     // listing now, local copy untouched since we saw it
     let local_delete_candidates: Vec<String> = state
         .files
         .iter()
         .filter(|(p, st)| {
-            !remote.contains_key(*p)
+            !listing.files.contains_key(*p)
                 && local.get(*p).is_some_and(|lf| lf.sha256 == st.sha256)
         })
         .map(|(p, _)| p.clone())
         .collect();
-    let pre = push_plan(&local, &remote, &state);
+    let pre = push_plan(&local, &listing.files, &state);
     // pull mode never deletes remotely, so would-be push deletions must not
     // trip the guard there (a wiped folder in pull mode just re-downloads)
     let push_side = if opts.mode == Mode::Pull { 0 } else { pre.deletes.len() };
@@ -521,30 +530,26 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
             state.files.remove(&p);
         }
         save_state(dir, &state).map_err(|e| SyncError::Io(e.to_string()))?;
+        report.head = listing.head;
         return Ok(report);
     }
 
     // ---- push: one commit with expected-parent CAS, bounded rebuilds ----
-    let mut landed_commit = false;
     if opts.mode != Mode::Pull {
         let mut attempt: u32 = 0;
         loop {
             attempt += 1;
-            let (remote_now, head) = if attempt == 1 {
-                (remote.clone(), storage.branch_head(MAIN)?)
-            } else {
-                let r = list_main(&storage)?;
-                let h = storage.branch_head(MAIN)?;
+            if attempt > 1 {
+                listing = list_main(&storage)?;
                 // a commit whose answer was lost may have landed: what it
                 // wrote now equals the folder, and adopting it (here and in
                 // record_conflicts) is what keeps it from reading as a new
                 // file to push again or as a conflict with our own bytes
-                adopt_identical(&storage, &local, &r, &mut state)?;
-                (r, h)
-            };
-            let plan = push_plan(&local, &remote_now, &state);
+                adopt_identical(&storage, &local, &listing, &mut state)?;
+            }
+            let plan = push_plan(&local, &listing.files, &state);
             record_conflicts(
-                ConflictCtx { storage: &storage, blobs: &blobs, dir, local: &local, remote: &remote_now, state: &mut state, report: &mut report, recorded: &mut recorded, writer_id: &opts.writer_id },
+                ConflictCtx { storage: &storage, blobs: &blobs, dir, local: &local, listing: &listing, state: &mut state, report: &mut report, recorded: &mut recorded, writer_id: &opts.writer_id },
                 &plan.conflicts,
             )?;
             if plan.upserts.is_empty() && plan.deletes.is_empty() {
@@ -565,7 +570,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
                 plan.upserts.len(),
                 plan.deletes.len()
             );
-            match storage.commit(head.as_deref(), &msg, &author, &changes) {
+            match storage.commit(listing.head.as_deref(), &msg, &author, &changes) {
                 Ok(tip) => {
                     for p in &plan.upserts {
                         if let Some(lf) = local.get(p) {
@@ -580,7 +585,8 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
                         state.files.remove(p);
                         report.deleted_remote.push(p.clone());
                     }
-                    landed_commit = true;
+                    listing = listing.landed(tip, &changes);
+                    report.landed = true;
                     break;
                 }
                 Err(CsError::CasRejected { .. }) if attempt < MAX_CAS_ATTEMPTS => {
@@ -591,7 +597,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
                     // never resent blind: the rebuilt diff is empty if it
                     // landed, and the same commit on a fresh head if not
                     eprintln!("  the commit's answer was lost ({detail}) — re-reading the branch to see whether it landed (attempt {attempt}/{MAX_CAS_ATTEMPTS})");
-                    landed_commit = true; // perhaps: the refresh nudge is harmless either way
+                    report.landed = true; // perhaps: the refresh nudge is harmless either way
                     continue;
                 }
                 Err(CsError::CasRejected { detail }) => {
@@ -607,8 +613,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
     // ---- pull: make the folder match main (fetch new/changed; propagate
     // remote deletions per mode) ----
     if opts.mode != Mode::Push {
-        let remote = list_main(&storage)?;
-        for rf in remote.values() {
+        for rf in listing.files.values() {
             let l = local.get(&rf.path);
             let s = state.files.get(&rf.path);
             let fetch = match (l, s) {
@@ -627,7 +632,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
                         // both changed and push didn't resolve it (push
                         // modes off, or a race) — same conflict treatment
                         record_conflicts(
-                            ConflictCtx { storage: &storage, blobs: &blobs, dir, local: &local, remote: &remote, state: &mut state, report: &mut report, recorded: &mut recorded, writer_id: &opts.writer_id },
+                            ConflictCtx { storage: &storage, blobs: &blobs, dir, local: &local, listing: &listing, state: &mut state, report: &mut report, recorded: &mut recorded, writer_id: &opts.writer_id },
                             std::slice::from_ref(&rf.path),
                         )?;
                         false
@@ -637,14 +642,14 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
                 }
             };
             if fetch {
-                pull_file(&storage, &blobs, dir, &rf.path, &rf.last_commit_sha, &mut state, &mut report)?;
+                pull_file(Pull { storage: &storage, blobs: &blobs, dir, rev: listing.rev() }, rf, &mut state, &mut report)?;
             }
         }
         // remote deletions: known before, gone now, local copy untouched
         let mut paths: Vec<String> = state.files.keys().cloned().collect();
         paths.sort();
         for p in paths {
-            if remote.contains_key(&p) {
+            if listing.files.contains_key(&p) {
                 continue;
             }
             let untouched = local.get(&p).is_some_and(|lf| Some(&lf.sha256) == state.files.get(&p).map(|s| &s.sha256));
@@ -677,7 +682,8 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
     }
 
     save_state(dir, &state).map_err(|e| SyncError::Io(e.to_string()))?;
-    if landed_commit {
+    report.head = listing.head;
+    if report.landed {
         // our commit is an EXTERNAL push from the cell's perspective:
         // without this nudge the cell's pins wait out the 5-minute poll
         // backstop before app reads and serving see it. Best-effort — the
@@ -689,11 +695,50 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
     Ok(report)
 }
 
-fn list_main(storage: &CodeStorage) -> Result<HashMap<String, TreeEntry>, SyncError> {
-    if storage.branch_head(MAIN)?.is_none() {
-        return Ok(HashMap::new()); // empty repo: everything local is new
+/// main as one pass reads it: its head, and the files at that head (read
+/// at the head's commit, not at `main`, so the two always agree).
+struct Listing {
+    head: Option<String>,
+    files: HashMap<String, TreeEntry>,
+}
+
+impl Listing {
+    /// The ref a pass reads files at: the listing's own commit, so a read
+    /// sees the bytes the listing describes even if main moved since.
+    fn rev(&self) -> &str {
+        self.head.as_deref().unwrap_or(MAIN)
     }
-    Ok(storage.list_files(MAIN)?.into_iter().map(|f| (f.path.clone(), f)).collect())
+
+    /// main once our commit `tip` landed on this listing's head. The
+    /// commit named this head as its expected parent, so our changes are
+    /// the only difference, and listing main again would only read back
+    /// what we just wrote.
+    fn landed(mut self, tip: String, changes: &[Change]) -> Listing {
+        for change in changes {
+            match change {
+                Change::Upsert { path, bytes } => {
+                    let entry = TreeEntry { path: path.clone(), size: bytes.len() as u64, mode: FILE_MODE.to_string(), last_commit_sha: tip.clone() };
+                    self.files.insert(path.clone(), entry);
+                }
+                Change::Delete { path } => {
+                    self.files.remove(path);
+                }
+            }
+        }
+        assert!(self.files.values().all(|f| !f.last_commit_sha.is_empty()), "every entry names its commit");
+        Listing { head: Some(tip), files: self.files }
+    }
+}
+
+/// The git mode of every file sync commits (the commit pack's default).
+const FILE_MODE: &str = "100644";
+
+fn list_main(storage: &CodeStorage) -> Result<Listing, SyncError> {
+    let Some(head) = storage.branch_head(MAIN)? else {
+        return Ok(Listing { head: None, files: HashMap::new() }); // empty repo: everything local is new
+    };
+    let files = storage.list_files(&head)?.into_iter().map(|f| (f.path.clone(), f)).collect();
+    Ok(Listing { head: Some(head), files })
 }
 
 /// Brings the journal up to what both sides already agree on, before any
@@ -711,10 +756,10 @@ fn list_main(storage: &CodeStorage) -> Result<HashMap<String, TreeEntry>, SyncEr
 fn adopt_identical(
     storage: &CodeStorage,
     local: &BTreeMap<String, LocalFile>,
-    remote: &HashMap<String, TreeEntry>,
+    listing: &Listing,
     state: &mut SyncState,
 ) -> Result<(), SyncError> {
-    for (p, rf) in remote.iter() {
+    for (p, rf) in listing.files.iter() {
         if state.files.contains_key(p) {
             continue;
         }
@@ -722,7 +767,7 @@ fn adopt_identical(
         if lf.size != rf.size && !crate::blobs::could_point(rf.size, lf.size) {
             continue;
         }
-        let bytes = storage.read_file(p, MAIN)?;
+        let bytes = storage.read_file(p, listing.rev())?;
         if crate::blobs::content_sha(&bytes) == lf.sha256 {
             state.files.insert(
                 p.clone(),
@@ -730,7 +775,7 @@ fn adopt_identical(
             );
         }
     }
-    state.files.retain(|p, _| local.contains_key(p) || remote.contains_key(p));
+    state.files.retain(|p, _| local.contains_key(p) || listing.files.contains_key(p));
     Ok(())
 }
 
@@ -752,14 +797,14 @@ fn record_conflicts(
         if !ctx.recorded.insert(path.clone()) {
             continue; // already recorded this pass
         }
-        let rf_commit = ctx.remote.get(path).map(|r| r.last_commit_sha.clone()).unwrap_or_default();
+        let rf_commit = ctx.listing.files.get(path).map(|r| r.last_commit_sha.clone()).unwrap_or_default();
         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let (stem, ext) = match path.rfind('.') {
             Some(i) if !path[i..].contains('/') => (&path[..i], &path[i..]),
             _ => (path.as_str(), ""),
         };
         let conflict_path = format!("{stem}.conflict-{ts}-{}{ext}", ctx.writer_id);
-        let git_bytes = ctx.storage.read_file(path, MAIN);
+        let git_bytes = ctx.storage.read_file(path, ctx.listing.rev());
         let same = match (&git_bytes, ctx.local.get(path)) {
             (Ok(bytes), Some(lf)) => crate::blobs::content_sha(bytes) == lf.sha256,
             _ => false,
@@ -793,7 +838,7 @@ struct ConflictCtx<'a> {
     blobs: &'a crate::blobs::Blobs<'a>,
     dir: &'a Path,
     local: &'a BTreeMap<String, LocalFile>,
-    remote: &'a HashMap<String, TreeEntry>,
+    listing: &'a Listing,
     state: &'a mut SyncState,
     report: &'a mut Report,
     /// the paths recorded as conflicts this pass (the push plan and the
@@ -802,16 +847,19 @@ struct ConflictCtx<'a> {
     writer_id: &'a str,
 }
 
-fn pull_file(
-    storage: &CodeStorage,
-    blobs: &crate::blobs::Blobs<'_>,
-    dir: &Path,
-    path: &str,
-    commit: &str,
-    state: &mut SyncState,
-    report: &mut Report,
-) -> Result<(), SyncError> {
-    let bytes = blobs.resolve(storage.read_file(path, MAIN)?).map_err(|e| SyncError::blob(path, e))?;
+/// Where a pull reads from and writes to.
+struct Pull<'a> {
+    storage: &'a CodeStorage,
+    blobs: &'a crate::blobs::Blobs<'a>,
+    dir: &'a Path,
+    /// the listing's commit (`Listing::rev`)
+    rev: &'a str,
+}
+
+fn pull_file(at: Pull<'_>, entry: &TreeEntry, state: &mut SyncState, report: &mut Report) -> Result<(), SyncError> {
+    let Pull { storage, blobs, dir, rev } = at;
+    let (path, commit) = (entry.path.as_str(), entry.last_commit_sha.as_str());
+    let bytes = blobs.resolve(storage.read_file(path, rev)?).map_err(|e| SyncError::blob(path, e))?;
     let sha = sha256_hex(&bytes);
     atomic_write(&dir.join(path), &bytes).map_err(|e| SyncError::Io(e.to_string()))?;
     let md = fs::metadata(dir.join(path)).map_err(|e| SyncError::Io(e.to_string()))?;
@@ -831,21 +879,20 @@ pub fn verify(client: &Client, name: &str, dir: &Path, codestorage: Option<&str>
     let (local, stats) = scan_local(dir, Some(&state), true).map_err(|e| SyncError::Io(e.to_string()))?;
     let storage = CodeStorage::connect(client, name, codestorage)?;
     let mut drift = Report { scan: stats, mode: "verify".into(), ..Default::default() };
-    let remote = list_main(&storage)?;
-    for (p, rf) in &remote {
+    let listing = list_main(&storage)?;
+    for p in listing.files.keys() {
         match local.get(p) {
             None => drift.conflicts.push(format!("{p}: in the repo, missing locally")),
             Some(lf) => {
-                let bytes = storage.read_file(p, MAIN)?;
+                let bytes = storage.read_file(p, listing.rev())?;
                 if crate::blobs::content_sha(&bytes) != lf.sha256 {
                     drift.conflicts.push(format!("{p}: content differs from the repo"));
                 }
-                let _ = rf;
             }
         }
     }
     for p in local.keys() {
-        if !remote.contains_key(p) {
+        if !listing.files.contains_key(p) {
             drift.conflicts.push(format!("{p}: not in the repo"));
         }
     }
@@ -994,6 +1041,77 @@ mod tests {
         assert_eq!(mock.file_at("t", "main", "a.txt").unwrap(), b"alpha");
         assert_eq!(mock.file_at("t", "main", "site/index.html").unwrap(), b"<h1>hi</h1>");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The fake's request counts, as a test states them.
+    fn counts(routes: &[(&str, u32)]) -> BTreeMap<String, u32> {
+        routes.iter().map(|(route, n)| (route.to_string(), *n)).collect()
+    }
+
+    /// Goal: a pass reads main's head and listing once. Method: count the
+    /// fake's requests for passes over a synced folder. Before, a pass with
+    /// nothing to push read the head three times and listed twice, and one
+    /// that pushed listed again after its own commit.
+    #[test]
+    fn a_pass_reads_the_head_and_the_listing_once() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("a.txt", b"a"), ("b.txt", b"b")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("reads-once");
+        sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        mock.take_requests("");
+        let read_once = counts(&[("GET branch", 1), ("GET files/metadata", 1), ("GET storage-token", 1)]);
+
+        let idle = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        assert!(idle.pushed.is_empty() && idle.pulled.is_empty() && !idle.landed, "{idle:?}");
+        assert_eq!(mock.take_requests(""), read_once, "a mirror pass with nothing to do");
+        sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
+        assert_eq!(mock.take_requests(""), read_once, "a pull pass with nothing to do");
+
+        fs::write(dir.join("a.txt"), b"changed").unwrap();
+        fs::remove_file(dir.join("b.txt")).unwrap();
+        let pushed = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!((pushed.pushed.as_slice(), pushed.deleted_remote.as_slice()), (&["a.txt".to_string()][..], &["b.txt".to_string()][..]));
+        assert!(pushed.pulled.is_empty() && pushed.landed, "{pushed:?}");
+        assert_eq!(pushed.head, mock.branch("t", "main"), "the pass ends on its own commit");
+        assert_eq!(
+            mock.take_requests(""),
+            counts(&[("GET branch", 1), ("GET files/metadata", 1), ("POST commit-pack", 1), ("GET storage-token", 1), ("POST refresh", 1)]),
+            "a pass that pushes lists once, and its pull reads the listing it derived"
+        );
+
+        // the derived listing named our commit, so nothing reads as changed
+        let again = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        assert!(again.pushed.is_empty() && again.pulled.is_empty() && again.conflicts.is_empty(), "{again:?}");
+        assert_eq!(mock.take_requests(""), read_once);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: the listing a pass derives after its own commit is the one
+    /// main lists. Method: commit changes (an edit, a new file, a
+    /// deletion) on a listing's head, derive, list main, and compare every
+    /// entry.
+    #[test]
+    fn a_derived_listing_is_the_listing_of_main() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("a.txt", b"a"), ("b.txt", b"b"), ("c/d.txt", b"d")]);
+        let c = client_for(&mock);
+        let storage = CodeStorage::connect(&c, "t", None).unwrap();
+        let before = list_main(&storage).unwrap();
+        let changes = [
+            Change::Upsert { path: "a.txt".into(), bytes: b"a, longer now".to_vec() },
+            Change::Upsert { path: "c/new.txt".into(), bytes: b"new".to_vec() },
+            Change::Delete { path: "b.txt".into() },
+        ];
+        let tip = storage.commit(before.head.as_deref(), "edit", &Author::writer("deadbeef"), &changes).unwrap();
+        let derived = before.landed(tip, &changes);
+        let listed = list_main(&storage).unwrap();
+        let entries = |l: &Listing| -> BTreeMap<String, (u64, String, String)> {
+            l.files.values().map(|f| (f.path.clone(), (f.size, f.mode.clone(), f.last_commit_sha.clone()))).collect()
+        };
+        assert_eq!(derived.head, listed.head);
+        assert_eq!(entries(&derived), entries(&listed));
+        assert_eq!(entries(&listed).len(), 3, "a.txt, c/d.txt, c/new.txt");
     }
 
     #[test]
@@ -1301,13 +1419,13 @@ mod tests {
         fs::write(dir.join("a.md"), b"ours a.md").unwrap();
         let storage = CodeStorage::connect(&c, "t", None).unwrap();
         let blobs = crate::blobs::Blobs::new(&c, "t");
-        let remote = list_main(&storage).unwrap();
+        let listing = list_main(&storage).unwrap();
         let (local, _) = scan_local(&dir, None, true).unwrap();
         let mut state = SyncState { schema_version: 3, name: "t".into(), host: None, repo: None, files: HashMap::new() };
         let mut report = Report::default();
         let mut recorded = HashSet::new();
         for path in ["a.md", "a", "a.md", "a"] {
-            let ctx = ConflictCtx { storage: &storage, blobs: &blobs, dir: &dir, local: &local, remote: &remote, state: &mut state, report: &mut report, recorded: &mut recorded, writer_id: "deadbeef" };
+            let ctx = ConflictCtx { storage: &storage, blobs: &blobs, dir: &dir, local: &local, listing: &listing, state: &mut state, report: &mut report, recorded: &mut recorded, writer_id: "deadbeef" };
             record_conflicts(ctx, &[path.to_string()]).unwrap();
         }
         assert_eq!(report.conflicts.len(), 2, "each path once: {:?}", report.conflicts);
