@@ -10,7 +10,13 @@
 //!   POST /api/a/{name}/turns          {text}: start a turn, or steer the running one
 //!   POST /api/a/{name}/stop           stop the running turn
 //!   GET  /api/a/{name}/tools          the tools its memberships give it now
+//!   POST /api/a/{name}/listen         {fragment, channel? ("chat"), reply? ("say")}: follow a channel
 //!   POST /api/a/{name}/test           test controls (dev fleets: AGENT_TEST_HOOKS=allow)
+//!
+//! A listened-to channel's records arrive at `POST /api/a/{name}/inbox/{token}`
+//! (the fragment's delivery; the token is the capability). A record from
+//! someone else starts a turn (or steers the running one), and the turn's
+//! last answer goes back through the fragment's reply operation.
 
 mod fleet;
 mod js;
@@ -24,7 +30,7 @@ use std::sync::Arc;
 
 use fragment_core::{npub, secrets};
 use fragment_nip98::Keys;
-use fragment_proto::{limits, valid_fragment_name, ErrorCode};
+use fragment_proto::{limits, valid_channel_name, valid_fragment_name, valid_op_name, ErrorCode};
 use goose_provider_types::conversation::message::{Message, MessageContent};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -42,6 +48,8 @@ const MODEL_MAX: usize = 128;
 const INSTRUCTIONS_MAX: usize = 8 * 1024;
 const TEST_HOLD_MS_MAX: u64 = 60_000;
 const BODY_MAX: usize = 64 * 1024;
+/// The channels one agent follows.
+const LISTENS_MAX: usize = 16;
 /// The platform's default model (ROADMAP decision 7).
 const DEFAULT_MODEL: &str = "z-ai/glm-5.3-flash";
 
@@ -93,12 +101,40 @@ fn arrived_url(req: &Request) -> Answer<Url> {
     Ok(url)
 }
 
+/// Hands a request to an agent's cell, as `principal` (none for an inbox delivery).
+async fn forward(env: &Env, name: &str, action: &str, method: Method, principal: Option<&str>, body: Vec<u8>) -> Answer<Response> {
+    let headers = Headers::new();
+    if let Some(p) = principal {
+        headers.set(PRINCIPAL_HEADER, p)?;
+    }
+    let mut init = RequestInit::new();
+    init.with_method(method).with_headers(headers);
+    if !body.is_empty() {
+        init.with_body(Some(worker::js_sys::Uint8Array::from(body.as_slice()).into()));
+    }
+    let inner = Request::new_with_init(&format!("https://agent.internal/{action}"), &init)?;
+    let stub = env.durable_object("AGENT")?.id_from_name(name)?.get_stub()?;
+    Ok(stub.fetch_with_request(inner).await?)
+}
+
 async fn route(mut req: Request, env: &Env) -> Answer<Response> {
     let url = arrived_url(&req)?;
     let path = url.path().to_string();
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     if req.method() == Method::Get && segments == ["healthz"] {
         return Ok(Response::ok("ok")?);
+    }
+    // a fragment's delivery to a listening agent: unsigned, the token is the capability
+    if let (Method::Post, ["api", "a", name, "inbox", token]) = (req.method(), segments.as_slice()) {
+        if !valid_fragment_name(name) || token.len() != 32 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Fail::new(ErrorCode::NotFound, "no such inbox"));
+        }
+        let (name, action) = (name.to_string(), format!("inbox/{token}"));
+        let body = req.bytes().await?;
+        if body.len() > BODY_MAX {
+            return Err(Fail::new(ErrorCode::TooLarge, format!("a delivery is at most {BODY_MAX} bytes")));
+        }
+        return forward(env, &name, &action, Method::Post, None, body).await;
     }
     let (name, action) = match (req.method(), segments.as_slice()) {
         (Method::Post, ["api", "agents"]) => (None, "create".to_string()),
@@ -121,16 +157,7 @@ async fn route(mut req: Request, env: &Env) -> Answer<Response> {
     if !valid_fragment_name(&name) {
         return Err(Fail::invalid("an agent name must match ^[a-z0-9][a-z0-9-]{0,62}$"));
     }
-    let headers = Headers::new();
-    headers.set(PRINCIPAL_HEADER, &principal)?;
-    let mut init = RequestInit::new();
-    init.with_method(req.method()).with_headers(headers);
-    if !body.is_empty() {
-        init.with_body(Some(worker::js_sys::Uint8Array::from(body.as_slice()).into()));
-    }
-    let inner = Request::new_with_init(&format!("https://agent.internal/{action}"), &init)?;
-    let stub = env.durable_object("AGENT")?.id_from_name(&name)?.get_stub()?;
-    Ok(stub.fetch_with_request(inner).await?)
+    forward(env, &name, &action, req.method(), Some(&principal), body).await
 }
 
 #[event(fetch)]
@@ -162,6 +189,13 @@ struct CreateBody {
 #[derive(Deserialize)]
 struct TurnBody {
     text: String,
+}
+
+#[derive(Deserialize)]
+struct ListenBody {
+    fragment: String,
+    channel: Option<String>,
+    reply: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -269,10 +303,11 @@ impl Agent {
         if kv_u64(&sql, "cancel")? == 1 {
             token.cancel();
         }
+        let fleet = self.fleet()?;
         let driver = Driver {
             storage: self.state.storage(),
             model,
-            fleet: self.fleet()?,
+            fleet: fleet.clone(),
             instructions,
             cancel: token.clone(),
             id: format!("{}:{reason}", self.booted_at),
@@ -283,8 +318,24 @@ impl Agent {
         let driving = self.driving.clone();
         let cancel_slot = self.cancel.clone();
         self.state.wait_until(async move {
-            let outcome = turn::drive(driver).await;
+            let mut outcome = turn::drive(driver).await;
             let sql = storage.sql();
+            // a turn a channel started answers there
+            if matches!(outcome, Ok("idle")) {
+                if let Err(error) = reply(&sql, &fleet).await {
+                    outcome = Err(error);
+                }
+            }
+            // a message that came in as the turn ended is read now: the turn
+            // stays active and the alarm starts a driver for it
+            let pending: Vec<Value> = sql.exec("SELECT seq FROM steer WHERE consumed = 0", None).and_then(|c| c.to_array()).unwrap_or_default();
+            if matches!(outcome, Ok("idle")) && !pending.is_empty() {
+                let _ = kv_set(&sql, "rerun", 1);
+                let _ = storage.set_alarm(std::time::Duration::from_millis(50)).await;
+                driving.set(false);
+                cancel_slot.borrow_mut().take();
+                return;
+            }
             let finish = || -> anyhow::Result<()> {
                 match &outcome {
                     Ok(how) => kv_set(&sql, "outcome", how)?,
@@ -307,15 +358,22 @@ impl Agent {
     }
 
     fn turn(&self, body: TurnBody) -> Answer<Value> {
-        if body.text.is_empty() || body.text.len() > MESSAGE_TEXT_MAX {
+        self.begin(body.text, "")
+    }
+
+    /// Starts a turn with `text`, or steers the running one. `reply_to` is
+    /// the listen (a token) whose fragment gets the turn's answer, if any.
+    fn begin(&self, text: String, reply_to: &str) -> Answer<Value> {
+        if text.is_empty() || text.len() > MESSAGE_TEXT_MAX {
             return Err(Fail::invalid(format!("text is 1-{MESSAGE_TEXT_MAX} bytes")));
         }
         let sql = self.sql();
         if kv_u64(&sql, "active")? == 1 {
-            store::steer(&sql, &body.text)?;
+            store::steer(&sql, &text)?;
             return Ok(json!({ "steered": true, "driving": self.driving.get() }));
         }
-        let mut kickoff = Message::user().with_text(body.text);
+        kv_set(&sql, "reply_to", reply_to)?;
+        let mut kickoff = Message::user().with_text(text);
         kickoff.id = Some(format!("msg_{}", uuid::Uuid::new_v4()));
         store::append_message(&sql, &kickoff)?;
         kv_set(&sql, "active", 1)?;
@@ -325,6 +383,77 @@ impl Agent {
         kv_set(&sql, "outcome", "running")?;
         let started = self.start_driver("turn")?;
         Ok(json!({ "started": started }))
+    }
+
+    async fn listen(&self, body: ListenBody) -> Answer<Value> {
+        let channel = body.channel.unwrap_or_else(|| "chat".into());
+        let reply = body.reply.unwrap_or_else(|| "say".into());
+        if !valid_fragment_name(&body.fragment) || !valid_channel_name(&channel) || !valid_op_name(&reply) {
+            return Err(Fail::invalid("a fragment name, a channel name, and a reply operation name"));
+        }
+        let sql = self.sql();
+        let listening: Vec<Value> = sql.exec("SELECT token FROM listens", None)?.to_array()?;
+        if listening.len() >= LISTENS_MAX {
+            return Err(Fail::new(ErrorCode::RateLimited, format!("an agent follows at most {LISTENS_MAX} channels")));
+        }
+        let base = var(&self.env, "AGENT_URL").ok_or_else(|| Fail::host("AGENT_URL is not set on this fleet"))?;
+        let name = kv_get(&sql, "name")?.unwrap_or_default();
+        let token = hex::encode(js::random_bytes::<16>());
+        let url = format!("{}/api/a/{name}/inbox/{token}", base.trim_end_matches('/'));
+        let path = format!("/api/f/{}/subscriptions", body.fragment);
+        let (status, answer) = self.fleet()?.call(Method::Post, &path, Some(&json!({ "channel": channel, "url": url }))).await?;
+        if status != 200 {
+            let code = match status {
+                401 | 403 => ErrorCode::Forbidden,
+                404 => ErrorCode::NotFound,
+                _ => ErrorCode::UpstreamFailed,
+            };
+            return Err(Fail::new(code, format!("{} answered {status}: {}", body.fragment, fleet::message(&answer))));
+        }
+        let sub = answer["id"].as_i64().ok_or_else(|| Fail::host("the fragment named no subscription"))?;
+        sql.exec(
+            "INSERT INTO listens (token, fragment, channel, reply, sub, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            vec![token.as_str().into(), body.fragment.as_str().into(), channel.as_str().into(), reply.as_str().into(), sub.into(), (js::now_ms() as i64).into()],
+        )?;
+        Ok(json!({ "fragment": body.fragment, "channel": channel, "reply": reply, "subscription": sub }))
+    }
+
+    /// A delivery from a followed channel: someone else's record starts a
+    /// turn (or steers the running one); the agent's own, and a record heard
+    /// before, are acknowledged and ignored.
+    fn inbox(&self, token: &str, body: Value) -> Answer<Value> {
+        let sql = self.sql();
+        let rows: Vec<Value> = sql.exec("SELECT fragment, channel FROM listens WHERE token = ?", vec![token.into()])?.to_array()?;
+        let Some(listen) = rows.first() else {
+            // unknown: the fragment drops the subscription
+            return Err(Fail::new(ErrorCode::NotFound, "no such inbox"));
+        };
+        let (fragment, channel) = (listen["fragment"].as_str().unwrap_or(""), listen["channel"].as_str().unwrap_or(""));
+        if body["fragment"] != fragment || body["channel"] != channel {
+            return Err(Fail::invalid("the delivery names another fragment or channel"));
+        }
+        let record = &body["record"];
+        let me = kv_get(&sql, "npub")?.unwrap_or_default();
+        let me_hex = npub::parse(&me).unwrap_or_default();
+        let from = record["principal"].as_str().unwrap_or("");
+        if from == me || from == me_hex {
+            return Ok(json!({ "ignored": "own" }));
+        }
+        let key = format!("{fragment}/{channel}/{}", record["seq"]);
+        let fresh: Vec<Value> = sql.exec("INSERT OR IGNORE INTO heard (key, at) VALUES (?, ?) RETURNING key", vec![key.as_str().into(), (js::now_ms() as i64).into()])?.to_array()?;
+        if fresh.is_empty() {
+            return Ok(json!({ "ignored": "heard" }));
+        }
+        let said = match record["body"]["text"].as_str() {
+            Some(t) => t.to_string(),
+            None => record["body"].to_string(),
+        };
+        let who: String = from.chars().take(12).collect();
+        let mut text = format!("[{fragment} · {who}] {said}");
+        if text.len() > MESSAGE_TEXT_MAX {
+            text.truncate(text.floor_char_boundary(MESSAGE_TEXT_MAX));
+        }
+        self.begin(text, token)
     }
 
     fn stop(&self) -> Answer<Value> {
@@ -404,7 +533,7 @@ impl Agent {
     }
 
     async fn handle(&self, mut req: Request) -> Answer<Response> {
-        let principal = req.headers().get(PRINCIPAL_HEADER)?.ok_or_else(|| Fail::host("the router named no principal"))?;
+        let principal = req.headers().get(PRINCIPAL_HEADER)?.unwrap_or_default();
         let action = req.path().trim_start_matches('/').to_string();
         let parse = |bytes: &[u8]| -> Answer<Value> {
             if bytes.is_empty() {
@@ -414,14 +543,21 @@ impl Agent {
         };
         let body = parse(&req.bytes().await?)?;
         let from = |v: Value| -> Answer<Value> { Ok(v) };
+        if let Some(token) = action.strip_prefix("inbox/") {
+            return Ok(Response::from_json(&self.inbox(token, body)?)?);
+        }
         let answer = match (req.method(), action.as_str()) {
             (Method::Post, "create") => self.create(&principal, serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?),
             (method, action) => {
+                if principal.is_empty() {
+                    return Err(Fail::host("the router named no principal"));
+                }
                 self.require_owner(&principal)?;
                 match (method.clone(), action) {
                     (Method::Get, "view") => self.view(),
                     (Method::Post, "turns") => self.turn(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?),
                     (Method::Post, "stop") => self.stop(),
+                    (Method::Post, "listen") => self.listen(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?).await,
                     (Method::Get, "tools") => from(json!({ "tools": tools::list(self.fleet()?).await? })),
                     (Method::Post, "test") => self.test(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?),
                     _ => Err(Fail::new(ErrorCode::NotFound, format!("no route {} {action}", method.as_ref()))),
@@ -430,6 +566,26 @@ impl Agent {
         }?;
         Ok(Response::from_json(&answer)?)
     }
+}
+
+/// Posts a channel-started turn's last answer to its fragment, through the
+/// listen's reply operation, once (the id comes from the message).
+async fn reply(sql: &worker::SqlStorage, fleet: &Fleet) -> anyhow::Result<()> {
+    let Some(token) = kv_get(sql, "reply_to")?.filter(|t| !t.is_empty()) else { return Ok(()) };
+    let rows: Vec<Value> = sql.exec("SELECT fragment, reply FROM listens WHERE token = ?", vec![token.as_str().into()]).and_then(|c| c.to_array()).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let Some(listen) = rows.first() else { return Ok(()) };
+    let answer = load_messages(sql)?
+        .into_iter()
+        .rev()
+        .find(|m| m.role == rmcp::model::Role::Assistant && !m.as_concat_text().trim().is_empty());
+    let Some(answer) = answer else { return Ok(()) };
+    let id = fragment_core::tools::reply_id(answer.id.as_deref().unwrap_or(""));
+    let path = format!("/api/f/{}/ops/{}", listen["fragment"].as_str().unwrap_or(""), listen["reply"].as_str().unwrap_or(""));
+    let (status, body) = fleet.call(Method::Post, &path, Some(&json!({ "id": id, "input": { "text": answer.as_concat_text() } }))).await?;
+    if status != 200 {
+        anyhow::bail!("posting the answer to {path}: {status} {}", fleet::message(&body));
+    }
+    kv_set(sql, "reply_to", "")
 }
 
 impl DurableObject for Agent {
@@ -454,7 +610,11 @@ impl DurableObject for Agent {
             // The watchdog: a driver that died with its node is replaced
             // here and resumes from the last applied step. A live driver
             // gets the wake re-armed, so one always stays pending.
-            match self.start_driver("alarm") {
+            let rerun = kv_u64(&sql, "rerun").unwrap_or(0) == 1;
+            match self.start_driver(if rerun { "rerun" } else { "alarm" }) {
+                Ok(true) if rerun => {
+                    let _ = kv_set(&sql, "rerun", 0);
+                }
                 Ok(true) => {
                     let restarts = kv_u64(&sql, "watchdog_restarts").unwrap_or(0);
                     let _ = kv_set(&sql, "watchdog_restarts", restarts + 1);

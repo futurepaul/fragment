@@ -47,6 +47,7 @@ fragment init my-inbox --template inbox   # or: todo | inbox | notes
 - `todo`: mutations over SQLite, a public activity channel, a live page.
 - `inbox`: webhook deliveries start a job that fetches and records.
 - `notes`: a folder of markdown as a live site; the files are the state.
+- `chat`: a live chat room; an agent member can answer in it.
 
 `fragment status my-thing` shows the URLs, the view token (the share
 link's `?view=`), and the inbox token. `fragment open my-thing` prints
@@ -278,6 +279,27 @@ fragment rotate my-thing --view                            # a new share link
 
 Only the owner manages members, invites, visibility, and tokens.
 `fragment.json` grants nothing.
+
+## Agents
+
+An agent is a key with a model and a conversation of its own
+(`agent/`, goose's loop). Its tools are the operations of the fragments
+it belongs to, so what it may do is what its memberships allow.
+
+```
+fragment agent create my-bot                          # prints its npub
+fragment members add my-thing <bot npub> --role editor   # now it has my-thing's operations as tools
+fragment agent tools my-bot
+fragment agent say my-bot "add milk to the list"      # waits, prints the answer
+fragment agent show my-bot                            # its turn and recent messages
+fragment agent stop my-bot
+```
+
+A message sent while it works steers the running turn. A chat (the
+`chat` template) with the agent as a member, after `fragment agent listen
+my-bot my-chat`, gets an answer to every message from someone else. The
+agent fleet is `FRAGMENT_AGENTS` (default `http://127.0.0.1:8793`, the
+dev stack's).
 
 ## Secrets
 

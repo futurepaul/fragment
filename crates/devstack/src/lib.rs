@@ -206,6 +206,9 @@ pub struct AgentFleet {
     pub host_secret: String,
     /// The fragment platform's base URL (`FRAGMENT_API`).
     pub fragment_api: String,
+    /// The agent fleet's own base URL (`AGENT_URL`): the inboxes it gives
+    /// fragments to deliver to.
+    pub agent_url: String,
     /// Where model calls go (`None`: OpenRouter itself).
     pub openrouter_url: Option<String>,
     pub openrouter_key: String,
@@ -219,6 +222,7 @@ impl AgentFleet {
         let mut vars = vec![
             ("FRAGMENT_HOST_SECRET", self.host_secret.as_str()),
             ("FRAGMENT_API", self.fragment_api.as_str()),
+            ("AGENT_URL", self.agent_url.as_str()),
             ("OPENROUTER_API_KEY", self.openrouter_key.as_str()),
         ];
         if let Some(u) = &self.openrouter_url {

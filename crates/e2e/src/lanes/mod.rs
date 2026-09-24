@@ -46,6 +46,7 @@ pub fn run(s: &mut Suite, api: Api) -> Result<()> {
     deliver::push(s, &api)?;
     deliver::ai(s, &api)?;
     agents::agents(s, &api)?;
+    agents::chat(s, &api)?;
     sync::folder_sync(s, &api)?;
     let api = restart::restart(s, api)?;
     restart::pathmode(s, api)?;

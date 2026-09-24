@@ -396,7 +396,7 @@ impl FragmentCell {
         let out = match kind.as_str() {
             "call" => self.step_call(&run, index, args).await,
             "fetch" => self.step_fetch(&run, args).await,
-            "publish" => self.step_publish(&run, index, args),
+            "publish" => self.step_publish(&run, index, args).await,
             "push" => {
                 let key = format!("{JOB_ID_PREFIX}{run_id}:{index}");
                 match self.send_push(&key, args["who"].as_str().unwrap_or(""), &args["payload"]).await {
@@ -540,7 +540,7 @@ impl FragmentCell {
 
     /// `job.publish(channel, body, kind)`: keyed by (run, step), so a
     /// retried step appends nothing twice.
-    fn step_publish(&self, run: &Value, index: i64, args: &Value) -> Result<Value, StepFail> {
+    async fn step_publish(&self, run: &Value, index: i64, args: &Value) -> Result<Value, StepFail> {
         let retry = |e: CellError| StepFail::Retry(e.message);
         let channel = args["channel"].as_str().unwrap_or("");
         if !self.declared_channels().map_err(retry)?.contains_key(channel) {
@@ -563,6 +563,7 @@ impl FragmentCell {
             Some(record) => {
                 let depth = run["depth"].as_u64().unwrap_or(0) as u32;
                 self.fire_channel(&record, depth + 1).map_err(retry)?;
+                self.deliver_record(&record).await.map_err(retry)?;
                 Ok(json!({ "seq": record.seq }))
             }
             None => {
@@ -871,6 +872,7 @@ impl FragmentCell {
         };
         let record = self.append("inbox", "inbox", "message", &record_body, None)?.ok_or_else(|| CellError::host("an inbox append returned nothing"))?;
         let runs = self.fire_channel(&record, hops)?;
+        self.deliver_record(&record).await?;
         self.launch_queued().await;
         json_response(&json!({ "ok": true, "seq": record.seq, "runs": runs }))
     }

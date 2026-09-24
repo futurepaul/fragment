@@ -165,6 +165,7 @@ impl FragmentCell {
             });
         }
         self.exec("DELETE FROM members WHERE principal = ?", vec![target.as_str().into()])?;
+        self.drop_subscriptions(&target)?;
         self.index_change(&target, None)?;
         self.close_sockets(&format!("p:{target}"), "membership revoked");
         let how = if is_self { "left" } else { "was removed" };

@@ -163,3 +163,101 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     s.stop_agents()?;
     Ok(())
 }
+
+fn chat_records(api: &Api, owner: &Keys, chat: &str) -> Vec<Value> {
+    api.signed(owner, "GET", &format!("/api/f/{chat}/channels/chat"), None).ok().and_then(|r| r.body["records"].as_array().cloned()).unwrap_or_default()
+}
+
+fn said_by(records: &[Value], who: &[&str], text: &str) -> bool {
+    records.iter().any(|r| who.contains(&r["principal"].as_str().unwrap_or("")) && r["body"]["text"] == text)
+}
+
+/// Phase 7's chat: the chat template, an agent that follows its channel and
+/// answers through `say`, and a chat that works an app through the agent.
+/// Driven the way a person would, with the CLI (`fragment agent`).
+pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("chat") {
+        return Ok(());
+    }
+    let agents = s.start_agents(true)?;
+    // the CLI finds the agent fleet here (the suite's children inherit it)
+    std::env::set_var("FRAGMENT_AGENTS", &agents.base);
+    let home = s.dir("chat-home");
+    s.cli(api, &home, &["login"]);
+    let owner = s.cli_keys(&home).expect("the CLI logged in");
+    let wait = Duration::from_secs(30);
+
+    let chat = s.name("chat");
+    let dir = s.dir("chat").join("room");
+    let dir_s = dir.to_str().expect("utf-8 path").to_string();
+    let out = s.cli(api, &home, &["new", &dir_s, "--template", "chat"]);
+    let room = s.cli_json(api, &home, &["create", &chat, "--json"])?;
+    s.hook(api, &room);
+    let deployed = s.cli(api, &home, &["deploy", &chat, "--dir", &dir_s]);
+    s.ok("the chat template scaffolds and deploys", out.status.success() && deployed.status.success(), String::from_utf8_lossy(&deployed.stderr));
+    let bot = s.name("chatbot");
+    let made = s.cli_json(api, &home, &["agent", "create", &bot, "--json"])?;
+    let bot_npub = made["npub"].as_str().unwrap_or("").to_string();
+    let bot_hex = fragment_core::npub::parse(&bot_npub).unwrap_or_default();
+    s.ok("fragment agent create makes an agent", bot_npub.starts_with("npub1"), &made);
+    s.cli(api, &home, &["members", "add", &chat, &bot_npub, "--role", "editor"]);
+    let r = s.cli_json(api, &home, &["agent", "listen", &bot, &chat, "--json"]);
+    s.ok("the agent listens to the chat (a subscription on its channel)", r.as_ref().is_ok_and(|v| v["channel"] == "chat"), format!("{r:?}"));
+    let subs = api.signed(&owner, "GET", &format!("/api/f/{chat}/subscriptions"), None)?;
+    s.ok("the owner sees the agent's subscription", subs.body["subscriptions"].as_array().is_some_and(|a| a.len() == 1 && a[0]["principal"] == bot_npub.as_str()), &subs);
+    let stranger = Keys::generate();
+    let r = api.signed(&stranger, "POST", &format!("/api/f/{chat}/subscriptions"), Some(&json!({ "channel": "chat", "url": "http://127.0.0.1:9/x" })))?;
+    s.ok("someone who is not a member cannot subscribe", r.status == 403, &r);
+
+    // a message: the agent answers in the chat, once
+    s.openrouter.clear_script();
+    s.openrouter.script(&[Reply::Text("Hello! I'm here.".into())]);
+    api.op(&owner, &chat, "say", "c1", json!({ "text": "hi bot" }))?;
+    let who = [bot_npub.as_str(), bot_hex.as_str()];
+    let answered = s.eventually(wait, || said_by(&chat_records(api, &owner, &chat), &who, "Hello! I'm here."));
+    s.ok("a message in the chat gets the agent's answer there, as the agent", answered, json!(chat_records(api, &owner, &chat)));
+    std::thread::sleep(Duration::from_secs(2));
+    let records = chat_records(api, &owner, &chat);
+    s.ok("the agent does not answer itself", records.len() == 2, json!(records));
+
+    // a chat that works an app: the agent is also in a todo list
+    let todo = s.name("chat-todo");
+    let c = s.create(api, &owner, &todo)?;
+    ship(s, &c, TODO_APP, TODO_JSON);
+    api.signed(&owner, "PUT", &format!("/api/f/{todo}/members/{bot_hex}"), Some(&json!({ "role": "editor" })))?;
+    s.openrouter.script(&[Reply::Tools(vec![(format!("{todo}__add_todo"), json!({ "text": "bread" }))]), Reply::Text("Added bread to your list.".into())]);
+    api.op(&owner, &chat, "say", "c2", json!({ "text": "please add bread to my todo list" }))?;
+    let done = s.eventually(wait, || said_by(&chat_records(api, &owner, &chat), &who, "Added bread to your list."));
+    s.ok("asked in the chat, the agent changes the todo list through its operation, and says so", done && todos(api, &owner, &todo) == ["bread"], json!(chat_records(api, &owner, &chat)));
+
+    // the owner talks to the agent directly, from the CLI
+    s.openrouter.script(&[Reply::Text("Just bread.".into())]);
+    let r = s.cli_json(api, &home, &["agent", "say", &bot, "what is on my list?", "--json"]);
+    s.ok("fragment agent say waits for the answer", r.as_ref().is_ok_and(|v| v["answer"] == "Just bread."), format!("{r:?}"));
+
+    // removing the agent from the chat ends its subscription
+    s.cli(api, &home, &["members", "rm", &chat, &bot_npub]);
+    let subs = api.signed(&owner, "GET", &format!("/api/f/{chat}/subscriptions"), None)?;
+    s.ok("a member removed loses its subscriptions", subs.body["subscriptions"] == json!([]), &subs);
+    let before = chat_records(api, &owner, &chat).len();
+    api.op(&owner, &chat, "say", "c3", json!({ "text": "anyone there?" }))?;
+    std::thread::sleep(Duration::from_secs(3));
+    let after = chat_records(api, &owner, &chat);
+    s.ok("and hears nothing more", after.len() == before + 1, json!(after));
+
+    // the page: the conversation so far, and a message sent from it
+    let Some(mut chrome) = crate::browser::Browser::launch(&s.scratch)? else {
+        s.ok("Chrome is installed for the chat page (set CHROME_BIN)", false, "no Chrome found");
+        return Ok(());
+    };
+    let page = chrome.open(&api.site_url(&chat, &format!("?view={}", room["viewToken"].as_str().unwrap_or(""))))?;
+    let shows = chrome.until(&page, "document.getElementById('messages')?.textContent.includes('Added bread to your list.')", wait);
+    let seen = chrome.eval(&page, "location.href + ' | ' + document.title + ' | ' + (document.body?.innerText || '').slice(0, 300)").unwrap_or_default();
+    s.ok("the chat page shows the conversation", shows, seen);
+    chrome.eval(&page, "document.getElementById('text').value = 'from the page'; document.getElementById('say').requestSubmit(); true")?;
+    let landed = s.eventually(wait, || chat_records(api, &owner, &chat).iter().any(|r| r["body"]["text"] == "from the page"));
+    s.ok("a message sent from the page lands in the channel, and shows", landed && chrome.until(&page, "document.getElementById('messages').textContent.includes('from the page')", wait), "");
+    std::env::remove_var("FRAGMENT_AGENTS");
+    s.stop_agents()?;
+    Ok(())
+}

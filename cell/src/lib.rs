@@ -36,6 +36,7 @@ mod plane;
 mod principal;
 mod push;
 mod serve;
+mod subscriptions;
 
 use fragment_proto::{limits, valid_fragment_name, CreateFragment, ErrorCode};
 use worker::*;

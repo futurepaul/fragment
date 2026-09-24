@@ -101,6 +101,9 @@ member may leave. Each person's list of fragments is kept in their
 | `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron\|channel\|files, run, paused, nextAt?}], paused}` |
 | `POST /api/f/{name}/inbox` | the inbox token | token in `x-fragment-inbox-token` or `?t=`; a JSON body `{source?, payload}` (any other JSON, or text, is the payload), at most 64 KiB → `{ok, seq, runs}`. Bad token 403; 1000 pending, 429 |
 
+| `POST /api/f/{name}/subscriptions` | a member who may read the channel | `{channel, url}` → `{id, channel, url}`: each new record of the channel is POSTed to `url` through the delivery queue as `{type: "record", fragment, channel, record}` (unsigned: the URL is the subscriber's capability; egress-checked; at most 32 a fragment; a 404 or 410 drops it; a removed member's go with it) |
+| `GET /api/f/{name}/subscriptions` | a member (the owner sees all) | → `{subscriptions: [{id, principal, channel, url, createdAt}]}` |
+| `DELETE /api/f/{name}/subscriptions/{id}` | its subscriber, or the owner | → `{ok, removed}` |
 | `GET /api/f/{name}/channels` | viewer | → `{channels: [{name, read, seq}]}`: `events`, `ops`, `inbox`, and the app's |
 | `GET /api/f/{name}/channels/{channel}?after=&limit=` | the channel's reader | → `{channel, records: [{channel, seq, at, principal, kind, body}], next}` (1000 a page) |
 
@@ -342,6 +345,7 @@ A separate celld project: agents act on fragments through the API above,
 signing with their own keys. Its variables: `FRAGMENT_HOST_SECRET` (seals
 each agent's key), `FRAGMENT_API` (the platform it acts on),
 `OPENROUTER_API_KEY` and `OPENROUTER_API_URL` (its model service),
+`AGENT_URL` (its own base, for the inboxes it hands out),
 `AGENT_TEST_HOOKS=allow` (dev and e2e only).
 
 | method & path | who | body → answer |
@@ -351,6 +355,8 @@ each agent's key), `FRAGMENT_API` (the platform it acts on),
 | `POST /api/a/{name}/turns` | owner | `{text}` (at most 16 KiB) → `{started}`; during a turn, `{steered: true}` (read between steps) |
 | `POST /api/a/{name}/stop` | owner | → `{active, driving}`; a tool in flight is interrupted |
 | `GET /api/a/{name}/tools` | owner | → `{tools: ["<fragment>__<op>", ...]}` |
+| `POST /api/a/{name}/listen` | owner | `{fragment, channel? ("chat"), reply? ("say")}` → `{fragment, channel, reply, subscription}`: the agent subscribes itself to the channel (it must be a member) with an inbox URL of its own (`AGENT_URL`); at most 16 |
+| `POST /api/a/{name}/inbox/{token}` | the fragment's delivery (the token is the capability) | a record: someone else's starts a turn (or steers the running one); the agent's own, and one heard before, are ignored; the turn's last answer goes back as `POST /api/f/{fragment}/ops/{reply}` `{text}` with the id `rp:<40 hex of SHA-256 of its message id>`; an unknown token is 404 |
 | `POST /api/a/{name}/test` | owner, test fleets | `{hold_in_tool_ms?, hold_after_tool_ms?, watchdog_ms?}` |
 
 An agent's tools are the operations of the fragments whose members include

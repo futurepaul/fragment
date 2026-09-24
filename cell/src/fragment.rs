@@ -95,6 +95,9 @@ CREATE TABLE IF NOT EXISTS own_commits (sha TEXT PRIMARY KEY, depth INTEGER NOT 
 CREATE TABLE IF NOT EXISTS blobs (sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS pointers (
   ref TEXT NOT NULL, path TEXT NOT NULL, sha TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY (ref, path));
+CREATE TABLE IF NOT EXISTS subs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, principal TEXT NOT NULL, channel TEXT NOT NULL, url TEXT NOT NULL,
+  created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS push_subs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL,
   who TEXT NOT NULL, principal TEXT NOT NULL, created_at INTEGER NOT NULL);
@@ -430,6 +433,12 @@ impl FragmentCell {
                 self.pause(&caller, body)
             }
             (Method::Get, ["api", "triggers"]) => self.triggers_api(&caller),
+            (Method::Post, ["api", "subscriptions"]) => {
+                let body: Value = body_json(&mut req).await?;
+                self.subscribe(&caller, &body)
+            }
+            (Method::Get, ["api", "subscriptions"]) => self.subscriptions(&caller),
+            (Method::Delete, ["api", "subscriptions", id]) => self.unsubscribe(&caller, id),
             (Method::Post, ["api", "inbox"]) => {
                 let token = match req.headers().get("x-fragment-inbox-token")? {
                     Some(t) => t,

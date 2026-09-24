@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chat</title>
+  <style>
+    :root { --bg: #f7f5f0; --fg: #1d1b16; --muted: #857f72; --line: #e2ddd2; --accent: #2f5d50; --mine: #e6efe9; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #16150f; --fg: #eeeae0; --muted: #9a9384; --line: #2d2b24; --accent: #7fb5a3; --mine: #1f2b26; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 ui-sans-serif, system-ui, sans-serif; }
+    main { max-width: 38rem; margin: 0 auto; padding: 2rem 1rem 7rem; }
+    h1 { font: 600 1.6rem/1.2 Georgia, serif; margin: 0 0 .25rem; }
+    #here { color: var(--muted); font-size: .85rem; margin-bottom: 1.25rem; }
+    #messages { display: flex; flex-direction: column; gap: .6rem; }
+    .msg { padding: .55rem .75rem; border: 1px solid var(--line); border-radius: .6rem; max-width: 85%; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .msg.mine { align-self: flex-end; background: var(--mine); }
+    .who { display: block; color: var(--muted); font-size: .75rem; margin-bottom: .1rem; }
+    form { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: .5rem; padding: 1rem; background: var(--bg); border-top: 1px solid var(--line); }
+    form > * { max-width: 38rem; }
+    input[type=text] { flex: 1; padding: .6rem .75rem; border: 1px solid var(--line); border-radius: .5rem; background: transparent; color: inherit; font: inherit; }
+    button { padding: .6rem 1rem; border: 0; border-radius: .5rem; background: var(--accent); color: var(--bg); font: inherit; cursor: pointer; }
+    #error { color: #b3261e; font-size: .9rem; min-height: 1.3rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Chat</h1>
+    <div id="here">connecting…</div>
+    <div id="messages"></div>
+    <div id="error"></div>
+  </main>
+  <form id="say"><input type="text" id="text" placeholder="Say something" maxlength="4000" autocomplete="off"><button>Send</button></form>
+  <script type="module">
+    import * as fragment from "./__fragment.js";
+
+    const $ = (id) => document.getElementById(id);
+    const short = (p) => (p || "").startsWith("npub1") ? p.slice(0, 12) + "…" : "a visitor";
+    let me = null;
+
+    function add(record) {
+      const div = document.createElement("div");
+      div.className = "msg" + (me && record.principal === me ? " mine" : "");
+      const who = document.createElement("span");
+      who.className = "who";
+      who.textContent = me && record.principal === me ? "you" : short(record.principal);
+      div.append(who, document.createTextNode(record.body?.text ?? ""));
+      $("messages").append(div);
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+
+    fragment.me().then((hello) => { me = hello.principal; });
+    fragment.presence.on((list) => {
+      const others = list.length - 1;
+      $("here").textContent = others <= 0 ? "just you here" : `you and ${others} other${others === 1 ? "" : "s"} here`;
+    });
+    fragment.presence.set({});
+    fragment.subscribe("chat", add, { after: 0 });
+
+    $("say").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const text = $("text").value.trim();
+      if (!text) return;
+      $("error").textContent = "";
+      try {
+        await fragment.call("say", { text });
+        $("text").value = "";
+      } catch (err) {
+        $("error").textContent = err.message;
+      }
+    });
+  </script>
+</body>
+</html>

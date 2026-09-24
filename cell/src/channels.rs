@@ -152,6 +152,7 @@ impl FragmentCell {
                 Effect::Record { channel, kind, body } => {
                     if let Some(record) = self.append(channel, principal, kind, body, Some((ledger_id, i as i64)))? {
                         self.fire_channel(&record, depth + 1)?;
+                        self.deliver_record(&record).await?;
                     }
                 }
                 Effect::File { file, text, base64 } => {

@@ -36,7 +36,7 @@ pub struct Delivery {
     pub headers: Vec<(String, String)>,
     /// base64
     pub body: String,
-    /// The push subscription it goes to (dropped on 404 or 410).
+    /// The push or channel subscription it goes to (dropped on 404 or 410).
     #[serde(default)]
     pub sub: Option<i64>,
 }
@@ -60,8 +60,9 @@ impl FragmentCell {
         match body["outcome"].as_str() {
             Some("gone") => {
                 if let Some(sub) = body["sub"].as_i64() {
-                    self.exec("DELETE FROM push_subs WHERE id = ?", vec![SqlStorageValue::Integer(sub)])?;
-                    self.event("push.gone", &format!("a subscription at {host} is gone; dropped"), json!({ "sub": sub }));
+                    let (table, event) = if kind == "record" { ("subs", "subscription.gone") } else { ("push_subs", "push.gone") };
+                    self.exec(&format!("DELETE FROM {table} WHERE id = ?"), vec![SqlStorageValue::Integer(sub)])?;
+                    self.event(event, &format!("a subscription at {host} is gone; dropped"), json!({ "sub": sub }));
                 }
             }
             _ => self.event(
@@ -106,7 +107,7 @@ async fn send(env: &Env, d: &Delivery) -> Result<Option<String>> {
     let status = resp.status_code();
     Ok(match status {
         200..=299 => None,
-        404 | 410 if d.kind == "push" => {
+        404 | 410 if d.kind == "push" || d.kind == "record" => {
             report(env, d, "gone", status, "").await?;
             None
         }

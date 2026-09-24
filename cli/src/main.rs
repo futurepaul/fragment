@@ -187,6 +187,12 @@ enum Cmd {
         #[command(subcommand)]
         sub: SecretCmd,
     },
+    /// Agents: make one, talk to it, point it at a chat (FRAGMENT_AGENTS
+    /// names the agent fleet; default http://127.0.0.1:8793)
+    Agent {
+        #[command(subcommand)]
+        sub: AgentCmd,
+    },
     /// A fragment's members: list, add, remove, or leave
     Members {
         #[command(subcommand)]
@@ -247,6 +253,42 @@ enum Cmd {
         /// List available templates
         #[arg(long)]
         list: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentCmd {
+    /// Make an agent you own; prints its npub (add it to fragments as a member)
+    Create {
+        name: String,
+        /// An OpenRouter model id (default z-ai/glm-5.3-flash)
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        instructions: Option<String>,
+    },
+    /// Its turn's state and its recent messages
+    Show { name: String },
+    /// Say something: starts a turn (or steers the running one) and waits for the answer
+    Say {
+        name: String,
+        text: String,
+        /// Return once the turn has started
+        #[arg(long)]
+        no_wait: bool,
+    },
+    /// Stop the running turn
+    Stop { name: String },
+    /// The tools its memberships give it (fragment operations)
+    Tools { name: String },
+    /// Follow a fragment's channel: others' messages start turns, answers go back through the reply operation
+    Listen {
+        name: String,
+        fragment: String,
+        #[arg(long, default_value = "chat")]
+        channel: String,
+        #[arg(long, default_value = "say")]
+        reply: String,
     },
 }
 
@@ -342,6 +384,26 @@ fn resolve_host(cli_host: &Option<String>, cfg: &Config) -> String {
         .or_else(|| std::env::var("FRAGMENT_HOST").ok())
         .or_else(|| cfg.host.clone())
         .unwrap_or_else(|| "http://127.0.0.1:8790".to_string())
+}
+
+/// The agent fleet: FRAGMENT_AGENTS, else the config's `agents`, else the dev stack's.
+fn agents_client(verbose: bool) -> Result<api::Client> {
+    let host = std::env::var("FRAGMENT_AGENTS")
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+        .or_else(|| std::fs::read(config_path()).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).and_then(|v| v["agents"].as_str().map(str::to_string)))
+        .unwrap_or_else(|| "http://127.0.0.1:8793".to_string());
+    require_client(&Some(host), verbose)
+}
+
+/// The last thing an agent said in its view.
+fn last_answer(view: &Value) -> String {
+    view["messages"]
+        .as_array()
+        .and_then(|m| m.iter().rev().find(|m| m["role"] == "assistant" && m["text"].as_str().is_some_and(|t| !t.trim().is_empty())))
+        .and_then(|m| m["text"].as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 fn require_client(cli_host: &Option<String>, verbose: bool) -> Result<api::Client> {
@@ -1188,6 +1250,100 @@ fn run(cli: Cli) -> Result<()> {
             println!("canonical:   {}{}{}", canon, suffix, view_part);
             println!("share link:  {}{}{}", canon, suffix, view_part);
             println!("webhook URL: {}/api/f/{}/inbox?t={}", c.host, name, inbox);
+        }
+        Cmd::Agent { sub } => {
+            let a = agents_client(cli.verbose)?;
+            match sub {
+                AgentCmd::Create { name, model, instructions } => {
+                    let mut body = json!({ "name": name });
+                    if let Some(m) = model {
+                        body["model"] = json!(m);
+                    }
+                    if let Some(i) = instructions {
+                        body["instructions"] = json!(i);
+                    }
+                    let v = a.call(a.post_json("/api/agents", &body)?)?;
+                    if j {
+                        ok_exit(&v);
+                    }
+                    println!("agent {} ({})", v["name"].as_str().unwrap_or(""), v["model"].as_str().unwrap_or(""));
+                    println!("  npub: {}", v["npub"].as_str().unwrap_or(""));
+                    println!("give it a fragment: fragment members add <fragment> {} --role editor", v["npub"].as_str().unwrap_or(""));
+                }
+                AgentCmd::Show { name } => {
+                    let v = a.call(a.get(&format!("/api/a/{name}"))?)?;
+                    if j {
+                        ok_exit(&v);
+                    }
+                    println!("{} ({}) {}: {}", v["name"].as_str().unwrap_or(""), v["model"].as_str().unwrap_or(""), v["npub"].as_str().unwrap_or(""), v["outcome"].as_str().unwrap_or("idle"));
+                    if let Some(e) = v["error"].as_str().filter(|e| !e.is_empty()) {
+                        println!("  error: {e}");
+                    }
+                    let messages = v["messages"].as_array().cloned().unwrap_or_default();
+                    for m in messages.iter().rev().take(10).rev() {
+                        let tools: Vec<&str> = m["tool_requests"].as_array().into_iter().flatten().filter_map(|t| t["name"].as_str()).collect();
+                        let text = m["text"].as_str().unwrap_or("");
+                        if !text.is_empty() {
+                            println!("  {}: {text}", m["role"].as_str().unwrap_or(""));
+                        } else if !tools.is_empty() {
+                            println!("  {} calls {}", m["role"].as_str().unwrap_or(""), tools.join(", "));
+                        }
+                    }
+                }
+                AgentCmd::Say { name, text, no_wait } => {
+                    let v = a.call(a.post_json(&format!("/api/a/{name}/turns"), &json!({ "text": text }))?)?;
+                    if no_wait {
+                        if j {
+                            ok_exit(&v);
+                        }
+                        println!("{}", if v["steered"] == true { "steered the running turn" } else { "started" });
+                        return Ok(());
+                    }
+                    // a steer is answered by the running turn: wait for it too
+                    let t0 = std::time::Instant::now();
+                    let view = loop {
+                        let view = a.call(a.get(&format!("/api/a/{name}"))?)?;
+                        if view["active"] == false {
+                            break view;
+                        }
+                        if t0.elapsed() > std::time::Duration::from_secs(600) {
+                            anyhow::bail!("the turn is still running after 10 minutes (fragment agent show {name})");
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    };
+                    if j {
+                        ok_exit(&json!({ "outcome": view["outcome"], "answer": last_answer(&view), "error": view["error"] }));
+                    }
+                    match view["outcome"].as_str() {
+                        Some("idle") => println!("{}", last_answer(&view)),
+                        Some(other) => println!("({other}) {}", view["error"].as_str().unwrap_or("")),
+                        None => {}
+                    }
+                }
+                AgentCmd::Stop { name } => {
+                    let v = a.call(a.post_json(&format!("/api/a/{name}/stop"), &json!({}))?)?;
+                    if j {
+                        ok_exit(&v);
+                    }
+                    println!("{}", if v["active"] == true { "stopping" } else { "no turn was running" });
+                }
+                AgentCmd::Tools { name } => {
+                    let v = a.call(a.get(&format!("/api/a/{name}/tools"))?)?;
+                    if j {
+                        ok_exit(&v);
+                    }
+                    for t in v["tools"].as_array().cloned().unwrap_or_default() {
+                        println!("{}", t.as_str().unwrap_or(""));
+                    }
+                }
+                AgentCmd::Listen { name, fragment, channel, reply } => {
+                    let v = a.call(a.post_json(&format!("/api/a/{name}/listen"), &json!({ "fragment": fragment, "channel": channel, "reply": reply }))?)?;
+                    if j {
+                        ok_exit(&v);
+                    }
+                    println!("{name} follows {fragment}'s {channel} channel and answers through {reply}");
+                }
+            }
         }
         Cmd::Members { sub } => match sub {
             MembersCmd::List { name } => {

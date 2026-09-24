@@ -42,7 +42,7 @@ debt ledger).
   code.storage fake (sections: auth, create, lockdown, members, secrets,
   files, deploy, ops, public, site, watch, schemas, channels, live,
   routes, cli, browser, jobs, triggers, appfiles, blobs, notes, push,
-  ai, agents, sync, restart, pathmode, creators). The browser and notes sections drive headless
+  ai, agents, chat, sync, restart, pathmode, creators). The browser and notes sections drive headless
   Chrome (`CHROME_BIN` to choose one); `triggers` waits for a cron
   minute (about a minute). The node runs from a staged copy of the cell
   (`target/e2e/cell`), so the e2e and `cargo xtask dev` can run at once.
@@ -53,7 +53,7 @@ debt ledger).
   key and the host secret are made there on first run). Point the CLI at
   it with `FRAGMENT_HOST=http://127.0.0.1:8790`. Dev fleets let jobs
   fetch local addresses (`FRAGMENT_EGRESS_LOCAL=allow`).
-- `cargo xtask try <todo|inbox|notes> [name]` (with `cargo xtask dev` running):
+- `cargo xtask try <todo|inbox|notes|chat> [name]` (with `cargo xtask dev` running):
   creates and deploys a fragment from a template under
   `target/devstack/try/` (never in the repo) and prints the link to open,
   a curl for the inbox, and a `fragment` alias for the dev stack. The

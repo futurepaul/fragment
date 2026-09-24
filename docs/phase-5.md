@@ -69,3 +69,36 @@ once); SIGKILL between steps (nothing runs again).
   Infrastructure and spend: Paul's call.
 - Streaming a turn's tokens to viewers; an owner's list of their agents.
 - The computer shape (phase 8): the loop on the agent's Sprite.
+
+## Phase 7's first part: chats with an agent in them
+
+*Done 2026-09-23 overnight.* The part of phase 7 that needs no sign-in
+(the share sheet and the share header do):
+
+- **Channel subscriptions** (`cell/src/subscriptions.rs`): a member asks
+  a fragment to deliver each new record of a channel it may read to a
+  URL, through the delivery queue (at-least-once, retried, a 404 or 410
+  drops it). A removed member's subscriptions go with it. This is
+  MODEL.md's "the agent member subscribes".
+- **An agent listens** (`POST /api/a/{name}/listen`): it subscribes itself
+  with an unguessable inbox URL; a record from someone else starts a turn
+  (or steers the running one), a record it has heard or wrote itself is
+  ignored, and the turn's last answer goes back through the fragment's
+  reply operation (`say`), once (its id comes from the message). A
+  message that lands as a turn ends runs a new turn at once instead of
+  waiting.
+- **`templates/chat`**: `say` appends to the `chat` channel; the page
+  follows it live with presence.
+- **`fragment agent`** in the CLI: create, show, say (waits for the
+  answer), stop, tools, listen.
+- e2e `chat` (11 checks, through the CLI): the template deploys; the
+  agent listens; a stranger cannot subscribe; a message gets the agent's
+  answer in the chat, as the agent, and the agent does not answer
+  itself; asked in the chat, the agent changes a todo list through its
+  operation and says so; `fragment agent say` waits for the answer;
+  removing the agent ends its subscription.
+
+Choices made without Paul: deliveries to subscribers are unsigned (the
+URL is the capability, as the inbox token is); the agent's reply goes
+through an operation named at listen time (`say`) rather than a channel
+write (channels take records only from the platform and mutations).

@@ -127,6 +127,7 @@ fn dev(args: &[String]) -> Result<()> {
     devstack::AgentFleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
         fragment_api: format!("http://127.0.0.1:{DEV_PORT}"),
+        agent_url: format!("http://127.0.0.1:{DEV_AGENT_PORT}"),
         openrouter_url: None,
         openrouter_key: model_key,
         test_hooks: false,
@@ -145,7 +146,7 @@ fn dev(args: &[String]) -> Result<()> {
 }
 
 /// The templates `try` scaffolds.
-const TRY_TEMPLATES: [&str; 3] = ["todo", "inbox", "notes"];
+const TRY_TEMPLATES: [&str; 4] = ["todo", "inbox", "notes", "chat"];
 
 fn try_template(args: &[String]) -> Result<()> {
     let usage = || format!("usage: cargo xtask try <{}> [name]", TRY_TEMPLATES.join("|"));

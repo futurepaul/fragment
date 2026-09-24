@@ -3,7 +3,7 @@
 // as include_bytes! entries.
 use std::{env, fs, path::Path};
 
-const TEMPLATES: [&str; 3] = ["todo", "inbox", "notes"];
+const TEMPLATES: [&str; 4] = ["todo", "inbox", "notes", "chat"];
 
 fn collect(dir: &Path, root: &Path, out: &mut Vec<String>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
