@@ -38,6 +38,9 @@ use worker::*;
 use crate::error::{CellError, CellResult};
 use crate::js;
 
+/// The identities one `/profiles` answers.
+const PROFILES_MAX: usize = 64;
+
 mod signin;
 pub use signin::SESSION_TTL_MS;
 
@@ -264,6 +267,27 @@ impl RegistryCell {
         }
     }
 
+    /// What anyone may know of an identity, as a page shows a name: a
+    /// person's username and picture, or that it is someone's agent. An id
+    /// the registry does not hold (an anonymous visitor's) is left out.
+    fn profiles(&self, ids: &[String]) -> CellResult<serde_json::Map<String, Value>> {
+        let mut out = serde_json::Map::new();
+        for id in ids {
+            let Some(facts) = self.facts(id)? else { continue };
+            let picture = match (&facts.kind, &facts.username) {
+                (IdentityKind::Person, Some(u)) => self
+                    .rows("SELECT sha FROM pictures WHERE identity = ?", vec![id.as_str().into()])?
+                    .first()
+                    .and_then(|r| r["sha"].as_str())
+                    .map(|sha| format!("/api/users/{u}/picture?v={}", &sha[..12])),
+                _ => None,
+            };
+            // an agent's facts carry its owner's username
+            out.insert(id.clone(), json!({ "kind": facts.kind, "username": facts.username, "picture": picture }));
+        }
+        Ok(out)
+    }
+
     fn view(&self, facts: &Facts, created: Option<bool>) -> CellResult<IdentityView> {
         let keys = self
             .rows("SELECT key, added_at, added_by, revoked_at FROM keys WHERE identity = ? ORDER BY added_at, key", vec![facts.id.as_str().into()])?
@@ -465,6 +489,13 @@ impl RegistryCell {
                 Ok(self.lookup(&b.who)?.json())
             }
             "/agents" => to(self.register_agent(from(body)?)?),
+            "/profiles" => {
+                let ids: Vec<String> = from(body["ids"].clone())?;
+                if ids.len() > PROFILES_MAX {
+                    return Err(CellError::invalid(format!("at most {PROFILES_MAX} identities at once")));
+                }
+                Ok(json!({ "profiles": self.profiles(&ids)? }))
+            }
             "/keys" => to(self.add_key(from(body)?)?),
             "/revoke" => to(self.revoke(from(body)?)?),
             "/view" => {

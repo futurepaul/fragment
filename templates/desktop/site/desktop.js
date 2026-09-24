@@ -271,8 +271,12 @@ function renderQuickOpen() {
 }
 
 // ---- loading ----
+let seen = "";
 async function load() {
   const [{ fragments }, { chats }] = await Promise.all([platform(), fragment.call("chats", {})]);
+  const now = JSON.stringify([fragments, chats]);
+  if (now === seen) return;
+  seen = now;
   state.fragments = fragments;
   state.chats = chats;
   // this desktop is one of them: the one this page is under
@@ -316,5 +320,13 @@ async function start() {
   else notice("No chats yet", "Start one with New chat.");
   restoreViewer();
 }
+
+// New fragments (an app your agent made) show up: asked again when the
+// page comes back into view, and every few seconds while it is in view.
+const REFRESH_MS = 5000;
+const refresh = () => { if (!document.hidden && state.self) load().catch(() => {}); };
+addEventListener("focus", refresh);
+document.addEventListener("visibilitychange", refresh);
+setInterval(refresh, REFRESH_MS);
 
 start();

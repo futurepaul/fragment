@@ -75,6 +75,17 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
             .is_ok_and(|r| r.body["records"].as_array().is_some_and(|a| a.iter().any(|x| x["principal"] == agent["principal"] && x["body"]["text"] == "Hello! I'm here.")))
     });
     s.ok("and the agent answers in the chat", answered, "");
+    let people = api.page(&chat, &format!("__people?id={}&id={}&id=anon:00", agent["principal"].as_str().unwrap_or(""), owner_id), Some(&chat_cookie))?;
+    let username = api.username(&owner)?;
+    let profiles = &people.body["profiles"];
+    s.ok(
+        "its page can name who is in it: a person by username, an agent as its owner's",
+        profiles[owner_id.as_str()]["username"] == username.as_str()
+            && profiles[agent["principal"].as_str().unwrap_or("")]["kind"] == "agent"
+            && profiles[agent["principal"].as_str().unwrap_or("")]["username"] == username.as_str()
+            && profiles.get("anon:00").is_none(),
+        &people,
+    );
     let r = api.create_with(&owner, json!({ "name": s.name("tchat2"), "template": "chat" }))?;
     let second = r.body["name"].as_str().unwrap_or("").to_string();
     let members = api.signed(&owner, "GET", &format!("/api/f/{second}/members"), None)?;

@@ -9,6 +9,8 @@ use std::time::Duration;
 use anyhow::Result;
 use serde_json::{json, Value};
 
+use fragment_fakes::openrouter::Reply;
+
 use super::templates::person;
 use crate::api::Api;
 use crate::browser::{Browser, Page};
@@ -75,7 +77,19 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the owner's desktop lists their apps", chrome.until(&page, &listed, wait), chrome.eval(&page, "document.body.innerText.slice(0, 300)").unwrap_or_default());
     s.ok("but not itself", chrome.eval(&page, &format!("![...document.querySelectorAll('#apps .row .label')].map(l => l.textContent).includes({:?})", label(&desk)))? == json!(true), "");
 
-    // a chat: a chat fragment of the owner's, in the middle column
+    // a chat: a chat fragment of the owner's, in the middle column, with
+    // the owner's agent in it (its model is the OpenRouter fake, scripted:
+    // a greeting, then an app when asked for one)
+    let app_label = s.name("dcounter");
+    let app = api.qualified(&owner, &app_label)?;
+    s.openrouter.clear_script();
+    s.openrouter.script(&[
+        Reply::Text("Hi! I'm your agent.".into()),
+        Reply::Tools(vec![("platform__create_fragment".into(), json!({ "label": app_label, "template": "blank" }))]),
+        Reply::Tools(vec![("platform__write_files".into(), json!({ "fragment": app, "files": [{ "path": "site/index.html", "text": "<h1>A counter your agent made</h1>" }] }))]),
+        Reply::Tools(vec![("platform__deploy".into(), json!({ "fragment": app }))]),
+        Reply::Text("Your counter is in your apps.".into()),
+    ]);
     chrome.eval(&page, "document.getElementById('new-chat').click(); true")?;
     let chatted = chrome.until(&page, "document.querySelectorAll('#chats .row').length === 1 && !!document.querySelector('#frames iframe:not([hidden])')", wait);
     let mine = api.signed(&owner, "GET", "/api/fragments", None)?;
@@ -92,6 +106,22 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
             .is_ok_and(|r| r.body["records"].as_array().is_some_and(|a| a.iter().any(|x| x["body"]["text"] == "hi from the desktop" && x["principal"] == me.as_str())))
     });
     s.ok("a message sent in it is the owner's", said && landed, api.signed(&owner, "GET", &format!("/api/f/{chat}/channels/chat"), None)?);
+    let in_chat = |chrome: &mut Browser, text: &str| {
+        chrome.eval_in_frame(&page, &format!("{}.", label(&chat)), "document.getElementById('messages').textContent").ok().and_then(|v| v.as_str().map(|t| t.contains(text))) == Some(true)
+    };
+    s.ok("the owner's agent answers in it", s.eventually(wait, || in_chat(&mut chrome, "Hi! I'm your agent.")), "");
+    let named = format!("{}'s agent", api.username(&owner)?);
+    s.ok("named as its owner's agent", s.eventually(wait, || in_chat(&mut chrome, &named)), &named);
+
+    // asked for an app, the agent makes it, and the desktop shows it
+    chrome.eval_in_frame(&page, &format!("{}.", label(&chat)), "document.getElementById('text').value = 'make me a counter app'; document.getElementById('say').requestSubmit(); true")?;
+    s.ok("asked for an app in the chat, the agent says it made one", s.eventually(Duration::from_secs(40), || in_chat(&mut chrome, "Your counter is in your apps.")), "");
+    let shown = format!("[...document.querySelectorAll('#apps .row .label')].map(l => l.textContent).includes({app_label:?})");
+    s.ok("and it appears in the desktop's sidebar, with no reload", chrome.until(&page, &shown, wait), chrome.eval(&page, "document.getElementById('apps').innerText").unwrap_or_default());
+    chrome.eval(&page, &format!("[...document.querySelectorAll('#apps .row')].find(r => r.dataset.key === {:?}).click(); true", format!("app:{app}")))?;
+    let made = s.eventually(wait, || chrome.eval_in_frame(&page, &format!("{app_label}."), "document.body.innerText").ok().and_then(|v| v.as_str().map(|t| t.contains("A counter your agent made"))) == Some(true));
+    s.ok("opened, it is the page the agent wrote", made, "");
+    chrome.eval(&page, &format!("document.querySelector('.pane[data-key={:?}] .pane-action[title=Close]').click(); true", format!("app:{app}")))?;
 
     // apps and files open into the viewer, newest on top
     chrome.eval(&page, &format!("[...document.querySelectorAll('#apps .row')].find(r => r.dataset.key === {:?}).click(); true", format!("app:{todo}")))?;

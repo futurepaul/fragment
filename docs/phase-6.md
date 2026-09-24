@@ -128,6 +128,17 @@ session's layout (`finite-next-worktrees/desktop-ui`, `d8d5c26`).
    - **4e.** The desktop notices new fragments (it asks again when the
      page regains focus and after a chat's message), so an app the agent
      made appears in the sidebar.
+   **Built 2026-09-24** (local, not deployed; fork `0d80ead`): 4a–4e as
+   planned, with two changes. The desktop asks again every five seconds
+   while it is in view, not after a chat's message (it cannot see into
+   the chat's frame). The chat names people through a new `__people`
+   route on every fragment (a person's username and picture, an agent as
+   "<owner>'s agent"). Acceptance met in Chrome (e2e lane `desktop`, 22
+   checks): in a new chat the owner's agent answers; asked for an app, it
+   makes a fragment, writes its page, deploys it, and says so; the app
+   appears in the sidebar without a reload, and opened it is the page
+   the agent wrote. The agents lane checks the same in the API, and that
+   every model call carried the owner's own key.
 5. **A computer with screenshots.** `fragment computer connect` (outbound),
    a `screenshot` tool (headless Chromium on the computer), the image in
    the chat. Acceptance: a turn opens a page on the computer and the chat

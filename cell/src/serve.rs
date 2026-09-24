@@ -127,6 +127,20 @@ impl FragmentCell {
                 self.owner_fragments(caller).await?
             };
             json_response(&answer)?
+        } else if path == "__people" {
+            // names for a page: a person's username and picture, or whose agent
+            self.require(caller, link, Role::Public)?;
+            let ids: Vec<String> = url.query_pairs().filter(|(k, _)| k == "id").map(|(_, v)| v.into_owned()).collect();
+            let mut v = crate::ask_registry(&self.env, "/profiles", &json!({ "ids": ids })).await?;
+            let platform = self.cfg.platform(&caller.url);
+            if let Some(profiles) = v["profiles"].as_object_mut() {
+                for p in profiles.values_mut() {
+                    if let Some(pic) = p["picture"].as_str().map(|s| format!("{platform}{s}")) {
+                        p["picture"] = json!(pic);
+                    }
+                }
+            }
+            json_response(&v)?
         } else if path == "__sw.js" {
             let h = Headers::new();
             h.set("content-type", "text/javascript; charset=utf-8")?;

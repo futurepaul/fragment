@@ -23,6 +23,13 @@
     #error { color: #b3261e; font-size: .9rem; min-height: 1.3rem; }
     #signin { display: inline-block; margin-bottom: 1rem; color: var(--accent); font-size: .9rem; }
     #signin[hidden] { display: none; }
+    .who img { width: 16px; height: 16px; border-radius: 50%; object-fit: cover; vertical-align: -3px; margin-right: .3rem; }
+    /* an agent's answer: markdown, no bubble */
+    .msg.agent { border: 0; padding: .2rem 0; max-width: 100%; white-space: normal; }
+    .msg.agent p { margin: .35rem 0; }
+    .msg.agent pre { overflow-x: auto; padding: .6rem .75rem; border-radius: .5rem; background: var(--mine); }
+    .msg.agent code { font-size: .9em; }
+    .msg.agent a { color: var(--accent); }
   </style>
 </head>
 <body>
@@ -36,21 +43,51 @@
   <form id="say"><input type="text" id="text" placeholder="Say something" maxlength="4000" autocomplete="off"><button>Send</button></form>
   <script type="module">
     import * as fragment from "./__fragment.js";
+    import { renderMarkdown } from "./markdown.js";
 
     const $ = (id) => document.getElementById(id);
-    // people and agents are identities (id:…); an unsigned visitor is anon:…
-    const short = (p) => (p || "").startsWith("id:") ? "id:…" + p.slice(-6) : "a visitor";
+    // people and agents are identities (id:…), named by the platform
+    // (__people: a username and picture, or whose agent); an unsigned
+    // visitor is anon:…
+    const people = new Map();
+    async function name(principal) {
+      if (!principal.startsWith("id:")) return { label: "a visitor" };
+      if (!people.has(principal)) {
+        people.set(principal, fetch(`./__people?id=${encodeURIComponent(principal)}`, { credentials: "same-origin" })
+          .then((r) => r.json())
+          .then((v) => v.profiles?.[principal] ?? {})
+          .catch(() => ({})));
+      }
+      const p = await people.get(principal);
+      const label = p.kind === "agent" ? `${p.username ?? "someone"}'s agent` : p.username ?? "id:…" + principal.slice(-6);
+      return { label, picture: p.picture, agent: p.kind === "agent" };
+    }
     let me = null;
 
     function add(record) {
       const div = document.createElement("div");
-      div.className = "msg" + (me && record.principal === me ? " mine" : "");
+      const mine = me && record.principal === me;
+      div.className = "msg" + (mine ? " mine" : "");
       const who = document.createElement("span");
       who.className = "who";
-      who.textContent = me && record.principal === me ? "you" : short(record.principal);
+      who.textContent = mine ? "you" : "…";
       div.append(who, document.createTextNode(record.body?.text ?? ""));
       $("messages").append(div);
       window.scrollTo(0, document.body.scrollHeight);
+      if (mine) return;
+      name(record.principal).then(({ label, picture, agent }) => {
+        who.textContent = label;
+        if (picture) {
+          const img = document.createElement("img");
+          img.src = picture;
+          img.alt = "";
+          who.prepend(img);
+        }
+        if (agent) {
+          div.classList.add("agent");
+          div.replaceChildren(who, renderMarkdown(record.body?.text ?? ""));
+        }
+      });
     }
 
     fragment.me().then((hello) => {
