@@ -138,12 +138,18 @@ pub(super) struct Finish {
     workos_sid: Option<String>,
 }
 
-/// `sessions` (the row for a hash, when it is live).
+/// A live session's row, with whether its parent is live and its
+/// identity with its username, all in one statement (`live_session`).
 #[derive(Deserialize)]
 struct SessionRow {
     identity: String,
     fragment: Option<String>,
     parent: Option<String>,
+    /// The parent's hash when the parent is live too.
+    parent_live: Option<String>,
+    kind: Option<IdentityKind>,
+    owner: Option<String>,
+    username: Option<String>,
 }
 
 /// `logins` (a pending sign-in, spent).
@@ -288,30 +294,29 @@ impl RegistryCell {
     /// fragment (`None`: a platform session), its parent live too. Answers
     /// the session's hash and its identity.
     fn live_session(&self, token: &str, fragment: Option<&str>) -> CellResult<(String, Identity)> {
+        // one statement: the session (its hash is the key), its parent (by
+        // its hash), its identity, and that identity's username
+        const Q: &str = concat!(
+            "SELECT s.identity, s.fragment, s.parent, p.hash AS parent_live, i.kind, i.owner, u.username FROM sessions s ",
+            "LEFT JOIN sessions p ON p.hash = s.parent AND p.revoked_at IS NULL AND p.expires_at > ? ",
+            "LEFT JOIN identities i ON i.id = s.identity ",
+            username_join!(),
+            " WHERE s.hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?"
+        );
         if !well_formed(token) {
             return Err(not_signed_in());
         }
         let hash = sha(token);
-        let now = js::now_ms();
-        let row = self
-            .row::<SessionRow>(
-                "SELECT identity, fragment, parent FROM sessions WHERE hash = ? AND revoked_at IS NULL AND expires_at > ?",
-                vec![hash.as_str().into(), SqlStorageValue::Integer(now)],
-            )?
-            .ok_or_else(not_signed_in)?;
+        let now = SqlStorageValue::Integer(js::now_ms());
+        let row = self.row::<SessionRow>(Q, vec![now.clone(), hash.as_str().into(), now])?.ok_or_else(not_signed_in)?;
         if row.fragment.as_deref() != fragment {
             return Err(not_signed_in());
         }
-        if let Some(parent) = &row.parent {
-            let live = self.row::<IgnoredAny>(
-                "SELECT hash FROM sessions WHERE hash = ? AND revoked_at IS NULL AND expires_at > ?",
-                vec![parent.as_str().into(), SqlStorageValue::Integer(now)],
-            )?;
-            if live.is_none() {
-                return Err(not_signed_in());
-            }
+        // a site session lives only while the platform session it came from does
+        if row.parent.is_some() && row.parent_live.is_none() {
+            return Err(not_signed_in());
         }
-        let who = self.stored_identity(&row.identity, "a session")?;
+        let who = joined_identity(row.identity, row.kind, row.owner, row.username, "a session")?;
         Ok((hash, who))
     }
 
