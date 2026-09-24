@@ -415,6 +415,15 @@ mod tests {
         assert!(timeout_for(256 * 1024 * 1024) > Duration::from_secs(2 * 3600));
     }
 
+    /// One percent-encoder for the query values and path segments the CLI
+    /// builds: unreserved bytes and `/` pass, everything else is escaped.
+    #[test]
+    fn query_values_are_percent_encoded() {
+        assert_eq!(encode_q("site/a b.md"), "site/a%20b.md");
+        assert_eq!(encode_q("x?y=1&z#é"), "x%3Fy%3D1%26z%23%C3%A9");
+        assert_eq!(encode_q("preview/abc-1_2"), "preview/abc-1_2");
+    }
+
     #[test]
     fn code_for_maps_statuses() {
         assert_eq!(code_for(401, ""), "auth_failed");

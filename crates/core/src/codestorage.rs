@@ -155,8 +155,11 @@ pub fn tree_page(v: &Value) -> Result<(Vec<TreeEntry>, Option<String>), String> 
             last_commit_sha: last.to_string(),
         });
     }
+    // A page that has more but names no cursor would end the listing
+    // early, and a missing file reads as a deleted one: fail instead.
     let next = match (v["has_more"].as_bool(), v["next_cursor"].as_str()) {
         (Some(true), Some(c)) if !c.is_empty() => Some(c.to_string()),
+        (Some(true), _) => return Err(format!("a tree listing has more pages but names no cursor: {}", v["next_cursor"])),
         _ => None,
     };
     Ok((out, next))
@@ -317,6 +320,13 @@ mod tests {
         assert_eq!(entries[0].path, "a.md");
         assert_eq!(next.as_deref(), Some("c2"));
         assert!(tree_page(&json!({"files": [{"path": "x"}]})).is_err());
+        // a size or last commit that is missing is refused, never read as 0 or ""
+        assert!(tree_page(&json!({"files": [{"path": "x", "size": 1, "type": "blob"}]})).is_err());
+        assert!(tree_page(&json!({"files": [{"path": "x", "last_commit_sha": sha, "type": "blob"}]})).is_err());
+        // the last page ends the listing; a page with more and no cursor fails
+        assert_eq!(tree_page(&json!({"files": [], "has_more": false})).unwrap().1, None);
+        assert!(tree_page(&json!({"files": [], "has_more": true})).is_err());
+        assert!(tree_page(&json!({"files": [], "has_more": true, "next_cursor": ""})).is_err());
         assert_eq!(listed_repo_url(&json!({"repos": [{"repo_name": "a", "url": "u-a"}, {"repo_name": "b", "url": "u-b"}]}), "b").as_deref(), Some("u-b"));
     }
 }

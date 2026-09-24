@@ -15,7 +15,8 @@
 // root-identity (dev/ino) check is subsumed by the mass-deletion guard,
 // which now also refuses a total wipe regardless of file count.
 use crate::api::Client;
-use crate::codestorage::{Author, Change, CodeStorage, CsError, RemoteFile, MAIN, MAX_CAS_ATTEMPTS};
+use crate::codestorage::{Author, Change, CodeStorage, CsError, MAIN, MAX_CAS_ATTEMPTS};
+use fragment_core::codestorage::TreeEntry;
 use anyhow::{anyhow, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -367,7 +368,7 @@ struct PushPlan {
 
 fn push_plan(
     local: &BTreeMap<String, LocalFile>,
-    remote: &HashMap<String, RemoteFile>,
+    remote: &HashMap<String, TreeEntry>,
     state: &SyncState,
 ) -> PushPlan {
     let mut plan = PushPlan { upserts: Vec::new(), deletes: Vec::new(), conflicts: Vec::new() };
@@ -665,7 +666,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
     Ok(report)
 }
 
-fn list_main(storage: &CodeStorage) -> Result<HashMap<String, RemoteFile>, SyncError> {
+fn list_main(storage: &CodeStorage) -> Result<HashMap<String, TreeEntry>, SyncError> {
     if storage.branch_head(MAIN)?.is_none() {
         return Ok(HashMap::new()); // empty repo: everything local is new
     }
@@ -687,7 +688,7 @@ fn list_main(storage: &CodeStorage) -> Result<HashMap<String, RemoteFile>, SyncE
 fn adopt_identical(
     storage: &CodeStorage,
     local: &BTreeMap<String, LocalFile>,
-    remote: &HashMap<String, RemoteFile>,
+    remote: &HashMap<String, TreeEntry>,
     state: &mut SyncState,
 ) -> Result<(), SyncError> {
     for (p, rf) in remote.iter() {
@@ -769,7 +770,7 @@ struct ConflictCtx<'a> {
     blobs: &'a crate::blobs::Blobs<'a>,
     dir: &'a Path,
     local: &'a BTreeMap<String, LocalFile>,
-    remote: &'a HashMap<String, RemoteFile>,
+    remote: &'a HashMap<String, TreeEntry>,
     state: &'a mut SyncState,
     report: &'a mut Report,
     /// the paths recorded as conflicts this pass (the push plan and the

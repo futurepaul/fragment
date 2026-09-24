@@ -4,8 +4,11 @@
 // expected-parent CAS, come back as listings and raw bytes.
 //
 // Per the engineering style: no anyhow in here — CsError is matchable at
-// the boundary, and every retry/loop has an explicit bound.
-use crate::api::{timeout_for, Client as HostClient, Replay, CONNECT_TIMEOUT, REQUEST_ATTEMPTS};
+// the boundary, and every retry/loop has an explicit bound. What goes over
+// the wire and what comes back is fragment_core::codestorage's, the same
+// encoder and decoders the cell uses; this file is the transport.
+use crate::api::{encode_q, timeout_for, Client as HostClient, Replay, CONNECT_TIMEOUT, REQUEST_ATTEMPTS};
+use fragment_core::codestorage::{self as core_cs, FileChange, TreeEntry};
 use serde_json::Value;
 use std::fmt;
 
@@ -22,10 +25,6 @@ pub const MAX_CAS_ATTEMPTS: u32 = 3;
 /// of spinning: 1000 pages x 1000 files/page = 1M files, far past any
 /// fragment's shape.
 pub const MAX_LIST_PAGES: u32 = 1000;
-/// Spec limit: decoded blob_chunk bodies are capped at 4 MiB each; larger
-/// files stream as multiple chunks. There is no total-size limit and no
-/// LFS path in the HTTP API (flagged vs ROADMAP — see GUIDE/deploy notes).
-pub const CHUNK_MAX: usize = 4 * 1024 * 1024;
 /// files/metadata page size (spec max 1000).
 const LIST_PAGE: u64 = 1000;
 
@@ -104,13 +103,6 @@ fn mint_from_host(host: &HostClient, name: &str, override_url: Option<&str>) -> 
     })
 }
 
-#[derive(Clone)]
-pub struct RemoteFile {
-    pub path: String,
-    pub size: u64,
-    pub last_commit_sha: String,
-}
-
 #[derive(serde::Serialize)]
 pub struct CommitInfo {
     pub sha: String,
@@ -160,14 +152,7 @@ impl CodeStorage {
 
     /// repo name URL-encoded as one path segment (spec: `a/b` -> `a%2Fb`)
     fn repo_seg(&self) -> String {
-        let mut out = String::new();
-        for b in self.repo.bytes() {
-            match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => out.push(b as char),
-                _ => out.push_str(&format!("%{b:02X}")),
-            }
-        }
-        out
+        encode_q(&self.repo).replace('/', "%2F")
     }
 
     /// One request against the spec server: its status and body. A
@@ -237,56 +222,49 @@ impl CodeStorage {
         }
     }
 
+    /// A 2xx answer's JSON (after `check`).
+    fn json(body: &[u8]) -> Result<Value, CsError> {
+        serde_json::from_slice(body).map_err(|e| CsError::Malformed(e.to_string()))
+    }
+
     /// Branch head SHA; Ok(None) when the branch does not exist (404).
     pub fn branch_head(&self, branch: &str) -> Result<Option<String>, CsError> {
-        let (status, body) = self.req("GET", &format!("/branch?name={}", q(branch)), None, None)?;
+        let (status, body) = self.req("GET", &format!("/branch?name={}", encode_q(branch)), None, None)?;
         if status == 404 {
             return Ok(None);
         }
         self.check(status, &body)?;
-        let v: Value = serde_json::from_slice(&body).map_err(|e| CsError::Malformed(e.to_string()))?;
-        let sha = v["branch"]["head_sha"].as_str().unwrap_or_default().to_string();
-        if sha.is_empty() {
-            return Err(CsError::Malformed(format!("branch response missing head_sha: {v}")));
-        }
+        let v = Self::json(&body)?;
+        let sha = core_cs::branch_head(&v).ok_or_else(|| CsError::Malformed(format!("a branch answer without a head sha: {v}")))?;
         Ok(Some(sha))
     }
 
     /// Full recursive file listing at a ref, cursor-paginated (bounded).
-    pub fn list_files(&self, git_ref: &str) -> Result<Vec<RemoteFile>, CsError> {
+    /// Every entry names its path, size, and last commit, or the listing
+    /// fails: a missing commit read as "" made every file look changed.
+    pub fn list_files(&self, git_ref: &str) -> Result<Vec<TreeEntry>, CsError> {
         let mut out = Vec::new();
         let mut cursor: Option<String> = None;
         for _ in 0..MAX_LIST_PAGES {
-            let mut path = format!("/files/metadata?ref={}&limit={LIST_PAGE}", q(git_ref));
+            let mut path = format!("/files/metadata?ref={}&limit={LIST_PAGE}", encode_q(git_ref));
             if let Some(c) = &cursor {
-                path.push_str(&format!("&cursor={}", q(c)));
+                path.push_str(&format!("&cursor={}", encode_q(c)));
             }
             let (status, body) = self.req("GET", &path, None, None)?;
             self.check(status, &body)?;
-            let v: Value = serde_json::from_slice(&body).map_err(|e| CsError::Malformed(e.to_string()))?;
-            let files = v["files"].as_array().cloned().unwrap_or_default();
-            for f in files {
-                let path = f["path"].as_str().unwrap_or_default().to_string();
-                if path.is_empty() {
-                    return Err(CsError::Malformed("file entry missing path".into()));
-                }
-                out.push(RemoteFile {
-                    path,
-                    size: f["size"].as_u64().unwrap_or(0),
-                    last_commit_sha: f["last_commit_sha"].as_str().unwrap_or_default().to_string(),
-                });
+            let (entries, next) = core_cs::tree_page(&Self::json(&body)?).map_err(CsError::Malformed)?;
+            out.extend(entries);
+            match next {
+                Some(c) => cursor = Some(c),
+                None => return Ok(out),
             }
-            if !v["has_more"].as_bool().unwrap_or(false) {
-                return Ok(out);
-            }
-            cursor = Some(v["next_cursor"].as_str().unwrap_or_default().to_string());
         }
         Err(CsError::Malformed(format!("listing exceeded {MAX_LIST_PAGES} pages")))
     }
 
     /// Raw file bytes at a ref.
     pub fn read_file(&self, path: &str, git_ref: &str) -> Result<Vec<u8>, CsError> {
-        let (status, body) = self.req("GET", &format!("/file?path={}&ref={}", q(path), q(git_ref)), None, None)?;
+        let (status, body) = self.req("GET", &format!("/file?path={}&ref={}", encode_q(path), encode_q(git_ref)), None, None)?;
         self.check(status, &body)?;
         Ok(body)
     }
@@ -301,57 +279,18 @@ impl CodeStorage {
         author: &Author,
         changes: &[Change],
     ) -> Result<String, CsError> {
-        use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD;
-        let mut files_meta: Vec<Value> = Vec::new();
-        let mut chunks: Vec<String> = Vec::new();
-        for (i, ch) in changes.iter().enumerate() {
-            let id = format!("blob-{i}");
-            match ch {
-                Change::Upsert { path, bytes } => {
-                    files_meta.push(json_f(path, "upsert", &id));
-                    // spec: decoded chunks cap at 4 MiB; each content stream
-                    // must END with an eof:true chunk (live-verified: the
-                    // real service reports "incomplete content stream" for
-                    // a final chunk sent with eof:false)
-                    let pieces: Vec<&[u8]> = bytes.chunks(CHUNK_MAX.max(1)).collect();
-                    for (i, piece) in pieces.iter().enumerate() {
-                        let last = i + 1 == pieces.len();
-                        chunks.push(line(&id, &b64.encode(piece), last));
-                    }
-                    if bytes.is_empty() {
-                        chunks.push(line(&id, "", true)); // empty file: one eof chunk
-                    }
-                }
-                Change::Delete { path } => {
-                    files_meta.push(json_f(path, "delete", &id));
-                    // spec example: deletes still send one empty eof chunk
-                    chunks.push(line(&id, "", true));
-                }
-            }
-        }
-        let mut meta = serde_json::json!({
-            "target_branch": MAIN,
-            "commit_message": message,
-            "author": { "name": author.name, "email": author.email },
-            "files": files_meta,
-        });
-        if let Some(sha) = expected {
-            meta["expected_target_sha"] = Value::String(sha.to_string());
-        }
-        let mut body = serde_json::to_string(&serde_json::json!({ "metadata": meta })).unwrap();
-        body.push('\n');
-        for c in chunks {
-            body.push_str(&c);
-        }
-        let (status, rbody) = self.req("POST", "/commit-pack", Some(body.into_bytes()), Some("application/x-ndjson"))?;
+        let files: Vec<FileChange> = changes
+            .iter()
+            .map(|change| match change {
+                Change::Upsert { path, bytes } => FileChange::Upsert { path, bytes },
+                Change::Delete { path } => FileChange::Delete { path },
+            })
+            .collect();
+        let pack = core_cs::commit_pack(MAIN, expected, message, (&author.name, &author.email), &files);
+        let (status, rbody) = self.req("POST", "/commit-pack", Some(pack.into_bytes()), Some("application/x-ndjson"))?;
         self.check(status, &rbody)?;
-        let v: Value = serde_json::from_slice(&rbody).map_err(|e| CsError::Malformed(e.to_string()))?;
-        let tip = v["result"]["new_sha"].as_str().unwrap_or_default().to_string();
-        if tip.is_empty() || !v["result"]["success"].as_bool().unwrap_or(false) {
-            return Err(CsError::Malformed(format!("commit-pack result not ok: {v}")));
-        }
-        Ok(tip)
+        let v = Self::json(&rbody)?;
+        core_cs::committed(&v).ok_or_else(|| CsError::Malformed(format!("commit-pack result not ok: {v}")))
     }
 
     /// Create a branch (or ephemeral ref) at a base ref. Returns its SHA.
@@ -363,12 +302,8 @@ impl CodeStorage {
         });
         let (status, rbody) = self.req("POST", "/branches/create", Some(body.to_string().into_bytes()), Some("application/json"))?;
         self.check(status, &rbody)?;
-        let v: Value = serde_json::from_slice(&rbody).map_err(|e| CsError::Malformed(e.to_string()))?;
-        let sha = v["commit_sha"].as_str().unwrap_or_default().to_string();
-        if sha.is_empty() {
-            return Err(CsError::Malformed(format!("branches/create missing commit_sha: {v}")));
-        }
-        Ok(sha)
+        let v = Self::json(&rbody)?;
+        sha_at(&v["commit_sha"]).ok_or_else(|| CsError::Malformed(format!("branches/create without a commit sha: {v}")))
     }
 
     /// Move `live` to `main`'s current tip: ff when possible, else a merge
@@ -385,12 +320,8 @@ impl CodeStorage {
         });
         let (status, rbody) = self.req("POST", "/merge", Some(body.to_string().into_bytes()), Some("application/json"))?;
         self.check(status, &rbody)?;
-        let v: Value = serde_json::from_slice(&rbody).map_err(|e| CsError::Malformed(e.to_string()))?;
-        let tip = v["target"]["new_sha"].as_str().unwrap_or_default().to_string();
-        if tip.is_empty() {
-            return Err(CsError::Malformed(format!("merge response missing target.new_sha: {v}")));
-        }
-        Ok(tip)
+        let v = Self::json(&rbody)?;
+        sha_at(&v["target"]["new_sha"]).ok_or_else(|| CsError::Malformed(format!("merge without a target sha: {v}")))
     }
 
     /// Rollback: append a restore commit on `live` whose tree matches
@@ -408,50 +339,31 @@ impl CodeStorage {
         let body = format!("{meta}\n");
         let (status, rbody) = self.req("POST", "/restore-commit", Some(body.into_bytes()), Some("application/x-ndjson"))?;
         self.check(status, &rbody)?;
-        let v: Value = serde_json::from_slice(&rbody).map_err(|e| CsError::Malformed(e.to_string()))?;
-        let tip = v["result"]["new_sha"].as_str().unwrap_or_default().to_string();
-        if tip.is_empty() || !v["result"]["success"].as_bool().unwrap_or(false) {
-            return Err(CsError::Malformed(format!("restore result not ok: {v}")));
-        }
-        Ok(tip)
+        // a restore answers as a commit pack does
+        let v = Self::json(&rbody)?;
+        core_cs::committed(&v).ok_or_else(|| CsError::Malformed(format!("restore result not ok: {v}")))
     }
 
     /// Commit history of a ref, newest first (deploy history on `live`).
     pub fn list_commits(&self, git_ref: &str, limit: u64) -> Result<Vec<CommitInfo>, CsError> {
-        let (status, body) = self.req("GET", &format!("/commits?ref={}&limit={}", q(git_ref), limit), None, None)?;
+        let (status, body) = self.req("GET", &format!("/commits?ref={}&limit={}", encode_q(git_ref), limit), None, None)?;
         self.check(status, &body)?;
-        let v: Value = serde_json::from_slice(&body).map_err(|e| CsError::Malformed(e.to_string()))?;
-        let mut out = Vec::new();
-        for c in v["commits"].as_array().cloned().unwrap_or_default() {
-            out.push(CommitInfo {
-                sha: c["sha"].as_str().unwrap_or_default().to_string(),
-                message: c["message"].as_str().unwrap_or_default().to_string(),
-                author: c["author_name"].as_str().unwrap_or_default().to_string(),
-                date: c["date"].as_str().unwrap_or_default().to_string(),
-            });
+        let v = Self::json(&body)?;
+        let commits = v["commits"].as_array().ok_or_else(|| CsError::Malformed(format!("a commit list without commits: {v}")))?;
+        let mut out = Vec::with_capacity(commits.len());
+        for c in commits {
+            // a deploy is named by its sha (rollback's target): one without is no deploy
+            let sha = sha_at(&c["sha"]).ok_or_else(|| CsError::Malformed(format!("a commit without a sha: {c}")))?;
+            let text = |k: &str| c[k].as_str().unwrap_or_default().to_string();
+            out.push(CommitInfo { sha, message: text("message"), author: text("author_name"), date: text("date") });
         }
         Ok(out)
     }
 }
 
-fn json_f(path: &str, op: &str, id: &str) -> Value {
-    serde_json::json!({ "path": path, "operation": op, "content_id": id, "mode": "100644" })
-}
-
-fn line(id: &str, data_b64: &str, eof: bool) -> String {
-    let l = serde_json::json!({ "blob_chunk": { "content_id": id, "data": data_b64, "eof": eof } });
-    format!("{l}\n")
-}
-
-fn q(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/' => out.push(b as char),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
+/// A commit sha the service named, checked (40 lowercase hex).
+fn sha_at(v: &Value) -> Option<String> {
+    v.as_str().filter(|s| core_cs::is_sha(s)).map(str::to_string)
 }
 
 #[cfg(test)]
@@ -459,6 +371,7 @@ mod tests {
     use super::*;
     use crate::auth;
     use crate::mockcs::MockServer;
+    use fragment_core::codestorage::CHUNK_MAX;
 
     fn cs_for(mock: &MockServer, repo: &str) -> CodeStorage {
         let host = crate::api::Client::new(&mock.url, auth::fixed(7));
@@ -555,6 +468,7 @@ mod tests {
         paths.sort();
         assert_eq!(paths, vec!["f0.txt", "f1.txt", "f2.txt", "f3.txt", "f4.txt"]);
         assert_eq!(listed.iter().find(|f| f.path == "f3.txt").unwrap().size, 4);
+        assert!(listed.iter().all(|f| fragment_core::codestorage::is_sha(&f.last_commit_sha)), "every entry names its commit");
     }
 
     #[test]
