@@ -4,7 +4,7 @@
 //! these (cell/src/live.rs), the CLI's `channel --follow` decodes them, and
 //! the browser library (cell/client.mjs) speaks the same field names.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::{ChannelRecord, Role};
@@ -81,14 +81,14 @@ impl From<Subscribe> for SubscribeFrame {
 }
 
 /// A frame the fragment sends.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LiveOut {
     /// First on every socket: who the page is to the fragment. The role is
     /// fixed while the socket stays open.
     Hello { id: String, principal: String, role: Role },
     /// A record of a channel: one of a page, or a new one while live.
-    Record(ChannelRecord),
+    Record(#[serde(deserialize_with = "record_through_value")] ChannelRecord),
     /// After each page: the cursor past it, and whether more follow. With
     /// `more`, the socket is not live on the channel yet: subscribe again
     /// from `next`.
@@ -108,6 +108,13 @@ pub struct Present {
     pub id: String,
     pub principal: String,
     pub data: Value,
+}
+
+/// A record frame's record, read through a `Value`: serde buffers a tagged
+/// frame's fields, and a body kept as raw JSON text cannot pass through
+/// that buffer, while a `Value` can hand one over.
+fn record_through_value<'de, D: Deserializer<'de>>(d: D) -> Result<ChannelRecord, D::Error> {
+    ChannelRecord::deserialize(Value::deserialize(d)?).map_err(serde::de::Error::custom)
 }
 
 impl LiveIn {
@@ -186,8 +193,9 @@ mod tests {
         ];
         for (frame, wire) in frames {
             assert_eq!(serde_json::from_str::<Value>(&frame.encode()).unwrap(), wire);
-            // the CLI decodes what the cell encodes
-            assert_eq!(serde_json::from_value::<LiveOut>(wire).unwrap(), frame);
+            // the CLI decodes what the cell encodes, from its text
+            let decoded: LiveOut = serde_json::from_str(&wire.to_string()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
         }
     }
 
