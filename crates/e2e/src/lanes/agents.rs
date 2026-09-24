@@ -215,6 +215,47 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     let calls = runs_of(&v, &add);
     let last_call_once = calls.last().is_some_and(|last| calls.iter().filter(|c| *c == last).count() == 1);
     s.ok("killed between steps, the turn resumes and nothing runs again", v["outcome"] == "idle" && last_call_once && list.iter().filter(|t| *t == "between").count() == 1, &v);
+
+    // a bounded conversation: each step loads the newest messages, cut at
+    // a turn's start, so what the model is sent stops growing with the
+    // agent's age (a window of 6 here, set by the test controls, which the
+    // history above already outgrew)
+    let window = 6;
+    agents.signed(&owner, "POST", &format!("/api/a/{name}/test"), Some(&json!({ "window_messages": window })))?;
+    let list = format!("{todo}__list");
+    s.openrouter.clear_script();
+    s.openrouter.script(&[Reply::Tools(vec![(list.clone(), json!({}))]), Reply::Text("Your list is long.".into())]);
+    let asked = s.openrouter.chats().len();
+    agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "what is on my list?" })))?;
+    let v = settle(s, &agents, &owner, &name, wait);
+    let chats = s.openrouter.chats();
+    let sent: Vec<usize> = chats.iter().skip(asked).map(|c| c["messages"].as_array().map_or(0, |m| m.len())).collect();
+    let stored = v["messages"].as_array().map_or(0, |m| m.len());
+    let last = v["messages"].as_array().and_then(|m| m.last()).cloned().unwrap_or_default();
+    s.ok(
+        "past the window, each model request carries at most the window (and the system prompt), and the turn ends with its answer",
+        stored > 2 * window && sent.len() == 2 && sent.iter().all(|n| *n <= window + 1) && v["outcome"] == "idle" && last["text"] == "Your list is long.",
+        json!({ "stored": stored, "sent": sent, "outcome": v["outcome"], "last": last["text"] }),
+    );
+    let oldest_sent = chats.iter().skip(asked).any(|c| c["messages"].to_string().contains("add milk to my list"));
+    s.ok("the oldest turns stay out of the request", !oldest_sent, "");
+
+    // a turn that alone outgrows the window ends in an error that says so;
+    // the agent is not broken: the next message starts a turn that fits
+    agents.signed(&owner, "POST", &format!("/api/a/{name}/test"), Some(&json!({ "window_messages": 2 })))?;
+    s.openrouter.clear_script();
+    s.openrouter.script(&[Reply::Tools(vec![(list.clone(), json!({}))]), Reply::Text("unused".into())]);
+    agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "read it again" })))?;
+    let v = settle(s, &agents, &owner, &name, wait);
+    s.ok("a turn longer than the window ends in an error that says so", v["outcome"] == "error" && v["error"].as_str().is_some_and(|e| e.contains("outgrew")), json!({ "outcome": v["outcome"], "error": v["error"] }));
+    s.openrouter.clear_script();
+    s.openrouter.script(&[Reply::Text("Still here.".into())]);
+    agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "are you there?" })))?;
+    let v = settle(s, &agents, &owner, &name, wait);
+    let last = v["messages"].as_array().and_then(|m| m.last()).cloned().unwrap_or_default();
+    s.ok("and the next message starts a turn that fits", v["outcome"] == "idle" && last["text"] == "Still here.", json!({ "outcome": v["outcome"], "error": v["error"], "last": last["text"] }));
+    agents.signed(&owner, "POST", &format!("/api/a/{name}/test"), Some(&json!({})))?;
+    s.openrouter.clear_script();
     Ok(())
 }
 
