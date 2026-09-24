@@ -110,6 +110,16 @@ mod tests {
         assert_eq!(display("anon:0123456789abcdef0123456789abcdef"), "anon:0123456789abcdef0123456789abcdef");
     }
 
+    /// A pin from another implementation (@noble/curves and JS bech32): the
+    /// key of the secret [1; 32] (crates/nip98 pins that step) and its npub.
+    #[test]
+    fn a_known_key_has_its_known_npub() {
+        let hex = "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f";
+        let npub = "npub1rwzv24nmzfjypx2a8m264ws9vht3uxp5vpypnluuzl67n4waq78suk0wul";
+        assert_eq!(encode(hex), npub);
+        assert_eq!(parse(npub).as_deref(), Some(hex));
+    }
+
     #[test]
     fn identities() {
         let id = identity([0xab; 16]);
