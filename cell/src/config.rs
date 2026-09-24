@@ -1,9 +1,11 @@
 //! The fleet's settings, from Worker variables (`cell/.dev.vars` in dev,
-//! rendered `vars` at deploy). Nothing about a fleet is a constant in code
+//! rendered `vars` at deploy), built once per isolate (`CONFIG`). Nothing about a fleet is a constant in code
 //! (ROADMAP decision 13): the hostname suffix and the code.storage org
 //! arrive here. The fleet's secrets do not: the host secret, the
 //! code.storage key, the WorkOS API key, and the OpenRouter management key
 //! live in the node's environment, used through `KEYS` (keys.rs).
+
+use std::sync::OnceLock;
 
 use fragment_proto::{flat_name, from_flat_name, ErrorCode};
 use worker::Env;
@@ -81,8 +83,34 @@ fn var(env: &Env, name: &str) -> Option<String> {
     env.var(name).ok().map(|v| v.to_string().trim().to_string()).filter(|s| !s.is_empty())
 }
 
+/// `FRAGMENT_DEPLOY_ID`, or `dev` where a fleet names none.
+fn deploy_id(env: &Env) -> String {
+    var(env, "FRAGMENT_DEPLOY_ID").unwrap_or_else(|| "dev".into())
+}
+
+/// The isolate's settings, built from the first `env` it is handed and
+/// shared by every request, cell, and queue batch it runs after that.
+///
+/// A cache, so its contract. Source: the deployment's Worker variables.
+/// Invalidation: a deploy (or, in dev, a change to `.dev.vars`, which
+/// rebuilds) starts new isolates, and each builds its own. Stale reads:
+/// impossible, because celld writes the variables into an isolate's `env`
+/// once, as literals, when it builds the isolate from its deployment's
+/// config (`build_env`), and never changes them under it; `from_env`
+/// checks that on every call against `FRAGMENT_DEPLOY_ID`.
+static CONFIG: OnceLock<Config> = OnceLock::new();
+
 impl Config {
-    pub fn from_env(env: &Env) -> Config {
+    /// The isolate's settings (`CONFIG`): built once, from `env`'s variables.
+    pub fn from_env(env: &Env) -> &'static Config {
+        let cfg = CONFIG.get_or_init(|| Config::build(env));
+        // one variable read, against the 17 a build takes: variables that
+        // changed under a running isolate would break the contract above
+        assert_eq!(deploy_id(env), cfg.deploy_id, "celld changed a Worker variable under a running isolate");
+        cfg
+    }
+
+    fn build(env: &Env) -> Config {
         let codestorage = var(env, "CODESTORAGE_ORG").map(|org| {
             let api =
                 var(env, "CODESTORAGE_API_URL").map(|a| a.trim_end_matches('/').to_string()).unwrap_or_else(|| fragment_core::codestorage::default_api(&org));
@@ -113,7 +141,7 @@ impl Config {
             .map(|n| n.min(i64::MAX as u64))
             .unwrap_or(fragment_proto::limits::SIGNINS_PENDING_MAX_DEFAULT);
         let test_hooks = var(env, "FRAGMENT_TEST_HOOKS").as_deref() == Some("allow");
-        let deploy_id = var(env, "FRAGMENT_DEPLOY_ID").unwrap_or_else(|| "dev".into());
+        let deploy_id = deploy_id(env);
         Config {
             codestorage,
             host_suffix,

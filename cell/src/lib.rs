@@ -213,10 +213,6 @@ async fn signer_if_signed(env: &Env, req: &Request, url: &Url, body: &[u8]) -> C
     }
 }
 
-fn test_hooks(env: &Env) -> bool {
-    Config::from_env(env).test_hooks
-}
-
 /// The identity a path names: `me` is the signer.
 fn named_identity(who: &str, signer: &Signed) -> CellResult<String> {
     if who == "me" {
@@ -528,10 +524,10 @@ async fn forward(env: &Env, req: &Request, body: Option<worker::wasm_bindgen::Js
     Ok(stub.fetch_with_request(inner).await?)
 }
 
-async fn serve(mut req: Request, env: &Env, url: &Url, name: &str, rest: &str, mode: Mode) -> CellResult<Response> {
+async fn serve(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, mode: Mode) -> CellResult<Response> {
     check_name(name)?;
     if auth::is_fragment_route(rest) {
-        return auth::fragment(&req, env, &Config::from_env(env), url, name, rest, mode == Mode::Path).await;
+        return auth::fragment(&req, env, cfg, url, name, rest, mode == Mode::Path).await;
     }
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     // a signature names its key's identity; a browser, its session here
@@ -552,7 +548,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
     // routes there); the platform API answers on the platform's host.
     if let Some(name) = url.host_str().and_then(|h| cfg.fragment_of_host(h)) {
         let rest = path.trim_start_matches('/').to_string();
-        return serve(req, env, &url, &name, &rest, Mode::Host).await;
+        return serve(req, env, cfg, &url, &name, &rest, Mode::Host).await;
     }
     // any other name under the suffix is no one's: the platform answers on its own host only
     if url.host_str().and_then(|h| cfg.subdomain(h)).is_some() {
@@ -562,7 +558,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
     match (req.method(), segments.as_slice()) {
         (_, [""] | ["auth", ..] | ["cli"] | ["cli", "approve"]) => {
             let segs = segments.clone();
-            auth::platform(req, env, &cfg, &url, &segs).await
+            auth::platform(req, env, cfg, &url, &segs).await
         }
         (Method::Get, ["healthz"]) => {
             let mut resp = Response::ok("ok")?;
@@ -573,7 +569,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let create: CreateFragment = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let principal = signer(env, &req, &url, &body).await?;
-            create_fragment(env, &cfg, &url, create, principal).await
+            create_fragment(env, cfg, &url, create, principal).await
         }
         // the agents' script, co-hosted: authenticated here, like the rest
         (_, ["api", "agents"]) | (_, ["api", "a", ..]) => {
@@ -587,9 +583,9 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
         }
         (_, ["api", "budget", rest @ ..]) => {
             let rest = rest.to_vec();
-            budget_route(req, env, &cfg, &url, &rest).await
+            budget_route(req, env, cfg, &url, &rest).await
         }
-        (Method::Post, ["api", "test", "ledger"]) if test_hooks(env) => {
+        (Method::Post, ["api", "test", "ledger"]) if cfg.test_hooks => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let org = v["identity"].as_str().and_then(ledger::org_of).ok_or_else(|| CellError::invalid("name an identity"))?;
@@ -611,8 +607,8 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             let rest = rest.to_vec();
             identities(req, env, &url, &rest).await
         }
-        (Method::Get, ["api", "test", "env"]) if test_hooks(env) => json_answer(&Value::Object(js::env_vars(env.as_ref())?)),
-        (Method::Post, ["api", "test", hook @ ("keys" | "fragment")]) if test_hooks(env) => {
+        (Method::Get, ["api", "test", "env"]) if cfg.test_hooks => json_answer(&Value::Object(js::env_vars(env.as_ref())?)),
+        (Method::Post, ["api", "test", hook @ ("keys" | "fragment")]) if cfg.test_hooks => {
             /// The fragment a test hook's body names (the rest is the fragment's to read).
             #[derive(Deserialize)]
             struct TestTarget {
@@ -625,7 +621,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             let inner = routed::internal_request(&format!("test/{hook}"), &body)?;
             Ok(env.durable_object("FRAGMENT")?.get_by_name(&target.fragment)?.fetch_with_request(inner).await?)
         }
-        (Method::Post, ["api", "test", "registry"]) if test_hooks(env) => {
+        (Method::Post, ["api", "test", "registry"]) if cfg.test_hooks => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let hook: calls::TestHook = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             json_answer(&ask_registry(env, &hook).await?)
@@ -693,7 +689,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
                 to.set_query(url.query());
                 return Ok(Response::redirect_with_status(to, 308)?);
             }
-            serve(req, env, &url, name, &rest, Mode::Path).await
+            serve(req, env, cfg, &url, name, &rest, Mode::Path).await
         }
         _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
     }
