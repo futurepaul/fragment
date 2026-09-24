@@ -1,0 +1,25 @@
+[package]
+name = "fragment-native"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Native services for our celld fork: Rust the node runs for our cells, reached as `native:<name>` service bindings (docs/hardening.md, H1)."
+
+# No celld dependency: celld depends on this crate, and the seam in the fork
+# (crates/celld/main/native_seam.rs there) is the only code that knows both
+# sides. Every dependency here also lands in the fork's Cargo.lock, so keep
+# the list short and prefer crates celld already carries.
+[dependencies]
+fragment-core = { path = "../core" }
+fragment-nip98 = { path = "../nip98", features = ["signer"] }
+serde_json = "1"
+sha2 = "0.10"
+hkdf = "0.12"
+aes-gcm = "0.10"
+hex = "0.4"
+base64 = "0.22"
+getrandom = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+[dev-dependencies]
+p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }

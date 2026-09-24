@@ -390,7 +390,7 @@ impl FragmentCell {
         }))
     }
 
-    pub(crate) fn put_secret(&self, caller: &Caller, key: &str, value: Vec<u8>) -> CellResult<Response> {
+    pub(crate) async fn put_secret(&self, caller: &Caller, key: &str, value: Vec<u8>) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
         if !fragment_proto::valid_secret_name(key) {
             return Err(CellError::invalid("a secret's name must match ^[A-Z][A-Z0-9_]{0,63}$"));
@@ -401,12 +401,13 @@ impl FragmentCell {
         if value.len() > limits::SECRET_MAX_BYTES {
             return Err(CellError::too_large("a secret", value.len(), limits::SECRET_MAX_BYTES));
         }
+        // sealed first: the checks and the write below share one turn
+        let sealed = crate::keys::seal(&self.env, &value).await?;
+        self.require(caller, false, Role::Editor)?;
         let exists = !self.rows("SELECT name FROM secrets WHERE name = ?", vec![key.into()])?.is_empty();
         if !exists && self.count("SELECT COUNT(*) AS n FROM secrets")? >= limits::SECRETS_MAX as u64 {
             return Err(CellError::invalid(format!("a fragment has at most {} secrets", limits::SECRETS_MAX)));
         }
-        let hosts = self.cfg.host_secrets()?;
-        let sealed = fragment_core::secrets::seal(hosts[0], &self.must("npub")?, &value, js::random_bytes()).map_err(|e| CellError::host(e.to_string()))?;
         let by = self.caller_id(caller)?;
         self.exec(
             "INSERT INTO secrets (name, sealed, set_by, set_at) VALUES (?, ?, ?, ?)

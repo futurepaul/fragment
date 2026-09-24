@@ -33,6 +33,11 @@ const LEDGER_TTL_MS = 7 * 24 * 3600 * 1000;
 const RECORD_MAX_BYTES = 64 * 1024;
 const EFFECTS_MAX = 64;
 const RESULT_MAX_BYTES = 1024 * 1024;
+// The app's database (limits::APP_DB_MAX_BYTES): a mutation that leaves it
+// larger rolls back. The node's own hard stop (CELLD_FACET_MAX_BYTES) sits
+// above it, so the runtime's bookkeeping always has room.
+const APP_DB_MAX_BYTES = 16 * 1024 * 1024;
+const STORAGE_FULL = Symbol("storage_full");
 const KIND = /^[a-z][a-z0-9._-]{0,63}$/;
 const FILE_WRITE_MAX_BYTES = 256 * 1024;
 const FILE_WRITES_MAX = 16;
@@ -359,6 +364,16 @@ export class App extends AuthorApp {
 
   __mutate(id, name, inputSha, input, meta) {
     if (!authorMethod(name)) return { error: "unknown_operation" };
+    try {
+      return this.#mutate(id, name, inputSha, input, meta);
+    } catch (e) {
+      // over the cap (or at the node's hard stop): the transaction rolled back
+      if (e === STORAGE_FULL || /database or disk is full|SQLITE_FULL/.test(describe(e))) return { error: "storage_full" };
+      throw e;
+    }
+  }
+
+  #mutate(id, name, inputSha, input, meta) {
     const sql = this.ctx.storage.sql;
     return this.ctx.storage.transactionSync(() => {
       const prior = sql.exec(`SELECT input_sha, result, effects FROM ${LEDGER} WHERE id = ?`, id).toArray()[0];
@@ -381,6 +396,7 @@ export class App extends AuthorApp {
       if (sql.exec("SELECT last_insert_rowid() AS r").one().r % 100 === 0) {
         sql.exec(`DELETE FROM ${LEDGER} WHERE at < ?`, now - LEDGER_TTL_MS);
       }
+      if (sql.databaseSize > APP_DB_MAX_BYTES) throw STORAGE_FULL;
       return { replayed: false, result, effects: call.effects };
     });
   }

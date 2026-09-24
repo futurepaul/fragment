@@ -9,13 +9,12 @@ slice G (its contract is in git history, last at `35f5e18`).
 ## Configuration
 
 Worker variables, rendered from the fleet's settings (ROADMAP decision
-13; `cell/.dev.vars` in dev):
+13; `cell/.dev.vars` in dev). None is a secret: the fleet's secrets are
+the node's environment, where only `KEYS` reads them (below).
 
 | Variable | Meaning |
 |---|---|
-| `FRAGMENT_HOST_SECRET` | seals secrets at rest (at least 32 bytes); required to create |
-| `FRAGMENT_HOST_SECRET_PREVIOUS` | the secret before a rotation; values sealed under it still open |
-| `CODESTORAGE_ORG`, `CODESTORAGE_PRIVATE_KEY` | the org and its PKCS#8 P-256 key (a one-line PEM may carry literal `\n`) |
+| `CODESTORAGE_ORG` | the code.storage org |
 | `CODESTORAGE_API_URL` | the API base (default `https://api.<org>.code.storage`) |
 | `FRAGMENT_HOST_SUFFIX` | fragments are served from `<name>.<suffix>`; unset, from `/f/<name>/` |
 | `FRAGMENT_POLL_INTERVAL_S` | the webhook backstop (default 300); also how often running runs are checked against their Workflows |
@@ -25,14 +24,34 @@ Worker variables, rendered from the fleet's settings (ROADMAP decision
 | `FRAGMENT_PUSH_SUBJECT` | who push services may contact about this fleet's pushes (a `mailto:` or https URL; RFC 8292) |
 | `FRAGMENT_DELIVERY_RETRY_S` | the shortest wait before a delivery is retried (default 10; the wait grows with the delivery's age, up to an hour) |
 | `OPENROUTER_API_URL` | where AI calls go (default https://openrouter.ai) |
-| `OPENROUTER_MANAGEMENT_KEY` | mints each billing org's own OpenRouter key, its limit the org's monthly allowance; unset, only a fragment's own `OPENROUTER_API_KEY` pays for AI |
 | `FRAGMENT_BUDGET_USD` | each person's monthly budget (default 20) |
 | `FRAGMENT_OPERATORS` | identities and keys that may top up budgets (as `FRAGMENT_CREATORS` once read them) |
 | `FRAGMENT_DEPLOY_ID` | which deployment this is (`cargo xtask deploy` sets it); `GET /healthz` answers it in `x-fragment-deploy` |
-| `WORKOS_CLIENT_ID`, `WORKOS_API_KEY` | sign-in: fragment's WorkOS environment (the key exchanges codes); unset, sign-in answers 500 |
+| `WORKOS_CLIENT_ID` | sign-in: fragment's WorkOS environment; unset, sign-in answers 500 |
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake) |
 | `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (default: the hostname suffix itself, e.g. https://fragment.club) |
-| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503 |
+| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503; `GET /api/test/env` answers the Worker variables; `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens through `KEYS` as that fragment |
+
+The node's environment (Fly secrets on a fleet; `devstack` in dev and
+the e2e), read by `KEYS`, the native service in our celld fork
+(`crates/native`, docs/hardening.md). The cell asks `KEYS` to seal and
+open (for the calling cell only), to sign code.storage tokens (for a
+`Fragment`), to exchange WorkOS's code (for the `Registry`), and to call
+OpenRouter's key API (for a `Ledger`); it never holds these keys:
+
+| Variable | Meaning |
+|---|---|
+| `FRAGMENT_KEYS_HOST_SECRET` | seals secrets at rest, per cell (at least 32 bytes) |
+| `FRAGMENT_KEYS_HOST_SECRET_PREVIOUS` | the secret before a rotation; values sealed under it open and come back resealed |
+| `FRAGMENT_KEYS_CODESTORAGE_ORG`, `FRAGMENT_KEYS_CODESTORAGE_PRIVATE_KEY` | the org and its PKCS#8 P-256 key (a one-line PEM may carry literal `\n`) |
+| `FRAGMENT_KEYS_WORKOS_API_KEY`, `FRAGMENT_KEYS_WORKOS_URL` | WorkOS's API key and base (default https://api.workos.com) |
+| `FRAGMENT_KEYS_OPENROUTER_MANAGEMENT_KEY`, `FRAGMENT_KEYS_OPENROUTER_URL` | mints each billing org's own OpenRouter key, its limit the org's monthly allowance; unset, only a fragment's own `OPENROUTER_API_KEY` pays for AI |
+
+And the fork's settings the fleet turns on: `CELLD_FACET_MAX_BYTES`
+(the app database's hard stop, 20 MiB), `CELLD_DYNAMIC_LOCKDOWN=1`
+(loaded workers without `eval` or `Atomics.wait`),
+`CELLD_INTERNAL_PEER_ONLY=1` (the internal listener serves only
+fleet-signed peers), with `CELLD_EGRESS_PUBLIC_ONLY=1` from phase 3.
 
 Bindings (`cell/wrangler.jsonc`): `FRAGMENT` and `PRINCIPAL` (Durable
 Objects), `LOADER` (the Worker Loader), `JOBS` (the Workflow that runs
@@ -133,7 +152,7 @@ cookie for another fragment, or whose platform session ended, is nobody.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/fragments` | a person (an agent is 403) | `{name, fragmentSecret, visibility?}` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}`. `fragmentSecret` is the fragment's own key, made by the client; it is stored sealed. The cell creates (or, for a name deleted before, finds) the code.storage repo. |
+| `POST /api/fragments` | a person (an agent is 403) | `{name, visibility?}` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}`. The fragment's own key is made by the node's `KEYS` and stays sealed there. The cell creates (or, for a name deleted before, finds) the code.storage repo. |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role}]}` |
 | `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes}` |
@@ -222,6 +241,17 @@ returns the stored result; the same id with another input is 409. Every
 applied mutation also appends `{op, id}` to `ops`. An optional
 `fetch(request)` answers every path that is not a site file (any
 method), with `x-fragment-principal` and `x-fragment-role` set.
+
+The app's database holds at most 16 MiB: a mutation that would leave it
+larger rolls back and answers 507 `storage_full`; the app still reads,
+and deleting rows makes room. A write from anywhere else (a query, the
+app's `fetch`) meets the node's own stop, 4 MiB above. The app runs
+without code generation from strings (`eval`, `new Function`) and
+without `Atomics.wait`, and a turn whose heap grows past twice the
+isolate's limit (128 MiB) ends with "Worker exceeded its memory limit"
+(422). When the node serving the fragment cannot load another app (celld
+keeps at most 255 per node until it restarts), calls into the app answer
+503 `node_full` and the rest of the fragment works (docs/hardening.md).
 
 ### Files
 
@@ -448,8 +478,10 @@ signing with their own keys. An agent is an identity its owner registers:
 sends it in `POST /api/identities {kind: "agent", proof}` (the CLI's
 `fragment agent create` does both). Every owner route checks, live, that
 the signing key is one of the owner's active keys
-(`GET /api/identities/{owner}/keys/{npub}`, signed by the agent). Its variables: `FRAGMENT_HOST_SECRET` (seals
-each agent's key), `FRAGMENT_API` (the platform it acts on),
+(`GET /api/identities/{owner}/keys/{npub}`, signed by the agent). Each
+agent's key is made by the node's `KEYS` and signs there
+(`FRAGMENT_KEYS_HOST_SECRET` in the node's environment seals it for the
+agent's cell). Its variables: `FRAGMENT_API` (the platform it acts on),
 `OPENROUTER_API_KEY` and `OPENROUTER_API_URL` (its model service),
 `AGENT_URL` (its own base, for the inboxes it hands out),
 `AGENT_TEST_HOOKS=allow` (dev and e2e only).

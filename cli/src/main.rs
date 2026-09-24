@@ -874,19 +874,13 @@ fn run(cli: Cli) -> Result<()> {
 
     match cli.cmd {
         Cmd::Create { name, visibility } => {
-            // Client-side fragment identity (ROADMAP level-c fix): the
-            // npub keypair is generated HERE, and the secret crosses the
-            // wire exactly once as `fragmentSecret` (the field the create
-            // route reads), inside the creator's NIP-98-authenticated
-            // request; the runtime stores it wrapped and the CLI drops it.
-            let fid = auth::Identity::generate();
-            let mut body = json!({ "name": name, "fragmentSecret": hex::encode(fid.secret) });
+            // the fragment's own key is made by the platform (its KEYS)
+            let mut body = json!({ "name": name });
             if let Some(vis) = &visibility {
                 body["visibility"] = json!(vis);
             }
             let v = c.call(c.post_json("/api/fragments", &body)?)?;
             let npub = v["npub"].as_str().unwrap_or_default().to_string();
-            let npub = if npub.is_empty() { fid.npub() } else { npub };
             if j {
                 ok_exit(&v);
             }
@@ -1188,10 +1182,7 @@ fn run(cli: Cli) -> Result<()> {
             if !j {
                 println!("scaffolded '{tpl_name}' into {}", dir.display());
             }
-            // client-side npub; secret crosses the wire once (fragmentSecret),
-            // wrapped at rest
-            let fid = auth::Identity::generate();
-            let created = c.post_json("/api/fragments", &json!({ "name": name, "fragmentSecret": hex::encode(fid.secret) })).and_then(|r| c.call(r));
+            let created = c.post_json("/api/fragments", &json!({ "name": name })).and_then(|r| c.call(r));
             if let Err(e) = created {
                 // nothing was created, so leave nothing here either: the same init can be retried
                 let _ = std::fs::remove_dir_all(&dir);

@@ -14,14 +14,14 @@ pub fn auth(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let keys = api.person()?;
     let name = s.name("auth");
-    let body = json!({ "name": name, "fragmentSecret": Keys::generate().secret_hex() });
+    let body = json!({ "name": name });
     let bytes = body.to_string().into_bytes();
     let r = api.unsigned("POST", "/api/fragments", Some(&body))?;
     s.ok("an unsigned create is 401", r.status == 401 && r.error() == "unauthenticated", &r);
     // behind a proxy that ends TLS (Fly's), the client signed the https URL
     let proxied = api.person()?;
     let https = format!("{}/api/fragments", api.base.replacen("http://", "https://", 1));
-    let pbody = json!({ "name": s.name("proxied"), "fragmentSecret": Keys::generate().secret_hex() });
+    let pbody = json!({ "name": s.name("proxied") });
     let pbytes = pbody.to_string().into_bytes();
     let r = api.call(Call {
         method: "POST",
@@ -94,12 +94,11 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("creating an existing name is 409", r.status == 409 && r.error() == "already_exists", &r);
     let r = api.create(&owner, "Bad_Name")?;
     s.ok("an invalid name is 400", r.status == 400 && r.error() == "invalid_request", &r);
-    let r = api.create_with(&owner, json!({ "name": s.name("nosecret") }))?;
-    s.ok("a create without fragmentSecret is refused naming it", r.status == 400 && r.message().contains("fragmentSecret"), &r);
-    let r = api.create_with(&owner, json!({ "name": s.name("badsecret"), "fragmentSecret": "0".repeat(64) }))?;
-    s.ok("an invalid fragment secret is 400", r.status == 400 && r.message().contains("fragmentSecret"), &r);
+    // the fragment's own key is made by the node's KEYS; no client sends one
+    let r = api.create_with(&owner, json!({ "name": s.name("oldsecret"), "fragmentSecret": Keys::generate().secret_hex() }))?;
+    s.ok("a create that sends a fragmentSecret is refused naming it", r.status == 400 && r.message().contains("fragmentSecret"), &r);
     let public = s.name("create-pub");
-    let r = api.create_with(&owner, json!({ "name": public, "fragmentSecret": Keys::generate().secret_hex(), "visibility": "public" }))?;
+    let r = api.create_with(&owner, json!({ "name": public, "visibility": "public" }))?;
     s.ok("create takes a visibility", r.status == 200 && r.body["visibility"] == "public", &r);
 
     let r = api.status(&owner, &name)?;
@@ -184,7 +183,7 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an unsigned webhook is 401", r.status == 401, &r);
     // Refused from its declared length before it is read: the client may see
     // the 413, or the connection closing while it is still sending.
-    let big = json!({ "name": s.name("big"), "fragmentSecret": "x".repeat(3 * 1024 * 1024) });
+    let big = json!({ "name": s.name("big"), "padding": "x".repeat(3 * 1024 * 1024) });
     let refused = match api.create_with(&owner, big) {
         Ok(r) => r.status == 413 && r.error() == "too_large",
         Err(e) => format!("{e:#}").contains("reset") || format!("{e:#}").contains("Broken pipe"),

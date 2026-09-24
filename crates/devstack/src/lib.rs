@@ -17,11 +17,15 @@ pub const READY_TIMEOUT: Duration = Duration::from_secs(120);
 /// A graceful stop must finish within this.
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The fork of celld: v0.5.1 with the alarm fix (spikes/celld-0.5.1/README.md)
-/// and public-only Worker egress (`CELLD_EGRESS_PUBLIC_ONLY`, branch
-/// `egress/public-only`, docs/phase-3.md slice E), until denoland carries them.
+/// The fork of celld (branch `hardening`): v0.5.1 with the alarm fix
+/// (spikes/celld-0.5.1/README.md), public-only Worker egress
+/// (`CELLD_EGRESS_PUBLIC_ONLY`, docs/phase-3.md slice E), the native-services
+/// seam that serves `KEYS` from crates/native, and the settings
+/// docs/hardening.md turns on: `CELLD_FACET_MAX_BYTES`,
+/// `CELLD_LOADED_WORKERS_MAX`, `CELLD_DYNAMIC_LOCKDOWN`,
+/// `CELLD_INTERNAL_PEER_ONLY`, and a hard heap ceiling.
 pub const CELLD_FORK_URL: &str = "https://github.com/futurepaul/celld.git";
-pub const CELLD_FORK_REV: &str = "cd3a68be5826a5a86594ab65e7dbe018952490fc";
+pub const CELLD_FORK_REV: &str = "27794184bebc453e3086680fcfd9f995fc04dc68";
 
 pub fn repo_root() -> PathBuf {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -138,8 +142,10 @@ pub fn write_dev_vars(project: &Path, vars: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
-/// What a fleet is configured with (ROADMAP decision 13): the cell reads
-/// these as Worker variables. A dev or test fleet points code.storage at the
+/// What a fleet is configured with (ROADMAP decision 13). The cell reads
+/// the plain settings as Worker variables; the fleet's secrets go to the
+/// node's environment, where only `KEYS` reads them (crates/native,
+/// docs/hardening.md H1). A dev or test fleet points code.storage at the
 /// fake in `crates/fakes`.
 pub struct Fleet {
     pub host_secret: String,
@@ -183,15 +189,47 @@ pub struct WorkOsVars {
     pub api_url: Option<String>,
 }
 
+/// An app's database: the platform refuses a mutation past
+/// `fragment_proto::limits::APP_DB_MAX_BYTES` (16 MiB); our celld fork stops
+/// every write at this, 4 MiB above, so the runtime's own bookkeeping in
+/// that database always has room.
+pub const FACET_MAX_BYTES: u64 = 20 * 1024 * 1024;
+
+/// The node's settings, as a fleet's (docs/hardening.md): `KEYS`'s secret,
+/// the app database cap, loaded workers without `eval` or `Atomics.wait`,
+/// and an internal listener that serves only fleet-signed peer routes.
+fn node_env(host_secret: &str) -> Vec<(String, String)> {
+    vec![
+        ("FRAGMENT_KEYS_HOST_SECRET".into(), host_secret.into()),
+        ("CELLD_FACET_MAX_BYTES".into(), FACET_MAX_BYTES.to_string()),
+        ("CELLD_DYNAMIC_LOCKDOWN".into(), "1".into()),
+        ("CELLD_INTERNAL_PEER_ONLY".into(), "1".into()),
+    ]
+}
+
 impl Fleet {
-    /// Renders the fleet into the project's `.dev.vars`.
-    pub fn write_vars(&self, project: &Path) -> Result<()> {
+    /// Renders the fleet's plain settings into the project's `.dev.vars`,
+    /// and answers the node's environment: the fleet's secrets, for `KEYS`.
+    pub fn configure(&self, project: &Path) -> Result<Vec<(String, String)>> {
+        let mut env = node_env(&self.host_secret);
+        env.push(("FRAGMENT_KEYS_CODESTORAGE_ORG".into(), self.codestorage_org.clone()));
+        env.push(("FRAGMENT_KEYS_CODESTORAGE_PRIVATE_KEY".into(), self.codestorage_key_pem.clone()));
+        if let Some(w) = &self.workos {
+            env.push(("FRAGMENT_KEYS_WORKOS_API_KEY".into(), w.api_key.clone()));
+            if let Some(u) = &w.api_url {
+                env.push(("FRAGMENT_KEYS_WORKOS_URL".into(), u.clone()));
+            }
+        }
+        if let Some(k) = &self.openrouter_management {
+            env.push(("FRAGMENT_KEYS_OPENROUTER_MANAGEMENT_KEY".into(), k.clone()));
+            if let Some(u) = &self.openrouter_url {
+                env.push(("FRAGMENT_KEYS_OPENROUTER_URL".into(), u.clone()));
+            }
+        }
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
         let mut vars = vec![
-            ("FRAGMENT_HOST_SECRET", self.host_secret.as_str()),
             ("CODESTORAGE_ORG", self.codestorage_org.as_str()),
-            ("CODESTORAGE_PRIVATE_KEY", self.codestorage_key_pem.as_str()),
             ("CODESTORAGE_API_URL", self.codestorage_url.as_str()),
             ("FRAGMENT_POLL_INTERVAL_S", poll.as_str()),
             ("FRAGMENT_JOB_RETRY_DELAY_S", retry.as_str()),
@@ -215,16 +253,12 @@ impl Fleet {
         }
         if let Some(w) = &self.workos {
             vars.push(("WORKOS_CLIENT_ID", w.client_id.as_str()));
-            vars.push(("WORKOS_API_KEY", w.api_key.as_str()));
             if let Some(u) = &w.api_url {
                 vars.push(("WORKOS_API_URL", u.as_str()));
             }
         }
         if let Some(p) = &self.platform_url {
             vars.push(("FRAGMENT_PLATFORM_URL", p.as_str()));
-        }
-        if let Some(k) = &self.openrouter_management {
-            vars.push(("OPENROUTER_MANAGEMENT_KEY", k.as_str()));
         }
         if let Some(b) = &self.budget_usd {
             vars.push(("FRAGMENT_BUDGET_USD", b.as_str()));
@@ -235,7 +269,8 @@ impl Fleet {
         if self.test_hooks {
             vars.push(("FRAGMENT_TEST_HOOKS", "allow"));
         }
-        write_dev_vars(project, &vars)
+        write_dev_vars(project, &vars)?;
+        Ok(env)
     }
 }
 
@@ -259,10 +294,10 @@ pub struct AgentFleet {
 }
 
 impl AgentFleet {
-    /// Renders the fleet into the project's `.dev.vars`.
-    pub fn write_vars(&self, project: &Path) -> Result<()> {
+    /// Renders the fleet into the project's `.dev.vars`, and answers the
+    /// node's environment (the host secret, for `KEYS`).
+    pub fn configure(&self, project: &Path) -> Result<Vec<(String, String)>> {
         let mut vars = vec![
-            ("FRAGMENT_HOST_SECRET", self.host_secret.as_str()),
             ("FRAGMENT_API", self.fragment_api.as_str()),
             ("AGENT_URL", self.agent_url.as_str()),
             ("OPENROUTER_API_KEY", self.openrouter_key.as_str()),
@@ -276,7 +311,8 @@ impl AgentFleet {
         if self.egress_local {
             vars.push(("FRAGMENT_EGRESS_LOCAL", "allow"));
         }
-        write_dev_vars(project, &vars)
+        write_dev_vars(project, &vars)?;
+        Ok(node_env(&self.host_secret))
     }
 }
 

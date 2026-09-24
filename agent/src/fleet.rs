@@ -2,14 +2,13 @@
 //! uses (NIP-98), with the agent's own key. An agent can do on a fragment
 //! exactly what its membership lets it, and nothing through a side door.
 
-use std::sync::Arc;
-
 use anyhow::{anyhow, Context};
-use fragment_nip98::Keys;
 use serde_json::Value;
-use worker::{Fetch, Headers, Method, Request, RequestInit};
+use sha2::{Digest, Sha256};
+use worker::{Env, Fetch, Headers, Method, Request, RequestInit, SqlStorage};
 
-use crate::js;
+use crate::keys::{self, Sign};
+use crate::store::{kv_get, kv_set};
 
 /// The largest answer the agent reads from a fragment.
 const ANSWER_MAX_BYTES: usize = 1024 * 1024;
@@ -18,7 +17,28 @@ const ANSWER_MAX_BYTES: usize = 1024 * 1024;
 pub struct Fleet {
     /// The platform's base URL (`FRAGMENT_API`), e.g. https://fragment.club.
     pub base: String,
-    pub keys: Arc<Keys>,
+    pub signer: Signer,
+}
+
+/// The agent's key, as `KEYS` holds it: sealed in the agent's own storage,
+/// used only through the service.
+#[derive(Clone)]
+pub struct Signer {
+    pub env: Env,
+    pub sql: SqlStorage,
+}
+
+impl Signer {
+    pub async fn sign(&self, what: Sign<'_>) -> anyhow::Result<String> {
+        let sealed = kv_get(&self.sql, "secret")?.context("the agent has no key")?;
+        // what an agent made before KEYS sealed its key with
+        let npub = kv_get(&self.sql, "npub")?.unwrap_or_default();
+        let signed = keys::nostr_sign(&self.env, &sealed, &npub, what).await?;
+        if let Some(fresh) = signed.resealed {
+            kv_set(&self.sql, "secret", fresh)?;
+        }
+        Ok(signed.header)
+    }
 }
 
 impl Fleet {
@@ -31,7 +51,8 @@ impl Fleet {
             None => Vec::new(),
         };
         let headers = Headers::new();
-        let auth = self.keys.header(method.as_ref(), &url, &bytes, (js::now_ms() / 1000) as i64);
+        let payload = (!bytes.is_empty()).then(|| hex::encode(Sha256::digest(&bytes)));
+        let auth = self.signer.sign(Sign::Header { method: method.as_ref(), url: &url, payload }).await?;
         headers.set("authorization", &auth).map_err(|e| anyhow!("{e}"))?;
         let mut init = RequestInit::new();
         init.with_method(method);

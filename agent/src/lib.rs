@@ -32,16 +32,15 @@
 mod computer;
 mod fleet;
 mod js;
+mod keys;
 mod store;
 mod tools;
 mod turn;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::Arc;
 
-use fragment_core::{npub, secrets};
-use fragment_nip98::Keys;
+use fragment_core::npub;
 use fragment_proto::{limits, valid_channel_name, valid_fragment_name, valid_op_name, ErrorCode};
 use goose_provider_types::conversation::message::{Message, MessageContent};
 use serde::Deserialize;
@@ -232,14 +231,6 @@ fn var(env: &Env, name: &str) -> Option<String> {
     env.var(name).ok().map(|v| v.to_string().trim().to_string()).filter(|s| !s.is_empty())
 }
 
-fn host_secrets(env: &Env) -> Answer<Vec<String>> {
-    let all: Vec<String> = ["FRAGMENT_HOST_SECRET", "FRAGMENT_HOST_SECRET_PREVIOUS"].iter().filter_map(|n| var(env, n)).collect();
-    match all.first() {
-        Some(s) if s.len() >= secrets::HOST_SECRET_MIN_BYTES => Ok(all),
-        _ => Err(Fail::host("FRAGMENT_HOST_SECRET is not set on this fleet (at least 32 bytes)")),
-    }
-}
-
 fn unanswered(why: computer::Unanswered) -> Fail {
     match why {
         computer::Unanswered::Refused => Fail::invalid("the computer refused this token (it is in the file `fragment computer serve --token-file` names)"),
@@ -302,39 +293,20 @@ impl Agent {
     }
 
     /// A key proof by the agent's key for its registration, meant for `creator`.
-    fn registration_proof(&self, creator: &str) -> Answer<String> {
+    async fn registration_proof(&self, creator: &str) -> Answer<String> {
         let url = format!("{}/api/identities", fleet::base(&self.env)?);
-        Ok(self.keys()?.proof("POST", &url, creator, (js::now_ms() / 1000) as i64))
-    }
-
-    fn keys(&self) -> Answer<Arc<Keys>> {
-        let sql = self.sql();
-        let sealed = kv_get(&sql, "secret")?.ok_or_else(|| Fail::host("the agent has no key"))?;
-        let npub = kv_get(&sql, "npub")?.ok_or_else(|| Fail::host("the agent has no npub"))?;
-        let hosts = host_secrets(&self.env)?;
-        let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
-        let opened = secrets::open(&hosts, &npub, &sealed).map_err(|e| Fail::host(format!("the agent's key: {e}")))?;
-        let secret = String::from_utf8(opened.plaintext).map_err(|_| Fail::host("the agent's key is not text"))?;
-        Keys::from_secret_hex(&secret).map(Arc::new).ok_or_else(|| Fail::host("the agent's key is not a secp256k1 key"))
+        let proof = self.fleet()?.signer.sign(keys::Sign::Proof { method: "POST", url: &url, signer: creator }).await.map_err(Fail::host)?;
+        Ok(proof)
     }
 
     fn fleet(&self) -> Answer<Fleet> {
-        Ok(Fleet { base: fleet::base(&self.env)?, keys: self.keys()? })
+        Ok(Fleet { base: fleet::base(&self.env)?, signer: fleet::Signer { env: self.env.clone(), sql: self.sql() } })
     }
 
-    /// The attached computer, its token opened (sealed under the fleet's
-    /// host secret, salted with the agent's npub).
-    fn computer(&self) -> Answer<Option<Attached>> {
-        let sql = self.sql();
-        let Some(url) = kv_get(&sql, "computer_url")?.filter(|u| !u.is_empty()) else { return Ok(None) };
-        let sealed = kv_get(&sql, "computer_token")?.ok_or_else(|| Fail::host("the computer has no token"))?;
-        let npub = kv_get(&sql, "npub")?.unwrap_or_default();
-        let hosts = host_secrets(&self.env)?;
-        let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
-        let opened = secrets::open(&hosts, &format!("{npub}/computer"), &sealed).map_err(|e| Fail::host(format!("the computer's token: {e}")))?;
-        let token = String::from_utf8(opened.plaintext).map_err(|_| Fail::host("the computer's token is not text"))?;
-        let cwd = kv_get(&sql, "computer_cwd")?.unwrap_or_else(|| "work".into());
-        Ok(Some(Attached { computer: Computer { url, token }, cwd }))
+    /// The attached computer, its token opened by `KEYS` (sealed for this
+    /// agent cell alone).
+    async fn computer(&self) -> Answer<Option<Attached>> {
+        open_computer(&self.env, &self.sql()).await.map_err(Fail::host)
     }
 
     /// Attaches a computer once it answers with this token: its tools join
@@ -356,10 +328,8 @@ impl Agent {
         let c = Computer { url: url.clone(), token: body.token.clone() };
         let manifest = c.check().await.map_err(unanswered)?;
         let tools: Vec<String> = computer::tools_of(&manifest)?.iter().map(|t| t.name.to_string()).collect();
+        let sealed = keys::seal(&self.env, body.token.as_bytes()).await.map_err(Fail::host)?;
         let sql = self.sql();
-        let npub = kv_get(&sql, "npub")?.unwrap_or_default();
-        let hosts = host_secrets(&self.env)?;
-        let sealed = secrets::seal(&hosts[0], &format!("{npub}/computer"), body.token.as_bytes(), js::random_bytes()).map_err(Fail::host)?;
         kv_set(&sql, "computer_url", &url)?;
         kv_set(&sql, "computer_token", sealed)?;
         kv_set(&sql, "computer_cwd", &cwd)?;
@@ -385,7 +355,7 @@ impl Agent {
                 return Err(Fail::new(ErrorCode::AlreadyExists, format!("agent {} already exists", body.name)));
             }
             let get = |k: &str| kv_get(&sql, k).map(|v| v.unwrap_or_default());
-            return Ok(json!({ "name": get("name")?, "npub": get("npub")?, "model": get("model")?, "proof": self.registration_proof(principal)?, "replayed": true }));
+            return Ok(json!({ "name": get("name")?, "npub": get("npub")?, "model": get("model")?, "proof": self.registration_proof(principal).await?, "replayed": true }));
         }
         let model = body.model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
         if model.is_empty() || model.len() > MODEL_MAX {
@@ -395,15 +365,12 @@ impl Agent {
         if instructions.len() > INSTRUCTIONS_MAX {
             return Err(Fail::invalid(format!("instructions are at most {INSTRUCTIONS_MAX} bytes")));
         }
-        let hosts = host_secrets(&self.env)?;
-        let (secret, pubkey) = loop {
-            let secret = hex::encode(js::random_bytes::<32>());
-            if let Some(pubkey) = fragment_nip98::pubkey_of_secret(&secret) {
-                break (secret, pubkey);
-            }
-        };
+        // the key is made by KEYS: its secret never reaches this cell
+        let (pubkey, sealed) = keys::nostr_keypair(&self.env).await.map_err(Fail::host)?;
+        if kv_get(&sql, "created_at")?.is_some() {
+            return Err(Fail::new(ErrorCode::AlreadyExists, format!("agent {} already exists", body.name)));
+        }
         let agent_npub = npub::encode(&pubkey);
-        let sealed = secrets::seal(&hosts[0], &agent_npub, secret.as_bytes(), js::random_bytes()).map_err(Fail::host)?;
         for (k, v) in [
             ("name", body.name.as_str()),
             // who made it (a key), until the registry names its owner
@@ -416,7 +383,7 @@ impl Agent {
             kv_set(&sql, k, v)?;
         }
         kv_set(&sql, "created_at", js::now_ms())?;
-        Ok(json!({ "name": body.name, "npub": agent_npub, "model": model, "proof": self.registration_proof(principal)? }))
+        Ok(json!({ "name": body.name, "npub": agent_npub, "model": model, "proof": self.registration_proof(principal).await? }))
     }
 
     fn start_driver(&self, reason: &str) -> Answer<bool> {
@@ -434,23 +401,31 @@ impl Agent {
             token.cancel();
         }
         let fleet = self.fleet()?;
-        let driver = Driver {
+        let mut driver = Driver {
             storage: self.state.storage(),
             model,
             fleet: fleet.clone(),
             instructions,
-            computer: self.computer()?,
+            // opened as the turn starts (below)
+            computer: None,
             cancel: token.clone(),
             id: format!("{}:{reason}", self.booted_at),
         };
+        let env = self.env.clone();
         *self.cancel.borrow_mut() = Some(token);
         self.driving.set(true);
         let storage = self.state.storage();
         let driving = self.driving.clone();
         let cancel_slot = self.cancel.clone();
         self.state.wait_until(async move {
-            let mut outcome = turn::drive(driver).await;
             let sql = storage.sql();
+            let mut outcome = match open_computer(&env, &sql).await {
+                Ok(computer) => {
+                    driver.computer = computer;
+                    turn::drive(driver).await
+                }
+                Err(e) => Err(e),
+            };
             // a turn a channel started answers there
             if matches!(outcome, Ok("idle")) {
                 if let Err(error) = reply(&sql, &fleet).await {
@@ -697,7 +672,7 @@ impl Agent {
                     (Method::Post, "listen") => self.listen(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?).await,
                     (Method::Get, "tools") => {
                         let mut names = tools::list(self.fleet()?).await?;
-                        if let Some(attached) = self.computer()? {
+                        if let Some(attached) = self.computer().await? {
                             let manifest = attached.computer.check().await.map_err(unanswered)?;
                             names.extend(computer::tools_of(&manifest)?.iter().map(|t| t.name.to_string()));
                         }
@@ -712,6 +687,21 @@ impl Agent {
         }?;
         Ok(Response::from_json(&answer)?)
     }
+}
+
+/// The attached computer, its token opened by `KEYS` (sealed for this
+/// agent cell alone).
+async fn open_computer(env: &Env, sql: &worker::SqlStorage) -> anyhow::Result<Option<Attached>> {
+    let Some(url) = kv_get(sql, "computer_url")?.filter(|u| !u.is_empty()) else { return Ok(None) };
+    let sealed = kv_get(sql, "computer_token")?.ok_or_else(|| anyhow::anyhow!("the computer has no token"))?;
+    let npub = kv_get(sql, "npub")?.unwrap_or_default();
+    let opened = keys::open(env, &sealed, &format!("{npub}/computer")).await.map_err(|e| anyhow::anyhow!("the computer's token: {e}"))?;
+    if let Some(fresh) = opened.resealed {
+        kv_set(sql, "computer_token", fresh)?;
+    }
+    let token = String::from_utf8(opened.plaintext).map_err(|_| anyhow::anyhow!("the computer's token is not text"))?;
+    let cwd = kv_get(sql, "computer_cwd")?.unwrap_or_else(|| "work".into());
+    Ok(Some(Attached { computer: Computer { url, token }, cwd }))
 }
 
 /// Posts a channel-started turn's last answer to its fragment, through the

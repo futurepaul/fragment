@@ -133,12 +133,27 @@ pub fn abort_app_facet(ctx: &JsValue, reason: &str) -> CellResult<()> {
     Ok(())
 }
 
+/// A failure calling into the app facet: the author's, unless the node
+/// could not load the app at all. celld keeps at most 255 loaded workers
+/// per script and releases none until the node restarts
+/// (docs/hardening.md), so that one is the node's, and says so.
+fn facet_error(message: String) -> CellError {
+    if message.contains("too many loaded workers") {
+        CellError::new(
+            fragment_proto::ErrorCode::NodeFull,
+            "the node serving this fragment cannot load another app until it restarts (it holds as many as it can); try again later",
+        )
+    } else {
+        CellError::new(fragment_proto::ErrorCode::AppFailed, message)
+    }
+}
+
 impl Facet {
     /// Forwards a request to the facet's `fetch` (the author's custom routes).
     pub async fn fetch(&self, req: worker::Request) -> CellResult<worker::Response> {
         let raw = JsValue::from(req.inner());
-        let pending = call(&self.stub, "fetch", &[raw]).map_err(|e| CellError::new(fragment_proto::ErrorCode::AppFailed, js_message(&e)))?;
-        let out = settle(pending).await.map_err(|e| CellError::new(fragment_proto::ErrorCode::AppFailed, js_message(&e)))?;
+        let pending = call(&self.stub, "fetch", &[raw]).map_err(|e| facet_error(js_message(&e)))?;
+        let out = settle(pending).await.map_err(|e| facet_error(js_message(&e)))?;
         let resp: worker_sys::web_sys::Response =
             out.dyn_into().map_err(|_| CellError::new(fragment_proto::ErrorCode::AppFailed, "the app's fetch did not return a Response"))?;
         // The app's response has immutable headers; the platform adds its
@@ -152,12 +167,12 @@ impl Facet {
     }
 
     /// Calls a platform method on the facet (`__query`, `__mutate`). An
-    /// exception from author code comes back as `Err(message)`.
-    pub async fn call(&self, method: &str, args: &[serde_json::Value]) -> Result<serde_json::Value, String> {
+    /// exception from author code comes back as `AppFailed`.
+    pub async fn call(&self, method: &str, args: &[serde_json::Value]) -> CellResult<serde_json::Value> {
         let args: Vec<JsValue> = args.iter().map(to_js).collect();
-        let pending = call(&self.stub, method, &args).map_err(|e| js_message(&e))?;
-        let out = settle(pending).await.map_err(|e| js_message(&e))?;
-        from_js(&out)
+        let pending = call(&self.stub, method, &args).map_err(|e| facet_error(js_message(&e)))?;
+        let out = settle(pending).await.map_err(|e| facet_error(js_message(&e)))?;
+        from_js(&out).map_err(CellError::host)
     }
 }
 
@@ -251,6 +266,39 @@ pub async fn queue_send(env: &JsValue, binding: &str, bodies: &[serde_json::Valu
     Ok(())
 }
 
+/// POSTs `body` (JSON) to a service binding: (status, the answer's text).
+/// workers-rs 0.8.5 refuses celld's service stubs (its constructor is not
+/// named `Fetcher`), so this goes to the binding itself.
+pub async fn service_post(env: &JsValue, binding: &str, url: &str, body: &str) -> CellResult<(u16, String)> {
+    let service = get(env, binding)?;
+    if service.is_undefined() {
+        return Err(CellError::host(format!("this node has no {binding} binding (wrangler.jsonc `services`)")));
+    }
+    let headers = Object::new();
+    set(&headers, "content-type", "application/json");
+    let init = Object::new();
+    set(&init, "method", "POST");
+    set(&init, "headers", headers);
+    set(&init, "body", body);
+    let resp = await_js(call(&service, "fetch", &[url.into(), init.into()]), binding).await?;
+    let status = get(&resp, "status")?.as_f64().unwrap_or(0.0) as u16;
+    let text = await_js(call(&resp, "text", &[]), binding).await?.as_string().unwrap_or_default();
+    Ok((status, text))
+}
+
+/// The Worker variables in `env` (its string values): the e2e checks that
+/// no fleet secret is one (a test hook).
+pub fn env_vars(env: &JsValue) -> CellResult<serde_json::Map<String, serde_json::Value>> {
+    let mut out = serde_json::Map::new();
+    for key in Reflect::own_keys(env).map_err(|e| CellError::host(js_message(&e)))?.iter() {
+        let Some(name) = key.as_string() else { continue };
+        if let Some(value) = get(env, &name)?.as_string() {
+            out.insert(name, serde_json::Value::String(value));
+        }
+    }
+    Ok(out)
+}
+
 /// Stores bytes at `key`.
 pub async fn blob_put_bytes(env: &JsValue, key: &str, bytes: &[u8]) -> CellResult<()> {
     let data = js_sys::Uint8Array::from(bytes);
@@ -326,7 +374,9 @@ pub fn now_ms() -> i64 {
     js_sys::Date::now() as i64
 }
 
-/// Cryptographically random bytes (`crypto.getRandomValues`).
+/// Cryptographically random bytes. celld's `crypto.getRandomValues` fills
+/// the buffer from the OS in a host op (`getrandom`, its
+/// `op_webcrypto_random`), the same source `KEYS` draws from.
 pub fn random_bytes<const N: usize>() -> [u8; N] {
     let crypto = Reflect::get(&js_sys::global(), &JsValue::from_str("crypto")).expect("globalThis.crypto");
     let buf = js_sys::Uint8Array::new_with_length(N as u32);

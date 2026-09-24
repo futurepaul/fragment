@@ -1,0 +1,9 @@
+{
+  "name": "hoard",
+  "operations": {
+    "add": { "kind": "mutation", "role": "editor" },
+    "sneak": { "kind": "query", "role": "editor" },
+    "size": { "kind": "query", "role": "viewer" },
+    "empty": { "kind": "mutation", "role": "editor" }
+  }
+}

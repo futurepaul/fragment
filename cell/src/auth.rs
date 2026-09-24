@@ -25,7 +25,7 @@
 
 use fragment_core::{npub, site};
 use fragment_proto::ErrorCode;
-use serde_json::{json, Value};
+use serde_json::json;
 use worker::*;
 
 use crate::config::Config;
@@ -211,16 +211,6 @@ async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>) -> Cell
     redirect(&to, &[set_cookie(LOGIN_COOKIE, state, "/auth", 600, secure(url))])
 }
 
-/// The `sid` claim of an access token WorkOS answered the exchange with
-/// (read, not trusted from a browser: it came from WorkOS over TLS).
-fn sid_of(access_token: &str) -> Option<String> {
-    use base64::Engine;
-    let payload = access_token.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?;
-    let claims: Value = serde_json::from_slice(&bytes).ok()?;
-    claims["sid"].as_str().map(str::to_string)
-}
-
 async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
     let workos = cfg.workos()?;
     if let Some(error) = query(url, "error") {
@@ -233,28 +223,8 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
         return page(400, "Sign-in did not start here", "<p>This sign-in began in another browser, or too long ago.</p><p><a href=\"/auth/login\">Start again</a></p>");
     }
     let code = query(url, "code").ok_or_else(|| CellError::invalid("the callback carries no code"))?;
-    let body = json!({ "client_id": workos.client_id, "client_secret": workos.api_key, "grant_type": "authorization_code", "code": code });
-    let headers = Headers::new();
-    headers.set("content-type", "application/json")?;
-    let mut init = RequestInit::new();
-    init.with_method(Method::Post).with_headers(headers).with_body(Some(body.to_string().into()));
-    let exchange = Request::new_with_init(&format!("{}/user_management/authenticate", workos.api), &init)?;
-    let mut resp = Fetch::Request(exchange).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS did not answer: {e}")))?;
-    let status = resp.status_code();
-    let answer: Value = resp.json().await.unwrap_or(Value::Null);
-    if status != 200 {
-        let why = answer["error_description"].as_str().or(answer["message"].as_str()).unwrap_or("no reason given");
-        return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS refused the sign-in ({status}): {why}")));
-    }
-    let subject = answer["user"]["id"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "WorkOS answered no user id"))?;
-    let email = answer["user"]["email"].as_str().unwrap_or("");
-    let sid = answer["access_token"].as_str().and_then(sid_of);
-    let done = ask_registry(
-        env,
-        "/login/finish",
-        &json!({ "state": state, "issuer": workos.issuer(), "subject": subject, "email": email, "workosSid": sid }),
-    )
-    .await?;
+    // the registry exchanges the code: WorkOS's API key is the node's (KEYS)
+    let done = ask_registry(env, "/login/exchange", &json!({ "state": state, "code": code, "clientId": workos.client_id, "issuer": workos.issuer() })).await?;
     let token = done["token"].as_str().ok_or_else(|| CellError::host("the registry answered no session"))?;
     let back = safe_return(done["returnTo"].as_str().map(str::to_string));
     redirect(

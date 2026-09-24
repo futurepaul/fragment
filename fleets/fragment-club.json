@@ -21,12 +21,14 @@
     "FRAGMENT_PUSH_SUBJECT": "https://fragment.club",
     "FRAGMENT_OPERATORS": "npub1w352vpm92yvdlar2vunk8ctjrz609jwtdf8svfr3hnequ52agv9qeqf9h2"
   },
-  "secret_vars": {
-    "FRAGMENT_HOST_SECRET": "~/.config/finite-next/secrets/fragment-club-host-secret",
-    "CODESTORAGE_PRIVATE_KEY": "~/.config/finite-next/secrets/codestorage-private-key.pem",
-    "WORKOS_CLIENT_ID": "~/.config/finite-next/secrets/fragment-workos-client-id",
-    "WORKOS_API_KEY": "~/.config/finite-next/secrets/fragment-workos-api-key",
-    "OPENROUTER_MANAGEMENT_KEY": "~/.config/finite-next/secrets/openrouter-management-key"
+  "var_files": {
+    "WORKOS_CLIENT_ID": "~/.config/finite-next/secrets/fragment-workos-client-id"
+  },
+  "node_secrets": {
+    "FRAGMENT_KEYS_HOST_SECRET": "~/.config/finite-next/secrets/fragment-club-host-secret",
+    "FRAGMENT_KEYS_CODESTORAGE_PRIVATE_KEY": "~/.config/finite-next/secrets/codestorage-private-key.pem",
+    "FRAGMENT_KEYS_WORKOS_API_KEY": "~/.config/finite-next/secrets/fragment-workos-api-key",
+    "FRAGMENT_KEYS_OPENROUTER_MANAGEMENT_KEY": "~/.config/finite-next/secrets/openrouter-management-key"
   },
   "e2e": {
     "key": "~/.config/finite-next/secrets/fragment-club-e2e-key",

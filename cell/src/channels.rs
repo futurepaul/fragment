@@ -193,7 +193,10 @@ impl FragmentCell {
         if self.swept.get() {
             return Ok(());
         }
-        let answer = facet.call("__recent", &[SWEEP_ROWS.into()]).await.map_err(|m| CellError::host(format!("sweep: {m}")))?;
+        let answer = facet.call("__recent", &[SWEEP_ROWS.into()]).await.map_err(|e| match e.code {
+            ErrorCode::NodeFull => e,
+            _ => CellError::host(format!("sweep: {}", e.message)),
+        })?;
         let rows = answer["result"].as_array().cloned().unwrap_or_default();
         let mut applied = 0;
         for row in rows.iter().rev() {

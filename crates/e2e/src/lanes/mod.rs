@@ -11,6 +11,8 @@ mod control;
 mod deliver;
 mod identities;
 mod jobs;
+mod keys;
+mod limits;
 mod members;
 mod notes;
 mod plane;
@@ -28,6 +30,7 @@ pub fn run(s: &mut Suite, api: Api) -> Result<()> {
     control::auth(s, &api)?;
     control::create(s, &api)?;
     control::lockdown(s, &api)?;
+    keys::keys(s, &api)?;
     members::members(s, &api)?;
     identities::identities(s, &api)?;
     signin::signin(s, &api)?;
@@ -36,6 +39,8 @@ pub fn run(s: &mut Suite, api: Api) -> Result<()> {
     plane::deploy(s, &api)?;
     app::ops(s, &api)?;
     app::public(s, &api)?;
+    limits::facet_cap(s, &api)?;
+    limits::lockdown(s, &api)?;
     site::site(s, &api)?;
     site::watch(s, &api)?;
     author::schemas(s, &api)?;
@@ -58,5 +63,6 @@ pub fn run(s: &mut Suite, api: Api) -> Result<()> {
     sync::folder_sync(s, &api)?;
     let api = restart::restart(s, api)?;
     restart::pathmode(s, api)?;
+    limits::node_full(s)?;
     Ok(())
 }

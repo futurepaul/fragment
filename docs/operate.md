@@ -10,18 +10,28 @@ paths of files that hold them, all under `~/.config/finite-next/secrets/`).
 - **Fly app `fragment-club`** (org `personal`, region `ord`): two
   `shared-cpu-2x` 2 GB Machines, each with a 3 GB volume `celld_data` at
   `/data`. Each runs the node image: the celld fork at the rev in
-  `crates/devstack` (`CELLD_FORK_REV`: v0.5.1, the alarm fix, and
-  public-only Worker egress) and `fragment-node` (`crates/node`), which
-  binds celld's peer listener to the Machine's private address
+  `crates/devstack` (`CELLD_FORK_REV`: v0.5.1, the alarm fix, public-only
+  Worker egress, and the hardening pass: `KEYS` built in from
+  `crates/native`) and `fragment-node` (`crates/node`), which binds
+  celld's peer listener to the Machine's private address
   (`[fdaa:…]:8081`, never a Fly service) and pairs the volume with the
-  bucket for life (`/data/bucket`). `CELLD_EGRESS_PUBLIC_ONLY=1` (in the
-  rendered fly.toml) keeps every Worker fetch off the private network.
+  bucket for life (`/data/bucket`). The rendered fly.toml turns on the
+  fork's settings: `CELLD_EGRESS_PUBLIC_ONLY=1` keeps every Worker fetch
+  off the private network, `CELLD_INTERNAL_PEER_ONLY=1` has the internal
+  listener serve only fleet-signed peers, `CELLD_DYNAMIC_LOCKDOWN=1` and
+  `CELLD_FACET_MAX_BYTES` bound what an app can do (docs/hardening.md).
+- **The fleet's secrets** (the host secret, the code.storage org key,
+  the WorkOS API key, the OpenRouter management key) are Fly secrets on
+  the app, `FRAGMENT_KEYS_*`: the node's environment, read only by `KEYS`.
+  `cargo xtask deploy --nodes` stages them from the files the fleet file's
+  `node_secrets` names, before it rolls the Machines.
 - **Bucket `fragment-club-ord`** (Tigris, single-region `ord`): the
   deployments, every cell's replicas, the node leases, the peer secret,
   and blobs under `r2/`. Its keys are Fly secrets on the app (the nodes)
   and `fragment-club-bucket.env` (the operator). **Whoever holds them
-  controls the fleet**, including the Worker variables (the host secret,
-  the code.storage key), which celld 0.5.1 keeps in the deployment.
+  controls the fleet** (they can deploy code). The Worker variables in
+  each deployment hold no secret since the hardening pass; the
+  deployments before it do (docs/technical-debt-ledger.md).
 - **code.storage org `finite`**: one repo per fragment, named after it.
 - **DNS** at Namecheap: `fragment.club` and `*.fragment.club` to the app
   (A `66.241.125.20`, AAAA `2a09:8280:1::199:8a1c:0`), and
@@ -52,22 +62,31 @@ cargo xtask fleet fragment-club cell list   # the fleet's Durable Objects
 
 ## Changing configuration
 
-Worker variables live in the fleet file (`vars`, or `secret_vars` for
-file-held values). Edit it, then `cargo xtask deploy fragment-club`.
-Budgets (phase 4 slice C): `OPENROUTER_MANAGEMENT_KEY` in
-`secret_vars` mints each person's OpenRouter key; `FRAGMENT_BUDGET_USD`
-(default 20) and `FRAGMENT_OPERATORS` (who may top up: `fragment budget
-top-up <id> <usd>`) in `vars`.
+Worker variables live in the fleet file (`vars`, or `var_files` for
+values kept out of the repo that are not secret). Edit it, then `cargo
+xtask deploy fragment-club`; the deploy refuses a variable that is a
+fleet secret, by name or by value. The fleet's secrets are `node_secrets`
+(file paths): change one by editing its file (or the entry), then `cargo
+xtask deploy fragment-club --nodes`, which stages them as Fly secrets and
+rolls the Machines. Budgets (phase 4 slice C):
+`FRAGMENT_KEYS_OPENROUTER_MANAGEMENT_KEY` in `node_secrets` mints each
+person's OpenRouter key; `FRAGMENT_BUDGET_USD` (default 20) and
+`FRAGMENT_OPERATORS` (who may top up: `fragment budget top-up <id>
+<usd>`) in `vars`.
 
-Sign-in is WorkOS (phase 4 slice B): `WORKOS_CLIENT_ID` in `vars`,
-`WORKOS_API_KEY` in `secret_vars`; the environment's redirect URI is
-`https://fragment.club/auth/callback`. Only people create fragments, and
-sign-up is off in WorkOS, so everyone who can sign in was invited there.
+Sign-in is WorkOS (phase 4 slice B): `WORKOS_CLIENT_ID` in `var_files`,
+`FRAGMENT_KEYS_WORKOS_API_KEY` in `node_secrets`; the environment's
+redirect URI is `https://fragment.club/auth/callback`. Only people create
+fragments, and sign-up is off in WorkOS, so everyone who can sign in was
+invited there.
 
-Rotating the host secret: move the current value to
-`FRAGMENT_HOST_SECRET_PREVIOUS` (a new `secret_vars` entry), put a new one
-in the host-secret file, deploy. Sealed values open under either and are
-resealed as they are read.
+Rotating the host secret: add `FRAGMENT_KEYS_HOST_SECRET_PREVIOUS` to
+`node_secrets` pointing at a copy of the current value, put a new one in
+the host-secret file, `cargo xtask deploy fragment-club --nodes`. Sealed
+values open under either and come back resealed as they are read.
+
+A deployment that changes both the cell and `KEYS`: nodes first (the old
+cell keeps working on them), then the cell.
 
 ## Bringing a fleet up (what was done for fragment-club)
 

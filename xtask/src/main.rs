@@ -68,23 +68,34 @@ fn build() -> Result<()> {
     run(Command::new("worker-build").arg("--release").current_dir(devstack::agent_dir()))
 }
 
+/// Builds the pinned fork. Its seam builds our native services
+/// (crates/native) from a fragment-next checkout beside it named
+/// `fragment/`: here, a link to this repository, so the node's `KEYS` is
+/// always this tree's. `CELLD_FORK_DIR` names a local clone of the fork to
+/// fetch the pinned commit from before it is pushed.
 fn celld() -> Result<()> {
     let root = devstack::repo_root().join("target/celld");
     let src = root.join("src");
-    let stamp = root.join("bin/REV");
-    if std::fs::read_to_string(&stamp).ok().as_deref() == Some(devstack::CELLD_FORK_REV) && devstack::fork_celld_path().is_file() {
-        println!("celld fork {} is built", &devstack::CELLD_FORK_REV[..7]);
-        return Ok(());
+    std::fs::create_dir_all(&root)?;
+    let beside = root.join("fragment");
+    if std::fs::symlink_metadata(&beside).is_err() {
+        std::os::unix::fs::symlink("../..", &beside).context("link target/celld/fragment to this repository")?;
     }
     if !src.join(".git").is_dir() {
         run(Command::new("git").args(["clone", "--quiet", devstack::CELLD_FORK_URL]).arg(&src))?;
     }
-    run(Command::new("git").args(["fetch", "--quiet", "origin"]).current_dir(&src))?;
-    run(Command::new("git").args(["checkout", "--quiet", "--detach", devstack::CELLD_FORK_REV]).current_dir(&src))?;
-    run(Command::new("cargo").args(["build", "--release", "-p", "celld"]).current_dir(&src))?;
+    let head = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&src).output()?;
+    if String::from_utf8_lossy(&head.stdout).trim() != devstack::CELLD_FORK_REV {
+        match std::env::var_os("CELLD_FORK_DIR") {
+            Some(dir) => run(Command::new("git").args(["fetch", "--quiet"]).arg(&dir).arg("+refs/heads/*:refs/remotes/local/*").current_dir(&src))?,
+            None => run(Command::new("git").args(["fetch", "--quiet", "origin"]).current_dir(&src))?,
+        }
+        run(Command::new("git").args(["checkout", "--quiet", "--detach", devstack::CELLD_FORK_REV]).current_dir(&src))?;
+    }
+    // every time: our crates in it may have changed (a no-op build is quick)
+    run(Command::new("cargo").args(["build", "--release", "--locked", "-p", "celld"]).current_dir(&src))?;
     std::fs::create_dir_all(root.join("bin"))?;
     std::fs::copy(src.join("target/release/celld"), devstack::fork_celld_path())?;
-    std::fs::write(&stamp, devstack::CELLD_FORK_REV)?;
     println!("celld fork {} built", &devstack::CELLD_FORK_REV[..7]);
     Ok(())
 }
@@ -124,7 +135,7 @@ fn dev(args: &[String]) -> Result<()> {
         Some(u) => format!("{u} (the fake)"),
         None => format!("WorkOS {}", workos.client_id),
     };
-    devstack::Fleet {
+    let node_env = devstack::Fleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
         codestorage_org: DEV_ORG.into(),
         codestorage_key_pem: key,
@@ -146,15 +157,15 @@ fn dev(args: &[String]) -> Result<()> {
         operators: None,
         test_hooks: false,
     }
-    .write_vars(&devstack::cell_dir())?;
-    let opts = devstack::NodeOptions { project: devstack::cell_dir(), port: DEV_PORT, clean, watch: true, env: vec![] };
+    .configure(&devstack::cell_dir())?;
+    let opts = devstack::NodeOptions { project: devstack::cell_dir(), port: DEV_PORT, clean, watch: true, env: node_env };
     let (node, took) = devstack::Node::start(&tools, &opts)?;
     // agents act on the dev fragments; their model key is a file's (never the repo's)
     let model_key = match std::env::var_os("OPENROUTER_API_KEY_FILE") {
         Some(path) => std::fs::read_to_string(&path).with_context(|| format!("reading {}", Path::new(&path).display()))?.trim().to_string(),
         None => "unset: point OPENROUTER_API_KEY_FILE at a key file".to_string(),
     };
-    devstack::AgentFleet {
+    let agent_env = devstack::AgentFleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
         fragment_api: format!("http://127.0.0.1:{DEV_PORT}"),
         agent_url: format!("http://127.0.0.1:{DEV_AGENT_PORT}"),
@@ -163,8 +174,8 @@ fn dev(args: &[String]) -> Result<()> {
         test_hooks: false,
         egress_local: true,
     }
-    .write_vars(&devstack::agent_dir())?;
-    let agent_opts = devstack::NodeOptions { project: devstack::agent_dir(), port: DEV_AGENT_PORT, clean, watch: true, env: vec![] };
+    .configure(&devstack::agent_dir())?;
+    let agent_opts = devstack::NodeOptions { project: devstack::agent_dir(), port: DEV_AGENT_PORT, clean, watch: true, env: agent_env };
     let (agents, _) = devstack::Node::start(&tools, &agent_opts)?;
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
     println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");

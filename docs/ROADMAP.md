@@ -156,7 +156,7 @@ a computer's wake/exec.
 | Browser sessions | platform session cookie (platform origin only) | maps to one identity key; re-checked against grants per request |
 | Agent conversations and turns | the agent's cell (goose's conversation in SQL) | a computer holds a working copy and a tool journal; effects dedupe at their owners by tool-call id |
 | Computer disks | Sprites durable storage | the front door's registry records ownership only |
-| Secrets (personal, fragment, host, OpenRouter, code.storage, Sprites) | the owning cell, encrypted; fleet secrets in the deployed config (`docs/secrets.md`) | never in a repo, a bucket in plaintext, a log, a command line, or a computer's disk; computers use Sprites connectors |
+| Secrets (personal, fragment, host, OpenRouter, code.storage, Sprites) | the owning cell, encrypted by the node's `KEYS` for that cell alone; fleet secrets in the node's environment, used only by `KEYS` (`docs/secrets.md`, `docs/hardening.md`) | never in a repo, a bucket in plaintext, a log, a command line, or a computer's disk; computers use Sprites connectors |
 | Compute/audit trail | the `events` channel | webhook deliveries recorded as events, deduped by delivery key |
 
 Hard rule kept: **no file bytes persist in cell SQLite.** File bytes live

@@ -18,6 +18,10 @@
       { "queue": "fragment-deliveries-dead", "max_batch_timeout": 1 }
     ]
   },
+  // The node's keys (crates/native, docs/hardening.md H1): sealing, the
+  // code.storage JWT, WorkOS's exchange, OpenRouter's key API. Needs our
+  // celld fork, which routes `native:*` targets to that crate.
+  "services": [{ "binding": "KEYS", "service": "native:keys" }],
   "durable_objects": {
     "bindings": [
       { "name": "FRAGMENT", "class_name": "Fragment" },

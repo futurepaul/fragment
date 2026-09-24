@@ -13,7 +13,10 @@
 //! Tokens and states are 32 random bytes; the cell keeps their SHA-256.
 //!
 //!   POST /login/begin   {returnTo, linkTo?}                 → {state}
-//!   POST /login/finish  {state, issuer, subject, email, workosSid?} → {token, id, created, linked, returnTo}
+//!   POST /login/exchange {state, code, clientId, issuer}    → {token, id, created, linked, returnTo}:
+//!                                                            WorkOS's code exchanged through KEYS
+//!                                                            (the API key is the node's), then the
+//!                                                            sign-in finished
 //!   POST /session       {token, fragment?}                  → {id, kind, owner} (401 when not live)
 //!   POST /logout        {token}                             → {workosSid}
 //!   POST /redeem/mint   {token, fragment, returnTo}         → {redeem}
@@ -70,6 +73,23 @@ pub(super) struct Begin {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct Exchange {
+    state: String,
+    code: String,
+    client_id: String,
+    issuer: String,
+}
+
+/// The `sid` claim of an access token WorkOS answered the exchange with
+/// (read, not trusted from a browser: it came from WorkOS over TLS).
+fn sid_of(access_token: &str) -> Option<String> {
+    use base64::Engine;
+    let payload = access_token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?;
+    let claims: Value = serde_json::from_slice(&bytes).ok()?;
+    claims["sid"].as_str().map(str::to_string)
+}
+
 pub(super) struct Finish {
     state: String,
     issuer: String,
@@ -184,7 +204,28 @@ impl RegistryCell {
         Ok(json!({ "state": state }))
     }
 
-    pub(super) fn finish(&self, b: Finish) -> CellResult<Value> {
+    /// WorkOS's code, exchanged by `KEYS` for the Registry, then the sign-in
+    /// finished. A code is single-use at WorkOS; the state here.
+    pub(super) async fn exchange(&self, b: Exchange) -> CellResult<Value> {
+        if b.state.is_empty() || b.code.is_empty() || b.client_id.is_empty() {
+            return Err(CellError::invalid("an exchange names its state, code, and client"));
+        }
+        let (status, answer) = crate::keys::workos_authenticate(&self.env, &b.client_id, &b.code).await?;
+        if status != 200 {
+            let why = answer["error_description"].as_str().or(answer["message"].as_str()).unwrap_or("no reason given");
+            return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS refused the sign-in ({status}): {why}")));
+        }
+        let subject = answer["user"]["id"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "WorkOS answered no user id"))?;
+        self.finish(Finish {
+            state: b.state,
+            issuer: b.issuer,
+            subject: subject.to_string(),
+            email: answer["user"]["email"].as_str().unwrap_or("").to_string(),
+            workos_sid: answer["access_token"].as_str().and_then(sid_of),
+        })
+    }
+
+    fn finish(&self, b: Finish) -> CellResult<Value> {
         if b.issuer.is_empty() || b.subject.is_empty() || b.email.len() > EMAIL_MAX {
             return Err(CellError::invalid("a sign-in names its issuer and subject"));
         }
@@ -314,7 +355,6 @@ impl RegistryCell {
     pub(super) fn route_signin(&self, path: &str, body: Value) -> CellResult<Option<Value>> {
         Ok(Some(match path {
             "/login/begin" => self.begin(from(body)?)?,
-            "/login/finish" => self.finish(from(body)?)?,
             "/session" => self.session(from(body)?)?,
             "/logout" => self.logout(from(body)?)?,
             "/redeem/mint" => self.mint(from(body)?)?,

@@ -1,137 +1,172 @@
-# Hardening pass (proposed)
+# Hardening pass
 
-Status: **proposed 2026-09-24, before building more on phase 4's
-abstractions.** Paul asked for it once fragment.club was live: keys out
-of JavaScript, and the isolation findings acted on. Sources: the native
-services spike (`spike/native-services`, cd1d6d8, its README), and the
-two isolation spikes (`spike/cell-isolation` 35c51f1; `spike/isolation`
-dadbadb, the zcode session `sess_8a882b9c…`), both run 2026-09-23 against
-celld 0.5.1 with our fork.
+Status: **H1–H3 built and proven locally on 2026-09-24**, on Paul's go
+("proceed with h1-h4"). **Not deployed:** the node image deploy, the Fly
+secrets, the bucket clean-up, and H4 are Paul's to approve (below). The
+celld fork is branch `hardening` at `2779418` in
+`celld-worktrees/hardening`, **not yet pushed** to futurepaul/celld (the
+node image clones it from there). Sources: the native services spike
+(`spike/native-services`, cd1d6d8), and the two isolation spikes
+(`spike/cell-isolation` 35c51f1; `spike/isolation` dadbadb).
 
-## Where each finding stands today
+## Where each finding stands
 
-| Finding | State on fragment.club | Where |
+| Finding | State (in code) | Where |
 |---|---|---|
-| Tenants with identical app source shared one V8 realm | **fixed** (one loaded worker per fragment) | `cell/src/ops.rs` |
-| A supervisor fetch could reach celld's internal listener or 6PN (SSRF; `/do/<scope>` answered with forged principal headers, confirmed live) | **mitigated** by the fork's public-only egress (`CELLD_EGRESS_PUBLIC_ONLY`, phase 3 slice E; the hosted e2e checks loopback and 6PN) | fork `cd3a68b` |
-| celld's internal listener has **no auth** (`/state`, `/do`, `/evict`, `/shutdown`) | **open**: it listens on the fleet's private network (8081), which every app in the Fly org can reach | fork, Tier 1 |
-| Fleet secrets are Worker `vars`: literals in every isolate's generated source, and plaintext in the deployment manifest in the bucket | **open, and grew in phase 4**: now also `WORKOS_API_KEY` and `OPENROUTER_MANAGEMENT_KEY` | debt ledger "The fleet's secrets live in the bucket" |
-| Key material handled in wasm/JS heaps: the host secret (sealing), the code.storage org key (JWTs), each agent's nostr key (NIP-98 signing), session and token generation | **open** | `secrets.rs`, `cs.rs`, `agent/`, `registry/signin.rs` |
-| A facet's SQLite has no size cap in celld (grew to 42 MB in the probe) | **open**: the 16 MiB cap is decided, not enforced | Tier 0 |
-| One node allows 255 loaded workers per (script, generation), never released; one tenant can exhaust it and brick every other app (confirmed live) | **open**: with one loaded worker per fragment, a node holding more than 255 fragments' apps stops loading new ones | Tier 0 and fork |
-| Code generation from strings (`eval`, `new Function`, Wasm from bytes), `SharedArrayBuffer`, `Atomics.wait` in facets | **open** | fork, Tier 1 |
-| No hard heap cap per isolate (a facet can grow the node to OOM) | **open** | fork, Tier 1 |
-| Facet egress (`globalOutbound: null`), CPU limits, SQL authorizer, frozen clocks | fine | — |
+| Tenants with identical app source shared one V8 realm | fixed (phase 4: one loaded worker per fragment) | `cell/src/ops.rs` |
+| A supervisor fetch could reach celld's internal listener or 6PN (SSRF) | mitigated since phase 3 (`CELLD_EGRESS_PUBLIC_ONLY`); **now also closed at the listener** | fork `cd3a68b`, `2779418` |
+| celld's internal listener has no auth (`/state`, `/do`, `/evict`, `/shutdown`) | **fixed**: `CELLD_INTERNAL_PEER_ONLY=1` serves only the fleet-signed routes (`/peer/*`, `/runtime/`) | fork `2779418` |
+| Fleet secrets are Worker `vars` (in every isolate, and in the manifest in the bucket) | **fixed**: they are the node's environment (Fly secrets), read only by `KEYS`; a cell deploy refuses a var that holds one. The old deployments' manifests still hold them (debt ledger) | `crates/native`, `xtask/src/deploy.rs` |
+| Key material in wasm/JS heaps (sealing, the code.storage key, agents' nostr keys) | **fixed** for the fleet's keys and the agents' and fragments' own keys; tenant secrets (a fragment's `{{NAME}}`, an org's OpenRouter key, a VAPID key, a computer's token) still open in the cell at the egress point, now only for the cell that sealed them | `cell/src/keys.rs`, `agent/src/keys.rs` |
+| A facet's SQLite has no size cap | **fixed**: 16 MiB per app (a mutation past it rolls back, 507), and the node's hard stop 4 MiB above | `cell/platform.mjs`, fork `cbea45e` |
+| 255 loaded workers per node, never released; one tenant can fill a node | **visible**: the next app answers 503 `node_full` and the rest serve on. Release is not built (debt ledger) | `cell/src/js.rs`, fork `c4d64a9` |
+| Code generation from strings, `Atomics.wait` in facets | **fixed**: `CELLD_DYNAMIC_LOCKDOWN=1` | fork `c4d64a9` |
+| No hard heap cap per isolate | **fixed** for the V8 heap: past twice its limit (128 MiB) an isolate's execution ends; ArrayBuffer memory is still uncounted (debt ledger) | fork `c4d64a9` |
+| Facet egress, CPU limits, SQL authorizer, frozen clocks | fine | — |
 
-On "JS in a secure random path": `crypto.getRandomValues` is workerd's
-native generator (BoringSSL) behind a JS name, so the randomness itself
-is not computed in JavaScript. What is exposed is where the results and
-the long-lived keys *live*: in isolate heaps and in the manifest. The
-steps below remove both.
+## What was built
 
-## The plan, in order
+### H1. `KEYS`, a native service in our celld fork
 
-**H1. `KEYS`, a native service in our celld fork** (the spike's seam:
-12 lines in 4 upstream files plus `native_seam.rs`; our code in
-`crates/native`, depending on `fragment-core`).
-- Rebase the seam from the spike's base (`b5f57ea`) onto our current
-  fork (`cd3a68b`, egress/public-only).
-- Fleet secrets move from `vars` to the node's environment (Fly
-  secrets): the host secret, the code.storage org key, the WorkOS API
-  key, the OpenRouter management key. They leave every isolate and the
-  bucket's manifest.
-- The cell asks `KEYS`, which knows the calling cell (the host attests
-  it; JS cannot forge it), for: sealing and opening (salted with the
-  caller), code.storage JWTs (checked against the fragment's own repo),
-  random tokens and ids (sessions, redemptions, agent keys), and a small
-  set of credentialed calls with fixed hosts (WorkOS's code exchange,
-  OpenRouter's key API), so no JS holds those keys even briefly.
-- Agents' keys: generated and held by `KEYS` (sealed to the agent's
-  cell); the agent cell asks `KEYS` to sign each NIP-98 header.
-- workers-rs refuses celld's service stubs (`Fetcher` name check): a
-  few lines of JS glue in `entry.mjs`, or the one-line upstream fix.
-- Numbers from the spike: a `KEYS` call ~55–70 µs from a cell; an ES256
-  JWT 184 µs natively vs 320 µs in the isolate.
-- Needs Paul: a node image rebuild and rolling deploy, and the Fly
-  secrets set (the fleet file names which files hold them).
+- **The seam** (fork `ddd220d`, `6a194d5`): a service binding whose
+  target is `native:<name>` is answered by `crates/native` instead of a
+  script, with the calling cell's scope as the host attests it (JS cannot
+  claim another cell's). celld builds our crate from fragment-next checked
+  out beside the fork as `fragment/` (`cargo xtask celld` links it; the
+  node image copies it there).
+- **`KEYS`** (`crates/native/src/keys.rs`, 12 host tests): only a cell may
+  call. It seals and opens values for the caller alone (`w2`, salted with
+  the attested scope; `w1` values sealed before `KEYS` open when the
+  caller names their old salt, and come back resealed), makes nostr keys
+  and signs NIP-98 headers and key proofs with them, signs code.storage
+  JWTs (for `Fragment` cells), makes WorkOS's code exchange (for the
+  `Registry`; the answer's refresh token is dropped), and calls
+  OpenRouter's key API (for `Ledger` cells). Its keys come from
+  `FRAGMENT_KEYS_*` in the node's environment.
+- **The cell** asks `KEYS` for all of that (`cell/src/keys.rs`, through
+  `js::service_post`: workers-rs refuses celld's service stubs). The
+  WorkOS exchange moved from the router into the registry
+  (`/login/exchange`). A fragment's own key is made by `KEYS` (the create
+  body lost `fragmentSecret`). `fragment_core::secrets` keeps only the
+  `{{NAME}}` parser.
+- **The agent** (`agent/src/keys.rs`): its nostr key is made by `KEYS`
+  and signs there (`Signer` in `agent/src/fleet.rs`); its computer's
+  token is sealed for it.
+- **Fleet config:** the fleet file's `secret_vars` became `node_secrets`
+  (Fly secrets, `FRAGMENT_KEYS_*`, staged by `deploy --nodes` from stdin,
+  values never printed) and `var_files` (WorkOS's client id, not secret).
+  `cargo xtask deploy` refuses a Worker variable that is a fleet secret by
+  name or value (a unit test). dev and the e2e pass the same settings to
+  the node's environment (`devstack`).
+- **Randomness stays with `crypto.getRandomValues`.** Paul asked for no JS
+  in a secure random path. celld's `getRandomValues` is a host op,
+  `op_webcrypto_random` → `getrandom::fill`: the same OS source `KEYS`
+  would use, reached through the same kind of JS binding a `KEYS` call
+  is. Routing tokens through `KEYS` would add a hop without changing where
+  the bytes come from, so it was dropped from the plan; the doc comments
+  on `js::random_bytes` say so. Keys that must never be in a heap
+  (fragments' and agents' nostr keys) are made in `KEYS`.
+- **Deviation from the plan:** a code.storage token is not tied to the
+  fragment's own repo. Repo ids are opaque, and supervisors share a V8
+  context (up to 32 cells), so binding it would not stop a compromised
+  context. It is in the debt ledger with its delete condition.
 
-**H2. Tier 0, platform rules (no fork).**
-- Enforce the 16 MiB app-facet cap: refuse a mutation that would pass
-  it, with a test.
-- The loaded-worker budget: count loaded fragments per node generation;
-  until the fork can release workers (H3), cap it and fail visibly (a
-  clear 503 "this node is full") instead of bricking other fragments.
-- Audit that every hop overwrites identity headers (the router already
-  passes an allowlist; recheck the agent service and deliveries).
+### H2. Platform rules
 
-**H3. Tier 1, the fork (mechanical, upstreamable where possible).**
-- Authenticate the internal listener (a shared HMAC from the node's
-  environment, or a unix socket for local operator commands).
-- Loaded workers: no code generation from strings, no
-  `SharedArrayBuffer`, no `Atomics.wait` (V8 flags for loaded workers).
-- A hard heap cap that ends the isolate, not the node.
-- Release memoized loaded workers (per-tenant accounting), which lifts
-  H2's cap.
+- **The app database cap** is the node's, not only the platform's: the
+  plan's JS check could be bypassed by author code writing from a query
+  or `fetch`. The fork caps every facet database
+  (`CELLD_FACET_MAX_BYTES`, SQLite's `max_page_count`, which JS cannot
+  raise); the platform refuses a mutation that leaves the database over
+  16 MiB (it rolls back: 507 `storage_full`). The hard stop sits 4 MiB
+  higher because celld writes its own bookkeeping into the facet's
+  database on every call: with no headroom, an app at the cap refused
+  even the call that would empty it (found by the e2e).
+- **A full node says so:** celld's "too many loaded workers" becomes 503
+  `node_full` naming the node, not an app failure, and the fragment's
+  other routes keep working. The fork's `CELLD_LOADED_WORKERS_MAX` lets
+  the e2e fill a node with three apps.
+- **Identity headers:** audited; nothing to fix. The router builds each
+  hop's headers fresh from an allowlist and sets identity itself; the
+  agent's router does the same; the internal headers (the delivery
+  report, the files capability, jobs, the ledger's org) are set only by
+  our own code on paths the router never forwards. The one other way in
+  was celld's internal `/do/`, closed in H3.
 
-**H4. Tier 2, deployment.**
-- The fleet on its own Fly private network (not the org's default
-  6PN), reached only through its public services.
-- Tigris keys scoped to the fleet's prefixes; non-root in the image.
-- Needs Paul: Fly network and Tigris changes.
+### H3. The fork
+
+- **The internal listener** (`2779418`): `CELLD_INTERNAL_PEER_ONLY=1`.
+  Checked by hand on a local node: with it, `GET /state` and `GET
+  /do/<scope>` answer 403; without it, 200 and reachable; unsigned
+  `/peer/probe` is 401 either way. (celld dev hides its internal port, so
+  the e2e cannot reach it.) A node then stops on its signal: Fly sends
+  SIGTERM, and `celld dev` falls back to it.
+- **Loaded workers** (`c4d64a9`): `CELLD_DYNAMIC_LOCKDOWN=1` turns off
+  code generation from strings (before the module's first line runs) and
+  `Atomics.wait`. A heap past twice its limit ends the isolate's
+  execution ("Worker exceeded its memory limit of 128 MiB"); the app
+  answers again on its next call, and its neighbors never notice.
+- **Not built:** releasing loaded workers. celld memoizes a named loaded
+  worker in each host isolate's `byName` and in a process registry, and a
+  facet holds its class; releasing one safely means evicting all three
+  together. It is the one H3 item left, in the debt ledger, and the H2
+  503 covers it until a node nears 255 apps.
+- **Upstreamable:** each setting defaults to upstream's behavior and
+  lives in its own commit (`cbea45e`, `c4d64a9`, `2779418`).
+
+## Evidence
+
+- `cargo test -p fragment-native` (12), `-p fragment-core`, `-p xtask`
+  (the fleet file parses; no fleet secret can be a var; the rendered
+  fly.toml carries the settings).
+- Local e2e on the pinned fork (`cargo xtask e2e`, the release build): 653
+  passed, 0 failed. The new lanes are `keys` (no
+  fleet secret in the cell's variables or the rendered `.dev.vars`; a
+  fragment is made with a `KEYS` key; one fragment cannot open another's
+  sealed value), `facet-cap` (the cap, rollback, emptying at the cap,
+  the hard stop from a query, neighbors unaffected), `app-lockdown`
+  (`eval`, `new Function`, `Atomics.wait` refused; a heap bomb ends only
+  its own turn), and `node-full` (503 for the third app on a node with
+  room for two; the others serve on). Every earlier lane passes through
+  `KEYS`: sign-in (WorkOS's exchange), budgets (OpenRouter's key API),
+  every create (a code.storage token), agents (their keys and proofs).
+
+## Deploying it (each step Paul's to approve)
+
+1. **Push the fork branch** `hardening` to futurepaul/celld (the node
+   image clones the pinned rev from there).
+2. **Nodes first:** `cargo xtask deploy fragment-club --nodes` stages the
+   four Fly secrets from the files `node_secrets` names (the host secret
+   must stay the same value: existing sealed values open under it) and
+   rolls both Machines to the new image. The running cell keeps working
+   on it (it still reads its old vars).
+3. **Then the cell:** `cargo xtask deploy fragment-club`. From here no
+   fleet secret is a Worker variable.
+4. **The hosted e2e**, and a check from inside a Machine (`flyctl ssh
+   console`) that `GET /state` on `[$FLY_PRIVATE_IP]:8081` answers 403
+   (the image has no curl; bash's `/dev/tcp` does).
+5. **Clean up and rotate:** delete the earlier deployments' manifests
+   from the bucket (`deploy/fragment/<version>/`, all but the current
+   one), then rotate the four secrets (debt ledger: "The fleet's old
+   secrets are still in the bucket's deployment history").
+
+## H4. Deployment (proposed; configuration, Paul's)
+
+- **The fleet's own private network.** Fly sets an app's network at
+  creation (`flyctl apps create --network`), so this is a new app, new
+  volumes, new certificates, and a DNS change at Namecheap. After H3 the
+  private network reaches only the fleet-signed peer routes and the
+  public port, so the move buys less than it did when the plan was
+  written. Recommendation: do it with Tier 3's cordons (a fleet per trust
+  tier), before strangers can publish code, not now.
+- **Tigris keys scoped to the fleet's bucket** (not the Tigris project):
+  cheap, made in Tigris's console; then `flyctl secrets set` on the app
+  and the operator's credentials file. Recommended now.
+- **Non-root in the image:** celld would run as a user that owns `/data`
+  (fragment-node chowns it once, then drops privileges). Inside a
+  Firecracker VM this buys little, and it needs a node deploy to test.
+  Recommendation: fold it into the next node deploy after this one.
 
 **Not in this pass: Tier 3, cordons** (separate fleets per trust tier,
 so strangers are never co-resident with friends). Needed before public
 sign-up or strangers' code, not for an invite-only alpha.
-
-## Evaluation
-
-- H1: an e2e check that no fleet secret appears in the rendered
-  manifest or in a cell's `env` (a probe reads `env` and the deployment
-  object); sealing across cells refused; a JWT for another fragment's
-  repo refused; the existing 622 local checks and the hosted e2e pass.
-- H2: a facet write past 16 MiB refused; the loaded-worker cap answers
-  503 and leaves other fragments serving.
-- H3: the isolation spikes' probes rerun against the fork: `/state` and
-  `/do` refused without the HMAC; `eval` and `SharedArrayBuffer` gone;
-  a heap bomb ends its isolate only.
-- H4: from another app in the org, the fleet's private address does not
-  answer.
-
-## Order and size
-
-H1 is the largest (the fork seam, a crate, the cell's key paths, a node
-deploy). H2 is small and needs nothing from Paul. H3 is fork work in the
-same rebuild as H1. H4 is configuration. Suggested: H2 and H1 together
-(one node deploy), then H3 (a second), then H4.
-
-## Starting points (for whoever picks this up)
-
-- **Paul's go:** asked 2026-09-24 ("are you ready to do the h1-h4?")
-  after fragment.club went live on phase 4 and the live-socket fix
-  (3b1fbc3). Order: H2 with H1 (one node deploy), then H3, then H4. Each
-  node image deploy, the Fly secrets, and the Fly network and Tigris
-  changes are still his to approve at the moment they happen.
-- **The fork today:** `futurepaul/celld` at `cd3a68b` (branch
-  `egress/public-only`: the alarm fix plus public-only egress), pinned in
-  `crates/devstack/src/lib.rs` (`CELLD_FORK_REV`) and built by
-  `cargo xtask celld`; the node image by `cargo xtask deploy fragment-club
-  --nodes` (local OrbStack build, rolling update).
-- **The seam:** `celld-worktrees/native-services` at `f373feb` ("fork
-  seam: service bindings to native:<name> reach fragment-native"), based
-  on `b5f57ea`; rebase it onto `cd3a68b`.
-- **The crate:** `fragment-next-worktrees/native-services` at `cd1d6d8`,
-  `crates/native` (`lib.rs`, `keys.rs`, `scope.rs`, `echo.rs`) and the
-  probe in `spikes/native-services/`; bring it onto `main` (it predates
-  phase 2's later slices and phase 4).
-- **The isolation probes** to rerun for H3: `spike/isolation` (dadbadb)
-  and `spike/cell-isolation` (35c51f1), `spikes/isolation/probe/`.
-- **Keys in the cell now:** `crates/core/src/secrets.rs` (sealing),
-  `cell/src/cs.rs` (the code.storage JWT), `cell/src/js.rs`
-  (`random_bytes`), `cell/src/registry/signin.rs` (session and
-  redemption tokens), `cell/src/ledger.rs` (the org's OpenRouter key,
-  sealed), `cell/src/auth.rs` (the WorkOS exchange), `agent/src/lib.rs`
-  (agent keys, sealed; NIP-98 signing in `agent/src/fleet.rs`).
-- **Fleet secrets now:** `fleets/fragment-club.json` `secret_vars`
-  (host secret, code.storage key, WorkOS client ID and key, OpenRouter
-  management key): rendered into `vars` by `xtask/src/deploy.rs`, which
-  H1 changes to Fly secrets on the node.

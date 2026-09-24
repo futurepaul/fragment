@@ -10,7 +10,7 @@
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use fragment_core::webpush::{self, Subscription, Vapid};
-use fragment_core::{egress, secrets};
+use fragment_core::egress;
 use fragment_proto::{limits, ErrorCode};
 use serde_json::{json, Value};
 use worker::*;
@@ -18,6 +18,7 @@ use worker::*;
 use crate::deliveries::Delivery;
 use crate::error::{CellError, CellResult};
 use crate::fragment::FragmentCell;
+use crate::keys;
 use crate::js;
 
 /// How long a push service keeps a message for an offline browser.
@@ -28,28 +29,31 @@ const ENDPOINT_MAX_BYTES: usize = 1024;
 pub const SW_JS: &str = include_str!("../sw.js");
 
 impl FragmentCell {
-    /// The fragment's VAPID key, made on first use and sealed like a secret.
-    fn vapid(&self) -> CellResult<Vapid> {
-        let hosts = self.cfg.host_secrets()?;
-        let salt = self.must("npub")?;
-        if let Some(sealed) = self.meta("vapid")? {
-            let opened = secrets::open(&hosts, &salt, &sealed).map_err(|e| CellError::host(format!("the VAPID key: {e}")))?;
-            let bytes: [u8; 32] = opened.plaintext.try_into().map_err(|_| CellError::host("a stored VAPID key is not 32 bytes"))?;
-            return Vapid::from_bytes(bytes).ok_or_else(|| CellError::host("a stored VAPID key is out of range"));
+    /// The fragment's VAPID key, made on first use and sealed like a secret
+    /// (`KEYS` opens it for this cell alone).
+    async fn vapid(&self) -> CellResult<Vapid> {
+        if self.meta("vapid")?.is_none() {
+            let key = loop {
+                if let Some(k) = Vapid::from_bytes(js::random_bytes()) {
+                    break k;
+                }
+            };
+            let sealed = keys::seal(&self.env, &key.to_bytes()).await?;
+            // two first uses at once: the first stored wins, and both use it
+            self.exec("INSERT INTO meta (key, value) VALUES ('vapid', ?) ON CONFLICT (key) DO NOTHING", vec![sealed.into()])?;
         }
-        let key = loop {
-            if let Some(k) = Vapid::from_bytes(js::random_bytes()) {
-                break k;
-            }
-        };
-        let sealed = secrets::seal(hosts[0], &salt, &key.to_bytes(), js::random_bytes()).map_err(|e| CellError::host(e.to_string()))?;
-        self.set_meta("vapid", &sealed)?;
-        Ok(key)
+        let sealed = self.must("vapid")?;
+        let opened = keys::open(&self.env, &sealed, &self.must("npub")?).await.map_err(|e| CellError::host(format!("the VAPID key: {}", e.message)))?;
+        if let Some(fresh) = opened.resealed {
+            self.exec("UPDATE meta SET value = ? WHERE key = 'vapid' AND value = ?", vec![fresh.into(), sealed.into()])?;
+        }
+        let bytes: [u8; 32] = opened.plaintext.try_into().map_err(|_| CellError::host("a stored VAPID key is not 32 bytes"))?;
+        Vapid::from_bytes(bytes).ok_or_else(|| CellError::host("a stored VAPID key is out of range"))
     }
 
     /// `GET __push-key`: the key a browser subscribes with.
-    pub(crate) fn push_key(&self) -> CellResult<Value> {
-        Ok(json!({ "key": self.vapid()?.public_key() }))
+    pub(crate) async fn push_key(&self) -> CellResult<Value> {
+        Ok(json!({ "key": self.vapid().await?.public_key() }))
     }
 
     /// `POST __push-sub` `{who, endpoint, p256dh, auth}`: anyone who can see
@@ -100,7 +104,7 @@ impl FragmentCell {
         } else {
             self.rows("SELECT id, endpoint, p256dh, auth FROM push_subs WHERE who = ?", vec![who.into()])?
         };
-        let vapid = self.vapid()?;
+        let vapid = self.vapid().await?;
         let (fragment, incarnation) = (self.must("name")?, self.must("created_at")?);
         let now_s = js::now_ms() / 1000;
         let mut deliveries = Vec::with_capacity(subs.len());

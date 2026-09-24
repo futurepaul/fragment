@@ -149,9 +149,14 @@ impl FragmentCell {
         let answer = match inv.decl.kind {
             OpKind::Query => facet.call("__query", &[inv.op.into(), inv.input.clone(), meta]).await,
             _ => facet.call("__mutate", &[ledger_id.as_str().into(), inv.op.into(), input_sha.as_str().into(), inv.input.clone(), meta]).await,
-        }
-        .map_err(|m| CellError::new(ErrorCode::AppFailed, m))?;
+        }?;
         match answer["error"].as_str() {
+            Some("storage_full") => {
+                return Err(CellError::new(
+                    ErrorCode::StorageFull,
+                    format!("the app's database is full ({} MiB): the mutation was rolled back", limits::APP_DB_MAX_BYTES / (1024 * 1024)),
+                ))
+            }
             Some("conflicting_body") => {
                 return Err(CellError::new(ErrorCode::ConflictingBody, "this operation id was already used with a different input"))
             }

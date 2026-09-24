@@ -37,7 +37,7 @@ pub struct PinMove {
 
 impl FragmentCell {
     pub(crate) fn cs(&self) -> CellResult<Cs<'_>> {
-        Ok(Cs::new(self.cfg.codestorage()?))
+        Ok(Cs::new(self.cfg.codestorage()?, &self.env))
     }
 
     pub(crate) fn pin(&self, which: &str) -> CellResult<Option<String>> {
@@ -398,11 +398,11 @@ impl FragmentCell {
         json_response(&json!({ "ok": true, "interpreted": true, "redelivery": false }))
     }
 
-    pub(crate) fn storage_token(&self, caller: &Caller) -> CellResult<Response> {
+    pub(crate) async fn storage_token(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
         let who = self.caller_id(caller)?;
         let repo = self.must("repo")?;
-        let token = self.cs()?.storage_token(&repo, who)?;
+        let token = self.cs()?.storage_token(&repo, who).await?;
         self.event(
             "storage-token.minted",
             &format!("{} → repo {repo}, git:read+git:write, {}s", npub::display(who), limits::STORAGE_TOKEN_TTL_S),

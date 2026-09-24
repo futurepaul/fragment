@@ -101,7 +101,7 @@ impl FragmentCell {
             // web push: anyone who can see the fragment (push.rs)
             self.require(caller, link, Role::Public)?;
             let answer = if op == "key" {
-                self.push_key()?
+                self.push_key().await?
             } else {
                 if req.method() != Method::Post || !req.headers().get("content-type")?.is_some_and(|c| c.starts_with("application/json")) {
                     return Err(CellError::invalid("POST the subscription as application/json"));

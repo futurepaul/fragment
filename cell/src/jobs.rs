@@ -27,7 +27,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use fragment_core::secrets::{self, placeholders};
+use fragment_core::secrets::placeholders;
 use fragment_core::{cron::Cron, egress, glob, npub};
 use fragment_proto::{
     limits, valid_secret_name, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunStatus, SetPaused, TriggerDecl, TriggerOn,
@@ -38,8 +38,8 @@ use worker::*;
 
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, Caller, FragmentCell};
-use crate::js;
 use crate::ops::{Invocation, JOB_ID_PREFIX};
+use crate::{js, keys};
 
 /// Set by the Workflow on its callbacks; the router never sets or passes it.
 pub const JOB_HEADER: &str = "x-fragment-job";
@@ -366,7 +366,10 @@ impl FragmentCell {
                     "attempt": attempt,
                     "channels": self.declared_channels()?.keys().collect::<Vec<_>>(),
                 });
-                let answer = facet.call("__job", &[op.as_str().into(), input, meta, Value::Array(results)]).await.map_err(|m| CellError::host(format!("the app facet: {m}")))?;
+                let answer = facet.call("__job", &[op.as_str().into(), input, meta, Value::Array(results)]).await.map_err(|e| match e.code {
+                    ErrorCode::NodeFull => e,
+                    _ => CellError::host(format!("the app facet: {}", e.message)),
+                })?;
                 if let Some(next) = answer.get("next") {
                     if next["index"].as_u64().unwrap_or(0) as usize >= limits::JOB_STEPS_MAX {
                         return fail(format!("a job takes at most {} steps", limits::JOB_STEPS_MAX));
@@ -496,6 +499,7 @@ impl FragmentCell {
                 }
                 let secret = self
                     .open_secret(name)
+                    .await
                     .map_err(|e| StepFail::Retry(e.message))?
                     .ok_or_else(|| permanent(format!("no secret named {name} (set it with `fragment secret set`)")))?;
                 let secret = String::from_utf8(secret).map_err(|_| permanent(format!("secret {name} is not UTF-8 text")))?;
@@ -883,16 +887,14 @@ impl FragmentCell {
         json_response(&json!({ "ok": true, "seq": record.seq, "runs": runs }))
     }
 
-    /// A secret's value, for the egress point only. A value sealed under the
-    /// previous host secret is resealed under the current one.
-    pub(crate) fn open_secret(&self, name: &str) -> CellResult<Option<Vec<u8>>> {
+    /// A secret's value, for the egress point only (`KEYS` opens it for
+    /// this cell alone). A value sealed under a previous host secret, or by
+    /// the cell itself before `KEYS`, comes back resealed and is stored so.
+    pub(crate) async fn open_secret(&self, name: &str) -> CellResult<Option<Vec<u8>>> {
         let rows = self.rows("SELECT sealed FROM secrets WHERE name = ?", vec![name.into()])?;
         let Some(sealed) = rows.first().and_then(|r| r["sealed"].as_str()).map(str::to_string) else { return Ok(None) };
-        let hosts = self.cfg.host_secrets()?;
-        let salt = self.must("npub")?;
-        let opened = secrets::open(&hosts, &salt, &sealed).map_err(|e| CellError::host(format!("secret {name}: {e}")))?;
-        if opened.stale {
-            let fresh = secrets::seal(hosts[0], &salt, &opened.plaintext, js::random_bytes()).map_err(|e| CellError::host(e.to_string()))?;
+        let opened = keys::open(&self.env, &sealed, &self.must("npub")?).await.map_err(|e| CellError::host(format!("secret {name}: {}", e.message)))?;
+        if let Some(fresh) = opened.resealed {
             self.exec("UPDATE secrets SET sealed = ? WHERE name = ? AND sealed = ?", vec![fresh.into(), name.into(), sealed.into()])?;
             self.event("secret.resealed", &format!("secret {name} resealed under the current host secret"), json!({ "name": name }));
         }

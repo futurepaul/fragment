@@ -9,8 +9,11 @@ without a delete condition is unfinished design, not debt.
 
 - **Observed:** each fragment's `app.mjs` (its operations, jobs, and
   `fetch`) runs in a loaded worker inside the same celld process that
-  holds `FRAGMENT_HOST_SECRET`, the code.storage org key, and every other
-  fragment's cells. Its env holds only its own capabilities, but an
+  holds the fleet's keys (in `KEYS`'s memory and the node's environment,
+  since H1: no longer in any isolate) and every other fragment's cells.
+  The hardening pass took `eval` and `Atomics.wait` from loaded workers,
+  capped their heaps and databases, and closed the internal listener to
+  unsigned callers. Its env holds only its own capabilities, but an
   isolate escape is not ruled out: celld's own security page calls it
   not safe for hostile multi-tenant use while it is alpha.
 - **Risk:** an isolate escape or side channel reads other fragments' data
@@ -234,25 +237,89 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** a remote build pushes (a newer flyctl, or a token the
   builders accept), or CI builds the image once a remote exists.
 
-## The fleet's secrets live in the bucket
+## The fleet's old secrets are still in the bucket's deployment history
 
-- **Observed:** phase 3 slice A. celld 0.5.1 removed the environment
-  passthrough for Worker variables (`CELLD_VAR_`): they come only from
-  the deployed config, which celld stores in the bucket. The host secret
-  and the code.storage org key are there in plaintext.
-- **Risk:** a leak of the bucket (or a backup of it) reveals them.
-  celld already makes the bucket the fleet's root of authority (its keys
-  can deploy code that reads any variable), so this adds no new holder.
+- **Observed:** phase 3 slice A until the hardening pass (H1). The fleet's
+  secrets were Worker `vars`, which celld stores in each deployment's
+  manifest (`deploy/fragment/<version>/` in the bucket) in plaintext, and
+  writes into every isolate's source. H1 moved them to the node's
+  environment, where only `KEYS` reads them; a cell deploy now refuses a
+  var that holds one (`xtask/src/deploy.rs`, `check_vars`). But the
+  manifests of every earlier deployment stay in the bucket (celld keeps
+  them; it has no clean-up), and the values were in isolate heaps.
+- **Risk:** a leak of the bucket (or a backup of it) reveals the host
+  secret, the code.storage org key, the WorkOS API key, and the
+  OpenRouter management key. celld already makes the bucket the fleet's
+  root of authority, so this adds no new holder, but it is a copy.
 - **First proof:** a bucket copy outside the fleet (a backup, a
   migration).
-- **Delete when:** celld (or the fork) gives Workers node-held secrets,
-  as the "fork forever?" thread proposes.
+- **Delete when:** fragment.club runs H1, the earlier deployments'
+  manifests are deleted from the bucket, and the four secrets are rotated
+  (the host secret through `FRAGMENT_KEYS_HOST_SECRET_PREVIOUS`; the
+  other three at their issuers). All Paul's to approve.
+
+## Loaded workers are never released
+
+- **Observed:** the isolation spike (2026-09-23); the hardening pass (H2)
+  made it visible. celld holds at most 255 loaded workers per script (256
+  per process) and releases a named one (`LOADER.get`) only when the node
+  restarts. We load one per fragment with an app, so a node that has
+  served 255 fragments' apps answers 503 `node_full` for the next one
+  (the e2e's `node-full` lane, with the bound lowered through our fork's
+  `CELLD_LOADED_WORKERS_MAX`); the apps it holds keep serving.
+- **Risk:** past about 255 active apps per node, new apps stop loading
+  until a restart; a tenant that makes many fragments can fill a node.
+- **First proof:** `node_full` answered on the fleet, or a node's
+  loaded-worker count (its `/state`, by the operator) near 255.
+- **Delete when:** the fork releases an idle loaded worker (evicting it
+  from the registry and the harness's `byName` memo, and aborting the
+  facet that used it) with per-tenant accounting, proven by a test that
+  loads more apps than the bound and every one still answers.
+
+## KEYS signs code.storage tokens for any repo a fragment names
+
+- **Observed:** H1. `KEYS` signs a code.storage JWT only for a `Fragment`
+  cell (the host attests the class), but for whatever repo that cell
+  names: the binding between a fragment and its repo is the cell's own
+  record. A repo's id is opaque (code.storage makes it), so `KEYS` cannot
+  derive it from the caller.
+- **Risk:** a supervisor made to ask for another fragment's repo gets a
+  token for it (at most fifteen minutes). Supervisors share a V8 context
+  (up to 32 cells), so a compromised one could act as any cell there
+  anyway; the org key itself stays in the node.
+- **First proof:** a bug in the cell that lets a caller choose the repo
+  a token names.
+- **Delete when:** `KEYS` makes the repo (or answers a binding it signed
+  when it did) and checks it on every token.
+
+## ArrayBuffer memory is outside the heap ceiling
+
+- **Observed:** H3. Our fork ends an isolate's execution once its V8
+  heap passes twice its limit (the e2e's `app-lockdown` lane), but an
+  ArrayBuffer's bytes live outside the V8 heap and are not counted.
+- **Risk:** an app that allocates large ArrayBuffers can still grow the
+  node's memory.
+- **First proof:** a node's memory growing with one fragment's traffic.
+- **Delete when:** the fork gives each loaded worker an ArrayBuffer
+  allocator with a budget (ending the isolate past it), with a test.
+
+## WebAssembly compiled from bytes never settles in an app
+
+- **Observed:** H3. With `CELLD_DYNAMIC_LOCKDOWN=1`, `eval` and `new
+  Function` throw in an app, but `WebAssembly.compile(bytes)` neither
+  resolves nor rejects (the call hangs until the client gives up). Only
+  the app's own call waits, as a never-settling promise would.
+- **Risk:** an author who tries Wasm gets a hang instead of an error.
+- **First proof:** an author asking why their Wasm module hangs.
+- **Delete when:** the fork refuses Wasm from bytes with an error in a
+  locked-down worker (or allows it deliberately), with a test.
 
 ## Agents spend the agent fleet's model key
 
 - **Observed:** phase 5. An agent's model calls use the agent fleet's
   `OPENROUTER_API_KEY`, whoever owns the agent; nothing counts them per
-  person.
+  person. It is still a Worker variable (in the agent fleet's manifest):
+  H1 moved the agents' own keys into `KEYS`, not this one.
 - **Risk:** spend that no person's budget shows, once agents are hosted.
 - **First proof:** the agent fleet hosted with people other than Paul.
 - **Delete when:** the agent service meters its model calls in the

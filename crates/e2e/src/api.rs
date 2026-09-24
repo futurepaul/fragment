@@ -253,7 +253,7 @@ impl Api {
     }
 
     pub fn create(&self, keys: &Keys, name: &str) -> Result<Reply> {
-        self.create_with(keys, json!({ "name": name, "fragmentSecret": Keys::generate().secret_hex() }))
+        self.create_with(keys, json!({ "name": name }))
     }
 
     pub fn create_with(&self, keys: &Keys, body: Value) -> Result<Reply> {

@@ -1,9 +1,10 @@
 //! The fleet's settings, from Worker variables (`cell/.dev.vars` in dev,
 //! rendered `vars` at deploy). Nothing about a fleet is a constant in code
-//! (ROADMAP decision 13): the hostname suffix, the code.storage org, and
-//! the host secret all arrive here.
+//! (ROADMAP decision 13): the hostname suffix and the code.storage org
+//! arrive here. The fleet's secrets do not: the host secret, the
+//! code.storage key, the WorkOS API key, and the OpenRouter management key
+//! live in the node's environment, used through `KEYS` (keys.rs).
 
-use fragment_core::secrets::HOST_SECRET_MIN_BYTES;
 use fragment_proto::{valid_fragment_name, ErrorCode};
 use worker::Env;
 
@@ -11,17 +12,14 @@ use crate::error::{CellError, CellResult};
 
 pub struct CodeStorageConfig {
     pub org: String,
-    pub key_pem: String,
     /// The API base, e.g. `https://api.<org>.code.storage`.
     pub api: String,
 }
 
 /// WorkOS AuthKit (phase 4 slice B): fragment's own environment.
 pub struct WorkOsConfig {
-    /// `WORKOS_CLIENT_ID`: names the environment.
+    /// `WORKOS_CLIENT_ID`: names the environment (its API key is the node's).
     pub client_id: String,
-    /// `WORKOS_API_KEY`: the environment's secret key (exchanges codes).
-    pub api_key: String,
     /// `WORKOS_API_URL` (default https://api.workos.com; dev and the e2e: the fake).
     pub api: String,
 }
@@ -36,8 +34,6 @@ impl WorkOsConfig {
 }
 
 pub struct Config {
-    /// `FRAGMENT_HOST_SECRET`, then `FRAGMENT_HOST_SECRET_PREVIOUS` during a rotation.
-    host_secrets: Vec<String>,
     codestorage: Option<CodeStorageConfig>,
     /// `FRAGMENT_HOST_SUFFIX`: fragments are served from `<name>.<suffix>`.
     /// Unset (dev without hostnames), they are served from `/f/<name>/`.
@@ -65,10 +61,6 @@ pub struct Config {
     /// e.g. https://fragment.club; without a suffix, the origin a request
     /// arrived on).
     platform_url: Option<String>,
-    /// `OPENROUTER_MANAGEMENT_KEY`: mints each billing org's own OpenRouter
-    /// key, its limit the org's allowance (decision 14). Unset, only a
-    /// fragment's own `OPENROUTER_API_KEY` pays for AI.
-    pub openrouter_management: Option<String>,
     /// `FRAGMENT_BUDGET_USD`: each person's monthly budget (default 20).
     pub budget_micros: i64,
     /// `FRAGMENT_OPERATORS`: identities and keys (as `parse_list` reads
@@ -87,16 +79,11 @@ fn var(env: &Env, name: &str) -> Option<String> {
 
 impl Config {
     pub fn from_env(env: &Env) -> Config {
-        let host_secrets = ["FRAGMENT_HOST_SECRET", "FRAGMENT_HOST_SECRET_PREVIOUS"].iter().filter_map(|n| var(env, n)).collect();
-        let codestorage = match (var(env, "CODESTORAGE_ORG"), var(env, "CODESTORAGE_PRIVATE_KEY")) {
-            (Some(org), Some(key_pem)) => {
-                let api = var(env, "CODESTORAGE_API_URL")
-                    .map(|a| a.trim_end_matches('/').to_string())
-                    .unwrap_or_else(|| fragment_core::codestorage::default_api(&org));
-                Some(CodeStorageConfig { org, key_pem, api })
-            }
-            _ => None,
-        };
+        let codestorage = var(env, "CODESTORAGE_ORG").map(|org| {
+            let api =
+                var(env, "CODESTORAGE_API_URL").map(|a| a.trim_end_matches('/').to_string()).unwrap_or_else(|| fragment_core::codestorage::default_api(&org));
+            CodeStorageConfig { org, api }
+        });
         let host_suffix = var(env, "FRAGMENT_HOST_SUFFIX").map(|s| s.trim_start_matches('.').to_ascii_lowercase());
         let poll_interval_ms = var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000;
         let egress_local = var(env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow");
@@ -104,16 +91,11 @@ impl Config {
         let push_subject = var(env, "FRAGMENT_PUSH_SUBJECT").unwrap_or_else(|| "mailto:webpush@fragment.invalid".into());
         let delivery_retry_s = var(env, "FRAGMENT_DELIVERY_RETRY_S").and_then(|s| s.parse::<u32>().ok()).filter(|s| *s >= 1).unwrap_or(10);
         let openrouter_url = var(env, "OPENROUTER_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://openrouter.ai".into());
-        let workos = match (var(env, "WORKOS_CLIENT_ID"), var(env, "WORKOS_API_KEY")) {
-            (Some(client_id), Some(api_key)) => Some(WorkOsConfig {
-                client_id,
-                api_key,
-                api: var(env, "WORKOS_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.workos.com".into()),
-            }),
-            _ => None,
-        };
+        let workos = var(env, "WORKOS_CLIENT_ID").map(|client_id| WorkOsConfig {
+            client_id,
+            api: var(env, "WORKOS_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.workos.com".into()),
+        });
         let platform_url = var(env, "FRAGMENT_PLATFORM_URL").map(|u| u.trim_end_matches('/').to_string());
-        let openrouter_management = var(env, "OPENROUTER_MANAGEMENT_KEY");
         let budget_micros = var(env, "FRAGMENT_BUDGET_USD")
             .and_then(|v| v.parse::<f64>().ok())
             .filter(|v| v.is_finite() && *v >= 0.0)
@@ -123,7 +105,6 @@ impl Config {
         let test_hooks = var(env, "FRAGMENT_TEST_HOOKS").as_deref() == Some("allow");
         let deploy_id = var(env, "FRAGMENT_DEPLOY_ID").unwrap_or_else(|| "dev".into());
         Config {
-            host_secrets,
             codestorage,
             host_suffix,
             poll_interval_ms,
@@ -134,7 +115,6 @@ impl Config {
             openrouter_url,
             workos,
             platform_url,
-            openrouter_management,
             budget_micros,
             operators,
             test_hooks,
@@ -155,7 +135,7 @@ impl Config {
     pub fn workos(&self) -> CellResult<&WorkOsConfig> {
         self.workos
             .as_ref()
-            .ok_or_else(|| CellError::new(ErrorCode::HostFailed, "sign-in is not configured on this fleet (WORKOS_CLIENT_ID, WORKOS_API_KEY)"))
+            .ok_or_else(|| CellError::new(ErrorCode::HostFailed, "sign-in is not configured on this fleet (WORKOS_CLIENT_ID)"))
     }
 
     /// The platform's origin, given the URL a request arrived on.
@@ -170,18 +150,9 @@ impl Config {
         }
     }
 
-    /// The current host secret and any previous one, current first.
-    pub fn host_secrets(&self) -> CellResult<Vec<&str>> {
-        match self.host_secrets.first() {
-            Some(s) if s.len() >= HOST_SECRET_MIN_BYTES => Ok(self.host_secrets.iter().map(String::as_str).collect()),
-            Some(_) => Err(CellError::host(format!("FRAGMENT_HOST_SECRET must be at least {HOST_SECRET_MIN_BYTES} bytes"))),
-            None => Err(CellError::host("FRAGMENT_HOST_SECRET is not set on this fleet; secrets cannot be stored")),
-        }
-    }
-
     pub fn codestorage(&self) -> CellResult<&CodeStorageConfig> {
         self.codestorage.as_ref().ok_or_else(|| {
-            CellError::new(ErrorCode::HostFailed, "code.storage is not configured on this fleet (CODESTORAGE_ORG, CODESTORAGE_PRIVATE_KEY)")
+            CellError::new(ErrorCode::HostFailed, "code.storage is not configured on this fleet (CODESTORAGE_ORG)")
         })
     }
 

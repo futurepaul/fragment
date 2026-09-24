@@ -68,9 +68,22 @@ pub struct Suite {
     agents: Option<devstack::Node>,
     agents_port: u16,
     agents_project: PathBuf,
+    /// More environment for the next node started (celld settings a lane tries).
+    pub node_env_extra: Vec<(String, String)>,
 }
 
 impl Suite {
+    /// The fleet's secrets (label, value): the node holds them, never a cell.
+    pub fn fleet_secrets(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("host secret", self.host_secret.clone()),
+            // a line of the PEM's body: found however the PEM was escaped
+            ("code.storage key", self.org_key.lines().find(|l| !l.starts_with("-----") && !l.trim().is_empty()).unwrap_or_default().trim().to_string()),
+            ("WorkOS API key", WORKOS_KEY.into()),
+            ("OpenRouter management key", OPENROUTER_MANAGEMENT.into()),
+        ]
+    }
+
     pub fn section(&self, name: &str) -> bool {
         if self.only.as_deref().is_some_and(|o| o != name) {
             return false;
@@ -96,7 +109,7 @@ impl Suite {
     /// Starts the node; `suffix` serves fragments from their own hosts.
     pub fn start(&mut self, clean: bool, suffix: bool) -> Result<Api> {
         assert!(self.node.is_none(), "one node at a time");
-        devstack::Fleet {
+        let env = devstack::Fleet {
             host_secret: self.host_secret.clone(),
             codestorage_org: ORG.into(),
             codestorage_key_pem: self.org_key.clone(),
@@ -119,8 +132,9 @@ impl Suite {
             operators: Some(fragment_core::npub::encode(self.operator.pubkey_hex())),
             test_hooks: true,
         }
-        .write_vars(&self.project)?;
-        let opts = devstack::NodeOptions { project: self.project.clone(), port: self.port, clean, watch: false, env: vec![] };
+        .configure(&self.project)?;
+        let env = env.into_iter().chain(self.node_env_extra.iter().cloned()).collect();
+        let opts = devstack::NodeOptions { project: self.project.clone(), port: self.port, clean, watch: false, env };
         let (node, _) = devstack::Node::start(&self.tools, &opts)?;
         self.node = Some(node);
         Ok(Api::new(self.port, suffix.then_some(SUFFIX)))
@@ -130,7 +144,7 @@ impl Suite {
     /// OpenRouter fake as its model service and test controls on.
     pub fn start_agents(&mut self, clean: bool) -> Result<Api> {
         assert!(self.agents.is_none(), "one agents node at a time");
-        devstack::AgentFleet {
+        let env = devstack::AgentFleet {
             host_secret: self.host_secret.clone(),
             fragment_api: format!("http://127.0.0.1:{}", self.port),
             agent_url: format!("http://127.0.0.1:{}", self.agents_port),
@@ -139,8 +153,8 @@ impl Suite {
             test_hooks: true,
             egress_local: true,
         }
-        .write_vars(&self.agents_project)?;
-        let opts = devstack::NodeOptions { project: self.agents_project.clone(), port: self.agents_port, clean, watch: false, env: vec![] };
+        .configure(&self.agents_project)?;
+        let opts = devstack::NodeOptions { project: self.agents_project.clone(), port: self.agents_port, clean, watch: false, env };
         let (node, _) = devstack::Node::start(&self.tools, &opts)?;
         self.agents = Some(node);
         Ok(Api::new(self.agents_port, None))
@@ -317,6 +331,7 @@ fn main() -> Result<()> {
         agents: None,
         agents_port: devstack::free_port()?,
         agents_project,
+        node_env_extra: vec![],
     };
     let api = s.start(true, true)?;
     lanes::run(&mut s, api)?;

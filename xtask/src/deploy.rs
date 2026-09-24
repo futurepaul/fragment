@@ -1,10 +1,15 @@
 //! `cargo xtask deploy <fleet> [--nodes]`: ships to a hosted fleet, read
 //! from `fleets/<fleet>.json` (ROADMAP decision 13: nothing about a fleet is
 //! a constant). Without `--nodes` it deploys the cell: builds `cell/`,
-//! renders its `vars` from the fleet file and the secret files it names,
-//! writes the deployment to the bucket with `celld deploy`, and waits until
-//! the fleet answers with it. `--nodes` rolls the Machines to a new node
-//! image (`fleets/Dockerfile`), one at a time.
+//! renders its `vars` from the fleet file (and the files it names), writes
+//! the deployment to the bucket with `celld deploy`, and waits until the
+//! fleet answers with it. `--nodes` stages the fleet's secrets as Fly
+//! secrets (the node's environment, where only `KEYS` reads them) and rolls
+//! the Machines to a new node image (`fleets/Dockerfile`), one at a time.
+//!
+//! The fleet's secrets never become Worker `vars`: those are literals in
+//! every isolate and plaintext in the deployment manifest in the bucket
+//! (docs/hardening.md, H1). A cell deploy refuses a var that is one.
 //!
 //! `cargo xtask fleet <fleet> <celld command...>` runs an operator command
 //! of the fork's celld (`diagnose`, `cell list`, `queue info Q`, ...)
@@ -23,6 +28,7 @@ use fragment_devstack as devstack;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Fleet {
     /// Where the platform answers (the fleet's own host).
     url: String,
@@ -30,10 +36,32 @@ struct Fleet {
     bucket: Bucket,
     /// Worker variables with plain values.
     vars: BTreeMap<String, String>,
-    /// Worker variables whose values are the contents of these files.
-    secret_vars: BTreeMap<String, String>,
+    /// Worker variables whose values are the contents of these files: kept
+    /// out of the repository, but not secret (they land in the manifest).
+    #[serde(default)]
+    var_files: BTreeMap<String, String>,
+    /// The node's environment from these files, as Fly secrets: the fleet's
+    /// secrets, which `KEYS` alone reads (`FRAGMENT_KEYS_*`).
+    node_secrets: BTreeMap<String, String>,
     /// The hosted e2e's inputs.
     e2e: Option<E2e>,
+}
+
+/// Worker variables that held fleet secrets before `KEYS`: never again.
+const RETIRED_SECRET_VARS: [&str; 5] =
+    ["FRAGMENT_HOST_SECRET", "FRAGMENT_HOST_SECRET_PREVIOUS", "CODESTORAGE_PRIVATE_KEY", "WORKOS_API_KEY", "OPENROUTER_MANAGEMENT_KEY"];
+
+/// Refuses Worker variables that carry a fleet secret, by name or by value.
+fn check_vars(vars: &BTreeMap<String, String>, secrets: &[String]) -> Result<()> {
+    for (k, v) in vars {
+        if RETIRED_SECRET_VARS.contains(&k.as_str()) || k.starts_with("FRAGMENT_KEYS_") {
+            bail!("{k} is a fleet secret: it belongs in node_secrets (the node's environment), never in a Worker variable");
+        }
+        if secrets.iter().any(|s| s.len() >= 8 && v.contains(s.as_str())) {
+            bail!("the Worker variable {k} holds a fleet secret's value");
+        }
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -198,7 +226,7 @@ pub fn hosted_e2e_env(name: &str) -> Result<Vec<(String, String)>> {
     if let Some(k) = &e2e.openrouter_key {
         env.push(("FRAGMENT_E2E_OPENROUTER_KEY_FILE".into(), path(k)));
     }
-    if let (Some(org), Some(key)) = (fleet.vars.get("CODESTORAGE_ORG"), fleet.secret_vars.get("CODESTORAGE_PRIVATE_KEY")) {
+    if let (Some(org), Some(key)) = (fleet.vars.get("CODESTORAGE_ORG"), fleet.node_secrets.get("FRAGMENT_KEYS_CODESTORAGE_PRIVATE_KEY")) {
         let api = fleet.vars.get("CODESTORAGE_API_URL").cloned().unwrap_or_else(|| format!("https://api.{org}.code.storage"));
         env.push(("FRAGMENT_E2E_CODESTORAGE_ORG".into(), org.clone()));
         env.push(("FRAGMENT_E2E_CODESTORAGE_API".into(), api));
@@ -220,12 +248,11 @@ pub fn operate(args: &[String]) -> Result<()> {
 fn deploy_cell(name: &str, fleet: &Fleet) -> Result<()> {
     crate::build()?;
     let mut vars = fleet.vars.clone();
-    let mut secrets = vec![];
-    for (k, path) in &fleet.secret_vars {
-        let v = read_secret(path)?;
-        secrets.push(v.clone());
-        vars.insert(k.clone(), v);
+    for (k, path) in &fleet.var_files {
+        vars.insert(k.clone(), read_secret(path)?);
     }
+    let mut secrets = fleet.node_secrets.values().map(|p| read_secret(p)).collect::<Result<Vec<_>>>()?;
+    check_vars(&vars, &secrets)?;
     let id = deploy_id();
     vars.insert("FRAGMENT_DEPLOY_ID".into(), id.clone());
     secrets.push(bucket_keys(fleet)?.1);
@@ -236,14 +263,12 @@ fn deploy_cell(name: &str, fleet: &Fleet) -> Result<()> {
     let result = (|| -> Result<()> {
         let config = stage.join("wrangler.jsonc");
         let rendered = with_vars(&std::fs::read_to_string(&config)?, &vars)?;
-        // the staged copy holds secrets: owner-only, before they are written
-        std::fs::set_permissions(&config, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
         std::fs::write(&config, rendered)?;
         println!("deploying the cell to {name} ({}) as {id}", fleet.bucket.url);
         let stage = stage.to_str().context("a UTF-8 path")?;
         run_redacted(celld(fleet, &["deploy", stage])?, &secrets)
     })();
-    std::fs::remove_dir_all(&stage).with_context(|| format!("remove the staged project {} (it holds secrets)", stage.display()))?;
+    std::fs::remove_dir_all(&stage).with_context(|| format!("remove the staged project {}", stage.display()))?;
     result?;
     wait_for(&format!("{}/healthz", fleet.url.trim_end_matches('/')), &id)
 }
@@ -277,6 +302,7 @@ fn wait_for(url: &str, id: &str) -> Result<()> {
 /// fly.toml for the fleet, rendered from its file.
 fn fly_toml(fleet: &Fleet) -> String {
     let f = &fleet.fly;
+    let org = fleet.vars.get("CODESTORAGE_ORG").map(String::as_str).unwrap_or_default();
     format!(
         r#"# Rendered by `cargo xtask deploy` from fleets/<fleet>.json; not edited by hand.
 app = "{app}"
@@ -292,6 +318,14 @@ kill_timeout = "60s"
   # a Worker's fetch reaches public addresses only: the private network
   # carries the internal listener (docs/phase-3.md slice E)
   CELLD_EGRESS_PUBLIC_ONLY = "1"
+  # our fork's hardening (docs/hardening.md): the app database's hard stop,
+  # loaded workers without eval or Atomics.wait, an internal listener that
+  # answers only fleet-signed peers
+  CELLD_FACET_MAX_BYTES = "{facet_max}"
+  CELLD_DYNAMIC_LOCKDOWN = "1"
+  CELLD_INTERNAL_PEER_ONLY = "1"
+  # KEYS: the code.storage org it signs for (its key is a Fly secret)
+  FRAGMENT_KEYS_CODESTORAGE_ORG = "{org}"
 
 [mounts]
   source = "celld_data"
@@ -334,7 +368,24 @@ kill_timeout = "60s"
         volume = f.volume,
         size = f.size,
         memory = f.memory,
+        facet_max = devstack::FACET_MAX_BYTES,
     )
+}
+
+/// The fleet's secrets as `flyctl secrets import` reads them: one
+/// `NAME=value` a line (a PEM's newlines as `\n`, which `KEYS` reads back).
+fn secrets_import(fleet: &Fleet) -> Result<(String, Vec<String>)> {
+    let mut text = String::new();
+    let mut values = vec![];
+    for (k, path) in &fleet.node_secrets {
+        if !k.starts_with("FRAGMENT_KEYS_") {
+            bail!("node_secrets holds {k}: only KEYS reads the node's secrets (FRAGMENT_KEYS_*)");
+        }
+        let v = read_secret(path)?;
+        text.push_str(&format!("{k}={}\n", v.replace('\n', "\\n")));
+        values.push(v);
+    }
+    Ok((text, values))
 }
 
 /// Builds the node image with the local Docker (for linux/amd64: OrbStack
@@ -379,6 +430,29 @@ fn deploy_nodes(name: &str, fleet: &Fleet) -> Result<()> {
     })();
     std::fs::remove_dir_all(&docker).with_context(|| format!("remove {} (it holds a registry login)", docker.display()))?;
     pushed?;
+    // the fleet's secrets, staged so the roll below brings them up with the image
+    let (import, values) = secrets_import(fleet)?;
+    println!("staging {} secrets on {} (values never printed)", fleet.node_secrets.len(), fleet.fly.app);
+    let mut child = Command::new("flyctl")
+        .args(["secrets", "import", "--stage", "--app", &fleet.fly.app])
+        .env("FLY_API_TOKEN", &token)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("could not start flyctl secrets import")?;
+    {
+        use std::io::Write;
+        child.stdin.take().context("flyctl's stdin")?.write_all(import.as_bytes())?;
+    }
+    let out = child.wait_with_output()?;
+    let mut hidden = values;
+    hidden.push(token.clone());
+    print!("{}", redact(&String::from_utf8_lossy(&out.stdout), &hidden));
+    eprint!("{}", redact(&String::from_utf8_lossy(&out.stderr), &hidden));
+    if !out.status.success() {
+        bail!("flyctl secrets import failed: {}", out.status);
+    }
     println!("rolling {} ({}) to {tag}", fleet.fly.app, fleet.fly.org);
     crate::run(
         Command::new("flyctl")
@@ -408,6 +482,31 @@ mod tests {
         assert_eq!(got.get("AWS_ACCESS_KEY_ID").map(String::as_str), Some("tid_1"));
         assert_eq!(got.get("AWS_SECRET_ACCESS_KEY").map(String::as_str), Some("tsec_2"));
         assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn no_fleet_secret_is_a_var() {
+        let secrets = vec!["sk_live_workos_0123456789".to_string()];
+        let ok = BTreeMap::from([("CODESTORAGE_ORG".to_string(), "finite".to_string())]);
+        assert!(check_vars(&ok, &secrets).is_ok());
+        for name in RETIRED_SECRET_VARS.iter().chain(&["FRAGMENT_KEYS_HOST_SECRET"]) {
+            let v = BTreeMap::from([(name.to_string(), "x".to_string())]);
+            assert!(check_vars(&v, &secrets).is_err(), "{name}");
+        }
+        let smuggled = BTreeMap::from([("NOTE".to_string(), "key=sk_live_workos_0123456789".to_string())]);
+        assert!(check_vars(&smuggled, &secrets).unwrap_err().to_string().contains("NOTE"));
+    }
+
+    #[test]
+    fn the_fleet_file_parses_with_node_secrets() {
+        let text = std::fs::read_to_string(devstack::repo_root().join("fleets/fragment-club.json")).unwrap();
+        let fleet: Fleet = serde_json::from_str(&text).unwrap();
+        assert!(fleet.node_secrets.keys().all(|k| k.starts_with("FRAGMENT_KEYS_")));
+        assert!(fleet.vars.keys().chain(fleet.var_files.keys()).all(|k| !RETIRED_SECRET_VARS.contains(&k.as_str())));
+        let toml = fly_toml(&fleet);
+        for line in ["CELLD_INTERNAL_PEER_ONLY = \"1\"", "CELLD_DYNAMIC_LOCKDOWN = \"1\"", "FRAGMENT_KEYS_CODESTORAGE_ORG = \"finite\""] {
+            assert!(toml.contains(line), "{line}");
+        }
     }
 
     #[test]

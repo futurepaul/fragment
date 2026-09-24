@@ -1,20 +1,21 @@
 //! The cell's code.storage client: the calls the file plane makes, each
 //! with a deadline, each authenticated with a short-lived org JWT that
-//! names exactly the repo it touches.
+//! names exactly the repo it touches. The node's `KEYS` signs the JWTs:
+//! the org key never reaches the cell (keys.rs).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use fragment_core::codestorage::{self as core_cs, Claims, OrgKey, TreeEntry};
+use fragment_core::codestorage::{self as core_cs, TreeEntry};
 use fragment_proto::{limits, ErrorCode, StorageToken};
 use futures_util::future::{select, Either};
 use serde_json::Value;
-use worker::{AbortController, Delay, Fetch, Headers, Method, Request, RequestInit, Response};
+use worker::{AbortController, Delay, Env, Fetch, Headers, Method, Request, RequestInit, Response};
 
 use crate::config::CodeStorageConfig;
 use crate::error::{CellError, CellResult};
-use crate::js;
+use crate::{js, keys};
 
 /// A JSON call's deadline, and a streamed read's deadline for headers.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -29,14 +30,13 @@ const RUNTIME_TOKEN_TTL_S: i64 = 300;
 const RUNTIME_TOKEN_MARGIN_S: i64 = 60;
 
 thread_local! {
-    /// The parsed org key, per isolate (parsing a PEM costs more than signing).
-    static KEY: RefCell<Option<(String, std::rc::Rc<OrgKey>)>> = const { RefCell::new(None) };
     /// The cell's own tokens by (repo, scopes), per isolate.
     static TOKENS: RefCell<HashMap<(String, String), (String, i64)>> = RefCell::new(HashMap::new());
 }
 
 pub struct Cs<'a> {
     cfg: &'a CodeStorageConfig,
+    env: &'a Env,
 }
 
 pub struct FileHead {
@@ -77,39 +77,24 @@ pub async fn fetch(req: Request, deadline: Duration) -> CellResult<Response> {
 }
 
 impl<'a> Cs<'a> {
-    pub fn new(cfg: &'a CodeStorageConfig) -> Cs<'a> {
-        Cs { cfg }
+    pub fn new(cfg: &'a CodeStorageConfig, env: &'a Env) -> Cs<'a> {
+        Cs { cfg, env }
     }
 
-    fn key(&self) -> CellResult<std::rc::Rc<OrgKey>> {
-        KEY.with(|k| {
-            let mut k = k.borrow_mut();
-            if let Some((pem, key)) = k.as_ref() {
-                if *pem == self.cfg.key_pem {
-                    return Ok(key.clone());
-                }
-            }
-            let key = std::rc::Rc::new(OrgKey::from_pem(&self.cfg.key_pem).map_err(CellError::host)?);
-            *k = Some((self.cfg.key_pem.clone(), key.clone()));
-            Ok(key)
-        })
-    }
-
-    fn runtime_token(&self, repo: &str, scopes: &[&str]) -> CellResult<String> {
+    async fn runtime_token(&self, repo: &str, scopes: &[&str]) -> CellResult<String> {
         let now = js::now_ms() / 1000;
         let cache_key = (repo.to_string(), scopes.join(","));
         if let Some(t) = TOKENS.with(|t| t.borrow().get(&cache_key).filter(|(_, exp)| exp - RUNTIME_TOKEN_MARGIN_S > now).map(|(t, _)| t.clone())) {
             return Ok(t);
         }
-        let exp = now + RUNTIME_TOKEN_TTL_S;
-        let token = self.key()?.token(&Claims { iss: &self.cfg.org, sub: RUNTIME_SUB, repo, scopes, iat: now, exp });
-        TOKENS.with(|t| t.borrow_mut().insert(cache_key, (token.clone(), exp)));
+        let (token, expires_ms) = keys::codestorage_token(self.env, repo, RUNTIME_SUB, scopes, RUNTIME_TOKEN_TTL_S).await?;
+        TOKENS.with(|t| t.borrow_mut().insert(cache_key, (token.clone(), expires_ms / 1000)));
         Ok(token)
     }
 
-    fn request(&self, method: Method, path: &str, repo: &str, scopes: &[&str], body: Option<Value>) -> CellResult<Request> {
+    async fn request(&self, method: Method, path: &str, repo: &str, scopes: &[&str], body: Option<Value>) -> CellResult<Request> {
         let headers = Headers::new();
-        headers.set("authorization", &format!("Bearer {}", self.runtime_token(repo, scopes)?))?;
+        headers.set("authorization", &format!("Bearer {}", self.runtime_token(repo, scopes).await?))?;
         let mut init = RequestInit::new();
         init.with_method(method);
         if let Some(b) = body {
@@ -122,7 +107,7 @@ impl<'a> Cs<'a> {
 
     /// (status, body) of a call; the body is read within the same deadline.
     async fn call(&self, method: Method, path: &str, repo: &str, scopes: &[&str], body: Option<Value>) -> CellResult<(u16, Vec<u8>)> {
-        let req = self.request(method, path, repo, scopes, body)?;
+        let req = self.request(method, path, repo, scopes, body).await?;
         let mut resp = fetch(req, CALL_TIMEOUT).await?;
         let status = resp.status_code();
         let bytes = resp.bytes().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("reading {path}: {e}")))?;
@@ -231,7 +216,7 @@ impl<'a> Cs<'a> {
 
     /// A file's bytes as an upstream response to stream through.
     pub async fn stream(&self, repo: &str, sha: &str, path: &str) -> CellResult<Response> {
-        let req = self.request(Method::Get, &Cs::file_path(repo, sha, path), repo, &["git:read"], None)?;
+        let req = self.request(Method::Get, &Cs::file_path(repo, sha, path), repo, &["git:read"], None).await?;
         let mut resp = fetch(req, CALL_TIMEOUT).await?;
         match resp.status_code() {
             200 => Ok(resp),
@@ -242,7 +227,7 @@ impl<'a> Cs<'a> {
 
     /// A file's git blob identity; `None` when absent.
     pub async fn head(&self, repo: &str, sha: &str, path: &str) -> CellResult<Option<FileHead>> {
-        let req = self.request(Method::Head, &Cs::file_path(repo, sha, path), repo, &["git:read"], None)?;
+        let req = self.request(Method::Head, &Cs::file_path(repo, sha, path), repo, &["git:read"], None).await?;
         let resp = fetch(req, CALL_TIMEOUT).await?;
         let h = |k: &str| resp.headers().get(k).ok().flatten().unwrap_or_default();
         match resp.status_code() {
@@ -261,7 +246,7 @@ impl<'a> Cs<'a> {
     /// the pack expected (409: read the head again and rebuild).
     pub async fn commit(&self, repo: &str, pack: String) -> CellResult<Option<String>> {
         let headers = Headers::new();
-        headers.set("authorization", &format!("Bearer {}", self.runtime_token(repo, &["git:write"])?))?;
+        headers.set("authorization", &format!("Bearer {}", self.runtime_token(repo, &["git:write"]).await?))?;
         headers.set("content-type", "application/x-ndjson")?;
         let mut init = RequestInit::new();
         init.with_method(Method::Post).with_headers(headers).with_body(Some(pack.into()));
@@ -281,18 +266,17 @@ impl<'a> Cs<'a> {
 
     /// A token for an editor's own client: this repo only, git read and
     /// write, fifteen minutes. The claims are checked after signing.
-    pub fn storage_token(&self, repo: &str, principal: &str) -> CellResult<StorageToken> {
-        let now = js::now_ms() / 1000;
-        let exp = now + limits::STORAGE_TOKEN_TTL_S;
+    pub async fn storage_token(&self, repo: &str, principal: &str) -> CellResult<StorageToken> {
         let scopes = ["git:read", "git:write"];
         let sub = format!("editor:{principal}");
-        let token = self.key()?.token(&Claims { iss: &self.cfg.org, sub: &sub, repo, scopes: &scopes, iat: now, exp });
+        let (token, expires_ms) = keys::codestorage_token(self.env, repo, &sub, &scopes, limits::STORAGE_TOKEN_TTL_S).await?;
+        let exp = expires_ms / 1000;
         let claims = token.split('.').nth(1).and_then(|p| {
             use base64::Engine;
             base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(p).ok()
         });
         let claims: Value = claims.and_then(|c| serde_json::from_slice(&c).ok()).unwrap_or_default();
-        if claims["repo"] != repo || claims["scopes"] != serde_json::json!(scopes) || claims["exp"].as_i64().unwrap_or(0) - now > limits::STORAGE_TOKEN_TTL_S {
+        if claims["repo"] != repo || claims["scopes"] != serde_json::json!(scopes) || claims["exp"].as_i64().unwrap_or(0) - claims["iat"].as_i64().unwrap_or(0) > limits::STORAGE_TOKEN_TTL_S {
             return Err(CellError::host("a minted storage token failed its claim check"));
         }
         Ok(StorageToken { token, repo: repo.to_string(), api: self.cfg.api.clone(), expires_at: exp * 1000 })

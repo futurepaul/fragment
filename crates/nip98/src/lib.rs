@@ -174,9 +174,15 @@ impl Keys {
 
     /// The `Authorization` header value for `method url` with `body`.
     pub fn header(&self, method: &str, url: &str, body: &[u8], created_at: i64) -> String {
+        let payload = (!body.is_empty()).then(|| hex::encode(Sha256::digest(body)));
+        self.header_for_payload(method, url, payload.as_deref(), created_at)
+    }
+
+    /// `header` for a body the signer holds only the SHA-256 (hex) of.
+    pub fn header_for_payload(&self, method: &str, url: &str, payload_sha_hex: Option<&str>, created_at: i64) -> String {
         let mut tags = vec![serde_json::json!(["u", url]), serde_json::json!(["method", method.to_ascii_uppercase()])];
-        if !body.is_empty() {
-            tags.push(serde_json::json!(["payload", hex::encode(Sha256::digest(body))]));
+        if let Some(p) = payload_sha_hex {
+            tags.push(serde_json::json!(["payload", p]));
         }
         self.event(tags, created_at)
     }

@@ -88,12 +88,9 @@ impl FragmentCell {
     /// Who pays for step `index` of `run`, reserving its worst case when it
     /// is a paid step.
     async fn payer(&self, run: &Value, index: i64, kind: &str, args: &Value) -> Result<Paying, StepFail> {
-        if let Some(own) = self.open_secret(KEY_SECRET).map_err(|e| StepFail::Retry(e.message))? {
+        if let Some(own) = self.open_secret(KEY_SECRET).await.map_err(|e| StepFail::Retry(e.message))? {
             let own = String::from_utf8(own).map_err(|_| permanent(format!("{KEY_SECRET} is not text")))?;
             return Ok(Paying::Payer(Payer::Own(own.trim().to_string())));
-        }
-        if self.cfg.openrouter_management.is_none() {
-            return Err(permanent(format!("set the fragment's {KEY_SECRET} secret to use OpenRouter (`fragment secret set`): this fleet pays for no AI")));
         }
         let owner = self.must("owner").map_err(|e| StepFail::Retry(e.message))?;
         let org = ledger::org_of(&owner).ok_or_else(|| permanent("the fragment's owner has no billing org"))?;

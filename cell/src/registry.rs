@@ -340,6 +340,9 @@ impl RegistryCell {
         if self.down()? {
             return Err(CellError::new(ErrorCode::RegistryUnavailable, "the registry is down (a test hook)"));
         }
+        if path == "/login/exchange" {
+            return self.exchange(from(body)?).await;
+        }
         if let Some(v) = self.route_signin(&path, body.clone())? {
             return Ok(v);
         }

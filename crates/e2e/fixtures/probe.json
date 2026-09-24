@@ -1,0 +1,10 @@
+{
+  "name": "probe",
+  "operations": {
+    "try_eval": { "kind": "query", "role": "viewer" },
+    "try_function": { "kind": "query", "role": "viewer" },
+    "try_wait": { "kind": "query", "role": "viewer" },
+    "bomb": { "kind": "query", "role": "viewer" },
+    "hello": { "kind": "query", "role": "viewer" }
+  }
+}
