@@ -13,6 +13,9 @@
 //!   {type: "hello", id, principal, role}
 //!   {type: "record", channel, seq, at, principal, kind, body}
 //!   {type: "subscribed", channel, next, more}   after each page
+//!   {type: "presence", list: [{id, principal, data}]}
+//!   {type: "changed", op}                 a mutation applied: re-run live queries
+//!   {type: "error", message}
 //!
 //! A subscribe answers one page: at most `CHANNEL_PAGE` records and about
 //! `CHANNEL_PAGE_MAX_BYTES` of frames. With `more`, the socket is not live
@@ -20,12 +23,11 @@
 //! page that reaches the end makes it live. A record appended while a
 //! client pages comes in a later page, never live ahead of the records
 //! before it, so a client's cursor never jumps a gap.
-//!   {type: "presence", list: [{id, principal, data}]}
-//!   {type: "changed", op}                 a mutation applied: re-run live queries
-//!   {type: "error", message}
 //!
 //! A socket's role is fixed when it connects; removing a member closes
-//! theirs, and rotating the share link closes link holders'.
+//! theirs, and rotating the share link closes link holders' (4003);
+//! deleting the fragment closes every socket (4004). Both codes are
+//! final: the browser library does not reconnect after them.
 
 use fragment_core::npub;
 use fragment_proto::{limits, ChannelRecord, Role};
