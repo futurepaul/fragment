@@ -605,7 +605,7 @@ fn json_env_flag() -> bool {
 
 // ---------- machine envelope (--json) ----------
 // Success: ONE line {"ok":true,"data":…} on stdout, exit 0.
-// Failure: {"ok":false,"error":{code,message,hint?}} on stdout, exit 1
+// Failure: {"ok":false,"error":{code,message,hint?,id?}} on stdout, exit 1
 // (2 for usage-class errors). Human mode prints exactly as before.
 
 fn emit_ok(data: &Value) {
@@ -625,9 +625,13 @@ fn fail_json(code: &str, msg: &str, hint: Option<&str>, exit_code: i32) -> ! {
     if let Some(h) = hint {
         err["hint"] = json!(h);
     }
+    fail_json_with(&err, exit_code)
+}
+
+fn fail_json_with(err: &Value, exit_code: i32) -> ! {
     println!(
         "{{\"ok\":false,\"error\":{}}}",
-        serde_json::to_string(&err).unwrap_or_else(|_| "{\"code\":\"server_error\"}".into())
+        serde_json::to_string(err).unwrap_or_else(|_| "{\"code\":\"server_error\"}".into())
     );
     std::process::exit(exit_code);
 }
@@ -647,6 +651,39 @@ fn summary_of(v: &Value) -> String {
     v["error"].as_str().unwrap_or("unknown error").to_string()
 }
 
+/// The id of an operation call that failed (the error's context): a
+/// retry with it replays the call, so the failure always names it.
+#[derive(Debug)]
+struct CallId(String);
+
+impl std::fmt::Display for CallId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "operation id {}", self.0)
+    }
+}
+
+/// The `--json` failure envelope's `error` for an error from anywhere in
+/// run(), and the exit code. A failed operation call carries its id, and
+/// when its outcome is unknown the hint says how to find it out.
+fn error_body(e: &anyhow::Error) -> (Value, i32) {
+    let (code, class) = classify_err(e);
+    let mut err = json!({ "code": code, "message": format!("{e:#}") });
+    let call = e.downcast_ref::<CallId>();
+    let hint = match call {
+        Some(CallId(id)) if code == "outcome_unknown" => {
+            Some(format!("the call may have run: `fragment call` it again with --id {id}, which replays it and never runs it twice"))
+        }
+        _ => default_hint(code).map(str::to_string),
+    };
+    if let Some(h) = hint {
+        err["hint"] = json!(h);
+    }
+    if let Some(CallId(id)) = call {
+        err["id"] = json!(id);
+    }
+    (err, class)
+}
+
 /// Next-action strings per stable error code (only shown under --json).
 fn default_hint(code: &str) -> Option<&'static str> {
     match code {
@@ -658,7 +695,7 @@ fn default_hint(code: &str) -> Option<&'static str> {
         "too_large" => Some("see the limit in the message; files of 1 MiB and up sync as blobs"),
         "rate_limited" => Some("back off and retry shortly"),
         "unavailable" => Some("usually transient; retrying is safe"),
-        "outcome_unknown" => Some("the change may have been applied: check (`fragment status`, `fragment list`, `fragment events`) before repeating it; an operation retried with the same --id replays"),
+        "outcome_unknown" => Some("the change may have been applied: check (`fragment status`, `fragment list`, `fragment events`) before repeating it"),
         "server_error" => Some("see `fragment events <name>` if it persists"),
         "invalid_usage" => Some("see `fragment --help`"),
         _ => None,
@@ -706,11 +743,14 @@ fn main() {
     let verbose = cli.verbose;
     let host = cli.host.clone();
     if let Err(e) = run(cli) {
-        let (code, class) = classify_err(&e);
+        let (err, class) = error_body(&e);
         if json_mode {
-            fail_json(code, &format!("{e:#}"), default_hint(code), class);
+            fail_json_with(&err, class);
         }
         eprintln!("error: {e:#}");
+        if let (Some(CallId(id)), Some("outcome_unknown")) = (e.downcast_ref::<CallId>(), err["code"].as_str()) {
+            eprintln!("the call may have run: call it again with --id {id}, which replays it and never runs it twice");
+        }
         std::process::exit(class);
     }
     let _ = (verbose, host);
@@ -1791,7 +1831,12 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Call { name, op, input, id } => {
             let input: Value = serde_json::from_str(&input).context("--input must be JSON")?;
             let id = id.unwrap_or_else(|| format!("cli-{:016x}", rand::random::<u64>()));
-            let v = c.call(c.post_json(&format!("/api/f/{name}/ops/{op}"), &json!({ "id": id, "input": input }))?)?;
+            // the id makes the call safe to send again: it is retried like a
+            // read, and a failure names it, so a retry by hand replays it too
+            let v = c
+                .post_json_by_id(&format!("/api/f/{name}/ops/{op}"), &json!({ "id": id, "input": input }))
+                .and_then(|r| c.call(r))
+                .map_err(|e| e.context(CallId(id.clone())))?;
             if j {
                 ok_exit(&json!({ "id": id, "result": v["result"], "replayed": v["replayed"] }));
             }
@@ -2044,4 +2089,33 @@ WantedBy=default.target
 fn uid() -> Result<String> {
     let out = std::process::Command::new("id").arg("-u").output().context("id -u failed")?;
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn coded(code: &'static str) -> anyhow::Error {
+        anyhow::Error::new(api::CodedError { code, msg: "the answer was lost".into() })
+    }
+
+    /// Goal: a failed operation call always names its id, and one whose
+    /// outcome is unknown says to call it again with that id. Method: the
+    /// envelope of a call's outcome_unknown, of its refusal, and of the same
+    /// outcome_unknown from a write with no id.
+    #[test]
+    fn a_failed_call_names_its_id() {
+        let (err, class) = error_body(&coded("outcome_unknown").context(CallId("cli-00000000000000ab".into())));
+        assert_eq!((err["code"].as_str(), class), (Some("outcome_unknown"), 1));
+        assert_eq!(err["id"], "cli-00000000000000ab");
+        assert!(err["hint"].as_str().is_some_and(|h| h.contains("--id cli-00000000000000ab")), "{err}");
+        assert!(err["message"].as_str().is_some_and(|m| m.starts_with("operation id cli-00000000000000ab: ")), "{err}");
+
+        let (err, _) = error_body(&coded("forbidden").context(CallId("mine".into())));
+        assert_eq!((err["code"].as_str(), err["id"].as_str()), (Some("forbidden"), Some("mine")));
+        assert!(!err["hint"].as_str().unwrap_or("").contains("--id"), "a refusal is not retried by id: {err}");
+
+        let (err, _) = error_body(&coded("outcome_unknown"));
+        assert!(err.get("id").is_none() && !err["hint"].as_str().unwrap_or("").contains("--id"), "{err}");
+    }
 }
