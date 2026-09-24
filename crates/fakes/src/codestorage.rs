@@ -402,7 +402,8 @@ impl Inner {
                     }
                 };
                 let token = self.mint(&url, &["git:read", "git:write"], 900);
-                return Response::json(200, &json!({ "token": token, "repo": url, "api": self.url }));
+                // the host's whole answer (fragment_proto::StorageToken)
+                return Response::json(200, &json!({ "token": token, "repo": url, "api": self.url, "expiresAt": now_ms() + 900_000 }));
             }
             if path.starts_with("/api/f/") && path.ends_with("/refresh") && m == "POST" {
                 st.refreshes += 1;

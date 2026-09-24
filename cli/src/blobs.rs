@@ -2,13 +2,13 @@
 //! is kept in git as a git-lfs pointer, and its bytes in the fragment's
 //! blob store. Sync uploads the bytes before it commits the pointer, and
 //! downloads a pointer's bytes when it pulls one, so a folder always holds
-//! real files. Only a host that says so (`blobMinBytes` in status) gets
-//! pointers: the TypeScript runtime keeps large files in git.
+//! real files, at the threshold the host names (`blobMinBytes` in status).
 
 use std::cell::OnceCell;
 
 use anyhow::{anyhow, bail, Result};
 use fragment_core::blob;
+use fragment_proto::FragmentStatus;
 
 use crate::api::Client;
 use crate::sync::sha256_hex;
@@ -24,15 +24,14 @@ impl<'a> Blobs<'a> {
         Blobs { client, name, min: OnceCell::new() }
     }
 
-    /// The host's blob threshold, asked once (`None`: it keeps everything
-    /// in git, as a host without a status route does).
+    /// The host's blob threshold, asked once per pass (`None`: it keeps
+    /// everything in git).
     fn min_bytes(&self) -> Result<Option<u64>> {
         if let Some(m) = self.min.get() {
             return Ok(*m);
         }
-        let resp = self.client.get(&format!("/api/f/{}/status", self.name))?;
-        let m = if resp.status == 404 { None } else { self.client.call(resp)?["blobMinBytes"].as_u64() };
-        Ok(*self.min.get_or_init(|| m))
+        let status: FragmentStatus = self.client.call_as(self.client.get(&format!("/api/f/{}/status", self.name))?)?;
+        Ok(*self.min.get_or_init(|| status.blob_min_bytes))
     }
 
     fn path(&self, sha: &str) -> String {
@@ -67,7 +66,7 @@ impl<'a> Blobs<'a> {
         let Some(p) = blob::parse(&bytes) else { return Ok(bytes) };
         let resp = self.client.get_sized(&self.path(&p.sha256), p.size)?;
         if !resp.ok() {
-            bail!("the bytes of blob {} (http {}: {})", p.sha256, resp.status, resp.err_summary());
+            return Err(anyhow::Error::new(resp.refusal()).context(format!("the bytes of blob {}", p.sha256)));
         }
         if sha256_hex(&resp.body) != p.sha256 {
             return Err(anyhow!("blob {} arrived with other bytes", p.sha256));

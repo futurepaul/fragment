@@ -407,11 +407,30 @@ Global flags: `--host <url>` (or `FRAGMENT_HOST`, or `fragment host
 <url>` to save one), `--json`, `-v`. With `--json` (or
 `FRAGMENT_OUTPUT=json`), stdout is exactly one line: `{"ok":true,
 "data":…}` or `{"ok":false,"error":{"code","message","hint","id"}}`
-(`id`: a failed `fragment call`'s), with
-stable codes (`invalid_usage auth_failed forbidden not_found name_taken
-conflict too_large rate_limited unavailable outcome_unknown
-server_error`). Exit codes: 0 ok, 1 failure, 2 usage. `-v` logs each
-signed request to stderr and leaves stdout clean.
+(`id`: a failed `fragment call`'s). The codes are stable, and a host's
+refusal gets its code from the error code in its answer, never from
+its wording:
+
+- `invalid_usage`: the command was called wrong (exit 2)
+- `invalid_request`: the host refused the request; the message says why (400)
+- `auth_failed`: no key here, or the host does not know it (401)
+- `forbidden`: signed, but your role does not allow it (403)
+- `not_found`: no such fragment, route, or operation (404)
+- `name_taken`: it exists already (409)
+- `conflict`: the branch moved under a sync, a deploy, or a manifest-set
+- `conflicting_body`: that operation id already ran with another input (409)
+- `too_large`: over a limit the message names (413)
+- `app_failed`: the app's code refused or threw (422)
+- `rate_limited`: too many calls; back off (429)
+- `budget_used_up`: this month's AI budget cannot cover it (402)
+- `storage_full`: the app's database is at its cap; the change rolled back (507)
+- `unavailable`: the host, or a service behind it, did not answer; retrying is safe
+- `outcome_unknown`: a write's answer was lost; it may have been applied
+- `server_error`: the host failed (500), or the CLI did
+
+Exit codes: 0 ok, 1 failure, 2 usage. Without `--json`, a refusal
+prints its message and a hint on stderr. `-v` logs each signed request
+to stderr and leaves stdout clean.
 
 A network failure is retried (three attempts in all) for reads, blob
 uploads, and `fragment call`, which are safe to repeat (a call carries

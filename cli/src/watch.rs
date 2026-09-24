@@ -165,10 +165,8 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, cfg: &Wa
 }
 
 fn view_token(client: &Client, name: &str) -> Option<String> {
-    client
-        .call(client.get(&format!("/api/f/{name}/status")).ok()?)
-        .ok()
-        .and_then(|v| v["viewToken"].as_str().map(|s| s.to_string()))
+    let status: fragment_proto::FragmentStatus = client.call_as(client.get(&format!("/api/f/{name}/status")).ok()?).ok()?;
+    status.view_token
 }
 
 /// native OS watcher; the boxed return keeps the watcher alive (dropping it

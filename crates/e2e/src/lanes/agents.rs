@@ -300,6 +300,16 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the agent listens to the chat (a subscription on its channel)", r.as_ref().is_ok_and(|v| v["channel"] == "chat"), format!("{r:?}"));
     let subs = api.signed(&owner, "GET", &format!("/api/f/{chat}/subscriptions"), None)?;
     s.ok("the owner sees the agent's subscription", subs.body["subscriptions"].as_array().is_some_and(|a| a.len() == 1 && a[0]["principal"] == bot_id.as_str()), &subs);
+    // the agent decodes a delivery whole: one whose record has no seq is
+    // refused, never heard under the key `…/null` forever after
+    let inbox = subs.body["subscriptions"][0]["url"].as_str().unwrap_or("").to_string();
+    let deliver = |record: Value| -> Result<(u16, String)> {
+        let body = json!({ "type": "record", "fragment": chat, "channel": "chat", "record": record });
+        let resp = reqwest::blocking::Client::new().post(&inbox).header("content-type", "application/json").body(body.to_string()).send()?;
+        Ok((resp.status().as_u16(), resp.text()?))
+    };
+    let (status, text) = deliver(json!({ "channel": "chat", "at": 1, "principal": owner.pubkey_hex(), "kind": "say", "body": { "text": "no seq" } }))?;
+    s.ok("a delivery whose record has no seq is 400", status == 400 && text.contains("seq"), &text);
     let stranger = api.person()?;
     let r = api.signed(&stranger, "POST", &format!("/api/f/{chat}/subscriptions"), Some(&json!({ "channel": "chat", "url": "http://127.0.0.1:9/x" })))?;
     s.ok("someone who is not a member cannot subscribe", r.status == 403, &r);

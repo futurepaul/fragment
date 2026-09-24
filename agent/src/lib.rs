@@ -43,7 +43,7 @@ use std::rc::Rc;
 
 use fragment_core::body::{LimitedBody, TooLarge};
 use fragment_core::npub;
-use fragment_proto::{valid_channel_name, valid_fragment_name, valid_op_name, ErrorCode};
+use fragment_proto::{valid_channel_name, valid_fragment_name, valid_op_name, Delivery, ErrorCode, IdentityView};
 use futures::TryStreamExt;
 use goose_provider_types::conversation::message::{Message, MessageContent};
 use serde::Deserialize;
@@ -310,12 +310,13 @@ impl Agent {
         let (status, me) = self.fleet()?.call(Method::Get, "/api/identities/me", None).await.map_err(|e| Fail::new(ErrorCode::RegistryUnavailable, e.to_string()))?;
         match status {
             200 => {
-                let (Some(id), Some(owner)) = (me["id"].as_str(), me["owner"].as_str()) else {
-                    return Err(Fail::host("the registry answered no id or owner for this agent"));
+                let me = IdentityView::deserialize(&me).map_err(|e| Fail::host(format!("the registry's answer for this agent: {e}")))?;
+                let Some(owner) = me.owner else {
+                    return Err(Fail::host("the registry named no owner for this agent"));
                 };
-                kv_set(&sql, "identity", id)?;
-                kv_set(&sql, "owner", owner)?;
-                Ok((id.to_string(), owner.to_string()))
+                kv_set(&sql, "identity", &me.id)?;
+                kv_set(&sql, "owner", &owner)?;
+                Ok((me.id, owner))
             }
             401 => {
                 let name = kv_get(&sql, "name")?.unwrap_or_default();
@@ -640,7 +641,8 @@ impl Agent {
     /// A delivery from a followed channel: someone else's record starts a
     /// turn (or steers the running one); the agent's own, and a record heard
     /// before, are acknowledged and ignored.
-    fn inbox(&self, token: &str, body: Value) -> Answer<Value> {
+    fn inbox(&self, token: &str, delivery: Delivery) -> Answer<Value> {
+        let Delivery::Record { fragment: sent_from, channel: sent_on, record } = delivery;
         let sql = self.sql();
         let rows: Vec<Value> = sql.exec("SELECT fragment, channel FROM listens WHERE token = ?", vec![token.into()])?.to_array()?;
         let Some(listen) = rows.first() else {
@@ -648,26 +650,25 @@ impl Agent {
             return Err(Fail::new(ErrorCode::NotFound, "no such inbox"));
         };
         let (fragment, channel) = (listen["fragment"].as_str().unwrap_or(""), listen["channel"].as_str().unwrap_or(""));
-        if body["fragment"] != fragment || body["channel"] != channel {
+        if sent_from != fragment || sent_on != channel || record.channel != channel {
             return Err(Fail::invalid("the delivery names another fragment or channel"));
         }
-        let record = &body["record"];
         // listening needed the registration, so the agent knows its identity
         let me = kv_get(&sql, "identity")?.unwrap_or_default();
-        let from = record["principal"].as_str().unwrap_or("");
-        if !me.is_empty() && from == me {
+        if !me.is_empty() && record.principal == me {
             return Ok(json!({ "ignored": "own" }));
         }
-        let key = format!("{fragment}/{channel}/{}", record["seq"]);
+        // the record's place in its channel: decoding made sure it has one
+        let key = format!("{fragment}/{channel}/{}", record.seq);
         let fresh: Vec<Value> = sql.exec("INSERT OR IGNORE INTO heard (key, at) VALUES (?, ?) RETURNING key", vec![key.as_str().into(), (js::now_ms() as i64).into()])?.to_array()?;
         if fresh.is_empty() {
             return Ok(json!({ "ignored": "heard" }));
         }
-        let said = match record["body"]["text"].as_str() {
+        let said = match record.body["text"].as_str() {
             Some(t) => t.to_string(),
-            None => record["body"].to_string(),
+            None => record.body.to_string(),
         };
-        let who: String = from.chars().take(12).collect();
+        let who: String = record.principal.chars().take(12).collect();
         let mut text = format!("[{fragment} · {who}] {said}");
         if text.len() > MESSAGE_TEXT_MAX {
             text.truncate(text.floor_char_boundary(MESSAGE_TEXT_MAX));
@@ -780,7 +781,9 @@ impl Agent {
         let body = parse(&req.bytes().await?)?;
         let from = |v: Value| -> Answer<Value> { Ok(v) };
         if let Some(token) = action.strip_prefix("inbox/") {
-            return Ok(Response::from_json(&self.inbox(token, body)?)?);
+            // decoded whole at the door: a delivery without its record's seq is refused, never keyed `…/null`
+            let delivery: Delivery = serde_json::from_value(body).map_err(|e| Fail::invalid(format!("delivery: {e}")))?;
+            return Ok(Response::from_json(&self.inbox(token, delivery)?)?);
         }
         match action.as_str() {
             "computer/poll" => return Ok(Response::from_json(&self.computer_poll(&computer_token).await?)?),
