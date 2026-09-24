@@ -207,6 +207,8 @@ impl CodeStorage {
             });
             match answer {
                 Ok(answer) => return Ok(answer),
+                // a request that could not be built never left
+                Err(e) if e.is_builder() => return Err(CsError::Malformed(format!("building {method} {path}: {e}"))),
                 Err(e) if replay.allows_retry(!e.is_connect()) => last_err = Some(e.to_string()),
                 Err(e) => return Err(CsError::OutcomeUnknown(format!("{method} {path}: {e}"))),
             }
