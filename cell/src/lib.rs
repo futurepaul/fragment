@@ -76,6 +76,14 @@ pub use registry::RegistryCell;
 const PASSED_HEADERS: [&str; 8] =
     ["content-type", "cookie", "accept", "if-none-match", "upgrade", "x-pierre-event", "x-pierre-signature", "range"];
 
+/// A WebSocket upgrade's own handshake, passed too: when the fragment's cell
+/// lives on another node, celld tunnels the upgrade there and answers the
+/// client's key itself, so it needs the client's handshake, not just
+/// `Upgrade` (without these, every live socket that lands on the other node
+/// fails: 502 "the cell accepted a WebSocket for a request that did not
+/// upgrade").
+const WEBSOCKET_HEADERS: [&str; 4] = ["sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions"];
+
 #[event(queue)]
 async fn queue(batch: MessageBatch<deliveries::Delivery>, env: Env, _ctx: Context) -> Result<()> {
     deliveries::consume(batch, env).await
@@ -317,6 +325,14 @@ async fn forward(env: &Env, req: &Request, url: &Url, body: Option<worker::wasm_
     for k in PASSED_HEADERS {
         if let Some(v) = req.headers().get(k)? {
             headers.set(k, &v)?;
+        }
+    }
+    if req.headers().get("upgrade")?.is_some_and(|u| u.eq_ignore_ascii_case("websocket")) {
+        headers.set("connection", "Upgrade")?;
+        for k in WEBSOCKET_HEADERS {
+            if let Some(v) = req.headers().get(k)? {
+                headers.set(k, &v)?;
+            }
         }
     }
     headers.set(NAME_HEADER, f.name)?;
