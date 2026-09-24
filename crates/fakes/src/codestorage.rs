@@ -54,11 +54,13 @@ pub struct Options {
     /// Also answer the fragment host's `storage-token` and `refresh` routes,
     /// for CLI unit tests that have no cell.
     pub host_routes: bool,
+    /// The lifetime of a token the host routes mint (the platform's is 900 s).
+    pub token_ttl_s: i64,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { org: "fragment-dev".into(), org_key_pem: None, page_size: 1000, state_file: None, port: 0, host_routes: false }
+        Options { org: "fragment-dev".into(), org_key_pem: None, page_size: 1000, state_file: None, port: 0, host_routes: false, token_ttl_s: 900 }
     }
 }
 
@@ -134,10 +136,18 @@ struct State {
     /// File reads answer 503 while set (an outage).
     #[serde(skip)]
     reads_failing: bool,
-    /// Requests per (repo url, `"<method> <route>"`), so a check can count
-    /// the round trips a cell makes (`requests`).
+    /// Requests answered, by (the bearer token's subject, the repo url a
+    /// repo route names or "", route): what a test counts, by repo
+    /// (`requests`) or by caller (`take_requests`). Bounded by subjects
+    /// times repos times routes.
     #[serde(skip)]
-    requests: BTreeMap<(String, String), u32>,
+    requests: BTreeMap<(String, String, String), u32>,
+    /// Unsigned tokens minted so far (`fake-token-<n>`), and the first
+    /// serial still honored (`revoke_tokens`).
+    #[serde(skip)]
+    tokens_minted: u64,
+    #[serde(skip)]
+    tokens_revoked_below: u64,
 }
 
 struct Inner {
@@ -146,6 +156,7 @@ struct Inner {
     page_size: usize,
     state_file: Option<PathBuf>,
     host_routes: bool,
+    token_ttl_s: i64,
     url: String,
     state: Mutex<State>,
 }
@@ -372,6 +383,7 @@ impl Inner {
         let mut deliveries = Vec::new();
         let resp = {
             let mut st = self.state.lock().expect("fake state lock");
+            *st.requests.entry((bearer_subject(req), repo_of(req), route_key(req))).or_default() += 1;
             let resp = self.route(&mut st, req, &mut deliveries);
             if req.method != "GET" && req.method != "HEAD" {
                 self.persist(&st);
@@ -405,9 +417,9 @@ impl Inner {
                         name.to_string()
                     }
                 };
-                let token = self.mint(&url, &["git:read", "git:write"], 900);
+                let token = self.mint(st, &url, &["git:read", "git:write"], self.token_ttl_s);
                 // the host's whole answer (fragment_proto::StorageToken)
-                return Response::json(200, &json!({ "token": token, "repo": url, "api": self.url, "expiresAt": now_ms() + 900_000 }));
+                return Response::json(200, &json!({ "token": token, "repo": url, "api": self.url, "expiresAt": now_ms() + self.token_ttl_s * 1000 }));
             }
             if path.starts_with("/api/f/") && path.ends_with("/refresh") && m == "POST" {
                 st.refreshes += 1;
@@ -489,10 +501,12 @@ impl Inner {
         if !st.repos.contains_key(url) {
             return problem(404, "repository not found");
         }
-        *st.requests.entry((url.to_string(), format!("{m} {op}"))).or_default() += 1;
         let scope = if m == "POST" { "git:write" } else { "git:read" };
         if let Err(r) = self.authorize(req, scope, Some(url)) {
             return r;
+        }
+        if unsigned_serial(req).is_some_and(|n| n < st.tokens_revoked_below) {
+            return problem(401, "Invalid or expired token");
         }
         let url = url.to_string();
         match (m, op) {
@@ -603,9 +617,12 @@ impl Inner {
         )
     }
 
-    fn mint(&self, repo: &str, scopes: &[&str], ttl_s: i64) -> String {
+    fn mint(&self, st: &mut State, repo: &str, scopes: &[&str], ttl_s: i64) -> String {
         match &self.signing {
-            None => "fake-token".to_string(),
+            None => {
+                st.tokens_minted += 1;
+                format!("{UNSIGNED_TOKEN}{}", st.tokens_minted - 1)
+            }
             Some(k) => {
                 let now = now_ms() / 1000;
                 let key = OrgKey::from_pem(&k.to_pkcs8_pem_string()).expect("the fake's own key re-encodes");
@@ -748,6 +765,39 @@ fn deliver(d: &Delivery, state: &Mutex<State>) {
     state.lock().expect("fake state lock").deliveries.push((d.url.clone(), result));
 }
 
+/// What a request is counted under: its method and route (`GET branch`,
+/// `POST commit-pack`, `GET storage-token`), not its repo or query.
+fn route_key(req: &Request) -> String {
+    let path = req.path.as_str();
+    let route = match (path.strip_prefix("/api/repos/"), path.strip_prefix("/api/f/")) {
+        (Some(repo_scoped), _) => repo_scoped.split_once('/').map_or(repo_scoped, |(_, op)| op),
+        (None, Some(host)) => host.rsplit_once('/').map_or(host, |(_, op)| op),
+        (None, None) => path,
+    };
+    format!("{} {route}", req.method)
+}
+
+/// The repo url a repo route names (`/api/repos/<url>/<op>`), or "".
+fn repo_of(req: &Request) -> String {
+    req.path.strip_prefix("/api/repos/").and_then(|p| p.split_once('/')).map_or_else(String::new, |(url, _)| url.to_string())
+}
+
+/// The subject (`sub`) of a request's bearer JWT, read without verifying it
+/// (counting is not authorizing); "" for none, or an unsigned token.
+fn bearer_subject(req: &Request) -> String {
+    let payload = req.header("authorization").and_then(|h| h.strip_prefix("Bearer ")).and_then(|t| t.split('.').nth(1));
+    let claims = payload.and_then(|p| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(p).ok()).and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    claims.and_then(|c| c["sub"].as_str().map(str::to_string)).unwrap_or_default()
+}
+
+/// Tokens the fake mints when it signs nothing: this prefix and a serial.
+const UNSIGNED_TOKEN: &str = "fake-token-";
+
+/// An unsigned token's serial, if the request carries one.
+fn unsigned_serial(req: &Request) -> Option<u64> {
+    req.header("authorization")?.strip_prefix("Bearer ")?.strip_prefix(UNSIGNED_TOKEN)?.parse().ok()
+}
+
 fn uuid_like(hex40: &str) -> String {
     format!("{}-{}-{}-{}-{}", &hex40[0..8], &hex40[8..12], &hex40[12..16], &hex40[16..20], &hex40[20..32])
 }
@@ -795,6 +845,7 @@ impl CodeStorage {
             page_size: opts.page_size,
             state_file: opts.state_file,
             host_routes: opts.host_routes,
+            token_ttl_s: opts.token_ttl_s,
             url: url.clone(),
             state: Mutex::new(state),
         });
@@ -955,12 +1006,13 @@ impl CodeStorage {
     }
 
     /// Requests to `repo` (a name or url) on one route, as `"<method>
-    /// <route>"` (`"GET branch"`, `"GET file"`, `"GET files/metadata"`):
-    /// every one that named an existing repo, answered or not.
+    /// <route>"` (`"GET branch"`, `"GET file"`, `"GET files/metadata"`),
+    /// from every caller, answered or not. A check counts by difference;
+    /// `take_requests` resets these counts too.
     pub fn requests(&self, repo: &str, route: &str) -> u32 {
         self.with(|st| {
             let Some(url) = st.url_of(repo) else { return 0 };
-            st.requests.get(&(url, route.to_string())).copied().unwrap_or(0)
+            st.requests.iter().filter(|((_, r, rt), _)| *r == url && rt == route).map(|(_, n)| n).sum()
         })
     }
 
@@ -969,10 +1021,36 @@ impl CodeStorage {
         self.with(|st| st.refreshes)
     }
 
+    /// The requests answered since the last take, by route (`GET branch`,
+    /// `GET files/metadata`, `GET file`, `POST commit-pack`, and with
+    /// `host_routes` `GET storage-token` and `POST refresh`), from callers
+    /// whose token's subject starts with `subject`: "" for every caller;
+    /// an editor's client is `editor:<id>`, the cell's `fragment-runtime`.
+    /// Taking resets every count, the other subjects' too.
+    pub fn take_requests(&self, subject: &str) -> BTreeMap<String, u32> {
+        self.with(|st| {
+            let mut out = BTreeMap::new();
+            for ((sub, _, route), n) in std::mem::take(&mut st.requests) {
+                if sub.starts_with(subject) {
+                    *out.entry(route).or_default() += n;
+                }
+            }
+            out
+        })
+    }
+
+    /// Every token minted so far is refused from now on (401, as an expired
+    /// or revoked one is); tokens minted later pass. Unsigned tokens only:
+    /// a fake with an org key checks real expiry instead.
+    pub fn revoke_tokens(&self) {
+        assert!(self.inner.signing.is_none(), "revoke_tokens works on the unsigned tokens of a fake without an org key");
+        self.with(|st| st.tokens_revoked_below = st.tokens_minted);
+    }
+
     /// A token for calling the fake directly.
     pub fn token(&self, repo: &str, scopes: &[&str]) -> String {
         let url = self.repo_url(repo).unwrap_or_else(|| repo.to_string());
-        self.inner.mint(&url, scopes, 900)
+        self.with(|st| self.inner.mint(st, &url, scopes, 900))
     }
 }
 
@@ -1063,6 +1141,44 @@ mod tests {
         let write_only = cs.token("r", &["git:write"]);
         let (status, _) = get(&format!("{}/api/repos/r/files/metadata?ref=main", cs.url), &write_only);
         assert_eq!(status, 403, "missing git:read");
+    }
+
+    /// Goal: the counters a CLI test pins its requests with count what was
+    /// asked, by route and by caller. Method: two callers (the org key signs
+    /// both, as the subjects `fake` and another) ask known routes.
+    #[test]
+    fn requests_are_counted_by_route_and_subject() {
+        let key = SigningKey::from_slice(&[5u8; 32]).unwrap();
+        let pem = key.to_pkcs8_pem(Default::default()).unwrap().to_string();
+        let cs = CodeStorage::start(Options { org_key_pem: Some(pem), ..Options::default() }).unwrap();
+        cs.seed_repo("r", &[("a", b"1")]);
+        let token = cs.token("r", &["git:read"]);
+        for _ in 0..2 {
+            assert_eq!(get(&format!("{}/api/repos/r/branch?name=main", cs.url), &token).0, 200);
+        }
+        assert_eq!(get(&format!("{}/api/repos/r/files/metadata?ref=main", cs.url), &token).0, 200);
+        assert_eq!(get(&format!("{}/api/repos/r/branch?name=nope", cs.url), "").0, 401);
+        let mine = cs.take_requests("fake");
+        assert_eq!(mine, BTreeMap::from([("GET branch".to_string(), 2), ("GET files/metadata".to_string(), 1)]));
+        assert!(cs.take_requests("").is_empty(), "taking resets every count");
+        assert_eq!(get(&format!("{}/api/repos/r/branch?name=main", cs.url), &token).0, 200);
+        assert_eq!(cs.take_requests(""), BTreeMap::from([("GET branch".to_string(), 1)]));
+    }
+
+    /// Goal: a revoked token is refused and a later one is not, as a
+    /// client that mints again after a refusal needs. Method: unsigned
+    /// tokens before and after the lever.
+    #[test]
+    fn revoked_tokens_are_refused_and_new_ones_pass() {
+        let cs = CodeStorage::start(Options::default()).unwrap();
+        cs.seed_repo("r", &[("a", b"1")]);
+        let old = cs.token("r", &["git:read"]);
+        assert_eq!(get(&format!("{}/api/repos/r/branch?name=main", cs.url), &old).0, 200);
+        cs.revoke_tokens();
+        assert_eq!(get(&format!("{}/api/repos/r/branch?name=main", cs.url), &old).0, 401);
+        let new = cs.token("r", &["git:read"]);
+        assert_ne!(new, old);
+        assert_eq!(get(&format!("{}/api/repos/r/branch?name=main", cs.url), &new).0, 200);
     }
 
     #[test]
