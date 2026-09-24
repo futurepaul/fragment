@@ -51,7 +51,7 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     let agents = s.start_agents(true)?;
-    let owner = Keys::generate();
+    let owner = api.person()?;
     let name = s.name("bot");
     let wait = Duration::from_secs(30);
 
@@ -59,12 +59,27 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an unsigned create is 401", r.status == 401, &r);
     let r = agents.signed(&owner, "POST", "/api/agents", Some(&json!({ "name": name })))?;
     let agent_npub = r.body["npub"].as_str().unwrap_or("").to_string();
-    s.ok("the owner makes an agent, and it has its own key", r.status == 200 && agent_npub.starts_with("npub1") && r.body["model"] == "z-ai/glm-5.3-flash", &r);
-    let agent_hex = fragment_core::npub::parse(&agent_npub).unwrap_or_default();
+    s.ok(
+        "the owner makes an agent: its own key, and a proof by it for the registration",
+        r.status == 200 && agent_npub.starts_with("npub1") && r.body["model"] == "z-ai/glm-5.3-flash" && r.body["proof"].is_string(),
+        &r,
+    );
+    let r = agents.signed(&owner, "GET", &format!("/api/a/{name}/tools"), None)?;
+    s.ok("until it is registered, it says so", r.status == 400 && r.message().contains("not registered"), &r);
+    let r = agents.signed(&api.person()?, "POST", "/api/agents", Some(&json!({ "name": name })))?;
+    s.ok("someone else cannot take the name meanwhile", r.status == 409, &r);
+    let again = agents.signed(&owner, "POST", "/api/agents", Some(&json!({ "name": name })))?;
+    s.ok("its maker asking again gets a fresh proof", again.status == 200 && again.body["replayed"] == true && again.body["npub"] == agent_npub.as_str(), &again);
+    let reg = api.signed(&owner, "POST", "/api/identities", Some(&json!({ "kind": "agent", "proof": again.body["proof"] })))?;
+    let agent_id = reg.body["id"].as_str().unwrap_or("").to_string();
+    let owner_id = api.identity(&owner)?;
+    s.ok("the owner registers it with the platform: an agent identity they own", reg.status == 200 && reg.body["kind"] == "agent" && reg.body["owner"] == owner_id.as_str(), &reg);
     let r = agents.signed(&owner, "POST", "/api/agents", Some(&json!({ "name": name })))?;
     s.ok("the name is taken after", r.status == 409, &r);
-    let r = agents.signed(&Keys::generate(), "GET", &format!("/api/a/{name}"), None)?;
+    let r = agents.signed(&api.person()?, "GET", &format!("/api/a/{name}"), None)?;
     s.ok("only its owner may see it", r.status == 403, &r);
+    let r = agents.signed(&Keys::generate(), "GET", &format!("/api/a/{name}"), None)?;
+    s.ok("nor a key no one registered", r.status == 403, &r);
     let r = agents.signed(&owner, "GET", &format!("/api/a/{name}/tools"), None)?;
     s.ok("an agent in no fragment has no tools", r.status == 200 && r.body["tools"] == json!([]), &r);
 
@@ -75,7 +90,12 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     let other = s.name("agent-other");
     let o = s.create(api, &owner, &other)?;
     ship(s, &o, TODO_APP, TODO_JSON);
-    api.signed(&owner, "PUT", &format!("/api/f/{todo}/members/{agent_hex}"), Some(&json!({ "role": "editor" })))?;
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{todo}/members/{agent_npub}"), Some(&json!({ "role": "editor" })))?;
+    s.ok(
+        "its key names the agent as a member, and the answer says whose it is",
+        r.status == 200 && r.body["principal"] == agent_id.as_str() && r.body["kind"] == "agent" && r.body["owner"] == owner_id.as_str(),
+        &r,
+    );
     let add = format!("{todo}__add_todo");
     let r = agents.signed(&owner, "GET", &format!("/api/a/{name}/tools"), None)?;
     let tools: Vec<String> = r.body["tools"].as_array().into_iter().flatten().filter_map(|t| t.as_str().map(str::to_string)).collect();
@@ -92,7 +112,7 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("it ends with the model's answer", v["outcome"] == "idle" && last["role"] == "assistant" && last["text"] == "Added milk.", &v);
     s.ok("the operation ran: the list has milk", todos(api, &owner, &todo) == ["milk"], json!(todos(api, &owner, &todo)));
     let ops = api.signed(&owner, "GET", &format!("/api/f/{todo}/channels/ops"), None)?;
-    let by_agent = ops.body["records"].as_array().into_iter().flatten().any(|r| r["body"]["op"] == "add_todo" && (r["principal"] == agent_npub.as_str() || r["principal"] == agent_hex.as_str()));
+    let by_agent = ops.body["records"].as_array().into_iter().flatten().any(|r| r["body"]["op"] == "add_todo" && r["principal"] == agent_id.as_str());
     s.ok("as the agent (its key, through the signed API)", by_agent, &ops);
     let chats = s.openrouter.chats();
     let schema = chats
@@ -198,14 +218,14 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let bot = s.name("chatbot");
     let made = s.cli_json(api, &home, &["agent", "create", &bot, "--json"])?;
     let bot_npub = made["npub"].as_str().unwrap_or("").to_string();
-    let bot_hex = fragment_core::npub::parse(&bot_npub).unwrap_or_default();
-    s.ok("fragment agent create makes an agent", bot_npub.starts_with("npub1"), &made);
+    let bot_id = made["id"].as_str().unwrap_or("").to_string();
+    s.ok("fragment agent create makes an agent and registers it", bot_npub.starts_with("npub1") && bot_id.starts_with("id:"), &made);
     s.cli(api, &home, &["members", "add", &chat, &bot_npub, "--role", "editor"]);
     let r = s.cli_json(api, &home, &["agent", "listen", &bot, &chat, "--json"]);
     s.ok("the agent listens to the chat (a subscription on its channel)", r.as_ref().is_ok_and(|v| v["channel"] == "chat"), format!("{r:?}"));
     let subs = api.signed(&owner, "GET", &format!("/api/f/{chat}/subscriptions"), None)?;
-    s.ok("the owner sees the agent's subscription", subs.body["subscriptions"].as_array().is_some_and(|a| a.len() == 1 && a[0]["principal"] == bot_npub.as_str()), &subs);
-    let stranger = Keys::generate();
+    s.ok("the owner sees the agent's subscription", subs.body["subscriptions"].as_array().is_some_and(|a| a.len() == 1 && a[0]["principal"] == bot_id.as_str()), &subs);
+    let stranger = api.person()?;
     let r = api.signed(&stranger, "POST", &format!("/api/f/{chat}/subscriptions"), Some(&json!({ "channel": "chat", "url": "http://127.0.0.1:9/x" })))?;
     s.ok("someone who is not a member cannot subscribe", r.status == 403, &r);
 
@@ -213,7 +233,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.openrouter.clear_script();
     s.openrouter.script(&[Reply::Text("Hello! I'm here.".into())]);
     api.op(&owner, &chat, "say", "c1", json!({ "text": "hi bot" }))?;
-    let who = [bot_npub.as_str(), bot_hex.as_str()];
+    let who = [bot_id.as_str()];
     let answered = s.eventually(wait, || said_by(&chat_records(api, &owner, &chat), &who, "Hello! I'm here."));
     s.ok("a message in the chat gets the agent's answer there, as the agent", answered, json!(chat_records(api, &owner, &chat)));
     std::thread::sleep(Duration::from_secs(2));
@@ -224,7 +244,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let todo = s.name("chat-todo");
     let c = s.create(api, &owner, &todo)?;
     ship(s, &c, TODO_APP, TODO_JSON);
-    api.signed(&owner, "PUT", &format!("/api/f/{todo}/members/{bot_hex}"), Some(&json!({ "role": "editor" })))?;
+    api.signed(&owner, "PUT", &format!("/api/f/{todo}/members/{bot_id}"), Some(&json!({ "role": "editor" })))?;
     s.openrouter.script(&[Reply::Tools(vec![(format!("{todo}__add_todo"), json!({ "text": "bread" }))]), Reply::Text("Added bread to your list.".into())]);
     api.op(&owner, &chat, "say", "c2", json!({ "text": "please add bread to my todo list" }))?;
     let done = s.eventually(wait, || said_by(&chat_records(api, &owner, &chat), &who, "Added bread to your list."));

@@ -178,7 +178,7 @@ impl FragmentCell {
         self.require(caller, link, Role::Viewer)?;
         let pair = WebSocketPair::new()?;
         let who = match &caller.principal {
-            Some(p) if self.member_role(p)?.is_some() => format!("p:{p}"),
+            Some(p) if self.has_standing(caller)? => format!("p:{p}"),
             _ => "view".to_string(),
         };
         self.state.accept_websocket_with_tags(&pair.server, &["watch", &who]);

@@ -29,6 +29,14 @@ export class Principal extends DurableObject {
   fetch(request) { return this.rs.fetch(request); }
 }
 
+export class Registry extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.rs = new rs.RegistryCell(ctx, env);
+  }
+  fetch(request) { return this.rs.fetch(request); }
+}
+
 // The app's read access to its files (files.rs), handed to its facet as
 // `env.FILES` bound to one fragment by `props`: the app cannot name another.
 export class Files extends WorkerEntrypoint {

@@ -40,9 +40,10 @@ pub struct Config {
     pub delivery_retry_s: u32,
     /// `OPENROUTER_API_URL`: where AI calls go (default https://openrouter.ai; the e2e's fake).
     pub openrouter_url: String,
-    /// `FRAGMENT_CREATORS`: until sign-in exists, the keys (npubs or hex,
-    /// comma-separated) that may create fragments. Unset: anyone who signs
-    /// (dev). A list that does not parse lets nobody create.
+    /// `FRAGMENT_CREATORS`: until sign-in exists, the identities (`id:…`)
+    /// and keys (npubs or hex), comma-separated, that may create fragments.
+    /// Unset: anyone registered (dev). A list that does not parse lets
+    /// nobody create.
     creators: Option<Result<Vec<String>, String>>,
     /// `FRAGMENT_DEPLOY_ID`: which deployment this is (`cargo xtask deploy`
     /// sets it; `/healthz` answers it in `x-fragment-deploy`).
@@ -77,12 +78,13 @@ impl Config {
         Config { host_secrets, codestorage, host_suffix, poll_interval_ms, egress_local, blob_grace_ms, push_subject, delivery_retry_s, openrouter_url, creators, deploy_id }
     }
 
-    /// Whether `principal` (64 hex) may create a fragment on this fleet.
-    pub fn may_create(&self, principal: &str) -> CellResult<()> {
+    /// Whether the signer (its key, 64 hex, and its identity) may create a
+    /// fragment on this fleet.
+    pub fn may_create(&self, key: &str, identity: &str) -> CellResult<()> {
         match &self.creators {
             None => Ok(()),
             Some(Err(e)) => Err(CellError::host(format!("FRAGMENT_CREATORS: {e}"))),
-            Some(Ok(keys)) if keys.iter().any(|k| k == principal) => Ok(()),
+            Some(Ok(listed)) if listed.iter().any(|k| k == key || k == identity) => Ok(()),
             Some(Ok(_)) => Err(CellError::new(ErrorCode::Forbidden, "creating fragments on this fleet is by invitation for now")),
         }
     }

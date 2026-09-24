@@ -56,9 +56,8 @@ impl FragmentCell {
             return Err(CellError::invalid("__live is a WebSocket; send Upgrade: websocket"));
         }
         let role = self.require(caller, link, Role::Public)?;
-        let is_member = caller.principal.as_deref().map(|p| self.member_role(p)).transpose()?.flatten().is_some();
         let tag = match &caller.principal {
-            Some(p) if is_member => format!("p:{p}"),
+            Some(p) if self.has_standing(caller)? => format!("p:{p}"),
             _ if link => "view".to_string(),
             _ => "anon".to_string(),
         };

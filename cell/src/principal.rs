@@ -1,9 +1,8 @@
-//! The `Principal` cell: one Durable Object per key, holding the index of
-//! the fragments that key belongs to (what `GET /api/fragments` lists). The
-//! fragments are the authority; each delivers its changes here from an
-//! outbox, versioned so a late delivery never undoes a newer one. From
-//! phase 4 this cell also holds the person's own secrets
-//! (docs/secrets.md).
+//! The `Principal` cell: one Durable Object per identity (`id:…`), holding
+//! the index of the fragments it belongs to (what `GET /api/fragments`
+//! lists). The fragments are the authority; each delivers its changes here
+//! from an outbox, versioned so a late delivery never undoes a newer one.
+//! Which keys an identity holds is the registry's (registry.rs).
 
 use fragment_proto::Role;
 use serde::Deserialize;

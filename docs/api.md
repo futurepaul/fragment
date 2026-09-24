@@ -26,7 +26,8 @@ Worker variables, rendered from the fleet's settings (ROADMAP decision
 | `FRAGMENT_DELIVERY_RETRY_S` | the shortest wait before a delivery is retried (default 10; the wait grows with the delivery's age, up to an hour) |
 | `OPENROUTER_API_URL` | where AI calls go (default https://openrouter.ai) |
 | `FRAGMENT_DEPLOY_ID` | which deployment this is (`cargo xtask deploy` sets it); `GET /healthz` answers it in `x-fragment-deploy` |
-| `FRAGMENT_CREATORS` | until sign-in exists, the keys (npubs or hex, comma-separated) that may create fragments; unset, anyone who signs; a list that does not parse lets nobody create (500) |
+| `FRAGMENT_CREATORS` | until sign-in exists, the identities (`id:…`) and keys (npubs or hex), comma-separated, that may create fragments; unset, anyone registered; a list that does not parse lets nobody create (500) |
+| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503 |
 
 Bindings (`cell/wrangler.jsonc`): `FRAGMENT` and `PRINCIPAL` (Durable
 Objects), `LOADER` (the Worker Loader), `JOBS` (the Workflow that runs
@@ -36,10 +37,17 @@ jobs), `BLOBS` (R2 over the fleet bucket: the bytes of large files),
 
 ## Principals and access
 
-A principal is a key (64 hex inside, an npub in answers; requests may use
-either) or an anonymous visitor (`anon:` + 32 hex, the hash of a random
-cookie on the fragment's origin). Control routes need NIP-98; site
-requests may carry it.
+A principal is an identity (`id:` + 32 hex: a person or an agent) or an
+anonymous visitor (`anon:` + 32 hex, the hash of a random cookie on the
+fragment's origin). Grants, records, runs, and the ledger name
+principals. A request is signed by a key (64 hex inside, an npub in
+answers; requests may use either); the router asks the registry which
+identity holds it, live, on every signed request, and passes the fragment
+both. A key no one registered, or a revoked one, is 401; when the
+registry cannot answer, a signed request is 503 `registry_unavailable`,
+never let through (docs/finite-integration.md, rule 7). Control routes
+need NIP-98; site requests may carry it. A fragment's own key is the
+principal of its triggered runs and is not registered.
 
 NIP-98 (`crates/nip98`): `Authorization: Nostr <base64 of the event>`, an
 event of kind 27235 with empty content and the tags `["u", <the absolute
@@ -57,24 +65,50 @@ fragment's origin) counts as `viewer`; a `members` fragment gives
 non-members nothing. A refusal is 401 for an unsigned caller and 403 for
 a signed one.
 
+An agent's owner reads what the agent reads (FIN-11): someone who is not
+a member but owns an agent that is reads the fragment as a `viewer`
+(status, files, channels, events, runs, its queries, its site), and never
+acts through it: a mutation or a job needs a membership of their own
+(403, saying so), and they get nothing the agent's own role opens beyond
+`viewer` (an editor's channels, tokens, or secrets).
+
 Membership is cell state: `fragment.json`'s `visibility`, `editors`, and
 `viewers` grant nothing (the cell records a `manifest.ignored` event).
 Only the owner manages members, invites, visibility, and tokens; a
-member may leave. Each person's list of fragments is kept in their
+member may leave. Each identity's list of fragments is kept in its
 `Principal` cell, fed from each fragment's outbox.
+
+## Identities (phase 4 slice A)
+
+The registry (`cell/src/registry.rs`; finite.computer's BANKS stands
+behind the same routes later) holds identities, the public keys each has
+held, each agent's owner, and, from slice B, sign-in subjects. It holds
+no grant and no private key. A **key proof** is a NIP-98 event by a new
+key for the same method and URL as the request that carries it, with
+`["p", <the signing key, 64 hex>]`: whoever sent the request also holds
+the new key and meant it for this signer.
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `POST /api/identities` | the signing key | `{kind: "person"}` → the identity: until sign-in (slice B), a key registers as a new person holding it; again, the same one (`created: false`); a revoked key is 401 |
+| `POST /api/identities` | a person | `{kind: "agent", proof}` → a new agent identity they own, holding the proof's key (FIN-11's trusted initial registration); again, the same one; a key someone else holds is 409; an agent owns no agents (403) |
+| `GET /api/identities/{id\|me}` | the identity, or its owner | → `{id, kind, owner?, createdAt, keys: [{npub, addedAt, addedBy, revokedAt?}], agents: [id]}`; anyone else 404 |
+| `POST /api/identities/{id\|me}/keys` | a person for themselves; an owner for their agent | `{proof}` → the identity with the key added (at most 64 keys, revoked ones included); a key someone else holds, or a revoked one, is 409 |
+| `DELETE /api/identities/{id\|me}/keys/{npub}` | the same | → the identity; the key is 401 from the next request and never comes back; the last active key cannot be revoked (400) |
+| `GET /api/identities/{id}/keys/{npub}` | the identity, or an agent it owns | → `{active}` (an agent's runtime checks its owner's keys with it) |
 
 ## Control API
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/fragments` | any signer (on a fleet with `FRAGMENT_CREATORS`, a listed key; others 403) | `{name, fragmentSecret, visibility?}` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}`. `fragmentSecret` is the fragment's own key, made by the client; it is stored sealed. The cell creates (or, for a name deleted before, finds) the code.storage repo. |
+| `POST /api/fragments` | any registered signer (on a fleet with `FRAGMENT_CREATORS`, a listed identity or key; others 403) | `{name, fragmentSecret, visibility?}` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}`. `fragmentSecret` is the fragment's own key, made by the client; it is stored sealed. The cell creates (or, for a name deleted before, finds) the code.storage repo. |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role}]}` |
 | `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes}` |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
-| `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt}]}` |
-| `PUT /api/f/{name}/members/{npub}` | owner | `{role: viewer\|editor}` → the member |
-| `DELETE /api/f/{name}/members/{npub}` | owner, or the member | → `{ok, removed}`; closes that member's change feeds |
+| `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
+| `PUT /api/f/{name}/members/{id\|npub}` | owner | `{role: viewer\|editor}` → the member; a key names the identity holding it (404 when no one registered it) |
+| `DELETE /api/f/{name}/members/{id\|npub\|me}` | owner, or the member | → `{ok, removed}`; closes that member's change feeds (and its owner's, when an agent's membership was their only view) |
 | `POST /api/f/{name}/invites` | owner | `{role, uses? (1), ttlS? (7 days, at most 30)}` → `{id, role, usesLeft, expiresAt, createdBy, token}`; the token is shown once |
 | `GET /api/f/{name}/invites` | owner | → `{invites: [...]}` without tokens |
 | `DELETE /api/f/{name}/invites/{id}` | owner | → `{ok, revoked}` |
@@ -145,8 +179,9 @@ keeps the last good code and says why in `status.code.error`.
   may call.
 
 `app.mjs` exports `class App extends DurableObject` with one method per
-operation, each called `(input, call)`: `call.principal` (an npub or
-`anon:…`) and `call.role`. A mutation is synchronous over the app's own
+operation, each called `(input, call)`: `call.principal` (an identity,
+`anon:…`, or the fragment's own npub for its triggered runs) and
+`call.role`. A mutation is synchronous over the app's own
 SQLite; `call.publish(channel, body, kind = "message")` appends a record
 (body at most 64 KiB, 64 per mutation) once the mutation commits, and an
 exception rolls back its writes and its records (422). The ledger keys a
@@ -342,7 +377,12 @@ channel <name> [<channel>] [--after N] [--follow]`.
 ## Agents (`agent/`, phase 5)
 
 A separate celld project: agents act on fragments through the API above,
-signing with their own keys. Its variables: `FRAGMENT_HOST_SECRET` (seals
+signing with their own keys. An agent is an identity its owner registers:
+`POST /api/agents` answers a key proof by the agent's key, and the owner
+sends it in `POST /api/identities {kind: "agent", proof}` (the CLI's
+`fragment agent create` does both). Every owner route checks, live, that
+the signing key is one of the owner's active keys
+(`GET /api/identities/{owner}/keys/{npub}`, signed by the agent). Its variables: `FRAGMENT_HOST_SECRET` (seals
 each agent's key), `FRAGMENT_API` (the platform it acts on),
 `OPENROUTER_API_KEY` and `OPENROUTER_API_URL` (its model service),
 `AGENT_URL` (its own base, for the inboxes it hands out),
@@ -350,8 +390,8 @@ each agent's key), `FRAGMENT_API` (the platform it acts on),
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/agents` | any signer (its owner from then on) | `{name, model? ("z-ai/glm-5.3-flash"), instructions?}` → `{name, npub, owner, model}`; 409 when taken |
-| `GET /api/a/{name}` | owner | → `{name, npub, model, active, driving, outcome (running, idle, stopped, error), error, tokens, watchdogRestarts, messages: [{id, role, text, tool_requests, tool_responses, steer}], steer, toolRuns, steps}` |
+| `POST /api/agents` | any signer | `{name, model? ("z-ai/glm-5.3-flash"), instructions?}` → `{name, npub, model, proof}`; its maker asking again before it is registered gets a fresh proof (`replayed`); otherwise 409 when taken; owner routes answer 400 until it is registered |
+| `GET /api/a/{name}` | owner | → `{name, id, owner, npub, model, active, driving, outcome (running, idle, stopped, error), error, tokens, watchdogRestarts, messages: [{id, role, text, tool_requests, tool_responses, steer}], steer, toolRuns, steps}` |
 | `POST /api/a/{name}/turns` | owner | `{text}` (at most 16 KiB) → `{started}`; during a turn, `{steered: true}` (read between steps) |
 | `POST /api/a/{name}/stop` | owner | → `{active, driving}`; a tool in flight is interrupted |
 | `GET /api/a/{name}/tools` | owner | → `{tools: ["<fragment>__<op>", ...]}` |
@@ -362,7 +402,7 @@ each agent's key), `FRAGMENT_API` (the platform it acts on),
 | `POST /api/a/{name}/test` | owner, test fleets | `{hold_in_tool_ms?, hold_after_tool_ms?, watchdog_ms?}` |
 
 An agent's tools are the operations of the fragments whose members include
-its npub, those its role there may call (at most 16 fragments, 128
+it, those its role there may call (at most 16 fragments, 128
 tools), named `<fragment>__<op>` with the operation's input schema. A call
 is `POST /api/f/<fragment>/ops/<op>` signed by the agent with the id
 `tc:<40 hex of SHA-256 of the tool-call id>`: a replayed call replays the

@@ -115,6 +115,7 @@ fn dev(args: &[String]) -> Result<()> {
         openrouter_url: None,
         delivery_retry_s: None,
         creators: None,
+        test_hooks: false,
     }
     .write_vars(&devstack::cell_dir())?;
     let opts = devstack::NodeOptions { project: devstack::cell_dir(), port: DEV_PORT, clean, watch: true, env: vec![] };

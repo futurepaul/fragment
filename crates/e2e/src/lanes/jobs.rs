@@ -139,8 +139,8 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     let upstream = Upstream::start()?;
-    let owner = Keys::generate();
-    let viewer = Keys::generate();
+    let owner = api.person()?;
+    let viewer = api.person()?;
     let (name, _) = jobs_fragment(s, api, &owner, "jobs", |_| {})?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", viewer.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
     api.call(Call {
@@ -174,10 +174,10 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     let items = api.op(&owner, &name, "items", "q", json!({}))?;
     s.ok("the job's call step ran the mutation", items.body["result"] == json!([{ "text": "alpha", "source": "digest" }, { "text": "beta", "source": "digest" }]), &items);
     let feed = records(api, &owner, &name, "feed");
-    let owner_npub = fragment_core::npub::encode(owner.pubkey_hex());
+    let owner_id = api.identity(&owner)?;
     s.ok(
         "its mutation's records and its own publish land in the channel, as the caller",
-        feed.len() == 3 && feed[2]["kind"] == "digest" && feed[2]["body"]["digest"] == 2 && feed[2]["principal"] == owner_npub.as_str(),
+        feed.len() == 3 && feed[2]["kind"] == "digest" && feed[2]["body"]["digest"] == 2 && feed[2]["principal"] == owner_id.as_str(),
         json!(feed),
     );
     let everything = format!("{done}{}{}", json!(feed), json!(events(api, &owner, &name)));
@@ -307,7 +307,7 @@ pub fn triggers(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("triggers") {
         return Ok(());
     }
-    let owner = Keys::generate();
+    let owner = api.person()?;
     let (name, c) = jobs_fragment(s, api, &owner, "triggers", |m| {
         m["triggers"].as_array_mut().expect("triggers").push(json!({ "cron": "* * * * *", "run": "tick" }));
     })?;

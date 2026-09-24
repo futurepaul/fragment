@@ -15,7 +15,8 @@ from github.com/futurepaul/fragment) and on celld
    `docs/finite-integration.md` — how fragment will move into
    finite.computer (Finite V3): every Core concern, its stand-in here,
    and the swap; update its row with any change that touches one;
-   `docs/phase-4.md` — sign-in, identities, budgets (proposed);
+   `docs/phase-4.md` — sign-in, identities, budgets (slice A built:
+   the registry, identities, key proofs);
    `docs/phase-5.md` — agents (built overnight; choices for review);
    `docs/phase-8.md` — computers, first part (the same night);
    `docs/phase-3.md` — hosting on fragment.club;
@@ -45,7 +46,7 @@ debt ledger).
 - `cargo xtask e2e [--only <section>]`: builds `cell/` and the CLI (with
   its `computer` feature), then
   runs `crates/e2e` against a fresh `celld dev` node and the in-process
-  code.storage fake (sections: auth, create, lockdown, members, secrets,
+  code.storage fake (sections: auth, create, lockdown, members, identities, secrets,
   files, deploy, ops, public, site, watch, schemas, channels, live,
   routes, cli, browser, jobs, triggers, appfiles, blobs, notes, push,
   ai, agents, chat, computer, sync, restart, pathmode, creators). The browser and notes sections drive headless

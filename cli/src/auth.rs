@@ -48,6 +48,21 @@ impl Identity {
         self.nostr_header(27235, tags, "", created_at)
     }
 
+    /// A key proof (crates/nip98 `verify_proof`): this key agrees to join
+    /// whoever signs `method url` with the key `signer_hex`.
+    pub fn proof(&self, method: &str, url: &str, signer_hex: &str) -> String {
+        let tags = vec![
+            serde_json::json!(["u", url]),
+            serde_json::json!(["method", method.to_uppercase()]),
+            serde_json::json!(["p", signer_hex]),
+        ];
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        self.nostr_header(27235, tags, "", created_at)
+    }
+
     /// Shared signing core: kind + tags + content -> NIP-01 id over the
     /// canonical serialization of [0, pubkey, created_at, kind, tags, content],
     /// schnorr-signed, wrapped as the `Authorization: Nostr <b64>` value.
@@ -81,7 +96,6 @@ pub fn npub_encode(pubkey_hex: &str) -> Result<String> {
     bech32::encode("npub", bytes.to_base32(), bech32::Variant::Bech32).map_err(|e| anyhow!(e.to_string()))
 }
 
-#[allow(dead_code)] // public helper; used by tests and future grant-validation
 pub fn npub_decode(npub: &str) -> Result<String> {
     use bech32::FromBase32;
     let (hrp, data, variant) = bech32::decode(npub).context("bad npub")?;

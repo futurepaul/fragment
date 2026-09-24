@@ -26,10 +26,11 @@ mechanism names the celld primitive it uses; read with the celld docs
 3. **One log: channels.** Append-only, ordered, paged, per fragment. The
    audit trail, the inbox, room messages, and chat transcripts are all
    channels. Presence stays ephemeral.
-4. **Membership is live cell state; every actor is a key.** People,
-   agents, and fragments are principals identified by npub. Grants,
-   invites, and revocations are transactional and take effect on the
-   next request. Each fragment is its own browser origin.
+4. **Membership is live cell state; every actor is an identity.** People
+   and agents are identities (`id:…`) holding keys, resolved live by the
+   registry on every signed request. Grants, invites, and revocations are
+   transactional and take effect on the next request. Each fragment is
+   its own browser origin.
 5. **Agents and computers are participants.** Agents are hosted members
    with durable turns; fragments can own computers (Sprites).
 
@@ -162,9 +163,11 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   one or more public keys in the registry (finite.computer's BANKS
   model, ROADMAP decision 15). The CLI proves a key with NIP-98 and the
   registry names its identity; a browser has a platform session that
-  maps to the person; an agent signs with its cell's key; a fragment
-  with its own key. The platform holds no person's private key. An
-  agent's designated owner can read what the agent can read.
+  maps to the person (phase 4 slice B); an agent signs with its cell's
+  key; a fragment with its own key (unregistered: it is the principal of
+  its own triggered runs only). The platform holds no person's private
+  key. An agent's designated owner reads what the agent can read, as a
+  viewer, and never acts through it (docs/api.md, Principals and access).
 - Members and invites are supervisor tables. A grant or revoke is one
   transaction; a revoke closes that principal's sockets. The `events`
   channel records every change. Membership leaves `fragment.json` (a git
@@ -172,7 +175,8 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   invites, visibility, and tokens; a member may leave. Members name
   identities, so replacing a key rewrites no grant. Each identity's list
   of fragments is an index in its own `Principal` cell, fed from the
-  fragment's outbox (phase 2 slice B; keyed by key until phase 4).
+  fragment's outbox (phase 2 slice B; keyed by identity since phase 4
+  slice A).
 - Visibility: `public`, `link` (a token that is a capability), or
   `members`. **A public fragment is a website anyone can use, writes
   included** (a public chat, a guestbook): an operation may declare

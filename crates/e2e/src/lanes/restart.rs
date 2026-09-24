@@ -24,14 +24,20 @@ pub fn restart(s: &mut Suite, api: Api) -> Result<Api> {
     if !s.section("restart") {
         return Ok(api);
     }
-    let owner = Keys::generate();
-    let member = Keys::generate();
+    let owner = api.person()?;
+    let member = api.person()?;
     let name = s.name("restart");
     let c = s.create(&api, &owner, &name)?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", member.pubkey_hex()), Some(&json!({ "role": "editor" })))?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/secrets/TOKEN"), None)?;
     let live = ship(s, &c, TODO_APP, TODO_JSON);
     let first = api.op(&owner, &name, "add_todo", "r1", json!({ "text": "survives" }))?;
+    // the registry: a key added, and one revoked, before the restart
+    let (added, revoked) = (Keys::generate(), api.person()?);
+    let add = "/api/identities/me/keys";
+    let r = api.signed(&revoked, "POST", add, Some(&json!({ "proof": api.proof(&added, "POST", add, &revoked) })))?;
+    let r2 = api.signed(&added, "DELETE", &format!("/api/identities/me/keys/{}", revoked.pubkey_hex()), None)?;
+    anyhow::ensure!(r.status == 200 && r2.status == 200, "registry setup: {r} {r2}");
 
     s.stop()?;
     let api = s.start(false, true)?;
@@ -40,6 +46,10 @@ pub fn restart(s: &mut Suite, api: Api) -> Result<Api> {
     s.ok("after a restart the app's rows survive", count(&api, &owner, &name) == 1, "count");
     let r = api.status(&member, &name)?;
     s.ok("after a restart members survive", r.status == 200 && r.body["role"] == "editor", &r);
+    let r = api.signed(&added, "GET", "/api/identities/me", None)?;
+    s.ok("after a restart the registry still knows an added key", r.status == 200, &r);
+    let r = api.signed(&revoked, "GET", "/api/fragments", None)?;
+    s.ok("and a revoked key stays revoked", r.status == 401, &r);
 
     let r = api.op(&owner, &name, "add_todo", "r2", json!({ "text": "before the crash" }))?;
     s.ok("a mutation before the crash", r.status == 200, &r);
@@ -73,7 +83,7 @@ pub fn pathmode(s: &mut Suite, api: Api) -> Result<()> {
     drop(api);
     s.stop()?;
     let api = s.start(false, false)?;
-    let owner = Keys::generate();
+    let owner = api.person()?;
     let name = s.name("paths");
     let c = s.create(&api, &owner, &name)?;
     s.ok("without a suffix the canonical URL is a path", c["canonical"] == format!("{}/f/{name}/", api.base), &c);

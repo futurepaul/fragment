@@ -8,6 +8,7 @@ mod author;
 mod computer;
 mod control;
 mod deliver;
+mod identities;
 mod jobs;
 mod members;
 mod notes;
@@ -26,6 +27,7 @@ pub fn run(s: &mut Suite, api: Api) -> Result<()> {
     control::create(s, &api)?;
     control::lockdown(s, &api)?;
     members::members(s, &api)?;
+    identities::identities(s, &api)?;
     members::secrets(s, &api)?;
     plane::files(s, &api)?;
     plane::deploy(s, &api)?;

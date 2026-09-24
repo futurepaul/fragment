@@ -3,13 +3,19 @@
 //! one transaction, and take effect on the next request. Only the owner
 //! changes them; a member may leave.
 //!
-//! Each person's list of fragments is an index in their `Principal` cell.
+//! Members are identities (`id:…`); a request may name one by a key, which
+//! the registry resolves to the identity holding it. An agent member's
+//! owner is recorded beside it: the owner reads what the agent reads
+//! (fragment.rs, `standing`). Kinds and owners never change once
+//! registered, so the copy here cannot go stale.
+//!
+//! Each identity's list of fragments is an index in its `Principal` cell.
 //! The fragment is the authority: a change is written here with an outbox
 //! row in the same turn, then delivered (and retried from the alarm).
 
 use fragment_core::access;
 use fragment_core::npub;
-use fragment_proto::{limits, CreateInvite, ErrorCode, Invite, Join, Member, Role, SetRole, SetVisibility, Visibility};
+use fragment_proto::{limits, CreateInvite, ErrorCode, IdentityKind, Invite, Join, Member, Role, SetRole, SetVisibility, Visibility};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use worker::*;
@@ -31,6 +37,8 @@ fn refusal(actor_is_owner: bool, why: &str) -> CellError {
     }
 }
 
+const MEMBER_COLUMNS: &str = "principal, role, added_by, added_at, kind, owner";
+
 fn member_json(r: &Value) -> CellResult<Member> {
     let s = |k: &str| r[k].as_str().map(str::to_string).ok_or_else(|| CellError::host(format!("members.{k}")));
     Ok(Member {
@@ -38,7 +46,20 @@ fn member_json(r: &Value) -> CellResult<Member> {
         role: Role::parse(&s("role")?).ok_or_else(|| CellError::host("members.role"))?,
         added_by: npub::display(&s("added_by")?),
         added_at: r["added_at"].as_i64().unwrap_or(0),
+        kind: r["kind"].as_str().and_then(IdentityKind::parse),
+        owner: r["owner"].as_str().map(str::to_string),
     })
+}
+
+/// Who a request names, as the registry knows them.
+struct Named {
+    id: String,
+    kind: IdentityKind,
+    owner: Option<String>,
+}
+
+fn opt(v: Option<&str>) -> SqlStorageValue {
+    v.map_or(SqlStorageValue::Null, |s| s.into())
 }
 
 fn invite_json(r: &Value) -> Invite {
@@ -123,39 +144,73 @@ impl FragmentCell {
         }
     }
 
+    /// The identity `who` (an `id:`, an npub, or 64 hex) names.
+    async fn named(&self, who: &str) -> CellResult<Named> {
+        if npub::parse_named(who).is_none() {
+            return Err(CellError::invalid(format!("{who:?} is not an identity (id:…), an npub, or a 64-hex key")));
+        }
+        let v = crate::ask_registry(&self.env, "/lookup", &json!({ "who": who })).await?;
+        let (id, kind, owner) = crate::facts_of(&v)?;
+        Ok(Named { id, kind, owner })
+    }
+
     pub(crate) fn members(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
-        let rows = self.rows("SELECT principal, role, added_by, added_at FROM members ORDER BY added_at, principal", vec![])?;
+        let rows = self.rows(&format!("SELECT {MEMBER_COLUMNS} FROM members ORDER BY added_at, principal"), vec![])?;
         let members = rows.iter().map(member_json).collect::<CellResult<Vec<_>>>()?;
         json_response(&json!({ "members": members }))
     }
 
     pub(crate) async fn set_member(&self, caller: &Caller, who: &str, body: SetRole) -> CellResult<Response> {
         let actor = self.actor_role(caller)?;
-        let target = npub::parse(who).ok_or_else(|| CellError::invalid(format!("{who:?} is not an npub or a 64-hex key")))?;
-        let current = self.member_role(&target)?;
+        // only the owner learns whom a key names
+        if actor != Some(Role::Owner) {
+            let why = access::refuse_set_role(actor, None, body.role).expect("only the owner manages members");
+            return Err(refusal(false, why));
+        }
+        let target = self.named(who).await?;
+        let current = self.member_role(&target.id)?;
         if let Some(why) = access::refuse_set_role(actor, current, body.role) {
-            return Err(refusal(actor == Some(Role::Owner), why));
+            return Err(refusal(true, why));
         }
         if current.is_none() && self.count("SELECT COUNT(*) AS n FROM members")? >= limits::MEMBERS_MAX as u64 {
             return Err(CellError::invalid(format!("a fragment has at most {} members", limits::MEMBERS_MAX)));
         }
-        let by = self.caller_hex(caller)?;
+        let by = self.caller_id(caller)?;
         self.exec(
-            "INSERT INTO members (principal, role, added_by, added_at) VALUES (?, ?, ?, ?)
+            "INSERT INTO members (principal, role, added_by, added_at, kind, owner) VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT (principal) DO UPDATE SET role = excluded.role",
-            vec![target.as_str().into(), body.role.as_str().into(), by.into(), SqlStorageValue::Integer(js::now_ms())],
+            vec![
+                target.id.as_str().into(),
+                body.role.as_str().into(),
+                by.into(),
+                SqlStorageValue::Integer(js::now_ms()),
+                target.kind.as_str().into(),
+                opt(target.owner.as_deref()),
+            ],
         )?;
-        self.index_change(&target, Some(body.role))?;
-        self.event("member.set", &format!("{} is now {}", npub::encode(&target), body.role.as_str()), json!({ "principal": npub::encode(&target), "role": body.role }));
+        self.index_change(&target.id, Some(body.role))?;
+        // sharing with an agent says so: its owner reads what it reads (FIN-11)
+        let summary = match &target.owner {
+            Some(owner) => format!("{} (an agent) is now {}; its owner {owner} reads what it reads", target.id, body.role.as_str()),
+            None => format!("{} is now {}", target.id, body.role.as_str()),
+        };
+        self.event("member.set", &summary, json!({ "principal": target.id, "role": body.role, "kind": target.kind, "owner": target.owner }));
         self.flush_index().await;
-        let row = self.rows("SELECT principal, role, added_by, added_at FROM members WHERE principal = ?", vec![target.as_str().into()])?;
+        let row = self.rows(&format!("SELECT {MEMBER_COLUMNS} FROM members WHERE principal = ?"), vec![target.id.as_str().into()])?;
         json_response(&member_json(&row[0])?)
     }
 
     pub(crate) async fn remove_member(&self, caller: &Caller, who: &str) -> CellResult<Response> {
         let actor = self.actor_role(caller)?;
-        let target = npub::parse(who).ok_or_else(|| CellError::invalid(format!("{who:?} is not an npub or a 64-hex key")))?;
+        // an identity is removed as it is (`me` is the caller); a key names
+        // the identity holding it
+        let target = match npub::parse_named(who) {
+            _ if who == "me" => self.caller_id(caller)?.to_string(),
+            Some(npub::Named::Identity(id)) => id,
+            Some(npub::Named::Key(_)) => self.named(who).await?.id,
+            None => return Err(CellError::invalid(format!("{who:?} is not an identity (id:…), an npub, or a 64-hex key"))),
+        };
         let is_self = caller.principal.as_deref() == Some(target.as_str());
         let current = self.member_role(&target)?;
         if let Some(why) = access::refuse_remove(actor, is_self, current) {
@@ -164,14 +219,24 @@ impl FragmentCell {
                 Some(_) => refusal(actor == Some(Role::Owner), why),
             });
         }
+        let owner = self.rows("SELECT owner FROM members WHERE principal = ?", vec![target.as_str().into()])?;
+        let owner = owner.first().and_then(|r| r["owner"].as_str()).map(str::to_string);
         self.exec("DELETE FROM members WHERE principal = ?", vec![target.as_str().into()])?;
         self.drop_subscriptions(&target)?;
         self.index_change(&target, None)?;
         self.close_sockets(&format!("p:{target}"), "membership revoked");
+        // an agent's owner who read through it, and has no standing of their own now
+        if let Some(owner) = owner {
+            let still = self.member_role(&owner)?.is_some()
+                || !self.rows("SELECT principal FROM members WHERE owner = ? LIMIT 1", vec![owner.as_str().into()])?.is_empty();
+            if !still {
+                self.close_sockets(&format!("p:{owner}"), "their agent's membership was revoked");
+            }
+        }
         let how = if is_self { "left" } else { "was removed" };
-        self.event("member.removed", &format!("{} {how}", npub::encode(&target)), json!({ "principal": npub::encode(&target) }));
+        self.event("member.removed", &format!("{} {how}", npub::display(&target)), json!({ "principal": npub::display(&target) }));
         self.flush_index().await;
-        json_response(&json!({ "ok": true, "removed": npub::encode(&target) }))
+        json_response(&json!({ "ok": true, "removed": npub::display(&target) }))
     }
 
     fn require_owner(&self, caller: &Caller) -> CellResult<()> {
@@ -206,7 +271,7 @@ impl FragmentCell {
         let id = js::random_hex::<8>();
         let now = js::now_ms();
         let expires_at = now + ttl_s * 1000;
-        let by = self.caller_hex(caller)?;
+        let by = self.caller_id(caller)?;
         self.exec(
             "INSERT INTO invites (id, token_sha, role, uses_left, expires_at, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             vec![
@@ -220,7 +285,7 @@ impl FragmentCell {
             ],
         )?;
         self.event("invite.created", &format!("invite {id} for {} ({uses} uses)", body.role.as_str()), json!({ "id": id, "role": body.role }));
-        json_response(&Invite { id, role: body.role, uses_left: uses, expires_at, created_by: npub::encode(by), token: Some(token) })
+        json_response(&Invite { id, role: body.role, uses_left: uses, expires_at, created_by: npub::display(by), token: Some(token) })
     }
 
     pub(crate) fn invites(&self, caller: &Caller) -> CellResult<Response> {
@@ -243,7 +308,7 @@ impl FragmentCell {
     /// Redeems an invite. The token is the capability: no visibility check.
     pub(crate) async fn join(&self, caller: &Caller, body: Join) -> CellResult<Response> {
         let name = self.name()?;
-        let who = self.caller_hex(caller)?.to_string();
+        let who = self.caller_id(caller)?.to_string();
         let rows = self.rows(
             "SELECT id, role FROM invites WHERE token_sha = ? AND expires_at > ? AND uses_left > 0",
             vec![hex::encode(Sha256::digest(body.token.as_bytes())).into(), SqlStorageValue::Integer(js::now_ms())],
@@ -257,13 +322,20 @@ impl FragmentCell {
             }
         }
         self.exec(
-            "INSERT INTO members (principal, role, added_by, added_at) VALUES (?, ?, ?, ?)
+            "INSERT INTO members (principal, role, added_by, added_at, kind, owner) VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT (principal) DO UPDATE SET role = excluded.role",
-            vec![who.as_str().into(), role.as_str().into(), format!("invite:{id}").into(), SqlStorageValue::Integer(js::now_ms())],
+            vec![
+                who.as_str().into(),
+                role.as_str().into(),
+                format!("invite:{id}").into(),
+                SqlStorageValue::Integer(js::now_ms()),
+                opt(caller.kind.map(IdentityKind::as_str)),
+                opt(caller.owner.as_deref()),
+            ],
         )?;
         self.exec("UPDATE invites SET uses_left = uses_left - 1 WHERE id = ?", vec![id.as_str().into()])?;
         self.index_change(&who, Some(role))?;
-        self.event("member.joined", &format!("{} joined as {} (invite {id})", npub::encode(&who), role.as_str()), json!({ "principal": npub::encode(&who), "role": role, "invite": id }));
+        self.event("member.joined", &format!("{} joined as {} (invite {id})", npub::display(&who), role.as_str()), json!({ "principal": npub::display(&who), "role": role, "invite": id }));
         self.flush_index().await;
         json_response(&json!({ "name": name, "role": role, "joined": true }))
     }
@@ -335,13 +407,13 @@ impl FragmentCell {
         }
         let hosts = self.cfg.host_secrets()?;
         let sealed = fragment_core::secrets::seal(hosts[0], &self.must("npub")?, &value, js::random_bytes()).map_err(|e| CellError::host(e.to_string()))?;
-        let by = self.caller_hex(caller)?;
+        let by = self.caller_id(caller)?;
         self.exec(
             "INSERT INTO secrets (name, sealed, set_by, set_at) VALUES (?, ?, ?, ?)
              ON CONFLICT (name) DO UPDATE SET sealed = excluded.sealed, set_by = excluded.set_by, set_at = excluded.set_at",
             vec![key.into(), sealed.into(), by.into(), SqlStorageValue::Integer(js::now_ms())],
         )?;
-        self.event("secret.set", &format!("secret {key} set by {}", npub::encode(by)), json!({ "name": key }));
+        self.event("secret.set", &format!("secret {key} set by {}", npub::display(by)), json!({ "name": key }));
         json_response(&json!({ "ok": true, "name": key }))
     }
 

@@ -22,6 +22,8 @@ pub enum AuthError {
     PayloadMismatch,
     IdMismatch,
     BadSignature,
+    /// A key proof that names someone other than the request's signer.
+    NotForSigner,
 }
 
 impl std::fmt::Display for AuthError {
@@ -37,6 +39,7 @@ impl std::fmt::Display for AuthError {
             AuthError::PayloadMismatch => write!(f, "auth event `payload` tag does not match the body"),
             AuthError::IdMismatch => write!(f, "auth event id does not match its content"),
             AuthError::BadSignature => write!(f, "auth event signature does not verify"),
+            AuthError::NotForSigner => write!(f, "the key proof's `p` tag does not name this request's signer"),
         }
     }
 }
@@ -66,6 +69,24 @@ fn tag<'a>(tags: &'a serde_json::Value, name: &str) -> Option<&'a str> {
 /// Verifies a NIP-98 header for `method url` with `body`, at `now_s`
 /// (seconds since the epoch). Returns the signer's public key, hex.
 pub fn verify(header: Option<&str>, method: &str, url: &str, body: &[u8], now_s: i64, window_s: i64) -> Result<String, AuthError> {
+    check(header, method, url, body, now_s, window_s).map(|(pubkey, _)| pubkey)
+}
+
+/// Verifies a key proof: a NIP-98 event by a new key for the same request
+/// (`method url`), naming the request's signer in a `p` tag. The request is
+/// signed by a key the registry knows; the proof in its body shows that
+/// whoever sent it also holds the new key, and meant it for this signer
+/// (a proof lifted from another request names someone else). Returns the
+/// new key, hex.
+pub fn verify_proof(proof: &str, method: &str, url: &str, signer_hex: &str, now_s: i64, window_s: i64) -> Result<String, AuthError> {
+    let (pubkey, tags) = check(Some(proof), method, url, &[], now_s, window_s)?;
+    if tag(&tags, "p") != Some(signer_hex) {
+        return Err(AuthError::NotForSigner);
+    }
+    Ok(pubkey)
+}
+
+fn check(header: Option<&str>, method: &str, url: &str, body: &[u8], now_s: i64, window_s: i64) -> Result<(String, serde_json::Value), AuthError> {
     let header = header.ok_or(AuthError::MissingHeader)?;
     let b64 = header.strip_prefix("Nostr ").ok_or(AuthError::MissingHeader)?.trim();
     let raw = base64::engine::general_purpose::STANDARD
@@ -105,7 +126,7 @@ pub fn verify(header: Option<&str>, method: &str, url: &str, body: &[u8], now_s:
     let key_bytes = hex::decode(pubkey).map_err(|_| AuthError::BadPubkey)?;
     let key = VerifyingKey::from_bytes(&key_bytes).map_err(|_| AuthError::BadPubkey)?;
     key.verify_raw(&id, &sig).map_err(|_| AuthError::BadSignature)?;
-    Ok(pubkey.to_string())
+    Ok((pubkey.to_string(), tags.clone()))
 }
 
 /// The x-only public key (64 hex) of a 64-hex secret key, or `None` when
@@ -157,6 +178,21 @@ impl Keys {
         if !body.is_empty() {
             tags.push(serde_json::json!(["payload", hex::encode(Sha256::digest(body))]));
         }
+        self.event(tags, created_at)
+    }
+
+    /// A key proof (`verify_proof`): this key agrees to join whoever signs
+    /// `method url` with `signer_hex`.
+    pub fn proof(&self, method: &str, url: &str, signer_hex: &str, created_at: i64) -> String {
+        let tags = vec![
+            serde_json::json!(["u", url]),
+            serde_json::json!(["method", method.to_ascii_uppercase()]),
+            serde_json::json!(["p", signer_hex]),
+        ];
+        self.event(tags, created_at)
+    }
+
+    fn event(&self, tags: Vec<serde_json::Value>, created_at: i64) -> String {
         let tags = serde_json::Value::Array(tags);
         let id = event_id(&self.pubkey_hex, created_at, KIND, &tags, "");
         let sig = self.key.sign_raw(&id, &[0u8; 32]).expect("BIP-340 signing a 32-byte digest");
@@ -214,6 +250,21 @@ mod tests {
         assert_eq!(verify(Some(&h), "POST", "http://127.0.0.1:8790/api/f/x", body, NOW, 60), Err(AuthError::UrlMismatch));
         assert_eq!(verify(Some(&h), "PUT", URL, body, NOW, 60), Err(AuthError::MethodMismatch));
         assert_eq!(verify(Some(&h), "POST", URL, b"{}", NOW, 60), Err(AuthError::PayloadMismatch));
+    }
+
+    #[test]
+    fn key_proofs() {
+        let (signer, new) = (Keys::generate(), Keys::generate());
+        let p = new.proof("POST", URL, signer.pubkey_hex(), NOW);
+        assert_eq!(verify_proof(&p, "POST", URL, signer.pubkey_hex(), NOW, 60).as_deref(), Ok(new.pubkey_hex()));
+        // meant for someone else, another request, stale
+        assert_eq!(verify_proof(&p, "POST", URL, new.pubkey_hex(), NOW, 60), Err(AuthError::NotForSigner));
+        assert_eq!(verify_proof(&p, "POST", "http://127.0.0.1:8790/api/x", signer.pubkey_hex(), NOW, 60), Err(AuthError::UrlMismatch));
+        assert_eq!(verify_proof(&p, "DELETE", URL, signer.pubkey_hex(), NOW, 60), Err(AuthError::MethodMismatch));
+        assert_eq!(verify_proof(&p, "POST", URL, signer.pubkey_hex(), NOW + 61, 60), Err(AuthError::Stale { skew_s: -61 }));
+        // an ordinary request header names no one
+        let h = new.header("POST", URL, b"", NOW);
+        assert_eq!(verify_proof(&h, "POST", URL, signer.pubkey_hex(), NOW, 60), Err(AuthError::NotForSigner));
     }
 
     #[test]

@@ -41,13 +41,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Generate a nostr keypair and store it (--force to replace)
+    /// Make a nostr key (or use the one you have) and register it with the
+    /// host as you: a new person (--force makes a new key and a new person)
     Login {
         #[arg(long)]
         force: bool,
     },
-    /// Print your npub and host
+    /// Who the host says you are: your identity, this key, your other keys
     Whoami,
+    /// Your keys: list them, rotate this one (a new key replaces it and
+    /// keeps every grant), or revoke one
+    Keys {
+        #[command(subcommand)]
+        sub: Option<KeysCmd>,
+    },
     /// Set the default host (or show it, with no argument)
     Host {
         /// Base URL, e.g. http://127.0.0.1:8790
@@ -333,13 +340,24 @@ enum ComputerCmd {
 }
 
 #[derive(Subcommand)]
+enum KeysCmd {
+    /// Your identity's keys (the same as `fragment whoami`)
+    List,
+    /// Make a new key, add it to you (proving you hold it), switch this
+    /// machine to it, and revoke the old one
+    Rotate,
+    /// Revoke one of your keys (never the last)
+    Revoke { npub: String },
+}
+
+#[derive(Subcommand)]
 enum MembersCmd {
     /// List members and their roles
     List { name: String },
     /// Add a member, or change their role (owner only)
     Add {
         name: String,
-        /// npub, 64-hex key, or NIP-05 name (name@domain)
+        /// identity (id:…), npub, 64-hex key, or NIP-05 name (name@domain)
         who: String,
         /// viewer | editor
         #[arg(long, default_value = "viewer")]
@@ -390,6 +408,45 @@ struct Config {
 
 fn config_path() -> PathBuf {
     dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("fragment").join("config.json")
+}
+
+/// Writes `secret_key` into the config, keeping its other fields; the file
+/// holds the secret key, so it stays 0600.
+fn save_secret_key(secret_hex: &str) -> Result<PathBuf> {
+    let p = config_path();
+    std::fs::create_dir_all(p.parent().expect("the config has a directory"))?;
+    let mut obj: Value = std::fs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()).filter(Value::is_object).unwrap_or(json!({}));
+    obj["secret_key"] = json!(secret_hex);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&p)?;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))?;
+        serde_json::to_writer_pretty(&mut f, &obj)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let f = std::fs::File::create(&p)?;
+        serde_json::to_writer_pretty(f, &obj)?;
+    }
+    Ok(p)
+}
+
+/// What a person's identity looks like in a terminal.
+fn print_identity(v: &Value, this_key: &str) {
+    println!("identity: {} ({})", v["id"].as_str().unwrap_or(""), v["kind"].as_str().unwrap_or(""));
+    for k in v["keys"].as_array().cloned().unwrap_or_default() {
+        let npub = k["npub"].as_str().unwrap_or("");
+        let state = match (npub == this_key, k["revokedAt"].is_null()) {
+            (true, _) => "this key",
+            (false, true) => "active",
+            (false, false) => "revoked",
+        };
+        println!("  {npub}  {state}");
+    }
+    for a in v["agents"].as_array().cloned().unwrap_or_default() {
+        println!("  agent {}", a.as_str().unwrap_or(""));
+    }
 }
 
 fn load_config() -> Config {
@@ -587,44 +644,69 @@ fn run(cli: Cli) -> Result<()> {
 
     match cli.cmd {
         Cmd::Login { force } => {
-            let p = config_path();
-            if p.exists() && !force {
-                let cfg = load_config();
-                if let Some(sk) = cfg.secret_key {
-                    let bytes = hex::decode(sk)?;
-                    let id = auth::Identity::from_secret(bytes.try_into().map_err(|_| anyhow!("bad key"))?);
-                    if j {
-                        // never echo the key itself
-                        ok_exit(&json!({ "npub": id.npub(), "config": p.display().to_string(), "existing": true }));
-                    }
-                    println!("already logged in as {}", id.npub());
-                    println!("(use --force to replace the key)");
-                    return Ok(());
-                }
+            // the key this machine signs with: the one it has, or a new one
+            let key_existed = !force && load_config().secret_key.is_some();
+            if !key_existed {
+                save_secret_key(&hex::encode(auth::Identity::generate().secret))?;
             }
-            let id = auth::Identity::generate();
-            std::fs::create_dir_all(p.parent().unwrap())?;
-            let f = std::fs::File::create(&p)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))?;
-            }
-            serde_json::to_writer_pretty(f, &json!({ "secret_key": hex::encode(id.secret) }))?;
+            // until sign-in (phase 4 slice B), a key registers as its own person
+            let c = require_client(&cli.host, cli.verbose)?;
+            let v = c.call(c.post_json("/api/identities", &json!({ "kind": "person" }))?).map_err(|e| {
+                anyhow!("{e}\nthe key is saved in {}; run `fragment login` again to register it", config_path().display())
+            })?;
             if j {
-                ok_exit(&json!({ "npub": id.npub(), "config": p.display().to_string() }));
+                // never echo the key itself
+                ok_exit(&json!({ "npub": c.id.npub(), "id": v["id"], "host": c.host, "config": config_path().display().to_string(), "existing": key_existed, "created": v["created"] }));
             }
-            println!("logged in: {}", id.npub());
-            println!("config: {}", p.display());
+            let how = if v["created"] == true { "registered" } else { "already registered" };
+            println!("logged in as {} ({how} on {})", v["id"].as_str().unwrap_or(""), c.host);
+            println!("key: {}", c.id.npub());
+            println!("config: {}", config_path().display());
             return Ok(());
         }
-        Cmd::Whoami => {
+        Cmd::Whoami | Cmd::Keys { sub: None | Some(KeysCmd::List) } => {
             let c = require_client(&cli.host, cli.verbose)?;
+            let v = c.call(c.get("/api/identities/me")?)?;
             if j {
-                ok_exit(&json!({ "npub": c.id.npub(), "host": c.host }));
+                ok_exit(&json!({ "npub": c.id.npub(), "host": c.host, "identity": v }));
             }
-            println!("npub: {}", c.id.npub());
+            print_identity(&v, &c.id.npub());
             println!("host: {}", c.host);
+            return Ok(());
+        }
+        Cmd::Keys { sub: Some(KeysCmd::Rotate) } => {
+            let old = require_client(&cli.host, cli.verbose)?;
+            let fresh = auth::Identity::generate();
+            // 1. the old key adds the new one, which proves itself inside
+            let url = format!("{}/api/identities/me/keys", old.host);
+            let proof = fresh.proof("POST", &url, &old.id.pubkey_hex);
+            old.call(old.post_json("/api/identities/me/keys", &json!({ "proof": proof }))?)?;
+            // 2. this machine switches to it (both keys work until step 3)
+            save_secret_key(&hex::encode(fresh.secret))?;
+            let new = require_client(&cli.host, cli.verbose)?;
+            // 3. the new key revokes the old one
+            let revoked = new.call(new.delete(&format!("/api/identities/me/keys/{}", old.id.pubkey_hex))?);
+            if let Err(e) = &revoked {
+                eprintln!("the new key is in use, but revoking the old one failed: {e}\nrevoke it: fragment keys revoke {}", old.id.npub());
+            }
+            let v = revoked?;
+            if j {
+                ok_exit(&json!({ "npub": new.id.npub(), "revoked": old.id.npub(), "identity": v }));
+            }
+            println!("{} replaces {} (revoked); every grant stays with {}", new.id.npub(), old.id.npub(), v["id"].as_str().unwrap_or(""));
+            return Ok(());
+        }
+        Cmd::Keys { sub: Some(KeysCmd::Revoke { npub }) } => {
+            let c = require_client(&cli.host, cli.verbose)?;
+            let hex = auth::npub_decode(&npub).or_else(|_| if npub.len() == 64 { Ok(npub.to_lowercase()) } else { Err(anyhow!("{npub} is not an npub")) })?;
+            if hex == c.id.pubkey_hex {
+                anyhow::bail!("that is the key this machine signs with: rotate it instead (`fragment keys rotate`)");
+            }
+            let v = c.call(c.delete(&format!("/api/identities/me/keys/{hex}"))?)?;
+            if j {
+                ok_exit(&v);
+            }
+            println!("revoked {npub}");
             return Ok(());
         }
         Cmd::Host { url } => {
@@ -1311,13 +1393,25 @@ fn run(cli: Cli) -> Result<()> {
                     if let Some(i) = instructions {
                         body["instructions"] = json!(i);
                     }
-                    let v = a.call(a.post_json("/api/agents", &body)?)?;
+                    let mut v = a.call(a.post_json("/api/agents", &body)?)?;
+                    // register it with the platform as yours: you sign, its key's proof is inside
+                    let proof = v["proof"].as_str().ok_or_else(|| anyhow!("the agent fleet answered no registration proof"))?.to_string();
+                    let reg = c.call(c.post_json("/api/identities", &json!({ "kind": "agent", "proof": proof }))?).map_err(|e| {
+                        anyhow!("{e}\nthe agent exists but is not registered: run `fragment agent create {name}` again to finish")
+                    })?;
+                    v["id"] = reg["id"].clone();
+                    v["owner"] = reg["owner"].clone();
+                    if let Some(o) = v.as_object_mut() {
+                        o.remove("proof");
+                    }
                     if j {
                         ok_exit(&v);
                     }
-                    println!("agent {} ({})", v["name"].as_str().unwrap_or(""), v["model"].as_str().unwrap_or(""));
+                    let id = v["id"].as_str().unwrap_or("");
+                    println!("agent {} ({}): {id}", v["name"].as_str().unwrap_or(""), v["model"].as_str().unwrap_or(""));
                     println!("  npub: {}", v["npub"].as_str().unwrap_or(""));
-                    println!("give it a fragment: fragment members add <fragment> {} --role editor", v["npub"].as_str().unwrap_or(""));
+                    println!("  you own it: you can read whatever it can read");
+                    println!("give it a fragment: fragment members add <fragment> {id} --role editor");
                 }
                 AgentCmd::Show { name } => {
                     let v = a.call(a.get(&format!("/api/a/{name}"))?)?;
@@ -1420,19 +1514,26 @@ fn run(cli: Cli) -> Result<()> {
                     ok_exit(&v);
                 }
                 for m in v["members"].as_array().cloned().unwrap_or_default() {
-                    println!("{}\t{}", m["role"].as_str().unwrap_or(""), m["principal"].as_str().unwrap_or(""));
+                    let agent = match m["owner"].as_str() {
+                        Some(o) => format!("\tagent of {o}"),
+                        None => String::new(),
+                    };
+                    println!("{}\t{}{agent}", m["role"].as_str().unwrap_or(""), m["principal"].as_str().unwrap_or(""));
                 }
             }
             MembersCmd::Add { name, who, role } => {
-                let who = auth::resolve_npub(&who)?;
+                let who = if who.starts_with("id:") { who } else { auth::resolve_npub(&who)? };
                 let v = c.call(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&json!({ "role": role }))?)?)?;
                 if j {
                     ok_exit(&v);
                 }
-                println!("{who} is now {role} on {name}");
+                println!("{} is now {role} on {name}", v["principal"].as_str().unwrap_or(&who));
+                if let Some(owner) = v["owner"].as_str() {
+                    println!("  an agent: its owner {owner} can read {name} too");
+                }
             }
             MembersCmd::Rm { name, who } => {
-                let who = auth::resolve_npub(&who)?;
+                let who = if who.starts_with("id:") { who } else { auth::resolve_npub(&who)? };
                 let v = c.call(c.delete(&format!("/api/f/{name}/members/{who}"))?)?;
                 if j {
                     ok_exit(&v);
@@ -1440,8 +1541,7 @@ fn run(cli: Cli) -> Result<()> {
                 println!("removed {who} from {name}");
             }
             MembersCmd::Leave { name } => {
-                let me = c.id.npub();
-                let v = c.call(c.delete(&format!("/api/f/{name}/members/{me}"))?)?;
+                let v = c.call(c.delete(&format!("/api/f/{name}/members/me"))?)?;
                 if j {
                     ok_exit(&v);
                 }
@@ -1546,7 +1646,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             println!("{name}: {}", v["visibility"].as_str().unwrap_or(""));
         }
-        Cmd::Login { .. } | Cmd::Whoami | Cmd::Host { .. } | Cmd::Guide | Cmd::New { .. } | Cmd::Computer { .. } => unreachable!(),
+        Cmd::Login { .. } | Cmd::Whoami | Cmd::Keys { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::New { .. } | Cmd::Computer { .. } => unreachable!(),
     }
     Ok(())
 }

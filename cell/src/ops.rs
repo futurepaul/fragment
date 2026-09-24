@@ -26,7 +26,7 @@ pub const JOB_ID_PREFIX: &str = "job:";
 /// One admitted call: who runs which operation, and how deep in a chain of
 /// triggered runs it is.
 pub(crate) struct Invocation<'a> {
-    /// Who the ledger records: a key, an anonymous visitor, or the fragment itself.
+    /// Who the ledger records: an identity, an anonymous visitor, or the fragment itself (its key).
     pub principal: &'a str,
     pub role: Role,
     pub op: &'a str,
@@ -72,7 +72,7 @@ impl FragmentCell {
 
     /// `POST /api/f/<name>/ops/<op>`: a signed caller.
     pub(crate) async fn api_op(&self, caller: &Caller, op: &str, body: OpCall) -> CellResult<Response> {
-        let who = self.caller_hex(caller)?.to_string();
+        let who = self.caller_id(caller)?.to_string();
         let result = self.call_op(caller, &who, false, op, body).await?;
         json_response(&result)
     }
@@ -86,14 +86,19 @@ impl FragmentCell {
     }
 
     /// Checks and runs one call from outside. `principal` is who the ledger
-    /// records (a key, or an anonymous visitor's id); `link` says the
+    /// records (an identity, or an anonymous visitor's id); `link` says the
     /// caller holds the share link.
     pub(crate) async fn call_op(&self, caller: &Caller, principal: &str, link: bool, op: &str, body: OpCall) -> CellResult<OpResult> {
         // Whether the caller can see the fragment at all comes before
         // anything about its operations.
         self.require(caller, link, Role::Public)?;
         let decl = self.declared(op)?;
-        let role = self.require(caller, link, decl.role)?;
+        // a query reads (docs/MODEL.md), so an agent's owner may ask it; a
+        // mutation or a job acts, which takes a membership of one's own
+        let role = match decl.kind {
+            OpKind::Query => self.require(caller, link, decl.role)?,
+            _ => self.require_to_act(caller, link, decl.role)?,
+        };
         let is_member = caller.principal.as_deref().map(|p| self.member_role(p)).transpose()?.flatten().is_some();
         if role == Role::Public && !is_member && !self.rate.borrow_mut().allow(principal, js::now_ms()) {
             return Err(CellError::new(ErrorCode::RateLimited, "too many public calls this minute; retry shortly"));

@@ -161,6 +161,9 @@ pub struct Fleet {
     pub delivery_retry_s: Option<u32>,
     /// The keys that may create fragments (`None`: anyone who signs).
     pub creators: Option<String>,
+    /// Test controls (`FRAGMENT_TEST_HOOKS=allow`: the registry can be made
+    /// to fail). Never on a shared fleet.
+    pub test_hooks: bool,
 }
 
 impl Fleet {
@@ -195,6 +198,9 @@ impl Fleet {
         }
         if let Some(c) = &self.creators {
             vars.push(("FRAGMENT_CREATORS", c.as_str()));
+        }
+        if self.test_hooks {
+            vars.push(("FRAGMENT_TEST_HOOKS", "allow"));
         }
         write_dev_vars(project, &vars)
     }

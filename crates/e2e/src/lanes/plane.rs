@@ -40,7 +40,7 @@ fn signed_webhook(api: &Api, name: &str, secret: &str, body: &Value, at: i64, ev
 }
 
 fn files_lane(s: &mut Suite, api: &Api) -> Result<()> {
-    let owner = Keys::generate();
+    let owner = api.person()?;
     let name = s.name("files");
     let c = s.create(api, &owner, &name)?;
     let repo = c["repo"].as_str().unwrap_or("").to_string();
@@ -56,7 +56,7 @@ fn files_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a storage token names the fragment's repo", r.status == 200 && r.body["repo"] == repo.as_str() && claims["repo"] == repo.as_str(), &r);
     s.ok("its scopes are git read and write only", claims["scopes"] == json!(["git:read", "git:write"]), &claims);
     s.ok("it lives fifteen minutes at most", claims["exp"].as_i64().unwrap_or(0) - claims["iat"].as_i64().unwrap_or(0) <= 900, &claims);
-    s.ok("it names who minted it", claims["sub"] == format!("editor:{}", owner.pubkey_hex()), &claims);
+    s.ok("it names who minted it (their identity)", claims["sub"] == format!("editor:{}", api.identity(&owner)?), &claims);
     let http = reqwest::blocking::Client::new();
     let st = http.get(format!("{}/api/repos/{repo}/branch?name=main", s.fake.url)).bearer_auth(&token).send()?.status().as_u16();
     s.ok("code.storage accepts it (a fresh repo has no main: 404)", st == 404, st);
@@ -114,7 +114,7 @@ fn files_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.fake.silent_commit(&repo, "main", &[("polled.md", Some(b"found by the poll"))], "silent");
     let polled = s.eventually(Duration::from_secs(u64::from(crate::POLL_S) * 5), || read(api, &owner, &name, "polled.md").is_some());
     s.ok("the poll backstop finds a commit no webhook announced", polled, "");
-    let stranger = Keys::generate();
+    let stranger = api.person()?;
     let r = api.signed(&stranger, "GET", &format!("/api/f/{name}/files"), None)?;
     s.ok("a stranger cannot list files", r.status == 403, &r);
     Ok(())

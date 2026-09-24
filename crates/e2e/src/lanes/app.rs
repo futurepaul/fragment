@@ -27,9 +27,9 @@ pub fn ops(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("ops") {
         return Ok(());
     }
-    let owner = Keys::generate();
-    let editor = Keys::generate();
-    let other = Keys::generate();
+    let owner = api.person()?;
+    let editor = api.person()?;
+    let other = api.person()?;
     let name = s.name("ops");
     let c = s.create(api, &owner, &name)?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", editor.pubkey_hex()), Some(&json!({ "role": "editor" })))?;
@@ -102,7 +102,7 @@ pub fn public(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("public") {
         return Ok(());
     }
-    let owner = Keys::generate();
+    let owner = api.person()?;
     let name = s.name("guestbook");
     let c = s.create(api, &owner, &name)?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "public" })))?;

@@ -96,6 +96,9 @@ pub mod limits {
     pub const AUTO_PAUSE_WINDOW_MS: i64 = 10 * 60 * 1000;
     /// … or after this many triggered runs within an hour.
     pub const TRIGGERED_RUNS_PER_HOUR: u64 = 120;
+    /// Keys one identity has held (active and revoked), and agents one person owns.
+    pub const KEYS_PER_IDENTITY_MAX: u64 = 64;
+    pub const AGENTS_PER_OWNER_MAX: u64 = 100;
     /// A file an app reads (a larger one is served from the site).
     pub const FILE_READ_MAX_BYTES: usize = 1024 * 1024;
     /// What one mutation or one job step may write to files, and in how many.
@@ -179,6 +182,9 @@ pub enum ErrorCode {
     HostFailed,
     /// 502: code.storage (or another service the platform calls) failed.
     UpstreamFailed,
+    /// 503: the identity registry did not answer; nothing signed is
+    /// decided without it (docs/finite-integration.md, rule 7).
+    RegistryUnavailable,
 }
 
 impl ErrorCode {
@@ -194,6 +200,7 @@ impl ErrorCode {
             ErrorCode::RateLimited => 429,
             ErrorCode::HostFailed => 500,
             ErrorCode::UpstreamFailed => 502,
+            ErrorCode::RegistryUnavailable => 503,
         }
     }
 }
@@ -349,12 +356,92 @@ pub struct FragmentStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Member {
-    /// npub
+    /// The member's identity (`id:…`).
     pub principal: String,
     pub role: Role,
-    /// npub of whoever granted it (the owner, or the invite's creator)
+    /// The identity that granted it (the owner), or `invite:<id>`.
     pub added_by: String,
     pub added_at: i64,
+    /// `person` or `agent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<IdentityKind>,
+    /// An agent member's owner, who reads what it reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+}
+
+/// What an identity is (docs/finite-integration.md). A fragment's own key
+/// stays the fragment's and is not registered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityKind {
+    Person,
+    Agent,
+}
+
+impl IdentityKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IdentityKind::Person => "person",
+            IdentityKind::Agent => "agent",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<IdentityKind> {
+        match s {
+            "person" => Some(IdentityKind::Person),
+            "agent" => Some(IdentityKind::Agent),
+            _ => None,
+        }
+    }
+}
+
+/// `POST /api/identities`: register the signing key as a new person
+/// (until sign-in, phase 4 slice B), or register an agent the signer owns,
+/// with a key proof by the agent's key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Register {
+    pub kind: IdentityKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<String>,
+}
+
+/// `POST /api/identities/<id>/keys`: a key proof by the key to add.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddKey {
+    pub proof: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyView {
+    pub npub: String,
+    pub added_at: i64,
+    /// The identity that added it.
+    pub added_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<i64>,
+}
+
+/// An identity as it, or its owner, sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityView {
+    pub id: String,
+    pub kind: IdentityKind,
+    /// An agent's owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    pub created_at: i64,
+    pub keys: Vec<KeyView>,
+    /// A person's agents.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<String>,
+    /// Whether this answer made it (a registration's replay answers false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<bool>,
 }
 
 /// `PUT /api/f/<name>/members/<npub>` (owner)

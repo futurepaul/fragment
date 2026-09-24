@@ -162,6 +162,33 @@ impl Api {
         })
     }
 
+    /// Registers `keys` as a new person (phase 4 slice A: until sign-in, a
+    /// key makes its own person) and answers the identity.
+    pub fn register(&self, keys: &Keys) -> Result<String> {
+        let r = self.signed(keys, "POST", "/api/identities", Some(&json!({ "kind": "person" })))?;
+        anyhow::ensure!(r.status == 200, "registering a person: {r}");
+        Ok(r.body["id"].as_str().context("a registration answers an id")?.to_string())
+    }
+
+    /// A new key, registered as a new person: someone who signs.
+    pub fn person(&self) -> Result<Keys> {
+        let keys = Keys::generate();
+        self.register(&keys)?;
+        Ok(keys)
+    }
+
+    /// The identity `keys` belongs to.
+    pub fn identity(&self, keys: &Keys) -> Result<String> {
+        let r = self.signed(keys, "GET", "/api/identities/me", None)?;
+        anyhow::ensure!(r.status == 200, "GET /api/identities/me: {r}");
+        Ok(r.body["id"].as_str().context("an identity has an id")?.to_string())
+    }
+
+    /// A key proof by `new` for a request `signer` signs.
+    pub fn proof(&self, new: &Keys, method: &str, path: &str, signer: &Keys) -> String {
+        new.proof(method, &format!("{}{path}", self.base), signer.pubkey_hex(), now_s())
+    }
+
     pub fn create(&self, keys: &Keys, name: &str) -> Result<Reply> {
         self.create_with(keys, json!({ "name": name, "fragmentSecret": Keys::generate().secret_hex() }))
     }

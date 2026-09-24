@@ -36,7 +36,7 @@ pub fn schemas(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("schemas") {
         return Ok(());
     }
-    let owner = Keys::generate();
+    let owner = api.person()?;
     let (name, c) = chat(s, api, &owner, "schemas")?;
     let r = api.op(&owner, &name, "say", "v1", json!({ "text": "hi" }))?;
     s.ok("an input that fits the schema runs", r.status == 200, &r);
@@ -72,12 +72,12 @@ pub fn channels(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("channels") {
         return Ok(());
     }
-    let owner = Keys::generate();
-    let viewer = Keys::generate();
-    let stranger = Keys::generate();
+    let owner = api.person()?;
+    let viewer = api.person()?;
+    let stranger = api.person()?;
     let (name, _) = chat(s, api, &owner, "channels")?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", viewer.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
-    let owner_npub = fragment_core::npub::encode(owner.pubkey_hex());
+    let owner_id = api.identity(&owner)?;
 
     let r = api.op(&owner, &name, "say", "c1", json!({ "text": "one" }))?;
     s.ok("a mutation publishes", r.status == 200, &r);
@@ -85,7 +85,7 @@ pub fn channels(s: &mut Suite, api: &Api) -> Result<()> {
     let r = records(api, &owner, &name, "room", 0)?;
     let recs = r.body["records"].as_array().cloned().unwrap_or_default();
     s.ok("the channel holds its records in order", recs.len() == 2 && recs[0]["seq"] == 1 && recs[1]["body"]["text"] == "two", &r);
-    s.ok("a record names who published it and its kind", recs[0]["principal"] == owner_npub.as_str() && recs[0]["kind"] == "said", &r);
+    s.ok("a record names who published it and its kind", recs[0]["principal"] == owner_id.as_str() && recs[0]["kind"] == "said", &r);
     let r = records(api, &owner, &name, "room", 1)?;
     s.ok("after= reads from a cursor", r.body["records"].as_array().map_or(0, |a| a.len()) == 1 && r.body["next"] == 2, &r);
     let r = api.op(&owner, &name, "say", "c1", json!({ "text": "one" }))?;
@@ -121,7 +121,7 @@ pub fn channels(s: &mut Suite, api: &Api) -> Result<()> {
         &r,
     );
     let r = api.op(&viewer, &name, "whoami", "w", json!({}))?;
-    s.ok("a method sees who called it and their role", r.body["result"] == json!({ "principal": fragment_core::npub::encode(viewer.pubkey_hex()), "role": "viewer" }), &r);
+    s.ok("a method sees who called it and their role", r.body["result"] == json!({ "principal": api.identity(&viewer)?, "role": "viewer" }), &r);
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/events"), None)?;
     s.ok("the event log reads from the events channel", r.status == 200 && r.body["events"][0]["kind"] == "create", &r);
     Ok(())
@@ -131,7 +131,7 @@ pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("live") {
         return Ok(());
     }
-    let owner = Keys::generate();
+    let owner = api.person()?;
     let (name, _) = chat(s, api, &owner, "live")?;
     api.op(&owner, &name, "say", "l1", json!({ "text": "before" }))?;
 
@@ -196,7 +196,7 @@ pub fn routes(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("routes") {
         return Ok(());
     }
-    let owner = Keys::generate();
+    let owner = api.person()?;
     let (name, c) = chat(s, api, &owner, "routes")?;
     s.commit(&c, &[("site/index.html", Some(b"<p>the site</p>"))]);
     s.deploy(&c);
@@ -207,7 +207,7 @@ pub fn routes(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("which imports applib/ modules", r.text.contains("HELLO!"), &r);
     s.ok("and sees who is asking", r.text.contains("anonymous as public at /hello"), &r);
     let r = api.call(Call { method: "GET", url: api.site_url(&name, "hello"), keys: Some(&owner), ..Call::default() })?;
-    s.ok("a signed member is named to the app", r.text.contains(&fragment_core::npub::encode(owner.pubkey_hex())) && r.text.contains("as owner"), &r);
+    s.ok("a signed member is named to the app", r.text.contains(&api.identity(&owner)?) && r.text.contains("as owner"), &r);
     let r = api.call(Call { method: "POST", url: api.site_url(&name, "echo"), body: Some(b"ping".to_vec()), content_type: Some("text/plain"), ..Call::default() })?;
     s.ok("the app's routes take other methods", r.status == 200 && r.text == "echo: ping", &r);
     let r = api.page(&name, "missing", None)?;
@@ -276,7 +276,7 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok("Chrome is installed for the browser lane (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());
     };
-    let owner = Keys::generate();
+    let owner = api.person()?;
     let name = s.name("todo");
     let c = s.create(api, &owner, &name)?;
     let changes: Vec<(&str, Option<&[u8]>)> = TODO_FILES.iter().map(|(p, b)| (*p, Some(*b))).collect();

@@ -21,10 +21,11 @@ pub fn creators(s: &mut Suite) -> Result<()> {
     let (invited, other) = (Keys::generate(), Keys::generate());
     s.creators = Some(format!("{}, {}", fragment_core::npub::encode(other.pubkey_hex()), invited.pubkey_hex()));
     let api = s.start(false, true)?;
+    api.register(&invited)?;
     let name = s.name("invited");
     let r = api.create(&invited, &name)?;
     s.ok("a listed key creates a fragment (npubs and hex both name keys)", r.status == 200, &r);
-    let stranger = Keys::generate();
+    let stranger = api.person()?;
     let r = api.create(&stranger, &s.name("uninvited"))?;
     s.ok("anyone else is refused, saying why", r.status == 403 && r.message().contains("by invitation"), &r);
     let r = api.signed(&invited, "PUT", &format!("/api/f/{name}/members/{}", stranger.pubkey_hex()), Some(&json!({ "role": "editor" })))?;
@@ -44,14 +45,14 @@ pub fn auth(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("auth") {
         return Ok(());
     }
-    let keys = Keys::generate();
+    let keys = api.person()?;
     let name = s.name("auth");
     let body = json!({ "name": name, "fragmentSecret": Keys::generate().secret_hex() });
     let bytes = body.to_string().into_bytes();
     let r = api.unsigned("POST", "/api/fragments", Some(&body))?;
     s.ok("an unsigned create is 401", r.status == 401 && r.error() == "unauthenticated", &r);
     // behind a proxy that ends TLS (Fly's), the client signed the https URL
-    let proxied = Keys::generate();
+    let proxied = api.person()?;
     let https = format!("{}/api/fragments", api.base.replacen("http://", "https://", 1));
     let pbody = json!({ "name": s.name("proxied"), "fragmentSecret": Keys::generate().secret_hex() });
     let pbytes = pbody.to_string().into_bytes();
@@ -96,13 +97,13 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("create") {
         return Ok(());
     }
-    let owner = Keys::generate();
-    let other = Keys::generate();
+    let owner = api.person()?;
+    let other = api.person()?;
     let name = s.name("create");
     let r = api.create(&owner, &name)?;
     let c = &r.body;
     s.ok("a signed create succeeds", r.status == 200, &r);
-    s.ok("create names the owner by npub", c["owner"] == fragment_core::npub::encode(owner.pubkey_hex()), &r);
+    s.ok("create names the owner by identity", c["owner"] == api.identity(&owner)?.as_str(), &r);
     s.ok("create returns the fragment's own npub", c["npub"].as_str().is_some_and(|n| n.starts_with("npub1")), &r);
     s.ok("create defaults to link visibility", c["visibility"] == "link", &r);
     s.ok(
@@ -169,7 +170,7 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     // a busy org: the repo is on a later page of the org's newest-first list
     s.fake.seed_filler(150);
     let r = api.create(&other, &name)?;
-    s.ok("a deleted name can be created again", r.status == 200 && r.body["owner"] == fragment_core::npub::encode(other.pubkey_hex()), &r);
+    s.ok("a deleted name can be created again", r.status == 200 && r.body["owner"] == api.identity(&other)?.as_str(), &r);
     s.ok("created again, it keeps its repo (found past the list's first page)", r.body["repo"] == repo.as_str(), &r);
     Ok(())
 }
@@ -178,8 +179,8 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("lockdown") {
         return Ok(());
     }
-    let owner = Keys::generate();
-    let stranger = Keys::generate();
+    let owner = api.person()?;
+    let stranger = api.person()?;
     let name = s.name("lock");
     s.create(api, &owner, &name)?;
     let forged = |keys: Option<&Keys>| {

@@ -12,9 +12,9 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("site") {
         return Ok(());
     }
-    let owner = Keys::generate();
-    let viewer = Keys::generate();
-    let stranger = Keys::generate();
+    let owner = api.person()?;
+    let viewer = api.person()?;
+    let stranger = api.person()?;
     let name = s.name("site");
     let c = s.create(api, &owner, &name)?;
     let view = c["viewToken"].as_str().unwrap_or("").to_string();
@@ -133,7 +133,7 @@ pub fn watch(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("watch") {
         return Ok(());
     }
-    let owner = Keys::generate();
+    let owner = api.person()?;
     let name = s.name("watch");
     let c = s.create(api, &owner, &name)?;
     let view = c["viewToken"].as_str().unwrap_or("").to_string();

@@ -4,8 +4,17 @@
 //! it calls through the platform's signed API with its own key: an agent
 //! acts on a fragment exactly as its membership lets it.
 //!
-//! The owner's API (NIP-98, the owner's key):
-//!   POST /api/agents                  {name, model?, instructions?} → {name, npub, owner, model}
+//! An agent is an identity in the platform's registry, owned by the person
+//! who made it (docs/finite-integration.md). Making one takes two signed
+//! requests: this service makes the agent and its key and answers a key
+//! proof by that key; the owner's CLI registers the agent with the platform
+//! (`POST /api/identities {kind: agent, proof}`), vouching for it. From
+//! then on, "the owner" is an identity: any of the owner's active keys
+//! controls the agent, checked live with the registry on each request.
+//!
+//! The owner's API (NIP-98, one of the owner's keys):
+//!   POST /api/agents                  {name, model?, instructions?} → {name, npub, model, proof}
+//!                                     (again, by the same key, until it is registered: a fresh proof)
 //!   GET  /api/a/{name}                the conversation and the turn's state
 //!   POST /api/a/{name}/turns          {text}: start a turn, or steer the running one
 //!   POST /api/a/{name}/stop           stop the running turn
@@ -251,12 +260,51 @@ impl Agent {
         self.state.storage().sql()
     }
 
-    fn require_owner(&self, principal: &str) -> Answer<()> {
-        match kv_get(&self.sql(), "owner")? {
-            None => Err(Fail::new(ErrorCode::NotFound, "no such agent")),
-            Some(owner) if owner == principal => Ok(()),
-            Some(_) => Err(Fail::new(ErrorCode::Forbidden, "only the agent's owner may do that")),
+    /// The agent's identity and its owner's, as the registry holds them
+    /// (learned once: neither ever changes).
+    async fn registration(&self) -> Answer<(String, String)> {
+        let sql = self.sql();
+        if kv_get(&sql, "created_at")?.is_none() {
+            return Err(Fail::new(ErrorCode::NotFound, "no such agent"));
         }
+        if let (Some(id), Some(owner)) = (kv_get(&sql, "identity")?.filter(|v| !v.is_empty()), kv_get(&sql, "owner")?.filter(|v| !v.is_empty())) {
+            return Ok((id, owner));
+        }
+        let (status, me) = self.fleet()?.call(Method::Get, "/api/identities/me", None).await.map_err(|e| Fail::new(ErrorCode::RegistryUnavailable, e.to_string()))?;
+        match status {
+            200 => {
+                let (Some(id), Some(owner)) = (me["id"].as_str(), me["owner"].as_str()) else {
+                    return Err(Fail::host("the registry answered no id or owner for this agent"));
+                };
+                kv_set(&sql, "identity", id)?;
+                kv_set(&sql, "owner", owner)?;
+                Ok((id.to_string(), owner.to_string()))
+            }
+            401 => {
+                let name = kv_get(&sql, "name")?.unwrap_or_default();
+                Err(Fail::new(ErrorCode::InvalidRequest, format!("agent {name} is not registered yet: finish with `fragment agent create {name}`")))
+            }
+            _ => Err(Fail::new(ErrorCode::RegistryUnavailable, format!("the platform answered {status}: {}", fleet::message(&me)))),
+        }
+    }
+
+    /// Whether `key` (the request's signer) is one of the owner's active
+    /// keys, asked live (a replaced key keeps control; a revoked one loses it).
+    async fn require_owner(&self, key: &str) -> Answer<()> {
+        let (_, owner) = self.registration().await?;
+        let path = format!("/api/identities/{owner}/keys/{key}");
+        let (status, answer) = self.fleet()?.call(Method::Get, &path, None).await.map_err(|e| Fail::new(ErrorCode::RegistryUnavailable, e.to_string()))?;
+        match status {
+            200 if answer["active"] == true => Ok(()),
+            200 => Err(Fail::new(ErrorCode::Forbidden, "only the agent's owner may do that")),
+            _ => Err(Fail::new(ErrorCode::RegistryUnavailable, format!("the platform answered {status}: {}", fleet::message(&answer)))),
+        }
+    }
+
+    /// A key proof by the agent's key for its registration, meant for `creator`.
+    fn registration_proof(&self, creator: &str) -> Answer<String> {
+        let url = format!("{}/api/identities", fleet::base(&self.env)?);
+        Ok(self.keys()?.proof("POST", &url, creator, (js::now_ms() / 1000) as i64))
     }
 
     fn keys(&self) -> Answer<Arc<Keys>> {
@@ -327,10 +375,17 @@ impl Agent {
         Ok(json!({ "detached": attached }))
     }
 
-    fn create(&self, principal: &str, body: CreateBody) -> Answer<Value> {
+    async fn create(&self, principal: &str, body: CreateBody) -> Answer<Value> {
         let sql = self.sql();
         if kv_get(&sql, "created_at")?.is_some() {
-            return Err(Fail::new(ErrorCode::AlreadyExists, format!("agent {} already exists", body.name)));
+            // the maker, again, before the registration went through: a fresh proof
+            let unregistered = kv_get(&sql, "creator")?.as_deref() == Some(principal)
+                && matches!(self.registration().await, Err(Fail { code: ErrorCode::InvalidRequest, .. }));
+            if !unregistered {
+                return Err(Fail::new(ErrorCode::AlreadyExists, format!("agent {} already exists", body.name)));
+            }
+            let get = |k: &str| kv_get(&sql, k).map(|v| v.unwrap_or_default());
+            return Ok(json!({ "name": get("name")?, "npub": get("npub")?, "model": get("model")?, "proof": self.registration_proof(principal)?, "replayed": true }));
         }
         let model = body.model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
         if model.is_empty() || model.len() > MODEL_MAX {
@@ -351,7 +406,8 @@ impl Agent {
         let sealed = secrets::seal(&hosts[0], &agent_npub, secret.as_bytes(), js::random_bytes()).map_err(Fail::host)?;
         for (k, v) in [
             ("name", body.name.as_str()),
-            ("owner", principal),
+            // who made it (a key), until the registry names its owner
+            ("creator", principal),
             ("npub", agent_npub.as_str()),
             ("secret", sealed.as_str()),
             ("model", model.as_str()),
@@ -360,7 +416,7 @@ impl Agent {
             kv_set(&sql, k, v)?;
         }
         kv_set(&sql, "created_at", js::now_ms())?;
-        Ok(json!({ "name": body.name, "npub": agent_npub, "owner": npub::encode(principal), "model": model }))
+        Ok(json!({ "name": body.name, "npub": agent_npub, "model": model, "proof": self.registration_proof(principal)? }))
     }
 
     fn start_driver(&self, reason: &str) -> Answer<bool> {
@@ -508,10 +564,10 @@ impl Agent {
             return Err(Fail::invalid("the delivery names another fragment or channel"));
         }
         let record = &body["record"];
-        let me = kv_get(&sql, "npub")?.unwrap_or_default();
-        let me_hex = npub::parse(&me).unwrap_or_default();
+        // listening needed the registration, so the agent knows its identity
+        let me = kv_get(&sql, "identity")?.unwrap_or_default();
         let from = record["principal"].as_str().unwrap_or("");
-        if from == me || from == me_hex {
+        if !me.is_empty() && from == me {
             return Ok(json!({ "ignored": "own" }));
         }
         let key = format!("{fragment}/{channel}/{}", record["seq"]);
@@ -592,6 +648,8 @@ impl Agent {
         let get = |k: &str| kv_get(&sql, k).map(|v| v.unwrap_or_default());
         Ok(json!({
             "name": get("name")?,
+            "id": get("identity")?,
+            "owner": get("owner")?,
             "npub": get("npub")?,
             "model": get("model")?,
             "active": kv_u64(&sql, "active")? == 1,
@@ -626,12 +684,12 @@ impl Agent {
             return Ok(Response::from_json(&self.inbox(token, body)?)?);
         }
         let answer = match (req.method(), action.as_str()) {
-            (Method::Post, "create") => self.create(&principal, serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?),
+            (Method::Post, "create") => self.create(&principal, serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?).await,
             (method, action) => {
                 if principal.is_empty() {
                     return Err(Fail::host("the router named no principal"));
                 }
-                self.require_owner(&principal)?;
+                self.require_owner(&principal).await?;
                 match (method.clone(), action) {
                     (Method::Get, "view") => self.view(),
                     (Method::Post, "turns") => self.turn(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?),

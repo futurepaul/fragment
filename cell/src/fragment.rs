@@ -1,8 +1,10 @@
 //! The `Fragment` supervisor: one Durable Object per fragment. It owns the
 //! fragment's identity, members, visibility, secrets, file-plane pins, and
 //! code record, and it answers every call into the app. The router has
-//! already verified the caller; it passes the principal, the fragment's
-//! name, and the URL the request arrived on in headers only it sets.
+//! already verified the caller and resolved their identity; it passes the
+//! identity (with the key it signed with, its kind, and an agent's owner),
+//! the fragment's name, and the URL the request arrived on in headers only
+//! it sets.
 //!
 //! Routes (inner paths; the router maps the public ones onto them):
 //!
@@ -11,8 +13,8 @@
 //!   GET    /api/status                    viewer
 //!   GET    /api/manifest                  viewer: fragment.json at main
 //!   GET    /api/members                   viewer
-//!   PUT    /api/members/<npub>            owner
-//!   DELETE /api/members/<npub>            owner, or the member themselves
+//!   PUT    /api/members/<id|npub>         owner (a key names the identity holding it)
+//!   DELETE /api/members/<id|npub>         owner, or the member themselves
 //!   POST   /api/invites  GET /api/invites  DELETE /api/invites/<id>   owner
 //!   POST   /api/join                      any signed principal with a token
 //!   PUT    /api/visibility                owner
@@ -37,11 +39,11 @@
 
 use std::cell::{Cell, RefCell};
 
-use fragment_core::access::{self, Decision};
+use fragment_core::access::{self, Decision, Purpose, Standing};
 use fragment_core::{npub, secrets};
 use fragment_proto::{
-    limits, valid_fragment_name, CodeStatus, Counts, CreateFragment, Created, ErrorCode, FragmentStatus, OpDecl, Pins, Role, Urls,
-    Visibility,
+    limits, valid_fragment_name, CodeStatus, Counts, CreateFragment, Created, ErrorCode, FragmentStatus, IdentityKind, OpDecl, Pins, Role,
+    Urls, Visibility,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -53,7 +55,12 @@ use crate::cs::Cs;
 use crate::error::{CellError, CellResult};
 use crate::js;
 
+/// The caller's identity (`id:…`), the key it signed with, the identity's
+/// kind, and an agent's owner.
 pub const PRINCIPAL_HEADER: &str = "x-fragment-principal";
+pub const KEY_HEADER: &str = "x-fragment-key";
+pub const KIND_HEADER: &str = "x-fragment-kind";
+pub const OWNER_HEADER: &str = "x-fragment-owner";
 pub const NAME_HEADER: &str = "x-fragment-name";
 pub const URL_HEADER: &str = "x-fragment-url";
 /// How long a create in progress holds its name.
@@ -62,7 +69,9 @@ const CLAIM_TTL_MS: i64 = 120_000;
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS members (
-  principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL);
+  principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL,
+  kind TEXT, owner TEXT);
+CREATE INDEX IF NOT EXISTS members_owner ON members (owner) WHERE owner IS NOT NULL;
 CREATE TABLE IF NOT EXISTS invites (
   id TEXT PRIMARY KEY, token_sha TEXT NOT NULL UNIQUE, role TEXT NOT NULL, uses_left INTEGER NOT NULL,
   expires_at INTEGER NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
@@ -135,6 +144,13 @@ impl DurableObject for FragmentCell {
                 sql.exec(&format!("ALTER TABLE code ADD COLUMN {decl}"), None).expect("the code table migrates");
             }
         }
+        let cols: Vec<Value> = sql.exec("PRAGMA table_info(members)", None).and_then(|c| c.to_array()).unwrap_or_default();
+        for col in ["kind", "owner"] {
+            if !cols.iter().any(|c| c["name"] == col) {
+                sql.exec(&format!("ALTER TABLE members ADD COLUMN {col} TEXT"), None).expect("the members table migrates");
+            }
+        }
+        sql.exec("CREATE INDEX IF NOT EXISTS members_owner ON members (owner) WHERE owner IS NOT NULL", None).expect("the members index applies");
         let cfg = Config::from_env(&env);
         let rate = fragment_core::ratelimit::Rate::new(limits::PUBLIC_CALLS_PER_MIN, limits::PUBLIC_CALLS_PER_MIN_FRAGMENT);
         FragmentCell { state, raw, env, cfg, plane: futures_util::lock::Mutex::new(()), rate: RefCell::new(rate), swept: Cell::new(false) }
@@ -183,8 +199,13 @@ impl DurableObject for FragmentCell {
 
 /// Who is calling, as the router established it.
 pub struct Caller {
-    /// A verified key (64 hex), when the request was signed.
+    /// The signer's identity (`id:…`), when the request was signed.
     pub principal: Option<String>,
+    /// The key it signed with (64 hex).
+    pub key: Option<String>,
+    pub kind: Option<IdentityKind>,
+    /// An agent's owner.
+    pub owner: Option<String>,
     /// The URL the request arrived on (canonical URLs and cookies derive from it).
     pub url: url::Url,
 }
@@ -269,37 +290,77 @@ impl FragmentCell {
         Ok(rows.first().and_then(|r| r["role"].as_str()).and_then(Role::parse))
     }
 
-    /// The caller's role, or the refusal: `needs` is the weakest role that may act.
-    pub(crate) fn require(&self, caller: &Caller, link: bool, needs: Role) -> CellResult<Role> {
-        self.name()?;
+    /// What the caller brings: their membership, or an agent of theirs that
+    /// is a member (they read what it reads).
+    fn standing(&self, caller: &Caller, link: bool) -> CellResult<Standing> {
         let member = match &caller.principal {
             Some(p) => self.member_role(p)?,
             None => None,
         };
+        let owns_member_agent = match (&caller.principal, member) {
+            (Some(p), None) => !self.rows("SELECT principal FROM members WHERE owner = ? LIMIT 1", vec![p.as_str().into()])?.is_empty(),
+            _ => false,
+        };
+        Ok(Standing { member, owns_member_agent, link, signed: caller.principal.is_some() })
+    }
+
+    /// Whether the caller sees the fragment as themselves (a member, or an
+    /// agent's owner), not by its link or its visibility: their sockets are
+    /// tagged `p:<id>` and close when that standing is revoked.
+    pub(crate) fn has_standing(&self, caller: &Caller) -> CellResult<bool> {
+        let s = self.standing(caller, false)?;
+        Ok(s.member.is_some() || s.owns_member_agent)
+    }
+
+    /// The caller's role for reading, or the refusal: `needs` is the weakest
+    /// role that may read.
+    pub(crate) fn require(&self, caller: &Caller, link: bool, needs: Role) -> CellResult<Role> {
+        self.decide(caller, link, needs, Purpose::Read)
+    }
+
+    /// The caller's role for acting (an operation): an agent's owner reads
+    /// through it and never acts through it.
+    pub(crate) fn require_to_act(&self, caller: &Caller, link: bool, needs: Role) -> CellResult<Role> {
+        self.decide(caller, link, needs, Purpose::Act)
+    }
+
+    fn decide(&self, caller: &Caller, link: bool, needs: Role, purpose: Purpose) -> CellResult<Role> {
+        self.name()?;
+        let standing = self.standing(caller, link)?;
         let visibility = self.visibility()?;
         let why = match (needs, visibility) {
+            _ if standing.owns_member_agent && purpose == Purpose::Act => {
+                "you read this fragment through your agent's membership; acting here needs your own".to_string()
+            }
             (Role::Public, Visibility::Link) => "this fragment is shared by link: open it with its share link (?view=)".to_string(),
             (Role::Public, Visibility::Members) => "this fragment is for its members only".to_string(),
             _ => format!("this needs the {} role", needs.as_str()),
         };
-        match access::decide(visibility, member, link, caller.principal.is_some(), needs) {
+        match access::decide(visibility, standing, purpose, needs) {
             Decision::Allow(role) => Ok(role),
             Decision::Unauthenticated => Err(CellError::new(ErrorCode::Unauthenticated, format!("{why}; sign in or sign the request"))),
             Decision::Forbidden => Err(CellError::new(ErrorCode::Forbidden, why)),
         }
     }
 
-    pub(crate) fn caller_hex<'a>(&self, caller: &'a Caller) -> CellResult<&'a str> {
+    /// The signer's identity.
+    pub(crate) fn caller_id<'a>(&self, caller: &'a Caller) -> CellResult<&'a str> {
         caller.principal.as_deref().ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "sign the request"))
     }
 
     async fn route(&self, mut req: Request) -> CellResult<Response> {
         // Only the router reaches a Durable Object's fetch; it sets these.
         let principal = req.headers().get(PRINCIPAL_HEADER)?;
+        let key = req.headers().get(KEY_HEADER)?;
+        let kind = req.headers().get(KIND_HEADER)?.and_then(|k| IdentityKind::parse(&k));
+        let owner = req.headers().get(OWNER_HEADER)?;
         let arrived =
             req.headers().get(URL_HEADER)?.and_then(|u| url::Url::parse(&u).ok()).ok_or_else(|| CellError::host("no URL from the router"))?;
         let routed_name = req.headers().get(NAME_HEADER)?.ok_or_else(|| CellError::host("no fragment name from the router"))?;
-        let caller = Caller { principal, url: arrived };
+        if principal.is_some() && (key.is_none() || kind.is_none()) {
+            return Err(CellError::host("the router named an identity without its key and kind"));
+        }
+        let caller = Caller { principal, key, kind, owner, url: arrived };
         let path = req.path();
         if let Some(step) = path.strip_prefix("/job/") {
             // Only this script's Workflow sets the header; the router never passes it.
@@ -453,7 +514,7 @@ impl FragmentCell {
     }
 
     async fn create(&self, caller: &Caller, body: CreateFragment) -> CellResult<Response> {
-        let owner = self.caller_hex(caller)?.to_string();
+        let owner = self.caller_id(caller)?.to_string();
         if !valid_fragment_name(&body.name) {
             return Err(CellError::invalid("a fragment name must match ^[a-z0-9][a-z0-9-]{0,62}$"));
         }
@@ -504,17 +565,23 @@ impl FragmentCell {
             self.set_meta(k, v)?;
         }
         self.exec(
-            "INSERT INTO members (principal, role, added_by, added_at) VALUES (?, 'owner', ?, ?)",
-            vec![owner.as_str().into(), owner.as_str().into(), SqlStorageValue::Integer(now)],
+            "INSERT INTO members (principal, role, added_by, added_at, kind, owner) VALUES (?, 'owner', ?, ?, ?, ?)",
+            vec![
+                owner.as_str().into(),
+                owner.as_str().into(),
+                SqlStorageValue::Integer(now),
+                caller.kind.map_or(SqlStorageValue::Null, |k| k.as_str().into()),
+                caller.owner.as_deref().map_or(SqlStorageValue::Null, |o| o.into()),
+            ],
         )?;
         self.index_change(&owner, Some(Role::Owner))?;
-        self.event("create", &format!("fragment {} created by {} (repo {repo})", body.name, npub::encode(&owner)), json!({ "repo": repo }));
+        self.event("create", &format!("fragment {} created by {owner} (repo {repo})", body.name), json!({ "repo": repo, "key": caller.key.as_deref().map(npub::display) }));
         self.flush_index().await;
         self.schedule().await?;
         json_response(&Created {
             name: body.name.clone(),
             npub: fragment_npub,
-            owner: npub::encode(&owner),
+            owner: owner.clone(),
             visibility,
             view_token,
             inbox_token,
@@ -560,7 +627,7 @@ impl FragmentCell {
         let name = self.name()?;
         json_response(&FragmentStatus {
             npub: self.must("npub")?,
-            owner: npub::encode(&self.must("owner")?),
+            owner: npub::display(&self.must("owner")?),
             role,
             visibility: self.visibility()?,
             repo: self.must("repo")?,

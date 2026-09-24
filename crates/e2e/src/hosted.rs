@@ -186,6 +186,9 @@ pub fn run(cli: PathBuf, scratch: PathBuf, only: Option<String>) -> Result<()> {
     println!("hosted e2e against {base} (run {})", h.run);
     let result = (|| -> Result<()> {
         health(&mut h)?;
+        // the enrolled key is a person on the fleet (registering again answers the same one)
+        let id = h.api.register(&h.key)?;
+        h.note("identity", id);
         creators(&mut h)?;
         todo(&mut h)?;
         inbox(&mut h)?;
@@ -225,7 +228,9 @@ fn creators(h: &mut Hosted) -> Result<()> {
         return Ok(());
     }
     let r = h.api.create(&Keys::generate(), &h.name("stranger"))?;
-    h.ok("a key the fleet does not list cannot create", r.status == 403 && r.message().contains("by invitation"), &r);
+    h.ok("a key no one registered cannot create", r.status == 401, &r);
+    let r = h.api.create(&h.api.person()?, &h.name("stranger"))?;
+    h.ok("a person the fleet does not list cannot create", r.status == 403 && r.message().contains("by invitation"), &r);
     Ok(())
 }
 

@@ -805,7 +805,7 @@ impl FragmentCell {
                 false => CellError::new(ErrorCode::NotFound, format!("no run #{}", body.run)),
             });
         };
-        let by = npub::encode(self.caller_hex(caller)?);
+        let by = npub::display(self.caller_id(caller)?);
         self.event("run.replayed", &format!("{} run #{} by {by}", row["op"].as_str().unwrap_or(""), body.run), json!({ "run": body.run }));
         self.launch_queued().await;
         json_response(&json!({ "ok": true, "run": body.run, "attempt": row["attempt"] }))
@@ -815,7 +815,7 @@ impl FragmentCell {
     pub(crate) fn pause(&self, caller: &Caller, body: SetPaused) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
         self.declared(&body.op)?;
-        let by = npub::encode(self.caller_hex(caller)?);
+        let by = npub::display(self.caller_id(caller)?);
         self.set_paused(&body.op, body.paused, &by, "")?;
         json_response(&json!({ "ok": true, "op": body.op, "paused": body.paused }))
     }

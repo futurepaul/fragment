@@ -18,15 +18,15 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("members") {
         return Ok(());
     }
-    let owner = Keys::generate();
-    let (bob, carol, dave, erin) = (Keys::generate(), Keys::generate(), Keys::generate(), Keys::generate());
+    let owner = api.person()?;
+    let (bob, carol, dave, erin) = (api.person()?, api.person()?, api.person()?, api.person()?);
     let name = s.name("members");
     s.create(api, &owner, &name)?;
     let path = |rest: &str| format!("/api/f/{name}/{rest}");
     let npub_of = |k: &Keys| npub::encode(k.pubkey_hex());
 
     let r = api.signed(&owner, "PUT", &path(&format!("members/{}", npub_of(&bob))), Some(&json!({ "role": "viewer" })))?;
-    s.ok("the owner adds a viewer by npub", r.status == 200 && r.body["role"] == "viewer" && r.body["principal"] == npub_of(&bob), &r);
+    s.ok("the owner adds a viewer by npub: the member is the identity holding it", r.status == 200 && r.body["role"] == "viewer" && r.body["principal"] == api.identity(&bob)?.as_str() && r.body["kind"] == "person", &r);
     let r = api.status(&bob, &name)?;
     s.ok("the viewer reads status", r.status == 200 && r.body["role"] == "viewer", &r);
     s.ok("a viewer does not see the inbox token", r.body["inboxToken"].is_null(), &r);
@@ -127,8 +127,8 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("secrets") {
         return Ok(());
     }
-    let owner = Keys::generate();
-    let viewer = Keys::generate();
+    let owner = api.person()?;
+    let viewer = api.person()?;
     let name = s.name("secrets");
     s.create(api, &owner, &name)?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", viewer.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;

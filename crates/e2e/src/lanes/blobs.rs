@@ -101,11 +101,11 @@ pub fn blobs(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and not kept", r.status == 404, &r);
     let r = put(None, &sha256_hex(&wrong), wrong.clone())?;
     s.ok("an unsigned upload is 401", r.status == 401, &r);
-    let viewer = Keys::generate();
+    let viewer = api.person()?;
     api.signed(&keys, "PUT", &format!("/api/f/{name}/members/{}", viewer.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
     let r = put(Some(&viewer), &sha256_hex(&wrong), wrong.clone())?;
     s.ok("a viewer cannot upload", r.status == 403, &r);
-    let r = api.signed(&Keys::generate(), "GET", &blob_path(&sha), None)?;
+    let r = api.signed(&api.person()?, "GET", &blob_path(&sha), None)?;
     s.ok("a stranger cannot read a blob", r.status == 403, &r);
 
     // a new version: the old bytes go once no branch names them

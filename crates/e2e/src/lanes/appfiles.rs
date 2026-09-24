@@ -6,7 +6,6 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
 use super::app::ship;
@@ -20,7 +19,7 @@ pub fn appfiles(s: &mut Suite, api: &crate::api::Api) -> Result<()> {
     if !s.section("appfiles") {
         return Ok(());
     }
-    let owner = Keys::generate();
+    let owner = api.person()?;
     let name = s.name("appfiles");
     let c = s.create(api, &owner, &name)?;
     ship(s, &c, FILES_APP, FILES_JSON);

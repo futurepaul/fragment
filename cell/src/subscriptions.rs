@@ -55,7 +55,7 @@ impl FragmentCell {
                     vec![principal.as_str().into(), channel.into(), url.into(), SqlStorageValue::Integer(crate::js::now_ms())],
                 )?;
                 let id = rows.first().and_then(|r| r["id"].as_i64()).ok_or_else(|| CellError::host("a subscription insert returned no id"))?;
-                self.event("subscription.added", &format!("{} to {channel}", npub::encode(&principal)), json!({ "id": id, "channel": channel }));
+                self.event("subscription.added", &format!("{} to {channel}", npub::display(&principal)), json!({ "id": id, "channel": channel }));
                 id
             }
         };
@@ -73,7 +73,7 @@ impl FragmentCell {
         };
         let subs: Vec<Value> = rows
             .iter()
-            .map(|r| json!({ "id": r["id"], "principal": npub::encode(r["principal"].as_str().unwrap_or("")), "channel": r["channel"], "url": r["url"], "createdAt": r["created_at"] }))
+            .map(|r| json!({ "id": r["id"], "principal": npub::display(r["principal"].as_str().unwrap_or("")), "channel": r["channel"], "url": r["url"], "createdAt": r["created_at"] }))
             .collect();
         json_response(&json!({ "subscriptions": subs }))
     }

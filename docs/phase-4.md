@@ -1,6 +1,8 @@
 # Phase 4: sign-in, identities, and budgets (proposed)
 
-Status: **proposed 2026-09-24, waiting on Paul's go.** The ROADMAP keeps
+Status: **go from Paul 2026-09-24; slice A built the same day** (below,
+"Slice A as built"); slice B next, then a stop for Paul to try signing
+in locally before slice C. The ROADMAP keeps
 the acceptance (phase 4, decisions 12, 14, 15); this file keeps the
 slices. Every slice follows the rules in `docs/finite-integration.md`
 and updates its rows there.
@@ -39,8 +41,8 @@ Decided with Paul on 2026-09-24:
   fragment grants the agent's owner `viewer` when the owner is not a
   member and a member agent they own can read: read only, never write.
 - Until slice B, `fragment login` makes a key and a person for it (on
-  fleets without `FRAGMENT_CREATORS`, as today), so the e2e and dev keep
-  working.
+  every fleet: anyone could sign before, and `FRAGMENT_CREATORS` still
+  decides who creates), so the e2e and dev keep working.
 - Existing state: hard cut. fragment.club holds only test fragments
   (the e2e's and push-check); they are deleted and re-created after the
   deploy. The rehearsal of a real migration waits for BANKS, where it
@@ -49,6 +51,48 @@ Decided with Paul on 2026-09-24:
   agent's owner reads what it reads and cannot write through it; the
   registry down is a visible 503, not an allow; everything that passes
   today still passes with identities underneath.
+
+### Slice A as built (2026-09-24)
+
+- **One registry cell, not a cell per identity and per key.** The
+  `Registry` cell (`cell/src/registry.rs`) holds identities, every key
+  each has held, agents' owners, and (empty until slice B) sign-in
+  subjects. One cell makes each key change one transaction (an agent is
+  never left keyless; a revoked key never comes back) and costs one hop
+  per signed request, where the three-cell shape needed two or a cache.
+  It is also the shape BANKS will have: one service. If it ever limits
+  throughput, shard it by key; at the friends alpha it does not.
+- **Numbers:** a signed request resolved by the registry, NIP-98
+  included, 0.9 ms median on a local node (21 requests); an unsigned
+  `/healthz` 0.1 ms.
+- **The router** resolves every signed request and hands the fragment
+  the identity, the key, the kind, and an agent's owner (headers only it
+  sets). A key no one registered, or a revoked one, is 401; a registry
+  that cannot answer is 503 `registry_unavailable` for every signed
+  request.
+- **Key proofs:** a NIP-98 event by the new key for the same method and
+  URL, with `["p", <signer>]`. Adding a key (`fragment keys rotate`) and
+  registering an agent (`fragment agent create`) both use it.
+- **Agents:** the agent service answers a proof by the new agent's key;
+  the owner's CLI registers the agent with it. The agent service checks
+  its owner live (`GET /api/identities/{owner}/keys/{npub}`, signed by
+  the agent), so a rotated owner key keeps control and a revoked one
+  loses it.
+- **Owners read, never act:** an agent's owner reads a fragment the
+  agent is in as a `viewer`, queries included (a query is read-only,
+  docs/MODEL.md), and gets 403 for a mutation or a job, saying why.
+  Capped at `viewer` whatever the agent's role (docs/finite-integration.md,
+  rule 5).
+- **Registration** is open on every fleet until slice B (debt ledger);
+  `FRAGMENT_CREATORS` may list identities or keys.
+- **Not registered:** a fragment's own key. It is the principal of the
+  fragment's own triggered runs and acts nowhere else yet.
+- **e2e:** the `identities` section (55 checks), and every other section
+  moved onto identities (members, records, runs, the storage token's
+  subject, and what an app sees name identities).
+- **Not yet:** sockets opened with a key outlive its revocation (debt
+  ledger); fragment.club still runs the phase 3 cell (the hard cut
+  happens at slice D's deploy).
 
 ## Slice B: sign-in and sessions
 

@@ -128,8 +128,7 @@ pub fn computer(s: &mut Suite, api: &Api) -> Result<()> {
 
     let bot = s.name("builder");
     let made = s.cli_json(api, &home, &["agent", "create", &bot, "--json"])?;
-    let bot_npub = made["npub"].as_str().unwrap_or("").to_string();
-    let bot_hex = fragment_core::npub::parse(&bot_npub).unwrap_or_default();
+    let bot_id = made["id"].as_str().unwrap_or("").to_string();
     let wrong = dir.join("wrong-token");
     std::fs::write(&wrong, "0123456789abcdef0123456789abcdef")?;
     let wrong_s = wrong.to_str().expect("utf-8 path");
@@ -144,7 +143,7 @@ pub fn computer(s: &mut Suite, api: &Api) -> Result<()> {
     let todo = s.name("computer-todo");
     let c = s.create(api, &owner, &todo)?;
     ship(s, &c, TODO_APP, TODO_JSON);
-    api.signed(&owner, "PUT", &format!("/api/f/{todo}/members/{bot_hex}"), Some(&json!({ "role": "editor" })))?;
+    api.signed(&owner, "PUT", &format!("/api/f/{todo}/members/{bot_id}"), Some(&json!({ "role": "editor" })))?;
     let add = format!("{todo}__add_todo");
     let r = agents.signed(&owner, "GET", &format!("/api/a/{bot}/tools"), None)?;
     let tools: Vec<&str> = r.body["tools"].as_array().into_iter().flatten().filter_map(|t| t.as_str()).collect();

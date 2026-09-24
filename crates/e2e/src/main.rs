@@ -99,6 +99,7 @@ impl Suite {
             openrouter_url: Some(self.openrouter.url.clone()),
             delivery_retry_s: Some(1),
             creators: self.creators.clone(),
+            test_hooks: true,
         }
         .write_vars(&self.project)?;
         let opts = devstack::NodeOptions { project: self.project.clone(), port: self.port, clean, watch: false, env: vec![] };

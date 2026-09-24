@@ -1,10 +1,19 @@
 //! The fragment platform on celld, in Rust.
 //!
-//! The router (this file's `fetch`) verifies NIP-98, bounds request bodies,
-//! decides which fragment a request is for, and hands it to that
-//! fragment's supervisor (`fragment.rs`) with the verified principal.
-//! Public routes:
+//! The router (this file's `fetch`) verifies NIP-98, asks the registry
+//! (`registry.rs`) which identity the signing key belongs to, bounds request
+//! bodies, decides which fragment a request is for, and hands it to that
+//! fragment's supervisor (`fragment.rs`) with the identity and the key.
+//! A signed request the registry cannot answer for is refused (503), never
+//! let through. Public routes:
 //!
+//!   POST   /api/identities                 register: the signing key as a new person
+//!                                          ({kind: person}), or an agent the signer owns
+//!                                          ({kind: agent, proof}: a key proof by its key)
+//!   GET    /api/identities/<id|me>         an identity, as it or its owner sees it
+//!   POST   /api/identities/<id|me>/keys    add a key ({proof}: a key proof by the new key)
+//!   DELETE /api/identities/<id|me>/keys/<npub>   revoke one
+//!   GET    /api/identities/<id>/keys/<npub>      {active}: for the identity and its agents
 //!   POST   /api/fragments                  create (signed; the signer owns it)
 //!   GET    /api/fragments                  the fragments the signer belongs to
 //!   DELETE /api/f/<name>                   delete (owner)
@@ -35,19 +44,23 @@ mod ops;
 mod plane;
 mod principal;
 mod push;
+mod registry;
 mod serve;
 mod subscriptions;
 
-use fragment_proto::{limits, valid_fragment_name, CreateFragment, ErrorCode};
+use fragment_core::npub;
+use fragment_proto::{limits, valid_fragment_name, AddKey, CreateFragment, ErrorBody, ErrorCode, IdentityKind, Register};
+use serde_json::{json, Value};
 use worker::*;
 
 use config::Config;
 use error::{CellError, CellResult};
-use fragment::{NAME_HEADER, PRINCIPAL_HEADER, URL_HEADER};
+use fragment::{KEY_HEADER, KIND_HEADER, NAME_HEADER, OWNER_HEADER, PRINCIPAL_HEADER, URL_HEADER};
 use serve::MODE_HEADER;
 
 pub use fragment::FragmentCell;
 pub use principal::PrincipalCell;
+pub use registry::RegistryCell;
 
 /// Client headers a fragment's supervisor sees; everything else, and any
 /// `x-fragment-*` a client sends, stays at the router.
@@ -79,6 +92,7 @@ async fn read_body(req: &mut Request) -> CellResult<Vec<u8>> {
     Ok(body)
 }
 
+/// The key that signed the request (NIP-98), not yet resolved.
 fn authenticate(req: &Request, url: &Url, body: &[u8]) -> CellResult<String> {
     let header = req.headers().get("authorization")?;
     let now_s = js::now_ms() / 1000;
@@ -86,11 +100,149 @@ fn authenticate(req: &Request, url: &Url, body: &[u8]) -> CellResult<String> {
         .map_err(|e| CellError::new(ErrorCode::Unauthenticated, e.to_string()))
 }
 
-/// NIP-98 when the request carries it (a bad signature is still a 401).
-fn authenticate_if_signed(req: &Request, url: &Url, body: &[u8]) -> CellResult<Option<String>> {
+/// Who signed: the key, and the identity the registry says holds it.
+pub(crate) struct Signer {
+    pub key: String,
+    pub id: String,
+    pub kind: IdentityKind,
+    pub owner: Option<String>,
+}
+
+/// Asks the registry cell. Its refusals pass through; not reaching it, or
+/// a failure inside it, is `registry_unavailable`: nothing signed is
+/// decided without it (docs/finite-integration.md, rule 7).
+pub(crate) async fn ask_registry(env: &Env, path: &str, body: &Value) -> CellResult<Value> {
+    let unavailable = |why: String| CellError::new(ErrorCode::RegistryUnavailable, format!("the identity registry did not answer ({why}); try again shortly"));
+    let asked = async {
+        let headers = Headers::new();
+        headers.set("content-type", "application/json")?;
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post).with_headers(headers).with_body(Some(body.to_string().into()));
+        let req = Request::new_with_init(&format!("https://registry.internal{path}"), &init)?;
+        let mut resp = env.durable_object("REGISTRY")?.get_by_name(registry::NAME)?.fetch_with_request(req).await?;
+        let status = resp.status_code();
+        let bytes = resp.bytes().await?;
+        Ok::<_, worker::Error>((status, bytes))
+    };
+    let (status, bytes) = asked.await.map_err(|e| unavailable(e.to_string()))?;
+    if status == 200 {
+        return serde_json::from_slice(&bytes).map_err(|e| unavailable(format!("its answer: {e}")));
+    }
+    match serde_json::from_slice::<ErrorBody>(&bytes) {
+        Ok(e) if status < 500 => Err(CellError::new(e.error, e.message)),
+        Ok(e) => Err(unavailable(e.message)),
+        Err(_) => Err(unavailable(format!("status {status}"))),
+    }
+}
+
+pub(crate) fn facts_of(v: &Value) -> CellResult<(String, IdentityKind, Option<String>)> {
+    let id = v["id"].as_str().filter(|i| npub::is_identity(i)).ok_or_else(|| CellError::host("the registry named no identity"))?;
+    let kind = v["kind"].as_str().and_then(IdentityKind::parse).ok_or_else(|| CellError::host("the registry named no kind"))?;
+    Ok((id.to_string(), kind, v["owner"].as_str().map(str::to_string)))
+}
+
+async fn resolve(env: &Env, key: String) -> CellResult<Signer> {
+    let v = ask_registry(env, "/resolve", &json!({ "key": key })).await?;
+    let (id, kind, owner) = facts_of(&v)?;
+    Ok(Signer { key, id, kind, owner })
+}
+
+/// The signer of a request that must be signed, resolved.
+async fn signer(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Signer> {
+    let key = authenticate(req, url, body)?;
+    resolve(env, key).await
+}
+
+/// The signer when the request carries a signature (a bad one is still a 401).
+async fn signer_if_signed(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Option<Signer>> {
     match req.headers().get("authorization")? {
-        Some(_) => authenticate(req, url, body).map(Some),
+        Some(_) => signer(env, req, url, body).await.map(Some),
         None => Ok(None),
+    }
+}
+
+fn test_hooks(env: &Env) -> bool {
+    env.var("FRAGMENT_TEST_HOOKS").map(|v| v.to_string()).ok().as_deref() == Some("allow")
+}
+
+/// The identity a path names: `me` is the signer.
+fn named_identity(who: &str, signer: &Signer) -> CellResult<String> {
+    if who == "me" {
+        return Ok(signer.id.clone());
+    }
+    if npub::is_identity(who) {
+        return Ok(who.to_string());
+    }
+    Err(CellError::invalid(format!("{who:?} is not an identity (id:…) or `me`")))
+}
+
+fn key_in_path(k: &str) -> CellResult<String> {
+    npub::parse(k).ok_or_else(|| CellError::invalid(format!("{k:?} is not an npub or a 64-hex key")))
+}
+
+/// The key a key proof in a body proves, for this request and its signer.
+fn proven_key(proof: &str, req: &Request, url: &Url, signer_key: &str) -> CellResult<String> {
+    let now_s = js::now_ms() / 1000;
+    let key = fragment_nip98::verify_proof(proof, req.method().as_ref(), url.as_str(), signer_key, now_s, limits::AUTH_WINDOW_S)
+        .map_err(|e| CellError::invalid(format!("proof: {e}")))?;
+    if key == signer_key {
+        return Err(CellError::invalid("proof: the new key must not be the key that signs the request"));
+    }
+    Ok(key)
+}
+
+fn json_answer(v: &Value) -> CellResult<Response> {
+    Ok(Response::from_json(v)?)
+}
+
+/// `/api/identities…`: the registry's public face.
+async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> CellResult<Response> {
+    let body = read_body(&mut req).await?;
+    let method = req.method();
+    if let (Method::Post, []) = (&method, rest) {
+        let reg: Register = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+        return match reg.kind {
+            // until sign-in (phase 4 slice B), a key makes its own person
+            IdentityKind::Person => {
+                if reg.proof.is_some() {
+                    return Err(CellError::invalid("a person registers with the key that signs; no proof"));
+                }
+                let key = authenticate(&req, url, &body)?;
+                json_answer(&ask_registry(env, "/people", &json!({ "key": key })).await?)
+            }
+            // FIN-11's trusted initial registration: the owner signs, and the
+            // agent's key proves itself inside
+            IdentityKind::Agent => {
+                let owner = signer(env, &req, url, &body).await?;
+                let proof = reg.proof.ok_or_else(|| CellError::invalid("registering an agent needs a proof by its key"))?;
+                let key = proven_key(&proof, &req, url, &owner.key)?;
+                json_answer(&ask_registry(env, "/agents", &json!({ "owner": owner.id, "key": key })).await?)
+            }
+        };
+    }
+    let who = signer(env, &req, url, &body).await?;
+    match (method, rest) {
+        (Method::Get, [id]) => {
+            let id = named_identity(id, &who)?;
+            json_answer(&ask_registry(env, "/view", &json!({ "identity": id, "by": who.id })).await?)
+        }
+        (Method::Post, [id, "keys"]) => {
+            let id = named_identity(id, &who)?;
+            let add: AddKey = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let key = proven_key(&add.proof, &req, url, &who.key)?;
+            json_answer(&ask_registry(env, "/keys", &json!({ "identity": id, "key": key, "by": who.id })).await?)
+        }
+        (Method::Delete, [id, "keys", k]) => {
+            let id = named_identity(id, &who)?;
+            let key = key_in_path(k)?;
+            json_answer(&ask_registry(env, "/revoke", &json!({ "identity": id, "key": key, "by": who.id })).await?)
+        }
+        (Method::Get, [id, "keys", k]) => {
+            let id = named_identity(id, &who)?;
+            let key = key_in_path(k)?;
+            json_answer(&ask_registry(env, "/check", &json!({ "identity": id, "key": key, "by": who.id })).await?)
+        }
+        (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
     }
 }
 
@@ -105,7 +257,7 @@ fn check_name(name: &str) -> CellResult<()> {
 struct Forward<'a> {
     name: &'a str,
     inner: String,
-    principal: Option<String>,
+    principal: Option<Signer>,
     mode: Option<&'a str>,
     /// Headers this route passes on purpose (the inbox's token and hop count).
     extra: Vec<(&'static str, String)>,
@@ -127,7 +279,12 @@ async fn forward(env: &Env, req: &Request, url: &Url, body: Option<worker::wasm_
     headers.set(NAME_HEADER, f.name)?;
     headers.set(URL_HEADER, url.as_str())?;
     if let Some(p) = &f.principal {
-        headers.set(PRINCIPAL_HEADER, p)?;
+        headers.set(PRINCIPAL_HEADER, &p.id)?;
+        headers.set(KEY_HEADER, &p.key)?;
+        headers.set(KIND_HEADER, p.kind.as_str())?;
+        if let Some(o) = &p.owner {
+            headers.set(OWNER_HEADER, o)?;
+        }
     }
     if let Some(m) = f.mode {
         headers.set(MODE_HEADER, m)?;
@@ -149,7 +306,7 @@ async fn forward(env: &Env, req: &Request, url: &Url, body: Option<worker::wasm_
 async fn serve(mut req: Request, env: &Env, url: &Url, name: &str, rest: &str, mode: &'static str) -> CellResult<Response> {
     check_name(name)?;
     let body = read_body(&mut req).await?;
-    let principal = authenticate_if_signed(&req, url, &body)?;
+    let principal = signer_if_signed(env, &req, url, &body).await?;
     let f = Forward { name, inner: format!("/serve/{rest}"), principal, mode: Some(mode), extra: vec![] };
     forward(env, &req, url, bytes_body(body), f).await
 }
@@ -186,15 +343,24 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             let body = read_body(&mut req).await?;
             let create: CreateFragment = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             check_name(&create.name)?;
-            let principal = authenticate(&req, &url, &body)?;
-            cfg.may_create(&principal)?;
+            let principal = signer(env, &req, &url, &body).await?;
+            cfg.may_create(&principal.key, &principal.id)?;
             let f = Forward { name: &create.name, inner: "/create".into(), principal: Some(principal), mode: None, extra: vec![] };
             forward(env, &req, &url, bytes_body(body), f).await
         }
         (Method::Get, ["api", "fragments"]) => {
-            let principal = authenticate(&req, &url, &[])?;
+            let principal = signer(env, &req, &url, &[]).await?;
             let list = Request::new("https://principal.internal/list", Method::Get)?;
-            Ok(env.durable_object("PRINCIPAL")?.get_by_name(&principal)?.fetch_with_request(list).await?)
+            Ok(env.durable_object("PRINCIPAL")?.get_by_name(&principal.id)?.fetch_with_request(list).await?)
+        }
+        (_, ["api", "identities", rest @ ..]) => {
+            let rest = rest.to_vec();
+            identities(req, env, &url, &rest).await
+        }
+        (Method::Post, ["api", "test", "registry"]) if test_hooks(env) => {
+            let body = read_body(&mut req).await?;
+            let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            json_answer(&ask_registry(env, "/test", &v).await?)
         }
         // A blob's bytes stream through: the router never holds them. The
         // signature covers the URL, which names the bytes' hash; the
@@ -207,7 +373,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
                 Some(n) if n > limits::BLOB_MAX_BYTES => return Err(CellError::too_large("a blob", n as usize, limits::BLOB_MAX_BYTES as usize)),
                 Some(_) => {}
             }
-            let principal = authenticate(&req, &url, &[])?;
+            let principal = signer(env, &req, &url, &[]).await?;
             let body = req.inner().body().map(worker::wasm_bindgen::JsValue::from);
             let f = Forward { name, inner: format!("/api/blobs/{sha}"), principal: Some(principal), mode: None, extra: vec![] };
             forward(env, &req, &url, body, f).await
@@ -233,7 +399,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
                     }
                     None
                 }
-                _ => Some(authenticate(&req, &url, &body)?),
+                _ => Some(signer(env, &req, &url, &body).await?),
             };
             let f = Forward { name, inner, principal, mode: None, extra };
             forward(env, &req, &url, bytes_body(body), f).await

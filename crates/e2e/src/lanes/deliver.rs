@@ -27,7 +27,7 @@ pub fn push(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("push") {
         return Ok(());
     }
-    let owner = Keys::generate();
+    let owner = api.person()?;
     let name = s.name("push");
     let c = s.create(api, &owner, &name)?;
     let mut manifest: Value = serde_json::from_slice(MEDIA_JSON)?;
@@ -114,7 +114,7 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("ai") {
         return Ok(());
     }
-    let owner = Keys::generate();
+    let owner = api.person()?;
     let name = s.name("ai");
     let c = s.create(api, &owner, &name)?;
     ship(s, &c, MEDIA_APP, MEDIA_JSON);

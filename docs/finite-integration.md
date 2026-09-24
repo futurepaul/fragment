@@ -44,6 +44,12 @@ matters: an agreed direction is not a finished interface.
 5. **Every agent has one designated human owner.** The owner can read
    whatever the agent can read. That is read visibility only: no writes,
    no resharing, no ownership. Sharing with an agent says so.
+   *fragment's reading (slice A):* the owner reads a fragment their agent
+   is a member of as a `viewer` (status, files, channels, events, runs,
+   queries, the site), whatever the agent's role; an editor's reads carry
+   capabilities (the inbox token, storage tokens, secret names) that
+   would let the owner act, so they stay closed. Operations that act
+   (mutations, jobs) need the owner's own membership.
 6. **Services own permissions.** The registry never stores a grant;
    fragments keep their members and roles. Organization membership grants
    nothing by itself.
@@ -61,7 +67,7 @@ is a viewer; `public` means anyone at all, no link needed.
 | Concern | Owner in V3 | fragment now | The swap |
 |---|---|---|---|
 | Human sign-in | WorkOS shared login (FIN-11) | fragment's own WorkOS environment, sign-up off, Paul invites; identities keyed by `(issuer, subject)` | finite.computer's login becomes a second issuer; a person links it by signing in with both (explicit, never by email) |
-| Identity and key registry | Core / BANKS (FIN-11) | fragment's registry cell, implementing rules 1–7 behind one interface (resolve a key, look up an identity's keys and an agent's owner, add and revoke keys) | a BANKS client behind the same interface; public keys and owner facts move, no private key does |
+| Identity and key registry | Core / BANKS (FIN-11) | **built (slice A):** one registry cell for the fleet (`cell/src/registry.rs`), rules 1–7 behind `/api/identities` (docs/api.md, Identities): resolve a key live on every signed request, register a person or an agent (with a key proof), add a key with a proof, revoke one, check an owner's key | a BANKS client behind the same routes; public keys and owner facts move, no private key does |
 | Browser sessions | Core session + a small per-service adapter (FIN-11) | a session on `fragment.club`; each fragment origin gets its own cookie through a single-use redemption URL (the pattern Sites v2 uses: finite-sites ADR 0025) | the platform session comes from finite.computer's login instead; the per-origin exchange stays |
 | Resource permissions | each service | fragment members and roles, per fragment | unchanged |
 | Billing, orgs, entitlements | Core + Stripe (FIN-10) | a monthly allowance that Paul sets by hand ($20, decision 14), held by a billing org that is always the person's own personal org; no Stripe | Core supplies the entitlement facts; the allowance row is replaced by them |
@@ -106,4 +112,9 @@ key (restoring old state must not revive it) and an unlinked person.
 - **The usage report** (FIN-13): units, granularity and corrections are
   Austin's to decide; fragment's rows keep FIN-10's fields until then.
 - **BANKS's interface** (FIN-11): fragment's registry interface is one
-  concrete proposal for it. Tell Alex where they differ.
+  concrete proposal for it (docs/api.md, Identities: the routes, and the
+  key proof: a NIP-98 event by the new key for the same request, naming
+  the signer in a `p` tag). Tell Alex where they differ.
+- **What "reads whatever the agent reads" covers** (FIN-11 rule 5):
+  fragment caps the owner at `viewer` (rule 5 above). Whether BANKS's
+  services should do the same is Alex's call.

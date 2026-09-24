@@ -7,8 +7,9 @@ host and sleep when idle; a request, a trigger, or an inbox delivery
 wakes them.
 
 You drive fragments with the `fragment` CLI. Every request is signed with
-your nostr key (made by `fragment login`), so keep using the same machine
-and user account.
+your nostr key (made by `fragment login`), and the host knows which
+identity (`id:…`) that key belongs to: memberships name you, not the key.
+`fragment keys rotate` replaces the key and keeps everything you have.
 
 ## The model in one screen
 
@@ -35,7 +36,7 @@ and user account.
 ## First moves
 
 ```
-fragment login                            # once per machine; prints your npub
+fragment login                            # once per machine: a key, registered as you (id:…)
 fragment init my-thing                    # scaffold (todo) + create + deploy → live URL,
                                           #   share link, webhook URL
 fragment init my-inbox --template inbox   # or: todo | inbox | notes
@@ -269,8 +270,8 @@ fragment channel my-thing activity --follow                     # stream records
 ```
 fragment visibility my-thing [public|link|members]
 fragment members list my-thing
-fragment members add my-thing <npub | name@domain> --role editor
-fragment members rm my-thing <npub>
+fragment members add my-thing <id:… | npub | name@domain> --role editor   # a key names its holder
+fragment members rm my-thing <id:… | npub>
 fragment members leave my-thing
 fragment invite create my-thing --role viewer --uses 5    # prints the token once
 fragment join my-thing <token>
@@ -280,15 +281,27 @@ fragment rotate my-thing --view                            # a new share link
 Only the owner manages members, invites, visibility, and tokens.
 `fragment.json` grants nothing.
 
-## Agents
-
-An agent is a key with a model and a conversation of its own
-(`agent/`, goose's loop). Its tools are the operations of the fragments
-it belongs to, so what it may do is what its memberships allow.
+## You and your keys
 
 ```
-fragment agent create my-bot                          # prints its npub
-fragment members add my-thing <bot npub> --role editor   # now it has my-thing's operations as tools
+fragment whoami              # your identity, this key, your other keys, your agents
+fragment keys rotate         # a new key replaces this one: every membership stays
+fragment keys revoke <npub>  # revoke another of your keys (never the last)
+```
+
+A revoked key is refused from its next request and never comes back.
+
+## Agents
+
+An agent is an identity with its own key, a model, and a conversation
+of its own (`agent/`, goose's loop), and you own it. Its tools are the
+operations of the fragments it belongs to, so what it may do is what its
+memberships allow. As its owner you can read whatever it can read (as a
+viewer), but you never act through it.
+
+```
+fragment agent create my-bot                          # makes it and registers it as yours; prints its id
+fragment members add my-thing <bot id> --role editor     # now it has my-thing's operations as tools
 fragment agent tools my-bot
 fragment agent say my-bot "add milk to the list"      # waits, prints the answer
 fragment agent show my-bot                            # its turn and recent messages
@@ -347,6 +360,7 @@ secret values into files.
 ```
 fragment login [--force]                 fragment call <name> <op> [--input JSON] [--id ID]
 fragment whoami                          fragment channel <name> [<channel>] [--after N] [--follow]
+fragment keys [list|rotate|revoke <npub>]
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
 fragment init <name> [--template T]      fragment replay <name> <run>
 fragment new <dir> [--template T]        fragment triggers <name>

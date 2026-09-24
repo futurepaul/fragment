@@ -400,13 +400,13 @@ impl FragmentCell {
 
     pub(crate) fn storage_token(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
-        let who = self.caller_hex(caller)?;
+        let who = self.caller_id(caller)?;
         let repo = self.must("repo")?;
         let token = self.cs()?.storage_token(&repo, who)?;
         self.event(
             "storage-token.minted",
-            &format!("{} → repo {repo}, git:read+git:write, {}s", npub::encode(who), limits::STORAGE_TOKEN_TTL_S),
-            json!({ "actor": npub::encode(who), "repo": repo, "expiresAt": token.expires_at }),
+            &format!("{} → repo {repo}, git:read+git:write, {}s", npub::display(who), limits::STORAGE_TOKEN_TTL_S),
+            json!({ "actor": npub::display(who), "key": caller.key.as_deref().map(npub::display), "repo": repo, "expiresAt": token.expires_at }),
         );
         json_response(&token)
     }

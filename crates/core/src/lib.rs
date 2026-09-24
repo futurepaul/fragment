@@ -11,6 +11,7 @@ pub mod glob;
 pub mod manifest;
 pub mod npub;
 pub mod ratelimit;
+pub mod registry;
 pub mod schema;
 pub mod secrets;
 pub mod webpush;
