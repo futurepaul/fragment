@@ -473,29 +473,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
     let mut recorded: HashSet<String> = HashSet::new();
 
     let remote = list_main(&storage)?;
-    // stateless bootstrap (journal-absent files present on both sides):
-    // equal size used to be "provisionally same" — but equal size is not
-    // identity, and a same-size different-content file silently never
-    // pushed (found live). Verify by content: fetch and hash each
-    // equal-size unknown; adopt into the journal only on a real match, so
-    // push and pull both see an ordinary unchanged file. Mismatches stay
-    // journal-absent and the push plan treats them as local-wins.
-    for (p, rf) in remote.iter() {
-        if state.files.contains_key(p) {
-            continue;
-        }
-        let Some(lf) = local.get(p) else { continue };
-        if lf.size != rf.size && !crate::blobs::could_point(rf.size, lf.size) {
-            continue;
-        }
-        let bytes = storage.read_file(p, MAIN)?;
-        if crate::blobs::content_sha(&bytes) == lf.sha256 {
-            state.files.insert(
-                p.clone(),
-                FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: rf.last_commit_sha.clone() },
-            );
-        }
-    }
+    adopt_identical(&storage, &local, &remote, &mut state)?;
     // candidate local deletions: known remotely before, gone from the
     // listing now, local copy untouched since we saw it
     let local_delete_candidates: Vec<String> = state
@@ -533,6 +511,11 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
             } else {
                 let r = list_main(&storage)?;
                 let h = storage.branch_head(MAIN)?;
+                // a commit whose answer was lost may have landed: what it
+                // wrote now equals the folder, and adopting it (here and in
+                // record_conflicts) is what keeps it from reading as a new
+                // file to push again or as a conflict with our own bytes
+                adopt_identical(&storage, &local, &r, &mut state)?;
                 (r, h)
             };
             let plan = push_plan(&local, &remote_now, &state);
@@ -578,6 +561,13 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
                 }
                 Err(CsError::CasRejected { .. }) if attempt < MAX_CAS_ATTEMPTS => {
                     eprintln!("  branch moved under us — refetching head and rebuilding the diff (attempt {attempt}/{MAX_CAS_ATTEMPTS})");
+                    continue;
+                }
+                Err(CsError::OutcomeUnknown(detail)) if attempt < MAX_CAS_ATTEMPTS => {
+                    // never resent blind: the rebuilt diff is empty if it
+                    // landed, and the same commit on a fresh head if not
+                    eprintln!("  the commit's answer was lost ({detail}) — re-reading the branch to see whether it landed (attempt {attempt}/{MAX_CAS_ATTEMPTS})");
+                    landed_commit = true; // perhaps: the refresh nudge is harmless either way
                     continue;
                 }
                 Err(CsError::CasRejected { detail }) => {
@@ -682,11 +672,51 @@ fn list_main(storage: &CodeStorage) -> Result<HashMap<String, RemoteFile>, SyncE
     Ok(storage.list_files(MAIN)?.into_iter().map(|f| (f.path.clone(), f)).collect())
 }
 
+/// Brings the journal up to what both sides already agree on, before any
+/// plan is made from it:
+/// - a journal-absent file present on both sides with the same content is
+///   adopted (the stateless bootstrap, and a new file whose commit landed
+///   though its answer was lost). Equal size used to be "provisionally
+///   same" — but equal size is not identity, and a same-size
+///   different-content file silently never pushed (found live). So each
+///   equal-size unknown is fetched and hashed; mismatches stay
+///   journal-absent and the push plan treats them as local-wins.
+/// - a row for a path gone from both sides is dropped (a deletion that
+///   landed, whoever made it); no plan reads it, and it would count toward
+///   the mass-deletion guard's known files forever.
+fn adopt_identical(
+    storage: &CodeStorage,
+    local: &BTreeMap<String, LocalFile>,
+    remote: &HashMap<String, RemoteFile>,
+    state: &mut SyncState,
+) -> Result<(), SyncError> {
+    for (p, rf) in remote.iter() {
+        if state.files.contains_key(p) {
+            continue;
+        }
+        let Some(lf) = local.get(p) else { continue };
+        if lf.size != rf.size && !crate::blobs::could_point(rf.size, lf.size) {
+            continue;
+        }
+        let bytes = storage.read_file(p, MAIN)?;
+        if crate::blobs::content_sha(&bytes) == lf.sha256 {
+            state.files.insert(
+                p.clone(),
+                FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: rf.last_commit_sha.clone() },
+            );
+        }
+    }
+    state.files.retain(|p, _| local.contains_key(p) || remote.contains_key(p));
+    Ok(())
+}
+
 /// both sides changed: keep local, save the remote bytes beside it as
 /// `<path>.conflict-<ts>-<writer>`, then adopt (remote commit, LOCAL file
 /// sha) so the conflict reports once and the next pass pushes local
 /// content — the old copy-strategy semantics (theirs survives in the copy
-/// file and in git history).
+/// file and in git history). Both sides changed to the SAME bytes is no
+/// conflict (our own commit whose answer was lost, or two writers agreeing):
+/// that adopts silently.
 fn record_conflicts(
     ctx: ConflictCtx<'_>,
     conflicts: &[String],
@@ -705,13 +735,20 @@ fn record_conflicts(
             _ => (path.as_str(), ""),
         };
         let conflict_path = format!("{stem}.conflict-{ts}-{}{ext}", ctx.writer_id);
-        match ctx.storage.read_file(path, MAIN).map_err(anyhow::Error::from).and_then(|b| ctx.blobs.resolve(b)) {
-            Ok(bytes) => {
-                atomic_write(&ctx.dir.join(&conflict_path), &bytes).map_err(|e| SyncError::Io(e.to_string()))?;
-                ctx.report.conflicts.push(format!("{path} (remote copy: {conflict_path})"));
-            }
-            Err(e) => {
-                ctx.report.conflicts.push(format!("{path} (remote copy unavailable: {e})"));
+        let git_bytes = ctx.storage.read_file(path, MAIN);
+        let same = match (&git_bytes, ctx.local.get(path)) {
+            (Ok(bytes), Some(lf)) => crate::blobs::content_sha(bytes) == lf.sha256,
+            _ => false,
+        };
+        if !same {
+            match git_bytes.map_err(anyhow::Error::from).and_then(|b| ctx.blobs.resolve(b)) {
+                Ok(bytes) => {
+                    atomic_write(&ctx.dir.join(&conflict_path), &bytes).map_err(|e| SyncError::Io(e.to_string()))?;
+                    ctx.report.conflicts.push(format!("{path} (remote copy: {conflict_path})"));
+                }
+                Err(e) => {
+                    ctx.report.conflicts.push(format!("{path} (remote copy unavailable: {e})"));
+                }
             }
         }
         let entry = match ctx.local.get(path) {
@@ -805,9 +842,16 @@ pub fn commit_single_file(
     let author = Author::writer(writer_id);
     for attempt in 1..=MAX_CAS_ATTEMPTS {
         let head = storage.branch_head(MAIN)?;
+        if let (true, Some(tip)) = (attempt > 1, &head) {
+            if storage.read_file(path, MAIN).is_ok_and(|b| b == bytes) {
+                // the last attempt's answer was lost, or someone wrote the
+                // same bytes: either way main holds them
+                return Ok(tip.clone());
+            }
+        }
         match storage.commit(head.as_deref(), message, &author, &[Change::Upsert { path: path.to_string(), bytes: bytes.clone() }]) {
             Ok(tip) => return Ok(tip),
-            Err(CsError::CasRejected { .. }) if attempt < MAX_CAS_ATTEMPTS => continue,
+            Err(CsError::CasRejected { .. } | CsError::OutcomeUnknown(_)) if attempt < MAX_CAS_ATTEMPTS => continue,
             Err(CsError::CasRejected { detail }) => {
                 return Err(SyncError::Cs(CsError::CasRejected {
                     detail: format!("branch kept moving after {MAX_CAS_ATTEMPTS} attempts ({detail})"),
@@ -968,6 +1012,52 @@ mod tests {
         assert!(err.to_string().contains("branch kept moving"), "got: {err}");
         assert_eq!(mock.commit_pack_count(), MAX_CAS_ATTEMPTS, "exactly the bounded number of attempts");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: a sync whose commit landed but lost its answer ends clean.
+    /// Method: the fake applies the pass's commit and drops the answer. The
+    /// old client sent the pack again (a 409), then recorded a conflict
+    /// with a copy of its own bytes and exited 3. Now: one pack, no
+    /// conflict, exit 0, and the next pass has nothing to do.
+    #[test]
+    fn a_lost_commit_answer_adopts_what_landed() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("doc.md", b"base"), ("gone.md", b"g"), ("kept.md", b"k")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("lost-answer");
+        sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        fs::write(dir.join("doc.md"), b"ours, changed").unwrap();
+        fs::write(dir.join("new.md"), b"new").unwrap();
+        fs::remove_file(dir.join("gone.md")).unwrap();
+        mock.drop_commit_answers("t", 1);
+        let report = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+        assert_eq!(report.exit_code(), 0);
+        assert_eq!(mock.commit_pack_count(), 1, "the pack was sent once");
+        let copies = fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains(".conflict-")).count();
+        assert_eq!(copies, 0, "no conflict copy");
+        assert_eq!(mock.file_at("t", "main", "doc.md").unwrap(), b"ours, changed");
+        assert_eq!(mock.file_at("t", "main", "new.md").unwrap(), b"new");
+        assert!(mock.file_at("t", "main", "gone.md").is_none());
+        assert_eq!(fs::read(dir.join("doc.md")).unwrap(), b"ours, changed");
+        let st = load_state(&dir, "t").unwrap();
+        assert!(!st.files.contains_key("gone.md"), "the landed deletion leaves no row");
+        let again = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        assert!(again.pushed.is_empty() && again.pulled.is_empty() && again.conflicts.is_empty(), "{again:?}");
+        assert_eq!(mock.commit_pack_count(), 1, "and nothing is left to send");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn manifest_set_with_a_lost_answer_lands_once() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("fragment.json", br#"{"name":"t"}"#)]);
+        let c = client_for(&mock);
+        mock.drop_commit_answers("t", 1);
+        let tip = commit_single_file(&c, "t", "fragment.json", br#"{"name":"t","visibility":"public"}"#.to_vec(), "manifest-set", "deadbeef", None).unwrap();
+        assert_eq!(mock.commit_pack_count(), 1, "sent once");
+        assert_eq!(mock.branch("t", "main").as_deref(), Some(tip.as_str()));
+        assert_eq!(mock.file_at("t", "main", "fragment.json").unwrap(), br#"{"name":"t","visibility":"public"}"#);
     }
 
     #[test]

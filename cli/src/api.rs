@@ -2,6 +2,7 @@
 use crate::auth::Identity;
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
+use std::time::Duration;
 
 /// An error carrying a stable machine code (surfaced in the `--json`
 /// envelope as `error.code`). Display is the plain human message.
@@ -49,6 +50,54 @@ fn http_context_suffix(status: u16) -> &'static str {
     }
 }
 
+/// Every request may take this long, plus the time its body takes at
+/// [`UPLOAD_BYTES_PER_S_MIN`]: a fixed total timeout (reqwest's default is
+/// 30 s, and it covers the upload) meant no upload over 30 s ever landed.
+pub const REQUEST_TIMEOUT_BASE: Duration = Duration::from_secs(30);
+/// The slowest link an upload is promised to finish on (256 kbit/s).
+pub const UPLOAD_BYTES_PER_S_MIN: u64 = 32 * 1024;
+/// How long a connection may take to open.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Attempts per request (the first and two retries), where a retry is allowed.
+pub const REQUEST_ATTEMPTS: u32 = 3;
+
+/// The time a request carrying `bytes` (up, or down when the size is
+/// known) may take.
+pub fn timeout_for(bytes: u64) -> Duration {
+    REQUEST_TIMEOUT_BASE + Duration::from_secs(bytes / UPLOAD_BYTES_PER_S_MIN)
+}
+
+/// Whether a request that may have reached the server can be sent again.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Replay {
+    /// GET, HEAD, and a PUT to a content address: sending it twice does
+    /// what sending it once does, so any transport failure is retried.
+    Safe,
+    /// Everything else is resent only when the connection never opened. A
+    /// request that reached the server may have been applied, and sending
+    /// it again turned a commit whose answer was lost into a 409 and a
+    /// conflict copy of your own bytes, and a create into "name taken" for
+    /// your own new fragment.
+    ConnectOnly,
+}
+
+impl Replay {
+    pub fn of(method: &str) -> Replay {
+        match method {
+            "GET" | "HEAD" => Replay::Safe,
+            _ => Replay::ConnectOnly,
+        }
+    }
+
+    /// Whether this failure of one attempt may be retried.
+    pub fn allows_retry(self, connection_opened: bool) -> bool {
+        match self {
+            Replay::Safe => true,
+            Replay::ConnectOnly => !connection_opened,
+        }
+    }
+}
+
 pub struct Client {
     pub host: String,
     pub id: Identity,
@@ -84,7 +133,11 @@ impl Client {
             host: host.trim_end_matches('/').to_string(),
             id,
             verbose: false,
-            http: reqwest::blocking::Client::new(),
+            // every request sets its own total timeout (`timeout_for`)
+            http: reqwest::blocking::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .build()
+                .expect("the HTTP client builds (its TLS backend is compiled in)"),
         }
     }
 
@@ -95,22 +148,21 @@ impl Client {
     }
 
     fn request(&self, method: &str, path: &str, body: Option<Vec<u8>>) -> Result<Resp> {
-        self.request_ct(method, path, body, None)
+        let body = body.unwrap_or_default();
+        let timeout = timeout_for(body.len() as u64);
+        self.send(method, path, body, Replay::of(method), timeout)
     }
 
-    /// request() with an explicit content-type (the ref-form commit REQUIRES
-    /// application/json on the wire for the runtime to select ref parsing).
-    fn request_ct(&self, method: &str, path: &str, body: Option<Vec<u8>>, content_type: Option<&str>) -> Result<Resp> {
+    /// One signed request, retried within [`REQUEST_ATTEMPTS`] as `replay`
+    /// allows: long-lived sync clients hold keep-alive pools that go stale
+    /// when the host restarts, and without retries a watcher wedges until
+    /// its process is restarted (observed live on relay-vault).
+    fn send(&self, method: &str, path: &str, body: Vec<u8>, replay: Replay, timeout: Duration) -> Result<Resp> {
         let url = format!("{}{}", self.host, path);
-        let body = body.unwrap_or_default();
-        // connection-level failures are retried a few times: long-lived
-        // sync clients hold keep-alive pools that go stale when the host
-        // restarts, and without retries a watcher wedges until its process
-        // is restarted (observed live on relay-vault)
         let mut last_err = None;
-        for attempt in 0..3 {
+        for attempt in 0..REQUEST_ATTEMPTS {
             if attempt > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(300 * attempt as u64));
+                std::thread::sleep(Duration::from_millis(300 * attempt as u64));
             }
             let auth = self.id.nip98_header(method, &url, &body);
             let t0 = std::time::Instant::now();
@@ -122,39 +174,46 @@ impl Client {
                 "HEAD" => self.http.head(&url),
                 _ => return Err(anyhow!("bad method")),
             };
-            req = req.header("authorization", auth);
-            if let Some(ct) = content_type {
-                req = req.header("content-type", ct);
-            }
+            req = req.header("authorization", auth).timeout(timeout);
             if !body.is_empty() {
                 req = req.body(body.clone());
             }
-            match req.send() {
+            // the body is read here too: an answer cut off mid-body is as
+            // lost as one that never came
+            let answer = req.send().and_then(|resp| {
+                let status = resp.status().as_u16();
+                resp.bytes().map(|b| Resp { status, body: b.to_vec() })
+            });
+            match answer {
                 Ok(resp) => {
-                    let status = resp.status().as_u16();
                     if self.verbose {
-                        eprintln!(
-                            "{method} {path} -> {status} ({}ms [retries={attempt}])",
-                            t0.elapsed().as_millis()
-                        );
+                        eprintln!("{method} {path} -> {} ({}ms [retries={attempt}])", resp.status, t0.elapsed().as_millis());
                     }
-                    let bytes = resp.bytes().context("reading body")?.to_vec();
-                    return Ok(Resp { status, body: bytes });
+                    return Ok(resp);
                 }
-                Err(e) if e.is_connect() || e.is_request() => {
+                Err(e) if replay.allows_retry(!e.is_connect()) => {
                     if self.verbose {
                         eprintln!("{method} {path} -> retry after error ({}ms [retries={attempt}])", t0.elapsed().as_millis());
                     }
                     last_err = Some(e);
-                    continue; // stale pool / transient network — try again
                 }
-                Err(e) => return Err(e).context("request failed"),
+                Err(e) => {
+                    // the request may have been applied: say so, and never
+                    // send it again blind
+                    return Err(anyhow::Error::new(CodedError {
+                        code: "outcome_unknown",
+                        msg: format!(
+                            "{method} {path}: the request may have reached {host}, but its answer was lost ({e}); it may have been applied, so check before repeating it",
+                            host = self.host
+                        ),
+                    }));
+                }
             }
         }
-        // three connect-level failures in a row: surface the last error
-        // with its cause — a bare "failed after retries" turned a host
-        // dropping large bodies into a silent 90s mystery (and before
-        // that, an unreachable!() panicked here; found by restore agents)
+        // every attempt failed: surface the last error with its cause — a
+        // bare "failed after retries" turned a host dropping large bodies
+        // into a silent 90s mystery (and before that, an unreachable!()
+        // panicked here; found by restore agents)
         Err(anyhow::Error::new(CodedError {
             code: "unavailable",
             msg: format!(
@@ -176,6 +235,17 @@ impl Client {
     }
     pub fn put_bytes(&self, path: &str, bytes: Vec<u8>) -> Result<Resp> {
         self.request("PUT", path, Some(bytes))
+    }
+    /// A PUT to a content address (a blob named by its bytes' hash): safe
+    /// to send again whatever became of the first.
+    pub fn put_blob(&self, path: &str, bytes: Vec<u8>) -> Result<Resp> {
+        let timeout = timeout_for(bytes.len() as u64);
+        self.send("PUT", path, bytes, Replay::Safe, timeout)
+    }
+    /// A GET whose answer is known to be about `bytes` long (a blob), given
+    /// the time that takes.
+    pub fn get_sized(&self, path: &str, bytes: u64) -> Result<Resp> {
+        self.send("GET", path, Vec::new(), Replay::Safe, timeout_for(bytes))
     }
     pub fn head(&self, path: &str) -> Result<Resp> {
         self.request("HEAD", path, None)
@@ -214,6 +284,78 @@ pub fn encode_q(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use fragment_fakes::http::{Response as FakeResponse, Server};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    /// A host that reads each request, counts it, and closes the
+    /// connection without answering (an answer lost on its way back).
+    fn silent_host() -> (Server, Arc<AtomicU32>, Client) {
+        let seen = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&seen);
+        let server = Server::start(
+            0,
+            Arc::new(move |_: &fragment_fakes::http::Request| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                FakeResponse::unanswered()
+            }),
+        )
+        .expect("start the silent host");
+        let client = Client::new(&server.url, Identity::from_secret([7u8; 32]));
+        (server, seen, client)
+    }
+
+    /// The failure's stable code (a request that got an answer fails the test).
+    fn code_of(r: Result<Resp>) -> &'static str {
+        match r {
+            Ok(resp) => panic!("expected a failure, got http {}", resp.status),
+            Err(e) => e.downcast_ref::<CodedError>().map(|c| c.code).unwrap_or("uncoded"),
+        }
+    }
+
+    /// Goal: a write that reached the host is never sent again blind.
+    /// Method: the host swallows every answer; a POST and a DELETE each
+    /// arrive once and fail as outcome_unknown, where the old client sent
+    /// them three times.
+    #[test]
+    fn a_write_whose_answer_is_lost_is_sent_once() {
+        let (_server, seen, c) = silent_host();
+        assert_eq!(code_of(c.post_json("/api/fragments", &serde_json::json!({ "name": "x" }))), "outcome_unknown");
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "the POST arrived once");
+        assert_eq!(code_of(c.delete("/api/f/x")), "outcome_unknown");
+        assert_eq!(seen.load(Ordering::SeqCst), 2, "the DELETE arrived once");
+        assert_eq!(code_of(c.put_bytes("/api/f/x/secrets/K", b"v".to_vec())), "outcome_unknown");
+        assert_eq!(seen.load(Ordering::SeqCst), 3, "a PUT that is not content-addressed arrived once");
+    }
+
+    /// The flip side: reads and content-addressed uploads are safe to
+    /// repeat, so they are, within REQUEST_ATTEMPTS.
+    #[test]
+    fn reads_and_blob_uploads_are_retried() {
+        let (_server, seen, c) = silent_host();
+        assert_eq!(code_of(c.get("/api/f/x/status")), "unavailable");
+        assert_eq!(seen.load(Ordering::SeqCst), REQUEST_ATTEMPTS);
+        assert_eq!(code_of(c.put_blob("/api/f/x/blobs/abc", vec![1, 2, 3])), "unavailable");
+        assert_eq!(seen.load(Ordering::SeqCst), 2 * REQUEST_ATTEMPTS);
+    }
+
+    /// A connection that never opened carried nothing, so even a POST is
+    /// retried, and the failure is plain unavailability.
+    #[test]
+    fn a_write_that_never_connected_is_unavailable() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let c = Client::new(&format!("http://127.0.0.1:{port}"), Identity::from_secret([7u8; 32]));
+        assert_eq!(code_of(c.post_json("/api/fragments", &serde_json::json!({ "name": "x" }))), "unavailable");
+    }
+
+    #[test]
+    fn the_timeout_grows_with_the_upload() {
+        assert_eq!(timeout_for(0), REQUEST_TIMEOUT_BASE);
+        assert_eq!(timeout_for(UPLOAD_BYTES_PER_S_MIN * 90), REQUEST_TIMEOUT_BASE + Duration::from_secs(90));
+        // the largest blob gets hours, not 30 seconds
+        assert!(timeout_for(256 * 1024 * 1024) > Duration::from_secs(2 * 3600));
+    }
 
     #[test]
     fn code_for_maps_statuses() {

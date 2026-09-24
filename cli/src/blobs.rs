@@ -54,7 +54,7 @@ impl<'a> Blobs<'a> {
         let size = bytes.len() as u64;
         let head = self.client.head(&self.path(&sha))?;
         if head.status == 404 {
-            self.client.call(self.client.put_bytes(&self.path(&sha), bytes)?)?;
+            self.client.call(self.client.put_blob(&self.path(&sha), bytes)?)?;
         } else if !head.ok() {
             bail!("checking blob {sha}: http {}", head.status);
         }
@@ -65,7 +65,7 @@ impl<'a> Blobs<'a> {
     /// store, checked against the hash it names.
     pub fn resolve(&self, bytes: Vec<u8>) -> Result<Vec<u8>> {
         let Some(p) = blob::parse(&bytes) else { return Ok(bytes) };
-        let resp = self.client.get(&self.path(&p.sha256))?;
+        let resp = self.client.get_sized(&self.path(&p.sha256), p.size)?;
         if !resp.ok() {
             bail!("the bytes of blob {} (http {}: {})", p.sha256, resp.status, resp.err_summary());
         }

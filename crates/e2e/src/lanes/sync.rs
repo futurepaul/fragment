@@ -44,6 +44,30 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
     let repo = c["repo"].as_str().unwrap_or("").to_string();
     s.ok("the remote is untouched by our conflict", s.fake.file_at(&repo, "main", "doc.md").as_deref() == Some(&b"theirs"[..]), "");
 
+    // a commit that landed but lost its answer: sync never resends it
+    // blind (the old client did: a 409, then a conflict copy of its own
+    // bytes, exit 3); it rereads the branch and adopts what landed
+    let (name, c) = create(s, "sync-lost")?;
+    let dir = s.dir("sync-lost");
+    std::fs::write(dir.join("doc.md"), "base")?;
+    s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir)]);
+    std::fs::write(dir.join("doc.md"), "ours, changed")?;
+    std::fs::write(dir.join("new.md"), "new")?;
+    let repo = c["repo"].as_str().unwrap_or("").to_string();
+    s.fake.drop_commit_answers(&repo, 1);
+    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir)]);
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    s.ok("a commit whose answer is lost is reread, not resent, and the sync exits 0", code(&out) == 0 && said.contains("answer was lost"), &said);
+    let copies = std::fs::read_dir(&dir)?.filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains(".conflict-")).count();
+    s.ok("it leaves no conflict copy", copies == 0, copies);
+    s.ok(
+        "what it committed is in the repo",
+        s.fake.file_at(&repo, "main", "doc.md").as_deref() == Some(&b"ours, changed"[..]) && s.fake.file_at(&repo, "main", "new.md").as_deref() == Some(&b"new"[..]),
+        format!("{:?}", s.fake.paths(&repo, "main")),
+    );
+    let again = s.cli_json(api, &home, &["sync", &name, "--dir", &dir_of(&dir), "--json"])?;
+    s.ok("the next pass has nothing to do", again["pushed"] == serde_json::json!([]) && again["conflicts"] == serde_json::json!([]), &again);
+
     // pull withholds deletions; --prune applies them
     let (name, c) = create(s, "sync-mode")?;
     let dir = s.dir("sync-mode");

@@ -658,6 +658,7 @@ fn default_hint(code: &str) -> Option<&'static str> {
         "too_large" => Some("see the limit in the message; files of 1 MiB and up sync as blobs"),
         "rate_limited" => Some("back off and retry shortly"),
         "unavailable" => Some("usually transient; retrying is safe"),
+        "outcome_unknown" => Some("the change may have been applied: check (`fragment status`, `fragment list`, `fragment events`) before repeating it; an operation retried with the same --id replays"),
         "server_error" => Some("see `fragment events <name>` if it persists"),
         "invalid_usage" => Some("see `fragment --help`"),
         _ => None,
@@ -1855,12 +1856,17 @@ fn writer_id(c: &api::Client) -> String {
 }
 
 /// typed sync/code.storage errors -> anyhow. CAS rejections map to the
-/// stable "conflict" machine code so `--json` consumers can branch.
+/// stable "conflict" machine code, and a write whose answer was lost to
+/// "outcome_unknown", so `--json` consumers can branch.
 fn cs_anyhow(e: impl Into<crate::sync::SyncError>) -> anyhow::Error {
     let e = e.into();
     match e {
         crate::sync::SyncError::Cs(CsError::CasRejected { .. }) => anyhow::Error::new(api::CodedError {
             code: "conflict",
+            msg: e.to_string(),
+        }),
+        crate::sync::SyncError::Cs(CsError::OutcomeUnknown(_)) => anyhow::Error::new(api::CodedError {
+            code: "outcome_unknown",
             msg: e.to_string(),
         }),
         other => anyhow!("{other}"),

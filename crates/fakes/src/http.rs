@@ -26,15 +26,23 @@ pub struct Response {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    /// Close the connection without writing an answer.
+    pub unanswered: bool,
 }
 
 impl Response {
+    /// No answer at all: the connection closes once the request is read (a
+    /// request that was handled, and an answer lost on its way back).
+    pub fn unanswered() -> Response {
+        Response { status: 0, headers: Vec::new(), body: Vec::new(), unanswered: true }
+    }
+
     pub fn json(status: u16, v: &serde_json::Value) -> Response {
         Response::bytes(status, "application/json", v.to_string().into_bytes())
     }
 
     pub fn bytes(status: u16, content_type: &str, body: Vec<u8>) -> Response {
-        Response { status, headers: vec![("content-type".into(), content_type.into())], body }
+        Response { status, headers: vec![("content-type".into(), content_type.into())], body, unanswered: false }
     }
 
     pub fn with_header(mut self, k: &str, v: &str) -> Response {
@@ -85,6 +93,10 @@ fn serve_one(mut stream: TcpStream, handler: &Handler) {
     let Some(req) = read_request(&mut stream) else { return };
     let head = req.method == "HEAD";
     let resp = handler(&req);
+    if resp.unanswered {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        return;
+    }
     let mut out = format!("HTTP/1.1 {} {}\r\n", resp.status, reason(resp.status));
     for (k, v) in &resp.headers {
         if !k.eq_ignore_ascii_case("content-length") {
