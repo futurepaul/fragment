@@ -222,7 +222,7 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     // history above already outgrew)
     let window = 6;
     agents.signed(&owner, "POST", &format!("/api/a/{name}/test"), Some(&json!({ "window_messages": window })))?;
-    let list = format!("{todo}__list");
+    let list = fragment_core::tools::tool_name(&todo, "list").expect("a tool name");
     s.openrouter.clear_script();
     s.openrouter.script(&[Reply::Tools(vec![(list.clone(), json!({}))]), Reply::Text("Your list is long.".into())]);
     let asked = s.openrouter.chats().len();
