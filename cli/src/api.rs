@@ -191,6 +191,8 @@ impl Client {
                     }
                     return Ok(resp);
                 }
+                // a request that could not be built never left
+                Err(e) if e.is_builder() => return Err(e).context("building the request"),
                 Err(e) if replay.allows_retry(!e.is_connect()) => {
                     if self.verbose {
                         eprintln!("{method} {path} -> retry after error ({}ms [retries={attempt}])", t0.elapsed().as_millis());
