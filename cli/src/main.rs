@@ -9,7 +9,7 @@ mod watch;
 #[cfg(test)]
 mod mockcs;
 
-include!(concat!(env!("OUT_DIR"), "/templates.rs"));
+use fragment_templates::ALL as TEMPLATES;
 
 use crate::api::encode_q;
 use crate::codestorage::{Author, CodeStorage, CsError, LIVE, MAIN, MAX_CAS_ATTEMPTS};

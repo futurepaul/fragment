@@ -26,6 +26,7 @@ url = "2.5"
 fragment-proto = { path = "../crates/proto" }
 fragment-nip98 = { path = "../crates/nip98" }
 fragment-core = { path = "../crates/core" }
+fragment-templates = { path = "../crates/templates" }
 
 [profile.release]
 lto = true

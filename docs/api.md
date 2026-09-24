@@ -150,7 +150,8 @@ random bytes, the registry keeps their SHA-256).
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /` | who is signed in, with links to sign in, sign out, and link another sign-in |
+| `GET /` | who is signed in, with links to sign in, sign out, and link another sign-in; with a username, their fragments and the "new fragment" form |
+| `POST /auth/new` | the form (`label`, `template`): makes `<label>.<username>` from the template, then → `/auth/fragment?name=…&return=/` (signed in on its origin, and there); a refusal is a 400 page saying why; another origin 403 |
 | `GET /auth/login?return=&login_hint=` | → WorkOS's authorize URL (`provider=authkit`, `redirect_uri` `<platform>/auth/callback`, a state); the state is bound to the browser by `fragment_login` (HttpOnly, SameSite=Lax, `Path=/auth`, ten minutes) |
 | `GET /auth/link?return=` | the same from a signed-in browser: the sign-in that comes back joins this person (409 when it is someone else's) |
 | `GET /auth/callback?code=&state=` | the state must match the browser's cookie (400 otherwise); the code is exchanged server-side; → `fragment_session` (HttpOnly, SameSite=Lax, `Path=/`) and back to `return`; a WorkOS `error` is shown (400) |
@@ -178,7 +179,7 @@ A path with a space in it arrives encoded (`return=%2Fa%2520b` returns to
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/fragments` | a person with a username (an agent is 403) | `{name, visibility?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). The fragment's own key is made by the node's `KEYS` and stays sealed there. The cell creates (or, for a name deleted before, finds) the code.storage repo. |
+| `POST /api/fragments` | a person with a username (an agent is 403) | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). The fragment's own key is made by the node's `KEYS` and stays sealed there. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`blank`, `chat`, `todo`, `inbox`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role}]}` |
 | `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes}` |
@@ -197,6 +198,8 @@ A path with a space in it arrives encoded (`return=%2Fa%2520b` returns to
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |
 | `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt}`: ES256, this repo, `git:read`+`git:write`, 15 minutes |
 | `POST /api/f/{name}/refresh` | editor | → `{ok, refs: {main: {pin, moved} \| {absent}, live: ...}}` |
+| `POST /api/f/{name}/files` | editor | `{files: [{path, text \| base64} \| {path, delete: true}], message?, key?}` → `{commit}`: one commit to main, as a sync makes (at most 16 files and 256 KiB; paths relative, no `.` or `..`). The same `key` from the same person answers the first commit again. Main's pin moves at once; live does not |
+| `POST /api/f/{name}/deploy` | editor | `{note?}` → `{live, canonical}`: live to main's tip, as `fragment deploy` does (a first deploy makes the branch; after a rollback, a merge commit), guarded against a live that moved meanwhile; the app installs from it at once |
 | `POST /api/f/{name}/webhook` | code.storage | signed with the fragment's webhook secret (`X-Pierre-Signature`, 5 minutes); validate, remember (redeliveries are acknowledged), then move the pin to the branch's head as read now |
 | `GET /api/f/{name}/files` | viewer | → `{ref, files: [{path, size, mode, lastCommitSha, machinery, blob?}]}` at main; a pointer's `size` is its bytes' |
 | `GET /api/f/{name}/file?path=` | viewer | → the bytes at main (`x-fragment-ref`); a pointer's come from the blob store |
@@ -239,6 +242,10 @@ keeps the last good code and says why in `status.code.error`.
 
 - `role` defaults to `viewer` for a query and `editor` for a mutation.
   `fetch` and `alarm` are not operation names.
+- `capabilities` asks the platform for powers the page uses, each granted
+  only to the fragment's owner viewing it. The one there is:
+  `"fragments"` (`__fragments`, Serving). Any other name is refused at
+  deploy.
 - `input` is a JSON Schema in a bounded subset (`crates/core/src/schema.rs`:
   types, `enum`, `const`, lengths, ranges, `items`, `properties`,
   `required`, `additionalProperties`, counts; annotations allowed; any
@@ -466,6 +473,7 @@ API answers on the platform's host):
 | `__signin`, `__signout` | this origin's session (Sign-in, above) |
 | `__join?invite=<token>` | an invite in a browser: signed out, → `__signin` and back; signed in, a Join button that posts `invite` here (form-encoded; another origin 403) and joins as the person |
 | `__fragment.js` | the browser library (below) |
+| `__fragments` | `{fragments: [{name, role, url}]}`: the fragments this fragment's owner belongs to, only to the owner signed in here, and only when `fragment.json` at live declares `"capabilities": ["fragments"]` (anyone else, or a page that does not ask, 403). A dashboard's page, such as the desktop's |
 | `__live` | WebSocket, anyone who can see the fragment: channel subscriptions from a cursor, presence, change signals (below) |
 | `__watch` | WebSocket, viewers and up (the share link, or a signed upgrade): `{type: "hello", ref, sha}`, then `{type: "changed", ref: "main", sha, paths}` per external move of main |
 | anything else | the app's `fetch`, when it has one |

@@ -18,7 +18,7 @@ const CHAT_APP: &[u8] = include_bytes!("../../fixtures/chat.mjs");
 const CHAT_JSON: &[u8] = include_bytes!("../../fixtures/chat.json");
 const FORMAT_MJS: &[u8] = include_bytes!("../../fixtures/format.mjs");
 
-fn with_session(api: &Api, method: &str, path: &str, session: &str) -> Result<Reply> {
+pub(super) fn with_session(api: &Api, method: &str, path: &str, session: &str) -> Result<Reply> {
     api.call(Call { method, url: format!("{}{path}", api.base), cookie: Some(format!("fragment_session={session}")), ..Call::default() })
 }
 
@@ -29,7 +29,7 @@ fn cookie_line(r: &Reply, name: &str) -> String {
 /// A browser signed in on the platform walks to a fragment's origin:
 /// `/auth/fragment` mints a redemption, `__signin` redeems it. Answers the
 /// fragment's own session cookie value.
-fn site_cookie(api: &Api, session: &str, name: &str) -> Result<String> {
+pub(super) fn site_cookie(api: &Api, session: &str, name: &str) -> Result<String> {
     let r = with_session(api, "GET", &format!("/auth/fragment?name={name}&return=/"), session)?;
     anyhow::ensure!(r.status == 302, "/auth/fragment: {r}");
     let r = api.call(Call { method: "GET", url: r.header("location"), ..Call::default() })?;

@@ -267,6 +267,7 @@ dependencies = [
  "fragment-core",
  "fragment-nip98",
  "fragment-proto",
+ "fragment-templates",
  "futures-util",
  "hex",
  "serde",
@@ -315,6 +316,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "fragment-templates"
+version = "0.1.0"
 
 [[package]]
 name = "futures-channel"

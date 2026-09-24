@@ -66,6 +66,14 @@ session's layout (`finite-next-worktrees/desktop-ui`, `d8d5c26`).
    template (chat, todo, desktop, a blank app), server-side commit and
    deploy routes (which the agent's tools also use), the platform's "new"
    page, and the owner capability.
+   **Built 2026-09-24** (the desktop template comes in step 3): the
+   templates are one crate (`crates/templates`) the CLI and the cell both
+   embed; the cell offers `blank`, `chat`, `todo`, and `inbox` (not
+   `notes`, 3 MiB). `POST /api/f/{name}/files` and `/deploy`
+   (`cell/src/publish.rs`); `fragment.json`'s `capabilities:
+   ["fragments"]` lets its owner's page read `__fragments`; the
+   platform's home lists your fragments and makes a new one. e2e lane
+   `templates`: 30 checks.
 3. **The desktop template**, ported from `claude/desktop-ui`.
    Acceptance (ROADMAP phase 6): a browser e2e opens apps and files into
    the viewer, reorders and closes panes, collapses both sides, works at

@@ -171,6 +171,51 @@ async fn email_of(env: &Env, id: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The fragments a person belongs to, as links.
+async fn fragments_list(env: &Env, cfg: &Config, url: &Url, id: &str) -> String {
+    let asked = async {
+        let list = Request::new("https://principal.internal/list", Method::Get)?;
+        let v: serde_json::Value = env.durable_object("PRINCIPAL")?.get_by_name(id)?.fetch_with_request(list).await?.json().await?;
+        Ok::<_, worker::Error>(v)
+    };
+    let Ok(v) = asked.await else { return String::new() };
+    let items: String = v["fragments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|f| {
+            let name = f["name"].as_str()?;
+            Some(format!("<li><a href=\"{}\">{}</a> <small>{}</small></li>", esc(&cfg.canonical(url, name)), esc(name), esc(f["role"].as_str().unwrap_or(""))))
+        })
+        .collect();
+    if items.is_empty() { String::new() } else { format!("<h2>Your fragments</h2><ul>{items}</ul>") }
+}
+
+/// The "new fragment" form: a label and one of the platform's templates.
+fn new_form(username: &str, platform: &str) -> String {
+    let host = platform.split("://").nth(1).unwrap_or("fragment.club");
+    let choices: String = crate::publish::TEMPLATES
+        .iter()
+        .enumerate()
+        .map(|(i, (name, t))| {
+            let (title, description) = crate::publish::describe(t);
+            format!(
+                "<p><label><input type=\"radio\" name=\"template\" value=\"{n}\"{c}> <b>{t}</b> {d}</label></p>",
+                n = esc(name),
+                c = if i == 0 { " checked" } else { "" },
+                t = esc(if title.is_empty() { name } else { &title }),
+                d = esc(&description),
+            )
+        })
+        .collect();
+    format!(
+        "<h2>New fragment</h2><form method=\"post\" action=\"/auth/new\">{choices}\
+         <p><input name=\"label\" required maxlength=\"63\" pattern=\"[a-z0-9]([a-z0-9-]*[a-z0-9])?\" placeholder=\"name\" style=\"font:inherit;padding:.4em .6em;border-radius:8px;border:1px solid #aab\"><code>.{u}.{h}</code> <button>Make it</button></p></form>",
+        u = esc(username),
+        h = esc(host),
+    )
+}
+
 fn to_login(platform: &str, back: &str) -> CellResult<Response> {
     redirect(&format!("{platform}/auth/login?return={}", enc(back)), &[])
 }
@@ -245,13 +290,15 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                         let email = email_of(env, &who.id).await;
                         let username = who.username.clone().unwrap_or_default();
                         format!(
-                            "<p><img src=\"/api/users/{u}/picture\" alt=\"\" width=\"48\" height=\"48\" style=\"border-radius:50%;vertical-align:middle;object-fit:cover\" onerror=\"this.remove()\"> Signed in as <b>{u}</b> ({e}, <code>{id}</code>).</p>{b}\
+                            "<p><img src=\"/api/users/{u}/picture\" alt=\"\" width=\"48\" height=\"48\" style=\"border-radius:50%;vertical-align:middle;object-fit:cover\" onerror=\"this.remove()\"> Signed in as <b>{u}</b> ({e}, <code>{id}</code>).</p>{b}{f}{n}\
                              <form method=\"post\" action=\"/auth/picture\" enctype=\"multipart/form-data\"><p>Picture: <input type=\"file\" name=\"picture\" accept=\"image/png,image/jpeg,image/webp,image/gif\" required> <button>Set</button></p></form>\
                              <p><a href=\"/auth/logout\">Sign out</a> · <a href=\"/auth/link\">Add another sign-in to you</a></p>",
                             u = esc(&username),
                             e = esc(&email),
                             id = esc(&who.id),
-                            b = budget_line(env, &who.id).await
+                            b = budget_line(env, &who.id).await,
+                            f = fragments_list(env, cfg, url, &who.id).await,
+                            n = new_form(&username, &cfg.platform(url)),
                         )
                     }
                     None => "<p>Places for people and agents.</p><p><a href=\"/auth/login\">Sign in</a></p>".to_string(),
@@ -275,6 +322,24 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                     }
                     Err(e) => Err(e),
                 }
+            }
+            (Method::Post, ["auth", "new"]) => {
+                same_origin(&req, &platform)?;
+                let Some((_, who)) = platform_session(&req, env).await? else { return to_login(&platform, "/") };
+                let bytes = req.bytes().await?;
+                let field = |name: &str| url::form_urlencoded::parse(&bytes).find(|(k, _)| k == name).map(|(_, v)| v.trim().to_string()).unwrap_or_default();
+                let create = fragment_proto::CreateFragment { name: field("label"), visibility: None, template: Some(field("template")) };
+                let v: serde_json::Value = match crate::create_fragment(env, cfg, url, create, who).await {
+                    Ok(mut made) if made.status_code() == 200 => made.json().await?,
+                    Ok(mut made) => {
+                        let v: serde_json::Value = made.json().await.unwrap_or_default();
+                        return page(400, "New fragment", &format!("<p>{}</p><p><a href=\"/\">Back</a></p>", esc(v["message"].as_str().unwrap_or("it could not be made"))));
+                    }
+                    Err(e) => return page(400, "New fragment", &format!("<p>{}</p><p><a href=\"/\">Back</a></p>", esc(&e.message))),
+                };
+                let name = v["name"].as_str().ok_or_else(|| CellError::host("the create answered no name"))?;
+                // signed in on its own origin, then there
+                redirect(&format!("/auth/fragment?name={}&return=/", enc(name)), &[])
             }
             (Method::Post, ["auth", "picture"]) => {
                 let Some((_, who)) = platform_session(&req, env).await? else { return to_login(&platform, "/") };

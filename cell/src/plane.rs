@@ -167,6 +167,7 @@ impl FragmentCell {
             self.exec("DELETE FROM code", vec![])?;
             self.sync_schedules(&[])?;
             self.del_meta("meta_live")?;
+            self.del_meta("capabilities_live")?;
             self.del_meta("code_error")?;
             js::abort_app_facet(&self.raw, "live is gone")?;
             return Ok(());
@@ -186,6 +187,7 @@ impl FragmentCell {
             Some(meta) => self.set_meta("meta_live", &serde_json::to_string(meta).expect("meta serializes"))?,
             None => self.del_meta("meta_live")?,
         }
+        self.set_meta("capabilities_live", &serde_json::to_string(&manifest.capabilities).expect("a list serializes"))?;
         if self.tree_row("live", "app.mjs")?.is_none() {
             self.exec("DELETE FROM code", vec![])?;
             self.sync_schedules(&[])?;

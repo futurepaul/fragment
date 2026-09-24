@@ -115,6 +115,8 @@ impl FragmentCell {
                 }
             };
             json_response(&answer)?
+        } else if path == "__fragments" {
+            json_response(&self.owner_fragments(caller).await?)?
         } else if path == "__sw.js" {
             let h = Headers::new();
             h.set("content-type", "text/javascript; charset=utf-8")?;

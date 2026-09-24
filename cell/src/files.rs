@@ -48,6 +48,14 @@ fn describe(sha: &Option<String>) -> String {
     }
 }
 
+/// A commit's author: the principal's display form, and an address that
+/// is never mail.
+pub(crate) fn author(principal: &str) -> (String, String) {
+    let name = npub::display(principal);
+    let email = format!("{}@fragment.invalid", name.chars().take(64).collect::<String>());
+    (name, email)
+}
+
 /// Bytes as a step or capability answer: text when it is UTF-8.
 pub(crate) fn content_json(bytes: Vec<u8>) -> Value {
     match String::from_utf8(bytes) {
@@ -82,15 +90,29 @@ impl FragmentCell {
         principal: &str,
         depth: u32,
     ) -> CellResult<Wrote> {
-        if let Some(r) = self.rows("SELECT sha FROM file_commits WHERE key = ?", vec![key.into()])?.first() {
-            return Ok(Wrote::Commit(r["sha"].as_str().unwrap_or("").to_string()));
-        }
         if writes.len() > limits::FILE_WRITES_MAX {
             return Err(CellError::invalid(format!("at most {} files per write", limits::FILE_WRITES_MAX)));
         }
         let total: usize = writes.iter().filter_map(|w| w.bytes.as_ref().map(Vec::len)).sum();
         if total > limits::FILE_WRITE_MAX_BYTES {
             return Err(CellError::too_large("the files written", total, limits::FILE_WRITE_MAX_BYTES));
+        }
+        self.commit(key, writes, expect, message, principal, depth).await
+    }
+
+    /// [`Self::commit_files`] without a write's limits: the platform's own
+    /// commits (a template).
+    pub(crate) async fn commit(
+        &self,
+        key: &str,
+        writes: &[FileWrite],
+        expect: &BTreeMap<String, Option<String>>,
+        message: &str,
+        principal: &str,
+        depth: u32,
+    ) -> CellResult<Wrote> {
+        if let Some(r) = self.rows("SELECT sha FROM file_commits WHERE key = ?", vec![key.into()])?.first() {
+            return Ok(Wrote::Commit(r["sha"].as_str().unwrap_or("").to_string()));
         }
         for w in writes {
             if !valid_repo_path(&w.path) {
@@ -99,8 +121,7 @@ impl FragmentCell {
         }
         let repo = self.must("repo")?;
         let cs = self.cs()?;
-        let author = npub::display(principal);
-        let email = format!("{}@fragment.invalid", author.chars().take(64).collect::<String>());
+        let (author, email) = author(principal);
         for _ in 0..WRITE_ATTEMPTS {
             let head = cs.branch_head(&repo, "main").await?;
             for (path, want) in expect {

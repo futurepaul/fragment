@@ -24,11 +24,17 @@ pub struct Manifest {
     pub triggers: Vec<TriggerDecl>,
     /// Where a `changed` frame goes on each move of `main`.
     pub notify_urls: Vec<String>,
+    /// Platform powers the page asks for; each is granted only to the
+    /// fragment's owner viewing it ([`CAPABILITIES`]).
+    pub capabilities: Vec<String>,
     /// Top-level keys that no longer do anything here.
     pub ignored: Vec<&'static str>,
 }
 
 const ACCESS_KEYS: [&str; 3] = ["visibility", "editors", "viewers"];
+/// The capabilities a manifest may declare. `fragments`: the page may list
+/// the fragments its owner belongs to (`__fragments`), as a dashboard does.
+pub const CAPABILITIES: [&str; 1] = ["fragments"];
 /// Method names the App class answers for the platform, never operations.
 const RESERVED_OPS: [&str; 2] = ["fetch", "alarm"];
 
@@ -192,6 +198,18 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
         }
         Some(_) => return Err("notifyUrls must be an array of URLs".into()),
     }
+    match obj.get("capabilities") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(list)) => {
+            for c in list {
+                match c.as_str() {
+                    Some(c) if CAPABILITIES.contains(&c) => m.capabilities.push(c.to_string()),
+                    _ => return Err(format!("capabilities: {c} is not one of {CAPABILITIES:?}")),
+                }
+            }
+        }
+        Some(_) => return Err("capabilities must be an array".into()),
+    }
     match obj.get("triggers") {
         None | Some(Value::Null) => {}
         Some(Value::Array(list)) => {
@@ -225,6 +243,8 @@ mod tests {
         assert_eq!(m.meta.unwrap().title.as_deref(), Some("T"));
         assert_eq!(m.ignored, vec!["visibility", "editors"]);
         assert_eq!(parse(b"{}").unwrap(), Manifest::default());
+        assert_eq!(parse(br#"{"capabilities":["fragments"]}"#).unwrap().capabilities, vec!["fragments"]);
+        assert!(parse(br#"{"capabilities":["everything"]}"#).is_err());
         let m = parse(br#"{"channels":{"chat":{},"news":{"read":"public"}}}"#).unwrap();
         assert_eq!(m.channels["chat"].read, Role::Viewer);
         assert_eq!(m.channels["news"].read, Role::Public);

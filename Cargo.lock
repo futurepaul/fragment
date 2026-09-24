@@ -758,6 +758,7 @@ dependencies = [
  "fragment-computer",
  "fragment-core",
  "fragment-fakes",
+ "fragment-templates",
  "fs2",
  "hex",
  "ignore",
@@ -895,6 +896,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "fragment-templates"
+version = "0.1.0"
 
 [[package]]
 name = "fs2"

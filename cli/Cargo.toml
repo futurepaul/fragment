@@ -14,6 +14,7 @@ path = "src/main.rs"
 computer = ["dep:fragment-computer"]
 
 [dependencies]
+fragment-templates = { path = "../crates/templates" }
 fragment-core = { path = "../crates/core" }
 fragment-computer = { path = "../crates/computer", optional = true }
 clap = { version = "4", features = ["derive"] }

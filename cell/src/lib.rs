@@ -52,6 +52,7 @@ mod members;
 mod ops;
 mod plane;
 mod principal;
+mod publish;
 mod push;
 mod registry;
 mod serve;
@@ -204,6 +205,21 @@ fn named_identity(who: &str, signer: &Signer) -> CellResult<String> {
 
 /// A create's name under the creator's username: a bare label goes under
 /// it, and a qualified name must already be under it.
+/// Makes a fragment for a person, under their username: the API's create
+/// and the platform's "new" page.
+pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut create: CreateFragment, principal: Signer) -> CellResult<Response> {
+    if principal.kind != IdentityKind::Person {
+        return Err(CellError::new(ErrorCode::Forbidden, "fragments are made by people"));
+    }
+    let username = principal.username.clone().ok_or_else(|| CellError::invalid(format!("choose a username first (sign in at {}/)", cfg.platform(url))))?;
+    create.name = qualify(&create.name, &username)?;
+    let body = serde_json::to_vec(&create).map_err(|e| CellError::host(e.to_string()))?;
+    // a fresh request: nothing of the caller's but what the router decided
+    let bare = Request::new(url.as_str(), Method::Post)?;
+    let f = Forward { name: &create.name, inner: "/create".into(), principal: Some(principal), mode: None, extra: vec![] };
+    forward(env, &bare, url, bytes_body(body), f).await
+}
+
 fn qualify(name: &str, username: &str) -> CellResult<String> {
     if fragment_proto::valid_label(name) {
         return Ok(fragment_proto::fragment_name(name, username));
@@ -502,19 +518,9 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
         }
         (Method::Post, ["api", "fragments"]) => {
             let body = read_body(&mut req).await?;
-            let mut create: CreateFragment = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let create: CreateFragment = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let principal = signer(env, &req, &url, &body).await?;
-            if principal.kind != IdentityKind::Person {
-                return Err(CellError::new(ErrorCode::Forbidden, "fragments are made by people"));
-            }
-            let username = principal
-                .username
-                .clone()
-                .ok_or_else(|| CellError::invalid(format!("choose a username first (sign in at {}/)", cfg.platform(&url))))?;
-            create.name = qualify(&create.name, &username)?;
-            let body = serde_json::to_vec(&create).map_err(|e| CellError::host(e.to_string()))?;
-            let f = Forward { name: &create.name, inner: "/create".into(), principal: Some(principal), mode: None, extra: vec![] };
-            forward(env, &req, &url, bytes_body(body), f).await
+            create_fragment(env, &cfg, &url, create, principal).await
         }
         (Method::Get, ["api", "fragments"]) => {
             let principal = signer(env, &req, &url, &[]).await?;

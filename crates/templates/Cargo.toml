@@ -1,0 +1,9 @@
+[package]
+name = "fragment-templates"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "The templates under templates/, embedded: the CLI scaffolds them and the cell makes fragments from them."
+build = "build.rs"
+
+[dependencies]

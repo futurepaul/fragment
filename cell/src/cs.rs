@@ -264,6 +264,36 @@ impl<'a> Cs<'a> {
         }
     }
 
+    /// Makes `branch` at `base_ref` (a first `live`): its sha, or `None`
+    /// when the branch exists already (made meanwhile: read it again).
+    pub async fn create_branch(&self, repo: &str, base_ref: &str, branch: &str) -> CellResult<Option<String>> {
+        let body = serde_json::json!({ "base_ref": base_ref, "target_branch": branch, "target_is_ephemeral": false });
+        match self.json(Method::Post, &format!("/api/repos/{}/branches/create", seg(repo)), repo, &["git:write"], Some(body)).await? {
+            (200 | 201, v) => v["commit_sha"].as_str().filter(|s| !s.is_empty()).map(|s| Some(s.to_string())).ok_or_else(|| upstream("create branch", 200, v.to_string().as_bytes())),
+            (409, _) => Ok(None),
+            (status, v) => Err(upstream("create branch", status, v.to_string().as_bytes())),
+        }
+    }
+
+    /// Moves `live` to `main`'s tip (a fast-forward when it can, else a
+    /// merge commit), guarded by `expected_live`: the new tip, or `None`
+    /// when `live` moved first (read it again).
+    pub async fn promote_live(&self, repo: &str, expected_live: &str, message: &str, author: (&str, &str)) -> CellResult<Option<String>> {
+        let body = serde_json::json!({
+            "target_branch": "live",
+            "source_ref": "main",
+            "strategy": "ff_prefer",
+            "expected_target_sha": expected_live,
+            "commit_message": message,
+            "author": { "name": author.0, "email": author.1 },
+        });
+        match self.json(Method::Post, &format!("/api/repos/{}/merge", seg(repo)), repo, &["git:write"], Some(body)).await? {
+            (200 | 201, v) => v["target"]["new_sha"].as_str().filter(|s| !s.is_empty()).map(|s| Some(s.to_string())).ok_or_else(|| upstream("merge", 200, v.to_string().as_bytes())),
+            (409, _) => Ok(None),
+            (status, v) => Err(upstream("merge", status, v.to_string().as_bytes())),
+        }
+    }
+
     /// A token for an editor's own client: this repo only, git read and
     /// write, fifteen minutes. The claims are checked after signing.
     pub async fn storage_token(&self, repo: &str, principal: &str) -> CellResult<StorageToken> {

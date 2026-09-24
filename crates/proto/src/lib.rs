@@ -342,6 +342,10 @@ pub struct CreateFragment {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visibility: Option<Visibility>,
+    /// Starts the fragment from one of the platform's templates (`chat`,
+    /// `todo`, `blank`, …): its files are the first commit, and live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
 }
 
 /// The answer to a create: the only time the webhook secret is shown

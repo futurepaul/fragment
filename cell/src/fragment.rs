@@ -472,6 +472,16 @@ impl FragmentCell {
                 self.webhook(&event, &signature, &body).await
             }
             (Method::Get, ["api", "files"]) => self.files(&caller).await,
+            (Method::Post, ["api", "files"]) => {
+                let body = body_json(&mut req).await?;
+                self.write_files_api(&caller, body).await
+            }
+            (Method::Post, ["api", "deploy"]) => {
+                let bytes = req.bytes().await?;
+                let body: Value =
+                    if bytes.is_empty() { json!({}) } else { serde_json::from_slice(&bytes).map_err(|e| CellError::invalid(format!("body: {e}")))? };
+                self.deploy_api(&caller, body).await
+            }
             (Method::Get, ["api", "file"]) => self.file(&caller, &query("path").unwrap_or_default()).await,
             (Method::Get, ["api", "file", "stat"]) => self.stat(&caller, &query("path").unwrap_or_default()).await,
             (Method::Get, ["api", "events"]) => self.events(&caller, query("since").and_then(|s| s.parse().ok()).unwrap_or(0)),
@@ -532,6 +542,10 @@ impl FragmentCell {
         if !valid_fragment_name(&body.name) {
             return Err(CellError::invalid("a fragment name must match ^[a-z0-9][a-z0-9-]{0,62}$"));
         }
+        if let Some(t) = body.template.as_deref().filter(|t| crate::publish::template(t).is_none()) {
+            let names: Vec<&str> = crate::publish::TEMPLATES.iter().map(|(n, _)| *n).collect();
+            return Err(CellError::invalid(format!("no template {t:?}; the templates are {}", names.join(", "))));
+        }
         let cs_cfg = self.cfg.codestorage()?;
         // Claim the name before the first await: a concurrent create for the
         // same name reaches this same object and must see it taken.
@@ -590,9 +604,16 @@ impl FragmentCell {
             ],
         )?;
         self.index_change(&owner, Some(Role::Owner))?;
+        if let Some(t) = &body.template {
+            self.set_meta("template_pending", t)?;
+        }
         self.event("create", &format!("fragment {} created by {owner} (repo {repo})", body.name), json!({ "repo": repo, "key": caller.key.as_deref().map(npub::display) }));
         self.flush_index().await;
         self.certificate().await?;
+        // a template that did not land is retried by the alarm
+        if let Err(e) = self.seed().await {
+            self.event("template.failed", &e.message, json!({ "code": e.code }));
+        }
         self.schedule().await?;
         json_response(&Created {
             name: body.name.clone(),
@@ -682,6 +703,9 @@ impl FragmentCell {
         self.flush_index().await;
         if self.meta("cert_pending")?.is_some() {
             self.certificate().await?;
+        }
+        if let Err(e) = self.seed().await {
+            self.event("template.failed", &e.message, json!({ "code": e.code }));
         }
         if !self.swept.get() {
             if let Ok(facet) = self.facet() {

@@ -20,6 +20,7 @@ mod restart;
 mod signin;
 mod site;
 mod sync;
+mod templates;
 
 use anyhow::Result;
 
@@ -37,6 +38,7 @@ pub fn run(s: &mut Suite, api: Api) -> Result<()> {
     members::secrets(s, &api)?;
     plane::files(s, &api)?;
     plane::deploy(s, &api)?;
+    templates::templates(s, &api)?;
     app::ops(s, &api)?;
     app::public(s, &api)?;
     limits::facet_cap(s, &api)?;

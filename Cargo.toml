@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["cli", "crates/proto", "crates/nip98", "crates/core", "crates/native", "crates/fakes", "crates/devstack", "crates/e2e", "crates/node", "crates/computer", "xtask"]
+members = ["cli", "crates/proto", "crates/nip98", "crates/core", "crates/native", "crates/fakes", "crates/devstack", "crates/e2e", "crates/node", "crates/computer", "crates/templates", "xtask"]
 # cell/ builds for wasm32 with worker-build; spikes/ are throwaway crates.
 exclude = ["cell", "agent", "spikes"]
 
