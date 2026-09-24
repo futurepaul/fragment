@@ -243,6 +243,9 @@ impl Call for SetPicture {
 pub(crate) enum TestHook {
     /// Answer 503 to everything else (`true`), or answer again.
     Down(bool),
+    /// How many calls the Registry has had since it started (`{calls:
+    /// null}`): a test counts a request's round trips by the difference.
+    Calls,
     Signins(SigninsHook),
 }
 
@@ -270,6 +273,7 @@ pub(crate) struct SigninCounts {
 #[serde(untagged)]
 pub(crate) enum TestAnswer {
     Down { down: bool },
+    Calls { calls: u64 },
     Signins(SigninCounts),
 }
 

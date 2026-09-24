@@ -22,7 +22,8 @@
 //!   POST /username/claim  {identity, username}    a person's username, chosen once
 //!   POST /username/lookup {username}              → the facts of whoever holds it
 //!   POST /picture/set     {identity, sha, mime}   a person's picture (its bytes are in BLOBS)
-//!   POST /test    {down} | {signins}      dev fleets: answer 503 to everything else, or count,
+//!   POST /test    {down} | {calls} | {signins}   dev fleets: answer 503 to everything else,
+//!                                         count the calls since the cell started, or count,
 //!                                         expire, or sweep sign-in's rows
 //!
 //! Each route's body and answer are types in `calls.rs`, shared with the
@@ -30,10 +31,13 @@
 //! identity's username, and an agent's carries its owner's (the namespace
 //! it makes fragments in). Rows are read into structs: a NOT NULL column
 //! is never defaulted, and a row naming an identity that is not there is a
-//! host fault, not a 404.
+//! host fault, not a 404. A lookup (`/resolve`, `/session`) is one
+//! statement: the key's or the session's row joined with its identity and
+//! the username it makes fragments under (`username_join!`).
 //!
 //! People come from sign-in, and browsers hold sessions: `signin.rs`.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use fragment_core::{npub, registry};
@@ -48,6 +52,16 @@ use crate::js;
 
 /// The identities one `/profiles` answers.
 const PROFILES_MAX: usize = 64;
+
+/// Joins an identity's row (`i`) to the username it makes fragments under
+/// (`u`): its own, or an agent's owner's. `usernames.identity` is UNIQUE,
+/// so the join adds no row. A macro, so each statement that reads an
+/// identity with its username stays one literal that spells it the same.
+macro_rules! username_join {
+    () => {
+        "LEFT JOIN usernames u ON u.identity = COALESCE(i.owner, i.id)"
+    };
+}
 
 pub(crate) mod calls;
 mod signin;
@@ -71,7 +85,7 @@ CREATE TABLE IF NOT EXISTS subjects (
   issuer TEXT NOT NULL, subject TEXT NOT NULL, identity TEXT NOT NULL, linked_at INTEGER NOT NULL, email TEXT,
   PRIMARY KEY (issuer, subject));
 CREATE INDEX IF NOT EXISTS subjects_identity ON subjects (identity);
-CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+DROP TABLE IF EXISTS meta;
 CREATE TABLE IF NOT EXISTS usernames (
   username TEXT PRIMARY KEY, identity TEXT NOT NULL UNIQUE, claimed_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS pictures (
@@ -84,6 +98,13 @@ pub struct RegistryCell {
     env: Env,
     /// The isolate's settings (config.rs: built once per isolate).
     cfg: &'static Config,
+    /// Dev fleets' test hook: every call but the hooks' is 503. It lasts
+    /// for this cell's life (a restart answers again), and only the hook,
+    /// which answers only with `FRAGMENT_TEST_HOOKS=allow`, sets it.
+    down: Cell<bool>,
+    /// The calls answered (or refused) since this cell started, the hooks'
+    /// aside: what a test counts a request's Registry round trips by.
+    calls: Cell<u64>,
 }
 
 impl DurableObject for RegistryCell {
@@ -92,7 +113,7 @@ impl DurableObject for RegistryCell {
         state.storage().sql().exec(signin::SCHEMA, None).expect("the sign-in schema applies");
         let cfg = Config::from_env(&env);
         assert!(cfg.signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
-        RegistryCell { state, env, cfg }
+        RegistryCell { state, env, cfg, down: Cell::new(false), calls: Cell::new(0) }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -114,12 +135,40 @@ impl DurableObject for RegistryCell {
     }
 }
 
-/// `identities` (the row for an id).
+/// `identities` (the row for an id), with its username (`username_join!`).
 #[derive(Deserialize)]
 struct IdentityRow {
     kind: IdentityKind,
     owner: Option<String>,
+    username: Option<String>,
+}
+
+/// When an identity was made.
+#[derive(Deserialize)]
+struct CreatedRow {
     created_at: i64,
+}
+
+/// A key's row, with its holder's identity and username in the same
+/// statement (`/resolve`). The holder's columns are `None` when the key
+/// names an identity that is not there.
+#[derive(Deserialize)]
+struct KeyHolderRow {
+    identity: String,
+    revoked_at: Option<i64>,
+    kind: Option<IdentityKind>,
+    owner: Option<String>,
+    username: Option<String>,
+}
+
+/// The identity a joined row names (a key's holder, a session's): its
+/// `identities` columns missing, the rows contradict each other, a host
+/// fault.
+fn joined_identity(id: String, kind: Option<IdentityKind>, owner: Option<String>, username: Option<String>, named_by: &str) -> CellResult<Identity> {
+    match kind {
+        Some(kind) => Ok(Identity { id, kind, owner, username }),
+        None => Err(CellError::host(format!("{named_by} names a missing identity {id}"))),
+    }
 }
 
 /// `keys` (the row for a key): who holds it, and whether it was revoked.
@@ -162,11 +211,6 @@ struct UsernameRow {
 #[derive(Deserialize)]
 struct CountRow {
     n: u64,
-}
-
-#[derive(Deserialize)]
-struct MetaRow {
-    value: String,
 }
 
 fn unauthenticated(m: impl Into<String>) -> CellError {
@@ -220,12 +264,11 @@ impl RegistryCell {
         self.row::<CountRow>(q, binds)?.map(|r| r.n).ok_or_else(|| CellError::host(format!("COUNT answered no row: {q}")))
     }
 
+    /// An identity with its username, in one statement.
     fn identity(&self, id: &str) -> CellResult<Option<Identity>> {
-        let Some(row) = self.row::<IdentityRow>("SELECT kind, owner, created_at FROM identities WHERE id = ?", vec![id.into()])? else {
-            return Ok(None);
-        };
-        let username = self.username_of(row.owner.as_deref().unwrap_or(id))?;
-        Ok(Some(Identity { id: id.to_string(), kind: row.kind, owner: row.owner, username }))
+        const Q: &str = concat!("SELECT i.kind, i.owner, u.username FROM identities i ", username_join!(), " WHERE i.id = ?");
+        let row = self.row::<IdentityRow>(Q, vec![id.into()])?;
+        Ok(row.map(|r| Identity { id: id.to_string(), kind: r.kind, owner: r.owner, username: r.username }))
     }
 
     /// An identity a request names: missing, it is 404.
@@ -322,15 +365,22 @@ impl RegistryCell {
         self.row::<KeyRow>("SELECT identity, revoked_at FROM keys WHERE key = ?", vec![key.into()])
     }
 
+    /// The identity holding a key, in one statement: the key's row joined
+    /// with its holder and the holder's username.
     fn resolve(&self, b: Resolve) -> CellResult<Identity> {
+        const Q: &str = concat!(
+            "SELECT k.identity, k.revoked_at, i.kind, i.owner, u.username FROM keys k LEFT JOIN identities i ON i.id = k.identity ",
+            username_join!(),
+            " WHERE k.key = ?"
+        );
         check_key(&b.key)?;
-        match self.key_row(&b.key)? {
+        match self.row::<KeyHolderRow>(Q, vec![b.key.as_str().into()])? {
             None => Err(unauthenticated(format!(
                 "the key {} belongs to no one on this fleet (add it to you: `fragment login`)",
                 npub::encode(&b.key)
             ))),
-            Some(row) if !row.active() => Err(unauthenticated(format!("the key {} was revoked", npub::encode(&b.key)))),
-            Some(row) => self.stored_identity(&row.identity, &format!("the key {}", b.key)),
+            Some(row) if row.revoked_at.is_some() => Err(unauthenticated(format!("the key {} was revoked", npub::encode(&b.key)))),
+            Some(row) => joined_identity(row.identity, row.kind, row.owner, row.username, &format!("the key {}", b.key)),
         }
     }
 
@@ -374,7 +424,7 @@ impl RegistryCell {
             .map(|r| r.id)
             .collect();
         let row = self
-            .row::<IdentityRow>("SELECT kind, owner, created_at FROM identities WHERE id = ?", vec![who.id.as_str().into()])?
+            .row::<CreatedRow>("SELECT created_at FROM identities WHERE id = ?", vec![who.id.as_str().into()])?
             .ok_or_else(|| CellError::host(format!("the identity {} went missing during its view", who.id)))?;
         // a person's own username (an agent's identity carries its owner's)
         let username = if who.kind == IdentityKind::Person { who.username.clone() } else { None };
@@ -528,19 +578,14 @@ impl RegistryCell {
         Ok(Active { active })
     }
 
-    fn down(&self) -> CellResult<bool> {
-        Ok(self.row::<MetaRow>("SELECT value FROM meta WHERE key = 'down'", vec![])?.is_some_and(|r| r.value == "1"))
-    }
-
     async fn test_hook(&self, hook: TestHook) -> CellResult<TestAnswer> {
+        assert!(self.cfg.test_hooks, "the hooks answer only on fleets with test hooks");
         match hook {
             TestHook::Down(down) => {
-                self.exec(
-                    "INSERT INTO meta (key, value) VALUES ('down', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-                    vec![if down { "1" } else { "0" }.into()],
-                )?;
+                self.down.set(down);
                 Ok(TestAnswer::Down { down })
             }
+            TestHook::Calls => Ok(TestAnswer::Calls { calls: self.calls.get() }),
             TestHook::Signins(hook) => Ok(TestAnswer::Signins(self.signins_hook(hook).await?)),
         }
     }
@@ -551,12 +596,13 @@ impl RegistryCell {
         let path = req.path();
         let bytes = req.bytes().await?;
         if path == TestHook::PATH {
-            if self.env.var("FRAGMENT_TEST_HOOKS").map(|v| v.to_string()).ok().as_deref() != Some("allow") {
+            if !self.cfg.test_hooks {
                 return Err(CellError::new(ErrorCode::NotFound, "no route /test"));
             }
             return reply::<TestHook>(self.test_hook(body(&bytes)?).await);
         }
-        if self.down()? {
+        self.calls.set(self.calls.get() + 1);
+        if self.down.get() {
             return Err(CellError::new(ErrorCode::RegistryUnavailable, "the registry is down (a test hook)"));
         }
         if let Some(resp) = self.route_signin(&path, &bytes).await? {
