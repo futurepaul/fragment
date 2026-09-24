@@ -447,19 +447,9 @@ impl FragmentCell {
             if req.headers().get(crate::jobs::JOB_HEADER)?.is_none() {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
             }
+            let step = step.to_string();
             let bytes = req.bytes().await?;
-            let body: Value = serde_json::from_slice(&bytes).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            // A Workflow from a deleted fragment's earlier life stops.
-            if body["incarnation"].as_str() != self.meta("created_at")?.as_deref() {
-                return json_response(&json!({ "stop": true }));
-            }
-            let answer = match step {
-                "advance" => self.job_advance(body, bytes.len()).await?,
-                "effect" => self.job_effect(body).await?,
-                "finish" => self.job_finish(body)?,
-                _ => return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
-            };
-            return json_response(&answer);
+            return json_response(&self.job_callback(&step, &bytes).await?);
         }
         if path == "/deliver/report" {
             // Only the delivery consumer sets the header; the router never passes it.

@@ -22,6 +22,7 @@ pub mod schema;
 pub mod secrets;
 pub mod webpush;
 pub mod site;
+pub mod steps;
 pub mod tools;
 pub mod trigger_state;
 pub mod webhook;

@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use fragment_core::budget::VideoEnd;
+use fragment_core::steps::Step;
 use fragment_core::{blob, budget};
 use fragment_proto::ErrorCode;
 use serde_json::{json, Value};
@@ -31,7 +32,7 @@ use crate::error::CellError;
 use crate::ledger;
 use crate::files::FileWrite;
 use crate::fragment::FragmentCell;
-use crate::jobs::{permanent, StepFail};
+use crate::jobs::{permanent, RunRow, StepFail};
 use crate::ops::JOB_ID_PREFIX;
 
 pub const IMAGE_MODEL: &str = "google/gemini-3.1-flash-lite-image";
@@ -77,6 +78,17 @@ impl Payer {
     }
 }
 
+/// The model a paid step runs on: the step's own, or the platform's
+/// default for its kind.
+fn model_of(step: &Step) -> Option<&str> {
+    match step {
+        Step::AiText(t) => Some(&t.model),
+        Step::AiImage(i) => Some(i.model.as_deref().unwrap_or(IMAGE_MODEL)),
+        Step::AiVideoStart(v) => Some(v.model.as_deref().unwrap_or(VIDEO_MODEL)),
+        _ => None,
+    }
+}
+
 /// A ledger refusal as a step's failure: a month that cannot cover it is
 /// for good (the run is held), a ledger that did not answer is for now.
 fn ledger_fail(e: CellError) -> StepFail {
@@ -89,40 +101,35 @@ fn ledger_fail(e: CellError) -> StepFail {
 impl FragmentCell {
     /// This step's source reference: unique to the fragment's life, the
     /// run, and the step's place in it (the same on a retry and a replay).
-    fn step_ref(&self, run: &Value, index: i64) -> Result<String, StepFail> {
+    fn step_ref(&self, run: &RunRow, index: u32) -> Result<String, StepFail> {
         let retry = |e: CellError| StepFail::Retry(e.message);
-        Ok(format!("{}@{}/run/{}/step/{index}", self.name().map_err(retry)?, self.must("created_at").map_err(retry)?, run["id"].as_i64().unwrap_or(0)))
+        Ok(format!("{}@{}/run/{}/step/{index}", self.name().map_err(retry)?, self.must("created_at").map_err(retry)?, run.id))
     }
 
     /// Who pays for step `index` of `run`, reserving its worst case when it
     /// is a paid step.
-    async fn payer(&self, run: &Value, index: i64, kind: &str, args: &Value) -> Result<Paying, StepFail> {
+    async fn payer(&self, run: &RunRow, index: u32, step: &Step) -> Result<Paying, StepFail> {
         if let Some(own) = self.open_secret(KEY_SECRET).await.map_err(|e| StepFail::Retry(e.message))? {
             let own = String::from_utf8(own).map_err(|_| permanent(format!("{KEY_SECRET} is not text")))?;
             return Ok(Paying::Payer(Payer::Own(own.trim().to_string())));
         }
         let owner = self.must("owner").map_err(|e| StepFail::Retry(e.message))?;
         let org = ledger::org_of(&owner).ok_or_else(|| permanent("the fragment's owner has no billing org"))?;
-        let Some(amount) = budget::reservation(kind, args) else {
+        let Some(amount) = budget::reservation(step) else {
             let v = ledger::ask(&self.env, &org, Method::Post, "/key", Some(&json!({}))).await.map_err(ledger_fail)?;
             let key = v["key"].as_str().ok_or_else(|| StepFail::Retry("the ledger answered no key".into()))?.to_string();
             return Ok(Paying::Payer(Payer::Org { org, key, reference: None }));
         };
         let reference = self.step_ref(run, index)?;
-        let principal = run["principal"].as_str().unwrap_or("").to_string();
+        let principal = run.principal.clone();
         let agent = self
             .rows("SELECT principal FROM members WHERE principal = ? AND kind = 'agent'", vec![principal.as_str().into()])
             .map_err(|e| StepFail::Retry(e.message))?
             .first()
             .map(|_| principal.clone());
-        let model = match kind {
-            "ai.image" => args["model"].as_str().unwrap_or(IMAGE_MODEL),
-            "ai.video.start" => args["model"].as_str().unwrap_or(VIDEO_MODEL),
-            _ => args["model"].as_str().unwrap_or(""),
-        };
         let body = json!({
-            "ref": reference, "kind": kind, "model": model, "amount": amount, "fragment": self.name().map_err(|e| StepFail::Retry(e.message))?,
-            "run": run["id"], "principal": principal, "agent": agent,
+            "ref": reference, "kind": step.kind(), "model": model_of(step), "amount": amount, "fragment": self.name().map_err(|e| StepFail::Retry(e.message))?,
+            "run": run.id, "principal": principal, "agent": agent,
         });
         let v = ledger::ask(&self.env, &org, Method::Post, "/reserve", Some(&body)).await.map_err(ledger_fail)?;
         if v["replay"] == true {
@@ -135,7 +142,7 @@ impl FragmentCell {
     /// A paid step's answer: settled to its cost (a video's comes with its
     /// last poll; any other step that reported none is charged its
     /// reservation), and the cost recorded on its run.
-    async fn settle(&self, run: &Value, payer: &Payer, cost_usd: Option<f64>, result: &Value, video: Option<&str>) -> Result<(), StepFail> {
+    async fn settle(&self, run: &RunRow, payer: &Payer, cost_usd: Option<f64>, result: &Value, video: Option<&str>) -> Result<(), StepFail> {
         let Payer::Org { org, reference: Some(reference), .. } = payer else { return Ok(()) };
         let cost = match video {
             Some(_) => None,
@@ -160,7 +167,7 @@ impl FragmentCell {
              ON CONFLICT (ref) DO UPDATE SET micros = excluded.micros, video = excluded.video",
             vec![
                 reference.as_str().into(),
-                SqlStorageValue::Integer(run["id"].as_i64().unwrap_or(0)),
+                SqlStorageValue::Integer(run.id),
                 SqlStorageValue::Integer(charged),
                 SqlStorageValue::Integer(crate::js::now_ms()),
                 video.map_or(SqlStorageValue::Null, |v| v.into()),
@@ -231,7 +238,7 @@ impl FragmentCell {
 
     /// Writes generated bytes to `path` on `main` once per step: in git, or
     /// as a blob and its pointer when 1 MiB or more.
-    async fn store_media(&self, run: &Value, index: i64, path: &str, bytes: Vec<u8>) -> Result<Value, StepFail> {
+    async fn store_media(&self, run: &RunRow, index: u32, path: &str, bytes: Vec<u8>) -> Result<Value, StepFail> {
         let retry = |e: CellError| StepFail::Retry(e.message);
         let sha = blob::sha256_hex(&bytes);
         let size = bytes.len() as u64;
@@ -241,25 +248,20 @@ impl FragmentCell {
         } else {
             bytes
         };
-        let run_id = run["id"].as_i64().unwrap_or(0);
-        let key = format!("{JOB_ID_PREFIX}{run_id}:{index}");
-        let message = format!("{} run {run_id}: generated {path}", run["op"].as_str().unwrap_or(""));
+        let key = format!("{JOB_ID_PREFIX}{}:{index}", run.id);
+        let message = format!("{} run {}: generated {path}", run.op, run.id);
         let writes = [FileWrite { path: path.to_string(), bytes: Some(content) }];
-        let depth = run["depth"].as_u64().unwrap_or(0) as u32;
-        self.commit_files(&key, &writes, &Default::default(), &message, run["principal"].as_str().unwrap_or(""), depth).await.map_err(retry)?;
+        self.commit_files(&key, &writes, &Default::default(), &message, &run.principal, run.depth).await.map_err(retry)?;
         Ok(json!({ "path": path, "size": size, "sha256": sha }))
     }
 
     /// `job.ai.*` steps, paid by whoever pays (above).
-    pub(crate) async fn step_ai(&self, run: &Value, index: i64, kind: &str, args: &Value) -> Result<Value, StepFail> {
-        if !matches!(kind, "ai.text" | "ai.image" | "ai.video.start" | "ai.video.poll" | "ai.video.save") {
-            return Err(permanent(format!("unknown step kind {kind:?}")));
-        }
-        let payer = match self.payer(run, index, kind, args).await? {
+    pub(crate) async fn step_ai(&self, run: &RunRow, index: u32, step: &Step) -> Result<Value, StepFail> {
+        let payer = match self.payer(run, index, step).await? {
             Paying::Replay(result) => return Ok(result),
             Paying::Payer(p) => p,
         };
-        let answer = self.ai_call(run, index, kind, args, &payer).await;
+        let answer = self.ai_call(run, index, step, &payer).await;
         match answer {
             Ok((result, cost, video)) => {
                 self.settle(run, &payer, cost, &result, video.as_deref()).await?;
@@ -300,23 +302,22 @@ impl FragmentCell {
 
     /// One `job.ai.*` step's call: its result, the cost OpenRouter reported,
     /// and the video it started (whose cost comes later).
-    async fn ai_call(&self, run: &Value, index: i64, kind: &str, args: &Value, payer: &Payer) -> Result<(Value, Option<f64>, Option<String>), StepFail> {
+    async fn ai_call(&self, run: &RunRow, index: u32, step: &Step, payer: &Payer) -> Result<(Value, Option<f64>, Option<String>), StepFail> {
         let key = payer.key();
-        match kind {
-            "ai.text" => {
-                let model = args["model"].as_str().ok_or_else(|| permanent("ai.text needs a model (an OpenRouter model id)"))?;
-                let messages = match (&args["messages"], args["prompt"].as_str()) {
-                    (Value::Array(m), _) => Value::Array(m.clone()),
-                    (_, Some(p)) => json!([{ "role": "user", "content": p }]),
-                    _ => return Err(permanent("ai.text needs messages or a prompt")),
+        match step {
+            Step::AiText(t) => {
+                let messages = match (&t.messages, &t.prompt) {
+                    (Some(m), _) => Value::Array(m.clone()),
+                    (None, Some(p)) => json!([{ "role": "user", "content": p }]),
+                    (None, None) => return Err(permanent("ai.text needs messages or a prompt")),
                 };
-                let mut body = json!({ "model": model, "messages": messages });
+                let mut body = json!({ "model": t.model, "messages": messages });
                 // OpenRouter's reasoning control, as the job gave it (a
                 // reasoning model can spend a small cap thinking)
-                if args["reasoning"].is_object() {
-                    body["reasoning"] = args["reasoning"].clone();
+                if let Some(reasoning) = &t.reasoning {
+                    body["reasoning"] = Value::Object(reasoning.clone());
                 }
-                if let Some(n) = args["max_tokens"].as_u64() {
+                if let Some(n) = t.max_tokens {
                     body["max_tokens"] = json!(n);
                 }
                 let (status, bytes) = self.openrouter(key, Method::Post, &self.api("chat/completions"), Some(&body)).await?;
@@ -327,10 +328,9 @@ impl FragmentCell {
                 let text = v["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string();
                 Ok((json!({ "text": text, "model": v["model"], "usage": v["usage"] }), v["usage"]["cost"].as_f64(), None))
             }
-            "ai.image" => {
-                let path = args["path"].as_str().unwrap_or("");
-                let mut body = json!({ "model": args["model"].as_str().unwrap_or(IMAGE_MODEL), "prompt": args["prompt"] });
-                if let Some(a) = args["aspect_ratio"].as_str() {
+            Step::AiImage(image) => {
+                let mut body = json!({ "model": model_of(step), "prompt": image.prompt });
+                if let Some(a) = &image.aspect_ratio {
                     body["aspect_ratio"] = json!(a);
                 }
                 let (status, bytes) = self.openrouter(key, Method::Post, &self.api("images"), Some(&body)).await?;
@@ -339,20 +339,24 @@ impl FragmentCell {
                 }
                 let v: Value = serde_json::from_slice(&bytes).map_err(|e| StepFail::Retry(format!("OpenRouter images: {e}")))?;
                 let b64 = v["data"][0]["b64_json"].as_str().ok_or_else(|| StepFail::Retry("OpenRouter images: no image in the answer".into()))?;
-                let image = base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e| StepFail::Retry(format!("OpenRouter images: {e}")))?;
-                if image.len() > MEDIA_MAX_BYTES {
+                let decoded = base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e| StepFail::Retry(format!("OpenRouter images: {e}")))?;
+                if decoded.len() > MEDIA_MAX_BYTES {
                     return Err(permanent(format!("the image is over {MEDIA_MAX_BYTES} bytes")));
                 }
-                let mut out = self.store_media(run, index, path, image).await?;
+                let mut out = self.store_media(run, index, &image.path, decoded).await?;
                 out["mediaType"] = v["data"][0]["media_type"].clone();
                 Ok((out, v["usage"]["cost"].as_f64(), None))
             }
-            "ai.video.start" => {
-                let mut body = json!({ "model": args["model"].as_str().unwrap_or(VIDEO_MODEL), "prompt": args["prompt"] });
-                for k in ["duration", "resolution", "aspect_ratio"] {
-                    if !args[k].is_null() {
-                        body[k] = args[k].clone();
-                    }
+            Step::AiVideoStart(video) => {
+                let mut body = json!({ "model": model_of(step), "prompt": video.prompt });
+                if let Some(d) = video.duration {
+                    body["duration"] = json!(d);
+                }
+                if let Some(r) = &video.resolution {
+                    body["resolution"] = json!(r);
+                }
+                if let Some(a) = &video.aspect_ratio {
+                    body["aspect_ratio"] = json!(a);
                 }
                 let (status, bytes) = self.openrouter(key, Method::Post, &self.api("videos"), Some(&body)).await?;
                 if !matches!(status, 200 | 202) {
@@ -362,8 +366,7 @@ impl FragmentCell {
                 let id = v["id"].as_str().map(str::to_string);
                 Ok((json!({ "id": v["id"] }), None, id))
             }
-            "ai.video.poll" => {
-                let id = args["id"].as_str().ok_or_else(|| permanent("ai.video.poll needs the job id"))?;
+            Step::AiVideoPoll { id } => {
                 let (status, bytes) = self.openrouter(key, Method::Get, &self.api(&format!("videos/{id}")), None).await?;
                 if status != 200 {
                     return Err(failure(status, &bytes));
@@ -377,10 +380,9 @@ impl FragmentCell {
                 let answer = json!({ "status": v["status"], "ended": end.is_some(), "error": v["error"], "urls": v["unsigned_urls"], "usage": v["usage"] });
                 Ok((answer, None, None))
             }
-            "ai.video.save" => {
-                let (id, path) = (args["id"].as_str().unwrap_or(""), args["path"].as_str().unwrap_or(""));
-                let url = match args["url"].as_str() {
-                    Some(u) if u.starts_with(&self.cfg.openrouter_url) => u.to_string(),
+            Step::AiVideoSave { id, path, url } => {
+                let url = match url {
+                    Some(u) if u.starts_with(&self.cfg.openrouter_url) => u.clone(),
                     Some(u) => return Err(permanent(format!("the video is at {u}, outside OpenRouter"))),
                     None => self.api(&format!("videos/{id}/content?index=0")),
                 };
@@ -393,7 +395,7 @@ impl FragmentCell {
                 }
                 Ok((self.store_media(run, index, path, video).await?, None, None))
             }
-            other => Err(permanent(format!("unknown step kind {other:?}"))),
+            other => unreachable!("only AI steps are performed here, not {}", other.kind()),
         }
     }
 }
