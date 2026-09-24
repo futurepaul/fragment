@@ -26,7 +26,7 @@
 //!   GET  /calls/{id}?wait_ms=      a call's record
 //!   POST /calls/{id}/cancel        cancel a running call (a shell command's process tree is killed)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -62,6 +62,18 @@ pub struct ConnectArgs {
     /// The connect token the agent's owner was given (`fragment agent computer --connect`).
     pub token_file: PathBuf,
 }
+// The journal is bounded too. A replay comes within the hour: an agent
+// waits at most an hour on one call (agent/src/computer.rs), and a step
+// is replayed once the watchdog finds its driver gone. Keeping a finished
+// record a week keeps every replay answerable; keeping every record
+// forever kept every result on disk forever.
+const CALL_RETENTION_MS: u64 = 7 * 24 * 3600 * 1000;
+/// Finished records kept at most, the oldest pruned first.
+const CALLS_KEPT_MAX: usize = 10_000;
+const PRUNE_INTERVAL: Duration = Duration::from_secs(3600);
+/// A pid file younger than this may belong to a call that is just
+/// starting, so pruning leaves it.
+const PID_FILE_GRACE_MS: u64 = 60_000;
 
 pub struct ServeArgs {
     pub listen: SocketAddr,
@@ -132,6 +144,11 @@ fn interrupted_result() -> CallToolResult {
     )])
 }
 
+fn modified_ms(path: &Path) -> Result<u64> {
+    let modified = std::fs::metadata(path)?.modified()?;
+    Ok(modified.duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0))
+}
+
 struct App {
     work: PathBuf,
     state: PathBuf,
@@ -175,25 +192,16 @@ impl App {
     }
 
     /// Start the call, or attach to it. The same id never runs twice.
+    ///
+    /// The slot goes in first, under the lock, and the journal is read and
+    /// written once the lock is released: a call that arrives meanwhile
+    /// attaches to the slot, and no other call waits behind this one's
+    /// disk flush. Only a slot's own task writes its id's record, and a
+    /// slot leaves the map only after its record is written, so a missing
+    /// slot means the journal is final for that id.
     fn start_or_attach(self: &Arc<Self>, id: &str, name: &str, mut arguments: Option<JsonObject>, cwd: &str) -> Result<watch::Receiver<CallRecord>> {
         ensure!(valid_id(id), "call ids are 1-{ID_MAX} of [A-Za-z0-9_-]");
         ensure!(valid_cwd(cwd), "cwd is 1-{CWD_MAX} of [a-z0-9-]");
-        let mut calls = self.calls.lock().expect("calls lock");
-        if let Some(slot) = calls.get(id) {
-            return Ok(slot.record.subscribe());
-        }
-        if let Some(mut record) = self.read_call(id)? {
-            if record.status == CallStatus::Running {
-                // No live slot but a running record: this process died
-                // while the tool ran. Say so instead of running it again.
-                record.status = CallStatus::Interrupted;
-                record.finished_at = Some(now_ms());
-                record.result = Some(interrupted_result());
-                self.write_call(&record)?;
-            }
-            let (_, receiver) = watch::channel(record);
-            return Ok(receiver);
-        }
         let record = CallRecord {
             id: id.to_string(),
             name: name.to_string(),
@@ -204,17 +212,41 @@ impl App {
             runs: 1,
             result: None,
         };
-        self.write_call(&record)?;
+        let slot = {
+            let mut calls = self.calls.lock().expect("calls lock");
+            if let Some(slot) = calls.get(id) {
+                return Ok(slot.record.subscribe());
+            }
+            let (sender, _) = watch::channel(record.clone());
+            let slot = Arc::new(CallSlot { record: sender, cancel: CancellationToken::new() });
+            calls.insert(id.to_string(), slot.clone());
+            slot
+        };
+        let receiver = slot.record.subscribe();
+        match self.open_journal(&record) {
+            Ok(None) => {}
+            Ok(Some(answered)) => {
+                slot.record.send_replace(answered);
+                self.calls.lock().expect("calls lock").remove(id);
+                return Ok(receiver);
+            }
+            Err(error) => {
+                // Nothing ran and nothing was journaled: whoever attached
+                // hears so, and the next call with this id starts afresh.
+                let mut failed = record;
+                failed.status = CallStatus::Interrupted;
+                failed.finished_at = Some(now_ms());
+                failed.result = Some(CallToolResult::error(vec![ContentBlock::text(format!("the computer could not journal the call, so it did not run: {error:#}"))]));
+                slot.record.send_replace(failed);
+                self.calls.lock().expect("calls lock").remove(id);
+                return Err(error);
+            }
+        }
         if name == "shell" {
             tag_command(&mut arguments, &self.pid_path(id));
         }
-        let (sender, receiver) = watch::channel(record.clone());
-        let cancel = CancellationToken::new();
-        let slot = Arc::new(CallSlot { record: sender, cancel: cancel.clone() });
-        calls.insert(id.to_string(), slot.clone());
-        drop(calls);
-
         let app = self.clone();
+        let cancel = slot.cancel.clone();
         let (name, cwd, id) = (name.to_string(), cwd.to_string(), id.to_string());
         tokio::spawn(async move {
             let result = match (name.as_str(), app.developer(&cwd)) {
@@ -234,6 +266,79 @@ impl App {
             app.calls.lock().expect("calls lock").remove(&id);
         });
         Ok(receiver)
+    }
+
+    /// Reads the journal for a call whose slot this thread holds: the
+    /// record to answer instead of running (finished, or interrupted by the
+    /// death of the process that ran it), or `None` once `fresh` is written
+    /// as the new call's running record.
+    fn open_journal(&self, fresh: &CallRecord) -> Result<Option<CallRecord>> {
+        assert_eq!(fresh.status, CallStatus::Running, "a fresh record is running");
+        match self.read_call(&fresh.id)? {
+            Some(mut record) => {
+                if record.status == CallStatus::Running {
+                    // A running record with no live slot: the process that
+                    // ran it died. Say so instead of running it again, and
+                    // drop its pid file (no one can cancel it now).
+                    record.status = CallStatus::Interrupted;
+                    record.finished_at = Some(now_ms());
+                    record.result = Some(interrupted_result());
+                    self.write_call(&record)?;
+                    let _ = std::fs::remove_file(self.pid_path(&record.id));
+                }
+                assert_ne!(record.status, CallStatus::Running, "an answered record is finished");
+                Ok(Some(record))
+            }
+            None => {
+                self.write_call(fresh)?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Bounds the journal: deletes finished records older than
+    /// `retention_ms`, and the oldest finished ones past `kept_max`, and
+    /// pid files no live call owns. A running record (its process died;
+    /// the next attach answers it interrupted), a record with a live slot,
+    /// and an unreadable record are kept. Answers how many records went.
+    fn prune(&self, now: u64, retention_ms: u64, kept_max: usize) -> Result<usize> {
+        let live = || -> HashSet<String> { self.calls.lock().expect("calls lock").keys().cloned().collect() };
+        let at_start = live();
+        // (modified, id) of every settled record, oldest first; `.tmp`
+        // files are a write in flight or a crash's leftover, left alone
+        let mut records: Vec<(u64, String)> = Vec::new();
+        for entry in std::fs::read_dir(self.state.join("calls"))? {
+            let entry = entry?;
+            let file = entry.file_name().to_string_lossy().to_string();
+            let Some(id) = file.strip_suffix(".json").filter(|id| valid_id(id)) else { continue };
+            if !at_start.contains(id) {
+                records.push((modified_ms(&entry.path())?, id.to_string()));
+            }
+        }
+        records.sort();
+        let mut remaining = records.len();
+        let mut deleted = 0;
+        for (modified, id) in &records {
+            let expired = now.saturating_sub(*modified) > retention_ms;
+            if !expired && remaining <= kept_max {
+                break; // oldest first: everything after is newer, and within the cap
+            }
+            let finished = matches!(self.read_call(id), Ok(Some(r)) if r.status != CallStatus::Running);
+            if finished && !live().contains(id) {
+                std::fs::remove_file(self.call_path(id))?;
+                deleted += 1;
+                remaining -= 1;
+            }
+        }
+        for entry in std::fs::read_dir(self.state.join("pids"))? {
+            let entry = entry?;
+            let id = entry.file_name().to_string_lossy().to_string();
+            let settled = now.saturating_sub(modified_ms(&entry.path())?) > PID_FILE_GRACE_MS;
+            if settled && !live().contains(&id) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+        Ok(deleted)
     }
 }
 
@@ -628,8 +733,27 @@ pub fn serve(args: ServeArgs) -> Result<()> {
         calls: Mutex::new(HashMap::new()),
         developers: Mutex::new(HashMap::new()),
     });
+    let pruned = app.prune(now_ms(), CALL_RETENTION_MS, CALLS_KEPT_MAX)?;
+    if pruned > 0 {
+        eprintln!("pruned {pruned} finished call record(s) from the journal");
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
+        let pruner = app.clone();
+        // lives as long as the server; each pass is bounded by the journal
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(PRUNE_INTERVAL);
+            every.tick().await; // the first tick is now, and startup just pruned
+            loop {
+                every.tick().await;
+                let app = pruner.clone();
+                match tokio::task::spawn_blocking(move || app.prune(now_ms(), CALL_RETENTION_MS, CALLS_KEPT_MAX)).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => eprintln!("pruning the journal failed: {error:#}"),
+                    Err(error) => eprintln!("pruning the journal failed: {error}"),
+                }
+            }
+        });
         let listener = tokio::net::TcpListener::bind(args.listen).await.with_context(|| format!("binding {}", args.listen))?;
         eprintln!("fragment computer serving on {}", listener.local_addr()?);
         axum::serve(listener, router(app)).await?;
@@ -693,6 +817,140 @@ mod tests {
         assert_eq!(record.status, CallStatus::Done);
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(!alive(), "the command's child was killed");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn test_app() -> (PathBuf, Arc<App>) {
+        let dir = std::env::temp_dir().join(format!("fragment-computer-test-{}", hex::encode(rand::random::<[u8; 4]>())));
+        let app = Arc::new(App {
+            work: dir.join("work"),
+            state: dir.join("state"),
+            token: "x".repeat(32),
+            calls: Mutex::new(HashMap::new()),
+            developers: Mutex::new(HashMap::new()),
+        });
+        std::fs::create_dir_all(app.state.join("calls")).unwrap();
+        std::fs::create_dir_all(app.state.join("pids")).unwrap();
+        (dir, app)
+    }
+
+    fn record(id: &str, status: CallStatus) -> CallRecord {
+        let finished = status != CallStatus::Running;
+        CallRecord {
+            id: id.into(),
+            name: "shell".into(),
+            cwd: "work".into(),
+            status,
+            started_at: 1,
+            finished_at: finished.then_some(2),
+            runs: 1,
+            result: finished.then(|| CallToolResult::success(vec![ContentBlock::text(format!("the result of {id}"))])),
+        }
+    }
+
+    fn age(path: &Path, ms: u64) {
+        let at = SystemTime::now() - Duration::from_millis(ms);
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(at).unwrap();
+    }
+
+    const DAY_MS: u64 = 24 * 3600 * 1000;
+
+    /// Goal: pruning bounds the journal without losing what a replay
+    /// needs. Method: records of each kind, some older than the retention;
+    /// only the old finished ones go, and only pid files no call owns.
+    #[test]
+    fn pruning_keeps_running_and_recent_records() {
+        let (dir, app) = test_app();
+        for (id, status, days) in [
+            ("old-done", CallStatus::Done, 8),
+            ("old-interrupted", CallStatus::Interrupted, 8),
+            ("old-running", CallStatus::Running, 8),
+            ("old-live", CallStatus::Done, 8),
+            ("recent-done", CallStatus::Done, 6),
+            ("fresh-done", CallStatus::Done, 0),
+        ] {
+            app.write_call(&record(id, status)).unwrap();
+            age(&app.call_path(id), days * DAY_MS);
+        }
+        // a slot for old-live: a call re-attached to its old record right now
+        let (sender, _) = watch::channel(record("old-live", CallStatus::Running));
+        app.calls.lock().unwrap().insert("old-live".into(), Arc::new(CallSlot { record: sender, cancel: CancellationToken::new() }));
+        for (id, ms) in [("old-done", DAY_MS), ("old-live", DAY_MS), ("just-started", 0)] {
+            std::fs::write(app.pid_path(id), "123").unwrap();
+            age(&app.pid_path(id), ms);
+        }
+        std::fs::write(app.state.join("calls").join("half-written.tmp"), "{").unwrap();
+
+        let deleted = app.prune(now_ms(), 7 * DAY_MS, 100).unwrap();
+        assert_eq!(deleted, 2);
+        let kept = |id: &str| app.call_path(id).exists();
+        assert!(!kept("old-done") && !kept("old-interrupted"), "finished records past the retention go");
+        assert!(kept("old-running"), "a running record stays for its next attach to answer");
+        assert!(kept("old-live"), "a record with a live slot stays");
+        assert!(kept("recent-done") && kept("fresh-done"), "records within the retention stay");
+        assert!(app.state.join("calls").join("half-written.tmp").exists(), "a write in flight is not a record");
+        assert!(!app.pid_path("old-done").exists(), "a pid file no call owns goes");
+        assert!(app.pid_path("old-live").exists(), "a live call's pid file stays");
+        assert!(app.pid_path("just-started").exists(), "a pid file a starting call may own stays");
+        assert_eq!(app.prune(now_ms(), 7 * DAY_MS, 100).unwrap(), 0, "a second pass finds nothing");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pruning_keeps_at_most_the_newest_finished_records() {
+        let (dir, app) = test_app();
+        for i in 0..5u64 {
+            let id = format!("done-{i}");
+            app.write_call(&record(&id, CallStatus::Done)).unwrap();
+            age(&app.call_path(&id), (10 - i) * 60_000); // done-4 is the newest
+        }
+        app.write_call(&record("running", CallStatus::Running)).unwrap();
+        age(&app.call_path("running"), 3_600_000);
+        assert_eq!(app.prune(now_ms(), 7 * DAY_MS, 3).unwrap(), 3);
+        let left: Vec<bool> = (0..5).map(|i| app.call_path(&format!("done-{i}")).exists()).collect();
+        assert_eq!(left, [false, false, false, true, true], "the oldest finished go first");
+        assert!(app.call_path("running").exists(), "never a running record");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A replay of a finished call answers its record and runs nothing; a
+    /// call whose process died comes back interrupted, its pid file gone;
+    /// neither leaves a slot behind.
+    #[tokio::test]
+    async fn the_journal_answers_replays_without_running() {
+        let (dir, app) = test_app();
+        let marker = app.work.join("work").join("ran.txt");
+        let arguments = || serde_json::from_value(json!({ "command": format!("touch '{}'", marker.display()) })).ok();
+        app.write_call(&record("tc-done", CallStatus::Done)).unwrap();
+        let mut receiver = app.start_or_attach("tc-done", "shell", arguments(), "work").unwrap();
+        let answered = wait_finished(&mut receiver, Duration::from_secs(5)).await;
+        assert_eq!(answered.status, CallStatus::Done);
+        assert_eq!(serde_json::to_value(&answered.result).unwrap(), serde_json::to_value(&record("tc-done", CallStatus::Done).result).unwrap());
+        assert!(!app.calls.lock().unwrap().contains_key("tc-done"));
+
+        app.write_call(&record("tc-died", CallStatus::Running)).unwrap();
+        std::fs::write(app.pid_path("tc-died"), "123").unwrap();
+        let mut receiver = app.start_or_attach("tc-died", "shell", arguments(), "work").unwrap();
+        let answered = wait_finished(&mut receiver, Duration::from_secs(5)).await;
+        assert_eq!(answered.status, CallStatus::Interrupted);
+        assert_eq!(app.read_call("tc-died").unwrap().unwrap().status, CallStatus::Interrupted, "journaled as interrupted");
+        assert!(!app.pid_path("tc-died").exists(), "the dead call's pid file is gone");
+        assert!(!app.calls.lock().unwrap().contains_key("tc-died"));
+        assert!(!marker.exists(), "neither ran the command");
+
+        // a new call runs once, journaled as done; its replay is the record
+        let mut receiver = app.start_or_attach("tc-new", "shell", arguments(), "work").unwrap();
+        let done = wait_finished(&mut receiver, Duration::from_secs(10)).await;
+        assert_eq!((done.status, done.runs), (CallStatus::Done, 1));
+        assert!(marker.exists(), "the new call ran");
+        std::fs::remove_file(&marker).unwrap();
+        let t0 = std::time::Instant::now();
+        while app.calls.lock().unwrap().contains_key("tc-new") && t0.elapsed() < Duration::from_secs(5) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let mut receiver = app.start_or_attach("tc-new", "shell", arguments(), "work").unwrap();
+        assert_eq!(wait_finished(&mut receiver, Duration::from_secs(5)).await.status, CallStatus::Done);
+        assert!(!marker.exists(), "the replay did not run it again");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -573,5 +573,8 @@ but `/health` takes `authorization: Bearer <its token>` (the file
 The agent names a call `tc-<40 hex of SHA-256 of the tool-call id>` and
 sends the attached `cwd` (`[a-z0-9-]{1,64}`, a directory under `--work`).
 Records live under `--state`: a record still `running` when the computer
-restarts answers `interrupted` and does not run again. While a computer is
-attached, a turn offers its tools beside the fragments' operations.
+restarts answers `interrupted` and does not run again. A finished record
+is kept a week (a replay comes within the hour), and at most 10,000 of
+them, the oldest pruned first, at start and hourly; after that, the same
+id would run again. While a computer is attached, a turn offers its tools
+beside the fragments' operations.
