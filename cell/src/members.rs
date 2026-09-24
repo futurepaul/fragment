@@ -161,6 +161,33 @@ impl FragmentCell {
         json_response(&json!({ "members": members }))
     }
 
+    /// A new member needs room under `MEMBERS_MAX`; a role change does not.
+    fn check_room(&self, current: Option<Role>) -> CellResult<()> {
+        if current.is_none() && self.count("SELECT COUNT(*) AS n FROM members")? >= limits::MEMBERS_MAX as u64 {
+            return Err(CellError::invalid(format!("a fragment has at most {} members", limits::MEMBERS_MAX)));
+        }
+        Ok(())
+    }
+
+    /// A test hook (`ops::test_hook`): placeholder members until there are
+    /// `fill`, so the e2e reaches the member cap without a thousand sign-ins.
+    pub(crate) fn fill_members(&self, fill: u64) -> CellResult<u64> {
+        if fill > limits::MEMBERS_MAX as u64 {
+            return Err(CellError::invalid(format!("fill is at most {}", limits::MEMBERS_MAX)));
+        }
+        let have = self.count("SELECT COUNT(*) AS n FROM members")?;
+        // Bounded by MEMBERS_MAX, just checked.
+        for _ in have..fill {
+            self.exec(
+                "INSERT INTO members (principal, role, added_by, added_at, kind) VALUES (?, 'viewer', 'test', ?, 'person')",
+                vec![format!("id:e2e-filler-{}", js::random_hex::<8>()).into(), SqlStorageValue::Integer(js::now_ms())],
+            )?;
+        }
+        let now = self.count("SELECT COUNT(*) AS n FROM members")?;
+        assert!(now >= fill && now <= limits::MEMBERS_MAX as u64, "filled to the count asked, within the cap");
+        Ok(now)
+    }
+
     pub(crate) async fn set_member(&self, caller: &Caller, who: &str, body: SetRole) -> CellResult<Response> {
         let actor = self.actor_role(caller)?;
         // only the owner learns whom a key names
@@ -173,9 +200,7 @@ impl FragmentCell {
         if let Some(why) = access::refuse_set_role(actor, current, body.role) {
             return Err(refusal(true, why));
         }
-        if current.is_none() && self.count("SELECT COUNT(*) AS n FROM members")? >= limits::MEMBERS_MAX as u64 {
-            return Err(CellError::invalid(format!("a fragment has at most {} members", limits::MEMBERS_MAX)));
-        }
+        self.check_room(current)?;
         let by = self.caller_id(caller)?;
         self.exec(
             "INSERT INTO members (principal, role, added_by, added_at, kind, owner) VALUES (?, ?, ?, ?, ?, ?)
@@ -316,11 +341,14 @@ impl FragmentCell {
         let row = rows.first().ok_or_else(|| CellError::new(ErrorCode::NotFound, "no such invite (it may have expired or been used)"))?;
         let id = row["id"].as_str().unwrap_or("").to_string();
         let role = row["role"].as_str().and_then(Role::parse).ok_or_else(|| CellError::host("invites.role"))?;
-        if let Some(current) = self.member_role(&who)? {
+        let current = self.member_role(&who)?;
+        if let Some(current) = current {
             if current >= role {
                 return json_response(&json!({ "name": name, "role": current, "joined": false }));
             }
         }
+        // A full fragment refuses before the invite spends a use.
+        self.check_room(current)?;
         self.exec(
             "INSERT INTO members (principal, role, added_by, added_at, kind, owner) VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT (principal) DO UPDATE SET role = excluded.role",
