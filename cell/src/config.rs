@@ -109,6 +109,8 @@ impl Config {
         let signins_pending_max = var(env, "FRAGMENT_SIGNINS_PENDING_MAX")
             .and_then(|s| s.parse::<u64>().ok())
             .filter(|n| *n >= 1)
+            // the registry counts rows as i64; a larger setting means "no cap to speak of"
+            .map(|n| n.min(i64::MAX as u64))
             .unwrap_or(fragment_proto::limits::SIGNINS_PENDING_MAX_DEFAULT);
         let test_hooks = var(env, "FRAGMENT_TEST_HOOKS").as_deref() == Some("allow");
         let deploy_id = var(env, "FRAGMENT_DEPLOY_ID").unwrap_or_else(|| "dev".into());
