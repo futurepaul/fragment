@@ -63,6 +63,7 @@ mod subscriptions;
 
 use fragment_core::npub;
 use fragment_proto::{limits, valid_fragment_name, AddKey, CreateFragment, ErrorBody, ErrorCode, IdentityKind, Register};
+use futures_util::TryStreamExt;
 use serde_json::{json, Value};
 use worker::*;
 
@@ -102,15 +103,28 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     }
 }
 
-pub(crate) async fn read_body(req: &mut Request) -> CellResult<Vec<u8>> {
-    let declared: usize = req.headers().get("content-length")?.and_then(|l| l.parse().ok()).unwrap_or(0);
-    if declared > limits::BODY_MAX_BYTES {
-        return Err(CellError::too_large("request body", declared, limits::BODY_MAX_BYTES));
+/// A request body of at most `max` bytes, read as it arrives: a declared
+/// length over `max` is refused unread, and a body without one (chunked)
+/// is refused at the chunk that crosses `max`, so an upload never fills
+/// the router's memory before it is measured.
+pub(crate) async fn read_body(req: &mut Request, max: usize) -> CellResult<Vec<u8>> {
+    let declared: Option<usize> = req.headers().get("content-length")?.and_then(|l| l.parse().ok());
+    if let Some(n) = declared.filter(|n| *n > max) {
+        return Err(CellError::too_large("request body", n, max));
     }
-    let body = req.bytes().await?;
-    if body.len() > limits::BODY_MAX_BYTES {
-        return Err(CellError::too_large("request body", body.len(), limits::BODY_MAX_BYTES));
+    if req.inner().body().is_none() {
+        return Ok(vec![]);
     }
+    let mut stream = req.stream()?;
+    let mut body = Vec::with_capacity(declared.unwrap_or(0));
+    // bounded: each chunk is counted before it is kept, and past `max` the read stops
+    while let Some(chunk) = stream.try_next().await? {
+        if chunk.len() > max - body.len() {
+            return Err(CellError::too_large("request body", body.len() + chunk.len(), max));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    assert!(body.len() <= max, "a body read stays within its limit");
     Ok(body)
 }
 
@@ -319,7 +333,7 @@ fn billing_org(who: &Signer) -> CellResult<String> {
 
 /// `/api/budget…`: a billing org's month (ledger.rs).
 async fn budget_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest: &[&str]) -> CellResult<Response> {
-    let body = read_body(&mut req).await?;
+    let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     let who = signer(env, &req, url, &body).await?;
     match (req.method(), rest) {
         (Method::Get, []) => json_answer(&ledger::ask(env, &billing_org(&who)?, Method::Get, "/status", None).await?),
@@ -357,7 +371,7 @@ async fn budget_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
 
 /// `/api/identities…`: the registry's public face.
 async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> CellResult<Response> {
-    let body = read_body(&mut req).await?;
+    let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     let method = req.method();
     if let (Method::Post, []) = (&method, rest) {
         let reg: Register = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
@@ -501,7 +515,7 @@ async fn serve(mut req: Request, env: &Env, url: &Url, name: &str, rest: &str, m
     if auth::is_fragment_route(rest) {
         return auth::fragment(&req, env, &Config::from_env(env), url, name, rest, mode == "path").await;
     }
-    let body = read_body(&mut req).await?;
+    let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     // a signature names its key's identity; a browser, its session here
     let principal = match signer_if_signed(env, &req, url, &body).await? {
         Some(s) => Some(s),
@@ -544,7 +558,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             Ok(resp)
         }
         (Method::Post, ["api", "fragments"]) => {
-            let body = read_body(&mut req).await?;
+            let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let create: CreateFragment = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let principal = signer(env, &req, &url, &body).await?;
             create_fragment(env, &cfg, &url, create, principal).await
@@ -564,7 +578,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             budget_route(req, env, &cfg, &url, &rest).await
         }
         (Method::Post, ["api", "test", "ledger"]) if test_hooks(env) => {
-            let body = read_body(&mut req).await?;
+            let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let org = v["identity"].as_str().and_then(ledger::org_of).ok_or_else(|| CellError::invalid("name an identity"))?;
             json_answer(&ledger::ask(env, &org, Method::Post, "/test", Some(&json!({ "offsetMs": v["offsetMs"] }))).await?)
@@ -579,7 +593,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
         }
         (Method::Get, ["api", "test", "env"]) if test_hooks(env) => json_answer(&Value::Object(js::env_vars(env.as_ref())?)),
         (Method::Post, ["api", "test", hook @ ("keys" | "fragment")]) if test_hooks(env) => {
-            let body = read_body(&mut req).await?;
+            let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let name = v["fragment"].as_str().unwrap_or("");
             check_name(name)?;
@@ -592,7 +606,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             Ok(env.durable_object("FRAGMENT")?.get_by_name(name)?.fetch_with_request(inner).await?)
         }
         (Method::Post, ["api", "test", "registry"]) if test_hooks(env) => {
-            let body = read_body(&mut req).await?;
+            let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             json_answer(&ask_registry(env, "/test", &v).await?)
         }
@@ -621,7 +635,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
                 (_, [] | [""]) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
                 _ => format!("/api/{}", rest.join("/")),
             };
-            let body = read_body(&mut req).await?;
+            let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             // code.storage signs its deliveries with the fragment's webhook
             // secret, and the inbox takes its token, instead of a signature.
             let mut extra = vec![];

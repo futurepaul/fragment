@@ -30,7 +30,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, url: &Url, segments: &[&s
     if let (Method::Post, ["api", "a", _, "inbox", _] | ["api", "a", _, "computer", "poll" | "answer"]) = (req.method(), segments) {
         return js::service_fetch(env.as_ref(), "AGENTS", req).await;
     }
-    let body = read_body(&mut req).await?;
+    let body = read_body(&mut req, fragment_proto::limits::BODY_MAX_BYTES).await?;
     let who = signer(env, &req, url, &body).await?;
     match (req.method(), segments) {
         (Method::Post, ["api", "agents"]) => {

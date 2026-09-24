@@ -3916,6 +3916,7 @@ dependencies = [
  "anyhow",
  "fragment-devstack",
  "fragment-fakes",
+ "fragment-proto",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

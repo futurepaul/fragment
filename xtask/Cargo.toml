@@ -12,3 +12,4 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 fragment-devstack = { path = "../crates/devstack" }
 fragment-fakes = { path = "../crates/fakes" }
+fragment-proto = { path = "../crates/proto" }

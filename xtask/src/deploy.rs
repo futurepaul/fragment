@@ -385,6 +385,10 @@ kill_timeout = "60s"
   CELLD_FACET_MAX_BYTES = "{facet_max}"
   CELLD_DYNAMIC_LOCKDOWN = "1"
   CELLD_INTERNAL_PEER_ONLY = "1"
+  # the largest body any route takes (a blob, streamed through the router;
+  # every other body the router reads is refused past 2 MiB as it arrives),
+  # instead of celld's default of 1 GiB
+  CELLD_MAX_REQUEST_BODY_BYTES = "{body_max}"
   # KEYS: the code.storage org it signs for (its key is a Fly secret), and
   # where it asks Fly for each fragment host's certificate (the app-scoped
   # token is a Fly secret)
@@ -435,6 +439,7 @@ kill_timeout = "60s"
         memory = f.memory,
         facet_max = devstack::FACET_MAX_BYTES,
         suffix = suffix,
+        body_max = fragment_proto::limits::BLOB_MAX_BYTES,
     )
 }
 
@@ -554,7 +559,8 @@ mod tests {
         assert!(fleet.node_secrets.keys().all(|k| k.starts_with("FRAGMENT_KEYS_")));
         assert!(fleet.vars.keys().chain(fleet.var_files.keys()).all(|k| !RETIRED_SECRET_VARS.contains(&k.as_str())));
         let toml = fly_toml(&fleet);
-        for line in ["CELLD_INTERNAL_PEER_ONLY = \"1\"", "CELLD_DYNAMIC_LOCKDOWN = \"1\"", "FRAGMENT_KEYS_CODESTORAGE_ORG = \"finite\""] {
+        let body_max = format!("CELLD_MAX_REQUEST_BODY_BYTES = \"{}\"", fragment_proto::limits::BLOB_MAX_BYTES);
+        for line in ["CELLD_INTERNAL_PEER_ONLY = \"1\"", "CELLD_DYNAMIC_LOCKDOWN = \"1\"", &body_max, "FRAGMENT_KEYS_CODESTORAGE_ORG = \"finite\""] {
             assert!(toml.contains(line), "{line}");
         }
     }

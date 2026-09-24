@@ -51,7 +51,9 @@ And the fork's settings the fleet turns on: `CELLD_FACET_MAX_BYTES`
 (the app database's hard stop, 20 MiB), `CELLD_DYNAMIC_LOCKDOWN=1`
 (loaded workers without `eval` or `Atomics.wait`),
 `CELLD_INTERNAL_PEER_ONLY=1` (the internal listener serves only
-fleet-signed peers), with `CELLD_EGRESS_PUBLIC_ONLY=1` from phase 3.
+fleet-signed peers), with `CELLD_EGRESS_PUBLIC_ONLY=1` from phase 3, and
+`CELLD_MAX_REQUEST_BODY_BYTES` (256 MiB, the largest body any route
+takes: a blob; celld's default is 1 GiB).
 
 Bindings (`cell/wrangler.jsonc`): `FRAGMENT` and `PRINCIPAL` (Durable
 Objects), `LOADER` (the Worker Loader), `JOBS` (the Workflow that runs
@@ -79,7 +81,10 @@ request URL>]`, `["method", <the method>]`, and, when the body is not
 empty, `["payload", <hex SHA-256 of the body>]`; `created_at` within 60
 seconds of the cell's clock; `id` and a BIP-340 `sig` as NIP-01 defines.
 A blob upload is signed without `payload`: its URL names the bytes' hash,
-which the cell checks as they arrive.
+which the cell checks as they arrive. Every other body the router reads
+is at most 2 MiB, measured as it arrives: a longer declared
+`content-length`, or a chunked body that runs past it, is 413 before
+anything is authenticated.
 
 Roles, weakest first: `public`, `viewer`, `editor`, `owner`. A member's
 role is their membership. Otherwise visibility decides: on a `public`
@@ -571,7 +576,9 @@ signed by the agent). Every person has their own agent,
 template has it as an editor that listens. Its variables: `FRAGMENT_API`
 (the platform it acts on), `OPENROUTER_API_URL` (its model service),
 `AGENT_URL` (the base of the inboxes it hands out: the platform's),
-`AGENT_TEST_HOOKS=allow` (dev and e2e only).
+`AGENT_TEST_HOOKS=allow` (dev and e2e only). The script reads a request
+body of at most 64 KiB, measured as it arrives (413 before anything
+else).
 
 | method & path | who | body → answer |
 | --- | --- | --- |
