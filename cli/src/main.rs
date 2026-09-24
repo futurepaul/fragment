@@ -87,7 +87,7 @@ enum Cmd {
         /// Show events after this event ID
         #[arg(long, default_value = "0", conflicts_with = "tail")]
         since: u64,
-        /// Show only the last N events
+        /// Show only the newest N events (at most 500)
         #[arg(long)]
         tail: Option<u64>,
     },
@@ -983,14 +983,15 @@ fn run(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         Cmd::Events { name, since, tail } => {
-            let v = c.call(c.get(&format!("/api/f/{name}/events?since={since}"))?)?;
-            let mut evs = v["events"].as_array().cloned().unwrap_or_default();
-            if let Some(n) = tail {
-                let n = n as usize;
-                if evs.len() > n {
-                    evs = evs.split_off(evs.len() - n);
-                }
-            }
+            // the host picks the newest for --tail: a page read from the
+            // start and cut here showed the oldest events once the log
+            // outgrew one page
+            let query = match tail {
+                Some(n) => format!("tail={n}"),
+                None => format!("since={since}"),
+            };
+            let v = c.call(c.get(&format!("/api/f/{name}/events?{query}"))?)?;
+            let evs = v["events"].as_array().cloned().unwrap_or_default();
             if j {
                 ok_exit(&json!({ "events": evs }));
             }

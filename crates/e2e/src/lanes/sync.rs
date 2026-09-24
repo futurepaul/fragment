@@ -1,13 +1,14 @@
 //! Folder sync through the CLI against the cell and code.storage:
-//! conflicts, modes, verify, the mirror source, the mass-deletion guard,
-//! chunked large files, and continuous sync with the change feed.
+//! conflicts, a commit whose answer is lost, modes, verify, the mirror
+//! source, the mass-deletion guard, chunked large files, continuous sync
+//! with the change feed, and the event log's tail.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::Result;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::api::Api;
 use crate::Suite;
@@ -66,7 +67,7 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{:?}", s.fake.paths(&repo, "main")),
     );
     let again = s.cli_json(api, &home, &["sync", &name, "--dir", &dir_of(&dir), "--json"])?;
-    s.ok("the next pass has nothing to do", again["pushed"] == serde_json::json!([]) && again["conflicts"] == serde_json::json!([]), &again);
+    s.ok("the next pass has nothing to do", again["pushed"] == json!([]) && again["conflicts"] == json!([]), &again);
 
     // pull withholds deletions; --prune applies them
     let (name, c) = create(s, "sync-mode")?;
@@ -181,5 +182,32 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a second watcher on the folder is refused", exited && !status.success() && stderr.contains("another fragment sync"), &stderr);
     let _ = child.kill();
     let _ = child.wait();
+
+    // the log a failed sync points to: `fragment events --tail` shows the
+    // newest events once the log outgrows a page (it showed the oldest
+    // page's last few)
+    let (name, _) = create(s, "sync-events")?;
+    let keys = s.cli_keys(&home).expect("the CLI logged in");
+    let page = fragment_proto::limits::EVENTS_PAGE;
+    let rotations = page + 100;
+    let mut refused = 0;
+    for _ in 0..rotations {
+        let r = api.signed(&keys, "POST", &format!("/api/f/{name}/rotate"), Some(&json!({ "scopes": ["inbox"] })))?;
+        refused += usize::from(r.status != 200);
+    }
+    let channels = api.signed(&keys, "GET", &format!("/api/f/{name}/channels"), None)?;
+    let newest = channels.body["channels"].as_array().and_then(|a| a.iter().find(|c| c["name"] == "events")).and_then(|c| c["seq"].as_i64()).unwrap_or(0);
+    let tail = s.cli_json(api, &home, &["events", &name, "--tail", "5", "--json"])?;
+    let ids: Vec<i64> = tail["events"].as_array().into_iter().flatten().filter_map(|e| e["id"].as_i64()).collect();
+    s.ok(
+        &format!("with {} events, --tail 5 shows the newest five, oldest first", rotations + 1),
+        refused == 0 && newest > page as i64 && ids == (newest - 4..=newest).collect::<Vec<_>>(),
+        json!({ "refused": refused, "newest": newest, "ids": ids }),
+    );
+    let bad: Vec<u16> = ["tail=0".to_string(), format!("tail={}", page + 1), "tail=x".into(), "tail=5&since=3".into()]
+        .iter()
+        .map(|q| api.signed(&keys, "GET", &format!("/api/f/{name}/events?{q}"), None).map(|r| r.status).unwrap_or(0))
+        .collect();
+    s.ok("a tail outside 1-500, or beside since, is refused", bad == [400, 400, 400, 400], json!(bad));
     Ok(())
 }
