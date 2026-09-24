@@ -294,6 +294,7 @@ fn deploy_cell(name: &str, fleet: &Fleet) -> Result<()> {
     vars.insert("FRAGMENT_DEPLOY_ID".into(), id.clone());
     secrets.push(bucket_keys(fleet)?.1);
 
+    deploy_agents(name, fleet, &secrets)?;
     let stage = devstack::repo_root().join("target/fleets").join(name).join("cell");
     let _ = std::fs::remove_dir_all(&stage);
     devstack::stage_project(&stage)?;
@@ -308,6 +309,28 @@ fn deploy_cell(name: &str, fleet: &Fleet) -> Result<()> {
     std::fs::remove_dir_all(&stage).with_context(|| format!("remove the staged project {}", stage.display()))?;
     result?;
     wait_for(&format!("{}/healthz", fleet.url.trim_end_matches('/')), &id)
+}
+
+/// The agents' script, published under its own name only (`celld deploy
+/// --named`): the cell's `AGENTS` binding loads it, and the fleet's
+/// application stays the cell, whose deploy right after makes the nodes
+/// load both. Its API and inboxes are the platform's own URL.
+fn deploy_agents(name: &str, fleet: &Fleet, secrets: &[String]) -> Result<()> {
+    let url = fleet.url.trim_end_matches('/').to_string();
+    let vars = BTreeMap::from([("FRAGMENT_API".to_string(), url.clone()), ("AGENT_URL".to_string(), url)]);
+    check_vars(&vars, secrets)?;
+    let stage = devstack::repo_root().join("target/fleets").join(name).join("agent");
+    let _ = std::fs::remove_dir_all(&stage);
+    devstack::stage_agent(&stage)?;
+    let result = (|| -> Result<()> {
+        let config = stage.join("wrangler.jsonc");
+        std::fs::write(&config, with_vars(&std::fs::read_to_string(&config)?, &vars)?)?;
+        println!("publishing the agents' script to {name} ({}), under its own name", fleet.bucket.url);
+        let stage = stage.to_str().context("a UTF-8 path")?;
+        run_redacted(celld(fleet, &["deploy", "--named", stage])?, secrets)
+    })();
+    std::fs::remove_dir_all(&stage).with_context(|| format!("remove the staged project {}", stage.display()))?;
+    result
 }
 
 /// Polls `url` until `ADOPT_STREAK` answers in a row carry deployment `id`.

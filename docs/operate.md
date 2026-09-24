@@ -20,6 +20,13 @@ paths of files that hold them, all under `~/.config/finite-next/secrets/`).
   off the private network, `CELLD_INTERNAL_PEER_ONLY=1` has the internal
   listener serve only fleet-signed peers, `CELLD_DYNAMIC_LOCKDOWN=1` and
   `CELLD_FACET_MAX_BYTES` bound what an app can do (docs/hardening.md).
+- **Two scripts, one application:** the cell (`fragment`, the fleet's
+  application: the fleet-wide pointer names it) and the agents'
+  (`fragment-agent`, from `agent/`), which the cell's `AGENTS` binding
+  loads from its own pointer. It has no ingress: the router hands it
+  `/api/agents` and `/api/a/*`. `cargo xtask deploy <fleet>` publishes
+  it first with `celld deploy --named` (the fork's), then the cell,
+  whose adoption loads both.
 - **The fleet's secrets** (the host secret, the code.storage org key,
   the WorkOS API key, the OpenRouter management key) are Fly secrets on
   the app, `FRAGMENT_KEYS_*`: the node's environment, read only by `KEYS`.
@@ -41,7 +48,7 @@ paths of files that hold them, all under `~/.config/finite-next/secrets/`).
 ## Everyday commands
 
 ```
-cargo xtask deploy fragment-club            # ship the cell (cell/): build, render vars, celld deploy, wait for adoption
+cargo xtask deploy fragment-club            # ship the agents' script (--named) and the cell: build, render vars, celld deploy, wait for adoption
 cargo xtask deploy fragment-club --nodes    # ship the node image (celld fork, fragment-node): local build, rolling update
 cargo xtask e2e --fleet fragment-club       # the hosted e2e (spends a few cents on OpenRouter)
 cargo xtask fleet fragment-club diagnose    # leases and the storage contract (peers are unreachable from outside Fly)
