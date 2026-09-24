@@ -288,6 +288,17 @@ fn todo(h: &mut Hosted) -> Result<()> {
     let wait = Duration::from_secs(20);
     let a = chrome.open(&share)?;
     h.ok("the page connects over wss", chrome.until(&a, "document.getElementById('here')?.textContent === 'just you here'", wait), "");
+    // Fly spreads connections over the fleet's machines, and a fragment's
+    // cell lives on one: a socket that lands on another is tunneled there
+    // (ten in a row reach both machines, but for a one-in-512 chance)
+    let sockets = chrome.eval(
+        &a,
+        "(async () => { let ok = 0; for (let i = 0; i < 10; i++) { ok += await new Promise((r) => { \
+           const w = new WebSocket(location.origin.replace('https', 'wss') + '/__live'); \
+           const t = setTimeout(() => r(0), 8000); w.onopen = () => { clearTimeout(t); w.close(); r(1); }; \
+           w.onerror = () => { clearTimeout(t); r(0); }; }); } return ok; })()",
+    )?;
+    h.ok("ten live sockets in a row all connect, whichever machine each lands on", sockets == 10, &sockets);
     let b = chrome.open(&share)?;
     h.ok("a second page sees the first", chrome.until(&a, "document.getElementById('here').textContent === 'you and 1 other here'", wait), "");
     chrome.eval(&a, "document.getElementById('text').value = 'milk'; document.getElementById('add').requestSubmit(); true")?;
