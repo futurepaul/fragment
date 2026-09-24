@@ -18,6 +18,8 @@ use crate::fragment::{json_response, Caller, FragmentCell};
 /// The subscriptions one fragment holds, and a URL's length.
 const SUBS_MAX: u64 = 32;
 const SUB_URL_MAX_BYTES: usize = 1024;
+/// Test fleets: how many more outbox writes fail (`fail-outbox`).
+pub const TEST_OUTBOX_FAILURES_KEY: &str = "test_fail_outbox";
 
 impl FragmentCell {
     /// The subscriber: a member whose role may read `channel`.
@@ -98,11 +100,40 @@ impl FragmentCell {
     /// caller appends, then calls this, with no await between; channels.rs
     /// `published`). Answers whether there are any to drain.
     pub(crate) fn outbox_record(&self, record: &ChannelRecord) -> CellResult<bool> {
+        self.test_outbox_failure()?;
         let rows = self.rows(
             "INSERT INTO delivery_outbox (kind, sub, channel, seq, next_at) SELECT 'record', id, channel, ?, ? FROM subs WHERE channel = ? RETURNING id",
             vec![SqlStorageValue::Integer(record.seq), SqlStorageValue::Integer(crate::js::now_ms()), record.channel.as_str().into()],
         )?;
+        self.exec(
+            "UPDATE records SET outboxed = 1 WHERE channel = ? AND seq = ?",
+            vec![record.channel.as_str().into(), SqlStorageValue::Integer(record.seq)],
+        )?;
         Ok(!rows.is_empty())
+    }
+
+    /// Whether a record's deliveries were written (`outbox_record`).
+    pub(crate) fn outboxed(&self, record: &ChannelRecord) -> CellResult<bool> {
+        let rows = self.rows(
+            "SELECT outboxed FROM records WHERE channel = ? AND seq = ?",
+            vec![record.channel.as_str().into(), SqlStorageValue::Integer(record.seq)],
+        )?;
+        let row = rows.first().ok_or_else(|| CellError::host(format!("record {} of {:?} is gone", record.seq, record.channel)))?;
+        Ok(row["outboxed"].as_i64().expect("records.outboxed is INTEGER NOT NULL") != 0)
+    }
+
+    /// Test fleets: the next `times` outbox writes fail before they write
+    /// (`/api/test/fragment` `fail-outbox`), after their record's append.
+    fn test_outbox_failure(&self) -> CellResult<()> {
+        if !self.cfg.test_hooks {
+            return Ok(());
+        }
+        let left: u64 = self.meta(TEST_OUTBOX_FAILURES_KEY)?.and_then(|n| n.parse().ok()).unwrap_or(0);
+        if left == 0 {
+            return Ok(());
+        }
+        self.set_meta(TEST_OUTBOX_FAILURES_KEY, &(left - 1).to_string())?;
+        Err(CellError::host("the record's outbox write failed after its append (a test hook)"))
     }
 
     /// The delivery of record `seq` of `channel` to subscription `sub`, or

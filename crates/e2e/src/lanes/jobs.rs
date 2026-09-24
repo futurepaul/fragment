@@ -424,6 +424,34 @@ pub fn triggers(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{r}; records, tick runs, boom runs: {after:?}"),
     );
 
+    // an outbox write that fails after its record's append: the call fails
+    // visibly and nothing is sent; the same call again writes the record's
+    // deliveries (the record was never marked outboxed), and sends it once
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": fails, "op": "fail-outbox", "times": 1 })))?;
+    s.ok("(the test fleet fails the fragment's next outbox write)", r.status == 200, &r);
+    let sent_before = hook.hits("/data").len();
+    let r = api.op(&owner, &fails, "raise", "outbox", json!({}))?;
+    let appended = records(api, &owner, &fails, "alarms").len();
+    s.ok(
+        "an outbox write that fails after the append fails the call, and the record stands",
+        r.status >= 500 && appended == 2,
+        format!("{r}; records: {appended}"),
+    );
+    let r = api.op(&owner, &fails, "raise", "outbox", json!({}))?;
+    let delivered = s.eventually(Duration::from_secs(10), || hook.hits("/data").len() > sent_before);
+    s.ok(
+        "a retry writes the record's delivery (it was never marked outboxed) and sends it once",
+        r.status == 200 && delivered && records(api, &owner, &fails, "alarms").len() == 2,
+        format!("{r}; deliveries since: {}", hook.hits("/data").len() - sent_before),
+    );
+    let r = api.op(&owner, &fails, "raise", "outbox", json!({}))?;
+    std::thread::sleep(Duration::from_millis(1500));
+    s.ok(
+        "and a third call writes nothing again",
+        r.status == 200 && hook.hits("/data").len() == sent_before + 1,
+        format!("{r}; deliveries since: {}", hook.hits("/data").len() - sent_before),
+    );
+
     // the rate ceiling: an operation's triggers start at most 120 runs an hour
     let (busy, busy_c) = jobs_fragment(s, api, &owner, "ceiling", |m| m["triggers"] = json!([{ "channel": "alarms", "run": "tick" }]))?;
     for i in 0..121 {

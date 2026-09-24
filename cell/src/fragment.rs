@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS secrets (
   name TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_by TEXT NOT NULL, set_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS records (
   channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, principal TEXT NOT NULL, kind TEXT NOT NULL,
-  body TEXT NOT NULL, op TEXT, idx INTEGER, PRIMARY KEY (channel, seq));
+  body TEXT NOT NULL, op TEXT, idx INTEGER, outboxed INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (channel, seq));
 CREATE UNIQUE INDEX IF NOT EXISTS records_effect ON records (op, idx) WHERE op IS NOT NULL;
 CREATE TABLE IF NOT EXISTS tree (
   ref TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, mode TEXT NOT NULL, last_commit TEXT NOT NULL,
@@ -172,6 +172,12 @@ impl DurableObject for FragmentCell {
             if !cols.iter().any(|c| c["name"] == col) {
                 sql.exec(&format!("ALTER TABLE members ADD COLUMN {col} TEXT"), None).expect("the members table migrates");
             }
+        }
+        // a records table from before the delivery outbox: its records were
+        // delivered by the code that wrote them, so they count as outboxed
+        let cols: Vec<Value> = sql.exec("PRAGMA table_info(records)", None).and_then(|c| c.to_array()).unwrap_or_default();
+        if !cols.iter().any(|c| c["name"] == "outboxed") {
+            sql.exec("ALTER TABLE records ADD COLUMN outboxed INTEGER NOT NULL DEFAULT 1", None).expect("the records table migrates");
         }
         // after the migration: a members table from before phase 4 has no
         // owner column until it runs (the index in SCHEMA broke those cells)
