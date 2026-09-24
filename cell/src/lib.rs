@@ -514,7 +514,7 @@ async fn serve(mut req: Request, env: &Env, url: &Url, name: &str, rest: &str, m
     // a signature names its key's identity; a browser, its session here
     let principal = match signer_if_signed(env, &req, url, &body).await? {
         Some(s) => Some(s),
-        None => auth::site_session(&req, env, name).await?,
+        None => auth::site_session(&req, env, name, url, mode == "path").await?,
     };
     let f = Forward { name, inner: format!("/serve/{rest}"), principal, mode: Some(mode), extra: vec![] };
     forward(env, &req, url, bytes_body(body), f).await
@@ -540,6 +540,10 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
     if let Some(name) = url.host_str().and_then(|h| cfg.fragment_of_host(h)) {
         let rest = path.trim_start_matches('/').to_string();
         return serve(req, env, &url, &name, &rest, "host").await;
+    }
+    // any other name under the suffix is no one's: the platform answers on its own host only
+    if url.host_str().and_then(|h| cfg.subdomain(h)).is_some() {
+        return Err(CellError::new(ErrorCode::NotFound, "no fragment here: a fragment's host is <label>--<username>.<suffix>"));
     }
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     match (req.method(), segments.as_slice()) {

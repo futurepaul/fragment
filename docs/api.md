@@ -16,7 +16,7 @@ the node's environment, where only `KEYS` reads them (below).
 |---|---|
 | `CODESTORAGE_ORG` | the code.storage org |
 | `CODESTORAGE_API_URL` | the API base (default `https://api.<org>.code.storage`) |
-| `FRAGMENT_HOST_SUFFIX` | fragments are served from `<name>.<suffix>`; unset, from `/f/<name>/` |
+| `FRAGMENT_HOST_SUFFIX` | fragments are served from `<label>--<username>.<suffix>` (any other name under it is 404, never the platform); unset, from `/f/<name>/` |
 | `FRAGMENT_POLL_INTERVAL_S` | the webhook backstop (default 300); also how often running runs are checked against their Workflows |
 | `FRAGMENT_JOB_RETRY_DELAY_S` | a failed job step's first retry delay, doubling over 4 retries (default 10) |
 | `FRAGMENT_EGRESS_LOCAL` | `allow` lets jobs fetch loopback and private addresses (dev and e2e fakes); never on a shared fleet |
@@ -135,8 +135,9 @@ the new key and meant it for this signer.
 A person chooses a **username** once (above; the platform's page asks
 after the first sign-in, and `fragment username <name>` does too). A
 fragment's **name** is `<label>.<username>`: `desktop.futurepaul`,
-served at `desktop.futurepaul.<suffix>` (or `/f/desktop.futurepaul/` on
-a fleet without a suffix), its code.storage repo `desktop--futurepaul`.
+served at `desktop--futurepaul.<suffix>` (one DNS label, under the
+suffix's one wildcard certificate; or `/f/desktop.futurepaul/` on a
+fleet without a suffix), its code.storage repo `desktop--futurepaul`.
 A label and a username never contain `--`. Creating with a bare label
 puts it under the creator's username; creating under someone else's is
 403. In a signed request's path, a bare label names the signer's own
@@ -158,13 +159,20 @@ random bytes, the registry keeps their SHA-256).
 | --- | --- |
 | `GET /` | who is signed in, with links to sign in, sign out, and link another sign-in; with a username, their fragments and the "new fragment" form |
 | `POST /auth/new` | the form (`label`, `template`): makes `<label>.<username>` from the template, then → `/auth/fragment?name=…&return=/` (signed in on its origin, and there); a refusal is a 400 page saying why; another origin 403 |
-| `GET /auth/login?return=&login_hint=` | → WorkOS's authorize URL (`provider=authkit`, `redirect_uri` `<platform>/auth/callback`, a state); the state is bound to the browser by `fragment_login` (HttpOnly, SameSite=Lax, `Path=/auth`, ten minutes) |
+| `GET /auth/login?return=&login_hint=` | → WorkOS's authorize URL (`provider=authkit`, `redirect_uri` `<platform>/auth/callback`, a state); the state is bound to the browser by `fragment_login` (HttpOnly, SameSite=Lax, `Path=/`, ten minutes) |
 | `GET /auth/link?return=` | the same from a signed-in browser: the sign-in that comes back joins this person (409 when it is someone else's) |
 | `GET /auth/callback?code=&state=` | the state must match the browser's cookie (400 otherwise); the code is exchanged server-side; → `fragment_session` (HttpOnly, SameSite=Lax, `Path=/`) and back to `return`; a WorkOS `error` is shown (400) |
 | `POST /auth/logout` | ends the session and every fragment session made from it, clears the cookie, and sends the browser to WorkOS's logout (`session_id` from the access token's `sid`); from another origin, 403 (`GET` shows the button) |
 | `GET /auth/fragment?name=&return=` | signed in: → `<fragment origin>/__signin?token=<a single-use redemption, 60 s, for that fragment only>` (a session holds at most 16 unspent; past that, the oldest is refused); signed out: → sign in first |
 | `GET /cli?key=<npub>&proof=` | the link `fragment login` prints: `proof` is the key's own NIP-98 event for `POST <platform>/cli/approve`, good for ten minutes (the proof of possession; without it, stale, or by another key: 400). Signed in: a page showing the key's last eight characters, to compare with the terminal, and an Add button; signed out: → sign in first, keeping the link |
 | `POST /cli/approve` | the page's form (`key`, `proof`): the key joins the signed-in person at once (a key someone else holds, or a revoked one, is 409; another origin 403); the CLI waits for `GET /api/identities/me` to answer. People themselves come only from sign-in (`POST /api/identities {kind: "person"}` is 400) |
+
+Over https every session cookie whose path is `/` is named with the
+`__Host-` prefix (`__Host-fragment_session`, `__Host-fragment_login`,
+`__Host-fragment_site`) and read under that name only: a fragment's page
+may set a cookie for all of the suffix's domain, but never a `__Host-`
+one, so none can stand in for the platform's session or another
+fragment's.
 
 On a fragment's origin, `GET __signin?token=` redeems the redemption for
 this fragment only (another fragment's is 401 and stays unspent) and sets
@@ -511,7 +519,7 @@ CLI: `fragment runs <name> [<run>] [--status S]`, `fragment triggers
 
 ## Serving
 
-`<name>.<suffix>/<path>` (or `/f/<name>/<path>` without a suffix; with
+`<label>--<username>.<suffix>/<path>` (or `/f/<name>/<path>` without a suffix; with
 one, those redirect to the fragment's host, except `__watch`). Every path
 on a fragment's host is the fragment's, `/api/…` included (the platform
 API answers on the platform's host):

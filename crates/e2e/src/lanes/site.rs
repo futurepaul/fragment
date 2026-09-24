@@ -113,11 +113,11 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.call(Call { method: "GET", url: format!("{}/f/{name}/docs/?x=1", api.base), ..Call::default() })?;
     s.ok(
         "a path URL redirects to the fragment's own origin",
-        r.status == 308 && r.header("location") == format!("http://{name}.{}:{}/docs/?x=1", crate::SUFFIX, api.port),
+        r.status == 308 && r.header("location") == api.site_url(&name, "docs/?x=1"),
         r.header("location"),
     );
     let r = api.call(Call { method: "GET", url: format!("{}/f/{name}", api.base), ..Call::default() })?;
-    s.ok("the bare path redirects to its root", r.status == 308 && r.header("location").ends_with(&format!("{name}.{}:{}/", crate::SUFFIX, api.port)), &r);
+    s.ok("the bare path redirects to its root", r.status == 308 && r.header("location") == api.site_url(&name, ""), &r);
     let r = api.call(Call {
         method: "POST",
         url: format!("{}/f/{name}/__op/x", api.base),

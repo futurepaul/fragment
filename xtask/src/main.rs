@@ -3,7 +3,7 @@
 //!   build            build cell/ and agent/ for wasm32 (worker-build 0.8.5)
 //!   celld            build the pinned celld fork into target/celld/bin
 //!   dev [--clean]    build, then run the stack in the foreground: the cell on
-//!                    :8790 (fragments at <name>.fragment.localhost:8790), the
+//!                    :8790 (fragments at <label>--<username>.fragment.localhost:8790), the
 //!                    code.storage fake on :8792, and agents co-hosted on the
 //!                    cell's node (their turns spend their owner's budget: a
 //!                    real OpenRouter key per person, minted with the
@@ -174,7 +174,7 @@ fn dev(args: &[String]) -> Result<()> {
     let opts = devstack::NodeOptions { project: devstack::cell_dir(), port: DEV_PORT, clean, watch: true, env: node_env, with: vec![devstack::agent_dir()] };
     let (node, took) = devstack::Node::start(&tools, &opts)?;
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
-    println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
+    println!("  fragments:    http://<label>--<username>.fragment.localhost:{DEV_PORT}/");
     println!("  agents:       {}/api/agents (co-hosted; signed)", node.base);
     println!("  code.storage: {} (the fake)", fake.url);
     println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");

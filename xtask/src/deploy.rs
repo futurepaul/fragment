@@ -363,7 +363,6 @@ fn wait_for(url: &str, id: &str) -> Result<()> {
 fn fly_toml(fleet: &Fleet) -> String {
     let f = &fleet.fly;
     let org = fleet.vars.get("CODESTORAGE_ORG").map(String::as_str).unwrap_or_default();
-    let suffix = fleet.vars.get("FRAGMENT_HOST_SUFFIX").map(String::as_str).unwrap_or_default();
     format!(
         r#"# Rendered by `cargo xtask deploy` from fleets/<fleet>.json; not edited by hand.
 app = "{app}"
@@ -389,12 +388,8 @@ kill_timeout = "60s"
   # every other body the router reads is refused past 2 MiB as it arrives),
   # instead of celld's default of 1 GiB
   CELLD_MAX_REQUEST_BODY_BYTES = "{body_max}"
-  # KEYS: the code.storage org it signs for (its key is a Fly secret), and
-  # where it asks Fly for each fragment host's certificate (the app-scoped
-  # token is a Fly secret)
+  # KEYS: the code.storage org it signs for (its key is a Fly secret)
   FRAGMENT_KEYS_CODESTORAGE_ORG = "{org}"
-  FRAGMENT_KEYS_FLY_APP = "{app}"
-  FRAGMENT_KEYS_HOST_SUFFIX = "{suffix}"
 
 [mounts]
   source = "celld_data"
@@ -438,7 +433,6 @@ kill_timeout = "60s"
         size = f.size,
         memory = f.memory,
         facet_max = devstack::FACET_MAX_BYTES,
-        suffix = suffix,
         body_max = fragment_proto::limits::BLOB_MAX_BYTES,
     )
 }

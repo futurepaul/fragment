@@ -148,7 +148,7 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
 
     std::fs::write(site.join("site/index.html"), "<h1>v1 marker</h1>")?;
     let out = s.cli(api, &home, &["deploy", &name, "--dir", site.to_str().unwrap(), "--note", "first"]);
-    s.ok("deploy prints the fragment's own origin", text(&out).contains(&format!("live: http://{name}.{}", crate::SUFFIX)), text(&out));
+    s.ok("deploy prints the fragment's own origin", text(&out).contains(&format!("live: {}", api.site_url(&name, "").trim_end_matches('/'))), text(&out));
     let st = s.cli_json(api, &home, &["status", &name, "--json"])?;
     s.ok("after a deploy live is main's tip", st["pins"]["live"].is_string() && st["pins"]["live"] == st["pins"]["main"], &st);
     s.ok("the site serves the deploy", page(api).contains("v1 marker"), page(api));

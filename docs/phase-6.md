@@ -12,14 +12,18 @@ session's layout (`finite-next-worktrees/desktop-ui`, `d8d5c26`).
 ## Paul's calls (2026-09-24)
 
 1. **People have usernames, and fragments live under them:**
-   `desktop.futurepaul.fragment.club`. A username is chosen once (not
+   `desktop--futurepaul.fragment.club`. A username is chosen once (not
    renamed, since renaming breaks URLs), with a profile picture stored
    with the identity.
-2. **A certificate per hostname**, asked of Fly's API when a fragment is
-   made (it validates on its own: the `*.fragment.club` DNS record already
-   answers nested names). This also opens custom domains later. Let's
-   Encrypt allows about 50 new names a week under fragment.club: enough
-   for the alpha, a limit to plan for (per-user wildcards need a DNS API).
+2. **Flat hosts, one certificate** (changed the same day). The first cut
+   asked Fly for a certificate per nested host
+   (`desktop.futurepaul.fragment.club`), but with every chat a fragment
+   that would spend Let's Encrypt's ~50 new names a week in days. A flat
+   host, `<label>--<username>`, is one label under the suffix, which the
+   existing `*.fragment.club` certificate covers. No `<username>.fragment.club`
+   home: people sign in at fragment.club and go from there. Sessions are
+   `__Host-` cookies (every fragment shares the platform's domain and may
+   set a cookie for all of it).
 3. **A hard cut:** fragments made before usernames are not migrated.
 4. **The agent runs on fragment.club**, inside the fleet that already
    runs (no new machines), metered in its owner's budget.
@@ -27,7 +31,7 @@ session's layout (`finite-next-worktrees/desktop-ui`, `d8d5c26`).
 ## The shape
 
 - **A fragment's name is `<label>.<username>`** (`desktop.futurepaul`),
-  its host `<label>.<username>.<suffix>`, its path `/f/<label>.<username>/`,
+  its host `<label>--<username>.<suffix>`, its path `/f/<label>.<username>/`,
   its code.storage repo `<label>--<username>` (repo names are global in
   the org). Labels and usernames never contain `--`. Creating with a bare
   label puts it under the creator's username (an agent's: its owner's).

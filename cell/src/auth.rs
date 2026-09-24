@@ -68,14 +68,30 @@ fn secure(url: &Url) -> bool {
     url.scheme() == "https"
 }
 
-pub fn set_cookie(name: &str, value: &str, path: &str, max_age_s: i64, secure: bool) -> String {
+/// A session cookie's name: `__Host-` first wherever it can be (https,
+/// `Path=/`). Every fragment's page shares `fragment.club` with the
+/// platform and may set a cookie for the whole domain; a browser takes a
+/// `__Host-` cookie only host-only and Secure, so none such can stand in
+/// for the platform's session or another fragment's. The session is read
+/// under that name only.
+fn cookie_name(base: &str, secure: bool, path: &str) -> String {
+    if secure && path == "/" {
+        format!("__Host-{base}")
+    } else {
+        base.to_string()
+    }
+}
+
+pub fn set_cookie(base: &str, value: &str, path: &str, max_age_s: i64, secure: bool) -> String {
+    let name = cookie_name(base, secure, path);
     let s = if secure { "; Secure" } else { "" };
     format!("{name}={value}; Path={path}; Max-Age={max_age_s}; HttpOnly; SameSite=Lax{s}")
 }
 
-fn cookie_of(req: &Request, name: &str) -> CellResult<Option<String>> {
+fn cookie_of(req: &Request, base: &str, secure: bool, path: &str) -> CellResult<Option<String>> {
     let cookies = req.headers().get("cookie")?.unwrap_or_default();
-    Ok(site::cookie(&cookies, name).filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())).map(str::to_string))
+    let name = cookie_name(base, secure, path);
+    Ok(site::cookie(&cookies, &name).filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())).map(str::to_string))
 }
 
 fn enc(s: &str) -> String {
@@ -123,8 +139,8 @@ fn query(url: &Url, k: &str) -> Option<String> {
 }
 
 /// The signed-in person on the platform origin, or `None`.
-async fn platform_session(req: &Request, env: &Env) -> CellResult<Option<(String, Signer)>> {
-    let Some(token) = cookie_of(req, SESSION_COOKIE)? else { return Ok(None) };
+async fn platform_session(req: &Request, env: &Env, url: &Url) -> CellResult<Option<(String, Signer)>> {
+    let Some(token) = cookie_of(req, SESSION_COOKIE, secure(url), "/")? else { return Ok(None) };
     match ask_registry(env, "/session", &json!({ "token": token })).await {
         Ok(v) => Ok(Some((token, signer_of(&v, None)?))),
         Err(e) if e.code == ErrorCode::Unauthenticated => Ok(None),
@@ -132,9 +148,19 @@ async fn platform_session(req: &Request, env: &Env) -> CellResult<Option<(String
     }
 }
 
+/// Where a fragment's session cookie lives: its whole host, or its path
+/// when fragments share the platform's origin (no suffix).
+fn site_cookie_path(name: &str, path_mode: bool) -> String {
+    if path_mode {
+        format!("/f/{name}/")
+    } else {
+        "/".to_string()
+    }
+}
+
 /// The session a fragment's own cookie carries, for that fragment only.
-pub async fn site_session(req: &Request, env: &Env, name: &str) -> CellResult<Option<Signer>> {
-    let Some(token) = cookie_of(req, SITE_COOKIE)? else { return Ok(None) };
+pub async fn site_session(req: &Request, env: &Env, name: &str, url: &Url, path_mode: bool) -> CellResult<Option<Signer>> {
+    let Some(token) = cookie_of(req, SITE_COOKIE, secure(url), &site_cookie_path(name, path_mode))? else { return Ok(None) };
     match ask_registry(env, "/session", &json!({ "token": token, "fragment": name })).await {
         Ok(v) => Ok(Some(signer_of(&v, None)?)),
         // a stale cookie is no session: the request goes on unsigned
@@ -247,7 +273,7 @@ async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>) -> Cell
     if let Some(token) = token {
         to += &format!("&invitation_token={token}");
     }
-    redirect(&to, &[set_cookie(LOGIN_COOKIE, state, "/auth", 600, secure(url))])
+    redirect(&to, &[set_cookie(LOGIN_COOKIE, state, "/", 600, secure(url))])
 }
 
 async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
@@ -257,7 +283,7 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
         return page(400, "Sign-in did not finish", &format!("<p>WorkOS said <code>{}</code>: {}</p><p><a href=\"/auth/login\">Try again</a></p>", esc(&error), esc(&why)));
     }
     let state = query(url, "state").unwrap_or_default();
-    let bound = cookie_of(req, LOGIN_COOKIE)?;
+    let bound = cookie_of(req, LOGIN_COOKIE, secure(url), "/")?;
     if state.is_empty() || bound.as_deref() != Some(state.as_str()) {
         return page(400, "Sign-in did not start here", "<p>This sign-in began in another browser, or too long ago.</p><p><a href=\"/auth/login\">Start again</a></p>");
     }
@@ -269,7 +295,7 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
         &back_to(&format!("{}/", cfg.platform(url)), done["returnTo"].as_str())?,
         &[
             set_cookie(SESSION_COOKIE, token, "/", crate::registry::SESSION_TTL_MS / 1000, secure(url)),
-            set_cookie(LOGIN_COOKIE, "", "/auth", 0, secure(url)),
+            set_cookie(LOGIN_COOKIE, "", "/", 0, secure(url)),
         ],
     )
 }
@@ -281,7 +307,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
     {
         match (method, segments) {
             (Method::Get, [""]) => {
-                let body = match platform_session(&req, env).await? {
+                let body = match platform_session(&req, env, url).await? {
                     // a username first: fragments live under it (decision 16)
                     Some((_, who)) if who.username.is_none() && who.kind == IdentityKind::Person => {
                         let email = email_of(env, &who.id).await;
@@ -313,13 +339,13 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 page(200, "fragment", &body)
             }
             (Method::Get, ["auth", "login"]) => begin(env, cfg, url, None).await,
-            (Method::Get, ["auth", "link"]) => match platform_session(&req, env).await? {
+            (Method::Get, ["auth", "link"]) => match platform_session(&req, env, url).await? {
                 Some((token, _)) => begin(env, cfg, url, Some(token)).await,
                 None => to_login(&platform, "/auth/link"),
             },
             (Method::Get, ["auth", "callback"]) => callback(&req, env, cfg, url).await,
             (Method::Post, ["auth", "username"]) => {
-                let Some((_, who)) = platform_session(&req, env).await? else { return to_login(&platform, "/") };
+                let Some((_, who)) = platform_session(&req, env, url).await? else { return to_login(&platform, "/") };
                 let form = req.form_data().await?;
                 let Some(FormEntry::Field(username)) = form.get("username") else { return Err(CellError::invalid("choose a username")) };
                 match ask_registry(env, "/username/claim", &json!({ "identity": who.id, "username": username.trim() })).await {
@@ -332,7 +358,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
             }
             (Method::Post, ["auth", "new"]) => {
                 same_origin(&req, &platform)?;
-                let Some((_, who)) = platform_session(&req, env).await? else { return to_login(&platform, "/") };
+                let Some((_, who)) = platform_session(&req, env, url).await? else { return to_login(&platform, "/") };
                 let bytes = crate::read_body(&mut req, NEW_FORM_MAX_BYTES).await?;
                 let field = |name: &str| url::form_urlencoded::parse(&bytes).find(|(k, _)| k == name).map(|(_, v)| v.trim().to_string()).unwrap_or_default();
                 let create = fragment_proto::CreateFragment { name: field("label"), visibility: None, template: Some(field("template")) };
@@ -349,7 +375,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 redirect(&format!("/auth/fragment?name={}&return=/", enc(name)), &[])
             }
             (Method::Post, ["auth", "picture"]) => {
-                let Some((_, who)) = platform_session(&req, env).await? else { return to_login(&platform, "/") };
+                let Some((_, who)) = platform_session(&req, env, url).await? else { return to_login(&platform, "/") };
                 let form = req.form_data().await?;
                 let Some(FormEntry::File(file)) = form.get("picture") else { return Err(CellError::invalid("choose a picture")) };
                 let bytes = file.bytes().await?;
@@ -368,7 +394,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
             (Method::Post, ["auth", "logout"]) => {
                 same_origin(&req, &platform)?;
                 let clear = set_cookie(SESSION_COOKIE, "", "/", 0, secure(url));
-                let Some(token) = cookie_of(&req, SESSION_COOKIE)? else { return redirect("/", &[clear]) };
+                let Some(token) = cookie_of(&req, SESSION_COOKIE, secure(url), "/")? else { return redirect("/", &[clear]) };
                 let sid = match ask_registry(env, "/logout", &json!({ "token": token })).await {
                     Ok(v) => v["workosSid"].as_str().map(str::to_string),
                     Err(e) if e.code == ErrorCode::Unauthenticated => None,
@@ -385,7 +411,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
             (Method::Get, ["auth", "fragment"]) => {
                 let name = query(url, "name").filter(|n| fragment_proto::valid_fragment_name(n)).ok_or_else(|| CellError::invalid("name a fragment"))?;
                 let back = site::return_path(query(url, "return").as_deref());
-                let Some((token, _)) = platform_session(&req, env).await? else {
+                let Some((token, _)) = platform_session(&req, env, url).await? else {
                     return to_login(&platform, &format!("/auth/fragment?name={name}&return={}", enc(&back)));
                 };
                 let v = ask_registry(env, "/redeem/mint", &json!({ "token": token, "fragment": name, "returnTo": back })).await?;
@@ -399,7 +425,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 if let Err(e) = link_proof(&platform, &hex, &proof) {
                     return page(400, "This link has expired", &format!("<p>{}</p>", esc(&e.message)));
                 }
-                let Some((_, who)) = platform_session(&req, env).await? else {
+                let Some((_, who)) = platform_session(&req, env, url).await? else {
                     return to_login(&platform, &format!("/cli?key={}&proof={}", enc(&key), enc(&proof)));
                 };
                 let email = email_of(env, &who.id).await;
@@ -424,7 +450,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 let bytes = crate::read_body(&mut req, APPROVE_FORM_MAX_BYTES).await?;
                 let field = |name: &str| url::form_urlencoded::parse(&bytes).find(|(k, _)| k == name).map(|(_, v)| v.into_owned()).unwrap_or_default();
                 let hex = npub::parse(&field("key")).ok_or_else(|| CellError::invalid("the form names no key"))?;
-                let Some((token, _)) = platform_session(&req, env).await? else {
+                let Some((token, _)) = platform_session(&req, env, url).await? else {
                     return Err(CellError::new(ErrorCode::Unauthenticated, "sign in first"));
                 };
                 link_proof(&platform, &hex, &field("proof"))?;
@@ -443,14 +469,14 @@ pub fn is_fragment_route(rest: &str) -> bool {
 
 /// `__signin` and `__signout` on a fragment's own origin.
 pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, path_mode: bool) -> CellResult<Response> {
-    let cookie_path = if path_mode { format!("/f/{name}/") } else { "/".to_string() };
+    let cookie_path = site_cookie_path(name, path_mode);
     let base = cfg.canonical(url, name);
     {
         match rest {
             "__signin" => match query(url, "token") {
                 // signed in here already (a page that embeds this one sends
                 // every frame through __signin): straight back
-                None if site_session(req, env, name).await?.is_some() => redirect(&back_to(&base, query(url, "return").as_deref())?, &[]),
+                None if site_session(req, env, name, url, path_mode).await?.is_some() => redirect(&back_to(&base, query(url, "return").as_deref())?, &[]),
                 None => {
                     let back = site::return_path(query(url, "return").as_deref());
                     redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(url), enc(&back)), &[])
@@ -470,7 +496,7 @@ pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &
                 // registry answers: a registry that cannot end the session
                 // is logged, and the session lasts until it expires or the
                 // platform session ends (`/auth/logout` ends every one).
-                if let Some(token) = cookie_of(req, SITE_COOKIE)? {
+                if let Some(token) = cookie_of(req, SITE_COOKIE, secure(url), &cookie_path)? {
                     if let Err(e) = ask_registry(env, "/session/end", &json!({ "token": token, "fragment": name })).await {
                         console_error!("__signout on {name}: the registry did not end the session ({:?}): {}", e.code, e.message);
                     }

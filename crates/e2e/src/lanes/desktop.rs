@@ -95,14 +95,14 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let mine = api.signed(&owner, "GET", "/api/fragments", None)?;
     let chat = mine.body["fragments"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str()).find(|n| n.starts_with("chat-")).unwrap_or("").to_string();
     s.ok("New chat makes a chat fragment and opens it in the middle", chatted && !chat.is_empty(), &mine);
-    let chat_title = s.eventually(wait, || chrome.eval_in_frame(&page, &format!("{}.", label(&chat)), "document.title").ok() == Some(json!("Chat")));
+    let chat_title = s.eventually(wait, || chrome.eval_in_frame(&page, &format!("{}--", label(&chat)), "document.title").ok() == Some(json!("Chat")));
     s.ok("the chat's own page shows there, signed in on its origin", chat_title, "");
     // the page is ready once it is connected (its module has run)
     let ready = s.eventually(wait, || {
-        chrome.eval_in_frame(&page, &format!("{}.", label(&chat)), "document.getElementById('here').textContent !== 'connecting…'").ok() == Some(json!(true))
+        chrome.eval_in_frame(&page, &format!("{}--", label(&chat)), "document.getElementById('here').textContent !== 'connecting…'").ok() == Some(json!(true))
     });
     let said = ready
-        && chrome.eval_in_frame(&page, &format!("{}.", label(&chat)), "document.getElementById('text').value = 'hi from the desktop'; document.getElementById('say').requestSubmit(); true").is_ok();
+        && chrome.eval_in_frame(&page, &format!("{}--", label(&chat)), "document.getElementById('text').value = 'hi from the desktop'; document.getElementById('say').requestSubmit(); true").is_ok();
     let me = api.identity(&owner)?;
     let landed = s.eventually(wait, || {
         api.signed(&owner, "GET", &format!("/api/f/{chat}/channels/chat"), None)
@@ -110,26 +110,26 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     });
     s.ok("a message sent in it is the owner's", said && landed, api.signed(&owner, "GET", &format!("/api/f/{chat}/channels/chat"), None)?);
     let in_chat = |chrome: &mut Browser, text: &str| {
-        chrome.eval_in_frame(&page, &format!("{}.", label(&chat)), "document.getElementById('messages').textContent").ok().and_then(|v| v.as_str().map(|t| t.contains(text))) == Some(true)
+        chrome.eval_in_frame(&page, &format!("{}--", label(&chat)), "document.getElementById('messages').textContent").ok().and_then(|v| v.as_str().map(|t| t.contains(text))) == Some(true)
     };
     s.ok("the owner's agent answers in it", s.eventually(wait, || in_chat(&mut chrome, "Hi! I'm your agent.")), "");
     let named = format!("{}'s agent", api.username(&owner)?);
     s.ok("named as its owner's agent", s.eventually(wait, || in_chat(&mut chrome, &named)), &named);
 
     // asked for an app, the agent makes it, and the desktop shows it
-    chrome.eval_in_frame(&page, &format!("{}.", label(&chat)), "document.getElementById('text').value = 'make me a counter app'; document.getElementById('say').requestSubmit(); true")?;
+    chrome.eval_in_frame(&page, &format!("{}--", label(&chat)), "document.getElementById('text').value = 'make me a counter app'; document.getElementById('say').requestSubmit(); true")?;
     s.ok("asked for an app in the chat, the agent says it made one", s.eventually(Duration::from_secs(40), || in_chat(&mut chrome, "Your counter is in your apps.")), "");
     let shown = format!("[...document.querySelectorAll('#apps .row .label')].map(l => l.textContent).includes({app_label:?})");
     s.ok("and it appears in the desktop's sidebar, with no reload", chrome.until(&page, &shown, wait), chrome.eval(&page, "document.getElementById('apps').innerText").unwrap_or_default());
     chrome.eval(&page, &format!("[...document.querySelectorAll('#apps .row')].find(r => r.dataset.key === {:?}).click(); true", format!("app:{app}")))?;
-    let made = s.eventually(wait, || chrome.eval_in_frame(&page, &format!("{app_label}."), "document.body.innerText").ok().and_then(|v| v.as_str().map(|t| t.contains("A counter your agent made"))) == Some(true));
+    let made = s.eventually(wait, || chrome.eval_in_frame(&page, &format!("{app_label}--"), "document.body.innerText").ok().and_then(|v| v.as_str().map(|t| t.contains("A counter your agent made"))) == Some(true));
     s.ok("opened, it is the page the agent wrote", made, "");
     chrome.eval(&page, &format!("document.querySelector('.pane[data-key={:?}] .pane-action[title=Close]').click(); true", format!("app:{app}")))?;
 
     // apps and files open into the viewer, newest on top
     chrome.eval(&page, &format!("[...document.querySelectorAll('#apps .row')].find(r => r.dataset.key === {:?}).click(); true", format!("app:{todo}")))?;
     s.ok("an app opens as a pane", chrome.until(&page, &format!("!!document.querySelector('.pane[data-key={:?}]')", format!("app:{todo}")), wait), "");
-    let todo_title = s.eventually(wait, || chrome.eval_in_frame(&page, &format!("{}.", label(&todo)), "document.title").ok() == Some(json!("Todo")));
+    let todo_title = s.eventually(wait, || chrome.eval_in_frame(&page, &format!("{}--", label(&todo)), "document.title").ok() == Some(json!("Todo")));
     s.ok("the app's own page is in it", todo_title, "");
     chrome.eval(&page, &format!("[...document.querySelectorAll('#apps .row')].find(r => r.dataset.key === {:?}).click(); true", format!("app:{notes}")))?;
     chrome.until(&page, &format!("!!document.querySelector('.pane[data-key={:?}]')", format!("app:{notes}")), wait);

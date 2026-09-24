@@ -197,11 +197,19 @@ pub fn fragment_name(label: &str, username: &str) -> String {
     format!("{label}.{username}")
 }
 
-/// A fragment's code.storage repo: `<label>--<username>` (repo names are
-/// global in the org; neither part contains `--`).
-pub fn repo_name(name: &str) -> Option<String> {
+/// A fragment's name as one DNS label, `<label>--<username>` (neither part
+/// contains `--`): its host under the fleet's suffix, so one wildcard
+/// certificate covers every fragment, and its code.storage repo (repo
+/// names are global in the org).
+pub fn flat_name(name: &str) -> Option<String> {
     let (label, username) = split_fragment_name(name)?;
     Some(format!("{label}--{username}"))
+}
+
+/// The fragment a flat name (`<label>--<username>`) names.
+pub fn from_flat_name(flat: &str) -> Option<String> {
+    let (label, username) = flat.split_once("--")?;
+    (valid_label(label) && valid_username(username)).then(|| fragment_name(label, username))
 }
 
 pub fn valid_op_id(id: &str) -> bool {
@@ -860,8 +868,12 @@ mod tests {
         assert!(!valid_fragment_name("a.b.futurepaul"));
         assert_eq!(split_fragment_name("todo-1.futurepaul"), Some(("todo-1", "futurepaul")));
         assert_eq!(fragment_name("todo", "paul"), "todo.paul");
-        assert_eq!(repo_name("todo-1.futurepaul").as_deref(), Some("todo-1--futurepaul"));
-        assert_eq!(repo_name("todo"), None);
+        assert_eq!(flat_name("todo-1.futurepaul").as_deref(), Some("todo-1--futurepaul"));
+        assert_eq!(flat_name("todo"), None);
+        assert_eq!(from_flat_name("todo-1--futurepaul").as_deref(), Some("todo-1.futurepaul"));
+        for not in ["todo", "todo--", "--paul", "a--b--c", "Todo--paul", "todo--pa", "todo.x--paul"] {
+            assert_eq!(from_flat_name(not), None, "{not}");
+        }
         assert!(valid_op_name("add_todo"));
         assert!(!valid_op_name("__mutate"));
         assert!(!valid_op_name("Add"));

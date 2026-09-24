@@ -145,9 +145,14 @@ a computer's wake/exec.
 ### 16. Usernames, and fragments under them (Paul, 2026-09-24)
 
 A person chooses a username once (with a profile picture). A fragment's
-name is `<label>.<username>`, served at `<label>.<username>.<suffix>`
-with a certificate per host from Fly (custom domains can follow). The
-fragments made before this were not migrated (a hard cut).
+name is `<label>.<username>`, served at `<label>--<username>.<suffix>`:
+one DNS label, so the suffix's one wildcard certificate covers every
+fragment (Paul, the same day, after per-host certificates met Let's
+Encrypt's ~50 new names a week with every chat a fragment; ChatGPT's
+`site.user.chatgpt.site` needs Cloudflare issuing a certificate per
+site). Sessions are `__Host-` cookies, since every fragment shares the
+platform's domain. The fragments made before this were not migrated (a
+hard cut).
 
 ## Truth map (every change is checked against this)
 
@@ -320,7 +325,7 @@ deployment.
 - **Reframed 2026-09-24 (Paul): `docs/phase-6.md` is the plan.** Fragment
   is the core product and the desktop is a template anyone deploys with a
   click; people get usernames and fragments live at
-  `<label>.<username>.fragment.club` (decision 16); the phase also brings
+  `<label>--<username>.fragment.club` (decision 16); the phase also brings
   back chatting with goose, the agent making apps, and computer
   screenshots.
 - The person's home fragment, laid out as the Desktop UI session designed

@@ -3,8 +3,7 @@
 //! bucket, the real code.storage, OpenRouter, and the open internet. Its
 //! fragments are made by the fleet's e2e key, a person's (username `e2e`),
 //! and deleted with their repos after. Their names are the same every run
-//! (`todo.e2e`, …): each host's certificate is asked of Let's Encrypt
-//! once, not once a run (about 50 new names a week, decision 16).
+//! (`todo.e2e`, …), so a crashed run's leftovers are found and removed.
 //!
 //! Inputs come from xtask, as paths to files (secret values never pass
 //! through arguments or output): `FRAGMENT_E2E_HOSTED` (the fleet's URL),
@@ -34,8 +33,6 @@ const USERNAME: &str = "e2e";
 /// The fragments a run makes (labels): a run first removes any a crashed
 /// run left behind.
 const MADE: [&str; 5] = ["todo", "inbox", "blobs", "egress", "ai"];
-/// How long a new host's certificate may take to be issued.
-const CERT_WAIT: Duration = Duration::from_secs(180);
 
 struct CodeStorage {
     org: String,
@@ -130,24 +127,6 @@ impl Hosted {
         let repo = self.signed("GET", &format!("/api/f/{name}/status"), None).ok().and_then(|r| r.body["repo"].as_str().map(str::to_string));
         self.note(&format!("{name}'s repo"), repo.as_deref().unwrap_or("?"));
         self.made.push((name.to_string(), repo.unwrap_or_default()));
-    }
-
-    /// A page on a fragment's own host, once its certificate is issued (a
-    /// host's first run asks for it at create).
-    fn served(&self, url: &str) -> Result<Reply> {
-        let t0 = Instant::now();
-        loop {
-            match self.api.call(Call { method: "GET", url: url.to_string(), ..Call::default() }) {
-                Ok(r) => {
-                    if t0.elapsed() > Duration::from_secs(2) {
-                        self.note("waited for a new host's certificate", format!("{:.0?}", t0.elapsed()));
-                    }
-                    return Ok(r);
-                }
-                Err(e) if t0.elapsed() > CERT_WAIT => return Err(e),
-                Err(_) => std::thread::sleep(Duration::from_secs(3)),
-            }
-        }
     }
 
     /// A job's run, once it has finished (or the last state seen).
@@ -297,7 +276,7 @@ fn todo(h: &mut Hosted) -> Result<()> {
     h.ok("fragment init makes, fills, and deploys a fragment (the real code.storage)", share.starts_with("https://"), &init);
     h.note("init (create + sync + deploy)", format!("{took:.1?}"));
 
-    let r = h.served(&share)?;
+    let r = h.api.call(Call { method: "GET", url: share.clone(), ..Call::default() })?;
     h.ok("its page is served over https, on its own host", r.status == 200 && r.text.contains("<"), &r);
     let add = |h: &Hosted, id: &str, text: &str| h.api.op(&h.key, &name, "add", id, json!({ "text": text }));
     let first = add(h, "t1", "from the hosted e2e")?;
@@ -394,7 +373,6 @@ fn blobs(h: &mut Hosted) -> Result<()> {
     let files = h.signed("GET", &format!("/api/f/{name}/files"), None)?;
     let entry = files.body["files"].as_array().and_then(|a| a.iter().find(|f| f["path"] == "site/big.bin").cloned()).unwrap_or(Value::Null);
     h.ok("it is a blob, its pointer in git", entry["blob"] == true && entry["size"] == big.len(), &entry);
-    h.served(&h.api.site_url(&name, ""))?;
     let r = h.api.call(Call {
         method: "GET",
         url: format!("{}?view={view}", h.api.site_url(&name, "big.bin")),

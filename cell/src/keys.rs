@@ -87,17 +87,6 @@ pub async fn workos_authenticate(env: &Env, client_id: &str, code: &str) -> Cell
     Ok((answer["status"].as_u64().unwrap_or(0) as u16, answer["body"].clone()))
 }
 
-/// Asks Fly for this fragment's certificate (its own host only): `None`
-/// when the node has no Fly (dev, the e2e), else (status, Fly's answer).
-pub async fn fly_certificate(env: &Env, name: &str) -> CellResult<Option<(u16, Value)>> {
-    let route = "fly/certificate";
-    match call_raw(env, route, &json!({ "name": name })).await? {
-        (200, answer) => Ok(Some((answer["status"].as_u64().unwrap_or(0) as u16, answer["body"].clone()))),
-        (503, _) => Ok(None),
-        (status, answer) => Err(refused(route, status, &answer)),
-    }
-}
-
 /// OpenRouter's key API (a `Ledger` only): (status, OpenRouter's answer),
 /// or `None` when the node holds no management key (the fleet pays for no AI).
 pub async fn openrouter_keys(env: &Env, method: &str, hash: Option<&str>, body: Option<&Value>) -> CellResult<Option<(u16, Value)>> {

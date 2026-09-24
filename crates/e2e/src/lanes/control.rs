@@ -147,19 +147,10 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     );
     s.ok(
         "create returns the fragment's own origin",
-        c["canonical"] == format!("http://{name}.{}:{}/", crate::SUFFIX, api.port),
+        c["canonical"] == api.site_url(&name, ""),
         &r,
     );
     s.hook(api, c);
-    // KEYS checks that the fragment asking for a certificate is the one it
-    // names (a scope it derives from the name, against the host's): here
-    // the check passes, and this node has no Fly to ask
-    let events = api.signed(&owner, "GET", &format!("/api/f/{name}/events"), None)?.text;
-    s.ok(
-        "a new fragment asks for its own host's certificate (KEYS knows it is that fragment)",
-        events.contains("certificate.skipped") && !events.contains("certificate.failed"),
-        &events,
-    );
 
     let r = api.create(&owner, &label)?;
     s.ok("creating an existing name is 409", r.status == 409 && r.error() == "already_exists", &r);
@@ -248,9 +239,11 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.call(Call { method: "GET", url: format!("http://evil.example.com:{}/index.html", api.port), ..Call::default() })?;
     s.ok("a host outside the suffix is the platform, not a fragment", r.status == 404 && r.message().contains("no route"), &r);
     let label = name.split('.').next().unwrap_or("");
-    for host in ["Bad_Name", "a.b", label] {
+    // a fragment's host is one label, <label>--<username>; any other name
+    // under the suffix is no one's (never the platform's)
+    for host in ["Bad_Name", "a.b", label, name.as_str(), "a--b"] {
         let r = api.call(Call { method: "GET", url: format!("http://{host}.{}:{}/index.html", crate::SUFFIX, api.port), ..Call::default() })?;
-        s.ok(&format!("host {host}.<suffix> is not a fragment"), r.status == 404 && r.message().contains("no route"), &r);
+        s.ok(&format!("host {host}.<suffix> is not a fragment, nor the platform"), r.status == 404 && r.message().contains("no fragment here"), &r);
     }
     let r = api.call(Call {
         method: "POST",

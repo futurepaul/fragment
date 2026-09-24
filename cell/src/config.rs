@@ -5,7 +5,7 @@
 //! code.storage key, the WorkOS API key, and the OpenRouter management key
 //! live in the node's environment, used through `KEYS` (keys.rs).
 
-use fragment_proto::{valid_fragment_name, ErrorCode};
+use fragment_proto::{flat_name, from_flat_name, ErrorCode};
 use worker::Env;
 
 use crate::error::{CellError, CellResult};
@@ -167,14 +167,20 @@ impl Config {
         })
     }
 
-    /// The fragment a hostname names, when it is `<name>.<suffix>`. celld
-    /// does not vouch for `Host`, so this is the only way a host becomes a
-    /// fragment: an exact single valid label under the configured suffix.
+    /// The fragment a hostname names, when it is `<label>--<username>.<suffix>`
+    /// (one DNS label, so the suffix's one wildcard certificate covers every
+    /// fragment). celld does not vouch for `Host`, so this is the only way a
+    /// host becomes a fragment: an exact single label under the suffix.
     pub fn fragment_of_host(&self, host: &str) -> Option<String> {
+        from_flat_name(self.subdomain(host)?.as_str())
+    }
+
+    /// The label a host has under the suffix (`x` of `x.<suffix>`), if it is
+    /// one: such a host is a fragment's or no one's, never the platform's.
+    pub fn subdomain(&self, host: &str) -> Option<String> {
         let suffix = self.host_suffix.as_deref()?;
         let host = host.to_ascii_lowercase();
-        let label = host.strip_suffix(suffix)?.strip_suffix('.')?;
-        valid_fragment_name(label).then(|| label.to_string())
+        host.strip_suffix(suffix)?.strip_suffix('.').map(str::to_string)
     }
 
     /// Where a fragment is served, given the URL a request arrived on (its
@@ -182,7 +188,10 @@ impl Config {
     pub fn canonical(&self, arrived: &url::Url, name: &str) -> String {
         let port = arrived.port().map(|p| format!(":{p}")).unwrap_or_default();
         match &self.host_suffix {
-            Some(suffix) => format!("{}://{name}.{suffix}{port}/", arrived.scheme()),
+            Some(suffix) => {
+                let host = flat_name(name).unwrap_or_else(|| name.to_string());
+                format!("{}://{host}.{suffix}{port}/", arrived.scheme())
+            }
             None => format!("{}://{}{port}/f/{name}/", arrived.scheme(), arrived.host_str().unwrap_or("localhost")),
         }
     }

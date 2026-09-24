@@ -1,8 +1,10 @@
 //! Durable Object addresses as celld derives them (crates/celld/js.rs,
 //! `namespace_key` and `durable_object_id_for_name`), so a service can check
 //! "the caller is fragment `todo.paul`" against the scope the host attests.
-//! celld's comments call these strings addresses that must never change;
-//! the e2e checks this derivation against the live host (`certificates`).
+//! celld's comments call these strings addresses that must never change.
+//! Nothing asks yet: phase 6 made one per fragment host's certificate
+//! request, which one wildcard certificate replaced; a custom domain's will
+//! need it again.
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};

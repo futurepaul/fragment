@@ -115,7 +115,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         &r,
     );
     let login = cookie_line(&r, "fragment_login");
-    s.ok("the state is bound to this browser by a cookie (HttpOnly, SameSite=Lax)", login.contains("HttpOnly") && login.contains("SameSite=Lax") && login.contains("Path=/auth"), &login);
+    s.ok("the state is bound to this browser by a cookie (HttpOnly, SameSite=Lax)", login.contains("HttpOnly") && login.contains("SameSite=Lax") && login.contains("Path=/;"), &login);
     let bound = r.cookies().into_iter().find(|c| c.starts_with("fragment_login=")).unwrap_or_default();
     let back = api.external(&format!("{to}&login_hint=round@e2e.test"))?;
     let callback = back.header("location");
@@ -270,7 +270,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let r = with_session(api, "GET", &format!("/auth/fragment?name={f}&return=%2Fa%2520b"), &member_session)?;
     let redeem = r.header("location");
     s.ok("signed in, the platform hands the fragment a single-use redemption", r.status == 302 && redeem.starts_with(&api.site_url(&f, "__signin?token=")), &r);
-    let other_host = redeem.replace(&format!("{f}."), &format!("{g}."));
+    let other_host = redeem.replace(&api.site_url(&f, ""), &api.site_url(&g, ""));
     let r = api.call(Call { method: "GET", url: other_host, ..Call::default() })?;
     s.ok("a redemption for one fragment is refused on another", r.status == 401, &r);
     let r = api.call(Call { method: "GET", url: redeem.clone(), ..Call::default() })?;
@@ -462,6 +462,24 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("past the cap, the oldest sign-in went first: finishing it is refused", r.status == 400 && r.message().contains("start again"), &r);
     let r = signed_in_to(api, "/after-the-flood")?;
     s.ok("and the newest finishes", r == format!("{}/after-the-flood", api.base), &r);
+
+    // over https (a proxy in front says so), sessions are __Host- cookies,
+    // which no fragment's page can set for the whole domain: a plain one,
+    // as a page could plant it, is nobody's
+    let https = |path: &str, cookie: Option<String>| {
+        api.call(Call { method: "GET", url: format!("{}{path}", api.base), cookie, extra: vec![("x-forwarded-proto", "https".into())], ..Call::default() })
+    };
+    let session = api.sign_in("host-prefix@e2e.test")?;
+    let planted = https("/", Some(format!("fragment_session={session}")))?;
+    let hosted = https("/", Some(format!("__Host-fragment_session={session}")))?;
+    s.ok(
+        "over https the platform reads its session only from a __Host- cookie (a planted plain one is nobody)",
+        planted.status == 200 && !planted.text.contains("Sign out") && hosted.status == 200 && hosted.text.contains("Sign out"),
+        format!("{} / {}", planted.text.chars().take(120).collect::<String>(), hosted.text.chars().take(120).collect::<String>()),
+    );
+    let start = https("/auth/login?return=/", None)?;
+    let cookie = start.headers.get_all("set-cookie").iter().filter_map(|v| v.to_str().ok()).find(|c| c.contains("fragment_login=")).unwrap_or("").to_string();
+    s.ok("and sets them so: __Host-, the whole host, Secure", cookie.starts_with("__Host-fragment_login=") && cookie.contains("Path=/;") && cookie.contains("Secure"), &cookie);
 
     // who makes fragments: people, and agents for their owners
     let agent = Keys::generate();

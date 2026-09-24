@@ -160,7 +160,7 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     let names: Vec<&str> = r.body["fragments"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str()).collect();
     s.ok("the owner, on a page that asks, lists their fragments", r.status == 200 && [&chat, &blank, &dash].iter().all(|n| names.contains(&n.as_str())), &r);
     let url = r.body["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == chat.as_str()).map(|f| f["url"].clone()).unwrap_or_default();
-    s.ok("each with its URL", url.as_str().is_some_and(|u| u.contains(&chat)), &url);
+    s.ok("each with its URL", url == api.site_url(&chat, "").as_str(), &url);
     let r = listed(Some(site_cookie(api, &editor_session, &dash)?), &dash)?;
     s.ok("an editor of that page is refused", r.status == 403, &r);
     let r = listed(None, &dash)?;
