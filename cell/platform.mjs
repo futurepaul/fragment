@@ -31,36 +31,39 @@
 // The checks here run in the author's realm, which can patch what they
 // rely on: they exist so an author sees a refusal while the mutation can
 // still roll back. The supervisor checks every effect again in Rust
-// (fragment_core::effects) before it applies any.
+// (fragment_core::effects) before it applies any. Their limits and rules
+// come from limits.js, which the cell generates from the Rust definitions
+// (fragment_core::facet), so the two sides count the same way.
 import { App as AuthorApp } from "./app.js";
+import {
+  RECORD_BODY_MAX_BYTES,
+  EFFECTS_MAX,
+  RESULT_MAX_BYTES,
+  APP_DB_MAX_BYTES,
+  FILE_WRITE_MAX_BYTES,
+  FILE_WRITES_MAX,
+  PATH_MAX_BYTES,
+  POINTER_MAX_BYTES,
+  PUSH_WHO_MAX_CHARS,
+  PUSH_PAYLOAD_MAX_BYTES,
+  RESERVED_OP_NAMES,
+  utf8Bytes,
+  validKind,
+  validRepoPath,
+  isBlobPointer,
+} from "./limits.js";
 
 const LEDGER = "_fragment_ops";
-const RECORD_MAX_BYTES = 64 * 1024;
-const EFFECTS_MAX = 64;
-const RESULT_MAX_BYTES = 1024 * 1024;
-// The app's database (limits::APP_DB_MAX_BYTES): a mutation that leaves it
-// larger rolls back. The node's own hard stop (CELLD_FACET_MAX_BYTES) sits
-// above it, so the runtime's bookkeeping always has room.
-const APP_DB_MAX_BYTES = 16 * 1024 * 1024;
+// A mutation that leaves the app's database over APP_DB_MAX_BYTES rolls
+// back. The node's own hard stop (CELLD_FACET_MAX_BYTES) sits above it, so
+// the runtime's bookkeeping always has room.
 const STORAGE_FULL = Symbol("storage_full");
-const KIND = /^[a-z][a-z0-9._-]{0,63}$/;
-const FILE_WRITE_MAX_BYTES = 256 * 1024;
-const FILE_WRITES_MAX = 16;
-const PATH = /^(?!\/)(?!.*\/$)(?!.*(^|\/)\.{1,2}(\/|$))(?!.*\/\/)[^\\\x00-\x1f]{1,300}$/;
-// limits::PATH_MAX_BYTES: in bytes, as git and the supervisor count them.
-const PATH_MAX_BYTES = 300;
-// A git-lfs pointer (fragment_core::blob): the platform writes these for
-// large files; an app never does.
-const POINTER_MAX_BYTES = 200;
-const POINTER = /^version https:\/\/git-lfs\.github\.com\/spec\/v1\noid sha256:[0-9a-f]{64}\nsize \+?(\d+)\n$/;
-const U64_MAX = 18446744073709551615n;
 // Half of a character (a lone surrogate, as from cutting a string inside an
 // emoji) in JSON text: JSON.stringify escapes one as \udXXX (lowercase), and
 // the supervisor's JSON reader refuses it, so it is refused here while the
 // mutation can still roll back. An even run of backslashes before it is
 // escaped backslashes, not the escape.
 const LONE_SURROGATE = /(?<!\\)(?:\\\\)*\\ud[89a-f]/;
-const RESERVED = new Set(["constructor", "fetch", "alarm", "webSocketMessage", "webSocketClose", "webSocketError"]);
 // A step not yet taken never settles: the body stops there, and a try/catch
 // or Promise.all in author code cannot swallow the suspension.
 const NEVER = new Promise(() => {});
@@ -72,42 +75,27 @@ function describe(e) {
   return e instanceof Error ? `${e.name}: ${e.message}` : String(e);
 }
 
-function bytes(text) {
-  return new TextEncoder().encode(text).length;
-}
-
 function base64(data) {
   let s = "";
   for (let i = 0; i < data.length; i += 0x8000) s += String.fromCharCode(...data.subarray(i, i + 0x8000));
   return btoa(s);
 }
 
-const PUSH_MAX_BYTES = 3800;
 // 20 seconds apart: a video has about 15 minutes to finish.
 const VIDEO_POLLS_MAX = 45;
 
 function checkPush(who, payload) {
-  if (typeof who !== "string" || who.length > 64) throw new Error("push(who, payload): who is a string of at most 64 characters");
-  if (bytes(JSON.stringify(payload ?? {})) > PUSH_MAX_BYTES) throw new Error(`a push payload is at most ${PUSH_MAX_BYTES} bytes`);
+  if (typeof who !== "string" || [...who].length > PUSH_WHO_MAX_CHARS) {
+    throw new Error(`push(who, payload): who is a string of at most ${PUSH_WHO_MAX_CHARS} characters`);
+  }
+  if (utf8Bytes(JSON.stringify(payload ?? {})) > PUSH_PAYLOAD_MAX_BYTES) throw new Error(`a push payload is at most ${PUSH_PAYLOAD_MAX_BYTES} bytes`);
   return payload ?? {};
 }
 
 function checkPath(path) {
-  if (typeof path !== "string" || !PATH.test(path) || bytes(path) > PATH_MAX_BYTES) {
+  if (!validRepoPath(path)) {
     throw new Error(`${JSON.stringify(path)} is not a file path (relative, no . or .. segments, at most ${PATH_MAX_BYTES} bytes)`);
   }
-}
-
-function isPointer(data) {
-  if (data.length > POINTER_MAX_BYTES) return false;
-  let text;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(data);
-  } catch {
-    return false;
-  }
-  const m = POINTER.exec(text);
-  return m !== null && BigInt(m[1]) <= U64_MAX;
 }
 
 // A file's content may not be a large-file pointer.
@@ -121,7 +109,7 @@ function checkContent(path, data) {
   } else if (data instanceof ArrayBuffer) {
     raw = new Uint8Array(data);
   }
-  if (raw !== null && isPointer(raw)) throw new Error(`${path}: an app does not write blob pointers`);
+  if (raw !== null && isBlobPointer(raw)) throw new Error(`${path}: an app does not write blob pointers`);
 }
 
 // A file's content as a step or effect carries it: { text } or { base64 }.
@@ -133,7 +121,7 @@ function content(data) {
 }
 
 function contentSize(c) {
-  return c.text !== undefined ? bytes(c.text) : Math.floor((c.base64.length * 3) / 4);
+  return c.text !== undefined ? utf8Bytes(c.text) : Math.floor((c.base64.length * 3) / 4);
 }
 
 // A mutation's file changes, applied to `main` as one commit after it commits.
@@ -195,7 +183,7 @@ class FilesReader {
 }
 
 function authorMethod(name) {
-  return !name.startsWith("__") && !RESERVED.has(name) && typeof AuthorApp.prototype[name] === "function";
+  return !name.startsWith("__") && !RESERVED_OP_NAMES.has(name) && typeof AuthorApp.prototype[name] === "function";
 }
 
 // The platform's own read of a call's effects: author code gets no
@@ -238,9 +226,9 @@ class Call {
   publish(channel, body, kind = "message") {
     if (this.#effects === null) throw new Error("publish is for mutations; a query cannot publish");
     if (!this.#channels.has(channel)) throw new Error(`channel ${channel} is not declared in fragment.json`);
-    if (typeof kind !== "string" || !KIND.test(kind)) throw new Error("kind must match ^[a-z][a-z0-9._-]{0,63}$");
+    if (!validKind(kind)) throw new Error("kind must match ^[a-z][a-z0-9._-]{0,63}$");
     const text = JSON.stringify(body ?? null);
-    if (new TextEncoder().encode(text).length > RECORD_MAX_BYTES) throw new Error(`a record's body is at most ${RECORD_MAX_BYTES} bytes`);
+    if (utf8Bytes(text) > RECORD_BODY_MAX_BYTES) throw new Error(`a record's body is at most ${RECORD_BODY_MAX_BYTES} bytes`);
     if (this.#effects.length >= EFFECTS_MAX) throw new Error(`a mutation publishes at most ${EFFECTS_MAX} records`);
     this.#effects.push({ channel, kind, body: JSON.parse(text) });
   }
@@ -326,9 +314,9 @@ class Job {
 
   publish(channel, body, kind = "message") {
     if (!this.#channels.has(channel)) throw new Error(`channel ${channel} is not declared in fragment.json`);
-    if (typeof kind !== "string" || !KIND.test(kind)) throw new Error("kind must match ^[a-z][a-z0-9._-]{0,63}$");
+    if (!validKind(kind)) throw new Error("kind must match ^[a-z][a-z0-9._-]{0,63}$");
     const text = JSON.stringify(body ?? null);
-    if (bytes(text) > RECORD_MAX_BYTES) throw new Error(`a record's body is at most ${RECORD_MAX_BYTES} bytes`);
+    if (utf8Bytes(text) > RECORD_BODY_MAX_BYTES) throw new Error(`a record's body is at most ${RECORD_BODY_MAX_BYTES} bytes`);
     return this.#step("publish", { channel, kind, body: JSON.parse(text) });
   }
 
@@ -450,7 +438,7 @@ export class App extends AuthorApp {
         throw new Error(`mutation ${name} returned a promise; mutations are synchronous`);
       }
       const text = JSON.stringify(out ?? null) ?? "null";
-      if (bytes(text) > RESULT_MAX_BYTES) throw new Error(`a result is at most ${RESULT_MAX_BYTES} bytes`);
+      if (utf8Bytes(text) > RESULT_MAX_BYTES) throw new Error(`a result is at most ${RESULT_MAX_BYTES} bytes`);
       const effects = JSON.stringify(effectsOf(call));
       if (LONE_SURROGATE.test(text) || LONE_SURROGATE.test(effects)) {
         throw new Error("a mutation's result and effects hold whole characters: this text holds half of one (a lone surrogate)");
@@ -495,7 +483,7 @@ export class App extends AuthorApp {
     }
     if (next) return { next };
     const text = JSON.stringify(out.value ?? null);
-    if (bytes(text) > RESULT_MAX_BYTES) return { failed: `a job's result is at most ${RESULT_MAX_BYTES} bytes` };
+    if (utf8Bytes(text) > RESULT_MAX_BYTES) return { failed: `a job's result is at most ${RESULT_MAX_BYTES} bytes` };
     return { done: true, output: JSON.parse(text) };
   }
 

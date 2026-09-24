@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use fragment_core::facet;
 use fragment_core::npub;
 use fragment_proto::{canonical_json, limits, valid_op_id, ErrorCode, OpCall, OpDecl, OpKind, OpResult, Role};
 use serde_json::{json, Value};
@@ -27,14 +28,30 @@ pub const JOB_ID_PREFIX: &str = "job:";
 /// facet takes the window from each call, so this is its one definition.
 pub(crate) const LEDGER_KEPT_MS: i64 = 7 * 24 * 3600 * 1000;
 
-/// `PLATFORM_JS`'s content address. It comes with the cell deploy, not
-/// with an install, so it joins the loader id when the app is loaded, not
-/// when its code is stored. Computed once per isolate from a constant
-/// compiled into that isolate: it has nothing to invalidate and cannot go
-/// stale.
-fn platform_id() -> &'static str {
-    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    ID.get_or_init(|| hex::encode(Sha256::digest(PLATFORM_JS.as_bytes())))
+/// The platform code this cell carries: `platform.js`, and the
+/// `limits.js` it imports (generated from the Rust limits and rules:
+/// `fragment_core::facet`), with their content address. Both come with the
+/// cell deploy, not with an install, so the address joins the loader id
+/// when the app is loaded, not when its code is stored. Computed once per
+/// isolate from constants compiled into that isolate: it has nothing to
+/// invalidate and cannot go stale.
+struct Platform {
+    limits: String,
+    id: String,
+}
+
+fn platform() -> &'static Platform {
+    static PLATFORM: std::sync::OnceLock<Platform> = std::sync::OnceLock::new();
+    PLATFORM.get_or_init(|| {
+        let limits = facet::limits_js();
+        let mut hasher = Sha256::new();
+        hasher.update(PLATFORM_JS.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(facet::LIMITS_MODULE.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(limits.as_bytes());
+        Platform { id: hex::encode(hasher.finalize()), limits }
+    })
 }
 
 /// One admitted call: who runs which operation, and how deep in a chain of
@@ -91,12 +108,13 @@ impl FragmentCell {
         let modules: BTreeMap<String, String> = serde_json::from_str(row["modules"].as_str().unwrap_or("{}")).expect("stored modules parse");
         // The loader memoizes a worker by its id, so the id names every
         // byte it runs: the app's modules (the stored loader_id) and the
-        // platform code this cell carries, which a cell deploy changes
-        // under code installed before it. And one loaded worker per
+        // platform code this cell carries (platform.js and limits.js), which
+        // a cell deploy changes under code installed before it. And one loaded worker per
         // fragment: its env holds this fragment's capabilities, and its
         // module state is this fragment's alone.
         let loader_id = row["loader_id"].as_str().expect("code.loader_id is TEXT");
-        let id = format!("{loader_id}:{}:{}", platform_id(), self.must("npub")?);
+        let platform = platform();
+        let id = format!("{loader_id}:{}:{}", platform.id, self.must("npub")?);
         js::app_facet(
             &self.raw,
             self.env.as_ref(),
@@ -104,6 +122,7 @@ impl FragmentCell {
             &AppCode {
                 id: &id,
                 platform: PLATFORM_JS,
+                limits: &platform.limits,
                 source: row["source"].as_str().expect("code.source is TEXT"),
                 modules: &modules,
                 cpu_ms: cpu_ms as u32,

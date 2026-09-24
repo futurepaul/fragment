@@ -66,6 +66,15 @@ pub fn schemas(s: &mut Suite, api: &Api) -> Result<()> {
     s.deploy(&c);
     let r = api.status(&owner, &name)?;
     s.ok("an operation named fetch is refused (it is the App's route handler)", r.body["code"]["error"].as_str().is_some_and(|e| e.contains("reserved")), &r.body["code"]);
+    // the facet never calls a reserved name, so the manifest may not declare one
+    s.commit(&c, &[("fragment.json", Some(br#"{"operations":{"constructor":{"kind":"mutation"}}}"#))]);
+    let refused = s.deploy(&c);
+    let r = api.status(&owner, &name)?;
+    s.ok(
+        "an operation named constructor is refused at deploy, not answered unknown later",
+        r.body["code"]["sha"] == live && r.body["code"]["error"].as_str().is_some_and(|e| e.contains(&refused[..12]) && e.contains("\"constructor\" is reserved")),
+        &r.body["code"],
+    );
     Ok(())
 }
 

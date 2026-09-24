@@ -9,14 +9,11 @@ use std::collections::BTreeMap;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use fragment_proto::{limits, valid_repo_path, ChannelDecl, BUILTIN_CHANNELS};
+use fragment_proto::{limits, valid_kind, valid_repo_path, ChannelDecl, BUILTIN_CHANNELS};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::{blob, webpush};
-
-/// A push's `who`: the tag a page subscribed with.
-pub const PUSH_WHO_MAX_CHARS: usize = 64;
 
 /// A file's content as an effect, a job step, or a read carries it:
 /// `{"text": …}` when it is UTF-8, `{"base64": …}` otherwise.
@@ -65,15 +62,6 @@ pub enum Effect {
     File { path: String, bytes: Option<Vec<u8>> },
     /// A web push to the subscriptions tagged `who` (`*`: all).
     Push { who: String, payload: Value },
-}
-
-/// A record's kind: `^[a-z][a-z0-9._-]{0,63}$`.
-pub fn valid_kind(kind: &str) -> bool {
-    let b = kind.as_bytes();
-    !b.is_empty()
-        && b.len() <= 64
-        && b[0].is_ascii_lowercase()
-        && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"._-".contains(c))
 }
 
 /// Checks a record an app publishes, from a mutation or a job step: only to
@@ -133,8 +121,8 @@ fn decode_one(v: &Value, declared: &BTreeMap<String, ChannelDecl>) -> Result<Eff
     } else if obj.contains_key("push") {
         only(obj, &["push", "payload"])?;
         let who = string(obj, "push")?;
-        if who.chars().count() > PUSH_WHO_MAX_CHARS {
-            return Err(format!("a push's who is at most {PUSH_WHO_MAX_CHARS} characters"));
+        if who.chars().count() > limits::PUSH_WHO_MAX_CHARS {
+            return Err(format!("a push's who is at most {} characters", limits::PUSH_WHO_MAX_CHARS));
         }
         let payload = obj.get("payload").ok_or("payload is missing")?;
         if payload.to_string().len() > webpush::PAYLOAD_MAX_BYTES {
@@ -274,8 +262,8 @@ mod tests {
 
     #[test]
     fn pushes_and_shapes() {
-        assert!(refusal(json!([{ "push": "w".repeat(PUSH_WHO_MAX_CHARS + 1), "payload": {} }])).contains("who"));
-        assert!(decode(&json!([{ "push": "\u{e9}".repeat(PUSH_WHO_MAX_CHARS), "payload": {} }]), &declared()).is_ok());
+        assert!(refusal(json!([{ "push": "w".repeat(limits::PUSH_WHO_MAX_CHARS + 1), "payload": {} }])).contains("who"));
+        assert!(decode(&json!([{ "push": "\u{e9}".repeat(limits::PUSH_WHO_MAX_CHARS), "payload": {} }]), &declared()).is_ok());
         let big = json!({ "body": "x".repeat(webpush::PAYLOAD_MAX_BYTES) });
         assert!(refusal(json!([{ "push": "*", "payload": big }])).contains("push payload"));
         assert!(refusal(json!({ "channel": "room" })).contains("an array"));

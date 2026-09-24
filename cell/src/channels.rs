@@ -45,8 +45,6 @@ const SWEEP_ROWS: i64 = 64;
 /// Mutations waiting for their effects; past this, new mutations are
 /// refused until they drain.
 const PENDING_MAX: u64 = 10_000;
-/// `events` and `ops` keep at most this many records each.
-const AUDIT_KEPT: i64 = 10_000;
 /// A passing failure tries again after 10 s, the wait doubling up to an
 /// hour, at most 60 times: about two days in all.
 const RETRY_FIRST_MS: i64 = 10_000;
@@ -184,7 +182,7 @@ impl FragmentCell {
         if BUILTIN_CHANNELS.contains(&channel) {
             self.exec(
                 "DELETE FROM records WHERE channel = ? AND seq <= (SELECT MAX(seq) FROM records WHERE channel = ?) - ?",
-                vec![channel.into(), channel.into(), SqlStorageValue::Integer(AUDIT_KEPT)],
+                vec![channel.into(), channel.into(), SqlStorageValue::Integer(limits::AUDIT_KEPT)],
             )?;
         }
         let record = record_json(row);

@@ -31,6 +31,21 @@ pub fn pointer(sha256: &str, size: u64) -> String {
     format!("{VERSION}\noid sha256:{sha256}\nsize {size}\n")
 }
 
+/// `parse`'s test for the app facet's in-app check (its `limits.js`,
+/// `crate::facet`): whether bytes (a `Uint8Array`) are a pointer, with the
+/// same three lines, the same strict UTF-8, and the same `u64` size.
+pub const IS_POINTER_JS: &str = r#"export function isBlobPointer(data) {
+  if (data.length > POINTER_MAX_BYTES) return false;
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(data);
+  } catch {
+    return false;
+  }
+  const m = /^version https:\/\/git-lfs\.github\.com\/spec\/v1\noid sha256:[0-9a-f]{64}\nsize \+?(\d+)\n$/.exec(text);
+  return m !== null && BigInt(m[1]) <= 18446744073709551615n;
+}"#;
+
 /// The pointer a file's bytes are, if they are one.
 pub fn parse(bytes: &[u8]) -> Option<Pointer> {
     if bytes.len() > POINTER_MAX_BYTES {

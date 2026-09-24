@@ -2,6 +2,7 @@
 //! Loader, Durable Object facets, and the Workflows binding. Every
 //! `Reflect` call in the cell lives here, behind typed functions.
 
+use fragment_core::facet;
 use worker::js_sys::{self, Array, Function, Object, Promise, Reflect};
 use worker::wasm_bindgen::{closure::Closure, JsCast, JsValue};
 use worker::wasm_bindgen_futures::JsFuture;
@@ -53,6 +54,7 @@ fn from_js(v: &JsValue) -> Result<serde_json::Value, String> {
 }
 
 /// What the Worker Loader compiles for an app: the platform wrapper, the
+/// limits it checks (`limits.js`, generated: `fragment_core::facet`), the
 /// author's `app.mjs` (as `app.js`), and their `applib/` modules, with no
 /// ambient network and bounded CPU.
 pub struct AppCode<'a> {
@@ -61,6 +63,7 @@ pub struct AppCode<'a> {
     /// so the id must name the bytes.
     pub id: &'a str,
     pub platform: &'a str,
+    pub limits: &'a str,
     pub source: &'a str,
     /// `applib/…` path → source.
     pub modules: &'a std::collections::BTreeMap<String, String>,
@@ -93,6 +96,7 @@ fn app_env(ctx: &JsValue, fragment: &str) -> CellResult<Object> {
 pub fn app_facet(ctx: &JsValue, env: &JsValue, fragment: &str, code: &AppCode<'_>) -> CellResult<Facet> {
     let modules = Object::new();
     set(&modules, "platform.js", code.platform);
+    set(&modules, facet::LIMITS_MODULE, code.limits);
     set(&modules, "app.js", code.source);
     for (path, source) in code.modules {
         set(&modules, path, source.as_str());

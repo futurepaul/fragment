@@ -25,7 +25,6 @@ use crate::js;
 
 /// How long a push service keeps a message for an offline browser.
 const PUSH_TTL_S: &str = "86400";
-const WHO_MAX_CHARS: usize = 64;
 const ENDPOINT_MAX_BYTES: usize = 1024;
 
 pub const SW_JS: &str = include_str!("../sw.js");
@@ -59,8 +58,8 @@ impl FragmentCell {
     pub(crate) fn push_subscribe(&self, body: &Value, principal: &str) -> CellResult<Value> {
         let endpoint = body["endpoint"].as_str().unwrap_or("");
         let who = body["who"].as_str().unwrap_or("");
-        if endpoint.len() > ENDPOINT_MAX_BYTES || who.chars().count() > WHO_MAX_CHARS {
-            return Err(CellError::invalid(format!("an endpoint is at most {ENDPOINT_MAX_BYTES} bytes, a who at most {WHO_MAX_CHARS} characters")));
+        if endpoint.len() > ENDPOINT_MAX_BYTES || who.chars().count() > limits::PUSH_WHO_MAX_CHARS {
+            return Err(CellError::invalid(format!("an endpoint is at most {ENDPOINT_MAX_BYTES} bytes, a who at most {} characters", limits::PUSH_WHO_MAX_CHARS)));
         }
         let url = egress::check(endpoint, self.cfg.egress_local).map_err(|e| CellError::invalid(format!("endpoint: {e}")))?;
         if url.scheme() != "https" && !self.cfg.egress_local {
