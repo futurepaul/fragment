@@ -176,7 +176,10 @@ their keys: the same decision either way. A cookie for another fragment,
 or whose platform session ended, is nobody. A platform session keeps its
 newest 4 sessions on each fragment (the oldest ends). `__signout` ends
 the session in the registry and clears the cookie: a copy of it is
-nobody from then on.
+nobody from then on. The cookie is cleared whatever the registry
+answers; when the registry cannot end the session, the failure is
+logged and a copy lasts until the session expires or its platform
+session ends (`/auth/logout`).
 
 `return` is a path on the origin it returns to, kept only when it begins
 with one `/` and holds no byte at or below 0x20, no DEL, and no
