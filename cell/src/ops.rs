@@ -269,7 +269,8 @@ impl FragmentCell {
 
     /// `POST /api/test/fragment {fragment, op, …}`, the router's, on fleets
     /// with test hooks only: the levers the e2e pulls on one fragment.
-    /// `fail-deliveries {times}` fails its next queue sends; `fail-triggers
+    /// `fail-deliveries {times}` fails its next queue sends; `fail-outbox
+    /// {times}` fails its next records' outbox writes after their append; `fail-triggers
     /// {times}` fails its next trigger steps before their last run; `drop-live
     /// {code}` closes its live sockets; `ledger {ms | null}` sets (or
     /// clears) a shorter ledger window; `age {ms}` forgets write keys as
@@ -283,6 +284,11 @@ impl FragmentCell {
             Some("fail-deliveries") => {
                 let times = body["times"].as_u64().ok_or_else(|| CellError::invalid("fail-deliveries names how many times"))?;
                 self.set_meta(crate::deliveries::TEST_FAILURES_KEY, &times.to_string())?;
+                json!({ "ok": true })
+            }
+            Some("fail-outbox") => {
+                let times = body["times"].as_u64().ok_or_else(|| CellError::invalid("fail-outbox names how many times"))?;
+                self.set_meta(crate::subscriptions::TEST_OUTBOX_FAILURES_KEY, &times.to_string())?;
                 json!({ "ok": true })
             }
             Some("fail-triggers") => {
@@ -316,7 +322,7 @@ impl FragmentCell {
                 let fill = body["fill"].as_u64().ok_or_else(|| CellError::invalid("fill is a count"))?;
                 json!({ "members": self.fill_members(fill)? })
             }
-            _ => return Err(CellError::invalid("op is fail-deliveries, fail-triggers, drop-live, ledger, age, or members")),
+            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-live, ledger, age, or members")),
         })
     }
 }

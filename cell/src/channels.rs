@@ -175,8 +175,8 @@ impl FragmentCell {
             None => (SqlStorageValue::Null, SqlStorageValue::Null),
         };
         let rows = self.rows(
-            "INSERT INTO records (channel, seq, at, principal, kind, body, op, idx)
-             VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM records WHERE channel = ?), ?, ?, ?, ?, ?, ?)
+            "INSERT INTO records (channel, seq, at, principal, kind, body, op, idx, outboxed)
+             VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM records WHERE channel = ?), ?, ?, ?, ?, ?, ?, 0)
              ON CONFLICT DO NOTHING RETURNING channel, seq, at, principal, kind, body",
             vec![channel.into(), channel.into(), SqlStorageValue::Integer(now), principal.into(), kind.into(), body.to_string().into(), op_id, idx],
         )?;
@@ -218,7 +218,10 @@ impl FragmentCell {
     /// a try after a failure here starts only what did not start; then the
     /// outbox is drained, whatever the triggers did. Answers the runs.
     pub(crate) async fn published(&self, record: &ChannelRecord, appended: bool, depth: u32) -> CellResult<Vec<i64>> {
-        let queued = appended && self.outbox_record(record)?;
+        // A retry finds the record appended; its deliveries are written
+        // then only if the try that appended it never wrote them (the mark
+        // goes with them), so none is lost and none is sent twice.
+        let queued = if appended || !self.outboxed(record)? { self.outbox_record(record)? } else { false };
         let fired = self.fire_channel(record, depth);
         if queued {
             self.drain_deliveries().await;
