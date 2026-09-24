@@ -158,17 +158,21 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
 
 ## Principals and membership
 
-- A principal is an npub: a person, an agent, or a fragment. The CLI
-  proves one with NIP-98; a browser with a platform session that maps to
-  the person's key; an agent with its cell's key; a fragment with its
-  own key.
+- A principal is an identity: a person, an agent, or a fragment, with
+  one or more public keys in the registry (finite.computer's BANKS
+  model, ROADMAP decision 15). The CLI proves a key with NIP-98 and the
+  registry names its identity; a browser has a platform session that
+  maps to the person; an agent signs with its cell's key; a fragment
+  with its own key. The platform holds no person's private key. An
+  agent's designated owner can read what the agent can read.
 - Members and invites are supervisor tables. A grant or revoke is one
   transaction; a revoke closes that principal's sockets. The `events`
   channel records every change. Membership leaves `fragment.json` (a git
   commit can no longer grant access). Only the owner manages members,
-  invites, visibility, and tokens; a member may leave. Each key's list of
-  fragments is an index in its own `Principal` cell, fed from the
-  fragment's outbox (phase 2 slice B).
+  invites, visibility, and tokens; a member may leave. Members name
+  identities, so replacing a key rewrites no grant. Each identity's list
+  of fragments is an index in its own `Principal` cell, fed from the
+  fragment's outbox (phase 2 slice B; keyed by key until phase 4).
 - Visibility: `public`, `link` (a token that is a capability), or
   `members`. **A public fragment is a website anyone can use, writes
   included** (a public chat, a guestbook): an operation may declare

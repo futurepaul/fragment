@@ -19,10 +19,12 @@ weight.
 
 ## The model: four nouns
 
-1. **Identity.** A nostr key for a person, an agent, or a fragment,
-   registered in BANKS (which identity a key belongs to, who owns it).
-   Resource permissions belong to the service that owns the resource,
-   never to BANKS.
+1. **Identity.** A person, an agent, or a fragment: a stable identity
+   with one or more nostr keys, in a registry shaped like finite.computer's
+   BANKS (which identity a key belongs to, which person owns an agent).
+   Grants name identities, not keys. Resource permissions belong to the
+   service that owns the resource, never to the registry
+   (`docs/finite-integration.md`, decision 15).
 2. **Fragment.** A place: one code.storage repo (files, history, `main`
    and `live`), one supervisor cell (members, operations, channels) with
    the app's own SQLite in a facet, URLs, and members (key → role). **Apps, chats, and desktops are all
@@ -97,8 +99,12 @@ a computer's wake/exec.
     connecting your own OpenRouter account (OAuth PKCE) comes back later
     as the way past the limit.
 12. **Sign-in for fragment.club is WorkOS** (phase 4): WorkOS
-    authenticates people; the platform holds one key per person behind
-    it; the CLI and agents keep signing with NIP-98.
+    authenticates people; the CLI and agents keep signing with NIP-98.
+    *Amended 2026-09-24 (Paul):* fragment has its own WorkOS environment
+    with sign-up switched off (Paul invites people), not finite.computer's;
+    a person is keyed by their verified `(issuer, subject)`, so
+    finite.computer's login can join later as a second issuer. The
+    platform holds no key for a person: browsers use a session.
 13. **Bring your own compute is a later phase (10)**, per org: an org's
     own celld fleet, Tigris bucket, Sprites org, and OpenRouter account
     under `<org>.fragment.club`. The shared fragment.club is deployed the
@@ -122,6 +128,19 @@ a computer's wake/exec.
     credit limit equal to their budget. A fragment that sets its own
     `OPENROUTER_API_KEY` pays for itself and is not metered. Paul's
     exposure is at most $20 a month per invited person, plus hosting.
+15. **Identity follows finite.computer's BANKS model (FIN-11)** (Paul,
+    2026-09-24), so that fragment's people can move to finite.computer
+    without rewriting a grant. Stable identities for people, agents, and
+    fragments; grants name identities; each identity has one or more
+    public keys, added with proof of possession and revoked one by one;
+    every agent has a designated human owner, who can read what the agent
+    can read; keys stay with their callers (browsers use sessions, the
+    CLI and agents sign); live lookups that fail visibly. Everything
+    finite.computer's Core will own (sign-in, the registry, billing,
+    model access, connections, chat channels) is a stand-in built in
+    V3's shape behind a seam, tracked in `docs/finite-integration.md`.
+    Visibility keeps fragment's own link: `link` means anyone holding the
+    unguessable link is a viewer; `public` means anyone, no link needed.
 
 ## Truth map (every change is checked against this)
 
@@ -133,7 +152,7 @@ a computer's wake/exec.
 | Members, roles, invites | the fragment's supervisor cell | grants and revokes are transactional; the `events` channel records each change |
 | Cell state (supervisor tables, operation ledger, channels, the app facet's SQL) | the S3 bucket (Tigris), via celld replication | — |
 | Large file bytes (1 MiB or more: uploads, generated media) | blobs in Tigris (celld's R2 binding, the fleet bucket under `r2/`), keyed by SHA-256 | git holds a pointer; a sync resolves it to the real file; blobs no branch tip references are deleted; never in cell SQL |
-| Identities ↔ keys, designated owners | BANKS registry cell | sessions and caches name it and never outlive a revocation |
+| Identities ↔ keys, designated owners | the registry cell (BANKS's shape; BANKS itself later, `docs/finite-integration.md`) | sessions and caches name an identity and never outlive a revocation |
 | Browser sessions | platform session cookie (platform origin only) | maps to one identity key; re-checked against grants per request |
 | Agent conversations and turns | the agent's cell (goose's conversation in SQL) | a computer holds a working copy and a tool journal; effects dedupe at their owners by tool-call id |
 | Computer disks | Sprites durable storage | the front door's registry records ownership only |
@@ -244,25 +263,33 @@ deployment.
 
 ### 4. Friends alpha: invite-only sign-in and budgets
 - Pulled forward so Paul can share fragment.club with friends without an
-  obvious problem (2026-09-23). BANKS registry cell: identities (person,
-  agent, fragment) ↔ npub and designated owners. Sign-in is WorkOS
-  AuthKit with sign-up switched off; Paul invites people from the WorkOS
-  dashboard (decision 12; a dev login stands in locally). Signing in
-  creates a person with a custodial key encrypted in their cell. A
-  platform session maps a browser to that principal; each fragment is
+  obvious problem (2026-09-23); reshaped to finite.computer's identity
+  model (decision 15, 2026-09-24; slices in `docs/phase-4.md`). A
+  registry of identities (person, agent, fragment), their public keys,
+  and each agent's owner, in BANKS's shape. Members name identities.
+  Sign-in is fragment's own WorkOS environment with sign-up switched off;
+  Paul invites people from the WorkOS dashboard (decision 12; a fake
+  stands in locally). Signing in finds or creates the person for that
+  `(issuer, subject)`; the platform holds no key for them. A session on
+  the platform origin maps a browser to that person; each fragment is
   served from its own origin (`<name>.fragment.club`, the suffix from
-  configuration), with the hostname checked before it is trusted.
-  `fragment login` becomes a browser sign-in that ties the CLI's key to
-  the person; creating a fragment needs a person (replacing phase 3's
-  allowlist).
-- Budgets (decision 14): the ledger in the person's cell, reservations
-  and settlement on every `job.ai` step, per-person OpenRouter keys with
+  configuration) and gets its own cookie through a single-use exchange,
+  with the hostname checked before it is trusted. `fragment login`
+  becomes a browser sign-in that adds the CLI's key to the person, with
+  proof of possession; creating a fragment needs a person (replacing
+  phase 3's allowlist).
+- Budgets (decision 14): the ledger in the billing org's cell (for now
+  always the person's own), reservations and settlement on every
+  `job.ai` step, usage rows in the shape finite.computer's Core will
+  take (`docs/finite-integration.md`), per-person OpenRouter keys with
   credit limits, the monthly reset, `fragment budget`, the platform bar,
   per-run costs. Computers join the same ledger in phase 8.
 - **Acceptance:** identical allow/deny decisions for CLI and browser
   across public, link, and members; negative tests (no session, not
-  invited, revoked member, cross-fragment cookie) and a session restart
-  test. Budgets, against the OpenRouter fake: a step over the remaining
+  invited, revoked member, revoked key, cross-fragment cookie, the
+  registry down) and a session restart test; a key replaced without any
+  grant rewritten; an agent's owner reads what the agent reads and
+  cannot write through it. Budgets, against the OpenRouter fake: a step over the remaining
   budget is held and succeeds on replay after a top-up; spend matches
   the fake's reported costs; two jobs racing for the last dollar cannot
   both run; the monthly reset; a public visitor's call bills the owner;

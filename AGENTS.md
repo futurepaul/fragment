@@ -12,6 +12,10 @@ from github.com/futurepaul/fragment) and on celld
 1. `docs/ROADMAP.md` — decisions, truth map, phases, escalations.
 2. `docs/MODEL.md` — the core model on celld primitives and the spikes.
    `docs/api.md` — the wire contract the cell answers.
+   `docs/finite-integration.md` — how fragment will move into
+   finite.computer (Finite V3): every Core concern, its stand-in here,
+   and the swap; update its row with any change that touches one;
+   `docs/phase-4.md` — sign-in, identities, budgets (proposed);
    `docs/phase-5.md` — agents (built overnight; choices for review);
    `docs/phase-8.md` — computers, first part (the same night);
    `docs/phase-3.md` — hosting on fragment.club;
