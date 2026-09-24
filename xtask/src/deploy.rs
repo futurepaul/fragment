@@ -188,7 +188,7 @@ pub fn run(args: &[String]) -> Result<()> {
 /// restarts the Machines). Values go through stdin and are never printed.
 fn import_secrets(fleet: &Fleet, token: &str, stage: bool) -> Result<()> {
     let (import, values) = secrets_import(fleet)?;
-    println!("{} {} secrets on {} (values never printed)", if stage { "staging" } else { "setting" }, fleet.node_secrets.len(), fleet.fly.app);
+    println!("{} {} secrets on {} (values never printed)", if stage { "staging" } else { "setting" }, fleet.node_secrets.len() + 2, fleet.fly.app);
     let mut cmd = Command::new("flyctl");
     cmd.args(["secrets", "import", "--app", &fleet.fly.app]);
     if stage {
@@ -411,6 +411,8 @@ kill_timeout = "60s"
 
 /// The fleet's secrets as `flyctl secrets import` reads them: one
 /// `NAME=value` a line (a PEM's newlines as `\n`, which `KEYS` reads back).
+/// With them, the bucket's keys from the fleet's credentials file (celld
+/// reads `AWS_*`), so a new bucket key reaches the nodes the same way.
 fn secrets_import(fleet: &Fleet) -> Result<(String, Vec<String>)> {
     let mut text = String::new();
     let mut values = vec![];
@@ -422,6 +424,9 @@ fn secrets_import(fleet: &Fleet) -> Result<(String, Vec<String>)> {
         text.push_str(&format!("{k}={}\n", v.replace('\n', "\\n")));
         values.push(v);
     }
+    let (id, key) = bucket_keys(fleet)?;
+    text.push_str(&format!("AWS_ACCESS_KEY_ID={id}\nAWS_SECRET_ACCESS_KEY={key}\n"));
+    values.extend([id, key]);
     Ok((text, values))
 }
 

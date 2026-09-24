@@ -88,6 +88,12 @@ values open under either and come back resealed as they are read.
 A deployment that changes both the cell and `KEYS`: nodes first (the old
 cell keeps working on them), then the cell.
 
+Changing a secret alone (a rotation): write the new value over its file
+(the bucket's keys: the two `AWS_*` lines of `fragment-club-bucket.env`),
+then `cargo xtask deploy fragment-club --secrets`, which sets the
+`node_secrets` and the bucket's keys on the app; Fly restarts the
+Machines one at a time. Then revoke the old value at its issuer.
+
 ## Bringing a fleet up (what was done for fragment-club)
 
 1. `flyctl apps create <app> --org <org>`.
