@@ -2,7 +2,8 @@
 //! Loader, Durable Object facets, and the Workflows binding. Every
 //! `Reflect` call in the cell lives here, behind typed functions.
 
-use fragment_core::facet;
+use fragment_core::facet::{self, Answer, LedgerRow, Mutated, Queried};
+use fragment_proto::ErrorCode;
 use worker::js_sys::{self, Array, Function, Object, Promise, Reflect};
 use worker::wasm_bindgen::{closure::Closure, JsCast, JsValue};
 use worker::wasm_bindgen_futures::JsFuture;
@@ -145,11 +146,11 @@ pub fn abort_app_facet(ctx: &JsValue, reason: &str) -> CellResult<()> {
 fn facet_error(message: String) -> CellError {
     if message.contains("too many loaded workers") {
         CellError::new(
-            fragment_proto::ErrorCode::NodeFull,
+            ErrorCode::NodeFull,
             "the node serving this fragment cannot load another app until it restarts (it holds as many as it can); try again later",
         )
     } else {
-        CellError::new(fragment_proto::ErrorCode::AppFailed, message)
+        CellError::new(ErrorCode::AppFailed, message)
     }
 }
 
@@ -160,7 +161,7 @@ impl Facet {
         let pending = call(&self.stub, "fetch", &[raw]).map_err(|e| facet_error(js_message(&e)))?;
         let out = settle(pending).await.map_err(|e| facet_error(js_message(&e)))?;
         let resp: worker_sys::web_sys::Response =
-            out.dyn_into().map_err(|_| CellError::new(fragment_proto::ErrorCode::AppFailed, "the app's fetch did not return a Response"))?;
+            out.dyn_into().map_err(|_| CellError::new(ErrorCode::AppFailed, "the app's fetch did not return a Response"))?;
         // The app's response has immutable headers; the platform adds its
         // own (cookies), so it answers a copy around the same body.
         let headers = worker_sys::web_sys::Headers::new_with_headers(&resp.headers()).map_err(|e| CellError::host(js_message(&e)))?;
@@ -171,14 +172,50 @@ impl Facet {
         Ok(worker::Response::from(copy))
     }
 
-    /// Calls a platform method on the facet (`__query`, `__mutate`). An
+    /// Calls a platform method on the facet (a job's `__job`). An
     /// exception from author code comes back as `AppFailed`.
     pub async fn call(&self, method: &str, args: &[serde_json::Value]) -> CellResult<serde_json::Value> {
-        let args: Vec<JsValue> = args.iter().map(to_js).collect();
-        let pending = call(&self.stub, method, &args).map_err(|e| facet_error(js_message(&e)))?;
-        let out = settle(pending).await.map_err(|e| facet_error(js_message(&e)))?;
+        let out = self.invoke(method, args).await?;
         from_js(&out).map_err(CellError::host)
     }
+
+    async fn invoke(&self, method: &str, args: &[serde_json::Value]) -> CellResult<JsValue> {
+        let args: Vec<JsValue> = args.iter().map(to_js).collect();
+        let pending = call(&self.stub, method, &args).map_err(|e| facet_error(js_message(&e)))?;
+        settle(pending).await.map_err(|e| facet_error(js_message(&e)))
+    }
+
+    /// A platform method's answer as its JSON text. An answer that is not
+    /// JSON is the app's failure: author code shares the platform code's
+    /// realm and can break it.
+    async fn answer_text(&self, method: &str, args: &[serde_json::Value]) -> CellResult<String> {
+        let out = self.invoke(method, args).await?;
+        let text = js_sys::JSON::stringify(&out).map_err(|e| app_answer(method, format!("not JSON: {}", js_message(&e))))?;
+        text.as_string().ok_or_else(|| app_answer(method, "no answer".into()))
+    }
+
+    /// Runs a query: `__query(op, input, meta)`.
+    pub async fn query(&self, op: &str, input: serde_json::Value, meta: serde_json::Value) -> CellResult<Answer<Queried>> {
+        let text = self.answer_text("__query", &[op.into(), input, meta]).await?;
+        facet::decode(&text).map_err(|why| app_answer("__query", why))
+    }
+
+    /// Runs a mutation: `__mutate(ledger id, op, input sha, input, meta)`.
+    pub async fn mutate(&self, args: [serde_json::Value; 5]) -> CellResult<Answer<Mutated>> {
+        let text = self.answer_text("__mutate", &args).await?;
+        facet::decode(&text).map_err(|why| app_answer("__mutate", why))
+    }
+
+    /// The facet's ledger row for a ledger id: `__ledger(id)`.
+    pub async fn ledger(&self, ledger_id: &str) -> CellResult<Option<LedgerRow>> {
+        let text = self.answer_text("__ledger", &[ledger_id.into()]).await?;
+        facet::decode_ledger(&text).map_err(|why| app_answer("__ledger", why))
+    }
+}
+
+/// An answer the platform code never gives: the app's realm broke it.
+fn app_answer(method: &str, why: String) -> CellError {
+    CellError::new(ErrorCode::AppFailed, format!("the app facet's {method} answered what its platform code never does: {why}"))
 }
 
 /// Stops the `app` facet and deletes its database (a deleted fragment).

@@ -465,8 +465,8 @@ impl FragmentCell {
     /// did. Answers whether it applied or refused effects; a passing
     /// failure is scheduled again, not answered.
     pub(crate) async fn settle_from_ledger(&self, facet: &js::Facet, p: &Pending) -> CellResult<bool> {
-        let row = match facet.call("__ledger", &[p.ledger_id.as_str().into()]).await {
-            Ok(answer) => answer["result"].clone(),
+        let row = match facet.ledger(&p.ledger_id).await {
+            Ok(row) => row,
             Err(e) => {
                 self.retry_later(p, &format!("the app did not answer: {}", e.message)).await?;
                 return Ok(false);
@@ -474,11 +474,13 @@ impl FragmentCell {
         };
         // Only this run's row: an older run of the same id holds its own
         // number (or none, from before runs were numbered).
-        if row["run"].as_i64() != Some(p.seq) {
-            self.forget(p)?;
-            return Ok(false);
+        match row {
+            Some(row) if row.run == Some(p.seq) => Ok(self.apply(p, &row.effects).await.is_ok()),
+            _ => {
+                self.forget(p)?;
+                Ok(false)
+            }
         }
-        Ok(self.apply(p, &row["effects"]).await.is_ok())
     }
 
     /// Pending runs no call is settling: those a call left behind (a crash,

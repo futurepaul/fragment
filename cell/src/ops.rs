@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use fragment_core::facet;
+use fragment_core::facet::{self, Answer, Refusal};
 use fragment_core::npub;
 use fragment_proto::{canonical_json, limits, valid_op_id, ErrorCode, OpCall, OpDecl, OpKind, OpResult, Role};
 use serde_json::{json, Value};
@@ -75,18 +75,14 @@ pub(crate) fn input_sha(op: &str, input: &Value) -> String {
     hex::encode(Sha256::digest(format!("{op}\n{}", canonical_json(input))))
 }
 
-/// The facet's answer when it refused a call: nothing of the call committed.
-fn refusal(answer: &Value, op: &str) -> CellResult<()> {
-    match answer["error"].as_str() {
-        Some("storage_full") => Err(CellError::new(
-            ErrorCode::StorageFull,
-            format!("the app's database is full ({} MiB): the mutation was rolled back", limits::APP_DB_MAX_BYTES / (1024 * 1024)),
-        )),
-        Some("conflicting_body") => Err(CellError::new(ErrorCode::ConflictingBody, "this operation id was already used with a different input")),
-        Some("unknown_operation") => Err(CellError::new(ErrorCode::UnknownOperation, format!("the app has no method {op:?}"))),
-        Some(other) => Err(CellError::host(format!("the facet's platform code answered {other:?}"))),
-        None => Ok(()),
-    }
+/// The facet refused a call: nothing of the call committed.
+fn refused(why: Refusal, op: &str) -> CellError {
+    let message = match why {
+        Refusal::StorageFull => format!("the app's database is full ({} MiB): the mutation was rolled back", limits::APP_DB_MAX_BYTES / (1024 * 1024)),
+        Refusal::ConflictingBody => "this operation id was already used with a different input".to_string(),
+        Refusal::UnknownOperation => format!("the app has no method {op:?}"),
+    };
+    CellError::new(why.code(), message)
 }
 
 /// A result is bounded here too: the facet's own bound runs in the author's realm.
@@ -205,11 +201,10 @@ impl FragmentCell {
             "channels": self.declared_channels()?.keys().collect::<Vec<_>>(),
         });
         match inv.decl.kind {
-            OpKind::Query => {
-                let answer = facet.call("__query", &[inv.op.into(), inv.input.clone(), meta]).await?;
-                refusal(&answer, inv.op)?;
-                bounded(OpResult { result: answer["result"].clone(), replayed: false })
-            }
+            OpKind::Query => match facet.query(inv.op, inv.input.clone(), meta).await? {
+                Answer::Ran(q) => bounded(OpResult { result: q.result, replayed: false }),
+                Answer::Refused(why) => Err(refused(why, inv.op)),
+            },
             OpKind::Mutation => self.mutate(&facet, &inv, &input_sha, meta).await,
             OpKind::Job => unreachable!("a job's call records a run above"),
         }
@@ -228,7 +223,7 @@ impl FragmentCell {
         meta["run"] = pending.seq.into();
         meta["ledgerMs"] = self.ledger_kept_ms()?.into();
         let args = [ledger_id.as_str().into(), inv.op.into(), input_sha.into(), inv.input.clone(), meta];
-        let answer = match facet.call("__mutate", &args).await {
+        let answer = match facet.mutate(args).await {
             Ok(answer) => answer,
             Err(e) => {
                 // A node that could not load the app ran nothing. Otherwise
@@ -246,14 +241,16 @@ impl FragmentCell {
                 return Err(e);
             }
         };
-        if let Err(e) = refusal(&answer, inv.op) {
-            if fresh {
-                self.forget(&pending)?;
+        let ran = match answer {
+            Answer::Ran(ran) => ran,
+            Answer::Refused(why) => {
+                if fresh {
+                    self.forget(&pending)?;
+                }
+                return Err(refused(why, inv.op));
             }
-            return Err(e);
-        }
-        let replayed = answer["replayed"].as_bool().expect("the platform answers `replayed`");
-        let run = answer["run"].as_i64();
+        };
+        let (replayed, run) = (ran.replayed, ran.run);
         if !replayed {
             if run != Some(pending.seq) {
                 // Fail closed: the sweep asks the facet's ledger which run it holds.
@@ -268,13 +265,13 @@ impl FragmentCell {
         // settled yet; any other run settled long ago (a replay applies
         // nothing again), and a row that is not its run never committed.
         if run == Some(pending.seq) {
-            if let Settled::Refused(why) = self.apply(&pending, &answer["effects"]).await? {
+            if let Settled::Refused(why) = self.apply(&pending, &ran.effects).await? {
                 return Err(CellError::new(ErrorCode::AppFailed, format!("{} committed, but the platform refused its effects: {why}", inv.op)));
             }
         } else {
             self.forget(&pending)?;
         }
-        bounded(OpResult { result: answer["result"].clone(), replayed })
+        bounded(OpResult { result: ran.result, replayed })
     }
 
     /// The ledger window this fragment's facet keeps: `LEDGER_KEPT_MS`, or
