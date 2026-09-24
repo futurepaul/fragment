@@ -66,6 +66,10 @@ pub struct Config {
     /// `FRAGMENT_OPERATORS`: identities and keys (as `parse_list` reads
     /// them) that may top up a budget.
     operators: Option<Result<Vec<String>, String>>,
+    /// `FRAGMENT_SIGNINS_PENDING_MAX`: sign-ins begun and not finished that
+    /// the Registry keeps before it lets the oldest go (default
+    /// `SIGNINS_PENDING_MAX_DEFAULT`).
+    pub signins_pending_max: u64,
     /// `FRAGMENT_TEST_HOOKS=allow`: dev and e2e fleets only.
     pub test_hooks: bool,
     /// `FRAGMENT_DEPLOY_ID`: which deployment this is (`cargo xtask deploy`
@@ -102,6 +106,10 @@ impl Config {
             .map(|v| (v * fragment_core::budget::USD as f64).round() as i64)
             .unwrap_or(20 * fragment_core::budget::USD);
         let operators = var(env, "FRAGMENT_OPERATORS").map(|l| fragment_core::npub::parse_list(&l));
+        let signins_pending_max = var(env, "FRAGMENT_SIGNINS_PENDING_MAX")
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|n| *n >= 1)
+            .unwrap_or(fragment_proto::limits::SIGNINS_PENDING_MAX_DEFAULT);
         let test_hooks = var(env, "FRAGMENT_TEST_HOOKS").as_deref() == Some("allow");
         let deploy_id = var(env, "FRAGMENT_DEPLOY_ID").unwrap_or_else(|| "dev".into());
         Config {
@@ -117,6 +125,7 @@ impl Config {
             platform_url,
             budget_micros,
             operators,
+            signins_pending_max,
             test_hooks,
             deploy_id,
         }

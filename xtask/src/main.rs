@@ -157,6 +157,7 @@ fn dev(args: &[String]) -> Result<()> {
         openrouter_management: read("OPENROUTER_MANAGEMENT_KEY_FILE")?,
         budget_usd: None,
         operators: None,
+        signins_pending_max: None,
         test_hooks: false,
     }
     .configure(&devstack::cell_dir())?;

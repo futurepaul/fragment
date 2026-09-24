@@ -70,13 +70,18 @@ CREATE TABLE IF NOT EXISTS pictures (
 pub struct RegistryCell {
     state: State,
     env: Env,
+    /// `FRAGMENT_SIGNINS_PENDING_MAX`, read once when the cell starts (a
+    /// fleet's variables change only with a deploy, which starts it again).
+    signins_pending_max: u64,
 }
 
 impl DurableObject for RegistryCell {
     fn new(state: State, env: Env) -> Self {
         state.storage().sql().exec(SCHEMA, None).expect("the Registry schema applies");
         state.storage().sql().exec(signin::SCHEMA, None).expect("the sign-in schema applies");
-        RegistryCell { state, env }
+        let signins_pending_max = crate::config::Config::from_env(&env).signins_pending_max;
+        assert!(signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
+        RegistryCell { state, env, signins_pending_max }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {

@@ -12,10 +12,11 @@
 //!
 //! Tokens and states are 32 random bytes; the cell keeps their SHA-256.
 //!
-//! Every sign-in table is bounded (`fragment_proto::limits`): the newest
-//! `SIGNINS_PENDING_MAX` pending sign-ins are kept, and a platform session
-//! keeps its newest `REDEMPTIONS_PER_SESSION_MAX` unspent redemptions and
-//! its newest `SITE_SESSIONS_PER_FRAGMENT_MAX` sessions on each fragment.
+//! Every sign-in table is bounded: a pending sign-in is kept through the
+//! fleet's next `FRAGMENT_SIGNINS_PENDING_MAX` starts (default
+//! `limits::SIGNINS_PENDING_MAX_DEFAULT`), and a platform session keeps its
+//! newest `REDEMPTIONS_PER_SESSION_MAX` unspent redemptions and its newest
+//! `SITE_SESSIONS_PER_FRAGMENT_MAX` sessions on each fragment.
 //! Expired rows go in batches on the Registry's alarm, never on a request:
 //! an anonymous `/auth/login` must not scan the tables every signed
 //! request waits on.
@@ -51,7 +52,7 @@ const SWEEP_BATCH: u64 = 256;
 const SWEEP_SLACK_MS: i64 = 60 * 1000;
 const SWEEP_AGAIN_MS: i64 = 1000;
 
-const _: () = assert!(limits::SIGNINS_PENDING_MAX >= 1 && limits::SITE_SESSIONS_PER_FRAGMENT_MAX >= 1 && limits::REDEMPTIONS_PER_SESSION_MAX >= 1);
+const _: () = assert!(limits::SIGNINS_PENDING_MAX_DEFAULT >= 1 && limits::SITE_SESSIONS_PER_FRAGMENT_MAX >= 1 && limits::REDEMPTIONS_PER_SESSION_MAX >= 1);
 
 /// The expiry columns are indexed for the sweep, and a site session's
 /// `(parent, fragment, created_at)` for its bound (that index replaced the
@@ -319,23 +320,24 @@ impl RegistryCell {
         let now = js::now_ms();
         self.sweep_by(now + LOGIN_TTL_MS).await?;
         let state = fresh_token();
-        let hash = sha(&state);
-        self.exec(
-            "INSERT INTO logins (state, return_to, link_to, created_at) VALUES (?, ?, ?, ?)",
+        let rows = self.rows(
+            "INSERT INTO logins (state, return_to, link_to, created_at) VALUES (?, ?, ?, ?) RETURNING rowid AS n",
             vec![
-                hash.as_str().into(),
+                sha(&state).into(),
                 b.return_to.as_str().into(),
                 link_to.map_or(SqlStorageValue::Null, |p| p.id.into()),
                 SqlStorageValue::Integer(now),
             ],
         )?;
-        // bounded: this sign-in and the newest others are kept, the oldest go
-        // (a walk of the created_at index, at most the cap's rows long; which
-        // of two made in the same millisecond goes first does not matter)
-        self.exec(
-            "DELETE FROM logins WHERE state IN (SELECT state FROM logins WHERE state != ? ORDER BY created_at DESC LIMIT -1 OFFSET ?)",
-            vec![hash.as_str().into(), SqlStorageValue::Integer(limits::SIGNINS_PENDING_MAX as i64 - 1)],
-        )?;
+        let n = rows.first().and_then(|r| r["n"].as_i64()).ok_or_else(|| CellError::host("a sign-in's insert answered no rowid"))?;
+        // Bounded: a new row's rowid is one past the largest left, so the
+        // rows within the cap's rowids of it are the newest starts, and the
+        // older go (this one never: the cap is at least 1). A range of the
+        // rowid, one row a start while a flood lasts; ranking the pending
+        // rows instead walked all of them on every start once a flood had
+        // filled the table.
+        let cap = i64::try_from(self.signins_pending_max).expect("the cap fits a rowid");
+        self.exec("DELETE FROM logins WHERE rowid <= ?", vec![SqlStorageValue::Integer(n.saturating_sub(cap))])?;
         Ok(json!({ "state": state }))
     }
 

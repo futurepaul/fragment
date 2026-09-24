@@ -33,6 +33,9 @@ pub const POLL_S: u32 = 2;
 pub const OPENROUTER_KEY: &str = "sk-or-e2e-7c1d";
 /// Blobs no branch names are kept this long here (7 days in production).
 pub const BLOB_GRACE_S: u32 = 4;
+/// The pending sign-ins this fleet keeps: small, so the signin lane fills
+/// the table and proves the oldest goes first in a few hundred requests.
+pub const SIGNINS_PENDING_MAX: u64 = 200;
 /// The OpenRouter fake's management key, and each person's monthly budget
 /// here (small, so a few steps use it up).
 pub const OPENROUTER_MANAGEMENT: &str = "sk-or-v1-management-e2e";
@@ -152,6 +155,7 @@ impl Suite {
             openrouter_management: Some(OPENROUTER_MANAGEMENT.into()),
             budget_usd: Some(BUDGET_USD.into()),
             operators: Some(fragment_core::npub::encode(self.operator.pubkey_hex())),
+            signins_pending_max: Some(SIGNINS_PENDING_MAX),
             test_hooks: true,
         }
         .configure(&self.project)?;
