@@ -128,6 +128,10 @@ impl App {
         self.state.join("calls").join(format!("{id}.json"))
     }
 
+    fn pid_path(&self, id: &str) -> PathBuf {
+        self.state.join("pids").join(id)
+    }
+
     fn read_call(&self, id: &str) -> Result<Option<CallRecord>> {
         let path = self.call_path(id);
         if !path.exists() {
@@ -185,7 +189,7 @@ impl App {
         };
         self.write_call(&record)?;
         if name == "shell" {
-            tag_command(&mut arguments, id);
+            tag_command(&mut arguments, &self.pid_path(id));
         }
         let (sender, receiver) = watch::channel(record.clone());
         let cancel = CancellationToken::new();
@@ -207,6 +211,7 @@ impl App {
             if let Err(error) = app.write_call(&record) {
                 eprintln!("call {id}: journal write failed: {error:#}");
             }
+            let _ = std::fs::remove_file(app.pid_path(&id));
             slot.record.send_replace(record);
             app.calls.lock().expect("calls lock").remove(&id);
         });
@@ -216,21 +221,20 @@ impl App {
 
 /// goose's shell runs `$SHELL -c <command>` without a process group of its
 /// own, and its cancel kills only that shell: the command's children would
-/// run on. So each command starts with a no-op naming its call, by which a
-/// cancel finds the shell and kills its whole tree first.
-fn tag_command(arguments: &mut Option<JsonObject>, id: &str) {
+/// run on. So each command first writes the shell's pid under the journal
+/// (a shell that execs the command in its place keeps that pid), by which a
+/// cancel finds it and kills its whole tree first.
+fn tag_command(arguments: &mut Option<JsonObject>, pid_file: &Path) {
     if let Some(Value::String(command)) = arguments.as_mut().and_then(|a| a.get_mut("command")) {
-        *command = format!(": {}; {command}", tag(id));
+        let quoted = pid_file.display().to_string().replace('\'', "'\\''");
+        *command = format!("echo $$ > '{quoted}'; {command}");
     }
 }
 
-fn tag(id: &str) -> String {
-    format!("fragment-call-{id}")
-}
-
-/// SIGKILLs a tagged shell and everything under it (a process that
-/// detached into its own session escapes, as it would a process group).
-fn kill_tree(id: &str) {
+/// SIGKILLs the call's shell (or what it exec'd) and everything under it;
+/// a process that detached into its own session escapes, as it would a
+/// process group.
+fn kill_tree(pid_file: &Path) {
     let pids = |args: &[&str]| -> Vec<String> {
         std::process::Command::new("pgrep")
             .args(args)
@@ -238,7 +242,10 @@ fn kill_tree(id: &str) {
             .map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().map(str::to_string).collect())
             .unwrap_or_default()
     };
-    let mut tree = pids(&["-f", &format!(": {};", tag(id))]);
+    let Some(root) = std::fs::read_to_string(pid_file).ok().map(|p| p.trim().to_string()).filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) else {
+        return;
+    };
+    let mut tree = vec![root];
     let mut next = 0;
     while next < tree.len() && tree.len() < 4096 {
         let children = pids(&["-P", &tree[next]]);
@@ -336,7 +343,7 @@ async fn call_cancel(State(app): Shared, UrlPath(id): UrlPath<String>) -> Json<V
     let slot = app.calls.lock().expect("calls lock").get(&id).cloned();
     if let Some(slot) = &slot {
         if valid_id(&id) && slot.record.borrow().name == "shell" {
-            kill_tree(&id);
+            kill_tree(&app.pid_path(&id));
         }
         slot.cancel.cancel();
     }
@@ -377,6 +384,7 @@ fn router(app: Arc<App>) -> Router {
 pub fn serve(args: ServeArgs) -> Result<()> {
     std::fs::create_dir_all(&args.work)?;
     std::fs::create_dir_all(args.state.join("calls"))?;
+    std::fs::create_dir_all(args.state.join("pids"))?;
     let app = Arc::new(App {
         work: args.work,
         state: args.state,
@@ -406,14 +414,25 @@ mod tests {
     }
 
     #[test]
-    fn a_shell_command_is_tagged_with_its_call() {
+    fn a_shell_command_first_writes_its_pid() {
         let mut arguments: Option<JsonObject> = serde_json::from_value(json!({ "command": "sleep 1 && echo done" })).ok();
-        tag_command(&mut arguments, "tc-abc");
-        assert_eq!(arguments.unwrap()["command"], ": fragment-call-tc-abc; sleep 1 && echo done");
+        tag_command(&mut arguments, Path::new("/state/it's/pids/tc-abc"));
+        assert_eq!(arguments.unwrap()["command"], "echo $$ > '/state/it'\\''s/pids/tc-abc'; sleep 1 && echo done");
     }
 
     #[tokio::test]
     async fn cancelling_a_shell_call_kills_its_children() {
+        cancel_kills_children("{marker} && echo late > late.txt").await;
+    }
+
+    /// A shell may exec the last command of `-c` in place of itself (bash
+    /// and zsh do); that command's own children must still die.
+    #[tokio::test]
+    async fn cancelling_kills_the_children_of_an_execed_command() {
+        cancel_kills_children("sh -c '{marker}; echo late > late.txt'").await;
+    }
+
+    async fn cancel_kills_children(template: &str) {
         let dir = std::env::temp_dir().join(format!("fragment-computer-test-{}", hex::encode(rand::random::<[u8; 4]>())));
         let app = Arc::new(App {
             work: dir.join("work"),
@@ -423,8 +442,9 @@ mod tests {
             developers: Mutex::new(HashMap::new()),
         });
         std::fs::create_dir_all(app.state.join("calls")).unwrap();
+        std::fs::create_dir_all(app.state.join("pids")).unwrap();
         let marker = format!("sleep 29.{}", rand::random::<u16>());
-        let arguments = serde_json::from_value(json!({ "command": format!("{marker} && echo late > late.txt") })).ok();
+        let arguments = serde_json::from_value(json!({ "command": template.replace("{marker}", &marker) })).ok();
         let mut receiver = app.start_or_attach("tc-cancel", "shell", arguments, "work").unwrap();
         let alive = || std::process::Command::new("pgrep").args(["-f", &marker]).output().unwrap().status.success();
         let t0 = std::time::Instant::now();

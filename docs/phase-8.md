@@ -24,8 +24,8 @@ built and the choices made without him, for his review.
 - **Stop kills the command.** goose drops a tool's future when its turn
   is cancelled, so the turn driver cancels whatever computer calls are
   still in flight; and since goose's shell kills only the shell (not the
-  command's children), the computer tags each command with its call id
-  and kills its whole process tree first.
+  command's children), the computer has each command record its shell's
+  pid first and kills the whole tree under it.
 - e2e `computer` (13 checks), with `fragment computer serve` as a local
   process: the token is made 0600 and required; a wrong token is refused
   at attach; one turn runs a shell command on the computer and a todo
@@ -35,6 +35,32 @@ built and the choices made without him, for his review.
   1`); SIGKILL of the computer mid-command, and after its restart the
   call answers "interrupted", the model hears it, and the command does
   not run again; detaching removes the tools.
+
+## On a real Sprite
+
+A smoke run the same night, on a Sprite made for it and destroyed after
+(`fnx-computer-smoke`, x86_64, Ubuntu 26.04):
+
+- The CLI built for Linux (`rust:1.97.1-bookworm`, `--features computer`,
+  15 MB, 3.5 minutes under emulation) ran as the Sprite's HTTP service
+  (`sprite-env services create computer --http-port 8080`); it made its
+  token on first start.
+- The Sprite URL stayed org-only: the local dev stack's agent reached the
+  computer through `sprite proxy`. The URL itself carries the Sprites
+  org auth in the same `authorization` header the computer's token
+  uses, so reaching a computer at its URL still needs a design (a public
+  URL with the computer's token, as the spike ran, or a token in another
+  header).
+- With the real model (`z-ai/glm-5.3-flash` on OpenRouter), an agent
+  wrote two pages and listed them in 3 to 8 seconds a turn; each tool
+  call through the proxy took 0.1 to 0.9 s. The first run put its files
+  in `site/site/`: the instructions now say paths are relative to the
+  project directory, and a fresh agent then wrote them where they
+  belong.
+- Stop: a turn running `sleep 297 && …`, and one running `sh -c 'sleep
+  296; …'` (a command a shell may exec in its own place), each ended
+  0.4 to 0.7 s after `fragment agent stop`, with nothing of the command
+  left running.
 
 ## Choices made without Paul (review these)
 

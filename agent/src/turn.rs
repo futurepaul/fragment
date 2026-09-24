@@ -277,7 +277,9 @@ pub async fn drive(driver: Driver) -> anyhow::Result<&'static str> {
         let c = attached.computer.clone();
         let manifest = SendFuture::new(async move { c.get("/tools").await }).await?;
         instructions.push_str(&format!(
-            "\n\nYou also have a computer. Its tools (shell, write, edit, tree) work in the project directory `{}` there.\n\n{}",
+            "\n\nYou also have a computer. Its tools (shell, write, edit, tree) start in your project directory there \
+             (`{}`): give paths relative to it (`index.html`, not `{}/index.html`).\n\n{}",
+            attached.cwd,
             attached.cwd,
             manifest["instructions"].as_str().unwrap_or("")
         ));

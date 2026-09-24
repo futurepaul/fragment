@@ -276,9 +276,10 @@ without a delete condition is unfinished design, not debt.
 - **Observed:** phase 8. `goose-developer`'s shell runs `$SHELL -c
   <command>` in the computer's own process group and, on cancel or
   timeout, kills only that shell: the command's children run on.
-  `fragment computer serve` starts each command with a no-op naming its
-  call (`: fragment-call-<id>;`) and, on cancel, finds that shell with
-  `pgrep` and kills its tree first (`crates/computer`).
+  `fragment computer serve` starts each command by writing the shell's
+  pid under its journal (`echo $$ > <state>/pids/<id>;`, a pid a shell
+  keeps when it execs the command in its place) and, on cancel, kills
+  the tree under that pid first (`crates/computer`).
 - **Risk:** a command that detaches into its own session escapes the
   kill; a timed-out command's children still run on, since the timeout
   is goose's.
@@ -286,5 +287,7 @@ without a delete condition is unfinished design, not debt.
   running after its turn was stopped or its call timed out.
 - **Delete when:** `goose-developer` gives each command its own process
   group and kills the group on cancel and on timeout (a commit on
-  `futurepaul/goose`, and upstream), proven by the unit test
-  `cancelling_a_shell_call_kills_its_children` with the tag removed.
+  `futurepaul/goose`, and upstream), proven by the unit tests
+  `cancelling_a_shell_call_kills_its_children` and
+  `cancelling_kills_the_children_of_an_execed_command` with the pid
+  file removed.
