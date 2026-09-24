@@ -109,11 +109,13 @@ pub mod limits {
     pub const AUTO_PAUSE_WINDOW_MS: i64 = 10 * 60 * 1000;
     /// … or after this many triggered runs within an hour.
     pub const TRIGGERED_RUNS_PER_HOUR: u64 = 120;
-    /// Sign-ins begun and not yet finished that the platform keeps (each
-    /// for ten minutes; past this, the oldest go first), and the sessions
-    /// one browser's platform session keeps on one fragment's origin (past
-    /// this, the oldest go first).
-    pub const SIGNINS_PENDING_MAX: u64 = 1000;
+    /// Sign-ins begun and not yet finished that the platform keeps when the
+    /// fleet does not say (`FRAGMENT_SIGNINS_PENDING_MAX`): each is good for
+    /// ten minutes, so the oldest is let go only past about 166 starts a
+    /// second, sustained.
+    pub const SIGNINS_PENDING_MAX_DEFAULT: u64 = 100_000;
+    /// The sessions one browser's platform session keeps on one fragment's
+    /// origin (past this, the oldest go first).
     pub const SITE_SESSIONS_PER_FRAGMENT_MAX: u64 = 4;
     /// Unspent single-use redemptions (a fragment origin's way in) one
     /// platform session holds: past this, the oldest go first.

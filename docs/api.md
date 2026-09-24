@@ -30,6 +30,7 @@ the node's environment, where only `KEYS` reads them (below).
 | `WORKOS_CLIENT_ID` | sign-in: fragment's WorkOS environment; unset, sign-in answers 500 |
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake) |
 | `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (default: the hostname suffix itself, e.g. https://fragment.club) |
+| `FRAGMENT_SIGNINS_PENDING_MAX` | sign-ins begun and not finished that the registry keeps (default 100000; at least 1): a sign-in is kept through this many later starts, so the oldest is let go only past this many starts in its ten minutes (Sign-in, below) |
 | `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503, and `{signins: "count"\|"expire"\|"sweep"}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, or runs its sweep now; `GET /api/test/env` answers the Worker variables; `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens through `KEYS` as that fragment; `POST /api/test/fragment {fragment, op}` makes that fragment's next queue sends fail (`fail-deliveries {times}`) or drops its live sockets (`drop-live {code}`); and, the owner of a fragment, `POST /api/f/{name}/test/ledger {ms \| null}` shortens (or restores) its ledger's window, `test/age {ms}` forgets its write keys as if `ms` had passed, `test/members {fill}` adds placeholder members until there are `fill` |
 
 The node's environment (Fly secrets on a fleet; `devstack` in dev and
@@ -184,10 +185,13 @@ with `//`, `/\`, or `/` and a control byte; anything else returns to `/`.
 A path with a space in it arrives encoded (`return=%2Fa%2520b` returns to
 `/a%20b`). The way back is always an absolute URL on that origin.
 
-At most 1000 sign-ins may be pending (begun and not finished; ten minutes
-each): past that, the oldest is let go, and finishing it is 400. Expired
-sign-ins, redemptions, and sessions are deleted in batches on the
-registry's alarm, never on a request.
+A pending sign-in (begun and not finished) is good for ten minutes and
+is kept through the next `FRAGMENT_SIGNINS_PENDING_MAX` starts (default
+100000): past that, the oldest is let go, and finishing it is 400; a
+fresh start always works. At the default, a sign-in in progress is lost
+only while someone starts more than 100000 in ten minutes, about 166 a
+second, sustained. Expired sign-ins, redemptions, and sessions are
+deleted in batches on the registry's alarm, never on a request.
 
 ## Control API
 

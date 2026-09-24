@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use super::app::ship;
 use crate::api::{url_enc, Api, Call, Reply};
-use crate::Suite;
+use crate::{Suite, SIGNINS_PENDING_MAX};
 
 const CHAT_APP: &[u8] = include_bytes!("../../fixtures/chat.mjs");
 const CHAT_JSON: &[u8] = include_bytes!("../../fixtures/chat.json");
@@ -433,18 +433,16 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let first_cookie = first.cookies().into_iter().find(|c| c.starts_with("fragment_login=")).context("a login cookie")?;
     let first_back = api.external(&first.header("location"))?;
     let t0 = Instant::now();
-    for _ in 0..limits::SIGNINS_PENDING_MAX {
+    // the fleet's FRAGMENT_SIGNINS_PENDING_MAX, set small (crate::SIGNINS_PENDING_MAX)
+    for _ in 0..SIGNINS_PENDING_MAX {
         let r = api.unsigned("GET", "/auth/login", None)?;
         anyhow::ensure!(r.status == 302, "/auth/login: {r}");
     }
     let began_ms = t0.elapsed().as_secs_f64() * 1000.0;
     let after_ms = signed_median_ms(api, &keys, 21)?;
-    println!(
-        "      {} sign-ins began in {began_ms:.0} ms; a signed request: {before_ms:.1} ms median before, {after_ms:.1} ms after",
-        limits::SIGNINS_PENDING_MAX
-    );
+    println!("      {SIGNINS_PENDING_MAX} sign-ins began in {began_ms:.0} ms; a signed request: {before_ms:.1} ms median before, {after_ms:.1} ms after");
     let r = signins(api, "count")?;
-    s.ok(&format!("pending sign-ins stay at {}", limits::SIGNINS_PENDING_MAX), r["logins"].as_u64() == Some(limits::SIGNINS_PENDING_MAX), &r);
+    s.ok(&format!("pending sign-ins stay at the fleet's cap ({SIGNINS_PENDING_MAX})"), r["logins"].as_u64() == Some(SIGNINS_PENDING_MAX), &r);
     let r = api.call(Call { method: "GET", url: first_back.header("location"), cookie: Some(first_cookie), ..Call::default() })?;
     s.ok("past the cap, the oldest sign-in went first: finishing it is refused", r.status == 400 && r.message().contains("start again"), &r);
     let r = signed_in_to(api, "/after-the-flood")?;

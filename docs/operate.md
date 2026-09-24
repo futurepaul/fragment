@@ -90,6 +90,19 @@ redirect URI is `https://fragment.club/auth/callback`. Only people create
 fragments, and sign-up is off in WorkOS, so everyone who can sign in was
 invited there.
 
+Pending sign-ins are capped by `FRAGMENT_SIGNINS_PENDING_MAX` in `vars`
+(default 100000). `/auth/login` is anonymous, so the cap is what a flood
+of starts meets: a sign-in is good for ten minutes and is kept through
+the next cap's worth of starts, so people's sign-ins in progress are let
+go only while starts outrun the cap over ten minutes (cap / 600 s: about
+166 a second at the default, 1.7 at 1000). At the cap, the registry holds
+that many rows of a 64-hex state, a return path (at most 2 KiB, usually
+`/`), and a time, about 200 bytes each with its indexes: some 20 MB at
+the default, swept once they expire. Each start costs one insert and one
+delete of the oldest by rowid, whatever the cap. Raise it when people
+must keep signing in through a heavier flood; lower it when the
+registry's storage matters more.
+
 Rotating the host secret: add `FRAGMENT_KEYS_HOST_SECRET_PREVIOUS` to
 `node_secrets` pointing at a copy of the current value, put a new one in
 the host-secret file, `cargo xtask deploy fragment-club --nodes`. Sealed

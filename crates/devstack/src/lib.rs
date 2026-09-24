@@ -176,6 +176,9 @@ pub struct Fleet {
     pub openrouter_management: Option<String>,
     pub budget_usd: Option<String>,
     pub operators: Option<String>,
+    /// Pending sign-ins the Registry keeps (`None`: the cell's default,
+    /// `limits::SIGNINS_PENDING_MAX_DEFAULT`).
+    pub signins_pending_max: Option<u64>,
     /// Test controls (`FRAGMENT_TEST_HOOKS=allow`: the registry can be made
     /// to fail). Never on a shared fleet.
     pub test_hooks: bool,
@@ -265,6 +268,10 @@ impl Fleet {
         }
         if let Some(o) = &self.operators {
             vars.push(("FRAGMENT_OPERATORS", o.as_str()));
+        }
+        let signins = self.signins_pending_max.map(|n| n.to_string());
+        if let Some(n) = &signins {
+            vars.push(("FRAGMENT_SIGNINS_PENDING_MAX", n.as_str()));
         }
         if self.test_hooks {
             vars.push(("FRAGMENT_TEST_HOOKS", "allow"));
