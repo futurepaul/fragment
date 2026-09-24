@@ -169,7 +169,7 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// A test hook (`ops::test_hook`): placeholder members until there are
+    /// A test hook (`ops::test_fragment`): placeholder members until there are
     /// `fill`, so the e2e reaches the member cap without a thousand sign-ins.
     pub(crate) fn fill_members(&self, fill: u64) -> CellResult<u64> {
         if fill > limits::MEMBERS_MAX as u64 {

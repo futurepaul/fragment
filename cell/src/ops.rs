@@ -252,15 +252,31 @@ impl FragmentCell {
         Ok(self.meta("test_ledger_ms")?.and_then(|v| v.parse().ok()).unwrap_or(LEDGER_KEPT_MS))
     }
 
-    /// `POST /api/f/<name>/test/<hook>`, owner, on fleets with test hooks
-    /// only: `ledger {ms | null}` sets (or clears) a shorter ledger window;
-    /// `age {ms}` forgets write keys as if `ms` had passed; `members
-    /// {fill}` adds placeholder members until there are `fill`.
-    pub(crate) fn test_hook(&self, caller: &Caller, hook: &str, body: &Value) -> CellResult<Response> {
+    /// `POST /api/test/fragment {fragment, op, …}`, the router's, on fleets
+    /// with test hooks only: the levers the e2e pulls on one fragment.
+    /// `fail-deliveries {times}` fails its next queue sends; `drop-live
+    /// {code}` closes its live sockets; `ledger {ms | null}` sets (or
+    /// clears) a shorter ledger window; `age {ms}` forgets write keys as
+    /// if `ms` had passed; `members {fill}` adds placeholder members until
+    /// there are `fill`.
+    pub(crate) fn test_fragment(&self, body: &Value) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "the route answers only on fleets with test hooks");
-        self.require(caller, false, Role::Owner)?;
-        let answer = match hook {
-            "ledger" => match body["ms"].as_i64() {
+        self.name()?;
+        let ms = || body["ms"].as_i64().filter(|ms| *ms >= 0).ok_or_else(|| CellError::invalid("ms is a duration"));
+        Ok(match body["op"].as_str() {
+            Some("fail-deliveries") => {
+                let times = body["times"].as_u64().ok_or_else(|| CellError::invalid("fail-deliveries names how many times"))?;
+                self.set_meta(crate::deliveries::TEST_FAILURES_KEY, &times.to_string())?;
+                json!({ "ok": true })
+            }
+            Some("drop-live") => {
+                let code = body["code"].as_u64().and_then(|c| u16::try_from(c).ok()).ok_or_else(|| CellError::invalid("drop-live names a close code"))?;
+                for ws in self.state.get_websockets_with_tag("live") {
+                    let _ = ws.close(Some(code), Some("dropped by a test hook"));
+                }
+                json!({ "ok": true })
+            }
+            Some("ledger") => match body["ms"].as_i64() {
                 Some(ms) if ms > 0 => {
                     self.set_meta("test_ledger_ms", &ms.to_string())?;
                     json!({ "ledgerMs": ms })
@@ -270,17 +286,16 @@ impl FragmentCell {
                     json!({ "ledgerMs": LEDGER_KEPT_MS })
                 }
             },
-            "age" => {
-                let ms = body["ms"].as_i64().filter(|ms| *ms >= 0).ok_or_else(|| CellError::invalid("ms is a duration"))?;
+            Some("age") => {
+                let ms = ms()?;
                 self.trim_writes_before(js::now_ms() + ms - crate::files::WRITES_KEPT_MS)?;
                 json!({ "aged": ms })
             }
-            "members" => {
+            Some("members") => {
                 let fill = body["fill"].as_u64().ok_or_else(|| CellError::invalid("fill is a count"))?;
                 json!({ "members": self.fill_members(fill)? })
             }
-            _ => return Err(CellError::new(ErrorCode::NotFound, format!("no test hook {hook:?}"))),
-        };
-        json_response(&answer)
+            _ => return Err(CellError::invalid("op is fail-deliveries, drop-live, ledger, age, or members")),
+        })
     }
 }
