@@ -3,11 +3,15 @@
 //! one per fragment origin through a single-use redemption), a CLI key
 //! joins a person through a browser approval, and a browser and the CLI
 //! get the same answers from a fragment. A sign-in never sends a browser
-//! off the platform.
+//! off the platform, and its rows in the registry stay bounded and are
+//! swept off the request path.
+
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use fragment_core::npub;
 use fragment_nip98::Keys;
+use fragment_proto::limits;
 use serde_json::{json, Value};
 
 use super::app::ship;
@@ -55,6 +59,27 @@ fn same_origin(to: &str, base: &str) -> bool {
         (Ok(to), Ok(base)) => to.origin() == base.origin(),
         _ => false,
     }
+}
+
+/// The registry's count of sign-in rows, after a test hook (`count`,
+/// `expire`, or `sweep`).
+fn signins(api: &Api, hook: &str) -> Result<Value> {
+    let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "signins": hook })))?;
+    anyhow::ensure!(r.status == 200 && r.body["logins"].is_u64(), "the signins test hook ({hook}): {r}");
+    Ok(r.body)
+}
+
+/// A median of `n` signed requests' times, in milliseconds.
+fn signed_median_ms(api: &Api, keys: &Keys, n: usize) -> Result<f64> {
+    let mut times = vec![];
+    for _ in 0..n {
+        let t0 = Instant::now();
+        let r = api.signed(keys, "GET", "/api/identities/me", None)?;
+        anyhow::ensure!(r.status == 200, "a timed request: {r}");
+        times.push(t0.elapsed().as_secs_f64() * 1000.0);
+    }
+    times.sort_by(|a, b| a.total_cmp(b));
+    Ok(times[n / 2])
 }
 
 /// What a browser with a fragment's session gets, and what the CLI signing
@@ -273,7 +298,6 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     }
     s.ok("nor does a fragment origin's sign-in", escaped.is_empty(), format!("{escaped:?}"));
 
-
     // the browser and the CLI decide alike: public, link, members
     let member_f2 = site_cookie(api, &member_session, &f)?;
     let outsider_f = site_cookie(api, &outsider_session, &f)?;
@@ -298,6 +322,28 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     }
     s.ok(&format!("the browser and the CLI decide alike ({decided} decisions across public, link, and members)"), mismatches.is_empty(), format!("{mismatches:?}"));
     api.signed(&owner, "PUT", &format!("/api/f/{f}/visibility"), Some(&json!({ "visibility": "members" })))?;
+
+    // a browser's sessions on a fragment: its newest few, and signing out ends one
+    let mut on_g = vec![];
+    for _ in 0..=limits::SITE_SESSIONS_PER_FRAGMENT_MAX {
+        on_g.push(site_cookie(api, &member_session, &g)?);
+    }
+    let reads = |cookie: &str| api.page(&g, "", Some(&format!("fragment_site={cookie}"))).map(|r| r.status);
+    let (oldest, newest) = (reads(&on_g[0])?, reads(&on_g[on_g.len() - 1])?);
+    s.ok(
+        &format!("a browser keeps its newest {} sessions on a fragment: the one before them ends (401)", limits::SITE_SESSIONS_PER_FRAGMENT_MAX),
+        oldest == 401 && newest == 200 && reads(&on_g[1])? == 200,
+        format!("oldest {oldest}, newest {newest}"),
+    );
+    let newest = on_g[on_g.len() - 1].clone();
+    let r = api.page(&g, "__signout", Some(&format!("fragment_site={newest}")))?;
+    s.ok("__signout clears the fragment's cookie", r.status == 302 && cookie_line(&r, "fragment_site").contains("Max-Age=0"), &r);
+    let after = reads(&newest)?;
+    s.ok("and ends its session: a copy of the cookie is nobody (members only: 401)", after == 401, after);
+    let (other, platform) = (reads(&on_g[1])?, with_session(api, "GET", "/", &member_session)?);
+    s.ok("(the browser's other sessions, and its platform session, stay)", other == 200 && platform.text.contains("member@e2e.test"), other);
+    let r = api.page(&g, "__signout", Some(&format!("fragment_site={newest}")))?;
+    s.ok("signing out again is no error", r.status == 302, &r);
 
     // revoking: a member removed, a person signed out
     api.signed(&owner, "DELETE", &format!("/api/f/{f}/members/{}", member.pubkey_hex()), None)?;
@@ -343,6 +389,66 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     })?;
     let r2 = api.page(&f, "", Some(&format!("fragment_site={outsider_f}")))?;
     s.ok("joining in the browser makes them a member", r.status == 302 && r2.status == 200, &r2);
+
+    // sign-in's rows: bounded, and swept on the registry's alarm, never on a request
+    let mut minted = vec![];
+    for _ in 0..=limits::REDEMPTIONS_PER_SESSION_MAX {
+        minted.push(with_session(api, "GET", &format!("/auth/fragment?name={f}&return=/"), &paul)?.header("location"));
+    }
+    let (oldest, newest) = (
+        api.call(Call { method: "GET", url: minted[0].clone(), ..Call::default() })?,
+        api.call(Call { method: "GET", url: minted[minted.len() - 1].clone(), ..Call::default() })?,
+    );
+    s.ok(
+        &format!("a platform session keeps its newest {} unspent redemptions: the one before them is refused", limits::REDEMPTIONS_PER_SESSION_MAX),
+        oldest.status == 401 && newest.status == 302,
+        format!("oldest {oldest}, newest {newest}"),
+    );
+    with_session(api, "GET", &format!("/auth/fragment?name={f}&return=/"), &paul)?;
+    api.unsigned("GET", "/auth/login", None)?;
+    let expired = signins(api, "expire")?;
+    s.ok(
+        "(the test hook expires every pending sign-in and unspent redemption)",
+        expired["logins"].as_u64() >= Some(1) && expired["redemptions"].as_u64() >= Some(1),
+        &expired,
+    );
+    api.unsigned("GET", "/auth/login", None)?;
+    let r = signins(api, "count")?;
+    s.ok(
+        "starting a sign-in sweeps nothing: the expired rows wait for the alarm",
+        r["logins"].as_u64() == expired["logins"].as_u64().map(|n| n + 1) && r["redemptions"] == expired["redemptions"],
+        &r,
+    );
+    signins(api, "sweep")?;
+    let mut last = Value::Null;
+    let swept = s.eventually(Duration::from_secs(10), || {
+        last = signins(api, "count").unwrap_or(Value::Null);
+        last["logins"] == 1 && last["redemptions"] == 0
+    });
+    s.ok("the alarm's sweep takes every expired row, and keeps the live sign-in", swept, &last);
+    s.ok("and every live session", last["sessions"] == expired["sessions"], &last);
+
+    let before_ms = signed_median_ms(api, &keys, 21)?;
+    let first = api.unsigned("GET", "/auth/login?login_hint=oldest@e2e.test", None)?;
+    let first_cookie = first.cookies().into_iter().find(|c| c.starts_with("fragment_login=")).context("a login cookie")?;
+    let first_back = api.external(&first.header("location"))?;
+    let t0 = Instant::now();
+    for _ in 0..limits::SIGNINS_PENDING_MAX {
+        let r = api.unsigned("GET", "/auth/login", None)?;
+        anyhow::ensure!(r.status == 302, "/auth/login: {r}");
+    }
+    let began_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let after_ms = signed_median_ms(api, &keys, 21)?;
+    println!(
+        "      {} sign-ins began in {began_ms:.0} ms; a signed request: {before_ms:.1} ms median before, {after_ms:.1} ms after",
+        limits::SIGNINS_PENDING_MAX
+    );
+    let r = signins(api, "count")?;
+    s.ok(&format!("pending sign-ins stay at {}", limits::SIGNINS_PENDING_MAX), r["logins"].as_u64() == Some(limits::SIGNINS_PENDING_MAX), &r);
+    let r = api.call(Call { method: "GET", url: first_back.header("location"), cookie: Some(first_cookie), ..Call::default() })?;
+    s.ok("past the cap, the oldest sign-in went first: finishing it is refused", r.status == 400 && r.message().contains("start again"), &r);
+    let r = signed_in_to(api, "/after-the-flood")?;
+    s.ok("and the newest finishes", r == format!("{}/after-the-flood", api.base), &r);
 
     // who makes fragments: people, and agents for their owners
     let agent = Keys::generate();

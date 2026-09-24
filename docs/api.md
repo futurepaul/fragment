@@ -30,7 +30,7 @@ the node's environment, where only `KEYS` reads them (below).
 | `WORKOS_CLIENT_ID` | sign-in: fragment's WorkOS environment; unset, sign-in answers 500 |
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake) |
 | `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (default: the hostname suffix itself, e.g. https://fragment.club) |
-| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503; `GET /api/test/env` answers the Worker variables; `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens through `KEYS` as that fragment; and, the owner of a fragment, `POST /api/f/{name}/test/ledger {ms \| null}` shortens (or restores) its ledger's window, `test/age {ms}` forgets its write keys as if `ms` had passed, `test/members {fill}` adds placeholder members until there are `fill` |
+| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503, and `{signins: "count"\|"expire"\|"sweep"}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, or runs its sweep now; `GET /api/test/env` answers the Worker variables; `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens through `KEYS` as that fragment; `POST /api/test/fragment {fragment, op}` makes that fragment's next queue sends fail (`fail-deliveries {times}`) or drops its live sockets (`drop-live {code}`); and, the owner of a fragment, `POST /api/f/{name}/test/ledger {ms \| null}` shortens (or restores) its ledger's window, `test/age {ms}` forgets its write keys as if `ms` had passed, `test/members {fill}` adds placeholder members until there are `fill` |
 
 The node's environment (Fly secrets on a fleet; `devstack` in dev and
 the e2e), read by `KEYS`, the native service in our celld fork
@@ -161,7 +161,7 @@ random bytes, the registry keeps their SHA-256).
 | `GET /auth/link?return=` | the same from a signed-in browser: the sign-in that comes back joins this person (409 when it is someone else's) |
 | `GET /auth/callback?code=&state=` | the state must match the browser's cookie (400 otherwise); the code is exchanged server-side; → `fragment_session` (HttpOnly, SameSite=Lax, `Path=/`) and back to `return`; a WorkOS `error` is shown (400) |
 | `POST /auth/logout` | ends the session and every fragment session made from it, clears the cookie, and sends the browser to WorkOS's logout (`session_id` from the access token's `sid`); from another origin, 403 (`GET` shows the button) |
-| `GET /auth/fragment?name=&return=` | signed in: → `<fragment origin>/__signin?token=<a single-use redemption, 60 s, for that fragment only>`; signed out: → sign in first |
+| `GET /auth/fragment?name=&return=` | signed in: → `<fragment origin>/__signin?token=<a single-use redemption, 60 s, for that fragment only>` (a session holds at most 16 unspent; past that, the oldest is refused); signed out: → sign in first |
 | `GET /cli?key=<npub>&proof=` | the link `fragment login` prints: `proof` is the key's own NIP-98 event for `POST <platform>/cli/approve`, good for ten minutes (the proof of possession; without it, stale, or by another key: 400). Signed in: a page showing the key's last eight characters, to compare with the terminal, and an Add button; signed out: → sign in first, keeping the link |
 | `POST /cli/approve` | the page's form (`key`, `proof`): the key joins the signed-in person at once (a key someone else holds, or a revoked one, is 409; another origin 403); the CLI waits for `GET /api/identities/me` to answer. People themselves come only from sign-in (`POST /api/identities {kind: "person"}` is 400) |
 
@@ -169,10 +169,13 @@ On a fragment's origin, `GET __signin?token=` redeems the redemption for
 this fragment only (another fragment's is 401 and stays unspent) and sets
 `fragment_site` (HttpOnly, SameSite=Lax, host-only, `Path=/` or
 `/f/<name>/`); without a token it starts at the platform, unless this
-origin's session is live already (then straight back). `__signout`
-clears it. A request with that cookie is its person, exactly as the same
-request signed by one of their keys: the same decision either way. A
-cookie for another fragment, or whose platform session ended, is nobody.
+origin's session is live already (then straight back). A request with
+that cookie is its person, exactly as the same request signed by one of
+their keys: the same decision either way. A cookie for another fragment,
+or whose platform session ended, is nobody. A platform session keeps its
+newest 4 sessions on each fragment (the oldest ends). `__signout` ends
+the session in the registry and clears the cookie: a copy of it is
+nobody from then on.
 
 `return` is a path on the origin it returns to, kept only when it begins
 with one `/` and holds no byte at or below 0x20, no DEL, and no
@@ -180,6 +183,11 @@ backslash, and when, percent-decoded once more, it still does not begin
 with `//`, `/\`, or `/` and a control byte; anything else returns to `/`.
 A path with a space in it arrives encoded (`return=%2Fa%2520b` returns to
 `/a%20b`). The way back is always an absolute URL on that origin.
+
+At most 1000 sign-ins may be pending (begun and not finished; ten minutes
+each): past that, the oldest is let go, and finishing it is 400. Expired
+sign-ins, redemptions, and sessions are deleted in batches on the
+registry's alarm, never on a request.
 
 ## Control API
 

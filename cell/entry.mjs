@@ -43,6 +43,7 @@ export class Registry extends DurableObject {
     this.rs = new rs.RegistryCell(ctx, env);
   }
   fetch(request) { return this.rs.fetch(request); }
+  alarm(info) { return this.rs.alarm(info); }
 }
 
 // The app's read access to its files (files.rs), handed to its facet as
