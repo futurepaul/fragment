@@ -265,8 +265,8 @@ deployment.
 - Pulled forward so Paul can share fragment.club with friends without an
   obvious problem (2026-09-23); reshaped to finite.computer's identity
   model (decision 15, 2026-09-24; slices in `docs/phase-4.md`; slices A,
-  the registry and identities, and B, sign-in and sessions, built
-  2026-09-24; C, budgets, and D, hosted, next). A
+  the registry and identities, B, sign-in and sessions, and C, budgets,
+  built 2026-09-24; D, hosted, next). A
   registry of identities (person, agent, fragment), their public keys,
   and each agent's owner, in BANKS's shape. Members name identities.
   Sign-in is fragment's own WorkOS environment with sign-up switched off;

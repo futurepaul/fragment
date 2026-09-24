@@ -5,6 +5,7 @@ mod app;
 mod appfiles;
 mod blobs;
 mod author;
+mod budget;
 mod computer;
 mod control;
 mod deliver;
@@ -50,6 +51,7 @@ pub fn run(s: &mut Suite, api: Api) -> Result<()> {
     notes::notes(s, &api)?;
     deliver::push(s, &api)?;
     deliver::ai(s, &api)?;
+    budget::budget(s, &api)?;
     agents::agents(s, &api)?;
     agents::chat(s, &api)?;
     computer::computer(s, &api)?;

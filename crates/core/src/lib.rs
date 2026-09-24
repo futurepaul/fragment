@@ -4,6 +4,7 @@
 
 pub mod access;
 pub mod blob;
+pub mod budget;
 pub mod codestorage;
 pub mod cron;
 pub mod egress;

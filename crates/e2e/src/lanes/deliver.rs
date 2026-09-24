@@ -126,7 +126,7 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
     };
 
     let r = run("t0", "summarize", json!({ "text": "hi" }))?;
-    s.ok("without the fragment's OPENROUTER_API_KEY a call fails, saying so", r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("OPENROUTER_API_KEY")), &r);
+    s.ok("without the fragment's own OPENROUTER_API_KEY, its owner's budget pays (the budget section)", r["status"] == "succeeded", &r);
     api.call(Call {
         method: "PUT",
         url: format!("{}/api/f/{name}/secrets/OPENROUTER_API_KEY", api.base),

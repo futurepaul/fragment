@@ -185,6 +185,8 @@ pub enum ErrorCode {
     /// 503: the identity registry did not answer; nothing signed is
     /// decided without it (docs/finite-integration.md, rule 7).
     RegistryUnavailable,
+    /// 402: the paying person's budget for the month cannot cover the step.
+    BudgetUsedUp,
 }
 
 impl ErrorCode {
@@ -201,6 +203,7 @@ impl ErrorCode {
             ErrorCode::HostFailed => 500,
             ErrorCode::UpstreamFailed => 502,
             ErrorCode::RegistryUnavailable => 503,
+            ErrorCode::BudgetUsedUp => 402,
         }
     }
 }
@@ -628,6 +631,56 @@ pub struct Run {
     pub input: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Value>,
+    /// What its paid steps cost the budget that paid (micro-dollars).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_micros: Option<i64>,
+}
+
+/// A month of a billing org's budget (`GET /api/budget`). Money is in
+/// micro-dollars; the allowance is the budget plus the month's top-ups.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetView {
+    pub billing_org: String,
+    pub period: String,
+    pub budget_micros: i64,
+    pub topped_up_micros: i64,
+    pub allowance_micros: i64,
+    pub spent_micros: i64,
+    pub reserved_micros: i64,
+    pub remaining_micros: i64,
+    /// At or past 80% of the allowance.
+    pub warn: bool,
+    /// The newest usage first.
+    #[serde(default)]
+    pub usage: Vec<UsageRow>,
+}
+
+/// One paid step, in the shape finite.computer's Core takes usage
+/// (FIN-10: source reference, agent, billing org, period, unit, quantity),
+/// recorded once per source reference.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageRow {
+    /// `<fragment>@<incarnation>/run/<run>/step/<index>`
+    pub source_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    pub billing_org: String,
+    pub period: String,
+    /// `usd_micro`
+    pub unit: String,
+    /// What it cost (settled), or what it holds (reserved).
+    pub quantity: i64,
+    /// `reserved` or `settled`.
+    pub state: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub fragment: String,
+    /// Who started the run (it may be a visitor; the owner pays).
+    pub principal: String,
+    pub at: i64,
 }
 
 /// `POST /api/f/<name>/pause` (editor): triggers stop starting runs of

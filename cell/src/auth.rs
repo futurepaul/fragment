@@ -132,6 +132,25 @@ fn same_origin(req: &Request, platform: &str) -> CellResult<()> {
     }
 }
 
+/// The platform bar's budget: what is left of this month's allowance.
+async fn budget_line(env: &Env, id: &str) -> String {
+    use fragment_core::budget::dollars;
+    let Some(org) = crate::ledger::org_of(id) else { return String::new() };
+    match crate::ledger::ask(env, &org, Method::Get, "/status", None).await {
+        Ok(v) => {
+            let (allowance, used) = (v["allowanceMicros"].as_i64().unwrap_or(0), v["spentMicros"].as_i64().unwrap_or(0) + v["reservedMicros"].as_i64().unwrap_or(0));
+            let warn = if v["warn"] == true { " <b>Most of it is used.</b>" } else { "" };
+            format!(
+                "<p>AI this month ({}): <b>{}</b> of {} left.{warn}</p>",
+                esc(v["period"].as_str().unwrap_or("")),
+                dollars((allowance - used).max(0)),
+                dollars(allowance)
+            )
+        }
+        Err(_) => String::new(),
+    }
+}
+
 async fn email_of(env: &Env, id: &str) -> String {
     ask_registry(env, "/view", &json!({ "identity": id, "by": id }))
         .await
@@ -228,9 +247,10 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                     Some((_, who)) => {
                         let email = email_of(env, &who.id).await;
                         format!(
-                            "<p>Signed in as <b>{}</b> (<code>{}</code>).</p><p><a href=\"/auth/logout\">Sign out</a> · <a href=\"/auth/link\">Add another sign-in to you</a></p>",
+                            "<p>Signed in as <b>{}</b> (<code>{}</code>).</p>{}<p><a href=\"/auth/logout\">Sign out</a> · <a href=\"/auth/link\">Add another sign-in to you</a></p>",
                             esc(&email),
-                            esc(&who.id)
+                            esc(&who.id),
+                            budget_line(env, &who.id).await
                         )
                     }
                     None => "<p>Places for people and agents.</p><p><a href=\"/auth/login\">Sign in</a></p>".to_string(),

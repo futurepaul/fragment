@@ -4,8 +4,12 @@
 //! Answers are deterministic from the request, so tests can assert on them.
 //! Chat completions stream (server-sent events, OpenAI's chunk format) when
 //! asked to, and answer scripted replies (text, or tool calls) in order
-//! before falling back to an echo. Levers: the calls made, the chat
-//! requests, failures queued for the next calls, and the script.
+//! before falling back to an echo. Every answer reports its cost
+//! (`usage.cost`, dollars). The management key mints keys with a credit
+//! limit (`POST /api/v1/keys`, `PATCH /api/v1/keys/{hash}`), and a call on a
+//! minted key past its limit is 402. Levers: the calls made, the chat
+//! requests, failures queued for the next calls, the script, the costs, and
+//! the keys minted.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -27,37 +31,88 @@ pub enum Reply {
     Tools(Vec<(String, Value)>),
 }
 
+/// A key the management key minted.
+#[derive(Clone, Debug)]
+pub struct Minted {
+    pub hash: String,
+    pub key: String,
+    pub name: String,
+    /// Dollars; `None` is no limit.
+    pub limit: Option<f64>,
+    pub limit_reset: Option<String>,
+    /// Dollars spent on it, ever, and since its limit last reset.
+    pub usage: f64,
+    pub usage_period: f64,
+}
+
+/// What each answer costs, in dollars.
+#[derive(Clone, Copy, Debug)]
+pub struct Costs {
+    pub text: f64,
+    pub image: f64,
+    pub video_per_s: f64,
+}
+
+impl Default for Costs {
+    fn default() -> Costs {
+        Costs { text: 0.001, image: 0.002, video_per_s: 0.01 }
+    }
+}
+
 #[derive(Default)]
 struct State {
     calls: Vec<Call>,
     failures: VecDeque<u16>,
-    videos: HashMap<String, usize>,
+    /// video id → (seconds, cost)
+    videos: HashMap<String, (usize, f64)>,
     script: VecDeque<Reply>,
     chats: Vec<Value>,
     tool_calls: u64,
+    costs: Costs,
+    minted: Vec<Minted>,
+    /// (hash, body) of each PATCH.
+    patches: Vec<(String, Value)>,
 }
 
-fn chunk(id: &str, model: &Value, delta: Value, finish: Option<&str>, usage: bool) -> String {
+impl State {
+    /// Charges `cost` to the key the call carried: past a minted key's
+    /// limit it is refused (402).
+    fn charge(&mut self, auth: &str, cost: f64) -> Result<(), Response> {
+        let Some(m) = self.minted.iter_mut().find(|m| auth == format!("Bearer {}", m.key)) else { return Ok(()) };
+        // a limit with a reset is the period's; without one, forever
+        let counted = if m.limit_reset.is_some() { m.usage_period } else { m.usage };
+        if let Some(limit) = m.limit {
+            if counted + cost > limit + 1e-9 {
+                return Err(problem(402, "Key limit exceeded"));
+            }
+        }
+        m.usage += cost;
+        m.usage_period += cost;
+        Ok(())
+    }
+}
+
+fn chunk(id: &str, model: &Value, delta: Value, finish: Option<&str>, usage: Option<f64>) -> String {
     let mut c = json!({
         "id": id, "object": "chat.completion.chunk", "created": 0, "model": model,
         "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }],
     });
-    if usage {
-        c["usage"] = json!({ "prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6 });
+    if let Some(cost) = usage {
+        c["usage"] = json!({ "prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6, "cost": cost });
     }
     format!("data: {c}\n\n")
 }
 
 /// A reply as server-sent events (OpenAI's streaming format); each reply
 /// has its own id, as the service's generations do.
-fn stream(model: &Value, reply: &Reply, ids: &mut u64) -> String {
+fn stream(model: &Value, reply: &Reply, ids: &mut u64, cost: f64) -> String {
     let mut out = String::new();
     *ids += 1;
     let id = format!("chatcmpl-fake-{ids}");
     match reply {
         Reply::Text(text) => {
-            out += &chunk(&id, model, json!({ "role": "assistant", "content": text }), None, false);
-            out += &chunk(&id, model, json!({}), Some("stop"), true);
+            out += &chunk(&id, model, json!({ "role": "assistant", "content": text }), None, None);
+            out += &chunk(&id, model, json!({}), Some("stop"), Some(cost));
         }
         Reply::Tools(calls) => {
             let calls: Vec<Value> = calls
@@ -68,8 +123,8 @@ fn stream(model: &Value, reply: &Reply, ids: &mut u64) -> String {
                     json!({ "index": i, "id": format!("call_{ids}"), "type": "function", "function": { "name": name, "arguments": args.to_string() } })
                 })
                 .collect();
-            out += &chunk(&id, model, json!({ "role": "assistant", "tool_calls": calls }), None, false);
-            out += &chunk(&id, model, json!({}), Some("tool_calls"), true);
+            out += &chunk(&id, model, json!({ "role": "assistant", "tool_calls": calls }), None, None);
+            out += &chunk(&id, model, json!({}), Some("tool_calls"), Some(cost));
         }
     }
     out + "data: [DONE]\n\n"
@@ -100,10 +155,11 @@ fn problem(status: u16, message: &str) -> Response {
 }
 
 impl OpenRouter {
-    /// Serves on a free port; `key` is the bearer every call must carry.
-    pub fn start(key: &str) -> std::io::Result<OpenRouter> {
+    /// Serves on a free port: `key` is a key calls may carry (a fragment's
+    /// own), `management` the key that mints more.
+    pub fn start(key: &str, management: &str) -> std::io::Result<OpenRouter> {
         let state: Arc<Mutex<State>> = Arc::default();
-        let (st, expected) = (Arc::clone(&state), format!("Bearer {key}"));
+        let (st, expected, manager) = (Arc::clone(&state), format!("Bearer {key}"), format!("Bearer {management}"));
         let base = Arc::new(Mutex::new(String::new()));
         let base_in = Arc::clone(&base);
         let handler: Handler = Arc::new(move |req: &Request| {
@@ -112,22 +168,62 @@ impl OpenRouter {
             let mut s = st.lock().expect("openrouter state");
             let reasoning = if body["reasoning"].is_null() { String::new() } else { body["reasoning"].to_string() };
             s.calls.push((req.method.clone(), req.path.clone(), body["model"].as_str().unwrap_or("").to_string(), auth.clone(), reasoning));
-            if auth != expected {
+            let path = req.path.as_str();
+            if path == "/api/v1/keys" || path.starts_with("/api/v1/keys/") {
+                if auth != manager {
+                    return problem(401, "a management key is required");
+                }
+                return match (req.method.as_str(), path.strip_prefix("/api/v1/keys/")) {
+                    ("POST", None) => {
+                        let n = s.minted.len() + 1;
+                        let m = Minted {
+                            hash: format!("{:064x}", n),
+                            key: format!("sk-or-v1-minted-{n:04}-{}", "f".repeat(40)),
+                            name: body["name"].as_str().unwrap_or("").to_string(),
+                            limit: body["limit"].as_f64(),
+                            limit_reset: body["limit_reset"].as_str().map(str::to_string),
+                            usage: 0.0,
+                            usage_period: 0.0,
+                        };
+                        s.minted.push(m.clone());
+                        Response::json(
+                            201,
+                            &json!({ "data": { "hash": m.hash, "name": m.name, "label": format!("sk-or-v1-min...{n:04}"), "limit": m.limit, "limit_reset": m.limit_reset, "disabled": false, "usage": 0 }, "key": m.key }),
+                        )
+                    }
+                    ("PATCH", Some(hash)) => {
+                        let hash = hash.to_string();
+                        let Some(m) = s.minted.iter_mut().find(|m| m.hash == hash) else { return problem(404, "no such key") };
+                        if let Some(l) = body.get("limit") {
+                            m.limit = l.as_f64();
+                        }
+                        let data = json!({ "hash": m.hash, "limit": m.limit, "limit_reset": m.limit_reset, "usage": m.usage });
+                        s.patches.push((hash, body.clone()));
+                        Response::json(200, &json!({ "data": data }))
+                    }
+                    _ => problem(404, "no such route"),
+                };
+            }
+            let minted = s.minted.iter().any(|m| auth == format!("Bearer {}", m.key));
+            if auth != expected && !minted {
                 return problem(401, "No auth credentials found");
             }
             if let Some(status) = s.failures.pop_front() {
                 return problem(status, "a failure the test asked for");
             }
             let base = base_in.lock().expect("base").clone();
-            let path = req.path.as_str();
+            let costs = s.costs;
             match (req.method.as_str(), path) {
                 ("POST", "/api/v1/chat/completions") => {
+                    if let Err(r) = s.charge(&auth, costs.text) {
+                        return r;
+                    }
                     let last = body["messages"].as_array().and_then(|m| m.last()).map(|m| m["content"].clone()).unwrap_or(Value::Null);
                     s.chats.push(body.clone());
                     let scripted = s.script.pop_front();
                     if body["stream"] == true {
                         let reply = scripted.unwrap_or_else(|| Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))));
-                        let events = stream(&body["model"], &reply, &mut s.tool_calls);
+                        let events = stream(&body["model"], &reply, &mut s.tool_calls, costs.text);
                         return Response::bytes(200, "text/event-stream", events.into_bytes());
                     }
                     Response::json(
@@ -135,20 +231,28 @@ impl OpenRouter {
                         &json!({
                             "id": "chatcmpl-fake", "object": "chat.completion", "created": 0, "model": body["model"],
                             "choices": [{ "index": 0, "finish_reason": "stop", "message": { "role": "assistant", "content": format!("echo: {}", last.as_str().unwrap_or("")) } }],
-                            "usage": { "prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6 },
+                            "usage": { "prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6, "cost": costs.text },
                         }),
                     )
                 }
                 ("POST", "/api/v1/images") => {
+                    if let Err(r) = s.charge(&auth, costs.image) {
+                        return r;
+                    }
                     let bytes = image_bytes(body["prompt"].as_str().unwrap_or(""));
                     Response::json(
                         200,
-                        &json!({ "created": 0, "data": [{ "b64_json": base64::engine::general_purpose::STANDARD.encode(bytes), "media_type": "image/png" }], "usage": { "cost": 0.0 } }),
+                        &json!({ "created": 0, "data": [{ "b64_json": base64::engine::general_purpose::STANDARD.encode(bytes), "media_type": "image/png" }], "usage": { "cost": costs.image } }),
                     )
                 }
                 ("POST", "/api/v1/videos") => {
+                    let seconds = body["duration"].as_u64().unwrap_or(5) as usize;
+                    let cost = costs.video_per_s * seconds as f64;
+                    if let Err(r) = s.charge(&auth, cost) {
+                        return r;
+                    }
                     let id = format!("gen-vid-{}", s.videos.len() + 1);
-                    s.videos.insert(id.clone(), body["duration"].as_u64().unwrap_or(5) as usize);
+                    s.videos.insert(id.clone(), (seconds, cost));
                     Response::json(202, &json!({ "id": id, "generation_id": id, "polling_url": format!("/api/v1/videos/{id}"), "status": "pending" }))
                 }
                 ("GET", p) if p.starts_with("/api/v1/videos/") => {
@@ -157,7 +261,7 @@ impl OpenRouter {
                         Some(id) => (id, true),
                         None => (rest, false),
                     };
-                    let Some(seconds) = s.videos.get(id).copied() else { return problem(404, "no such video job") };
+                    let Some((seconds, cost)) = s.videos.get(id).copied() else { return problem(404, "no such video job") };
                     if content {
                         return Response::bytes(200, "video/mp4", video_bytes(seconds));
                     }
@@ -166,7 +270,7 @@ impl OpenRouter {
                         &json!({
                             "id": id, "status": "completed",
                             "unsigned_urls": [format!("{base}/api/v1/videos/{id}/content?index=0")],
-                            "usage": { "cost": 0.0, "is_byok": false },
+                            "usage": { "cost": cost, "is_byok": false },
                         }),
                     )
                 }
@@ -200,5 +304,28 @@ impl OpenRouter {
     /// The next calls answer these statuses, in order.
     pub fn fail_next(&self, statuses: &[u16]) {
         self.state.lock().expect("openrouter state").failures.extend(statuses);
+    }
+
+    /// What the next answers cost.
+    pub fn set_costs(&self, costs: Costs) {
+        self.state.lock().expect("openrouter state").costs = costs;
+    }
+
+    /// The keys the management key minted, with what each has spent.
+    pub fn minted(&self) -> Vec<Minted> {
+        self.state.lock().expect("openrouter state").minted.clone()
+    }
+
+    /// A new period begins for keys whose limits reset (the test moved the
+    /// platform's clock past a month).
+    pub fn reset_period(&self) {
+        for m in self.state.lock().expect("openrouter state").minted.iter_mut().filter(|m| m.limit_reset.is_some()) {
+            m.usage_period = 0.0;
+        }
+    }
+
+    /// Each PATCH of a minted key: its hash and body.
+    pub fn patches(&self) -> Vec<(String, Value)> {
+        self.state.lock().expect("openrouter state").patches.clone()
     }
 }

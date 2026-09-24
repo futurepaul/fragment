@@ -54,6 +54,11 @@ cargo xtask fleet fragment-club cell list   # the fleet's Durable Objects
 
 Worker variables live in the fleet file (`vars`, or `secret_vars` for
 file-held values). Edit it, then `cargo xtask deploy fragment-club`.
+Budgets (phase 4 slice C): `OPENROUTER_MANAGEMENT_KEY` in
+`secret_vars` mints each person's OpenRouter key; `FRAGMENT_BUDGET_USD`
+(default 20) and `FRAGMENT_OPERATORS` (who may top up: `fragment budget
+top-up <id> <usd>`) in `vars`.
+
 Sign-in is WorkOS (phase 4 slice B): `WORKOS_CLIENT_ID` in `vars`,
 `WORKOS_API_KEY` in `secret_vars`; the environment's redirect URI is
 `https://fragment.club/auth/callback`. Only people create fragments, and

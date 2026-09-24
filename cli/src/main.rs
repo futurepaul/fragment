@@ -180,6 +180,12 @@ enum Cmd {
     },
     /// List a fragment's triggers (cron, channel, files) and what is paused
     Triggers { name: String },
+    /// Your AI budget this month: what is left, and what spent it (the
+    /// fragments you own pay for their AI unless they have their own key)
+    Budget {
+        #[command(subcommand)]
+        sub: Option<BudgetCmd>,
+    },
     /// Pause an operation's triggers (calls still work)
     Pause { name: String, op: String },
     /// Unpause an operation's triggers (also after an auto-pause)
@@ -344,6 +350,23 @@ enum ComputerCmd {
         #[arg(long, default_value = ".fragment-computer/token")]
         token_file: PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+enum BudgetCmd {
+    /// Every paid step this month (or --period YYYY-MM)
+    Usage {
+        #[arg(long)]
+        period: Option<String>,
+    },
+    /// Add dollars to someone's month (the fleet's operators)
+    TopUp { who: String, usd: f64 },
+}
+
+/// Micro-dollars for people.
+fn usd(m: i64) -> String {
+    let d = m as f64 / 1_000_000.0;
+    if m % 10_000 == 0 { format!("${d:.2}") } else { format!("${d:.4}") }
 }
 
 #[derive(Subcommand)]
@@ -1221,6 +1244,56 @@ fn run(cli: Cli) -> Result<()> {
             }
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
+        Cmd::Budget { sub } => match sub {
+            None => {
+                let v = c.call(c.get("/api/budget")?)?;
+                if j {
+                    ok_exit(&v);
+                }
+                let m = |k: &str| v[k].as_i64().unwrap_or(0);
+                println!(
+                    "{}: {} of {} left ({} spent{})",
+                    v["period"].as_str().unwrap_or(""),
+                    usd(m("remainingMicros").max(0)),
+                    usd(m("allowanceMicros")),
+                    usd(m("spentMicros")),
+                    if m("reservedMicros") > 0 { format!(", {} held by steps running now", usd(m("reservedMicros"))) } else { String::new() }
+                );
+                if v["warn"] == true {
+                    println!("most of this month's budget is used: paid steps stop when it runs out");
+                }
+                for u in v["usage"].as_array().cloned().unwrap_or_default().iter().take(10) {
+                    println!("  {}\t{}\t{}\t{}", usd(u["quantity"].as_i64().unwrap_or(0)), u["kind"].as_str().unwrap_or(""), u["fragment"].as_str().unwrap_or(""), u["state"].as_str().unwrap_or(""));
+                }
+            }
+            Some(BudgetCmd::Usage { period }) => {
+                let path = match period {
+                    Some(p) => format!("/api/budget/usage?period={}", encode_q(&p)),
+                    None => "/api/budget/usage".to_string(),
+                };
+                let v = c.call(c.get(&path)?)?;
+                if j {
+                    ok_exit(&v);
+                }
+                for u in v["usage"].as_array().cloned().unwrap_or_default() {
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}",
+                        usd(u["quantity"].as_i64().unwrap_or(0)),
+                        u["state"].as_str().unwrap_or(""),
+                        u["kind"].as_str().unwrap_or(""),
+                        u["model"].as_str().unwrap_or(""),
+                        u["sourceRef"].as_str().unwrap_or("")
+                    );
+                }
+            }
+            Some(BudgetCmd::TopUp { who, usd: dollars }) => {
+                let v = c.call(c.post_json(&format!("/api/budget/{who}/top-up"), &json!({ "usd": dollars }))?)?;
+                if j {
+                    ok_exit(&v);
+                }
+                println!("{who}: {} of {} left in {}", usd(v["remainingMicros"].as_i64().unwrap_or(0)), usd(v["allowanceMicros"].as_i64().unwrap_or(0)), v["period"].as_str().unwrap_or(""));
+            }
+        },
         Cmd::Triggers { name } => {
             let v = c.call(c.get(&format!("/api/f/{name}/triggers"))?)?;
             if j {
@@ -1257,14 +1330,16 @@ fn run(cli: Cli) -> Result<()> {
                     Some(max) => format!("try {}/{max}", r["attempt"].as_u64().unwrap_or(0)),
                     None => format!("attempt {}", r["attempt"].as_u64().unwrap_or(0)),
                 };
+                let cost = r["costMicros"].as_i64().map(usd).unwrap_or_default();
                 println!(
-                    "#{}\t{}\t{}\t{}\t{}\t{}",
+                    "#{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     r["id"].as_u64().unwrap_or(0),
                     r["via"].as_str().unwrap_or("?"),
                     r["op"].as_str().or(r["wf"].as_str()).unwrap_or("?"),
                     r["status"].as_str().unwrap_or("?"),
                     tries,
                     dur,
+                    cost,
                 );
                 if let Some(e) = r["error"].as_str() {
                     println!("  {}", e.chars().take(120).collect::<String>());

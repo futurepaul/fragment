@@ -29,6 +29,14 @@ export class Principal extends DurableObject {
   fetch(request) { return this.rs.fetch(request); }
 }
 
+export class Ledger extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.rs = new rs.LedgerCell(ctx, env);
+  }
+  fetch(request) { return this.rs.fetch(request); }
+}
+
 export class Registry extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);

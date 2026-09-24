@@ -15,6 +15,9 @@
 //!   POST   /api/identities/<id|me>/keys    add a key ({proof}: a key proof by the new key)
 //!   DELETE /api/identities/<id|me>/keys/<npub>   revoke one
 //!   GET    /api/identities/<id>/keys/<npub>      {active}: for the identity and its agents
+//!   GET    /api/budget                     the signer's month: allowance, spent, reserved, recent usage
+//!   GET    /api/budget/usage?period=       a month's usage rows (FIN-10's shape)
+//!   POST   /api/budget/<id>/top-up         {usd}: operators (FRAGMENT_OPERATORS)
 //!   POST   /api/fragments                  create (signed; the signer owns it)
 //!   GET    /api/fragments                  the fragments the signer belongs to
 //!   DELETE /api/f/<name>                   delete (owner)
@@ -44,6 +47,7 @@ mod files;
 mod fragment;
 mod jobs;
 mod js;
+mod ledger;
 mod live;
 mod members;
 mod ops;
@@ -66,6 +70,7 @@ use serve::MODE_HEADER;
 
 pub use fragment::FragmentCell;
 pub use principal::PrincipalCell;
+pub use ledger::LedgerCell;
 pub use registry::RegistryCell;
 
 /// Client headers a fragment's supervisor sees; everything else, and any
@@ -169,7 +174,7 @@ async fn signer_if_signed(env: &Env, req: &Request, url: &Url, body: &[u8]) -> C
 }
 
 fn test_hooks(env: &Env) -> bool {
-    env.var("FRAGMENT_TEST_HOOKS").map(|v| v.to_string()).ok().as_deref() == Some("allow")
+    Config::from_env(env).test_hooks
 }
 
 /// The identity a path names: `me` is the signer.
@@ -200,6 +205,45 @@ fn proven_key(proof: &str, req: &Request, url: &Url, signer_key: &str) -> CellRe
 
 fn json_answer(v: &Value) -> CellResult<Response> {
     Ok(Response::from_json(v)?)
+}
+
+/// Whose budget a signer sees: a person's own org; an agent's owner's.
+fn billing_org(who: &Signer) -> CellResult<String> {
+    let person = match who.kind {
+        IdentityKind::Person => who.id.as_str(),
+        IdentityKind::Agent => who.owner.as_deref().ok_or_else(|| CellError::host("an agent without an owner"))?,
+    };
+    ledger::org_of(person).ok_or_else(|| CellError::host("no billing org"))
+}
+
+/// `/api/budget…`: a billing org's month (ledger.rs).
+async fn budget_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest: &[&str]) -> CellResult<Response> {
+    let body = read_body(&mut req).await?;
+    let who = signer(env, &req, url, &body).await?;
+    match (req.method(), rest) {
+        (Method::Get, []) => json_answer(&ledger::ask(env, &billing_org(&who)?, Method::Get, "/status", None).await?),
+        (Method::Get, ["usage"]) => {
+            let period = url.query_pairs().find(|(k, _)| k == "period").map(|(_, v)| v.into_owned());
+            let path = match period {
+                Some(p) if p.len() == 7 && p.as_bytes()[4] == b'-' && p.bytes().enumerate().all(|(i, b)| i == 4 || b.is_ascii_digit()) => format!("/usage?period={p}"),
+                Some(_) => return Err(CellError::invalid("period is YYYY-MM")),
+                None => "/usage".to_string(),
+            };
+            json_answer(&ledger::ask(env, &billing_org(&who)?, Method::Get, &path, None).await?)
+        }
+        (Method::Post, [id, "top-up"]) => {
+            if !cfg.is_operator(who.key.as_deref(), &who.id)? {
+                return Err(CellError::new(ErrorCode::Forbidden, "only the fleet's operators top up budgets"));
+            }
+            let id = named_identity(id, &who)?;
+            let org = ledger::org_of(&id).ok_or_else(|| CellError::invalid("name a person"))?;
+            let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let usd = v["usd"].as_f64().filter(|u| u.is_finite() && *u > 0.0).ok_or_else(|| CellError::invalid("usd is a positive number of dollars"))?;
+            let micros = fragment_core::budget::micros(usd);
+            json_answer(&ledger::ask(env, &org, Method::Post, "/top-up", Some(&json!({ "micros": micros, "by": who.id }))).await?)
+        }
+        (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
+    }
 }
 
 /// `/api/identities…`: the registry's public face.
@@ -377,6 +421,16 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             let principal = signer(env, &req, &url, &[]).await?;
             let list = Request::new("https://principal.internal/list", Method::Get)?;
             Ok(env.durable_object("PRINCIPAL")?.get_by_name(&principal.id)?.fetch_with_request(list).await?)
+        }
+        (_, ["api", "budget", rest @ ..]) => {
+            let rest = rest.to_vec();
+            budget_route(req, env, &cfg, &url, &rest).await
+        }
+        (Method::Post, ["api", "test", "ledger"]) if test_hooks(env) => {
+            let body = read_body(&mut req).await?;
+            let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let org = v["identity"].as_str().and_then(ledger::org_of).ok_or_else(|| CellError::invalid("name an identity"))?;
+            json_answer(&ledger::ask(env, &org, Method::Post, "/test", Some(&json!({ "offsetMs": v["offsetMs"] }))).await?)
         }
         (_, ["api", "identities", rest @ ..]) => {
             let rest = rest.to_vec();

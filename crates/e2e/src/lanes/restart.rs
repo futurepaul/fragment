@@ -15,6 +15,8 @@ use crate::Suite;
 
 const TODO_APP: &[u8] = include_bytes!("../../fixtures/todo.mjs");
 const TODO_JSON: &[u8] = include_bytes!("../../fixtures/todo.json");
+const BUDGET_APP: &[u8] = include_bytes!("../../fixtures/budget.mjs");
+const BUDGET_JSON: &[u8] = include_bytes!("../../fixtures/budget.json");
 
 fn count(api: &Api, keys: &Keys, name: &str) -> i64 {
     api.op(keys, name, "count", "q", json!({})).ok().and_then(|r| r.body["result"]["n"].as_i64()).unwrap_or(-1)
@@ -38,6 +40,13 @@ pub fn restart(s: &mut Suite, api: Api) -> Result<Api> {
     let r = api.signed(&revoked, "POST", add, Some(&json!({ "proof": api.proof(&added, "POST", add, &revoked) })))?;
     let r2 = api.signed(&added, "DELETE", &format!("/api/identities/me/keys/{}", revoked.pubkey_hex()), None)?;
     anyhow::ensure!(r.status == 200 && r2.status == 200, "registry setup: {r} {r2}");
+    // a ledger: a month with something spent
+    let paid = s.name("restart-paid");
+    let pc = s.create(&api, &owner, &paid)?;
+    ship(s, &pc, BUDGET_APP, BUDGET_JSON);
+    let r = api.op(&owner, &paid, "summarize", "before", json!({ "text": "before the restart" }))?;
+    jobs::settle(&api, &owner, &paid, jobs::started(&r), &["succeeded"], Duration::from_secs(40));
+    let spent = api.signed(&owner, "GET", "/api/budget", None)?.body["spentMicros"].clone();
 
     s.stop()?;
     let api = s.start(false, true)?;
@@ -50,6 +59,8 @@ pub fn restart(s: &mut Suite, api: Api) -> Result<Api> {
     s.ok("after a restart the registry still knows an added key", r.status == 200, &r);
     let r = api.signed(&revoked, "GET", "/api/fragments", None)?;
     s.ok("and a revoked key stays revoked", r.status == 401, &r);
+    let r = api.signed(&owner, "GET", "/api/budget", None)?;
+    s.ok("after a restart the month's spend is what it was", r.status == 200 && r.body["spentMicros"] == spent && spent.as_i64().unwrap_or(0) > 0, &r);
 
     let r = api.op(&owner, &name, "add_todo", "r2", json!({ "text": "before the crash" }))?;
     s.ok("a mutation before the crash", r.status == 200, &r);

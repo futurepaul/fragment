@@ -108,8 +108,12 @@ fn run_of(r: &Value, full: bool) -> Run {
         error: text("error"),
         input: parsed("input"),
         output: parsed("output"),
+        cost_micros: r["cost_micros"].as_i64(),
     }
 }
+
+/// A run's columns and what its paid steps cost (`spend`, ai.rs).
+const RUN_COLUMNS: &str = "*, (SELECT SUM(micros) FROM spend WHERE spend.run = runs.id) AS cost_micros";
 
 fn ids(body: &Value) -> CellResult<(i64, i64)> {
     match (body["run"].as_i64(), body["attempt"].as_i64()) {
@@ -752,13 +756,15 @@ impl FragmentCell {
         self.exec(
             "DELETE FROM runs WHERE status NOT IN ('queued', 'running') AND (finished_at < ? OR id <= (SELECT MAX(id) FROM runs) - ?)",
             vec![SqlStorageValue::Integer(js::now_ms() - limits::RUN_RETENTION_MS), SqlStorageValue::Integer(limits::RUNS_KEPT)],
-        )
+        )?;
+        // a run's costs go with it (the ledger keeps the month's usage)
+        self.exec("DELETE FROM spend WHERE run NOT IN (SELECT id FROM runs)", vec![])
     }
 
     /// `GET /api/f/<name>/runs?status=&op=&limit=`
     pub(crate) fn runs_api(&self, caller: &Caller, status: Option<String>, op: Option<String>, limit: usize) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
-        let mut q = "SELECT * FROM runs WHERE 1 = 1".to_string();
+        let mut q = format!("SELECT {RUN_COLUMNS} FROM runs WHERE 1 = 1");
         let mut binds: Vec<SqlStorageValue> = vec![];
         if let Some(s) = status {
             let s = RunStatus::parse(&s).ok_or_else(|| CellError::invalid("status is queued, running, succeeded, held, or blocked"))?;
@@ -783,7 +789,7 @@ impl FragmentCell {
     pub(crate) fn run_api(&self, caller: &Caller, id: &str) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
         let id: i64 = id.parse().map_err(|_| CellError::invalid("a run id is a number"))?;
-        let rows = self.rows("SELECT * FROM runs WHERE id = ?", vec![SqlStorageValue::Integer(id)])?;
+        let rows = self.rows(&format!("SELECT {RUN_COLUMNS} FROM runs WHERE id = ?"), vec![SqlStorageValue::Integer(id)])?;
         let run = rows.first().ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no run #{id}")))?;
         json_response(&run_of(run, true))
     }

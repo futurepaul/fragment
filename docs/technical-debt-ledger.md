@@ -195,19 +195,6 @@ without a delete condition is unfinished design, not debt.
   "Photoshop file" exception in MODEL), and a per-fragment policy keeps
   the bytes named by the last N live commits.
 
-## AI spend has no limit of the platform's own
-
-- **Observed:** phase 2 slice F. `job.ai.*` spend the fragment's own
-  OpenRouter key; a video is about $0.05 to $0.08 a second. Triggered
-  runs have the hop budget and 120 runs an hour, but a job an editor calls
-  in a loop, or a public job, spends until the key's own limit.
-- **Risk:** a surprise bill on the owner's key (their money, their key's
-  limits: OpenRouter lets a key carry a spend cap).
-- **First proof:** a public fragment whose job generates media.
-- **Delete when:** the platform counts spend per fragment (OpenRouter
-  answers `usage.cost`) and an owner can cap it, or people connect their
-  own keys with caps (phase 4).
-
 ## workers-rs cannot take celld's queue binding
 
 - **Observed:** phase 2 slice F. `env.queue()` in workers-rs 0.8.5 checks
@@ -268,8 +255,10 @@ without a delete condition is unfinished design, not debt.
   person.
 - **Risk:** spend that no person's budget shows, once agents are hosted.
 - **First proof:** the agent fleet hosted with people other than Paul.
-- **Delete when:** phase 4's budgets (decision 14) meter model calls per
-  owner, with the person's own OpenRouter key and its limit.
+- **Delete when:** the agent service meters its model calls in the
+  owner's ledger, as `job.ai` steps have since phase 4 slice C (reserve
+  per turn step, settle to `usage.cost`, the owner's own key), before the
+  agent fleet is hosted for people other than Paul.
 
 ## The computer kills a shell command's tree itself
 
@@ -306,3 +295,32 @@ without a delete condition is unfinished design, not debt.
   index to close the sockets tagged with that key (the index cell
   already lists them), with an e2e check; or sockets re-resolve their
   key on a timer.
+
+## A paid step's reservation is an estimate per kind of step
+
+- **Observed:** phase 4 slice C. A step reserves a fixed worst case (text
+  $0.05, an image $0.10, a video $0.10 a second), not the model's price
+  times its tokens. A long answer from an expensive model can cost more
+  than it reserved; the ledger records what it did cost, so a month can
+  pass its allowance by that difference.
+- **Risk:** the ledger's month a little past the allowance. OpenRouter
+  itself cannot pass it: each org's key carries the allowance as its
+  limit, and a call past it is refused (402, the step held).
+- **First proof:** a settled cost above its reservation (the usage row
+  shows both).
+- **Delete when:** reservations come from the model's prices
+  (`/api/v1/models`) and the step's `max_tokens`, with a test that a
+  month never passes its allowance.
+
+## A paid step whose result was not stored is paid again
+
+- **Observed:** phase 4 slice C. A paid step settles once its whole
+  result is in hand (an image is written to `main` first). If that write
+  fails for now, the step is retried on the reservation it holds and
+  calls OpenRouter again; only the retry's cost is recorded.
+- **Risk:** a second charge at OpenRouter that the ledger does not show
+  (the key's limit still counts it).
+- **First proof:** an image step retried after a code.storage failure.
+- **Delete when:** a paid step's answer is kept before anything else
+  runs (the image as a blob by its hash first), so a retry settles
+  without calling again.

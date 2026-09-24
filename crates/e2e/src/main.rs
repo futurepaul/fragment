@@ -33,6 +33,10 @@ pub const POLL_S: u32 = 2;
 pub const OPENROUTER_KEY: &str = "sk-or-e2e-7c1d";
 /// Blobs no branch names are kept this long here (7 days in production).
 pub const BLOB_GRACE_S: u32 = 4;
+/// The OpenRouter fake's management key, and each person's monthly budget
+/// here (small, so a few steps use it up).
+pub const OPENROUTER_MANAGEMENT: &str = "sk-or-v1-management-e2e";
+pub const BUDGET_USD: &str = "0.1";
 /// The WorkOS fake's environment.
 const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";
@@ -53,6 +57,9 @@ pub struct Suite {
     host_secret: String,
     /// Sign-in's stand-in: people sign in through it (`Api::person`).
     pub workos: fragment_fakes::workos::WorkOs,
+    /// The fleet's operator (`FRAGMENT_OPERATORS`): a key a person approves
+    /// when a lane needs it.
+    pub operator: Keys,
     pub cli: PathBuf,
     pub scratch: PathBuf,
     /// The node's own copy of the cell project (never `cell/`, where `xtask dev` runs).
@@ -107,6 +114,9 @@ impl Suite {
                 api_url: Some(self.workos.url.clone()),
             }),
             platform_url: Some(format!("http://127.0.0.1:{}", self.port)),
+            openrouter_management: Some(OPENROUTER_MANAGEMENT.into()),
+            budget_usd: Some(BUDGET_USD.into()),
+            operators: Some(fragment_core::npub::encode(self.operator.pubkey_hex())),
             test_hooks: true,
         }
         .write_vars(&self.project)?;
@@ -294,11 +304,12 @@ fn main() -> Result<()> {
         port: devstack::free_port()?,
         run,
         fake,
-        openrouter: fragment_fakes::openrouter::OpenRouter::start(OPENROUTER_KEY)?,
+        openrouter: fragment_fakes::openrouter::OpenRouter::start(OPENROUTER_KEY, OPENROUTER_MANAGEMENT)?,
         push: fragment_fakes::push::PushService::start()?,
         org_key,
         host_secret: devstack::random_hex(32),
         workos: fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY)?,
+        operator: Keys::generate(),
         cli,
         scratch,
         project,

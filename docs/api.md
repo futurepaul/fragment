@@ -25,6 +25,9 @@ Worker variables, rendered from the fleet's settings (ROADMAP decision
 | `FRAGMENT_PUSH_SUBJECT` | who push services may contact about this fleet's pushes (a `mailto:` or https URL; RFC 8292) |
 | `FRAGMENT_DELIVERY_RETRY_S` | the shortest wait before a delivery is retried (default 10; the wait grows with the delivery's age, up to an hour) |
 | `OPENROUTER_API_URL` | where AI calls go (default https://openrouter.ai) |
+| `OPENROUTER_MANAGEMENT_KEY` | mints each billing org's own OpenRouter key, its limit the org's monthly allowance; unset, only a fragment's own `OPENROUTER_API_KEY` pays for AI |
+| `FRAGMENT_BUDGET_USD` | each person's monthly budget (default 20) |
+| `FRAGMENT_OPERATORS` | identities and keys that may top up budgets (as `FRAGMENT_CREATORS` once read them) |
 | `FRAGMENT_DEPLOY_ID` | which deployment this is (`cargo xtask deploy` sets it); `GET /healthz` answers it in `x-fragment-deploy` |
 | `WORKOS_CLIENT_ID`, `WORKOS_API_KEY` | sign-in: fragment's WorkOS environment (the key exchanges codes); unset, sign-in answers 500 |
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake) |
@@ -288,8 +291,17 @@ reported (`delivery.failed`).
 
 ### AI
 
-A job calls OpenRouter with the fragment's own `OPENROUTER_API_KEY`
-secret (added at the egress point; without it the step fails saying so):
+A job calls OpenRouter as its steps. Who pays: a fragment with its own
+`OPENROUTER_API_KEY` secret pays with it, unmetered. Otherwise its owner
+does, from their monthly budget (Budgets, below): each paid step reserves
+its worst case in the owner's ledger before it runs (text $0.05, an
+image $0.10, a video $0.10 a second), runs on the owner's own OpenRouter
+key, and settles to the cost OpenRouter reports (`usage.cost`). A step
+the month cannot cover fails with `budget used up` (uncaught, the run is
+held; replay it after a top-up or in a new month). A step the ledger
+already settled answers its stored result, so a replayed run is not paid
+twice. The key is added at the egress point and never reaches the app.
+The steps:
 
 - `job.ai.text({model, prompt | messages, max_tokens, reasoning})` →
   `{text, model, usage}` (chat completions). `reasoning` is OpenRouter's
@@ -305,8 +317,31 @@ secret (added at the egress point; without it the step fails saying so):
   video: the job starts it, polls every 20 seconds (up to about 15
   minutes) as steps, and saves it as a blob.
 
-An OpenRouter 429 or 5xx is retried; 402 (out of credits) and other
-refusals fail the step with OpenRouter's message.
+An OpenRouter 429 or 5xx is retried; 402 (out of credits, or past the
+key's limit) and other refusals fail the step with OpenRouter's message.
+A run answers `costMicros`: what its paid steps cost the owner's budget.
+
+### Budgets (phase 4 slice C)
+
+Every person has a monthly budget (`FRAGMENT_BUDGET_USD`, $20) in their
+own billing org, `org:` + their identity's hex (finite.computer's
+personal org; FIN-10). A month is a UTC calendar month; the allowance is
+the budget plus that month's top-ups; money is in micro-dollars. The
+org's own OpenRouter key, minted with the fleet's management key, carries
+the allowance as its monthly limit, so OpenRouter itself stops the org
+there. Running out stops only paid steps, never sites or mutations.
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `GET /api/budget` | a person (an agent: its owner's) | → `{billingOrg, period, budgetMicros, toppedUpMicros, allowanceMicros, spentMicros, reservedMicros, remainingMicros, warn, usage}`: `warn` at 80% of the allowance; the newest 20 usage rows |
+| `GET /api/budget/usage?period=YYYY-MM` | the same | → the same with every usage row of the month |
+| `POST /api/budget/{id}/top-up` | the fleet's operators | `{usd}` → the month: the allowance rises, and the org's key limit with it |
+
+A usage row is FIN-10's report shape: `{sourceRef, agent?, billingOrg,
+period, unit: "usd_micro", quantity, state (reserved, settled), kind,
+model, fragment, principal, at}`, one per paid step
+(`sourceRef` is `<fragment>@<incarnation>/run/<run>/step/<index>`),
+recorded once.
 
 ### Jobs and triggers
 

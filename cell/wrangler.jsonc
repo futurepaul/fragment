@@ -23,12 +23,15 @@
       { "name": "FRAGMENT", "class_name": "Fragment" },
       { "name": "PRINCIPAL", "class_name": "Principal" },
       // The identity registry: one cell for the fleet (registry.rs).
-      { "name": "REGISTRY", "class_name": "Registry" }
+      { "name": "REGISTRY", "class_name": "Registry" },
+      // A billing org's budget and usage: one cell per org (ledger.rs).
+      { "name": "LEDGER", "class_name": "Ledger" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Fragment"] },
     { "tag": "v2", "new_sqlite_classes": ["Principal"] },
-    { "tag": "v3", "new_sqlite_classes": ["Registry"] }
+    { "tag": "v3", "new_sqlite_classes": ["Registry"] },
+    { "tag": "v4", "new_sqlite_classes": ["Ledger"] }
   ]
 }

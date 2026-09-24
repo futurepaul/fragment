@@ -61,7 +61,12 @@ uses it reads it from there.
 AI up to each person's monthly budget. Each person still gets a key of
 their own: the platform's OpenRouter management key mints one per person
 with a credit limit equal to their budget, kept in the person's cell, so
-OpenRouter itself stops them at the limit. Connecting their own account,
+OpenRouter itself stops them at the limit. *Built in phase 4 slice C:* the
+key belongs to the person's billing org, sealed in its `Ledger` cell
+(salted with the org's id), minted on the first paid step with
+`limit_reset: monthly`, its limit patched to the allowance on a top-up
+and at each new month; a fragment's supervisor opens it only as a paid
+step leaves. Connecting their own account,
 below, comes back later as the way past it.
 
 Later, a person **connects OpenRouter** (OpenRouter's OAuth PKCE flow,

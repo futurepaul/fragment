@@ -164,6 +164,12 @@ pub struct Fleet {
     /// The platform's origin (sign-in, the platform session), when it is
     /// not the hostname suffix itself.
     pub platform_url: Option<String>,
+    /// Budgets: the OpenRouter management key that mints each person's key
+    /// (`None`: only a fragment's own key pays), the monthly budget in
+    /// dollars (`None`: the cell's 20), and who may top one up.
+    pub openrouter_management: Option<String>,
+    pub budget_usd: Option<String>,
+    pub operators: Option<String>,
     /// Test controls (`FRAGMENT_TEST_HOOKS=allow`: the registry can be made
     /// to fail). Never on a shared fleet.
     pub test_hooks: bool,
@@ -216,6 +222,15 @@ impl Fleet {
         }
         if let Some(p) = &self.platform_url {
             vars.push(("FRAGMENT_PLATFORM_URL", p.as_str()));
+        }
+        if let Some(k) = &self.openrouter_management {
+            vars.push(("OPENROUTER_MANAGEMENT_KEY", k.as_str()));
+        }
+        if let Some(b) = &self.budget_usd {
+            vars.push(("FRAGMENT_BUDGET_USD", b.as_str()));
+        }
+        if let Some(o) = &self.operators {
+            vars.push(("FRAGMENT_OPERATORS", o.as_str()));
         }
         if self.test_hooks {
             vars.push(("FRAGMENT_TEST_HOOKS", "allow"));

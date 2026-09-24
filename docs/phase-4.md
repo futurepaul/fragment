@@ -1,8 +1,8 @@
 # Phase 4: sign-in, identities, and budgets (proposed)
 
-Status: **go from Paul 2026-09-24; slices A and B built the same day**
-(below, "as built"). Stopped here for Paul to try signing in locally
-before slice C (budgets). The ROADMAP keeps
+Status: **go from Paul 2026-09-24; slices A, B, and C built the same
+day** (below, "as built"; Paul tried sign-in locally before C). Slice D,
+the deploy, is Paul's to approve. The ROADMAP keeps
 the acceptance (phase 4, decisions 12, 14, 15); this file keeps the
 slices. Every slice follows the rules in `docs/finite-integration.md`
 and updates its rows there.
@@ -189,6 +189,41 @@ and `WORKOS_API_KEY_FILE=~/.config/finite-next/secrets/fragment-workos-api-key`.
 - Per-person OpenRouter keys with a credit limit, minted with a
   management key; `fragment budget`; costs on runs; the platform bar.
 - e2e: the ROADMAP's budget list, against the OpenRouter fake.
+
+### Slice C as built (2026-09-24)
+
+- **A `Ledger` cell per billing org** (`cell/src/ledger.rs`); every
+  person's is their own personal org, `org:` + their identity's hex. It
+  holds the month (UTC), top-ups, one usage row per paid step, and the
+  org's own OpenRouter key, sealed.
+- **Paid steps** (`job.ai.text`, `.image`, `.video`; `cell/src/ai.rs`):
+  a fragment with its own `OPENROUTER_API_KEY` pays with it, unmetered;
+  otherwise its owner's org pays, whoever started the run (a public
+  visitor included). The step reserves a worst case per kind (text
+  $0.05, image $0.10, video $0.10 a second; `crates/core/src/budget.rs`),
+  runs on the org's key, and settles to OpenRouter's `usage.cost` (a
+  video when its last poll reports it). A step the month cannot cover
+  fails `budget used up`, so the run is held until a replay after a
+  top-up or in the next month. A settled step answers its stored result,
+  so a replayed run pays only for what it had not paid for. Reservations
+  in one cell cannot race: two jobs for the last reservation, one runs.
+- **The org's OpenRouter key** is minted with the fleet's management key
+  on the first paid step (`limit` = the allowance, `limit_reset:
+  monthly`), and patched on a top-up and at each new month: OpenRouter
+  stops the org at its allowance even if the ledger were wrong.
+- **Usage rows** carry FIN-10's fields (source reference, agent, billing
+  org, period, unit `usd_micro`, quantity), once per step.
+- **Where people see it:** `fragment budget` (and `budget usage`), a
+  cost on every run (`costMicros`, `fragment runs`), the month on the
+  platform page, a warning at 80%.
+- **Operators** (`FRAGMENT_OPERATORS`) top up a person's month:
+  `fragment budget top-up <id> <usd>`.
+- **e2e:** the `budget` section (25 checks, against the OpenRouter fake,
+  which now mints keys, enforces their limits, and reports costs), and
+  a restart check that a month's spend survives.
+- **Not metered yet:** an agent's own turns (the agent fleet's key;
+  debt ledger, before that fleet is hosted), computers (phase 8).
+  Reservations are per-kind estimates (debt ledger).
 
 ## Slice D: hosted
 

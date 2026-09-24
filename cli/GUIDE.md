@@ -285,6 +285,20 @@ fragment rotate my-thing --view                            # a new share link
 Only the owner manages members, invites, visibility, and tokens.
 `fragment.json` grants nothing.
 
+## Your AI budget
+
+The fragments you own pay for their AI (`job.ai`) from your monthly
+budget, whoever started the run, unless a fragment sets its own
+`OPENROUTER_API_KEY`. A step reserves its worst case first; one the month
+cannot cover is held ("budget used up"): replay it after a top-up or next
+month.
+
+```
+fragment budget              # what is left this month, and what spent it
+fragment budget usage        # every paid step this month (--period 2026-09)
+fragment runs my-thing       # each run shows what it cost
+```
+
 ## You and your keys
 
 ```
@@ -365,6 +379,7 @@ secret values into files.
 fragment login [--force] [--no-wait]     fragment call <name> <op> [--input JSON] [--id ID]
 fragment whoami                          fragment channel <name> [<channel>] [--after N] [--follow]
 fragment keys [list|rotate|revoke <npub>]
+fragment budget [usage [--period P] | top-up <id> <usd>]
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
 fragment init <name> [--template T]      fragment replay <name> <run>
 fragment new <dir> [--template T]        fragment triggers <name>

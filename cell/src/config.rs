@@ -65,6 +65,17 @@ pub struct Config {
     /// e.g. https://fragment.club; without a suffix, the origin a request
     /// arrived on).
     platform_url: Option<String>,
+    /// `OPENROUTER_MANAGEMENT_KEY`: mints each billing org's own OpenRouter
+    /// key, its limit the org's allowance (decision 14). Unset, only a
+    /// fragment's own `OPENROUTER_API_KEY` pays for AI.
+    pub openrouter_management: Option<String>,
+    /// `FRAGMENT_BUDGET_USD`: each person's monthly budget (default 20).
+    pub budget_micros: i64,
+    /// `FRAGMENT_OPERATORS`: identities and keys (as `parse_list` reads
+    /// them) that may top up a budget.
+    operators: Option<Result<Vec<String>, String>>,
+    /// `FRAGMENT_TEST_HOOKS=allow`: dev and e2e fleets only.
+    pub test_hooks: bool,
     /// `FRAGMENT_DEPLOY_ID`: which deployment this is (`cargo xtask deploy`
     /// sets it; `/healthz` answers it in `x-fragment-deploy`).
     pub deploy_id: String,
@@ -102,6 +113,14 @@ impl Config {
             _ => None,
         };
         let platform_url = var(env, "FRAGMENT_PLATFORM_URL").map(|u| u.trim_end_matches('/').to_string());
+        let openrouter_management = var(env, "OPENROUTER_MANAGEMENT_KEY");
+        let budget_micros = var(env, "FRAGMENT_BUDGET_USD")
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .map(|v| (v * fragment_core::budget::USD as f64).round() as i64)
+            .unwrap_or(20 * fragment_core::budget::USD);
+        let operators = var(env, "FRAGMENT_OPERATORS").map(|l| fragment_core::npub::parse_list(&l));
+        let test_hooks = var(env, "FRAGMENT_TEST_HOOKS").as_deref() == Some("allow");
         let deploy_id = var(env, "FRAGMENT_DEPLOY_ID").unwrap_or_else(|| "dev".into());
         Config {
             host_secrets,
@@ -115,7 +134,21 @@ impl Config {
             openrouter_url,
             workos,
             platform_url,
+            openrouter_management,
+            budget_micros,
+            operators,
+            test_hooks,
             deploy_id,
+        }
+    }
+
+    /// Whether the signer (its key, 64 hex, if it signed, and its identity)
+    /// may top up budgets.
+    pub fn is_operator(&self, key: Option<&str>, identity: &str) -> CellResult<bool> {
+        match &self.operators {
+            None => Ok(false),
+            Some(Err(e)) => Err(CellError::host(format!("FRAGMENT_OPERATORS: {e}"))),
+            Some(Ok(listed)) => Ok(listed.iter().any(|l| l == identity || Some(l.as_str()) == key)),
         }
     }
 
