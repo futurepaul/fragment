@@ -466,8 +466,8 @@ impl FragmentCell {
             if req.headers().get(crate::deliveries::REPORT_HEADER)?.is_none() {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
             }
-            let body: Value = body_json(&mut req).await?;
-            return json_response(&self.delivery_report(&body)?);
+            let report = body_json(&mut req).await?;
+            return json_response(&self.delivery_report(&report)?);
         }
         if let Some(op) = path.strip_prefix("/cap/files/") {
             // Only the `Files` capability sets the header; the router never passes it.

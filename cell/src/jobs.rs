@@ -30,7 +30,7 @@ use std::time::Duration;
 use fragment_core::secrets::placeholders;
 use fragment_core::{cron::Cron, egress, glob, npub, trigger_state};
 use fragment_proto::{
-    limits, valid_secret_name, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunStatus, SetPaused, TriggerDecl, TriggerOn,
+    limits, valid_secret_name, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunStatus, SetPaused, TriggerDecl, TriggerOn, Via,
 };
 use serde_json::{json, Map, Value};
 use worker::wasm_bindgen::JsValue;
@@ -62,8 +62,7 @@ const ERROR_MAX_CHARS: usize = 2000;
 
 pub(crate) struct NewRun<'a> {
     pub op: &'a str,
-    /// `call`, `job`, or the trigger: `cron`, `channel`, `files`
-    pub via: &'a str,
+    pub via: Via,
     pub trigger: Option<String>,
     pub principal: &'a str,
     pub role: Role,
@@ -101,7 +100,7 @@ fn run_of(r: &Value, full: bool) -> Run {
     Run {
         id: r["id"].as_i64().unwrap_or(0),
         op: text("op").unwrap_or_default(),
-        via: text("via").unwrap_or_default(),
+        via: r["via"].as_str().and_then(Via::parse).expect("runs.via is one the cell wrote"),
         trigger: text("trigger"),
         principal: r["principal"].as_str().map(npub::display).unwrap_or_default(),
         status: r["status"].as_str().and_then(RunStatus::parse).unwrap_or(RunStatus::Held),
@@ -232,7 +231,7 @@ impl FragmentCell {
                 return Ok(Started { id: p["id"].as_i64().unwrap_or(0), status, replayed: true });
             }
         }
-        let triggered = !matches!(r.via, "call" | "job");
+        let triggered = r.via.triggered();
         let now = js::now_ms();
         let blocked = if r.depth > limits::HOP_DEPTH_MAX {
             let why = format!("{} hops deep: triggered runs chained past the budget of {} (a loop?)", r.depth, limits::HOP_DEPTH_MAX);
@@ -264,7 +263,7 @@ impl FragmentCell {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?) RETURNING id",
             vec![
                 r.op.into(),
-                r.via.into(),
+                r.via.as_str().into(),
                 opt(r.trigger.as_deref()),
                 r.principal.into(),
                 r.role.as_str().into(),
@@ -521,7 +520,7 @@ impl FragmentCell {
             id: format!("{JOB_ID_PREFIX}{run_id}:{index}"),
             input: args["input"].clone(),
             depth: if child { depth + 1 } else { depth },
-            via: "job",
+            via: Via::Job,
             trigger: Some(format!("run {run_id}")),
         };
         match self.invoke(inv).await {
@@ -677,7 +676,7 @@ impl FragmentCell {
             let sha = crate::ops::input_sha(op, &input);
             let s = self.start_run(NewRun {
                 op,
-                via: "channel",
+                via: Via::Channel,
                 trigger: Some(record.channel.clone()),
                 principal: &own,
                 role: Role::Editor,
@@ -715,7 +714,7 @@ impl FragmentCell {
             }
             self.start_run(NewRun {
                 op: &t.run,
-                via: "files",
+                via: Via::Files,
                 trigger: Some(pattern.clone()),
                 principal: &self.own_key()?,
                 role: Role::Editor,
@@ -789,7 +788,7 @@ impl FragmentCell {
             } else if !self.is_paused(op)? {
                 self.start_run(NewRun {
                     op,
-                    via: "cron",
+                    via: Via::Cron,
                     trigger: Some(expr.to_string()),
                     principal: &self.own_key()?,
                     role: Role::Editor,

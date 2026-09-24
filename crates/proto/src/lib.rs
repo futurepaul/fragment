@@ -818,14 +818,50 @@ impl RunStatus {
     }
 }
 
+/// How a run started: someone's call, another run's step, or a trigger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Via {
+    Call,
+    /// A step of another run called it (`trigger` names the parent run).
+    Job,
+    Cron,
+    Channel,
+    Files,
+}
+
+impl Via {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Via::Call => "call",
+            Via::Job => "job",
+            Via::Cron => "cron",
+            Via::Channel => "channel",
+            Via::Files => "files",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Via> {
+        [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files].into_iter().find(|v| v.as_str() == s)
+    }
+
+    /// Started by a trigger: these runs act as the fragment, pause with
+    /// their operation, and count toward its hourly ceiling.
+    pub fn triggered(self) -> bool {
+        match self {
+            Via::Call | Via::Job => false,
+            Via::Cron | Via::Channel | Via::Files => true,
+        }
+    }
+}
+
 /// One run of an operation: a job, or a triggered mutation (`GET /api/f/<name>/runs`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Run {
     pub id: i64,
     pub op: String,
-    /// `call`, `cron`, `channel`, `files`, or `job` (started by another run's step)
-    pub via: String,
+    pub via: Via,
     /// The cron schedule, channel, file pattern, or parent run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger: Option<String>,
@@ -880,12 +916,10 @@ pub struct UsageRow {
     pub agent: Option<String>,
     pub billing_org: String,
     pub period: String,
-    /// `usd_micro`
-    pub unit: String,
+    pub unit: UsageUnit,
     /// What it cost (settled), or what it holds (reserved).
     pub quantity: i64,
-    /// `reserved` or `settled`.
-    pub state: String,
+    pub state: UsageState,
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -893,6 +927,34 @@ pub struct UsageRow {
     /// Who started the run (it may be a visitor; the owner pays).
     pub principal: String,
     pub at: i64,
+}
+
+/// What a usage row's quantity counts: micro-dollars.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageUnit {
+    UsdMicro,
+}
+
+/// A paid step holds its reservation until it settles to its cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageState {
+    Reserved,
+    Settled,
+}
+
+impl UsageState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UsageState::Reserved => "reserved",
+            UsageState::Settled => "settled",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<UsageState> {
+        [UsageState::Reserved, UsageState::Settled].into_iter().find(|u| u.as_str() == s)
+    }
 }
 
 /// `POST /api/f/<name>/pause` (editor): triggers stop starting runs of
@@ -1096,6 +1158,23 @@ mod tests {
         let b: Value = serde_json::from_str(r#"{"a":{"c":3,"d":2},"b":1}"#).unwrap();
         assert_eq!(canonical_json(&a), canonical_json(&b));
         assert_eq!(canonical_json(&a), r#"{"a":{"c":3,"d":2},"b":1}"#);
+    }
+
+    #[test]
+    fn stored_states_read_back_as_they_serialize() {
+        for v in [Via::Call, Via::Job, Via::Cron, Via::Channel, Via::Files] {
+            assert_eq!(Via::parse(v.as_str()), Some(v));
+            assert_eq!(serde_json::to_value(v).unwrap(), v.as_str());
+        }
+        assert_eq!(Via::parse("inbox"), None);
+        assert!(!Via::Call.triggered() && !Via::Job.triggered());
+        assert!(Via::Cron.triggered() && Via::Channel.triggered() && Via::Files.triggered());
+        for u in [UsageState::Reserved, UsageState::Settled] {
+            assert_eq!(UsageState::parse(u.as_str()), Some(u));
+            assert_eq!(serde_json::to_value(u).unwrap(), u.as_str());
+        }
+        assert_eq!(UsageState::parse("pending"), None);
+        assert_eq!(serde_json::to_value(UsageUnit::UsdMicro).unwrap(), "usd_micro");
     }
 
     #[test]
