@@ -410,6 +410,20 @@ pub fn triggers(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "GET", &format!("/api/f/{busy}/triggers"), None)?;
     s.ok("the triggers list shows the pause on the trigger", r.body["paused"] == json!(["tick"]) && r.body["triggers"][0]["paused"] == true, &r);
 
+    // a live commit with no app says nothing about the next code: the
+    // pause outlasts it, and the next good deploy comes back paused
+    s.commit(&busy_c, &[("app.mjs", None)]);
+    s.deploy(&busy_c);
+    let r = api.status(&owner, &busy)?;
+    s.ok("(a live commit without app.mjs installs no app)", r.body["code"]["sha"].is_null(), &r);
+    let r = api.signed(&owner, "GET", &format!("/api/f/{busy}/runs?limit=1"), None)?;
+    s.ok("an operation stays paused while live has no app", r.body["paused"] == json!(["tick"]), &r);
+    let mut same: Value = serde_json::from_slice(JOBS_JSON)?;
+    same["triggers"] = json!([{ "channel": "alarms", "run": "tick" }]);
+    ship(s, &busy_c, JOBS_APP, same.to_string().as_bytes());
+    let r = api.signed(&owner, "GET", &format!("/api/f/{busy}/triggers"), None)?;
+    s.ok("and the app deployed again comes back paused", r.body["paused"] == json!(["tick"]) && r.body["triggers"][0]["paused"] == true, &r);
+
     // an operation the installed code no longer has loses its pause; one
     // of that name later starts clean
     let mut without: Value = serde_json::from_slice(JOBS_JSON)?;
