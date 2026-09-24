@@ -406,18 +406,24 @@ fragment computer serve [--listen A]     fragment guide
 Global flags: `--host <url>` (or `FRAGMENT_HOST`, or `fragment host
 <url>` to save one), `--json`, `-v`. With `--json` (or
 `FRAGMENT_OUTPUT=json`), stdout is exactly one line: `{"ok":true,
-"data":…}` or `{"ok":false,"error":{"code","message","hint"}}`, with
+"data":…}` or `{"ok":false,"error":{"code","message","hint","id"}}`
+(`id`: a failed `fragment call`'s), with
 stable codes (`invalid_usage auth_failed forbidden not_found name_taken
 conflict too_large rate_limited unavailable outcome_unknown
 server_error`). Exit codes: 0 ok, 1 failure, 2 usage. `-v` logs each
 signed request to stderr and leaves stdout clean.
 
-A network failure is retried (three attempts in all) for reads and blob
-uploads, which are safe to repeat; any other write is retried only when
-the connection never opened. A write that reached the host but lost its
-answer fails with `outcome_unknown`: it may have been applied, so check
-before repeating it. A request may take 30 s plus a second for every
-32 KiB it uploads.
+A network failure is retried (three attempts in all) for reads, blob
+uploads, and `fragment call`, which are safe to repeat (a call carries
+its id, and the fragment answers a repeated id with the first answer);
+any other write is retried only when the connection never opened. A
+write that reached the host but lost its answer fails with
+`outcome_unknown`: it may have been applied, so check before repeating
+it. A failed `fragment call` names its id (in the message, and as
+`error.id` with `--json`, whether you gave `--id` or the CLI made one
+up); when its outcome is unknown, call it again with that `--id`, which
+replays it and never runs it twice. A request may take 30 s plus a
+second for every 32 KiB it uploads.
 
 The code.storage server is named by the host; to point the CLI at
 another, set `FRAGMENT_CODESTORAGE_URL` or `"codestorage"` in

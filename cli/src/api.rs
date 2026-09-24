@@ -73,6 +73,12 @@ pub enum Replay {
     /// GET, HEAD, and a PUT to a content address: sending it twice does
     /// what sending it once does, so any transport failure is retried.
     Safe,
+    /// A write that carries its own idempotency id (an operation call):
+    /// the server answers a repeat of the id with the first call's answer,
+    /// so it is retried like a read. When every try failed and one reached
+    /// the server, the write may have been applied: the outcome is unknown,
+    /// and a retry with the same id finds out.
+    ById,
     /// Everything else is resent only when the connection never opened. A
     /// request that reached the server may have been applied, and sending
     /// it again turned a commit whose answer was lost into a 409 and a
@@ -92,7 +98,7 @@ impl Replay {
     /// Whether this failure of one attempt may be retried.
     pub fn allows_retry(self, connection_opened: bool) -> bool {
         match self {
-            Replay::Safe => true,
+            Replay::Safe | Replay::ById => true,
             Replay::ConnectOnly => !connection_opened,
         }
     }
@@ -160,6 +166,8 @@ impl Client {
     fn send(&self, method: &str, path: &str, body: Vec<u8>, replay: Replay, timeout: Duration) -> Result<Resp> {
         let url = format!("{}{}", self.host, path);
         let mut last_err = None;
+        // whether any try's connection opened: its request may have landed
+        let mut reached = false;
         for attempt in 0..REQUEST_ATTEMPTS {
             if attempt > 0 {
                 std::thread::sleep(Duration::from_millis(300 * attempt as u64));
@@ -197,6 +205,7 @@ impl Client {
                     if self.verbose {
                         eprintln!("{method} {path} -> retry after error ({}ms [retries={attempt}])", t0.elapsed().as_millis());
                     }
+                    reached |= !e.is_connect();
                     last_err = Some(e);
                 }
                 Err(e) => {
@@ -212,6 +221,16 @@ impl Client {
                 }
             }
         }
+        let last = last_err.map(|e| e.to_string()).unwrap_or_else(|| "no error recorded".into());
+        if replay == Replay::ById && reached {
+            return Err(anyhow::Error::new(CodedError {
+                code: "outcome_unknown",
+                msg: format!(
+                    "{method} {path}: {REQUEST_ATTEMPTS} tries reached {host} or may have, and none got an answer ({last}); it may have been applied",
+                    host = self.host
+                ),
+            }));
+        }
         // every attempt failed: surface the last error with its cause — a
         // bare "failed after retries" turned a host dropping large bodies
         // into a silent 90s mystery (and before that, an unreachable!()
@@ -219,9 +238,8 @@ impl Client {
         Err(anyhow::Error::new(CodedError {
             code: "unavailable",
             msg: format!(
-                "request failed after retries ({host} unreachable, or it dropped the connection mid-body — check the request size): {err}",
+                "request failed after retries ({host} unreachable, or it dropped the connection mid-body — check the request size): {last}",
                 host = self.host,
-                err = last_err.map(|e| e.to_string()).unwrap_or_else(|| "no error recorded".into())
             ),
         }))
     }
@@ -231,6 +249,13 @@ impl Client {
     }
     pub fn post_json(&self, path: &str, v: &Value) -> Result<Resp> {
         self.request("POST", path, Some(serde_json::to_vec(v)?))
+    }
+    /// A POST whose body carries its idempotency id (an operation call):
+    /// retried like a read (`Replay::ById`).
+    pub fn post_json_by_id(&self, path: &str, v: &Value) -> Result<Resp> {
+        let body = serde_json::to_vec(v)?;
+        let timeout = timeout_for(body.len() as u64);
+        self.send("POST", path, body, Replay::ById, timeout)
     }
     pub fn put_json(&self, path: &str, v: &Value) -> Result<Resp> {
         self.request("PUT", path, Some(serde_json::to_vec(v)?))
@@ -340,6 +365,22 @@ mod tests {
         assert_eq!(seen.load(Ordering::SeqCst), REQUEST_ATTEMPTS);
         assert_eq!(code_of(c.put_blob("/api/f/x/blobs/abc", vec![1, 2, 3])), "unavailable");
         assert_eq!(seen.load(Ordering::SeqCst), 2 * REQUEST_ATTEMPTS);
+    }
+
+    /// Goal: an operation call, which carries its idempotency id, is
+    /// retried like a read, and a failure after it may have landed says the
+    /// outcome is unknown. Method: the host swallows every answer; the call
+    /// arrives REQUEST_ATTEMPTS times (a plain POST arrives once), and with
+    /// no host at all it is merely unavailable.
+    #[test]
+    fn an_op_call_is_retried_by_its_id() {
+        let (_server, seen, c) = silent_host();
+        let call = serde_json::json!({ "id": "cli-1", "input": {} });
+        assert_eq!(code_of(c.post_json_by_id("/api/f/x/ops/add", &call)), "outcome_unknown");
+        assert_eq!(seen.load(Ordering::SeqCst), REQUEST_ATTEMPTS, "each try arrived");
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let nowhere = Client::new(&format!("http://127.0.0.1:{port}"), Identity::from_secret([7u8; 32]));
+        assert_eq!(code_of(nowhere.post_json_by_id("/api/f/x/ops/add", &call)), "unavailable", "no try reached a host");
     }
 
     /// A connection that never opened carried nothing, so even a POST is
