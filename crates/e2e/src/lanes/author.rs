@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use fragment_nip98::Keys;
+use fragment_proto::limits;
 use serde_json::{json, Value};
 
 use super::app::ship;
@@ -213,7 +214,83 @@ pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a visitor's socket closes when the fragment stops being public (4003)", closed.contains("4003"), &closed);
     let r = Socket::open(api, &name, "__live", None, None);
     s.ok("and a new anonymous socket is refused", r.is_err(), "");
+
+    // a backlog past a page, by count and then by bytes: page after page
+    // until the last, then live; a record appended while the client pages
+    // comes in its turn, never ahead of the pages it has not read
+    let (paged, _) = chat(s, api, &owner, "pages")?;
+    let total = fill_past_a_page(api, &owner, &paged, true)?;
+    let mut p = Socket::open(api, &paged, "__live", None, None)?;
+    p.until("hello", 5)?;
+    p.send(&json!({ "type": "subscribe", "channel": "room", "after": 0 }))?;
+    let (mut seqs, mut pages, mut appended) = (vec![], 0, false);
+    for _ in 0..total as usize + 100 {
+        let f = p.next()?;
+        match f["type"].as_str() {
+            Some("record") => seqs.push(f["seq"].as_i64().unwrap_or(0)),
+            Some("subscribed") => {
+                pages += 1;
+                if f["more"] != true {
+                    break;
+                }
+                if !appended {
+                    api.op(&owner, &paged, "say", "between", json!({ "text": "between pages" }))?;
+                    appended = true;
+                }
+                p.send(&json!({ "type": "subscribe", "channel": "room", "after": f["next"] }))?;
+            }
+            _ => {}
+        }
+    }
+    api.op(&owner, &paged, "say", "after", json!({ "text": "live after the pages" }))?;
+    let rec = p.until("record", 10)?;
+    seqs.push(rec["seq"].as_i64().unwrap_or(0));
+    let want: Vec<i64> = (1..=total + 2).collect();
+    let gap = seqs.iter().zip(&want).position(|(a, b)| a != b);
+    s.ok(
+        "a backlog past a page comes a page at a time, then live, with no gap and nothing twice",
+        seqs == want && pages >= 3 && rec["body"]["text"] == "live after the pages",
+        format!("{pages} pages, {} records, first difference at {gap:?}", seqs.len()),
+    );
+    let mut q = Socket::open(api, &paged, "__live", None, None)?;
+    q.until("hello", 5)?;
+    q.send(&json!({ "type": "subscribe", "channel": "room", "last": 5 }))?;
+    let mut tail = vec![];
+    let sub = loop {
+        let f = q.until("record", 10).and_then(|f| if f["type"] == "record" { Ok(f) } else { anyhow::bail!("{f}") });
+        match f {
+            Ok(f) => tail.push(f["seq"].as_i64().unwrap_or(0)),
+            Err(_) => break Value::Null,
+        }
+        if tail.len() == 5 {
+            break q.until("subscribed", 5)?;
+        }
+    };
+    s.ok(
+        "last: N starts that many records before the end, then live",
+        tail == (total - 2..=total + 2).collect::<Vec<_>>() && sub["more"] == false && sub["next"] == total + 2,
+        format!("{tail:?} {sub}"),
+    );
     Ok(())
+}
+
+/// Fills `room` past a page by count (more records than `CHANNEL_PAGE`)
+/// and, when `bytes`, then past a page by size; answers how many records.
+fn fill_past_a_page(api: &Api, keys: &Keys, name: &str, bytes: bool) -> Result<i64> {
+    let mut total = 0;
+    for i in 0..limits::CHANNEL_PAGE / limits::EFFECTS_MAX + 1 {
+        let r = api.op(keys, name, "bulk", &format!("small-{i}"), json!({ "n": limits::EFFECTS_MAX, "size": 16 }))?;
+        anyhow::ensure!(r.status == 200, "bulk: {r}");
+        total += limits::EFFECTS_MAX as i64;
+    }
+    // records of 60 KiB, past the byte budget of one page
+    let size = 60 * 1024;
+    for i in 0..if bytes { limits::CHANNEL_PAGE_MAX_BYTES / size + 3 } else { 0 } {
+        let r = api.op(keys, name, "bulk", &format!("big-{i}"), json!({ "n": 1, "size": size }))?;
+        anyhow::ensure!(r.status == 200, "bulk: {r}");
+        total += 1;
+    }
+    Ok(total)
 }
 
 pub fn routes(s: &mut Suite, api: &Api) -> Result<()> {
@@ -274,6 +351,38 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = follow.kill();
     let _ = follow.wait();
     s.ok("fragment channel --follow streams new records", seen, std::fs::read_to_string(&log).unwrap_or_default());
+
+    // --follow from the start of a channel past a page: every record in
+    // order, page after page, then the live one
+    fill_past_a_page(api, &keys, &name, false)?;
+    let listed = s.cli_json(api, &home, &["channel", &name, "--json"])?;
+    let head = listed["channels"].as_array().and_then(|a| a.iter().find(|c| c["name"] == "room")).and_then(|c| c["seq"].as_i64()).unwrap_or(0);
+    let log = s.scratch.join(format!("follow-all-{name}.log"));
+    let mut follow = Command::new(&s.cli)
+        .args(["channel", &name, "room", "--follow"])
+        .env("HOME", &home)
+        .env("FRAGMENT_HOST", &api.base)
+        .stdin(Stdio::null())
+        .stdout(std::fs::File::create(&log)?)
+        .stderr(Stdio::null())
+        .spawn()?;
+    let lines = |log: &std::path::Path| std::fs::read_to_string(log).unwrap_or_default().lines().filter(|l| l.contains(r#""type":"record""#)).count() as i64;
+    let backlog = s.eventually(Duration::from_secs(20), || lines(&log) >= head);
+    api.op(&keys, &name, "say", "cli-3", json!({ "text": "after the pages" }))?;
+    let live = s.eventually(Duration::from_secs(10), || lines(&log) > head);
+    let _ = follow.kill();
+    let _ = follow.wait();
+    let seqs: Vec<i64> = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|v| v["seq"].as_i64())
+        .collect();
+    s.ok(
+        "fragment channel --follow pages through a long backlog, then streams, with no gap",
+        backlog && live && head > limits::CHANNEL_PAGE as i64 && seqs == (1..=head + 1).collect::<Vec<_>>(),
+        format!("head {head}, {} lines", seqs.len()),
+    );
 
     // rotate renews what the CLI names; the webhook secret is code.storage's and changes only when asked
     let r = s.cli_json(api, &home, &["rotate", &name, "--json"])?;

@@ -74,6 +74,9 @@ pub mod limits {
     pub const RECORD_BODY_MAX_BYTES: usize = 64 * 1024;
     /// Records per page of a channel read.
     pub const CHANNEL_PAGE: usize = 1000;
+    /// A page of a channel on the live socket also ends at about this many
+    /// bytes of record frames (a record is at most `RECORD_BODY_MAX_BYTES`).
+    pub const CHANNEL_PAGE_MAX_BYTES: usize = 1024 * 1024;
     /// Records one mutation may publish.
     pub const EFFECTS_MAX: usize = 64;
     /// App channels per fragment.
