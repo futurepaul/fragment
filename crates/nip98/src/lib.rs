@@ -298,7 +298,6 @@ fn tag(name: &str, value: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use secp256k1::{Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
 
     const NOW: i64 = 1_790_000_000;
     const URL: &str = "http://127.0.0.1:8790/api/fragments";
@@ -344,6 +343,13 @@ mod tests {
         assert_eq!(pubkey_of_secret(&k.secret_hex()).as_deref(), Some(k.pubkey_hex()));
         assert_eq!(pubkey_of_secret(&"0".repeat(64)), None);
         assert_eq!(pubkey_of_secret("abc"), None);
+    }
+
+    /// A pin from another implementation: this secret's x-only key as
+    /// @noble/curves computes it (its npub is pinned in fragment-core).
+    #[test]
+    fn a_known_secret_has_its_known_key() {
+        assert_eq!(keys(1).pubkey_hex(), "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f");
     }
 
     #[test]
@@ -491,39 +497,5 @@ mod tests {
         let arrived = arrived_url(url("http://fragment.club/api/fragments"), Some("https"));
         let h = k.header("GET", "https://fragment.club/api/fragments", b"", NOW);
         assert!(verify_request(Some(&h), "GET", &arrived, b"", NOW, 60).is_ok());
-    }
-
-    fn secp_header(secret: &[u8; 32], method: &str, url: &str, body: &[u8], created_at: i64) -> String {
-        // the CLI's signer (cli/src/auth.rs), reproduced
-        let secp = Secp256k1::new();
-        let kp = Keypair::from_seckey_slice(&secp, secret).unwrap();
-        let pubkey = hex::encode(kp.x_only_public_key().0.serialize());
-        let mut tags = vec![tag("u", url), tag("method", method)];
-        if !body.is_empty() {
-            tags.push(tag("payload", &hex::encode(Sha256::digest(body))));
-        }
-        let id = event_id(&pubkey, created_at, KIND, &tags, "");
-        let sig = secp.sign_schnorr_no_aux_rand(&Message::from_digest_slice(&id).unwrap(), &kp);
-        let ev = serde_json::json!({"id": hex::encode(id), "pubkey": pubkey, "created_at": created_at,
-            "kind": KIND, "tags": tags, "content": "", "sig": hex::encode(sig.as_ref())});
-        format!("Nostr {}", base64::engine::general_purpose::STANDARD.encode(ev.to_string()))
-    }
-
-    #[test]
-    fn the_cli_signer_and_this_verifier_agree() {
-        let secret = [7u8; 32];
-        let h = secp_header(&secret, "POST", URL, b"{}", NOW);
-        let pubkey = verify(Some(&h), "POST", URL, b"{}", NOW, 60).expect("a secp256k1 signature verifies with k256");
-        let sk = SecretKey::from_slice(&secret).unwrap();
-        let expect = XOnlyPublicKey::from_keypair(&Keypair::from_secret_key(&Secp256k1::new(), &sk)).0;
-        assert_eq!(pubkey, hex::encode(expect.serialize()));
-        // and the other direction
-        let k = Keys::from_secret_hex(&hex::encode(secret)).unwrap();
-        let ev = decoded(&k.header("GET", URL, b"", NOW));
-        let sig = secp256k1::schnorr::Signature::from_slice(&hex::decode(&ev.sig).unwrap()).unwrap();
-        let id = hex::decode(&ev.id).unwrap();
-        Secp256k1::verification_only()
-            .verify_schnorr(&sig, &Message::from_digest_slice(&id).unwrap(), &expect)
-            .expect("a k256 signature verifies with secp256k1");
     }
 }

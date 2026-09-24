@@ -1,118 +1,71 @@
-// Nostr keys and NIP-98 HTTP auth (kind 27235), as the cell verifies it (crates/nip98).
+// This machine's nostr key and its NIP-98 HTTP auth: crates/nip98 signs
+// (the same code the cell verifies with), crates/core names keys as npubs.
 use anyhow::{anyhow, bail, Context, Result};
-use base64::Engine;
-use secp256k1::{Keypair, Message, Secp256k1, XOnlyPublicKey};
+use fragment_core::npub;
+use fragment_nip98::Keys;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
+#[derive(Clone)]
 pub struct Identity {
-    pub secret: [u8; 32],
-    pub pubkey_hex: String,
+    keys: Keys,
+}
+
+fn now_s() -> i64 {
+    let since_epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("the clock is past 1970");
+    i64::try_from(since_epoch.as_secs()).expect("seconds since 1970 fit an i64")
 }
 
 impl Identity {
-    pub fn generate() -> Self {
-        let secp = Secp256k1::new();
-        let (sk, _) = secp.generate_keypair(&mut rand::thread_rng());
-        Self::from_secret(sk.secret_bytes())
+    pub fn generate() -> Identity {
+        Identity { keys: Keys::generate() }
     }
 
-    pub fn from_secret(secret: [u8; 32]) -> Self {
-        let secp = Secp256k1::new();
-        let kp = Keypair::from_seckey_slice(&secp, &secret).expect("valid secret key");
-        let (xonly, _) = XOnlyPublicKey::from_keypair(&kp);
-        Self {
-            secret,
-            pubkey_hex: hex::encode(xonly.serialize()),
+    /// The key the config holds (`secret_key`: 64 hex), or `None` when it
+    /// is not a secp256k1 secret.
+    pub fn from_secret_hex(secret_hex: &str) -> Option<Identity> {
+        if secret_hex.len() != 64 {
+            return None;
         }
+        Keys::from_secret_hex(secret_hex).map(|keys| Identity { keys })
+    }
+
+    /// The secret as the config stores it (64 lowercase hex). BIP-340
+    /// keeps the secret whose public point has an even y, so this may be
+    /// the negation of the hex it was loaded from: the same key.
+    pub fn secret_hex(&self) -> String {
+        self.keys.secret_hex()
+    }
+
+    pub fn pubkey_hex(&self) -> &str {
+        self.keys.pubkey_hex()
     }
 
     pub fn npub(&self) -> String {
-        npub_encode(&self.pubkey_hex).expect("npub encode")
+        npub::encode(self.keys.pubkey_hex())
     }
 
-    /// Build the Authorization header value for a NIP-98 request.
+    /// The Authorization header value for a NIP-98 request, signed now.
     pub fn nip98_header(&self, method: &str, url: &str, body: &[u8]) -> String {
-        let mut tags = vec![
-            serde_json::json!(["u", url]),
-            serde_json::json!(["method", method.to_uppercase()]),
-        ];
-        if !body.is_empty() {
-            let hash = hex::encode(Sha256::digest(body));
-            tags.push(serde_json::json!(["payload", hash]));
-        }
-        let created_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        self.nostr_header(27235, tags, "", created_at)
+        self.keys.header(method, url, body, now_s())
     }
 
     /// A key proof (crates/nip98 `verify_proof`): this key agrees to join
     /// whoever signs `method url` with the key `signer_hex`.
     pub fn proof(&self, method: &str, url: &str, signer_hex: &str) -> String {
-        let tags = vec![
-            serde_json::json!(["u", url]),
-            serde_json::json!(["method", method.to_uppercase()]),
-            serde_json::json!(["p", signer_hex]),
-        ];
-        let created_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        self.nostr_header(27235, tags, "", created_at)
-    }
-
-    /// Shared signing core: kind + tags + content -> NIP-01 id over the
-    /// canonical serialization of [0, pubkey, created_at, kind, tags, content],
-    /// schnorr-signed, wrapped as the `Authorization: Nostr <b64>` value.
-    fn nostr_header(&self, kind: u64, tags: Vec<Value>, content: &str, created_at: u64) -> String {
-        let preimage =
-            serde_json::to_string(&serde_json::json!([0, self.pubkey_hex, created_at, kind, tags, content]))
-                .expect("event preimage serializes");
-        let id = Sha256::digest(preimage.as_bytes());
-        let secp = Secp256k1::new();
-        let kp = Keypair::from_seckey_slice(&secp, &self.secret).expect("valid secret key");
-        let msg = Message::from_digest_slice(&id).expect("32-byte digest");
-        let sig = secp.sign_schnorr_no_aux_rand(&msg, &kp);
-        let event = serde_json::json!({
-            "id": hex::encode(id),
-            "pubkey": self.pubkey_hex,
-            "created_at": created_at,
-            "kind": kind,
-            "tags": tags,
-            "content": content,
-            "sig": hex::encode(sig.as_ref()),
-        });
-        let b64 = base64::engine::general_purpose::STANDARD
-            .encode(serde_json::to_string(&event).unwrap());
-        format!("Nostr {b64}")
+        self.keys.proof(method, url, signer_hex, now_s())
     }
 }
 
-pub fn npub_encode(pubkey_hex: &str) -> Result<String> {
-    use bech32::ToBase32;
-    let bytes = hex::decode(pubkey_hex).context("bad pubkey hex")?;
-    bech32::encode("npub", bytes.to_base32(), bech32::Variant::Bech32).map_err(|e| anyhow!(e.to_string()))
-}
-
-pub fn npub_decode(npub: &str) -> Result<String> {
-    use bech32::FromBase32;
-    let (hrp, data, variant) = bech32::decode(npub).context("bad npub")?;
-    if hrp != "npub" {
-        return Err(anyhow!("not an npub"));
-    }
-    if variant != bech32::Variant::Bech32 {
-        return Err(anyhow!("npub must be bech32 (not bech32m)"));
-    }
-    let bytes = Vec::<u8>::from_base32(&data).context("bad npub data")?;
-    Ok(hex::encode(bytes))
+/// An identity from a fixed secret (tests).
+#[cfg(test)]
+pub fn fixed(n: u8) -> Identity {
+    Identity::from_secret_hex(&hex::encode([n; 32])).expect("a valid secret")
 }
 
 /// Resolve an identifier to its canonical npub form.
 ///
-/// Plain npubs are validated and canonicalised. NIP-05 names (`local@domain`)
-/// resolve via the standard well-known path
+/// An npub or a 64-hex key is checked and canonicalised. NIP-05 names
+/// (`local@domain`) resolve via the standard well-known path
 /// `https://<domain>/.well-known/nostr.json?name=<local>` — the same lookup
 /// the other finite CLIs (fbrain, fsite) use — so finite identities like
 /// `paul@finite.vip` work anywhere an npub does.
@@ -145,83 +98,44 @@ pub fn resolve_npub(input: &str) -> Result<String> {
         let published = doc["names"][local]
             .as_str()
             .ok_or_else(|| anyhow!("no npub published for '{s}'"))?;
-        let hex = if published.starts_with("npub1") {
-            npub_decode(published)?
-        } else {
-            published.to_ascii_lowercase()
-        };
-        return npub_encode(&hex).with_context(|| format!("'{s}' published an invalid pubkey"));
+        let hex = npub::parse(published).ok_or_else(|| anyhow!("'{s}' published an invalid pubkey"))?;
+        return Ok(npub::encode(&hex));
     }
-    let hex = npub_decode(s)?;
-    npub_encode(&hex)
+    let hex = npub::parse(s).ok_or_else(|| anyhow!("'{s}' is not an npub or a 64-hex key"))?;
+    Ok(npub::encode(&hex))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A key saved as hex before the CLI signed through crates/nip98 still
+    /// loads as the same key (a known answer, from @noble/curves), and
+    /// signs what the cell verifies.
     #[test]
-    fn npub_roundtrip() {
-        let id = Identity::from_secret([3u8; 32]);
-        let npub = id.npub();
-        assert!(npub.starts_with("npub1"));
-        assert_eq!(npub_decode(&npub).unwrap(), id.pubkey_hex);
+    fn a_stored_hex_key_keeps_working() {
+        let stored = hex::encode([1u8; 32]);
+        let id = Identity::from_secret_hex(&stored).expect("the stored key loads");
+        assert_eq!(id.pubkey_hex(), "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f");
+        // what this CLI saves loads back as the same key
+        let saved = Identity::from_secret_hex(&id.secret_hex()).expect("the saved key loads");
+        assert_eq!(saved.pubkey_hex(), id.pubkey_hex());
+        let fresh = Identity::generate();
+        assert_eq!(Identity::from_secret_hex(&fresh.secret_hex()).map(|k| k.npub()), Some(fresh.npub()));
+        let url = "http://x/api/fragments";
+        let h = id.nip98_header("POST", url, b"{}");
+        assert_eq!(fragment_nip98::verify(Some(&h), "POST", url, b"{}", now_s(), 60).as_deref(), Ok(id.pubkey_hex()));
+        for bad in ["", "abc", &"0".repeat(64), &"zz".repeat(32), &"01".repeat(33)] {
+            assert!(Identity::from_secret_hex(bad).is_none(), "{bad:?}");
+        }
     }
 
     #[test]
-    // Cross-implementation pin: value computed via @noble/curves + JS bech32.
-    fn npub_pinned() {
-        let id = Identity::from_secret([1u8; 32]);
-        assert_eq!(
-            id.pubkey_hex,
-            "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f"
-        );
-        assert_eq!(
-            id.npub(),
-            "npub1rwzv24nmzfjypx2a8m264ws9vht3uxp5vpypnluuzl67n4waq78suk0wul"
-        );
+    fn identifiers_resolve_to_npubs() {
+        let id = fixed(1);
+        assert_eq!(resolve_npub(&id.npub()).unwrap(), id.npub());
+        assert_eq!(resolve_npub(&format!(" {} ", id.pubkey_hex().to_uppercase())).unwrap(), id.npub());
+        assert!(resolve_npub("npub1xyz").is_err());
+        assert!(resolve_npub("@x").is_err());
     }
-
-    #[test]
-    fn nip98_shape() {
-        let id = Identity::from_secret([7u8; 32]);
-        let h = id.nip98_header("POST", "http://x/api/fragments", br#"{"name":"a"}"#);
-        let b64 = h.strip_prefix("Nostr ").unwrap();
-        let raw = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
-        let ev: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(ev["kind"], 27235);
-        assert_eq!(ev["content"], "");
-        assert_eq!(ev["tags"][0], serde_json::json!(["u", "http://x/api/fragments"]));
-        assert_eq!(ev["tags"][1], serde_json::json!(["method", "POST"]));
-        let expect_payload = hex::encode(Sha256::digest(br#"{"name":"a"}"#));
-        assert_eq!(ev["tags"][2], serde_json::json!(["payload", expect_payload]));
-        // id recompute
-        let pre = serde_json::to_string(&serde_json::json!([
-            0,
-            ev["pubkey"],
-            ev["created_at"],
-            27235,
-            ev["tags"],
-            ""
-        ]))
-        .unwrap();
-        assert_eq!(ev["id"].as_str().unwrap(), hex::encode(Sha256::digest(pre.as_bytes())));
-        // signature verifies
-        let secp = Secp256k1::new();
-        let msg = Message::from_digest_slice(&hex::decode(ev["id"].as_str().unwrap()).unwrap()).unwrap();
-        let sig = secp256k1::schnorr::Signature::from_slice(&hex::decode(ev["sig"].as_str().unwrap()).unwrap()).unwrap();
-        let pk = XOnlyPublicKey::from_slice(&hex::decode(ev["pubkey"].as_str().unwrap()).unwrap()).unwrap();
-        secp.verify_schnorr(&sig, &msg, &pk).unwrap();
-    }
-
-    #[test]
-    fn nip98_no_payload_tag_when_empty() {
-        let id = Identity::from_secret([9u8; 32]);
-        let h = id.nip98_header("GET", "http://x/api/fragments", b"");
-        let b64 = h.strip_prefix("Nostr ").unwrap();
-        let raw = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
-        let ev: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(ev["tags"].as_array().unwrap().len(), 2);
-    }
-
 }

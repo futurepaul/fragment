@@ -344,7 +344,7 @@ mod tests {
             }),
         )
         .expect("start the silent host");
-        let client = Client::new(&server.url, Identity::from_secret([7u8; 32]));
+        let client = Client::new(&server.url, crate::auth::fixed(7));
         (server, seen, client)
     }
 
@@ -394,7 +394,7 @@ mod tests {
         assert_eq!(code_of(c.post_json_by_id("/api/f/x/ops/add", &call)), "outcome_unknown");
         assert_eq!(seen.load(Ordering::SeqCst), REQUEST_ATTEMPTS, "each try arrived");
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let nowhere = Client::new(&format!("http://127.0.0.1:{port}"), Identity::from_secret([7u8; 32]));
+        let nowhere = Client::new(&format!("http://127.0.0.1:{port}"), crate::auth::fixed(7));
         assert_eq!(code_of(nowhere.post_json_by_id("/api/f/x/ops/add", &call)), "unavailable", "no try reached a host");
     }
 
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn a_write_that_never_connected_is_unavailable() {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let c = Client::new(&format!("http://127.0.0.1:{port}"), Identity::from_secret([7u8; 32]));
+        let c = Client::new(&format!("http://127.0.0.1:{port}"), crate::auth::fixed(7));
         assert_eq!(code_of(c.post_json("/api/fragments", &serde_json::json!({ "name": "x" }))), "unavailable");
     }
 

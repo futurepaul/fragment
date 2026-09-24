@@ -461,7 +461,7 @@ mod tests {
     use crate::mockcs::MockServer;
 
     fn cs_for(mock: &MockServer, repo: &str) -> CodeStorage {
-        let host = crate::api::Client::new(&mock.url, auth::Identity::from_secret([7u8; 32]));
+        let host = crate::api::Client::new(&mock.url, auth::fixed(7));
         CodeStorage::connect(&host, repo, None).expect("connect")
     }
 
@@ -627,7 +627,7 @@ mod tests {
     fn storage_token_override_wins() {
         let mock = MockServer::start();
         mock.seed_repo("t", &[("a", b"1")]);
-        let host = crate::api::Client::new(&mock.url, auth::Identity::from_secret([7u8; 32]));
+        let host = crate::api::Client::new(&mock.url, auth::fixed(7));
         let cs = CodeStorage::connect(&host, "t", Some(&mock.url)).unwrap();
         assert!(cs.branch_head(MAIN).unwrap().is_some());
     }

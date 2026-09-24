@@ -114,7 +114,7 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, cfg: &Wa
             Some(t) => format!("{}/f/{}/__watch?view={}", host.replace("http", "ws"), name, t),
             None => format!("{}/f/{}/__watch", host.replace("http", "ws"), name),
         };
-        let signer = crate::auth::Identity::from_secret(client.id.secret);
+        let signer = client.id.clone();
         std::thread::spawn(move || live_listener(&url, &signer, tx3));
         live_state = "connecting";
     }

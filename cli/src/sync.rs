@@ -870,7 +870,7 @@ mod tests {
     use crate::mockcs::MockServer;
 
     fn client_for(mock: &MockServer) -> Client {
-        Client::new(&mock.url, auth::Identity::from_secret([7u8; 32]))
+        Client::new(&mock.url, auth::fixed(7))
     }
 
     fn opts(mode: Mode) -> SyncOptions {

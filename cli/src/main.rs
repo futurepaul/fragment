@@ -595,9 +595,8 @@ fn require_client(cli_host: &Option<String>, verbose: bool) -> Result<api::Clien
             msg: "no keypair — run `fragment login` first".into(),
         })
     })?;
-    let bytes = hex::decode(&sk).context("config secret_key is not hex")?;
-    let arr: [u8; 32] = bytes.try_into().map_err(|_| anyhow!("config secret_key must be 32 bytes"))?;
-    let c = api::Client::new(&host, auth::Identity::from_secret(arr));
+    let id = auth::Identity::from_secret_hex(&sk).ok_or_else(|| anyhow!("the config's secret_key is not a 64-hex secp256k1 secret ({})", config_path().display()))?;
+    let c = api::Client::new(&host, id);
     Ok(if verbose { c.with_verbose() } else { c })
 }
 
@@ -771,7 +770,7 @@ fn run(cli: Cli) -> Result<()> {
             // the key this machine signs with: the one it has, or a new one
             let key_existed = !force && load_config().secret_key.is_some();
             if !key_existed {
-                save_secret_key(&hex::encode(auth::Identity::generate().secret))?;
+                save_secret_key(&auth::Identity::generate().secret_hex())?;
             }
             let c = require_client(&cli.host, cli.verbose)?;
             // whose is this key? (401 until someone signed in approves it)
@@ -862,13 +861,13 @@ fn run(cli: Cli) -> Result<()> {
             let fresh = auth::Identity::generate();
             // 1. the old key adds the new one, which proves itself inside
             let url = format!("{}/api/identities/me/keys", old.host);
-            let proof = fresh.proof("POST", &url, &old.id.pubkey_hex);
+            let proof = fresh.proof("POST", &url, old.id.pubkey_hex());
             old.call(old.post_json("/api/identities/me/keys", &json!({ "proof": proof }))?)?;
             // 2. this machine switches to it (both keys work until step 3)
-            save_secret_key(&hex::encode(fresh.secret))?;
+            save_secret_key(&fresh.secret_hex())?;
             let new = require_client(&cli.host, cli.verbose)?;
             // 3. the new key revokes the old one
-            let revoked = new.call(new.delete(&format!("/api/identities/me/keys/{}", old.id.pubkey_hex))?);
+            let revoked = new.call(new.delete(&format!("/api/identities/me/keys/{}", old.id.pubkey_hex()))?);
             if let Err(e) = &revoked {
                 eprintln!("the new key is in use, but revoking the old one failed: {e}\nrevoke it: fragment keys revoke {}", old.id.npub());
             }
@@ -881,8 +880,8 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Keys { sub: Some(KeysCmd::Revoke { npub }) } => {
             let c = require_client(&cli.host, cli.verbose)?;
-            let hex = auth::npub_decode(&npub).or_else(|_| if npub.len() == 64 { Ok(npub.to_lowercase()) } else { Err(anyhow!("{npub} is not an npub")) })?;
-            if hex == c.id.pubkey_hex {
+            let hex = fragment_core::npub::parse(&npub).ok_or_else(|| anyhow!("{npub} is not an npub or a 64-hex key"))?;
+            if hex == c.id.pubkey_hex() {
                 anyhow::bail!("that is the key this machine signs with: rotate it instead (`fragment keys rotate`)");
             }
             let v = c.call(c.delete(&format!("/api/identities/me/keys/{hex}"))?)?;
@@ -1913,7 +1912,7 @@ fn share_link(canonical: &str, token: &str) -> String {
 /// 8 hex chars of the user's pubkey — the writer identity that names
 /// conflict copies and signs commits
 fn writer_id(c: &api::Client) -> String {
-    c.id.pubkey_hex.chars().take(8).collect()
+    c.id.pubkey_hex().chars().take(8).collect()
 }
 
 /// typed sync/code.storage errors -> anyhow. CAS rejections map to the

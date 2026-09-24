@@ -17,6 +17,7 @@ computer = ["dep:fragment-computer"]
 fragment-templates = { path = "../crates/templates" }
 fragment-core = { path = "../crates/core" }
 fragment-proto = { path = "../crates/proto" }
+fragment-nip98 = { path = "../crates/nip98", features = ["sign"] }
 fragment-computer = { path = "../crates/computer", optional = true }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -24,10 +25,8 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 sha2 = "0.10"
 hex = "0.4"
-bech32 = "0.9"
 base64 = "0.22"
 rand = "0.8"
-secp256k1 = { version = "0.29", features = ["rand", "global-context"] }
 dirs = "5"
 anyhow = "1"
 walkdir = "=2.5.0"
