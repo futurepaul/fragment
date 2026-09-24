@@ -2,7 +2,9 @@
 //! subscription (RFC 8291, the `aes128gcm` content coding of RFC 8188) and
 //! the VAPID token that identifies the sender to the push service (RFC
 //! 8292). The randomness comes from the caller (the cell has no getrandom),
-//! so encryption here is deterministic given its inputs.
+//! so encryption here is deterministic given its inputs. A key is drawn
+//! from that randomness once, and checked as it is drawn: encryption takes
+//! a key already known to be in range.
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes128Gcm, Nonce};
@@ -18,6 +20,31 @@ use sha2::Sha256;
 /// A push service accepts records up to 4096 bytes; the payload is at most this.
 pub const PAYLOAD_MAX_BYTES: usize = 3800;
 const RECORD_SIZE: u32 = 4096;
+/// Random draws a P-256 secret may take. A uniform 32-byte draw is out of
+/// range (zero, or at least the group order) with probability about
+/// 2^-128, so four in a row is a broken random source, not bad luck.
+pub const DRAWS_MAX: usize = 4;
+
+/// A P-256 secret from the caller's random draws: an out-of-range draw is
+/// drawn again, at most `DRAWS_MAX` times in all.
+fn drawn<T>(mut draw: impl FnMut() -> [u8; 32], make: impl Fn([u8; 32]) -> Option<T>) -> T {
+    for _ in 0..DRAWS_MAX {
+        if let Some(key) = make(draw()) {
+            return key;
+        }
+    }
+    panic!("{DRAWS_MAX} random draws in a row were out of range for P-256: the random source is broken");
+}
+
+/// The sender's one-time key for a push (RFC 8291's application server
+/// key pair), in range by construction.
+pub struct Ephemeral(SecretKey);
+
+impl Ephemeral {
+    pub fn draw(draw: impl FnMut() -> [u8; 32]) -> Ephemeral {
+        Ephemeral(drawn(draw, |bytes| SecretKey::from_slice(&bytes).ok()))
+    }
+}
 
 /// What a browser's `PushSubscription` gives the sender.
 pub struct Subscription<'a> {
@@ -61,14 +88,14 @@ pub fn subscription_keys(sub: &Subscription) -> Result<(PublicKey, Vec<u8>), Str
     Ok((ua, auth))
 }
 
-/// The request body for one push: `payload` encrypted for `sub`, with an
-/// ephemeral key made from `ephemeral` and a record salt `salt` (both random).
-pub fn encrypt(sub: &Subscription, payload: &[u8], ephemeral: [u8; 32], salt: [u8; 16]) -> Result<Vec<u8>, String> {
+/// The request body for one push: `payload` encrypted for `sub`, with the
+/// one-time key `ephemeral` and a record salt `salt` (both random).
+pub fn encrypt(sub: &Subscription, payload: &[u8], ephemeral: &Ephemeral, salt: [u8; 16]) -> Result<Vec<u8>, String> {
     if payload.len() > PAYLOAD_MAX_BYTES {
         return Err(format!("a push payload is at most {PAYLOAD_MAX_BYTES} bytes"));
     }
     let (ua, auth) = subscription_keys(sub)?;
-    let secret = SecretKey::from_slice(&ephemeral).map_err(|_| "the ephemeral key is out of range; draw again")?;
+    let secret = &ephemeral.0;
     let as_public = uncompressed(&secret.public_key());
     let ecdh = p256::ecdh::diffie_hellman(secret.to_nonzero_scalar(), ua.as_affine());
     let (cek, nonce) = derive(ecdh.raw_secret_bytes(), &auth, &uncompressed(&ua), &as_public, &salt);
@@ -116,9 +143,15 @@ pub fn decrypt(ua_secret: &SecretKey, auth: &[u8], body: &[u8]) -> Result<Vec<u8
 pub struct Vapid(SigningKey);
 
 impl Vapid {
-    /// From 32 random bytes; `None` in the rare case they are out of range.
+    /// From 32 bytes; `None` when they are out of range (a stored key that
+    /// does not load).
     pub fn from_bytes(secret: [u8; 32]) -> Option<Vapid> {
         SigningKey::from_slice(&secret).ok().map(Vapid)
+    }
+
+    /// A new key from random draws (`DRAWS_MAX` at most).
+    pub fn draw(draw: impl FnMut() -> [u8; 32]) -> Vapid {
+        drawn(draw, Vapid::from_bytes)
     }
 
     pub fn to_bytes(&self) -> [u8; 32] {
@@ -160,7 +193,8 @@ mod tests {
     fn round_trip() {
         let (secret, p256dh, auth, auth_b64) = browser();
         let sub = Subscription { endpoint: "https://push.example.com/abc", p256dh: &p256dh, auth: &auth_b64 };
-        let body = encrypt(&sub, br#"{"title":"hi"}"#, [3u8; 32], [5u8; 16]).unwrap();
+        let ephemeral = Ephemeral::draw(|| [3u8; 32]);
+        let body = encrypt(&sub, br#"{"title":"hi"}"#, &ephemeral, [5u8; 16]).unwrap();
         assert_eq!(&body[16..20], &4096u32.to_be_bytes(), "record size");
         assert_eq!(body[20], 65, "the sender's key id is its uncompressed point");
         assert_eq!(decrypt(&secret, &auth, &body).unwrap(), br#"{"title":"hi"}"#);
@@ -168,9 +202,39 @@ mod tests {
         *tampered.last_mut().unwrap() ^= 1;
         assert!(decrypt(&secret, &auth, &tampered).is_err());
         assert!(decrypt(&secret, &[1u8; 16], &body).is_err(), "another auth secret");
-        assert!(encrypt(&sub, &[0u8; PAYLOAD_MAX_BYTES + 1], [3u8; 32], [5u8; 16]).is_err());
+        assert!(encrypt(&sub, &[0u8; PAYLOAD_MAX_BYTES + 1], &ephemeral, [5u8; 16]).is_err());
         let bad = Subscription { endpoint: "x", p256dh: "nope", auth: &auth_b64 };
-        assert!(encrypt(&bad, b"x", [3u8; 32], [5u8; 16]).is_err());
+        assert!(encrypt(&bad, b"x", &ephemeral, [5u8; 16]).is_err());
+    }
+
+    /// Zero and all-ones are both out of range for P-256 (all-ones is past
+    /// the group order): a draw of either is drawn again, and the first
+    /// draw in range is the key.
+    #[test]
+    fn a_key_draw_skips_out_of_range_bytes() {
+        let draws = [[0u8; 32], [0xffu8; 32], [3u8; 32], [4u8; 32]];
+        let mut next = draws.iter().copied();
+        let mut taken = 0;
+        let ephemeral = Ephemeral::draw(|| {
+            taken += 1;
+            next.next().unwrap()
+        });
+        assert_eq!(taken, 3, "two draws out of range, the third taken");
+        assert_eq!(uncompressed(&ephemeral.0.public_key()), uncompressed(&SecretKey::from_slice(&[3u8; 32]).unwrap().public_key()));
+        let mut next = draws.iter().copied();
+        let vapid = Vapid::draw(|| next.next().unwrap());
+        assert_eq!(vapid.to_bytes(), [3u8; 32]);
+    }
+
+    #[test]
+    #[should_panic(expected = "the random source is broken")]
+    fn a_key_draw_stops_after_its_bound() {
+        let mut taken = 0;
+        let _ = Ephemeral::draw(|| {
+            taken += 1;
+            assert!(taken <= DRAWS_MAX, "drew past the bound");
+            [0u8; 32]
+        });
     }
 
     #[test]

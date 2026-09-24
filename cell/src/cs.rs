@@ -58,9 +58,32 @@ fn seg(repo: &str) -> String {
     url::form_urlencoded::byte_serialize(repo.as_bytes()).collect::<String>().replace('+', "%20")
 }
 
+/// celld rejects a fetch its egress check refused with this prefix
+/// (`crates/celld/egress.rs`, `CELLD_EGRESS_PUBLIC_ONLY`): its contract
+/// for "this request can never pass".
+const EGRESS_REFUSED_PREFIX: &str = "egress refused:";
+
+/// Why a fetch has no response, decided once, here.
+#[derive(Debug)]
+pub enum FetchError {
+    /// The node refused the address: no retry passes.
+    Refused(String),
+    /// The network failed or the deadline passed: a retry may pass.
+    Failed(String),
+}
+
+impl From<FetchError> for CellError {
+    fn from(e: FetchError) -> CellError {
+        match e {
+            FetchError::Refused(m) => CellError::new(ErrorCode::Forbidden, m),
+            FetchError::Failed(m) => CellError::new(ErrorCode::UpstreamFailed, m),
+        }
+    }
+}
+
 /// A fetch with a deadline. The loser of the race is dropped: a finished
 /// fetch clears its timer, and a timed-out fetch is aborted.
-pub async fn fetch(req: Request, deadline: Duration) -> CellResult<Response> {
+pub async fn fetch(req: Request, deadline: Duration) -> Result<Response, FetchError> {
     let ctrl = AbortController::default();
     let signal = ctrl.signal();
     let fetch = Fetch::Request(req);
@@ -68,10 +91,22 @@ pub async fn fetch(req: Request, deadline: Duration) -> CellResult<Response> {
     let timer = Delay::from(deadline);
     futures_util::pin_mut!(send, timer);
     match select(send, timer).await {
-        Either::Left((resp, _)) => resp.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("fetch failed: {e}"))),
+        Either::Left((Ok(resp), _)) => Ok(resp),
+        Either::Left((Err(e), _)) => {
+            // a Worker's fetch rejects with an Error whose message is all it
+            // says; celld documents the prefix as the refusal's mark
+            let refused = match &e {
+                worker::Error::UnknownJsError { message, .. } | worker::Error::JsError(message) => message.starts_with(EGRESS_REFUSED_PREFIX),
+                _ => false,
+            };
+            match refused {
+                true => Err(FetchError::Refused(e.to_string())),
+                false => Err(FetchError::Failed(format!("fetch failed: {e}"))),
+            }
+        }
         Either::Right(_) => {
             ctrl.abort();
-            Err(CellError::new(ErrorCode::UpstreamFailed, format!("no answer within {deadline:?}")))
+            Err(FetchError::Failed(format!("no answer within {deadline:?}")))
         }
     }
 }

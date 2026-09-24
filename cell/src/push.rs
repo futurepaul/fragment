@@ -33,11 +33,7 @@ impl FragmentCell {
     /// (`KEYS` opens it for this cell alone).
     async fn vapid(&self) -> CellResult<Vapid> {
         if self.meta("vapid")?.is_none() {
-            let key = loop {
-                if let Some(k) = Vapid::from_bytes(js::random_bytes()) {
-                    break k;
-                }
-            };
+            let key = Vapid::draw(js::random_bytes);
             let sealed = keys::seal(&self.env, &key.to_bytes()).await?;
             // two first uses at once: the first stored wins, and both use it
             self.exec("INSERT INTO meta (key, value) VALUES ('vapid', ?) ON CONFLICT (key) DO NOTHING", vec![sealed.into()])?;
@@ -116,14 +112,8 @@ impl FragmentCell {
             };
             // a subscription that no longer checks out is skipped, not fatal
             let Ok(auth) = vapid.authorization(sub.endpoint, &self.cfg.push_subject, now_s) else { continue };
-            let body = loop {
-                match webpush::encrypt(&sub, text.as_bytes(), js::random_bytes(), js::random_bytes()) {
-                    Ok(b) => break Some(b),
-                    Err(e) if e.contains("draw again") => continue,
-                    Err(_) => break None,
-                }
-            };
-            let Some(body) = body else { continue };
+            let ephemeral = webpush::Ephemeral::draw(js::random_bytes);
+            let Ok(body) = webpush::encrypt(&sub, text.as_bytes(), &ephemeral, js::random_bytes()) else { continue };
             deliveries.push(Delivery {
                 fragment: fragment.clone(),
                 incarnation: incarnation.clone(),
