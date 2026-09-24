@@ -32,12 +32,15 @@
 //!   POST   /api/replay  POST /api/pause   editor
 //!   GET    /api/triggers                  viewer
 //!   POST   /api/inbox                     the inbox token (no signature)
+//!   POST   /api/test/ledger|age           owner, on fleets with test hooks only (ops.rs)
 //!   *      /serve/<path>                  the site, `__tree`, `__file`, `__op`, `__watch`
 //!   POST   /job/advance|effect|finish     a run's Workflow (jobs.rs); never routed from outside
 //!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
 //!   POST   /deliver/report                the delivery consumer (deliveries.rs); never routed from outside
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use fragment_core::access::{self, Decision, Purpose, Standing};
 use fragment_core::npub;
@@ -65,6 +68,10 @@ pub const NAME_HEADER: &str = "x-fragment-name";
 pub const URL_HEADER: &str = "x-fragment-url";
 /// How long a create in progress holds its name.
 const CLAIM_TTL_MS: i64 = 120_000;
+/// The alarm fires no sooner than this after it is armed …
+const ALARM_SOON_MS: i64 = 50;
+/// … or than this after it failed.
+const ALARM_RETRY_MS: i64 = 30_000;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -110,6 +117,10 @@ CREATE TABLE IF NOT EXISTS push_subs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL,
   who TEXT NOT NULL, principal TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS sent (key TEXT PRIMARY KEY, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS pending (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, ledger_id TEXT NOT NULL UNIQUE, op TEXT NOT NULL, principal TEXT NOT NULL,
+  depth INTEGER NOT NULL, tries INTEGER NOT NULL, next_at INTEGER NOT NULL, at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS pending_due ON pending (next_at);
 CREATE TABLE IF NOT EXISTS spend (ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, at INTEGER NOT NULL, video TEXT);
 CREATE INDEX IF NOT EXISTS spend_run ON spend (run);
 ";
@@ -123,8 +134,10 @@ pub struct FragmentCell {
     /// Serializes pin refreshes: two refreshes racing could leave the older head pinned.
     pub(crate) plane: futures_util::lock::Mutex<()>,
     pub(crate) rate: RefCell<fragment_core::ratelimit::Rate>,
-    /// Whether this activation has swept the facet's ledger for effects.
+    /// Whether this activation has swept its pending mutations.
     pub(crate) swept: Cell<bool>,
+    /// The ledger ids a call or a sweep is settling now (channels.rs).
+    pub(crate) settling: RefCell<BTreeMap<String, Arc<futures_util::lock::Mutex<()>>>>,
 }
 
 impl DurableObject for FragmentCell {
@@ -156,7 +169,7 @@ impl DurableObject for FragmentCell {
         sql.exec("CREATE INDEX IF NOT EXISTS members_owner ON members (owner) WHERE owner IS NOT NULL", None).expect("the members index applies");
         let cfg = Config::from_env(&env);
         let rate = fragment_core::ratelimit::Rate::new(limits::PUBLIC_CALLS_PER_MIN, limits::PUBLIC_CALLS_PER_MIN_FRAGMENT);
-        FragmentCell { state, raw, env, cfg, plane: futures_util::lock::Mutex::new(()), rate: RefCell::new(rate), swept: Cell::new(false) }
+        FragmentCell { state, raw, env, cfg, plane: futures_util::lock::Mutex::new(()), rate: RefCell::new(rate), swept: Cell::new(false), settling: RefCell::default() }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -169,7 +182,9 @@ impl DurableObject for FragmentCell {
     async fn alarm(&self) -> Result<Response> {
         if let Err(e) = self.on_alarm().await {
             self.event("alarm.failed", &e.message, json!({ "code": e.code }));
-            let _ = self.schedule().await;
+            // Whatever is due, a failing alarm tries again no sooner than
+            // this, so a lasting failure never spins.
+            let _ = self.schedule_after(ALARM_RETRY_MS).await;
         }
         Response::ok("")
     }
@@ -524,6 +539,10 @@ impl FragmentCell {
             }
             (Method::Get, ["api", "subscriptions"]) => self.subscriptions(&caller),
             (Method::Delete, ["api", "subscriptions", id]) => self.unsubscribe(&caller, id),
+            (Method::Post, ["api", "test", hook]) if self.cfg.test_hooks => {
+                let body: Value = body_json(&mut req).await?;
+                self.test_hook(&caller, hook, &body)
+            }
             (Method::Post, ["api", "inbox"]) => {
                 let token = match req.headers().get("x-fragment-inbox-token")? {
                     Some(t) => t,
@@ -730,11 +749,9 @@ impl FragmentCell {
         } else if let Err(e) = self.join_owners_agent().await {
             self.event("agent.join-failed", &e.message, json!({ "code": e.code }));
         }
-        if !self.swept.get() {
-            if let Ok(facet) = self.facet() {
-                self.sweep(&facet).await?;
-            }
-        }
+        // Settles pending mutations that are due; one that fails waits for
+        // its own next try and never fails the alarm.
+        self.sweep_due().await?;
         self.fire_cron()?;
         self.launch_queued().await;
         let poll_at: i64 = self.meta("poll_at")?.and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -782,12 +799,18 @@ impl FragmentCell {
 
     /// Arms the alarm for the earliest due work.
     pub(crate) async fn schedule(&self) -> CellResult<()> {
+        self.schedule_after(ALARM_SOON_MS).await
+    }
+
+    /// Arms the alarm for the earliest due work, but no sooner than `min_ms` from now.
+    async fn schedule_after(&self, min_ms: i64) -> CellResult<()> {
         if self.meta("created_at")?.is_none() {
             return Ok(());
         }
         let poll_at: i64 = self.meta("poll_at")?.and_then(|s| s.parse().ok()).unwrap_or_else(|| js::now_ms() + self.cfg.poll_interval_ms);
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
-        let at = [outbox, self.runs_due_at()?].into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + 50);
+        let due = [outbox, self.runs_due_at()?, self.pending_due_at()?];
+        let at = due.into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + min_ms);
         self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;
         Ok(())
     }

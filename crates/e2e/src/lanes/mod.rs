@@ -43,6 +43,7 @@ pub fn run(s: &mut Suite, api: Api) -> Result<()> {
     let api = desktop::desktop(s, api)?;
     app::ops(s, &api)?;
     app::public(s, &api)?;
+    app::effects(s, &api)?;
     limits::facet_cap(s, &api)?;
     limits::lockdown(s, &api)?;
     site::site(s, &api)?;

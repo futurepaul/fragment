@@ -26,8 +26,10 @@ use crate::js;
 pub const CAP_HEADER: &str = "x-fragment-cap";
 /// Commits tried against a `main` that keeps moving.
 const WRITE_ATTEMPTS: usize = 5;
-/// Keys and own commits are remembered this long.
-const WRITES_KEPT_MS: i64 = 7 * 24 * 3600 * 1000;
+/// Write keys (a commit or a push happens once per key) and own commits
+/// are remembered this long; a pending mutation's last try comes well
+/// inside it (channels.rs).
+pub(crate) const WRITES_KEPT_MS: i64 = 7 * 24 * 3600 * 1000;
 
 pub(crate) struct FileWrite {
     pub path: String,
@@ -67,14 +69,10 @@ pub(crate) fn content_json(bytes: Vec<u8>) -> Value {
     }
 }
 
-/// Bytes from `{text}` or `{base64}`.
+/// Bytes from `{text}` or `{base64}` (a job step's write).
 pub(crate) fn content_of(v: &Value) -> Result<Vec<u8>, String> {
-    use base64::Engine;
-    match (v["text"].as_str(), v["base64"].as_str()) {
-        (Some(t), None) => Ok(t.as_bytes().to_vec()),
-        (None, Some(b)) => base64::engine::general_purpose::STANDARD.decode(b).map_err(|e| format!("base64: {e}")),
-        _ => Err("a file's content is text or base64".into()),
-    }
+    let obj = v.as_object().ok_or("a file's content is text or base64")?;
+    fragment_core::effects::file_content(obj)?.ok_or_else(|| "a file's content is text or base64".into())
 }
 
 impl FragmentCell {
@@ -169,7 +167,13 @@ impl FragmentCell {
 
     /// From the alarm: forgets old write keys and own commits.
     pub(crate) fn trim_writes(&self) -> CellResult<()> {
-        let before = SqlStorageValue::Integer(js::now_ms() - WRITES_KEPT_MS);
+        self.trim_writes_before(js::now_ms() - WRITES_KEPT_MS)
+    }
+
+    /// Forgets write keys and own commits made before `before_ms` (a test
+    /// ages them by passing a later time).
+    pub(crate) fn trim_writes_before(&self, before_ms: i64) -> CellResult<()> {
+        let before = SqlStorageValue::Integer(before_ms);
         self.exec("DELETE FROM file_commits WHERE at < ?", vec![before.clone()])?;
         self.exec("DELETE FROM own_commits WHERE at < ?", vec![before.clone()])?;
         self.exec("DELETE FROM sent WHERE at < ?", vec![before])

@@ -1,5 +1,8 @@
 //! Operations in the app facet, with code from the live commit; then a
-//! public fragment that anonymous visitors write to.
+//! public fragment that anonymous visitors write to; then the effects a
+//! mutation leaves, refused, delayed, and forged, across a restart.
+
+use std::time::Duration;
 
 use anyhow::Result;
 use fragment_nip98::Keys;
@@ -12,6 +15,8 @@ const TODO_APP: &[u8] = include_bytes!("../../fixtures/todo.mjs");
 const TODO_JSON: &[u8] = include_bytes!("../../fixtures/todo.json");
 const GUESTBOOK_APP: &[u8] = include_bytes!("../../fixtures/guestbook.mjs");
 const GUESTBOOK_JSON: &[u8] = include_bytes!("../../fixtures/guestbook.json");
+const EFFECTS_APP: &[u8] = include_bytes!("../../fixtures/effects.mjs");
+const EFFECTS_JSON: &[u8] = include_bytes!("../../fixtures/effects.json");
 
 /// Commits an app and deploys it.
 pub fn ship(s: &Suite, c: &Value, app: &[u8], manifest: &[u8]) -> String {
@@ -168,5 +173,85 @@ pub fn public(s: &mut Suite, api: &Api) -> Result<()> {
     api.signed(&owner, "PUT", &format!("/api/f/{link}/visibility"), Some(&json!({ "visibility": "members" })))?;
     let r = api.browser_op(&link, "peek", "l4", json!({}), Some(&view))?;
     s.ok("on a members fragment the link counts for nothing", r.status == 401, &r);
+    Ok(())
+}
+
+/// Effects the platform refuses (in the app, and after the commit), a
+/// commit that keeps failing, and a ledger row the app writes itself: the
+/// app answers through all of it, and after a restart of the node.
+pub fn effects(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("effects") {
+        return Ok(());
+    }
+    let owner = api.person()?;
+    let name = s.name("effects");
+    let c = s.create(api, &owner, &name)?;
+    ship(s, &c, EFFECTS_APP, EFFECTS_JSON);
+    let repo = c["repo"].as_str().unwrap_or("").to_string();
+    let call = |op: &str, id: &str, input: Value| api.op(&owner, &name, op, id, input);
+    let notes = || count(api, &owner, &name);
+    let channel = |ch: &str| -> Vec<Value> {
+        api.signed(&owner, "GET", &format!("/api/f/{name}/channels/{ch}"), None)
+            .map(|r| r.body["records"].as_array().cloned().unwrap_or_default())
+            .unwrap_or_default()
+    };
+    let slugs = |slug: &str| channel("feed").iter().filter(|r| r["body"]["slug"] == slug).count();
+    let applied = |id: &str| channel("ops").iter().filter(|r| r["body"]["id"] == id).count();
+    let note = |s: &Suite, slug: &str| s.fake.file_at(&repo, "main", &format!("notes/{slug}.md"));
+
+    let r = call("note", "n1", json!({ "slug": "one", "text": "one" }))?;
+    s.ok("a note lands", r.status == 200 && note(s, "one").as_deref() == Some(&b"one"[..]) && slugs("one") == 1, &r);
+
+    // refused in the app, while the mutation can still roll back
+    let r = call("pointer", "p1", json!({}))?;
+    s.ok("a mutation that writes pointer-shaped text is refused before it commits", r.status == 422 && r.message().contains("an app does not write blob pointers"), &r);
+    let r = call("wide", "w1", json!({}))?;
+    s.ok("a path within 300 characters but over 300 bytes is refused before it commits", r.status == 422 && r.message().contains("at most 300 bytes"), &r);
+    let r = call("half", "h1", json!({}))?;
+    s.ok("a record holding half a character is refused before it commits", r.status == 422 && r.message().contains("lone surrogate"), &r);
+    s.ok("none of them wrote anything", notes() == 1, notes());
+
+    // refused by the supervisor, after a commit that got past the in-app check
+    let r = call("sneaky", "s1", json!({}))?;
+    s.ok(
+        "a pointer past a broken in-app check is refused after the commit",
+        r.status == 422 && r.message().contains("refused its effects") && r.message().contains("blob pointers"),
+        &r,
+    );
+    s.ok("the pointer never reaches main", s.fake.file_at(&repo, "main", "big.bin").is_none(), "");
+    let r = api.signed(&owner, "GET", &format!("/api/f/{name}/events"), None)?;
+    s.ok(
+        "the refusal is in events, and the mutation counts as applied",
+        r.body["events"].as_array().is_some_and(|a| a.iter().any(|e| e["kind"] == "effects.refused" && e["data"]["id"] == "s1")) && applied("s1") == 1,
+        &r,
+    );
+    s.ok("the next query answers (the mutation's own write stands)", notes() == 2, notes());
+    let r = call("note", "n2", json!({ "slug": "two", "text": "two" }))?;
+    s.ok("the next mutation applies", r.status == 200 && note(s, "two").as_deref() == Some(&b"two"[..]), &r);
+
+    // a ledger row the app writes itself, naming its caller
+    let r = call("forge", "f1", json!({}))?;
+    s.ok("(the app writes a ledger row of its own)", r.status == 200, &r);
+
+    // a passing failure: every try of one commit loses to another writer
+    s.fake.sabotage_commit_packs(5);
+    let r = call("note", "n3", json!({ "slug": "three", "text": "three" }))?;
+    s.ok("a commit that keeps failing answers a passing failure", r.status == 502 && r.error() == "upstream_failed", &r);
+    s.ok("an unrelated call answers meanwhile", notes() == 4, notes());
+    let landed = s.eventually(Duration::from_secs(45), || note(s, "three").is_some());
+    s.ok("the alarm applies it on a later try", landed && note(s, "three").as_deref() == Some(&b"three"[..]), "");
+    s.ok("its record is published once, and it is applied once", slugs("three") == 1 && applied("n3") == 1, json!(channel("feed")));
+    let packs = s.fake.commit_pack_count();
+    let r = call("note", "n3", json!({ "slug": "three", "text": "three" }))?;
+    s.ok("its replay applies nothing again", r.status == 200 && r.body["replayed"] == true && s.fake.commit_pack_count() == packs && slugs("three") == 1, &r);
+
+    // a restart: the next activation settles what was pending, and only that
+    s.stop()?;
+    s.start(false, true)?;
+    s.ok("after a restart the app answers", notes() == 4, notes());
+    let r = call("note", "n4", json!({ "slug": "four", "text": "four" }))?;
+    s.ok("and applies mutations", r.status == 200 && note(s, "four").as_deref() == Some(&b"four"[..]), &r);
+    let forged = channel("feed").into_iter().filter(|r| r["kind"] == "forged").count();
+    s.ok("the app's own ledger row is never applied", forged == 0 && applied("forged-1") == 0, json!(channel("feed")));
     Ok(())
 }

@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use worker::*;
 
-use crate::channels::Effect;
+use crate::channels::Settled;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, Caller, FragmentCell};
 use crate::jobs::NewRun;
@@ -22,6 +22,10 @@ use crate::plane::PLATFORM_JS;
 
 /// Operation ids a job's steps use; callers cannot choose them.
 pub const JOB_ID_PREFIX: &str = "job:";
+/// How long the facet's ledger recognizes an id: a call with it within
+/// this is a replay; after it, the same id runs again as a new run. The
+/// facet takes the window from each call, so this is its one definition.
+pub(crate) const LEDGER_KEPT_MS: i64 = 7 * 24 * 3600 * 1000;
 
 /// One admitted call: who runs which operation, and how deep in a chain of
 /// triggered runs it is.
@@ -42,6 +46,29 @@ pub(crate) struct Invocation<'a> {
 
 pub(crate) fn input_sha(op: &str, input: &Value) -> String {
     hex::encode(Sha256::digest(format!("{op}\n{}", canonical_json(input))))
+}
+
+/// The facet's answer when it refused a call: nothing of the call committed.
+fn refusal(answer: &Value, op: &str) -> CellResult<()> {
+    match answer["error"].as_str() {
+        Some("storage_full") => Err(CellError::new(
+            ErrorCode::StorageFull,
+            format!("the app's database is full ({} MiB): the mutation was rolled back", limits::APP_DB_MAX_BYTES / (1024 * 1024)),
+        )),
+        Some("conflicting_body") => Err(CellError::new(ErrorCode::ConflictingBody, "this operation id was already used with a different input")),
+        Some("unknown_operation") => Err(CellError::new(ErrorCode::UnknownOperation, format!("the app has no method {op:?}"))),
+        Some(other) => Err(CellError::host(format!("the facet's platform code answered {other:?}"))),
+        None => Ok(()),
+    }
+}
+
+/// A result is bounded here too: the facet's own bound runs in the author's realm.
+fn bounded(result: OpResult) -> CellResult<OpResult> {
+    let text = result.result.to_string();
+    if text.len() > limits::RESULT_MAX_BYTES {
+        return Err(CellError::too_large("operation result", text.len(), limits::RESULT_MAX_BYTES));
+    }
+    Ok(result)
 }
 
 impl FragmentCell {
@@ -138,46 +165,117 @@ impl FragmentCell {
         }
         let facet = self.facet()?;
         self.sweep(&facet).await?;
-        // Ids are the caller's: the ledger keys them by principal, so one
-        // caller can neither replay nor block another's id.
-        let ledger_id = format!("{}/{}", inv.principal, inv.id);
         let meta = json!({
             "principal": npub::display(inv.principal),
             "role": inv.role,
             "channels": self.declared_channels()?.keys().collect::<Vec<_>>(),
         });
-        let answer = match inv.decl.kind {
-            OpKind::Query => facet.call("__query", &[inv.op.into(), inv.input.clone(), meta]).await,
-            _ => facet.call("__mutate", &[ledger_id.as_str().into(), inv.op.into(), input_sha.as_str().into(), inv.input.clone(), meta]).await,
-        }?;
-        match answer["error"].as_str() {
-            Some("storage_full") => {
-                return Err(CellError::new(
-                    ErrorCode::StorageFull,
-                    format!("the app's database is full ({} MiB): the mutation was rolled back", limits::APP_DB_MAX_BYTES / (1024 * 1024)),
-                ))
+        match inv.decl.kind {
+            OpKind::Query => {
+                let answer = facet.call("__query", &[inv.op.into(), inv.input.clone(), meta]).await?;
+                refusal(&answer, inv.op)?;
+                bounded(OpResult { result: answer["result"].clone(), replayed: false })
             }
-            Some("conflicting_body") => {
-                return Err(CellError::new(ErrorCode::ConflictingBody, "this operation id was already used with a different input"))
-            }
-            Some("unknown_operation") => return Err(CellError::new(ErrorCode::UnknownOperation, format!("the app has no method {:?}", inv.op))),
-            Some(other) => return Err(CellError::host(format!("the facet's platform code answered {other:?}"))),
-            None => {}
+            OpKind::Mutation => self.mutate(&facet, &inv, &input_sha, meta).await,
+            OpKind::Job => unreachable!("a job's call records a run above"),
         }
-        let result = OpResult {
-            result: answer["result"].clone(),
-            replayed: answer["replayed"].as_bool().expect("the platform answers `replayed`"),
+    }
+
+    /// A mutation: recorded as pending, run in the facet (where it and its
+    /// ledger row commit together), then settled (channels.rs).
+    async fn mutate(&self, facet: &js::Facet, inv: &Invocation<'_>, input_sha: &str, mut meta: Value) -> CellResult<OpResult> {
+        // Ids are the caller's: the ledger keys them by principal, so one
+        // caller can neither replay nor block another's id.
+        let ledger_id = format!("{}/{}", inv.principal, inv.id);
+        // One call settles an id at a time: a retry that arrives while the
+        // first is still running waits for it, then replays.
+        let _held = self.hold(&ledger_id).await;
+        let (mut pending, fresh) = self.begin(&ledger_id, inv.op, inv.principal, inv.depth)?;
+        meta["run"] = pending.seq.into();
+        meta["ledgerMs"] = self.ledger_kept_ms()?.into();
+        let args = [ledger_id.as_str().into(), inv.op.into(), input_sha.into(), inv.input.clone(), meta];
+        let answer = match facet.call("__mutate", &args).await {
+            Ok(answer) => answer,
+            Err(e) => {
+                // A node that could not load the app ran nothing. Otherwise
+                // the author's code usually threw and the facet rolled back;
+                // its ledger says whether this run committed anyway (an
+                // answer lost after the commit). A row an earlier attempt
+                // left is the sweep's.
+                match (fresh, e.code) {
+                    (false, _) => {}
+                    (true, ErrorCode::NodeFull) => self.forget(&pending)?,
+                    (true, _) => {
+                        self.settle_from_ledger(facet, &pending).await?;
+                    }
+                }
+                return Err(e);
+            }
         };
-        if inv.decl.kind == OpKind::Mutation {
-            // The facet committed; its effects apply now (again, harmlessly, on a replay).
-            let effects: Vec<Effect> = serde_json::from_value(answer["effects"].clone()).map_err(|e| CellError::host(format!("effects: {e}")))?;
-            self.apply(&ledger_id, inv.op, &effects, inv.depth).await?;
+        if let Err(e) = refusal(&answer, inv.op) {
+            if fresh {
+                self.forget(&pending)?;
+            }
+            return Err(e);
         }
-        // A mutation's result was bounded inside its transaction; a query's is bounded here.
-        let text = result.result.to_string();
-        if text.len() > limits::RESULT_MAX_BYTES {
-            return Err(CellError::too_large("operation result", text.len(), limits::RESULT_MAX_BYTES));
+        let replayed = answer["replayed"].as_bool().expect("the platform answers `replayed`");
+        let run = answer["run"].as_i64();
+        if !replayed {
+            if run != Some(pending.seq) {
+                // Fail closed: the sweep asks the facet's ledger which run it holds.
+                return Err(CellError::host(format!("the facet committed run {run:?}, not run {}", pending.seq)));
+            }
+            if !fresh {
+                self.restate(&mut pending, inv.op, inv.depth)?;
+            }
         }
-        Ok(result)
+        // The facet answers the run it holds for this id. That run is this
+        // row's when it just committed, or when an earlier try of it has not
+        // settled yet; any other run settled long ago (a replay applies
+        // nothing again), and a row that is not its run never committed.
+        if run == Some(pending.seq) {
+            if let Settled::Refused(why) = self.apply(&pending, &answer["effects"]).await? {
+                return Err(CellError::new(ErrorCode::AppFailed, format!("{} committed, but the platform refused its effects: {why}", inv.op)));
+            }
+        } else {
+            self.forget(&pending)?;
+        }
+        bounded(OpResult { result: answer["result"].clone(), replayed })
+    }
+
+    /// The ledger window this fragment's facet keeps: `LEDGER_KEPT_MS`, or
+    /// a shorter one a test set (on fleets with test hooks only).
+    fn ledger_kept_ms(&self) -> CellResult<i64> {
+        if !self.cfg.test_hooks {
+            return Ok(LEDGER_KEPT_MS);
+        }
+        Ok(self.meta("test_ledger_ms")?.and_then(|v| v.parse().ok()).unwrap_or(LEDGER_KEPT_MS))
+    }
+
+    /// `POST /api/f/<name>/test/<hook>`, owner, on fleets with test hooks
+    /// only: `ledger {ms | null}` sets (or clears) a shorter ledger window;
+    /// `age {ms}` forgets write keys as if `ms` had passed.
+    pub(crate) fn test_hook(&self, caller: &Caller, hook: &str, body: &Value) -> CellResult<Response> {
+        assert!(self.cfg.test_hooks, "the route answers only on fleets with test hooks");
+        self.require(caller, false, Role::Owner)?;
+        let answer = match hook {
+            "ledger" => match body["ms"].as_i64() {
+                Some(ms) if ms > 0 => {
+                    self.set_meta("test_ledger_ms", &ms.to_string())?;
+                    json!({ "ledgerMs": ms })
+                }
+                _ => {
+                    self.del_meta("test_ledger_ms")?;
+                    json!({ "ledgerMs": LEDGER_KEPT_MS })
+                }
+            },
+            "age" => {
+                let ms = body["ms"].as_i64().filter(|ms| *ms >= 0).ok_or_else(|| CellError::invalid("ms is a duration"))?;
+                self.trim_writes_before(js::now_ms() + ms - crate::files::WRITES_KEPT_MS)?;
+                json!({ "aged": ms })
+            }
+            _ => return Err(CellError::new(ErrorCode::NotFound, format!("no test hook {hook:?}"))),
+        };
+        json_response(&answer)
     }
 }

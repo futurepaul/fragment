@@ -551,20 +551,10 @@ impl FragmentCell {
     async fn step_publish(&self, run: &Value, index: i64, args: &Value) -> Result<Value, StepFail> {
         let retry = |e: CellError| StepFail::Retry(e.message);
         let channel = args["channel"].as_str().unwrap_or("");
-        if !self.declared_channels().map_err(retry)?.contains_key(channel) {
-            return Err(permanent(format!("channel {channel:?} is not declared in fragment.json")));
-        }
         let kind = args["kind"].as_str().unwrap_or("message");
-        let kind_ok = kind.len() <= 64
-            && kind.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
-            && kind.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b));
-        if !kind_ok {
-            return Err(permanent("kind must match ^[a-z][a-z0-9._-]{0,63}$"));
-        }
         let body = args.get("body").cloned().unwrap_or(Value::Null);
-        if body.to_string().len() > limits::RECORD_BODY_MAX_BYTES {
-            return Err(permanent(format!("a record's body is at most {} bytes", limits::RECORD_BODY_MAX_BYTES)));
-        }
+        // the one check a mutation's records meet too
+        fragment_core::effects::check_record(channel, kind, &body, &self.declared_channels().map_err(retry)?).map_err(permanent)?;
         let key = format!("{JOB_ID_PREFIX}{}", run["id"].as_i64().unwrap_or(0));
         let principal = run["principal"].as_str().unwrap_or("");
         match self.append(channel, principal, kind, &body, Some((&key, index))).map_err(retry)? {
