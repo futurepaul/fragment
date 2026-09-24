@@ -115,7 +115,7 @@ pub(super) fn records(api: &Api, keys: &Keys, name: &str, channel: &str) -> Vec<
         .unwrap_or_default()
 }
 
-fn inbox(api: &Api, name: &str, token: &str, body: &Value, hops: Option<u32>) -> Result<Reply> {
+pub(super) fn inbox(api: &Api, name: &str, token: &str, body: &Value, hops: Option<u32>) -> Result<Reply> {
     let mut extra = vec![("x-fragment-inbox-token", token.to_string())];
     if let Some(h) = hops {
         extra.push(("x-fragment-hops", h.to_string()));

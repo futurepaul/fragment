@@ -47,8 +47,8 @@ use std::sync::Arc;
 use fragment_core::access::{self, Decision, Purpose, Standing};
 use fragment_core::npub;
 use fragment_proto::{
-    limits, valid_fragment_name, CodeStatus, Counts, CreateFragment, Created, ErrorCode, FragmentStatus, IdentityKind, OpDecl, Pins, Role,
-    Urls, Visibility,
+    limits, valid_fragment_name, CodeStatus, Counts, CreateFragment, Created, ErrorCode, FragmentStatus, IdentityKind, Pins, Role, Urls,
+    Visibility,
 };
 use serde::de::DeserializeOwned;
 use serde_json::value::RawValue;
@@ -91,9 +91,12 @@ CREATE TABLE IF NOT EXISTS tree (
 CREATE TABLE IF NOT EXISTS deliveries (key TEXT PRIMARY KEY, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS code (
   id INTEGER PRIMARY KEY CHECK (id = 1), sha TEXT NOT NULL, loader_id TEXT NOT NULL, source TEXT NOT NULL,
-  operations TEXT NOT NULL, cpu_ms INTEGER NOT NULL, installed_at INTEGER NOT NULL,
-  channels TEXT NOT NULL DEFAULT '{}', modules TEXT NOT NULL DEFAULT '{}', triggers TEXT NOT NULL DEFAULT '[]',
-  notify TEXT NOT NULL DEFAULT '[]');
+  cpu_ms INTEGER NOT NULL, installed_at INTEGER NOT NULL,
+  modules TEXT NOT NULL DEFAULT '{}', notify TEXT NOT NULL DEFAULT '[]');
+CREATE TABLE IF NOT EXISTS code_ops (op TEXT PRIMARY KEY, kind TEXT NOT NULL, role TEXT NOT NULL, input TEXT);
+CREATE TABLE IF NOT EXISTS code_channels (channel TEXT PRIMARY KEY, read TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS code_triggers (idx INTEGER PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT NULL, run TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS code_triggers_on ON code_triggers (kind, target);
 CREATE TABLE IF NOT EXISTS runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, via TEXT NOT NULL, trigger TEXT, principal TEXT NOT NULL,
   role TEXT NOT NULL, depth INTEGER NOT NULL, call_id TEXT, input_sha TEXT, input TEXT NOT NULL, status TEXT NOT NULL,
@@ -151,18 +154,8 @@ impl DurableObject for FragmentCell {
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         let sql = state.storage().sql();
         sql.exec(SCHEMA, None).expect("the Fragment schema applies");
-        // a code table made before channels, applib, and triggers (phase 2 slices B and C)
-        let cols: Vec<Value> = sql.exec("PRAGMA table_info(code)", None).and_then(|c| c.to_array()).unwrap_or_default();
-        for (col, decl) in [
-            ("channels", "channels TEXT NOT NULL DEFAULT '{}'"),
-            ("modules", "modules TEXT NOT NULL DEFAULT '{}'"),
-            ("triggers", "triggers TEXT NOT NULL DEFAULT '[]'"),
-            ("notify", "notify TEXT NOT NULL DEFAULT '[]'"),
-        ] {
-            if !cols.iter().any(|c| c["name"] == col) {
-                sql.exec(&format!("ALTER TABLE code ADD COLUMN {decl}"), None).expect("the code table migrates");
-            }
-        }
+        // before the trigger state's migration, which reads the installed triggers
+        let code_migrated = crate::plane::migrate_code(&sql);
         let cols: Vec<Value> = sql.exec("PRAGMA table_info(members)", None).and_then(|c| c.to_array()).unwrap_or_default();
         for col in ["kind", "owner"] {
             if !cols.iter().any(|c| c["name"] == col) {
@@ -185,6 +178,9 @@ impl DurableObject for FragmentCell {
         if !paused_by_migration.is_empty() {
             let summary = format!("the stored pause list did not parse; paused every triggered operation: {}", paused_by_migration.join(", "));
             cell.event("op.paused", &summary, json!({ "ops": paused_by_migration, "by": "migration" }));
+        }
+        if let Some(why) = code_migrated {
+            cell.event("code.dropped", &format!("the installed code did not move into its tables ({why}); live installs again at the next refresh"), Value::Null);
         }
         cell
     }
@@ -724,15 +720,9 @@ impl FragmentCell {
     }
 
     pub(crate) fn code_status(&self) -> CellResult<CodeStatus> {
-        let rows = self.rows("SELECT sha, operations FROM code WHERE id = 1", vec![])?;
-        let (sha, operations) = match rows.first() {
-            Some(r) => (
-                r["sha"].as_str().map(str::to_string),
-                serde_json::from_str::<std::collections::BTreeMap<String, OpDecl>>(r["operations"].as_str().unwrap_or("{}")).unwrap_or_default(),
-            ),
-            None => (None, Default::default()),
-        };
-        Ok(CodeStatus { sha, operations, error: self.meta("code_error")? })
+        let rows = self.rows("SELECT sha FROM code WHERE id = 1", vec![])?;
+        let sha = rows.first().map(|r| r["sha"].as_str().expect("code.sha is TEXT").to_string());
+        Ok(CodeStatus { sha, operations: self.operations()?, error: self.meta("code_error")? })
     }
 
     fn status(&self, caller: &Caller) -> CellResult<Response> {

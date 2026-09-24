@@ -134,14 +134,6 @@ impl FragmentCell {
         json_response(&result)
     }
 
-    /// The declared operation, or why there is none.
-    pub(crate) fn declared(&self, op: &str) -> CellResult<OpDecl> {
-        self.operations()?
-            .ok_or_else(|| CellError::new(ErrorCode::NoCode, "the live commit has no app.mjs (deploy one)"))?
-            .remove(op)
-            .ok_or_else(|| CellError::new(ErrorCode::UnknownOperation, format!("no operation named {op:?}")))
-    }
-
     /// Checks and runs one call from outside. `principal` is who the ledger
     /// records (an identity, or an anonymous visitor's id); `link` says the
     /// caller holds the share link.
@@ -291,7 +283,8 @@ impl FragmentCell {
     /// {code}` closes its live sockets; `ledger {ms | null}` sets (or
     /// clears) a shorter ledger window; `age {ms}` forgets write keys as
     /// if `ms` had passed; `members {fill}` adds placeholder members until
-    /// there are `fill`.
+    /// there are `fill`; `code-before-tables` puts its installed code back
+    /// in the shape stored before the code tables (plane.rs).
     pub(crate) fn test_fragment(&self, body: &Value) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "the route answers only on fleets with test hooks");
         self.name()?;
@@ -338,7 +331,11 @@ impl FragmentCell {
                 let fill = body["fill"].as_u64().ok_or_else(|| CellError::invalid("fill is a count"))?;
                 json!({ "members": self.fill_members(fill)? })
             }
-            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-live, ledger, age, or members")),
+            Some("code-before-tables") => {
+                self.code_before_tables()?;
+                json!({ "ok": true })
+            }
+            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-live, ledger, age, members, or code-before-tables")),
         })
     }
 }

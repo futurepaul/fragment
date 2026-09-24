@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use fragment_core::effects::{self, Effect};
 use fragment_core::npub;
-use fragment_proto::{limits, valid_channel_name, ChannelDecl, ChannelRecord, ErrorCode, Role, BUILTIN_CHANNELS};
+use fragment_proto::{limits, valid_channel_name, ChannelRecord, ErrorCode, Role, BUILTIN_CHANNELS};
 use futures_util::lock::{Mutex, OwnedMutexGuard};
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -252,21 +252,12 @@ impl FragmentCell {
         )
     }
 
-    /// The app channels the live code declares.
-    pub(crate) fn declared_channels(&self) -> CellResult<BTreeMap<String, ChannelDecl>> {
-        let rows = self.rows("SELECT channels FROM code WHERE id = 1", vec![])?;
-        Ok(rows.first().and_then(|r| r["channels"].as_str()).and_then(|c| serde_json::from_str(c).ok()).unwrap_or_default())
-    }
-
     /// Who may read a channel, or 404 when there is no such channel.
     pub(crate) fn channel_read_role(&self, channel: &str) -> CellResult<Role> {
         if BUILTIN_CHANNELS.contains(&channel) {
             return Ok(Role::Viewer);
         }
-        self.declared_channels()?
-            .get(channel)
-            .map(|d| d.read)
-            .ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no channel named {channel:?}")))
+        self.declared_channel(channel)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no channel named {channel:?}")))
     }
 
     /// A page of records after `after`.
