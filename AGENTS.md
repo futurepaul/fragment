@@ -58,8 +58,9 @@ debt ledger).
 - `cargo xtask dev [--clean]`: the dev stack in the foreground: the cell
   on :8790 with fragments at `http://<name>.fragment.localhost:8790/`,
   agents (`agent/`, goose's loop) co-hosted on the same node (the router
-  hands them `/api/agents` and `/api/a/*`) with their model key from the
-  file `OPENROUTER_API_KEY_FILE` names, the code.storage fake on :8792 (state in `target/devstack/`; its org
+  hands them `/api/agents` and `/api/a/*`), whose turns spend their
+  owner's budget (a per-person OpenRouter key, minted with the management
+  key `OPENROUTER_MANAGEMENT_KEY_FILE` names), the code.storage fake on :8792 (state in `target/devstack/`; its org
   key and the host secret are made there on first run), and sign-in at
   http://127.0.0.1:8790/ through the WorkOS fake on :8794 (any email), or
   a real WorkOS environment when `WORKOS_CLIENT_ID_FILE` and

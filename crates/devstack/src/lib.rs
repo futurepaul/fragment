@@ -283,9 +283,9 @@ pub struct AgentFleet {
     /// The agent fleet's own base URL (`AGENT_URL`): the inboxes it gives
     /// fragments to deliver to.
     pub agent_url: String,
-    /// Where model calls go (`None`: OpenRouter itself).
+    /// Where model calls go (`None`: OpenRouter itself). The key is each
+    /// owner's, which the platform's `Ledger` mints (`POST /api/budget/key`).
     pub openrouter_url: Option<String>,
-    pub openrouter_key: String,
     /// The owner's test controls (holds, the watchdog period): dev and e2e only.
     pub test_hooks: bool,
     /// `FRAGMENT_EGRESS_LOCAL=allow`: computers on loopback or a private
@@ -300,7 +300,6 @@ impl AgentFleet {
         let mut vars = vec![
             ("FRAGMENT_API", self.fragment_api.as_str()),
             ("AGENT_URL", self.agent_url.as_str()),
-            ("OPENROUTER_API_KEY", self.openrouter_key.as_str()),
         ];
         if let Some(u) = &self.openrouter_url {
             vars.push(("OPENROUTER_API_URL", u.as_str()));

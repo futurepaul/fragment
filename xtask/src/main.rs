@@ -5,8 +5,9 @@
 //!   dev [--clean]    build, then run the stack in the foreground: the cell on
 //!                    :8790 (fragments at <name>.fragment.localhost:8790), the
 //!                    code.storage fake on :8792, and agents co-hosted on the
-//!                    cell's node (their model key from the file
-//!                    OPENROUTER_API_KEY_FILE names)
+//!                    cell's node (their turns spend their owner's budget: a
+//!                    real OpenRouter key per person, minted with the
+//!                    management key OPENROUTER_MANAGEMENT_KEY_FILE names)
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -159,18 +160,12 @@ fn dev(args: &[String]) -> Result<()> {
         test_hooks: false,
     }
     .configure(&devstack::cell_dir())?;
-    // agents act on the dev fragments; their model key is a file's (never the repo's)
-    let model_key = match std::env::var_os("OPENROUTER_API_KEY_FILE") {
-        Some(path) => std::fs::read_to_string(&path).with_context(|| format!("reading {}", Path::new(&path).display()))?.trim().to_string(),
-        None => "unset: point OPENROUTER_API_KEY_FILE at a key file".to_string(),
-    };
     // the agents' script is co-hosted on the same node, as the fleet runs it
     devstack::AgentFleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
         fragment_api: format!("http://127.0.0.1:{DEV_PORT}"),
         agent_url: format!("http://127.0.0.1:{DEV_PORT}"),
         openrouter_url: None,
-        openrouter_key: model_key,
         test_hooks: false,
         egress_local: true,
     }

@@ -238,6 +238,17 @@ fn unanswered(why: computer::Unanswered) -> Fail {
     }
 }
 
+/// The model key a turn spends: the owner's org key, whose limit is their
+/// month's allowance (the platform's `Ledger` mints it; OpenRouter stops
+/// the owner there). Kept only for the turn, never stored.
+async fn owners_key(fleet: &Fleet) -> anyhow::Result<String> {
+    let (status, answer) = fleet.call(Method::Post, "/api/budget/key", None).await?;
+    match (status, answer["key"].as_str()) {
+        (200, Some(key)) if !key.is_empty() => Ok(key.to_string()),
+        _ => Err(anyhow::anyhow!("no model key from the owner's budget ({status}): {}", fleet::message(&answer))),
+    }
+}
+
 fn default_instructions(name: &str) -> String {
     format!(
         "You are {name}, an agent. Each of your tools is an operation of a fragment you belong to: a shared place such as \
@@ -391,9 +402,9 @@ impl Agent {
             return Ok(false);
         }
         let sql = self.sql();
-        let key = var(&self.env, "OPENROUTER_API_KEY").ok_or_else(|| Fail::host("OPENROUTER_API_KEY is not set on this fleet"))?;
         let base = var(&self.env, "OPENROUTER_API_URL").unwrap_or_else(|| "https://openrouter.ai".into()).trim_end_matches('/').to_string();
-        let model = Model { base, key, name: kv_get(&sql, "model")?.unwrap_or_else(|| DEFAULT_MODEL.into()) };
+        // the key is the owner's, asked for as the turn starts (below)
+        let model = Model { base, key: String::new(), name: kv_get(&sql, "model")?.unwrap_or_else(|| DEFAULT_MODEL.into()) };
         let name = kv_get(&sql, "name")?.unwrap_or_default();
         let instructions = kv_get(&sql, "instructions")?.unwrap_or_else(|| default_instructions(&name));
         let token = CancellationToken::new();
@@ -419,12 +430,13 @@ impl Agent {
         let cancel_slot = self.cancel.clone();
         self.state.wait_until(async move {
             let sql = storage.sql();
-            let mut outcome = match open_computer(&env, &sql).await {
-                Ok(computer) => {
+            let mut outcome = match (owners_key(&fleet).await, open_computer(&env, &sql).await) {
+                (Ok(key), Ok(computer)) => {
+                    driver.model.key = key;
                     driver.computer = computer;
                     turn::drive(driver).await
                 }
-                Err(e) => Err(e),
+                (Err(e), _) | (_, Err(e)) => Err(e),
             };
             // a turn a channel started answers there
             if matches!(outcome, Ok("idle")) {

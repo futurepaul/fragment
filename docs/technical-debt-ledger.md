@@ -347,18 +347,24 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** the fork refuses Wasm from bytes with an error in a
   locked-down worker (or allows it deliberately), with a test.
 
-## Agents spend the agent fleet's model key
+## An agent's turns have no usage rows
 
-- **Observed:** phase 5. An agent's model calls use the agent fleet's
-  `OPENROUTER_API_KEY`, whoever owns the agent; nothing counts them per
-  person. It is still a Worker variable (in the agent fleet's manifest):
-  H1 moved the agents' own keys into `KEYS`, not this one.
-- **Risk:** spend that no person's budget shows, once agents are hosted.
-- **First proof:** the agent fleet hosted with people other than Paul.
-- **Delete when:** the agent service meters its model calls in the
-  owner's ledger, as `job.ai` steps have since phase 4 slice C (reserve
-  per turn step, settle to `usage.cost`, the owner's own key), before the
-  agent fleet is hosted for people other than Paul.
+- **Observed:** phase 6 step 4b. An agent's model calls spend its
+  owner's month on the owner's own OpenRouter key (the `Ledger` mints it,
+  its limit the allowance, so OpenRouter stops the owner there), fetched
+  per turn through `POST /api/budget/key`. But nothing reserves or
+  settles per step, so the month's view (`fragment budget`) does not show
+  what agents spent until OpenRouter refuses the key, and the key is in
+  the agent script's heap for the turn (as a `job.ai` step's is in the
+  cell's).
+- **Risk:** a person's budget looks unspent while their agent spends it;
+  their fragments' AI steps then fail at OpenRouter's limit with less
+  warning than the ledger gives.
+- **First proof:** a person whose agent works a lot.
+- **Delete when:** each turn step reserves and settles in the owner's
+  ledger as `job.ai` steps do (reserve the step's worst case, settle to
+  the stream's `usage.cost`, one usage row per step keyed by agent, turn,
+  and step).
 
 ## The computer kills a shell command's tree itself
 

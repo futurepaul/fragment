@@ -105,6 +105,7 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     // a turn: the model calls the operation, then answers
     s.openrouter.clear_script();
     s.openrouter.script(&[Reply::Tools(vec![(add.clone(), json!({ "text": "milk" }))]), Reply::Text("Added milk.".into())]);
+    let calls_before = s.openrouter.calls().len();
     let r = agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "add milk to my list" })))?;
     s.ok("a turn starts", r.status == 200 && r.body["started"] == true, &r);
     let v = settle(s, &agents, &owner, &name, wait);
@@ -114,6 +115,15 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     let ops = api.signed(&owner, "GET", &format!("/api/f/{todo}/channels/ops"), None)?;
     let by_agent = ops.body["records"].as_array().into_iter().flatten().any(|r| r["body"]["op"] == "add_todo" && r["principal"] == agent_id.as_str());
     s.ok("as the agent (its key, through the signed API)", by_agent, &ops);
+    // the owner's org key, minted by the platform's Ledger with their allowance as its limit
+    let org = format!("fragment org:{}", owner_id.trim_start_matches("id:"));
+    let owners = s.openrouter.minted().into_iter().find(|m| m.name == org).map(|m| format!("Bearer {}", m.key));
+    let spent: Vec<String> = s.openrouter.calls()[calls_before..].iter().filter(|c| c.1 == "/api/v1/chat/completions").map(|c| c.3.clone()).collect();
+    s.ok(
+        "its turn spent its owner's month: every model call carried the owner's own key",
+        owners.is_some() && !spent.is_empty() && spent.iter().all(|a| Some(a) == owners.as_ref()),
+        format!("{} calls; owner's key minted: {}", spent.len(), owners.is_some()),
+    );
     let chats = s.openrouter.chats();
     let schema = chats
         .iter()

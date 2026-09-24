@@ -16,6 +16,7 @@
 //!   GET    /api/budget                     the signer's month: allowance, spent, reserved, recent usage
 //!   GET    /api/budget/usage?period=       a month's usage rows (FIN-10's shape)
 //!   POST   /api/budget/<id>/top-up         {usd}: operators (FRAGMENT_OPERATORS)
+//!   POST   /api/budget/key                 an agent: its owner's org OpenRouter key, for its turns
 //!   POST   /api/fragments                  create (signed; the signer owns it)
 //!   GET    /api/fragments                  the fragments the signer belongs to
 //!   *      /api/agents, /api/a/...         the agents' script (agent/), co-hosted: passed through
@@ -313,6 +314,14 @@ async fn budget_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
                 None => "/usage".to_string(),
             };
             json_answer(&ledger::ask(env, &billing_org(&who)?, Method::Get, &path, None).await?)
+        }
+        // an agent's turns spend its owner's month: their org's OpenRouter
+        // key, whose limit is the allowance (OpenRouter stops it there)
+        (Method::Post, ["key"]) => {
+            if who.kind != IdentityKind::Agent {
+                return Err(CellError::new(ErrorCode::Forbidden, "only an agent asks for its owner's model key"));
+            }
+            json_answer(&ledger::ask(env, &billing_org(&who)?, Method::Post, "/key", None).await?)
         }
         (Method::Post, [id, "top-up"]) => {
             if !cfg.is_operator(who.key.as_deref(), &who.id)? {

@@ -162,7 +162,6 @@ impl Suite {
             fragment_api: format!("http://127.0.0.1:{}", self.port),
             agent_url: format!("http://127.0.0.1:{}", self.port),
             openrouter_url: Some(self.openrouter.url.clone()),
-            openrouter_key: OPENROUTER_KEY.into(),
             test_hooks: true,
             egress_local: true,
         }

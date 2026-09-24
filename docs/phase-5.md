@@ -33,7 +33,8 @@ of it.
   steers it (a durable queue read between steps); stop cancels a tool in
   flight.
 - **Dev and e2e:** `cargo xtask dev` runs agents on :8793 beside the
-  cell (their model key from the file `OPENROUTER_API_KEY_FILE` names);
+  cell (their model key from the file `OPENROUTER_API_KEY_FILE` names;
+  since phase 6 step 4a they are co-hosted on the cell's node);
   `cargo xtask build` and `check` build and lint `agent/`; the e2e
   section `agents` (18 checks) drives a scripted OpenRouter fake, which
   now streams and answers scripted tool calls.
@@ -54,7 +55,8 @@ once); SIGKILL between steps (nothing runs again).
   runs one application), and an agent can do on a fragment exactly what
   its membership allows, through the one API the CLI uses.
 - **The model key is the agent fleet's own** (`OPENROUTER_API_KEY`) until
-  phase 4's per-person budgets meter it (debt ledger).
+  phase 4's per-person budgets meter it (debt ledger). *Since phase 6
+  step 4b, an agent's turns spend its owner's own key.*
 - **The turn driver is the spike's alarm-and-`waitUntil` driver**, not
   Workflows (MODEL.md already chose this).
 - **Only the owner drives an agent.** Other people reach it through the
