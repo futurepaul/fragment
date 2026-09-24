@@ -2,7 +2,8 @@
 //! their `(issuer, subject)`, browsers hold sessions (the platform's, then
 //! one per fragment origin through a single-use redemption), a CLI key
 //! joins a person through a browser approval, and a browser and the CLI
-//! get the same answers from a fragment.
+//! get the same answers from a fragment. A sign-in never sends a browser
+//! off the platform.
 
 use anyhow::{Context, Result};
 use fragment_core::npub;
@@ -34,6 +35,26 @@ fn site_cookie(api: &Api, session: &str, name: &str) -> Result<String> {
     let r = api.call(Call { method: "GET", url: r.header("location"), ..Call::default() })?;
     anyhow::ensure!(r.status == 302, "__signin: {r}");
     r.cookies().into_iter().find_map(|c| c.strip_prefix("fragment_site=").map(str::to_string)).context("a site cookie")
+}
+
+/// A browser's sign-in that began at `/auth/login?return=<raw>` (`raw` as
+/// the query carries it), finished: where the callback sends the browser.
+fn signed_in_to(api: &Api, raw: &str) -> Result<String> {
+    let r = api.unsigned("GET", &format!("/auth/login?return={raw}&login_hint=back@e2e.test"), None)?;
+    anyhow::ensure!(r.status == 302, "/auth/login: {r}");
+    let bound = r.cookies().into_iter().find(|c| c.starts_with("fragment_login=")).context("a login cookie")?;
+    let back = api.external(&r.header("location"))?;
+    let done = api.call(Call { method: "GET", url: back.header("location"), cookie: Some(bound), ..Call::default() })?;
+    anyhow::ensure!(done.status == 302, "the callback: {done}");
+    Ok(done.header("location"))
+}
+
+/// Whether `to` is on `base`'s origin (scheme, host, and port).
+fn same_origin(to: &str, base: &str) -> bool {
+    match (reqwest::Url::parse(to), reqwest::Url::parse(base)) {
+        (Ok(to), Ok(base)) => to.origin() == base.origin(),
+        _ => false,
+    }
 }
 
 /// What a browser with a fragment's session gets, and what the CLI signing
@@ -95,6 +116,19 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let back = api.external(&format!("{}&login_hint=denied@e2e.test", r.header("location")))?;
     let r = api.call(Call { method: "GET", url: back.header("location"), cookie: r.cookies().into_iter().find(|c| c.starts_with("fragment_login=")), ..Call::default() })?;
     s.ok("a refusal at WorkOS is shown, and signs no one in", r.status == 400 && r.text.contains("access_denied"), &r);
+
+    // the way back never leaves the platform (audit R1: the first three once
+    // landed on https://evil.example/ after a real sign-in)
+    let mut escaped = vec![];
+    for raw in ["/%20//evil.example", "/+//evil.example", "/%09//evil.example", "/%0D%0A//evil.example", "%2F%2Fevil.example", "/%5Cevil.example", "/http:evil.example"] {
+        let to = signed_in_to(api, raw)?;
+        if !same_origin(&to, &api.base) {
+            escaped.push(format!("{raw} -> {to}"));
+        }
+    }
+    s.ok("a sign-in's return never sends the browser to another origin", escaped.is_empty(), format!("{escaped:?}"));
+    let to = signed_in_to(api, "/%20//evil.example")?;
+    s.ok("(a return it will not keep comes back to the platform's root)", to == format!("{}/", api.base), &to);
 
     // who a person is: their (issuer, subject), never their email
     let paul = api.sign_in("paul@e2e.test")?;
@@ -208,7 +242,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a fragment's sign-in starts at the platform", r.status == 302 && r.header("location").starts_with(&format!("{}/auth/fragment?name={f}", api.base)), &r);
     let r = api.unsigned("GET", &format!("/auth/fragment?name={f}&return=/"), None)?;
     s.ok("which sends a signed-out browser to sign in, and back", r.status == 302 && r.header("location").contains("/auth/login?return="), &r);
-    let r = with_session(api, "GET", &format!("/auth/fragment?name={f}&return=/a%20b"), &member_session)?;
+    let r = with_session(api, "GET", &format!("/auth/fragment?name={f}&return=%2Fa%2520b"), &member_session)?;
     let redeem = r.header("location");
     s.ok("signed in, the platform hands the fragment a single-use redemption", r.status == 302 && redeem.starts_with(&api.site_url(&f, "__signin?token=")), &r);
     let other_host = redeem.replace(&format!("{f}."), &format!("{g}."));
@@ -229,6 +263,16 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the member's browser reads the members-only fragment", r.status == 200 && r.text.contains("inside"), &r);
     let r = api.page(&g, "", Some(&format!("fragment_site={member_f}")))?;
     s.ok("the same cookie on another fragment's origin is nobody (members only: 401)", r.status == 401, &r);
+    let mut escaped = vec![];
+    for raw in ["/%20//evil.example", "/%09//evil.example", "/http:evil.example"] {
+        let r = with_session(api, "GET", &format!("/auth/fragment?name={f}&return={raw}"), &member_session)?;
+        let r = api.call(Call { method: "GET", url: r.header("location"), ..Call::default() })?;
+        if r.status != 302 || !same_origin(&r.header("location"), &api.site_url(&f, "")) {
+            escaped.push(format!("{raw} -> {r} {}", r.header("location")));
+        }
+    }
+    s.ok("nor does a fragment origin's sign-in", escaped.is_empty(), format!("{escaped:?}"));
+
 
     // the browser and the CLI decide alike: public, link, members
     let member_f2 = site_cookie(api, &member_session, &f)?;

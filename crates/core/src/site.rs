@@ -1,7 +1,13 @@
 //! Serving a fragment's `site/` from its live pin: file lookup, types,
-//! caching, cookies, and the Open Graph tags `meta` asks for.
+//! caching, cookies, and the Open Graph tags `meta` asks for; and where a
+//! browser returns to after signing in.
+
+use url::Url;
 
 use crate::manifest::Meta;
+
+/// A `return=` path the platform keeps for a browser's way back.
+pub const RETURN_PATH_MAX_BYTES: usize = 2048;
 
 pub fn mime_for_path(path: &str) -> &'static str {
     let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
@@ -80,6 +86,90 @@ pub fn cookie<'a>(header: &'a str, name: &str) -> Option<&'a str> {
     })
 }
 
+/// The path a browser returns to after signing in, from the `return=` it
+/// brought (a query value, so already percent-decoded once): the path when
+/// it is one on this origin, and `/` otherwise.
+///
+/// Kept: a path that begins with exactly one `/` and holds no byte at or
+/// below 0x20, no DEL, and no backslash, and that, percent-decoded once
+/// more, still does not begin with `//`, `/\`, or `/` and a control byte.
+/// The URL parser trims and drops control bytes and spaces, and a browser
+/// reads `\` as `/`: `/ //evil.example` once became the scheme-relative
+/// `//evil.example` and left the platform.
+pub fn return_path(raw: Option<&str>) -> String {
+    match raw {
+        Some(path) if returnable(path) => path.to_string(),
+        _ => "/".to_string(),
+    }
+}
+
+/// Where a browser returns to on `base` (an origin, or a fragment's base
+/// under one, ending in `/`), from the `return=` it brought: `return_path`
+/// joined under `base`, and `base` itself should the join name another
+/// origin.
+pub fn return_url(base: &Url, raw: Option<&str>) -> Url {
+    joined(base, &return_path(raw))
+}
+
+fn returnable(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    if bytes.is_empty() || bytes.len() > RETURN_PATH_MAX_BYTES {
+        return false;
+    }
+    if bytes.iter().any(|&b| b <= 0x20 || b == 0x7f || b == b'\\') {
+        return false;
+    }
+    plain_start(bytes) && plain_start(&percent_decoded(bytes))
+}
+
+/// A path that begins with one `/`, not followed by another, a backslash,
+/// or a control byte or space (which a parser would drop, leaving `//`).
+fn plain_start(path: &[u8]) -> bool {
+    match path {
+        [b'/'] => true,
+        [b'/', next, ..] => !(*next == b'/' || *next == b'\\' || *next <= 0x20 || *next == 0x7f),
+        _ => false,
+    }
+}
+
+/// `bytes` with each `%XX` decoded; a malformed escape stays as it is.
+fn percent_decoded(bytes: &[u8]) -> Vec<u8> {
+    let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    // bounded: `i` grows by one or three each turn
+    while i < bytes.len() {
+        let escape = match (bytes[i], bytes.get(i + 1).copied().and_then(hex), bytes.get(i + 2).copied().and_then(hex)) {
+            (b'%', Some(high), Some(low)) => Some(high * 16 + low),
+            _ => None,
+        };
+        match escape {
+            Some(b) => {
+                out.push(b);
+                i += 3;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// `path` under `base`, as a path relative to it (`./…`: a colon in its
+/// first segment is never read as a scheme, nor a leading `//` as a host),
+/// or `base` itself when the result would name another origin. Neither the
+/// filter in `return_path` nor the `./` lets that happen; the origin check
+/// is the tripwire should both miss a form.
+fn joined(base: &Url, path: &str) -> Url {
+    assert!(path.starts_with('/'), "a return path begins with /");
+    match base.join(&format!(".{path}")) {
+        Ok(url) if url.origin() == base.origin() => url,
+        _ => base.clone(),
+    }
+}
+
 pub fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
@@ -149,5 +239,84 @@ mod tests {
         let titled = inject_og("<head><title>Own</title></head>", "n", &meta, "x");
         assert_eq!(titled.matches("<title>").count(), 1, "a page's own title stays the only one");
         assert!(preview_svg("todo").starts_with("<svg"));
+    }
+
+    /// Goal: no `return=` a browser can bring leaves the platform's origin
+    /// (audit R1). Method: every form that once did (a space, tab, or CR/LF
+    /// before `//`, an encoded slash or backslash, a scheme in the first
+    /// segment), and the legitimate paths that must survive, against a host
+    /// base and a dev fleet's path base, with the expected URL written out.
+    #[test]
+    fn return_paths_stay_on_the_origin() {
+        let club = Url::parse("https://fragment.club/").unwrap();
+        let dev = Url::parse("http://127.0.0.1:8790/f/todo/").unwrap();
+        let hostile = [
+            "/ //evil.example",
+            "/\t//evil.example",
+            "/\r\n//evil.example",
+            "/\n//evil.example",
+            "/\u{7f}//evil.example",
+            "//evil.example",
+            "///evil.example",
+            "/\\evil.example",
+            "/\\/evil.example",
+            "/%2F/evil.example",
+            "/%2f%2fevil.example",
+            "/%5Cevil.example",
+            "/%09//evil.example",
+            "/%20//evil.example",
+            "/%0D%0A//evil.example",
+            "/ok\\..\\evil",
+            "/a b",
+            "https://evil.example/",
+            "evil.example",
+            "",
+        ];
+        for raw in hostile {
+            assert_eq!(return_path(Some(raw)), "/", "{raw:?}");
+            assert_eq!(return_url(&club, Some(raw)).as_str(), "https://fragment.club/", "{raw:?}");
+            assert_eq!(return_url(&dev, Some(raw)).as_str(), "http://127.0.0.1:8790/f/todo/", "{raw:?}");
+        }
+        assert_eq!(return_path(None), "/");
+        assert_eq!(return_path(Some(&format!("/{}", "a".repeat(RETURN_PATH_MAX_BYTES)))), "/", "too long");
+        let longest = format!("/{}", "a".repeat(RETURN_PATH_MAX_BYTES - 1));
+        assert_eq!(return_path(Some(&longest)), longest);
+
+        // a scheme in the first segment is a path here, never a scheme
+        // (joined bare, `http:evil.example` under an https base was http://evil.example/)
+        assert_eq!(return_url(&club, Some("/http:evil.example")).as_str(), "https://fragment.club/http:evil.example");
+        assert_eq!(return_url(&club, Some("/javascript:alert(1)")).as_str(), "https://fragment.club/javascript:alert(1)");
+        assert_eq!(return_url(&dev, Some("/https:evil.example")).as_str(), "http://127.0.0.1:8790/f/todo/https:evil.example");
+
+        let kept = [
+            ("/", "https://fragment.club/", "http://127.0.0.1:8790/f/todo/"),
+            ("/x", "https://fragment.club/x", "http://127.0.0.1:8790/f/todo/x"),
+            ("/a%20b", "https://fragment.club/a%20b", "http://127.0.0.1:8790/f/todo/a%20b"),
+            ("/c++/notes%2Fold", "https://fragment.club/c++/notes%2Fold", "http://127.0.0.1:8790/f/todo/c++/notes%2Fold"),
+            ("/__join?invite=abc", "https://fragment.club/__join?invite=abc", "http://127.0.0.1:8790/f/todo/__join?invite=abc"),
+            ("/auth/fragment?name=f&return=%2Fx", "https://fragment.club/auth/fragment?name=f&return=%2Fx", "http://127.0.0.1:8790/f/todo/auth/fragment?name=f&return=%2Fx"),
+            ("/doc#part", "https://fragment.club/doc#part", "http://127.0.0.1:8790/f/todo/doc#part"),
+        ];
+        for (raw, on_club, on_dev) in kept {
+            assert_eq!(return_path(Some(raw)), raw);
+            assert_eq!(return_url(&club, Some(raw)).as_str(), on_club);
+            assert_eq!(return_url(&dev, Some(raw)).as_str(), on_dev);
+        }
+    }
+
+    /// Goal: the join alone keeps a path on the origin, should the filter in
+    /// `return_path` ever miss a form. Method: paths the filter refuses,
+    /// handed to the join directly: each stays a path under the base.
+    #[test]
+    fn the_join_alone_stays_on_the_origin() {
+        let club = Url::parse("https://fragment.club/").unwrap();
+        for (path, expected) in [
+            ("//evil.example", "https://fragment.club//evil.example"),
+            ("/\\evil.example", "https://fragment.club//evil.example"),
+            ("/\t//evil.example", "https://fragment.club///evil.example"),
+            ("/http://evil.example/", "https://fragment.club/http://evil.example/"),
+        ] {
+            assert_eq!(joined(&club, path).as_str(), expected, "{path:?}");
+        }
     }
 }
