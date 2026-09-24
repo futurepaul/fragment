@@ -138,7 +138,7 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
     let home = s.dir("deploy-home");
     let site = s.dir("deploy-site");
     std::fs::create_dir_all(site.join("site"))?;
-    s.cli(api, &home, &["login"]);
+    s.login(api, &home);
     let name = s.name("deploy");
     let created = s.cli_json(api, &home, &["create", &name, "--json"])?;
     s.hook(api, &created);

@@ -7,9 +7,10 @@
 //! A signed request the registry cannot answer for is refused (503), never
 //! let through. Public routes:
 //!
-//!   POST   /api/identities                 register: the signing key as a new person
-//!                                          ({kind: person}), or an agent the signer owns
+//!   POST   /api/identities                 register an agent the signer owns
 //!                                          ({kind: agent, proof}: a key proof by its key)
+//!   POST   /api/identities/claim           signed by a CLI key a signed-in person approved
+//!                                          (`/cli`): the key joins them (202 until then)
 //!   GET    /api/identities/<id|me>         an identity, as it or its owner sees it
 //!   POST   /api/identities/<id|me>/keys    add a key ({proof}: a key proof by the new key)
 //!   DELETE /api/identities/<id|me>/keys/<npub>   revoke one
@@ -21,6 +22,10 @@
 //!                                          the inbox is its token)
 //!   *      <name>.<suffix>/<path>          the fragment's site, on its own origin (every path)
 //!   *      /f/<name>/<path>                the same, when no suffix is configured (dev)
+//!   GET    /, /auth/…, /cli                sign-in on the platform origin (`auth.rs`)
+//!
+//! A browser on a fragment's origin is its person through that origin's own
+//! session cookie (`__signin`), looked up live like a key.
 //!
 //! With a suffix configured, `/f/<name>/…` redirects to the fragment's own
 //! host: fragments sharing one origin could act as each other's visitors.
@@ -28,6 +33,7 @@
 //! no cookies.
 
 mod ai;
+mod auth;
 mod blobs;
 mod config;
 mod channels;
@@ -100,9 +106,10 @@ fn authenticate(req: &Request, url: &Url, body: &[u8]) -> CellResult<String> {
         .map_err(|e| CellError::new(ErrorCode::Unauthenticated, e.to_string()))
 }
 
-/// Who signed: the key, and the identity the registry says holds it.
+/// Who is asking: the identity the registry says holds the signing key,
+/// or a browser's session names (no key then).
 pub(crate) struct Signer {
-    pub key: String,
+    pub key: Option<String>,
     pub id: String,
     pub kind: IdentityKind,
     pub owner: Option<String>,
@@ -144,7 +151,7 @@ pub(crate) fn facts_of(v: &Value) -> CellResult<(String, IdentityKind, Option<St
 async fn resolve(env: &Env, key: String) -> CellResult<Signer> {
     let v = ask_registry(env, "/resolve", &json!({ "key": key })).await?;
     let (id, kind, owner) = facts_of(&v)?;
-    Ok(Signer { key, id, kind, owner })
+    Ok(Signer { key: Some(key), id, kind, owner })
 }
 
 /// The signer of a request that must be signed, resolved.
@@ -202,22 +209,25 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
     if let (Method::Post, []) = (&method, rest) {
         let reg: Register = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
         return match reg.kind {
-            // until sign-in (phase 4 slice B), a key makes its own person
-            IdentityKind::Person => {
-                if reg.proof.is_some() {
-                    return Err(CellError::invalid("a person registers with the key that signs; no proof"));
-                }
-                let key = authenticate(&req, url, &body)?;
-                json_answer(&ask_registry(env, "/people", &json!({ "key": key })).await?)
-            }
+            IdentityKind::Person => Err(CellError::invalid("people sign in: `fragment login` adds a key to you")),
             // FIN-11's trusted initial registration: the owner signs, and the
             // agent's key proves itself inside
             IdentityKind::Agent => {
                 let owner = signer(env, &req, url, &body).await?;
+                let owner_key = owner.key.clone().expect("a signed request has a key");
                 let proof = reg.proof.ok_or_else(|| CellError::invalid("registering an agent needs a proof by its key"))?;
-                let key = proven_key(&proof, &req, url, &owner.key)?;
+                let key = proven_key(&proof, &req, url, &owner_key)?;
                 json_answer(&ask_registry(env, "/agents", &json!({ "owner": owner.id, "key": key })).await?)
             }
+        };
+    }
+    // a CLI key a signed-in person approved: its signature proves it
+    if let (Method::Post, ["claim"]) = (&method, rest) {
+        let key = authenticate(&req, url, &body)?;
+        return match ask_registry(env, "/cli/claim", &json!({ "key": key })).await {
+            Ok(v) => json_answer(&v),
+            Err(e) if e.code == ErrorCode::NotFound => Ok(Response::from_json(&json!({ "pending": true, "message": e.message }))?.with_status(202)),
+            Err(e) => Err(e),
         };
     }
     let who = signer(env, &req, url, &body).await?;
@@ -229,7 +239,7 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
         (Method::Post, [id, "keys"]) => {
             let id = named_identity(id, &who)?;
             let add: AddKey = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            let key = proven_key(&add.proof, &req, url, &who.key)?;
+            let key = proven_key(&add.proof, &req, url, who.key.as_deref().expect("a signed request has a key"))?;
             json_answer(&ask_registry(env, "/keys", &json!({ "identity": id, "key": key, "by": who.id })).await?)
         }
         (Method::Delete, [id, "keys", k]) => {
@@ -280,7 +290,9 @@ async fn forward(env: &Env, req: &Request, url: &Url, body: Option<worker::wasm_
     headers.set(URL_HEADER, url.as_str())?;
     if let Some(p) = &f.principal {
         headers.set(PRINCIPAL_HEADER, &p.id)?;
-        headers.set(KEY_HEADER, &p.key)?;
+        if let Some(k) = &p.key {
+            headers.set(KEY_HEADER, k)?;
+        }
         headers.set(KIND_HEADER, p.kind.as_str())?;
         if let Some(o) = &p.owner {
             headers.set(OWNER_HEADER, o)?;
@@ -305,8 +317,15 @@ async fn forward(env: &Env, req: &Request, url: &Url, body: Option<worker::wasm_
 
 async fn serve(mut req: Request, env: &Env, url: &Url, name: &str, rest: &str, mode: &'static str) -> CellResult<Response> {
     check_name(name)?;
+    if auth::is_fragment_route(rest) {
+        return auth::fragment(env, &Config::from_env(env), url, name, rest, mode == "path").await;
+    }
     let body = read_body(&mut req).await?;
-    let principal = signer_if_signed(env, &req, url, &body).await?;
+    // a signature names its key's identity; a browser, its session here
+    let principal = match signer_if_signed(env, &req, url, &body).await? {
+        Some(s) => Some(s),
+        None => auth::site_session(&req, env, name).await?,
+    };
     let f = Forward { name, inner: format!("/serve/{rest}"), principal, mode: Some(mode), extra: vec![] };
     forward(env, &req, url, bytes_body(body), f).await
 }
@@ -334,6 +353,10 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
     }
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     match (req.method(), segments.as_slice()) {
+        (_, [""] | ["auth", ..] | ["cli"] | ["cli", "approve"]) => {
+            let segs = segments.clone();
+            auth::platform(req, env, &cfg, &url, &segs).await
+        }
         (Method::Get, ["healthz"]) => {
             let mut resp = Response::ok("ok")?;
             resp.headers_mut().set("x-fragment-deploy", &cfg.deploy_id)?;
@@ -344,7 +367,9 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             let create: CreateFragment = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             check_name(&create.name)?;
             let principal = signer(env, &req, &url, &body).await?;
-            cfg.may_create(&principal.key, &principal.id)?;
+            if principal.kind != IdentityKind::Person {
+                return Err(CellError::new(ErrorCode::Forbidden, "fragments are made by people"));
+            }
             let f = Forward { name: &create.name, inner: "/create".into(), principal: Some(principal), mode: None, extra: vec![] };
             forward(env, &req, &url, bytes_body(body), f).await
         }

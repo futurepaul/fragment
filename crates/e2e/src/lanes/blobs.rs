@@ -24,7 +24,7 @@ pub fn blobs(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     let home = s.dir("blobs-home");
-    s.cli(api, &home, &["login"]);
+    s.login(api, &home);
     let keys = s.cli_keys(&home).expect("the CLI logged in");
     let name = s.name("blobs");
     let c = s.cli_json(api, &home, &["create", &name, "--json"])?;

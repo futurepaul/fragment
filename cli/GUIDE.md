@@ -7,9 +7,13 @@ host and sleep when idle; a request, a trigger, or an inbox delivery
 wakes them.
 
 You drive fragments with the `fragment` CLI. Every request is signed with
-your nostr key (made by `fragment login`), and the host knows which
-identity (`id:…`) that key belongs to: memberships name you, not the key.
-`fragment keys rotate` replaces the key and keeps everything you have.
+this machine's nostr key. `fragment login` makes it and opens a page on
+the host: sign in (WorkOS) and approve the key, whose ending the page and
+the terminal both show. On a machine without a browser, it prints the link
+to open anywhere you are signed in (`--no-wait` returns at once; run it
+again after approving). The host knows which identity (`id:…`) each key
+belongs to: memberships name you, not the key. `fragment keys rotate`
+replaces the key and keeps everything you have.
 
 ## The model in one screen
 
@@ -36,7 +40,7 @@ identity (`id:…`) that key belongs to: memberships name you, not the key.
 ## First moves
 
 ```
-fragment login                            # once per machine: a key, registered as you (id:…)
+fragment login                            # once per machine: sign in in a browser, approve this machine's key
 fragment init my-thing                    # scaffold (todo) + create + deploy → live URL,
                                           #   share link, webhook URL
 fragment init my-inbox --template inbox   # or: todo | inbox | notes
@@ -273,8 +277,8 @@ fragment members list my-thing
 fragment members add my-thing <id:… | npub | name@domain> --role editor   # a key names its holder
 fragment members rm my-thing <id:… | npub>
 fragment members leave my-thing
-fragment invite create my-thing --role viewer --uses 5    # prints the token once
-fragment join my-thing <token>
+fragment invite create my-thing --role viewer --uses 5    # prints a link to open in a browser (once)
+fragment join my-thing <token>                            # or join from a CLI
 fragment rotate my-thing --view                            # a new share link
 ```
 
@@ -358,7 +362,7 @@ secret values into files.
 ## Command reference
 
 ```
-fragment login [--force]                 fragment call <name> <op> [--input JSON] [--id ID]
+fragment login [--force] [--no-wait]     fragment call <name> <op> [--input JSON] [--id ID]
 fragment whoami                          fragment channel <name> [<channel>] [--after N] [--follow]
 fragment keys [list|rotate|revoke <npub>]
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]

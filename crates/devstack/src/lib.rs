@@ -159,11 +159,22 @@ pub struct Fleet {
     pub openrouter_url: Option<String>,
     /// The shortest wait before a delivery is retried (`None`: the cell's 10 s).
     pub delivery_retry_s: Option<u32>,
-    /// The keys that may create fragments (`None`: anyone who signs).
-    pub creators: Option<String>,
+    /// Sign-in: WorkOS AuthKit (the real one, or the fake in `crates/fakes`).
+    pub workos: Option<WorkOsVars>,
+    /// The platform's origin (sign-in, the platform session), when it is
+    /// not the hostname suffix itself.
+    pub platform_url: Option<String>,
     /// Test controls (`FRAGMENT_TEST_HOOKS=allow`: the registry can be made
     /// to fail). Never on a shared fleet.
     pub test_hooks: bool,
+}
+
+/// A WorkOS environment as the cell reads it.
+pub struct WorkOsVars {
+    pub client_id: String,
+    pub api_key: String,
+    /// `None`: WorkOS itself.
+    pub api_url: Option<String>,
 }
 
 impl Fleet {
@@ -196,8 +207,15 @@ impl Fleet {
         if let Some(s) = &self.host_suffix {
             vars.push(("FRAGMENT_HOST_SUFFIX", s.as_str()));
         }
-        if let Some(c) = &self.creators {
-            vars.push(("FRAGMENT_CREATORS", c.as_str()));
+        if let Some(w) = &self.workos {
+            vars.push(("WORKOS_CLIENT_ID", w.client_id.as_str()));
+            vars.push(("WORKOS_API_KEY", w.api_key.as_str()));
+            if let Some(u) = &w.api_url {
+                vars.push(("WORKOS_API_URL", u.as_str()));
+            }
+        }
+        if let Some(p) = &self.platform_url {
+            vars.push(("FRAGMENT_PLATFORM_URL", p.as_str()));
         }
         if self.test_hooks {
             vars.push(("FRAGMENT_TEST_HOOKS", "allow"));

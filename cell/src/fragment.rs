@@ -357,8 +357,8 @@ impl FragmentCell {
         let arrived =
             req.headers().get(URL_HEADER)?.and_then(|u| url::Url::parse(&u).ok()).ok_or_else(|| CellError::host("no URL from the router"))?;
         let routed_name = req.headers().get(NAME_HEADER)?.ok_or_else(|| CellError::host("no fragment name from the router"))?;
-        if principal.is_some() && (key.is_none() || kind.is_none()) {
-            return Err(CellError::host("the router named an identity without its key and kind"));
+        if principal.is_some() && kind.is_none() {
+            return Err(CellError::host("the router named an identity without its kind"));
         }
         let caller = Caller { principal, key, kind, owner, url: arrived };
         let path = req.path();

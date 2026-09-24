@@ -21,7 +21,7 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     let home = s.dir("sync-home");
-    s.cli(api, &home, &["login"]);
+    s.login(api, &home);
     let create = |s: &Suite, base: &str| -> Result<(String, Value)> {
         let name = s.name(base);
         let c = s.cli_json(api, &home, &["create", &name, "--json"])?;

@@ -26,7 +26,9 @@ Worker variables, rendered from the fleet's settings (ROADMAP decision
 | `FRAGMENT_DELIVERY_RETRY_S` | the shortest wait before a delivery is retried (default 10; the wait grows with the delivery's age, up to an hour) |
 | `OPENROUTER_API_URL` | where AI calls go (default https://openrouter.ai) |
 | `FRAGMENT_DEPLOY_ID` | which deployment this is (`cargo xtask deploy` sets it); `GET /healthz` answers it in `x-fragment-deploy` |
-| `FRAGMENT_CREATORS` | until sign-in exists, the identities (`id:…`) and keys (npubs or hex), comma-separated, that may create fragments; unset, anyone registered; a list that does not parse lets nobody create (500) |
+| `WORKOS_CLIENT_ID`, `WORKOS_API_KEY` | sign-in: fragment's WorkOS environment (the key exchanges codes); unset, sign-in answers 500 |
+| `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake) |
+| `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (default: the hostname suffix itself, e.g. https://fragment.club) |
 | `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503 |
 
 Bindings (`cell/wrangler.jsonc`): `FRAGMENT` and `PRINCIPAL` (Durable
@@ -90,18 +92,46 @@ the new key and meant it for this signer.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/identities` | the signing key | `{kind: "person"}` → the identity: until sign-in (slice B), a key registers as a new person holding it; again, the same one (`created: false`); a revoked key is 401 |
+| `POST /api/identities/claim` | a key a signed-in person approved (`/cli?key=<npub>`) | → `{id, claimed}`: the key joins the person who approved it (the signature is the proof of possession); again, `claimed: false`; 202 `{pending}` until someone approves it (ten minutes); people themselves come only from sign-in (`{kind: "person"}` is 400) |
 | `POST /api/identities` | a person | `{kind: "agent", proof}` → a new agent identity they own, holding the proof's key (FIN-11's trusted initial registration); again, the same one; a key someone else holds is 409; an agent owns no agents (403) |
-| `GET /api/identities/{id\|me}` | the identity, or its owner | → `{id, kind, owner?, createdAt, keys: [{npub, addedAt, addedBy, revokedAt?}], agents: [id]}`; anyone else 404 |
+| `GET /api/identities/{id\|me}` | the identity, or its owner | → `{id, kind, owner?, createdAt, keys: [{npub, addedAt, addedBy, revokedAt?}], agents: [id], subjects: [{issuer, email, linkedAt}]}`; anyone else 404 |
 | `POST /api/identities/{id\|me}/keys` | a person for themselves; an owner for their agent | `{proof}` → the identity with the key added (at most 64 keys, revoked ones included); a key someone else holds, or a revoked one, is 409 |
-| `DELETE /api/identities/{id\|me}/keys/{npub}` | the same | → the identity; the key is 401 from the next request and never comes back; the last active key cannot be revoked (400) |
+| `DELETE /api/identities/{id\|me}/keys/{npub}` | the same | → the identity; the key is 401 from the next request and never comes back; an agent's last active key cannot be revoked (400); a person who signs in may hold none |
 | `GET /api/identities/{id}/keys/{npub}` | the identity, or an agent it owns | → `{active}` (an agent's runtime checks its owner's keys with it) |
+
+## Sign-in (phase 4 slice B)
+
+A person is keyed by their verified `(issuer, subject)`: the issuer is
+`workos:<client id>` (the environment), the subject WorkOS's user id. The
+email is an attribute, refreshed at each sign-in and never matched. The
+platform holds no key for a person; browsers hold sessions, each looked up
+live in the registry on every request (a 30-day lifetime; tokens are 32
+random bytes, the registry keeps their SHA-256).
+
+| method & path (platform origin) | what |
+| --- | --- |
+| `GET /` | who is signed in, with links to sign in, sign out, and link another sign-in |
+| `GET /auth/login?return=&login_hint=` | → WorkOS's authorize URL (`provider=authkit`, `redirect_uri` `<platform>/auth/callback`, a state); the state is bound to the browser by `fragment_login` (HttpOnly, SameSite=Lax, `Path=/auth`, ten minutes) |
+| `GET /auth/link?return=` | the same from a signed-in browser: the sign-in that comes back joins this person (409 when it is someone else's) |
+| `GET /auth/callback?code=&state=` | the state must match the browser's cookie (400 otherwise); the code is exchanged server-side; → `fragment_session` (HttpOnly, SameSite=Lax, `Path=/`) and back to `return`; a WorkOS `error` is shown (400) |
+| `POST /auth/logout` | ends the session and every fragment session made from it, clears the cookie, and sends the browser to WorkOS's logout (`session_id` from the access token's `sid`); from another origin, 403 (`GET` shows the button) |
+| `GET /auth/fragment?name=&return=` | signed in: → `<fragment origin>/__signin?token=<a single-use redemption, 60 s, for that fragment only>`; signed out: → sign in first |
+| `GET /cli?key=<npub>` | signed in: a page showing the key's last eight characters, to compare with the terminal, and an Add button; signed out: → sign in first |
+| `POST /cli/approve` | the page's form (`key`): approves the key for ten minutes (a key someone else holds is 409; another origin 403) |
+
+On a fragment's origin, `GET __signin?token=` redeems the redemption for
+this fragment only (another fragment's is 401 and stays unspent) and sets
+`fragment_site` (HttpOnly, SameSite=Lax, host-only, `Path=/` or
+`/f/<name>/`); without a token it starts at the platform. `__signout`
+clears it. A request with that cookie is its person, exactly as the same
+request signed by one of their keys: the same decision either way. A
+cookie for another fragment, or whose platform session ended, is nobody.
 
 ## Control API
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/fragments` | any registered signer (on a fleet with `FRAGMENT_CREATORS`, a listed identity or key; others 403) | `{name, fragmentSecret, visibility?}` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}`. `fragmentSecret` is the fragment's own key, made by the client; it is stored sealed. The cell creates (or, for a name deleted before, finds) the code.storage repo. |
+| `POST /api/fragments` | a person (an agent is 403) | `{name, fragmentSecret, visibility?}` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}`. `fragmentSecret` is the fragment's own key, made by the client; it is stored sealed. The cell creates (or, for a name deleted before, finds) the code.storage repo. |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role}]}` |
 | `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes}` |
@@ -342,7 +372,9 @@ API answers on the platform's host):
 | `__tree` | `{type, ref: "live", sha, count, files}`, content only |
 | `__file?path=` | a content file from live, else main |
 | `__preview.svg` | the placeholder preview image |
-| `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; an unsigned caller gets an anonymous principal cookie; callers holding only `public` get 60 calls a minute each, 600 per fragment |
+| `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; a signed-in browser (`fragment_site`) calls as its person; an unsigned caller gets an anonymous principal cookie; callers holding only `public` get 60 calls a minute each, 600 per fragment |
+| `__signin`, `__signout` | this origin's session (Sign-in, above) |
+| `__join?invite=<token>` | an invite in a browser: signed out, → `__signin` and back; signed in, a Join button that posts `invite` here (form-encoded; another origin 403) and joins as the person |
 | `__fragment.js` | the browser library (below) |
 | `__live` | WebSocket, anyone who can see the fragment: channel subscriptions from a cursor, presence, change signals (below) |
 | `__watch` | WebSocket, viewers and up (the share link, or a signed upgrade): `{type: "hello", ref, sha}`, then `{type: "changed", ref: "main", sha, paths}` per external move of main |

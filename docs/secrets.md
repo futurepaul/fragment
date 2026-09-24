@@ -21,7 +21,8 @@ first reads it (slice D: a job's fetch).
 | A person's model credential (their OpenRouter key, minted by the platform with their budget as its limit), their GitHub token, other personal keys | the person's own cell |
 | A key an app needs (a third-party API key, a webhook signing key) | the fragment's supervisor |
 | The Sprites org token a person's computers run under | the person's own cell (ours by default; theirs if they bring their own Sprites org) |
-| The fleet's host secret, the code.storage org key, the OpenRouter management key | the fleet's own configuration (`vars` rendered at deploy) |
+| The fleet's host secret, the code.storage org key, the OpenRouter management key, the WorkOS API key | the fleet's own configuration (`vars` rendered at deploy) |
+| A browser's sessions (the platform's, and one per fragment origin) | the registry cell, as SHA-256 hashes of random tokens; the tokens live only in HttpOnly cookies |
 
 Never in git, a log, a command line, a channel record, or a computer's
 disk. Rotating a secret means changing it in its home; everything that

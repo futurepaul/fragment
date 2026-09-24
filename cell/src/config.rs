@@ -16,6 +16,25 @@ pub struct CodeStorageConfig {
     pub api: String,
 }
 
+/// WorkOS AuthKit (phase 4 slice B): fragment's own environment.
+pub struct WorkOsConfig {
+    /// `WORKOS_CLIENT_ID`: names the environment.
+    pub client_id: String,
+    /// `WORKOS_API_KEY`: the environment's secret key (exchanges codes).
+    pub api_key: String,
+    /// `WORKOS_API_URL` (default https://api.workos.com; dev and the e2e: the fake).
+    pub api: String,
+}
+
+impl WorkOsConfig {
+    /// Who vouches for a person's subject: this environment. A person is
+    /// keyed by `(issuer, subject)`, so finite.computer's login (another
+    /// environment) is another issuer (docs/finite-integration.md).
+    pub fn issuer(&self) -> String {
+        format!("workos:{}", self.client_id)
+    }
+}
+
 pub struct Config {
     /// `FRAGMENT_HOST_SECRET`, then `FRAGMENT_HOST_SECRET_PREVIOUS` during a rotation.
     host_secrets: Vec<String>,
@@ -40,11 +59,12 @@ pub struct Config {
     pub delivery_retry_s: u32,
     /// `OPENROUTER_API_URL`: where AI calls go (default https://openrouter.ai; the e2e's fake).
     pub openrouter_url: String,
-    /// `FRAGMENT_CREATORS`: until sign-in exists, the identities (`id:…`)
-    /// and keys (npubs or hex), comma-separated, that may create fragments.
-    /// Unset: anyone registered (dev). A list that does not parse lets
-    /// nobody create.
-    creators: Option<Result<Vec<String>, String>>,
+    workos: Option<WorkOsConfig>,
+    /// `FRAGMENT_PLATFORM_URL`: the platform's own origin, where sign-in
+    /// and the platform session live (default: the hostname suffix itself,
+    /// e.g. https://fragment.club; without a suffix, the origin a request
+    /// arrived on).
+    platform_url: Option<String>,
     /// `FRAGMENT_DEPLOY_ID`: which deployment this is (`cargo xtask deploy`
     /// sets it; `/healthz` answers it in `x-fragment-deploy`).
     pub deploy_id: String,
@@ -73,19 +93,47 @@ impl Config {
         let push_subject = var(env, "FRAGMENT_PUSH_SUBJECT").unwrap_or_else(|| "mailto:webpush@fragment.invalid".into());
         let delivery_retry_s = var(env, "FRAGMENT_DELIVERY_RETRY_S").and_then(|s| s.parse::<u32>().ok()).filter(|s| *s >= 1).unwrap_or(10);
         let openrouter_url = var(env, "OPENROUTER_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://openrouter.ai".into());
-        let creators = var(env, "FRAGMENT_CREATORS").map(|list| fragment_core::npub::parse_list(&list));
+        let workos = match (var(env, "WORKOS_CLIENT_ID"), var(env, "WORKOS_API_KEY")) {
+            (Some(client_id), Some(api_key)) => Some(WorkOsConfig {
+                client_id,
+                api_key,
+                api: var(env, "WORKOS_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.workos.com".into()),
+            }),
+            _ => None,
+        };
+        let platform_url = var(env, "FRAGMENT_PLATFORM_URL").map(|u| u.trim_end_matches('/').to_string());
         let deploy_id = var(env, "FRAGMENT_DEPLOY_ID").unwrap_or_else(|| "dev".into());
-        Config { host_secrets, codestorage, host_suffix, poll_interval_ms, egress_local, blob_grace_ms, push_subject, delivery_retry_s, openrouter_url, creators, deploy_id }
+        Config {
+            host_secrets,
+            codestorage,
+            host_suffix,
+            poll_interval_ms,
+            egress_local,
+            blob_grace_ms,
+            push_subject,
+            delivery_retry_s,
+            openrouter_url,
+            workos,
+            platform_url,
+            deploy_id,
+        }
     }
 
-    /// Whether the signer (its key, 64 hex, and its identity) may create a
-    /// fragment on this fleet.
-    pub fn may_create(&self, key: &str, identity: &str) -> CellResult<()> {
-        match &self.creators {
-            None => Ok(()),
-            Some(Err(e)) => Err(CellError::host(format!("FRAGMENT_CREATORS: {e}"))),
-            Some(Ok(listed)) if listed.iter().any(|k| k == key || k == identity) => Ok(()),
-            Some(Ok(_)) => Err(CellError::new(ErrorCode::Forbidden, "creating fragments on this fleet is by invitation for now")),
+    pub fn workos(&self) -> CellResult<&WorkOsConfig> {
+        self.workos
+            .as_ref()
+            .ok_or_else(|| CellError::new(ErrorCode::HostFailed, "sign-in is not configured on this fleet (WORKOS_CLIENT_ID, WORKOS_API_KEY)"))
+    }
+
+    /// The platform's origin, given the URL a request arrived on.
+    pub fn platform(&self, arrived: &url::Url) -> String {
+        if let Some(p) = &self.platform_url {
+            return p.clone();
+        }
+        let port = arrived.port().map(|p| format!(":{p}")).unwrap_or_default();
+        match &self.host_suffix {
+            Some(suffix) => format!("{}://{suffix}{port}", arrived.scheme()),
+            None => format!("{}://{}{port}", arrived.scheme(), arrived.host_str().unwrap_or("localhost")),
         }
     }
 

@@ -5,7 +5,9 @@
 //! share link counts as a viewer (a `?view=` token sets a cookie on the
 //! fragment's origin); on a `public` fragment, everyone else holds the
 //! `public` floor. An unsigned browser calling an operation gets an
-//! anonymous principal: a random cookie whose hash names it.
+//! anonymous principal: a random cookie whose hash names it. A browser
+//! signed in on this origin (`__signin`, the router's) is its person, and
+//! accepts an invite at `__join?invite=<token>`.
 
 use fragment_core::{npub, site};
 use fragment_proto::{valid_repo_path, ErrorCode, OpCall, Role, Visibility};
@@ -118,6 +120,8 @@ impl FragmentCell {
             h.set("content-type", "text/javascript; charset=utf-8")?;
             h.set("cache-control", "no-cache")?;
             Response::ok(crate::push::SW_JS)?.with_headers(h)
+        } else if path == "__join" {
+            self.join_page(&mut req, caller, name, &url).await?
         } else if path == "__watch" {
             self.watch(&req, caller, link)?
         } else if path == "__live" {
@@ -134,6 +138,48 @@ impl FragmentCell {
             }
         };
         with_cookies(resp, &set)
+    }
+
+    /// An invite in a browser: sign in on this origin, then a button that
+    /// posts back here (a cross-site form carries no SameSite=Lax cookie).
+    async fn join_page(&self, req: &mut Request, caller: &Caller, name: &str, url: &url::Url) -> CellResult<Response> {
+        let base = self.cfg.canonical(&caller.url, name);
+        let form = |bytes: &[u8]| url::form_urlencoded::parse(bytes).find(|(k, _)| k == "invite").map(|(_, v)| v.into_owned());
+        match req.method() {
+            Method::Get => {
+                let invite = url.query_pairs().find(|(k, _)| k == "invite").map(|(_, v)| v.into_owned()).unwrap_or_default();
+                if caller.principal.is_none() {
+                    let back: String = url::form_urlencoded::byte_serialize(format!("/__join?invite={invite}").as_bytes()).collect();
+                    let mut resp = Response::empty()?.with_status(302);
+                    resp.headers_mut().set("location", &format!("{base}__signin?return={back}"))?;
+                    return Ok(resp);
+                }
+                let esc = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('"', "&quot;");
+                let html = format!(
+                    r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Join {n}</title>
+<style>body{{font:16px/1.5 system-ui,sans-serif;max-width:34rem;margin:12vh auto;padding:0 16px}}button{{font:inherit;padding:.5em 1.1em;border-radius:8px}}</style>
+<h1>Join {n}</h1><form method="post" action="{base}__join"><input type="hidden" name="invite" value="{i}"><button>Join</button></form>"#,
+                    n = esc(name),
+                    i = esc(&invite)
+                );
+                let h = Headers::new();
+                h.set("content-type", "text/html; charset=utf-8")?;
+                h.set("cache-control", "no-store")?;
+                Ok(Response::ok(html)?.with_headers(h))
+            }
+            Method::Post => {
+                let origin = req.headers().get("origin")?;
+                if origin.is_some_and(|o| !base.starts_with(&o)) {
+                    return Err(CellError::new(ErrorCode::Forbidden, "an invite is accepted from this fragment's own page"));
+                }
+                let token = form(&req.bytes().await?).ok_or_else(|| CellError::invalid("the form names no invite"))?;
+                self.join(caller, fragment_proto::Join { token }).await?;
+                let mut resp = Response::empty()?.with_status(302);
+                resp.headers_mut().set("location", &base)?;
+                Ok(resp)
+            }
+            _ => Err(CellError::invalid("__join takes GET or POST")),
+        }
     }
 
     /// The author's `fetch` for a path that is not a site file: it sees the

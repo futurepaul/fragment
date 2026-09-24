@@ -21,12 +21,15 @@
     input[type=text] { flex: 1; padding: .6rem .75rem; border: 1px solid var(--line); border-radius: .5rem; background: transparent; color: inherit; font: inherit; }
     button { padding: .6rem 1rem; border: 0; border-radius: .5rem; background: var(--accent); color: var(--bg); font: inherit; cursor: pointer; }
     #error { color: #b3261e; font-size: .9rem; min-height: 1.3rem; }
+    #signin { display: inline-block; margin-bottom: 1rem; color: var(--accent); font-size: .9rem; }
+    #signin[hidden] { display: none; }
   </style>
 </head>
 <body>
   <main>
     <h1>Chat</h1>
     <div id="here">connecting…</div>
+    <a id="signin" href="./__signin?return=/" hidden>sign in to be yourself here</a>
     <div id="messages"></div>
     <div id="error"></div>
   </main>
@@ -35,7 +38,8 @@
     import * as fragment from "./__fragment.js";
 
     const $ = (id) => document.getElementById(id);
-    const short = (p) => (p || "").startsWith("npub1") ? p.slice(0, 12) + "…" : "a visitor";
+    // people and agents are identities (id:…); an unsigned visitor is anon:…
+    const short = (p) => (p || "").startsWith("id:") ? "id:…" + p.slice(-6) : "a visitor";
     let me = null;
 
     function add(record) {
@@ -49,7 +53,10 @@
       window.scrollTo(0, document.body.scrollHeight);
     }
 
-    fragment.me().then((hello) => { me = hello.principal; });
+    fragment.me().then((hello) => {
+      me = hello.principal;
+      $("signin").hidden = !me.startsWith("anon:");
+    });
     fragment.presence.on((list) => {
       const others = list.length - 1;
       $("here").textContent = others <= 0 ? "just you here" : `you and ${others} other${others === 1 ? "" : "s"} here`;

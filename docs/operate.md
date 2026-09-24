@@ -54,8 +54,10 @@ cargo xtask fleet fragment-club cell list   # the fleet's Durable Objects
 
 Worker variables live in the fleet file (`vars`, or `secret_vars` for
 file-held values). Edit it, then `cargo xtask deploy fragment-club`.
-`FRAGMENT_CREATORS` lists who may create fragments until sign-in exists
-(phase 4): Paul's npub and the e2e key's.
+Sign-in is WorkOS (phase 4 slice B): `WORKOS_CLIENT_ID` in `vars`,
+`WORKOS_API_KEY` in `secret_vars`; the environment's redirect URI is
+`https://fragment.club/auth/callback`. Only people create fragments, and
+sign-up is off in WorkOS, so everyone who can sign in was invited there.
 
 Rotating the host secret: move the current value to
 `FRAGMENT_HOST_SECRET_PREVIOUS` (a new `secret_vars` entry), put a new one

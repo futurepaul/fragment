@@ -396,9 +396,8 @@ impl IdentityKind {
     }
 }
 
-/// `POST /api/identities`: register the signing key as a new person
-/// (until sign-in, phase 4 slice B), or register an agent the signer owns,
-/// with a key proof by the agent's key.
+/// `POST /api/identities`: register an agent the signer owns, with a key
+/// proof by the agent's key. People come from sign-in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Register {
@@ -439,6 +438,10 @@ pub struct IdentityView {
     /// A person's agents.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<String>,
+    /// A person's sign-ins: `{issuer, email, linkedAt}` (the email is an
+    /// attribute, never the key).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subjects: Vec<Value>,
     /// Whether this answer made it (a registration's replay answers false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<bool>,

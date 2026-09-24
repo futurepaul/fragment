@@ -33,6 +33,9 @@ pub const POLL_S: u32 = 2;
 pub const OPENROUTER_KEY: &str = "sk-or-e2e-7c1d";
 /// Blobs no branch names are kept this long here (7 days in production).
 pub const BLOB_GRACE_S: u32 = 4;
+/// The WorkOS fake's environment.
+const WORKOS_CLIENT: &str = "client_fragment_e2e";
+const WORKOS_KEY: &str = "sk_test_fragment_e2e";
 
 pub struct Suite {
     only: Option<String>,
@@ -48,8 +51,8 @@ pub struct Suite {
     pub push: fragment_fakes::push::PushService,
     org_key: String,
     host_secret: String,
-    /// Who may create fragments from the next start (`FRAGMENT_CREATORS`).
-    creators: Option<String>,
+    /// Sign-in's stand-in: people sign in through it (`Api::person`).
+    pub workos: fragment_fakes::workos::WorkOs,
     pub cli: PathBuf,
     pub scratch: PathBuf,
     /// The node's own copy of the cell project (never `cell/`, where `xtask dev` runs).
@@ -98,7 +101,12 @@ impl Suite {
             blob_grace_s: Some(BLOB_GRACE_S),
             openrouter_url: Some(self.openrouter.url.clone()),
             delivery_retry_s: Some(1),
-            creators: self.creators.clone(),
+            workos: Some(devstack::WorkOsVars {
+                client_id: self.workos.client_id.clone(),
+                api_key: WORKOS_KEY.into(),
+                api_url: Some(self.workos.url.clone()),
+            }),
+            platform_url: Some(format!("http://127.0.0.1:{}", self.port)),
             test_hooks: true,
         }
         .write_vars(&self.project)?;
@@ -201,6 +209,24 @@ impl Suite {
             .expect("run the fragment CLI")
     }
 
+    /// `fragment login` in `home`, with a person approving its key in a
+    /// browser: the CLI's pending login, a sign-in through the WorkOS fake,
+    /// the approval, then the CLI's login finishing.
+    pub fn login(&self, api: &Api, home: &Path) -> Output {
+        let pending = self.cli_json(api, home, &["login", "--no-wait", "--json"]);
+        if let Ok(p) = &pending {
+            if p["pending"] == true {
+                let npub = p["npub"].as_str().unwrap_or("").to_string();
+                let email = format!("cli-{}@e2e.test", &npub[5..17]);
+                let approved = api.sign_in(&email).and_then(|session| api.approve_key(&session, &npub));
+                if let Err(e) = approved {
+                    println!("      the browser's approval failed: {e}");
+                }
+            }
+        }
+        self.cli(api, home, &["login", "--no-browser"])
+    }
+
     /// The `data` of a `--json` CLI answer.
     pub fn cli_json(&self, api: &Api, home: &Path, args: &[&str]) -> Result<Value> {
         let out = self.cli(api, home, args);
@@ -272,7 +298,7 @@ fn main() -> Result<()> {
         push: fragment_fakes::push::PushService::start()?,
         org_key,
         host_secret: devstack::random_hex(32),
-        creators: None,
+        workos: fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY)?,
         cli,
         scratch,
         project,

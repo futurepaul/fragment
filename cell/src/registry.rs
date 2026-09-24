@@ -14,13 +14,14 @@
 //!
 //!   POST /resolve {key}                   → {id, kind, owner} (401 unknown or revoked)
 //!   POST /lookup  {who}                   → {id, kind, owner}: an `id:` or an active key
-//!   POST /people  {key}                   register the key as a new person (until sign-in)
 //!   POST /agents  {owner, key}            register an agent its owner vouches for
 //!   POST /keys    {identity, key, by}     add a key (its proof was checked by the router)
 //!   POST /revoke  {identity, key, by}     revoke one
 //!   POST /view    {identity, by}          the identity, as it or its owner sees it
 //!   POST /check   {identity, key, by}     → {active}: is `key` one of `identity`'s?
 //!   POST /test    {down}                  dev fleets: answer 503 to everything else
+//!
+//! People come from sign-in, and browsers hold sessions: `signin.rs`.
 
 use fragment_core::{npub, registry};
 use fragment_proto::{limits, ErrorCode, IdentityKind, IdentityView, KeyView};
@@ -30,6 +31,9 @@ use worker::*;
 
 use crate::error::{CellError, CellResult};
 use crate::js;
+
+mod signin;
+pub use signin::SESSION_TTL_MS;
 
 /// The fleet's one registry cell.
 pub const NAME: &str = "registry";
@@ -42,8 +46,9 @@ CREATE TABLE IF NOT EXISTS keys (
   key TEXT PRIMARY KEY, identity TEXT NOT NULL, added_at INTEGER NOT NULL, added_by TEXT NOT NULL, revoked_at INTEGER);
 CREATE INDEX IF NOT EXISTS keys_identity ON keys (identity);
 CREATE TABLE IF NOT EXISTS subjects (
-  issuer TEXT NOT NULL, subject TEXT NOT NULL, identity TEXT NOT NULL, linked_at INTEGER NOT NULL,
+  issuer TEXT NOT NULL, subject TEXT NOT NULL, identity TEXT NOT NULL, linked_at INTEGER NOT NULL, email TEXT,
   PRIMARY KEY (issuer, subject));
+CREATE INDEX IF NOT EXISTS subjects_identity ON subjects (identity);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ";
 
@@ -56,6 +61,7 @@ pub struct RegistryCell {
 impl DurableObject for RegistryCell {
     fn new(state: State, env: Env) -> Self {
         state.storage().sql().exec(SCHEMA, None).expect("the Registry schema applies");
+        state.storage().sql().exec(signin::SCHEMA, None).expect("the sign-in schema applies");
         RegistryCell { state, env }
     }
 
@@ -160,7 +166,7 @@ impl RegistryCell {
         check_key(key)?;
         match self.key_row(key)? {
             None => Err(unauthenticated(format!(
-                "the key {} belongs to no one on this fleet (register it: `fragment login`)",
+                "the key {} belongs to no one on this fleet (add it to you: `fragment login`)",
                 npub::encode(key)
             ))),
             Some((_, true)) => Err(unauthenticated(format!("the key {} was revoked", npub::encode(key)))),
@@ -192,6 +198,7 @@ impl RegistryCell {
             created_at: created_at.first().and_then(|r| r["created_at"].as_i64()).unwrap_or(0),
             keys,
             agents,
+            subjects: self.subjects_of(&facts.id)?,
             created,
         })
     }
@@ -213,24 +220,6 @@ impl RegistryCell {
             vec![key.into(), id.as_str().into(), SqlStorageValue::Integer(now), added_by.into()],
         )?;
         Ok(Facts { id, kind, owner: owner.map(str::to_string) })
-    }
-
-    fn register_person(&self, key: &str) -> CellResult<IdentityView> {
-        check_key(key)?;
-        match self.key_row(key)? {
-            Some((_, true)) => Err(unauthenticated(format!("the key {} was revoked", npub::encode(key)))),
-            Some((id, false)) => {
-                let facts = self.must_facts(&id)?;
-                if facts.kind != IdentityKind::Person {
-                    return Err(conflict("this key belongs to an agent"));
-                }
-                self.view(&facts, Some(false))
-            }
-            None => {
-                let facts = self.make(IdentityKind::Person, None, key, "")?;
-                self.view(&facts, Some(true))
-            }
-        }
     }
 
     fn register_agent(&self, body: AgentBody) -> CellResult<IdentityView> {
@@ -303,9 +292,11 @@ impl RegistryCell {
             Some((_, true)) => return self.view(&facts, Some(false)),
             Some((_, false)) => {}
         }
+        // an agent always keeps a key; a person who signs in may hold none
         let active = self.count("SELECT COUNT(*) AS n FROM keys WHERE identity = ? AND revoked_at IS NULL", vec![facts.id.as_str().into()])?;
-        if active <= 1 {
-            return Err(CellError::invalid("an identity keeps at least one key: add the new key before revoking the last"));
+        let signs_in = facts.kind == IdentityKind::Person && self.signs_in(&facts.id)?;
+        if active <= 1 && !signs_in {
+            return Err(CellError::invalid("an agent keeps at least one key: add the new key before revoking the last"));
         }
         self.exec("UPDATE keys SET revoked_at = ? WHERE key = ?", vec![SqlStorageValue::Integer(js::now_ms()), body.key.as_str().into()])?;
         self.view(&facts, Some(true))
@@ -349,6 +340,9 @@ impl RegistryCell {
         if self.down()? {
             return Err(CellError::new(ErrorCode::RegistryUnavailable, "the registry is down (a test hook)"));
         }
+        if let Some(v) = self.route_signin(&path, body.clone())? {
+            return Ok(v);
+        }
         match path.as_str() {
             "/resolve" => {
                 let b: KeyBody = from(body)?;
@@ -357,10 +351,6 @@ impl RegistryCell {
             "/lookup" => {
                 let b: WhoBody = from(body)?;
                 Ok(self.lookup(&b.who)?.json())
-            }
-            "/people" => {
-                let b: KeyBody = from(body)?;
-                to(self.register_person(&b.key)?)
             }
             "/agents" => to(self.register_agent(from(body)?)?),
             "/keys" => to(self.add_key(from(body)?)?),

@@ -292,20 +292,6 @@ without a delete condition is unfinished design, not debt.
   `cancelling_kills_the_children_of_an_execed_command` with the pid
   file removed.
 
-## Until sign-in, a key registers as its own person
-
-- **Observed:** phase 4 slice A. `POST /api/identities {kind: person}`
-  makes a new person for any key that signs it, on every fleet
-  (`FRAGMENT_CREATORS` still decides who creates fragments). It keeps
-  today's rule that anyone may sign and be invited, with identities
-  underneath.
-- **Risk:** anyone can mint any number of persons; nothing ties a person
-  to a human.
-- **First proof:** someone registering many keys on fragment.club.
-- **Delete when:** slice B: a person comes from a WorkOS sign-in
-  (`(issuer, subject)`), and a CLI key joins a person only through the
-  browser approval; the e2e makes people through the WorkOS fake.
-
 ## A socket opened with a key outlives that key's revocation
 
 - **Observed:** phase 4 slice A. Every request resolves its key live, so

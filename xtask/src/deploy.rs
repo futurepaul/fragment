@@ -38,8 +38,8 @@ struct Fleet {
 
 #[derive(Deserialize)]
 struct E2e {
-    /// A file holding the e2e's secret key (hex); the fleet must list its
-    /// npub in `FRAGMENT_CREATORS`.
+    /// A file holding the e2e's secret key (hex); a person on the fleet
+    /// approved it once (`/cli?key=<npub>`, signed in).
     key: String,
     /// A file holding an OpenRouter key for the live AI check (optional).
     openrouter_key: Option<String>,

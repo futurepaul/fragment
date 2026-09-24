@@ -41,23 +41,26 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
 
-    // registering: until sign-in, a key makes its own person
+    // people come from sign-in; a key joins the person who approves it
     let stray = Keys::generate();
     let r = api.signed(&stray, "GET", "/api/fragments", None)?;
-    s.ok("a key no one registered is 401, saying how to register", r.status == 401 && r.message().contains("fragment login"), &r);
-    let r = api.unsigned("POST", "/api/identities", Some(&json!({ "kind": "person" })))?;
-    s.ok("registering is signed", r.status == 401, &r);
+    s.ok("a key no one approved is 401, saying how to add it", r.status == 401 && r.message().contains("fragment login"), &r);
     let r = api.signed(&stray, "POST", "/api/identities", Some(&json!({ "kind": "person" })))?;
+    s.ok("a key does not make a person: people sign in", r.status == 400 && r.message().contains("sign in"), &r);
+    let r = api.signed(&stray, "POST", "/api/identities/claim", None)?;
+    s.ok("claiming before anyone approved is pending (202)", r.status == 202 && r.body["pending"] == true, &r);
+    let session = api.sign_in("stray@e2e.test")?;
+    let r = api.approve(&session, &stray)?;
     let stray_id = r.body["id"].as_str().unwrap_or("").to_string();
+    s.ok("approved in a signed-in browser, the key's claim joins it to that person", r.status == 200 && r.body["claimed"] == true && npub::is_identity(&stray_id), &r);
+    let r = api.signed(&stray, "POST", "/api/identities/claim", None)?;
+    s.ok("claiming again answers the same person", r.status == 200 && r.body["id"] == stray_id.as_str() && r.body["claimed"] == false, &r);
+    let r = api.signed(&stray, "GET", "/api/identities/me", None)?;
     s.ok(
-        "the key registers as a new person holding it",
-        r.status == 200 && npub::is_identity(&stray_id) && r.body["kind"] == "person" && r.body["created"] == true && keys_of(&r.body).len() == 1,
+        "the person is keyed by their sign-in, and the email is shown beside it",
+        r.status == 200 && r.body["id"] == stray_id.as_str() && r.body["kind"] == "person" && r.body["subjects"][0]["email"] == "stray@e2e.test",
         &r,
     );
-    let r = api.signed(&stray, "POST", "/api/identities", Some(&json!({ "kind": "person" })))?;
-    s.ok("registering again answers the same person", r.status == 200 && r.body["id"] == stray_id.as_str() && r.body["created"] == false, &r);
-    let r = api.signed(&stray, "GET", "/api/identities/me", None)?;
-    s.ok("a signed request knows who it is", r.status == 200 && r.body["id"] == stray_id.as_str(), &r);
     let r = api.signed(&stray, "POST", "/api/identities", Some(&json!({ "kind": "robot" })))?;
     s.ok("an unknown kind is 400", r.status == 400, &r);
 
@@ -108,12 +111,10 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("no grant was rewritten: the members are the same identities", after.body["members"] == before.body["members"], &after);
     let r = api.signed(&paul, "GET", "/api/fragments", None)?;
     s.ok("the revoked key is 401 from the next request", r.status == 401 && r.message().contains("revoked"), &r);
-    let r = api.signed(&paul, "POST", "/api/identities", Some(&json!({ "kind": "person" })))?;
-    s.ok("a revoked key cannot register again", r.status == 401, &r);
+    let r = api.signed(&paul, "POST", "/api/identities/claim", None)?;
+    s.ok("a revoked key cannot be claimed again", r.status == 401, &r);
     let r = api.signed(&new, "POST", add, Some(&json!({ "proof": api.proof(&paul, "POST", add, &new) })))?;
     s.ok("a revoked key stays revoked", r.status == 409, &r);
-    let r = api.signed(&new, "DELETE", &format!("/api/identities/me/keys/{}", npub::encode(new.pubkey_hex())), None)?;
-    s.ok("the last key cannot be revoked", r.status == 400, &r);
     let r = api.signed(&new, "DELETE", &format!("/api/identities/me/keys/{old_hex}"), None)?;
     s.ok("revoking again changes nothing", r.status == 200 && r.body["created"] == false, &r);
     let r = api.signed(&friend, "DELETE", &format!("/api/identities/{paul_id}/keys/{}", new.pubkey_hex()), None)?;
@@ -146,6 +147,8 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an agent does not add keys to itself", r.status == 403, &r);
     let r = api.signed(&owner, "GET", "/api/identities/me", None)?;
     s.ok("the owner's identity lists the agent", r.body["agents"] == json!([agent_id]), &r);
+    let r = api.signed(&owner, "DELETE", &format!("/api/identities/{agent_id}/keys/{}", agent.pubkey_hex()), None)?;
+    s.ok("an agent's last key cannot be revoked", r.status == 400, &r);
 
     let room = s.name("room");
     let c = s.create(api, &friend, &room)?;
@@ -178,8 +181,8 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
 
     // the CLI: login registers, whoami says who, rotate keeps every grant
     let home = s.dir("identities-home");
-    let out = s.cli(api, &home, &["login"]);
-    s.ok("fragment login registers the key", out.status.success() && String::from_utf8_lossy(&out.stdout).contains("id:"), String::from_utf8_lossy(&out.stderr));
+    let out = s.login(api, &home);
+    s.ok("fragment login, approved in a browser, adds the key to the person", out.status.success() && String::from_utf8_lossy(&out.stdout).contains("id:"), String::from_utf8_lossy(&out.stderr));
     let me = s.cli_json(api, &home, &["whoami", "--json"])?;
     let cli_id = me["identity"]["id"].as_str().unwrap_or("").to_string();
     let first = s.cli_keys(&home).expect("the CLI logged in");

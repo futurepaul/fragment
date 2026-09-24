@@ -8,39 +8,6 @@ use serde_json::json;
 use crate::api::{now_s, Api, Call};
 use crate::Suite;
 
-/// Until sign-in exists, a fleet lets only the keys it lists create
-/// fragments (`FRAGMENT_CREATORS`); a list that does not parse lets nobody.
-/// Runs last: it restarts the node twice.
-pub fn creators(s: &mut Suite) -> Result<()> {
-    if !s.section("creators") {
-        return Ok(());
-    }
-    if s.node.is_some() {
-        s.stop()?;
-    }
-    let (invited, other) = (Keys::generate(), Keys::generate());
-    s.creators = Some(format!("{}, {}", fragment_core::npub::encode(other.pubkey_hex()), invited.pubkey_hex()));
-    let api = s.start(false, true)?;
-    api.register(&invited)?;
-    let name = s.name("invited");
-    let r = api.create(&invited, &name)?;
-    s.ok("a listed key creates a fragment (npubs and hex both name keys)", r.status == 200, &r);
-    let stranger = api.person()?;
-    let r = api.create(&stranger, &s.name("uninvited"))?;
-    s.ok("anyone else is refused, saying why", r.status == 403 && r.message().contains("by invitation"), &r);
-    let r = api.signed(&invited, "PUT", &format!("/api/f/{name}/members/{}", stranger.pubkey_hex()), Some(&json!({ "role": "editor" })))?;
-    let joined = api.status(&stranger, &name)?;
-    s.ok("the list governs creating only: a stranger can still be a member", r.status == 200 && joined.status == 200, &joined);
-    s.stop()?;
-    s.creators = Some("npub1notakey".into());
-    let api = s.start(false, true)?;
-    let r = api.create(&invited, &s.name("misconfigured"))?;
-    s.ok("a list that does not parse lets nobody create", r.status == 500 && r.message().contains("FRAGMENT_CREATORS"), &r);
-    s.stop()?;
-    s.creators = None;
-    Ok(())
-}
-
 pub fn auth(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("auth") {
         return Ok(());
@@ -200,10 +167,10 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the supervisor's create is not a public route", r.status == 404, &r);
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}"), None)?;
     s.ok("GET on a fragment's root is 404", r.status == 404, &r);
-    let r = api.call(Call { method: "GET", url: format!("http://evil.example.com:{}/", api.port), ..Call::default() })?;
+    let r = api.call(Call { method: "GET", url: format!("http://evil.example.com:{}/index.html", api.port), ..Call::default() })?;
     s.ok("a host outside the suffix is the platform, not a fragment", r.status == 404 && r.message().contains("no route"), &r);
     for host in ["Bad_Name", "a.b"] {
-        let r = api.call(Call { method: "GET", url: format!("http://{host}.{}:{}/", crate::SUFFIX, api.port), ..Call::default() })?;
+        let r = api.call(Call { method: "GET", url: format!("http://{host}.{}:{}/index.html", crate::SUFFIX, api.port), ..Call::default() })?;
         s.ok(&format!("host {host}.<suffix> is not a fragment"), r.status == 404 && r.message().contains("no route"), &r);
     }
     let r = api.call(Call {

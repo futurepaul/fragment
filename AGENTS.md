@@ -46,19 +46,22 @@ debt ledger).
 - `cargo xtask e2e [--only <section>]`: builds `cell/` and the CLI (with
   its `computer` feature), then
   runs `crates/e2e` against a fresh `celld dev` node and the in-process
-  code.storage fake (sections: auth, create, lockdown, members, identities, secrets,
+  code.storage fake (sections: auth, create, lockdown, members, identities, signin, secrets,
   files, deploy, ops, public, site, watch, schemas, channels, live,
   routes, cli, browser, jobs, triggers, appfiles, blobs, notes, push,
-  ai, agents, chat, computer, sync, restart, pathmode, creators). The browser and notes sections drive headless
+  ai, agents, chat, computer, sync, restart, pathmode). The browser and notes sections drive headless
   Chrome (`CHROME_BIN` to choose one); `triggers` waits for a cron
   minute (about a minute). The node runs from a staged copy of the cell
   (`target/e2e/cell`), so the e2e and `cargo xtask dev` can run at once.
 - `cargo xtask dev [--clean]`: the dev stack in the foreground: the cell
   on :8790 with fragments at `http://<name>.fragment.localhost:8790/`,
   agents (`agent/`, goose's loop) on :8793 with their model key from the
-  file `OPENROUTER_API_KEY_FILE` names, and the code.storage fake on :8792 (state in `target/devstack/`; its org
-  key and the host secret are made there on first run). Point the CLI at
-  it with `FRAGMENT_HOST=http://127.0.0.1:8790`. Dev fleets let jobs
+  file `OPENROUTER_API_KEY_FILE` names, the code.storage fake on :8792 (state in `target/devstack/`; its org
+  key and the host secret are made there on first run), and sign-in at
+  http://127.0.0.1:8790/ through the WorkOS fake on :8794 (any email), or
+  a real WorkOS environment when `WORKOS_CLIENT_ID_FILE` and
+  `WORKOS_API_KEY_FILE` name its files. Point the CLI at it with
+  `FRAGMENT_HOST=http://127.0.0.1:8790` and run `fragment login` once. Dev fleets let jobs
   fetch local addresses (`FRAGMENT_EGRESS_LOCAL=allow`).
 - `cargo xtask try <todo|inbox|notes|chat> [name]` (with `cargo xtask dev` running):
   creates and deploys a fragment from a template under

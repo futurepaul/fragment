@@ -8,6 +8,15 @@ use anyhow::{Context, Result};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
+pub fn url_enc(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 pub fn now_s() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).expect("clock after 1970").as_secs() as i64
 }
@@ -162,18 +171,59 @@ impl Api {
         })
     }
 
-    /// Registers `keys` as a new person (phase 4 slice A: until sign-in, a
-    /// key makes its own person) and answers the identity.
-    pub fn register(&self, keys: &Keys) -> Result<String> {
-        let r = self.signed(keys, "POST", "/api/identities", Some(&json!({ "kind": "person" })))?;
-        anyhow::ensure!(r.status == 200, "registering a person: {r}");
-        Ok(r.body["id"].as_str().context("a registration answers an id")?.to_string())
+    /// A GET to another service (the WorkOS fake), as it is.
+    pub fn external(&self, url: &str) -> Result<Reply> {
+        let resp = self.http.get(url).send().with_context(|| format!("GET {url}"))?;
+        let status = resp.status().as_u16();
+        let headers = resp.headers().clone();
+        let bytes = resp.bytes()?.to_vec();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        Ok(Reply { status, body: serde_json::from_str(&text).unwrap_or(Value::Null), text, bytes, headers })
     }
 
-    /// A new key, registered as a new person: someone who signs.
+    /// A browser signing in as `email` through WorkOS (the fake): the
+    /// platform session's cookie value.
+    pub fn sign_in(&self, email: &str) -> Result<String> {
+        let path = format!("/auth/login?return=/&login_hint={}", url_enc(email));
+        let start = self.unsigned("GET", &path, None)?;
+        anyhow::ensure!(start.status == 302, "GET {path}: {start}");
+        let bound = start.cookies().into_iter().find(|c| c.starts_with("fragment_login=")).context("a login cookie")?;
+        let back = self.external(&start.header("location"))?;
+        anyhow::ensure!(back.status == 302, "WorkOS (fake) authorize: {back}");
+        let done = self.call(Call { method: "GET", url: back.header("location"), cookie: Some(bound), ..Call::default() })?;
+        anyhow::ensure!(done.status == 302, "the callback: {done}");
+        let session = done.cookies().into_iter().find_map(|c| c.strip_prefix("fragment_session=").map(str::to_string)).context("a session cookie")?;
+        Ok(session)
+    }
+
+    /// The signed-in browser approves a CLI key (`/cli`'s form).
+    pub fn approve_key(&self, session: &str, npub: &str) -> Result<Reply> {
+        self.call(Call {
+            method: "POST",
+            url: format!("{}/cli/approve", self.base),
+            body: Some(format!("key={npub}").into_bytes()),
+            content_type: Some("application/x-www-form-urlencoded"),
+            cookie: Some(format!("fragment_session={session}")),
+            extra: vec![("origin", self.base.clone())],
+            ..Call::default()
+        })
+    }
+
+    /// The signed-in browser approves `keys`, and the key claims it.
+    pub fn approve(&self, session: &str, keys: &Keys) -> Result<Reply> {
+        let r = self.approve_key(session, &fragment_core::npub::encode(keys.pubkey_hex()))?;
+        anyhow::ensure!(r.status == 200, "approving a key: {r}");
+        self.signed(keys, "POST", "/api/identities/claim", None)
+    }
+
+    /// Someone who signs: a person signed in through WorkOS (the fake),
+    /// with a new CLI key they approved.
     pub fn person(&self) -> Result<Keys> {
         let keys = Keys::generate();
-        self.register(&keys)?;
+        let email = format!("p-{}@e2e.test", &keys.pubkey_hex()[..12]);
+        let session = self.sign_in(&email)?;
+        let claimed = self.approve(&session, &keys)?;
+        anyhow::ensure!(claimed.status == 200 && claimed.body["claimed"] == true, "claiming an approved key: {claimed}");
         Ok(keys)
     }
 

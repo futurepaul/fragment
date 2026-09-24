@@ -110,7 +110,7 @@ pub fn computer(s: &mut Suite, api: &Api) -> Result<()> {
     let agents = s.start_agents(true)?;
     std::env::set_var("FRAGMENT_AGENTS", &agents.base);
     let home = s.dir("computer-home");
-    s.cli(api, &home, &["login"]);
+    s.login(api, &home);
     let owner = s.cli_keys(&home).expect("the CLI logged in");
     let wait = Duration::from_secs(30);
 

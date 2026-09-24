@@ -34,6 +34,10 @@ const WORKER_BUILD_VERSION: &str = "0.8.5";
 const DEV_PORT: u16 = 8790;
 const DEV_CODESTORAGE_PORT: u16 = 8792;
 const DEV_AGENT_PORT: u16 = 8793;
+const DEV_WORKOS_PORT: u16 = 8794;
+/// The WorkOS fake's environment in dev.
+const DEV_WORKOS_CLIENT: &str = "client_fragment_dev";
+const DEV_WORKOS_KEY: &str = "sk_test_fragment_dev";
 const DEV_ORG: &str = "fragment-dev";
 
 /// A command as errors show it: the program and its arguments only
@@ -101,6 +105,25 @@ fn dev(args: &[String]) -> Result<()> {
         port: DEV_CODESTORAGE_PORT,
         ..Default::default()
     })?;
+    // sign-in: a real WorkOS environment when its files are named (its
+    // redirect URI must include http://127.0.0.1:8790/auth/callback), else the fake
+    let read = |var: &str| -> Result<Option<String>> {
+        match std::env::var_os(var) {
+            Some(path) => Ok(Some(std::fs::read_to_string(&path).with_context(|| format!("reading {}", Path::new(&path).display()))?.trim().to_string())),
+            None => Ok(None),
+        }
+    };
+    let (workos, _workos_fake) = match (read("WORKOS_CLIENT_ID_FILE")?, read("WORKOS_API_KEY_FILE")?) {
+        (Some(client_id), Some(api_key)) => (devstack::WorkOsVars { client_id, api_key, api_url: None }, None),
+        _ => {
+            let fake = fragment_fakes::workos::WorkOs::start_on(DEV_WORKOS_PORT, DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
+            (devstack::WorkOsVars { client_id: DEV_WORKOS_CLIENT.into(), api_key: DEV_WORKOS_KEY.into(), api_url: Some(fake.url.clone()) }, Some(fake))
+        }
+    };
+    let workos_label = match &workos.api_url {
+        Some(u) => format!("{u} (the fake)"),
+        None => format!("WorkOS {}", workos.client_id),
+    };
     devstack::Fleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
         codestorage_org: DEV_ORG.into(),
@@ -114,7 +137,9 @@ fn dev(args: &[String]) -> Result<()> {
         blob_grace_s: None,
         openrouter_url: None,
         delivery_retry_s: None,
-        creators: None,
+        workos: Some(workos),
+        // the CLI's host: sign-in and approvals happen where it points
+        platform_url: Some(format!("http://127.0.0.1:{DEV_PORT}")),
         test_hooks: false,
     }
     .write_vars(&devstack::cell_dir())?;
@@ -141,6 +166,7 @@ fn dev(args: &[String]) -> Result<()> {
     println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
     println!("  agents:       {} (POST /api/agents, signed)", agents.base);
     println!("  code.storage: {} (the fake)", fake.url);
+    println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
     println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");
     let status = node.wait()?;
     println!("celld dev exited: {status}");
@@ -166,6 +192,14 @@ fn try_template(args: &[String]) -> Result<()> {
     let name = args.get(1).cloned().unwrap_or_else(|| format!("{tpl}-{}", devstack::random_hex(2)));
     let dir = root.join("target/devstack/try");
     std::fs::create_dir_all(&dir)?;
+    // your CLI key must be a person's on the dev fleet (phase 4: people sign in)
+    let who = Command::new(&cli).args(["whoami"]).env("FRAGMENT_HOST", &host).output()?;
+    if !who.status.success() {
+        bail!(
+            "your CLI key is no one's on the dev stack yet. Once:\n  FRAGMENT_HOST={host} {} login\n(the dev stack signs in through the WorkOS fake: any email)",
+            cli.display()
+        );
+    }
     let out = Command::new(&cli).args(["init", &name, "--template", tpl]).env("FRAGMENT_HOST", &host).current_dir(&dir).output()?;
     let text = String::from_utf8_lossy(&out.stdout);
     print!("{text}");

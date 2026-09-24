@@ -41,11 +41,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Make a nostr key (or use the one you have) and register it with the
-    /// host as you: a new person (--force makes a new key and a new person)
+    /// Make a nostr key (or use the one you have) and add it to you: sign
+    /// in on the host in a browser and approve it there (--force makes a
+    /// new key)
     Login {
         #[arg(long)]
         force: bool,
+        /// Print the approval link and return (run `fragment login` again after approving)
+        #[arg(long)]
+        no_wait: bool,
+        /// Print the link instead of opening a browser
+        #[arg(long)]
+        no_browser: bool,
     },
     /// Who the host says you are: your identity, this key, your other keys
     Whoami,
@@ -643,25 +650,54 @@ fn run(cli: Cli) -> Result<()> {
     let j = cli.json || json_env_flag();
 
     match cli.cmd {
-        Cmd::Login { force } => {
+        Cmd::Login { force, no_wait, no_browser } => {
             // the key this machine signs with: the one it has, or a new one
             let key_existed = !force && load_config().secret_key.is_some();
             if !key_existed {
                 save_secret_key(&hex::encode(auth::Identity::generate().secret))?;
             }
-            // until sign-in (phase 4 slice B), a key registers as its own person
             let c = require_client(&cli.host, cli.verbose)?;
-            let v = c.call(c.post_json("/api/identities", &json!({ "kind": "person" }))?).map_err(|e| {
-                anyhow!("{e}\nthe key is saved in {}; run `fragment login` again to register it", config_path().display())
-            })?;
+            let claim = || -> Result<Option<Value>> {
+                let r = c.post_json("/api/identities/claim", &json!({}))?;
+                match r.status {
+                    200 => Ok(Some(r.json()?)),
+                    202 => Ok(None),
+                    _ => c.call(r).map(Some),
+                }
+            };
+            let mut done = claim()?;
+            if done.is_none() {
+                let npub = c.id.npub();
+                let url = format!("{}/cli?key={npub}", c.host);
+                if no_wait {
+                    if j {
+                        ok_exit(&json!({ "npub": npub, "pending": true, "approve": url }));
+                    }
+                    println!("approve this key in a browser where you are signed in:\n  {url}");
+                    println!("its key ends in {}; then run `fragment login` again", &npub[npub.len() - 8..]);
+                    return Ok(());
+                }
+                eprintln!("sign in and approve this key:\n  {url}\nthe page should show a key ending in {}", &npub[npub.len() - 8..]);
+                if !no_browser {
+                    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+                    let _ = std::process::Command::new(opener).arg(&url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+                }
+                let t0 = std::time::Instant::now();
+                while done.is_none() {
+                    if t0.elapsed() > std::time::Duration::from_secs(600) {
+                        anyhow::bail!("no approval in ten minutes; run `fragment login` again");
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    done = claim()?;
+                }
+            }
+            let v = done.expect("claimed");
             if j {
                 // never echo the key itself
-                ok_exit(&json!({ "npub": c.id.npub(), "id": v["id"], "host": c.host, "config": config_path().display().to_string(), "existing": key_existed, "created": v["created"] }));
+                ok_exit(&json!({ "npub": c.id.npub(), "id": v["id"], "host": c.host, "config": config_path().display().to_string(), "existing": key_existed }));
             }
-            let how = if v["created"] == true { "registered" } else { "already registered" };
-            println!("logged in as {} ({how} on {})", v["id"].as_str().unwrap_or(""), c.host);
+            println!("logged in as {} on {}", v["id"].as_str().unwrap_or(""), c.host);
             println!("key: {}", c.id.npub());
-            println!("config: {}", config_path().display());
             return Ok(());
         }
         Cmd::Whoami | Cmd::Keys { sub: None | Some(KeysCmd::List) } => {
@@ -1554,13 +1590,20 @@ fn run(cli: Cli) -> Result<()> {
                 if let Some(t) = ttl {
                     body["ttlS"] = json!(t);
                 }
-                let v = c.call(c.post_json(&format!("/api/f/{name}/invites"), &body)?)?;
+                let mut v = c.call(c.post_json(&format!("/api/f/{name}/invites"), &body)?)?;
+                let token = v["token"].as_str().unwrap_or("").to_string();
+                // the link a person opens in a browser (they sign in, then join)
+                let status = c.call(c.get(&format!("/api/f/{name}/status"))?)?;
+                let link = status["urls"]["canonical"].as_str().map(|base| format!("{base}__join?invite={token}"));
+                v["link"] = json!(link);
                 if j {
                     ok_exit(&v);
                 }
-                let token = v["token"].as_str().unwrap_or("");
                 println!("invite {} ({role}, {uses} use{})", v["id"].as_str().unwrap_or(""), if uses == 1 { "" } else { "s" });
-                println!("join with: fragment join {name} {token}");
+                if let Some(link) = link {
+                    println!("open in a browser: {link}");
+                }
+                println!("or from a CLI: fragment join {name} {token}");
             }
             InviteCmd::List { name } => {
                 let v = c.call(c.get(&format!("/api/f/{name}/invites"))?)?;

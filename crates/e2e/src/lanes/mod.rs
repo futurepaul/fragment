@@ -14,6 +14,7 @@ mod members;
 mod notes;
 mod plane;
 mod restart;
+mod signin;
 mod site;
 mod sync;
 
@@ -28,6 +29,7 @@ pub fn run(s: &mut Suite, api: Api) -> Result<()> {
     control::lockdown(s, &api)?;
     members::members(s, &api)?;
     identities::identities(s, &api)?;
+    signin::signin(s, &api)?;
     members::secrets(s, &api)?;
     plane::files(s, &api)?;
     plane::deploy(s, &api)?;
@@ -54,6 +56,5 @@ pub fn run(s: &mut Suite, api: Api) -> Result<()> {
     sync::folder_sync(s, &api)?;
     let api = restart::restart(s, api)?;
     restart::pathmode(s, api)?;
-    control::creators(s)?;
     Ok(())
 }

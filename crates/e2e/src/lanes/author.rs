@@ -222,7 +222,7 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     let home = s.dir("cli-home");
-    s.cli(api, &home, &["login"]);
+    s.login(api, &home);
     let keys = s.cli_keys(&home).expect("the CLI logged in");
     let (name, c) = chat(s, api, &keys, "cli")?;
     let r = s.cli_json(api, &home, &["call", &name, "say", "--input", r#"{"text":"from the cli"}"#, "--id", "cli-1", "--json"])?;

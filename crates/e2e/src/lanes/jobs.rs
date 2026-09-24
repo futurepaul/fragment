@@ -261,7 +261,7 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
 
     // the CLI
     let home = s.dir("jobs-cli");
-    s.cli(api, &home, &["login"]);
+    s.login(api, &home);
     let cli = s.cli_keys(&home).expect("the CLI logged in");
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", cli.pubkey_hex()), Some(&json!({ "role": "editor" })))?;
     let wrong_id = wrong["id"].as_i64().unwrap_or(0).to_string();
@@ -351,6 +351,8 @@ pub fn triggers(s: &mut Suite, api: &Api) -> Result<()> {
     // a channel trigger that feeds itself stops at the hop budget
     api.op(&owner, &name, "ping", "loop", json!({}))?;
     let looped = s.eventually(long, || runs(api, &owner, &name, "&op=ping").iter().any(|r| r["status"] == "blocked"));
+    // the blocked 17th is recorded while the 16th may still be finishing
+    s.eventually(long, || !runs(api, &owner, &name, "&op=ping").iter().any(|r| r["status"] == "running" || r["status"] == "queued"));
     let pings = runs(api, &owner, &name, "&op=ping");
     s.ok(
         "a trigger loop runs 16 hops, then is blocked",
