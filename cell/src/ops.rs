@@ -254,7 +254,8 @@ impl FragmentCell {
 
     /// `POST /api/f/<name>/test/<hook>`, owner, on fleets with test hooks
     /// only: `ledger {ms | null}` sets (or clears) a shorter ledger window;
-    /// `age {ms}` forgets write keys as if `ms` had passed.
+    /// `age {ms}` forgets write keys as if `ms` had passed; `members
+    /// {fill}` adds placeholder members until there are `fill`.
     pub(crate) fn test_hook(&self, caller: &Caller, hook: &str, body: &Value) -> CellResult<Response> {
         assert!(self.cfg.test_hooks, "the route answers only on fleets with test hooks");
         self.require(caller, false, Role::Owner)?;
@@ -273,6 +274,10 @@ impl FragmentCell {
                 let ms = body["ms"].as_i64().filter(|ms| *ms >= 0).ok_or_else(|| CellError::invalid("ms is a duration"))?;
                 self.trim_writes_before(js::now_ms() + ms - crate::files::WRITES_KEPT_MS)?;
                 json!({ "aged": ms })
+            }
+            "members" => {
+                let fill = body["fill"].as_u64().ok_or_else(|| CellError::invalid("fill is a count"))?;
+                json!({ "members": self.fill_members(fill)? })
             }
             _ => return Err(CellError::new(ErrorCode::NotFound, format!("no test hook {hook:?}"))),
         };

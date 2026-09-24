@@ -32,7 +32,7 @@
 //!   POST   /api/replay  POST /api/pause   editor
 //!   GET    /api/triggers                  viewer
 //!   POST   /api/inbox                     the inbox token (no signature)
-//!   POST   /api/test/ledger|age           owner, on fleets with test hooks only (ops.rs)
+//!   POST   /api/test/ledger|age|members   owner, on fleets with test hooks only (ops.rs)
 //!   *      /serve/<path>                  the site, `__tree`, `__file`, `__op`, `__watch`
 //!   POST   /job/advance|effect|finish     a run's Workflow (jobs.rs); never routed from outside
 //!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside

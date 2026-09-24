@@ -4,6 +4,7 @@
 use anyhow::Result;
 use fragment_core::npub;
 use fragment_nip98::Keys;
+use fragment_proto::limits;
 use serde_json::json;
 
 use crate::api::{self, Api};
@@ -120,6 +121,29 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
         ["member.set", "invite.created", "member.joined", "invite.revoked", "member.removed"].iter().all(|k| kinds.contains(k)),
         format!("{kinds:?}"),
     );
+
+    // the member cap holds for invites as it does for grants
+    let r = api.signed(&owner, "POST", &path("invites"), Some(&json!({ "role": "viewer", "uses": 5 })))?;
+    let (open, open_id) = (r.body["token"].as_str().unwrap_or("").to_string(), r.body["id"].as_str().unwrap_or("").to_string());
+    let below = limits::MEMBERS_MAX as u64 - 1;
+    let r = api.signed(&owner, "POST", &path("test/members"), Some(&json!({ "fill": below })))?;
+    s.ok("(a test hook fills the fragment to one below the member cap)", r.status == 200 && r.body["members"] == below, &r);
+    let r = join(&erin, &open)?;
+    s.ok("an invite admits the member that reaches the cap", r.status == 200 && r.body["joined"] == true, &r);
+    let frank = api.person()?;
+    let r = join(&frank, &open)?;
+    s.ok(
+        "at the member cap an invite is refused",
+        r.status == 400 && r.message() == format!("a fragment has at most {} members", limits::MEMBERS_MAX),
+        &r,
+    );
+    let r = api.signed(&owner, "GET", &path("invites"), None)?;
+    let uses_left = r.body["invites"].as_array().and_then(|a| a.iter().find(|i| i["id"] == open_id.as_str())).map(|i| i["usesLeft"].clone());
+    s.ok("and the refusal spends no use of it", uses_left == Some(json!(4)), &r);
+    let r = api.signed(&owner, "GET", &path("members"), None)?;
+    s.ok("the fragment holds exactly the cap", r.body["members"].as_array().map(Vec::len) == Some(limits::MEMBERS_MAX), r.status);
+    let r = api.status(&frank, &name)?;
+    s.ok("the refused person is not a member", r.status == 403, &r);
     Ok(())
 }
 

@@ -30,7 +30,7 @@ the node's environment, where only `KEYS` reads them (below).
 | `WORKOS_CLIENT_ID` | sign-in: fragment's WorkOS environment; unset, sign-in answers 500 |
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake) |
 | `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (default: the hostname suffix itself, e.g. https://fragment.club) |
-| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503; `GET /api/test/env` answers the Worker variables; `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens through `KEYS` as that fragment; and, the owner of a fragment, `POST /api/f/{name}/test/ledger {ms \| null}` shortens (or restores) its ledger's window, `test/age {ms}` forgets its write keys as if `ms` had passed |
+| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503; `GET /api/test/env` answers the Worker variables; `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens through `KEYS` as that fragment; and, the owner of a fragment, `POST /api/f/{name}/test/ledger {ms \| null}` shortens (or restores) its ledger's window, `test/age {ms}` forgets its write keys as if `ms` had passed, `test/members {fill}` adds placeholder members until there are `fill` |
 
 The node's environment (Fly secrets on a fleet; `devstack` in dev and
 the e2e), read by `KEYS`, the native service in our celld fork
@@ -191,7 +191,7 @@ A path with a space in it arrives encoded (`return=%2Fa%2520b` returns to
 | `POST /api/f/{name}/invites` | owner | `{role, uses? (1), ttlS? (7 days, at most 30)}` → `{id, role, usesLeft, expiresAt, createdBy, token}`; the token is shown once |
 | `GET /api/f/{name}/invites` | owner | → `{invites: [...]}` without tokens |
 | `DELETE /api/f/{name}/invites/{id}` | owner | → `{ok, revoked}` |
-| `POST /api/f/{name}/join` | any signer | `{token}` → `{name, role, joined}`; a stronger existing role is kept |
+| `POST /api/f/{name}/join` | any signer | `{token}` → `{name, role, joined}`; a stronger existing role is kept; a fragment at its 1000 members is 400, and the invite keeps its use |
 | `PUT /api/f/{name}/visibility` | owner | `{visibility}` → `{ok, visibility}` |
 | `POST /api/f/{name}/rotate` | owner | `{scopes?: [inbox, view, webhook]}` → `{ok, inbox_token, view_token, webhook_secret, rotated}`; a new view token closes link holders' feeds |
 | `PUT /api/f/{name}/secrets/{KEY}` | editor | raw body (at most 64 KiB) → `{ok, name}`; sealed (AES-256-GCM, key HKDF'd from the host secret and the fragment's npub) |
