@@ -15,4 +15,5 @@ pub mod schema;
 pub mod secrets;
 pub mod webpush;
 pub mod site;
+pub mod tools;
 pub mod webhook;

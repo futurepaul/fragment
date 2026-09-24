@@ -54,6 +54,10 @@ pub struct Suite {
     pub scratch: PathBuf,
     /// The node's own copy of the cell project (never `cell/`, where `xtask dev` runs).
     project: PathBuf,
+    /// The agents' node (phase 5), started by the lanes that need it.
+    agents: Option<devstack::Node>,
+    agents_port: u16,
+    agents_project: PathBuf,
 }
 
 impl Suite {
@@ -101,6 +105,32 @@ impl Suite {
         let (node, _) = devstack::Node::start(&self.tools, &opts)?;
         self.node = Some(node);
         Ok(Api::new(self.port, suffix.then_some(SUFFIX)))
+    }
+
+    /// Starts the agents' node, acting on this suite's cell node, with the
+    /// OpenRouter fake as its model service and test controls on.
+    pub fn start_agents(&mut self, clean: bool) -> Result<Api> {
+        assert!(self.agents.is_none(), "one agents node at a time");
+        devstack::AgentFleet {
+            host_secret: self.host_secret.clone(),
+            fragment_api: format!("http://127.0.0.1:{}", self.port),
+            openrouter_url: Some(self.openrouter.url.clone()),
+            openrouter_key: OPENROUTER_KEY.into(),
+            test_hooks: true,
+        }
+        .write_vars(&self.agents_project)?;
+        let opts = devstack::NodeOptions { project: self.agents_project.clone(), port: self.agents_port, clean, watch: false, env: vec![] };
+        let (node, _) = devstack::Node::start(&self.tools, &opts)?;
+        self.agents = Some(node);
+        Ok(Api::new(self.agents_port, None))
+    }
+
+    pub fn stop_agents(&mut self) -> Result<()> {
+        self.agents.take().expect("a running agents node").stop()
+    }
+
+    pub fn crash_agents(&mut self) -> Result<()> {
+        self.agents.take().expect("a running agents node").crash()
     }
 
     pub fn stop(&mut self) -> Result<()> {
@@ -224,6 +254,7 @@ fn main() -> Result<()> {
     let scratch = root.join("target/e2e");
     std::fs::create_dir_all(&scratch)?;
     let project = devstack::stage_project(&scratch.join("cell"))?;
+    let agents_project = devstack::stage_agent(&scratch.join("agent"))?;
     let run = format!("{:x}", api::now_s() % 0xffffff);
     let mut s = Suite {
         only,
@@ -242,11 +273,17 @@ fn main() -> Result<()> {
         cli,
         scratch,
         project,
+        agents: None,
+        agents_port: devstack::free_port()?,
+        agents_project,
     };
     let api = s.start(true, true)?;
     lanes::run(&mut s, api)?;
     if s.node.is_some() {
         s.stop()?;
+    }
+    if s.agents.is_some() {
+        s.stop_agents()?;
     }
     println!("\n{} passed, {} failed", s.passed, s.failed.len());
     if !s.failed.is_empty() {

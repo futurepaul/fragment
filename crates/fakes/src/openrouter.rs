@@ -2,7 +2,10 @@
 //! completions, image generation (`POST /api/v1/images`), and asynchronous
 //! video generation (create, poll, download), each checking the bearer key.
 //! Answers are deterministic from the request, so tests can assert on them.
-//! Levers: the calls made, and failures queued for the next calls.
+//! Chat completions stream (server-sent events, OpenAI's chunk format) when
+//! asked to, and answer scripted replies (text, or tool calls) in order
+//! before falling back to an echo. Levers: the calls made, the chat
+//! requests, failures queued for the next calls, and the script.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -16,11 +19,60 @@ use crate::http::{Handler, Request, Response, Server};
 /// (method, path, model, authorization, the body's `reasoning` as JSON or "").
 pub type Call = (String, String, String, String, String);
 
+/// A scripted model reply.
+#[derive(Clone, Debug)]
+pub enum Reply {
+    Text(String),
+    /// Tool calls: (name, arguments).
+    Tools(Vec<(String, Value)>),
+}
+
 #[derive(Default)]
 struct State {
     calls: Vec<Call>,
     failures: VecDeque<u16>,
     videos: HashMap<String, usize>,
+    script: VecDeque<Reply>,
+    chats: Vec<Value>,
+    tool_calls: u64,
+}
+
+fn chunk(id: &str, model: &Value, delta: Value, finish: Option<&str>, usage: bool) -> String {
+    let mut c = json!({
+        "id": id, "object": "chat.completion.chunk", "created": 0, "model": model,
+        "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }],
+    });
+    if usage {
+        c["usage"] = json!({ "prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6 });
+    }
+    format!("data: {c}\n\n")
+}
+
+/// A reply as server-sent events (OpenAI's streaming format); each reply
+/// has its own id, as the service's generations do.
+fn stream(model: &Value, reply: &Reply, ids: &mut u64) -> String {
+    let mut out = String::new();
+    *ids += 1;
+    let id = format!("chatcmpl-fake-{ids}");
+    match reply {
+        Reply::Text(text) => {
+            out += &chunk(&id, model, json!({ "role": "assistant", "content": text }), None, false);
+            out += &chunk(&id, model, json!({}), Some("stop"), true);
+        }
+        Reply::Tools(calls) => {
+            let calls: Vec<Value> = calls
+                .iter()
+                .enumerate()
+                .map(|(i, (name, args))| {
+                    *ids += 1;
+                    json!({ "index": i, "id": format!("call_{ids}"), "type": "function", "function": { "name": name, "arguments": args.to_string() } })
+                })
+                .collect();
+            out += &chunk(&id, model, json!({ "role": "assistant", "tool_calls": calls }), None, false);
+            out += &chunk(&id, model, json!({}), Some("tool_calls"), true);
+        }
+    }
+    out + "data: [DONE]\n\n"
 }
 
 pub struct OpenRouter {
@@ -71,6 +123,13 @@ impl OpenRouter {
             match (req.method.as_str(), path) {
                 ("POST", "/api/v1/chat/completions") => {
                     let last = body["messages"].as_array().and_then(|m| m.last()).map(|m| m["content"].clone()).unwrap_or(Value::Null);
+                    s.chats.push(body.clone());
+                    let scripted = s.script.pop_front();
+                    if body["stream"] == true {
+                        let reply = scripted.unwrap_or_else(|| Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))));
+                        let events = stream(&body["model"], &reply, &mut s.tool_calls);
+                        return Response::bytes(200, "text/event-stream", events.into_bytes());
+                    }
                     Response::json(
                         200,
                         &json!({
@@ -117,6 +176,21 @@ impl OpenRouter {
         let server = Server::start(0, handler)?;
         *base.lock().expect("base") = server.url.clone();
         Ok(OpenRouter { url: server.url.clone(), state, _server: server })
+    }
+
+    /// Replies the next streamed chat completions answer, in order.
+    pub fn script(&self, replies: &[Reply]) {
+        self.state.lock().expect("openrouter state").script.extend(replies.iter().cloned());
+    }
+
+    /// Drops any scripted replies not yet answered.
+    pub fn clear_script(&self) {
+        self.state.lock().expect("openrouter state").script.clear();
+    }
+
+    /// The chat completion request bodies, in order.
+    pub fn chats(&self) -> Vec<Value> {
+        self.state.lock().expect("openrouter state").chats.clone()
     }
 
     pub fn calls(&self) -> Vec<Call> {

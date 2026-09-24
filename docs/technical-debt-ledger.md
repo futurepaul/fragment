@@ -260,3 +260,13 @@ without a delete condition is unfinished design, not debt.
   migration).
 - **Delete when:** celld (or the fork) gives Workers node-held secrets,
   as the "fork forever?" thread proposes.
+
+## Agents spend the agent fleet's model key
+
+- **Observed:** phase 5. An agent's model calls use the agent fleet's
+  `OPENROUTER_API_KEY`, whoever owns the agent; nothing counts them per
+  person.
+- **Risk:** spend that no person's budget shows, once agents are hosted.
+- **First proof:** the agent fleet hosted with people other than Paul.
+- **Delete when:** phase 4's budgets (decision 14) meter model calls per
+  owner, with the person's own OpenRouter key and its limit.

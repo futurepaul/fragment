@@ -117,15 +117,18 @@ pub fn pubkey_of_secret(secret_hex: &str) -> Option<String> {
     Some(hex::encode(key.verifying_key().to_bytes()))
 }
 
-/// A signing identity (hosts only).
-#[cfg(feature = "sign")]
+/// A signing identity.
+#[cfg(feature = "signer")]
 pub struct Keys {
     key: k256::schnorr::SigningKey,
     pubkey_hex: String,
 }
 
-#[cfg(feature = "sign")]
+#[cfg(feature = "signer")]
 impl Keys {
+    /// A new key from the OS's randomness (hosts; a cell makes its secret
+    /// from the platform's randomness and uses `from_secret_hex`).
+    #[cfg(feature = "sign")]
     pub fn generate() -> Keys {
         Keys::from_key(k256::schnorr::SigningKey::random(&mut rand_core::OsRng))
     }

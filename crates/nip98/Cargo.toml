@@ -6,8 +6,10 @@ license.workspace = true
 description = "NIP-98 HTTP auth (kind 27235): verify in the cell (wasm), sign on hosts."
 
 [features]
-# Signing needs randomness for key generation; the cell only verifies.
-sign = ["dep:rand_core"]
+# Signing with a key you hold (the agent cell signs in wasm, no randomness).
+signer = []
+# Signing plus key generation, which needs the OS's randomness (hosts).
+sign = ["signer", "dep:rand_core"]
 
 [dependencies]
 k256 = { version = "=0.13.4", default-features = false, features = ["schnorr"] }

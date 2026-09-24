@@ -1,5 +1,6 @@
 //! The sections, in the order they run.
 
+mod agents;
 mod app;
 mod appfiles;
 mod blobs;
@@ -44,6 +45,7 @@ pub fn run(s: &mut Suite, api: Api) -> Result<()> {
     notes::notes(s, &api)?;
     deliver::push(s, &api)?;
     deliver::ai(s, &api)?;
+    agents::agents(s, &api)?;
     sync::folder_sync(s, &api)?;
     let api = restart::restart(s, api)?;
     restart::pathmode(s, api)?;

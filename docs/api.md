@@ -335,3 +335,27 @@ channel, onRecord, {after?})`, `presence.set(data)`, `presence.on(fn)`,
 
 CLI: `fragment call <name> <op> --input '{...}' [--id ID]`, `fragment
 channel <name> [<channel>] [--after N] [--follow]`.
+
+## Agents (`agent/`, phase 5)
+
+A separate celld project: agents act on fragments through the API above,
+signing with their own keys. Its variables: `FRAGMENT_HOST_SECRET` (seals
+each agent's key), `FRAGMENT_API` (the platform it acts on),
+`OPENROUTER_API_KEY` and `OPENROUTER_API_URL` (its model service),
+`AGENT_TEST_HOOKS=allow` (dev and e2e only).
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `POST /api/agents` | any signer (its owner from then on) | `{name, model? ("z-ai/glm-5.3-flash"), instructions?}` → `{name, npub, owner, model}`; 409 when taken |
+| `GET /api/a/{name}` | owner | → `{name, npub, model, active, driving, outcome (running, idle, stopped, error), error, tokens, watchdogRestarts, messages: [{id, role, text, tool_requests, tool_responses, steer}], steer, toolRuns, steps}` |
+| `POST /api/a/{name}/turns` | owner | `{text}` (at most 16 KiB) → `{started}`; during a turn, `{steered: true}` (read between steps) |
+| `POST /api/a/{name}/stop` | owner | → `{active, driving}`; a tool in flight is interrupted |
+| `GET /api/a/{name}/tools` | owner | → `{tools: ["<fragment>__<op>", ...]}` |
+| `POST /api/a/{name}/test` | owner, test fleets | `{hold_in_tool_ms?, hold_after_tool_ms?, watchdog_ms?}` |
+
+An agent's tools are the operations of the fragments whose members include
+its npub, those its role there may call (at most 16 fragments, 128
+tools), named `<fragment>__<op>` with the operation's input schema. A call
+is `POST /api/f/<fragment>/ops/<op>` signed by the agent with the id
+`tc:<40 hex of SHA-256 of the tool-call id>`: a replayed call replays the
+operation. At most 64 steps a turn.

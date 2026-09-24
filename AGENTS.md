@@ -12,7 +12,8 @@ from github.com/futurepaul/fragment) and on celld
 1. `docs/ROADMAP.md` — decisions, truth map, phases, escalations.
 2. `docs/MODEL.md` — the core model on celld primitives and the spikes.
    `docs/api.md` — the wire contract the cell answers.
-   `docs/phase-3.md` — the current phase (hosting on fragment.club);
+   `docs/phase-5.md` — agents (built overnight; choices for review);
+   `docs/phase-3.md` — hosting on fragment.club;
    `docs/phase-2.md` — the record of the core cut (slices A–G);
    `docs/operate.md` — the operator runbook.
 3. `docs/finite-next-lessons.md` — what to port from finite-next and the
@@ -41,13 +42,14 @@ debt ledger).
   code.storage fake (sections: auth, create, lockdown, members, secrets,
   files, deploy, ops, public, site, watch, schemas, channels, live,
   routes, cli, browser, jobs, triggers, appfiles, blobs, notes, push,
-  ai, sync, restart, pathmode, creators). The browser and notes sections drive headless
+  ai, agents, sync, restart, pathmode, creators). The browser and notes sections drive headless
   Chrome (`CHROME_BIN` to choose one); `triggers` waits for a cron
   minute (about a minute). The node runs from a staged copy of the cell
   (`target/e2e/cell`), so the e2e and `cargo xtask dev` can run at once.
 - `cargo xtask dev [--clean]`: the dev stack in the foreground: the cell
-  on :8790 with fragments at `http://<name>.fragment.localhost:8790/`, and
-  the code.storage fake on :8792 (state in `target/devstack/`; its org
+  on :8790 with fragments at `http://<name>.fragment.localhost:8790/`,
+  agents (`agent/`, goose's loop) on :8793 with their model key from the
+  file `OPENROUTER_API_KEY_FILE` names, and the code.storage fake on :8792 (state in `target/devstack/`; its org
   key and the host secret are made there on first run). Point the CLI at
   it with `FRAGMENT_HOST=http://127.0.0.1:8790`. Dev fleets let jobs
   fetch local addresses (`FRAGMENT_EGRESS_LOCAL=allow`).

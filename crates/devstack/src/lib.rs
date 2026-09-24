@@ -32,6 +32,22 @@ pub fn cell_dir() -> PathBuf {
     repo_root().join("cell")
 }
 
+/// The agents' celld project (goose's loop; phase 5).
+pub fn agent_dir() -> PathBuf {
+    repo_root().join("agent")
+}
+
+/// A copy of the built agent project at `dir` (its config and build).
+pub fn stage_agent(dir: &Path) -> Result<PathBuf> {
+    let agent = agent_dir();
+    fs::create_dir_all(dir.join("build"))?;
+    fs::copy(agent.join("wrangler.jsonc"), dir.join("wrangler.jsonc")).context("stage the agent's wrangler.jsonc")?;
+    for f in ["index.js", "index_bg.wasm"] {
+        fs::copy(agent.join("build").join(f), dir.join("build").join(f)).with_context(|| format!("stage agent/build/{f} (run `cargo xtask build`)"))?;
+    }
+    Ok(dir.to_path_buf())
+}
+
 /// A copy of the built cell project at `dir` (its config, shim, and build),
 /// so a node run from it keeps its state and variables apart from `cell/`,
 /// where `xtask dev` runs.
@@ -179,6 +195,37 @@ impl Fleet {
         }
         if let Some(c) = &self.creators {
             vars.push(("FRAGMENT_CREATORS", c.as_str()));
+        }
+        write_dev_vars(project, &vars)
+    }
+}
+
+/// What an agent fleet is configured with: the platform it acts on, the
+/// model service, and its own host secret.
+pub struct AgentFleet {
+    pub host_secret: String,
+    /// The fragment platform's base URL (`FRAGMENT_API`).
+    pub fragment_api: String,
+    /// Where model calls go (`None`: OpenRouter itself).
+    pub openrouter_url: Option<String>,
+    pub openrouter_key: String,
+    /// The owner's test controls (holds, the watchdog period): dev and e2e only.
+    pub test_hooks: bool,
+}
+
+impl AgentFleet {
+    /// Renders the fleet into the project's `.dev.vars`.
+    pub fn write_vars(&self, project: &Path) -> Result<()> {
+        let mut vars = vec![
+            ("FRAGMENT_HOST_SECRET", self.host_secret.as_str()),
+            ("FRAGMENT_API", self.fragment_api.as_str()),
+            ("OPENROUTER_API_KEY", self.openrouter_key.as_str()),
+        ];
+        if let Some(u) = &self.openrouter_url {
+            vars.push(("OPENROUTER_API_URL", u.as_str()));
+        }
+        if self.test_hooks {
+            vars.push(("AGENT_TEST_HOOKS", "allow"));
         }
         write_dev_vars(project, &vars)
     }

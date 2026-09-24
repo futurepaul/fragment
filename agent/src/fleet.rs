@@ -1,0 +1,76 @@
+//! The fragment fleet as an agent reaches it: the same signed API the CLI
+//! uses (NIP-98), with the agent's own key. An agent can do on a fragment
+//! exactly what its membership lets it, and nothing through a side door.
+
+use std::sync::Arc;
+
+use anyhow::{anyhow, Context};
+use fragment_nip98::Keys;
+use serde_json::Value;
+use worker::{Fetch, Headers, Method, Request, RequestInit};
+
+use crate::js;
+
+/// The largest answer the agent reads from a fragment.
+const ANSWER_MAX_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone)]
+pub struct Fleet {
+    /// The platform's base URL (`FRAGMENT_API`), e.g. https://fragment.club.
+    pub base: String,
+    pub keys: Arc<Keys>,
+}
+
+impl Fleet {
+    /// A signed request; answers the status and the JSON body (`Null` when
+    /// empty, a string when it is not JSON).
+    pub async fn call(&self, method: Method, path: &str, body: Option<&Value>) -> anyhow::Result<(u16, Value)> {
+        let url = format!("{}{path}", self.base);
+        let bytes = match body {
+            Some(b) => serde_json::to_vec(b)?,
+            None => Vec::new(),
+        };
+        let headers = Headers::new();
+        let auth = self.keys.header(method.as_ref(), &url, &bytes, (js::now_ms() / 1000) as i64);
+        headers.set("authorization", &auth).map_err(|e| anyhow!("{e}"))?;
+        let mut init = RequestInit::new();
+        init.with_method(method);
+        if body.is_some() {
+            headers.set("content-type", "application/json").map_err(|e| anyhow!("{e}"))?;
+            init.with_body(Some(worker::js_sys::Uint8Array::from(bytes.as_slice()).into()));
+        }
+        init.with_headers(headers);
+        let request = Request::new_with_init(&url, &init).map_err(|e| anyhow!("{e}"))?;
+        let mut response = Fetch::Request(request).send().await.map_err(|e| anyhow!("{path}: {e}"))?;
+        let status = response.status_code();
+        let bytes = response.bytes().await.map_err(|e| anyhow!("{path}: {e}"))?;
+        if bytes.len() > ANSWER_MAX_BYTES {
+            return Err(anyhow!("{path}: the answer is {} bytes; at most {ANSWER_MAX_BYTES}", bytes.len()));
+        }
+        let value = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()))
+        };
+        Ok((status, value))
+    }
+
+    pub async fn get(&self, path: &str) -> anyhow::Result<Value> {
+        let (status, value) = self.call(Method::Get, path, None).await?;
+        if status != 200 {
+            return Err(anyhow!("GET {path}: {status} {}", message(&value)));
+        }
+        Ok(value)
+    }
+}
+
+/// A fragment error's message, or the whole answer.
+pub fn message(v: &Value) -> String {
+    v["message"].as_str().map(str::to_string).unwrap_or_else(|| v.to_string())
+}
+
+/// The fleet from the agent's variables.
+pub fn base(env: &worker::Env) -> anyhow::Result<String> {
+    let base = env.var("FRAGMENT_API").map(|v| v.to_string()).context("FRAGMENT_API is not set on this fleet")?;
+    Ok(base.trim().trim_end_matches('/').to_string())
+}

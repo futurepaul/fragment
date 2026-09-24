@@ -1,0 +1,10 @@
+{
+  "name": "fragment-agent",
+  // worker-build bundles the Rust worker already: index.js imports only
+  // index_bg.wasm and cloudflare:workers, so celld takes it as it is
+  "main": "build/index.js",
+  "no_bundle": true,
+  "compatibility_date": "2026-01-01",
+  "durable_objects": { "bindings": [{ "name": "AGENT", "class_name": "Agent" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Agent"] }]
+}
