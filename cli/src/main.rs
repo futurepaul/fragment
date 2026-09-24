@@ -313,17 +313,22 @@ enum AgentCmd {
     /// Attach a computer (`fragment computer serve`): its shell and file tools join the agent's turns
     Computer {
         name: String,
-        /// The computer's URL
-        #[arg(long, required_unless_present = "detach")]
+        /// The computer's URL (`fragment computer serve`)
+        #[arg(long, required_unless_present_any = ["detach", "connect"])]
         url: Option<String>,
-        /// A file holding its token (the one `fragment computer serve` made)
+        /// A file holding its token: the one `fragment computer serve` made,
+        /// or, with --connect, where to write the new connect token
         #[arg(long, required_unless_present = "detach")]
         token_file: Option<PathBuf>,
+        /// The computer connects out to the agent instead (`fragment computer
+        /// connect`): no public URL. Writes its connect token to --token-file
+        #[arg(long, conflicts_with = "url")]
+        connect: bool,
         /// The project directory its tools work in, on the computer
         #[arg(long, default_value = "work")]
         cwd: String,
         /// Detach the computer instead
-        #[arg(long, conflicts_with_all = ["url", "token_file"])]
+        #[arg(long, conflicts_with_all = ["url", "token_file", "connect"])]
         detach: bool,
     },
     /// Follow a fragment's channel: others' messages start turns, answers go back through the reply operation
@@ -339,6 +344,22 @@ enum AgentCmd {
 
 #[derive(Subcommand)]
 enum ComputerCmd {
+    /// Answer an agent without a public URL: poll it for work, and run it here
+    /// (goose's developer tools and screenshots)
+    Connect {
+        /// The agent: its URL (`fragment agent computer --connect` prints it)
+        #[arg(long)]
+        agent: String,
+        /// The connect token its owner was given
+        #[arg(long)]
+        token_file: PathBuf,
+        /// Projects live under this directory, one per attached cwd
+        #[arg(long, default_value = "work")]
+        work: PathBuf,
+        /// The call journal
+        #[arg(long, default_value = ".fragment-computer")]
+        state: PathBuf,
+    },
     /// Serve goose's developer tools (shell, write, edit, tree) over HTTP to the agent that attaches this computer
     Serve {
         #[arg(long, default_value = "0.0.0.0:8080")]
@@ -441,6 +462,24 @@ struct Config {
 
 fn config_path() -> PathBuf {
     dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("fragment").join("config.json")
+}
+
+/// Writes a secret into its own file, readable by its owner only (0600).
+fn write_secret_file(path: &Path, secret: &str) -> Result<()> {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        writeln!(f, "{secret}")?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(path, format!("{secret}\n"))?;
+    Ok(())
 }
 
 /// Writes `secret_key` into the config, keeping its other fields; the file
@@ -880,6 +919,15 @@ fn run(cli: Cli) -> Result<()> {
             println!("next:");
             println!("  fragment init <name> --template <tpl>  (scaffold + create + deploy in one step)");
             return Ok(());
+        }
+        Cmd::Computer { sub: ComputerCmd::Connect { agent, token_file, work, state } } => {
+            #[cfg(feature = "computer")]
+            return fragment_computer::connect(fragment_computer::ConnectArgs { agent, work, state, token_file });
+            #[cfg(not(feature = "computer"))]
+            {
+                let _ = (agent, work, state, token_file);
+                anyhow::bail!("this fragment was built without computers: cargo install --path cli --features computer");
+            }
         }
         Cmd::Computer { sub: ComputerCmd::Serve { listen, work, state, token_file } } => {
             #[cfg(feature = "computer")]
@@ -1608,8 +1656,21 @@ fn run(cli: Cli) -> Result<()> {
                     }
                     println!("{name} follows {fragment}'s {channel} channel and answers through {reply}");
                 }
-                AgentCmd::Computer { name, url, token_file, cwd, detach } => {
+                AgentCmd::Computer { name, url, token_file, connect, cwd, detach } => {
                     let path = format!("/api/a/{name}/computer");
+                    if connect {
+                        let token_file = token_file.unwrap_or_default();
+                        let v = a.call(a.put_json(&path, &json!({ "connect": true, "cwd": cwd }))?)?;
+                        let token = v["token"].as_str().ok_or_else(|| anyhow!("the agent answered no connect token"))?;
+                        write_secret_file(&token_file, token)?;
+                        let agent = v["agent"].as_str().unwrap_or("");
+                        if j {
+                            ok_exit(&json!({ "agent": agent, "cwd": v["cwd"], "tokenFile": token_file }));
+                        }
+                        println!("{name} takes a computer that connects out; its token is in {} (0600).", token_file.display());
+                        println!("on the computer: fragment computer connect --agent {agent} --token-file <that file>");
+                        return Ok(());
+                    }
                     if detach {
                         let v = a.call(a.delete(&path)?)?;
                         if j {

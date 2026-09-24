@@ -344,11 +344,21 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let r2 = api.page(&f, "", Some(&format!("fragment_site={outsider_f}")))?;
     s.ok("joining in the browser makes them a member", r.status == 302 && r2.status == 200, &r2);
 
-    // who makes fragments: people
+    // who makes fragments: people, and agents for their owners
     let agent = Keys::generate();
     let reg = "/api/identities";
-    api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&agent, "POST", reg, &owner) })))?;
+    let registered = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&agent, "POST", reg, &owner) })))?;
     let r = api.create(&agent, &s.name("by-an-agent"))?;
-    s.ok("an agent cannot make a fragment: people do", r.status == 403, &r);
+    let owner_id = api.identity(&owner)?;
+    let name = r.body["name"].as_str().unwrap_or("").to_string();
+    let members = api.signed(&owner, "GET", &format!("/api/f/{name}/members"), None)?;
+    s.ok(
+        "an agent makes a fragment for its owner: theirs, under their username, with the agent an editor",
+        r.status == 200
+            && r.body["owner"] == owner_id.as_str()
+            && name == api.qualified(&owner, &s.name("by-an-agent"))?
+            && members.body["members"].as_array().is_some_and(|a| a.iter().any(|m| m["principal"] == registered.body["id"] && m["role"] == "editor")),
+        format!("{r} {members}"),
+    );
     Ok(())
 }

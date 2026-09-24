@@ -10,6 +10,12 @@
 //! tool-call id, so a driver that dies mid-call and the watchdog's replay
 //! reach the same run, and the computer's journal answers "interrupted"
 //! for a call its own restart cut off.
+//!
+//! A computer can also connect out (`fragment computer connect`, phase 6
+//! step 5): it has no URL, and each request waits in this agent's storage
+//! (`tunnel`) until the computer fetches it with its long poll and posts
+//! the answer back. An image a tool answers (a screenshot) is kept for the
+//! chat the turn answers in (`shots`), and the model reads that it was.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -41,14 +47,61 @@ const ANSWER_MAX_BYTES: usize = 4 * 1024 * 1024;
 const RESULT_TEXT_MAX: usize = 64 * 1024;
 pub const CWD_MAX: usize = 64;
 
+/// How long a tunneled request waits for its answer: a call's own wait,
+/// and room for the trip.
+const TUNNEL_WAIT_MS: u64 = CALL_WAIT_MS + 15_000;
+/// A connected computer asks at least this often (its long poll is 25 s).
+pub const SEEN_WITHIN_MS: u64 = 60_000;
+/// The URL a computer that connects out is attached with.
+pub const CONNECTS: &str = "connect";
+
 #[derive(Clone)]
 pub struct Computer {
     pub url: String,
     pub token: String,
+    /// A computer that connects out: its requests wait here.
+    pub tunnel: Option<SqlStorage>,
+}
+
+/// Leaves a request for a computer that connects out, and waits for its answer.
+async fn tunneled(sql: &SqlStorage, method: Method, path: &str, body: Option<&Value>) -> anyhow::Result<(u16, Value)> {
+    let seen = crate::store::kv_u64(sql, "computer_seen_at")?;
+    if js::now_ms() > seen + SEEN_WITHIN_MS {
+        return Err(anyhow!("the computer is not connected (run `fragment computer connect` on it)"));
+    }
+    let rid = hex::encode(js::random_bytes::<16>());
+    let body = body.map(Value::to_string).map_or(worker::SqlStorageValue::Null, |b| b.into());
+    sql.exec(
+        "INSERT INTO tunnel (rid, method, path, body, created_at) VALUES (?, ?, ?, ?, ?)",
+        vec![rid.as_str().into(), method.to_string().into(), path.into(), body, (js::now_ms() as i64).into()],
+    )
+    .map_err(|e| anyhow!("{e}"))?;
+    let deadline = js::now_ms() + TUNNEL_WAIT_MS;
+    loop {
+        let rows: Vec<Value> = sql.exec("SELECT status, answer FROM tunnel WHERE rid = ?", vec![rid.as_str().into()]).and_then(|c| c.to_array()).map_err(|e| anyhow!("{e}"))?;
+        let done = rows.first().and_then(|r| r["status"].as_u64().map(|s| (s as u16, r["answer"].as_str().unwrap_or("null").to_string())));
+        if done.is_some() || js::now_ms() > deadline {
+            sql.exec("DELETE FROM tunnel WHERE rid = ?", vec![rid.as_str().into()]).map_err(|e| anyhow!("{e}"))?;
+        }
+        if let Some((status, answer)) = done {
+            if answer.len() > ANSWER_MAX_BYTES {
+                return Err(anyhow!("{path}: the computer answered {} bytes; at most {ANSWER_MAX_BYTES}", answer.len()));
+            }
+            return Ok((status, serde_json::from_str(&answer).unwrap_or(Value::Null)));
+        }
+        if js::now_ms() > deadline {
+            // a 503 is transient: the request is tried again
+            return Ok((503, json!({ "error": format!("{path}: the computer did not answer in {TUNNEL_WAIT_MS} ms") })));
+        }
+        Delay::from(Duration::from_millis(100)).await;
+    }
 }
 
 impl Computer {
     async fn request(&self, method: Method, path: &str, body: Option<&Value>) -> anyhow::Result<(u16, Value)> {
+        if let Some(sql) = &self.tunnel {
+            return tunneled(sql, method, path, body).await;
+        }
         let headers = Headers::new();
         headers.set("authorization", &format!("Bearer {}", self.token)).map_err(|e| anyhow!("{e}"))?;
         let mut init = RequestInit::new();
@@ -156,6 +209,30 @@ fn bounded(mut result: CallToolResult) -> CallToolResult {
     result
 }
 
+/// The images one turn keeps for its chat, at most.
+const SHOTS_MAX: i64 = 4;
+
+impl ComputerTools {
+    /// Keeps a result's images (a screenshot) for the chat the turn
+    /// answers in, and tells the model so: its model may read no images.
+    fn keep_images(&self, mut result: CallToolResult) -> anyhow::Result<CallToolResult> {
+        for block in result.content.iter_mut() {
+            let Some(image) = block.as_image().map(|i| (i.mime_type.clone(), i.data.clone())) else { continue };
+            let kept: i64 = self.sql.exec("SELECT COUNT(*) AS n FROM shots", None).and_then(|c| c.one::<Value>()).map(|v| v["n"].as_i64().unwrap_or(0)).unwrap_or(0);
+            let note = if kept < SHOTS_MAX {
+                self.sql
+                    .exec("INSERT INTO shots (mime, data, at) VALUES (?, ?, ?)", vec![image.0.into(), image.1.into(), (js::now_ms() as i64).into()])
+                    .map_err(|e| anyhow!("{e}"))?;
+                "[an image: it will be shown with your answer in the chat]"
+            } else {
+                "[an image: not shown, this turn has shown as many as it may]"
+            };
+            *block = ContentBlock::text(note);
+        }
+        Ok(result)
+    }
+}
+
 pub struct ComputerTools {
     pub computer: Computer,
     pub cwd: String,
@@ -195,7 +272,7 @@ impl ToolProvider<Session> for ComputerTools {
                 Some("done" | "interrupted") => {
                     self.in_flight.lock().expect("in-flight lock").remove(&id);
                     let result: CallToolResult = serde_json::from_value(record["result"].clone()).map_err(|e| internal(anyhow!("the computer returned a bad result: {e}")))?;
-                    return Ok(bounded(result));
+                    return Ok(bounded(self.keep_images(result).map_err(internal)?));
                 }
                 other => return Err(internal(anyhow!("the computer answered status {other:?}"))),
             }

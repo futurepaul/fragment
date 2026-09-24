@@ -78,8 +78,9 @@ function table(rows) {
   return wrap;
 }
 
-// Inline spans: `code`, **bold**, *italic*/_italic_, [text](url), bare URLs.
-const INLINE = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\s][^*]*\*|_[^_\s][^_]*_)|(\[[^\]]+\]\((https?:\/\/[^)\s]+)\))|(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g;
+// Inline spans: `code`, **bold**, *italic*/_italic_, ![alt](__file?path=…)
+// (an image from this fragment's own files only), [text](url), bare URLs.
+const INLINE = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\s][^*]*\*|_[^_\s][^_]*_)|(!\[([^\]]*)\]\((__file\?path=[^)\s]+)\))|(\[[^\]]+\]\((https?:\/\/[^)\s]+)\))|(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g;
 
 function inline(parent, text) {
   let last = 0;
@@ -89,7 +90,8 @@ function inline(parent, text) {
     if (m[1]) parent.append(el("code", null, whole.slice(1, -1)));
     else if (m[2]) parent.append(inline(el("strong"), whole.slice(2, -2)));
     else if (m[3]) parent.append(inline(el("em"), whole.slice(1, -1)));
-    else if (m[4]) parent.append(link(m[5], whole.slice(1, whole.indexOf("]("))));
+    else if (m[4]) parent.append(image(m[6], m[5]));
+    else if (m[7]) parent.append(link(m[8], whole.slice(1, whole.indexOf("]("))));
     else parent.append(link(whole, whole));
     last = m.index + whole.length;
   }
@@ -102,6 +104,16 @@ function appendText(parent, text) {
     if (n) parent.append(el("br"));
     parent.append(part);
   });
+}
+
+function image(src, alt) {
+  const a = link(src, "");
+  const img = el("img", "shot");
+  img.src = src;
+  img.alt = alt;
+  img.loading = "lazy";
+  a.append(img);
+  return a;
 }
 
 function link(href, label) {

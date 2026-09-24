@@ -56,6 +56,14 @@ use crate::store::{kv_get, kv_set, kv_u64, load_messages};
 use crate::turn::{Attached, Driver, Model, WATCHDOG_MS_DEFAULT, WATCHDOG_MS_MIN};
 
 const PRINCIPAL_HEADER: &str = "x-agent-principal";
+/// A computer that connects out presents its connect token here.
+const COMPUTER_TOKEN_HEADER: &str = "x-computer-token";
+/// A computer's long poll waits this long, and a request it fetched but
+/// never answered is handed out again after this.
+const POLL_WAIT_MS: u64 = 25_000;
+const RESEND_MS: i64 = 40_000;
+/// A computer's answer (a screenshot inside) is at most this.
+const ANSWER_BODY_MAX: usize = 6 * 1024 * 1024;
 const MESSAGE_TEXT_MAX: usize = 16 * 1024;
 const MODEL_MAX: usize = 128;
 const INSTRUCTIONS_MAX: usize = 8 * 1024;
@@ -119,9 +127,14 @@ fn arrived_url(req: &Request) -> Answer<Url> {
 
 /// Hands a request to an agent's cell, as `principal` (none for an inbox delivery).
 async fn forward(env: &Env, name: &str, action: &str, method: Method, principal: Option<&str>, body: Vec<u8>) -> Answer<Response> {
+    forward_with(env, name, action, method, principal.map(|p| (PRINCIPAL_HEADER, p)), body).await
+}
+
+/// `forward`, with one header of the caller's (who, or a computer's token).
+async fn forward_with(env: &Env, name: &str, action: &str, method: Method, header: Option<(&str, &str)>, body: Vec<u8>) -> Answer<Response> {
     let headers = Headers::new();
-    if let Some(p) = principal {
-        headers.set(PRINCIPAL_HEADER, p)?;
+    if let Some((k, v)) = header {
+        headers.set(k, v)?;
     }
     let mut init = RequestInit::new();
     init.with_method(method).with_headers(headers);
@@ -151,6 +164,18 @@ async fn route(mut req: Request, env: &Env) -> Answer<Response> {
             return Err(Fail::new(ErrorCode::TooLarge, format!("a delivery is at most {BODY_MAX} bytes")));
         }
         return forward(env, &name, &action, Method::Post, None, body).await;
+    }
+    // a computer that connects out: its connect token is the capability
+    if let (Method::Post, ["api", "a", name, "computer", op @ ("poll" | "answer")]) = (req.method(), segments.as_slice()) {
+        if !valid_fragment_name(name) {
+            return Err(Fail::new(ErrorCode::NotFound, "no such agent"));
+        }
+        let token = req.headers().get(COMPUTER_TOKEN_HEADER)?.unwrap_or_default();
+        let body = req.bytes().await?;
+        if body.len() > ANSWER_BODY_MAX {
+            return Err(Fail::new(ErrorCode::TooLarge, format!("a computer's answer is at most {ANSWER_BODY_MAX} bytes")));
+        }
+        return forward_with(env, name, &format!("computer/{op}"), Method::Post, Some((COMPUTER_TOKEN_HEADER, &token)), body).await;
     }
     // the platform's router, the only way in, names who is calling
     let principal = req.headers().get(PRINCIPAL_HEADER)?.filter(|p| npub::is_identity(p)).ok_or_else(|| Fail::new(ErrorCode::Unauthenticated, "reach agents through the platform"))?;
@@ -214,8 +239,11 @@ struct ListenBody {
 
 #[derive(Deserialize)]
 struct ComputerBody {
-    url: String,
-    token: String,
+    url: Option<String>,
+    token: Option<String>,
+    /// A computer that connects out: no URL, a connect token made here.
+    #[serde(default)]
+    connect: bool,
     cwd: Option<String>,
 }
 
@@ -314,23 +342,29 @@ impl Agent {
     /// Attaches a computer once it answers with this token: its tools join
     /// the agent's next turns.
     async fn attach(&self, body: ComputerBody) -> Answer<Value> {
-        let url = body.url.trim().trim_end_matches('/').to_string();
+        if body.connect {
+            return self.attach_connecting(body.cwd);
+        }
+        let (Some(url), Some(token)) = (body.url, body.token) else { return Err(Fail::invalid("a computer has a url and a token, or connects out (connect: true)")) };
+        let body = ComputerBody { url: Some(url.clone()), token: Some(token.clone()), connect: false, cwd: body.cwd };
+        let url = url.trim().trim_end_matches('/').to_string();
         if url.len() > COMPUTER_URL_MAX {
             return Err(Fail::invalid(format!("a computer URL is at most {COMPUTER_URL_MAX} bytes")));
         }
         let local = var(&self.env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow");
         fragment_core::egress::check(&url, local).map_err(|e| Fail::invalid(format!("url: {e}")))?;
-        if body.token.len() < 16 || body.token.len() > COMPUTER_TOKEN_MAX {
+        let token = body.token.unwrap_or_default();
+        if token.len() < 16 || token.len() > COMPUTER_TOKEN_MAX {
             return Err(Fail::invalid(format!("a computer token is 16-{COMPUTER_TOKEN_MAX} bytes")));
         }
         let cwd = body.cwd.unwrap_or_else(|| "work".into());
         if !computer::valid_cwd(&cwd) {
             return Err(Fail::invalid(format!("cwd is 1-{} of [a-z0-9-]", computer::CWD_MAX)));
         }
-        let c = Computer { url: url.clone(), token: body.token.clone() };
+        let c = Computer { url: url.clone(), token: token.clone(), tunnel: None };
         let manifest = c.check().await.map_err(unanswered)?;
         let tools: Vec<String> = computer::tools_of(&manifest)?.iter().map(|t| t.name.to_string()).collect();
-        let sealed = keys::seal(&self.env, body.token.as_bytes()).await.map_err(Fail::host)?;
+        let sealed = keys::seal(&self.env, token.as_bytes()).await.map_err(Fail::host)?;
         let sql = self.sql();
         kv_set(&sql, "computer_url", &url)?;
         kv_set(&sql, "computer_token", sealed)?;
@@ -338,8 +372,77 @@ impl Agent {
         Ok(json!({ "url": url, "cwd": cwd, "tools": tools }))
     }
 
+    /// Attaches a computer that connects out: a new connect token (only its
+    /// hash is kept), answered once, for `fragment computer connect`.
+    fn attach_connecting(&self, cwd: Option<String>) -> Answer<Value> {
+        let cwd = cwd.unwrap_or_else(|| "work".into());
+        if !computer::valid_cwd(&cwd) {
+            return Err(Fail::invalid(format!("cwd is 1-{} of [a-z0-9-]", computer::CWD_MAX)));
+        }
+        let token = hex::encode(js::random_bytes::<32>());
+        let sql = self.sql();
+        kv_set(&sql, "computer_url", computer::CONNECTS)?;
+        kv_set(&sql, "computer_token", hex::encode(<sha2::Sha256 as sha2::Digest>::digest(token.as_bytes())))?;
+        kv_set(&sql, "computer_cwd", &cwd)?;
+        kv_set(&sql, "computer_seen_at", 0)?;
+        sql.exec("DELETE FROM tunnel", None)?;
+        let name = kv_get(&sql, "name")?.unwrap_or_default();
+        let agent = format!("{}/api/a/{name}", var(&self.env, "AGENT_URL").unwrap_or_default().trim_end_matches('/'));
+        Ok(json!({ "connect": true, "agent": agent, "token": token, "cwd": cwd }))
+    }
+
+    /// Whether `token` is the connect token of the computer attached here.
+    fn require_computer(&self, token: &str) -> Answer<worker::SqlStorage> {
+        let sql = self.sql();
+        let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(token.as_bytes()));
+        let stored = kv_get(&sql, "computer_token")?.unwrap_or_default();
+        let same = hash.len() == stored.len() && hash.bytes().zip(stored.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0;
+        if kv_get(&sql, "computer_url")?.as_deref() != Some(computer::CONNECTS) || !same {
+            return Err(Fail::new(ErrorCode::Forbidden, "not this agent's computer (its connect token was replaced, or it was detached)"));
+        }
+        kv_set(&sql, "computer_seen_at", js::now_ms())?;
+        Ok(sql)
+    }
+
+    /// `computer/poll`: the requests waiting for the computer that connects
+    /// out, answered at once, or as they come for up to 25 s.
+    async fn computer_poll(&self, token: &str) -> Answer<Value> {
+        let deadline = js::now_ms() + POLL_WAIT_MS;
+        loop {
+            let sql = self.require_computer(token)?;
+            let now = js::now_ms() as i64;
+            let rows: Vec<Value> = sql
+                .exec(
+                    "SELECT rid, method, path, body FROM tunnel WHERE status IS NULL AND (sent_at IS NULL OR sent_at < ?) ORDER BY created_at LIMIT 16",
+                    vec![(now - RESEND_MS).into()],
+                )?
+                .to_array()?;
+            if !rows.is_empty() || js::now_ms() > deadline {
+                for r in &rows {
+                    sql.exec("UPDATE tunnel SET sent_at = ? WHERE rid = ?", vec![now.into(), r["rid"].as_str().unwrap_or("").into()])?;
+                }
+                let requests: Vec<Value> = rows
+                    .iter()
+                    .map(|r| json!({ "rid": r["rid"], "method": r["method"], "path": r["path"], "body": r["body"].as_str().and_then(|b| serde_json::from_str::<Value>(b).ok()) }))
+                    .collect();
+                return Ok(json!({ "requests": requests }));
+            }
+            worker::Delay::from(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    /// `computer/answer {rid, status, body}`: a request's answer.
+    fn computer_answer(&self, token: &str, body: Value) -> Answer<Value> {
+        let sql = self.require_computer(token)?;
+        let rid = body["rid"].as_str().ok_or_else(|| Fail::invalid("rid is required"))?;
+        let status = body["status"].as_i64().ok_or_else(|| Fail::invalid("status is required"))?;
+        sql.exec("UPDATE tunnel SET status = ?, answer = ? WHERE rid = ? AND status IS NULL", vec![status.into(), body["body"].to_string().into(), rid.into()])?;
+        Ok(json!({ "ok": true }))
+    }
+
     fn detach(&self) -> Answer<Value> {
         let sql = self.sql();
+        sql.exec("DELETE FROM tunnel", None)?;
         let attached = kv_get(&sql, "computer_url")?.is_some_and(|u| !u.is_empty());
         for k in ["computer_url", "computer_token", "computer_cwd"] {
             kv_set(&sql, k, "")?;
@@ -481,6 +584,8 @@ impl Agent {
             return Ok(json!({ "steered": true, "driving": self.driving.get() }));
         }
         kv_set(&sql, "reply_to", reply_to)?;
+        // a new turn: images an earlier one kept and never showed are dropped
+        sql.exec("DELETE FROM shots", None)?;
         let mut kickoff = Message::user().with_text(text);
         kickoff.id = Some(format!("msg_{}", uuid::Uuid::new_v4()));
         store::append_message(&sql, &kickoff)?;
@@ -636,6 +741,7 @@ impl Agent {
             "tokens": { "input": kv_u64(&sql, "tokens_in")?, "output": kv_u64(&sql, "tokens_out")? },
             "computer": match get("computer_url")? {
                 url if url.is_empty() => Value::Null,
+                url if url == computer::CONNECTS => json!({ "connect": true, "cwd": get("computer_cwd")?, "seenAt": kv_u64(&sql, "computer_seen_at")? }),
                 url => json!({ "url": url, "cwd": get("computer_cwd")? }),
             },
             "watchdogRestarts": kv_u64(&sql, "watchdog_restarts")?,
@@ -655,10 +761,16 @@ impl Agent {
             }
             serde_json::from_slice(bytes).map_err(|e| Fail::invalid(format!("body: {e}")))
         };
+        let computer_token = req.headers().get(COMPUTER_TOKEN_HEADER)?.unwrap_or_default();
         let body = parse(&req.bytes().await?)?;
         let from = |v: Value| -> Answer<Value> { Ok(v) };
         if let Some(token) = action.strip_prefix("inbox/") {
             return Ok(Response::from_json(&self.inbox(token, body)?)?);
+        }
+        match action.as_str() {
+            "computer/poll" => return Ok(Response::from_json(&self.computer_poll(&computer_token).await?)?),
+            "computer/answer" => return Ok(Response::from_json(&self.computer_answer(&computer_token, body)?)?),
+            _ => {}
         }
         let answer = match (req.method(), action.as_str()) {
             (Method::Post, "create") => self.create(&principal, serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?).await,
@@ -695,6 +807,14 @@ impl Agent {
 /// agent cell alone).
 async fn open_computer(env: &Env, sql: &worker::SqlStorage) -> anyhow::Result<Option<Attached>> {
     let Some(url) = kv_get(sql, "computer_url")?.filter(|u| !u.is_empty()) else { return Ok(None) };
+    if url == computer::CONNECTS {
+        // one that has not asked lately is not there: the turn goes on without it
+        if js::now_ms() > kv_u64(sql, "computer_seen_at")? + computer::SEEN_WITHIN_MS {
+            return Ok(None);
+        }
+        let cwd = kv_get(sql, "computer_cwd")?.unwrap_or_else(|| "work".into());
+        return Ok(Some(Attached { computer: Computer { url, token: String::new(), tunnel: Some(sql.clone()) }, cwd }));
+    }
     let sealed = kv_get(sql, "computer_token")?.ok_or_else(|| anyhow::anyhow!("the computer has no token"))?;
     let npub = kv_get(sql, "npub")?.unwrap_or_default();
     let opened = keys::open(env, &sealed, &format!("{npub}/computer")).await.map_err(|e| anyhow::anyhow!("the computer's token: {e}"))?;
@@ -703,7 +823,7 @@ async fn open_computer(env: &Env, sql: &worker::SqlStorage) -> anyhow::Result<Op
     }
     let token = String::from_utf8(opened.plaintext).map_err(|_| anyhow::anyhow!("the computer's token is not text"))?;
     let cwd = kv_get(sql, "computer_cwd")?.unwrap_or_else(|| "work".into());
-    Ok(Some(Attached { computer: Computer { url, token }, cwd }))
+    Ok(Some(Attached { computer: Computer { url, token, tunnel: None }, cwd }))
 }
 
 /// Posts a channel-started turn's last answer to its fragment, through the
@@ -718,11 +838,31 @@ async fn reply(sql: &worker::SqlStorage, fleet: &Fleet) -> anyhow::Result<()> {
         .find(|m| m.role == rmcp::model::Role::Assistant && !m.as_concat_text().trim().is_empty());
     let Some(answer) = answer else { return Ok(()) };
     let id = fragment_core::tools::reply_id(answer.id.as_deref().unwrap_or(""));
-    let path = format!("/api/f/{}/ops/{}", listen["fragment"].as_str().unwrap_or(""), listen["reply"].as_str().unwrap_or(""));
-    let (status, body) = fleet.call(Method::Post, &path, Some(&json!({ "id": id, "input": { "text": answer.as_concat_text() } }))).await?;
+    let fragment = listen["fragment"].as_str().unwrap_or("");
+    let mut text = answer.as_concat_text();
+    // the turn's images (a screenshot) land in the chat's files, shown with the answer
+    let shots: Vec<Value> = sql.exec("SELECT seq, mime, data FROM shots ORDER BY seq", None).and_then(|c| c.to_array()).map_err(|e| anyhow::anyhow!("{e}"))?;
+    if !shots.is_empty() {
+        let paths: Vec<String> = shots
+            .iter()
+            .map(|s| format!("shots/{id}-{}.{}", s["seq"], if s["mime"] == "image/jpeg" { "jpg" } else { "png" }))
+            .collect();
+        let files: Vec<Value> = shots.iter().zip(&paths).map(|(s, p)| json!({ "path": p, "base64": s["data"] })).collect();
+        let (status, body) = fleet.call(Method::Post, &format!("/api/f/{fragment}/files"), Some(&json!({ "files": files, "message": "screenshots", "key": format!("{id}-shots") }))).await?;
+        if status == 200 {
+            for p in &paths {
+                text.push_str(&format!("\n\n![screenshot](__file?path={p})"));
+            }
+        } else {
+            text.push_str(&format!("\n\n(the screenshot could not be shown here: {})", fleet::message(&body)));
+        }
+    }
+    let path = format!("/api/f/{fragment}/ops/{}", listen["reply"].as_str().unwrap_or(""));
+    let (status, body) = fleet.call(Method::Post, &path, Some(&json!({ "id": id, "input": { "text": text } }))).await?;
     if status != 200 {
         anyhow::bail!("posting the answer to {path}: {status} {}", fleet::message(&body));
     }
+    sql.exec("DELETE FROM shots", None).map_err(|e| anyhow::anyhow!("{e}"))?;
     kv_set(sql, "reply_to", "")
 }
 

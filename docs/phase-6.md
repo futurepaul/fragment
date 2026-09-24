@@ -143,3 +143,21 @@ session's layout (`finite-next-worktrees/desktop-ui`, `d8d5c26`).
    a `screenshot` tool (headless Chromium on the computer), the image in
    the chat. Acceptance: a turn opens a page on the computer and the chat
    shows its screenshot.
+   **Built 2026-09-24** (local, not deployed): the computer's protocol is
+   unchanged; `fragment computer connect` carries it over a long poll
+   instead of a public URL. The owner attaches with `fragment agent
+   computer <agent> --connect --token-file <f>` (a connect token, answered
+   once; the agent keeps its hash); each request waits in the agent's
+   storage until the computer fetches it (`POST /api/a/<agent>/computer/
+   poll`, 25 s) and posts the answer back (`/computer/answer`), and a turn
+   leaves out a computer that has not asked in a minute. The computer's
+   `screenshot {url}` takes the page with headless Chrome (it waits for the
+   file, then stops Chrome, which can linger). An image a tool answers is
+   kept for the chat (the model reads a note, since its model may read no
+   images), written to the chat's files as `shots/…png` with the answer,
+   and the chat's markdown shows it (images only from the fragment's own
+   `__file`). The files route now takes up to 1 MiB. e2e lane
+   `screenshots` (8 checks, a real `fragment computer connect` process and
+   Chrome): the tunnel, a wrong token refused, the tools through it, and a
+   chat turn whose answer shows a PNG taken on the computer, drawn in the
+   chat's page.

@@ -220,3 +220,95 @@ pub fn computer(s: &mut Suite, api: &Api) -> Result<()> {
     std::env::remove_var("FRAGMENT_AGENTS");
     Ok(())
 }
+
+/// `fragment computer connect`, as a child process: it polls its agent.
+struct Connected(Child);
+
+impl Drop for Connected {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A computer that connects out (docs/phase-6.md, step 5): no public URL.
+/// The owner's own agent, in a chat, takes a screenshot on it, and the
+/// chat shows the image.
+pub fn screenshots(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("screenshots") {
+        return Ok(());
+    }
+    let agents = s.agents()?;
+    let owner = api.person()?;
+    let chat = s.named(api, &owner, "shots")?;
+    let r = api.create_with(&owner, json!({ "name": chat, "template": "chat" }))?;
+    anyhow::ensure!(r.status == 200, "making the chat: {r}");
+    let view_token = r.body["viewToken"].as_str().unwrap_or("").to_string();
+    let agent = api.qualified(&owner, "agent")?;
+
+    let r = agents.signed(&owner, "PUT", "/api/a/agent/computer", Some(&json!({ "connect": true, "cwd": "shots" })))?;
+    let token = r.body["token"].as_str().unwrap_or("").to_string();
+    let url = r.body["agent"].as_str().unwrap_or("").to_string();
+    s.ok(
+        "the owner attaches a computer that connects out: a connect token, answered once, and where it connects",
+        r.status == 200 && token.len() == 64 && url.ends_with(&format!("/api/a/{agent}")),
+        &r,
+    );
+    let r = api.call(crate::api::Call { method: "POST", url: format!("{url}/computer/poll"), extra: vec![("x-computer-token", "0".repeat(64))], ..Default::default() })?;
+    s.ok("a wrong connect token is refused", r.status == 403, &r);
+
+    let dir = s.dir("connect");
+    let token_file = dir.join("connect-token");
+    std::fs::write(&token_file, &token)?;
+    let log = std::fs::File::create(dir.join("connect.log"))?;
+    let _computer = Connected(
+        Command::new(&s.cli)
+            .args(["computer", "connect", "--agent", &url, "--token-file"])
+            .arg(&token_file)
+            .arg("--work")
+            .arg(dir.join("work"))
+            .arg("--state")
+            .arg(dir.join("state"))
+            .stdout(Stdio::null())
+            .stderr(log)
+            .spawn()?,
+    );
+    let wait = Duration::from_secs(30);
+    let seen = s.eventually(wait, || view(&agents, &owner, "agent")["computer"]["seenAt"].as_u64().is_some_and(|t| t > 0));
+    s.ok("the computer connects out, and its agent sees it", seen, view(&agents, &owner, "agent")["computer"].clone());
+    let r = agents.signed(&owner, "GET", "/api/a/agent/tools", None)?;
+    let tools: Vec<&str> = r.body["tools"].as_array().into_iter().flatten().filter_map(|t| t.as_str()).collect();
+    s.ok("its tools reach the agent through that connection, a screenshot among them", tools.contains(&"screenshot") && tools.contains(&"shell"), &r);
+
+    // in the chat: a page, opened on the computer, shown
+    s.openrouter.clear_script();
+    s.openrouter.script(&[
+        Reply::Tools(vec![("screenshot".into(), json!({ "url": "data:text/html,<h1 style='font:72px sans-serif'>Hello from the computer</h1>" }))]),
+        Reply::Text("Here is the page.".into()),
+    ]);
+    let r = api.op(&owner, &chat, "say", "s1", json!({ "text": "open a page on your computer and show me" }))?;
+    anyhow::ensure!(r.status == 200, "saying it: {r}");
+    let mut text = String::new();
+    let shown = s.eventually(Duration::from_secs(90), || {
+        let records = api.signed(&owner, "GET", &format!("/api/f/{chat}/channels/chat"), None).map(|r| r.body["records"].clone()).unwrap_or_default();
+        text = records.as_array().into_iter().flatten().filter_map(|r| r["body"]["text"].as_str()).find(|t| t.contains("Here is the page.")).unwrap_or("").to_string();
+        text.contains("![screenshot](__file?path=shots/")
+    });
+    s.ok("asked in the chat, the agent opens a page on its computer, and its answer shows the screenshot", shown, &text);
+    let path = text.split("__file?path=").nth(1).and_then(|t| t.split(')').next()).unwrap_or("").to_string();
+    let file = api.signed(&owner, "GET", &format!("/api/f/{chat}/file?path={path}"), None)?;
+    s.ok("the image is a PNG in the chat's own files", file.status == 200 && file.bytes.starts_with(b"\x89PNG") && file.bytes.len() > 1000, format!("{} ({} bytes)", file.status, file.bytes.len()));
+    let told = s.openrouter.chats().iter().any(|c| c.to_string().contains("it will be shown with your answer in the chat"));
+    s.ok("the model reads that an image was kept for the chat, not the image", told, "");
+    // and the chat's page shows it
+    if let Some(mut chrome) = crate::browser::Browser::launch(&s.scratch)? {
+        let page = chrome.open(&api.site_url(&chat, &format!("?view={view_token}")))?;
+        chrome.viewport(&page, 900, 900, false)?;
+        let drawn = chrome.until(&page, "[...document.querySelectorAll('img.shot')].some(i => i.complete && i.naturalWidth > 500)", wait);
+        chrome.screenshot(&page, &s.scratch.join("chat-screenshot.png"))?;
+        s.ok("the chat's page shows the screenshot", drawn, "");
+    } else {
+        s.ok("Chrome is installed for the chat's page (set CHROME_BIN)", false, "no Chrome found");
+    }
+    Ok(())
+}

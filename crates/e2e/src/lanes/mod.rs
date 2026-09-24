@@ -64,6 +64,7 @@ pub fn run(s: &mut Suite, api: Api) -> Result<()> {
     agents::agents(s, &api)?;
     agents::chat(s, &api)?;
     computer::computer(s, &api)?;
+    computer::screenshots(s, &api)?;
     sync::folder_sync(s, &api)?;
     let api = restart::restart(s, api)?;
     restart::pathmode(s, api)?;

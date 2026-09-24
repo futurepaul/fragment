@@ -23,6 +23,10 @@ pub(crate) const TEMPLATES: [(&str, Template); 5] = [("desktop", DESKTOP), ("cha
 
 /// `live` moving under a deploy this many times is an error.
 const DEPLOY_ATTEMPTS: usize = 5;
+/// What one `POST /api/files` may write in all: an editor's write (a
+/// screenshot), larger than an app's (`limits::FILE_WRITE_MAX_BYTES`);
+/// bigger files go through the CLI as blobs.
+const API_WRITE_MAX_BYTES: usize = 1024 * 1024;
 
 pub(crate) fn template(name: &str) -> Option<Template> {
     TEMPLATES.iter().find(|(n, _)| *n == name).map(|(_, t)| *t)
@@ -126,8 +130,8 @@ impl FragmentCell {
     }
 
     /// `POST /api/files {files: [{path, text | base64 | delete: true}],
-    /// message?, key?}`: one commit to `main`, for editors. A `key` makes a
-    /// retry commit nothing twice.
+    /// message?, key?}`: one commit to `main`, for editors (at most 16
+    /// files and 1 MiB). A `key` makes a retry commit nothing twice.
     pub(crate) async fn write_files_api(&self, caller: &Caller, body: Value) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
         let who = self.caller_id(caller)?.to_string();
@@ -141,9 +145,16 @@ impl FragmentCell {
             };
             writes.push(FileWrite { path, bytes });
         }
+        if writes.len() > fragment_proto::limits::FILE_WRITES_MAX {
+            return Err(CellError::invalid(format!("at most {} files per write", fragment_proto::limits::FILE_WRITES_MAX)));
+        }
+        let total: usize = writes.iter().filter_map(|w| w.bytes.as_ref().map(Vec::len)).sum();
+        if total > API_WRITE_MAX_BYTES {
+            return Err(CellError::too_large("the files written", total, API_WRITE_MAX_BYTES));
+        }
         let message = body["message"].as_str().map_or_else(|| format!("write {} file(s)", writes.len()), str::to_string);
         let key = format!("api:{who}:{}", body["key"].as_str().map_or_else(js::random_hex::<16>, str::to_string));
-        match self.commit_files(&key, &writes, &BTreeMap::new(), &message, &who, 0).await? {
+        match self.commit(&key, &writes, &BTreeMap::new(), &message, &who, 0).await? {
             Wrote::Commit(sha) => json_response(&json!({ "commit": sha })),
             // nothing was expected, so nothing can conflict
             Wrote::Conflict(why) => Err(CellError::host(why)),

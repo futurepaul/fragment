@@ -11,6 +11,14 @@
 //! The agent's loop drives (phase 8's first shape): the computer holds no
 //! platform credential and no model key, only its own bearer token.
 //!
+//! `fragment computer connect` answers the same requests without a public
+//! URL: it asks its agent for them (`POST <agent>/computer/poll`, a long
+//! poll with the connect token its owner was given), runs each here, and
+//! posts the answer back (`/computer/answer`).
+//!
+//! Beside goose's tools, `screenshot {url}`: a page as headless Chrome
+//! shows it, answered as an image.
+//!
 //!   GET  /health                   open
 //!   GET  /tools                    goose's tool definitions and instructions
 //!   POST /calls {id, name, arguments, cwd, wait_ms}
@@ -45,6 +53,15 @@ const CWD_MAX: usize = 64;
 const WAIT_MS_MAX: u64 = 25_000;
 const BODY_BYTES_MAX: usize = 32 * 1024 * 1024;
 const TOKEN_MIN: usize = 16;
+
+pub struct ConnectArgs {
+    /// The agent's base on the platform: `https://fragment.club/api/a/<agent>`.
+    pub agent: String,
+    pub work: PathBuf,
+    pub state: PathBuf,
+    /// The connect token the agent's owner was given (`fragment agent computer --connect`).
+    pub token_file: PathBuf,
+}
 
 pub struct ServeArgs {
     pub listen: SocketAddr,
@@ -200,9 +217,10 @@ impl App {
         let app = self.clone();
         let (name, cwd, id) = (name.to_string(), cwd.to_string(), id.to_string());
         tokio::spawn(async move {
-            let result = match app.developer(&cwd) {
-                Ok(developer) => developer.call(&name, arguments, cancel).await,
-                Err(error) => CallToolResult::error(vec![ContentBlock::text(format!("the computer could not open {cwd}: {error}"))]),
+            let result = match (name.as_str(), app.developer(&cwd)) {
+                ("screenshot", _) => screenshot(&app.state, &id, arguments, cancel).await,
+                (_, Ok(developer)) => developer.call(&name, arguments, cancel).await,
+                (_, Err(error)) => CallToolResult::error(vec![ContentBlock::text(format!("the computer could not open {cwd}: {error}"))]),
             };
             let mut record = record;
             record.status = CallStatus::Done;
@@ -257,6 +275,111 @@ fn kill_tree(pid_file: &Path) {
     }
 }
 
+// ---------------------------------------------------------------- screenshots
+
+/// Its size, and how long one may take.
+const SHOT_SIZE: (u32, u32) = (1024, 640);
+const SHOT_TIMEOUT: Duration = Duration::from_secs(45);
+
+fn screenshot_tool() -> Value {
+    json!({
+        "name": "screenshot",
+        "description": "Opens a page (an http(s) or data: URL) in this computer's headless Chrome and answers what it shows, \
+                        as an image (1024×640). The chat you answer in shows it too.",
+        "inputSchema": { "type": "object", "required": ["url"], "properties": { "url": { "type": "string" } } },
+    })
+}
+
+/// Chrome or Chromium on this computer (`CHROME_BIN` names another).
+fn chrome() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("CHROME_BIN") {
+        return Some(PathBuf::from(p));
+    }
+    [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .find(|p| p.is_file())
+}
+
+async fn screenshot(state: &Path, id: &str, arguments: Option<JsonObject>, cancel: CancellationToken) -> CallToolResult {
+    let fail = |why: String| CallToolResult::error(vec![ContentBlock::text(why)]);
+    let Some(url) = arguments.as_ref().and_then(|a| a.get("url")).and_then(Value::as_str).map(str::to_string) else {
+        return fail("url is required".into());
+    };
+    if !(url.starts_with("https://") || url.starts_with("http://") || url.starts_with("data:")) {
+        return fail("the url is http(s) or data:".into());
+    }
+    let Some(bin) = chrome() else { return fail("this computer has no Chrome: install chromium (or set CHROME_BIN)".into()) };
+    let dir = state.join("shots");
+    let (out, profile) = (dir.join(format!("{id}.png")), dir.join(format!("{id}.profile")));
+    if let Err(e) = std::fs::create_dir_all(&profile) {
+        return fail(format!("the computer could not make {}: {e}", profile.display()));
+    }
+    let mut command = tokio::process::Command::new(bin);
+    command
+        .args(["--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run", "--no-default-browser-check"])
+        .arg(format!("--user-data-dir={}", profile.display()))
+        .arg(format!("--window-size={},{}", SHOT_SIZE.0, SHOT_SIZE.1))
+        .arg(format!("--screenshot={}", out.display()))
+        .arg(&url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    // Chrome refuses to sandbox as root, which is how a Sprite runs it
+    if std::env::var("USER").as_deref() == Ok("root") {
+        command.arg("--no-sandbox");
+    }
+    let mut child = match command.spawn() {
+        Ok(c) => c,
+        Err(e) => return fail(format!("Chrome did not start: {e}")),
+    };
+    // Chrome writes the screenshot but can linger after (its updater): the
+    // file, once it stops growing, is the answer, and Chrome is stopped
+    let written = async {
+        let mut last = 0u64;
+        loop {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+            if size > 0 && size == last {
+                return true;
+            }
+            last = size;
+            if let Ok(Some(_)) = child.try_wait() {
+                return std::fs::metadata(&out).is_ok_and(|m| m.len() > 0);
+            }
+        }
+    };
+    let ran = tokio::select! {
+        r = tokio::time::timeout(SHOT_TIMEOUT, written) => r,
+        _ = cancel.cancelled() => Ok(false),
+    };
+    let _ = child.kill().await;
+    let _ = std::fs::remove_dir_all(&profile);
+    match ran {
+        Err(_) => return fail(format!("the page did not finish in {SHOT_TIMEOUT:?}")),
+        Ok(false) if cancel.is_cancelled() => return fail("the screenshot was cancelled".into()),
+        Ok(false) => return fail("Chrome stopped without a screenshot".into()),
+        Ok(true) => {}
+    }
+    let bytes = match std::fs::read(&out) {
+        Ok(b) => b,
+        Err(e) => return fail(format!("Chrome made no screenshot: {e}")),
+    };
+    let _ = std::fs::remove_file(&out);
+    use base64::Engine;
+    CallToolResult::success(vec![
+        ContentBlock::image(base64::engine::general_purpose::STANDARD.encode(bytes), "image/png"),
+        ContentBlock::text(format!("A screenshot of {url} ({}×{}).", SHOT_SIZE.0, SHOT_SIZE.1)),
+    ])
+}
+
 async fn wait_finished(receiver: &mut watch::Receiver<CallRecord>, wait: Duration) -> CallRecord {
     let _ = tokio::time::timeout(wait, receiver.wait_for(|r| r.status != CallStatus::Running)).await;
     let record = receiver.borrow().clone();
@@ -297,8 +420,16 @@ async fn authorize(State(app): Shared, request: Request, next: Next) -> Response
     next.run(request).await
 }
 
+fn tools_answer() -> Value {
+    let mut tools = serde_json::to_value(Developer::tools()).unwrap_or_else(|_| json!([]));
+    if let Some(list) = tools.as_array_mut() {
+        list.push(screenshot_tool());
+    }
+    json!({ "tools": tools, "instructions": goose_developer::instructions() })
+}
+
 async fn tools() -> Json<Value> {
-    Json(json!({ "tools": Developer::tools(), "instructions": goose_developer::instructions() }))
+    Json(tools_answer())
 }
 
 #[derive(Deserialize)]
@@ -317,37 +448,51 @@ struct WaitQuery {
     wait_ms: u64,
 }
 
-async fn call(State(app): Shared, Json(body): Json<CallBody>) -> Result<Json<CallRecord>, Failure> {
+// The routes' work, shared by `serve`'s HTTP and `connect`'s tunnel.
+
+async fn start_call(app: &Arc<App>, body: CallBody) -> Result<CallRecord, Failure> {
     let mut receiver = app.start_or_attach(&body.id, &body.name, body.arguments, &body.cwd)?;
-    Ok(Json(wait_finished(&mut receiver, clamp_wait(body.wait_ms)).await))
+    Ok(wait_finished(&mut receiver, clamp_wait(body.wait_ms)).await)
 }
 
-async fn call_status(State(app): Shared, UrlPath(id): UrlPath<String>, Query(query): Query<WaitQuery>) -> Result<Json<CallRecord>, Failure> {
-    if !valid_id(&id) {
+async fn call_record(app: &Arc<App>, id: &str, wait_ms: u64) -> Result<CallRecord, Failure> {
+    if !valid_id(id) {
         return Err(Failure(StatusCode::BAD_REQUEST, "bad call id".into()));
     }
-    let slot = app.calls.lock().expect("calls lock").get(&id).cloned();
+    let slot = app.calls.lock().expect("calls lock").get(id).cloned();
     match slot {
         Some(slot) => {
             let mut receiver = slot.record.subscribe();
-            Ok(Json(wait_finished(&mut receiver, clamp_wait(query.wait_ms)).await))
+            Ok(wait_finished(&mut receiver, clamp_wait(wait_ms)).await)
         }
-        None => match app.read_call(&id)? {
-            Some(record) => Ok(Json(record)),
+        None => match app.read_call(id)? {
+            Some(record) => Ok(record),
             None => Err(Failure(StatusCode::NOT_FOUND, format!("no call {id}"))),
         },
     }
 }
 
-async fn call_cancel(State(app): Shared, UrlPath(id): UrlPath<String>) -> Json<Value> {
-    let slot = app.calls.lock().expect("calls lock").get(&id).cloned();
+fn cancel_call(app: &Arc<App>, id: &str) -> Value {
+    let slot = app.calls.lock().expect("calls lock").get(id).cloned();
     if let Some(slot) = &slot {
-        if valid_id(&id) && slot.record.borrow().name == "shell" {
-            kill_tree(&app.pid_path(&id));
+        if valid_id(id) && slot.record.borrow().name == "shell" {
+            kill_tree(&app.pid_path(id));
         }
         slot.cancel.cancel();
     }
-    Json(json!({ "cancelled": slot.is_some() }))
+    json!({ "cancelled": slot.is_some() })
+}
+
+async fn call(State(app): Shared, Json(body): Json<CallBody>) -> Result<Json<CallRecord>, Failure> {
+    Ok(Json(start_call(&app, body).await?))
+}
+
+async fn call_status(State(app): Shared, UrlPath(id): UrlPath<String>, Query(query): Query<WaitQuery>) -> Result<Json<CallRecord>, Failure> {
+    Ok(Json(call_record(&app, &id, query.wait_ms).await?))
+}
+
+async fn call_cancel(State(app): Shared, UrlPath(id): UrlPath<String>) -> Json<Value> {
+    Json(cancel_call(&app, &id))
 }
 
 /// The bearer token: read from its file, or made there (0600) the first time.
@@ -378,6 +523,97 @@ fn router(app: Arc<App>) -> Router {
         .route("/calls/{id}/cancel", post(call_cancel))
         .route_layer(middleware::from_fn_with_state(app.clone(), authorize));
     Router::new().route("/health", get(|| async { "ok" })).merge(authed).layer(DefaultBodyLimit::max(BODY_BYTES_MAX)).with_state(app)
+}
+
+// ---------------------------------------------------------------- connect
+
+/// A request the agent would have sent to `serve`, tunneled.
+#[derive(Deserialize)]
+struct Tunneled {
+    rid: String,
+    method: String,
+    path: String,
+    #[serde(default)]
+    body: Value,
+}
+
+/// Answers a tunneled request as `serve`'s routes would: (status, body).
+async fn dispatch(app: &Arc<App>, method: &str, path: &str, body: Value) -> (u16, Value) {
+    let (path, query) = path.split_once('?').unwrap_or((path, ""));
+    let wait_ms = query.split('&').find_map(|kv| kv.strip_prefix("wait_ms=")).and_then(|v| v.parse().ok()).unwrap_or(0);
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let answered = match (method, segments.as_slice()) {
+        ("GET", ["tools"]) => Ok(tools_answer()),
+        ("POST", ["calls"]) => match serde_json::from_value::<CallBody>(body) {
+            Ok(b) => start_call(app, b).await.map(|r| json!(r)),
+            Err(e) => Err(Failure(StatusCode::BAD_REQUEST, format!("body: {e}"))),
+        },
+        ("GET", ["calls", id]) => call_record(app, id, wait_ms).await.map(|r| json!(r)),
+        ("POST", ["calls", id, "cancel"]) => Ok(cancel_call(app, id)),
+        _ => Err(Failure(StatusCode::NOT_FOUND, format!("no route {method} {path}"))),
+    };
+    match answered {
+        Ok(v) => (200, v),
+        Err(Failure(status, why)) => (status.as_u16(), json!({ "error": why })),
+    }
+}
+
+/// Answers its agent's requests until the process is stopped: a long poll
+/// out to the platform, each request run here, its answer posted back.
+pub fn connect(args: ConnectArgs) -> Result<()> {
+    std::fs::create_dir_all(&args.work)?;
+    std::fs::create_dir_all(args.state.join("calls"))?;
+    std::fs::create_dir_all(args.state.join("pids"))?;
+    let token = std::fs::read_to_string(&args.token_file)
+        .with_context(|| format!("reading {} (the connect token its owner was given)", args.token_file.display()))?
+        .trim()
+        .to_string();
+    ensure!(token.len() >= TOKEN_MIN, "{} holds no usable token", args.token_file.display());
+    let app = Arc::new(App { work: args.work, state: args.state, token: token.clone(), calls: Mutex::new(HashMap::new()), developers: Mutex::new(HashMap::new()) });
+    let base = args.agent.trim_end_matches('/').to_string();
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    runtime.block_on(async move {
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(60)).build()?;
+        eprintln!("fragment computer answering {base} (Ctrl-C stops it)");
+        let mut backoff = 1u64;
+        loop {
+            let polled = client.post(format!("{base}/computer/poll")).header("x-computer-token", &token).header("content-type", "application/json").body("{}").send().await;
+            let requests: Vec<Tunneled> = match polled {
+                Ok(r) if r.status().is_success() => {
+                    backoff = 1;
+                    let bytes = r.bytes().await.unwrap_or_default();
+                    serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| serde_json::from_value(v["requests"].clone()).ok()).unwrap_or_default()
+                }
+                Ok(r) if matches!(r.status().as_u16(), 401 | 403 | 404) => {
+                    anyhow::bail!("{base} refused this computer ({}): ask the agent's owner for a new connect token", r.status());
+                }
+                Ok(r) => {
+                    eprintln!("the platform answered {}; again in {backoff} s", r.status());
+                    tokio::time::sleep(Duration::from_secs(backoff)).await;
+                    backoff = (backoff * 2).min(30);
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("the platform did not answer ({e}); again in {backoff} s");
+                    tokio::time::sleep(Duration::from_secs(backoff)).await;
+                    backoff = (backoff * 2).min(30);
+                    continue;
+                }
+            };
+            for t in requests {
+                let (app, client, base, token) = (app.clone(), client.clone(), base.clone(), token.clone());
+                tokio::spawn(async move {
+                    let (status, body) = dispatch(&app, &t.method, &t.path, t.body).await;
+                    let answer = json!({ "rid": t.rid, "status": status, "body": body }).to_string();
+                    // a lost answer is asked again (the calls are idempotent by id)
+                    let sent = client.post(format!("{base}/computer/answer")).header("x-computer-token", &token).header("content-type", "application/json").body(answer).send().await;
+                    if let Err(e) = sent {
+                        eprintln!("answering {}: {e}", t.rid);
+                    }
+                });
+            }
+        }
+    })
 }
 
 /// Serves until the process is stopped.

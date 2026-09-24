@@ -2,8 +2,8 @@
 //! step 4). It has no ingress of its own: this router authenticates each
 //! request as it does its own (a signature resolved to an identity by the
 //! registry) and hands it on with the caller's identity, which the script
-//! trusts. An inbox delivery passes as it came: its token is the
-//! capability.
+//! trusts. An inbox delivery, and a computer that connects out asking for
+//! work, pass as they came: their tokens are the capability.
 //!
 //! An agent's name is `<label>.<username>`, its owner's username, as a
 //! fragment's is; a bare label names one of the signer's own. Making an
@@ -25,7 +25,9 @@ pub(crate) const DEFAULT_LABEL: &str = "agent";
 
 /// `/api/agents` and `/api/a/*`.
 pub(crate) async fn route(mut req: Request, env: &Env, url: &Url, segments: &[&str]) -> CellResult<Response> {
-    if let (Method::Post, ["api", "a", _, "inbox", _]) = (req.method(), segments) {
+    // an inbox delivery (its token) and a computer that connects out (its
+    // connect token) carry their own capability
+    if let (Method::Post, ["api", "a", _, "inbox", _] | ["api", "a", _, "computer", "poll" | "answer"]) = (req.method(), segments) {
         return js::service_fetch(env.as_ref(), "AGENTS", req).await;
     }
     let body = read_body(&mut req).await?;
