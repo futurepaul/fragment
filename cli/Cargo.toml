@@ -18,6 +18,7 @@ fragment-templates = { path = "../crates/templates" }
 fragment-core = { path = "../crates/core" }
 fragment-proto = { path = "../crates/proto" }
 fragment-nip98 = { path = "../crates/nip98", features = ["sign"] }
+fragment-proto = { path = "../crates/proto" }
 fragment-computer = { path = "../crates/computer", optional = true }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

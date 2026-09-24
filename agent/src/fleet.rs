@@ -3,6 +3,9 @@
 //! exactly what its membership lets it, and nothing through a side door.
 
 use anyhow::{anyhow, Context};
+use fragment_proto::ErrorBody;
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use worker::{Env, Fetch, Headers, Method, Request, RequestInit, SqlStorage};
@@ -83,11 +86,21 @@ impl Fleet {
         }
         Ok(value)
     }
+
+    /// A signed GET, decoded into its fragment_proto type.
+    pub async fn get_as<T: DeserializeOwned>(&self, path: &str) -> anyhow::Result<T> {
+        let value = self.get(path).await?;
+        T::deserialize(&value).with_context(|| format!("GET {path}: not a {}", std::any::type_name::<T>()))
+    }
 }
 
-/// A fragment error's message, or the whole answer.
+/// A refusal's message (its `ErrorBody`), or the whole answer when it is
+/// not one.
 pub fn message(v: &Value) -> String {
-    v["message"].as_str().map(str::to_string).unwrap_or_else(|| v.to_string())
+    match ErrorBody::deserialize(v) {
+        Ok(refusal) => refusal.message,
+        Err(_) => v.to_string(),
+    }
 }
 
 /// The fleet from the agent's variables.

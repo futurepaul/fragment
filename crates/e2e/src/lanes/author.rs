@@ -376,6 +376,17 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the same --id replays", r["replayed"] == true, &r);
     let out = s.cli(api, &home, &["call", &name, "say", "--input", "{}"]);
     s.ok("a schema refusal is reported", !out.status.success() && String::from_utf8_lossy(&out.stderr).contains("/text: is required"), String::from_utf8_lossy(&out.stderr));
+    // --json names a refusal by the host's own code (these were server_error)
+    let refused = |s: &Suite, args: &[&str]| {
+        let out = s.cli(api, &home, args);
+        (out.status.code(), serde_json::from_slice::<Value>(&out.stdout).unwrap_or_default())
+    };
+    let (exit, v) = refused(s, &["call", &name, "say", "--input", "{}", "--json"]);
+    s.ok("with --json it is invalid_request (exit 1)", exit == Some(1) && v["error"]["code"] == "invalid_request", &v);
+    let (exit, v) = refused(s, &["call", &name, "say", "--input", r#"{"text":"other"}"#, "--id", "cli-1", "--json"]);
+    s.ok("an --id reused with another input is conflicting_body", exit == Some(1) && v["error"]["code"] == "conflicting_body", &v);
+    let (exit, v) = refused(s, &["call", &name, "say", "--input", "{not json", "--json"]);
+    s.ok("input that is not JSON is invalid_usage (exit 2)", exit == Some(2) && v["error"]["code"] == "invalid_usage", &v);
     let r = s.cli_json(api, &home, &["channel", &name, "--json"])?;
     s.ok("fragment channel lists the channels", r["channels"].as_array().is_some_and(|a| a.iter().any(|c| c["name"] == "room")), &r);
     let r = s.cli_json(api, &home, &["channel", &name, "room", "--json"])?;

@@ -19,7 +19,8 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
-use fragment_proto::{OpDecl, OpKind, Role};
+use fragment_proto::{FragmentList, FragmentStatus, OpDecl, OpKind, OpResult};
+use serde::Deserialize;
 use goose_agent::operation::Emitter;
 use goose_agent::tool::ToolProvider;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, ErrorData, Tool};
@@ -157,7 +158,7 @@ impl FragmentTools {
     }
 
     async fn read_catalog(fleet: Fleet) -> anyhow::Result<Catalog> {
-        let listed = fleet.get("/api/fragments").await?;
+        let listed: FragmentList = fleet.get_as("/api/fragments").await?;
         let mut tools = Vec::new();
         let mut routes = HashMap::new();
         for (name, description, schema) in platform_tools() {
@@ -165,17 +166,15 @@ impl FragmentTools {
             tools.push(Tool::new(name, description, Arc::new(schema)));
             routes.insert(name.to_string(), Route::Platform(name));
         }
-        for f in listed["fragments"].as_array().into_iter().flatten().take(FRAGMENTS_MAX) {
-            let (Some(name), Some(role)) = (f["name"].as_str(), f["role"].as_str()) else { continue };
-            let role: Role = serde_json::from_value(json!(role))?;
-            let status = match fleet.get(&format!("/api/f/{name}/status")).await {
+        for f in listed.fragments.iter().take(FRAGMENTS_MAX) {
+            let name = f.name.as_str();
+            let status: FragmentStatus = match fleet.get_as(&format!("/api/f/{name}/status")).await {
                 Ok(s) => s,
-                // a fragment that will not answer is left out, not fatal
+                // a fragment that will not answer (or not with a status) is left out, not fatal
                 Err(_) => continue,
             };
-            let ops: std::collections::BTreeMap<String, OpDecl> = serde_json::from_value(status["code"]["operations"].clone()).unwrap_or_default();
-            for (op, decl) in ops {
-                if decl.role > role || tools.len() >= TOOLS_MAX {
+            for (op, decl) in status.code.operations {
+                if decl.role > f.role || tools.len() >= TOOLS_MAX {
                     continue;
                 }
                 let Some(tool) = tool_name(name, &op) else { continue };
@@ -242,7 +241,10 @@ impl ToolProvider<Session> for FragmentTools {
             return Ok(CallToolResult::error(vec![ContentBlock::text(format!("{status}: {}", fleet::message(&answer)))]));
         }
         let mut text = match (&route, &answer) {
-            (Route::Op { .. }, _) => answer["result"].to_string(),
+            (Route::Op { .. }, _) => match OpResult::deserialize(&answer) {
+                Ok(done) => done.result.to_string(),
+                Err(e) => return Ok(CallToolResult::error(vec![ContentBlock::text(format!("the fragment's answer is not an operation's result: {e}"))])),
+            },
             // a file's bytes come back as text; the rest are JSON
             (Route::Platform(_), Value::String(s)) => s.clone(),
             (Route::Platform(_), v) => v.to_string(),

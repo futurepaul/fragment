@@ -479,6 +479,19 @@ pub struct FragmentStatus {
     pub blob_min_bytes: Option<u64>,
 }
 
+/// A fragment the signer holds a role on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListedFragment {
+    pub name: String,
+    pub role: Role,
+}
+
+/// `GET /api/fragments` (any signer).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FragmentList {
+    pub fragments: Vec<ListedFragment>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Member {
@@ -494,6 +507,12 @@ pub struct Member {
     /// An agent member's owner, who reads what it reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+}
+
+/// `GET /api/f/<name>/members` (viewer).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemberList {
+    pub members: Vec<Member>,
 }
 
 /// What an identity is (docs/finite-integration.md). A fragment's own key
@@ -658,6 +677,12 @@ pub struct Invite {
     pub token: Option<String>,
 }
 
+/// `GET /api/f/<name>/invites` (owner): the open invites, without tokens.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InviteList {
+    pub invites: Vec<Invite>,
+}
+
 /// `POST /api/f/<name>/join` (any signed principal)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -737,6 +762,23 @@ pub struct ChannelRecord {
     /// The JSON text the cell stored, passed through as it is: the cell
     /// neither parses a body it just wrote nor one it reads back.
     pub body: Box<RawValue>,
+}
+
+/// `GET /api/f/<name>/channels/<channel>?after=` (the channel's reader):
+/// a page of records after `after`, and the cursor after the page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChannelPage {
+    pub channel: String,
+    pub records: Vec<ChannelRecord>,
+    pub next: i64,
+}
+
+/// What a subscription's URL receives (`POST`, unsigned: the URL is the
+/// subscriber's capability): one new record of the channel it follows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Delivery {
+    Record { fragment: String, channel: String, record: ChannelRecord },
 }
 
 /// Channel names: `^[a-z][a-z0-9_-]{0,63}$`.
@@ -882,6 +924,16 @@ pub struct Run {
     /// What its paid steps cost the budget that paid (micro-dollars).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_micros: Option<i64>,
+}
+
+/// `GET /api/f/<name>/runs` (viewer): newest first, how many runs are in
+/// each status (`queued`, `running`, …), and the operations whose triggers
+/// are paused.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunList {
+    pub runs: Vec<Run>,
+    pub counts: std::collections::BTreeMap<String, u64>,
+    pub paused: Vec<String>,
 }
 
 /// A month of a billing org's budget (`GET /api/budget`). Money is in
@@ -1158,6 +1210,24 @@ mod tests {
         let b: Value = serde_json::from_str(r#"{"a":{"c":3,"d":2},"b":1}"#).unwrap();
         assert_eq!(canonical_json(&a), canonical_json(&b));
         assert_eq!(canonical_json(&a), r#"{"a":{"c":3,"d":2},"b":1}"#);
+    }
+
+    /// Goal: a delivery names its record's place, or it does not decode.
+    /// Method: the wire shape round-trips; one without `seq`, or of another
+    /// type, is an error (an agent keyed a seq-less one `…/null`).
+    #[test]
+    fn deliveries_decode_whole_or_not_at_all() {
+        let wire = serde_json::json!({ "type": "record", "fragment": "f", "channel": "chat",
+            "record": { "channel": "chat", "seq": 7, "at": 1, "principal": "id:0123456789abcdef0123456789abcdef", "kind": "say", "body": { "text": "hi" } } });
+        let Delivery::Record { fragment, channel, record } = serde_json::from_value::<Delivery>(wire.clone()).unwrap();
+        assert_eq!((fragment.as_str(), channel.as_str(), record.seq), ("f", "chat", 7));
+        assert_eq!(serde_json::to_value(Delivery::Record { fragment, channel, record }).unwrap(), wire);
+        let mut no_seq = wire.clone();
+        no_seq["record"].as_object_mut().unwrap().remove("seq");
+        assert!(serde_json::from_value::<Delivery>(no_seq).is_err());
+        let mut other = wire.clone();
+        other["type"] = serde_json::json!("push");
+        assert!(serde_json::from_value::<Delivery>(other).is_err());
     }
 
     #[test]

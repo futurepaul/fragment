@@ -7,8 +7,9 @@
 // the boundary, and every retry/loop has an explicit bound. What goes over
 // the wire and what comes back is fragment_core::codestorage's, the same
 // encoder and decoders the cell uses; this file is the transport.
-use crate::api::{encode_q, timeout_for, Client as HostClient, Replay, CONNECT_TIMEOUT, REQUEST_ATTEMPTS};
+use crate::api::{encode_q, timeout_for, Client as HostClient, CodedError, Replay, CONNECT_TIMEOUT, REQUEST_ATTEMPTS};
 use fragment_core::codestorage::{self as core_cs, FileChange, TreeEntry};
+use fragment_proto::StorageToken;
 use serde_json::Value;
 use std::fmt;
 
@@ -30,6 +31,8 @@ const LIST_PAGE: u64 = 1000;
 
 #[derive(Debug)]
 pub enum CsError {
+    /// the fragment host would not mint a token: its refusal, coded
+    Host(CodedError),
     /// connection-level failure (after the bounded connect retries)
     Transport(String),
     /// a write reached the server but its answer was lost: it may have
@@ -54,6 +57,7 @@ pub enum CsError {
 impl fmt::Display for CsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            CsError::Host(e) => write!(f, "storage token: {e}"),
             CsError::Transport(d) => write!(f, "code.storage unreachable: {d}"),
             CsError::OutcomeUnknown(d) => write!(f, "code.storage may have applied the request, but its answer was lost: {d}"),
             CsError::Auth(d) => write!(f, "code.storage refused the token (auth/ref policy): {d}"),
@@ -68,33 +72,29 @@ impl fmt::Display for CsError {
 }
 impl std::error::Error for CsError {}
 
-/// The fragment host mints a short-lived, repo-scoped code.storage JWT;
-/// the CLI never sees the org key. Response contract (runtime side):
-/// {"token": ..., "repo": ..., "api": "https://api.<cluster>.code.storage"}
-/// where `api` is the spec's server URL (endpoints append /api/repos/...).
+/// The fragment host's failure, coded when it is one (a refusal, or a
+/// request that never got an answer).
+fn host_error(e: anyhow::Error) -> CsError {
+    match e.downcast::<CodedError>() {
+        Ok(coded) => CsError::Host(coded),
+        Err(e) => CsError::Transport(format!("storage token: {e:#}")),
+    }
+}
+
+/// The fragment host mints a short-lived, repo-scoped code.storage JWT
+/// (`StorageToken`); the CLI never sees the org key. Its `api` is the
+/// spec's server URL (endpoints append /api/repos/...).
 fn mint_from_host(host: &HostClient, name: &str, override_url: Option<&str>) -> Result<CodeStorage, CsError> {
-    let resp = host
-        .get(&format!("/api/f/{name}/storage-token"))
-        .map_err(|e| CsError::Auth(format!("storage-token request failed: {e:#}")))?;
-    let v: Value = host
-        .call(resp)
-        .map_err(|e| CsError::Auth(format!("storage-token fetch failed: {e:#}")))?;
-    let server = override_url
-        .map(|s| s.trim_end_matches('/').to_string())
-        .unwrap_or_else(|| {
-            v["api"].as_str().unwrap_or_default().trim_end_matches('/').to_string()
-        });
-    let repo = v["repo"].as_str().unwrap_or_default().to_string();
-    let token = v["token"].as_str().unwrap_or_default().to_string();
-    if server.is_empty() || repo.is_empty() || token.is_empty() {
-        return Err(CsError::Malformed(format!(
-            "storage-token response needs non-empty token/repo/api, got: {v}"
-        )));
+    let resp = host.get(&format!("/api/f/{name}/storage-token")).map_err(host_error)?;
+    let minted: StorageToken = host.call_as(resp).map_err(host_error)?;
+    let server = override_url.unwrap_or(&minted.api).trim_end_matches('/').to_string();
+    if server.is_empty() || minted.repo.is_empty() || minted.token.is_empty() {
+        return Err(CsError::Malformed(format!("a storage token needs a token, a repo, and an api (repo {:?}, api {server:?})", minted.repo)));
     }
     Ok(CodeStorage {
         server,
-        repo,
-        token,
+        repo: minted.repo,
+        token: minted.token,
         // every request sets its own total timeout (`timeout_for`)
         http: reqwest::blocking::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)

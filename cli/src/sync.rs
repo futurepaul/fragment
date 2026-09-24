@@ -15,6 +15,7 @@
 // root-identity (dev/ino) check is subsumed by the mass-deletion guard,
 // which now also refuses a total wipe regardless of file count.
 use crate::api::Client;
+use crate::api::CodedError;
 use crate::codestorage::{Author, Change, CodeStorage, CsError, MAIN, MAX_CAS_ATTEMPTS};
 use fragment_core::codestorage::TreeEntry;
 use anyhow::{anyhow, Result};
@@ -71,6 +72,9 @@ impl Default for SyncOptions {
 #[derive(Debug)]
 pub enum SyncError {
     Cs(CsError),
+    /// the fragment host refused a blob's upload or download: its code
+    /// (budget, size, role) is the one to act on
+    Host(CodedError),
     Io(String),
     /// the folder's journal belongs to a different repo than the fragment
     /// being synced — refuse before touching anything
@@ -90,12 +94,23 @@ impl std::fmt::Display for SyncError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SyncError::Cs(e) => write!(f, "{e}"),
+            SyncError::Host(e) => write!(f, "{e}"),
             SyncError::Io(e) => write!(f, "io: {e}"),
             SyncError::Repo(e) => write!(f, "{e}"),
         }
     }
 }
 impl std::error::Error for SyncError {}
+
+impl SyncError {
+    /// A blob's failure for `path`: the host's refusal keeps its code.
+    fn blob(path: &str, e: anyhow::Error) -> SyncError {
+        match e.downcast::<CodedError>() {
+            Ok(refused) => SyncError::Host(CodedError { code: refused.code, msg: format!("{path}: {}", refused.msg) }),
+            Err(e) => SyncError::Io(format!("{path}: {e:#}")),
+        }
+    }
+}
 
 /// stat cache v3: content sha + last-seen remote commit per path.
 /// Anything else (or a v2 file from the old engine) reads as fresh —
@@ -530,7 +545,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
             let mut changes: Vec<Change> = Vec::with_capacity(plan.upserts.len() + plan.deletes.len());
             for p in &plan.upserts {
                 let bytes = fs::read(dir.join(p)).map_err(|e| SyncError::Io(format!("read {p}: {e}")))?;
-                let bytes = blobs.store(bytes).map_err(|e| SyncError::Io(format!("{p}: {e:#}")))?;
+                let bytes = blobs.store(bytes).map_err(|e| SyncError::blob(p, e))?;
                 changes.push(Change::Upsert { path: p.clone(), bytes });
             }
             for p in &plan.deletes {
@@ -788,7 +803,7 @@ fn pull_file(
     state: &mut SyncState,
     report: &mut Report,
 ) -> Result<(), SyncError> {
-    let bytes = blobs.resolve(storage.read_file(path, MAIN)?).map_err(|e| SyncError::Io(format!("{path}: {e:#}")))?;
+    let bytes = blobs.resolve(storage.read_file(path, MAIN)?).map_err(|e| SyncError::blob(path, e))?;
     let sha = sha256_hex(&bytes);
     atomic_write(&dir.join(path), &bytes).map_err(|e| SyncError::Io(e.to_string()))?;
     let md = fs::metadata(dir.join(path)).map_err(|e| SyncError::Io(e.to_string()))?;
