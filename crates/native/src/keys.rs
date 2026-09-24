@@ -352,9 +352,19 @@ impl Config {
         }
         let fly = self.fly.as_ref().ok_or_else(|| Response::error(503, "FRAGMENT_KEYS_FLY_API_TOKEN, _FLY_APP, and _HOST_SUFFIX are not set on this node"))?;
         let url = format!("{}/v1/apps/{}/certificates/acme", fly.api, fly.app);
-        let req = client().post(url).bearer_auth(&fly.token).json_body(&json!({ "hostname": format!("{name}.{}", fly.suffix) }));
+        let req = client().post(url).header("authorization", fly_authorization(&fly.token)).json_body(&json!({ "hostname": format!("{name}.{}", fly.suffix) }));
         let (status, answer) = send(req, "Fly").await?;
         Ok(Response::json(200, &json!({ "status": status, "body": answer })))
+    }
+}
+
+/// A Fly token as its API takes it: a macaroon (`fly tokens create deploy`
+/// makes one, `FlyV1 fm2_…`) goes as it is, an older token as a bearer.
+fn fly_authorization(token: &str) -> String {
+    if token.starts_with("FlyV1 ") {
+        token.to_string()
+    } else {
+        format!("Bearer {token}")
     }
 }
 
@@ -391,6 +401,12 @@ async fn send(req: reqwest::RequestBuilder, host: &str) -> Result<(u16, Value), 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fly_tokens_go_as_the_api_takes_them() {
+        assert_eq!(super::fly_authorization("FlyV1 fm2_abc,fm2_def"), "FlyV1 fm2_abc,fm2_def");
+        assert_eq!(super::fly_authorization("old-style"), "Bearer old-style");
+    }
+
     use super::*;
     use std::task::{Context, Poll, Waker};
 
