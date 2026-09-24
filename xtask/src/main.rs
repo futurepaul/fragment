@@ -14,9 +14,10 @@
 //!                    with --fleet <fleet> first, run its hosted sections against
 //!                    that fleet instead
 //!   check            host tests and clippy, warnings denied
-//!   deploy <fleet> [--nodes]
+//!   deploy <fleet> [--nodes | --secrets]
 //!                    ship the cell to a hosted fleet (fleets/<fleet>.json), or
-//!                    with --nodes roll its Machines to a new node image
+//!                    with --nodes roll its Machines to a new node image (and
+//!                    its secrets), with --secrets set its secrets alone
 //!   fleet <fleet> <celld command...>
 //!                    a celld operator command against the fleet's bucket
 //!                    (diagnose, cell list, queue info <queue>, ...)
@@ -286,7 +287,7 @@ fn main() -> Result<()> {
         Some("check") => check(),
         Some("deploy") => deploy::run(&args[1..]),
         Some("fleet") => deploy::operate(&args[1..]),
-        _ => bail!("usage: cargo xtask build | celld | dev [--clean] | try <template> [name] | e2e [--fleet <fleet>] [--only <case>] | check | deploy <fleet> [--nodes] | fleet <fleet> <celld command...>"),
+        _ => bail!("usage: cargo xtask build | celld | dev [--clean] | try <template> [name] | e2e [--fleet <fleet>] [--only <case>] | check | deploy <fleet> [--nodes | --secrets] | fleet <fleet> <celld command...>"),
     }
 }
 

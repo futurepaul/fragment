@@ -258,6 +258,36 @@ without a delete condition is unfinished design, not debt.
   (the host secret through `FRAGMENT_KEYS_HOST_SECRET_PREVIOUS`; the
   other three at their issuers). All Paul's to approve.
 
+## The fleet shares Fly's default private network
+
+- **Observed:** the hardening pass (H4, deferred with Paul's agreement
+  2026-09-24). fragment-club's Machines are on the `personal` org's
+  default private network (6PN), which every app in the org can reach.
+  Since H3 the nodes' internal listener answers only fleet-signed peers,
+  so what an app in the org reaches is the peer routes (which refuse it)
+  and the public port.
+- **Risk:** another app in the org, if compromised, can probe the fleet's
+  private addresses; a celld bug in a peer route would be reachable from
+  there.
+- **First proof:** another app in the `personal` org that runs code we
+  did not write, or strangers' code on the fleet.
+- **Delete when:** the fleet runs as an app created on its own network
+  (`flyctl apps create --network`: a new app, new volumes, certificates,
+  and a DNS change), done with Tier 3's cordons (a fleet per trust tier)
+  before public sign-up; proven by a check from another app in the org
+  that the fleet's private address does not answer.
+
+## celld runs as root in the node image
+
+- **Observed:** H4, deferred. `fragment-node` and celld run as root in
+  the Machine (a Firecracker VM).
+- **Risk:** small: a celld compromise already holds the node's keys (its
+  environment) and data; root adds the rest of the VM.
+- **First proof:** a node deploy that touches the image anyway.
+- **Delete when:** the image has a `celld` user that owns `/data`
+  (`fragment-node` chowns it once, then drops privileges before exec),
+  shipped in a node deploy and checked on the fleet.
+
 ## Loaded workers are never released
 
 - **Observed:** the isolation spike (2026-09-23); the hardening pass (H2)

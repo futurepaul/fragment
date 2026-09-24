@@ -150,22 +150,19 @@ node image clones it from there). Sources: the native services spike
    one), then rotate the four secrets (debt ledger: "The fleet's old
    secrets are still in the bucket's deployment history").
 
-## H4. Deployment (proposed; configuration, Paul's)
+## H4. Deployment (decided with Paul, 2026-09-24)
 
-- **The fleet's own private network.** Fly sets an app's network at
-  creation (`flyctl apps create --network`), so this is a new app, new
-  volumes, new certificates, and a DNS change at Namecheap. After H3 the
-  private network reaches only the fleet-signed peer routes and the
-  public port, so the move buys less than it did when the plan was
-  written. Recommendation: do it with Tier 3's cordons (a fleet per trust
-  tier), before strangers can publish code, not now.
-- **Tigris keys scoped to the fleet's bucket** (not the Tigris project):
-  cheap, made in Tigris's console; then `flyctl secrets set` on the app
-  and the operator's credentials file. Recommended now.
-- **Non-root in the image:** celld would run as a user that owns `/data`
-  (fragment-node chowns it once, then drops privileges). Inside a
-  Firecracker VM this buys little, and it needs a node deploy to test.
-  Recommendation: fold it into the next node deploy after this one.
+- **Tigris keys scoped to the fleet's bucket: now.** Tigris makes a key
+  scoped to one bucket in its console (Access Keys, bucket
+  `fragment-club-ord`, Editor); its IAM API can too, but its "no default
+  access" option is not documented well enough to trust on Paul's org.
+  The key replaces the app's `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`
+  secrets and the operator's `fragment-club-bucket.env`; then the old
+  key is revoked.
+- **The fleet's own private network: later**, with Tier 3's cordons
+  (debt ledger: "The fleet shares Fly's default private network").
+- **Non-root in the image: later**, in a node deploy that touches the
+  image anyway (debt ledger: "celld runs as root in the node image").
 
 **Not in this pass: Tier 3, cordons** (separate fleets per trust tier,
 so strangers are never co-resident with friends). Needed before public

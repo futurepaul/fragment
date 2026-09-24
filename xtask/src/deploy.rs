@@ -6,6 +6,8 @@
 //! fleet answers with it. `--nodes` stages the fleet's secrets as Fly
 //! secrets (the node's environment, where only `KEYS` reads them) and rolls
 //! the Machines to a new node image (`fleets/Dockerfile`), one at a time.
+//! `--secrets` sets the fleet's secrets alone (a rotation): Fly restarts
+//! the Machines on the image they run.
 //!
 //! The fleet's secrets never become Worker `vars`: those are literals in
 //! every isolate and plaintext in the deployment manifest in the bucket
@@ -165,18 +167,53 @@ fn redact(text: &str, secrets: &[String]) -> String {
 }
 
 pub fn run(args: &[String]) -> Result<()> {
-    let usage = "usage: cargo xtask deploy <fleet> [--nodes]";
-    let (name, nodes) = match args {
-        [name] => (name, false),
-        [name, flag] if flag == "--nodes" => (name, true),
+    let usage = "usage: cargo xtask deploy <fleet> [--nodes | --secrets]";
+    let (name, mode) = match args {
+        [name] => (name, None),
+        [name, flag] if flag == "--nodes" || flag == "--secrets" => (name, Some(flag.as_str())),
         _ => bail!(usage),
     };
     let fleet = load(name)?;
-    if nodes {
-        deploy_nodes(name, &fleet)
-    } else {
-        deploy_cell(name, &fleet)
+    match mode {
+        None => deploy_cell(name, &fleet),
+        Some("--nodes") => deploy_nodes(name, &fleet),
+        // the fleet's secrets changed (a rotation): Fly restarts the
+        // Machines, one at a time, on the image they run
+        _ => import_secrets(&fleet, &read_secret(&fleet.fly.token)?, false),
     }
+}
+
+/// Sets the fleet's secrets on the app from the files `node_secrets`
+/// names: staged (the next deploy brings them up) or applied now (Fly
+/// restarts the Machines). Values go through stdin and are never printed.
+fn import_secrets(fleet: &Fleet, token: &str, stage: bool) -> Result<()> {
+    let (import, values) = secrets_import(fleet)?;
+    println!("{} {} secrets on {} (values never printed)", if stage { "staging" } else { "setting" }, fleet.node_secrets.len(), fleet.fly.app);
+    let mut cmd = Command::new("flyctl");
+    cmd.args(["secrets", "import", "--app", &fleet.fly.app]);
+    if stage {
+        cmd.arg("--stage");
+    }
+    let mut child = cmd
+        .env("FLY_API_TOKEN", token)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("could not start flyctl secrets import")?;
+    {
+        use std::io::Write;
+        child.stdin.take().context("flyctl's stdin")?.write_all(import.as_bytes())?;
+    }
+    let out = child.wait_with_output()?;
+    let mut hidden = values;
+    hidden.push(token.to_string());
+    print!("{}", redact(&String::from_utf8_lossy(&out.stdout), &hidden));
+    eprint!("{}", redact(&String::from_utf8_lossy(&out.stderr), &hidden));
+    if !out.status.success() {
+        bail!("flyctl secrets import failed: {}", out.status);
+    }
+    Ok(())
 }
 
 /// The bucket's credentials, from the fleet's credentials file.
@@ -431,28 +468,7 @@ fn deploy_nodes(name: &str, fleet: &Fleet) -> Result<()> {
     std::fs::remove_dir_all(&docker).with_context(|| format!("remove {} (it holds a registry login)", docker.display()))?;
     pushed?;
     // the fleet's secrets, staged so the roll below brings them up with the image
-    let (import, values) = secrets_import(fleet)?;
-    println!("staging {} secrets on {} (values never printed)", fleet.node_secrets.len(), fleet.fly.app);
-    let mut child = Command::new("flyctl")
-        .args(["secrets", "import", "--stage", "--app", &fleet.fly.app])
-        .env("FLY_API_TOKEN", &token)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("could not start flyctl secrets import")?;
-    {
-        use std::io::Write;
-        child.stdin.take().context("flyctl's stdin")?.write_all(import.as_bytes())?;
-    }
-    let out = child.wait_with_output()?;
-    let mut hidden = values;
-    hidden.push(token.clone());
-    print!("{}", redact(&String::from_utf8_lossy(&out.stdout), &hidden));
-    eprint!("{}", redact(&String::from_utf8_lossy(&out.stderr), &hidden));
-    if !out.status.success() {
-        bail!("flyctl secrets import failed: {}", out.status);
-    }
+    import_secrets(fleet, &token, true)?;
     println!("rolling {} ({}) to {tag}", fleet.fly.app, fleet.fly.org);
     crate::run(
         Command::new("flyctl")
