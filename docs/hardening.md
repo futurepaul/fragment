@@ -1,11 +1,9 @@
 # Hardening pass
 
-Status: **H1–H3 built and proven locally on 2026-09-24**, on Paul's go
-("proceed with h1-h4"). **Not deployed:** the node image deploy, the Fly
-secrets, the bucket clean-up, and H4 are Paul's to approve (below). The
-celld fork is branch `hardening` at `2779418` in
-`celld-worktrees/hardening`, **not yet pushed** to futurepaul/celld (the
-node image clones it from there). Sources: the native services spike
+Status: **H1–H3 deployed to fragment.club on 2026-09-24** (Paul: "proceed
+with h1-h4", then each deploy step). The bucket clean-up and the secret
+rotations wait on Paul (below). The celld fork is branch `hardening` at
+`2779418` on futurepaul/celld (`celld-worktrees/hardening`). Sources: the native services spike
 (`spike/native-services`, cd1d6d8), and the two isolation spikes
 (`spike/cell-isolation` 35c51f1; `spike/isolation` dadbadb).
 
@@ -131,24 +129,28 @@ node image clones it from there). Sources: the native services spike
   `KEYS`: sign-in (WorkOS's exchange), budgets (OpenRouter's key API),
   every create (a code.storage token), agents (their keys and proofs).
 
-## Deploying it (each step Paul's to approve)
+## Deploying it (Paul approved each step, 2026-09-24)
 
-1. **Push the fork branch** `hardening` to futurepaul/celld (the node
-   image clones the pinned rev from there).
-2. **Nodes first:** `cargo xtask deploy fragment-club --nodes` stages the
-   four Fly secrets from the files `node_secrets` names (the host secret
-   must stay the same value: existing sealed values open under it) and
-   rolls both Machines to the new image. The running cell keeps working
-   on it (it still reads its old vars).
-3. **Then the cell:** `cargo xtask deploy fragment-club`. From here no
-   fleet secret is a Worker variable.
-4. **The hosted e2e**, and a check from inside a Machine (`flyctl ssh
-   console`) that `GET /state` on `[$FLY_PRIVATE_IP]:8081` answers 403
-   (the image has no curl; bash's `/dev/tcp` does).
-5. **Clean up and rotate:** delete the earlier deployments' manifests
-   from the bucket (`deploy/fragment/<version>/`, all but the current
-   one), then rotate the four secrets (debt ledger: "The fleet's old
-   secrets are still in the bucket's deployment history").
+1. **Done:** the fork branch `hardening` is on futurepaul/celld.
+2. **Done:** nodes first (`deploy --nodes`, the four Fly secrets staged
+   and rolled with image `node-2779418-e55f665`), then the cell. The
+   deployment's Worker variables hold no secret.
+3. **Done:** the hosted e2e, 29/29, live AI included. (Its first run
+   found a phase 4 bug: a fragment from before phase 4 panicked in its
+   constructor, and each panic reset the wasm app shared by its isolate,
+   so other fragments' AI steps never finished; fixed in the next commit
+   and redeployed.) From inside both Machines, the internal listener
+   answers 403 to `GET /state` and `GET /do/<scope>`.
+4. **Waiting on Paul** (the permission checks refuse these to Claude):
+   - delete the nine earlier deployments (27 objects, listed exactly;
+     their manifests hold the old secrets): the script Claude wrote,
+     `delete-old-deployments.py`, run from its scratchpad;
+   - the host secret is rotated in its file (the old value kept as
+     `fragment-club-host-secret-previous`, named in `node_secrets`): set it
+     on the fleet with `cargo xtask deploy fragment-club --secrets`;
+   - the WorkOS API key, the OpenRouter management key, and the
+     code.storage org key: new ones at their issuers, written over the
+     same files, then `--secrets` again, then the old ones revoked.
 
 ## H4. Deployment (decided with Paul, 2026-09-24)
 
