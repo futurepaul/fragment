@@ -56,8 +56,9 @@ fn from_js(v: &JsValue) -> Result<serde_json::Value, String> {
 /// author's `app.mjs` (as `app.js`), and their `applib/` modules, with no
 /// ambient network and bounded CPU.
 pub struct AppCode<'a> {
-    /// Content address of every module: the loader memoizes by id per
-    /// isolate across every fragment, so the id must name the bytes.
+    /// Content address of every module, the platform's included: the
+    /// loader memoizes by id (celld: per isolate, across every fragment),
+    /// so the id must name the bytes.
     pub id: &'a str,
     pub platform: &'a str,
     pub source: &'a str,

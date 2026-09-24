@@ -219,9 +219,10 @@ impl FragmentCell {
         }
         let mut modules = BTreeMap::new();
         let mut total = source.len();
+        // the app's own modules; the platform code joins the id when it is
+        // loaded (ops.rs `facet`), since a cell deploy changes it, not this
         let mut hasher = Sha256::new();
-        hasher.update(PLATFORM_JS.as_bytes());
-        hasher.update(b"\0app.js\0");
+        hasher.update(b"app.js\0");
         hasher.update(source.as_bytes());
         for path in libs {
             let room = limits::APP_MODULES_MAX_BYTES.saturating_sub(total);

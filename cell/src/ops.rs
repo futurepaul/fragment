@@ -27,6 +27,16 @@ pub const JOB_ID_PREFIX: &str = "job:";
 /// facet takes the window from each call, so this is its one definition.
 pub(crate) const LEDGER_KEPT_MS: i64 = 7 * 24 * 3600 * 1000;
 
+/// `PLATFORM_JS`'s content address. It comes with the cell deploy, not
+/// with an install, so it joins the loader id when the app is loaded, not
+/// when its code is stored. Computed once per isolate from a constant
+/// compiled into that isolate: it has nothing to invalidate and cannot go
+/// stale.
+fn platform_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| hex::encode(Sha256::digest(PLATFORM_JS.as_bytes())))
+}
+
 /// One admitted call: who runs which operation, and how deep in a chain of
 /// triggered runs it is.
 pub(crate) struct Invocation<'a> {
@@ -79,9 +89,14 @@ impl FragmentCell {
         let cpu_ms = row["cpu_ms"].as_u64().expect("code.cpu_ms is INTEGER");
         assert!(cpu_ms > 0 && cpu_ms <= limits::APP_CPU_MS as u64, "stored cpu_ms is within the limit");
         let modules: BTreeMap<String, String> = serde_json::from_str(row["modules"].as_str().unwrap_or("{}")).expect("stored modules parse");
-        // One loaded worker per fragment: its env holds this fragment's
-        // capabilities, and its module state is this fragment's alone.
-        let id = format!("{}:{}", row["loader_id"].as_str().expect("code.loader_id is TEXT"), self.must("npub")?);
+        // The loader memoizes a worker by its id, so the id names every
+        // byte it runs: the app's modules (the stored loader_id) and the
+        // platform code this cell carries, which a cell deploy changes
+        // under code installed before it. And one loaded worker per
+        // fragment: its env holds this fragment's capabilities, and its
+        // module state is this fragment's alone.
+        let loader_id = row["loader_id"].as_str().expect("code.loader_id is TEXT");
+        let id = format!("{loader_id}:{}:{}", platform_id(), self.must("npub")?);
         js::app_facet(
             &self.raw,
             self.env.as_ref(),
