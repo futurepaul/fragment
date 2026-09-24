@@ -258,7 +258,7 @@ fragment replay my-thing <run>              # after fixing the code: the same in
 fragment triggers my-thing                  # what starts runs, and what is paused
 fragment pause my-thing <op>                # stop its triggers (calls still work)
 fragment unpause my-thing <op>
-fragment events my-thing --tail 30          # the log
+fragment events my-thing --tail 30          # the log's newest 30 (at most 500)
 ```
 
 An operation pauses its own triggers after 5 held runs in 10 minutes or

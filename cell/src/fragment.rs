@@ -26,7 +26,7 @@
 //!   GET    /api/files  /api/file?path=  /api/file/stat?path=   viewer
 //!   PUT    /api/blobs/<sha256>            editor (the body, streamed and hashed)
 //!   GET|HEAD /api/blobs/<sha256>          viewer
-//!   GET    /api/events?since=             viewer
+//!   GET    /api/events?since=|tail=       viewer
 //!   POST   /api/ops/<operation>           the operation's role (a job answers its run)
 //!   GET    /api/runs?status=&op=  /api/runs/<id>   viewer
 //!   POST   /api/replay  POST /api/pause   editor
@@ -484,7 +484,7 @@ impl FragmentCell {
             }
             (Method::Get, ["api", "file"]) => self.file(&caller, &query("path").unwrap_or_default()).await,
             (Method::Get, ["api", "file", "stat"]) => self.stat(&caller, &query("path").unwrap_or_default()).await,
-            (Method::Get, ["api", "events"]) => self.events(&caller, query("since").and_then(|s| s.parse().ok()).unwrap_or(0)),
+            (Method::Get, ["api", "events"]) => self.events(&caller, query("since").and_then(|s| s.parse().ok()).unwrap_or(0), query("tail")),
             (Method::Get, ["api", "channels"]) => self.channels(&caller),
             (Method::Get, ["api", "channels", channel]) => {
                 let after = query("after").and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -686,11 +686,29 @@ impl FragmentCell {
         })
     }
 
-    /// The `events` channel in the shape `fragment events` reads.
-    fn events(&self, caller: &Caller, since: i64) -> CellResult<Response> {
+    /// The `events` channel in the shape `fragment events` reads: the page
+    /// after `since`, or with `tail` the newest `tail` events (oldest first
+    /// either way). Without `tail`, a log longer than one page never
+    /// showed its recent events to `fragment events --tail`.
+    fn events(&self, caller: &Caller, since: i64, tail: Option<String>) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
+        let (after, limit) = match tail {
+            None => (since, limits::EVENTS_PAGE),
+            Some(t) => {
+                let n = t.parse::<usize>().ok().filter(|n| (1..=limits::EVENTS_PAGE).contains(n));
+                let Some(n) = n else { return Err(CellError::invalid(format!("tail is 1-{}", limits::EVENTS_PAGE))) };
+                if since != 0 {
+                    return Err(CellError::invalid("since or tail, not both"));
+                }
+                let oldest = self.rows(
+                    "SELECT MIN(seq) AS seq FROM (SELECT seq FROM records WHERE channel = 'events' ORDER BY seq DESC LIMIT ?)",
+                    vec![SqlStorageValue::Integer(n as i64)],
+                )?;
+                (oldest.first().and_then(|r| r["seq"].as_i64()).map_or(0, |seq| seq - 1), n)
+            }
+        };
         let events: Vec<Value> = self
-            .read_channel("events", since, limits::EVENTS_PAGE)?
+            .read_channel("events", after, limit)?
             .into_iter()
             .map(|r| json!({ "id": r.seq, "at": r.at, "kind": r.kind, "summary": r.body["summary"], "data": r.body["data"] }))
             .collect();
