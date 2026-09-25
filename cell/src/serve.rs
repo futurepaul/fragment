@@ -123,6 +123,8 @@ impl FragmentCell {
         }
         let path: String = rest.split('/').map(decode_segment).collect::<Vec<_>>().join("/");
         let anon = site::cookie(&cookies, ANON_COOKIE).filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())).map(anon_principal);
+        // who a socket connected as is asked again later (live.rs)
+        let credential = if path == "__live" { caller.unresolved.clone() } else { None };
         let resolved;
         let caller = if answers_someone(&path) {
             resolved = self.identified(caller, name).await?;
@@ -198,9 +200,18 @@ impl FragmentCell {
         } else if path == "__watch" {
             self.watch(&req, caller, &facts, link)?
         } else if path == "__live" {
-            // an unsigned visitor without a cookie yet is anonymous for this socket only
-            let principal = caller.principal().map(str::to_string).or(anon).unwrap_or_else(|| anon_principal(&js::random_hex::<32>()));
-            self.live(&req, caller, &principal, link)?
+            // an unsigned visitor without a cookie yet gets one, as a call
+            // does: its sockets share one principal, and one query budget
+            let principal = match (caller.principal(), anon) {
+                (Some(p), _) => p.to_string(),
+                (None, Some(a)) => a,
+                (None, None) => {
+                    let fresh = js::random_hex::<32>();
+                    set.push(origin.cookie(ANON_COOKIE, &fresh, ANON_COOKIE_AGE_S));
+                    anon_principal(&fresh)
+                }
+            };
+            self.live(&req, caller, credential, &principal, link)?
         } else {
             match req.method() {
                 Method::Get | Method::Head => self.site(&mut req, caller, &mut facts, &path, &url, link, anon).await?,

@@ -298,6 +298,31 @@ pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{seen} {gone} {d_hello}"),
     );
     d.close();
+
+    // A page loaded before presence came one change a frame (its library
+    // connects without `?v=2`) hears the whole list, as it did, while a
+    // current page hears the change; and a visitor's socket without a
+    // cookie gets one, as a call does, so its sockets are one principal
+    let (mut old, set) = Socket::open_answered(api, &name, "__live?v=1", None, None)?;
+    old.until("hello", 5)?;
+    let first_list = old.next()?;
+    let mut n = Socket::open(api, &name, "__live", None, None)?;
+    let n_hello = n.until("hello", 5)?;
+    n.send(&json!({ "type": "presence", "data": { "name": "new" } }))?;
+    let own = n.until("presence", 5)?;
+    let listed = old.until("presence", 5)?;
+    s.ok(
+        "a page from before the change frames hears the whole list, on connecting and on each change",
+        first_list == json!({ "type": "presence", "list": [] })
+            && listed == json!({ "type": "presence", "list": [{ "id": n_hello["id"], "principal": n_hello["principal"], "data": { "name": "new" } }] }),
+        format!("{first_list} {listed}"),
+    );
+    s.ok("while a current page hears the one change", own == json!({ "type": "presence", "id": n_hello["id"], "principal": n_hello["principal"], "data": { "name": "new" } }), &own);
+    n.close();
+    let left = old.until("presence", 5)?;
+    s.ok("and the old page's list drops a socket that left", left == json!({ "type": "presence", "list": [] }), &left);
+    old.close();
+    s.ok("a visitor's socket without a cookie gets one, as a call does", set.iter().any(|c| c.starts_with("fragment_anon=") && c.contains("HttpOnly")), format!("{set:?}"));
     b.send(&json!({ "type": "unsubscribe", "channel": "room" }))?;
     api.op(&owner, &name, "say", "l4", json!({ "text": "after unsubscribe" }))?;
     let next = b.until("changed", 5)?;
@@ -375,7 +400,7 @@ pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 /// Queries over the live socket: run as the socket's principal and role,
-/// refused as `__op` would refuse them, and bounded by the socket's own
+/// refused as `__op` would refuse them, and bounded by their principal's
 /// budget between changes, never by the public call budget.
 fn live_queries(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let (name, _) = chat(s, api, owner, "queries")?;
@@ -419,7 +444,7 @@ fn live_queries(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         bad["error"] == "invalid_request" && bad["id"] == "not an id!" && schema["error"] == "unknown_operation" && schema["status"] == 404,
         format!("{bad} {schema}"),
     );
-    // the socket's own budget: LIVE_QUERIES_MAX between two changes
+    // the principal's budget: LIVE_QUERIES_MAX between two changes
     let r = api.op(owner, &name, "say", "refill-1", json!({ "text": "a change" }))?;
     let mut answered = vec![];
     for i in 0..=limits::LIVE_QUERIES_MAX {
@@ -439,6 +464,111 @@ fn live_queries(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         "result frames decode as LiveOut",
         [&who, &who_owner, &above, &act, &bad, &last, &after].iter().all(|f| serde_json::from_value::<LiveOut>((*f).clone()).is_ok()),
         "",
+    );
+
+    // A principal's sockets share its budget: a socket opened again gets
+    // no fresh one. (A cookie names the visitor, as a browser's does.)
+    let visitor = format!("fragment_anon={}", "ab".repeat(32));
+    api.op(owner, &name, "say", "refill-3", json!({ "text": "a third change" }))?;
+    let mut w1 = Socket::open(api, &name, "__live", None, Some(&visitor))?;
+    w1.until("hello", 5)?;
+    let mut spent = 0;
+    for i in 0..limits::LIVE_QUERIES_MAX {
+        spent += usize::from(ask(&mut w1, &format!("w{i}"), "count", json!({}))?["result"] == json!({ "n": 3 }));
+    }
+    let mut w2 = Socket::open(api, &name, "__live", None, Some(&visitor))?;
+    w2.until("hello", 5)?;
+    let more = ask(&mut w2, "w-more", "count", json!({}))?;
+    s.ok(
+        "a visitor's sockets share one budget: a second socket runs nothing once the first spent it (429)",
+        spent == limits::LIVE_QUERIES_MAX as usize && more["error"] == "rate_limited" && more["status"] == 429,
+        format!("{spent} ran on the first; the second answered {more}"),
+    );
+    w1.close();
+    w2.close();
+
+    // a principal holds at most LIVE_SOCKETS_PER_PRINCIPAL sockets
+    let tabs = format!("fragment_anon={}", "cd".repeat(32));
+    let mut held = vec![];
+    for _ in 0..limits::LIVE_SOCKETS_PER_PRINCIPAL {
+        let mut t = Socket::open(api, &name, "__live", None, Some(&tabs))?;
+        t.until("hello", 5)?;
+        held.push(t);
+    }
+    let over = Socket::open(api, &name, "__live", None, Some(&tabs)).err().map(|e| e.to_string()).unwrap_or_default();
+    s.ok(
+        &format!("a principal holds at most {} sockets on a fragment; one more is refused (429)", limits::LIVE_SOCKETS_PER_PRINCIPAL),
+        over.contains("429"),
+        &over,
+    );
+    held.into_iter().for_each(Socket::close);
+
+    // opening a socket at the public role is a public call: what a
+    // visitor opens comes out of the calls it may make that minute
+    let minute = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 60).unwrap_or(0);
+    let opens = 3;
+    let mut calls = (0, false);
+    for attempt in 0..2 {
+        let payer = format!("fragment_anon={}", format!("e{attempt}").repeat(32));
+        let at = minute();
+        for _ in 0..opens {
+            Socket::open(api, &name, "__live", None, Some(&payer))?.close();
+        }
+        let mut went = 0;
+        for i in 0..=limits::PUBLIC_CALLS_PER_MIN {
+            if api.browser_op(&name, "count", &format!("pay-{attempt}-{i}"), json!({}), Some(&payer))?.status != 200 {
+                break;
+            }
+            went += 1;
+        }
+        calls = (went, minute() == at);
+        if calls.1 {
+            break;
+        }
+    }
+    s.ok(
+        &format!("a visitor's {opens} socket opens are public calls: {} calls go through that minute, not {}", limits::PUBLIC_CALLS_PER_MIN - opens, limits::PUBLIC_CALLS_PER_MIN),
+        calls == (limits::PUBLIC_CALLS_PER_MIN - opens, true),
+        format!("{} went through (within one minute: {})", calls.0, calls.1),
+    );
+
+    // Who a signed-in socket is gets asked again once LIVE_IDENTITY_MS
+    // passed (a test lever ages the check): the owner's key is still
+    // theirs, and a key revoked meanwhile closes its socket (4001)
+    let signer = api.person()?;
+    let spare = Keys::generate();
+    let add = "/api/identities/me/keys";
+    let r = api.signed(&signer, "POST", add, Some(&json!({ "proof": api.proof(&spare, "POST", add, &signer) })))?;
+    let mut k = Socket::open(api, &name, "__live", Some(&spare), None)?;
+    let k_hello = k.until("hello", 5)?;
+    s.ok("(a person's second key opens a socket as them)", r.status == 200 && k_hello["principal"] == api.identity(&signer)?.as_str(), &k_hello);
+    let r = api.signed(&signer, "DELETE", &format!("/api/identities/me/keys/{}", fragment_core::npub::encode(spare.pubkey_hex())), None)?;
+    let aged = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "age-live", "ms": limits::LIVE_IDENTITY_MS })))?;
+    s.ok("(the test fleet ages the sockets' identity checks)", r.status == 200 && aged.status == 200 && aged.body["aged"].as_u64().is_some_and(|n| n >= 2), &aged);
+    o.send(&json!({ "type": "ping" }))?;
+    let still = o.until("pong", 5)?;
+    s.ok("a signed-in socket asked about again goes on while its key is still its person's", still["type"] == "pong", &still);
+    k.send(&json!({ "type": "ping" }))?;
+    let closed = loop {
+        match k.next() {
+            Ok(_) => continue,
+            Err(e) => break e.to_string(),
+        }
+    };
+    s.ok("a socket whose key was revoked is closed at its next frame once asked again (4001)", closed.contains("4001"), &closed);
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "forget-live" })))?;
+    api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "age-live", "ms": limits::LIVE_IDENTITY_MS })))?;
+    o.send(&json!({ "type": "ping" }))?;
+    let closed = loop {
+        match o.next() {
+            Ok(_) => continue,
+            Err(e) => break e.to_string(),
+        }
+    };
+    s.ok(
+        "one the object holds no credential for (it woke) is closed to reconnect, never trusted as it was (4001)",
+        r.status == 200 && closed.contains("4001"),
+        &closed,
     );
 
     // a socket's role is fixed while it is open: a member whose role

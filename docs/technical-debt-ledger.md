@@ -26,6 +26,27 @@ without a delete condition is unfinished design, not debt.
   tokens), proven by a test that an author isolate cannot reach another
   fragment or a host secret.
 
+## Pages loaded before presence changes came one at a time hear the whole list
+
+- **Observed:** round 3 (S8) made a presence change one socket's change
+  (`{type: "presence", id, principal, data}`). A page loaded before that
+  deploy runs the library it loaded, which reads `m.list` and hands it to
+  its presence handlers; with the new frame that is `undefined`, and a
+  template that maps it throws until the page reloads. So a socket that
+  connects without `?v=2` is tagged `live1` (`LEGACY_TAG` in
+  cell/src/live.rs) and hears the whole list, once after `hello` and on
+  each change, read from every socket's attachment when one is open. The
+  cell logs `live.legacy-page` when one connects.
+- **Risk:** while such a page is open, each presence change reads every
+  socket's attachment again (the O(N) read S8 removed), and the page's
+  own frame is O(N) bytes. Bounded by `LIVE_SOCKETS_MAX` and the presence
+  pace; nothing else is.
+- **First proof:** a `live.legacy-page` event on the fleet: someone kept a
+  page open across the deploy.
+- **Delete when:** no fleet has logged `live.legacy-page` for a week:
+  remove `LEGACY_TAG`, `legacy_presence_frame`, the `v` check (a socket
+  without it is refused), and the live lane's old-page check.
+
 ## The browser half of web push is not driven by a test
 
 - **Observed:** phase 2 slice F. The e2e proves the server half end to end

@@ -31,7 +31,7 @@ the node's environment, where only `KEYS` reads them (below).
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake) |
 | `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (default: the hostname suffix itself, e.g. https://fragment.club) |
 | `FRAGMENT_SIGNINS_PENDING_MAX` | sign-ins begun and not finished that the registry keeps (default 100000; at least 1): a sign-in is kept through this many later starts, so the oldest is let go only past this many starts in its ten minutes (Sign-in, below) |
-| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, or runs its sweep now; `GET /api/test/env` answers the Worker variables; `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens through `KEYS` as that fragment; `POST /api/test/fragment {fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-before-tables {fill?}` puts its installed code back in the shape from before the code tables (to prove their in-place migration), with placeholder operations until there are `fill` (to prove a stored manifest past a limit fails closed), and `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader |
+| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, or runs its sweep now; `GET /api/test/env` answers the Worker variables; `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens through `KEYS` as that fragment; `POST /api/test/fragment {fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-before-tables {fill?}` puts its installed code back in the shape from before the code tables (to prove their in-place migration), with placeholder operations until there are `fill` (to prove a stored manifest past a limit fails closed), and `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader |
 
 The node's environment (Fly secrets on a fleet; `devstack` in dev and
 the e2e), read by `KEYS`, the native service in our celld fork
@@ -582,7 +582,14 @@ file.
 `__live` and `__watch` are also served in place at `/f/<name>/…` for the
 CLI. The `__live` protocol is JSON frames tagged by `type`, defined once
 as `LiveIn` (client → server) and `LiveOut` (server → client) in
-`crates/proto/src/live.rs`; the cell and the CLI decode through them:
+`crates/proto/src/live.rs`; the cell and the CLI decode through them. A
+client asks for it as `__live?v=2`. A socket opened without `v=2` is a
+page loaded before presence came one change a frame: it gets
+`{type: "presence", list: [{id, principal, data}]}`, everyone sharing
+presence, once after `hello` and on each change, and no change frames
+(until no such page connects: docs/technical-debt-ledger.md). An
+unsigned visitor without a cookie gets the anonymous principal cookie on
+the upgrade, as a call does.
 
 - client → server: `{type: "subscribe", channel, after}` (records with
   `seq` after `after`) or `{type: "subscribe", channel, last}` (the last
@@ -616,22 +623,35 @@ A socket's role is fixed when it connects. Removing a member closes their
 sockets; rotating the share link closes link holders'; a fragment that
 stops being public closes its anonymous visitors'. Changing a member's
 role closes theirs (and, for an agent, its owner's) with 4001, which the
-browser library reconnects after, at the new role. A fragment holds at
-most 1000 live sockets (`limits::LIVE_SOCKETS_MAX`); past that a new one
-is refused (429).
+browser library reconnects after, at the new role. A signed-in socket
+acts as who it connected as for a minute (`limits::LIVE_IDENTITY_MS`);
+at its next frame after that the registry is asked again, with the
+credential it connected with: a sign-out, an ended session, or a revoked
+key closes it with 4001, and so does a fragment that woke from
+hibernation (it keeps no credential) or a registry that cannot answer.
+A fragment holds at most 1000 live sockets (`limits::LIVE_SOCKETS_MAX`),
+and one principal at most 8 (`limits::LIVE_SOCKETS_PER_PRINCIPAL`); past
+either a new one is refused (429). Opening a socket at the public role
+is one call of the public call budget below (429 past it).
 
 A query over the socket runs as `__op` runs it, as the socket's
 principal and role, with no HTTP request, router, or registry lookup,
-and outside the public call budget: a socket may run 16 queries between
-two changes to the fragment (`limits::LIVE_QUERIES_MAX`; a page re-runs
-its live views after changes), no more than that at once, and one at a
-time for each id. Past that, a query is refused `rate_limited` (429).
-Only queries run there: a mutation or a job is refused, and not run.
+and outside the public call budget: a principal may run 16 queries over
+its sockets between two changes to the fragment
+(`limits::LIVE_QUERIES_MAX`; a page re-runs its live views after
+changes; its tabs share them, and a socket opened again gets none
+fresh), no more than that at once, and one at a time for each id on a
+socket. Past that, a query is refused `rate_limited` (429). Only
+queries run there: a mutation or a job is refused, and not run. So a
+visitor who reconnects over and over pays a public call each time, and
+visitors holding the public role alone run at most
+`PUBLIC_CALLS_PER_MIN_FRAGMENT` × 16 queries a minute over a fragment's
+sockets between changes, however they open them.
 
 The browser library (`import * as fragment from "./__fragment.js"`):
 `call(op, input, {id?})` (retries keep the id), `live(op, input,
 onResult, onError?)` (re-runs a query after every change, over the socket
-when it is open and over HTTP when not, or when the socket's budget is
+when it is open and over HTTP when not, or when its principal's budget is
 spent; one run at a time, however many changes came), `subscribe(
 channel, onRecord, {after?, last?})` (pages through the backlog, then
 follows live; after a reconnect it resumes after the last record),

@@ -1,5 +1,6 @@
 //! The live socket's bounds (cell/src/live.rs), as pure logic: the
-//! queries one socket may run, and how often it may change its presence.
+//! queries one principal may run over its sockets, and how often a socket
+//! may change its presence.
 
 use std::collections::BTreeSet;
 
@@ -10,17 +11,21 @@ use fragment_proto::limits;
 pub enum QueryRefused {
     /// A query with this id is running on the socket: one at a time each.
     InFlight,
-    /// The socket ran `LIVE_QUERIES_MAX` queries since the fragment last
-    /// changed, or has that many running.
+    /// The principal ran `LIVE_QUERIES_MAX` queries since the fragment
+    /// last changed, or has that many running.
     Spent,
 }
 
-/// One socket's queries. A page re-runs its live views after changes, so
-/// a socket may run `limits::LIVE_QUERIES_MAX` queries between two
-/// changes to the fragment (a page with that many views never runs out;
-/// one asking again and again between changes does), no more than that
-/// many at once, and one at a time for each id. Queries over the socket
-/// are outside the public call budget: this is their bound.
+/// One principal's queries over its live sockets. A page re-runs its live
+/// views after changes, so a principal may run `limits::LIVE_QUERIES_MAX`
+/// queries between two changes to the fragment (a page with that many
+/// views never runs out; one asking again and again between changes
+/// does), no more than that many at once, and one at a time for each id
+/// (the caller names a run by its socket and the page's id, so two tabs'
+/// ids never collide). Its sockets share it: a socket opened again gets
+/// no fresh budget. Queries over sockets are outside the public call
+/// budget (opening a socket at the public role is one call of it): this
+/// is their bound.
 #[derive(Debug, Default)]
 pub struct QueryBudget {
     /// The fragment's change count when the budget was last refilled.
@@ -45,7 +50,7 @@ impl QueryBudget {
         }
         self.used += 1;
         self.running.insert(id.to_string());
-        assert!(self.running.len() <= limits::LIVE_QUERIES_MAX as usize, "a socket runs at most LIVE_QUERIES_MAX queries at once");
+        assert!(self.running.len() <= limits::LIVE_QUERIES_MAX as usize, "a principal runs at most LIVE_QUERIES_MAX queries at once");
         Ok(())
     }
 
@@ -89,7 +94,7 @@ mod tests {
     const MAX: u32 = limits::LIVE_QUERIES_MAX;
 
     #[test]
-    fn a_socket_runs_its_budget_between_changes() {
+    fn a_principal_runs_its_budget_between_changes() {
         let mut b = QueryBudget::default();
         for i in 0..MAX {
             assert_eq!(b.admit(&format!("q{i}"), 0), Ok(()));

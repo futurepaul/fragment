@@ -345,9 +345,17 @@ pub struct Socket(tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std
 
 impl Socket {
     /// Opens `/f/<name>/<path>` (reachable in place on every fleet);
-    /// `keys` signs the upgrade, `cookie` rides along like a browser's.
+    /// `keys` signs the upgrade, `cookie` rides along like a browser's. A
+    /// `__live` socket speaks the current protocol (`?v=2`), as the browser
+    /// library's does; `__live?v=1` opens one as a page from before it.
     pub fn open(api: &Api, name: &str, path: &str, keys: Option<&Keys>, cookie: Option<&str>) -> Result<Socket> {
+        Socket::open_answered(api, name, path, keys, cookie).map(|(socket, _)| socket)
+    }
+
+    /// `open`, with the cookies the upgrade's answer set.
+    pub fn open_answered(api: &Api, name: &str, path: &str, keys: Option<&Keys>, cookie: Option<&str>) -> Result<(Socket, Vec<String>)> {
         use tungstenite::client::IntoClientRequest;
+        let path = if path == "__live" { "__live?v=2" } else { path };
         let http = format!("{}/f/{name}/{path}", api.base);
         let mut req = http.replacen("http", "ws", 1).into_client_request()?;
         if let Some(k) = keys {
@@ -356,11 +364,12 @@ impl Socket {
         if let Some(c) = cookie {
             req.headers_mut().insert("cookie", c.parse()?);
         }
-        let (socket, _) = tungstenite::connect(req)?;
+        let (socket, answer) = tungstenite::connect(req)?;
         if let tungstenite::stream::MaybeTlsStream::Plain(s) = socket.get_ref() {
             s.set_read_timeout(Some(Duration::from_secs(5)))?;
         }
-        Ok(Socket(socket))
+        let cookies = answer.headers().get_all("set-cookie").iter().filter_map(|v| v.to_str().ok()).map(str::to_string).collect();
+        Ok((Socket(socket), cookies))
     }
 
     pub fn send(&mut self, v: &Value) -> Result<()> {
