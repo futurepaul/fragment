@@ -649,9 +649,34 @@ async fn forward(env: &Env, req: &Request, body: Option<worker::wasm_bindgen::Js
     Ok(stub.fetch_with_request(inner).await?)
 }
 
-async fn serve(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, mode: Mode) -> CellResult<Response> {
+/// Whether a request is a browser's navigation to a page (its `Accept`
+/// names HTML): a refusal answers it as one (`auth::refused`), and an API
+/// call, a fetch, or a request that asks for no HTML keeps the JSON.
+fn shows_page(req: &Request, fetched: Fetched) -> CellResult<bool> {
+    Ok(fetched.navigation && req.headers().get("accept")?.is_some_and(|a| a.contains("text/html")))
+}
+
+/// The answer without the fragment's mark on its refusal (`serve::REFUSAL`).
+fn unmarked(resp: Response) -> CellResult<Response> {
+    let h = resp.headers().clone();
+    h.delete(serve::REFUSAL)?;
+    Ok(resp.with_headers(h))
+}
+
+/// A request on a fragment's site; a refusal a browser navigated to is
+/// answered as a page: the router's own here, the fragment's in `site`.
+async fn serve(req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, mode: Mode) -> CellResult<Response> {
     check_name(name)?;
     let fetched = fetched(&req)?;
+    let page = shows_page(&req, fetched)?;
+    match site(req, env, cfg, url, name, rest, mode, fetched, page).await {
+        Err(e) if page && auth::is_refusal(e.code) => auth::refused(cfg, url, name, rest, fetched.framed, &e),
+        answered => answered,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, mode: Mode, fetched: Fetched, page: bool) -> CellResult<Response> {
     if auth::is_fragment_route(rest) {
         return auth::fragment(&req, env, cfg, url, name, rest, mode == Mode::Path, fetched).await;
     }
@@ -676,7 +701,17 @@ async fn serve(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str,
         credential = None;
     }
     let routed = Routed { name: name.to_string(), url: url.clone(), mode: Some(mode), signed, credential };
-    let resp = forward(env, &req, bytes_body(body), Forward { routed, inner: format!("/serve/{rest}"), extra: vec![] }).await?;
+    let mut resp = forward(env, &req, bytes_body(body), Forward { routed, inner: format!("/serve/{rest}"), extra: vec![] }).await?;
+    // the fragment's own refusal, never its app's answer
+    if resp.headers().has(serve::REFUSAL)? {
+        resp = match page {
+            true => {
+                let e: ErrorBody = resp.json().await?;
+                auth::refused(cfg, url, name, rest, fetched.framed, &CellError::new(e.error, e.message))?
+            }
+            false => unmarked(resp)?,
+        };
+    }
     match fetched.navigation {
         true => bound(resp, fetched.framed, embedder.as_deref()),
         false => Ok(resp),
