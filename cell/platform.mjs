@@ -123,26 +123,19 @@ function checkPath(path) {
   }
 }
 
-// A file's content may not be a large-file pointer.
-function checkContent(path, data) {
-  let raw = null;
+// A file's content as a step or effect carries it: { text } or { base64 }.
+// It may not be a large-file pointer.
+function content(path, data) {
+  const pointer = () => new Error(`${path}: an app does not write blob pointers`);
   if (typeof data === "string") {
     // more UTF-16 units than a pointer's bytes: more bytes, too
-    if (data.length <= POINTER_MAX_BYTES) raw = new TextEncoder().encode(data);
-  } else if (data instanceof Uint8Array) {
-    raw = data;
-  } else if (data instanceof ArrayBuffer) {
-    raw = new Uint8Array(data);
+    if (data.length <= POINTER_MAX_BYTES && isBlobPointer(new TextEncoder().encode(data))) throw pointer();
+    return { text: data };
   }
-  if (raw !== null && isBlobPointer(raw)) throw new Error(`${path}: an app does not write blob pointers`);
-}
-
-// A file's content as a step or effect carries it: { text } or { base64 }.
-function content(data) {
-  if (typeof data === "string") return { text: data };
-  if (data instanceof Uint8Array) return { base64: base64(data) };
-  if (data instanceof ArrayBuffer) return { base64: base64(new Uint8Array(data)) };
-  throw new TypeError("a file's content is a string, a Uint8Array, or an ArrayBuffer");
+  const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
+  if (!(bytes instanceof Uint8Array)) throw new TypeError("a file's content is a string, a Uint8Array, or an ArrayBuffer");
+  if (isBlobPointer(bytes)) throw pointer();
+  return { base64: base64(bytes) };
 }
 
 function contentSize(c) {
@@ -170,40 +163,13 @@ class FileEffects {
 
   write(path, data) {
     checkPath(path);
-    checkContent(path, data);
-    const c = content(data);
+    const c = content(path, data);
     this.#push({ file: path, ...c }, contentSize(c));
   }
 
   remove(path) {
     checkPath(path);
     this.#push({ file: path }, 0);
-  }
-}
-
-// Reads at `main` through the FILES capability.
-class FilesReader {
-  #cap;
-
-  constructor(cap) {
-    this.#cap = cap;
-  }
-
-  readBytes(path) {
-    return this.#cap.read(path);
-  }
-
-  async read(path) {
-    const data = await this.#cap.read(path);
-    return data === null ? null : new TextDecoder().decode(data);
-  }
-
-  list(prefix = "") {
-    return this.#cap.list(prefix);
-  }
-
-  stat(path) {
-    return this.#cap.stat(path);
   }
 }
 
@@ -356,8 +322,7 @@ class Job {
       stat: (path) => (checkPath(path), step("files.stat", { path })),
       write: (path, data, { expect } = {}) => {
         checkPath(path);
-        checkContent(path, data);
-        const c = content(data);
+        const c = content(path, data);
         if (contentSize(c) > FILE_WRITE_MAX_BYTES) throw new Error(`a job step writes at most ${FILE_WRITE_MAX_BYTES} bytes`);
         return step("files.write", { path, ...c, ...(expect !== undefined ? { expect } : {}) });
       },
@@ -425,8 +390,18 @@ export class App extends AuthorApp {
     if (!cols.some((c) => c.name === "run")) sql.exec(`ALTER TABLE ${LEDGER} ADD COLUMN run INTEGER`);
   }
 
+  // Reads at `main` through the FILES capability.
   get files() {
-    return new FilesReader(this.env.FILES);
+    const cap = this.env.FILES;
+    return {
+      readBytes: (path) => cap.read(path),
+      read: async (path) => {
+        const data = await cap.read(path);
+        return data === null ? null : new TextDecoder().decode(data);
+      },
+      list: (prefix = "") => cap.list(prefix),
+      stat: (path) => cap.stat(path),
+    };
   }
 
   __mutate(id, name, inputSha, inputText, meta) {
