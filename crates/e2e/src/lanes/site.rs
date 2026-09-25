@@ -112,6 +112,37 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     let r = conditional("app.3f9a1c2e.js", &hashed)?;
     s.ok("a file the deploy did not touch keeps its ETag", r.status == 304, &r);
 
+    // A signed member's read waits on the Registry (without the link, the
+    // anonymous standing may not read), and other requests run meanwhile.
+    // A deploy that lands during that wait must not leave the answer
+    // naming the new commit while it streams the old one's bytes.
+    let blue = tag("style.css");
+    s.commit(&c, &[("site/style.css", Some(b"body{color:green}"))]);
+    let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "hold": 3000 })))?;
+    s.ok("the registry holds its next answer (a test hook)", r.status == 200 && r.body["hold"] == 3000, &r);
+    let (raced, landed) = std::thread::scope(|scope| {
+        let read = scope.spawn(|| {
+            let r = api.call(Call { method: "GET", url: api.site_url(&name, "style.css"), keys: Some(&viewer), ..Call::default() });
+            (r, std::time::Instant::now())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        s.deploy(&c);
+        let landed = s.eventually(std::time::Duration::from_secs(2), || tag("style.css") != blue).then(std::time::Instant::now);
+        (read.join().expect("the read's thread"), landed)
+    });
+    let ((r, answered), green) = (raced, tag("style.css"));
+    let r = r?;
+    s.ok(
+        "the deploy landed while the member's read waited on the registry",
+        r.status == 200 && landed.is_some_and(|at| at < answered),
+        format!("{} landed={landed:?} answered={answered:?}", r.status),
+    );
+    s.ok(
+        "and its answer names the bytes it carries: the new commit's tag with the new bytes",
+        r.header("etag") == green && r.text == "body{color:green}",
+        format!("etag {} (new {green}, old {blue}): {:?}", r.header("etag"), r.text),
+    );
+
     // the machine-read plane
     let r = api.page(&name, "__tree", Some(&cookie))?;
     let paths: Vec<&str> = r.body["files"].as_array().map(|a| a.iter().filter_map(|f| f["path"].as_str()).collect()).unwrap_or_default();
