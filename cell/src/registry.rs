@@ -25,7 +25,7 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
-use fragment_core::{npub, registry};
+use fragment_core::{blob, npub, registry};
 use fragment_proto::{limits, ErrorCode, Identity, IdentityKind, IdentityView, KeyView};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -336,7 +336,7 @@ impl RegistryCell {
     /// (its URLs are built from it).
     fn picture_of(&self, id: &str) -> CellResult<Option<Picture>> {
         let picture = self.row::<Picture>("SELECT sha, mime FROM pictures WHERE identity = ?", vec![id.into()])?;
-        if picture.as_ref().is_some_and(|p| p.sha.len() != 64 || !p.sha.bytes().all(|c| c.is_ascii_hexdigit())) {
+        if picture.as_ref().is_some_and(|p| !blob::valid_sha(&p.sha)) {
             return Err(CellError::host(format!("pictures.sha of {id} is not a SHA-256")));
         }
         Ok(picture)
@@ -347,7 +347,7 @@ impl RegistryCell {
         if who.kind != IdentityKind::Person || who.username.is_none() {
             return Err(CellError::invalid("choose a username before a picture"));
         }
-        if b.sha.len() != 64 || !b.sha.bytes().all(|c| c.is_ascii_hexdigit()) || !matches!(b.mime.as_str(), "image/png" | "image/jpeg" | "image/webp" | "image/gif") {
+        if !blob::valid_sha(&b.sha) || !matches!(b.mime.as_str(), "image/png" | "image/jpeg" | "image/webp" | "image/gif") {
             return Err(CellError::invalid("a picture is a PNG, JPEG, WebP, or GIF, named by its SHA-256"));
         }
         self.exec(
