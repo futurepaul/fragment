@@ -234,7 +234,7 @@ fn page(s: &mut Suite, api: &Api, agents: &mut Api, chat: &str, (owner, owner_se
                 && !!(g.compareDocumentPosition(a) & Node.DOCUMENT_POSITION_FOLLOWING) && !!a.querySelector('strong'); })()";
     s.ok("answered: the group says it worked through its step, above the answer (markdown); the working line and Stop are gone", chrome.until(&mine, done, wait), dump(&mut chrome, &mine));
     // the group opened, for the screenshots
-    chrome.eval(&mine, "[...document.querySelectorAll('details.tools')].pop().open = true; true")?;
+    chrome.eval(&mine, "(() => { const g = [...document.querySelectorAll('details.tools')].pop(); if (g) g.open = true; return true; })()")?;
     std::thread::sleep(Duration::from_millis(300));
     chrome.screenshot(&mine, &s.scratch.join("chat-after-dark.png"))?;
     chrome.color_scheme(&mine, "light")?;
