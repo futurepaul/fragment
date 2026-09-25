@@ -23,6 +23,7 @@ the node's environment, where only `KEYS` reads them (below).
 | `FRAGMENT_BLOB_GRACE_S` | how long a blob no branch names is kept before it is deleted (default 7 days) |
 | `FRAGMENT_PUSH_SUBJECT` | who push services may contact about this fleet's pushes (a `mailto:` or https URL; RFC 8292) |
 | `FRAGMENT_DELIVERY_RETRY_S` | the shortest wait before a delivery is retried (default 10; the wait grows with the delivery's age, up to an hour) |
+| `FRAGMENT_DELIVERY_RETRY_MAX_S` | the longest (default an hour, never under the shortest; test fleets set both, for a fixed pace) |
 | `OPENROUTER_API_URL` | where AI calls go (default https://openrouter.ai) |
 | `FRAGMENT_BUDGET_USD` | each person's monthly budget (default 20) |
 | `FRAGMENT_OPERATORS` | identities and keys that may top up budgets (as `FRAGMENT_CREATORS` once read them) |

@@ -32,7 +32,6 @@ pub const DEAD_QUEUE: &str = "fragment-deliveries-dead";
 /// Set by the consumer on its reports; the router never sets or passes it.
 pub const REPORT_HEADER: &str = "x-fragment-delivery";
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
-const RETRY_MAX_S: u32 = 3600;
 /// Outbox rows one drain takes.
 const DRAIN_ROWS: i64 = 100;
 /// Messages per `sendBatch` (the queue's cap), and so per push batch.
@@ -396,7 +395,7 @@ async fn consume_one(message: Message<Delivery>, env: &Env, cfg: &Config, dead: 
         Ok(Some(_)) | Err(_) => {
             // no attempt count in workers-rs 0.8.5: the delay grows with the message's age
             let age_s = ((js::now_ms() - message.timestamp().as_millis() as i64) / 1000).max(0) as u32;
-            let delay = age_s.clamp(cfg.delivery_retry_s, RETRY_MAX_S);
+            let delay = age_s.clamp(cfg.delivery_retry_s, cfg.delivery_retry_max_s);
             message.retry_with_options(&QueueRetryOptionsBuilder::new().with_delay_seconds(delay).build());
         }
     }

@@ -18,6 +18,9 @@ use crate::Suite;
 
 const MEDIA_APP: &[u8] = include_bytes!("../../fixtures/media.mjs");
 const MEDIA_JSON: &[u8] = include_bytes!("../../fixtures/media.json");
+/// How long the slow push receiver takes to answer: well past the 2 s a
+/// delivery beside it in the batch must land within.
+const SLOW_RECEIVER: Duration = Duration::from_secs(4);
 
 fn events(api: &Api, keys: &Keys, name: &str) -> String {
     api.signed(keys, "GET", &format!("/api/f/{name}/events?since=0"), None).map(|r| r.text).unwrap_or_default()
@@ -135,19 +138,19 @@ pub fn push(s: &mut Suite, api: &Api) -> Result<()> {
     let after = deferred();
     s.ok("two deliveries that wait through one outage say so once", both && after == before + 1, format!("arrived {both}; deferred events {before} then {after}"));
 
-    // a batch goes out together: a receiver that takes 10 seconds to
+    // a batch goes out together: a receiver that takes 4 seconds to
     // answer holds up only its own delivery, and one queued behind it in
     // the same batch lands at once
     subscribe(s, "slow", "race", 11)?;
     subscribe(s, "fast", "race", 13)?;
-    s.push.slow("slow", Duration::from_secs(10));
+    s.push.slow("slow", SLOW_RECEIVER);
     let r = api.op(&owner, &name, "notify_all", "race", json!({ "title": "side by side" }))?;
     let queued = Instant::now();
     let fast = s.eventually(Duration::from_secs(12), || !s.push.landed("fast").is_empty());
     let fast_after = s.push.landed("fast").first().map(|t| t.duration_since(queued));
     println!("      the fast delivery landed {fast_after:?} after the push was queued");
     s.ok(
-        "a delivery in the same batch as one that takes 10 seconds still lands within 2 seconds",
+        "a delivery in the same batch as one that takes 4 seconds still lands within 2 seconds",
         r.status == 200 && fast && fast_after.is_some_and(|d| d < Duration::from_secs(2)),
         format!("{r}; the fast one landed after {fast_after:?}"),
     );
@@ -155,7 +158,7 @@ pub fn push(s: &mut Suite, api: &Api) -> Result<()> {
     let slow_after = s.push.landed("slow").first().map(|t| t.duration_since(queued));
     s.ok(
         "and the slow one lands once it answers, once",
-        slow && slow_after.is_some_and(|d| d >= Duration::from_secs(10)) && s.push.received("slow") == vec![json!({ "title": "side by side", "body": "from a mutation" })],
+        slow && slow_after.is_some_and(|d| d >= SLOW_RECEIVER) && s.push.received("slow") == vec![json!({ "title": "side by side", "body": "from a mutation" })],
         format!("the slow one landed after {slow_after:?}: {:?}", s.push.received("slow")),
     );
 

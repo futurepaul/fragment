@@ -163,7 +163,8 @@ pub struct Fleet {
     pub blob_grace_s: Option<u32>,
     /// Where AI calls go (`None`: OpenRouter itself).
     pub openrouter_url: Option<String>,
-    /// The shortest wait before a delivery is retried (`None`: the cell's 10 s).
+    /// The wait before a delivery is retried, every time (`None`: the
+    /// cell's, 10 s growing with the delivery's age to an hour).
     pub delivery_retry_s: Option<u32>,
     /// Sign-in: WorkOS AuthKit (the real one, or the fake in `crates/fakes`).
     pub workos: Option<WorkOsVars>,
@@ -250,6 +251,7 @@ impl Fleet {
         let retry = self.delivery_retry_s.map(|r| r.to_string());
         if let Some(r) = &retry {
             vars.push(("FRAGMENT_DELIVERY_RETRY_S", r.as_str()));
+            vars.push(("FRAGMENT_DELIVERY_RETRY_MAX_S", r.as_str()));
         }
         if let Some(s) = &self.host_suffix {
             vars.push(("FRAGMENT_HOST_SUFFIX", s.as_str()));
@@ -398,6 +400,10 @@ pub struct Node {
     reaped: bool,
 }
 
+/// A dev node's shutdown budget (`CELLD_SHUTDOWN_TOTAL_MS`): room for its
+/// handoff on a slow runner, not a peer's.
+const DEV_SHUTDOWN_TOTAL_MS: &str = "5000";
+
 impl Node {
     pub fn start(tools: &Tools, opts: &NodeOptions) -> Result<(Node, Duration)> {
         let (log, out) = boot_log(&opts.log_dir, opts.port)?;
@@ -416,6 +422,12 @@ impl Node {
             cmd.arg("--no-watch");
         }
         cmd.env("CELLD_ESBUILD", &tools.esbuild);
+        // A dev node is the fleet's only one: once its cells are handed off
+        // (durable, well inside a second) no peer takes them, and celld
+        // waits out its whole no-progress window, 25 s of its default 40.
+        if std::env::var_os("CELLD_SHUTDOWN_TOTAL_MS").is_none() {
+            cmd.env("CELLD_SHUTDOWN_TOTAL_MS", DEV_SHUTDOWN_TOTAL_MS);
+        }
         for (k, v) in &opts.env {
             cmd.env(k, v);
         }
