@@ -347,9 +347,6 @@ pub(crate) struct Exchange {
 pub(crate) struct Exchanged {
     /// The platform session's token.
     pub token: String,
-    pub id: String,
-    pub created: bool,
-    pub linked: bool,
     pub return_to: String,
 }
 
@@ -390,14 +387,9 @@ pub(crate) struct EndSession {
     pub fragment: String,
 }
 
-#[derive(Serialize, Deserialize)]
-pub(crate) struct Ended {
-    pub ended: bool,
-}
-
 impl Call for EndSession {
     const PATH: &'static str = "/session/end";
-    type Answer = Ended;
+    type Answer = ();
 }
 
 /// `POST /logout`: the platform session ends, and every site session made
@@ -467,15 +459,7 @@ pub(crate) struct ApproveKey {
     pub key: String,
 }
 
-#[derive(Serialize, Deserialize)]
-pub(crate) struct Approved {
-    pub id: String,
-    /// The key's npub.
-    pub key: String,
-    pub added: bool,
-}
-
 impl Call for ApproveKey {
     const PATH: &'static str = "/cli/add";
-    type Answer = Approved;
+    type Answer = ();
 }
