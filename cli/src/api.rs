@@ -72,6 +72,21 @@ impl Code {
         }
     }
 
+    /// The code an answer's status alone names, for an answer that is not
+    /// the platform's (a proxy's page): the statuses whose meaning does not
+    /// depend on who answered. A 409 names no conflict the CLI can act on.
+    pub fn of_status(status: u16) -> Code {
+        match status {
+            401 => Code::AuthFailed,
+            403 => Code::Forbidden,
+            404 => Code::NotFound,
+            413 => Code::TooLarge,
+            429 => Code::RateLimited,
+            502..=504 => Code::Unavailable,
+            _ => Code::ServerError,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Code::InvalidUsage => "invalid_usage",
@@ -101,7 +116,7 @@ impl Code {
             Code::AuthFailed => "run `fragment login`, or point at another host with --host / `fragment host <url>`",
             Code::Forbidden => "your identity lacks a role here: ask the owner for an invite (`fragment invite create`) or to add you (`fragment members add`)",
             Code::NotFound => "check the fragment's name with `fragment list`, and a call's operation with `fragment status <name>` (code.operations)",
-            Code::NameTaken => "it exists already: pick another name, or remove the existing fragment with `fragment rm <name>`",
+            Code::NameTaken => "it exists already, as the message says: choose another name (a fragment's or a username), or remove the existing fragment with `fragment rm <name>`; a key someone holds, or one revoked, cannot be added again",
             Code::Conflict => "re-sync (`fragment sync`) and reapply your change",
             Code::ConflictingBody => "that operation id already ran with another input: use a new --id for a new action (the same id and input replay)",
             Code::TooLarge => "see the limit in the message; files of 1 MiB and up sync as blobs",
@@ -222,14 +237,14 @@ impl Resp {
     }
 
     /// The host's refusal, as its `ErrorBody` names it. An answer that is
-    /// not one (a proxy's page, say) says only its status: a gateway's is
-    /// unavailable, anything else a server error.
+    /// not one (a proxy's page, say) says only its status, and the status
+    /// alone names what it can (`Code::of_status`).
     pub fn refusal(&self) -> CodedError {
         assert!(!self.ok(), "a refusal is an answer outside 2xx");
         match serde_json::from_slice::<ErrorBody>(&self.body) {
             Ok(e) => CodedError { code: Code::of(e.error), msg: format!("http {}: {}", self.status, e.message) },
             Err(_) => {
-                let code = if matches!(self.status, 502..=504) { Code::Unavailable } else { Code::ServerError };
+                let code = Code::of_status(self.status);
                 let text: String = String::from_utf8_lossy(&self.body).chars().take(200).collect();
                 CodedError { code, msg: format!("http {} (not the platform's answer): {text}", self.status) }
             }
@@ -559,6 +574,12 @@ mod tests {
         assert_eq!(page(504), Code::Unavailable);
         assert_eq!(page(500), Code::ServerError);
         assert_eq!(page(409), Code::ServerError, "a 409 without a code is no conflict the CLI can name");
+        assert_eq!(page(401), Code::AuthFailed);
+        assert_eq!(page(403), Code::Forbidden);
+        assert_eq!(page(404), Code::NotFound);
+        assert_eq!(page(413), Code::TooLarge);
+        assert_eq!(page(429), Code::RateLimited);
+        assert_eq!(page(400), Code::ServerError, "a 400 without a code names no reason");
     }
 
     /// Every code has its own name, and GUIDE.md lists each one.
