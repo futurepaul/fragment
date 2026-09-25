@@ -5,6 +5,7 @@
       "input": { "type": "object", "required": ["slug", "text"], "properties": { "slug": { "type": "string" }, "text": { "type": "string" } } }
     },
     "count": { "kind": "query" },
+    "big": { "kind": "query", "input": { "type": "object", "required": ["n"], "properties": { "n": { "type": "integer" } } } },
     "pointer": { "kind": "mutation" },
     "wide": { "kind": "mutation" },
     "half": { "kind": "mutation" },

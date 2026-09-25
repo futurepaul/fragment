@@ -8,11 +8,13 @@
 use std::collections::BTreeMap;
 
 use fragment_core::access::Purpose;
-use fragment_core::facet::{self, Answer, Refusal};
+use fragment_core::facet::{self, Answer, Answered, Refusal};
 use fragment_core::npub;
-use fragment_proto::{canonical_json, limits, valid_op_id, ErrorCode, OpCall, OpDecl, OpKind, OpResult, Role, Via};
+use fragment_proto::{canonical_json, limits, valid_op_id, ErrorCode, OpCall, OpDecl, OpKind, Role, Via};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use worker::wasm_bindgen::JsValue;
 use worker::*;
 
 use crate::channels::Settled;
@@ -20,8 +22,6 @@ use crate::error::{CellError, CellResult};
 use crate::fragment::{decide, json_response, Caller, Facts, FragmentCell, MetaKey};
 use crate::jobs::NewRun;
 use crate::js::{self, AppCode};
-use serde::Deserialize;
-use worker::wasm_bindgen::JsValue;
 use crate::plane::PLATFORM_JS;
 
 /// Operation ids a job's steps use; callers cannot choose them.
@@ -74,8 +74,10 @@ pub(crate) struct Invocation<'a> {
     pub trigger: Option<String>,
 }
 
-pub(crate) fn input_sha(op: &str, input: &Value) -> String {
-    hex::encode(Sha256::digest(format!("{op}\n{}", canonical_json(input))))
+/// The hash a call's id is recorded with: its operation and its input's
+/// canonical JSON text (`fragment_proto::canonical_json`).
+pub(crate) fn input_sha(op: &str, canonical_input: &str) -> String {
+    hex::encode(Sha256::digest(format!("{op}\n{canonical_input}")))
 }
 
 /// The facet refused a call: nothing of the call committed.
@@ -88,13 +90,14 @@ fn refused(why: Refusal, op: &str) -> CellError {
     CellError::new(why.code(), message)
 }
 
-/// A result is bounded here too: the facet's own bound runs in the author's realm.
-fn bounded(result: OpResult) -> CellResult<OpResult> {
-    let text = result.result.to_string();
-    if text.len() > limits::RESULT_MAX_BYTES {
-        return Err(CellError::too_large("operation result", text.len(), limits::RESULT_MAX_BYTES));
+/// A result is bounded here too, by its text's length: the facet's own
+/// bound runs in the author's realm.
+fn bounded(answer: Answered) -> CellResult<Answered> {
+    let bytes = answer.result.get().len();
+    if bytes > limits::RESULT_MAX_BYTES {
+        return Err(CellError::too_large("operation result", bytes, limits::RESULT_MAX_BYTES));
     }
-    Ok(result)
+    Ok(answer)
 }
 
 /// The loader id of the code installed now, or why there is none: the
@@ -196,7 +199,7 @@ impl FragmentCell {
     /// records (an identity, or an anonymous visitor's id); `link` says the
     /// caller holds the share link. The caller's standing is read once and
     /// decided twice.
-    pub(crate) async fn call_op(&self, caller: &Caller, facts: &Facts, principal: &str, link: bool, op: &str, body: OpCall) -> CellResult<OpResult> {
+    pub(crate) async fn call_op(&self, caller: &Caller, facts: &Facts, principal: &str, link: bool, op: &str, body: OpCall) -> CellResult<Answered> {
         let standing = self.standing(caller, link)?;
         // Whether the caller can see the fragment at all comes before
         // anything about its operations.
@@ -221,8 +224,10 @@ impl FragmentCell {
     }
 
     /// Runs an admitted call: a query or a mutation in the facet, or a job's
-    /// run recorded (the caller launches queued runs afterwards).
-    pub(crate) async fn invoke(&self, inv: Invocation<'_>) -> CellResult<OpResult> {
+    /// run recorded (the caller launches queued runs afterwards). The input
+    /// is written as canonical JSON once: its size, its hash, and the text
+    /// the app parses are all that one text.
+    pub(crate) async fn invoke(&self, inv: Invocation<'_>) -> CellResult<Answered> {
         let input_text = canonical_json(&inv.input);
         if input_text.len() > limits::INPUT_MAX_BYTES {
             return Err(CellError::too_large("operation input", input_text.len(), limits::INPUT_MAX_BYTES));
@@ -230,7 +235,7 @@ impl FragmentCell {
         if let Some(schema) = &inv.decl.input {
             fragment_core::schema::validate(schema, &inv.input).map_err(|e| CellError::invalid(format!("input {e}")))?;
         }
-        let input_sha = input_sha(inv.op, &inv.input);
+        let input_sha = input_sha(inv.op, &input_text);
         if inv.decl.kind == OpKind::Job {
             let started = self.start_run(NewRun {
                 op: inv.op,
@@ -242,28 +247,35 @@ impl FragmentCell {
                 call: Some((&inv.id, &input_sha)),
                 input: inv.input,
             })?;
-            return Ok(OpResult { result: json!({ "run": started.id, "status": started.status }), replayed: started.replayed });
+            let result = serde_json::value::to_raw_value(&json!({ "run": started.id, "status": started.status })).expect("a run's id and status serialize");
+            return Ok(Answered { result, replayed: started.replayed });
         }
         let facet = self.facet()?;
         self.sweep(&facet).await?;
-        let meta = json!({
-            "principal": npub::display(inv.principal),
-            "role": inv.role,
-            "channels": self.declared_channels()?.keys().collect::<Vec<_>>(),
-        });
         match inv.decl.kind {
-            OpKind::Query => match facet.query(inv.op, inv.input.clone(), meta).await? {
-                Answer::Ran(q) => bounded(OpResult { result: q.result, replayed: false }),
-                Answer::Refused(why) => Err(refused(why, inv.op)),
-            },
-            OpKind::Mutation => self.mutate(&facet, &inv, &input_sha, meta).await,
+            OpKind::Query => {
+                // a query publishes nothing, so it is told no channels
+                let meta = json!({ "principal": npub::display(inv.principal), "role": inv.role });
+                match facet.query(inv.op, &input_text, &meta).await? {
+                    Answer::Ran(q) => bounded(Answered { result: q.result, replayed: false }),
+                    Answer::Refused(why) => Err(refused(why, inv.op)),
+                }
+            }
+            OpKind::Mutation => {
+                let meta = json!({
+                    "principal": npub::display(inv.principal),
+                    "role": inv.role,
+                    "channels": self.declared_channels()?.keys().collect::<Vec<_>>(),
+                });
+                self.mutate(&facet, &inv, &input_sha, &input_text, meta).await
+            }
             OpKind::Job => unreachable!("a job's call records a run above"),
         }
     }
 
     /// A mutation: recorded as pending, run in the facet (where it and its
     /// ledger row commit together), then settled (channels.rs).
-    async fn mutate(&self, facet: &js::Facet, inv: &Invocation<'_>, input_sha: &str, mut meta: Value) -> CellResult<OpResult> {
+    async fn mutate(&self, facet: &js::Facet, inv: &Invocation<'_>, input_sha: &str, input_text: &str, mut meta: Value) -> CellResult<Answered> {
         // Ids are the caller's: the ledger keys them by principal, so one
         // caller can neither replay nor block another's id.
         let ledger_id = format!("{}/{}", inv.principal, inv.id);
@@ -273,8 +285,8 @@ impl FragmentCell {
         let (mut pending, fresh) = self.begin(&ledger_id, inv.op, inv.principal, inv.depth)?;
         meta["run"] = pending.seq.into();
         meta["ledgerMs"] = self.ledger_kept_ms()?.into();
-        let args = [ledger_id.as_str().into(), inv.op.into(), input_sha.into(), inv.input.clone(), meta];
-        let answer = match facet.mutate(args).await {
+        let call = js::Mutation { ledger_id: &ledger_id, op: inv.op, input_sha, input: input_text, meta: &meta };
+        let answer = match facet.mutate(call).await {
             Ok(answer) => answer,
             Err(e) => {
                 // A node that could not load the app ran nothing. Otherwise
@@ -322,7 +334,7 @@ impl FragmentCell {
         } else {
             self.forget(&pending)?;
         }
-        bounded(OpResult { result: ran.result, replayed })
+        bounded(Answered { result: ran.result, replayed })
     }
 
     /// The ledger window this fragment's facet keeps: `LEDGER_KEPT_MS`, or

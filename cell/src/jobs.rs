@@ -669,7 +669,8 @@ impl FragmentCell {
             trigger: Some(format!("run {}", run.id)),
         };
         match self.invoke(inv).await {
-            Ok(r) => Ok(r.result),
+            // a step's value is a tree (its answers are stored as JSON with the run's)
+            Ok(r) => serde_json::from_str(r.result.get()).map_err(|e| permanent(format!("{op}: its result does not read as JSON: {e}"))),
             Err(e) => match e.code {
                 ErrorCode::HostFailed | ErrorCode::UpstreamFailed => Err(StepFail::Retry(e.message)),
                 _ => Err(permanent(format!("{op}: {}", e.message))),
@@ -789,7 +790,7 @@ impl FragmentCell {
                 self.test_trigger_failure()?;
             }
             let call_id = format!("record:{}:{}:{op}", record.channel, record.seq);
-            let sha = crate::ops::input_sha(op, &input);
+            let sha = crate::ops::input_sha(op, &fragment_proto::canonical_json(&input));
             let s = self.start_run(NewRun {
                 op,
                 via: Via::Channel,
