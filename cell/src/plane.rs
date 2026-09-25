@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use fragment_core::codestorage::TreeEntry;
+use fragment_core::tree::{self, Indexed, TreeDiff};
 use fragment_core::{manifest, npub, site, webhook};
 use fragment_proto::{limits, valid_repo_path, ChannelDecl, ErrorCode, OpDecl, OpKind, Role, TriggerDecl, TriggerOn};
 use serde::Deserialize;
@@ -244,17 +244,13 @@ impl FragmentCell {
             return Ok(PinMove { changed: false, to: Some(to), paths: vec![] });
         }
         let entries = cs.tree(&repo, &to).await?;
-        let prior: BTreeMap<String, (u64, String)> = self.tree_rows(which)?.into_iter().map(|r| (r.path, (r.size, r.last_commit))).collect();
-        let mut paths: Vec<String> = entries
-            .iter()
-            .filter(|e| prior.get(&e.path).is_none_or(|(size, last)| *size != e.size || *last != e.last_commit_sha))
-            .map(|e| e.path.clone())
-            .collect();
-        let now: std::collections::BTreeSet<&str> = entries.iter().map(|e| e.path.as_str()).collect();
-        paths.extend(prior.keys().filter(|p| !now.contains(p.as_str())).cloned());
+        let prior: BTreeMap<String, Indexed> =
+            self.tree_rows(which)?.into_iter().map(|r| (r.path, Indexed { size: r.size, mode: r.mode, last_commit: r.last_commit })).collect();
+        let diff = tree::diff(&prior, &entries);
+        let paths = diff.paths();
         let sizes: std::collections::HashMap<&str, u64> = entries.iter().map(|e| (e.path.as_str(), e.size)).collect();
         self.track_pointers(which, &to, &paths, &sizes).await?;
-        self.write_tree(which, &entries)?;
+        self.write_tree(which, &diff, entries.len())?;
         self.set_meta(MetaKey::pin(which), &to)?;
         self.event(
             "git.refresh",
@@ -264,15 +260,37 @@ impl FragmentCell {
         Ok(PinMove { changed: true, to: Some(to), paths })
     }
 
-    fn write_tree(&self, which: &str, entries: &[TreeEntry]) -> CellResult<()> {
-        self.exec("DELETE FROM tree WHERE ref = ?", vec![which.into()])?;
-        for batch in entries.chunks(TREE_BATCH) {
+    /// Writes a pin move's changes to its index (`tree::diff`): deletes
+    /// the paths gone and upserts the ones added or changed, so a one-file
+    /// commit writes one row whatever the tree's size. The index then
+    /// holds one row per file of the listing, `files`, or the listing
+    /// named a path twice: then the pin does not move, and the next
+    /// refresh diffs again from what was written.
+    fn write_tree(&self, which: &str, diff: &TreeDiff<'_>, files: usize) -> CellResult<()> {
+        for batch in diff.removed.chunks(TREE_BATCH) {
+            let marks = vec!["?"; batch.len()].join(", ");
+            let mut binds: Vec<SqlStorageValue> = Vec::with_capacity(batch.len() + 1);
+            binds.push(which.into());
+            binds.extend(batch.iter().map(|p| SqlStorageValue::from(*p)));
+            self.exec(&format!("DELETE FROM tree WHERE ref = ? AND path IN ({marks})"), binds)?;
+        }
+        for batch in diff.upserts.chunks(TREE_BATCH) {
             let tuples = vec!["(?, ?, ?, ?, ?)"; batch.len()].join(", ");
             let mut binds: Vec<SqlStorageValue> = Vec::with_capacity(batch.len() * 5);
             for e in batch {
                 binds.extend([which.into(), e.path.as_str().into(), SqlStorageValue::Integer(e.size as i64), e.mode.as_str().into(), e.last_commit_sha.as_str().into()]);
             }
-            self.exec(&format!("INSERT INTO tree (ref, path, size, mode, last_commit) VALUES {tuples}"), binds)?;
+            self.exec(
+                &format!(
+                    "INSERT INTO tree (ref, path, size, mode, last_commit) VALUES {tuples}
+                     ON CONFLICT (ref, path) DO UPDATE SET size = excluded.size, mode = excluded.mode, last_commit = excluded.last_commit"
+                ),
+                binds,
+            )?;
+        }
+        let held = self.rows("SELECT COUNT(*) AS n FROM tree WHERE ref = ?", vec![which.into()])?.first().and_then(|r| r["n"].as_u64()).expect("COUNT answers a row");
+        if held != files as u64 {
+            return Err(CellError::host(format!("{which}'s index holds {held} files after the move, not the listing's {files} (a path listed twice?)")));
         }
         Ok(())
     }
