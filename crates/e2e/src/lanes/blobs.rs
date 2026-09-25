@@ -132,6 +132,9 @@ pub fn blobs(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a blob no branch names is deleted after its grace period", gone, "");
     let r = api.signed(&keys, "HEAD", &blob_path(&sha256_hex(&v2)), None)?;
     s.ok("the current version's bytes stay", r.status == 200 && r.header("content-length") == v2.len().to_string(), &r);
-    s.ok("the event log says so", api.signed(&keys, "GET", &format!("/api/f/{name}/events"), None)?.text.contains("blobs.collected"), "");
+    // the bytes go before the rows and the event (a HEAD can see the 404
+    // while the collector still awaits the bucket), so wait for it too
+    let logged = s.eventually(Duration::from_secs(10), || api.signed(&keys, "GET", &format!("/api/f/{name}/events"), None).is_ok_and(|r| r.text.contains("blobs.collected")));
+    s.ok("the event log says so", logged, "no blobs.collected event in 10 s");
     Ok(())
 }
