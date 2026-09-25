@@ -1,9 +1,11 @@
 # Hardening pass
 
 Status: **H1–H3 deployed to fragment.club on 2026-09-24** (Paul: "proceed
-with h1-h4", then each deploy step). The bucket clean-up and the secret
-rotations wait on Paul (below). The celld fork is branch `hardening` at
-`2779418` on futurepaul/celld (`celld-worktrees/hardening`; `43c3238` after it adds only a lockfile line for phase 6). Sources: the native services spike
+with h1-h4", then each deploy step). The secret rotations wait on Paul
+(below). The celld fork is branch `hardening` on futurepaul/celld
+(`celld-worktrees/hardening`): H1–H3 at `2779418`; after it, phase 6's
+co-hosting (`0d80ead`, on fragment.club) and two lockfile updates (the
+last, `f734f8f`, is what `master` pins). Sources: the native services spike
 (`spike/native-services`, cd1d6d8), and the two isolation spikes
 (`spike/cell-isolation` 35c51f1; `spike/isolation` dadbadb).
 

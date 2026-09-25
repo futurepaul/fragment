@@ -1,8 +1,9 @@
-# Phase 4: sign-in, identities, and budgets (proposed)
+# Phase 4: sign-in, identities, and budgets
 
 Status: **go from Paul 2026-09-24; slices A, B, and C built the same
 day** (below, "as built"; Paul tried sign-in locally before C). Slice D,
-the deploy, is Paul's to approve. The ROADMAP keeps
+the deploy, went out the same day: fragment.club signs in with WorkOS
+and pays AI from budgets. The ROADMAP keeps
 the acceptance (phase 4, decisions 12, 14, 15); this file keeps the
 slices. Every slice follows the rules in `docs/finite-integration.md`
 and updates its rows there.
@@ -90,8 +91,7 @@ Decided with Paul on 2026-09-24:
   moved onto identities (members, records, runs, the storage token's
   subject, and what an app sees name identities).
 - **Not yet:** sockets opened with a key outlive its revocation (debt
-  ledger); fragment.club still runs the phase 3 cell (the hard cut
-  happens at slice D's deploy).
+  ledger).
 
 ## Slice B: sign-in and sessions
 
@@ -225,8 +225,9 @@ and `WORKOS_API_KEY_FILE=~/.config/finite-next/secrets/fragment-workos-api-key`.
 - **e2e:** the `budget` section (25 checks, against the OpenRouter fake,
   which now mints keys, enforces their limits, and reports costs), and
   a restart check that a month's spend survives.
-- **Not metered yet:** an agent's own turns (the agent fleet's key;
-  debt ledger, before that fleet is hosted), computers (phase 8).
+- **Not metered yet:** an agent's own turns spend its owner's key
+  (phase 6 step 4b) but write no usage rows (debt ledger); computers
+  (phase 8).
   Reservations are per-kind estimates (debt ledger).
 
 ## Slice D: hosted
@@ -236,7 +237,7 @@ and `WORKOS_API_KEY_FILE=~/.config/finite-next/secrets/fragment-workos-api-key`.
   invited. The hosted e2e signs in with an enrolled CLI key; Paul checks
   the browser sign-in himself.
 
-## What Paul sets up (I can't create accounts)
+## What Paul set up (I can't create accounts; both done 2026-09-24)
 
 1. **Before slice D (slices A–C run on the fake):** a WorkOS account
    for fragment with AuthKit. In its Production environment switch

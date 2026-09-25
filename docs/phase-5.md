@@ -2,7 +2,9 @@
 
 Started 2026-09-23 overnight on Paul's word ("work on 5-8, the stuff
 that's obvious"). The ROADMAP keeps the acceptance; this file keeps what
-was built and the choices made without him, for his review.
+was built and the choices made without him, for his review. Live on
+fragment.club since 2026-09-24, co-hosted on the cell's nodes
+(`docs/phase-6.md`, step 4a).
 
 ## What landed
 
@@ -13,9 +15,9 @@ its SQL. 6.5 MB of wasm, as the spike measured; fragment cells carry none
 of it.
 
 - **An agent has its own key.** The owner creates it (`POST
-  /api/agents`, NIP-98); the cell makes a secp256k1 key from the
-  platform's randomness and keeps it sealed under the fleet's host
-  secret. Only its owner drives it (turns, stop, view).
+  /api/agents`, NIP-98); the node's `KEYS` makes its secp256k1 key and
+  signs with it (`docs/hardening.md`, H1; before that, the cell sealed it
+  under the host secret). Only its owner drives it (turns, stop, view).
 - **Its tools are the operations of the fragments it belongs to.** An
   owner adds the agent's npub as a member of a fragment, like anyone;
   the agent reads its memberships (`GET /api/fragments`, signed with its
@@ -32,9 +34,9 @@ of it.
   replaces a driver that died with its node. A message during a turn
   steers it (a durable queue read between steps); stop cancels a tool in
   flight.
-- **Dev and e2e:** `cargo xtask dev` runs agents on :8793 beside the
-  cell (their model key from the file `OPENROUTER_API_KEY_FILE` names;
-  since phase 6 step 4a they are co-hosted on the cell's node);
+- **Dev and e2e:** `cargo xtask dev` runs agents (on :8793 beside the
+  cell at first; co-hosted on the cell's node since phase 6 step 4a, on
+  their owner's key since 4b);
   `cargo xtask build` and `check` build and lint `agent/`; the e2e
   section `agents` (18 checks) drives a scripted OpenRouter fake, which
   now streams and answers scripted tool calls.
@@ -66,9 +68,6 @@ once); SIGKILL between steps (nothing runs again).
 
 ## Not yet
 
-- Hosting the agent fleet: a second celld app beside the cell's on Fly
-  (its own bucket prefix and Machines, or a process beside each node).
-  Infrastructure and spend: Paul's call.
 - Streaming a turn's tokens to viewers; an owner's list of their agents.
 - The computer shape: its first part (tools on an attached computer, the
   loop still in the cell) is in `docs/phase-8.md`.

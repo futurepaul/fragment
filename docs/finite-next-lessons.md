@@ -43,9 +43,9 @@ time; read it before touching the matching phase.
 - celld 0.5 removed `CELLD_WORKER_LOADER` and the `CELLD_VAR_*`
   passthrough: loaders are `worker_loaders` in the config; variables are
   `vars` in the config or `.dev.vars` (dotenv, one line per value) under
-  `celld dev`. `celld deploy` never reads `.dev.vars`, so production
-  secrets are `vars` rendered into the deployed config
-  (`spikes/celld-0.5.1/README.md`).
+  `celld dev`. `celld deploy` never reads `.dev.vars`, and `vars` land
+  in the deployment's manifest in the bucket, so the fleet's secrets are
+  the node's environment, read only by `KEYS` (`docs/hardening.md`, H1).
 - A process started with `nohup … &` from a tool shell can die when that
   shell exits; long-lived dev servers run as background tasks or through
   `scripts/dev`.

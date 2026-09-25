@@ -9,18 +9,20 @@ github.com/futurepaul/fragment's `master`, which fragment.club runs) and on cell
 
 ## Read first
 
-1. `docs/ROADMAP.md` — decisions, truth map, phases, escalations.
+1. `docs/ROADMAP.md` — decisions, truth map, phases (and what is live),
+   escalations.
 2. `docs/MODEL.md` — the core model on celld primitives and the spikes.
    `docs/api.md` — the wire contract the cell answers.
    `docs/finite-integration.md` — how fragment will move into
    finite.computer (Finite V3): every Core concern, its stand-in here,
    and the swap; update its row with any change that touches one;
-   `docs/phase-4.md` — sign-in, identities, budgets (slices A–C built;
-   live on fragment.club);
-   `docs/hardening.md` — the hardening pass (proposed): native keys,
+   `docs/phase-6.md` — the desktop as a template, usernames and flat
+   hosts, your agent making apps, computers with screenshots (live);
+   `docs/phase-4.md` — sign-in, identities, budgets (live);
+   `docs/hardening.md` — the hardening pass (H1–H3 live): native keys,
    the isolation findings;
-   `docs/phase-5.md` — agents (built overnight; choices for review);
-   `docs/phase-8.md` — computers, first part (the same night);
+   `docs/phase-5.md` — agents (choices for review);
+   `docs/phase-8.md` — computers, first part;
    `docs/phase-3.md` — hosting on fragment.club;
    `docs/phase-2.md` — the record of the core cut (slices A–G);
    `docs/operate.md` — the operator runbook.
@@ -45,15 +47,19 @@ debt ledger).
   (builds the celld fork with the alarm fix into `target/celld/bin`).
 - `cargo xtask check`: host tests and clippy (host and wasm), warnings
   denied.
-- `cargo xtask e2e [--only <section>[,...] | --except <section>[,...]]`: builds `cell/` and the CLI (with
-  its `computer` feature), then
-  runs `crates/e2e` against a fresh `celld dev` node and the in-process
-  code.storage fake (sections: auth, create, lockdown, members, identities, signin, secrets,
-  files, deploy, ops, public, site, watch, schemas, channels, live,
-  routes, cli, browser, jobs, triggers, appfiles, blobs, notes, push,
-  ai, budget, agents, chat, computer, sync, restart, pathmode). The browser and notes sections drive headless
-  Chrome (`CHROME_BIN` to choose one; one Chrome serves the whole run, a
-  fresh browser context per section); `--only triggers` waits for a cron
+- `cargo xtask e2e [--only <section>[,...] | --except <section>[,...]]`:
+  builds `cell/`, `agent/`, and the CLI (with its `computer` feature),
+  then runs `crates/e2e` against a fresh `celld dev` node and the
+  in-process fakes (sections, in order: auth, create, lockdown, keys,
+  members, identities, signin, secrets, files, deploy, templates,
+  desktop, ops, public, effects, facet-cap, app-lockdown, site, watch,
+  schemas, channels, live, routes, cli, browser, jobs, triggers,
+  appfiles, blobs, notes, push, ai, budget, agents, chat, computer,
+  screenshots, sync, restart, pathmode, node-full;
+  `crates/e2e/src/lanes/mod.rs`). The browser, notes, desktop, chat, and
+  screenshots sections drive headless Chrome (`CHROME_BIN` to choose
+  one; one Chrome serves the whole run, a fresh browser context per
+  section); `--only triggers` waits for a cron
   minute (up to a minute; a full run deploys its cron fragment sections
   earlier). A section that errors or panics is one FAIL and the sections
   after it still run. The node runs from a staged copy of the cell in the
@@ -80,21 +86,27 @@ debt ledger).
   creates and deploys a fragment from a template under
   `target/devstack/try/` (never in the repo) and prints the link to open,
   a curl for the inbox, and a `fragment` alias for the dev stack. The
-  templates on the new model: `todo` (operations, channels, the browser
+  reference templates: `todo` (operations, channels, the browser
   library), `inbox` (a trigger, a job, the inbox), and `notes` (files as
   the state, read through `App.fetch`, refreshed by a file trigger).
-  `fragment new|init --template` scaffolds the same three.
+  `fragment new|init --template` scaffolds any of `templates/` (also
+  `blank`, `chat`, `desktop`); the platform's "new" page offers all but
+  `notes`.
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
-  logic, host-tested), `crates/nip98`, `crates/fakes` (code.storage,
-  OpenRouter, a push service), `crates/devstack`, `crates/e2e`.
+  logic, host-tested), `crates/nip98`, `crates/native` (`KEYS`, built
+  into the celld fork), `crates/templates` (`templates/`, embedded),
+  `crates/computer` (`fragment computer`), `crates/node` (the fleet's
+  launcher), `crates/fakes` (code.storage, OpenRouter, WorkOS, a push
+  service), `crates/devstack`, `crates/e2e`.
 - `.github/workflows/ci.yml` runs `check`, and the e2e in parallel: one
   macOS job builds what it runs (`cargo xtask e2e-kit`, the node cached
   by its fork commit), four shards each run a slice of the sections from
   that kit (`--only`, and `--except` for the rest), and one `e2e` check
-  passes when every shard does.
+  passes when every shard does (about 7 minutes on warm caches).
 - The hosted fleet (`fleets/fragment-club.json`, `docs/operate.md`):
-  `cargo xtask deploy fragment-club` ships the cell; `--nodes` ships the
-  node image (local Docker); `cargo xtask e2e --fleet fragment-club` runs
+  `cargo xtask deploy fragment-club` ships the agents' script and the
+  cell; `--nodes` ships the node image (local Docker), nodes before the
+  cell when both change; `cargo xtask e2e --fleet fragment-club` runs
   the hosted e2e (live OpenRouter: a few cents); `cargo xtask fleet
   fragment-club <celld command>` runs celld's operator commands
   (`diagnose`, `cell list`, `queue info <q>`) with the bucket's keys.
@@ -109,6 +121,7 @@ debt ledger).
 - `cargo xtask dev` runs `celld dev` on `cell/`, which rebuilds when it
   changes; the e2e runs a staged copy (`target/e2e/<run>/cell`) with its own
   variables, so the two can run at once.
-- No remote of its own yet; `fragment-rs` is a fetch-only pointer to
-  github.com/futurepaul/fragment. Ask Paul before adding or pushing to a
-  remote, deleting Sprites, or anything else irreversible.
+- The remote is `fragment-rs`, github.com/futurepaul/fragment: work goes
+  up as a branch and a pull request against `master` (branch names under
+  `ci/` are refused). Ask Paul before merging, adding a remote, deleting
+  Sprites, or anything else irreversible.

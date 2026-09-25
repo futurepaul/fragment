@@ -158,9 +158,7 @@ A label and a username never contain `--`. Creating with a bare label
 puts it under the creator's username; creating under someone else's is
 403. In a signed request's path, a bare label names the signer's own
 fragment (`/api/f/todo/status` is `todo.<your username>`); anything
-unsigned (an inbox, a webhook, a site) names it in full. Each new
-fragment asks for its host's TLS certificate (`KEYS` asks Fly, for the
-fragment of that name only).
+unsigned (an inbox, a webhook, a site) names it in full.
 
 ## Sign-in (phase 4 slice B)
 

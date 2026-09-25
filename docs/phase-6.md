@@ -2,9 +2,10 @@
 
 Status: **built and deployed to fragment.club 2026-09-24** (nodes on the
 celld fork's `0d80ead`, cell `fd471b1`; hosted e2e 29/29), with flat hosts
-(call 2 below) and `__Host-` sessions. Open after it: PR #12 (the audit's
-single-source-of-truth pass), per-step usage rows for agents' turns (debt
-ledger), phase 7's sharing sheet. Paul's framing:
+(call 2 below) and `__Host-` sessions. Merged since, not deployed:
+PRs #12–#14 (the audit's passes) and #15 (CI); deploying them needs a
+node from the fork's `f734f8f`. Open: per-step usage rows for agents'
+turns (debt ledger), phase 7's sharing sheet. Paul's framing:
 fragment is the core product; the desktop is a fun demonstration of what
 fragment can do: "ideally it's just a fragment that the user can deploy
 with a click". The goal is to get back what finite-next could do before
@@ -66,10 +67,9 @@ session's layout (`finite-next-worktrees/desktop-ui`, `d8d5c26`).
    **Built 2026-09-24:** local e2e 671 passed, 0 failed (fork `43c3238`:
    its lockfile gained `KEYS`'s `hmac`, which `native::scope` uses to
    derive the Fragment's address it checks a certificate request
-   against). The hosted e2e's fragments now keep their names across runs
-   (`todo.e2e`, …) under the username `e2e`, so each host's certificate
-   is asked for once, and a run waits for a new host's certificate.
-   Deploying it is a hard cut: fragments made before it are not served.
+   against; call 2's wildcard certificate then made the per-host
+   requests unneeded). Deploying it is a hard cut: fragments made before
+   it are not served.
 2. **Templates and one-click deploy.** A server-side create from a
    template (chat, todo, desktop, a blank app), server-side commit and
    deploy routes (which the agent's tools also use), the platform's "new"
@@ -136,7 +136,7 @@ session's layout (`finite-next-worktrees/desktop-ui`, `d8d5c26`).
    - **4e.** The desktop notices new fragments (it asks again when the
      page regains focus and after a chat's message), so an app the agent
      made appears in the sidebar.
-   **Built 2026-09-24** (local, not deployed; fork `0d80ead`): 4a–4e as
+   **Built 2026-09-24** (fork `0d80ead`): 4a–4e as
    planned, with two changes. The desktop asks again every five seconds
    while it is in view, not after a chat's message (it cannot see into
    the chat's frame). The chat names people through a new `__people`
@@ -151,7 +151,7 @@ session's layout (`finite-next-worktrees/desktop-ui`, `d8d5c26`).
    a `screenshot` tool (headless Chromium on the computer), the image in
    the chat. Acceptance: a turn opens a page on the computer and the chat
    shows its screenshot.
-   **Built 2026-09-24** (local, not deployed): the computer's protocol is
+   **Built 2026-09-24:** the computer's protocol is
    unchanged; `fragment computer connect` carries it over a long poll
    instead of a public URL. The owner attaches with `fragment agent
    computer <agent> --connect --token-file <f>` (a connect token, answered

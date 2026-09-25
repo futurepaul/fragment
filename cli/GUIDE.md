@@ -15,6 +15,12 @@ again after approving). The host knows which identity (`id:…`) each key
 belongs to: memberships name you, not the key. `fragment keys rotate`
 replaces the key and keeps everything you have.
 
+A person chooses a username once (`fragment username <name>`, or the
+host's page after the first sign-in) and can create nothing before. A
+fragment's name is `<label>.<username>`, served at
+`<label>--<username>.<suffix>`; in a command, a bare label names one of
+yours (`fragment status todo` is `todo.<your username>`).
+
 ## The model in one screen
 
 - **Files.** One git repo per fragment (on code.storage). `main` is the
@@ -43,7 +49,7 @@ replaces the key and keeps everything you have.
 fragment login                            # once per machine: sign in in a browser, approve this machine's key
 fragment init my-thing                    # scaffold (todo) + create + deploy → live URL,
                                           #   share link, webhook URL
-fragment init my-inbox --template inbox   # or: todo | inbox | notes
+fragment init my-inbox --template inbox   # or: todo | notes | chat | desktop | blank
 ```
 
 `fragment new <dir> --template T` scaffolds without creating;
@@ -53,6 +59,8 @@ fragment init my-inbox --template inbox   # or: todo | inbox | notes
 - `inbox`: webhook deliveries start a job that fetches and records.
 - `notes`: a folder of markdown as a live site; the files are the state.
 - `chat`: a live chat room; an agent member can answer in it.
+- `desktop`: your fragments side by side: chats, apps, and files.
+- `blank`: one page, to build on.
 
 `fragment status my-thing` shows the URLs, the view token (the share
 link's `?view=`), and the inbox token. `fragment open my-thing` prints
@@ -352,7 +360,8 @@ agents answer on the platform's own host (their script is co-hosted in
 its fleet); `FRAGMENT_AGENTS` names another.
 
 An agent with a computer also gets goose's developer tools (shell,
-write, edit, tree) there. On the computer (a CLI built with
+write, edit, tree) there, and `screenshot {url}` (headless Chrome; a
+turn in a chat shows the image there). On the computer (a CLI built with
 `--features computer`):
 
 ```
@@ -364,6 +373,13 @@ and from anywhere, with a copy of that token file:
 ```
 fragment agent computer my-bot --url https://my-computer.example --token-file token --cwd site
 fragment agent computer my-bot --detach
+```
+
+or, with no public URL, the computer connects out:
+
+```
+fragment agent computer my-bot --connect --token-file token   # prints the command below
+fragment computer connect --agent <its URL> --token-file token   # on the computer
 ```
 
 Its commands run in `work/<cwd>` on the computer. Stop kills a running
@@ -397,6 +413,7 @@ secret values into files.
 ```
 fragment login [--force] [--no-wait]     fragment call <name> <op> [--input JSON] [--id ID]
 fragment whoami                          fragment channel <name> [<channel>] [--after N] [--follow]
+fragment username [<name>]
 fragment keys [list|rotate|revoke <npub>]
 fragment budget [usage [--period P] | top-up <id> <usd>]
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
@@ -417,6 +434,7 @@ fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment build [DIR]                     fragment rm <name>
 fragment agent create|show|say|stop|tools|listen|computer ...
 fragment computer serve [--listen A]     fragment guide
+fragment computer connect --agent U --token-file F
 ```
 
 Global flags: `--host <url>` (or `FRAGMENT_HOST`, or `fragment host
