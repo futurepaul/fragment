@@ -121,7 +121,8 @@ fragment verify my-thing --dir .            # full-content audit
 - **Deletions converge**; a locally modified copy wins over a remote
   delete.
 - **What syncs**: everything but dot files and folders (`.fragment/`,
-  `.git/`, `.obsidian/`, `.DS_Store`), `node_modules/`, editor droppings
+  `.git/`, `.obsidian/`, `.DS_Store`), the top-level `node_modules/` (one
+  deeper down, as under `site/`, is served and syncs), editor droppings
   (`~` backups, `~$` locks, `.swp`), and sync's own `.conflict-` copies.
   One rule for both directions: such a file in the repo is never pulled,
   and never deleted for being absent from your folder. In a git repo,

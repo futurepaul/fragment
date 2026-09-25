@@ -348,17 +348,20 @@ pub(crate) struct LocalFile {
 /// segment, so a folder that is out takes everything under it:
 /// - dot files and folders: sync's own `.fragment/`, `.git/`, an editor's
 ///   workspace state (`.obsidian/`), `.DS_Store`, `.#` lock files;
-/// - `node_modules/`: the platform never loads or serves it (an app's
-///   modules are `applib/`), and one install writes thousands of files;
+/// - the top-level `node_modules/`: the platform never loads or serves it
+///   (an app's modules are `applib/`; `site::is_machinery`), and one
+///   install writes thousands of files. One deeper down is content (the
+///   site serves `site/node_modules/…`), so it syncs;
 /// - editor droppings: `~` backups, `~$` lock files, `.swp` swap files;
 /// - sync's own `.conflict-` copies and `.fragment-partial` temp files.
 pub fn syncable(rel: &str) -> bool {
     // bounded by the path's segments
-    for seg in rel.split('/') {
+    for (depth, seg) in rel.split('/').enumerate() {
         let hidden = seg.starts_with('.');
+        let modules = depth == 0 && seg == "node_modules";
         let dropping = seg.ends_with('~') || seg.starts_with("~$") || seg.ends_with(".swp");
         let ours = seg.contains(".conflict-") || seg.contains(".fragment-partial");
-        if hidden || seg == "node_modules" || dropping || ours {
+        if hidden || modules || dropping || ours {
             return false;
         }
     }
@@ -1060,7 +1063,8 @@ mod tests {
     /// disagreed on, and ordinary ones.
     #[test]
     fn what_syncs() {
-        for rel in ["a.md", "site/index.html", "notes/2026/x.md", "a.b/c.d.md", "applib/x.mjs", "fragment.json"] {
+        // a node_modules below the top is the site's content: it serves it
+        for rel in ["a.md", "site/index.html", "notes/2026/x.md", "a.b/c.d.md", "applib/x.mjs", "fragment.json", "site/node_modules/y.js"] {
             assert!(syncable(rel), "{rel} syncs");
         }
         for rel in [
@@ -1071,7 +1075,6 @@ mod tests {
             ".fragment/state.json",
             ".trash/old.md",
             "node_modules/x/index.js", // the scan uploaded it while the watcher ignored it
-            "site/node_modules/y.js",
             "a.md~",
             "~$report.docx",
             "notes.swp",
