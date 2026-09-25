@@ -6,9 +6,9 @@
 //! asked to, and answer scripted replies (text, or tool calls) in order
 //! before falling back to an echo. Every answer reports its cost
 //! (`usage.cost`, dollars) unless told to leave it out. A video's prompt
-//! decides how it ends: one naming "expire" expires (no cost, nothing to
-//! save), one naming "vanish" is forgotten (its polls answer 404); any
-//! other completes. The management key mints keys with a credit limit
+//! decides how it ends: one naming "expire" expires and one naming
+//! "cancel" is cancelled (no cost, nothing to save), one naming "vanish"
+//! is forgotten (its polls answer 404); any other completes. The management key mints keys with a credit limit
 //! (`POST /api/v1/keys`, `PATCH /api/v1/keys/{hash}`), and a call on a
 //! minted key past its limit is 402. Levers: the calls made, the chat
 //! requests, failures queued for the next calls, the script, the costs,
@@ -273,7 +273,13 @@ impl OpenRouter {
                     let id = format!("gen-vid-{}", s.video_ids);
                     let prompt = body["prompt"].as_str().unwrap_or("");
                     if !prompt.contains("vanish") {
-                        let status = if prompt.contains("expire") { "expired" } else { "completed" };
+                        let status = if prompt.contains("expire") {
+                            "expired"
+                        } else if prompt.contains("cancel") {
+                            "cancelled"
+                        } else {
+                            "completed"
+                        };
                         s.videos.insert(id.clone(), (seconds, cost, status));
                     }
                     Response::json(202, &json!({ "id": id, "generation_id": id, "polling_url": format!("/api/v1/videos/{id}"), "status": "pending" }))
@@ -286,7 +292,7 @@ impl OpenRouter {
                     };
                     let Some((seconds, cost, status)) = s.videos.get(id).copied() else { return problem(404, "no such video job") };
                     if status != "completed" {
-                        return Response::json(200, &json!({ "id": id, "status": status, "error": "the generation expired" }));
+                        return Response::json(200, &json!({ "id": id, "status": status, "error": format!("the generation ended {status}") }));
                     }
                     if content {
                         return Response::bytes(200, "video/mp4", video_bytes(seconds));

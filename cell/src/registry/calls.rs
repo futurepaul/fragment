@@ -284,6 +284,9 @@ pub(crate) enum SigninsHook {
     Expire,
     /// The sweep runs now.
     Sweep,
+    /// The session this token names expires now (its row stays for the
+    /// sweep; a platform session's site sessions end with it).
+    ExpireSession(String),
 }
 
 /// How many rows sign-in's tables hold.
