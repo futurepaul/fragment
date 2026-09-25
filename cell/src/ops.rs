@@ -26,6 +26,8 @@ use crate::plane::PLATFORM_JS;
 
 /// Operation ids a job's steps use; callers cannot choose them.
 pub const JOB_ID_PREFIX: &str = "job:";
+/// A browser posts to a channel at `__op/channels/<channel>` (`call_op`).
+const SITE_POST_PREFIX: &str = "channels/";
 /// How long the facet's ledger recognizes an id: a call with it within
 /// this is a replay; after it, the same id runs again as a new run. The
 /// facet takes the window from each call, so this is its one definition.
@@ -200,6 +202,15 @@ impl FragmentCell {
     /// caller holds the share link. The caller's standing is read once and
     /// decided twice.
     pub(crate) async fn call_op(&self, caller: &Caller, facts: &Facts, principal: &str, link: bool, op: &str, body: OpCall) -> CellResult<Answered> {
+        // A browser's post (`fragment.post`) takes the call's door on the
+        // site, `__op/channels/<channel>` with the body as the input, and so
+        // its checks: JSON only, and a session or an anonymous principal.
+        // No operation name has a `/`, so none is ever mistaken for one.
+        if let Some(channel) = op.strip_prefix(SITE_POST_PREFIX).filter(|_| caller.mode.is_some()) {
+            let (record, replayed) = self.post(caller, facts, principal, link, channel, &body.id, &body.input).await?;
+            let result = serde_json::value::to_raw_value(&record).expect("a record serializes");
+            return Ok(Answered { result, replayed });
+        }
         let standing = self.standing(caller, link)?;
         // Whether the caller can see the fragment at all comes before
         // anything about its operations.
@@ -360,11 +371,23 @@ impl FragmentCell {
     /// `POST /api/test/fragment {fragment, op, …}`, the router's, on fleets
     /// with test hooks only: the levers the e2e pulls on one fragment
     /// (docs/api.md, `FRAGMENT_TEST_HOOKS`).
-    pub(crate) fn test_fragment(&self, body: &Value) -> CellResult<Value> {
+    pub(crate) async fn test_fragment(&self, body: &Value) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "the route answers only on fleets with test hooks");
         self.name()?;
         let ms = || body["ms"].as_i64().filter(|ms| *ms >= 0).ok_or_else(|| CellError::invalid("ms is a duration"));
         Ok(match body["op"].as_str() {
+            Some("alarm") => {
+                let alarm_at = self.state.storage().get_alarm().await?;
+                let poll_at = self.meta(MetaKey::PollAt)?.and_then(|at| at.parse::<i64>().ok());
+                json!({ "alarmAt": alarm_at, "pollAt": poll_at, "now": js::now_ms() })
+            }
+            Some("age-outside") => {
+                let ms = ms()?;
+                if let Some(at) = self.meta(MetaKey::OutsideAt)?.and_then(|at| at.parse::<i64>().ok()) {
+                    self.set_meta(MetaKey::OutsideAt, &(at - ms).to_string())?;
+                }
+                json!({ "aged": ms })
+            }
             Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects")) => {
                 let key = match lever {
                     "fail-deliveries" => MetaKey::TestFailDeliveries,
@@ -441,7 +464,7 @@ impl FragmentCell {
                 json!({ "ok": true })
             }
             Some("code-builds") => json!({ "builds": self.app.builds() }),
-            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, forget-steps, hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-before-tables, or code-builds")),
+            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, forget-steps, hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-before-tables, code-builds, alarm, or age-outside")),
         })
     }
 }

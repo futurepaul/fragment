@@ -1,0 +1,12 @@
+{
+  "operations": {
+    "heard": { "kind": "mutation" },
+    "log": { "kind": "query", "role": "public" }
+  },
+  "channels": {
+    "chat": { "read": "public", "post": "public" },
+    "lobby": { "read": "public", "post": "public" },
+    "notes": { "read": "viewer", "post": "editor" }
+  },
+  "triggers": [{ "channel": "chat", "run": "heard" }]
+}

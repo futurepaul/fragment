@@ -31,6 +31,8 @@
 //!   PUT    /api/blobs/<sha256>            editor (the body, streamed and hashed)
 //!   GET|HEAD /api/blobs/<sha256>          viewer
 //!   GET    /api/events?since=|tail=       viewer
+//!   GET    /api/channels  /api/channels/<channel>?after=   viewer; the channel's reader
+//!   POST   /api/channels/<channel>        the channel's post role ({id, body}: the platform appends)
 //!   POST   /api/ops/<operation>           the operation's role (a job answers its run)
 //!   GET    /api/runs?status=&op=  /api/runs/<id>   viewer
 //!   POST   /api/replay  POST /api/pause   editor
@@ -97,7 +99,7 @@ CREATE TABLE IF NOT EXISTS code (
   cpu_ms INTEGER NOT NULL, installed_at INTEGER NOT NULL,
   modules TEXT NOT NULL DEFAULT '{}', notify TEXT NOT NULL DEFAULT '[]');
 CREATE TABLE IF NOT EXISTS code_ops (op TEXT PRIMARY KEY, kind TEXT NOT NULL, role TEXT NOT NULL, input TEXT);
-CREATE TABLE IF NOT EXISTS code_channels (channel TEXT PRIMARY KEY, read TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS code_channels (channel TEXT PRIMARY KEY, read TEXT NOT NULL, post TEXT);
 CREATE TABLE IF NOT EXISTS code_triggers (idx INTEGER PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT NULL, run TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS code_triggers_on ON code_triggers (kind, target);
 CREATE TABLE IF NOT EXISTS runs (
@@ -338,8 +340,12 @@ pub(crate) enum MetaKey {
     Repo,
     /// The latest members index change (members.rs).
     IndexVersion,
-    /// When the poll backstop runs next.
+    /// When the poll backstop runs next (a day after the last pass, or
+    /// within the poll interval while the fragment is busy: plane.rs `busy`).
     PollAt,
+    /// When something outside the platform last may have written the repo:
+    /// a storage token was minted for it, or a webhook arrived (plane.rs).
+    OutsideAt,
     /// A template still to commit (publish.rs).
     TemplatePending,
     /// An owner's agent still to join (publish.rs).
@@ -403,6 +409,7 @@ impl MetaKey {
             MetaKey::Repo => "repo",
             MetaKey::IndexVersion => "index_version",
             MetaKey::PollAt => "poll_at",
+            MetaKey::OutsideAt => "outside_at",
             MetaKey::TemplatePending => "template_pending",
             MetaKey::AgentPending => "agent_pending",
             MetaKey::PinMain => "pin_main",
@@ -737,7 +744,7 @@ impl FragmentCell {
         }
         if path == "/test/fragment" && self.cfg.test_hooks {
             let body: Value = body_json(&mut req).await?;
-            return json_response(&self.test_fragment(&body)?);
+            return json_response(&self.test_fragment(&body).await?);
         }
         if let Some(step) = path.strip_prefix("/job/") {
             // Only this script's Workflow sets the header; the router never passes it.
@@ -849,6 +856,11 @@ impl FragmentCell {
                 let after = query("after").and_then(|s| s.parse().ok()).unwrap_or(0);
                 let limit = query("limit").and_then(|s| s.parse().ok()).unwrap_or(limits::CHANNEL_PAGE);
                 self.channel(&caller, channel, after, limit)
+            }
+            (Method::Post, ["api", "channels", channel]) => {
+                let body = body_json(&mut req).await?;
+                let channel = channel.to_string();
+                self.post_api(&caller, &channel, body).await
             }
             (Method::Post, ["api", "ops", op]) => {
                 let body = body_json(&mut req).await?;
@@ -1072,8 +1084,9 @@ impl FragmentCell {
     }
 
     /// The alarm runs the index and delivery outboxes, due schedules,
-    /// queued runs, and the poll backstop (which also checks running runs),
-    /// then re-arms.
+    /// queued runs, and the pass: the poll backstop, which also checks
+    /// running runs. The next pass is a day away, or within the poll
+    /// interval while the fragment is busy (`arm`). Then it re-arms.
     async fn on_alarm(&self) -> CellResult<()> {
         if self.meta(MetaKey::CreatedAt)?.is_none() {
             return Ok(());
@@ -1102,7 +1115,8 @@ impl FragmentCell {
             self.reconcile_runs().await;
             self.release_held_videos().await;
             self.launch_queued().await;
-            self.set_meta(MetaKey::PollAt, &(js::now_ms() + self.cfg.poll_interval_ms).to_string())?;
+            let quiet = crate::plane::QUIET_PASS_MS.max(self.cfg.poll_interval_ms);
+            self.set_meta(MetaKey::PollAt, &(js::now_ms() + quiet).to_string())?;
         }
         self.schedule().await
     }
@@ -1118,13 +1132,19 @@ impl FragmentCell {
     }
 
     /// Arms the alarm for the earliest due work (or `also`), but no sooner
-    /// than `min_ms` from now.
+    /// than `min_ms` from now. A busy fragment's next pass comes within the
+    /// poll interval: a pass further off is brought in (plane.rs `busy`).
     async fn arm(&self, also: Option<i64>, min_ms: i64) -> CellResult<()> {
         let [created_at, poll_at] = self.metas([MetaKey::CreatedAt, MetaKey::PollAt])?;
         if created_at.is_none() {
             return Ok(());
         }
-        let poll_at: i64 = poll_at.and_then(|s| s.parse().ok()).unwrap_or_else(|| js::now_ms() + self.cfg.poll_interval_ms);
+        let soon = js::now_ms() + self.cfg.poll_interval_ms;
+        let mut poll_at: i64 = poll_at.and_then(|s| s.parse().ok()).unwrap_or(soon);
+        if poll_at > soon && self.busy()? {
+            poll_at = soon;
+            self.set_meta(MetaKey::PollAt, &poll_at.to_string())?;
+        }
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
         let due = [outbox, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, also];
         let at = due.into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + min_ms);

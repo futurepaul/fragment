@@ -18,7 +18,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use fragment_proto::limits::AGENT_STATE_WAIT_MS_MAX;
 use fragment_proto::{
-    AgentState, BudgetView, ChannelPage, Created, FragmentList, FragmentStatus, IdentityView, Invite, InviteList, Member, MemberList, OpResult,
+    AgentState, BudgetView, ChannelPage, Created, FragmentList, FragmentStatus, IdentityView, Invite, InviteList, Member, MemberList, OpResult, Posted,
     Rotated, Run, RunList, TurnOutcome, Visibility,
 };
 use serde::Serialize;
@@ -254,6 +254,18 @@ enum Cmd {
         #[arg(long, default_value = "{}")]
         input: String,
         /// The operation id (default: a fresh one)
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// Post a record to a channel fragment.json declares with a post role;
+    /// prints the record (a retry with the same --id appends nothing)
+    Post {
+        name: String,
+        channel: String,
+        /// The record's body, as JSON
+        #[arg(long)]
+        body: String,
+        /// The post's id (default: a fresh one)
         #[arg(long)]
         id: Option<String>,
     },
@@ -658,14 +670,29 @@ fn classify_err(e: &anyhow::Error) -> Code {
     Code::ServerError
 }
 
-/// The id of an operation call that failed (the error's context): a
-/// retry with it replays the call, so the failure always names it.
+/// The id of an operation call or a post that failed (the error's
+/// context): a retry with it replays it, so the failure always names it.
 #[derive(Debug)]
-struct CallId(String);
+struct CallId {
+    id: String,
+    /// The command that sent it: `call` or `post`.
+    command: &'static str,
+}
+
+impl CallId {
+    fn call(id: &str) -> CallId {
+        CallId { id: id.to_string(), command: "call" }
+    }
+
+    fn post(id: &str) -> CallId {
+        CallId { id: id.to_string(), command: "post" }
+    }
+}
 
 impl std::fmt::Display for CallId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "operation id {}", self.0)
+        let what = if self.command == "post" { "post" } else { "operation" };
+        write!(f, "{what} id {}", self.id)
     }
 }
 
@@ -676,13 +703,13 @@ fn error_body(e: &anyhow::Error) -> (Value, Code) {
     let code = classify_err(e);
     let call = e.downcast_ref::<CallId>();
     let hint = match call {
-        Some(CallId(id)) if code == Code::OutcomeUnknown => {
-            format!("the call may have run: `fragment call` it again with --id {id}, which replays it and never runs it twice")
+        Some(CallId { id, command }) if code == Code::OutcomeUnknown => {
+            format!("the {command} may have run: `fragment {command}` it again with --id {id}, which replays it and never runs it twice")
         }
         _ => code.hint().to_string(),
     };
     let mut err = json!({ "code": code.as_str(), "message": format!("{e:#}"), "hint": hint });
-    if let Some(CallId(id)) = call {
+    if let Some(CallId { id, .. }) = call {
         err["id"] = json!(id);
     }
     (err, code)
@@ -1709,7 +1736,7 @@ fn run(cli: Cli) -> Result<()> {
             let v: OpResult = c
                 .post_json_by_id(&format!("/api/f/{name}/ops/{op}"), &call)
                 .and_then(|r| c.call_as(r))
-                .map_err(|e| e.context(CallId(id.clone())))?;
+                .map_err(|e| e.context(CallId::call(&id)))?;
             if j {
                 ok_exit(&json!({ "id": id, "result": v.result, "replayed": v.replayed }));
             }
@@ -1718,13 +1745,31 @@ fn run(cli: Cli) -> Result<()> {
                 eprintln!("(replayed: operation {id} had already run)");
             }
         }
+        Cmd::Post { name, channel, body, id } => {
+            let body: Value = serde_json::from_str(&body).map_err(|e| usage(format!("--body must be JSON: {e}")))?;
+            let id = id.unwrap_or_else(|| format!("cli-{:016x}", rand::random::<u64>()));
+            // the id makes the post safe to send again, as a call's does
+            let post = fragment_proto::PostRecord { id: id.clone(), body };
+            let v: Posted = c
+                .post_json_by_id(&format!("/api/f/{name}/channels/{channel}"), &post)
+                .and_then(|r| c.call_as(r))
+                .map_err(|e| e.context(CallId::post(&id)))?;
+            if j {
+                ok_exit(&json!({ "id": id, "record": v.record, "replayed": v.replayed }));
+            }
+            println!("{}", serde_json::to_string(&v.record)?);
+            if v.replayed {
+                eprintln!("(replayed: post {id} had already appended this record)");
+            }
+        }
         Cmd::Channel { name, channel: None, .. } => {
             let v = c.call(c.get(&format!("/api/f/{name}/channels"))?)?;
             if j {
                 ok_exit(&v);
             }
             for ch in v["channels"].as_array().cloned().unwrap_or_default() {
-                println!("{}\t{}\t{} records", ch["name"].as_str().unwrap_or(""), ch["read"].as_str().unwrap_or(""), ch["seq"]);
+                let post = ch["post"].as_str().map(|p| format!(", {p} posts")).unwrap_or_default();
+                println!("{}\t{}{post}\t{} records", ch["name"].as_str().unwrap_or(""), ch["read"].as_str().unwrap_or(""), ch["seq"]);
             }
         }
         Cmd::Channel { name, channel: Some(channel), after, follow } => {
@@ -2083,13 +2128,13 @@ mod tests {
     /// outcome_unknown from a write with no id.
     #[test]
     fn a_failed_call_names_its_id() {
-        let (err, code) = error_body(&coded(Code::OutcomeUnknown).context(CallId("cli-00000000000000ab".into())));
+        let (err, code) = error_body(&coded(Code::OutcomeUnknown).context(CallId::call("cli-00000000000000ab")));
         assert_eq!((err["code"].as_str(), code.exit_status()), (Some("outcome_unknown"), 1));
         assert_eq!(err["id"], "cli-00000000000000ab");
         assert!(err["hint"].as_str().is_some_and(|h| h.contains("--id cli-00000000000000ab")), "{err}");
         assert!(err["message"].as_str().is_some_and(|m| m.starts_with("operation id cli-00000000000000ab: ")), "{err}");
 
-        let (err, _) = error_body(&coded(Code::Forbidden).context(CallId("mine".into())));
+        let (err, _) = error_body(&coded(Code::Forbidden).context(CallId::call("mine")));
         assert_eq!((err["code"].as_str(), err["id"].as_str()), (Some("forbidden"), Some("mine")));
         assert!(!err["hint"].as_str().unwrap_or("").contains("--id"), "a refusal is not retried by id: {err}");
 

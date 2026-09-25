@@ -4,7 +4,10 @@
 //! pin (metadata only), and moves a pin when a signed push webhook, an
 //! editor's `refresh`, or the poll backstop sees its branch move. Editors
 //! write to git directly with a storage token; deploy, preview, and
-//! rollback are ref moves the CLI makes.
+//! rollback are ref moves the CLI makes. The poll backstop keeps its
+//! interval only while something outside the platform may be writing (a
+//! token minted, a webhook, in the last day) or other work rides it
+//! (`busy`); a fragment nothing touches is polled once a day.
 
 use std::collections::BTreeMap;
 
@@ -28,6 +31,13 @@ const DELIVERIES_KEPT: i64 = 10_000;
 const DELIVERY_TTL_MS: i64 = 7 * 24 * 3600 * 1000;
 /// Tree rows per insert statement.
 const TREE_BATCH: usize = 20;
+/// How far apart a quiet fragment's passes are (the poll backstop, and the
+/// housekeeping it carries): a day. A busy one's come every poll interval
+/// (`FragmentCell::busy`).
+pub const QUIET_PASS_MS: i64 = 24 * 3600 * 1000;
+/// How long a storage token minted, or a webhook, keeps a fragment busy: a
+/// token lives 15 minutes, so this is generous for whoever pushes with it.
+const OUTSIDE_WRITES_MS: i64 = 24 * 3600 * 1000;
 pub const REFS: [&str; 2] = ["main", "live"];
 
 pub struct PinMove {
@@ -70,7 +80,9 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
         sql.exec("INSERT INTO code_ops (op, kind, role, input) VALUES (?, ?, ?, ?)", vec![op.as_str().into(), d.kind.as_str().into(), d.role.as_str().into(), input])?;
     }
     for (channel, d) in code.channels {
-        sql.exec("INSERT INTO code_channels (channel, read) VALUES (?, ?)", vec![channel.as_str().into(), d.read.as_str().into()])?;
+        assert!(d.post.is_none_or(|p| p >= d.read), "a checked manifest's post role is never looser than its read");
+        let post = d.post.map_or(SqlStorageValue::Null, |p| p.as_str().into());
+        sql.exec("INSERT INTO code_channels (channel, read, post) VALUES (?, ?, ?)", vec![channel.as_str().into(), d.read.as_str().into(), post])?;
     }
     for (i, t) in code.triggers.iter().enumerate() {
         let (kind, target) = t.on.parts();
@@ -108,6 +120,11 @@ const CODE_JSON_COLUMNS: [&str; 3] = ["operations", "channels", "triggers"];
 /// `store_installed`'s assertions: this runs in the constructor, where one
 /// that failed would fail every activation of the fragment.
 pub(crate) fn migrate_code(sql: &SqlStorage) -> Option<String> {
+    // who may post to a channel came after the channel table: its channels take no posts
+    let channel_cols: Vec<Value> = sql.exec("PRAGMA table_info(code_channels)", None).and_then(|c| c.to_array()).expect("the channel table's columns read");
+    if !channel_cols.iter().any(|c| c["name"] == "post") {
+        sql.exec("ALTER TABLE code_channels ADD COLUMN post TEXT", None).expect("the channel table migrates");
+    }
     let cols: Vec<Value> = sql.exec("PRAGMA table_info(code)", None).and_then(|c| c.to_array()).expect("the code table's columns read");
     let has = |col: &str| cols.iter().any(|c| c["name"] == col);
     for (col, decl) in [("modules", "modules TEXT NOT NULL DEFAULT '{}'"), ("notify", "notify TEXT NOT NULL DEFAULT '[]'")] {
@@ -142,6 +159,9 @@ pub(crate) fn migrate_code(sql: &SqlStorage) -> Option<String> {
                 bounded("operations", operations.len(), limits::OPERATIONS_MAX)?;
                 bounded("channels", channels.len(), limits::CHANNELS_MAX)?;
                 bounded("triggers", triggers.len(), limits::TRIGGERS_MAX)?;
+                if let Some((name, _)) = channels.iter().find(|(_, d)| d.post.is_some_and(|p| p < d.read)) {
+                    return Err(format!("channels: {name}'s post role is looser than its read"));
+                }
                 Ok((operations, channels, triggers))
             })();
             match decoded {
@@ -192,11 +212,14 @@ fn op_decl(row: OpRow) -> CellResult<(String, OpDecl)> {
 struct ChannelRow {
     channel: String,
     read: String,
+    post: Option<String>,
 }
 
 fn channel_decl(row: ChannelRow) -> CellResult<(String, ChannelDecl)> {
-    let read = Role::parse(&row.read).ok_or_else(|| stored(&format!("channel {}", row.channel), format!("read {:?}", row.read)))?;
-    Ok((row.channel, ChannelDecl { read }))
+    let role = |key: &str, text: &str| Role::parse(text).ok_or_else(|| stored(&format!("channel {}", row.channel), format!("{key} {text:?}")));
+    let read = role("read", &row.read)?;
+    let post = row.post.as_deref().map(|p| role("post", p)).transpose()?;
+    Ok((row.channel, ChannelDecl { read, post }))
 }
 
 #[derive(Deserialize)]
@@ -346,8 +369,9 @@ impl FragmentCell {
     /// Installs the app from the live commit: `fragment.json` declares the
     /// operations and `app.mjs` is the code. A live commit without
     /// `app.mjs` has no app (its schedules go; pauses and breakers stay for
-    /// the next code to judge); one with an invalid manifest keeps the last
-    /// good code and records why.
+    /// the next code to judge), and keeps only its manifest's channels:
+    /// people post to them with no app code at all (a chat). One with an
+    /// invalid manifest keeps the last good code and records why.
     async fn install_code(&self, live: Option<&str>) -> CellResult<()> {
         let repo = self.must(MetaKey::Repo)?;
         let Some(sha) = live else {
@@ -378,11 +402,13 @@ impl FragmentCell {
         self.set_meta(MetaKey::CapabilitiesLive, &serde_json::to_string(&manifest.capabilities).expect("a list serializes"))?;
         if self.tree_row("live", "app.mjs")?.is_none() {
             self.exec("DELETE FROM code", vec![])?;
-            clear_installed(&self.sql())?;
+            // no operations to run, so nothing for a trigger to start
+            store_installed(&self.sql(), &Installed { operations: &BTreeMap::new(), channels: &manifest.channels, triggers: &[] })?;
             self.sync_schedules(&[])?;
             self.del_meta(MetaKey::CodeError)?;
             js::abort_app_facet(&self.raw, "live has no app.mjs")?;
-            self.event("code.none", &format!("live {} has no app.mjs", short(Some(sha))), json!({ "sha": sha }));
+            let summary = format!("live {} has no app.mjs ({} channels)", short(Some(sha)), manifest.channels.len());
+            self.event("code.none", &summary, json!({ "sha": sha, "channels": manifest.channels.keys().collect::<Vec<_>>() }));
             return Ok(());
         }
         let source = match cs.read(&repo, sha, "app.mjs", limits::SOURCE_MAX_BYTES).await {
@@ -536,11 +562,49 @@ impl FragmentCell {
         }
     }
 
-    /// The backstop for lost webhooks, from the alarm.
+    /// The backstop for lost webhooks, from the alarm's pass.
     pub(crate) async fn poll(&self) {
         if let Err(e) = self.interpret(&REFS).await {
             self.event("git.poll-failed", &e.message, json!({ "code": e.code }));
         }
+    }
+
+    /// Whether the fragment's next pass (the poll backstop and the
+    /// housekeeping it carries) comes within the poll interval rather than
+    /// a day after the last: something outside the platform may have
+    /// written its repo in the last day (a storage token was minted for it,
+    /// or a webhook arrived), a run is in flight (each pass checks it
+    /// against its Workflow) or held with a video's reservation to give
+    /// back, or a template or an owner's agent is still to land (each pass
+    /// tries again). The rest of the alarm's work has due times of its own.
+    /// A fragment nothing touches (a chat, from its second day) is woken
+    /// once a day, and asks code.storage twice.
+    pub(crate) fn busy(&self) -> CellResult<bool> {
+        #[derive(Deserialize)]
+        struct Busy {
+            outside_at: Option<String>,
+            pending: i64,
+            running: i64,
+            videos: i64,
+        }
+        let rows: Vec<Busy> = self.typed(
+            "SELECT (SELECT value FROM meta WHERE key = ?) AS outside_at,
+               EXISTS (SELECT 1 FROM meta WHERE key IN (?, ?)) AS pending,
+               EXISTS (SELECT 1 FROM runs WHERE status = 'running') AS running,
+               EXISTS (SELECT 1 FROM spend WHERE video IS NOT NULL AND run IN (SELECT id FROM runs WHERE status = 'held')) AS videos",
+            vec![MetaKey::OutsideAt.key().into(), MetaKey::TemplatePending.key().into(), MetaKey::AgentPending.key().into()],
+        )?;
+        let b = rows.into_iter().next().expect("a SELECT without FROM answers one row");
+        let outside = b.outside_at.and_then(|at| at.parse::<i64>().ok()).is_some_and(|at| js::now_ms() - at < OUTSIDE_WRITES_MS);
+        Ok(outside || b.pending != 0 || b.running != 0 || b.videos != 0)
+    }
+
+    /// Something outside the platform may write the repo from now on (a
+    /// storage token was minted for it, or a webhook arrived): for the next
+    /// day the poll backstop comes within its interval (`busy`).
+    async fn outside_writer(&self) -> CellResult<()> {
+        self.set_meta(MetaKey::OutsideAt, &js::now_ms().to_string())?;
+        self.schedule().await
     }
 
     pub(crate) async fn refresh(&self, caller: &Caller) -> CellResult<Response> {
@@ -570,6 +634,7 @@ impl FragmentCell {
             self.event("webhook.rejected", &format!("{event}: {why}"), Value::Null);
             return Err(CellError::new(ErrorCode::Unauthenticated, why));
         }
+        self.outside_writer().await?;
         let payload: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("webhook body: {e}")))?;
         let Some(push) = webhook::parse_push(event, &payload) else {
             return json_response(&json!({ "ok": true, "ignored": event }));
@@ -608,6 +673,7 @@ impl FragmentCell {
             &format!("{} → repo {repo}, git:read+git:write, {}s", npub::display(who), limits::STORAGE_TOKEN_TTL_S),
             json!({ "actor": npub::display(who), "key": caller.key().map(npub::display), "repo": repo, "expiresAt": token.expires_at }),
         );
+        self.outside_writer().await?;
         json_response(&token)
     }
 
@@ -727,13 +793,14 @@ impl FragmentCell {
 
     /// The app channels the live code declares.
     pub(crate) fn declared_channels(&self) -> CellResult<BTreeMap<String, ChannelDecl>> {
-        self.typed::<ChannelRow>("SELECT channel, read FROM code_channels ORDER BY channel", vec![])?.into_iter().map(channel_decl).collect()
+        self.typed::<ChannelRow>("SELECT channel, read, post FROM code_channels ORDER BY channel", vec![])?.into_iter().map(channel_decl).collect()
     }
 
-    /// Who may read an app channel the live code declares; `None` when it declares no such channel.
-    pub(crate) fn declared_channel(&self, channel: &str) -> CellResult<Option<Role>> {
-        let rows: Vec<ChannelRow> = self.typed("SELECT channel, read FROM code_channels WHERE channel = ?", vec![channel.into()])?;
-        Ok(rows.into_iter().next().map(channel_decl).transpose()?.map(|(_, d)| d.read))
+    /// An app channel the live code declares (who reads it, who may post
+    /// to it); `None` when it declares no such channel.
+    pub(crate) fn declared_channel(&self, channel: &str) -> CellResult<Option<ChannelDecl>> {
+        let rows: Vec<ChannelRow> = self.typed("SELECT channel, read, post FROM code_channels WHERE channel = ?", vec![channel.into()])?;
+        Ok(rows.into_iter().next().map(channel_decl).transpose()?.map(|(_, d)| d))
     }
 
     /// The installed triggers, in their manifest's order (a cron trigger's

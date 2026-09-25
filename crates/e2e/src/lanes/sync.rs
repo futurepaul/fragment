@@ -129,5 +129,67 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
         .map(|q| api.signed(&keys, "GET", &format!("/api/f/{name}/events?{q}"), None).map(|r| r.status).unwrap_or(0))
         .collect();
     s.ok("a tail outside 1-500, or beside since, is refused", bad == [400, 400, 400, 400], json!(bad));
+    quiet_poll(s, api)
+}
+
+/// The poll backstop (docs/api.md, `FRAGMENT_POLL_INTERVAL_S`): a fragment
+/// something outside the platform may write (a storage token was minted
+/// for it, or a webhook came, in the last day) is polled every interval,
+/// so an editor's push through code.storage syncs within it; one nothing
+/// touches is polled once a day.
+fn quiet_poll(s: &mut Suite, api: &Api) -> Result<()> {
+    let owner = api.person()?;
+    let name = s.named(api, &owner, "quiet")?;
+    let c = s.create(api, &owner, &name)?;
+    let repo = c["repo"].as_str().unwrap_or("").to_string();
+    let interval = Duration::from_secs(u64::from(crate::POLL_S));
+    let interval_ms = i64::from(crate::POLL_S) * 1000;
+    let day_ms: i64 = 24 * 3600 * 1000;
+    let hook = |op: &str, ms: Option<i64>| -> Value {
+        let body = json!({ "fragment": name, "op": op, "ms": ms });
+        api.unsigned("POST", "/api/test/fragment", Some(&body)).map(|r| r.body).unwrap_or_default()
+    };
+    // how far off the next pass (`pollAt`) or the alarm (`alarmAt`) is
+    let ahead = |alarm: &Value, key: &str| alarm[key].as_i64().zip(alarm["now"].as_i64()).map_or(i64::MIN, |(at, now)| at - now);
+    let read = |path: &str| api.signed(&owner, "GET", &format!("/api/f/{name}/file?path={path}"), None).is_ok_and(|r| r.status == 200);
+    // the first request reads the branches once: made now, nothing after it
+    // reads them but the poll
+    api.signed(&owner, "GET", &format!("/api/f/{name}/files"), None)?;
+
+    let quiet = s.eventually(interval * 5, || ahead(&hook("alarm", None), "pollAt") > day_ms - 60_000);
+    let alarm = hook("alarm", None);
+    s.ok(
+        "a fragment nothing outside the platform writes is polled once a day: its next pass and its alarm are a day away",
+        quiet && ahead(&alarm, "alarmAt") > day_ms - 60_000,
+        &alarm,
+    );
+    let reads = s.fake.requests(&repo, "GET branch");
+    s.fake.silent_commit(&repo, "main", &[("quiet.md", Some(b"no webhook"))], "silent");
+    std::thread::sleep(interval * 4);
+    let asked = s.fake.requests(&repo, "GET branch") - reads;
+    s.ok(
+        "and asks code.storage nothing for four poll intervals: a commit no webhook announced waits",
+        asked == 0 && !read("quiet.md"),
+        format!("{asked} branch reads"),
+    );
+
+    // an editor who may push through code.storage: a storage token
+    let r = api.signed(&owner, "GET", &format!("/api/f/{name}/storage-token"), None)?;
+    let found = s.eventually(interval * 5, || read("quiet.md"));
+    let alarm = hook("alarm", None);
+    s.ok(
+        "a storage token minted brings the poll back to its interval, which finds a commit no webhook announced",
+        r.status == 200 && found && ahead(&alarm, "pollAt") <= interval_ms,
+        &alarm,
+    );
+    let reads = s.fake.requests(&repo, "GET branch");
+    std::thread::sleep(interval * 4);
+    println!("      busy, {} branch reads in four poll intervals; quiet, none", s.fake.requests(&repo, "GET branch") - reads);
+    hook("age-outside", Some(day_ms));
+    let quiet = s.eventually(interval * 5, || ahead(&hook("alarm", None), "pollAt") > day_ms - 60_000);
+    s.ok("a day after the token, it is polled once a day again", quiet, hook("alarm", None));
+    s.commit(&c, &[("announced.md", Some(b"by webhook"))]);
+    let alarm = hook("alarm", None);
+    s.ok("a webhook brings the poll back to its interval too", read("announced.md") && ahead(&alarm, "pollAt") <= interval_ms, &alarm);
     Ok(())
 }

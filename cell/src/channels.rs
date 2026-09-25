@@ -4,6 +4,13 @@
 //! fragment.json declares. Clients read: a page at a time over the API, or
 //! live from a cursor over the fragment's `__live` socket.
 //!
+//! A channel fragment.json declares with a `post` role takes posts (ROADMAP
+//! decision 18): the platform appends a member's record for them, with no
+//! app code (a chat needs no worker). A post is checked as a call is (the
+//! role, the public call budget, the id), bounded as a record is, keyed by
+//! its poster and id as a mutation is, and reaches sockets, subscriptions,
+//! and triggers as a mutation's record does (`post`).
+//!
 //! A mutation's effects are applied after the facet commits it. Before it
 //! calls the facet, the supervisor records the mutation as pending: its
 //! ledger id, operation, principal, and depth are the supervisor's own
@@ -29,9 +36,12 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use fragment_core::access::Purpose;
 use fragment_core::effects::{self, Effect};
 use fragment_core::npub;
-use fragment_proto::{limits, valid_channel_name, ChannelPage, ChannelRecord, ErrorCode, Role, BUILTIN_CHANNELS};
+use fragment_proto::{
+    limits, valid_channel_name, valid_op_id, ChannelPage, ChannelRecord, ErrorCode, PostRecord, Posted, Role, BUILTIN_CHANNELS, POST_KIND,
+};
 use futures_util::lock::{Mutex, OwnedMutexGuard};
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -39,7 +49,7 @@ use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
-use crate::fragment::{json_response, Caller, FragmentCell};
+use crate::fragment::{decide, json_response, Caller, Facts, FragmentCell};
 use crate::js;
 
 /// Due pending mutations one sweep settles.
@@ -82,6 +92,23 @@ const fn retry_horizon_ms() -> i64 {
 // a commit or a push happen once, and the facet's ledger row.
 const _: () = assert!(retry_horizon_ms() < crate::files::WRITES_KEPT_MS);
 const _: () = assert!(retry_horizon_ms() < crate::ops::LEDGER_KEPT_MS);
+
+/// A post's record is the one effect of its key (`post_key`).
+const POST_INDEX: i64 = 0;
+/// A post is a call from outside, as a mutation called from outside is
+/// (depth 0): the runs its record triggers are one hop deeper, as that
+/// mutation's records' are.
+const POST_TRIGGERS_DEPTH: u32 = 1;
+
+// A post's retry within the horizon finds the runs its first try started.
+const _: () = assert!(retry_horizon_ms() < limits::RUN_RETENTION_MS);
+
+/// What keys a post: its poster and their id, for as long as its record is
+/// kept. A mutation's effects are keyed `<principal>/<id>#<run>`, so the
+/// two never meet.
+fn post_key(principal: &str, id: &str) -> String {
+    format!("post:{principal}/{id}")
+}
 
 /// A mutation the supervisor recorded before the facet ran it, not yet settled.
 #[derive(Debug, Clone)]
@@ -257,7 +284,87 @@ impl FragmentCell {
         if BUILTIN_CHANNELS.contains(&channel) {
             return Ok(Role::Viewer);
         }
-        self.declared_channel(channel)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no channel named {channel:?}")))
+        self.declared_channel(channel)?.map(|d| d.read).ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no channel named {channel:?}")))
+    }
+
+    /// A post to a channel its fragment.json declares postable: the
+    /// platform appends the record as the poster, and no app code runs.
+    /// `principal` is who the record names (an identity, or an anonymous
+    /// visitor's id); `link` says the caller holds the share link. The
+    /// caller's standing is read once and decided twice, as a call's is
+    /// (ops.rs `call_op`), and a caller holding the public floor alone
+    /// spends a public call. The same (principal, id) again answers the
+    /// record it appended and appends nothing; a retry that finds it also
+    /// finishes what the first try left undone (its deliveries, its
+    /// triggers' runs). Another body under that id is 409. Answers the
+    /// record, and whether it was a replay.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn post(&self, caller: &Caller, facts: &Facts, principal: &str, link: bool, channel: &str, id: &str, body: &Value) -> CellResult<(ChannelRecord, bool)> {
+        let standing = self.standing(caller, link)?;
+        // whether the caller can see the fragment at all comes first
+        decide(facts.visibility, standing, Purpose::Read, Role::Public)?;
+        if !valid_channel_name(channel) {
+            return Err(CellError::invalid("a channel name must match ^[a-z][a-z0-9_-]{0,63}$"));
+        }
+        if BUILTIN_CHANNELS.contains(&channel) {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("channel {channel} is the platform's: posts go to a channel fragment.json declares with a post role")));
+        }
+        let decl = self.declared_channel(channel)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no channel named {channel:?}")))?;
+        let Some(needs) = decl.post else {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("channel {channel} takes no posts: its fragment.json names no post role")));
+        };
+        // posting acts, as a mutation does: an agent's owner reads through
+        // its membership and never posts through it
+        let role = decide(facts.visibility, standing, Purpose::Act, needs)?;
+        assert!(role >= decl.read, "whoever may post to a channel may read it (checked at deploy)");
+        if role == Role::Public && !self.rate.borrow_mut().allow(principal, js::now_ms()) {
+            return Err(CellError::new(ErrorCode::RateLimited, "too many public calls this minute; retry shortly"));
+        }
+        if !valid_op_id(id) {
+            return Err(CellError::invalid("a post's id must match ^[A-Za-z0-9._:-]{1,128}$"));
+        }
+        let size = body.to_string().len();
+        if size > limits::RECORD_BODY_MAX_BYTES {
+            return Err(CellError::too_large("a record's body", size, limits::RECORD_BODY_MAX_BYTES));
+        }
+        let key = post_key(principal, id);
+        // the append and the look for an earlier one are one step (no await between)
+        let (record, appended) = match self.append(channel, principal, POST_KIND, body, Some((&key, POST_INDEX)))? {
+            Some(record) => (record, true),
+            None => (self.posted(&key, channel, body)?, false),
+        };
+        // A retry finishes what the first try left undone for as long as a
+        // mutation's effects are tried again; later, the runs it started may
+        // be forgotten, and it would start them twice.
+        if appended || js::now_ms() - record.at < retry_horizon_ms() {
+            self.published(&record, appended, POST_TRIGGERS_DEPTH).await?;
+            self.launch_queued().await;
+        }
+        Ok((record, !appended))
+    }
+
+    /// The record an earlier post under `key` appended, when it is this
+    /// post again: the same channel and the same body. Anything else is
+    /// the poster reusing an id (409), as a call with another input is.
+    fn posted(&self, key: &str, channel: &str, body: &Value) -> CellResult<ChannelRecord> {
+        let rows: Vec<RecordRow> =
+            self.typed("SELECT channel, seq, at, principal, kind, body FROM records WHERE op = ? AND idx = ?", vec![key.into(), SqlStorageValue::Integer(POST_INDEX)])?;
+        // the append conflicted on (op, idx), so a row holds them
+        let record = rows.into_iter().next().ok_or_else(|| CellError::host(format!("post {key} conflicted, and no record holds it")))?.record()?;
+        let stored: Value = serde_json::from_str(record.body.get()).map_err(|e| CellError::host(format!("post {key}: its stored body is not JSON: {e}")))?;
+        if record.channel != channel || stored != *body {
+            return Err(CellError::new(ErrorCode::ConflictingBody, "this post id was already used with a different body (or on another channel)"));
+        }
+        assert_eq!(record.kind, POST_KIND, "a post's key names a posted record");
+        Ok(record)
+    }
+
+    /// `POST /api/f/<name>/channels/<channel>`: a signed poster.
+    pub(crate) async fn post_api(&self, caller: &Caller, channel: &str, post: PostRecord) -> CellResult<Response> {
+        let who = self.caller_id(caller)?.to_string();
+        let facts = self.facts()?;
+        let (record, replayed) = self.post(caller, &facts, &who, false, channel, &post.id, &post.body).await?;
+        json_response(&Posted { record, replayed })
     }
 
     /// A page of records after `after`.
@@ -273,16 +380,16 @@ impl FragmentCell {
     pub(crate) fn channels(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
         let mut out: Vec<Value> = vec![];
-        let mut add = |name: &str, read: Role| -> CellResult<()> {
+        let mut add = |name: &str, read: Role, post: Option<Role>| -> CellResult<()> {
             let last = self.rows("SELECT MAX(seq) AS n FROM records WHERE channel = ?", vec![name.into()])?;
-            out.push(json!({ "name": name, "read": read, "seq": last.first().and_then(|r| r["n"].as_i64()).unwrap_or(0) }));
+            out.push(json!({ "name": name, "read": read, "post": post, "seq": last.first().and_then(|r| r["n"].as_i64()).unwrap_or(0) }));
             Ok(())
         };
         for b in BUILTIN_CHANNELS {
-            add(b, Role::Viewer)?;
+            add(b, Role::Viewer, None)?;
         }
         for (name, decl) in self.declared_channels()? {
-            add(&name, decl.read)?;
+            add(&name, decl.read, decl.post)?;
         }
         json_response(&json!({ "channels": out }))
     }
