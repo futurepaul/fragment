@@ -13,35 +13,12 @@
 //! per request that asks it (two to set a picture, whose bytes are stored
 //! between).
 //!
-//! Inner routes (only the router and fragments reach them):
-//!
-//!   POST /resolve {key}                   → {id, kind, owner} (401 unknown or revoked)
-//!   POST /lookup  {who}                   → {id, kind, owner}: an `id:` or an active key
-//!   POST /agents  {owner, key}            register an agent its owner vouches for
-//!   POST /keys    {identity?, key, by}    add a key (its proof was checked by the router)
-//!   POST /revoke  {identity?, key, by}    revoke one
-//!   POST /view    {identity?, by}         the identity, as it or its owner sees it
-//!   POST /check   {identity?, key, by}    → {active}: is `key` one of `identity`'s?
-//!   POST /username/claim  {by, username}          the asker's username, chosen once
-//!   POST /username/lookup {username}              → the facts of whoever holds it
-//!   POST /picture/set     {by, sha, mime}         the asker's picture (its bytes are in BLOBS)
-//!   POST /test    {down} | {calls} | {hold} | {signins}   dev fleets: answer 503 to
-//!                                         everything else, count the calls since the cell
-//!                                         started, hold the next call's answer, or count,
-//!                                         expire, or sweep sign-in's rows, or expire one session
-//!
-//! Each route's body and answer are types in `calls.rs`, shared with the
-//! askers. A call that acts names who asks (`by`, an `owner`: `calls::By`,
-//! a key, a platform session, or a resolved identity), and the Registry
-//! resolves them in the same turn as the act: one round trip, and a key
-//! revoked a moment before cannot act. `identity` left out is the asker's
-//! own (a path's `me`). An `Identity` (`/resolve`, `/lookup`, a session) carries the
-//! identity's username, and an agent's carries its owner's (the namespace
-//! it makes fragments in). Rows are read into structs: a NOT NULL column
-//! is never defaulted, and a row naming an identity that is not there is a
-//! host fault, not a 404. A lookup (`/resolve`, `/session`) is one
-//! statement: the key's or the session's row joined with its identity and
-//! the username it makes fragments under (`username_join!`).
+//! Its inner routes (only the router and fragments reach them) are the
+//! types in `calls.rs`: each one's path, body, and answer, and dev fleets'
+//! `/test` hooks (`calls::TestHook`). `identity` left out of a call is the
+//! asker's own (a path's `me`). Rows are read into structs: a NOT NULL
+//! column is never defaulted, and a row naming an identity that is not
+//! there is a host fault, not a 404.
 //!
 //! People come from sign-in, and browsers hold sessions: `signin.rs`.
 
@@ -154,7 +131,6 @@ struct IdentityRow {
     username: Option<String>,
 }
 
-/// When an identity was made.
 #[derive(Deserialize)]
 struct CreatedRow {
     created_at: i64,
@@ -380,7 +356,6 @@ impl RegistryCell {
         Ok(Picture { sha: b.sha, mime: b.mime })
     }
 
-    /// The key's row: the identity holding it and whether it was revoked.
     fn key_row(&self, key: &str) -> CellResult<Option<KeyRow>> {
         self.row::<KeyRow>("SELECT identity, revoked_at FROM keys WHERE key = ?", vec![key.into()])
     }
@@ -628,8 +603,6 @@ impl RegistryCell {
         }
     }
 
-    /// Each route decodes its call's body and answers its call's answer
-    /// (`calls.rs`), so a route and its askers cannot disagree.
     async fn route(&self, mut req: Request) -> CellResult<Response> {
         let path = req.path();
         let bytes = req.bytes().await?;
