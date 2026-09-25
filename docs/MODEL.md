@@ -103,7 +103,9 @@ caller (`principal`, `role`) and, in a mutation, collects its effects
   at the egress point), `job.publish`, or `job.sleep` is a durable step,
   so retries, backoff, and sleeps are celld's. The body runs in the app
   facet by replay up to its next step; the Workflow, platform code, takes
-  the step through the supervisor. fragment's failure leg (held runs,
+  the step through the supervisor, which keeps each step's answer (the
+  replay reads them from there, and a step retried after its answer was
+  lost is not taken twice). fragment's failure leg (held runs,
   replay, auto-pause, the hop budget) is on runs (phase 2 slice D;
   `docs/api.md`, Jobs and triggers). `waitForEvent` (approvals, invites)
   comes with agents.

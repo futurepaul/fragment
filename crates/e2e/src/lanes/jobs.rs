@@ -42,6 +42,7 @@ impl Upstream {
             log.lock().expect("upstream log").push((req.path.clone(), header("authorization"), header("x-fragment-hops")));
             match req.path.as_str() {
                 "/data" => Response::json(200, &json!({ "items": ["alpha", "beta"] })),
+                "/once" => Response::json(200, &json!({ "items": ["once"] })),
                 "/flaky" if flaky.fetch_add(1, Ordering::SeqCst) < 2 => Response::json(503, &json!({ "error": "busy" })),
                 "/flaky" => Response::json(200, &json!({ "items": ["gamma"] })),
                 "/down" => Response::json(503, &json!({ "error": "down" })),
@@ -268,6 +269,29 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/runs?op=digest"), None)?;
     s.ok("runs filter by operation, newest first", r.body["runs"].as_array().is_some_and(|a| a.len() == 2 && a[0]["id"].as_i64() > a[1]["id"].as_i64()), &r);
+
+    // a long job: each step's answer is kept by the cell, and the body
+    // reads all of them back, in order, at every step
+    let (steps, _) = jobs_fragment(s, api, &owner, "jobsteps", |_| {})?;
+    let r = api.op(&owner, &steps, "count_up", "fifty", json!({ "n": 50 }))?;
+    let fifty = settle(api, &owner, &steps, started(&r), &["succeeded", "held"], Duration::from_secs(120));
+    let published: Vec<i64> = (1..=45).collect();
+    s.ok(
+        "a 50-step job (45 publishes, 5 sleeps) reads every earlier answer back, in order",
+        fifty["status"] == "succeeded" && fifty["output"]["seqs"] == json!(published) && records(api, &owner, &steps, "steps").len() == 45,
+        &fifty,
+    );
+    // a step whose answer is lost on its way back to the Workflow: the
+    // retried step is answered from what the cell kept, not performed again
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": steps, "op": "drop-effects", "times": 1 })))?;
+    s.ok("(the test fleet loses the fragment's next step answer)", r.status == 200, &r);
+    let r = api.op(&owner, &steps, "probe", "once", json!({ "url": upstream.url("/once") }))?;
+    let once = settle(api, &owner, &steps, started(&r), &["succeeded", "held"], long);
+    s.ok(
+        "a fetch whose answer was lost is answered again from what the cell kept: the upstream sees one request",
+        once["status"] == "succeeded" && once["output"]["status"] == 200 && upstream.hits("/once").len() == 1,
+        format!("{once}; the upstream saw {} requests", upstream.hits("/once").len()),
+    );
 
     // the CLI
     let home = s.dir("jobs-cli");

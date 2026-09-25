@@ -106,6 +106,9 @@ CREATE TABLE IF NOT EXISTS runs (
   attempt INTEGER NOT NULL, output TEXT, error TEXT, created_at INTEGER NOT NULL, launched_at INTEGER, finished_at INTEGER);
 CREATE UNIQUE INDEX IF NOT EXISTS runs_call ON runs (principal, call_id) WHERE call_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS runs_status ON runs (status, op);
+CREATE TABLE IF NOT EXISTS steps (
+  run INTEGER NOT NULL, attempt INTEGER NOT NULL, idx INTEGER NOT NULL, kind TEXT NOT NULL, value TEXT, error TEXT,
+  CHECK ((value IS NULL) <> (error IS NULL)), PRIMARY KEY (run, attempt, idx));
 CREATE TABLE IF NOT EXISTS schedules (idx INTEGER PRIMARY KEY, op TEXT NOT NULL, cron TEXT NOT NULL, next_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS paused_ops (op TEXT PRIMARY KEY, by TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS op_breakers (op TEXT PRIMARY KEY, reset_at INTEGER NOT NULL);
@@ -368,6 +371,9 @@ pub(crate) enum MetaKey {
     TestFailOutbox,
     /// Test fleets only: how many more trigger steps fail (`fail-triggers`).
     TestFailTriggers,
+    /// Test fleets only: how many more step answers are lost on their way
+    /// back to the Workflow, after the step was performed (`drop-effects`).
+    TestDropEffects,
 }
 
 impl MetaKey {
@@ -403,6 +409,7 @@ impl MetaKey {
             MetaKey::TestFailDeliveries => "test_fail_deliveries",
             MetaKey::TestFailOutbox => "test_fail_outbox",
             MetaKey::TestFailTriggers => "test_fail_triggers",
+            MetaKey::TestDropEffects => "test_drop_effects",
         }
     }
 

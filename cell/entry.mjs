@@ -74,10 +74,14 @@ export class Files extends WorkerEntrypoint {
 
 // One run of an operation (docs/MODEL.md, Operations: job). Each round asks
 // the supervisor to advance the job to its next step, then performs that
-// step through the supervisor; both answers are durable step results, so a
-// replay after a crash re-sends nothing that already happened. A step that
-// fails for now (the supervisor answers 5xx) is retried with backoff; when
-// its retries run out the job sees the error and may catch it.
+// step through the supervisor, which keeps the step's answer before it
+// replies (jobs.rs, `steps`): an advance names only how many steps are
+// done, and a step tried again because its reply was lost is answered from
+// what was kept, not performed again. Both calls are durable steps here, so
+// a replay after a crash re-sends nothing that already happened. A step
+// that fails for now (the supervisor answers 5xx) is retried with backoff;
+// when its retries run out, the next advance carries its error, and the job
+// sees it and may catch it.
 export class Job extends WorkflowEntrypoint {
   async run(event, step) {
     const { fragment, incarnation, run, attempt } = event.payload;
@@ -90,25 +94,25 @@ export class Job extends WorkflowEntrypoint {
       if (!resp.ok) throw new Error(out.message || `job/${path} answered ${resp.status}`);
       return out;
     };
-    const results = [];
+    // the step before this round, when it ran out of retries
+    let failed = null;
     try {
       for (let i = 0; ; i++) {
-        const next = await step.do(`advance ${i}`, retrying, () => post("advance", { results }));
+        const next = await step.do(`advance ${i}`, retrying, () => post("advance", { count: i, failed }));
         if (!next.step) return next; // done, failed, or stop: the supervisor has recorded it
+        failed = null;
         const { kind, args } = next.step;
         if (kind === "sleep") {
+          // the supervisor kept the sleep's answer as it handed the step out
           await step.sleep(`sleep ${i}`, args.ms);
-          results.push({ kind, value: null });
           continue;
         }
-        let result;
         try {
-          result = await step.do(`${kind} ${i}`, retrying, () => post("effect", { index: i, kind, args }));
+          const done = await step.do(`${kind} ${i}`, retrying, () => post("effect", { index: i, kind, args }));
+          if (done.stop) return done;
         } catch (e) {
-          result = { kind, error: String((e && e.message) || e) };
+          failed = { index: i, kind, error: String((e && e.message) || e) };
         }
-        if (result.stop) return result;
-        results.push(result);
       }
     } catch (e) {
       const error = String((e && e.message) || e);

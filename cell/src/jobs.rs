@@ -6,20 +6,31 @@
 //! celld Workflow instance (`Job` in entry.mjs) that drives it one step at
 //! a time by calling back into this supervisor:
 //!
-//!   POST /job/advance {run, attempt, results}   re-run the job's body in the
-//!        app facet over the step results so far, up to its next step
-//!   POST /job/effect  {run, attempt, index, kind, args}   perform that step:
-//!        call an operation, fetch (secrets are added here), or publish
+//!   POST /job/advance {run, attempt, count, failed?}   re-run the job's body
+//!        in the app facet over the answers of its first `count` steps, up
+//!        to its next step
+//!   POST /job/effect  {run, attempt, index, kind, args}   perform that step
+//!        (call an operation, fetch with secrets added here, publish, …)
+//!        and keep its answer
 //!   POST /job/finish  {run, attempt, error}     the Workflow gave up
 //!
 //! Every callback also names the fragment's incarnation, and each is
 //! decoded once into its struct below; a step's kind and args decode into
 //! `fragment_core::steps::Step`, and a run's row into `RunRow`.
 //!
-//! The Workflow records every answer, so a crash resumes at the step it
-//! was on, and a step that fails for a reason that may pass (an upstream
-//! 5xx, a network error) is retried with backoff. A run that fails for
-//! good is **held**: kept with its input until someone replays it.
+//! Each step's answer is kept here (`steps`, by run, attempt, and index)
+//! before the Workflow hears that the step is done, and the job's body
+//! reads the answers back from there, so an advance carries a count, not
+//! every answer so far. A step the Workflow tries again because its reply
+//! was lost (a timeout, a crash) is answered from what was kept, not
+//! performed again: a fetch reaches its upstream once. Only an answer the
+//! cell never gave comes from the Workflow: a step that ran out of its
+//! retries, whose error the next advance carries (`failed`). The Workflow
+//! records each callback, so a crash resumes at the step it was on, and a
+//! step that fails for a reason that may pass (an upstream 5xx, a network
+//! error) is retried with backoff. A run that fails for good is **held**:
+//! kept with its input until someone replays it; its kept answers go when
+//! it finishes, and a replay takes every step afresh.
 //!
 //! **Triggers** start runs as the fragment itself, with an editor's reach:
 //! cron schedules (on this object's alarm), records appended to a channel
@@ -189,9 +200,46 @@ struct AdvanceCall {
     incarnation: String,
     run: i64,
     attempt: u32,
-    /// The step results so far, as the Workflow recorded them: the job's
-    /// body reads them back (`StepResult`); only a mutation's run reads its one.
-    results: Vec<Value>,
+    /// Steps taken so far: the cell kept each one's answer.
+    count: u32,
+    /// The last step, when it ran out of retries: its answer is the error
+    /// only the Workflow saw.
+    #[serde(default)]
+    failed: Option<FailedStep>,
+}
+
+#[derive(Deserialize)]
+struct FailedStep {
+    index: u32,
+    kind: String,
+    error: String,
+}
+
+/// A `steps` row: one step's answer as the cell kept it.
+#[derive(Deserialize)]
+struct StepRow {
+    idx: i64,
+    kind: String,
+    /// The value's JSON text, or none when the step failed.
+    value: Option<String>,
+    error: Option<String>,
+}
+
+impl StepRow {
+    fn size(&self) -> usize {
+        self.kind.len() + self.value.as_ref().map_or(0, String::len) + self.error.as_ref().map_or(0, String::len)
+    }
+
+    /// Only the cell writes `steps`, and its CHECK keeps exactly one of
+    /// value and error: anything else is corruption.
+    fn answer(self) -> StepResult {
+        let outcome = match (self.value, self.error) {
+            (Some(v), None) => StepOutcome::Value(serde_json::from_str(&v).unwrap_or_else(|e| panic!("steps.value is the JSON the cell wrote: {e}"))),
+            (None, Some(e)) => StepOutcome::Error(e),
+            _ => panic!("a steps row holds a value or an error, not both or neither"),
+        };
+        StepResult { kind: self.kind, outcome }
+    }
 }
 
 /// `POST /job/effect`: the step as the Workflow carries it, whose kind and
@@ -458,6 +506,9 @@ impl FragmentCell {
         if changed.is_empty() {
             return Ok(());
         }
+        // No callback of this attempt is answered from here on, and a
+        // replay takes its steps afresh: the kept answers go.
+        self.exec("DELETE FROM steps WHERE run = ?", vec![SqlStorageValue::Integer(id)])?;
         match outcome {
             Ok(_) => self.event("run.succeeded", &format!("{op} run #{id}"), json!({ "op": op, "run": id })),
             Err(e) => {
@@ -488,7 +539,7 @@ impl FragmentCell {
                 if !self.this_life(&call.incarnation)? {
                     return Ok(stop);
                 }
-                let answer = self.advance(call, body.len()).await?;
+                let answer = self.advance(call).await?;
                 if answer.get("failed").is_some() {
                     // the held run polls its videos no more: their reservations go back
                     self.release_held_videos().await;
@@ -517,17 +568,26 @@ impl FragmentCell {
     }
 
     /// `POST /job/advance`
-    async fn advance(&self, call: AdvanceCall, size: usize) -> CellResult<Value> {
-        let (run_id, attempt) = (call.run, call.attempt);
+    async fn advance(&self, call: AdvanceCall) -> CellResult<Value> {
+        let (run_id, attempt, count) = (call.run, call.attempt, call.count);
         let Some(run) = self.current_run(run_id, attempt)? else { return Ok(json!({ "stop": true })) };
         let fail = |why: String| -> CellResult<Value> {
             self.finish_run(&run, Err(why.clone()))?;
             Ok(json!({ "failed": why }))
         };
-        if size > limits::JOB_RESULTS_MAX_BYTES {
-            return fail(format!("its step results are over {} bytes together", limits::JOB_RESULTS_MAX_BYTES));
+        if count as usize > limits::JOB_STEPS_MAX {
+            return Err(CellError::invalid(format!("an advance after {count} steps; a job takes at most {}", limits::JOB_STEPS_MAX)));
         }
-        let results = call.results;
+        if let Some(f) = call.failed {
+            if f.index + 1 != count {
+                return Err(CellError::invalid(format!("step {} ran out of retries, but the advance is after {count} steps", f.index)));
+            }
+            self.keep_step(run_id, attempt, f.index, &StepResult { kind: f.kind, outcome: StepOutcome::Error(clip(&f.error)) })?;
+        }
+        let results = match self.kept_answers(run_id, attempt, count)? {
+            Ok(results) => results,
+            Err(why) => return fail(why),
+        };
         let op = run.op.clone();
         let input = self.run_input(run_id)?;
         let decl = match self.declared(&op) {
@@ -536,10 +596,9 @@ impl FragmentCell {
         };
         match decl.kind {
             // A triggered mutation is a run of one step: the call.
-            OpKind::Mutation => match results.first() {
+            OpKind::Mutation => match results.into_iter().next() {
                 None => Ok(json!({ "step": NextStep { index: 0, step: Step::Call { op, input } } })),
-                Some(r) => {
-                    let result = StepResult::deserialize(r).map_err(|e| CellError::invalid(format!("the call step's result: {e}")))?;
+                Some(result) => {
                     match result.outcome {
                         StepOutcome::Error(e) => fail(e),
                         StepOutcome::Value(v) => {
@@ -559,13 +618,24 @@ impl FragmentCell {
                     "attempt": attempt,
                     "channels": self.declared_channels()?.keys().collect::<Vec<_>>(),
                 });
+                let results: Vec<Value> = results.iter().map(|r| serde_json::to_value(r).expect("a step result serializes")).collect();
                 let answer = facet.call("__job", &[op.as_str().into(), input, meta, Value::Array(results)]).await.map_err(|e| match e.code {
                     ErrorCode::NodeFull => e,
                     _ => CellError::host(format!("the app facet: {}", e.message)),
                 })?;
                 if let Some(next) = answer.get("next") {
-                    if next["index"].as_u64().unwrap_or(0) as usize >= limits::JOB_STEPS_MAX {
+                    let index = next["index"].as_u64().unwrap_or(u64::MAX);
+                    if index >= limits::JOB_STEPS_MAX as u64 {
                         return fail(format!("a job takes at most {} steps", limits::JOB_STEPS_MAX));
+                    }
+                    // the platform code asks for the first step it has no answer for
+                    if index != u64::from(count) {
+                        return fail(format!("the job asked for step {index} after {count} steps: the app broke its platform code"));
+                    }
+                    // A sleep is the Workflow's own step: its answer (nothing)
+                    // is kept as it is handed out, and read once it is over.
+                    if next["kind"] == "sleep" {
+                        self.keep_step(run_id, attempt, count, &StepResult { kind: "sleep".into(), outcome: StepOutcome::Value(Value::Null) })?;
                     }
                     return Ok(json!({ "step": next }));
                 }
@@ -585,6 +655,61 @@ impl FragmentCell {
         }
     }
 
+    /// The kept answers of a run's first `count` steps, in order, or why the
+    /// run cannot go on: one is missing (a run started before the cell kept
+    /// answers: replay it), or together they are over their limit.
+    fn kept_answers(&self, run: i64, attempt: u32, count: u32) -> CellResult<Result<Vec<StepResult>, String>> {
+        let rows: Vec<StepRow> = self.typed(
+            "SELECT idx, kind, value, error FROM steps WHERE run = ? AND attempt = ? AND idx < ? ORDER BY idx",
+            vec![SqlStorageValue::Integer(run), SqlStorageValue::Integer(attempt.into()), SqlStorageValue::Integer(count.into())],
+        )?;
+        let mut answers = Vec::with_capacity(rows.len());
+        let mut bytes = 0;
+        for row in rows {
+            if row.idx != answers.len() as i64 {
+                break;
+            }
+            bytes += row.size();
+            if bytes > limits::JOB_RESULTS_MAX_BYTES {
+                return Ok(Err(format!("its step results are over {} bytes together", limits::JOB_RESULTS_MAX_BYTES)));
+            }
+            answers.push(row.answer());
+        }
+        if answers.len() != count as usize {
+            return Ok(Err(format!("step {} has no kept answer (the run began before answers were kept): replay it", answers.len())));
+        }
+        Ok(Ok(answers))
+    }
+
+    /// Keeps a step's answer, once: a second answer for the same step (a
+    /// retry that raced the first) leaves the first.
+    fn keep_step(&self, run: i64, attempt: u32, index: u32, answer: &StepResult) -> CellResult<()> {
+        let (value, error) = match &answer.outcome {
+            StepOutcome::Value(v) => (SqlStorageValue::from(v.to_string()), SqlStorageValue::Null),
+            StepOutcome::Error(e) => (SqlStorageValue::Null, SqlStorageValue::from(e.as_str())),
+        };
+        self.exec(
+            "INSERT INTO steps (run, attempt, idx, kind, value, error) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+            vec![
+                SqlStorageValue::Integer(run),
+                SqlStorageValue::Integer(attempt.into()),
+                SqlStorageValue::Integer(index.into()),
+                answer.kind.as_str().into(),
+                value,
+                error,
+            ],
+        )
+    }
+
+    /// The kind of a step's kept answer, when it has one.
+    fn kept_kind(&self, run: i64, attempt: u32, index: u32) -> CellResult<Option<String>> {
+        let rows = self.rows(
+            "SELECT kind FROM steps WHERE run = ? AND attempt = ? AND idx = ?",
+            vec![SqlStorageValue::Integer(run), SqlStorageValue::Integer(attempt.into()), SqlStorageValue::Integer(index.into())],
+        )?;
+        Ok(rows.first().map(|r| r["kind"].as_str().expect("steps.kind is TEXT NOT NULL").to_string()))
+    }
+
     /// A run's input, as the call or trigger that started it gave it.
     fn run_input(&self, run: i64) -> CellResult<Value> {
         let rows = self.rows("SELECT input FROM runs WHERE id = ?", vec![SqlStorageValue::Integer(run)])?;
@@ -592,29 +717,62 @@ impl FragmentCell {
         Ok(stored_json(row, "input"))
     }
 
-    /// `POST /job/effect`: one step. A value or a lasting failure is the
-    /// step's result; a passing failure is a 502, which the Workflow retries.
+    /// `POST /job/effect`: one step, performed and its answer kept (a
+    /// value, or a lasting failure the job sees) before the reply; a
+    /// passing failure is a 502, which the Workflow retries. A step that
+    /// already has a kept answer (its reply was lost) is not performed again.
     async fn job_effect(&self, call: EffectCall) -> CellResult<Value> {
         let Some(run) = self.current_run(call.run, call.attempt)? else { return Ok(json!({ "stop": true })) };
         let index = call.index;
-        let out = match Step::from_parts(&call.kind, call.args) {
-            Ok(step) => self.perform(&run, index, step).await,
-            // the args come from the app's realm: the job sees why, and may catch it
-            Err(why) => Err(permanent(format!("step {index} ({}): {why}", call.kind))),
+        if index as usize >= limits::JOB_STEPS_MAX {
+            return Err(CellError::invalid(format!("step {index}: a job takes at most {} steps", limits::JOB_STEPS_MAX)));
+        }
+        let kept = match self.kept_kind(run.id, run.attempt, index)? {
+            Some(kept) => kept,
+            None => {
+                let out = match Step::from_parts(&call.kind, call.args) {
+                    Ok(step) => self.perform(&run, index, step).await,
+                    // the args come from the app's realm: the job sees why, and may catch it
+                    Err(why) => Err(permanent(format!("step {index} ({}): {why}", call.kind))),
+                };
+                let outcome = match out {
+                    Ok(v) => StepOutcome::Value(v),
+                    Err(StepFail::Permanent(m)) => StepOutcome::Error(clip(&m)),
+                    Err(StepFail::Retry(m)) => return Err(CellError::new(ErrorCode::UpstreamFailed, m)),
+                };
+                let mut answer = StepResult { kind: call.kind.clone(), outcome };
+                // the job's body reads every answer back at each later step
+                let size = serde_json::to_string(&answer).expect("a step result serializes").len();
+                if size > limits::RESULT_MAX_BYTES {
+                    answer.outcome = StepOutcome::Error(format!("the step's result is over {} bytes", limits::RESULT_MAX_BYTES));
+                }
+                self.keep_step(run.id, run.attempt, index, &answer)?;
+                let kept = self.kept_kind(run.id, run.attempt, index)?.ok_or_else(|| CellError::host(format!("step {index}'s answer was not kept")))?;
+                self.test_drop_effect()?;
+                kept
+            }
         };
-        let outcome = match out {
-            Ok(v) => StepOutcome::Value(v),
-            Err(StepFail::Permanent(m)) => StepOutcome::Error(clip(&m)),
-            Err(StepFail::Retry(m)) => return Err(CellError::new(ErrorCode::UpstreamFailed, m)),
-        };
-        let mut answer = StepResult { kind: call.kind, outcome };
-        // The Workflow stores each step result, up to 1 MiB.
-        let size = serde_json::to_string(&answer).expect("a step result serializes").len();
-        if size > limits::RESULT_MAX_BYTES - 4096 {
-            answer.outcome = StepOutcome::Error(format!("the step's result is over {} bytes", limits::RESULT_MAX_BYTES - 4096));
+        // one step, one kind: a retry names the kind its first try did
+        if kept != call.kind {
+            return Err(CellError::host(format!("step {index} of run #{} was kept as {kept}, and is {} now", run.id, call.kind)));
         }
         self.launch_queued().await;
-        Ok(serde_json::to_value(answer).expect("a step result serializes"))
+        Ok(json!({ "kept": index }))
+    }
+
+    /// Test fleets: the next `times` step answers are lost after their step
+    /// was performed and its answer kept (`/api/test/fragment`
+    /// `drop-effects`): the Workflow sees a failure and tries the step again.
+    fn test_drop_effect(&self) -> CellResult<()> {
+        if !self.cfg.test_hooks {
+            return Ok(());
+        }
+        let left: u64 = self.meta(MetaKey::TestDropEffects)?.and_then(|n| n.parse().ok()).unwrap_or(0);
+        if left == 0 {
+            return Ok(());
+        }
+        self.set_meta(MetaKey::TestDropEffects, &(left - 1).to_string())?;
+        Err(CellError::host("the step's answer was lost on its way back (a test hook)"))
     }
 
     /// Performs one step of `run`.

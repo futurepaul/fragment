@@ -380,7 +380,7 @@ pub async fn consume(batch: MessageBatch<Delivery>, env: Env) -> Result<()> {
     let dead = batch.queue() == DEAD_QUEUE;
     let messages = batch.messages()?;
     assert!(messages.len() <= CONSUME_BATCH_MAX, "a delivery batch holds at most {CONSUME_BATCH_MAX} messages, not {}", messages.len());
-    futures_util::future::join_all(messages.into_iter().map(|message| consume_one(message, &env, &cfg, dead))).await;
+    futures_util::future::join_all(messages.into_iter().map(|message| consume_one(message, &env, cfg, dead))).await;
     Ok(())
 }
 
