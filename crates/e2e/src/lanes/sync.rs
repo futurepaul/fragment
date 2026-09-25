@@ -49,7 +49,12 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
     let dir = s.dir("sync-watch");
     std::fs::write(dir.join("seed.md"), "seed")?;
     s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir)]);
-    let log = std::fs::File::create(s.scratch.join(format!("sync-watch-{name}.log")))?;
+    // a file the watcher's first pass pushes, and logs: after that line a
+    // remote write reaches the folder only by the change feed (nothing
+    // changes locally, and the next sweep is a minute away)
+    std::fs::write(dir.join("first.md"), "first")?;
+    let log_path = s.scratch.join(format!("sync-watch-{name}.log"));
+    let log = std::fs::File::create(&log_path)?;
     let mut child = Command::new(&s.cli)
         .args(["sync", &name, "--dir", &dir_of(&dir), "--watch"])
         .env("HOME", &home)
@@ -58,10 +63,10 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
         .stdout(log.try_clone()?)
         .stderr(log)
         .spawn()?;
-    std::thread::sleep(Duration::from_millis(2500));
+    let first_pass = s.eventually(Duration::from_secs(15), || std::fs::read_to_string(&log_path).is_ok_and(|t| t.contains("pushed 1")));
     s.commit(&c, &[("remote.md", Some(b"from the server"))]);
     let pulled = s.eventually(Duration::from_secs(15), || std::fs::read_to_string(dir.join("remote.md")).is_ok_and(|t| t == "from the server"));
-    s.ok("continuous sync pulls a remote write within seconds", pulled, "");
+    s.ok("continuous sync pulls a remote write within seconds", first_pass && pulled, std::fs::read_to_string(&log_path).unwrap_or_default());
     std::fs::write(dir.join("local.md"), "from the client")?;
     let repo = c["repo"].as_str().unwrap_or("").to_string();
     let pushed = s.eventually(Duration::from_secs(15), || s.fake.file_at(&repo, "main", "local.md").as_deref() == Some(&b"from the client"[..]));

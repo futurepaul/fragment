@@ -701,21 +701,23 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("fragment channel lists the channels", r["channels"].as_array().is_some_and(|a| a.iter().any(|c| c["name"] == "room")), &r);
     let r = s.cli_json(api, &home, &["channel", &name, "room", "--json"])?;
     s.ok("fragment channel reads one", r["records"][0]["body"]["text"] == "from the cli", &r);
+    // the follower has read the channel's one record before the next is
+    // published, so the next can only reach it live
     let log = s.scratch.join(format!("follow-{name}.log"));
     let mut follow = Command::new(&s.cli)
-        .args(["channel", &name, "room", "--follow", "--after", "1"])
+        .args(["channel", &name, "room", "--follow"])
         .env("HOME", &home)
         .env("FRAGMENT_HOST", &api.base)
         .stdin(Stdio::null())
         .stdout(std::fs::File::create(&log)?)
         .stderr(Stdio::null())
         .spawn()?;
-    std::thread::sleep(Duration::from_millis(1500));
+    let caught_up = s.eventually(Duration::from_secs(10), || std::fs::read_to_string(&log).is_ok_and(|t| t.contains("from the cli")));
     api.op(&keys, &name, "say", "cli-2", json!({ "text": "followed" }))?;
     let seen = s.eventually(Duration::from_secs(10), || std::fs::read_to_string(&log).is_ok_and(|t| t.contains("followed")));
     let _ = follow.kill();
     let _ = follow.wait();
-    s.ok("fragment channel --follow streams new records", seen, std::fs::read_to_string(&log).unwrap_or_default());
+    s.ok("fragment channel --follow streams new records", caught_up && seen, std::fs::read_to_string(&log).unwrap_or_default());
 
     // --follow from the start of a channel past a page: every record in
     // order, page after page, then the live one
