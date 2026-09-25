@@ -35,7 +35,7 @@ impl WorkOsConfig {
 
 pub struct Config {
     codestorage: Option<CodeStorageConfig>,
-    /// `FRAGMENT_HOST_SUFFIX`: fragments are served from `<name>.<suffix>`.
+    /// `FRAGMENT_HOST_SUFFIX`: fragments are served from `<label>--<username>.<suffix>`.
     /// Unset (dev without hostnames), they are served from `/f/<name>/`.
     pub host_suffix: Option<String>,
     /// `FRAGMENT_POLL_INTERVAL_S`: the webhook backstop (default 300).

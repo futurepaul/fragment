@@ -1,5 +1,5 @@
 //! Signed and unsigned HTTP against the node, the way the CLI and a
-//! browser call it. Fragment hosts (`<name>.<suffix>`) are reached by
+//! browser call it. Fragment hosts (`<label>--<username>.<suffix>`) are reached by
 //! sending the node the right `Host` header.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -94,7 +94,7 @@ impl Api {
         Api { http, base: format!("http://127.0.0.1:{port}"), port, suffix: suffix.map(str::to_string), remote: false }
     }
 
-    /// A hosted fleet at `base` (https), its fragments on `<name>.<suffix>`
+    /// A hosted fleet at `base` (https), its fragments on `<label>--<username>.<suffix>`
     /// when it has a suffix.
     pub fn remote(base: &str, suffix: Option<&str>) -> Api {
         let http = reqwest::blocking::Client::builder()

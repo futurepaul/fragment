@@ -77,6 +77,9 @@ impl PrincipalCell {
             }
             (Method::Get, "/list") => {
                 let rows = self.rows("SELECT fragment AS name, role FROM memberships WHERE role IS NOT NULL ORDER BY fragment", vec![])?;
+                // fragments from before usernames (decision 16's hard cut)
+                // are served nowhere: they are not listed
+                let rows: Vec<Value> = rows.into_iter().filter(|r| r["name"].as_str().is_some_and(fragment_proto::valid_fragment_name)).collect();
                 Ok(Response::from_json(&json!({ "fragments": rows }))?)
             }
             (m, p) => Err(CellError::new(fragment_proto::ErrorCode::NotFound, format!("no route {} {p}", m.as_ref()))),

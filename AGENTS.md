@@ -3,8 +3,8 @@
 Places for people and agents: apps, chats, and desktops are all
 fragments; agents join them as members; computers are Fly Sprites.
 Built on fragment (this repo carries fragment's full history; its
-TypeScript runtime was cut in phase 2, and fragment.club still runs it
-from github.com/futurepaul/fragment) and on celld
+TypeScript runtime was cut in phase 2; this repo is
+github.com/futurepaul/fragment's `master`, which fragment.club runs) and on celld
 (https://celld.dev/docs/).
 
 ## Read first
@@ -56,7 +56,7 @@ debt ledger).
   minute (about a minute). The node runs from a staged copy of the cell
   (`target/e2e/cell`), so the e2e and `cargo xtask dev` can run at once.
 - `cargo xtask dev [--clean]`: the dev stack in the foreground: the cell
-  on :8790 with fragments at `http://<name>.fragment.localhost:8790/`,
+  on :8790 with fragments at `http://<label>--<username>.fragment.localhost:8790/`,
   agents (`agent/`, goose's loop) co-hosted on the same node (the router
   hands them `/api/agents` and `/api/a/*`), whose turns spend their
   owner's budget (a per-person OpenRouter key, minted with the management

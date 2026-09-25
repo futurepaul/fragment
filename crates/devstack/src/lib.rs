@@ -152,7 +152,7 @@ pub struct Fleet {
     pub codestorage_org: String,
     pub codestorage_key_pem: String,
     pub codestorage_url: String,
-    /// Fragments are served from `<name>.<suffix>` when set.
+    /// Fragments are served from `<label>--<username>.<suffix>` when set.
     pub host_suffix: Option<String>,
     pub poll_interval_s: u32,
     /// Jobs may fetch loopback and private addresses (the local fakes).

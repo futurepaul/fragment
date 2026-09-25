@@ -23,7 +23,7 @@
 //!   DELETE /api/f/<name>                   delete (owner)
 //!   *      /api/f/<name>/<route>           the control API (signed; the code.storage webhook is HMAC,
 //!                                          the inbox is its token)
-//!   *      <name>.<suffix>/<path>          the fragment's site, on its own origin (every path)
+//!   *      <label>--<username>.<suffix>/<path>  the fragment's site, on its own origin (every path)
 //!   *      /f/<name>/<path>                the same, when no suffix is configured (dev)
 //!   GET    /, /auth/…, /cli                sign-in on the platform origin (`auth.rs`)
 //!

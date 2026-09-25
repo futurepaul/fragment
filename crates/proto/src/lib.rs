@@ -181,7 +181,7 @@ pub fn valid_username(username: &str) -> bool {
 }
 
 /// A fragment's name: `<label>.<username>` (decision 16), served at
-/// `<label>.<username>.<suffix>`.
+/// `<label>--<username>.<suffix>` ([`flat_name`]).
 pub fn valid_fragment_name(name: &str) -> bool {
     split_fragment_name(name).is_some()
 }

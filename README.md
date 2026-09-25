@@ -20,8 +20,8 @@ This repo holds:
 Read [docs/MODEL.md](docs/MODEL.md) for the model,
 [docs/api.md](docs/api.md) for the wire contract, and
 [docs/ROADMAP.md](docs/ROADMAP.md) for where it is going. fragment.club
-still runs the previous runtime, from
-[futurepaul/fragment](https://github.com/futurepaul/fragment). MIT
+runs it: this repo is
+[futurepaul/fragment](https://github.com/futurepaul/fragment)'s `master`. MIT
 licensed; see [LICENSE](LICENSE).
 
 ## Try it locally
@@ -44,7 +44,7 @@ cargo xtask try todo       # in another terminal: todo | inbox | notes
 `try` creates and deploys a fragment from a template under
 `target/devstack/try/`, and prints the link to open and a `fragment`
 alias pointed at the dev stack. Fragments are served at
-`http://<name>.fragment.localhost:8790/`.
+`http://<label>--<username>.fragment.localhost:8790/`.
 
 ## Tests
 
