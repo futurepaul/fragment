@@ -248,8 +248,9 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         armed_in_time && landed && role_of(&guest_id)?.as_deref() == Some("editor"),
         chrome.eval(&page, "location.href + ' ' + document.title").unwrap_or_default(),
     );
-    let connected = chrome.until(&page, "document.getElementById('here').textContent !== 'connecting…'", wait);
-    let r = api.op(&owner, &chat, "say", "share-owner-1", json!({ "text": "hello from the owner" }))?;
+    // the chat's page (the platform's, __chat.js) is ready once it knows who it is
+    let connected = chrome.until(&page, "document.getElementById('say')?.dataset.ready === '1'", wait);
+    let r = super::agents::say(api, &owner, &chat, "share-owner-1", "hello from the owner")?;
     let live = chrome.until(&page, "document.getElementById('messages').textContent.includes('hello from the owner')", wait);
     s.ok("the guest sees the owner's message arrive live", connected && r.status == 200 && live, &r);
     chrome.eval(&page, "document.getElementById('text').value = 'hello from the guest'; document.getElementById('say').requestSubmit(); true")?;
@@ -307,8 +308,9 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let form = armed(api, &sheet, &owner_session)?;
     let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "remove"), ("member", &guest_id)])?;
     s.ok("the owner removes the guest from the sheet", r.status == 303 && r.header("location") == sheet && role_of(&guest_id)?.is_none(), &r);
-    let closed = chrome.until(&page, "document.getElementById('here').textContent === \"this page's access changed: reload it\"", wait);
-    s.ok("the guest's socket closes (their page says its access changed)", closed, chrome.eval(&page, "document.getElementById('here').textContent").unwrap_or_default());
+    let said = "document.getElementById('banner-text')?.textContent ?? ''";
+    let closed = chrome.until(&page, &format!("!document.getElementById('banner').hidden && ({said}).includes('access to this chat changed')"), wait);
+    s.ok("the guest's socket closes (their page says its access changed)", closed, chrome.eval(&page, said).unwrap_or_default());
     let again = site_cookie(api, &guest_session, &chat)?;
     let r = api.page(&chat, "", Some(&format!("fragment_site={again}")))?;
     chrome.reload(&page)?;
