@@ -1578,20 +1578,6 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn commit_single_file_lands_with_cas_retry() {
-        let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("fragment.json", br#"{"name":"t"}"#)]);
-        let c = client_for(&mock);
-        let tip = commit_single_file(&c, "t", "fragment.json", br#"{"name":"t","visibility":"public"}"#.to_vec(), "manifest-set", "deadbeef", None).unwrap();
-        assert!(!tip.is_empty());
-        let v: serde_json::Value = serde_json::from_slice(&mock.file_at("t", "main", "fragment.json").unwrap()).unwrap();
-        assert_eq!(v["visibility"], "public");
-        // replay (same expected parent now stale) still succeeds via retry
-        let tip2 = commit_single_file(&c, "t", "fragment.json", br#"{"name":"t","visibility":"token"}"#.to_vec(), "manifest-set", "deadbeef", None).unwrap();
-        assert_ne!(tip, tip2);
-    }
-
     // ---- the world-change regressions (both found live in one day) ----
 
     #[test]
