@@ -579,7 +579,7 @@ impl FragmentCell {
             return Err(CellError::invalid(format!("an advance after {count} steps; a job takes at most {}", limits::JOB_STEPS_MAX)));
         }
         if let Some(f) = call.failed {
-            if f.index + 1 != count {
+            if f.index.checked_add(1) != Some(count) {
                 return Err(CellError::invalid(format!("step {} ran out of retries, but the advance is after {count} steps", f.index)));
             }
             self.keep_step(run_id, attempt, f.index, &StepResult { kind: f.kind, outcome: StepOutcome::Error(clip(&f.error)) })?;
