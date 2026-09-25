@@ -49,13 +49,19 @@ jobs:
             target
           key: e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: e2e-${{ runner.os }}-
-      # the node: the pinned fork, built with this repo's crates it links
-      # (crates/native and what it depends on)
+      # the node: the pinned fork (its commit, CELLD_FORK_REV), built with
+      # this repo's crates it links (crates/native and what it depends on;
+      # the fork's own lock pins their dependencies)
+      - id: fork
+        run: |
+          rev=$(sed -n 's/^pub const CELLD_FORK_REV: &str = "\([0-9a-f]\{40\}\)";$/\1/p' crates/devstack/src/lib.rs)
+          test -n "$rev" || { echo "no CELLD_FORK_REV in crates/devstack/src/lib.rs"; exit 1; }
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
       - id: celld
         uses: actions/cache@v4
         with:
           path: target/celld/bin/celld
-          key: celld-${{ runner.os }}-${{ hashFiles('crates/devstack/src/lib.rs', 'Cargo.lock', 'crates/native/**', 'crates/core/**', 'crates/proto/**', 'crates/nip98/**') }}
+          key: celld-${{ runner.os }}-${{ steps.fork.outputs.rev }}-${{ hashFiles('crates/native/**', 'crates/core/**', 'crates/proto/**', 'crates/nip98/**') }}
       - run: worker-build --version | grep -q 0.8.5 || cargo install worker-build --version 0.8.5 --locked
       - if: steps.celld.outputs.cache-hit != 'true'
         run: cargo xtask celld
