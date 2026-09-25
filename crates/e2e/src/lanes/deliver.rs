@@ -70,15 +70,25 @@ pub fn push(s: &mut Suite, api: &Api) -> Result<()> {
         both && s.push.received("a")[0] == json!({ "title": "hello", "body": "from a mutation" }) && s.push.refused().is_empty(),
         format!("{:?} {:?} refused {:?}", s.push.received("a"), s.push.received("b"), s.push.refused()),
     );
-    api.op(&owner, &name, "notify_all", "n1", json!({ "title": "hello" }))?;
-    std::thread::sleep(Duration::from_secs(2));
-    s.ok("a replay pushes nothing again", s.push.received("a").len() == 1, s.push.received("a").len());
+    // the replay, then a sentinel push through the same queue: once the
+    // sentinel has landed, a second push of the replay would have too
+    let r = api.op(&owner, &name, "notify_all", "n1", json!({ "title": "hello" }))?;
+    api.op(&owner, &name, "notify_all", "n1-sentinel", json!({ "title": "sentinel" }))?;
+    let sentinel = |who: &str| s.push.received(who).iter().any(|p| p["title"] == "sentinel");
+    let landed = s.eventually(wait, || sentinel("a") && sentinel("b"));
+    let pushed = |title: &str| json!({ "title": title, "body": "from a mutation" });
+    s.ok(
+        "a replay pushes nothing again",
+        r.body["replayed"] == true && landed && ["a", "b"].iter().all(|who| s.push.received(who) == [pushed("hello"), pushed("sentinel")]),
+        format!("{:?} {:?}", s.push.received("a"), s.push.received("b")),
+    );
 
     // a job pushes to one tag
+    let (a0, b0) = (s.push.received("a").len(), s.push.received("b").len());
     let r = api.op(&owner, &name, "announce", "j1", json!({ "who": "team", "title": "team only" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
     s.ok("a job's push step answers how many it queued", run["output"]["queued"] == 1, &run);
-    s.ok("only that tag gets it", s.eventually(wait, || s.push.received("a").len() == 2) && s.push.received("b").len() == 1, "");
+    s.ok("only that tag gets it", s.eventually(wait, || s.push.received("a").len() == a0 + 1) && s.push.received("b").len() == b0, "");
 
     // a subscription that is gone is dropped; a failing one is retried
     s.push.forget("b");

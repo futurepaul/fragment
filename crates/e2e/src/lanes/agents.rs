@@ -341,13 +341,21 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     // a message: the agent answers in the chat, once
     s.openrouter.clear_script();
     s.openrouter.script(&[Reply::Text("Hello! I'm here.".into())]);
+    let asked = s.openrouter.chats().len();
     api.op(&owner, &chat, "say", "c1", json!({ "text": "hi bot" }))?;
     let who = [bot_id.as_str()];
     let answered = s.eventually(wait, || said_by(&chat_records(api, &owner, &chat), &who, "Hello! I'm here."));
     s.ok("a message in the chat gets the agent's answer there, as the agent", answered, json!(chat_records(api, &owner, &chat)));
-    std::thread::sleep(Duration::from_secs(2));
+    // a sentinel through the same subscription: the owner's next message is
+    // delivered after the agent's own answer, so once the agent has answered
+    // it, it has heard its own and let it be (a turn for it would have asked
+    // the model once more)
+    s.openrouter.script(&[Reply::Text("Still here.".into())]);
+    api.op(&owner, &chat, "say", "c1b", json!({ "text": "still there?" }))?;
+    let sentinel = s.eventually(wait, || said_by(&chat_records(api, &owner, &chat), &who, "Still here."));
     let records = chat_records(api, &owner, &chat);
-    s.ok("the agent does not answer itself", records.len() == 2, json!(records));
+    let turns = s.openrouter.chats().len() - asked;
+    s.ok("the agent does not answer itself", sentinel && records.len() == 4 && turns == 2, json!({ "model requests": turns, "records": records }));
 
     // a chat that works an app: the agent is also in a todo list
     let todo = s.named(api, &owner, "chat-todo")?;
@@ -373,10 +381,21 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let subs = api.signed(&owner, "GET", &format!("/api/f/{chat}/subscriptions"), None)?;
     s.ok("a member removed loses its subscriptions", subs.body["subscriptions"] == json!([]), &subs);
     let before = chat_records(api, &owner, &chat).len();
+    let asked = s.openrouter.chats().len();
     api.op(&owner, &chat, "say", "c3", json!({ "text": "anyone there?" }))?;
-    std::thread::sleep(Duration::from_secs(3));
+    // the sentinel is the same pipe opened again: the agent back in the chat,
+    // listening anew, answers the next message; a delivery of the one
+    // before would have reached it first, and started a turn with it
+    s.cli(api, &home, &["members", "add", &chat, &bot_npub, "--role", "editor"]);
+    let relisten = s.cli_json(api, &home, &["agent", "listen", &bot, &chat, "--json"]);
+    s.openrouter.script(&[Reply::Text("Back again.".into())]);
+    api.op(&owner, &chat, "say", "c4", json!({ "text": "are you back?" }))?;
+    let back = s.eventually(wait, || said_by(&chat_records(api, &owner, &chat), &who, "Back again."));
+    let heard = s.openrouter.chats()[asked..].iter().any(|c| c["messages"].to_string().contains("anyone there?"));
     let after = chat_records(api, &owner, &chat);
-    s.ok("and hears nothing more", after.len() == before + 1, json!(after));
+    s.ok("and hears nothing more", relisten.is_ok() && back && !heard && after.len() == before + 3, json!({ "heard": heard, "records": after }));
+    // out again, so the page's message below goes unanswered
+    s.cli(api, &home, &["members", "rm", &chat, &bot_npub]);
 
     // the page: the conversation so far, and a message sent from it
     let Some(mut chrome) = s.browser()? else {
