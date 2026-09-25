@@ -370,11 +370,39 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     }
     s.ok("nor does a fragment origin's sign-in", escaped.is_empty(), format!("{escaped:?}"));
 
-    // the browser and the CLI decide alike: public, link, members; a page,
-    // a file, the tree, an app route (which sees who is asking), operations
+    // the browser and the CLI decide alike, and as the model says (docs/MODEL.md,
+    // Visibility): public, link, members; a page, a file, the tree, an app
+    // route (which sees who is asking), operations
     let member_f2 = site_cookie(api, &member_session, &f)?;
     let outsider_f = site_cookie(api, &outsider_session, &f)?;
+    // Each asker's answer on each route, in the order `paths` names them: a
+    // page, its HEAD, a file, the tree, an app route, a public query, a
+    // public mutation, and a mutation that needs an editor (the member is a
+    // viewer). Whoever may see the fragment gets 200; short of it, a signed
+    // asker is 403 and an anonymous one 401. A public fragment is everyone's
+    // to see; a share link counts as a viewer on a link or public fragment,
+    // and for nothing on a members one.
+    const SEES_SIGNED: [u16; 8] = [200, 200, 200, 200, 200, 200, 200, 403];
+    const SEES_ANON: [u16; 8] = [200, 200, 200, 200, 200, 200, 200, 401];
+    let expected = [
+        ("public", "member", SEES_SIGNED),
+        ("public", "outsider", SEES_SIGNED),
+        ("public", "outsider with the link", SEES_SIGNED),
+        ("public", "nobody", SEES_ANON),
+        ("public", "nobody with the link", SEES_ANON),
+        ("link", "member", SEES_SIGNED),
+        ("link", "outsider", [403; 8]),
+        ("link", "outsider with the link", SEES_SIGNED),
+        ("link", "nobody", [401; 8]),
+        ("link", "nobody with the link", SEES_ANON),
+        ("members", "member", SEES_SIGNED),
+        ("members", "outsider", [403; 8]),
+        ("members", "outsider with the link", [403; 8]),
+        ("members", "nobody", [401; 8]),
+        ("members", "nobody with the link", [401; 8]),
+    ];
     let mut mismatches = vec![];
+    let mut wrong = vec![];
     let mut decided = 0;
     for visibility in ["public", "link", "members"] {
         api.signed(&owner, "PUT", &format!("/api/f/{f}/visibility"), Some(&json!({ "visibility": visibility })))?;
@@ -386,10 +414,12 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
             ("nobody with the link", None, None, f_view.as_str()),
         ];
         for (who, cookie, keys, view) in askers {
-            let n = decided;
-            let say = json!({ "id": format!("say-{visibility}-{who}-{n}"), "input": { "text": "hi" } });
+            let want = expected.iter().find(|(v, w, _)| *v == visibility && *w == who).map(|(.., statuses)| *statuses).context("an expected row per asker")?;
+            // an operation id holds no spaces: an asker's name in one is dashed
+            let (n, tag) = (decided, who.replace(' ', "-"));
+            let say = json!({ "id": format!("say-{visibility}-{tag}-{n}"), "input": { "text": "hi" } });
             let count = json!({ "id": "c", "input": {} });
-            let note = json!({ "id": format!("note-{visibility}-{who}-{n}"), "input": { "text": "n" } });
+            let note = json!({ "id": format!("note-{visibility}-{tag}-{n}"), "input": { "text": "n" } });
             let paths = [
                 ("GET", "", None),
                 ("HEAD", "", None),
@@ -400,7 +430,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
                 ("POST", "__op/say", Some(&say)),
                 ("POST", "__op/note", Some(&note)),
             ];
-            for (method, path, body) in paths {
+            for ((method, path, body), want) in paths.into_iter().zip(want) {
                 let (browser, cli) = both(api, &f, method, &format!("{path}{view}"), body, cookie, keys)?;
                 decided += 1;
                 // an anonymous call is rate limited per cookie, and a signed one is not: equal status is the check;
@@ -409,10 +439,15 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
                 if browser.status != cli.status || !saw_alike {
                     mismatches.push(format!("{visibility} {who} {method} /{path}: browser {browser}, CLI {cli}"));
                 }
+                // a wrong answer both give alike is still wrong
+                if browser.status != want || cli.status != want {
+                    wrong.push(format!("{visibility} {who} {method} /{path}: want {want}; browser {browser}, CLI {cli}"));
+                }
             }
         }
     }
     s.ok(&format!("the browser and the CLI decide alike ({decided} decisions across public, link, and members)"), mismatches.is_empty(), format!("{mismatches:?}"));
+    s.ok(&format!("and each of the {decided} is the model's answer for its visibility, asker, and route"), wrong.is_empty(), format!("{wrong:?}"));
     api.signed(&owner, "PUT", &format!("/api/f/{f}/visibility"), Some(&json!({ "visibility": "public" })))?;
     let member_id = api.identity(&member)?;
     let (browser, cli) = both(api, &f, "GET", "hello", None, Some(&member_f2), Some(&member))?;
