@@ -71,10 +71,7 @@ pub fn fixed(n: u8) -> Identity {
 /// `paul@finite.vip` work anywhere an npub does.
 pub fn resolve_npub(input: &str) -> Result<String> {
     let s = input.trim();
-    if s.contains('@') {
-        let (local, domain) = s
-            .split_once('@')
-            .ok_or_else(|| anyhow!("'{s}' is not a valid NIP-05 name"))?;
+    if let Some((local, domain)) = s.split_once('@') {
         if local.is_empty() || domain.is_empty() || domain.contains('@') {
             bail!("'{s}' is not a valid NIP-05 name");
         }

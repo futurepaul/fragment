@@ -8,12 +8,6 @@
 // No local .git, no git2, no host file API. `.fragment/state.json` is a
 // stat cache only (path -> content sha + mtime + last-seen commit); the
 // repo is the truth, the folder is a disposable working copy.
-//
-// Hard cuts vs the old engine: the three-way merge/conflict-marker
-// machinery and the blob tier are gone (remote content survives in git
-// history; conflicts keep local and save a `.conflict-` copy). The
-// root-identity (dev/ino) check is subsumed by the mass-deletion guard,
-// which now also refuses a total wipe regardless of file count.
 use crate::api::Client;
 use crate::api::CodedError;
 use crate::codestorage::{Author, Change, CodeStorage, CsError, MAIN, MAX_CAS_ATTEMPTS};
@@ -48,8 +42,6 @@ pub struct SyncOptions {
     /// (pull never deletes without it; mirror always propagates)
     pub prune: bool,
     pub writer_id: String, // 8 hex of our pubkey, for conflict-copy names
-    /// FRAGMENT_CODESTORAGE_URL/config override for the code.storage
-    /// server (backend-swap knob; else the storage-token response wins)
     pub codestorage: Option<String>,
 }
 
@@ -120,14 +112,10 @@ pub struct SyncState {
     pub name: String,
     /// url-form repo identity this folder last synced against, plus the
     /// fragment host it synced through. The mirror trusts the journal to
-    /// mean "same world": without the binding, a journal from ANOTHER
-    /// world (a wiped+recreated fragment, or the same name on a different
-    /// host — dev vs prod bite equally, and repo ids alone can't tell
-    /// them apart when the service reports name-form identities) makes
-    /// every file look remotely-changed and the pull phase faithfully
-    /// mirrors the wrong world over the folder — silent local data loss
-    /// (found live, twice in one day). None on old journals; bound on the
-    /// first sync.
+    /// mean "same world": a journal from another (a recreated fragment, or
+    /// the same name on another host) makes every file look remotely
+    /// changed, and the pull mirrors the wrong world over the folder.
+    /// None on old journals; bound on the first sync.
     #[serde(default)]
     pub host: Option<String>,
     #[serde(default)]
@@ -235,10 +223,8 @@ fn state_path(dir: &Path) -> PathBuf {
 pub struct SyncLock(#[allow(dead_code)] File); // the field IS the lock (RAII)
 impl SyncLock {
     pub fn acquire(dir: &Path) -> Result<Self> {
+        fs::create_dir_all(dir.join(".fragment"))?;
         let p = dir.join(".fragment").join("sync.lock");
-        if let Some(parent) = p.parent() {
-            fs::create_dir_all(parent)?;
-        }
         let f = File::create(&p)?;
         f.try_lock_exclusive()
             .map_err(|_| anyhow!("another fragment sync holds this folder ({}). If that's wrong, no process should own it; otherwise stop it or use a different folder.", p.display()))?;
@@ -296,9 +282,6 @@ fn save_state(dir: &Path, state: &SyncState, before: Option<&[u8]>) -> Result<()
     if before == Some(bytes.as_slice()) {
         return Ok(());
     }
-    if let Some(parent) = state_path(dir).parent() {
-        fs::create_dir_all(parent)?;
-    }
     atomic_write(&state_path(dir), &bytes)
 }
 
@@ -353,7 +336,6 @@ pub(crate) struct LocalFile {
 /// - editor droppings: `~` backups, `~$` lock files, `.swp` swap files;
 /// - sync's own `.conflict-` copies and `.fragment-partial` temp files.
 pub fn syncable(rel: &str) -> bool {
-    // bounded by the path's segments
     for (depth, seg) in rel.split('/').enumerate() {
         let hidden = seg.starts_with('.');
         let modules = depth == 0 && seg == "node_modules";
@@ -565,11 +547,7 @@ pub fn pass(client: &Client, storage: &CodeStorage, name: &str, dir: &Path, opts
 /// first to learn whether it needs a pass at all.
 pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path, opts: &SyncOptions, local: Local) -> Result<Report, SyncError> {
     let Local { mut state, journal, files: local, stats } = local;
-    // World binding: this folder's journal must belong to THIS host+repo.
-    // A mismatch means the fragment was recreated, or this folder last
-    // synced the same name somewhere else (dev vs prod) — mirroring now
-    // would faithfully copy the wrong world over the folder. Refuse
-    // before any read or write.
+    // World binding (`SyncState::host`): refuse before any read or write.
     let bound_host = client.host.trim_end_matches('/').to_string();
     match (&state.host, &state.repo) {
         (Some(h), Some(r)) if h != &bound_host || r != storage.repo() => {
@@ -703,14 +681,11 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
             let l = local.get(&rf.path);
             let s = state.files.get(&rf.path);
             let fetch = match (l, s) {
-                (None, _) => true, // remote-only
-                (Some(_), None) => {
-                    // journal-absent but present locally: the bootstrap
-                    // pass adopted every content-verified match, so what's
-                    // left here is content-different — fetch (remote wins
-                    // in pull/mirror; push modes already pushed local)
-                    true
-                }
+                // remote-only; or journal-absent but present locally: the
+                // bootstrap pass adopted every content-verified match, so
+                // what's left here is content-different — fetch (remote wins
+                // in pull/mirror; push modes already pushed local)
+                (None, _) | (Some(_), None) => true,
                 (Some(lf), Some(st)) => {
                     let local_changed = st.sha256 != lf.sha256;
                     let remote_changed = st.commit != rf.last_commit_sha;
@@ -728,7 +703,7 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
                 }
             };
             if fetch {
-                pull_file(Pull { storage, blobs: &blobs, dir, rev: listing.rev() }, rf, &mut state, &mut report)?;
+                pull_file(storage, &blobs, dir, listing.rev(), rf, &mut state, &mut report)?;
             }
         }
         // remote deletions: known before, gone now, local copy untouched
@@ -742,28 +717,16 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
             if !untouched {
                 continue;
             }
-            match opts.mode {
-                Mode::Mirror => {
-                    fs::remove_file(dir.join(&p)).map_err(|e| SyncError::Io(format!("delete {p}: {e}")))?;
-                    state.files.remove(&p);
-                    report.deleted_local.push(p.clone());
-                }
-                Mode::Pull => {
-                    if opts.prune {
-                        fs::remove_file(dir.join(&p)).map_err(|e| SyncError::Io(format!("delete {p}: {e}")))?;
-                        state.files.remove(&p);
-                        report.deleted_local.push(p.clone());
-                    } else {
-                        report.withheld_deletions.push(p.clone());
-                        // keep the state row: dropping it here made the
-                        // deletion unknowable, so a later --prune pass could
-                        // never apply it (found by the e2e withhold-then-prune
-                        // sequence). Re-reporting each pass is honest — the
-                        // deletion is still pending.
-                    }
-                }
-                Mode::Push => unreachable!("pull phase only runs when mode != Push"),
+            if opts.mode == Mode::Pull && !opts.prune {
+                // keep the state row: dropping it here made the deletion
+                // unknowable, so a later --prune pass could never apply it.
+                // Re-reporting each pass is honest — it is still pending.
+                report.withheld_deletions.push(p.clone());
+                continue;
             }
+            fs::remove_file(dir.join(&p)).map_err(|e| SyncError::Io(format!("delete {p}: {e}")))?;
+            state.files.remove(&p);
+            report.deleted_local.push(p.clone());
         }
     }
 
@@ -934,17 +897,8 @@ struct ConflictCtx<'a> {
     writer_id: &'a str,
 }
 
-/// Where a pull reads from and writes to.
-struct Pull<'a> {
-    storage: &'a CodeStorage,
-    blobs: &'a crate::blobs::Blobs<'a>,
-    dir: &'a Path,
-    /// the listing's commit (`Listing::rev`)
-    rev: &'a str,
-}
-
-fn pull_file(at: Pull<'_>, entry: &TreeEntry, state: &mut SyncState, report: &mut Report) -> Result<(), SyncError> {
-    let Pull { storage, blobs, dir, rev } = at;
+/// Fetches one file at `rev` (the listing's commit) into the folder.
+fn pull_file(storage: &CodeStorage, blobs: &crate::blobs::Blobs<'_>, dir: &Path, rev: &str, entry: &TreeEntry, state: &mut SyncState, report: &mut Report) -> Result<(), SyncError> {
     let (path, commit) = (entry.path.as_str(), entry.last_commit_sha.as_str());
     let bytes = blobs.resolve(storage.read_file(path, rev)?).map_err(|e| SyncError::blob(path, e))?;
     let sha = sha256_hex(&bytes);
@@ -1110,7 +1064,7 @@ mod tests {
     /// file; a mirror pass, then another.
     #[test]
     fn repo_files_that_do_not_sync_are_left_alone() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a.md", b"a"), (".env.example", b"X=1"), ("node_modules/x.js", b"x")]);
         let c = client_for(&mock);
         let dir = tmpdir("left-alone");
@@ -1209,7 +1163,7 @@ mod tests {
 
     #[test]
     fn push_success_commits_folder() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[]);
         let c = client_for(&mock);
         let dir = tmpdir("push-ok");
@@ -1234,7 +1188,7 @@ mod tests {
     /// that pushed listed again after its own commit.
     #[test]
     fn a_pass_reads_the_head_and_the_listing_once() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a.txt", b"a"), ("b.txt", b"b")]);
         let c = client_for(&mock);
         let dir = tmpdir("reads-once");
@@ -1275,7 +1229,7 @@ mod tests {
     #[test]
     fn the_journal_is_written_only_when_it_changed() {
         use std::os::unix::fs::MetadataExt;
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a.txt", b"a")]);
         let c = client_for(&mock);
         let dir = tmpdir("journal-writes");
@@ -1297,7 +1251,7 @@ mod tests {
     /// entry.
     #[test]
     fn a_derived_listing_is_the_listing_of_main() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a.txt", b"a"), ("b.txt", b"b"), ("c/d.txt", b"d")]);
         let c = client_for(&mock);
         let storage = CodeStorage::connect(&c, "t", None).unwrap();
@@ -1322,7 +1276,7 @@ mod tests {
     fn push_replay_commits_exactly_once() {
         // the idempotency replay: the same folder re-synced must send NO
         // further commit-packs (content equality short-circuits)
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[]);
         let c = client_for(&mock);
         let dir = tmpdir("push-replay");
@@ -1339,7 +1293,7 @@ mod tests {
     fn push_conflicting_parent_retries_then_succeeds() {
         // competitor moves the tip once: our pack 409s, we refetch,
         // rebuild, and land on the new tip — both changes survive
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[]);
         mock.sabotage_commit_packs(1);
         let c = client_for(&mock);
@@ -1356,7 +1310,7 @@ mod tests {
     #[test]
     fn push_conflicting_parent_forever_is_bounded() {
         // every attempt is sabotaged: explicit error after MAX_CAS_ATTEMPTS
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[]);
         mock.sabotage_commit_packs(99);
         let c = client_for(&mock);
@@ -1375,7 +1329,7 @@ mod tests {
     /// conflict, exit 0, and the next pass has nothing to do.
     #[test]
     fn a_lost_commit_answer_adopts_what_landed() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("doc.md", b"base"), ("gone.md", b"g"), ("kept.md", b"k")]);
         let c = client_for(&mock);
         let dir = tmpdir("lost-answer");
@@ -1404,7 +1358,7 @@ mod tests {
 
     #[test]
     fn manifest_set_with_a_lost_answer_lands_once() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("fragment.json", br#"{"name":"t"}"#)]);
         let c = client_for(&mock);
         mock.drop_commit_answers("t", 1);
@@ -1416,7 +1370,7 @@ mod tests {
 
     #[test]
     fn pull_materializes_repo() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a.txt", b"remote-a"), ("site/index.html", b"<p>x</p>")]);
         let c = client_for(&mock);
         let dir = tmpdir("pull");
@@ -1432,7 +1386,7 @@ mod tests {
 
     #[test]
     fn mirror_pushes_and_pulls() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("remote-only.txt", b"r")]);
         let c = client_for(&mock);
         let dir = tmpdir("mirror");
@@ -1447,7 +1401,7 @@ mod tests {
 
     #[test]
     fn deletion_pushes_and_propagates_back() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("gone.txt", b"g"), ("kept.txt", b"k")]);
         let c = client_for(&mock);
         let dir = tmpdir("delete");
@@ -1470,7 +1424,7 @@ mod tests {
 
     #[test]
     fn remote_deletion_propagates_in_mirror_withheld_in_pull() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("gone.txt", b"g"), ("kept.txt", b"k")]);
         let c = client_for(&mock);
         // three folders adopt both files
@@ -1498,7 +1452,7 @@ mod tests {
 
     #[test]
     fn remote_deletion_applies_in_pull_with_prune() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("gone.txt", b"g"), ("kept.txt", b"k")]);
         let c = client_for(&mock);
         let dir = tmpdir("prune");
@@ -1521,7 +1475,7 @@ mod tests {
         // pull without --prune withholds; the FOLLOWING pass with --prune
         // must apply it — dropping the state row on withhold made the
         // deletion unknowable (e2e: filesync modes sequence)
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("gone.txt", b"g"), ("kept.txt", b"k")]);
         let c = client_for(&mock);
         let dir = tmpdir("prune-late");
@@ -1545,7 +1499,7 @@ mod tests {
 
     #[test]
     fn mass_deletion_guard_blocks_push() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a", b"1"), ("b", b"2"), ("c", b"3")]);
         let c = client_for(&mock);
         let dir = tmpdir("guard");
@@ -1566,7 +1520,7 @@ mod tests {
 
     #[test]
     fn wiped_folder_in_pull_mode_re_downloads_not_guard() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a", b"1"), ("b", b"2"), ("c", b"3")]);
         let c = client_for(&mock);
         let dir = tmpdir("wipe-pull");
@@ -1582,7 +1536,7 @@ mod tests {
 
     #[test]
     fn conflict_both_changed_saves_remote_copy() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("shared.txt", b"base")]);
         let c = client_for(&mock);
         let dir = tmpdir("conflict");
@@ -1615,7 +1569,7 @@ mod tests {
     /// and skipped `a` silently, on every pass.
     #[test]
     fn conflicts_are_tracked_by_path_not_report_text() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a", b"theirs a"), ("a.md", b"theirs a.md")]);
         let c = client_for(&mock);
         let dir = tmpdir("conflict-paths");
@@ -1642,7 +1596,7 @@ mod tests {
 
     #[test]
     fn pull_records_both_a_and_a_md_conflicts() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a", b"base a"), ("a.md", b"base a.md")]);
         let c = client_for(&mock);
         let dir = tmpdir("pull-conflict-paths");
@@ -1662,7 +1616,7 @@ mod tests {
 
     #[test]
     fn verify_catches_drift() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a.txt", b"same"), ("b.txt", b"will-drift")]);
         let c = client_for(&mock);
         let dir = tmpdir("verify");
@@ -1685,7 +1639,7 @@ mod tests {
         // bootstrap verifies by content — no adoption, local wins. The old
         // size-provisional rule silently never pushed these (found live);
         // verify audits nothing if the first sync already guessed wrong.
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a.txt", b"12345")]);
         let c = client_for(&mock);
         let dir = tmpdir("bootstrap");
@@ -1699,7 +1653,7 @@ mod tests {
 
     #[test]
     fn mirror_from_overlays_before_push() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[]);
         let c = client_for(&mock);
         let src = tmpdir("mf-src");
@@ -1720,7 +1674,7 @@ mod tests {
 
     #[test]
     fn commit_single_file_lands_with_cas_retry() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("fragment.json", br#"{"name":"t"}"#)]);
         let c = client_for(&mock);
         let tip = commit_single_file(&c, "t", "fragment.json", br#"{"name":"t","visibility":"public"}"#.to_vec(), "manifest-set", "deadbeef", None).unwrap();
@@ -1742,7 +1696,7 @@ mod tests {
         // (b) same repo name, different host — dev vs prod (repo ids
         //     alone can't tell these apart when the service reports
         //     name-form identities)
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("old.txt", b"remote world")]);
         let c = client_for(&mock);
         for (tag, journal) in [
@@ -1776,7 +1730,7 @@ mod tests {
         // same repo identity, but the remote was reset (fresh seed, empty
         // tree): the journal's files look remotely-deleted and the mirror
         // would delete them locally — the guard must refuse instead
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[]);
         let c = client_for(&mock);
         let dir = tmpdir("world-reset");
@@ -1804,7 +1758,7 @@ mod tests {
         // stateless bootstrap used to treat equal SIZE as same FILE — a
         // same-size different-content file silently never pushed (found
         // live). Content must decide.
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a.txt", b"aaaa")]);
         let c = client_for(&mock);
         let dir = tmpdir("bootstrap-diff");
@@ -1819,7 +1773,7 @@ mod tests {
     fn bootstrap_identical_content_adopts_without_commit() {
         // the flip side: byte-identical files adopt into the journal with
         // no commit and no re-fetch on the next pass
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a.txt", b"same")]);
         let c = client_for(&mock);
         let dir = tmpdir("bootstrap-same");

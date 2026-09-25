@@ -445,7 +445,7 @@ mod tests {
     /// style: success, replay-same-parent, conflicting-parent.
     #[test]
     fn commit_triple_success_replay_conflict() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("base.txt", b"base")]);
         let cs = cs_for(&mock, "t");
         let head0 = cs.branch_head(MAIN).unwrap().unwrap();
@@ -483,7 +483,7 @@ mod tests {
     /// the commit is on the branch.
     #[test]
     fn a_commit_whose_answer_is_lost_is_not_resent() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("base.txt", b"base")]);
         let cs = cs_for(&mock, "t");
         let head0 = cs.branch_head(MAIN).unwrap().unwrap();
@@ -497,7 +497,7 @@ mod tests {
 
     #[test]
     fn commit_deletes_and_oversized_chunking() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("small.txt", b"s")]);
         let cs = cs_for(&mock, "t");
         let head = cs.branch_head(MAIN).unwrap().unwrap();
@@ -513,7 +513,7 @@ mod tests {
 
     #[test]
     fn list_files_paginates() {
-        let mock = MockServer::start(); // page_size = 2 in the mock
+        let mock = crate::mockcs::start(); // page_size = 2 in the mock
         let files: Vec<(String, Vec<u8>)> = (0..5).map(|i| (format!("f{i}.txt"), vec![7u8; i + 1])).collect();
         let refs: Vec<(&str, &[u8])> = files.iter().map(|(p, b)| (p.as_str(), b.as_slice())).collect();
         mock.seed_repo("t", &refs);
@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn branch_head_missing_is_none() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a", b"1")]);
         let cs = cs_for(&mock, "t");
         assert!(cs.branch_head(MAIN).unwrap().is_some());
@@ -537,7 +537,7 @@ mod tests {
 
     #[test]
     fn first_commit_creates_branch_without_expected() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         let cs = cs_for(&mock, "fresh"); // a repo with no branches at all
         assert!(cs.branch_head(MAIN).unwrap().is_none());
         let tip = cs.commit(None, "root", &author(), &[upsert("root.txt", b"r")]).unwrap();
@@ -547,7 +547,7 @@ mod tests {
 
     #[test]
     fn promote_and_rollback_flow() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("v1.txt", b"1")]);
         let cs = cs_for(&mock, "t");
         // first deploy: create live at main's tip
@@ -579,7 +579,7 @@ mod tests {
     fn promote_with_stale_expected_live_is_cas_rejected() {
         // deploy's bounded retry loop keys off this rejection: live moved
         // since the SHA we pinned -> 409 target_moved, nothing applied
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("v1.txt", b"1")]);
         let cs = cs_for(&mock, "t");
         let tip1 = cs.branch_head(MAIN).unwrap().unwrap();
@@ -599,7 +599,7 @@ mod tests {
     /// than the margin.
     #[test]
     fn a_held_client_mints_again_only_near_expiry_or_when_refused() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a", b"1")]);
         let host = crate::api::Client::new(&mock.url, auth::fixed(7));
         let mut held = Held::new("t", None);
@@ -615,7 +615,7 @@ mod tests {
         assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some(), "a new token after the refusal");
         assert_eq!(mock.take_requests("").get("GET storage-token"), Some(&1));
 
-        let short = MockServer::with_token_ttl(TOKEN_REMINT_BEFORE_EXPIRY_MS / 1000 / 2);
+        let short = crate::mockcs::with_token_ttl(TOKEN_REMINT_BEFORE_EXPIRY_MS / 1000 / 2);
         short.seed_repo("t", &[("a", b"1")]);
         let host = crate::api::Client::new(&short.url, auth::fixed(7));
         let mut held = Held::new("t", None);
@@ -635,7 +635,7 @@ mod tests {
 
     #[test]
     fn storage_token_override_wins() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a", b"1")]);
         let host = crate::api::Client::new(&mock.url, auth::fixed(7));
         let cs = CodeStorage::connect(&host, "t", Some(&mock.url)).unwrap();

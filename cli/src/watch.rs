@@ -361,13 +361,9 @@ fn live_listener(url: &str, signer: &crate::auth::Identity, tx: Sender<Wakeup>, 
     }
 }
 
+/// The log's UTC wall-clock prefix, HH:MM:SS.
 fn chrono_like() -> String {
-    // UTC wall-clock log prefix; the old hand-roll walked leap years to
-    // produce a day-of-year it then discarded.
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     format!("{:02}:{:02}:{:02}", (secs % 86400) / 3600, (secs % 3600) / 60, secs % 60)
 }
 
@@ -429,7 +425,6 @@ pub fn follow_channel(client: &Client, name: &str, channel: &str, after: i64) ->
 mod tests {
     use super::*;
     use crate::auth;
-    use crate::mockcs::MockServer;
     use crate::sync::Mode;
     use std::collections::BTreeMap;
     use std::fs;
@@ -514,7 +509,7 @@ mod tests {
     /// feed's frame for our own commit started one more.
     #[test]
     fn one_local_write_is_one_pass_and_its_echoes_none() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a.md", b"a")]);
         let c = Client::new(&mock.url, auth::fixed(7));
         let dir = tmpdir("one-write");
@@ -553,7 +548,7 @@ mod tests {
     #[test]
     fn an_idle_sweep_reads_one_head_and_a_missed_move_is_pulled() {
         use std::os::unix::fs::MetadataExt;
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a.md", b"a")]);
         let c = Client::new(&mock.url, auth::fixed(7));
         let dir = tmpdir("sweep");
@@ -591,7 +586,7 @@ mod tests {
     /// tokens between passes.
     #[test]
     fn a_refused_token_is_minted_again_by_the_next_pass() {
-        let mock = MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a.md", b"a")]);
         let c = Client::new(&mock.url, auth::fixed(7));
         let dir = tmpdir("refused");
