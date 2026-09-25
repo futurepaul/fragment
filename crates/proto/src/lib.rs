@@ -1270,6 +1270,26 @@ mod tests {
         assert!(api.contains(&rule), "docs/api.md should say: {rule}");
     }
 
+    /// Goal: the list answers the cell builds through these types keep the
+    /// wire form it built by hand (`json!`) before, the one docs/api.md
+    /// names. Method: each type against that literal JSON.
+    #[test]
+    fn list_answers_keep_their_wire_form() {
+        fn value(v: &impl Serialize) -> Value {
+            serde_json::to_value(v).unwrap()
+        }
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner }] };
+        assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes.ann", "role": "owner" }] }));
+        let members = MemberList { members: vec![] };
+        assert_eq!(value(&members), serde_json::json!({ "members": [] }));
+        let invites = InviteList { invites: vec![] };
+        assert_eq!(value(&invites), serde_json::json!({ "invites": [] }));
+        let runs = RunList { runs: vec![], counts: [("held".to_string(), 2)].into(), paused: vec!["digest".into()] };
+        assert_eq!(value(&runs), serde_json::json!({ "runs": [], "counts": { "held": 2 }, "paused": ["digest"] }));
+        let page = ChannelPage { channel: "chat".into(), records: vec![], next: 7 };
+        assert_eq!(value(&page), serde_json::json!({ "channel": "chat", "records": [], "next": 7 }));
+    }
+
     /// A rotation answers in the contract's camelCase, like every answer.
     #[test]
     fn a_rotation_answers_in_camel_case() {

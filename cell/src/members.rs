@@ -15,7 +15,9 @@
 
 use fragment_core::access;
 use fragment_core::npub;
-use fragment_proto::{limits, CreateInvite, ErrorCode, Identity, IdentityKind, Invite, Join, Member, Role, Rotated, SetRole, SetVisibility, Visibility};
+use fragment_proto::{
+    limits, CreateInvite, ErrorCode, Identity, IdentityKind, Invite, InviteList, Join, Member, MemberList, Role, Rotated, SetRole, SetVisibility, Visibility,
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use worker::*;
@@ -144,7 +146,7 @@ impl FragmentCell {
         self.require(caller, false, Role::Viewer)?;
         let rows = self.rows(&format!("SELECT {MEMBER_COLUMNS} FROM members ORDER BY added_at, principal"), vec![])?;
         let members = rows.iter().map(member_json).collect::<CellResult<Vec<_>>>()?;
-        json_response(&json!({ "members": members }))
+        json_response(&MemberList { members })
     }
 
     /// A new member needs room under `MEMBERS_MAX`; a role change does not.
@@ -303,7 +305,7 @@ impl FragmentCell {
         self.require_owner(caller)?;
         self.drop_spent_invites()?;
         let rows = self.rows("SELECT id, role, uses_left, expires_at, created_by FROM invites ORDER BY created_at", vec![])?;
-        json_response(&json!({ "invites": rows.iter().map(invite_json).collect::<Vec<_>>() }))
+        json_response(&InviteList { invites: rows.iter().map(invite_json).collect() })
     }
 
     pub(crate) fn revoke_invite(&self, caller: &Caller, id: &str) -> CellResult<Response> {

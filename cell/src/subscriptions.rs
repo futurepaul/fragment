@@ -2,29 +2,19 @@
 //! each new record of a channel it may read to a URL, such as an agent's
 //! inbox (MODEL.md, Agents: "the agent member subscribes"). Records go out
 //! through the delivery outbox and queue (deliveries.rs) as `{type:
-//! "record", fragment, channel, record}`, unsigned: the URL is the
-//! subscriber's capability. A member's subscriptions end with its
+//! "record", fragment, channel, record}` (`fragment_proto::Delivery`, the
+//! type the agents' inbox decodes), unsigned: the URL is the subscriber's
+//! capability. A member's subscriptions end with its
 //! membership.
 
 use fragment_core::{egress, npub};
-use fragment_proto::{valid_channel_name, ChannelRecord, ErrorCode};
-use serde::Serialize;
+use fragment_proto::{valid_channel_name, ChannelRecord, DeliveryType, ErrorCode};
 use serde_json::{json, Value};
 use worker::*;
 
 use crate::deliveries::{Delivery, DeliveryKind};
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, Caller, FragmentCell};
-
-/// A record's delivery: `{type: "record", fragment, channel, record}`.
-#[derive(Serialize)]
-struct RecordDelivery<'a> {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    fragment: &'a str,
-    channel: &'a str,
-    record: &'a ChannelRecord,
-}
 
 /// The subscriptions one fragment holds, and a URL's length.
 const SUBS_MAX: u64 = 32;
@@ -155,7 +145,8 @@ impl FragmentCell {
         let Some(url) = subs.first().map(|r| r["url"].as_str().expect("subs.url is TEXT").to_string()) else { return Ok(None) };
         let Some(record) = self.read_channel(channel, seq - 1, 1)?.into_iter().next().filter(|r| r.seq == seq) else { return Ok(None) };
         // serialized as it is: the record's body goes out as the text the cell stored
-        let body = serde_json::to_string(&RecordDelivery { kind: "record", fragment, channel, record: &record }).expect("a delivery serializes");
+        let delivery = fragment_proto::Delivery { kind: DeliveryType::Record, fragment: fragment.to_string(), channel: channel.to_string(), record };
+        let body = serde_json::to_string(&delivery).expect("a delivery serializes");
         Ok(Some(Delivery {
             fragment: fragment.to_string(),
             incarnation: incarnation.to_string(),
