@@ -117,6 +117,26 @@ acts through it: a mutation or a job needs a membership of their own
 (403, saying so), and they get nothing the agent's own role opens beyond
 `viewer` (an editor's channels, tokens, or secrets).
 
+An agent acts for whoever asked, capped (ROADMAP decision 17). A request
+signed by an agent may name an identity in `for=<id:…>` in its URL's
+query (inside the signed URL, so the signature covers it): the request
+acts with the lower of the role that identity holds in the fragment (its
+membership, an agent of its own that is a member, or the visibility
+floor; never the share link, which the agent does not hold) and the
+agent's cap: the agent's own role there, or its owner's membership role
+if higher, and never above `editor`. The owner's part is the owner's own
+role, so an agent never reaches further than its owner could. The
+principal is still the agent (records, runs, and the ledger name it).
+`for` is honored on a fragment's routes (`/api/f/{name}/…`) and on `GET`
+and `POST /api/fragments` (a `POST` for anyone but the agent's owner is
+403: what an agent makes is its owner's); on any other route it is 400.
+A person's request naming `for` is 403, as is more than one `for` (400)
+or one that is not an identity (400). A call without `for` acts as the
+agent's own membership. Owner-only actions (members, other than leaving
+with `DELETE members/me`; invites; visibility; rotation; deletion) are
+403 for an agent whatever it names. A site request's query is its app's:
+`for` there means nothing to the platform.
+
 Membership is cell state: `fragment.json`'s `visibility`, `editors`, and
 `viewers` grant nothing (the cell records a `manifest.ignored` event).
 Only the owner manages members, invites, visibility, and tokens; a
@@ -238,7 +258,7 @@ deleted in batches on the registry's alarm, never on a request.
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/fragments` | a person with a username (an agent is 403) | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). The fragment's own key is made by the node's `KEYS` and stays sealed there. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`desktop`, `chat`, `todo`, `inbox`, `blank`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
-| `GET /api/fragments` | any signer | → `{fragments: [{name, role}]}` |
+| `GET /api/fragments` | any signer | → `{fragments: [{name, role}]}`; an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
 | `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes}` |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
@@ -719,13 +739,13 @@ else).
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/agents` | a person with a username | `{name, model? ("z-ai/glm-5.3-flash"), instructions?}` → `{name, npub, model, id}`: made and registered as the caller's; again by its owner, the same answer (`replayed`); a name under someone else's username is 403 |
-| `GET /api/a/{name}` | owner | → `{name, id, owner, npub, model, active, driving, outcome (running, idle, stopped, yielded, error), error, tokens, watchdogRestarts, messages: [{id, role, text, tool_requests, tool_responses, steer}], steer, toolRuns, steps}` (each list its newest 256, oldest first; `steer` holds the running turn's messages sent while it worked: a new turn drops those the model read) |
-| `GET /api/a/{name}/state?wait_ms=` | owner | → `AgentState` `{active, driving, outcome, error, answer}` (`crates/proto`; `answer` is the newest message when that is the model's text), once the turn is not active or `wait_ms` (0-25000, default 0) has passed: the read waits in the agent's cell, so a client waiting out a turn asks about every 25 s (`fragment agent say` does) |
-| `POST /api/a/{name}/turns` | owner | `{text}` (at most 16 KiB) → `{started}`; during a turn, `{steered: true}` (read between steps) |
-| `POST /api/a/{name}/stop` | owner | → `{active, driving}`; a tool in flight is interrupted |
-| `GET /api/a/{name}/tools` | owner | → `{tools: ["platform__create_fragment", "platform__list_files", "platform__read_file", "platform__write_files", "platform__deploy", "<fragment>__<op>", ...]}`: the platform's verbs (a fragment the agent makes is its owner's, the agent an editor; a file write's key is the tool call's), then its fragments' operations, less the reply operation of each channel it follows (its answers are posted there for it) |
-| `POST /api/a/{name}/listen` | owner | `{fragment, channel? ("chat"), reply? ("say")}` → `{fragment, channel, reply, subscription}`: the agent subscribes itself to the channel (it must be a member) with an inbox URL of its own (`AGENT_URL`); at most 16. Listening again to the same fragment's channel is the same listen: its inbox URL, so the one subscription (made again if the fragment dropped it) |
-| `POST /api/a/{name}/inbox/{token}` | the fragment's delivery (the token is the capability) | a `Delivery` (`crates/proto`), decoded whole: one that does not decode (a record without its `seq`, say) is 400. A record: someone else's starts a turn (or steers the running one); the agent's own, and one heard before (within a day: past the longest redelivery), are ignored; the turn's last answer goes back as `POST /api/f/{fragment}/ops/{reply}` `{text}` with the id `rp:<40 hex of SHA-256 of its message id>`; an unknown token is 404 |
+| `GET /api/a/{name}` | owner | → `{name, id, owner, npub, model, active, driving, outcome (running, idle, stopped, yielded, error), error, tokens, watchdogRestarts, conversation, asker, waiting: [{conversation, asker, at}], conversations: [{conversation, outcome, error, asker, at}], listens: {count, newest: [{fragment, channel, at}]}, ignored: [{fragment, channel, principal, at}], messages: [{id, role, text, tool_requests, tool_responses, steer, conversation}], steer, toolRuns, steps}` (each list its newest 256, oldest first but `conversations` and `listens`, newest first). `active`, `outcome`, and `error` are the running (or last) turn's, of any conversation; `conversation` and `asker` name it (`direct` is the owner's own conversation, a chat's is `<fragment>/<channel>`); `steer` holds the running turn's messages from its starter sent while it worked (a new turn drops those the model read); `ignored` notes anonymous messages, which start nothing |
+| `GET /api/a/{name}/state?wait_ms=` | owner | → `AgentState` `{active, driving, outcome, error, answer}` (`crates/proto`) of the owner's own conversation: `active` while a turn of it runs or waits behind a chat's, `answer` its newest message when that is the model's text; answered once it is not active or `wait_ms` (0-25000, default 0) has passed: the read waits in the agent's cell, so a client waiting out a turn asks about every 25 s (`fragment agent say` does) |
+| `POST /api/a/{name}/turns` | owner | `{text}` (at most 16 KiB) → `{started}`; during the owner's own turn, `{steered: true}` (read between steps); during another (a chat's), `{queued: true}`: it runs next, in the owner's conversation. At most 64 messages wait (429) |
+| `POST /api/a/{name}/stop` | owner | → `{active, driving}`; a tool in flight is interrupted; the messages waiting run next |
+| `GET /api/a/{name}/tools` | owner | → `{tools: ["platform__create_fragment", "platform__list_fragments", "platform__operations", "platform__call", "platform__list_files", "platform__read_file", "platform__write_files", "platform__deploy", "<fragment>__<op>", ...]}`: what the owner's own turn has (below) |
+| `POST /api/a/{name}/listen` | owner | `{fragment, channel? ("chat"), reply? ("say")}` → `{fragment, channel, reply, subscription}`: the agent subscribes itself to the channel (it must be a member) with an inbox URL of its own (`AGENT_URL`); at most 500. A new listen first drops those of fragments the agent is no longer in: of the fragments its memberships leave out, up to 16 are asked, and one that answers 404 or 403 loses its listens (so does one whose subscribe answers either, and a chat whose answer's post does). Listening again to the same fragment's channel is the same listen: its inbox URL, so the one subscription (made again if the fragment dropped it) |
+| `POST /api/a/{name}/inbox/{token}` | the fragment's delivery (the token is the capability) | a `Delivery` (`crates/proto`), decoded whole: one that does not decode (a record without its `seq`, say) is 400. A record from an identity starts a turn in the chat's conversation, acting for that identity; from the running turn's starter in its conversation, it steers that turn; any other waits for a turn of its own (429 past 64 waiting: the fragment delivers it again). The agent's own, one heard before (within a day: past the longest redelivery), and one from an anonymous visitor (`anon:`) are ignored (the owner's view keeps the newest 32 anonymous ones). The turn's last answer goes back as `POST /api/f/{fragment}/ops/{reply}` `{text}` with the id `rp:<40 hex of SHA-256 of its message id>`, as the agent; an unknown token is 404 |
 | `PUT /api/a/{name}/computer` | owner | `{url, token, cwd? ("work")}` → `{url, cwd, tools}`: attaches a computer once it answers `GET /tools` with that token (400 when it refuses it, 502 when it does not answer); the token is sealed like the agent's key |
 | `PUT /api/a/{name}/computer` | owner | `{connect: true, cwd?}` → `{connect, agent, token, cwd}`: a computer that connects out instead (`fragment computer connect --agent <agent> --token-file <f>`): a new connect token, answered once (the agent keeps its SHA-256), replacing any computer before |
 | `POST /api/a/{name}/computer/poll` | the connect token (`x-computer-token`) | → `{requests: [{rid, method, path, body}]}`: what the agent asks of its computer (the routes `fragment computer serve` answers), at once or within 25 s; one fetched and not answered in 40 s is handed out again; a wrong token 403 |
@@ -733,22 +753,43 @@ else).
 | `DELETE /api/a/{name}/computer` | owner | → `{detached}` |
 | `POST /api/a/{name}/test` | owner, test fleets | `{hold_in_tool_ms?, hold_after_tool_ms?, watchdog_ms?, window_messages? (2-256), view_rows? (2-256)}` |
 
-An agent's tools are the operations of the fragments whose members include
-it, those its role there may call (at most 16 fragments, 128
-tools), named `<fragment>__<op>` with the operation's input schema,
-less each followed channel's reply operation: the model is told its
-answer to a chat is posted for it, and a call to a tool the turn does
-not offer is answered with an error, so the turn goes on to its answer.
-A call
-is `POST /api/f/<fragment>/ops/<op>` signed by the agent with the id
-`tc:<40 hex of SHA-256 of the tool-call id>`: a replayed call replays the
-operation. At most 64 steps a turn. Each step sends the model a window
-of the conversation, not all of it: the newest 256 messages, cut to
+One conversation per chat: a turn belongs to the owner's own
+conversation or to one chat's, reads only it, and answers there. One turn
+runs at a time; a message for another conversation, or from anyone but
+the running turn's starter, waits for a turn of its own, and so does a
+steer the turn ended before reading (unless it was stopped). The driver
+that ends a turn starts the next one waiting in the same step. A turn
+records who started it (the owner, or the identity whose record it was),
+and every call it makes on the platform acts for them (`for`, above);
+the agent's own calls (listening, its model key, a chat's answer) name no
+one. An attached computer is its owner's: it joins its owner's turns
+only.
+
+A turn's tools, read as it starts, are of two kinds. Per-operation
+tools, for the turn's chat and the other fragments the agent is a member
+of (less the other chats it follows; at most 16 fragments, 128 tools):
+each fragment's operations, read with its status `for` the turn's asker,
+those the role it answers may call, named `<fragment>__<op>` with the
+operation's input schema, less each followed channel's reply operation
+(the model is told its answer to a chat is posted for it, and a call to
+a tool the turn does not offer is answered with an error, so the turn
+goes on to its answer). And the platform's verbs, for every fragment the
+asker reaches: `platform__list_fragments` (`GET /api/fragments?for=`),
+`platform__operations` (`{fragment}` → its operations and the role the
+turn acts with there), `platform__call` (`{fragment, operation, input}`),
+`platform__list_files`, `platform__read_file`, `platform__write_files`,
+`platform__deploy`, and, in its owner's turns only,
+`platform__create_fragment` (a fragment the agent makes is its owner's,
+the agent an editor). A call is `POST /api/f/<fragment>/ops/<op>?for=<asker>`
+signed by the agent with the id `tc:<40 hex of SHA-256 of the tool-call
+id>`: a replayed call replays the operation; a file write's key is the
+tool call's. At most 64 steps a turn. Each step sends the model a window
+of its conversation, not all of it: the newest 256 messages, cut to
 start at a turn's first message (so a tool call and its result stay
 together), with the running turn whole and earlier turns while they
 total 256 KiB. A turn that alone outgrows the window ends in an error;
-the next message starts a turn that fits. A channel-started turn's
-answer is its last message, when that is the model's text.
+the next message starts a turn that fits. A chat turn's answer is its
+last message, when that is the model's text.
 
 ### Computers (`fragment computer serve`, phase 8)
 

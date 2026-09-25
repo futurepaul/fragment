@@ -9,6 +9,7 @@
 
 use std::collections::HashSet;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
@@ -37,7 +38,7 @@ use worker::{Delay, Fetch, Headers, Method, Request, RequestInit, SqlStorage, St
 use crate::computer::{self, Computer, ComputerTools};
 use crate::fleet::Fleet;
 use crate::js;
-use crate::store::{self, kv_get, kv_set, kv_u64, Effect, Session, Store, SESSION_ID};
+use crate::store::{self, kv_get, kv_set, kv_u64, Effect, Session, Store};
 use crate::tools::FragmentTools;
 
 /// Every loop and input is bounded.
@@ -60,14 +61,23 @@ pub struct Attached {
     pub cwd: String,
 }
 
+/// One turn's driver: its conversation, and whom it acts for.
 pub struct Driver {
-    pub storage: Storage,
+    /// The agent cell's, shared by the turns one driver runs.
+    pub storage: Rc<Storage>,
     pub model: Model,
+    /// The agent's own; the turn's tools act for `asker` through it.
     pub fleet: Fleet,
     pub instructions: String,
     pub computer: Option<Attached>,
     pub cancel: CancellationToken,
     pub id: String,
+    /// The turn's conversation (store.rs `DIRECT`, or a chat's).
+    pub conv: String,
+    /// Who started the turn (an identity): every call acts for them.
+    pub asker: String,
+    /// Whether that is the agent's owner.
+    pub owner_turn: bool,
 }
 
 // ---------------------------------------------------------------- operations
@@ -272,7 +282,7 @@ async fn run_steps(driver: &Driver, machine: &StateMachine<'_, Session, Effect>,
             driver.cancel.cancel();
         }
         let t0 = js::now_ms();
-        let session = store.load(SESSION_ID).await?;
+        let session = store.load(&driver.conv).await?;
         let Some(mut result) = machine.step(&session, &emit).await? else {
             return Ok(TurnOutcome::Idle);
         };
@@ -304,10 +314,13 @@ pub async fn drive(driver: Driver) -> anyhow::Result<TurnOutcome> {
     arm_watchdog(&driver.storage, &sql).await?;
     let store = Store { sql: driver.storage.sql() };
     let provider: Arc<dyn Provider> = Arc::new(OpenRouter { base: driver.model.base.clone(), key: driver.model.key.clone() });
-    let tools = FragmentTools::new(driver.fleet.clone(), driver.storage.sql(), driver.id.clone());
+    let fleet = driver.fleet.acting_for(&driver.asker);
+    let tools = FragmentTools::new(fleet, driver.storage.sql(), driver.id.clone(), driver.conv.clone(), driver.owner_turn);
     let mut operation = ToolOperation::new().with_provider(Arc::new(tools));
     let mut instructions = driver.instructions.clone();
     let in_flight = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
+    // the computer is its owner's: someone else's turn never reaches it
+    assert!(driver.computer.is_none() || driver.owner_turn, "a computer joins its owner's turns only");
     if let Some(attached) = &driver.computer {
         // the computer's tools join the fragments' for this turn
         let c = attached.computer.clone();

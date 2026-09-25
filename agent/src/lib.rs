@@ -1,8 +1,21 @@
 //! Agents on celld (ROADMAP phase 5): a Durable Object per agent, with its
-//! own key, its conversation in SQL, and goose's loop (`goose-agent`) as its
-//! turn. Its tools are the operations of the fragments it belongs to, which
-//! it calls through the platform's signed API with its own key: an agent
-//! acts on a fragment exactly as its membership lets it.
+//! own key, its conversations in SQL, and goose's loop (`goose-agent`) as
+//! its turn. Its tools are fragments' operations and the platform's verbs,
+//! which it calls through the platform's signed API with its own key.
+//!
+//! An agent acts for whoever asked (ROADMAP decision 17): a turn records
+//! who started it, and every call the turn makes names them (`for`, inside
+//! the signed URL), so the platform acts with the lower of their role and
+//! the agent's cap. The owner starts turns directly; anyone else, by a
+//! message in a chat the agent follows. An anonymous visitor's message
+//! starts nothing.
+//!
+//! One conversation per chat (store.rs): a turn belongs to one, reads only
+//! it, and answers there. One turn runs at a time. A message from the
+//! running turn's starter, in its conversation, steers it; any other waits
+//! for a turn of its own, and a steer the turn ended before reading gets
+//! one too. The driver that ends a turn starts the next one waiting in the
+//! same step, so no message lands where nothing will read it.
 //!
 //! An agent is an identity in the platform's registry, owned by the person
 //! who made it (docs/finite-integration.md). This script is co-hosted in
@@ -16,11 +29,11 @@
 //! The owner's API (through the platform; the router checks the signature):
 //!   POST /api/agents                  {name, model?, instructions?} → {name, npub, model}
 //!                                     (again, by its owner: the same answer, `replayed`)
-//!   GET  /api/a/{name}                the conversation and the turn's state
-//!   GET  /api/a/{name}/state?wait_ms= the turn's state alone, once the turn ends (or wait_ms, at most 25 s)
-//!   POST /api/a/{name}/turns          {text}: start a turn, or steer the running one
+//!   GET  /api/a/{name}                its conversations, and its turns' state
+//!   GET  /api/a/{name}/state?wait_ms= the owner's own turn's state, once it ends (or wait_ms, at most 25 s)
+//!   POST /api/a/{name}/turns          {text}: start a turn, steer the owner's running one, or wait for one
 //!   POST /api/a/{name}/stop           stop the running turn
-//!   GET  /api/a/{name}/tools          the tools its memberships give it now
+//!   GET  /api/a/{name}/tools          the tools the owner's turn has now
 //!   POST /api/a/{name}/listen         {fragment, channel? ("chat"), reply? ("say")}: follow a channel (once: again is the same listen)
 //!   PUT  /api/a/{name}/computer       {url, token, cwd? ("work")}: attach a computer (`fragment computer serve`)
 //!   DELETE /api/a/{name}/computer     detach it
@@ -28,8 +41,9 @@
 //!
 //! A listened-to channel's records arrive at `POST /api/a/{name}/inbox/{token}`
 //! (the fragment's delivery; the token is the capability). A record from
-//! someone else starts a turn (or steers the running one), and the turn's
-//! last answer goes back through the fragment's reply operation.
+//! someone else starts a turn in that chat's conversation (or steers or
+//! waits, as above), and the turn's last answer goes back through the
+//! fragment's reply operation.
 
 mod computer;
 mod fleet;
@@ -40,13 +54,14 @@ mod tools;
 mod turn;
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use fragment_core::body::{LimitedBody, TooLarge};
 use fragment_core::npub;
 use fragment_proto::limits::AGENT_STATE_WAIT_MS_MAX;
-use fragment_proto::{valid_channel_name, valid_fragment_name, valid_op_name, AgentState, Delivery, ErrorCode, IdentityView, TurnOutcome};
-use futures::TryStreamExt;
+use fragment_proto::{valid_channel_name, valid_fragment_name, valid_op_name, AgentState, Delivery, ErrorCode, FragmentList, IdentityView, TurnOutcome};
+use futures::{StreamExt, TryStreamExt};
 use goose_provider_types::conversation::message::{Message, MessageContent};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -73,8 +88,20 @@ const MODEL_MAX: usize = 128;
 const INSTRUCTIONS_MAX: usize = 8 * 1024;
 const TEST_HOLD_MS_MAX: u64 = 60_000;
 const BODY_MAX: usize = 64 * 1024;
-/// The channels one agent follows.
-const LISTENS_MAX: usize = 16;
+/// The channels one agent follows (the desktop's own limit on a person's
+/// fragments).
+const LISTENS_MAX: usize = 500;
+/// Listens whose fragment the agent is no longer in, checked (and dropped
+/// when it answers 404 or 403) as a new listen is made, at most.
+const PRUNE_CHECKS_MAX: usize = 16;
+const PRUNE_CHECKS_AT_ONCE: usize = 4;
+/// Messages waiting while a turn runs (steers and turns of their own).
+const WAITING_MAX: usize = 64;
+/// The anonymous messages the owner's view keeps, newest.
+const IGNORED_KEEP: i64 = 32;
+/// Turns one driver runs back to back before it rests and leaves the next
+/// to the alarm.
+const TURNS_PER_DRIVER_MAX: usize = 256;
 /// The platform's default model (ROADMAP decision 7).
 const DEFAULT_MODEL: &str = "z-ai/glm-5.3-flash";
 /// A computer's URL, and its token.
@@ -302,8 +329,10 @@ async fn owners_key(fleet: &Fleet) -> anyhow::Result<String> {
 /// Told to the model on every turn, after the agent's instructions: those
 /// are stored when the agent is made, so a line added to
 /// `default_instructions` would never reach the agents made before it. The
-/// chat's reply operation is not among its tools (tools.rs `answer_ops`).
-const ANSWER_POSTED: &str = "Your answer to a chat message is posted to that chat for you.";
+/// chat's reply operation is not among its tools (tools.rs `listens`).
+const TURN_NOTES: &str = "Your answer to a chat message is posted to that chat for you. You act for the person who \
+     asked: you reach only what they may (platform__list_fragments lists it), and platform__operations and \
+     platform__call reach a fragment you have no tools for.";
 
 fn default_instructions(name: &str) -> String {
     let name = name.split('.').next().unwrap_or(name);
@@ -360,7 +389,7 @@ impl Agent {
     }
 
     fn fleet(&self) -> Answer<Fleet> {
-        Ok(Fleet { base: fleet::base(&self.env)?, signer: fleet::Signer { env: self.env.clone(), sql: self.sql() } })
+        Ok(Fleet { base: fleet::base(&self.env)?, signer: fleet::Signer { env: self.env.clone(), sql: self.sql() }, acting_for: None })
     }
 
     /// The attached computer, its token opened by `KEYS` (sealed for this
@@ -520,113 +549,101 @@ impl Agent {
         Ok(json!({ "name": body.name, "npub": agent_npub, "model": model }))
     }
 
+    /// Starts a driver for the active turn, unless one is running: it runs
+    /// that turn, answers it, and then each turn waiting, back to back.
     fn start_driver(&self, reason: &str) -> Answer<bool> {
         if self.driving.get() {
             return Ok(false);
         }
         let sql = self.sql();
         let base = var(&self.env, "OPENROUTER_API_URL").unwrap_or_else(|| "https://openrouter.ai".into()).trim_end_matches('/').to_string();
-        // the key is the owner's, asked for as the turn starts (below)
-        let model = Model { base, key: String::new(), name: kv_get(&sql, "model")?.unwrap_or_else(|| DEFAULT_MODEL.into()) };
         let name = kv_get(&sql, "name")?.unwrap_or_default();
-        let instructions = format!("{}\n\n{ANSWER_POSTED}", kv_get(&sql, "instructions")?.unwrap_or_else(|| default_instructions(&name)));
-        let token = CancellationToken::new();
+        let setup = Setup {
+            base,
+            model: kv_get(&sql, "model")?.unwrap_or_else(|| DEFAULT_MODEL.into()),
+            instructions: format!("{}\n\n{TURN_NOTES}", kv_get(&sql, "instructions")?.unwrap_or_else(|| default_instructions(&name))),
+            fleet: self.fleet()?,
+            env: self.env.clone(),
+            storage: Rc::new(self.state.storage()),
+            id: format!("{}:{reason}", self.booted_at),
+        };
+        // a stop that came before this driver is honored
+        let mut token = CancellationToken::new();
         if kv_u64(&sql, "cancel")? == 1 {
             token.cancel();
         }
-        let fleet = self.fleet()?;
-        let mut driver = Driver {
-            storage: self.state.storage(),
-            model,
-            fleet: fleet.clone(),
-            instructions,
-            // opened as the turn starts (below)
-            computer: None,
-            cancel: token.clone(),
-            id: format!("{}:{reason}", self.booted_at),
-        };
-        let env = self.env.clone();
-        *self.cancel.borrow_mut() = Some(token);
+        *self.cancel.borrow_mut() = Some(token.clone());
         self.driving.set(true);
-        let storage = self.state.storage();
         let driving = self.driving.clone();
         let cancel_slot = self.cancel.clone();
         self.state.wait_until(async move {
-            let sql = storage.sql();
-            let mut outcome = match (owners_key(&fleet).await, open_computer(&env, &sql).await) {
-                (Ok(key), Ok(computer)) => {
-                    driver.model.key = key;
-                    driver.computer = computer;
-                    turn::drive(driver).await
+            let sql = setup.storage.sql();
+            let mut resting = true;
+            // bounded: TURNS_PER_DRIVER_MAX turns, then the alarm starts the next driver
+            for pass in 0..TURNS_PER_DRIVER_MAX {
+                let outcome = run_turn(&setup, token.clone()).await;
+                // No await from here to the end of the pass: a message that
+                // lands meanwhile finds either the turn active (and steers
+                // it or waits: both are read below) or the agent at rest
+                // with no driver (and starts one).
+                if let Err(error) = finish_turn(&sql, &outcome) {
+                    worker::console_error!("finishing the turn failed: {error}");
                 }
-                (Err(e), _) | (_, Err(e)) => Err(e),
-            };
-            // a turn a channel started answers there
-            if matches!(outcome, Ok(TurnOutcome::Idle)) {
-                if let Err(error) = reply(&sql, &fleet).await {
-                    outcome = Err(error);
-                }
-            }
-            // a message that came in as the turn ended is read now: the turn
-            // stays active and the alarm starts a driver for it
-            let pending: Vec<Value> = sql.exec("SELECT seq FROM steer WHERE consumed = 0", None).and_then(|c| c.to_array()).unwrap_or_default();
-            if matches!(outcome, Ok(TurnOutcome::Idle)) && !pending.is_empty() {
-                let _ = kv_set(&sql, "rerun", 1);
-                let _ = storage.set_alarm(std::time::Duration::from_millis(50)).await;
-                driving.set(false);
-                cancel_slot.borrow_mut().take();
-                return;
-            }
-            let finish = || -> anyhow::Result<()> {
-                match &outcome {
-                    Ok(how) => kv_set(&sql, "outcome", how.as_str())?,
+                match next_turn(&sql) {
+                    Ok(true) if pass + 1 < TURNS_PER_DRIVER_MAX => {
+                        token = CancellationToken::new();
+                        *cancel_slot.borrow_mut() = Some(token.clone());
+                    }
+                    Ok(true) => resting = false,
+                    Ok(false) => break,
                     Err(error) => {
-                        kv_set(&sql, "outcome", TurnOutcome::Error.as_str())?;
-                        kv_set(&sql, "last_error", error.to_string())?;
+                        worker::console_error!("starting the next turn failed: {error}");
+                        break;
                     }
                 }
-                kv_set(&sql, "active", 0)?;
-                kv_set(&sql, "turn_ended_at", js::now_ms())
-            };
-            if let Err(error) = finish() {
-                worker::console_error!("finishing the turn failed: {error}");
             }
-            let _ = storage.delete_alarm().await;
-            driving.set(false);
             cancel_slot.borrow_mut().take();
+            driving.set(false);
+            // Issued before anything else runs: a driver started after it
+            // arms its own watchdog after this lands.
+            let _ = match resting {
+                true => setup.storage.delete_alarm().await,
+                false => setup.storage.set_alarm(std::time::Duration::from_millis(50)).await,
+            };
         });
         Ok(true)
     }
 
-    fn turn(&self, body: TurnBody) -> Answer<Value> {
-        self.begin(body.text, "")
+    /// The owner's own message (`POST turns`).
+    fn turn(&self, owner: &str, body: TurnBody) -> Answer<Value> {
+        self.begin(store::DIRECT, owner, body.text)
     }
 
-    /// Starts a turn with `text`, or steers the running one. `reply_to` is
-    /// the listen (a token) whose fragment gets the turn's answer, if any.
-    fn begin(&self, text: String, reply_to: &str) -> Answer<Value> {
+    /// A message for `conv` from `asker`: it starts a turn when none runs,
+    /// steers the running one when that is `asker`'s in `conv`, and waits
+    /// for a turn of its own otherwise.
+    fn begin(&self, conv: &str, asker: &str, text: String) -> Answer<Value> {
         if text.is_empty() || text.len() > MESSAGE_TEXT_MAX {
             return Err(Fail::invalid(format!("text is 1-{MESSAGE_TEXT_MAX} bytes")));
         }
+        assert!(npub::is_identity(asker), "a turn's asker is an identity");
         let sql = self.sql();
         if kv_u64(&sql, "active")? == 1 {
-            store::steer(&sql, &text)?;
-            return Ok(json!({ "steered": true, "driving": self.driving.get() }));
+            if waiting(&sql)? >= WAITING_MAX {
+                return Err(Fail::new(ErrorCode::RateLimited, format!("at most {WAITING_MAX} messages wait for the agent; try again when it is done")));
+            }
+            let running = (kv_get(&sql, "turn_conv")?.unwrap_or_default(), kv_get(&sql, "turn_asker")?.unwrap_or_default());
+            if running.0 == conv && running.1 == asker {
+                store::steer(&sql, &text)?;
+                return Ok(json!({ "steered": true, "driving": self.driving.get() }));
+            }
+            wait(&sql, conv, asker, &text)?;
+            return Ok(json!({ "queued": true, "driving": self.driving.get() }));
         }
-        kv_set(&sql, "reply_to", reply_to)?;
-        // a new turn: images an earlier one kept and never showed are
-        // dropped, and so are the earlier turns' steers the model read
-        // (each is in the conversation as a message of its own)
-        sql.exec("DELETE FROM shots", None)?;
-        sql.exec("DELETE FROM steer WHERE consumed = 1", None)?;
-        let mut kickoff = Message::user().with_text(text);
-        kickoff.id = Some(format!("msg_{}", uuid::Uuid::new_v4()));
-        store::append_message(&sql, &kickoff)?;
-        kv_set(&sql, "active", 1)?;
-        kv_set(&sql, "cancel", 0)?;
-        kv_set(&sql, "last_error", "")?;
-        kv_set(&sql, "turn_started_at", js::now_ms())?;
-        kv_set(&sql, "outcome", TurnOutcome::Running.as_str())?;
+        // at rest: the oldest message waiting goes first (a driver drains
+        // them before it rests, so there is none unless one died between)
+        wait(&sql, conv, asker, &text)?;
+        next_turn(&sql)?;
         let started = self.start_driver("turn")?;
         Ok(json!({ "started": started }))
     }
@@ -635,9 +652,10 @@ impl Agent {
     /// channel (a retry, or a chat's alarm joining its owner's agent once
     /// more) reuses its token, so its inbox URL is the same and the fragment
     /// answers the one subscription it holds for that URL (or makes it
-    /// again, if it was dropped). A new listen's row is written before the
-    /// request, with no await between the read and the write, so a listen
-    /// racing it finds the token too.
+    /// again, if it was dropped). A new listen first drops the listens of
+    /// fragments the agent is no longer in (`prune_listens`). Its row is
+    /// written before the request, with no await between the read and the
+    /// write, so a listen racing it finds the token too.
     async fn listen(&self, body: ListenBody) -> Answer<Value> {
         let channel = body.channel.unwrap_or_else(|| "chat".into());
         let reply = body.reply.unwrap_or_else(|| "say".into());
@@ -651,11 +669,20 @@ impl Agent {
         struct Listening {
             token: String,
         }
-        let same: Vec<Listening> = sql
-            .exec("SELECT token FROM listens WHERE fragment = ? AND channel = ? ORDER BY created_at LIMIT 1", vec![body.fragment.as_str().into(), channel.as_str().into()])?
-            .to_array()?;
-        let token = match same.into_iter().next() {
-            Some(listening) => listening.token,
+        let same = |sql: &worker::SqlStorage| -> Answer<Option<String>> {
+            let rows: Vec<Listening> = sql
+                .exec("SELECT token FROM listens WHERE fragment = ? AND channel = ? ORDER BY created_at LIMIT 1", vec![body.fragment.as_str().into(), channel.as_str().into()])?
+                .to_array()?;
+            Ok(rows.into_iter().next().map(|l| l.token))
+        };
+        if same(&sql)?.is_none() {
+            // housekeeping: a prune that fails leaves the listens as they were
+            if let Err(e) = self.prune_listens().await {
+                worker::console_warn!("pruning listens: {}", e.message);
+            }
+        }
+        let token = match same(&sql)? {
+            Some(token) => token,
             None => {
                 let listening: Vec<Value> = sql.exec("SELECT token FROM listens", None)?.to_array()?;
                 if listening.len() >= LISTENS_MAX {
@@ -675,8 +702,9 @@ impl Agent {
         let path = format!("/api/f/{}/subscriptions", body.fragment);
         let (status, answer) = platform.call(Method::Post, &path, Some(&json!({ "channel": channel, "url": url }))).await?;
         if status != 200 {
-            // a listen that never subscribed leaves nothing behind
-            sql.exec("DELETE FROM listens WHERE token = ? AND sub = 0", vec![token.as_str().into()])?;
+            // a listen that never subscribed leaves nothing behind, nor one
+            // on a fragment that is gone (404) or that it is not in (403)
+            sql.exec("DELETE FROM listens WHERE token = ? AND (sub = 0 OR ?)", vec![token.as_str().into(), (matches!(status, 403 | 404) as i64).into()])?;
             let code = match status {
                 401 | 403 => ErrorCode::Forbidden,
                 404 => ErrorCode::NotFound,
@@ -694,9 +722,45 @@ impl Agent {
         Ok(json!({ "fragment": body.fragment, "channel": channel, "reply": reply, "subscription": sub }))
     }
 
+    /// Drops the listens of fragments the agent is no longer in. Those its
+    /// memberships leave out (its `Principal` index, which can trail a
+    /// join) are asked, at most PRUNE_CHECKS_MAX of them: one that answers
+    /// 404 (it is gone) or 403 (the agent is not in it) loses its listens.
+    /// Answers how many fragments did.
+    async fn prune_listens(&self) -> Answer<usize> {
+        let fleet = self.fleet()?;
+        let mine: FragmentList = fleet.get_as("/api/fragments").await?;
+        let member: HashSet<String> = mine.fragments.into_iter().map(|f| f.name).collect();
+        #[derive(Deserialize)]
+        struct Row {
+            fragment: String,
+        }
+        let rows: Vec<Row> = self.sql().exec("SELECT DISTINCT fragment FROM listens ORDER BY fragment", None)?.to_array()?;
+        let unlisted: Vec<String> = rows.into_iter().map(|r| r.fragment).filter(|f| !member.contains(f)).take(PRUNE_CHECKS_MAX).collect();
+        let gone: Vec<String> = futures::stream::iter(unlisted)
+            .map(|fragment| {
+                let fleet = fleet.clone();
+                async move {
+                    let status = fleet.call(Method::Get, &format!("/api/f/{fragment}/status"), None).await.map(|(status, _)| status);
+                    matches!(status, Ok(403 | 404)).then_some(fragment)
+                }
+            })
+            .buffer_unordered(PRUNE_CHECKS_AT_ONCE)
+            .filter_map(|gone| async move { gone })
+            .collect()
+            .await;
+        let sql = self.sql();
+        for fragment in &gone {
+            sql.exec("DELETE FROM listens WHERE fragment = ?", vec![fragment.as_str().into()])?;
+        }
+        Ok(gone.len())
+    }
+
     /// A delivery from a followed channel: someone else's record starts a
-    /// turn (or steers the running one); the agent's own, and a record heard
-    /// before, are acknowledged and ignored.
+    /// turn in that chat's conversation (or steers, or waits: `begin`). The
+    /// agent's own, and a record heard before, are acknowledged and
+    /// ignored; so is one from someone not signed in (an anonymous visitor
+    /// holding a chat's link), which the owner's view notes.
     fn inbox(&self, token: &str, delivery: Delivery) -> Answer<Value> {
         let Delivery { kind: _, fragment: sent_from, channel: sent_on, record } = delivery;
         let sql = self.sql();
@@ -714,6 +778,12 @@ impl Agent {
         if !me.is_empty() && record.principal == me {
             return Ok(json!({ "ignored": "own" }));
         }
+        let signed_in = npub::is_identity(&record.principal);
+        // a message that cannot wait now is refused before it is heard, so
+        // its redelivery is heard
+        if signed_in && kv_u64(&sql, "active")? == 1 && waiting(&sql)? >= WAITING_MAX {
+            return Err(Fail::new(ErrorCode::RateLimited, format!("at most {WAITING_MAX} messages wait for the agent")));
+        }
         // the record's place in its channel: decoding made sure it has one
         let key = format!("{fragment}/{channel}/{}", record.seq);
         let now = js::now_ms() as i64;
@@ -723,6 +793,14 @@ impl Agent {
         }
         // no delivery comes again after HEARD_KEEP_MS: older keys only grow the table
         sql.exec("DELETE FROM heard WHERE at < ?", vec![(now - HEARD_KEEP_MS).into()])?;
+        if !signed_in {
+            sql.exec(
+                "INSERT INTO ignored (fragment, channel, principal, at) VALUES (?, ?, ?, ?)",
+                vec![fragment.into(), channel.into(), record.principal.as_str().into(), now.into()],
+            )?;
+            sql.exec("DELETE FROM ignored WHERE seq <= (SELECT MAX(seq) FROM ignored) - ?", vec![IGNORED_KEEP.into()])?;
+            return Ok(json!({ "ignored": "anonymous" }));
+        }
         // a chat's record says `{text}`; any other body is heard as its JSON
         #[derive(Deserialize)]
         struct Said {
@@ -737,7 +815,7 @@ impl Agent {
         if text.len() > MESSAGE_TEXT_MAX {
             text.truncate(text.floor_char_boundary(MESSAGE_TEXT_MAX));
         }
-        self.begin(text, token)
+        self.begin(&store::conv_of(fragment, channel), &record.principal, text)
     }
 
     fn stop(&self) -> Answer<Value> {
@@ -786,19 +864,35 @@ impl Agent {
         Ok(json!({ "ok": true }))
     }
 
-    /// The turn's state, as `state` answers it.
+    /// The owner's own turn's state, as `state` answers it: active while
+    /// one runs or waits (behind a chat's), and its conversation's outcome
+    /// and answer.
     fn turn_state(&self) -> Answer<AgentState> {
         let sql = self.sql();
-        let outcome = match kv_get(&sql, "outcome")?.unwrap_or_default().as_str() {
-            "" => None,
-            stored => Some(TurnOutcome::parse(stored).ok_or_else(|| Fail::host(format!("corrupt state: outcome {stored:?}")))?),
+        let parse = |stored: &str| TurnOutcome::parse(stored).ok_or_else(|| Fail::host(format!("corrupt state: outcome {stored:?}")));
+        let running = kv_u64(&sql, "active")? == 1 && kv_get(&sql, "turn_conv")?.is_none_or(|c| c == store::DIRECT);
+        let queued: Vec<Value> = sql.exec("SELECT seq FROM pending WHERE conv = ? LIMIT 1", vec![store::DIRECT.into()])?.to_array()?;
+        #[derive(Deserialize)]
+        struct Ended {
+            outcome: String,
+            error: String,
+        }
+        let ended: Vec<Ended> = sql.exec("SELECT outcome, error FROM convs WHERE conv = ?", vec![store::DIRECT.into()])?.to_array()?;
+        let (outcome, error) = match ended.into_iter().next() {
+            _ if running || !queued.is_empty() => (Some(TurnOutcome::Running), None),
+            Some(ended) => (Some(parse(&ended.outcome)?), Some(ended.error)),
+            // an agent whose turns ended before conversations were kept apart
+            None => match kv_get(&sql, "outcome")?.unwrap_or_default().as_str() {
+                "" => (None, None),
+                stored => (Some(parse(stored)?), kv_get(&sql, "last_error")?),
+            },
         };
-        let error = kv_get(&sql, "last_error")?.filter(|e| !e.is_empty());
-        let answer = last_answer(&sql)?.map(|m| m.as_concat_text());
-        Ok(AgentState { active: kv_u64(&sql, "active")? == 1, driving: self.driving.get(), outcome, error, answer })
+        let answer = last_answer(&sql, store::DIRECT)?.map(|m| m.as_concat_text());
+        let error = error.filter(|e| !e.is_empty());
+        Ok(AgentState { active: running || !queued.is_empty(), driving: self.driving.get(), outcome, error, answer })
     }
 
-    /// `state?wait_ms=`: the turn's state once the turn is not active, or
+    /// `state?wait_ms=`: the owner's turn's state once it is not active, or
     /// once `wait_ms` passed. It waits here, reading this cell's own SQL,
     /// so a client waiting out a turn asks once every 25 s instead of
     /// reading the whole view (signature, owner check, every list) twice a
@@ -825,7 +919,7 @@ impl Agent {
         };
         let messages: Vec<Value> = recent_messages(&sql, rows)?
             .iter()
-            .map(|message| {
+            .map(|(message, conv)| {
                 let requests: Vec<Value> = message
                     .content
                     .iter()
@@ -839,6 +933,7 @@ impl Agent {
                     "tool_requests": requests,
                     "tool_responses": message.get_tool_response_ids(),
                     "steer": message.metadata.steer,
+                    "conversation": conv,
                 })
             })
             .collect();
@@ -848,6 +943,8 @@ impl Agent {
             Ok(sql.exec(&query, vec![(rows as i64).into()])?.to_array::<Value>()?)
         };
         let get = |k: &str| kv_get(&sql, k).map(|v| v.unwrap_or_default());
+        let newest = |query: &str| -> Answer<Vec<Value>> { Ok(sql.exec(query, vec![(rows as i64).into()])?.to_array::<Value>()?) };
+        let listens: Vec<Value> = sql.exec("SELECT COUNT(*) AS n FROM listens", None)?.to_array()?;
         Ok(json!({
             "name": get("name")?,
             "id": get("identity")?,
@@ -865,6 +962,15 @@ impl Agent {
                 url => json!({ "url": url, "cwd": get("computer_cwd")? }),
             },
             "watchdogRestarts": kv_u64(&sql, "watchdog_restarts")?,
+            "conversation": get("turn_conv")?,
+            "asker": get("turn_asker")?,
+            "waiting": table("conv AS conversation, asker, at", "pending")?,
+            "conversations": newest("SELECT conv AS conversation, outcome, error, asker, at FROM convs ORDER BY at DESC LIMIT ?")?,
+            "listens": {
+                "count": listens.first().map_or(json!(0), |r| r["n"].clone()),
+                "newest": newest("SELECT fragment, channel, created_at AS at FROM listens ORDER BY created_at DESC LIMIT ?")?,
+            },
+            "ignored": table("fragment, channel, principal, at", "ignored")?,
             "messages": messages,
             "steer": table("seq, text, consumed", "steer")?,
             "toolRuns": table("tool_call_id, tool, at, driver", "tool_runs")?,
@@ -910,11 +1016,12 @@ impl Agent {
                 match (method.clone(), action) {
                     (Method::Get, "view") => self.view(),
                     (Method::Get, "state") => from(serde_json::to_value(self.state(wait_ms(&url)?).await?).map_err(|e| Fail::host(e.to_string()))?),
-                    (Method::Post, "turns") => self.turn(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?),
+                    (Method::Post, "turns") => self.turn(&principal, serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?),
                     (Method::Post, "stop") => self.stop(),
                     (Method::Post, "listen") => self.listen(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?).await,
                     (Method::Get, "tools") => {
-                        let mut names = tools::list(self.fleet()?, &self.sql()).await?;
+                        // what the owner's own turn has
+                        let mut names = tools::list(self.fleet()?.acting_for(&principal), &self.sql()).await?;
                         if let Some(attached) = self.computer().await? {
                             let manifest = attached.computer.check().await.map_err(unanswered)?;
                             names.extend(computer::tools_of(&manifest)?.iter().map(|t| t.name.to_string()));
@@ -964,19 +1071,152 @@ async fn open_computer(env: &Env, sql: &worker::SqlStorage) -> anyhow::Result<Op
     Ok(Some(Attached { computer: Computer { url, token, tunnel: None }, cwd }))
 }
 
-/// Posts a channel-started turn's last answer to its fragment, through the
-/// listen's reply operation, once (the id comes from the message).
-async fn reply(sql: &worker::SqlStorage, fleet: &Fleet) -> anyhow::Result<()> {
-    let Some(token) = kv_get(sql, "reply_to")?.filter(|t| !t.is_empty()) else { return Ok(()) };
-    let rows: Vec<Value> = sql.exec("SELECT fragment, reply FROM listens WHERE token = ?", vec![token.as_str().into()]).and_then(|c| c.to_array()).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let Some(listen) = rows.first() else { return Ok(()) };
+/// What every turn one driver runs shares.
+struct Setup {
+    /// The model service's base URL.
+    base: String,
+    /// The model's name.
+    model: String,
+    instructions: String,
+    /// The agent's own; each turn's tools act for its asker through it.
+    fleet: Fleet,
+    env: Env,
+    storage: Rc<worker::Storage>,
+    /// The driver's name in the steps it records.
+    id: String,
+}
+
+/// Runs the active turn to its end, and answers it in its chat.
+async fn run_turn(setup: &Setup, cancel: CancellationToken) -> anyhow::Result<TurnOutcome> {
+    let sql = setup.storage.sql();
+    let conv = kv_get(&sql, "turn_conv")?.filter(|c| !c.is_empty()).unwrap_or_else(|| store::DIRECT.to_string());
+    let asker = kv_get(&sql, "turn_asker")?.unwrap_or_default();
+    if !npub::is_identity(&asker) {
+        anyhow::bail!("this turn began before turns recorded who asked for them; send the message again");
+    }
+    // the owner is learned before any turn can start (`registration`)
+    let owner_turn = kv_get(&sql, "owner")?.is_some_and(|owner| owner == asker);
+    let key = owners_key(&setup.fleet).await?;
+    // the computer is its owner's: it joins its owner's turns only
+    let computer = if owner_turn { open_computer(&setup.env, &sql).await? } else { None };
+    let driver = Driver {
+        storage: setup.storage.clone(),
+        model: Model { base: setup.base.clone(), key, name: setup.model.clone() },
+        fleet: setup.fleet.clone(),
+        instructions: setup.instructions.clone(),
+        computer,
+        cancel,
+        id: setup.id.clone(),
+        conv: conv.clone(),
+        asker,
+        owner_turn,
+    };
+    let outcome = turn::drive(driver).await?;
+    // a turn a chat started answers there
+    if outcome == TurnOutcome::Idle {
+        reply(&sql, &setup.fleet, &conv).await?;
+    }
+    Ok(outcome)
+}
+
+/// Records the active turn's end (its conversation's too). The messages
+/// its starter sent that it ended before reading wait for a turn of their
+/// own, unless it was stopped. No await: the caller starts the next turn
+/// in the same step.
+fn finish_turn(sql: &worker::SqlStorage, outcome: &anyhow::Result<TurnOutcome>) -> anyhow::Result<()> {
+    let (how, error) = match outcome {
+        Ok(how) => (*how, String::new()),
+        Err(error) => (TurnOutcome::Error, error.to_string()),
+    };
+    let conv = kv_get(sql, "turn_conv")?.unwrap_or_default();
+    let asker = kv_get(sql, "turn_asker")?.unwrap_or_default();
+    let now = js::now_ms() as i64;
+    kv_set(sql, "outcome", how.as_str())?;
+    kv_set(sql, "last_error", &error)?;
+    kv_set(sql, "active", 0)?;
+    kv_set(sql, "turn_ended_at", now)?;
+    sql.exec(
+        "INSERT INTO convs (conv, outcome, error, asker, at) VALUES (?, ?, ?, ?, ?) \
+         ON CONFLICT (conv) DO UPDATE SET outcome = excluded.outcome, error = excluded.error, asker = excluded.asker, at = excluded.at",
+        vec![conv.as_str().into(), how.as_str().into(), error.as_str().into(), asker.as_str().into(), now.into()],
+    )?;
+    if how != TurnOutcome::Stopped && npub::is_identity(&asker) {
+        sql.exec(
+            "INSERT INTO pending (conv, asker, text, at) SELECT ?, ?, text, ? FROM steer WHERE consumed = 0 ORDER BY seq",
+            vec![conv.as_str().into(), asker.as_str().into(), now.into()],
+        )?;
+    }
+    sql.exec("DELETE FROM steer WHERE consumed = 0", None)?;
+    Ok(())
+}
+
+/// Starts the oldest message waiting as a turn of its own; `false` when
+/// none waits. No await.
+fn next_turn(sql: &worker::SqlStorage) -> anyhow::Result<bool> {
+    #[derive(Deserialize)]
+    struct Waiting {
+        seq: i64,
+        conv: String,
+        asker: String,
+        text: String,
+    }
+    let rows: Vec<Waiting> = sql.exec("SELECT seq, conv, asker, text FROM pending ORDER BY seq LIMIT 1", None)?.to_array()?;
+    let Some(next) = rows.into_iter().next() else { return Ok(false) };
+    sql.exec("DELETE FROM pending WHERE seq = ?", vec![next.seq.into()])?;
+    // the steers an earlier turn's model read are in its conversation, and
+    // the images it kept and never showed are dropped
+    sql.exec("DELETE FROM steer", None)?;
+    sql.exec("DELETE FROM shots", None)?;
+    let mut kickoff = Message::user().with_text(next.text);
+    kickoff.id = Some(format!("msg_{}", uuid::Uuid::new_v4()));
+    store::append_message(sql, &next.conv, &kickoff)?;
+    kv_set(sql, "turn_conv", &next.conv)?;
+    kv_set(sql, "turn_asker", &next.asker)?;
+    kv_set(sql, "active", 1)?;
+    kv_set(sql, "cancel", 0)?;
+    kv_set(sql, "last_error", "")?;
+    kv_set(sql, "turn_started_at", js::now_ms())?;
+    kv_set(sql, "outcome", TurnOutcome::Running.as_str())?;
+    Ok(true)
+}
+
+/// Puts a message in line for a turn of its own.
+fn wait(sql: &worker::SqlStorage, conv: &str, asker: &str, text: &str) -> anyhow::Result<()> {
+    sql.exec("INSERT INTO pending (conv, asker, text, at) VALUES (?, ?, ?, ?)", vec![conv.into(), asker.into(), text.into(), (js::now_ms() as i64).into()])?;
+    Ok(())
+}
+
+/// The messages waiting while a turn runs: its steers not read yet, and
+/// those in line for turns of their own.
+fn waiting(sql: &worker::SqlStorage) -> anyhow::Result<usize> {
+    #[derive(Deserialize)]
+    struct Count {
+        n: i64,
+    }
+    let rows: Vec<Count> =
+        sql.exec("SELECT (SELECT COUNT(*) FROM pending) + (SELECT COUNT(*) FROM steer WHERE consumed = 0) AS n", None)?.to_array()?;
+    Ok(rows.first().map_or(0, |c| c.n.max(0) as usize))
+}
+
+/// Posts a chat turn's last answer to its fragment, through the listen's
+/// reply operation, once (the id comes from the message). The owner's own
+/// conversation has nowhere to post. A chat that is gone (404), or that no
+/// longer has the agent (403), drops its listen.
+async fn reply(sql: &worker::SqlStorage, fleet: &Fleet, conv: &str) -> anyhow::Result<()> {
+    let Some((fragment, channel)) = store::chat_of(conv) else { return Ok(()) };
+    #[derive(Deserialize)]
+    struct Listen {
+        reply: String,
+    }
+    let rows: Vec<Listen> = sql.exec("SELECT reply FROM listens WHERE fragment = ? AND channel = ?", vec![fragment.into(), channel.into()])?.to_array()?;
+    // a listen dropped since: nowhere to answer
+    let Some(listen) = rows.into_iter().next() else { return Ok(()) };
     // a turn that ended without text has nothing to say
-    let Some(answer) = last_answer(sql)? else { return Ok(()) };
+    let Some(answer) = last_answer(sql, conv)? else { return Ok(()) };
     let id = fragment_core::tools::reply_id(answer.id.as_deref().unwrap_or(""));
-    let fragment = listen["fragment"].as_str().unwrap_or("");
     let mut text = answer.as_concat_text();
     // the turn's images (a screenshot) land in the chat's files, shown with the answer
-    let shots: Vec<Value> = sql.exec("SELECT seq, mime, data FROM shots ORDER BY seq", None).and_then(|c| c.to_array()).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let shots: Vec<Value> = sql.exec("SELECT seq, mime, data FROM shots ORDER BY seq", None)?.to_array()?;
     if !shots.is_empty() {
         let paths: Vec<String> = shots
             .iter()
@@ -992,19 +1232,26 @@ async fn reply(sql: &worker::SqlStorage, fleet: &Fleet) -> anyhow::Result<()> {
             text.push_str(&format!("\n\n(the screenshot could not be shown here: {})", fleet::message(&body)));
         }
     }
-    let path = format!("/api/f/{fragment}/ops/{}", listen["reply"].as_str().unwrap_or(""));
+    let path = format!("/api/f/{fragment}/ops/{}", listen.reply);
     let (status, body) = fleet.call(Method::Post, &path, Some(&json!({ "id": id, "input": { "text": text } }))).await?;
+    if matches!(status, 403 | 404) {
+        sql.exec("DELETE FROM listens WHERE fragment = ?", vec![fragment.into()])?;
+    }
     if status != 200 {
         anyhow::bail!("posting the answer to {path}: {status} {}", fleet::message(&body));
     }
-    sql.exec("DELETE FROM shots", None).map_err(|e| anyhow::anyhow!("{e}"))?;
-    kv_set(sql, "reply_to", "")
+    sql.exec("DELETE FROM shots", None)?;
+    Ok(())
 }
 
 impl DurableObject for Agent {
     fn new(state: State, env: Env) -> Self {
-        if let Err(error) = state.storage().sql().exec(store::SCHEMA, None) {
+        let sql = state.storage().sql();
+        if let Err(error) = sql.exec(store::SCHEMA, None) {
             worker::console_error!("schema: {error}");
+        }
+        if let Err(error) = store::migrate(&sql) {
+            worker::console_error!("migrating the schema: {error}");
         }
         Self { state, env, booted_at: js::now_ms(), driving: Rc::new(Cell::new(false)), cancel: Rc::new(RefCell::new(None)) }
     }
@@ -1018,26 +1265,29 @@ impl DurableObject for Agent {
 
     async fn alarm(&self) -> worker::Result<Response> {
         let sql = self.sql();
-        let active = kv_u64(&sql, "active").map_err(|e| worker::Error::RustError(e.to_string()))? == 1;
+        let failed = |e: anyhow::Error| worker::Error::RustError(e.to_string());
+        let active = kv_u64(&sql, "active").map_err(failed)? == 1;
         if active {
             // The watchdog: a driver that died with its node is replaced
             // here and resumes from the last applied step. A live driver
             // gets the wake re-armed, so one always stays pending.
-            let rerun = kv_u64(&sql, "rerun").unwrap_or(0) == 1;
-            match self.start_driver(if rerun { "rerun" } else { "alarm" }) {
-                Ok(true) if rerun => {
-                    let _ = kv_set(&sql, "rerun", 0);
-                }
+            match self.start_driver("alarm") {
                 Ok(true) => {
                     let restarts = kv_u64(&sql, "watchdog_restarts").unwrap_or(0);
                     let _ = kv_set(&sql, "watchdog_restarts", restarts + 1);
                 }
-                Ok(false) => turn::arm_watchdog(&self.state.storage(), &sql).await.map_err(|e| worker::Error::RustError(e.to_string()))?,
+                Ok(false) => turn::arm_watchdog(&self.state.storage(), &sql).await.map_err(failed)?,
                 Err(f) => {
                     let _ = kv_set(&sql, "outcome", TurnOutcome::Error.as_str());
                     let _ = kv_set(&sql, "last_error", &f.message);
                     let _ = kv_set(&sql, "active", 0);
                 }
+            }
+        } else if next_turn(&sql).map_err(failed)? {
+            // a message waiting with no driver (one rested after its most
+            // turns, or died between them)
+            if let Err(f) = self.start_driver("waiting") {
+                worker::console_error!("starting a waiting turn: {}", f.message);
             }
         }
         Response::ok("ok")

@@ -175,18 +175,48 @@ pub(crate) async fn ask_registry<C: Call>(env: &Env, call: &C) -> CellResult<C::
     }
 }
 
+/// The identity a request's signed URL names in `for`: an agent acting
+/// for whoever asked it (ROADMAP decision 17). At most one, an identity.
+fn acting_for(url: &Url) -> CellResult<Option<String>> {
+    let mut named = url.query_pairs().filter(|(k, _)| k == "for").map(|(_, v)| v.into_owned());
+    let first = named.next();
+    if named.next().is_some() {
+        return Err(CellError::invalid("`for` is named once"));
+    }
+    match first {
+        Some(id) if !npub::is_identity(&id) => Err(CellError::invalid(format!("`for` names an identity (id:…), not {id:?}"))),
+        first => Ok(first),
+    }
+}
+
 /// The signer of a request that must be signed, resolved, with the body
-/// the router read.
+/// the router read. It acts as itself: `for` is honored on a fragment's
+/// routes only (`signer_for`).
 pub(crate) async fn signer(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Signed> {
+    let who = signer_of(env, req, url, Payload::Read(body)).await?;
+    if who.acting_for.is_some() {
+        return Err(CellError::invalid("`for` is honored on a fragment's routes (/api/f/…) and the fragment list only"));
+    }
+    Ok(who)
+}
+
+/// `signer`, honoring `for`: an agent's request acts for the identity it
+/// names, capped (the fragment decides: `fragment_core::access`).
+async fn signer_for(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Signed> {
     signer_of(env, req, url, Payload::Read(body)).await
 }
 
-/// `signer` for any payload: a body the router read, or one it streams
-/// through unread (a blob, whose URL names its hash).
+/// The signer for any payload: a body the router read, or one it streams
+/// through unread (a blob, whose URL names its hash). `for` is inside the
+/// signed URL, and only an agent may name it: a person acts as themselves.
 async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<Signed> {
     let key = authenticate(req, url, payload)?;
+    let acting_for = acting_for(url)?;
     let identity = ask_registry(env, &calls::Resolve { key: key.clone() }).await?;
-    Ok(Signed { identity, key: Some(key) })
+    if acting_for.is_some() && (identity.kind != IdentityKind::Agent || identity.owner.is_none()) {
+        return Err(CellError::new(ErrorCode::Forbidden, "only an agent acts for someone (`for`); a person acts as themselves"));
+    }
+    Ok(Signed { identity, key: Some(key), acting_for })
 }
 
 /// Who is asking a site request, unresolved: a signature names its key
@@ -238,7 +268,7 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
         IdentityKind::Agent => {
             let owner = principal.owner.clone().ok_or_else(|| CellError::host("an agent without an owner"))?;
             let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: principal.username.clone() };
-            (Signed { identity, key: None }, Some(principal.identity.id))
+            (Signed::new(identity, None), Some(principal.identity.id))
         }
     };
     let username = maker.username.clone().ok_or_else(|| CellError::invalid(format!("choose a username first (sign in at {}/)", cfg.platform(url))))?;
@@ -384,6 +414,9 @@ async fn budget_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
 /// asks (`calls::By`): one round trip a call, and a key revoked a moment
 /// before cannot act.
 async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> CellResult<Response> {
+    if acting_for(url)?.is_some() {
+        return Err(CellError::invalid("`for` is honored on a fragment's routes (/api/f/…) and the fragment list only"));
+    }
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     let method = req.method();
     if let (Method::Post, []) = (&method, rest) {
@@ -560,7 +593,11 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
         (Method::Post, ["api", "fragments"]) => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let create: CreateFragment = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            let principal = signer(env, &req, &url, &body).await?;
+            let principal = signer_for(env, &req, &url, &body).await?;
+            // what an agent makes is its owner's: only its owner's turns make one
+            if principal.acting_for.as_ref().is_some_and(|asker| principal.owner.as_ref() != Some(asker)) {
+                return Err(CellError::new(ErrorCode::Forbidden, "an agent makes fragments for its owner, in its owner's turns only"));
+            }
             create_fragment(env, cfg, &url, create, principal).await
         }
         // the agents' script, co-hosted: authenticated here, like the rest
@@ -569,7 +606,10 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             agents::route(req, env, &url, &segs).await
         }
         (Method::Get, ["api", "fragments"]) => {
-            let principal = signer(env, &req, &url, &[]).await?;
+            let principal = signer_for(env, &req, &url, &[]).await?;
+            if let Some(asker) = &principal.acting_for {
+                return json_answer(&agents::reachable(env, &principal, asker).await?);
+            }
             let list = Request::new("https://principal.internal/list", Method::Get)?;
             Ok(env.durable_object("PRINCIPAL")?.get_by_name(&principal.id)?.fetch_with_request(list).await?)
         }
@@ -639,6 +679,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             if !valid_fragment_name(name) && !fragment_proto::valid_label(name) {
                 return Err(CellError::invalid("a fragment's name is <label>.<username>"));
             }
+            let owner_only = fragment_core::access::owner_only(method.as_ref(), rest);
             let inner = match (method, rest) {
                 (Method::Delete, [] | [""]) => "/delete".to_string(),
                 (_, [] | [""]) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
@@ -658,8 +699,12 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
                     }
                     None
                 }
-                _ => Some(signer(env, &req, &url, &body).await?),
+                _ => Some(signer_for(env, &req, &url, &body).await?),
             };
+            // owner-only actions never go through an agent, whatever it acts for
+            if owner_only && principal.as_ref().is_some_and(|p| p.kind == IdentityKind::Agent) {
+                return Err(CellError::new(ErrorCode::Forbidden, "an agent never manages members, invites, visibility, or links, nor deletes a fragment: its owner does"));
+            }
             let name = named_fragment(name, principal.as_ref())?;
             let routed = Routed { name, url: url.clone(), mode: None, signed: principal, credential: None };
             forward(env, &req, bytes_body(body), Forward { routed, inner, extra }).await

@@ -12,8 +12,11 @@
 use serde_json::{json, Value};
 use worker::*;
 
+use std::collections::HashMap;
+
+use fragment_core::access::{listed_role, Cap};
 use fragment_core::npub;
-use fragment_proto::{split_fragment_name, valid_fragment_name, valid_label, ErrorCode, IdentityKind};
+use fragment_proto::{split_fragment_name, valid_fragment_name, valid_label, ErrorCode, FragmentList, IdentityKind, ListedFragment, Role};
 
 use crate::error::{CellError, CellResult};
 use crate::registry::calls;
@@ -123,8 +126,34 @@ pub(crate) async fn create(env: &Env, who: &Signed, label: &str, options: &Value
 /// `(identity, npub, name)`.
 pub(crate) async fn own_agent(env: &Env, owner: &str, username: &str) -> CellResult<(String, String, String)> {
     let identity = fragment_proto::Identity { id: owner.to_string(), kind: IdentityKind::Person, owner: None, username: Some(username.to_string()) };
-    let who = Signed { identity, key: None };
+    let who = Signed::new(identity, None);
     let made = create(env, &who, DEFAULT_LABEL, &Value::Null).await?;
     let text = |k: &str| made[k].as_str().map(str::to_string).ok_or_else(|| CellError::host(format!("the agent answered no {k}")));
     Ok((text("id")?, text("npub")?, text("name")?))
+}
+
+/// An identity's fragments, as its `Principal` cell lists them.
+async fn listed(env: &Env, identity: &str) -> CellResult<FragmentList> {
+    let list = Request::new("https://principal.internal/list", Method::Get)?;
+    Ok(env.durable_object("PRINCIPAL")?.get_by_name(identity)?.fetch_with_request(list).await?.json().await?)
+}
+
+/// `GET /api/fragments?for=<asker>`, signed by an agent: the fragments it
+/// reaches for whoever asked (ROADMAP decision 17): the asker's, where the
+/// agent or its owner is in too, each with the role the agent acts with
+/// there (`access::listed_role`). A call decides again, live.
+pub(crate) async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<FragmentList> {
+    let owner = agent.owner.as_deref().ok_or_else(|| CellError::host("an agent without an owner"))?;
+    let (askers, own, owners) = futures_util::future::join3(listed(env, asker), listed(env, &agent.id), listed(env, owner)).await;
+    let roles = |l: FragmentList| -> HashMap<String, Role> { l.fragments.into_iter().map(|f| (f.name, f.role)).collect() };
+    let (own, owners) = (roles(own?), roles(owners?));
+    let fragments = askers?
+        .fragments
+        .into_iter()
+        .filter_map(|f| {
+            let cap = Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied() };
+            listed_role(Some(f.role), cap).map(|role| ListedFragment { name: f.name, role })
+        })
+        .collect();
+    Ok(FragmentList { fragments })
 }

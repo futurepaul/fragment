@@ -9,6 +9,16 @@
 //! An agent's owner reads what the agent reads (FIN-11): a person who owns
 //! an agent member reads the fragment as a viewer, and never acts through
 //! it (no operations, nothing a membership would let them change).
+//!
+//! An agent acts for whoever asked, capped (ROADMAP decision 17): a request
+//! an agent signs `for=<identity>` acts with the lower of that identity's
+//! role and a cap. The cap is the agent's own role (its membership, or the
+//! visibility floor), or, on a fragment its owner belongs to, the owner's
+//! role; never more than `editor`. The owner's part is the owner's own role
+//! capped at `editor`, not `editor` outright: an agent never reaches further
+//! than its owner could, so a key that signs `for` someone else gains
+//! nothing its owner does not hold. Owner-only actions never go through an
+//! agent, whatever it acts for (`owner_only`).
 
 use fragment_proto::{Role, Visibility};
 
@@ -23,7 +33,22 @@ pub struct Standing {
     pub link: bool,
     /// The request is signed (or has a session).
     pub signed: bool,
+    /// An agent acts for the caller this standing describes (its asker):
+    /// what caps it. `None`: the caller acts as themselves.
+    pub cap: Option<Cap>,
 }
+
+/// What an agent acting for someone brings to a fragment (decision 17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Cap {
+    /// The agent's own membership.
+    pub agent: Option<Role>,
+    /// Its owner's membership.
+    pub owner: Option<Role>,
+}
+
+/// The most an agent ever acts with: owner-only actions are never its.
+pub const AGENT_ROLE_MAX: Role = Role::Editor;
 
 /// Whether the caller reads or acts: an owner's view through their agent
 /// counts only for reading.
@@ -34,7 +59,18 @@ pub enum Purpose {
 }
 
 /// The role a caller acts with, or `None` when they cannot see the fragment.
+/// An agent acting for them (`standing.cap`) acts with the lower of that
+/// and its cap.
 pub fn effective_role(visibility: Visibility, standing: Standing, purpose: Purpose) -> Option<Role> {
+    let own = own_role(visibility, standing, purpose);
+    match standing.cap {
+        None => own,
+        // `None` is below every role: nothing on either side is nothing
+        Some(cap) => own.min(cap_role(visibility, cap, standing.link)),
+    }
+}
+
+fn own_role(visibility: Visibility, standing: Standing, purpose: Purpose) -> Option<Role> {
     if standing.member.is_some() {
         return standing.member;
     }
@@ -47,6 +83,39 @@ pub fn effective_role(visibility: Visibility, standing: Standing, purpose: Purpo
         return floor.max(Some(Role::Viewer));
     }
     floor
+}
+
+/// The role a cap allows: the agent's own (its membership, or the floor
+/// anyone has) or its owner's membership, whichever is higher, and never
+/// above `AGENT_ROLE_MAX`.
+fn cap_role(visibility: Visibility, cap: Cap, link: bool) -> Option<Role> {
+    let agent = own_role(visibility, Standing { member: cap.agent, owns_member_agent: false, link, signed: true, cap: None }, Purpose::Act);
+    agent.max(cap.owner).map(|r| r.min(AGENT_ROLE_MAX))
+}
+
+/// The role an agent acting for someone holds in a fragment it lists for
+/// them, from the memberships alone (the asker's, its own, and its
+/// owner's); `None` leaves the fragment out. A call decides again, with
+/// the fragment's visibility.
+pub fn listed_role(asker: Option<Role>, cap: Cap) -> Option<Role> {
+    let standing = Standing { member: asker, owns_member_agent: false, link: false, signed: true, cap: Some(cap) };
+    effective_role(Visibility::Members, standing, Purpose::Act)
+}
+
+/// Whether a control API request (`method`, and its path under
+/// `/api/f/<name>`) is one only the owner makes: members, invites,
+/// visibility, link rotation, deletion. An agent never makes one, whatever
+/// it acts for; a member leaving (`DELETE members/me`) is not one.
+pub fn owner_only(method: &str, rest: &[&str]) -> bool {
+    match (method, rest) {
+        ("DELETE", [] | [""]) => true,
+        ("PUT", ["members", _]) => true,
+        ("DELETE", ["members", who]) => *who != "me",
+        (_, ["invites", ..]) => true,
+        ("PUT", ["visibility"]) => true,
+        ("POST", ["rotate"]) => true,
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,11 +171,17 @@ mod tests {
     use Visibility as V;
 
     fn st(member: Option<Role>, link: bool, signed: bool) -> Standing {
-        Standing { member, owns_member_agent: false, link, signed }
+        Standing { member, owns_member_agent: false, link, signed, cap: None }
     }
 
     fn owner_of_agent() -> Standing {
-        Standing { member: None, owns_member_agent: true, link: false, signed: true }
+        Standing { member: None, owns_member_agent: true, link: false, signed: true, cap: None }
+    }
+
+    /// An agent acting for someone whose membership is `asker`, beside its
+    /// own membership and its owner's.
+    fn acting(asker: Option<Role>, agent: Option<Role>, owner: Option<Role>) -> Standing {
+        Standing { member: asker, owns_member_agent: false, link: false, signed: true, cap: Some(Cap { agent, owner }) }
     }
 
     #[test]
@@ -147,6 +222,74 @@ mod tests {
         // their own membership wins
         let member = Standing { member: Some(Editor), ..owner_of_agent() };
         assert_eq!(decide(V::Members, member, Purpose::Act, Editor), Decision::Allow(Editor));
+    }
+
+    #[test]
+    fn an_agent_acts_for_its_asker_capped() {
+        let d = |v, s, needs| decide(v, s, Purpose::Act, needs);
+        // the owner's turn on an app the owner made, which the agent is not in
+        assert_eq!(d(V::Members, acting(Some(Owner), None, Some(Owner)), Editor), Decision::Allow(Editor));
+        // a guest who is in the owner's chat only: the owner's app is out of reach
+        assert_eq!(d(V::Members, acting(None, None, Some(Owner)), Viewer), Decision::Forbidden);
+        assert_eq!(d(V::Link, acting(None, Some(Editor), Some(Owner)), Public), Decision::Forbidden);
+        // what the owner shared with the guest: the guest's own role
+        assert_eq!(d(V::Members, acting(Some(Editor), None, Some(Owner)), Editor), Decision::Allow(Editor));
+        assert_eq!(d(V::Members, acting(Some(Viewer), None, Some(Owner)), Editor), Decision::Forbidden);
+        // what neither the agent nor its owner is in: nothing, whoever asks
+        assert_eq!(d(V::Members, acting(Some(Owner), None, None), Viewer), Decision::Forbidden);
+        // the agent's own membership caps it
+        assert_eq!(d(V::Members, acting(Some(Editor), Some(Viewer), None), Editor), Decision::Forbidden);
+        assert_eq!(d(V::Members, acting(Some(Editor), Some(Viewer), None), Viewer), Decision::Allow(Viewer));
+        // never above editor: owner-only actions are never an agent's
+        assert_eq!(d(V::Members, acting(Some(Owner), Some(Owner), Some(Owner)), Owner), Decision::Forbidden);
+        assert_eq!(effective_role(V::Members, acting(Some(Owner), Some(Owner), Some(Owner)), Purpose::Act), Some(Editor));
+        // never further than its owner: an owner who only views caps a guest who edits
+        assert_eq!(effective_role(V::Members, acting(Some(Editor), None, Some(Viewer)), Purpose::Act), Some(Viewer));
+        // the floor anyone has: a public fragment, for anyone
+        assert_eq!(d(V::Public, acting(None, None, None), Public), Decision::Allow(Public));
+        assert_eq!(d(V::Public, acting(None, None, None), Viewer), Decision::Forbidden);
+        // the link is not the agent's to hold for anyone
+        assert_eq!(effective_role(V::Link, acting(None, None, None), Purpose::Read), None);
+        // an asker who reads through their own agent's membership reads, and never acts
+        let owner_reads = Standing { owns_member_agent: true, ..acting(None, Some(Editor), None) };
+        assert_eq!(decide(V::Members, owner_reads, Purpose::Read, Viewer), Decision::Allow(Viewer));
+        assert_eq!(decide(V::Members, owner_reads, Purpose::Act, Viewer), Decision::Forbidden);
+    }
+
+    #[test]
+    fn listing_for_an_asker() {
+        let cap = |agent, owner| Cap { agent, owner };
+        assert_eq!(listed_role(Some(Owner), cap(None, Some(Owner))), Some(Editor));
+        assert_eq!(listed_role(Some(Viewer), cap(Some(Editor), None)), Some(Viewer));
+        assert_eq!(listed_role(Some(Editor), cap(None, None)), None);
+        assert_eq!(listed_role(None, cap(Some(Editor), Some(Owner))), None);
+    }
+
+    #[test]
+    fn owner_only_routes() {
+        for (method, rest) in [
+            ("DELETE", &[][..]),
+            ("PUT", &["members", "id:00"][..]),
+            ("DELETE", &["members", "npub1x"][..]),
+            ("POST", &["invites"][..]),
+            ("GET", &["invites"][..]),
+            ("DELETE", &["invites", "ab12"][..]),
+            ("PUT", &["visibility"][..]),
+            ("POST", &["rotate"][..]),
+        ] {
+            assert!(owner_only(method, rest), "{method} {rest:?}");
+        }
+        for (method, rest) in [
+            ("DELETE", &["members", "me"][..]),
+            ("GET", &["members"][..]),
+            ("GET", &["status"][..]),
+            ("POST", &["ops", "add"][..]),
+            ("POST", &["files"][..]),
+            ("POST", &["deploy"][..]),
+            ("PUT", &["secrets", "K"][..]),
+        ] {
+            assert!(!owner_only(method, rest), "{method} {rest:?}");
+        }
     }
 
     #[test]

@@ -93,7 +93,7 @@ impl FragmentCell {
         if self.member_role(&agent)?.is_none() {
             let identity = fragment_proto::Identity { id: owner.clone(), kind: IdentityKind::Person, owner: None, username: Some(username.to_string()) };
             let as_owner = Caller {
-                signed: Some(Signed { identity, key: None }),
+                signed: Some(Signed::new(identity, None)),
                 unresolved: None,
                 url: url::Url::parse("https://fragment.internal/").expect("a URL"),
                 mode: None,
@@ -215,7 +215,7 @@ impl FragmentCell {
         let text = |k: &str| body[k].as_str().map(str::to_string).ok_or_else(|| CellError::invalid(format!("{k} is a string")));
         let create = CreateFragment { name: text("label")?, visibility: None, template: Some(text("template")?) };
         let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: Some(username.to_string()) };
-        let signer = Signed { identity, key: None };
+        let signer = Signed::new(identity, None);
         let mut made = crate::create_fragment(&self.env, self.cfg, &caller.url, create, signer).await?;
         let status = made.status_code();
         let v: Value = made.json().await?;

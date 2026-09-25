@@ -19,7 +19,7 @@
 use std::ops::Deref;
 
 use fragment_core::npub;
-use fragment_proto::{routed, valid_fragment_name, ErrorCode, Identity};
+use fragment_proto::{routed, valid_fragment_name, ErrorCode, Identity, IdentityKind};
 use serde::{Deserialize, Serialize};
 // the macro's generated code names `wasm_bindgen`: worker's re-export
 use worker::wasm_bindgen::{self, prelude::*};
@@ -61,6 +61,20 @@ pub struct Signed {
     pub identity: Identity,
     /// 64 hex.
     pub key: Option<String>,
+    /// An agent acting for someone (ROADMAP decision 17): the identity its
+    /// signed URL named in `for`, which the router honors on an agent's
+    /// request to a fragment only (`crate::acting_for`). The fragment acts
+    /// with the lower of that identity's role and the agent's cap
+    /// (`fragment_core::access`).
+    #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
+    pub acting_for: Option<String>,
+}
+
+impl Signed {
+    /// Who signed, acting as themselves.
+    pub fn new(identity: Identity, key: Option<String>) -> Signed {
+        Signed { identity, key, acting_for: None }
+    }
 }
 
 impl Deref for Signed {
@@ -100,10 +114,10 @@ impl Credential {
         match self {
             Credential::Key(key) => {
                 let identity = crate::ask_registry(env, &calls::Resolve { key: key.clone() }).await?;
-                Ok(Some(Signed { identity, key: Some(key) }))
+                Ok(Some(Signed::new(identity, Some(key))))
             }
             Credential::Session(token) => match crate::ask_registry(env, &calls::Session { token, fragment: Some(fragment.to_string()) }).await {
-                Ok(live) => Ok(Some(Signed { identity: live.identity, key: None })),
+                Ok(live) => Ok(Some(Signed::new(live.identity, None))),
                 Err(e) if e.code == ErrorCode::Unauthenticated => Ok(None),
                 Err(e) => Err(e),
             },
@@ -133,6 +147,7 @@ impl Routed {
         assert!(valid_fragment_name(&self.name), "the router routes to a valid name");
         assert!(self.signed.is_none() || self.credential.is_none(), "who is asking is resolved or not, never both");
         assert!(self.credential.as_ref().is_none_or(Credential::well_formed), "the router forwards a credential it checked");
+        assert!(self.signed.as_ref().is_none_or(|s| s.acting_for.is_none() || s.kind == IdentityKind::Agent), "only an agent acts for someone");
         headers.set(routed::NAME, &self.name)?;
         headers.set(routed::URL, self.url.as_str())?;
         if let Some(mode) = self.mode {
@@ -163,6 +178,10 @@ impl Routed {
                 let signed: Signed = serde_json::from_str(&json).map_err(|e| CellError::host(format!("the router's signer: {e}")))?;
                 if !npub::is_identity(&signed.id) || signed.key.as_deref().is_some_and(|k| !npub::is_hex_key(k)) {
                     return Err(CellError::host("the router named a malformed signer"));
+                }
+                // the router honors `for` for an agent only, naming an identity
+                if signed.acting_for.as_deref().is_some_and(|f| !npub::is_identity(f) || signed.kind != IdentityKind::Agent || signed.owner.is_none()) {
+                    return Err(CellError::host("the router named a malformed `for`"));
                 }
                 Some(signed)
             }

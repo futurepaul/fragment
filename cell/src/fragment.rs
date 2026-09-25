@@ -508,6 +508,7 @@ pub(crate) fn as_themselves(standing: Standing) -> bool {
 /// role that may do it.
 pub(crate) fn decide(visibility: Visibility, standing: Standing, purpose: Purpose, needs: Role) -> CellResult<Role> {
     let why = || match (needs, visibility) {
+        _ if standing.cap.is_some() => format!("this needs the {} role: an agent acts with the lower of its asker's role and its own (or its owner's), at most editor", needs.as_str()),
         _ if standing.owns_member_agent && purpose == Purpose::Act => "you read this fragment through your agent's membership; acting here needs your own".to_string(),
         (Role::Public, Visibility::Link) => "this fragment is shared by link: open it with its share link (?view=)".to_string(),
         (Role::Public, Visibility::Members) => "this fragment is for its members only".to_string(),
@@ -658,8 +659,11 @@ impl FragmentCell {
     /// it asks.
     pub(crate) fn standing(&self, caller: &Caller, link: bool) -> CellResult<Standing> {
         let Some(principal) = caller.principal() else {
-            return Ok(Standing { member: None, owns_member_agent: false, link, signed: false });
+            return Ok(Standing { member: None, owns_member_agent: false, link, signed: false, cap: None });
         };
+        if let Some(signed) = caller.signed.as_ref().filter(|s| s.acting_for.is_some()) {
+            return self.standing_for(signed, link);
+        }
         #[derive(serde::Deserialize)]
         struct Row {
             role: Option<String>,
@@ -671,7 +675,33 @@ impl FragmentCell {
         )?;
         let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
         let member = row.role.as_deref().and_then(Role::parse);
-        Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true })
+        Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: None })
+    }
+
+    /// An agent acting for someone (ROADMAP decision 17), in one statement:
+    /// the asker's standing (their membership, or an agent of theirs that is
+    /// a member), capped by the agent's own membership and its owner's
+    /// (`access::effective_role`).
+    fn standing_for(&self, agent: &Signed, link: bool) -> CellResult<Standing> {
+        let asker = agent.acting_for.as_deref().expect("standing_for is for an agent acting for someone");
+        let owner = agent.owner.as_deref().ok_or_else(|| CellError::host("an agent acting for someone has no owner"))?;
+        #[derive(serde::Deserialize)]
+        struct Row {
+            role: Option<String>,
+            agent: i64,
+            agent_role: Option<String>,
+            owner_role: Option<String>,
+        }
+        let rows: Vec<Row> = self.typed(
+            "SELECT (SELECT role FROM members WHERE principal = ?) AS role, EXISTS (SELECT 1 FROM members WHERE owner = ?) AS agent, \
+             (SELECT role FROM members WHERE principal = ?) AS agent_role, (SELECT role FROM members WHERE principal = ?) AS owner_role",
+            vec![asker.into(), asker.into(), agent.id.as_str().into(), owner.into()],
+        )?;
+        let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
+        let role = |r: Option<String>| r.as_deref().and_then(Role::parse);
+        let member = role(row.role);
+        let cap = access::Cap { agent: role(row.agent_role), owner: role(row.owner_role) };
+        Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: Some(cap) })
     }
 
     /// Whether the caller sees the fragment as themselves (a member, or an
