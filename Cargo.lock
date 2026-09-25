@@ -843,10 +843,13 @@ dependencies = [
 name = "fragment-fakes"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "base64 0.22.1",
  "fragment-core",
  "hex",
+ "hkdf",
+ "hmac",
  "p256",
  "serde",
  "serde_json",

@@ -115,32 +115,6 @@ pub fn encrypt(sub: &Subscription, payload: &[u8], ephemeral: &Ephemeral, salt: 
     Ok(body)
 }
 
-/// A browser's side of `encrypt` (the e2e's push service decrypts with it).
-pub fn decrypt(ua_secret: &SecretKey, auth: &[u8], body: &[u8]) -> Result<Vec<u8>, String> {
-    if body.len() < 21 {
-        return Err("too short for an aes128gcm header".into());
-    }
-    let salt = &body[..16];
-    let id_len = body[20] as usize;
-    let as_public = body.get(21..21 + id_len).ok_or("the key id overruns the body")?;
-    let sealed = &body[21 + id_len..];
-    let sender = PublicKey::from_sec1_bytes(as_public).map_err(|_| "the key id is not a P-256 point")?;
-    let ecdh = p256::ecdh::diffie_hellman(ua_secret.to_nonzero_scalar(), sender.as_affine());
-    let (cek, nonce) = derive(ecdh.raw_secret_bytes(), auth, &uncompressed(&ua_secret.public_key()), as_public, salt);
-    let nonce: [u8; 12] = nonce;
-    let mut record = Aes128Gcm::new_from_slice(&cek)
-        .expect("a 16-byte key")
-        .decrypt(&Nonce::from(nonce), sealed)
-        .map_err(|_| "the record does not decrypt")?;
-    match record.iter().rposition(|b| *b != 0) {
-        Some(i) if record[i] == 0x02 => {
-            record.truncate(i);
-            Ok(record)
-        }
-        _ => Err("no last-record delimiter".into()),
-    }
-}
-
 /// A VAPID key (the fragment's, sealed at rest by the cell).
 pub struct Vapid(SigningKey);
 
@@ -218,30 +192,50 @@ mod tests {
     use p256::ecdsa::signature::Verifier;
     use p256::ecdsa::VerifyingKey;
 
-    fn browser() -> (SecretKey, String, Vec<u8>, String) {
-        let secret = SecretKey::from_slice(&[7u8; 32]).unwrap();
-        let p256dh = B64URL.encode(uncompressed(&secret.public_key()));
-        let auth = vec![9u8; 16];
-        let auth_b64 = B64URL.encode(&auth);
-        (secret, p256dh, auth, auth_b64)
+    /// RFC 8291 section 5's example, base64url as the RFC prints it (its
+    /// line breaks removed): the sender's key and salt, the receiver's
+    /// public key and auth secret, the plaintext, and the body a push
+    /// service receives. crates/fakes decrypts the same body.
+    const RFC_SENDER_SECRET: &str = "yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw";
+    const RFC_SALT: &str = "DGv6ra1nlYgDCS1FRnbzlw";
+    const RFC_RECEIVER_PUBLIC: &str = "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4";
+    const RFC_AUTH: &str = "BTBZMqHH6r4Tts7J_aSIgg";
+    const RFC_PLAINTEXT: &[u8] = b"When I grow up, I want to be a watermelon";
+    const RFC_BODY: &str = concat!(
+        "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27ml",
+        "mlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPT",
+        "pK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN",
+    );
+
+    fn rfc_subscription() -> Subscription<'static> {
+        Subscription { endpoint: "https://push.example.net/push/JzLQ3raZJfFBR0aqvOMsLrt54w4rJUsV", p256dh: RFC_RECEIVER_PUBLIC, auth: RFC_AUTH }
+    }
+
+    fn rfc_ephemeral() -> Ephemeral {
+        let secret: [u8; 32] = B64URL.decode(RFC_SENDER_SECRET).unwrap().try_into().unwrap();
+        Ephemeral::draw(|| secret)
+    }
+
+    /// Goal: a push is encrypted as RFC 8291 says, byte for byte, so a real
+    /// browser can read it (a round trip through our own decrypt passed
+    /// with a wrong HKDF label on both sides). Method: section 5's example,
+    /// its body written out.
+    #[test]
+    fn the_rfc_8291_example_encrypts_to_its_body() {
+        let salt: [u8; 16] = B64URL.decode(RFC_SALT).unwrap().try_into().unwrap();
+        let body = encrypt(&rfc_subscription(), RFC_PLAINTEXT, &rfc_ephemeral(), salt).unwrap();
+        assert_eq!(B64URL.encode(&body), RFC_BODY);
     }
 
     #[test]
-    fn round_trip() {
-        let (secret, p256dh, auth, auth_b64) = browser();
-        let sub = Subscription { endpoint: "https://push.example.com/abc", p256dh: &p256dh, auth: &auth_b64 };
-        let ephemeral = Ephemeral::draw(|| [3u8; 32]);
-        let body = encrypt(&sub, br#"{"title":"hi"}"#, &ephemeral, [5u8; 16]).unwrap();
-        assert_eq!(&body[16..20], &4096u32.to_be_bytes(), "record size");
-        assert_eq!(body[20], 65, "the sender's key id is its uncompressed point");
-        assert_eq!(decrypt(&secret, &auth, &body).unwrap(), br#"{"title":"hi"}"#);
-        let mut tampered = body.clone();
-        *tampered.last_mut().unwrap() ^= 1;
-        assert!(decrypt(&secret, &auth, &tampered).is_err());
-        assert!(decrypt(&secret, &[1u8; 16], &body).is_err(), "another auth secret");
-        assert!(encrypt(&sub, &[0u8; PAYLOAD_MAX_BYTES + 1], &ephemeral, [5u8; 16]).is_err());
-        let bad = Subscription { endpoint: "x", p256dh: "nope", auth: &auth_b64 };
-        assert!(encrypt(&bad, b"x", &ephemeral, [5u8; 16]).is_err());
+    fn what_encrypt_refuses() {
+        let ephemeral = rfc_ephemeral();
+        assert!(encrypt(&rfc_subscription(), &[0u8; PAYLOAD_MAX_BYTES], &ephemeral, [5u8; 16]).is_ok());
+        assert!(encrypt(&rfc_subscription(), &[0u8; PAYLOAD_MAX_BYTES + 1], &ephemeral, [5u8; 16]).is_err());
+        for (p256dh, auth) in [("nope", RFC_AUTH), (RFC_SENDER_SECRET, RFC_AUTH), (RFC_RECEIVER_PUBLIC, "nope!"), (RFC_RECEIVER_PUBLIC, RFC_SALT.get(..20).unwrap())] {
+            let sub = Subscription { endpoint: "https://push.example.net/x", p256dh, auth };
+            assert!(encrypt(&sub, b"x", &ephemeral, [5u8; 16]).is_err(), "{p256dh} {auth}");
+        }
     }
 
     /// Zero and all-ones are both out of range for P-256 (all-ones is past
