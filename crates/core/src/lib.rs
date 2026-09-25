@@ -26,5 +26,4 @@ pub mod site;
 pub mod steps;
 pub mod tools;
 pub mod tree;
-pub mod trigger_state;
 pub mod webhook;

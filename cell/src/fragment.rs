@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS members (
   principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL,
   kind TEXT, owner TEXT);
+CREATE INDEX IF NOT EXISTS members_owner ON members (owner) WHERE owner IS NOT NULL;
 CREATE TABLE IF NOT EXISTS invites (
   id TEXT PRIMARY KEY, token_sha TEXT NOT NULL UNIQUE, role TEXT NOT NULL, uses_left INTEGER NOT NULL,
   expires_at INTEGER NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
@@ -111,7 +112,6 @@ CREATE INDEX IF NOT EXISTS runs_status ON runs (status, op);
 CREATE TABLE IF NOT EXISTS steps (
   run INTEGER NOT NULL, attempt INTEGER NOT NULL, idx INTEGER NOT NULL, kind TEXT NOT NULL, value TEXT, error TEXT,
   CHECK ((value IS NULL) <> (error IS NULL)), PRIMARY KEY (run, attempt, idx));
-INSERT OR IGNORE INTO meta (key, value) VALUES ('steps_kept_since', CAST(CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER) AS TEXT));
 CREATE TABLE IF NOT EXISTS schedules (idx INTEGER PRIMARY KEY, op TEXT NOT NULL, cron TEXT NOT NULL, next_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS paused_ops (op TEXT PRIMARY KEY, by TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS op_breakers (op TEXT PRIMARY KEY, reset_at INTEGER NOT NULL);
@@ -168,28 +168,11 @@ impl DurableObject for FragmentCell {
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         let sql = state.storage().sql();
         sql.exec(SCHEMA, None).expect("the Fragment schema applies");
-        // before the trigger state's migration, which reads the installed triggers
-        let code_migrated = crate::plane::migrate_code(&sql);
-        let cols: Vec<Value> = sql.exec("PRAGMA table_info(members)", None).and_then(|c| c.to_array()).unwrap_or_default();
-        for col in ["kind", "owner"] {
-            if !cols.iter().any(|c| c["name"] == col) {
-                sql.exec(&format!("ALTER TABLE members ADD COLUMN {col} TEXT"), None).expect("the members table migrates");
-            }
-        }
-        // a records table from before the delivery outbox: its records were
-        // delivered by the code that wrote them, so they count as outboxed
-        let cols: Vec<Value> = sql.exec("PRAGMA table_info(records)", None).and_then(|c| c.to_array()).unwrap_or_default();
-        if !cols.iter().any(|c| c["name"] == "outboxed") {
-            sql.exec("ALTER TABLE records ADD COLUMN outboxed INTEGER NOT NULL DEFAULT 1", None).expect("the records table migrates");
-        }
-        // after the migration: a members table from before phase 4 has no
-        // owner column until it runs (the index in SCHEMA broke those cells)
-        sql.exec("CREATE INDEX IF NOT EXISTS members_owner ON members (owner) WHERE owner IS NOT NULL", None).expect("the members index applies");
-        let paused_by_migration = crate::jobs::migrate_trigger_state(&sql, js::now_ms());
+        crate::plane::migrate_code(&sql);
         let cfg = Config::from_env(&env);
         let rate = fragment_core::ratelimit::Rate::new(limits::PUBLIC_CALLS_PER_MIN, limits::PUBLIC_CALLS_PER_MIN_FRAGMENT);
         let app = crate::ops::app_loader(&raw, env.as_ref(), sql.clone());
-        let cell = FragmentCell {
+        FragmentCell {
             state,
             raw,
             env,
@@ -200,15 +183,7 @@ impl DurableObject for FragmentCell {
             settling: RefCell::default(),
             app,
             live: RefCell::default(),
-        };
-        if !paused_by_migration.is_empty() {
-            let summary = format!("the stored pause list did not parse; paused every triggered operation: {}", paused_by_migration.join(", "));
-            cell.event("op.paused", &summary, json!({ "ops": paused_by_migration, "by": "migration" }));
         }
-        if let Some(why) = code_migrated {
-            cell.event("code.dropped", &format!("the installed code did not move into its tables ({why}); live installs again at the next refresh"), Value::Null);
-        }
-        cell
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -383,10 +358,6 @@ pub(crate) enum MetaKey {
     /// Test fleets only: how many more step answers are lost on their way
     /// back to the Workflow, after the step was performed (`drop-effects`).
     TestDropEffects,
-    /// When this cell began keeping job steps' answers (ms): the first
-    /// activation with the `steps` table writes it, once. A run launched
-    /// before it finds no answers kept, and starts again (jobs.rs).
-    StepsKeptSince,
     /// Test fleets only: while set, an advance after a run's first step
     /// waits (`hold-advances`), naming its run in `TestAdvanceHeld`.
     TestHoldAdvances,
@@ -428,7 +399,6 @@ impl MetaKey {
             MetaKey::TestFailOutbox => "test_fail_outbox",
             MetaKey::TestFailTriggers => "test_fail_triggers",
             MetaKey::TestDropEffects => "test_drop_effects",
-            MetaKey::StepsKeptSince => "steps_kept_since",
             MetaKey::TestHoldAdvances => "test_hold_advances",
             MetaKey::TestAdvanceHeld => "test_advance_held",
         }

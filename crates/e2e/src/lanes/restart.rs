@@ -9,7 +9,6 @@ use std::time::Duration;
 use anyhow::Result;
 use fragment_fakes::http::{Handler, Response, Server};
 use fragment_nip98::Keys;
-use fragment_proto::limits;
 use serde_json::{json, Value};
 
 use super::app::ship;
@@ -66,7 +65,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     // a paused operation: its pause is a row, not a cached list
     let r = api.signed(&owner, "POST", &format!("/api/f/{paid}/pause"), Some(&json!({ "op": "summarize", "paused": true })))?;
     anyhow::ensure!(r.status == 200, "pause setup: {r}");
-    // code stored as the fleet stored it before the code tables: JSON in the code row
+    // a fragment with code, triggers, and a channel
     let (stored, sc) = jobs::jobs_fragment(s, &api, &owner, "restart-code", |_| {})?;
     // a sealed secret its job fetches with, and a channel with records in it
     let r = api.call(Call { method: "PUT", url: format!("{}/api/f/{stored}/secrets/API_KEY", api.base), body: Some(SECRET.as_bytes().to_vec()), keys: Some(&owner), ..Call::default() })?;
@@ -75,16 +74,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let seq_before = jobs::records(&api, &owner, &stored, "feed").last().and_then(|r| r["seq"].as_i64()).unwrap_or(0);
     anyhow::ensure!(r.status == 200 && seq_before == 2, "channel setup: {r} (feed at {seq_before})");
     let code_before = api.status(&owner, &stored)?.body["code"].clone();
-    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": stored, "op": "code-before-tables" })))?;
-    anyhow::ensure!(r.status == 200 && code_before["operations"]["save"]["kind"] == "mutation", "code-before-tables setup: {r} {code_before}");
-    // and code stored with more operations than a manifest may declare
-    let past = s.named(&api, &owner, "restart-past")?;
-    let past_c = s.create(&api, &owner, &past)?;
-    ship(s, &past_c, TODO_APP, TODO_JSON);
-    let past_code = api.status(&owner, &past)?.body["code"].clone();
-    let fill = limits::OPERATIONS_MAX + 1;
-    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": past, "op": "code-before-tables", "fill": fill })))?;
-    anyhow::ensure!(r.status == 200 && past_code["operations"]["add_todo"]["kind"] == "mutation", "code-before-tables fill setup: {r} {past_code}");
+    anyhow::ensure!(code_before["operations"]["save"]["kind"] == "mutation", "code setup: {code_before}");
 
     s.stop()?;
     let api = s.start(false, true)?;
@@ -102,7 +92,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let r = api.signed(&owner, "GET", &format!("/api/f/{paid}/runs?limit=1"), None)?;
     s.ok("after a restart a paused operation is still paused", r.status == 200 && r.body["paused"] == json!(["summarize"]), &r);
     let r = api.status(&owner, &stored)?;
-    s.ok("code stored before the code tables moves into them: its operations and schemas are the same", r.body["code"] == code_before, &r.body["code"]);
+    s.ok("after a restart the installed code is the same: its operations and schemas", r.body["code"] == code_before, &r.body["code"]);
     let r = api.signed(&owner, "GET", &format!("/api/f/{stored}/triggers"), None)?;
     let on: Vec<Value> = r.body["triggers"].as_array().into_iter().flatten().map(|t| t["run"].clone()).collect();
     s.ok("and its triggers, in their order", on == vec![json!("ingest"), json!("ping"), json!("boom"), json!("tick")], &r);
@@ -139,20 +129,6 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let r = push_key(&api)?;
     s.ok("and its site session on a fragment still works", r.status == 200, &r);
     s.ok("the fragment's VAPID key is the one it had (sealed, and opened again)", r.body["key"].is_string() && r.body["key"] == vapid, format!("{} vs {vapid}", r.body["key"]));
-
-    // Goal: stored data past a limit never reaches an assertion in the
-    // constructor, which would fail every activation. Method: the fragment
-    // whose stored code holds OPERATIONS_MAX + 1 operations answers, says
-    // its code was dropped and why, and a refresh installs live again.
-    let r = api.status(&owner, &past)?;
-    s.ok("code stored past a manifest's limit does not stop its fragment: it answers", r.status == 200, &r);
-    let r = api.signed(&owner, "GET", &format!("/api/f/{past}/events?tail=20"), None)?;
-    let dropped = r.body["events"].as_array().into_iter().flatten().find(|e| e["kind"] == "code.dropped").cloned().unwrap_or(Value::Null);
-    let why = format!("operations: {fill}, past the limit of {}", limits::OPERATIONS_MAX);
-    s.ok("and its code is dropped, with an event that says why", dropped["summary"].as_str().is_some_and(|m| m.contains(&why)), &r);
-    let r = api.signed(&owner, "POST", &format!("/api/f/{past}/refresh"), Some(&json!({})))?;
-    let code = api.status(&owner, &past)?.body["code"].clone();
-    s.ok("and the next refresh installs live again, as it was", r.status == 200 && code == past_code, &code);
 
     let r = api.op(&owner, &name, "add_todo", "r2", json!({ "text": "before the crash" }))?;
     s.ok("a mutation before the crash", r.status == 200, &r);
