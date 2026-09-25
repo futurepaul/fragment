@@ -14,6 +14,7 @@ pub mod egress;
 pub mod facet;
 pub mod glob;
 pub mod history;
+pub mod live;
 pub mod manifest;
 pub mod npub;
 pub mod ratelimit;

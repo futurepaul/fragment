@@ -7,7 +7,7 @@
 //   fragment.subscribe("activity", (rec) => log(rec.body));    // a channel, from a cursor
 //   fragment.subscribe("chat", show, { last: 100 });           // or from near its end
 //   fragment.presence.set({ name: "paul" });                   // who is here
-//   fragment.presence.on((list) => showWho(list));
+//   fragment.presence.on((list) => showWho(list));             // now, and on each change
 //   await fragment.push.register("everyone");                  // web push (after a click)
 //   fragment.closed(({ code }) => showGone(code));             // the fragment ended this page's socket
 //
@@ -20,6 +20,9 @@
 // A channel's backlog comes a page at a time: the library asks for the next
 // page until the last one, which makes the channel live, so no record is
 // skipped however far behind the page starts.
+// Presence comes whole when the socket opens, then one change at a time;
+// this page sends its own at most once every 150 ms, the latest last (the
+// fragment drops more than 10 a second).
 // A call keeps its id across retries, so a retried mutation is a replay,
 // never a second write.
 
@@ -63,13 +66,18 @@ let backoff = 1000;
 let rerun = null;
 let hello = null;
 let presenceData = null;
+let presenceSentAt = 0;
+let presenceTimer = null;
 let ended = null; // { code, reason } once the fragment closed the socket for good
 const helloWaiters = [];
 const closedHandlers = new Set();
 // Close codes after which reconnecting cannot help (live.rs, fragment.rs).
 const FINAL_CLOSE_CODES = [4003, 4004];
+// Under the fragment's 10 presence changes a second (limits::PRESENCE_PER_S).
+const PRESENCE_EVERY_MS = 150;
 const subs = new Map(); // channel -> { after, last, handlers }
 const lives = new Set(); // { op, input, onResult, onError }
+const present = new Map(); // socket id -> { id, principal, data }
 const presenceHandlers = new Set();
 
 function send(message) {
@@ -95,14 +103,17 @@ function connect() {
   ws.onopen = () => {
     backoff = 1000;
     for (const [channel, s] of subs) send(subscribeFrame(channel, s));
-    if (presenceData !== null) send({ type: "presence", data: presenceData });
+    if (presenceData !== null) sendPresence();
     for (const l of lives) run(l);
   };
   ws.onmessage = (event) => {
     const m = JSON.parse(event.data);
     if (m.type === "hello") {
       hello = { id: m.id, principal: m.principal, role: m.role };
+      present.clear();
+      for (const p of m.presence) present.set(p.id, p);
       helloWaiters.splice(0).forEach((resolve) => resolve(hello));
+      showPresence();
     } else if (m.type === "record") {
       const s = subs.get(m.channel);
       if (s && m.seq > s.after) {
@@ -118,7 +129,9 @@ function connect() {
         if (m.more) send(subscribeFrame(m.channel, s));
       }
     } else if (m.type === "presence") {
-      for (const h of presenceHandlers) h(m.list);
+      if (m.data === null) present.delete(m.id);
+      else present.set(m.id, { id: m.id, principal: m.principal, data: m.data });
+      showPresence();
     } else if (m.type === "changed") {
       clearTimeout(rerun);
       rerun = setTimeout(() => lives.forEach(run), 50);
@@ -177,17 +190,38 @@ export function subscribe(channel, onRecord, { after = 0, last = null } = {}) {
   };
 }
 
+function presenceList() {
+  return [...present.values()];
+}
+
+function showPresence() {
+  const list = presenceList();
+  for (const h of presenceHandlers) h(list);
+}
+
+function sendPresence() {
+  clearTimeout(presenceTimer);
+  presenceTimer = null;
+  presenceSentAt = Date.now();
+  send({ type: "presence", data: presenceData });
+}
+
 export const presence = {
   /// Shares `data` (at most 4 KiB) with everyone on the page; null leaves.
+  /// Changes closer together than 150 ms go as one, the latest.
   set(data) {
     presenceData = data;
     connect();
-    send({ type: "presence", data });
+    const wait = presenceSentAt + PRESENCE_EVERY_MS - Date.now();
+    if (wait <= 0) sendPresence();
+    else if (presenceTimer === null) presenceTimer = setTimeout(sendPresence, wait);
   },
-  /// Calls `handler(list)` whenever who is here changes; returns a stop function.
+  /// Calls `handler(list)` now (once the socket said hello) and whenever
+  /// who is here changes; returns a stop function.
   on(handler) {
     presenceHandlers.add(handler);
     connect();
+    if (hello) handler(presenceList());
     return () => presenceHandlers.delete(handler);
   },
 };

@@ -19,7 +19,9 @@ pub enum LiveIn {
     Subscribe(Subscribe),
     Unsubscribe { channel: String },
     /// Shares `data` with everyone on the page (at most
-    /// `limits::PRESENCE_MAX_BYTES`); `null`, or no `data`, clears it.
+    /// `limits::PRESENCE_MAX_BYTES`); `null`, or no `data`, clears it. At
+    /// most `limits::PRESENCE_PER_S` a second, after a burst: faster
+    /// changes are dropped, each with an error.
     Presence {
         #[serde(default)]
         data: Value,
@@ -84,17 +86,19 @@ impl From<Subscribe> for SubscribeFrame {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LiveOut {
-    /// First on every socket: who the page is to the fragment. The role is
-    /// fixed while the socket stays open.
-    Hello { id: String, principal: String, role: Role },
+    /// First on every socket: who the page is to the fragment (the role is
+    /// fixed while the socket stays open), and everyone on the page who
+    /// shares presence.
+    Hello { id: String, principal: String, role: Role, presence: Vec<Present> },
     /// A record of a channel: one of a page, or a new one while live.
     Record(#[serde(deserialize_with = "record_through_value")] ChannelRecord),
     /// After each page: the cursor past it, and whether more follow. With
     /// `more`, the socket is not live on the channel yet: subscribe again
     /// from `next`.
     Subscribed { channel: String, next: i64, more: bool },
-    /// Everyone on the page who shares presence (on connect and on each change).
-    Presence { list: Vec<Present> },
+    /// One socket's presence changed: its data, or `null` once it cleared
+    /// it or left.
+    Presence(Present),
     /// A mutation applied: re-run live queries.
     Changed { op: String },
     /// A frame the fragment refused, and why.
@@ -102,7 +106,7 @@ pub enum LiveOut {
     Pong,
 }
 
-/// One socket's presence.
+/// One socket's presence (`data` is never `null` in a `hello`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Present {
     pub id: String,
@@ -189,15 +193,27 @@ mod tests {
     fn the_fragment_sends_these_frames() {
         let record = ChannelRecord { channel: "chat".into(), seq: 3, at: 9, principal: "platform".into(), kind: "said".into(), body: serde_json::value::to_raw_value(&json!({ "text": "hi" })).unwrap() };
         let frames = [
-            (LiveOut::Hello { id: "ab".into(), principal: "anon:x".into(), role: Role::Public }, json!({ "type": "hello", "id": "ab", "principal": "anon:x", "role": "public" })),
+            (
+                LiveOut::Hello {
+                    id: "ab".into(),
+                    principal: "anon:x".into(),
+                    role: Role::Public,
+                    presence: vec![Present { id: "cd".into(), principal: "id:y".into(), data: json!({ "name": "paul" }) }],
+                },
+                json!({ "type": "hello", "id": "ab", "principal": "anon:x", "role": "public", "presence": [{ "id": "cd", "principal": "id:y", "data": { "name": "paul" } }] }),
+            ),
             (
                 LiveOut::Record(record),
                 json!({ "type": "record", "channel": "chat", "seq": 3, "at": 9, "principal": "platform", "kind": "said", "body": { "text": "hi" } }),
             ),
             (LiveOut::Subscribed { channel: "chat".into(), next: 3, more: true }, json!({ "type": "subscribed", "channel": "chat", "next": 3, "more": true })),
             (
-                LiveOut::Presence { list: vec![Present { id: "ab".into(), principal: "anon:x".into(), data: json!({ "name": "paul" }) }] },
-                json!({ "type": "presence", "list": [{ "id": "ab", "principal": "anon:x", "data": { "name": "paul" } }] }),
+                LiveOut::Presence(Present { id: "ab".into(), principal: "anon:x".into(), data: json!({ "name": "paul" }) }),
+                json!({ "type": "presence", "id": "ab", "principal": "anon:x", "data": { "name": "paul" } }),
+            ),
+            (
+                LiveOut::Presence(Present { id: "ab".into(), principal: "anon:x".into(), data: Value::Null }),
+                json!({ "type": "presence", "id": "ab", "principal": "anon:x", "data": null }),
             ),
             (LiveOut::Changed { op: "say".into() }, json!({ "type": "changed", "op": "say" })),
             (LiveOut::Error { message: "no".into() }, json!({ "type": "error", "message": "no" })),
