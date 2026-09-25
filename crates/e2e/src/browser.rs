@@ -209,6 +209,26 @@ impl Browser {
         Ok(())
     }
 
+    /// The pages open in this lease's context, popups a page opened
+    /// included: (target id, URL).
+    pub fn pages(&mut self) -> Result<Vec<(String, String)>> {
+        let v = self.send("Target.getTargets", json!({}), None)?;
+        let context = self.context.clone();
+        Ok(v["targetInfos"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["type"] == "page" && context.as_deref().is_none_or(|c| t["browserContextId"] == c))
+            .map(|t| (t["targetId"].as_str().unwrap_or("").to_string(), t["url"].as_str().unwrap_or("").to_string()))
+            .collect())
+    }
+
+    /// Closes a page `pages` listed.
+    pub fn close_target(&mut self, target: &str) -> Result<()> {
+        self.send("Target.closeTarget", json!({ "targetId": target }), None)?;
+        Ok(())
+    }
+
     /// Evaluates `expr` in the page (awaiting a promise) and returns its value.
     pub fn eval(&mut self, page: &Page, expr: &str) -> Result<Value> {
         let r = self.send("Runtime.evaluate", json!({ "expression": expr, "awaitPromise": true, "returnByValue": true }), Some(&page.session))?;
@@ -283,6 +303,26 @@ impl Browser {
             bail!("the frame threw: {}", e["exception"]["description"].as_str().unwrap_or(&e.to_string()));
         }
         Ok(r["result"]["value"].clone())
+    }
+
+    /// A click at a point, as a hand makes it: a user gesture, so a popup
+    /// it opens is allowed (a script's `click()` is not one).
+    pub fn click_at(&mut self, page: &Page, (x, y): (f64, f64)) -> Result<()> {
+        let mouse = |kind: &str, buttons: u8| json!({ "type": kind, "x": x, "y": y, "button": "left", "buttons": buttons, "clickCount": 1 });
+        self.send("Input.dispatchMouseEvent", mouse("mouseMoved", 0), Some(&page.session))?;
+        self.send("Input.dispatchMouseEvent", mouse("mousePressed", 1), Some(&page.session))?;
+        self.send("Input.dispatchMouseEvent", mouse("mouseReleased", 0), Some(&page.session))?;
+        Ok(())
+    }
+
+    /// `click_at` the middle of the first element `selector` matches.
+    pub fn click(&mut self, page: &Page, selector: &str) -> Result<()> {
+        let at = self.eval(
+            page,
+            &format!("(() => {{ const e = document.querySelector({selector:?}); if (!e) return null; e.scrollIntoView({{ block: 'nearest' }}); const r = e.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; }})()"),
+        )?;
+        let (Some(x), Some(y)) = (at[0].as_f64(), at[1].as_f64()) else { bail!("nothing on the page matches {selector}") };
+        self.click_at(page, (x, y))
     }
 
     /// A mouse drag from one point to another, in steps, as a hand makes it.

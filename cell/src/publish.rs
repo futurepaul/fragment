@@ -198,7 +198,7 @@ impl FragmentCell {
             .flatten()
             .filter_map(|f| {
                 let name = f["name"].as_str()?;
-                Some(json!({ "name": name, "role": f["role"], "url": self.cfg.canonical(&caller.url, name) }))
+                Some(json!({ "name": name, "role": f["role"], "url": self.cfg.canonical(&caller.url, name), "sharing": f["sharing"] }))
             })
             .collect();
         Ok(json!({ "fragments": fragments }))

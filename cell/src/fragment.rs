@@ -20,7 +20,8 @@
 //!   PUT    /api/members/<id|npub>         owner (a key names the identity holding it)
 //!   DELETE /api/members/<id|npub>         owner, or the member themselves
 //!   POST   /api/invites  GET /api/invites  DELETE /api/invites/<id>   owner
-//!   POST   /api/join                      any signed principal with a token
+//!   POST   /api/join                      any signed principal with a token (an invite for one identity: them)
+//!   POST   /api/join/preview              the same: what joining would do, joining no one
 //!   PUT    /api/visibility                owner
 //!   POST   /api/rotate                    owner
 //!   PUT    /api/secrets/<KEY>  GET /api/secrets  DELETE /api/secrets/<KEY>   editor
@@ -82,7 +83,7 @@ CREATE TABLE IF NOT EXISTS members (
 CREATE INDEX IF NOT EXISTS members_owner ON members (owner) WHERE owner IS NOT NULL;
 CREATE TABLE IF NOT EXISTS invites (
   id TEXT PRIMARY KEY, token_sha TEXT NOT NULL UNIQUE, role TEXT NOT NULL, uses_left INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
+  expires_at INTEGER NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, invitee TEXT);
 CREATE TABLE IF NOT EXISTS index_outbox (
   principal TEXT PRIMARY KEY, role TEXT, version INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS secrets (
@@ -169,6 +170,7 @@ impl DurableObject for FragmentCell {
         let sql = state.storage().sql();
         sql.exec(SCHEMA, None).expect("the Fragment schema applies");
         crate::plane::migrate_code(&sql);
+        crate::members::migrate(&sql);
         let cfg = Config::from_env(&env);
         let rate = fragment_core::ratelimit::Rate::new(limits::PUBLIC_CALLS_PER_MIN, limits::PUBLIC_CALLS_PER_MIN_FRAGMENT);
         let app = crate::ops::app_loader(&raw, env.as_ref(), sql.clone());
@@ -315,6 +317,9 @@ pub(crate) enum MetaKey {
     Repo,
     /// The latest members index change (members.rs).
     IndexVersion,
+    /// The owner's row in their list has been sent this fragment's sharing
+    /// (members.rs); a fragment from before sends it once.
+    SharingSent,
     /// When the poll backstop runs next (a day after the last pass, or
     /// within the poll interval while the fragment is busy: plane.rs `busy`).
     PollAt,
@@ -379,6 +384,7 @@ impl MetaKey {
             MetaKey::WebhookSecret => "webhook_secret",
             MetaKey::Repo => "repo",
             MetaKey::IndexVersion => "index_version",
+            MetaKey::SharingSent => "sharing_sent",
             MetaKey::PollAt => "poll_at",
             MetaKey::OutsideAt => "outside_at",
             MetaKey::TemplatePending => "template_pending",
@@ -813,9 +819,13 @@ impl FragmentCell {
                 let body = body_json(&mut req).await?;
                 self.join(&caller, body).await
             }
+            (Method::Post, ["api", "join", "preview"]) => {
+                let body = body_json(&mut req).await?;
+                self.join_preview(&caller, body)
+            }
             (Method::Put, ["api", "visibility"]) => {
                 let body = body_json(&mut req).await?;
-                self.set_visibility(&caller, body)
+                self.set_visibility(&caller, body).await
             }
             (Method::Post, ["api", "rotate"]) => {
                 let bytes = req.bytes().await?;

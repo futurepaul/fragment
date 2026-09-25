@@ -505,6 +505,20 @@ pub struct FragmentStatus {
 pub struct ListedFragment {
     pub name: String,
     pub role: Role,
+    /// Its owner's row only: who else is in it, as the fragment last said
+    /// (`None` until it has: a fragment from before sends it once).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sharing: Option<Sharing>,
+}
+
+/// A fragment's sharing, in its owner's list (the desktop's badges): who
+/// may open it, how many members it has, and how many of them are guests
+/// (neither the owner nor an agent of theirs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sharing {
+    pub visibility: Visibility,
+    pub members: u64,
+    pub guests: u64,
 }
 
 /// `GET /api/fragments` (any signer).
@@ -686,6 +700,10 @@ pub struct CreateInvite {
     /// Seconds until it expires (default 7 days).
     #[serde(default)]
     pub ttl_s: Option<i64>,
+    /// The identity (`id:…`) it is for: only they may accept it. `None`:
+    /// anyone who holds its token.
+    #[serde(default)]
+    pub invitee: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -696,6 +714,9 @@ pub struct Invite {
     pub uses_left: u32,
     pub expires_at: i64,
     pub created_by: String,
+    /// The identity it is for (`CreateInvite::invitee`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invitee: Option<String>,
     /// Only in the answer to the create: the cell keeps its hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
@@ -1406,8 +1427,14 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner }] };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner, sharing: None }] };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes.ann", "role": "owner" }] }));
+        let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1 };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "chat.ann".into(), role: Role::Owner, sharing: Some(sharing) }] };
+        assert_eq!(
+            value(&listed),
+            serde_json::json!({ "fragments": [{ "name": "chat.ann", "role": "owner", "sharing": { "visibility": "link", "members": 3, "guests": 1 } }] })
+        );
         let members = MemberList { members: vec![] };
         assert_eq!(value(&members), serde_json::json!({ "members": [] }));
         let invites = InviteList { invites: vec![] };

@@ -46,6 +46,7 @@ mod push;
 mod registry;
 mod routed;
 mod serve;
+mod share;
 mod subscriptions;
 
 use fragment_core::body::{LimitedBody, TooLarge};
@@ -623,6 +624,10 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
         (_, [""] | ["auth", ..] | ["cli"] | ["cli", "approve"]) => {
             let segs = segments.clone();
             auth::platform(req, env, cfg, &url, &segs).await
+        }
+        (_, ["share" | "join", _]) => {
+            let segs = segments.clone();
+            share::route(req, env, cfg, &url, &segs).await
         }
         (Method::Get, ["healthz"]) => {
             let mut resp = Response::ok("ok")?;

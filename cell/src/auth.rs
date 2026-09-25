@@ -20,8 +20,10 @@
 //!
 //! Every fragment's origin is one site with the platform, so its pages'
 //! forms, fetches, and frames carry the platform's session cookie: every
-//! page here refuses frames (`unframed`), and every form is refused from
-//! another origin (`same_origin`).
+//! page here refuses frames (`unframed`) and severs a window that opened it
+//! (`unopened`), and every form is refused from another origin
+//! (`same_origin`). Sharing's pages (share.rs) add a form token and armed
+//! buttons.
 //!
 //! Each platform page asks the registry once: a call that needs the
 //! signed-in person carries the session's token, and the registry checks
@@ -79,7 +81,7 @@ fn link_proof(platform: &str, key_hex: &str, proof: &str) -> CellResult<()> {
     Ok(())
 }
 
-fn secure(url: &Url) -> bool {
+pub(crate) fn secure(url: &Url) -> bool {
     url.scheme() == "https"
 }
 
@@ -103,17 +105,17 @@ pub fn set_cookie(base: &str, value: &str, path: &str, max_age_s: i64, secure: b
     format!("{name}={value}; Path={path}; Max-Age={max_age_s}; HttpOnly; SameSite=Lax{s}")
 }
 
-fn cookie_of(req: &Request, base: &str, secure: bool, path: &str) -> CellResult<Option<String>> {
+pub(crate) fn cookie_of(req: &Request, base: &str, secure: bool, path: &str) -> CellResult<Option<String>> {
     let cookies = req.headers().get("cookie")?.unwrap_or_default();
     let name = cookie_name(base, secure, path);
     Ok(site::cookie(&cookies, &name).filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())).map(str::to_string))
 }
 
-fn enc(s: &str) -> String {
+pub(crate) fn enc(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
-fn esc(s: &str) -> String {
+pub(crate) fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
@@ -124,7 +126,7 @@ fn back_to(base: &str, raw: Option<&str>) -> CellResult<String> {
     Ok(site::return_url(&base, raw).into())
 }
 
-fn redirect(to: &str, cookies: &[String]) -> CellResult<Response> {
+pub(crate) fn redirect(to: &str, cookies: &[String]) -> CellResult<Response> {
     let mut resp = Response::empty()?.with_status(302);
     resp.headers_mut().set("location", to)?;
     resp.headers_mut().set("cache-control", "no-store")?;
@@ -134,22 +136,33 @@ fn redirect(to: &str, cookies: &[String]) -> CellResult<Response> {
     Ok(resp)
 }
 
-/// No page may frame one that acts for its person: the platform's, or a
-/// fragment's `__join`. Every fragment's origin is one site with the
-/// platform, so a session cookie rides into a frame, and a page there could
-/// lay the button under a click of its own. A redirect stays framable: it
-/// shows nothing, and the desktop's frames sign in through them.
+/// No page may frame one that acts for its person: every one of the
+/// platform's. Every fragment's origin is one site with the platform, so a
+/// session cookie rides into a frame, and a page there could lay the button
+/// under a click of its own. A redirect stays framable: it shows nothing,
+/// and the desktop's frames sign in through them.
 pub(crate) fn unframed(h: &Headers) -> worker::Result<()> {
     h.set("content-security-policy", "frame-ancestors 'none'")?;
     h.set("x-frame-options", "DENY")
 }
 
-fn page(status: u16, title: &str, body: &str) -> CellResult<Response> {
+/// No page that opens one of the platform's in a window of its own (a
+/// fragment's page: its author's code, or an agent's) keeps a hold on it:
+/// the window is severed from its opener, whose handle reads `closed` and
+/// can neither navigate nor message it.
+pub(crate) fn unopened(h: &Headers) -> worker::Result<()> {
+    h.set("cross-origin-opener-policy", "same-origin")
+}
+
+/// The platform's look, shared by its pages (`page`, and share.rs's).
+pub(crate) const STYLE: &str = "body{font:16px/1.5 system-ui,sans-serif;max-width:34rem;margin:12vh auto;padding:0 16px;color:#1d2126;background:#f6f7f8}
+h1{font-size:1.4rem}code{background:#e8eaed;padding:1px 5px;border-radius:4px}button{font:inherit;padding:.5em 1.1em;border-radius:8px;border:1px solid #1d2126;background:#1d2126;color:#fff;cursor:pointer}
+a{color:#2a5bd7}@media (prefers-color-scheme:dark){body{background:#15181b;color:#e6e8ea}code{background:#262b30}button{background:#e6e8ea;color:#15181b;border-color:#e6e8ea}a{color:#7aa2f7}}";
+
+pub(crate) fn page(status: u16, title: &str, body: &str) -> CellResult<Response> {
     let html = format!(
         r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{t}</title>
-<style>body{{font:16px/1.5 system-ui,sans-serif;max-width:34rem;margin:12vh auto;padding:0 16px;color:#1d2126;background:#f6f7f8}}
-h1{{font-size:1.4rem}}code{{background:#e8eaed;padding:1px 5px;border-radius:4px}}button{{font:inherit;padding:.5em 1.1em;border-radius:8px;border:1px solid #1d2126;background:#1d2126;color:#fff;cursor:pointer}}
-a{{color:#2a5bd7}}@media (prefers-color-scheme:dark){{body{{background:#15181b;color:#e6e8ea}}code{{background:#262b30}}button{{background:#e6e8ea;color:#15181b;border-color:#e6e8ea}}a{{color:#7aa2f7}}}}</style>
+<style>{STYLE}</style>
 <h1>{t}</h1>{body}"#,
         t = esc(title)
     );
@@ -157,16 +170,17 @@ a{{color:#2a5bd7}}@media (prefers-color-scheme:dark){{body{{background:#15181b;c
     h.set("content-type", "text/html; charset=utf-8")?;
     h.set("cache-control", "no-store")?;
     unframed(&h)?;
+    unopened(&h)?;
     Ok(Response::ok(html)?.with_status(status).with_headers(h))
 }
 
-fn query(url: &Url, k: &str) -> Option<String> {
+pub(crate) fn query(url: &Url, k: &str) -> Option<String> {
     url.query_pairs().find(|(q, _)| q == k).map(|(_, v)| v.into_owned())
 }
 
 /// The signed-in person on the platform origin, with their email, and
 /// their session's token, or `None`.
-async fn platform_session(req: &Request, env: &Env, url: &Url) -> CellResult<Option<(String, calls::LiveSession)>> {
+pub(crate) async fn platform_session(req: &Request, env: &Env, url: &Url) -> CellResult<Option<(String, calls::LiveSession)>> {
     let Some(token) = cookie_of(req, SESSION_COOKIE, secure(url), "/")? else { return Ok(None) };
     match ask_registry(env, &calls::Session { token: token.clone(), fragment: None }).await {
         Ok(live) => Ok(Some((token, live))),
@@ -196,7 +210,7 @@ pub fn site_token(req: &Request, name: &str, url: &Url, path_mode: bool) -> Cell
 /// session cookie, and only the Origin tells them apart. A browser sends
 /// Origin with every POST (`null` from a page that hides its referrer), so
 /// a POST without one is no browser's.
-fn same_origin(req: &Request, platform: &str) -> CellResult<()> {
+pub(crate) fn same_origin(req: &Request, platform: &str) -> CellResult<()> {
     match req.headers().get("origin")? {
         Some(o) if o.trim_end_matches('/') != platform => Err(CellError::new(ErrorCode::Forbidden, "this form posts from the platform's own page")),
         _ => Ok(()),
@@ -266,7 +280,7 @@ fn new_form(username: &str, platform: &str) -> String {
     )
 }
 
-fn to_login(platform: &str, back: &str) -> CellResult<Response> {
+pub(crate) fn to_login(platform: &str, back: &str) -> CellResult<Response> {
     redirect(&format!("{platform}/auth/login?return={}", enc(back)), &[])
 }
 

@@ -10,6 +10,12 @@ authority over any of them.
   (`__fragments`). Anyone else, editors included, is refused.
 - `app.mjs` keeps which fragments are chats (`chats`, `add_chat`,
   `remove_chat`); every other fragment is an app.
+- Sharing is the platform's: each row's `…` menu has Share, which opens
+  the platform's share sheet (`/share/<name>`, from `__fragments`) in a
+  window of its own; this page cannot drive it. Rows are badged with how
+  many people besides you (and your agents) are in them, and a globe when
+  anyone may open them, from `sharing` in your list (reading it wakes none
+  of the fragments).
 - `site/layout.js` is the frame (sidebar | chat | viewer, one CSS grid
   resized with split-grid), `site/viewer.js` the stacked panes, and
   `site/desktop.js` the rest. Layout and open panes are remembered in the

@@ -6,8 +6,9 @@
 //! fragment's origin); on a `public` fragment, everyone else holds the
 //! `public` floor. An unsigned browser calling an operation gets an
 //! anonymous principal: a random cookie whose hash names it. A browser
-//! signed in on this origin (`__signin`, the router's) is its person, and
-//! accepts an invite at `__join?invite=<token>`.
+//! signed in on this origin (`__signin`, the router's) is its person.
+//! Invites are accepted on the platform's origin (`/join/<name>`,
+//! share.rs), never here: a page here is the fragment's author's.
 //!
 //! The router hands a site request's signer or session on unresolved: a
 //! page or a file answers alike for everyone who may see the fragment, so
@@ -90,10 +91,10 @@ fn script(req: &Request, body: &'static str, hash: u64) -> CellResult<Response> 
 
 /// Whether a site path's answer is someone's, beyond whether they may see
 /// the fragment: an operation's call, a socket (`__live`'s presence; a
-/// member's `__watch` closes when they leave), an invite, a push
-/// subscription, or the owner's fragments. Its caller is resolved first.
+/// member's `__watch` closes when they leave), a push subscription, or the
+/// owner's fragments. Its caller is resolved first.
 fn answers_someone(path: &str) -> bool {
-    path.starts_with("__op/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__fragments" | "__join" | "__watch" | "__live")
+    path.starts_with("__op/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__fragments" | "__watch" | "__live")
 }
 
 fn with_cookies(mut resp: Response, cookies: &[String]) -> CellResult<Response> {
@@ -180,7 +181,8 @@ impl FragmentCell {
                 let body: Value = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
                 self.owner_create(caller, body).await?
             } else {
-                self.owner_fragments(caller).await?
+                let listed = self.owner_fragments(caller).await?;
+                self.with_share_sheets(caller, listed)?
             };
             json_response(&answer)?
         } else if path == "__people" {
@@ -195,8 +197,6 @@ impl FragmentCell {
             json_response(&answer)?
         } else if path == "__sw.js" {
             script(&req, crate::push::SW_JS, SW_JS_HASH)?
-        } else if path == "__join" {
-            self.join_page(&mut req, caller, name, &url).await?
         } else if path == "__watch" {
             self.watch(&req, caller, &facts, link)?
         } else if path == "__live" {
@@ -222,47 +222,18 @@ impl FragmentCell {
         with_cookies(resp, &set)
     }
 
-    /// An invite in a browser: sign in on this origin, then a button that
-    /// posts back here (a cross-site form carries no SameSite=Lax cookie).
-    async fn join_page(&self, req: &mut Request, caller: &Caller, name: &str, url: &url::Url) -> CellResult<Response> {
-        let base = self.cfg.canonical(&caller.url, name);
-        let form = |bytes: &[u8]| url::form_urlencoded::parse(bytes).find(|(k, _)| k == "invite").map(|(_, v)| v.into_owned());
-        match req.method() {
-            Method::Get => {
-                let invite = url.query_pairs().find(|(k, _)| k == "invite").map(|(_, v)| v.into_owned()).unwrap_or_default();
-                if caller.principal().is_none() {
-                    let back: String = url::form_urlencoded::byte_serialize(format!("/__join?invite={invite}").as_bytes()).collect();
-                    let mut resp = Response::empty()?.with_status(302);
-                    resp.headers_mut().set("location", &format!("{base}__signin?return={back}"))?;
-                    return Ok(resp);
-                }
-                let esc = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('"', "&quot;");
-                let html = format!(
-                    r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Join {n}</title>
-<style>body{{font:16px/1.5 system-ui,sans-serif;max-width:34rem;margin:12vh auto;padding:0 16px}}button{{font:inherit;padding:.5em 1.1em;border-radius:8px}}</style>
-<h1>Join {n}</h1><form method="post" action="{base}__join"><input type="hidden" name="invite" value="{i}"><button>Join</button></form>"#,
-                    n = esc(name),
-                    i = esc(&invite)
-                );
-                let h = Headers::new();
-                h.set("content-type", "text/html; charset=utf-8")?;
-                h.set("cache-control", "no-store")?;
-                crate::auth::unframed(&h)?;
-                Ok(Response::ok(html)?.with_headers(h))
-            }
-            Method::Post => {
-                let origin = req.headers().get("origin")?;
-                if origin.is_some_and(|o| o != self.cfg.origin(&caller.url, name)) {
-                    return Err(CellError::new(ErrorCode::Forbidden, "an invite is accepted from this fragment's own page"));
-                }
-                let token = form(&req.bytes().await?).ok_or_else(|| CellError::invalid("the form names no invite"))?;
-                self.join(caller, fragment_proto::Join { token }).await?;
-                let mut resp = Response::empty()?.with_status(302);
-                resp.headers_mut().set("location", &base)?;
-                Ok(resp)
-            }
-            _ => Err(CellError::invalid("__join takes GET or POST")),
+    /// `__fragments`' list with each fragment's share sheet (on the
+    /// platform's origin) added, for the desktop's Share item. Its badges
+    /// read `sharing`, which the owner's list carries: a read here asks the
+    /// Principal cell alone, and wakes none of the fragments it lists.
+    fn with_share_sheets(&self, caller: &Caller, mut listed: Value) -> CellResult<Value> {
+        let platform = self.cfg.platform(&caller.url);
+        let Some(list) = listed["fragments"].as_array_mut() else { return Err(CellError::host("__fragments lists no fragments")) };
+        for f in list {
+            let name = f["name"].as_str().unwrap_or_default().to_string();
+            f["share"] = json!(format!("{platform}/share/{name}"));
         }
+        Ok(listed)
     }
 
     /// The author's `fetch` for a path that is not a site file: it sees the

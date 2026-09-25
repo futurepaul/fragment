@@ -208,11 +208,14 @@ SameSite=Lax session cookie rides along on a fragment page's form, fetch,
 or frame. So every page here answers `Content-Security-Policy:
 frame-ancestors 'none'` and `X-Frame-Options: DENY` (no page may frame
 one and lay its button under a click; the redirects need not, and the
-desktop's frames sign in through them), and every form here
-(`/auth/new`, `/auth/username`, `/auth/picture`, `/auth/logout`,
-`/cli/approve`) is 403 from another origin, a fragment's page included.
-A browser sends `Origin` with every POST (`null` from a page that hides
-its referrer), so a POST without one is no browser's.
+desktop's frames sign in through them) and `Cross-Origin-Opener-Policy:
+same-origin` (a page that opens one in a window of its own is severed
+from it: its handle reads `closed`, and can neither navigate nor message
+it), and every form here (`/auth/new`, `/auth/username`, `/auth/picture`,
+`/auth/logout`, `/cli/approve`, and Sharing's below) is 403 from another
+origin, a fragment's page included. A browser sends `Origin` with every
+POST (`null` from a page that hides its referrer), so a POST without one
+is no browser's.
 
 Over https every session cookie whose path is `/` is named with the
 `__Host-` prefix (`__Host-fragment_session`, `__Host-fragment_login`,
@@ -251,22 +254,54 @@ only while someone starts more than 100000 in ten minutes, about 166 a
 second, sustained. Expired sign-ins, redemptions, and sessions are
 deleted in batches on the registry's alarm, never on a request.
 
+## Sharing (phase 7, decision 4)
+
+The share sheet and accepting invites are the platform's pages, never a
+fragment's: a fragment's page is its author's code (or an agent's), and
+sharing grants. Each acts through the fragment's own routes (members,
+invites, visibility, rotate, join; below) as the person signed in on the
+platform, so the fragment decides who may do what.
+
+| method & path (platform origin) | what |
+| --- | --- |
+| `GET /share/<name>` | the share sheet: who is in (usernames and pictures, from the registry's profiles) and their roles, to any member (anyone else, a 403 page); for the owner, inviting by username, the pending invites (revoke), each member's role and removing them, who can open it (`members`, `link`, `public`), and the share link (copy; a new one). Signed out: → sign in first, and back. It reads nothing from its URL |
+| `POST /share/<name>` | the sheet's form: `form` (the page's token), `action`, and its fields: `invite` (`username`, `role`: an invite for them alone, one use, seven days; answers the sheet with the `/join` link to send them), `role` (`member`, `role`), `remove` (`member`), `uninvite` (`invite`: its id), `visibility` (`visibility`), `rotate` (the share link only; the inbox's token and the webhook's secret are the CLI's). Done: → 303 back to the sheet; refused by the fragment (a member who is not the owner: 403): the sheet, saying why, with the refusal's status |
+| `GET /join/<name>?token=` | what the invite grants (the fragment, the role, who invites), and a Join button; signed out: → sign in first, and back. An invite for someone else: a 403 page naming them; used, revoked, or expired: 404; the person is in already (at that role or above): a link to open it |
+| `POST /join/<name>` | the page's form (`form`, `token`): joins as the signed-in person, then → `/auth/fragment?name=<name>&return=/` (signed in on its origin, and there) |
+
+Neither page can be driven by a fragment's page. Every POST's `Origin`
+must be the platform's (403 otherwise), and every POST carries `form`,
+the token its page was made with: an HMAC, keyed by the session's own
+token (the HttpOnly cookie, which no page's script reads), of what the
+form does (`share:<name>`, `join:<name>`) and when its page was made
+(`fragment_core::form`). A form without it, another session's, one for
+another fragment or page, one sent sooner than 800 ms after its page was
+made, or one older than 12 hours is 403. Their buttons come disabled and
+arm 800 ms after the page shows (again each time it is shown), so the
+click that opened a page (a double-click's second half) cannot confirm
+in it. Both pages send no CORS headers (a fragment's page cannot read
+them, so it never holds a form's token), refuse every frame, sever their
+opener, allow scripts and styles only inline and images only from the
+platform (`Content-Security-Policy`), and keep their URL to the platform
+(`Referrer-Policy: same-origin`: the join page's holds its invite).
+
 ## Control API
 
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/fragments` | a person with a username (an agent is 403) | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). The fragment's own key is made by the node's `KEYS` and stays sealed there. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`desktop`, `chat`, `todo`, `inbox`, `blank`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
-| `GET /api/fragments` | any signer | → `{fragments: [{name, role}]}`; an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
+| `GET /api/fragments` | any signer | → `{fragments: [{name, role, sharing?}]}`; `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility (a fragment from before sends it once, on its next change or alarm; until then it has none); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
 | `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes}` |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
 | `PUT /api/f/{name}/members/{id\|npub}` | owner | `{role: viewer\|editor}` → the member; a key names the identity holding it (404 when no one registered it) |
 | `DELETE /api/f/{name}/members/{id\|npub\|me}` | owner, or the member | → `{ok, removed}`; closes that member's change feeds (and its owner's, when an agent's membership was their only view) |
-| `POST /api/f/{name}/invites` | owner | `{role, uses? (1), ttlS? (7 days, at most 30)}` → `{id, role, usesLeft, expiresAt, createdBy, token}`; the token is shown once |
+| `POST /api/f/{name}/invites` | owner | `{role, uses? (1), ttlS? (7 days, at most 30), invitee? (id:…)}` → `{id, role, usesLeft, expiresAt, createdBy, invitee?, token}`; the token is shown once. With `invitee`, only that identity may accept it (the share sheet's invite by username); without, whoever holds the token |
 | `GET /api/f/{name}/invites` | owner | → `{invites: [...]}` without tokens |
 | `DELETE /api/f/{name}/invites/{id}` | owner | → `{ok, revoked}` |
-| `POST /api/f/{name}/join` | any signer | `{token}` → `{name, role, joined}`; a stronger existing role is kept; a fragment at its 1000 members is 400, and the invite keeps its use |
+| `POST /api/f/{name}/join` | any signer | `{token}` → `{name, role, joined}`; a stronger existing role is kept; a fragment at its 1000 members is 400, and the invite keeps its use; an invite for another identity is 403, and keeps its use |
+| `POST /api/f/{name}/join/preview` | any signer | `{token}` → `{name, role, invitedBy, invitee, expiresAt, current}`: what joining would grant (`current`: the signer's role now), joining no one; 404 for a token that names no open invite (the platform's `/join` page shows it) |
 | `PUT /api/f/{name}/visibility` | owner | `{visibility}` → `{ok, visibility}` |
 | `POST /api/f/{name}/rotate` | owner | `{scopes?: [inbox, view, webhook]}` → `{inboxToken, viewToken, webhookSecret, rotated}` (`Rotated`): every token as it is now, and the scopes renewed; a new view token closes link holders' feeds |
 | `PUT /api/f/{name}/secrets/{KEY}` | editor | raw body (at most 64 KiB) → `{ok, name}`; sealed (AES-256-GCM, key HKDF'd from the host secret and the fragment's npub) |
@@ -603,9 +638,8 @@ API answers on the platform's host):
 | `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; a signed-in browser (`fragment_site`) calls as its person; an unsigned caller gets an anonymous principal cookie; callers holding only `public` get 60 calls a minute each, 600 per fragment (a page's live views re-run over `__live`, outside this) |
 | `POST __op/channels/{channel}` | a browser's post (`fragment.post`), through the call's door and its checks: `{id, input}` with the record's body as `input` → `{result: record, replayed}`, as `POST /api/f/{name}/channels/{channel}` answers it; a post spends the public budget as a call does (no operation name holds a `/`) |
 | `__signin`, `__signout` | this origin's session (Sign-in, above) |
-| `__join?invite=<token>` | an invite in a browser: signed out, → `__signin` and back; signed in, a Join button that posts `invite` here (form-encoded; another origin 403) and joins as the person; the page refuses every frame (`frame-ancestors 'none'`, `X-Frame-Options: DENY`), as the platform's do |
 | `__fragment.js` | the browser library (below) |
-| `__fragments` | `{fragments: [{name, role, url}]}`: the fragments this fragment's owner belongs to, only to the owner signed in here, and only when `fragment.json` at live declares `"capabilities": ["fragments"]` (anyone else, or a page that does not ask, 403). A dashboard's page, such as the desktop's. `POST` `application/json` `{label, template}` → `{name, url}` makes `<label>.<username>` for the owner, as `POST /api/fragments` would, under the same conditions |
+| `__fragments` | `{fragments: [{name, role, url, share, sharing?}]}`: the fragments this fragment's owner belongs to, only to the owner signed in here, and only when `fragment.json` at live declares `"capabilities": ["fragments"]` (anyone else, or a page that does not ask, 403). `share` is its share sheet (`<platform>/share/<name>`); `sharing` is the owner's list's (`GET /api/fragments`): a read asks the owner's Principal cell alone and wakes none of the fragments listed. A dashboard's page, such as the desktop's. `POST` `application/json` `{label, template}` → `{name, url}` makes `<label>.<username>` for the owner, as `POST /api/fragments` would, under the same conditions |
 | `__people?id=…&id=…` | anyone who can see the fragment: `{profiles: {<id>: {kind, username, picture}}}` for up to 64 identities (an agent's `username` is its owner's; a picture is an absolute platform URL); an id the registry does not hold is left out |
 | `__files` | an HTML list of the content files (live and main) linking to `__file`; framed, a click asks the page around it to open the file (`postMessage({fragment: "open", url, title})`) |
 | `__live` | WebSocket, anyone who can see the fragment: channel subscriptions from a cursor, presence, change signals, queries (below) |

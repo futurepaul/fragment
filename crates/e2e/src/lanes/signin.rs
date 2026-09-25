@@ -36,7 +36,7 @@ const A_FRAGMENTS_PAGE: &str = "http://page--mallory.fragment.localhost";
 /// `X-Frame-Options: DENY` for browsers without it). Every fragment's
 /// origin is one site with the platform, so the platform's session rides
 /// into a frame, and a page there could lay a button under a click.
-fn unframed(r: &Reply) -> bool {
+pub(super) fn unframed(r: &Reply) -> bool {
     r.header("content-security-policy").contains("frame-ancestors 'none'") && r.header("x-frame-options") == "DENY"
 }
 
@@ -362,6 +362,9 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     ];
     let framable: Vec<String> = pages.iter().filter(|(_, shows, r)| !(r.text.contains(shows) && unframed(r))).map(|(page, _, r)| format!("{page}: {}", framing(r))).collect();
     s.ok(&format!("and so does every other platform page ({} of them)", pages.len()), framable.is_empty(), format!("{framable:?}"));
+    // a page that opens one of them in a window of its own keeps no hold on it
+    let held: Vec<&str> = pages.iter().filter(|(_, _, r)| r.header("cross-origin-opener-policy") != "same-origin").map(|(page, _, _)| *page).collect();
+    s.ok("and every one severs a window that opened it (Cross-Origin-Opener-Policy: same-origin)", held.is_empty(), format!("{held:?}"));
     // a person who signs in may hold no key at all
     let lone = api.sign_in("lone@e2e.test")?;
     let lone_key = Keys::generate();
@@ -672,38 +675,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let r = with_session(api, "GET", "/", &member_session)?;
     s.ok("the platform no longer knows the browser", r.text.contains("Sign in") && !r.text.contains("member@e2e.test"), &r);
 
-    // invites in the browser
-    let r = api.signed(&owner, "POST", &format!("/api/f/{f}/invites"), Some(&json!({ "role": "viewer" })))?;
-    let invite = r.body["token"].as_str().unwrap_or("").to_string();
-    let r = api.page(&f, &format!("__join?invite={invite}"), None)?;
-    s.ok("an invite link sends a signed-out browser to sign in first", r.status == 302 && r.header("location").contains("__signin?return="), &r);
-    let r = api.page(&f, &format!("__join?invite={invite}"), Some(&format!("fragment_site={outsider_f}")))?;
-    s.ok("signed in, it offers to join", r.status == 200 && r.text.contains("Join"), &r);
-    s.ok("and no page may frame it: another fragment's page could lay Join under a click", unframed(&r), framing(&r));
-    // a form's post names the page it came from; another fragment's page
-    // is one site with this one, so its post carries the outsider's cookie
-    let join_from = |origin: &str| {
-        api.call(Call {
-            method: "POST",
-            url: api.site_url(&f, "__join"),
-            body: Some(format!("invite={invite}").into_bytes()),
-            content_type: Some("application/x-www-form-urlencoded"),
-            cookie: Some(format!("fragment_site={outsider_f}")),
-            extra: vec![("origin", origin.to_string())],
-            ..Call::default()
-        })
-    };
-    let r = join_from(&api.site_origin(&g))?;
-    let r2 = api.page(&f, "", Some(&format!("fragment_site={outsider_f}")))?;
-    s.ok("an invite posted from another fragment's page is refused (403), and joins no one", r.status == 403 && r2.status == 403, format!("{r} / {r2}"));
-    let mut portless = reqwest::Url::parse(&api.site_origin(&f))?;
-    let _ = portless.set_port(None);
-    let r = join_from(&portless.origin().ascii_serialization())?;
-    let r2 = api.page(&f, "", Some(&format!("fragment_site={outsider_f}")))?;
-    s.ok("and from its host on another port (another origin, whose name begins the same)", r.status == 403 && r2.status == 403, format!("{r} / {r2}"));
-    let r = join_from(&api.site_origin(&f))?;
-    let r2 = api.page(&f, "", Some(&format!("fragment_site={outsider_f}")))?;
-    s.ok("joining in the browser, from the invite's own page, makes them a member", r.status == 302 && r2.status == 200, &r2);
+    // invites are accepted on the platform's origin (`/join/<name>`: the share lane)
 
     // sign-in's rows: bounded, and swept on the registry's alarm, never on a request
     let mut minted = vec![];

@@ -1682,13 +1682,14 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Invite { sub } => match sub {
             InviteCmd::Create { name, role, uses, ttl } => {
                 let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
-                let body = fragment_proto::CreateInvite { role, uses: Some(uses), ttl_s: ttl };
+                let body = fragment_proto::CreateInvite { role, uses: Some(uses), ttl_s: ttl, invitee: None };
                 let v: Invite = c.call_as(c.post_json(&format!("/api/f/{name}/invites"), &body)?)?;
                 // the create is the one answer that carries the token
                 let token = v.token.clone().ok_or_else(|| anyhow!("the host made invite {} but did not answer its token", v.id))?;
-                // the link a person opens in a browser (they sign in, then join)
+                // the link a person opens in a browser: the platform's join
+                // page (they sign in, see what it grants, then join)
                 let status: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
-                let link = format!("{}__join?invite={token}", status.urls.canonical);
+                let link = format!("{}/join/{}?token={token}", c.host.trim_end_matches('/'), status.name);
                 if j {
                     let mut out = serde_json::to_value(&v)?;
                     out["link"] = json!(link);

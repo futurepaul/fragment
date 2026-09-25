@@ -11,12 +11,21 @@
 //!
 //! Each identity's list of fragments is an index in its `Principal` cell.
 //! The fragment is the authority: a change is written here with an outbox
-//! row in the same turn, then delivered (and retried from the alarm).
+//! row in the same turn, then delivered (and retried from the alarm). The
+//! owner's row also carries the fragment's sharing (`Sharing`: who may
+//! open it, its members and guests), made when the row is sent: a change
+//! to members or visibility sends it again (`sharing_changed`), so the
+//! desktop's badges read the owner's list alone.
+//!
+//! An invite may be for one identity (`invitee`, the share sheet's invite by
+//! username): only they may accept it, so a forwarded link admits no one
+//! else. Without one, whoever holds its token may.
 
 use fragment_core::access;
 use fragment_core::npub;
 use fragment_proto::{
-    limits, CreateInvite, ErrorCode, Identity, IdentityKind, Invite, InviteList, Join, Member, MemberList, Role, Rotated, SetRole, SetVisibility, Visibility,
+    limits, CreateInvite, ErrorCode, Identity, IdentityKind, Invite, InviteList, Join, Member, MemberList, Role, Rotated, SetRole, SetVisibility, Sharing,
+    Visibility,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -59,7 +68,17 @@ fn invite_json(r: &Value) -> Invite {
         uses_left: r["uses_left"].as_u64().unwrap_or(0) as u32,
         expires_at: r["expires_at"].as_i64().unwrap_or(0),
         created_by: npub::display(r["created_by"].as_str().unwrap_or("")),
+        invitee: r["invitee"].as_str().map(str::to_string),
         token: None,
+    }
+}
+
+/// An invites table from before invites could name their invitee gains
+/// the column (every invite made before is anyone's who holds its token).
+pub(crate) fn migrate(sql: &SqlStorage) {
+    let cols: Vec<Value> = sql.exec("PRAGMA table_info(invites)", None).and_then(|c| c.to_array()).unwrap_or_default();
+    if !cols.iter().any(|c| c["name"] == "invitee") {
+        sql.exec("ALTER TABLE invites ADD COLUMN invitee TEXT", None).expect("the invites table migrates");
     }
 }
 
@@ -77,10 +96,25 @@ impl FragmentCell {
         )
     }
 
+    /// Who is in, or who may open it, changed: the owner's row in their
+    /// list is sent again, with the sharing as it is when it goes.
+    pub(crate) fn sharing_changed(&self) -> CellResult<()> {
+        let owner = self.must(MetaKey::Owner)?;
+        self.index_change(&owner, Some(Role::Owner))?;
+        self.set_meta(MetaKey::SharingSent, "1")
+    }
+
     /// Delivers due index changes to the people's `Principal` cells. A
     /// failure stays in the outbox with a backoff; the alarm retries it.
+    /// A fragment from before the owner's row carried its sharing sends it
+    /// once, here (on its next change, or its alarm).
     pub(crate) async fn flush_index(&self) {
-        let (Ok(name), Ok(Some(incarnation))) = (self.must(MetaKey::Name), self.meta(MetaKey::CreatedAt)) else { return };
+        let (Ok(name), Ok(Some(incarnation)), Ok(owner)) = (self.must(MetaKey::Name), self.meta(MetaKey::CreatedAt), self.must(MetaKey::Owner)) else { return };
+        if matches!(self.meta(MetaKey::SharingSent), Ok(None)) {
+            if let Err(e) = self.sharing_changed() {
+                console_error!("{name}: its sharing was not queued for its owner's list ({:?}): {}", e.code, e.message);
+            }
+        }
         let due = self
             .rows(
                 "SELECT principal, role, version, attempts FROM index_outbox WHERE next_at <= ?",
@@ -90,12 +124,20 @@ impl FragmentCell {
         for row in due {
             let principal = row["principal"].as_str().unwrap_or("").to_string();
             let version = row["version"].as_i64().unwrap_or(0);
-            let body = json!({
+            let mut body = json!({
                 "fragment": name,
                 "role": row["role"],
                 "incarnation": incarnation.parse::<i64>().unwrap_or(0),
                 "version": version,
             });
+            // the owner's row: the sharing now, which no later change undoes
+            // (a later one sends a newer version, made after it)
+            if principal == owner && row["role"].is_string() {
+                match self.sharing_counts() {
+                    Ok(sharing) => body["sharing"] = json!(sharing),
+                    Err(e) => console_error!("{name}: its sharing did not read ({:?}): {}", e.code, e.message),
+                }
+            }
             let delivered = async {
                 let headers = Headers::new();
                 headers.set("content-type", "application/json")?;
@@ -203,6 +245,7 @@ impl FragmentCell {
             ],
         )?;
         self.index_change(&target.id, Some(body.role))?;
+        self.sharing_changed()?;
         // sharing with an agent says so: its owner reads what it reads (FIN-11)
         let summary = match &target.owner {
             Some(owner) => format!("{} (an agent) is now {}; its owner {owner} reads what it reads", target.id, body.role.as_str()),
@@ -246,6 +289,7 @@ impl FragmentCell {
         self.exec("DELETE FROM members WHERE principal = ?", vec![target.as_str().into()])?;
         self.drop_subscriptions(&target)?;
         self.index_change(&target, None)?;
+        self.sharing_changed()?;
         self.close_sockets(&format!("p:{target}"), "membership revoked");
         // an agent's owner who read through it, and has no standing of their own now
         if let Some(owner) = owner {
@@ -277,6 +321,14 @@ impl FragmentCell {
         if !matches!(body.role, Role::Viewer | Role::Editor) {
             return Err(CellError::invalid("an invite grants viewer or editor"));
         }
+        if let Some(invitee) = &body.invitee {
+            if !npub::is_identity(invitee) {
+                return Err(CellError::invalid(format!("invitee {invitee:?} is not an identity (id:…)")));
+            }
+            if self.caller_id(caller)? == invitee {
+                return Err(CellError::invalid("the owner is in already"));
+            }
+        }
         let uses = body.uses.unwrap_or(1);
         if uses == 0 || uses > limits::INVITE_USES_MAX {
             return Err(CellError::invalid(format!("uses must be 1..={}", limits::INVITE_USES_MAX)));
@@ -295,7 +347,7 @@ impl FragmentCell {
         let expires_at = now + ttl_s * 1000;
         let by = self.caller_id(caller)?;
         self.exec(
-            "INSERT INTO invites (id, token_sha, role, uses_left, expires_at, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO invites (id, token_sha, role, uses_left, expires_at, created_by, created_at, invitee) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             vec![
                 id.as_str().into(),
                 hex::encode(Sha256::digest(token.as_bytes())).into(),
@@ -304,16 +356,22 @@ impl FragmentCell {
                 SqlStorageValue::Integer(expires_at),
                 by.into(),
                 SqlStorageValue::Integer(now),
+                opt(body.invitee.as_deref()),
             ],
         )?;
-        self.event("invite.created", &format!("invite {id} for {} ({uses} uses)", body.role.as_str()), json!({ "id": id, "role": body.role }));
-        json_response(&Invite { id, role: body.role, uses_left: uses, expires_at, created_by: npub::display(by), token: Some(token) })
+        let whom = body.invitee.as_deref().map(|i| format!(", for {i}")).unwrap_or_default();
+        self.event(
+            "invite.created",
+            &format!("invite {id} for {} ({uses} uses{whom})", body.role.as_str()),
+            json!({ "id": id, "role": body.role, "invitee": body.invitee }),
+        );
+        json_response(&Invite { id, role: body.role, uses_left: uses, expires_at, created_by: npub::display(by), invitee: body.invitee, token: Some(token) })
     }
 
     pub(crate) fn invites(&self, caller: &Caller) -> CellResult<Response> {
         self.require_owner(caller)?;
         self.drop_spent_invites()?;
-        let rows = self.rows("SELECT id, role, uses_left, expires_at, created_by FROM invites ORDER BY created_at", vec![])?;
+        let rows = self.rows("SELECT id, role, uses_left, expires_at, created_by, invitee FROM invites ORDER BY created_at", vec![])?;
         json_response(&InviteList { invites: rows.iter().map(invite_json).collect() })
     }
 
@@ -327,15 +385,43 @@ impl FragmentCell {
         json_response(&json!({ "ok": true, "revoked": id }))
     }
 
-    /// Redeems an invite. The token is the capability: no visibility check.
+    /// The open invite a token names: its row (`id, role, expires_at,
+    /// created_by, invitee`), or 404.
+    fn open_invite(&self, token: &str) -> CellResult<Value> {
+        let rows = self.rows(
+            "SELECT id, role, expires_at, created_by, invitee FROM invites WHERE token_sha = ? AND expires_at > ? AND uses_left > 0",
+            vec![hex::encode(Sha256::digest(token.as_bytes())).into(), SqlStorageValue::Integer(js::now_ms())],
+        )?;
+        rows.into_iter().next().ok_or_else(|| CellError::new(ErrorCode::NotFound, "no such invite (it may have expired, been used, or been revoked)"))
+    }
+
+    /// What joining with a token would do, joining no one (the platform's
+    /// `/join` page shows it before its button): `{name, role, invitedBy,
+    /// invitee, expiresAt, current}`, `current` the caller's role now.
+    pub(crate) fn join_preview(&self, caller: &Caller, body: Join) -> CellResult<Response> {
+        let name = self.name()?;
+        let who = self.caller_id(caller)?;
+        let row = self.open_invite(&body.token)?;
+        let role = row["role"].as_str().and_then(Role::parse).ok_or_else(|| CellError::host("invites.role"))?;
+        json_response(&json!({
+            "name": name,
+            "role": role,
+            "invitedBy": npub::display(row["created_by"].as_str().unwrap_or("")),
+            "invitee": row["invitee"],
+            "expiresAt": row["expires_at"],
+            "current": self.member_role(who)?,
+        }))
+    }
+
+    /// Redeems an invite. The token is the capability (no visibility
+    /// check); an invite for one identity is theirs alone.
     pub(crate) async fn join(&self, caller: &Caller, body: Join) -> CellResult<Response> {
         let name = self.name()?;
         let who = self.caller_id(caller)?.to_string();
-        let rows = self.rows(
-            "SELECT id, role FROM invites WHERE token_sha = ? AND expires_at > ? AND uses_left > 0",
-            vec![hex::encode(Sha256::digest(body.token.as_bytes())).into(), SqlStorageValue::Integer(js::now_ms())],
-        )?;
-        let row = rows.first().ok_or_else(|| CellError::new(ErrorCode::NotFound, "no such invite (it may have expired or been used)"))?;
+        let row = self.open_invite(&body.token)?;
+        if row["invitee"].as_str().is_some_and(|invitee| invitee != who) {
+            return Err(CellError::new(ErrorCode::Forbidden, "this invite is for someone else"));
+        }
         let id = row["id"].as_str().unwrap_or("").to_string();
         let role = row["role"].as_str().and_then(Role::parse).ok_or_else(|| CellError::host("invites.role"))?;
         let current = self.member_role(&who)?;
@@ -360,15 +446,37 @@ impl FragmentCell {
         )?;
         self.exec("UPDATE invites SET uses_left = uses_left - 1 WHERE id = ?", vec![id.as_str().into()])?;
         self.index_change(&who, Some(role))?;
+        self.sharing_changed()?;
         self.event("member.joined", &format!("{} joined as {} (invite {id})", npub::display(&who), role.as_str()), json!({ "principal": npub::display(&who), "role": role, "invite": id }));
         self.flush_index().await;
         json_response(&json!({ "name": name, "role": role, "joined": true }))
     }
 
-    pub(crate) fn set_visibility(&self, caller: &Caller, body: SetVisibility) -> CellResult<Response> {
+    /// The fragment's sharing, as its owner's list carries it: `guests`
+    /// counts the members who are neither the owner nor an agent of theirs.
+    pub(crate) fn sharing_counts(&self) -> CellResult<Sharing> {
+        let visibility = self.visibility()?;
+        let owner = self.must(MetaKey::Owner)?;
+        #[derive(serde::Deserialize)]
+        struct Counts {
+            members: u64,
+            guests: u64,
+        }
+        let counts: Vec<Counts> = self.typed(
+            "SELECT (SELECT COUNT(*) FROM members) AS members,
+                    (SELECT COUNT(*) FROM members WHERE principal != ? AND (owner IS NULL OR owner != ?)) AS guests",
+            vec![owner.as_str().into(), owner.as_str().into()],
+        )?;
+        let counts = counts.into_iter().next().expect("a SELECT without FROM answers one row");
+        assert!(counts.guests <= counts.members, "guests are members");
+        Ok(Sharing { visibility, members: counts.members, guests: counts.guests })
+    }
+
+    pub(crate) async fn set_visibility(&self, caller: &Caller, body: SetVisibility) -> CellResult<Response> {
         self.require_owner(caller)?;
         let before = self.visibility()?;
         self.set_meta(MetaKey::Visibility, body.visibility.as_str())?;
+        self.sharing_changed()?;
         if body.visibility != Visibility::Public {
             self.close_sockets("anon", "the fragment is no longer public");
         }
@@ -380,6 +488,7 @@ impl FragmentCell {
             &format!("visibility {} → {}", before.as_str(), body.visibility.as_str()),
             json!({ "from": before, "to": body.visibility }),
         );
+        self.flush_index().await;
         json_response(&json!({ "ok": true, "visibility": body.visibility }))
     }
 

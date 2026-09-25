@@ -3,7 +3,10 @@
 // the viewer, and a file opens through its own fragment's __file. Each
 // frame signs in on its own origin (through its __signin), so the desktop
 // holds no authority over any of them: the one platform power it has is
-// its owner's list (`__fragments`, which fragment.json asks for).
+// its owner's list (`__fragments`, which fragment.json asks for). Sharing
+// is the platform's too: a row's Share item opens the platform's share
+// sheet in a window of its own, which this page cannot script (the sheet
+// severs its opener); the list says who else is in each, for the badges.
 import * as fragment from "./__fragment.js";
 import { createLayout, store } from "./layout.js";
 import { createViewer } from "./viewer.js";
@@ -15,6 +18,10 @@ const ICON = {
   grid: '<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>',
   reload: '<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>',
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  more: '<circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/>',
+  people: '<circle cx="9" cy="8" r="3.2"/><path d="M3 19a6 6 0 0 1 12 0"/><path d="M16 5.2a3.2 3.2 0 0 1 0 5.6M18 19a6 6 0 0 0-2.5-4.9"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+  share: '<path d="M12 15V3M7 8l5-5 5 5"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/>',
 };
 const svg = (name) => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON[name]}</svg>`;
 const CURRENT = "desktop.chat.v1";
@@ -94,15 +101,94 @@ function show(spec) {
   layout.show("right");
 }
 
+// ---- sharing: the platform's sheet, and who else is in each ----
+// Who else is in a fragment, as a badge: people besides its owner and
+// their agents, and whether anyone at all may open it. (A link is every
+// fragment's default, so it is not badged.) `sharing` is the owner's list's
+// (none yet for a fragment that has not sent it: no badge).
+function badges(f) {
+  const out = [];
+  const { guests = 0, visibility } = f.sharing ?? {};
+  if (guests > 0) {
+    const b = el("span", "shared");
+    b.innerHTML = svg("people");
+    b.append(String(guests));
+    b.title = `Shared with ${guests} ${guests === 1 ? "person" : "people"}`;
+    out.push(b);
+  }
+  if (visibility === "public") {
+    const b = el("span", "shared");
+    b.innerHTML = svg("globe");
+    b.title = "Anyone can open it";
+    out.push(b);
+  }
+  return out;
+}
+
+// The platform's share sheet, in a small window of its own. `noopener`:
+// this page keeps no handle on it (and the sheet severs any opener anyway).
+function share(name) {
+  const f = byName(name);
+  if (!f?.share) return notice("Sharing is not available", "This platform does not offer a share sheet.");
+  const w = 480, h = 720;
+  const left = Math.max(0, screenX + (outerWidth - w) / 2), top = Math.max(0, screenY + (outerHeight - h) / 3);
+  window.open(f.share, "_blank", `popup,noopener,width=${w},height=${h},left=${left},top=${top}`);
+}
+
+// One `…` menu, for whichever row asked.
+const menu = $("menu");
+let menuFor = null;
+function closeMenu() {
+  if (!menuFor) return;
+  menuFor.button.setAttribute("aria-expanded", "false");
+  menuFor = null;
+  menu.hidden = true;
+}
+function openMenu(button, name) {
+  const again = menuFor?.button === button;
+  closeMenu();
+  if (again) return;
+  menuFor = { button, name };
+  button.setAttribute("aria-expanded", "true");
+  menu.hidden = false;
+  const r = button.getBoundingClientRect();
+  menu.style.top = `${Math.min(r.bottom + 4, innerHeight - menu.offsetHeight - 8)}px`;
+  menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8))}px`;
+  $("menu-share").focus();
+}
+$("menu-share").innerHTML = svg("share");
+$("menu-share").append("Share…");
+$("menu-share").onclick = () => { const name = menuFor?.name; closeMenu(); if (name) share(name); };
+addEventListener("pointerdown", (e) => { if (menuFor && !menu.contains(e.target) && e.target !== menuFor.button && !menuFor.button.contains(e.target)) closeMenu(); });
+addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
+addEventListener("blur", closeMenu);
+addEventListener("resize", closeMenu);
+
+// A sidebar row with its `…` button beside it.
+function item(row, name) {
+  const wrap = el("div", "item");
+  const more = el("button", "icon-button small more");
+  more.type = "button";
+  more.title = "More";
+  more.setAttribute("aria-label", `More for ${label(name)}`);
+  more.setAttribute("aria-haspopup", "menu");
+  more.setAttribute("aria-expanded", "false");
+  more.dataset.fragment = name;
+  more.innerHTML = svg("more");
+  more.onclick = (e) => { e.stopPropagation(); openMenu(more, name); };
+  wrap.append(row, more);
+  return wrap;
+}
+
 // ---- chats: each a chat fragment, shown in the middle column ----
 function renderChats() {
   const chats = state.chats.filter(byName);
   $("chats").replaceChildren(...(chats.length ? chats.map((name) => {
     const row = el("button", `row${name === state.current ? " active" : ""}`);
     row.innerHTML = svg("chat");
-    row.append(el("span", "label", label(name)));
+    row.append(el("span", "label", label(name)), ...badges(byName(name)));
     row.onclick = () => { openChat(name); leaveSidebar(); };
-    return row;
+    return item(row, name);
   }) : [el("div", "empty-row", "No chats yet")]));
 }
 
@@ -164,10 +250,10 @@ function renderApps() {
   $("apps").replaceChildren(...(list.length ? list.map((f) => {
     const row = el("button", `row${open.includes(`app:${f.name}`) ? " open" : ""}`);
     row.dataset.key = `app:${f.name}`;
-    row.append(appIcon(label(f.name)), el("span", "label", label(f.name)));
+    row.append(appIcon(label(f.name)), el("span", "label", label(f.name)), ...badges(f));
     if (f.role !== "owner") row.append(el("span", "meta", f.role));
     row.onclick = () => { openApp(f.name); leaveSidebar(); };
-    return row;
+    return item(row, f.name);
   }) : [el("div", "empty-row", "No apps yet")]));
 }
 
@@ -277,6 +363,8 @@ async function load() {
   const now = JSON.stringify([fragments, chats]);
   if (now === seen) return;
   seen = now;
+  // the rows are made again: a menu open on one closes
+  closeMenu();
   state.fragments = fragments;
   state.chats = chats;
   // this desktop is one of them: the one this page is under

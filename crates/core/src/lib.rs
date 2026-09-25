@@ -12,6 +12,7 @@ pub mod cron;
 pub mod effects;
 pub mod egress;
 pub mod facet;
+pub mod form;
 pub mod glob;
 pub mod history;
 pub mod live;
