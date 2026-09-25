@@ -1,7 +1,9 @@
 // Files as an app's state (slice E): mutations write notes to main, queries
 // read them through this.files, jobs read and compare-and-swap as steps, and
-// a file trigger that writes what it watches runs into the hop budget.
+// a file trigger's write starts the next run one hop deeper.
 import { DurableObject } from "cloudflare:workers";
+
+const POINTER = `version https://git-lfs.github.com/spec/v1\noid sha256:${"a".repeat(64)}\nsize 5\n`;
 
 export class App extends DurableObject {
   add_note({ slug, text }, call) {
@@ -67,10 +69,32 @@ export class App extends DurableObject {
     }
   }
 
-  // the file trigger on loop/**: writes into loop/ again
+  // a pointer written by a step past an in-app check the author's code
+  // broke: the cell refuses the step for good, and the job may catch that
+  async sneaky(_input, job) {
+    const decode = TextDecoder.prototype.decode;
+    TextDecoder.prototype.decode = () => {
+      throw new TypeError("patched");
+    };
+    let wrote;
+    try {
+      wrote = job.files.write("sneaky.bin", POINTER);
+    } finally {
+      TextDecoder.prototype.decode = decode;
+    }
+    try {
+      await wrote;
+      return { refused: null };
+    } catch (e) {
+      return { refused: e.message, name: e.name };
+    }
+  }
+
+  // the file trigger on loop/: the run for loop/0.txt writes loop/1.txt,
+  // and the run that write starts writes nothing
   async again({ paths }, job) {
     const n = Number(paths[0].match(/(\d+)/)?.[1] ?? 0) + 1;
-    await job.files.write(`loop/${n}.txt`, String(n));
+    if (n === 1) await job.files.write(`loop/${n}.txt`, String(n));
     return { n };
   }
 
