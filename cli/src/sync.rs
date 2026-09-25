@@ -47,7 +47,6 @@ pub struct SyncOptions {
     /// in pull mode, delete local files that were deleted remotely
     /// (pull never deletes without it; mirror always propagates)
     pub prune: bool,
-    pub verify: bool,
     pub writer_id: String, // 8 hex of our pubkey, for conflict-copy names
     /// FRAGMENT_CODESTORAGE_URL/config override for the code.storage
     /// server (backend-swap knob; else the storage-token response wins)
@@ -61,7 +60,6 @@ impl Default for SyncOptions {
             mirror_from: None,
             apply_mass_delete: false,
             prune: false,
-            verify: false,
             writer_id: "anon".into(),
             codestorage: None,
         }
@@ -331,7 +329,7 @@ pub fn read_local(dir: &Path, name: &str, opts: &SyncOptions) -> Result<Local, S
         mirror_overlay(src, dir).map_err(|e| SyncError::Io(format!("mirror-from {}: {e}", src.display())))?;
     }
     let (state, journal) = read_state(dir, name).map_err(|e| SyncError::Io(e.to_string()))?;
-    let (files, stats) = scan_local(dir, Some(&state), opts.verify).map_err(|e| SyncError::Io(e.to_string()))?;
+    let (files, stats) = scan_local(dir, Some(&state), false).map_err(|e| SyncError::Io(e.to_string()))?;
     Ok(Local { state, journal, files, stats })
 }
 

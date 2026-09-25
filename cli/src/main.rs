@@ -969,7 +969,7 @@ fn run(cli: Cli) -> Result<()> {
                 return Err(usage("sync --watch streams progress lines continuously, so --json does not apply: run single passes with --json (`fragment sync <name> --dir .`), or drop --json to watch"));
             }
             if install || uninstall {
-                install_sync_unit(&name, &dir, install, mirror_from.as_deref().and_then(|p| p.to_str()))?;
+                install_sync_unit(&name, &dir, install)?;
                 return Ok(());
             }
             if rebuild_state {
@@ -987,13 +987,11 @@ fn run(cli: Cli) -> Result<()> {
                 },
                 apply_mass_delete,
                 prune,
-                verify: false,
                 writer_id: writer_id(&c),
                 codestorage: codestorage_override(),
             };
             if watch {
-                let cfg = watch::WatchConfig { live: !no_live };
-                watch::run(&c, &name, &dir, &opts, &cfg)?;
+                watch::run(&c, &name, &dir, &opts, !no_live)?;
                 return Ok(());
             }
             let report = sync::sync_once(&c, &name, &dir, &opts).map_err(cs_anyhow)?;
@@ -1716,7 +1714,7 @@ fn chrono_like(secs: u64) -> String {
 // PATH — launchd and systemd both run with minimal environments (the
 // agent-built watch.sh failed on exactly this).
 
-fn install_sync_unit(name: &str, dir: &Path, install: bool, mirror_from: Option<&str>) -> Result<()> {
+fn install_sync_unit(name: &str, dir: &Path, install: bool) -> Result<()> {
     let dir = match dir.canonicalize() {
         Ok(d) => d,
         Err(_) => anyhow::bail!("no such directory: {}", dir.display()),
@@ -1726,9 +1724,6 @@ fn install_sync_unit(name: &str, dir: &Path, install: bool, mirror_from: Option<
         .and_then(|p| p.canonicalize())
         .context("cannot resolve the fragment binary path")?;
     let log = dir.join(".fragment").join("watch.log");
-    let mirror_arg = mirror_from
-        .map(|m| format!("    <string>--mirror-from</string>\n    <string>{m}</string>\n"))
-        .unwrap_or_default();
 
     if cfg!(target_os = "macos") {
         let label = format!("sh.finite.fragment-sync.{name}");
@@ -1773,7 +1768,6 @@ fn install_sync_unit(name: &str, dir: &Path, install: bool, mirror_from: Option<
             .replace("__NAME__", name)
             .replace("__DIR__", &dir.display().to_string())
             .replace("__HOMEBIN__", &format!("{}/.local/bin:{}/.cargo/bin", home, home))
-            .replace("    __MIRROR__\n", &mirror_arg)
             .replace("__HOME__", &home)
             .replace("__LOG__", &log.display().to_string());
             std::fs::write(&plist, xml)?;
@@ -1832,8 +1826,7 @@ WantedBy=default.target
                 .replace("__NAME__", name)
                 .replace("__EXE__", &exe.display().to_string())
                 .replace("__DIR__", &dir.display().to_string())
-                .replace("__HOMEBIN__", &format!("{}/.local/bin:{}/.cargo/bin", home, home))
-            .replace("    __MIRROR__\n", &mirror_arg);
+                .replace("__HOMEBIN__", &format!("{}/.local/bin:{}/.cargo/bin", home, home));
             std::fs::write(&path, ini)?;
             let run = |args: &[&str]| -> Result<()> {
                 let st = std::process::Command::new("systemctl")
