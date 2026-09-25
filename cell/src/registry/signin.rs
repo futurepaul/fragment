@@ -318,14 +318,9 @@ impl RegistryCell {
     }
 
     pub(super) async fn begin(&self, b: Begin) -> CellResult<Began> {
-        let link_to = match &b.link_to {
-            Some(token) => Some(self.live_session(token, None)?.1.identity),
-            None => None,
-        };
-        if let Some(p) = &link_to {
-            if p.kind != IdentityKind::Person {
-                return Err(CellError::new(ErrorCode::Forbidden, "only a person links a sign-in"));
-            }
+        let link_to = b.link_to.as_deref().map(|token| self.live_session(token, None)).transpose()?.map(|(_, live)| live.identity);
+        if link_to.as_ref().is_some_and(|p| p.kind != IdentityKind::Person) {
+            return Err(CellError::new(ErrorCode::Forbidden, "only a person links a sign-in"));
         }
         let now = js::now_ms();
         self.sweep_by(now + LOGIN_TTL_MS).await?;
