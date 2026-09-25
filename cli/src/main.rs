@@ -951,7 +951,7 @@ fn run(cli: Cli) -> Result<()> {
                 return Err(usage("sync --watch streams progress lines continuously, so --json does not apply: run single passes with --json (`fragment sync <name> --dir .`), or drop --json to watch"));
             }
             if install || uninstall {
-                install_sync_unit(&name, &dir, install)?;
+                install_sync_unit(&name, &dir, install, mirror_from.as_deref())?;
                 return Ok(());
             }
             if rebuild_state {
@@ -1677,10 +1677,15 @@ fn chrono_like(secs: u64) -> String {
 // PATH — launchd and systemd both run with minimal environments (the
 // agent-built watch.sh failed on exactly this).
 
-fn install_sync_unit(name: &str, dir: &Path, install: bool) -> Result<()> {
+fn install_sync_unit(name: &str, dir: &Path, install: bool, mirror_from: Option<&Path>) -> Result<()> {
     let dir = match dir.canonicalize() {
         Ok(d) => d,
         Err(_) => anyhow::bail!("no such directory: {}", dir.display()),
+    };
+    // the unit runs in `dir`, so a relative source is made absolute here
+    let mirror_from = match mirror_from.filter(|_| install) {
+        Some(m) => Some(m.canonicalize().with_context(|| format!("no such directory: {}", m.display()))?),
+        None => None,
     };
     let home = std::env::var("HOME").context("HOME not set")?;
     let exe = std::env::current_exe()
@@ -1699,41 +1704,7 @@ fn install_sync_unit(name: &str, dir: &Path, install: bool) -> Result<()> {
         if install {
             std::fs::create_dir_all(&plist_dir)?;
             std::fs::create_dir_all(dir.join(".fragment"))?;
-            let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>__LABEL__</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>__EXE__</string>
-    <string>sync</string>
-    <string>__NAME__</string>
-    <string>--dir</string>
-    <string>__DIR__</string>
-    <string>--watch</string>
-  </array>
-  <key>WorkingDirectory</key><string>__DIR__</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key><string>__HOMEBIN__:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>HOME</key><string>__HOME__</string>
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>__LOG__</string>
-  <key>StandardErrorPath</key><string>__LOG__</string>
-</dict>
-</plist>
-"#
-            .replace("__LABEL__", &label)
-            .replace("__EXE__", &exe.display().to_string())
-            .replace("__NAME__", name)
-            .replace("__DIR__", &dir.display().to_string())
-            .replace("__HOMEBIN__", &format!("{}/.local/bin:{}/.cargo/bin", home, home))
-            .replace("__HOME__", &home)
-            .replace("__LOG__", &log.display().to_string());
-            std::fs::write(&plist, xml)?;
+            std::fs::write(&plist, sync_unit_file(true, name, &exe, &dir, mirror_from.as_deref(), &home))?;
             // bootstrap can race the bootout above (async port teardown) —
             // give it a beat and retry once before giving up
             let mut ok = false;
@@ -1773,24 +1744,7 @@ fn install_sync_unit(name: &str, dir: &Path, install: bool) -> Result<()> {
         if install {
             std::fs::create_dir_all(&dir_units)?;
             std::fs::create_dir_all(dir.join(".fragment"))?;
-            let ini = r#"[Unit]
-Description=fragment sync __NAME__
-After=network-online.target
-
-[Service]
-ExecStart=__EXE__ sync __NAME__ --dir __DIR__ --watch
-WorkingDirectory=__DIR__
-Environment=PATH=__HOMEBIN__:/usr/local/bin:/usr/bin:/bin
-Restart=always
-
-[Install]
-WantedBy=default.target
-"#
-                .replace("__NAME__", name)
-                .replace("__EXE__", &exe.display().to_string())
-                .replace("__DIR__", &dir.display().to_string())
-                .replace("__HOMEBIN__", &format!("{}/.local/bin:{}/.cargo/bin", home, home));
-            std::fs::write(&path, ini)?;
+            std::fs::write(&path, sync_unit_file(false, name, &exe, &dir, mirror_from.as_deref(), &home))?;
             let run = |args: &[&str]| -> Result<()> {
                 let st = std::process::Command::new("systemctl")
                     .arg("--user")
@@ -1833,6 +1787,63 @@ fn scaffold(dir: &Path, tpl_name: &str) -> Result<(Vec<&'static str>, usize)> {
         created.push(*rel);
     }
     Ok((created, skipped))
+}
+
+/// The unit file that keeps `dir` synced: a LaunchAgent plist on macOS, a
+/// systemd user unit elsewhere. It runs this CLI by its absolute path with
+/// `sync --watch`, and with `--mirror-from` when the install had one.
+fn sync_unit_file(macos: bool, name: &str, exe: &Path, dir: &Path, mirror_from: Option<&Path>, home: &str) -> String {
+    let mut args = vec![exe.display().to_string(), "sync".into(), name.into(), "--dir".into(), dir.display().to_string(), "--watch".into()];
+    if let Some(m) = mirror_from {
+        args.extend(["--mirror-from".into(), m.display().to_string()]);
+    }
+    let homebin = format!("{home}/.local/bin:{home}/.cargo/bin");
+    if !macos {
+        return r#"[Unit]
+Description=fragment sync __NAME__
+After=network-online.target
+
+[Service]
+ExecStart=__ARGS__
+WorkingDirectory=__DIR__
+Environment=PATH=__HOMEBIN__:/usr/local/bin:/usr/bin:/bin
+Restart=always
+
+[Install]
+WantedBy=default.target
+"#
+        .replace("__NAME__", name)
+        .replace("__ARGS__", &args.join(" "))
+        .replace("__DIR__", &dir.display().to_string())
+        .replace("__HOMEBIN__", &homebin);
+    }
+    r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>__LABEL__</string>
+  <key>ProgramArguments</key>
+  <array>
+__ARGS__  </array>
+  <key>WorkingDirectory</key><string>__DIR__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>__HOMEBIN__:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>__HOME__</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>__LOG__</string>
+  <key>StandardErrorPath</key><string>__LOG__</string>
+</dict>
+</plist>
+"#
+    .replace("__LABEL__", &format!("sh.finite.fragment-sync.{name}"))
+    .replace("__ARGS__", &args.iter().map(|a| format!("    <string>{a}</string>\n")).collect::<String>())
+    .replace("__DIR__", &dir.display().to_string())
+    .replace("__HOMEBIN__", &homebin)
+    .replace("__HOME__", home)
+    .replace("__LOG__", &dir.join(".fragment").join("watch.log").display().to_string())
 }
 
 fn uid() -> Result<String> {
@@ -1931,5 +1942,20 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
         assert!(child.status.success(), "{}", String::from_utf8_lossy(&child.stdout));
         assert_eq!(after, config("http://127.0.0.1:2"));
+    }
+
+    /// Goal: `sync --install --mirror-from <src>` installs a unit that runs
+    /// with `--mirror-from <src>`, as a LaunchAgent and as a systemd unit.
+    /// Method: both unit files, with a source and without. Neither template
+    /// had a place for it, so an installed watcher never overlaid its
+    /// source.
+    #[test]
+    fn an_installed_unit_carries_its_mirror_source() {
+        let unit = |macos, src: Option<&str>| sync_unit_file(macos, "n", Path::new("/bin/fragment"), Path::new("/notes"), src.map(Path::new), "/home/p");
+        let plist = unit(true, Some("/vault"));
+        assert!(plist.contains("    <string>--watch</string>\n    <string>--mirror-from</string>\n    <string>/vault</string>\n  </array>"), "{plist}");
+        let systemd = unit(false, Some("/vault"));
+        assert!(systemd.contains("\nExecStart=/bin/fragment sync n --dir /notes --watch --mirror-from /vault\n"), "{systemd}");
+        assert!(!unit(true, None).contains("--mirror-from") && !unit(false, None).contains("--mirror-from"));
     }
 }
