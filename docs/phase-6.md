@@ -1,6 +1,10 @@
 # Phase 6: the desktop, as a fragment (and what it needs)
 
-Status: **agreed with Paul 2026-09-24, in progress.** Paul's framing:
+Status: **built and deployed to fragment.club 2026-09-24** (nodes on the
+celld fork's `0d80ead`, cell `fd471b1`; hosted e2e 29/29), with flat hosts
+(call 2 below) and `__Host-` sessions. Open after it: PR #12 (the audit's
+single-source-of-truth pass), per-step usage rows for agents' turns (debt
+ledger), phase 7's sharing sheet. Paul's framing:
 fragment is the core product; the desktop is a fun demonstration of what
 fragment can do: "ideally it's just a fragment that the user can deploy
 with a click". The goal is to get back what finite-next could do before
