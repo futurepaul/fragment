@@ -57,6 +57,17 @@ export class App extends DurableObject {
     return { ok: true };
   }
 
+  // `n` steps, one after another: a publish each, and every tenth a
+  // sleep. At each step the body reads every earlier answer back.
+  async count_up({ n }, job) {
+    const seqs = [];
+    for (let i = 0; i < n; i++) {
+      if (i % 10 === 9) await job.sleep(1);
+      else seqs.push((await job.publish("steps", { i }, "step")).seq);
+    }
+    return { seqs };
+  }
+
   async nap({ ms }, job) {
     await job.sleep(ms);
     await job.publish("feed", { woke: true }, "nap");

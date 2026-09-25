@@ -15,6 +15,7 @@
     "flag": { "kind": "query" },
     "fragile": { "kind": "job" },
     "nap": { "kind": "job" },
+    "count_up": { "kind": "job", "input": { "type": "object", "required": ["n"], "properties": { "n": { "type": "integer", "minimum": 1, "maximum": 256 } } } },
     "careful": { "kind": "job" },
     "probe": { "kind": "job" },
     "parent": { "kind": "job" },
@@ -26,7 +27,7 @@
     "tick": { "kind": "mutation" },
     "ticks": { "kind": "query" }
   },
-  "channels": { "feed": { "read": "viewer" }, "loop": {}, "alarms": {} },
+  "channels": { "feed": { "read": "viewer" }, "loop": {}, "alarms": {}, "steps": {} },
   "triggers": [
     { "channel": "inbox", "run": "ingest" },
     { "channel": "loop", "run": "ping" },
