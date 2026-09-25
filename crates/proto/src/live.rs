@@ -127,6 +127,18 @@ impl LiveOut {
     pub fn encode(&self) -> String {
         serde_json::to_string(self).expect("a live frame serializes")
     }
+
+    /// A record's frame, the text `LiveOut::Record(record).encode()` makes,
+    /// from a borrowed record: an append broadcasts its record uncopied.
+    pub fn record_frame(record: &ChannelRecord) -> String {
+        #[derive(Serialize)]
+        #[serde(tag = "type", rename = "record")]
+        struct Frame<'a> {
+            #[serde(flatten)]
+            record: &'a ChannelRecord,
+        }
+        serde_json::to_string(&Frame { record }).expect("a record frame serializes")
+    }
 }
 
 #[cfg(test)]
@@ -197,6 +209,15 @@ mod tests {
             let decoded: LiveOut = serde_json::from_str(&wire.to_string()).unwrap();
             assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
         }
+    }
+
+    #[test]
+    fn a_record_frame_from_a_borrowed_record_is_the_same_text() {
+        let body = serde_json::value::to_raw_value(&json!({ "text": "hi", "n": [1, 2] })).unwrap();
+        let record = ChannelRecord { channel: "chat".into(), seq: 3, at: 9, principal: "id:ab".into(), kind: "said".into(), body };
+        let frame = LiveOut::record_frame(&record);
+        assert_eq!(frame, LiveOut::Record(record).encode());
+        assert!(frame.starts_with(r#"{"type":"record","channel":"chat""#), "{frame}");
     }
 
     #[test]

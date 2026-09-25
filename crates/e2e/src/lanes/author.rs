@@ -223,6 +223,14 @@ pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
     let rec = b.until("record", 5)?;
     let sub = b.until("subscribed", 5)?;
     s.ok("a reconnect resumes after its cursor", rec["body"]["text"] == "while away" && sub["next"] == 3, &sub);
+    // the object forgets what it knew of its sockets beyond their
+    // attachments, as when it wakes from hibernation: it gathers them
+    // again, and the socket that follows still gets the next record
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "forget-live" })))?;
+    s.ok("(the test fleet forgets the fragment's live sockets, as waking does)", r.status == 200, &r);
+    api.op(&owner, &name, "say", "l3b", json!({ "text": "after waking" }))?;
+    let rec = b.until("record", 5)?;
+    s.ok("a socket that followed before the object woke still gets records", rec["body"]["text"] == "after waking" && rec["seq"] == 4, &rec);
 
     // presence
     let mut c = Socket::open(api, &name, "__live", Some(&owner), None)?;

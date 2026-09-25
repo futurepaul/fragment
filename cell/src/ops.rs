@@ -351,8 +351,10 @@ impl FragmentCell {
     /// `fail-deliveries {times}` fails its next queue sends; `fail-outbox
     /// {times}` fails its next records' outbox writes after their append; `fail-triggers
     /// {times}` fails its next trigger steps before their last run; `drop-effects
-    /// {times}` loses its next job step answers after their step ran; `drop-live
-    /// {code}` closes its live sockets; `ledger {ms | null}` sets (or
+    /// {times}` loses its next job step answers after their step ran;
+    /// `forget-live` forgets what the activation knows of its live sockets
+    /// (as waking from hibernation does); `drop-live {code}` closes its
+    /// live sockets; `ledger {ms | null}` sets (or
     /// clears) a shorter ledger window; `age {ms}` forgets write keys as
     /// if `ms` had passed; `members {fill}` adds placeholder members until
     /// there are `fill`; `code-before-tables {fill?}` puts its installed code
@@ -383,6 +385,10 @@ impl FragmentCell {
             Some("drop-effects") => {
                 let times = body["times"].as_u64().ok_or_else(|| CellError::invalid("drop-effects names how many times"))?;
                 self.set_meta(MetaKey::TestDropEffects, &times.to_string())?;
+                json!({ "ok": true })
+            }
+            Some("forget-live") => {
+                self.live_forget();
                 json!({ "ok": true })
             }
             Some("drop-live") => {
@@ -420,7 +426,7 @@ impl FragmentCell {
                 json!({ "ok": true })
             }
             Some("code-builds") => json!({ "builds": self.app.builds() }),
-            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, drop-live, ledger, age, members, code-before-tables, or code-builds")),
+            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, forget-live, drop-live, ledger, age, members, code-before-tables, or code-builds")),
         })
     }
 }
