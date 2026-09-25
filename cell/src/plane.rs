@@ -106,82 +106,14 @@ fn clear_installed(sql: &SqlStorage) -> Result<()> {
     Ok(())
 }
 
-/// The columns the code row held before its tables: JSON text each.
-const CODE_JSON_COLUMNS: [&str; 3] = ["operations", "channels", "triggers"];
-
-/// A fragment stored before the code tables kept its operations, channels,
-/// and triggers as JSON columns of the code row (and one from before
-/// applib and notifyUrls, phase 2 slices B and C, lacks those columns).
-/// Activation moves them into their tables in place, in one step, and
-/// drops the columns. Stored JSON that does not decode, or holds more than
-/// a manifest may (the cell wrote it from a checked manifest, so it never
-/// has), fails closed: the code goes, and the next refresh or poll installs
-/// live again. Answers why, then. Stored data never reaches
-/// `store_installed`'s assertions: this runs in the constructor, where one
-/// that failed would fail every activation of the fragment.
-pub(crate) fn migrate_code(sql: &SqlStorage) -> Option<String> {
-    // who may post to a channel came after the channel table: its channels take no posts
-    let channel_cols: Vec<Value> = sql.exec("PRAGMA table_info(code_channels)", None).and_then(|c| c.to_array()).expect("the channel table's columns read");
-    if !channel_cols.iter().any(|c| c["name"] == "post") {
+/// Who may post to a channel came after the channel table (phase 7 slice
+/// B1): a table from before gains the column, and its channels take no
+/// posts. Runs in the constructor, before anything reads the channels.
+pub(crate) fn migrate_code(sql: &SqlStorage) {
+    let cols: Vec<Value> = sql.exec("PRAGMA table_info(code_channels)", None).and_then(|c| c.to_array()).expect("the channel table's columns read");
+    if !cols.iter().any(|c| c["name"] == "post") {
         sql.exec("ALTER TABLE code_channels ADD COLUMN post TEXT", None).expect("the channel table migrates");
     }
-    let cols: Vec<Value> = sql.exec("PRAGMA table_info(code)", None).and_then(|c| c.to_array()).expect("the code table's columns read");
-    let has = |col: &str| cols.iter().any(|c| c["name"] == col);
-    for (col, decl) in [("modules", "modules TEXT NOT NULL DEFAULT '{}'"), ("notify", "notify TEXT NOT NULL DEFAULT '[]'")] {
-        if !has(col) {
-            sql.exec(&format!("ALTER TABLE code ADD COLUMN {decl}"), None).expect("the code table migrates");
-        }
-    }
-    let json_columns: Vec<&str> = CODE_JSON_COLUMNS.into_iter().filter(|c| has(c)).collect();
-    if json_columns.is_empty() {
-        return None;
-    }
-    let read: Vec<String> = CODE_JSON_COLUMNS.iter().map(|c| if has(c) { (*c).to_string() } else { format!("NULL AS {c}") }).collect();
-    let rows: Vec<Value> = sql.exec(&format!("SELECT {} FROM code WHERE id = 1", read.join(", ")), None).and_then(|c| c.to_array()).expect("the code row reads");
-    let outcome = match rows.first() {
-        None => {
-            clear_installed(sql).expect("the code tables clear");
-            None
-        }
-        Some(row) => {
-            let text = |col: &str, empty: &'static str| row[col].as_str().unwrap_or(empty).to_string();
-            let bounded = |what: &str, n: usize, max: usize| -> std::result::Result<(), String> {
-                if n <= max {
-                    Ok(())
-                } else {
-                    Err(format!("{what}: {n}, past the limit of {max}"))
-                }
-            };
-            let decoded = (|| -> std::result::Result<_, String> {
-                let operations: BTreeMap<String, OpDecl> = serde_json::from_str(&text("operations", "{}")).map_err(|e| format!("operations: {e}"))?;
-                let channels: BTreeMap<String, ChannelDecl> = serde_json::from_str(&text("channels", "{}")).map_err(|e| format!("channels: {e}"))?;
-                let triggers: Vec<TriggerDecl> = serde_json::from_str(&text("triggers", "[]")).map_err(|e| format!("triggers: {e}"))?;
-                bounded("operations", operations.len(), limits::OPERATIONS_MAX)?;
-                bounded("channels", channels.len(), limits::CHANNELS_MAX)?;
-                bounded("triggers", triggers.len(), limits::TRIGGERS_MAX)?;
-                if let Some((name, _)) = channels.iter().find(|(_, d)| d.post.is_some_and(|p| p < d.read)) {
-                    return Err(format!("channels: {name}'s post role is looser than its read"));
-                }
-                Ok((operations, channels, triggers))
-            })();
-            match decoded {
-                Ok((operations, channels, triggers)) => {
-                    store_installed(sql, &Installed { operations: &operations, channels: &channels, triggers: &triggers }).expect("the code tables fill");
-                    None
-                }
-                Err(why) => {
-                    sql.exec("DELETE FROM code", None).expect("the code row goes");
-                    clear_installed(sql).expect("the code tables clear");
-                    sql.exec("DELETE FROM meta WHERE key = ?", vec![MetaKey::LiveReadAt.key().into()]).expect("live is read again");
-                    Some(why)
-                }
-            }
-        }
-    };
-    for col in json_columns {
-        sql.exec(&format!("ALTER TABLE code DROP COLUMN {col}"), None).expect("the code table drops its JSON column");
-    }
-    outcome
 }
 
 #[derive(Deserialize)]
@@ -829,47 +761,6 @@ impl FragmentCell {
         let (kind, target) = on.parts();
         let rows: Vec<Run> = self.typed("SELECT run FROM code_triggers WHERE kind = ? AND target = ? GROUP BY run ORDER BY MIN(idx)", vec![kind.into(), target.into()])?;
         Ok(rows.into_iter().map(|r| r.run).collect())
-    }
-
-    /// A test hook (fleets with test hooks only): puts the installed code
-    /// back into the shape fragments stored before the code tables (JSON
-    /// columns of the code row), so the e2e can restart the node and watch
-    /// `migrate_code` move it. With `fill`, placeholder operations are
-    /// stored beside the real ones until there are `fill`, so the e2e can
-    /// store more than a manifest may and watch the move fail closed.
-    pub(crate) fn code_before_tables(&self, fill: Option<u64>) -> CellResult<()> {
-        assert!(self.cfg.test_hooks, "the hook answers only on fleets with test hooks");
-        let (mut operations, channels, triggers) = (self.operations()?, self.declared_channels()?, self.triggers()?);
-        if let Some(fill) = fill {
-            let fill_max = 2 * limits::OPERATIONS_MAX as u64;
-            if fill > fill_max {
-                return Err(CellError::invalid(format!("fill is at most {fill_max}")));
-            }
-            // Bounded by `fill`, just checked. Of the `fill` names tried, at
-            // most as many as there are operations are taken, so the rest
-            // are enough.
-            for i in 0..fill {
-                if operations.len() as u64 >= fill {
-                    break;
-                }
-                operations.entry(format!("filler_{i}")).or_insert(OpDecl { kind: OpKind::Mutation, role: Role::Editor, input: None });
-            }
-            assert!(operations.len() as u64 >= fill, "filled to the count asked");
-        }
-        for (col, empty) in CODE_JSON_COLUMNS.into_iter().zip(["{}", "{}", "[]"]) {
-            self.exec(&format!("ALTER TABLE code ADD COLUMN {col} TEXT NOT NULL DEFAULT '{empty}'"), vec![])?;
-        }
-        let text = |v: serde_json::Result<String>| v.map_err(|e| CellError::host(e.to_string()));
-        self.exec(
-            "UPDATE code SET operations = ?, channels = ?, triggers = ? WHERE id = 1",
-            vec![
-                text(serde_json::to_string(&operations))?.into(),
-                text(serde_json::to_string(&channels))?.into(),
-                text(serde_json::to_string(&triggers))?.into(),
-            ],
-        )?;
-        clear_installed(&self.sql())?;
-        Ok(())
     }
 }
 

@@ -44,7 +44,7 @@ use std::time::Duration;
 
 use fragment_core::secrets::placeholders;
 use fragment_core::steps::{Fetch, NextStep, Step, StepOutcome, StepResult};
-use fragment_core::{cron::Cron, egress, glob, npub, trigger_state};
+use fragment_core::{cron::Cron, egress, glob, npub};
 use fragment_proto::{
     limits, valid_secret_name, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunList, RunStatus, SetPaused, TriggerDecl, TriggerOn, Via,
 };
@@ -269,45 +269,6 @@ struct FinishCall {
     run: i64,
     attempt: u32,
     error: String,
-}
-
-/// Paused operations were a JSON array in meta (`paused`), and each
-/// operation's breaker a meta key (`breaker_since:<op>`); both move into
-/// their tables once, in place (`fragment_core::trigger_state` decides
-/// what they get). Answers the operations paused because `paused` did not
-/// parse (it fails closed), for the caller's event.
-pub(crate) fn migrate_trigger_state(sql: &SqlStorage, now: i64) -> Vec<String> {
-    let rows = |q: &str| -> Vec<Value> { sql.exec(q, None).and_then(|c| c.to_array()).expect("the trigger state migration reads") };
-    let exec = |q: &str, binds: Vec<SqlStorageValue>| {
-        sql.exec(q, binds).expect("the trigger state migration writes");
-    };
-    let text = |r: &Value, k: &str| r[k].as_str().map(str::to_string);
-    let paused = rows("SELECT value FROM meta WHERE key = 'paused'").first().and_then(|r| text(r, "value"));
-    let breakers: Vec<(String, String)> = rows("SELECT key, value FROM meta WHERE key LIKE 'breaker_since:%'")
-        .iter()
-        .map(|r| (text(r, "key").expect("meta.key is TEXT"), text(r, "value").expect("meta.value is TEXT")))
-        .collect();
-    if paused.is_none() && breakers.is_empty() {
-        return vec![];
-    }
-    // the installed code's tables, which migrate_code filled first (plane.rs)
-    let triggered: Vec<String> = rows("SELECT run FROM code_triggers ORDER BY idx").iter().map(|r| text(r, "run").expect("code_triggers.run is TEXT")).collect();
-    let moved = trigger_state::migrate(paused.as_deref(), &triggered, &breakers);
-    for op in &moved.paused {
-        exec("INSERT INTO paused_ops (op, by, at) VALUES (?, 'migrated', ?) ON CONFLICT (op) DO NOTHING", vec![op.as_str().into(), SqlStorageValue::Integer(now)]);
-    }
-    for (op, reset_at) in &moved.breakers {
-        exec("INSERT INTO op_breakers (op, reset_at) VALUES (?, ?) ON CONFLICT (op) DO NOTHING", vec![op.as_str().into(), SqlStorageValue::Integer(*reset_at)]);
-    }
-    exec("DELETE FROM meta WHERE key = 'paused'", vec![]);
-    for (key, _) in &breakers {
-        exec("DELETE FROM meta WHERE key = ?", vec![key.as_str().into()]);
-    }
-    if moved.failed_closed {
-        moved.paused
-    } else {
-        vec![]
-    }
 }
 
 impl FragmentCell {
@@ -595,7 +556,6 @@ impl FragmentCell {
         }
         let results = match self.kept_answers(run_id, attempt, count)? {
             Kept::All(results) => results,
-            Kept::Missing(_) if self.began_before_answers_were_kept(run_id)? => return self.resume(&run).await,
             Kept::Missing(index) => return fail(format!("step {index} has no kept answer: replay it")),
             Kept::TooLarge => return fail(format!("its step results are over {} bytes together", limits::JOB_RESULTS_MAX_BYTES)),
         };
@@ -678,34 +638,6 @@ impl FragmentCell {
             Delay::from(Duration::from_millis(TEST_HOLD_POLL_MS)).await;
         }
         Ok(())
-    }
-
-    /// Whether a run's attempt was launched before this cell kept step
-    /// answers (`MetaKey::StepsKeptSince`): a run in flight across the
-    /// deploy that began keeping them.
-    fn began_before_answers_were_kept(&self, run: i64) -> CellResult<bool> {
-        let since: i64 = match self.meta(MetaKey::StepsKeptSince)? {
-            Some(at) => at.parse().map_err(|_| CellError::host(format!("the stored steps_kept_since {at:?} is not a time")))?,
-            None => return Err(CellError::host("the schema writes steps_kept_since, and it is not there")),
-        };
-        let rows = self.rows("SELECT launched_at FROM runs WHERE id = ?", vec![SqlStorageValue::Integer(run)])?;
-        Ok(rows.first().and_then(|r| r["launched_at"].as_i64()).is_some_and(|at| at < since))
-    }
-
-    /// A run in flight across the deploy that began keeping step answers
-    /// finds none: it starts again as its next attempt, once (that attempt
-    /// launches after the mark), as a replay would. A call step replays by
-    /// its op id; a fetch or a sleep runs again. Its Workflow stops.
-    async fn resume(&self, run: &RunRow) -> CellResult<Value> {
-        self.exec(
-            "UPDATE runs SET status = 'queued', attempt = attempt + 1, error = NULL, output = NULL, finished_at = NULL, launched_at = NULL
-             WHERE id = ? AND attempt = ?",
-            vec![SqlStorageValue::Integer(run.id), SqlStorageValue::Integer(run.attempt.into())],
-        )?;
-        let summary = format!("{} run #{} began before step answers were kept: attempt {} starts it again", run.op, run.id, run.attempt + 1);
-        self.event("run.resumed", &summary, json!({ "run": run.id, "attempt": run.attempt + 1 }));
-        self.launch_queued().await;
-        Ok(json!({ "stop": true }))
     }
 
     /// The kept answers of a run's first `count` steps, in order, or why the

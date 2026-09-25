@@ -330,40 +330,24 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{once}; the upstream saw {} requests", upstream.hits("/once").len()),
     );
 
-    // A run in flight across the deploy that began keeping step answers
-    // finds none: it starts again as its next attempt, once, by itself.
-    // A run that loses its answers otherwise is held, as before. Each run
-    // is caught between its sleep and the advance after it (a test lever
-    // holds that advance: a latch, not a clock), its answers are forgotten
-    // there, and then it goes on.
+    // A run whose kept answers are lost fails closed: it is held (replay
+    // it), never run on without them. It is caught between its sleep and
+    // the advance after it (a test lever holds that advance: a latch, not
+    // a clock), its answers are forgotten there, and then it goes on.
     let lever = |op: &str, extra: Value| {
         let mut body = json!({ "fragment": steps, "op": op });
         body.as_object_mut().expect("an object").extend(extra.as_object().cloned().unwrap_or_default());
         api.unsigned("POST", "/api/test/fragment", Some(&body))
     };
-    let held_at = |run: i64| lever("advance-held", json!({})).is_ok_and(|r| r.body["run"] == run);
-    lever("hold-advances", json!({ "on": true }))?;
-    let r = api.op(&owner, &steps, "nap", "across", json!({ "ms": 100 }))?;
-    let across = started(&r);
-    let caught = s.eventually(Duration::from_secs(20), || held_at(across));
-    let r = lever("forget-steps", json!({ "deploy": true }))?;
-    lever("hold-advances", json!({ "on": false }))?;
-    let resumed = settle(api, &owner, &steps, across, &["succeeded", "held"], long);
-    let said = events(api, &owner, &steps).into_iter().any(|e| e["kind"] == "run.resumed" && e["data"]["run"] == across);
-    s.ok(
-        "a run in flight across the deploy that began keeping answers starts again by itself, once, and finishes",
-        caught && r.status == 200 && resumed["status"] == "succeeded" && resumed["attempt"] == 2 && said,
-        format!("caught between steps: {caught}; {resumed}; run.resumed logged: {said}"),
-    );
     lever("hold-advances", json!({ "on": true }))?;
     let r = api.op(&owner, &steps, "nap", "lost", json!({ "ms": 100 }))?;
     let lost = started(&r);
-    let caught = s.eventually(Duration::from_secs(20), || held_at(lost));
-    lever("forget-steps", json!({ "deploy": false }))?;
+    let caught = s.eventually(Duration::from_secs(20), || lever("advance-held", json!({})).is_ok_and(|r| r.body["run"] == lost));
+    lever("forget-steps", json!({}))?;
     lever("hold-advances", json!({ "on": false }))?;
     let held = settle(api, &owner, &steps, lost, &["succeeded", "held"], long);
     s.ok(
-        "a run launched since, whose answers are lost, is held (replay it), not started again",
+        "a run whose kept answers are lost is held (replay it), not run on without them",
         caught && held["status"] == "held" && held["attempt"] == 1 && held["error"].as_str().is_some_and(|e| e.contains("no kept answer")),
         format!("caught between steps: {caught}; {held}"),
     );

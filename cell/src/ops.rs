@@ -404,13 +404,8 @@ impl FragmentCell {
                 json!({ "ok": true })
             }
             Some("forget-steps") => {
-                // the kept answers of every run in flight go; with `deploy`,
-                // now is when answers began to be kept, as the deploy that
-                // began keeping them wrote
+                // the kept answers of every run in flight go
                 self.exec("DELETE FROM steps WHERE run IN (SELECT id FROM runs WHERE status IN ('queued', 'running'))", vec![])?;
-                if body["deploy"] == true {
-                    self.set_meta(MetaKey::StepsKeptSince, &js::now_ms().to_string())?;
-                }
                 json!({ "ok": true })
             }
             Some("hold-advances") => {
@@ -455,16 +450,8 @@ impl FragmentCell {
                 let fill = body["fill"].as_u64().ok_or_else(|| CellError::invalid("fill is a count"))?;
                 json!({ "members": self.fill_members(fill)? })
             }
-            Some("code-before-tables") => {
-                let fill = match &body["fill"] {
-                    Value::Null => None,
-                    v => Some(v.as_u64().ok_or_else(|| CellError::invalid("fill is a count"))?),
-                };
-                self.code_before_tables(fill)?;
-                json!({ "ok": true })
-            }
             Some("code-builds") => json!({ "builds": self.app.builds() }),
-            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, forget-steps, hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-before-tables, code-builds, alarm, or age-outside")),
+            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, forget-steps, hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, or age-outside")),
         })
     }
 }
