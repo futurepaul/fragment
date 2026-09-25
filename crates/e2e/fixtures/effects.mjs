@@ -23,6 +23,11 @@ export class App extends DurableObject {
     return { n: this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM notes").one().n };
   }
 
+  // a result of `n` characters: n + 2 bytes of JSON
+  big({ n }) {
+    return "x".repeat(n);
+  }
+
   // a file whose text is a large-file pointer
   pointer(_input, call) {
     this.ctx.storage.sql.exec("INSERT INTO notes (slug) VALUES ('pointer')");

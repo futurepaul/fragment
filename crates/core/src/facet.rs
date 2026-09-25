@@ -13,13 +13,16 @@
 //! Out: the platform code's answers, decoded once into types. That code
 //! shares a realm with the author's, which can patch it, so an answer is
 //! app-shaped data: one that is not what the platform code answers is the
-//! app's failure, never a panic or a guess.
+//! app's failure, never a panic or a guess. Each answer crosses as JSON
+//! text, once; an operation's result stays that text (a raw value) on its
+//! way into the response, and is never parsed into a tree.
 
 use std::fmt::Write;
 
 use fragment_proto::{limits, ErrorCode, RESERVED_OP_NAMES, VALID_KIND_JS, VALID_REPO_PATH_JS};
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::value::RawValue;
 use serde_json::Value;
 
 use crate::{blob, webpush};
@@ -112,24 +115,88 @@ pub enum Answer<T> {
     Refused(Refusal),
 }
 
-/// A query ran (`__query`).
+/// A query ran (`__query`): its result as the JSON text the app answered.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Queried {
-    pub result: Value,
+    pub result: Box<RawValue>,
 }
 
-/// A mutation ran, now or before (`__mutate`): its result and effects, and
-/// the run its ledger row holds (`None` for a row from before runs were
-/// numbered).
+/// A mutation ran, now or before (`__mutate`): its result (the JSON text
+/// the app answered, or the ledger stored) and effects, and the run its
+/// ledger row holds (`None` for a row from before runs were numbered).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Mutated {
     pub replayed: bool,
-    pub result: Value,
+    pub result: Box<RawValue>,
     pub effects: Value,
     #[serde(deserialize_with = "present")]
     pub run: Option<i64>,
+}
+
+/// An answer that carries an operation's result.
+pub trait WithResult {
+    fn result(&self) -> &RawValue;
+}
+
+impl WithResult for Queried {
+    fn result(&self) -> &RawValue {
+        &self.result
+    }
+}
+
+impl WithResult for Mutated {
+    fn result(&self) -> &RawValue {
+        &self.result
+    }
+}
+
+/// An operation's answer as the cell sends it: `fragment_proto::OpResult`'s
+/// shape, with the result spliced in as the JSON text the app answered.
+#[derive(Debug, Serialize)]
+pub struct Answered {
+    pub result: Box<RawValue>,
+    /// True when this operation id already ran and the stored result is returned.
+    pub replayed: bool,
+}
+
+/// Whether JSON text holds half of a character: a `\u` escape of a UTF-16
+/// surrogate without its other half, as JSON.stringify writes for a string
+/// cut inside an emoji. It is JSON by the grammar, which is all a raw value
+/// is checked for, but no reader of the answer takes it as a string. The
+/// text is JSON, so every backslash starts an escape.
+pub fn has_lone_surrogate(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let unit = |at: usize| -> Option<u16> {
+        let digits = std::str::from_utf8(bytes.get(at..at + 4)?).ok()?;
+        u16::from_str_radix(digits, 16).ok()
+    };
+    let mut i = 0;
+    // bounded: `i` grows by at least one each turn that does not return
+    while i < bytes.len() {
+        if bytes[i] != b'\\' {
+            i += 1;
+            continue;
+        }
+        if bytes.get(i + 1) != Some(&b'u') {
+            i += 2;
+            continue;
+        }
+        match unit(i + 2) {
+            Some(0xD800..=0xDBFF) => {
+                // a high half stands only right before a low half
+                let low = if bytes.get(i + 6..i + 8) == Some(b"\\u") { unit(i + 8) } else { None };
+                match low {
+                    Some(0xDC00..=0xDFFF) => i += 12,
+                    _ => return true,
+                }
+            }
+            Some(0xDC00..=0xDFFF) | None => return true,
+            Some(_) => i += 6,
+        }
+    }
+    false
 }
 
 /// One ledger row (`__ledger`), or `None` when the ledger has none for the id.
@@ -164,11 +231,14 @@ struct Refused {
 }
 
 /// A query's or a mutation's answer, from its JSON text. A refusal is
-/// tried first: it fails at its first key otherwise, before reading on.
-pub fn decode<T: DeserializeOwned>(text: &str) -> Result<Answer<T>, String> {
+/// tried first: it fails at its first key otherwise, before reading on. A
+/// result is checked as JSON while it is read, never parsed into a tree,
+/// then for half characters.
+pub fn decode<T: DeserializeOwned + WithResult>(text: &str) -> Result<Answer<T>, String> {
     match serde_json::from_str::<Refused>(text) {
         Ok(r) => Ok(Answer::Refused(r.error)),
         Err(as_refusal) => match serde_json::from_str::<T>(text) {
+            Ok(ran) if has_lone_surrogate(ran.result().get()) => Err("its result holds half of a character (a lone surrogate)".to_string()),
             Ok(ran) => Ok(Answer::Ran(ran)),
             Err(as_answer) => Err(format!("neither a refusal ({as_refusal}) nor an answer ({as_answer})")),
         },
@@ -261,10 +331,10 @@ mod tests {
 
     #[test]
     fn answers_decode_strictly() {
-        let Ok(Answer::Ran(m)) = decode::<Mutated>(r#"{"replayed":true,"result":{"id":1},"effects":[],"run":null}"#) else { panic!("a replay") };
-        assert!(m.replayed && m.run.is_none() && m.result["id"] == 1);
+        let Ok(Answer::Ran(m)) = decode::<Mutated>(r#"{"replayed":true,"run":null,"effects":[],"result":{"id":1}}"#) else { panic!("a replay") };
+        assert!(m.replayed && m.run.is_none() && m.result.get() == r#"{"id":1}"#);
         let Ok(Answer::Ran(m)) = decode::<Mutated>(r#"{"replayed":false,"result":null,"effects":[{"push":"*","payload":{}}],"run":7}"#) else { panic!("a run") };
-        assert_eq!((m.replayed, m.run, m.result.is_null()), (false, Some(7), true));
+        assert_eq!((m.replayed, m.run, m.result.get()), (false, Some(7), "null"));
         // what the author's realm could make of it: a missing key, a wrong type, an extra key, not JSON
         for bad in [
             r#"{"result":1,"effects":[],"run":7}"#,
@@ -277,9 +347,41 @@ mod tests {
         ] {
             assert!(decode::<Mutated>(bad).is_err(), "{bad}");
         }
-        let Ok(Answer::Ran(q)) = decode::<Queried>(r#"{"result":[1,2]}"#) else { panic!("a query") };
-        assert_eq!(q.result, serde_json::json!([1, 2]));
+        let Ok(Answer::Ran(q)) = decode::<Queried>(r#"{"result":[1, 2]}"#) else { panic!("a query") };
+        assert_eq!(q.result.get(), "[1, 2]", "the result is the text the app answered, not re-serialized");
         assert!(decode::<Queried>(r#"{"replayed":false,"result":1}"#).is_err());
+        // a result spliced in from stored text cannot forge the envelope around it
+        for forged in [r#"{"result":1,"result":2}"#, r#"{"result":1}}"#, r#"{"result":1,"x":2}"#, r#"{"result":}"#] {
+            assert!(decode::<Queried>(forged).is_err(), "{forged}");
+        }
+        assert!(decode::<Mutated>(r#"{"replayed":true,"run":1,"effects":[],"result":1,"run":2}"#).is_err());
+    }
+
+    /// Goal: a result holding half a character is the app's failure, as it
+    /// was when results were parsed (a raw value is checked only as JSON).
+    /// Method: halves alone, in pairs, escaped, and after other escapes.
+    #[test]
+    fn half_characters() {
+        for bad in [r#""\ud800""#, r#""\udc00""#, r#"["\ud83d"]"#, r#""\ud83d\u0041""#, r#""\ude00\ud83d""#, r#""a\n\udbff""#, r#""\\\ud800""#] {
+            assert!(has_lone_surrogate(bad), "{bad}");
+            assert!(serde_json::from_str::<Value>(bad).is_err(), "serde_json's reader refuses {bad} too");
+        }
+        for good in [r#""\ud83d\ude00""#, r#""😀""#, r#""\\ud800""#, r#""\u0041\n""#, r#"{"a":[1,"\"x\\"]}"#, "null"] {
+            assert!(!has_lone_surrogate(good), "{good}");
+            assert!(serde_json::from_str::<Value>(good).is_ok(), "{good}");
+        }
+        let Err(why) = decode::<Queried>(r#"{"result":"\ud800"}"#) else { panic!("a half character is refused") };
+        assert!(why.contains("half of a character"), "{why}");
+    }
+
+    /// Goal: the cell's raw answer is the wire's `OpResult`. Method: what
+    /// `Answered` writes, read back as the clients read it.
+    #[test]
+    fn answered_is_an_op_result() {
+        let result = RawValue::from_string(r#"{"id": 1, "text": "é"}"#.to_string()).unwrap();
+        let text = serde_json::to_string(&Answered { result, replayed: true }).unwrap();
+        let read: fragment_proto::OpResult = serde_json::from_str(&text).unwrap();
+        assert_eq!(read, fragment_proto::OpResult { result: serde_json::json!({ "id": 1, "text": "é" }), replayed: true });
     }
 
     #[test]

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use fragment_nip98::Keys;
+use fragment_proto::limits;
 use serde_json::{json, Value};
 
 use crate::api::Api;
@@ -212,6 +213,14 @@ pub fn effects(s: &mut Suite, api: &Api) -> Result<()> {
 
     let r = call("note", "n1", json!({ "slug": "one", "text": "one" }))?;
     s.ok("a note lands", r.status == 200 && note(s, "one").as_deref() == Some(&b"one"[..]) && slugs("one") == 1, &r);
+
+    // a query's result is bounded like a mutation's: a string of n
+    // characters is n + 2 bytes of JSON
+    let max = limits::RESULT_MAX_BYTES;
+    let r = call("big", "b1", json!({ "n": max - 2 }))?;
+    s.ok("a query result of exactly the limit is answered whole", r.status == 200 && r.body["result"].as_str().map(str::len) == Some(max - 2), r.status);
+    let r = call("big", "b2", json!({ "n": max - 1 }))?;
+    s.ok("a query result one byte over the limit is refused", r.status == 422 && r.message().contains(&format!("a result is at most {max} bytes")), &r);
 
     // refused in the app, while the mutation can still roll back
     let r = call("pointer", "p1", json!({}))?;

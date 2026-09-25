@@ -232,33 +232,34 @@ impl Facet {
     /// Calls a platform method on the facet (a job's `__job`). An
     /// exception from author code comes back as `AppFailed`.
     pub async fn call(&self, method: &str, args: &[serde_json::Value]) -> CellResult<serde_json::Value> {
-        let out = self.invoke(method, args).await?;
+        let args: Vec<JsValue> = args.iter().map(to_js).collect();
+        let out = self.invoke(method, &args).await?;
         from_js(&out).map_err(CellError::host)
     }
 
-    async fn invoke(&self, method: &str, args: &[serde_json::Value]) -> CellResult<JsValue> {
-        let args: Vec<JsValue> = args.iter().map(to_js).collect();
-        let pending = call(&self.stub, method, &args).map_err(|e| facet_error(js_message(&e)))?;
+    async fn invoke(&self, method: &str, args: &[JsValue]) -> CellResult<JsValue> {
+        let pending = call(&self.stub, method, args).map_err(|e| facet_error(js_message(&e)))?;
         settle(pending).await.map_err(|e| facet_error(js_message(&e)))
     }
 
-    /// A platform method's answer as its JSON text. An answer that is not
-    /// JSON is the app's failure: author code shares the platform code's
-    /// realm and can break it.
-    async fn answer_text(&self, method: &str, args: &[serde_json::Value]) -> CellResult<String> {
+    /// A platform method's answer, the JSON text it made (platform.mjs):
+    /// one copy across, nothing stringified or parsed on the way. An answer
+    /// that is not text is the app's failure: author code shares the
+    /// platform code's realm and can break it.
+    async fn answer_text(&self, method: &str, args: &[JsValue]) -> CellResult<String> {
         let out = self.invoke(method, args).await?;
-        let text = js_sys::JSON::stringify(&out).map_err(|e| app_answer(method, format!("not JSON: {}", js_message(&e))))?;
-        text.as_string().ok_or_else(|| app_answer(method, "no answer".into()))
+        out.as_string().ok_or_else(|| app_answer(method, "not JSON text".into()))
     }
 
-    /// Runs a query: `__query(op, input, meta)`.
-    pub async fn query(&self, op: &str, input: serde_json::Value, meta: serde_json::Value) -> CellResult<Answer<Queried>> {
-        let text = self.answer_text("__query", &[op.into(), input, meta]).await?;
+    /// Runs a query: `__query(op, input, meta)`, the input as its canonical JSON text.
+    pub async fn query(&self, op: &str, input: &str, meta: &serde_json::Value) -> CellResult<Answer<Queried>> {
+        let text = self.answer_text("__query", &[op.into(), input.into(), to_js(meta)]).await?;
         facet::decode(&text).map_err(|why| app_answer("__query", why))
     }
 
     /// Runs a mutation: `__mutate(ledger id, op, input sha, input, meta)`.
-    pub async fn mutate(&self, args: [serde_json::Value; 5]) -> CellResult<Answer<Mutated>> {
+    pub async fn mutate(&self, m: Mutation<'_>) -> CellResult<Answer<Mutated>> {
+        let args = [m.ledger_id.into(), m.op.into(), m.input_sha.into(), m.input.into(), to_js(m.meta)];
         let text = self.answer_text("__mutate", &args).await?;
         facet::decode(&text).map_err(|why| app_answer("__mutate", why))
     }
@@ -268,6 +269,16 @@ impl Facet {
         let text = self.answer_text("__ledger", &[ledger_id.into()]).await?;
         facet::decode_ledger(&text).map_err(|why| app_answer("__ledger", why))
     }
+}
+
+/// One mutation's call into the facet.
+pub struct Mutation<'a> {
+    pub ledger_id: &'a str,
+    pub op: &'a str,
+    pub input_sha: &'a str,
+    /// The input's canonical JSON text, as it was hashed.
+    pub input: &'a str,
+    pub meta: &'a serde_json::Value,
 }
 
 /// An answer the platform code never gives: the app's realm broke it.

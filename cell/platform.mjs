@@ -25,10 +25,14 @@
 // Every answer is an envelope, so no value an author returns can be
 // mistaken for a platform answer: a query's { result }, a mutation's
 // { result, replayed, effects, run }, or either's { error } (the
-// supervisor decodes each into its type once: cell/src/js.rs); for a
-// job, { next } (its next step), { done, output }, or { failed }. Answers
-// are plain JSON, so nothing about one can fail after its mutation
-// committed.
+// supervisor decodes each into its type once: fragment_core::facet); for
+// a job, { next } (its next step), { done, output }, or { failed }. A
+// query's, a mutation's, and a ledger lookup's answers cross as JSON text
+// made here, once: an input arrives as text and is parsed once, and a
+// result is spliced into its envelope as the text JSON.stringify made (or
+// the ledger stored), which the supervisor passes on without parsing it.
+// Answers are plain JSON, so nothing about one can fail after its
+// mutation committed.
 //
 // The checks here run in the author's realm, which can patch what they
 // rely on: they exist so an author sees a refusal while the mutation can
@@ -75,6 +79,25 @@ const UNIT_MS = { second: 1000, minute: 60_000, hour: 3_600_000, day: 86_400_000
 
 function describe(e) {
   return e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+}
+
+// A text's UTF-8 size is at least its length in UTF-16 units, so a text
+// longer than the limit is over it before it is encoded to be counted.
+function overBytes(text, max) {
+  return text.length > max || utf8Bytes(text) > max;
+}
+
+// A result as JSON text, within the limit and of whole characters.
+function resultText(value) {
+  const text = JSON.stringify(value ?? null) ?? "null";
+  if (overBytes(text, RESULT_MAX_BYTES)) throw new Error(`a result is at most ${RESULT_MAX_BYTES} bytes`);
+  if (LONE_SURROGATE.test(text)) throw new Error("a result holds whole characters: this one holds half of one (a lone surrogate)");
+  return text;
+}
+
+// A mutation's answer, its effects and result spliced in as the texts they are.
+function mutated(replayed, run, effects, result) {
+  return `{"replayed":${replayed},"run":${JSON.stringify(run)},"effects":${effects},"result":${result}}`;
 }
 
 function base64(data) {
@@ -406,13 +429,13 @@ export class App extends AuthorApp {
     return new FilesReader(this.env.FILES);
   }
 
-  __mutate(id, name, inputSha, input, meta) {
-    if (!authorMethod(name)) return { error: "unknown_operation" };
+  __mutate(id, name, inputSha, inputText, meta) {
+    if (!authorMethod(name)) return JSON.stringify({ error: "unknown_operation" });
     try {
-      return this.#mutate(id, name, inputSha, input, meta);
+      return this.#mutate(id, name, inputSha, JSON.parse(inputText), meta);
     } catch (e) {
       // over the cap (or at the node's hard stop): the transaction rolled back
-      if (e === STORAGE_FULL || /database or disk is full|SQLITE_FULL/.test(describe(e))) return { error: "storage_full" };
+      if (e === STORAGE_FULL || /database or disk is full|SQLITE_FULL/.test(describe(e))) return JSON.stringify({ error: "storage_full" });
       throw e;
     }
   }
@@ -428,8 +451,9 @@ export class App extends AuthorApp {
     return this.ctx.storage.transactionSync(() => {
       const prior = sql.exec(`SELECT input_sha, result, effects, run, at FROM ${LEDGER} WHERE id = ?`, id).toArray()[0];
       if (prior && prior.at >= now - meta.ledgerMs) {
-        if (prior.input_sha !== inputSha) return { error: "conflicting_body" };
-        return { replayed: true, result: JSON.parse(prior.result), effects: JSON.parse(prior.effects), run: prior.run ?? null };
+        if (prior.input_sha !== inputSha) return JSON.stringify({ error: "conflicting_body" });
+        // the stored texts as they are: the supervisor checks them
+        return mutated(true, prior.run ?? null, prior.effects, prior.result);
       }
       // Older than the window, the id runs again: a new run, keyed anew.
       if (prior) sql.exec(`DELETE FROM ${LEDGER} WHERE id = ?`, id);
@@ -439,11 +463,10 @@ export class App extends AuthorApp {
         out.catch(() => {});
         throw new Error(`mutation ${name} returned a promise; mutations are synchronous`);
       }
-      const text = JSON.stringify(out ?? null) ?? "null";
-      if (utf8Bytes(text) > RESULT_MAX_BYTES) throw new Error(`a result is at most ${RESULT_MAX_BYTES} bytes`);
+      const text = resultText(out);
       const effects = JSON.stringify(effectsOf(call));
-      if (LONE_SURROGATE.test(text) || LONE_SURROGATE.test(effects)) {
-        throw new Error("a mutation's result and effects hold whole characters: this text holds half of one (a lone surrogate)");
+      if (LONE_SURROGATE.test(effects)) {
+        throw new Error("a mutation's effects hold whole characters: this text holds half of one (a lone surrogate)");
       }
       sql.exec(`INSERT INTO ${LEDGER} (id, name, input_sha, result, at, effects, run) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         id, name, inputSha, text, now, effects, meta.run);
@@ -451,14 +474,14 @@ export class App extends AuthorApp {
         sql.exec(`DELETE FROM ${LEDGER} WHERE at < ?`, now - meta.ledgerMs);
       }
       if (sql.databaseSize > APP_DB_MAX_BYTES) throw STORAGE_FULL;
-      return { replayed: false, result: JSON.parse(text), effects: JSON.parse(effects), run: meta.run };
+      return mutated(false, meta.run, effects, text);
     });
   }
 
-  async __query(name, input, meta) {
-    if (!authorMethod(name)) return { error: "unknown_operation" };
-    const result = await AuthorApp.prototype[name].call(this, input, new Call(meta, false));
-    return { result: result ?? null };
+  async __query(name, inputText, meta) {
+    if (!authorMethod(name)) return JSON.stringify({ error: "unknown_operation" });
+    const result = await AuthorApp.prototype[name].call(this, JSON.parse(inputText), new Call(meta, false));
+    return `{"result":${resultText(result)}}`;
   }
 
   // Runs a job's body over the results of the steps it has taken, up to
@@ -484,8 +507,8 @@ export class App extends AuthorApp {
       return next ? { next } : { failed: describe(e) };
     }
     if (next) return { next };
-    const text = JSON.stringify(out.value ?? null);
-    if (utf8Bytes(text) > RESULT_MAX_BYTES) return { failed: `a job's result is at most ${RESULT_MAX_BYTES} bytes` };
+    const text = JSON.stringify(out.value ?? null) ?? "null";
+    if (overBytes(text, RESULT_MAX_BYTES)) return { failed: `a job's result is at most ${RESULT_MAX_BYTES} bytes` };
     return { done: true, output: JSON.parse(text) };
   }
 
@@ -495,7 +518,7 @@ export class App extends AuthorApp {
   // it gave, never an id or principal from this table.
   __ledger(id) {
     const row = this.ctx.storage.sql.exec(`SELECT run, effects FROM ${LEDGER} WHERE id = ?`, String(id)).toArray()[0];
-    if (!row) return { result: null };
+    if (!row) return JSON.stringify({ result: null });
     // A row the supervisor could not read (the app garbled it, or wrote half
     // a character) goes as null, which the supervisor refuses.
     let effects = null;
@@ -504,7 +527,7 @@ export class App extends AuthorApp {
     } catch {
       effects = null;
     }
-    return { result: { run: row.run ?? null, effects } };
+    return JSON.stringify({ result: { run: row.run ?? null, effects } });
   }
 
   // Custom routes: the author's fetch, when there is one.

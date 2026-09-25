@@ -309,7 +309,11 @@ exception rolls back its writes and its records (422). The ledger keys a
 mutation by (principal, id) for seven days: a retry with the same id
 returns the stored result and applies nothing again; the same id with
 another input is 409; after seven days the same id runs again, as a new
-run. Every applied mutation also appends `{op, id}` to `ops`.
+run. Every applied mutation also appends `{op, id}` to `ops`. A query's
+or a mutation's result is at most 1 MiB of JSON
+(`limits::RESULT_MAX_BYTES`) of whole characters: a larger one is refused
+in the app (422; a mutation rolls back), and the cell checks it again
+(413).
 
 The platform checks a mutation's effects twice: in the app, where a
 refusal rolls the mutation back (422), and again in the cell before it
