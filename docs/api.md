@@ -184,6 +184,18 @@ random bytes, the registry keeps their SHA-256).
 | `GET /cli?key=<npub>&proof=` | the link `fragment login` prints: `proof` is the key's own NIP-98 event for `POST <platform>/cli/approve`, good for ten minutes (the proof of possession; without it, stale, or by another key: 400). Signed in: a page showing the key's last eight characters, to compare with the terminal, and an Add button; signed out: → sign in first, keeping the link |
 | `POST /cli/approve` | the page's form (`key`, `proof`): the key joins the signed-in person at once (a key someone else holds, or a revoked one, is 409; another origin 403); the CLI waits for `GET /api/identities/me` to answer. People themselves come only from sign-in (`POST /api/identities {kind: "person"}` is 400) |
 
+Every fragment's origin is one site with the platform
+(`<label>--<username>.fragment.club` and `fragment.club`), so a
+SameSite=Lax session cookie rides along on a fragment page's form, fetch,
+or frame. So every page here answers `Content-Security-Policy:
+frame-ancestors 'none'` and `X-Frame-Options: DENY` (no page may frame
+one and lay its button under a click; the redirects need not, and the
+desktop's frames sign in through them), and every form here
+(`/auth/new`, `/auth/username`, `/auth/picture`, `/auth/logout`,
+`/cli/approve`) is 403 from another origin, a fragment's page included.
+A browser sends `Origin` with every POST (`null` from a page that hides
+its referrer), so a POST without one is no browser's.
+
 Over https every session cookie whose path is `/` is named with the
 `__Host-` prefix (`__Host-fragment_session`, `__Host-fragment_login`,
 `__Host-fragment_site`) and read under that name only: a fragment's page
@@ -567,7 +579,7 @@ API answers on the platform's host):
 | `__preview.svg` | the placeholder preview image |
 | `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; a signed-in browser (`fragment_site`) calls as its person; an unsigned caller gets an anonymous principal cookie; callers holding only `public` get 60 calls a minute each, 600 per fragment (a page's live views re-run over `__live`, outside this) |
 | `__signin`, `__signout` | this origin's session (Sign-in, above) |
-| `__join?invite=<token>` | an invite in a browser: signed out, → `__signin` and back; signed in, a Join button that posts `invite` here (form-encoded; another origin 403) and joins as the person |
+| `__join?invite=<token>` | an invite in a browser: signed out, → `__signin` and back; signed in, a Join button that posts `invite` here (form-encoded; another origin 403) and joins as the person; the page refuses every frame (`frame-ancestors 'none'`, `X-Frame-Options: DENY`), as the platform's do |
 | `__fragment.js` | the browser library (below) |
 | `__fragments` | `{fragments: [{name, role, url}]}`: the fragments this fragment's owner belongs to, only to the owner signed in here, and only when `fragment.json` at live declares `"capabilities": ["fragments"]` (anyone else, or a page that does not ask, 403). A dashboard's page, such as the desktop's. `POST` `application/json` `{label, template}` → `{name, url}` makes `<label>.<username>` for the owner, as `POST /api/fragments` would, under the same conditions |
 | `__people?id=…&id=…` | anyone who can see the fragment: `{profiles: {<id>: {kind, username, picture}}}` for up to 64 identities (an agent's `username` is its owner's; a picture is an absolute platform URL); an id the registry does not hold is left out |

@@ -247,6 +247,7 @@ impl FragmentCell {
                 let h = Headers::new();
                 h.set("content-type", "text/html; charset=utf-8")?;
                 h.set("cache-control", "no-store")?;
+                crate::auth::unframed(&h)?;
                 Ok(Response::ok(html)?.with_headers(h))
             }
             Method::Post => {
