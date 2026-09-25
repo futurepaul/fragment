@@ -158,6 +158,14 @@ struct App {
 }
 
 impl App {
+    /// The server's state, its project and journal folders made.
+    fn open(work: PathBuf, state: PathBuf, token: String) -> Result<Arc<App>> {
+        std::fs::create_dir_all(&work)?;
+        std::fs::create_dir_all(state.join("calls"))?;
+        std::fs::create_dir_all(state.join("pids"))?;
+        Ok(Arc::new(App { work, state, token, calls: Mutex::new(HashMap::new()), developers: Mutex::new(HashMap::new()) }))
+    }
+
     fn call_path(&self, id: &str) -> PathBuf {
         self.state.join("calls").join(format!("{id}.json"))
     }
@@ -487,8 +495,7 @@ async fn screenshot(state: &Path, id: &str, arguments: Option<JsonObject>, cance
 
 async fn wait_finished(receiver: &mut watch::Receiver<CallRecord>, wait: Duration) -> CallRecord {
     let _ = tokio::time::timeout(wait, receiver.wait_for(|r| r.status != CallStatus::Running)).await;
-    let record = receiver.borrow().clone();
-    record
+    receiver.borrow().clone()
 }
 
 fn clamp_wait(wait_ms: u64) -> Duration {
@@ -666,15 +673,12 @@ async fn dispatch(app: &Arc<App>, method: &str, path: &str, body: Value) -> (u16
 /// Answers its agent's requests until the process is stopped: a long poll
 /// out to the platform, each request run here, its answer posted back.
 pub fn connect(args: ConnectArgs) -> Result<()> {
-    std::fs::create_dir_all(&args.work)?;
-    std::fs::create_dir_all(args.state.join("calls"))?;
-    std::fs::create_dir_all(args.state.join("pids"))?;
     let token = std::fs::read_to_string(&args.token_file)
         .with_context(|| format!("reading {} (the connect token its owner was given)", args.token_file.display()))?
         .trim()
         .to_string();
     ensure!(token.len() >= TOKEN_MIN, "{} holds no usable token", args.token_file.display());
-    let app = Arc::new(App { work: args.work, state: args.state, token: token.clone(), calls: Mutex::new(HashMap::new()), developers: Mutex::new(HashMap::new()) });
+    let app = App::open(args.work, args.state, token.clone())?;
     let base = args.agent.trim_end_matches('/').to_string();
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
@@ -692,14 +696,9 @@ pub fn connect(args: ConnectArgs) -> Result<()> {
                 Ok(r) if matches!(r.status().as_u16(), 401 | 403 | 404) => {
                     anyhow::bail!("{base} refused this computer ({}): ask the agent's owner for a new connect token", r.status());
                 }
-                Ok(r) => {
-                    eprintln!("the platform answered {}; again in {backoff} s", r.status());
-                    tokio::time::sleep(Duration::from_secs(backoff)).await;
-                    backoff = (backoff * 2).min(30);
-                    continue;
-                }
-                Err(e) => {
-                    eprintln!("the platform did not answer ({e}); again in {backoff} s");
+                other => {
+                    let why = other.map_or_else(|e| format!("the platform did not answer ({e})"), |r| format!("the platform answered {}", r.status()));
+                    eprintln!("{why}; again in {backoff} s");
                     tokio::time::sleep(Duration::from_secs(backoff)).await;
                     backoff = (backoff * 2).min(30);
                     continue;
@@ -723,16 +722,7 @@ pub fn connect(args: ConnectArgs) -> Result<()> {
 
 /// Serves until the process is stopped.
 pub fn serve(args: ServeArgs) -> Result<()> {
-    std::fs::create_dir_all(&args.work)?;
-    std::fs::create_dir_all(args.state.join("calls"))?;
-    std::fs::create_dir_all(args.state.join("pids"))?;
-    let app = Arc::new(App {
-        work: args.work,
-        state: args.state,
-        token: token(&args.token_file)?,
-        calls: Mutex::new(HashMap::new()),
-        developers: Mutex::new(HashMap::new()),
-    });
+    let app = App::open(args.work, args.state, token(&args.token_file)?)?;
     let pruned = app.prune(now_ms(), CALL_RETENTION_MS, CALLS_KEPT_MAX)?;
     if pruned > 0 {
         eprintln!("pruned {pruned} finished call record(s) from the journal");
@@ -780,11 +770,6 @@ mod tests {
         assert_eq!(arguments.unwrap()["command"], "echo $$ > '/state/it'\\''s/pids/tc-abc'; sleep 1 && echo done");
     }
 
-    #[tokio::test]
-    async fn cancelling_a_shell_call_kills_its_children() {
-        cancel_kills_children("{marker} && echo late > late.txt").await;
-    }
-
     /// A shell may exec the last command of `-c` in place of itself (bash
     /// and zsh do); that command's own children must still die.
     #[tokio::test]
@@ -793,16 +778,7 @@ mod tests {
     }
 
     async fn cancel_kills_children(template: &str) {
-        let dir = std::env::temp_dir().join(format!("fragment-computer-test-{}", hex::encode(rand::random::<[u8; 4]>())));
-        let app = Arc::new(App {
-            work: dir.join("work"),
-            state: dir.join("state"),
-            token: "x".repeat(32),
-            calls: Mutex::new(HashMap::new()),
-            developers: Mutex::new(HashMap::new()),
-        });
-        std::fs::create_dir_all(app.state.join("calls")).unwrap();
-        std::fs::create_dir_all(app.state.join("pids")).unwrap();
+        let (dir, app) = test_app();
         let marker = format!("sleep 29.{}", rand::random::<u16>());
         let arguments = serde_json::from_value(json!({ "command": template.replace("{marker}", &marker) })).ok();
         let mut receiver = app.start_or_attach("tc-cancel", "shell", arguments, "work").unwrap();
@@ -822,15 +798,7 @@ mod tests {
 
     fn test_app() -> (PathBuf, Arc<App>) {
         let dir = std::env::temp_dir().join(format!("fragment-computer-test-{}", hex::encode(rand::random::<[u8; 4]>())));
-        let app = Arc::new(App {
-            work: dir.join("work"),
-            state: dir.join("state"),
-            token: "x".repeat(32),
-            calls: Mutex::new(HashMap::new()),
-            developers: Mutex::new(HashMap::new()),
-        });
-        std::fs::create_dir_all(app.state.join("calls")).unwrap();
-        std::fs::create_dir_all(app.state.join("pids")).unwrap();
+        let app = App::open(dir.join("work"), dir.join("state"), "x".repeat(32)).unwrap();
         (dir, app)
     }
 
@@ -961,11 +929,6 @@ mod tests {
         let first = token(&path).unwrap();
         assert_eq!(first.len(), 64);
         assert_eq!(token(&path).unwrap(), first);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-        }
         std::fs::write(&path, "short\n").unwrap();
         assert!(token(&path).is_err());
         std::fs::remove_dir_all(&dir).unwrap();

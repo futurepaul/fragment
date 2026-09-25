@@ -68,7 +68,7 @@ fn field(spec: &str, min: u32, max: u32, names: Option<&[&str]>) -> Result<u64, 
 }
 
 /// Days since 1970-01-01 → (year, month 1-12, day 1-31) (Hinnant's civil_from_days).
-fn civil(days: i64) -> (i64, u32, u32) {
+pub fn civil(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);

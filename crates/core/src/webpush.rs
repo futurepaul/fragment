@@ -179,11 +179,6 @@ impl<'a> Tokens<'a> {
         let token = self.by_audience.entry(url.origin().ascii_serialization()).or_insert_with_key(|audience| vapid.authorization(audience, subject, now_s));
         Ok(token.as_str())
     }
-
-    /// Tokens signed so far: one per push service.
-    pub fn signed(&self) -> usize {
-        self.by_audience.len()
-    }
 }
 
 #[cfg(test)]
@@ -309,6 +304,6 @@ mod tests {
             let auth = tokens.authorization(endpoint).unwrap().to_string();
             assert_eq!(verified_claims(&vapid, &auth)["aud"], audience, "{endpoint}");
         }
-        assert_eq!(tokens.signed(), 3, "one signature per push service, not per subscription");
+        assert_eq!(tokens.by_audience.len(), 3, "one signature per push service, not per subscription");
     }
 }

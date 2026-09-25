@@ -220,15 +220,6 @@ pub fn verify_proof(proof: &str, method: &str, url: &str, signer_hex: &str, now_
     Ok(event.pubkey)
 }
 
-/// The x-only public key (64 hex) of a 64-hex secret key, or `None` when
-/// the secret is not a valid secp256k1 scalar. Needs no randomness, so the
-/// cell uses it to check a fragment secret a client generated.
-pub fn pubkey_of_secret(secret_hex: &str) -> Option<String> {
-    let bytes = hex::decode(secret_hex).ok().filter(|b| b.len() == 32)?;
-    let key = k256::schnorr::SigningKey::from_bytes(&bytes).ok()?;
-    Some(hex::encode(key.verifying_key().to_bytes()))
-}
-
 /// A signing identity.
 #[cfg(feature = "signer")]
 #[derive(Clone)]
@@ -354,16 +345,8 @@ mod tests {
         encode(&event)
     }
 
-    #[test]
-    fn pubkey_of_secret_matches_keys() {
-        let k = keys(3);
-        assert_eq!(pubkey_of_secret(&k.secret_hex()).as_deref(), Some(k.pubkey_hex()));
-        assert_eq!(pubkey_of_secret(&"0".repeat(64)), None);
-        assert_eq!(pubkey_of_secret("abc"), None);
-    }
-
     /// A pin from another implementation: this secret's x-only key as
-    /// @noble/curves computes it (its npub is pinned in fragment-core).
+    /// @noble/curves computes it.
     #[test]
     fn a_known_secret_has_its_known_key() {
         assert_eq!(keys(1).pubkey_hex(), "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f");

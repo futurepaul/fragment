@@ -137,14 +137,10 @@ pub struct AiText {
     /// An OpenRouter model id.
     pub model: String,
     /// The conversation; without it, `prompt` is one user message.
-    #[serde(default)]
     pub messages: Option<Vec<Value>>,
-    #[serde(default)]
     pub prompt: Option<String>,
     /// OpenRouter's reasoning control, passed as given.
-    #[serde(default)]
     pub reasoning: Option<Map<String, Value>>,
-    #[serde(default)]
     pub max_tokens: Option<u64>,
 }
 
@@ -153,9 +149,7 @@ pub struct AiText {
 pub struct AiImage {
     pub prompt: String,
     pub path: String,
-    #[serde(default)]
     pub model: Option<String>,
-    #[serde(default)]
     pub aspect_ratio: Option<String>,
 }
 
@@ -163,14 +157,10 @@ pub struct AiImage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AiVideo {
     pub prompt: String,
-    #[serde(default)]
     pub model: Option<String>,
     /// Seconds, passed as given (its reservation is clamped: budget.rs).
-    #[serde(default)]
     pub duration: Option<i64>,
-    #[serde(default)]
     pub resolution: Option<String>,
-    #[serde(default)]
     pub aspect_ratio: Option<String>,
 }
 
