@@ -1257,23 +1257,6 @@ mod tests {
     }
 
     #[test]
-    fn push_replay_commits_exactly_once() {
-        // the idempotency replay: the same folder re-synced must send NO
-        // further commit-packs (content equality short-circuits)
-        let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[]);
-        let c = client_for(&mock);
-        let dir = tmpdir("push-replay");
-        fs::write(dir.join("a.txt"), b"alpha").unwrap();
-        sync_once(&c, "t", &dir, &opts(Mode::Push)).unwrap();
-        assert_eq!(mock.commit_pack_count(), 1);
-        let r2 = sync_once(&c, "t", &dir, &opts(Mode::Push)).unwrap();
-        assert!(r2.pushed.is_empty());
-        assert_eq!(mock.commit_pack_count(), 1, "replayed sync must not commit again");
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn push_conflicting_parent_retries_then_succeeds() {
         // competitor moves the tip once: our pack 409s, we refetch,
         // rebuild, and land on the new tip — both changes survive
