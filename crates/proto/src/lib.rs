@@ -1246,13 +1246,16 @@ mod tests {
     fn deliveries_decode_whole_or_not_at_all() {
         let wire = serde_json::json!({ "type": "record", "fragment": "f", "channel": "chat",
             "record": { "channel": "chat", "seq": 7, "at": 1, "principal": "id:0123456789abcdef0123456789abcdef", "kind": "say", "body": { "text": "hi" } } });
-        // from text, as a delivery arrives: a record's body is raw JSON, which
-        // decodes from text only (from an already parsed Value it cannot)
+        // from text, as a delivery arrives. A record's raw body decodes from a
+        // parsed Value as well; what cannot hold one is serde's buffer for an
+        // internally tagged enum, which is why Delivery is a struct.
         let decode = |v: &Value| serde_json::from_str::<Delivery>(&v.to_string());
         let delivery = decode(&wire).unwrap();
         assert_eq!((delivery.kind, delivery.fragment.as_str(), delivery.channel.as_str(), delivery.record.seq), (DeliveryType::Record, "f", "chat", 7));
         let encoded = serde_json::to_string(&delivery).unwrap();
         assert_eq!(serde_json::from_str::<Value>(&encoded).unwrap(), wire);
+        let from_value: Delivery = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(from_value.record.body.get(), r#"{"text":"hi"}"#);
         let mut no_seq = wire.clone();
         no_seq["record"].as_object_mut().unwrap().remove("seq");
         assert!(decode(&no_seq).is_err());

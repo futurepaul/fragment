@@ -785,9 +785,11 @@ impl Agent {
         let computer_token = req.headers().get(COMPUTER_TOKEN_HEADER)?.unwrap_or_default();
         let bytes = req.bytes().await?;
         if let Some(token) = action.strip_prefix("inbox/") {
-            // decoded whole at the door, from its text (a record's body is
-            // raw JSON, which decodes from text only): a delivery without its
-            // record's seq is refused, never keyed `…/null`
+            // decoded whole at the door, once, from its bytes: a delivery
+            // without its record's seq is refused, never keyed `…/null`. (A
+            // record's raw body would decode from a parsed Value too; what
+            // cannot hold one is serde's buffer for an internally tagged
+            // enum, which is why proto's Delivery is a struct.)
             let delivery: Delivery = serde_json::from_slice(&bytes).map_err(|e| Fail::invalid(format!("delivery: {e}")))?;
             return Ok(Response::from_json(&self.inbox(token, delivery)?)?);
         }
