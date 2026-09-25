@@ -1,0 +1,9 @@
+{
+  "operations": {
+    "fill": {
+      "kind": "mutation",
+      "input": { "type": "object", "required": ["n"], "properties": { "n": { "type": "integer", "minimum": 1, "maximum": 64 } } }
+    }
+  },
+  "channels": { "wall": { "read": "viewer", "post": "viewer" } }
+}

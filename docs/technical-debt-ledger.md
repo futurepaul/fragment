@@ -540,3 +540,36 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** turns of different conversations run at once (a
   driver, a watchdog, and a cancel token per conversation), proven by an
   e2e where chat B's answer lands while chat A's turn is held in a tool.
+
+## Chats made before phase 7 answer through `say`
+
+- **Observed:** phase 7 slice C made the chat template two postable
+  channels and no app code; the agent posts its answer to a chat whose
+  `chat` channel takes posts. A chat made before still has the old
+  template's `app.mjs` (a `say` operation, a worker) and its old page, so
+  the agent reads each chat's channels as a turn starts
+  (agent/src/progress.rs `shape`) and answers such a chat through its
+  listen's reply operation (agent/src/lib.rs `reply`), with no `work`
+  records. The e2e keeps the old template as a fixture
+  (crates/e2e/fixtures/old_chat.*).
+- **Risk:** two answer paths in the agent, and old chats keep a worker
+  each and the low-effort page.
+- **First proof:** a change to how answers are posted that the old path
+  misses (the e2e's old chat stops getting answers).
+- **Delete when:** no chat on the hosted fleet has a `say` operation
+  (each rewritten to the template's `fragment.json` and page, or
+  deleted), proven by a fleet listing; then `reply` posts only, and the
+  listen's `reply` field goes.
+
+## A postable channel's retention is fixed
+
+- **Observed:** a channel people may post to keeps its newest
+  `limits::POSTED_KEPT` (10 000) records (cell/src/channels.rs `append`),
+  whatever the fragment would choose; fragment.json cannot declare
+  another number (it would need a column in the installed code's channel
+  table, and its parsing).
+- **Risk:** a busy chat loses its oldest messages past 10 000, and a
+  small one could not ask for less.
+- **First proof:** a person asks where the start of a long chat went.
+- **Delete when:** a channel's `keep` is declarable (bounded, with this
+  as its default) and tested past it.

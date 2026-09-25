@@ -52,7 +52,13 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     let chat_cookie = format!("fragview={}", r.body["viewToken"].as_str().unwrap_or(""));
     let st = api.status(&owner, &chat)?;
     s.ok("its template is main's first commit, and live", st.body["pins"]["live"].is_string() && st.body["pins"]["live"] == st.body["pins"]["main"], &st);
-    s.ok("its app is installed from live", st.body["code"]["operations"]["say"]["kind"] == "mutation", &st.body["code"]);
+    let channels = api.signed(&owner, "GET", &format!("/api/f/{chat}/channels"), None)?;
+    let declared = |n: &str| channels.body["channels"].as_array().into_iter().flatten().find(|c| c["name"] == n).map(|c| (c["read"].clone(), c["post"].clone()));
+    s.ok(
+        "a chat is its channels: viewers post to chat, and read the agent's work, which editors post",
+        declared("chat") == Some((json!("public"), json!("viewer"))) && declared("work") == Some((json!("viewer"), json!("editor"))),
+        &channels,
+    );
     let m = api.signed(&owner, "GET", &format!("/api/f/{chat}/manifest"), None)?;
     s.ok("its fragment.json carries the fragment's own name", m.body["name"] == chat.as_str(), &m);
     let page = api.page(&chat, "", Some(&chat_cookie))?;
@@ -73,12 +79,13 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     let again = api.signed(&owner, "POST", &format!("/api/a/{agent_name}/listen"), Some(&json!({ "fragment": chat })))?;
     let subs = api.signed(&owner, "GET", &format!("/api/f/{chat}/subscriptions"), None)?;
     s.ok("and a join sent again leaves the one subscription", again.status == 200 && listening(&subs) == Some(1), json!({ "listen": again.body, "subscriptions": subs.body }));
-    // the model calls the chat's `say` itself, then answers: one answer lands
+    // a message is a post; the model calls a `say` that is not there (as a
+    // chat made before this had), then answers: one answer lands
     s.openrouter.clear_script();
     let say = fragment_core::tools::tool_name(&chat, "say").expect("a tool name");
     s.openrouter.script(&[Say::Tools(vec![(say, json!({ "text": "Hello from the tool." }))]), Say::Text("Hello! I'm here.".into())]);
-    let said = api.op(&owner, &chat, "say", "t1", json!({ "text": "hello from a template" }))?;
-    s.ok("its operations answer", said.status == 200, &said);
+    let said = api.signed(&owner, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": "t1", "body": { "text": "hello from a template" } })))?;
+    s.ok("a message is posted to its chat channel", said.status == 200 && said.body["record"]["principal"] == owner_id.as_str(), &said);
     let agents_records = || -> Vec<Value> {
         let records = api.signed(&owner, "GET", &format!("/api/f/{chat}/channels/chat"), None).ok().and_then(|r| r.body["records"].as_array().cloned()).unwrap_or_default();
         records.into_iter().filter(|x| x["principal"] == agent["principal"]).collect()
@@ -86,7 +93,19 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     let answered = s.eventually(Duration::from_secs(30), || agents_records().iter().any(|x| x["body"]["text"] == "Hello! I'm here."));
     // the answer comes after anything the turn did, so it is all there now
     let records = agents_records();
-    s.ok("and the agent answers in the chat, once", answered && records.len() == 1, json!(records));
+    s.ok(
+        "and the agent answers in the chat, once, naming its turn",
+        answered && records.len() == 1 && records[0]["body"]["turn"].as_str().is_some_and(|t| t.len() == 24),
+        json!(records),
+    );
+    // a chat has no app code: no worker, however it is used
+    let st = api.status(&owner, &chat)?;
+    let builds = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": chat, "op": "code-builds" })))?;
+    s.ok(
+        "a new chat has no app code, and after a message and an answer it has loaded no worker",
+        st.body["code"]["sha"].is_null() && builds.status == 200 && builds.body["builds"] == 0,
+        format!("{} {}", st.body["code"], builds.body),
+    );
     let people = api.page(&chat, &format!("__people?id={}&id={}&id=anon:00", agent["principal"].as_str().unwrap_or(""), owner_id), Some(&chat_cookie))?;
     let username = api.username(&owner)?;
     let profiles = &people.body["profiles"];

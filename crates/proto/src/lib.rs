@@ -67,6 +67,11 @@ pub mod limits {
     pub const EVENTS_PAGE: usize = 500;
     /// Records `events` and `ops` each keep (the oldest go first).
     pub const AUDIT_KEPT: i64 = 10_000;
+    /// Records a channel people may post to keeps (a `post` role in
+    /// fragment.json; the oldest go first, whoever appended them): at the
+    /// public call limits a public chat would otherwise grow ~38 MB a
+    /// minute, for good.
+    pub const POSTED_KEPT: i64 = 10_000;
     /// `public`-role calls per minute by one principal that is not a member.
     pub const PUBLIC_CALLS_PER_MIN: u32 = 60;
     /// `public`-role calls per minute into one fragment by non-members.

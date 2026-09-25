@@ -38,6 +38,7 @@ use worker::{Delay, Fetch, Headers, Method, Request, RequestInit, SqlStorage, St
 use crate::computer::{self, Computer, ComputerTools};
 use crate::fleet::Fleet;
 use crate::js;
+use crate::progress::Progress;
 use crate::store::{self, kv_get, kv_set, kv_u64, Effect, Session, Store};
 use crate::tools::FragmentTools;
 
@@ -78,6 +79,8 @@ pub struct Driver {
     pub asker: String,
     /// Whether that is the agent's owner.
     pub owner_turn: bool,
+    /// A chat turn's progress records (progress.rs), when its chat takes them.
+    pub progress: Option<Rc<Progress>>,
 }
 
 // ---------------------------------------------------------------- operations
@@ -291,6 +294,11 @@ async fn run_steps(driver: &Driver, machine: &StateMachine<'_, Session, Effect>,
         let t1 = js::now_ms();
         store::record_step(sql, name, result.effects.len(), t1 - t0, t1, &driver.id)?;
         arm_watchdog(&driver.storage, sql).await?;
+        // the steps that store tool results: their calls go to the chat's
+        // `work` channel (best-effort), before any test hold below
+        if let (Some(progress), "tools" | "unoffered") = (&driver.progress, name) {
+            progress.steps().await;
+        }
         if name == "tools" {
             // Test hook: hold after a tool result is persisted, so a kill
             // lands between steps.

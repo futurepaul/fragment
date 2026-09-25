@@ -286,7 +286,7 @@ pub fn screenshots(s: &mut Suite, api: &Api) -> Result<()> {
         Reply::Tools(vec![("screenshot".into(), json!({ "url": "data:text/html,<h1 style='font:72px sans-serif'>Hello from the computer</h1>" }))]),
         Reply::Text("Here is the page.".into()),
     ]);
-    let r = api.op(&owner, &chat, "say", "s1", json!({ "text": "open a page on your computer and show me" }))?;
+    let r = super::agents::say(api, &owner, &chat, "s1", "open a page on your computer and show me")?;
     anyhow::ensure!(r.status == 200, "saying it: {r}");
     let mut text = String::new();
     let shown = s.eventually(Duration::from_secs(90), || {

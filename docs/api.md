@@ -372,7 +372,10 @@ keeps the last good code and says why in `status.code.error`.
   (`POST /api/f/{name}/channels/{channel}`, `fragment.post`), so a
   fragment whose live commit has channels and no `app.mjs` (a chat) runs
   no worker at all. A `post` role looser than the channel's `read` is
-  refused at deploy (whoever may post may read).
+  refused at deploy (whoever may post may read). Such a channel keeps its
+  newest 10 000 records (`limits::POSTED_KEPT`; the oldest go, whoever
+  appended them, and with them their posts' ids), as `events` and `ops`
+  keep theirs; the number is not declarable yet.
 - `kind` is `query`, `mutation`, or `job` (below); a job's `role`
   defaults to `editor`.
 - `triggers` (at most 32) start runs of an operation: `{"cron": "0 9 * *
@@ -639,6 +642,7 @@ API answers on the platform's host):
 | `POST __op/channels/{channel}` | a browser's post (`fragment.post`), through the call's door and its checks: `{id, input}` with the record's body as `input` → `{result: record, replayed}`, as `POST /api/f/{name}/channels/{channel}` answers it; a post spends the public budget as a call does (no operation name holds a `/`) |
 | `__signin`, `__signout` | this origin's session (Sign-in, above) |
 | `__fragment.js` | the browser library (below) |
+| `__chat.js`, `__chat.css` | the chat's page, the platform's (docs/platform.md): `import { mount } from "./__chat.js"; mount(document.body, {suggestions?, placeholder?})` renders a chat's `chat` and `work` channels (the chat template, below) |
 | `__fragments` | `{fragments: [{name, role, url, share, sharing?}]}`: the fragments this fragment's owner belongs to, only to the owner signed in here, and only when `fragment.json` at live declares `"capabilities": ["fragments"]` (anyone else, or a page that does not ask, 403). `share` is its share sheet (`<platform>/share/<name>`); `sharing` is the owner's list's (`GET /api/fragments`): a read asks the owner's Principal cell alone and wakes none of the fragments listed. A dashboard's page, such as the desktop's. `POST` `application/json` `{label, template}` → `{name, url}` makes `<label>.<username>` for the owner, as `POST /api/fragments` would, under the same conditions |
 | `__people?id=…&id=…` | anyone who can see the fragment: `{profiles: {<id>: {kind, username, picture}}}` for up to 64 identities (an agent's `username` is its owner's; a picture is an absolute platform URL); an id the registry does not hold is left out |
 | `__files` | an HTML list of the content files (live and main) linking to `__file`; framed, a click asks the page around it to open the file (`postMessage({fragment: "open", url, title})`) |
@@ -648,8 +652,8 @@ API answers on the platform's host):
 
 A site file carries an `ETag` that names its bytes: the last commit that
 changed it, or, for a page given Open Graph tags, a weak tag that also
-names the live commit (its `fragment.json`). `__fragment.js` and
-`__sw.js` carry a hash of their bytes. A `GET` or `HEAD` whose
+names the live commit (its `fragment.json`). `__fragment.js`, `__sw.js`,
+`__chat.js`, and `__chat.css` carry a hash of their bytes. A `GET` or `HEAD` whose
 `If-None-Match` names the current tag answers 304 without reading the
 file.
 
@@ -780,8 +784,8 @@ else).
 | `POST /api/a/{name}/turns` | owner | `{text}` (at most 16 KiB) → `{started}`; during the owner's own turn, `{steered: true}` (read between steps); during another (a chat's), `{queued: true}`: it runs next, in the owner's conversation. At most 64 messages wait (429) |
 | `POST /api/a/{name}/stop` | owner | → `{active, driving}`; a tool in flight is interrupted; the messages waiting run next |
 | `GET /api/a/{name}/tools` | owner | → `{tools: ["platform__create_fragment", "platform__list_fragments", "platform__operations", "platform__call", "platform__list_files", "platform__read_file", "platform__write_files", "platform__deploy", "<fragment>__<op>", ...]}`: what the owner's own turn has (below) |
-| `POST /api/a/{name}/listen` | owner | `{fragment, channel? ("chat"), reply? ("say")}` → `{fragment, channel, reply, subscription}`: the agent subscribes itself to the channel (it must be a member) with an inbox URL of its own (`AGENT_URL`); at most 500. A new listen first drops those of fragments the agent is no longer in: of the fragments its memberships leave out, up to 16 are asked, and one that answers 404 or 403 loses its listens (so does one whose subscribe answers either, and a chat whose answer's post does). Listening again to the same fragment's channel is the same listen: its inbox URL, so the one subscription (made again if the fragment dropped it) |
-| `POST /api/a/{name}/inbox/{token}` | the fragment's delivery (the token is the capability) | a `Delivery` (`crates/proto`), decoded whole: one that does not decode (a record without its `seq`, say) is 400. A record from an identity starts a turn in the chat's conversation, acting for that identity; from the running turn's starter in its conversation, it steers that turn; any other waits for a turn of its own (429 past 64 waiting: the fragment delivers it again). The agent's own, one heard before (within a day: past the longest redelivery), and one from an anonymous visitor (`anon:`) are ignored (the owner's view keeps the newest 32 anonymous ones). The turn's last answer goes back as `POST /api/f/{fragment}/ops/{reply}` `{text}` with the id `rp:<40 hex of SHA-256 of its message id>`, as the agent; an unknown token is 404 |
+| `POST /api/a/{name}/listen` | owner | `{fragment, channel? ("chat"), reply? ("say")}` → `{fragment, channel, reply, subscription}`: the agent subscribes itself to the channel (it must be a member) with an inbox URL of its own (`AGENT_URL`); at most 500. `reply` answers a chat whose channel takes no posts (one made before phase 7); a postable channel is answered by a post. A new listen first drops those of fragments the agent is no longer in: of the fragments its memberships leave out, up to 16 are asked, and one that answers 404 or 403 loses its listens (so does one whose subscribe answers either, and a chat whose answer's post does). Listening again to the same fragment's channel is the same listen: its inbox URL, so the one subscription (made again if the fragment dropped it) |
+| `POST /api/a/{name}/inbox/{token}` | the fragment's delivery (the token is the capability) | a `Delivery` (`crates/proto`), decoded whole: one that does not decode (a record without its `seq`, say) is 400. A message (a body with no `kind`, or `kind: "message"`: its `text`, else its JSON) from an identity starts a turn in the chat's conversation, acting for that identity; from the running turn's starter in its conversation, it steers that turn; any other waits for a turn of its own (429 past 64 waiting: the fragment delivers it again). `{kind: "stop", turn?}` from the running turn's starter, in its chat, naming that turn (or none), stops it; from anyone else, or another kind, it is ignored, never a message. The agent's own, one heard before (within a day: past the longest redelivery), and a message from an anonymous visitor (`anon:`) are ignored (the owner's view keeps the newest 32 anonymous ones). The turn's last answer goes back as the agent, with the id `rp:<40 hex of SHA-256 of its message id>`: posted to the channel as `{text, turn}` when it takes posts (`POST /api/f/{fragment}/channels/{channel}`), else `POST /api/f/{fragment}/ops/{reply}` `{text}`; an unknown token is 404 |
 | `PUT /api/a/{name}/computer` | owner | `{url, token, cwd? ("work")}` → `{url, cwd, tools}`: attaches a computer once it answers `GET /tools` with that token (400 when it refuses it, 502 when it does not answer); the token is sealed like the agent's key |
 | `PUT /api/a/{name}/computer` | owner | `{connect: true, cwd?}` → `{connect, agent, token, cwd}`: a computer that connects out instead (`fragment computer connect --agent <agent> --token-file <f>`): a new connect token, answered once (the agent keeps its SHA-256), replacing any computer before |
 | `POST /api/a/{name}/computer/poll` | the connect token (`x-computer-token`) | → `{requests: [{rid, method, path, body}]}`: what the agent asks of its computer (the routes `fragment computer serve` answers), at once or within 25 s; one fetched and not answered in 40 s is handed out again; a wrong token 403 |
@@ -826,6 +830,47 @@ together), with the running turn whole and earlier turns while they
 total 256 KiB. A turn that alone outgrows the window ends in an error;
 the next message starts a turn that fits. A chat turn's answer is its
 last message, when that is the model's text.
+
+### The chat template (phase 7, slice C)
+
+A chat made from the `chat` template is two channels and no app code (no
+worker), with the platform's page (`__chat.js`, `__chat.css`):
+
+```json
+"channels": {
+  "chat": { "read": "public", "post": "viewer" },
+  "work": { "read": "viewer", "post": "editor" }
+}
+```
+
+- `chat`: messages, `{text}`, posted by viewers and up (link holders
+  too; `fragment.post("chat", {text})`); an agent's answer, `{text,
+  turn}`; and `{kind: "stop", turn}`, the page's Stop, which the agent
+  acts on only from the turn's starter. A body of another `kind` is for
+  pages, never a message.
+- `work`: an agent's progress, for turns a chat started, each posted by
+  the agent (best-effort: a failed post never fails the turn) with the id
+  `wk:<turn>:<part>` (`start`, the call's number, `end`), so a replayed
+  step posts the same record and nothing new:
+  - `{kind: "turn.start", turn, asker}`: who asked (only they may steer
+    or stop it);
+  - `{kind: "turn.step", turn, step, tool, args, ok, excerpt, text?}`: one
+    per tool call, once its result is stored, numbered from 1 in the
+    order the model asked: the tool's name, its arguments as one line of
+    JSON (at most 140 characters), whether it worked, at most 300
+    characters of its result, and the model's text before the call (at
+    most 300) on the first call of a message. A result can hold what the
+    asker reaches in other fragments (decision 1: they could read it
+    anyway), so only this excerpt is posted;
+  - `{kind: "turn.end", turn, outcome, error?}`: `idle` (answered),
+    `stopped`, `yielded`, or `error` (at most 300 characters of it).
+
+  `turn` is 24 hex of the SHA-256 of the turn's first message's id; the
+  answer on `chat` names it, so a page places the steps above their
+  answer. Nothing streams: a record is a whole step.
+
+A chat made before this (a `say` operation, `chat` taking no posts) keeps
+its own page, and its agent answers through `say`, with no `work`.
 
 ### Computers (`fragment computer serve`, phase 8)
 

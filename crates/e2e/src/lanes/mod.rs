@@ -24,6 +24,7 @@ mod signin;
 mod site;
 mod sync;
 mod templates;
+mod work;
 
 use std::panic::{self, AssertUnwindSafe};
 use std::time::Instant;

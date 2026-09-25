@@ -281,6 +281,13 @@ impl Browser {
         Ok(())
     }
 
+    /// The page's `prefers-color-scheme`: `dark` or `light`.
+    pub fn color_scheme(&mut self, page: &Page, scheme: &str) -> Result<()> {
+        let params = json!({ "features": [{ "name": "prefers-color-scheme", "value": scheme }] });
+        self.send("Emulation.setEmulatedMedia", params, Some(&page.session))?;
+        Ok(())
+    }
+
     /// Evaluates `expr` inside the page's first frame whose URL contains
     /// `url_part` (a same-site frame shares the page's process), in a world
     /// of its own that shares the frame's DOM.

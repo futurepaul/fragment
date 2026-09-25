@@ -40,15 +40,20 @@
 //!   POST /api/a/{name}/test           test controls (dev fleets: AGENT_TEST_HOOKS=allow)
 //!
 //! A listened-to channel's records arrive at `POST /api/a/{name}/inbox/{token}`
-//! (the fragment's delivery; the token is the capability). A record from
+//! (the fragment's delivery; the token is the capability). A message from
 //! someone else starts a turn in that chat's conversation (or steers or
-//! waits, as above), and the turn's last answer goes back through the
-//! fragment's reply operation.
+//! waits, as above); a stop from the running turn's starter stops it. The
+//! turn's last answer is posted to the chat's channel, naming its turn,
+//! when the channel takes posts (the chat template's, docs/api.md), and
+//! goes through the fragment's reply operation otherwise (chats made
+//! before). Such a turn also posts its progress to the chat's `work`
+//! channel (progress.rs).
 
 mod computer;
 mod fleet;
 mod js;
 mod keys;
+mod progress;
 mod store;
 mod tools;
 mod turn;
@@ -59,6 +64,7 @@ use std::rc::Rc;
 
 use fragment_core::body::{LimitedBody, TooLarge};
 use fragment_core::npub;
+use fragment_core::work::{self, Said};
 use fragment_proto::limits::AGENT_STATE_WAIT_MS_MAX;
 use fragment_proto::{valid_channel_name, valid_fragment_name, valid_op_name, AgentState, Delivery, ErrorCode, FragmentList, IdentityView, TurnOutcome};
 use futures::{StreamExt, TryStreamExt};
@@ -71,6 +77,7 @@ use worker::{durable_object, event, DurableObject, Env, Headers, Method, Request
 
 use crate::computer::Computer;
 use crate::fleet::Fleet;
+use crate::progress::{Progress, Shape};
 use crate::store::{kv_get, kv_set, kv_u64, last_answer, recent_messages};
 use crate::turn::{Attached, Driver, Model, WATCHDOG_MS_DEFAULT, WATCHDOG_MS_MIN};
 
@@ -756,11 +763,14 @@ impl Agent {
         Ok(gone.len())
     }
 
-    /// A delivery from a followed channel: someone else's record starts a
+    /// A delivery from a followed channel: someone else's message starts a
     /// turn in that chat's conversation (or steers, or waits: `begin`). The
     /// agent's own, and a record heard before, are acknowledged and
-    /// ignored; so is one from someone not signed in (an anonymous visitor
-    /// holding a chat's link), which the owner's view notes.
+    /// ignored; so is a message from someone not signed in (an anonymous
+    /// visitor holding a chat's link), which the owner's view notes. A
+    /// record of another kind is never a message: a stop (`{kind: "stop",
+    /// turn}`, the chat page's Stop) stops the running turn when it comes
+    /// from that turn's starter, in its chat; any other is ignored.
     fn inbox(&self, token: &str, delivery: Delivery) -> Answer<Value> {
         let Delivery { kind: _, fragment: sent_from, channel: sent_on, record } = delivery;
         let sql = self.sql();
@@ -779,9 +789,11 @@ impl Agent {
             return Ok(json!({ "ignored": "own" }));
         }
         let signed_in = npub::is_identity(&record.principal);
+        let said = work::said(record.body.get());
         // a message that cannot wait now is refused before it is heard, so
         // its redelivery is heard
-        if signed_in && kv_u64(&sql, "active")? == 1 && waiting(&sql)? >= WAITING_MAX {
+        let message = matches!(said, Said::Message(_));
+        if message && signed_in && kv_u64(&sql, "active")? == 1 && waiting(&sql)? >= WAITING_MAX {
             return Err(Fail::new(ErrorCode::RateLimited, format!("at most {WAITING_MAX} messages wait for the agent")));
         }
         // the record's place in its channel: decoding made sure it has one
@@ -793,6 +805,11 @@ impl Agent {
         }
         // no delivery comes again after HEARD_KEEP_MS: older keys only grow the table
         sql.exec("DELETE FROM heard WHERE at < ?", vec![(now - HEARD_KEEP_MS).into()])?;
+        let said = match said {
+            Said::Message(text) => text,
+            Said::Stop { turn } => return self.stop_from(&store::conv_of(fragment, channel), &record.principal, turn.as_deref()),
+            Said::Other => return Ok(json!({ "ignored": "kind" })),
+        };
         if !signed_in {
             sql.exec(
                 "INSERT INTO ignored (fragment, channel, principal, at) VALUES (?, ?, ?, ?)",
@@ -801,21 +818,28 @@ impl Agent {
             sql.exec("DELETE FROM ignored WHERE seq <= (SELECT MAX(seq) FROM ignored) - ?", vec![IGNORED_KEEP.into()])?;
             return Ok(json!({ "ignored": "anonymous" }));
         }
-        // a chat's record says `{text}`; any other body is heard as its JSON
-        #[derive(Deserialize)]
-        struct Said {
-            text: String,
-        }
-        let said = match serde_json::from_str::<Said>(record.body.get()) {
-            Ok(s) => s.text,
-            Err(_) => record.body.get().to_string(),
-        };
+        // a chat's message says `{text}`; any other body is heard as its JSON
         let who: String = record.principal.chars().take(12).collect();
         let mut text = format!("[{fragment} · {who}] {said}");
         if text.len() > MESSAGE_TEXT_MAX {
             text.truncate(text.floor_char_boundary(MESSAGE_TEXT_MAX));
         }
         self.begin(&store::conv_of(fragment, channel), &record.principal, text)
+    }
+
+    /// A stop posted in a chat: it stops the running turn only when that
+    /// turn is this chat's, `principal` started it (ROADMAP decision 17: the
+    /// asker's turn is theirs), and it names that turn (or none).
+    fn stop_from(&self, conv: &str, principal: &str, turn: Option<&str>) -> Answer<Value> {
+        let sql = self.sql();
+        let running = kv_u64(&sql, "active")? == 1
+            && kv_get(&sql, "turn_conv")?.as_deref() == Some(conv)
+            && kv_get(&sql, "turn_asker")?.as_deref() == Some(principal)
+            && turn.is_none_or(|t| kv_get(&sql, "turn_id").ok().flatten().as_deref() == Some(t));
+        if !running {
+            return Ok(json!({ "ignored": "stop" }));
+        }
+        self.stop()
     }
 
     fn stop(&self) -> Answer<Value> {
@@ -1086,7 +1110,10 @@ struct Setup {
     id: String,
 }
 
-/// Runs the active turn to its end, and answers it in its chat.
+/// Runs the active turn to its end, and answers it in its chat. A turn a
+/// chat started posts its progress to the chat's `work` channel, when the
+/// chat declares one: its start, its tool calls, and its end, whatever the
+/// outcome (progress.rs).
 async fn run_turn(setup: &Setup, cancel: CancellationToken) -> anyhow::Result<TurnOutcome> {
     let sql = setup.storage.sql();
     let conv = kv_get(&sql, "turn_conv")?.filter(|c| !c.is_empty()).unwrap_or_else(|| store::DIRECT.to_string());
@@ -1094,6 +1121,47 @@ async fn run_turn(setup: &Setup, cancel: CancellationToken) -> anyhow::Result<Tu
     if !npub::is_identity(&asker) {
         anyhow::bail!("this turn began before turns recorded who asked for them; send the message again");
     }
+    // what the chat declares, read once as the turn starts (again at its
+    // answer, if this read fails)
+    let shape = match store::chat_of(&conv) {
+        None => None,
+        Some((fragment, channel)) => match progress::shape(&setup.fleet, fragment, channel).await {
+            Ok(shape) => Some(shape),
+            Err(e) => {
+                worker::console_warn!("reading {fragment}'s channels: {e:#}");
+                None
+            }
+        },
+    };
+    // a turn begun before turns had ids (a deploy mid-turn) posts no progress
+    let turn = kv_get(&sql, "turn_id")?.filter(|t| !t.is_empty());
+    let progress = match (store::chat_of(&conv), shape, &turn) {
+        (Some((fragment, _)), Some(Shape { work: true, .. }), Some(turn)) => {
+            Some(Rc::new(Progress { fleet: setup.fleet.clone(), fragment: fragment.to_string(), turn: turn.clone(), sql: sql.clone() }))
+        }
+        _ => None,
+    };
+    if let Some(p) = &progress {
+        p.start(&asker).await;
+    }
+    let outcome = drive_and_answer(setup, cancel, &conv, asker, shape, turn.as_deref(), progress.clone()).await;
+    if let Some(p) = &progress {
+        p.end(&outcome).await;
+    }
+    outcome
+}
+
+/// The turn itself, and its answer in the chat that started it.
+async fn drive_and_answer(
+    setup: &Setup,
+    cancel: CancellationToken,
+    conv: &str,
+    asker: String,
+    shape: Option<Shape>,
+    turn: Option<&str>,
+    progress: Option<Rc<Progress>>,
+) -> anyhow::Result<TurnOutcome> {
+    let sql = setup.storage.sql();
     // the owner is learned before any turn can start (`registration`)
     let owner_turn = kv_get(&sql, "owner")?.is_some_and(|owner| owner == asker);
     let key = owners_key(&setup.fleet).await?;
@@ -1107,14 +1175,15 @@ async fn run_turn(setup: &Setup, cancel: CancellationToken) -> anyhow::Result<Tu
         computer,
         cancel,
         id: setup.id.clone(),
-        conv: conv.clone(),
+        conv: conv.to_string(),
         asker,
         owner_turn,
+        progress,
     };
     let outcome = turn::drive(driver).await?;
     // a turn a chat started answers there
     if outcome == TurnOutcome::Idle {
-        reply(&sql, &setup.fleet, &conv).await?;
+        reply(&sql, &setup.fleet, conv, shape, turn).await?;
     }
     Ok(outcome)
 }
@@ -1167,9 +1236,15 @@ fn next_turn(sql: &worker::SqlStorage) -> anyhow::Result<bool> {
     // the images it kept and never showed are dropped
     sql.exec("DELETE FROM steer", None)?;
     sql.exec("DELETE FROM shots", None)?;
+    let id = format!("msg_{}", uuid::Uuid::new_v4());
     let mut kickoff = Message::user().with_text(next.text);
-    kickoff.id = Some(format!("msg_{}", uuid::Uuid::new_v4()));
+    kickoff.id = Some(id.clone());
     store::append_message(sql, &next.conv, &kickoff)?;
+    // the turn's id in its chat's records, where its messages start, and
+    // how many of its calls its progress has posted (progress.rs)
+    kv_set(sql, "turn_id", fragment_core::work::turn_id(&id))?;
+    kv_set(sql, "turn_seq", store::message_seq(sql, &id)?)?;
+    kv_set(sql, "work_posted", 0)?;
     kv_set(sql, "turn_conv", &next.conv)?;
     kv_set(sql, "turn_asker", &next.asker)?;
     kv_set(sql, "active", 1)?;
@@ -1198,11 +1273,13 @@ fn waiting(sql: &worker::SqlStorage) -> anyhow::Result<usize> {
     Ok(rows.first().map_or(0, |c| c.n.max(0) as usize))
 }
 
-/// Posts a chat turn's last answer to its fragment, through the listen's
-/// reply operation, once (the id comes from the message). The owner's own
+/// Posts a chat turn's last answer to its fragment, once (the id comes
+/// from the message): to the chat's channel, naming its turn, when the
+/// channel takes posts; else through the listen's reply operation, as
+/// chats made before postable channels answer. The owner's own
 /// conversation has nowhere to post. A chat that is gone (404), or that no
 /// longer has the agent (403), drops its listen.
-async fn reply(sql: &worker::SqlStorage, fleet: &Fleet, conv: &str) -> anyhow::Result<()> {
+async fn reply(sql: &worker::SqlStorage, fleet: &Fleet, conv: &str, shape: Option<Shape>, turn: Option<&str>) -> anyhow::Result<()> {
     let Some((fragment, channel)) = store::chat_of(conv) else { return Ok(()) };
     #[derive(Deserialize)]
     struct Listen {
@@ -1232,8 +1309,15 @@ async fn reply(sql: &worker::SqlStorage, fleet: &Fleet, conv: &str) -> anyhow::R
             text.push_str(&format!("\n\n(the screenshot could not be shown here: {})", fleet::message(&body)));
         }
     }
-    let path = format!("/api/f/{fragment}/ops/{}", listen.reply);
-    let (status, body) = fleet.call(Method::Post, &path, Some(&json!({ "id": id, "input": { "text": text } }))).await?;
+    let shape = match shape {
+        Some(shape) => shape,
+        None => progress::shape(fleet, fragment, channel).await?,
+    };
+    let (path, body) = match shape.posts {
+        true => (format!("/api/f/{fragment}/channels/{channel}"), json!({ "id": id, "body": fragment_core::work::answer(&text, turn) })),
+        false => (format!("/api/f/{fragment}/ops/{}", listen.reply), json!({ "id": id, "input": { "text": text } })),
+    };
+    let (status, body) = fleet.call(Method::Post, &path, Some(&body)).await?;
     if matches!(status, 403 | 404) {
         sql.exec("DELETE FROM listens WHERE fragment = ?", vec![fragment.into()])?;
     }
