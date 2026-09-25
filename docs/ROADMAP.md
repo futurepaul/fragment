@@ -62,6 +62,11 @@ a computer's wake/exec.
    platform bar; a direct fragment URL signs you in and shows the
    fragment with a Google-Docs-style share header. The desktop (user
    code the agent can rewrite) can never grant anything by itself.
+   *Amended 2026-09-25 (Paul):* a direct URL signs you in silently only
+   on your own fragments and those shared with you; any other fragment
+   asks once, on the platform ("Continue to X as you?"), before it learns
+   who you are, and signing out of it there makes it ask again
+   (docs/fragment-boats.md, answer 1).
 5. **All computers are Sprites** (personal computers and builder
    workspaces); Agent Substrate and GKE are dropped. A `Computer` cell per
    Sprite (ownership, quotas, sleep policy) holds the owner's Sprites org
