@@ -86,6 +86,13 @@ pub mod limits {
     pub const AUDIT_RETENTION_MS: i64 = 90 * 24 * 3600 * 1000;
     /// A socket's presence data.
     pub const PRESENCE_MAX_BYTES: usize = 4 * 1024;
+    /// Presence changes one live socket may make a second, after a burst
+    /// of `PRESENCE_BURST`: faster ones are dropped.
+    pub const PRESENCE_PER_S: i64 = 10;
+    pub const PRESENCE_BURST: i64 = 10;
+    /// Live sockets one fragment holds open at once: each presence change
+    /// and each mutation's change signal goes to all of them.
+    pub const LIVE_SOCKETS_MAX: usize = 1000;
     /// Modules an app may load besides `app.mjs` (`applib/`), and their total size.
     pub const APPLIB_FILES_MAX: usize = 64;
     pub const APP_MODULES_MAX_BYTES: usize = 4 * 1024 * 1024;

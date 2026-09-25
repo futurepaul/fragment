@@ -18,11 +18,17 @@
 //! deleting the fragment closes every socket (4004). Both codes are
 //! final: the browser library does not reconnect after them.
 //!
+//! A fragment holds at most `LIVE_SOCKETS_MAX` sockets. Presence comes
+//! whole in `hello`, then one change at a time, each encoded once and sent
+//! to every socket (the O(N) bytes of a change, never O(N²)); a socket's
+//! changes past `PRESENCE_PER_S` a second are dropped.
+//!
 //! What this activation knows of its sockets besides their attachments
 //! (`LiveMemory`) is gathered from them again after the object wakes.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use fragment_core::live::presence_admit;
 use fragment_core::npub;
 use fragment_proto::live::{Cursor, LiveIn, LiveOut, Present, Subscribe};
 use fragment_proto::{limits, ChannelRecord, ErrorCode, Role};
@@ -47,6 +53,11 @@ pub struct LiveState {
     pub role: Role,
     pub subs: Vec<String>,
     pub presence: Option<Value>,
+    /// When the socket's next presence change is due at its steady pace
+    /// (`presence_admit`); 0, as for a socket that connected before the
+    /// pace was kept, lets its first changes through.
+    #[serde(default)]
+    pub presence_at: i64,
 }
 
 /// What this activation knows of its live sockets besides their
@@ -72,6 +83,11 @@ fn send(ws: &WebSocket, frame: &LiveOut) {
     let _ = ws.send_with_str(frame.encode());
 }
 
+/// Everyone on `sockets` who shares presence.
+fn present_on(sockets: &[WebSocket]) -> Vec<Present> {
+    sockets.iter().filter_map(state_of).filter_map(|s| Some(Present { id: s.id, principal: s.principal, data: s.presence? })).collect()
+}
+
 impl FragmentCell {
     /// Opens a live socket for a caller who can see the fragment.
     pub(crate) fn live(&self, req: &Request, caller: &Caller, principal: &str, link: bool) -> CellResult<Response> {
@@ -79,6 +95,11 @@ impl FragmentCell {
             return Err(CellError::invalid("__live is a WebSocket; send Upgrade: websocket"));
         }
         let role = self.require(caller, link, Role::Public)?;
+        let sockets = self.state.get_websockets_with_tag("live");
+        if sockets.len() >= limits::LIVE_SOCKETS_MAX {
+            return Err(CellError::new(ErrorCode::RateLimited, format!("this fragment has {} live sockets open, its most; try again later", sockets.len())));
+        }
+        let presence = present_on(&sockets);
         let tag = match caller.principal() {
             Some(p) if self.has_standing(caller)? => format!("p:{p}"),
             _ if link => "view".to_string(),
@@ -86,29 +107,18 @@ impl FragmentCell {
         };
         let pair = WebSocketPair::new()?;
         self.state.accept_websocket_with_tags(&pair.server, &["live", &tag]);
-        let st = LiveState { id: js::random_hex::<8>(), principal: npub::display(principal), role, subs: vec![], presence: None };
+        let st = LiveState { id: js::random_hex::<8>(), principal: npub::display(principal), role, subs: vec![], presence: None, presence_at: 0 };
         pair.server.serialize_attachment(&st)?;
-        send(&pair.server, &LiveOut::Hello { id: st.id, principal: st.principal, role });
-        send(&pair.server, &LiveOut::Presence { list: self.presence_list(None) });
+        send(&pair.server, &LiveOut::Hello { id: st.id, principal: st.principal, role, presence });
         Ok(Response::from_websocket(pair.client)?)
     }
 
-    fn presence_list(&self, leaving: Option<&str>) -> Vec<Present> {
-        self.state
-            .get_websockets_with_tag("live")
-            .iter()
-            .filter_map(state_of)
-            .filter(|s| Some(s.id.as_str()) != leaving)
-            .filter_map(|s| Some(Present { id: s.id, principal: s.principal, data: s.presence? }))
-            .collect()
-    }
-
-    fn broadcast_presence(&self, leaving: Option<&str>) {
-        let frame = LiveOut::Presence { list: self.presence_list(leaving) }.encode();
+    /// One socket's presence changed, to every socket (its own too): one
+    /// frame, encoded once, and no attachment read.
+    fn broadcast_presence(&self, change: Present) {
+        let frame = LiveOut::Presence(change).encode();
         for ws in self.state.get_websockets_with_tag("live") {
-            if state_of(&ws).is_some_and(|s| Some(s.id.as_str()) != leaving) {
-                let _ = ws.send_with_str(&frame);
-            }
+            let _ = ws.send_with_str(&frame);
         }
     }
 
@@ -232,9 +242,17 @@ impl FragmentCell {
                 if size > limits::PRESENCE_MAX_BYTES {
                     return Err(CellError::too_large("presence data", size, limits::PRESENCE_MAX_BYTES));
                 }
+                let Some(at) = presence_admit(st.presence_at, js::now_ms()) else {
+                    return Err(CellError::new(ErrorCode::RateLimited, format!("presence changes past {} a second are dropped", limits::PRESENCE_PER_S)));
+                };
+                let had = st.presence.is_some();
                 st.presence = (!data.is_null()).then_some(data);
+                st.presence_at = at;
                 ws.serialize_attachment(&st)?;
-                self.broadcast_presence(None);
+                // clearing presence that was never shared changes nothing
+                if had || st.presence.is_some() {
+                    self.broadcast_presence(Present { id: st.id, principal: st.principal, data: st.presence.unwrap_or(Value::Null) });
+                }
             }
         }
         Ok(())
@@ -288,7 +306,7 @@ impl FragmentCell {
             }
         }
         if st.presence.is_some() {
-            self.broadcast_presence(Some(&st.id));
+            self.broadcast_presence(Present { id: st.id, principal: st.principal, data: Value::Null });
         }
     }
 }

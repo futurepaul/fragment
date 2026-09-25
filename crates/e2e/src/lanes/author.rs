@@ -232,24 +232,72 @@ pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
     let rec = b.until("record", 5)?;
     s.ok("a socket that followed before the object woke still gets records", rec["body"]["text"] == "after waking" && rec["seq"] == 4, &rec);
 
-    // presence
+    // presence: whole in hello, then one socket's change at a time
     let mut c = Socket::open(api, &name, "__live", Some(&owner), None)?;
     let c_hello = c.next()?;
-    s.ok("a signed member's socket has their role", c_hello["role"] == "owner", &c_hello);
+    s.ok("a signed member's socket has their role, and its hello says no one shares presence yet", c_hello["role"] == "owner" && c_hello["presence"] == json!([]), &c_hello);
     c.send(&json!({ "type": "presence", "data": { "name": "owner" } }))?;
     let seen = b.until("presence", 10)?;
-    s.ok("presence reaches the others", seen["list"].as_array().is_some_and(|l| l.iter().any(|p| p["data"]["name"] == "owner")), &seen);
+    let owner_here = json!({ "id": c_hello["id"], "principal": c_hello["principal"], "data": { "name": "owner" } });
+    s.ok(
+        "a presence change reaches the others as that one socket's change",
+        seen == json!({ "type": "presence", "id": c_hello["id"], "principal": c_hello["principal"], "data": { "name": "owner" } }),
+        &seen,
+    );
+    let mut d = Socket::open(api, &name, "__live", None, None)?;
+    let d_hello = d.next()?;
+    s.ok("a socket that connects later hears who is here in its hello", d_hello["presence"] == json!([owner_here]), &d_hello);
     c.send(&json!({ "type": "presence", "data": "x".repeat(5000) }))?;
     let err = c.until("error", 5)?;
     s.ok("presence data over 4 KiB is refused", err["message"].as_str().is_some_and(|m| m.contains("4096")), &err);
+    // a flood of changes: a burst goes through at once, then ten a second;
+    // the rest are dropped, each with an error, and the others hear only
+    // the ones that went through
+    let flood = 3 * limits::PRESENCE_BURST;
+    for i in 0..flood {
+        c.send(&json!({ "type": "presence", "data": { "n": i } }))?;
+    }
+    let (mut through, mut dropped) = (0, 0);
+    for _ in 0..flood {
+        let f = c.next()?;
+        match f["type"].as_str() {
+            Some("presence") => through += 1,
+            Some("error") if f["message"].as_str().is_some_and(|m| m.contains("10 a second")) => dropped += 1,
+            _ => anyhow::bail!("a flood of presence answered {f}"),
+        }
+    }
+    // once the pace allows again, one last change marks the end of the flood
+    std::thread::sleep(Duration::from_millis(1100));
+    c.send(&json!({ "type": "presence", "data": { "name": "owner", "after": "the flood" } }))?;
+    let mut heard = 0;
+    for _ in 0..flood + 1 {
+        let f = d.until("presence", 5)?;
+        if f["data"]["after"] == "the flood" {
+            break;
+        }
+        heard += 1;
+    }
+    s.ok(
+        "presence faster than ten a second is dropped past a burst, and the others hear only what went through",
+        through > 0 && dropped > 0 && through + dropped == flood && heard == through,
+        format!("{through} went through, {dropped} dropped, the others heard {heard}"),
+    );
     c.close();
-    let gone = b.until("presence", 10)?;
-    s.ok("presence leaves when the socket closes", gone["list"] == json!([]), &gone);
+    // past the flood's changes that went through (b heard them too)
+    let mut gone = Value::Null;
+    for _ in 0..flood + 2 {
+        gone = b.until("presence", 5)?;
+        if gone["data"].is_null() {
+            break;
+        }
+    }
+    s.ok("presence leaves when the socket closes", gone == json!({ "type": "presence", "id": c_hello["id"], "principal": c_hello["principal"], "data": null }), &gone);
     s.ok(
         "presence frames decode as LiveOut too",
-        [&seen, &gone].iter().all(|f| serde_json::from_value::<LiveOut>((*f).clone()).is_ok()),
-        format!("{seen} {gone}"),
+        [&seen, &gone, &d_hello].iter().all(|f| serde_json::from_value::<LiveOut>((*f).clone()).is_ok()),
+        format!("{seen} {gone} {d_hello}"),
     );
+    d.close();
     b.send(&json!({ "type": "unsubscribe", "channel": "room" }))?;
     api.op(&owner, &name, "say", "l4", json!({ "text": "after unsubscribe" }))?;
     let next = b.until("changed", 5)?;

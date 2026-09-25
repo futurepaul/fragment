@@ -588,11 +588,14 @@ as `LiveIn` (client → server) and `LiveOut` (server → client) in
   `seq` after `after`) or `{type: "subscribe", channel, last}` (the last
   `last` records, at most 1000): exactly one of `after` and `last`;
   `{type: "unsubscribe", channel}`, `{type: "presence", data}` (at most
-  4 KiB; `null` or no `data` clears), `{type: "ping"}`
-- server → client: `{type: "hello", id, principal, role}`,
+  4 KiB; `null` or no `data` clears; at most 10 a second after a burst
+  of 10: a faster change is dropped, with an error), `{type: "ping"}`
+- server → client: `{type: "hello", id, principal, role, presence:
+  [{id, principal, data}]}` (everyone sharing presence as it opens),
   `{type: "record", channel, seq, at, principal, kind, body}`,
   `{type: "subscribed", channel, next, more}` (after each page),
-  `{type: "presence", list: [{id, principal, data}]}`,
+  `{type: "presence", id, principal, data}` (one socket's change, to
+  every socket, its own too; `data: null` once it cleared or left),
   `{type: "changed", op}` (after every applied mutation),
   `{type: "pong"}` (to a ping), `{type: "error", message}` (a frame
   that does not decode, with what was wrong, or a refusal; the socket
@@ -606,14 +609,18 @@ client pages arrives in its turn, never ahead of the records before it.
 
 A socket's role is fixed when it connects. Removing a member closes their
 sockets; rotating the share link closes link holders'; a fragment that
-stops being public closes its anonymous visitors'.
+stops being public closes its anonymous visitors'. A fragment holds at
+most 1000 live sockets (`limits::LIVE_SOCKETS_MAX`); past that a new one
+is refused (429).
 
 The browser library (`import * as fragment from "./__fragment.js"`):
 `call(op, input, {id?})` (retries keep the id), `live(op, input,
 onResult, onError?)` (re-runs a query after every change), `subscribe(
 channel, onRecord, {after?, last?})` (pages through the backlog, then
 follows live; after a reconnect it resumes after the last record),
-`presence.set(data)`, `presence.on(fn)`, `me()`, `closed(fn)`. The page's
+`presence.set(data)` (changes within 150 ms go as one, the latest),
+`presence.on(fn)` (called with everyone here now, and on each change),
+`me()`, `closed(fn)`. The page's
 socket reconnects by itself after a jittered wait (half to one and a
 half times a backoff that doubles from 1 to 30 seconds), except after a
 close the fragment means for good: 4003 (the page's access was revoked)
