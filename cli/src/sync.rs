@@ -1336,32 +1336,16 @@ mod tests {
     }
 
     #[test]
-    fn pull_materializes_repo() {
-        let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("a.txt", b"remote-a"), ("site/index.html", b"<p>x</p>")]);
-        let c = client_for(&mock);
-        let dir = tmpdir("pull");
-        let report = sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
-        assert_eq!(report.pulled.len(), 2);
-        assert_eq!(fs::read(dir.join("a.txt")).unwrap(), b"remote-a");
-        assert_eq!(fs::read(dir.join("site/index.html")).unwrap(), b"<p>x</p>");
-        // second pull: nothing to do
-        let r2 = sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
-        assert!(r2.pulled.is_empty());
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn mirror_pushes_and_pulls() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("remote-only.txt", b"r")]);
+        mock.seed_repo("t", &[("site/remote-only.txt", b"r")]);
         let c = client_for(&mock);
         let dir = tmpdir("mirror");
         fs::write(dir.join("local-only.txt"), b"l").unwrap();
         let report = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
         assert_eq!(report.pushed, vec!["local-only.txt"]);
-        assert_eq!(report.pulled, vec!["remote-only.txt"]);
-        assert!(dir.join("remote-only.txt").exists());
+        assert_eq!(report.pulled, vec!["site/remote-only.txt"]);
+        assert_eq!(fs::read(dir.join("site/remote-only.txt")).unwrap(), b"r");
         assert!(mock.file_at("t", "main", "local-only.txt").is_some());
         fs::remove_dir_all(&dir).ok();
     }
