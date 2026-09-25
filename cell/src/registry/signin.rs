@@ -74,10 +74,6 @@ fn fresh_token() -> String {
     hex::encode(js::random_bytes::<32>())
 }
 
-fn well_formed(token: &str) -> bool {
-    token.len() == 64 && token.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
 fn not_signed_in() -> CellError {
     CellError::new(ErrorCode::Unauthenticated, "not signed in (the session ended or never began)")
 }
@@ -286,7 +282,7 @@ impl RegistryCell {
             username_join!(),
             " WHERE s.hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?"
         );
-        if !well_formed(token) {
+        if !blob::valid_sha(token) {
             return Err(not_signed_in());
         }
         let hash = sha(token);
@@ -435,7 +431,7 @@ impl RegistryCell {
     /// (its row goes; the platform session and its other sessions stay).
     /// A second sign-out is no error.
     pub(super) fn end_site_session(&self, b: EndSession) -> CellResult<()> {
-        if !well_formed(&b.token) {
+        if !blob::valid_sha(&b.token) {
             return Ok(());
         }
         self.exec("DELETE FROM sessions WHERE hash = ? AND fragment = ?", vec![sha(&b.token).into(), b.fragment.as_str().into()])
@@ -480,7 +476,7 @@ impl RegistryCell {
     /// its parent (whose row already armed the sweep for that time).
     pub(super) fn redeem(&self, b: Redeem) -> CellResult<Redeemed> {
         let refused = || CellError::new(ErrorCode::Unauthenticated, "this sign-in link expired, was used, or is for another fragment; sign in again");
-        if !well_formed(&b.redeem) {
+        if !blob::valid_sha(&b.redeem) {
             return Err(refused());
         }
         // shown to another fragment, it is refused and stays unspent
