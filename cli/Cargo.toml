@@ -34,13 +34,6 @@ notify = "=8.2.0"
 notify-debouncer-full = "=0.7.0"
 fs2 = "=0.4.3"
 tungstenite = "=0.29.0"
-oxc_allocator = "0.147.0"
-oxc_parser = "0.147.0"
-oxc_span = "0.147.0"
-oxc_ast = "0.147.0"
-oxc_transformer = "0.147.0"
-oxc_codegen = "0.147.0"
-oxc_semantic = "0.147.0"
 
 
 [dev-dependencies]
