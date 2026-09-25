@@ -314,8 +314,8 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let again = site_cookie(api, &guest_session, &chat)?;
     let r = api.page(&chat, "", Some(&format!("fragment_site={again}")))?;
     chrome.reload(&page)?;
-    let refused = chrome.until(&page, "document.body?.innerText.includes('forbidden')", wait);
-    s.ok("and the chat answers them 403", r.status == 403 && refused, &r);
+    let refused = chrome.until(&page, "document.contentType === 'text/html' && document.body?.innerText.includes(\"You don't have access to\")", wait);
+    s.ok("and the chat answers them 403: their reload, a page saying they have no access", r.status == 403 && refused, &r);
     drop(chrome);
 
     // ---- an invite anyone may use (the CLI's `fragment invite`) is
