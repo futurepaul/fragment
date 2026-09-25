@@ -19,7 +19,8 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
-use fragment_proto::{FragmentList, FragmentStatus, OpDecl, OpKind, OpResult};
+use fragment_proto::{FragmentList, FragmentStatus, ListedFragment, OpDecl, OpKind, OpResult};
+use futures::StreamExt;
 use serde::Deserialize;
 use goose_agent::operation::Emitter;
 use goose_agent::tool::ToolProvider;
@@ -36,6 +37,9 @@ use crate::store::{kv_u64, Session};
 /// The fragments, and the tools, one agent's turn considers at most.
 pub const FRAGMENTS_MAX: usize = 16;
 pub const TOOLS_MAX: usize = 128;
+/// Status reads in flight at once while the catalog is read: 16 fragments
+/// are three waves of round trips before the first model token, not 16.
+const STATUS_READS_AT_ONCE: usize = 6;
 /// The most of an operation's answer the model reads back.
 const RESULT_TEXT_MAX: usize = 16 * 1024;
 
@@ -166,12 +170,25 @@ impl FragmentTools {
             tools.push(Tool::new(name, description, Arc::new(schema)));
             routes.insert(name.to_string(), Route::Platform(name));
         }
-        for f in listed.fragments.iter().take(FRAGMENTS_MAX) {
+        // in the listing's order (`buffered`, not `buffer_unordered`), so
+        // which tools TOOLS_MAX keeps does not depend on who answered first
+        let statuses: Vec<(&ListedFragment, anyhow::Result<FragmentStatus>)> = futures::stream::iter(listed.fragments.iter().take(FRAGMENTS_MAX))
+            .map(|f| {
+                let fleet = fleet.clone();
+                async move { (f, fleet.get_as::<FragmentStatus>(&format!("/api/f/{}/status", f.name)).await) }
+            })
+            .buffered(STATUS_READS_AT_ONCE)
+            .collect()
+            .await;
+        for (f, status) in statuses {
             let name = f.name.as_str();
-            let status: FragmentStatus = match fleet.get_as(&format!("/api/f/{name}/status")).await {
+            let status = match status {
                 Ok(s) => s,
                 // a fragment that will not answer (or not with a status) is left out, not fatal
-                Err(_) => continue,
+                Err(e) => {
+                    worker::console_warn!("the agent's tools leave out {name}: {e:#}");
+                    continue;
+                }
             };
             for (op, decl) in status.code.operations {
                 if decl.role > f.role || tools.len() >= TOOLS_MAX {
