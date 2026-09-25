@@ -35,7 +35,7 @@ use fragment_core::secrets::placeholders;
 use fragment_core::steps::{Fetch, NextStep, Step, StepOutcome, StepResult};
 use fragment_core::{cron::Cron, egress, glob, npub, trigger_state};
 use fragment_proto::{
-    limits, valid_secret_name, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunStatus, SetPaused, TriggerDecl, TriggerOn, Via,
+    limits, valid_secret_name, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunList, RunStatus, SetPaused, TriggerDecl, TriggerOn, Via,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -980,11 +980,12 @@ impl FragmentCell {
         q.push_str(" ORDER BY id DESC LIMIT ?");
         binds.push(SqlStorageValue::Integer(limit.clamp(1, 200) as i64));
         let runs: Vec<Run> = self.rows(&q, binds)?.iter().map(|r| run_view(run_row(r), r["cost_micros"].as_i64(), None)).collect();
-        let mut counts = Map::new();
+        let mut counts = BTreeMap::new();
         for r in self.rows("SELECT status, COUNT(*) AS n FROM runs GROUP BY status", vec![])? {
-            counts.insert(r["status"].as_str().expect("runs.status is TEXT NOT NULL").to_string(), r["n"].clone());
+            let status = r["status"].as_str().expect("runs.status is TEXT NOT NULL").to_string();
+            counts.insert(status, r["n"].as_u64().expect("COUNT answers a count"));
         }
-        json_response(&json!({ "runs": runs, "counts": counts, "paused": self.paused_ops()? }))
+        json_response(&RunList { runs, counts, paused: self.paused_ops()? })
     }
 
     /// `GET /api/f/<name>/runs/<id>`

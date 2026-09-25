@@ -223,13 +223,12 @@ fn named_identity(who: &str, signer: &Signed) -> CellResult<String> {
 async fn release_username(env: &Env, username: &str) -> CellResult<Response> {
     let holder = ask_registry(env, &calls::FindUsername { username: username.to_string() }).await?;
     let list = Request::new("https://principal.internal/list", Method::Get)?;
-    let v: Value = env.durable_object("PRINCIPAL")?.get_by_name(&holder.identity.id)?.fetch_with_request(list).await?.json().await?;
-    let owned: Vec<&str> = v["fragments"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|f| f["role"] == "owner")
-        .filter_map(|f| f["name"].as_str())
+    let listed: fragment_proto::FragmentList = env.durable_object("PRINCIPAL")?.get_by_name(&holder.identity.id)?.fetch_with_request(list).await?.json().await?;
+    let owned: Vec<&str> = listed
+        .fragments
+        .iter()
+        .filter(|f| f.role == fragment_proto::Role::Owner)
+        .map(|f| f.name.as_str())
         .filter(|n| fragment_proto::split_fragment_name(n).is_some_and(|(_, u)| u == username))
         .collect();
     if !owned.is_empty() {

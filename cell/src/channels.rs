@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use fragment_core::effects::{self, Effect};
 use fragment_core::npub;
-use fragment_proto::{limits, valid_channel_name, ChannelRecord, ErrorCode, Role, BUILTIN_CHANNELS};
+use fragment_proto::{limits, valid_channel_name, ChannelPage, ChannelRecord, ErrorCode, Role, BUILTIN_CHANNELS};
 use futures_util::lock::{Mutex, OwnedMutexGuard};
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -297,7 +297,7 @@ impl FragmentCell {
         self.require(caller, false, read)?;
         let records = self.read_channel(channel, after, limit)?;
         let next = records.last().map_or(after, |r| r.seq);
-        json_response(&json!({ "channel": channel, "records": records, "next": next }))
+        json_response(&ChannelPage { channel: channel.to_string(), records, next })
     }
 
     /// Waits for, then holds, one ledger id.

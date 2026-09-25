@@ -4,7 +4,7 @@
 //! from an outbox, versioned so a late delivery never undoes a newer one.
 //! Which keys an identity holds is the registry's (registry.rs).
 
-use fragment_proto::Role;
+use fragment_proto::{FragmentList, ListedFragment, Role};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
@@ -76,11 +76,13 @@ impl PrincipalCell {
                 Ok(Response::from_json(&json!({ "ok": true, "applied": newer }))?)
             }
             (Method::Get, "/list") => {
-                let rows = self.rows("SELECT fragment AS name, role FROM memberships WHERE role IS NOT NULL ORDER BY fragment", vec![])?;
+                // `GET /api/fragments`'s answer, whole: the router passes it through
+                let q = "SELECT fragment AS name, role FROM memberships WHERE role IS NOT NULL ORDER BY fragment";
+                let mut fragments: Vec<ListedFragment> = self.state.storage().sql().exec(q, None)?.to_array()?;
                 // fragments from before usernames (decision 16's hard cut)
                 // are served nowhere: they are not listed
-                let rows: Vec<Value> = rows.into_iter().filter(|r| r["name"].as_str().is_some_and(fragment_proto::valid_fragment_name)).collect();
-                Ok(Response::from_json(&json!({ "fragments": rows }))?)
+                fragments.retain(|f| fragment_proto::valid_fragment_name(&f.name));
+                Ok(Response::from_json(&FragmentList { fragments })?)
             }
             (m, p) => Err(CellError::new(fragment_proto::ErrorCode::NotFound, format!("no route {} {p}", m.as_ref()))),
         }
