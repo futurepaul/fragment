@@ -53,6 +53,7 @@ mod computer;
 mod fleet;
 mod js;
 mod keys;
+mod model;
 mod progress;
 mod store;
 mod tools;
@@ -309,6 +310,9 @@ struct TestControls {
     window_messages: Option<u64>,
     /// Fewer rows in the owner's view, so a test can outgrow it.
     view_rows: Option<u64>,
+    /// A shorter deadline for each model call, so a test's slow model
+    /// outlasts it in seconds (model.rs `DEADLINE_MS`).
+    model_timeout_ms: Option<u64>,
 }
 
 fn var(env: &Env, name: &str) -> Option<String> {
@@ -341,7 +345,43 @@ const TURN_NOTES: &str = "Your answer to a chat message is posted to that chat f
      asked: you reach only what they may (platform__list_fragments lists it), and platform__operations and \
      platform__call reach a fragment you have no tools for.";
 
+/// How to build an app, told on every turn with the notes above (about 400
+/// tokens): without it, an agent asked for an app read other fragments'
+/// files for a dozen calls to learn the format, then wrote the whole page
+/// in one reply that outlasted the node's fetch (2026-09-25). Every turn,
+/// not only those that look like building: "make the numbers bigger" is
+/// building too, and a guess that missed costs far more than the guide.
+const BUILD_GUIDE: &str = "How to build an app (a fragment):
+- A fragment is a place with its own address. Visitors see site/index.html (and the other files under site/), served \
+as written: a page of HTML, CSS, and JavaScript needs nothing else. Most apps (a countdown, a calculator, a landing \
+page) are that one file.
+- Only a page that must keep shared data or update live needs operations: fragment.json declares them (keep its name \
+and meta; add \"operations\": {\"add\": {\"kind\": \"mutation\", \"role\": \"public\", \"input\": <a JSON Schema>}}, kind \
+query or mutation), app.mjs runs them (export class App extends DurableObject, from \"cloudflare:workers\", with one method \
+per operation taking (input, call), its data in this.ctx.storage.sql), and the page calls them: import * as fragment from \
+\"./__fragment.js\", then fragment.call(\"add\", {...}) or fragment.live(\"list\", {}, onResult).
+- Templates: blank (one page: the usual start), todo (a live list, the example of operations), inbox, chat. Make a \
+fragment with platform__create_fragment, or use the one the person names (<label>.<their username>).
+- Then platform__write_file for each file, platform__deploy (nothing is live until you deploy), and answer with its URL.
+- Do not read other fragments or templates to learn this format: it is all here. Read a fragment's files only to change \
+what is in them.
+- Be quick: write a whole first version at once, deploy it, then improve it.
+- A reply is cut off after about 4,000 tokens. One file per call, each under 150 lines (6 KB); put the rest of a longer \
+file in more calls to platform__append_file. What a cut-off call wrote is kept, and you are told where it stops.";
+
 fn default_instructions(name: &str) -> String {
+    let name = name.split('.').next().unwrap_or(name);
+    format!(
+        "You are {name}, an agent. Most of your tools are operations of the fragments you belong to: shared places such \
+         as an app, a list, or a chat. The platform__ tools make new fragments for your owner and change their files. \
+         Do what you are asked, one call at a time, and when the work is done answer in one short sentence."
+    )
+}
+
+/// The default before the build guide: it told the model to read the todo
+/// template's files for the shape, which the guide says not to do. An agent
+/// made with it (stored at creation) gets today's default instead.
+fn default_instructions_before_the_guide(name: &str) -> String {
     let name = name.split('.').next().unwrap_or(name);
     format!(
         "You are {name}, an agent. Most of your tools are operations of the fragments you belong to: shared places such \
@@ -349,6 +389,16 @@ fn default_instructions(name: &str) -> String {
          when asked for an app, make one, read the todo template's files for the shape, write yours, deploy it, and say \
          where it is. Do what you are asked, one call at a time, and when the work is done answer in one short sentence."
     )
+}
+
+/// What a turn tells the model: the agent's instructions, then the notes
+/// and the build guide every turn gets.
+fn turn_instructions(stored: Option<String>, name: &str) -> String {
+    let own = match stored {
+        Some(s) if s != default_instructions_before_the_guide(name) => s,
+        _ => default_instructions(name),
+    };
+    format!("{own}\n\n{TURN_NOTES}\n\n{BUILD_GUIDE}")
 }
 
 impl Agent {
@@ -568,7 +618,11 @@ impl Agent {
         let setup = Setup {
             base,
             model: kv_get(&sql, "model")?.unwrap_or_else(|| DEFAULT_MODEL.into()),
-            instructions: format!("{}\n\n{TURN_NOTES}", kv_get(&sql, "instructions")?.unwrap_or_else(|| default_instructions(&name))),
+            instructions: turn_instructions(kv_get(&sql, "instructions")?, &name),
+            deadline_ms: match kv_u64(&sql, "test_model_timeout_ms")? {
+                0 => model::DEADLINE_MS,
+                ms => ms,
+            },
             fleet: self.fleet()?,
             env: self.env.clone(),
             storage: Rc::new(self.state.storage()),
@@ -885,6 +939,11 @@ impl Agent {
             return Err(Fail::invalid(format!("view_rows is 2-{VIEW_ROWS_MAX} (0: the product's)")));
         }
         kv_set(&sql, "test_view_rows", rows)?;
+        let deadline = body.model_timeout_ms.unwrap_or(0);
+        if deadline != 0 && !(model::DEADLINE_MS_MIN..=model::DEADLINE_MS).contains(&deadline) {
+            return Err(Fail::invalid(format!("model_timeout_ms is {}-{} (0: the product's)", model::DEADLINE_MS_MIN, model::DEADLINE_MS)));
+        }
+        kv_set(&sql, "test_model_timeout_ms", deadline)?;
         Ok(json!({ "ok": true }))
     }
 
@@ -1102,6 +1161,8 @@ struct Setup {
     /// The model's name.
     model: String,
     instructions: String,
+    /// One model call's deadline.
+    deadline_ms: u64,
     /// The agent's own; each turn's tools act for its asker through it.
     fleet: Fleet,
     env: Env,
@@ -1151,7 +1212,9 @@ async fn run_turn(setup: &Setup, cancel: CancellationToken) -> anyhow::Result<Tu
     outcome
 }
 
-/// The turn itself, and its answer in the chat that started it.
+/// The turn itself, and its answer in the chat that started it. A turn
+/// that fails is never silent: it says so where its answer would go (and
+/// in its conversation, so the owner's view and the next turn see it).
 async fn drive_and_answer(
     setup: &Setup,
     cancel: CancellationToken,
@@ -1162,6 +1225,25 @@ async fn drive_and_answer(
     progress: Option<Rc<Progress>>,
 ) -> anyhow::Result<TurnOutcome> {
     let sql = setup.storage.sql();
+    let outcome = drive_turn(setup, cancel, conv, asker, progress).await;
+    match outcome {
+        // a turn a chat started answers there
+        Ok(TurnOutcome::Idle) => {
+            reply(&sql, &setup.fleet, conv, shape, turn).await?;
+            Ok(TurnOutcome::Idle)
+        }
+        Ok(other) => Ok(other),
+        Err(error) => {
+            if let Err(e) = say_failed(&sql, &setup.fleet, conv, shape, turn, &error).await {
+                worker::console_warn!("saying the turn failed in {conv}: {e:#}");
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn drive_turn(setup: &Setup, cancel: CancellationToken, conv: &str, asker: String, progress: Option<Rc<Progress>>) -> anyhow::Result<TurnOutcome> {
+    let sql = setup.storage.sql();
     // the owner is learned before any turn can start (`registration`)
     let owner_turn = kv_get(&sql, "owner")?.is_some_and(|owner| owner == asker);
     let key = owners_key(&setup.fleet).await?;
@@ -1169,7 +1251,7 @@ async fn drive_and_answer(
     let computer = if owner_turn { open_computer(&setup.env, &sql).await? } else { None };
     let driver = Driver {
         storage: setup.storage.clone(),
-        model: Model { base: setup.base.clone(), key, name: setup.model.clone() },
+        model: Model { base: setup.base.clone(), key, name: setup.model.clone(), deadline_ms: setup.deadline_ms },
         fleet: setup.fleet.clone(),
         instructions: setup.instructions.clone(),
         computer,
@@ -1180,12 +1262,27 @@ async fn drive_and_answer(
         owner_turn,
         progress,
     };
-    let outcome = turn::drive(driver).await?;
-    // a turn a chat started answers there
-    if outcome == TurnOutcome::Idle {
-        reply(&sql, &setup.fleet, conv, shape, turn).await?;
+    turn::drive(driver).await
+}
+
+/// What a failed turn says, as its answer would: why, and what to do.
+fn failed_text(error: &anyhow::Error) -> String {
+    let why = fragment_core::work::cut(&error.to_string(), fragment_core::work::ERROR_MAX_CHARS);
+    format!("I couldn't finish: {why}. Ask me to try again.")
+}
+
+/// Says a failed turn's reason where its answer would go: stored as the
+/// agent's message in the turn's conversation, then posted to its chat as
+/// an answer is (once: its id comes from the message's). A turn whose
+/// conversation already ends with the model's text (a replay after this
+/// ran) posts that.
+async fn say_failed(sql: &worker::SqlStorage, fleet: &Fleet, conv: &str, shape: Option<Shape>, turn: Option<&str>, error: &anyhow::Error) -> anyhow::Result<()> {
+    if last_answer(sql, conv)?.is_none() {
+        let mut said = Message::assistant().with_text(failed_text(error));
+        said.id = Some(format!("msg_{}", uuid::Uuid::new_v4()));
+        store::append_message(sql, conv, &said)?;
     }
-    Ok(outcome)
+    reply(sql, fleet, conv, shape, turn).await
 }
 
 /// Records the active turn's end (its conversation's too). The messages

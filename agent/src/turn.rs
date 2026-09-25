@@ -2,42 +2,38 @@
 //! steer, a batch of tool calls, or one model call), apply its effects in
 //! SQL, repeat. A watchdog alarm stays armed while a turn runs, so a driver
 //! that dies with its node is replaced and resumes from the last applied
-//! step (ported from spikes/goose-agent, branch spike/goose-agent).
+//! step (ported from spikes/goose-agent, branch spike/goose-agent). The
+//! model is called through model.rs, which bounds, retries, and names a
+//! failed call; a turn that ends on one ends in an error (`ended`).
 //!
-//! wasm32 is single-threaded, so `AssertSend` and `SendFuture` only satisfy
-//! goose's `Send` bounds; nothing crosses a thread.
+//! wasm32 is single-threaded, so `SendFuture` (and model.rs `AssertSend`)
+//! only satisfy goose's `Send` bounds; nothing crosses a thread.
 
 use std::collections::HashSet;
-use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use anyhow::anyhow;
 use fragment_proto::TurnOutcome;
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
 use goose_agent::inference::InferenceRunner;
 use goose_agent::machine::{SessionLoader, StateMachine, Step};
 use goose_agent::operation::{applied, ends_turn, last_effective_role, messages_since_kickoff, not_applicable, Emitter, Operation, OperationResult};
 use goose_agent::tool::ToolOperation;
-use goose_provider_types::base::{MessageStream, Provider};
+use goose_provider_types::base::Provider;
 use goose_provider_types::conversation::message::{Message, MessageContent};
 use goose_provider_types::conversation::{Conversation, EffectiveRole};
-use goose_provider_types::errors::ProviderError;
-use goose_provider_types::formats::openai::{create_request, response_to_streaming_message};
-use goose_provider_types::images::ImageFormat;
-use goose_provider_types::model::ModelConfig;
-use rmcp::model::{CallToolResult, ContentBlock, Tool};
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 use worker::send::SendFuture;
-use worker::{Delay, Fetch, Headers, Method, Request, RequestInit, SqlStorage, Storage};
+use worker::{Delay, SqlStorage, Storage};
 
 use crate::computer::{self, Computer, ComputerTools};
 use crate::fleet::Fleet;
 use crate::js;
+use crate::model::{self, OpenRouter};
 use crate::progress::Progress;
 use crate::store::{self, kv_get, kv_set, kv_u64, Effect, Session, Store};
 use crate::tools::FragmentTools;
@@ -46,7 +42,6 @@ use crate::tools::FragmentTools;
 pub const STEPS_PER_TURN_MAX: u32 = 64;
 pub const WATCHDOG_MS_DEFAULT: u64 = 30_000;
 pub const WATCHDOG_MS_MIN: u64 = 2_000;
-const SSE_LINE_MAX: usize = 1024 * 1024;
 const EVENTS_BUFFER: usize = 1024;
 
 pub struct Model {
@@ -54,6 +49,8 @@ pub struct Model {
     pub base: String,
     pub key: String,
     pub name: String,
+    /// One model call's deadline (model.rs `DEADLINE_MS`, or a test control's).
+    pub deadline_ms: u64,
 }
 
 /// A computer attached to the agent, and the project directory its tools work in.
@@ -175,96 +172,6 @@ impl Operation<Session, Effect> for Steer {
     }
 }
 
-// ---------------------------------------------------------------- the provider
-
-struct AssertSend<T>(T);
-
-// SAFETY: wasm32-unknown-unknown has one thread; goose's bounds are nominal here.
-unsafe impl<T> Send for AssertSend<T> {}
-
-impl<S: Stream + Unpin> Stream for AssertSend<S> {
-    type Item = S::Item;
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<S::Item>> {
-        Pin::new(&mut self.0).poll_next(cx)
-    }
-}
-
-type LineStream = Pin<Box<dyn Stream<Item = anyhow::Result<String>> + Send>>;
-
-/// Splits a byte stream into lines without breaking UTF-8 across chunks.
-fn lines(bytes: AssertSend<worker::ByteStream>) -> LineStream {
-    Box::pin(futures::stream::unfold((bytes, Vec::<u8>::new(), false), |(mut bytes, mut buffer, mut done)| async move {
-        loop {
-            if let Some(end) = buffer.iter().position(|b| *b == b'\n') {
-                let line: Vec<u8> = buffer.drain(..=end).collect();
-                let line = String::from_utf8_lossy(&line[..end]).trim_end().to_string();
-                return Some((Ok(line), (bytes, buffer, done)));
-            }
-            if done {
-                if buffer.is_empty() {
-                    return None;
-                }
-                let line = String::from_utf8_lossy(&buffer).to_string();
-                buffer.clear();
-                return Some((Ok(line), (bytes, buffer, done)));
-            }
-            if buffer.len() > SSE_LINE_MAX {
-                return Some((Err(anyhow!("a stream line is over {SSE_LINE_MAX} bytes")), (bytes, Vec::new(), true)));
-            }
-            match bytes.next().await {
-                Some(Ok(chunk)) => buffer.extend_from_slice(&chunk),
-                Some(Err(error)) => return Some((Err(anyhow!("stream read: {error}")), (bytes, Vec::new(), true))),
-                None => done = true,
-            }
-        }
-    }))
-}
-
-async fn open_stream(url: String, key: String, body: String) -> Result<LineStream, ProviderError> {
-    let failed = |e: worker::Error| ProviderError::RequestFailed(e.to_string());
-    let headers = Headers::new();
-    headers.set("authorization", &format!("Bearer {key}")).map_err(failed)?;
-    headers.set("content-type", "application/json").map_err(failed)?;
-    headers.set("x-title", "fragment agent").map_err(failed)?;
-    let mut init = RequestInit::new();
-    init.with_method(Method::Post).with_headers(headers).with_body(Some(body.into()));
-    let request = Request::new_with_init(&url, &init).map_err(failed)?;
-    let mut response = Fetch::Request(request).send().await.map_err(failed)?;
-    let status = response.status_code();
-    if status != 200 {
-        let text = response.text().await.unwrap_or_default();
-        return Err(match status {
-            401 | 403 => ProviderError::Authentication(text),
-            429 => ProviderError::RateLimitExceeded { details: text, retry_delay: None },
-            _ => ProviderError::RequestFailed(format!("{status}: {text}")),
-        });
-    }
-    Ok(lines(AssertSend(response.stream().map_err(failed)?)))
-}
-
-/// OpenRouter through the cell's own fetch, with goose's OpenAI-format
-/// request builder and stream parser.
-struct OpenRouter {
-    base: String,
-    key: String,
-}
-
-#[async_trait]
-impl Provider for OpenRouter {
-    fn get_name(&self) -> &str {
-        "openrouter"
-    }
-
-    async fn stream(&self, model_config: &ModelConfig, system: &str, messages: &[Message], tools: &[Tool]) -> Result<MessageStream, ProviderError> {
-        let payload = create_request(model_config, system, messages, tools, &ImageFormat::OpenAi, true)
-            .map_err(|e| ProviderError::RequestFailed(format!("request: {e}")))?;
-        let body = serde_json::to_string(&payload).map_err(|e| ProviderError::RequestFailed(format!("request: {e}")))?;
-        let url = format!("{}/api/v1/chat/completions", self.base);
-        let lines = SendFuture::new(open_stream(url, self.key.clone(), body)).await?;
-        Ok(Box::pin(response_to_streaming_message(lines).map(|item| item.map_err(|e| ProviderError::RequestFailed(e.to_string())))))
-    }
-}
-
 // ---------------------------------------------------------------- the driver
 
 pub async fn arm_watchdog(storage: &Storage, sql: &SqlStorage) -> anyhow::Result<()> {
@@ -287,7 +194,11 @@ async fn run_steps(driver: &Driver, machine: &StateMachine<'_, Session, Effect>,
         let t0 = js::now_ms();
         let session = store.load(&driver.conv).await?;
         let Some(mut result) = machine.step(&session, &emit).await? else {
-            return Ok(TurnOutcome::Idle);
+            // a stopped turn is stopped (`drive`), whatever it last held
+            if driver.cancel.is_cancelled() {
+                return Ok(TurnOutcome::Idle);
+            }
+            return ended(&session.conversation);
         };
         machine.apply(store, &session, &mut result, &emit).await?;
         let name = result.applied_step.unwrap_or("?");
@@ -314,6 +225,22 @@ async fn run_steps(driver: &Driver, machine: &StateMachine<'_, Session, Effect>,
     Err(anyhow!("the turn exceeded {STEPS_PER_TURN_MAX} steps"))
 }
 
+/// How a turn that has nothing left to do ended: answered (idle), or,
+/// when its last message is goose's record of a failed model call (after
+/// model.rs tried twice) or an answer with nothing in it, an error that
+/// says why. Never silent: the caller says it where the person reads it.
+fn ended(conversation: &Conversation) -> anyhow::Result<TurnOutcome> {
+    let Some(last) = conversation.last() else { return Ok(TurnOutcome::Idle) };
+    if let Some(error) = last.content.iter().find_map(MessageContent::as_error) {
+        return Err(anyhow!("{}", model::reason(&error.message)));
+    }
+    let said = !last.as_concat_text().trim().is_empty() || last.is_tool_call();
+    if last.role == rmcp::model::Role::Assistant && !said {
+        return Err(anyhow!("the model's last answer was empty"));
+    }
+    Ok(TurnOutcome::Idle)
+}
+
 /// Runs the turn to its end (or its cancellation): the outcome is idle
 /// (the model answered), yielded, stopped, or an error.
 pub async fn drive(driver: Driver) -> anyhow::Result<TurnOutcome> {
@@ -321,7 +248,8 @@ pub async fn drive(driver: Driver) -> anyhow::Result<TurnOutcome> {
     // armed before reaching a computer, which can take its retries
     arm_watchdog(&driver.storage, &sql).await?;
     let store = Store { sql: driver.storage.sql() };
-    let provider: Arc<dyn Provider> = Arc::new(OpenRouter { base: driver.model.base.clone(), key: driver.model.key.clone() });
+    let provider: Arc<dyn Provider> =
+        Arc::new(OpenRouter { base: driver.model.base.clone(), key: driver.model.key.clone(), deadline_ms: driver.model.deadline_ms });
     let fleet = driver.fleet.acting_for(&driver.asker);
     let tools = FragmentTools::new(fleet, driver.storage.sql(), driver.id.clone(), driver.conv.clone(), driver.owner_turn);
     let mut operation = ToolOperation::new().with_provider(Arc::new(tools));
@@ -355,7 +283,7 @@ pub async fn drive(driver: Driver) -> anyhow::Result<TurnOutcome> {
             Step::Operation(Arc::new(Unoffered)),
             Step::Operation(Arc::new(Steer { sql: driver.storage.sql() })),
             Step::Operation(Arc::new(Instructions(instructions))),
-            Step::Inference(Arc::new(InferenceRunner::new(provider, ModelConfig::new(&driver.model.name)))),
+            Step::Inference(Arc::new(InferenceRunner::new(provider, model::config(&driver.model.name)))),
         ],
         driver.cancel.clone(),
     );

@@ -880,7 +880,7 @@ else).
 | `GET /api/a/{name}/state?wait_ms=` | owner | → `AgentState` `{active, driving, outcome, error, answer}` (`crates/proto`) of the owner's own conversation: `active` while a turn of it runs or waits behind a chat's, `answer` its newest message when that is the model's text; answered once it is not active or `wait_ms` (0-25000, default 0) has passed: the read waits in the agent's cell, so a client waiting out a turn asks about every 25 s (`fragment agent say` does) |
 | `POST /api/a/{name}/turns` | owner | `{text}` (at most 16 KiB) → `{started}`; during the owner's own turn, `{steered: true}` (read between steps); during another (a chat's), `{queued: true}`: it runs next, in the owner's conversation. At most 64 messages wait (429) |
 | `POST /api/a/{name}/stop` | owner | → `{active, driving}`; a tool in flight is interrupted; the messages waiting run next |
-| `GET /api/a/{name}/tools` | owner | → `{tools: ["platform__create_fragment", "platform__list_fragments", "platform__operations", "platform__call", "platform__list_files", "platform__read_file", "platform__write_files", "platform__deploy", "<fragment>__<op>", ...]}`: what the owner's own turn has (below) |
+| `GET /api/a/{name}/tools` | owner | → `{tools: ["platform__create_fragment", "platform__list_fragments", "platform__operations", "platform__call", "platform__list_files", "platform__read_file", "platform__write_file", "platform__append_file", "platform__write_files", "platform__deploy", "<fragment>__<op>", ...]}`: what the owner's own turn has (below) |
 | `POST /api/a/{name}/listen` | owner | `{fragment, channel? ("chat"), reply? ("say")}` → `{fragment, channel, reply, subscription}`: the agent subscribes itself to the channel (it must be a member) with an inbox URL of its own (`AGENT_URL`); at most 500. `reply` answers a chat whose channel takes no posts (one made before phase 7); a postable channel is answered by a post. A new listen first drops those of fragments the agent is no longer in: of the fragments its memberships leave out, up to 16 are asked, and one that answers 404 or 403 loses its listens (so does one whose subscribe answers either, and a chat whose answer's post does). Listening again to the same fragment's channel is the same listen: its inbox URL, so the one subscription (made again if the fragment dropped it) |
 | `POST /api/a/{name}/inbox/{token}` | the fragment's delivery (the token is the capability) | a `Delivery` (`crates/proto`), decoded whole: one that does not decode (a record without its `seq`, say) is 400. A message (a body with no `kind`, or `kind: "message"`: its `text`, else its JSON) from an identity starts a turn in the chat's conversation, acting for that identity; from the running turn's starter in its conversation, it steers that turn; any other waits for a turn of its own (429 past 64 waiting: the fragment delivers it again). `{kind: "stop", turn?}` from the running turn's starter, in its chat, naming that turn (or none), stops it; from anyone else, or another kind, it is ignored, never a message. The agent's own, one heard before (within a day: past the longest redelivery), and a message from an anonymous visitor (`anon:`) are ignored (the owner's view keeps the newest 32 anonymous ones). The turn's last answer goes back as the agent, with the id `rp:<40 hex of SHA-256 of its message id>`: posted to the channel as `{text, turn}` when it takes posts (`POST /api/f/{fragment}/channels/{channel}`), else `POST /api/f/{fragment}/ops/{reply}` `{text}`; an unknown token is 404 |
 | `PUT /api/a/{name}/computer` | owner | `{url, token, cwd? ("work")}` → `{url, cwd, tools}`: attaches a computer once it answers `GET /tools` with that token (400 when it refuses it, 502 when it does not answer); the token is sealed like the agent's key |
@@ -888,7 +888,7 @@ else).
 | `POST /api/a/{name}/computer/poll` | the connect token (`x-computer-token`) | → `{requests: [{rid, method, path, body}]}`: what the agent asks of its computer (the routes `fragment computer serve` answers), at once or within 25 s; one fetched and not answered in 40 s is handed out again; a wrong token 403 |
 | `POST /api/a/{name}/computer/answer` | the connect token | `{rid, status, body}` (at most 6 MiB) → `{ok}`. A turn leaves out a computer that has not polled in 60 s |
 | `DELETE /api/a/{name}/computer` | owner | → `{detached}` |
-| `POST /api/a/{name}/test` | owner, test fleets | `{hold_in_tool_ms?, hold_after_tool_ms?, watchdog_ms?, window_messages? (2-256), view_rows? (2-256)}` |
+| `POST /api/a/{name}/test` | owner, test fleets | `{hold_in_tool_ms?, hold_after_tool_ms?, watchdog_ms?, window_messages? (2-256), view_rows? (2-256), model_timeout_ms? (200-100000)}` |
 
 One conversation per chat: a turn belongs to the owner's own
 conversation or to one chat's, reads only it, and answers there. One turn
@@ -914,8 +914,11 @@ goes on to its answer). And the platform's verbs, for every fragment the
 asker reaches: `platform__list_fragments` (`GET /api/fragments?for=`),
 `platform__operations` (`{fragment}` → its operations and the role the
 turn acts with there), `platform__call` (`{fragment, operation, input}`),
-`platform__list_files`, `platform__read_file`, `platform__write_files`,
-`platform__deploy`, and, in its owner's turns only,
+`platform__list_files`, `platform__read_file`, `platform__write_file`
+(`{fragment, path, text}`: one file), `platform__append_file` (the same:
+adds to the file as it is at main, none yet being empty, in one commit),
+`platform__write_files` (several), `platform__deploy`, and, in its
+owner's turns only,
 `platform__create_fragment` (a fragment the agent makes is its owner's,
 the agent an editor). A call is `POST /api/f/<fragment>/ops/<op>?for=<asker>`
 signed by the agent with the id `tc:<40 hex of SHA-256 of the tool-call
@@ -927,6 +930,33 @@ together), with the running turn whole and earlier turns while they
 total 256 KiB. A turn that alone outgrows the window ends in an error;
 the next message starts a turn that fits. A chat turn's answer is its
 last message, when that is the model's text.
+
+Every turn tells the model, after the agent's instructions, that its
+answer to a chat is posted for it, and a short guide to building an app
+(`BUILD_GUIDE` in `agent/src/lib.rs`, about 400 tokens: a page is
+`site/index.html`; `fragment.json` and `app.mjs` only for data or live
+updates; the templates; write, deploy, answer; never read other
+fragments to learn the format; one file per call under 150 lines). An
+agent made with the default instructions from before the guide (which
+said to read the todo template) is told today's default instead.
+
+A model call (`agent/src/model.rs`) asks for at most 4096 tokens and has
+100 s, under the node's 120 s fetch timeout (`CELLD_FETCH_TIMEOUT_S`,
+which counts to the answer's last byte, so streaming does not stretch
+it); its answer is read whole before the turn sees it. A call past its
+deadline, one that fails, or one that answers nothing (no text and no
+tool call: reasoning alone is nothing) is made once more, told why when
+that helps; a refused key or budget (401, 402, 403) is not. Nothing twice,
+after tool calls that worked in the turn, is answered with what those
+calls did ("Done. Here is what I did: …"). A reply cut off at its limit
+(`finish_reason: length`) keeps what it wrote: a cut
+`platform__write_file` or `platform__append_file` runs with the text so
+far, and its result says where the file stops so the model appends the
+rest; any other cut call is refused, saying why. A turn that fails (a
+second failed call, or any other error) is never silent: "I couldn't
+finish: <why>. Ask me to try again." is its answer, stored in its
+conversation and posted to its chat as an answer is, and the chat's
+`turn.end` carries the error.
 
 ### The chat template (phase 7, slice C)
 

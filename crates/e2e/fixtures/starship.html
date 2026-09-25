@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Starship countdown</title>
+  <style>
+    :root { --bg: #05060d; --fg: #eef1ff; --muted: #8a91b4; --accent: #ff7a2f; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center; color: var(--fg);
+      font: 16px/1.4 ui-sans-serif, system-ui, sans-serif;
+      background: radial-gradient(ellipse at 50% 120%, #1b1f4a 0%, var(--bg) 60%);
+      overflow: hidden;
+    }
+    .stars { position: fixed; inset: 0; pointer-events: none; }
+    .stars i { position: absolute; width: 2px; height: 2px; border-radius: 50%; background: #fff; opacity: .7; animation: twinkle 3s infinite alternate; }
+    @keyframes twinkle { from { opacity: .2; } to { opacity: .9; } }
+    main { position: relative; text-align: center; padding: 2rem 1rem; }
+    h1 { margin: 0 0 .25rem; font-size: 1rem; letter-spacing: .3em; text-transform: uppercase; color: var(--muted); }
+    .mission { margin: 0 0 2.5rem; font-size: 1.4rem; }
+    .clock { display: flex; gap: clamp(.75rem, 3vw, 2.5rem); justify-content: center; }
+    .unit { min-width: 4ch; }
+    .unit b { display: block; font: 700 clamp(3rem, 12vw, 8rem)/1 ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums; }
+    .unit span { font-size: .8rem; letter-spacing: .2em; text-transform: uppercase; color: var(--muted); }
+    .when { margin-top: 2.5rem; color: var(--muted); }
+    .go { color: var(--accent); font-weight: 700; }
+  </style>
+</head>
+<body>
+  <div class="stars" id="stars"></div>
+  <main>
+    <h1>Next Starship launch</h1>
+    <p class="mission" id="mission">Starship flight test</p>
+    <div class="clock" aria-live="polite">
+      <div class="unit"><b id="d">--</b><span>days</span></div>
+      <div class="unit"><b id="h">--</b><span>hours</span></div>
+      <div class="unit"><b id="m">--</b><span>minutes</span></div>
+      <div class="unit"><b id="s">--</b><span>seconds</span></div>
+    </div>
+    <p class="when" id="when"></p>
+  </main>
+  <script>
+    // the next launch window (UTC); edit when SpaceX announces a new one
+    const LAUNCH = { name: "Starship flight test", at: "2026-10-14T12:30:00Z" };
+    const target = new Date(LAUNCH.at).getTime();
+    document.getElementById("mission").textContent = LAUNCH.name;
+    document.getElementById("when").textContent = "Window opens " + new Date(target).toLocaleString(undefined, { dateStyle: "full", timeStyle: "short" });
+
+    const stars = document.getElementById("stars");
+    for (let i = 0; i < 120; i++) {
+      const star = document.createElement("i");
+      star.style.left = Math.random() * 100 + "%";
+      star.style.top = Math.random() * 100 + "%";
+      star.style.animationDelay = Math.random() * 3 + "s";
+      stars.append(star);
+    }
+
+    const pad = (n) => String(n).padStart(2, "0");
+    function tick() {
+      const left = Math.max(0, target - Date.now());
+      const s = Math.floor(left / 1000);
+      document.getElementById("d").textContent = Math.floor(s / 86400);
+      document.getElementById("h").textContent = pad(Math.floor(s / 3600) % 24);
+      document.getElementById("m").textContent = pad(Math.floor(s / 60) % 60);
+      document.getElementById("s").textContent = pad(s % 60);
+      if (left === 0) document.getElementById("when").innerHTML = '<span class="go">Liftoff!</span>';
+    }
+    tick();
+    setInterval(tick, 1000);
+  </script>
+</body>
+</html>

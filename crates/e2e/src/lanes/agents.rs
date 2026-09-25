@@ -92,6 +92,8 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
         "platform__call",
         "platform__list_files",
         "platform__read_file",
+        "platform__write_file",
+        "platform__append_file",
         "platform__write_files",
         "platform__deploy",
     ];
@@ -573,7 +575,8 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok("Chrome is installed for the chat page (set CHROME_BIN)", false, "no Chrome found");
     }
     std::env::remove_var("FRAGMENT_AGENTS");
-    super::work::work(s, api)
+    super::work::work(s, api)?;
+    super::build::build(s, api)
 }
 
 /// The agent a chat lane drives: its name, identity, and key.

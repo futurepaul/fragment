@@ -6,6 +6,7 @@ mod appfiles;
 mod blobs;
 mod author;
 mod budget;
+mod build;
 mod computer;
 mod control;
 mod deliver;
