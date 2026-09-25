@@ -268,8 +268,32 @@ fn e2e(args: &[String]) -> Result<()> {
         .args(args))
 }
 
+/// A merge conflict's markers (git's diff3 style too), at the start of a
+/// line: none may be committed.
+fn conflict_marker(line: &str) -> bool {
+    ["<<<<<<< ", "||||||| ", ">>>>>>> "].iter().any(|m| line.starts_with(m)) || line == "======="
+}
+
+/// Fails on a tracked text file holding conflict markers: a rebase that
+/// committed one compiles when it lands in docs or a lockfile.
+fn no_conflict_markers(root: &Path) -> Result<()> {
+    let out = Command::new("git").args(["ls-files", "-z"]).current_dir(root).output().context("git ls-files")?;
+    anyhow::ensure!(out.status.success(), "git ls-files: {}", String::from_utf8_lossy(&out.stderr));
+    let mut found = vec![];
+    for path in out.stdout.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+        let path = String::from_utf8_lossy(path).into_owned();
+        // a file that is not text (a font, an image) holds no markers
+        let Ok(text) = std::fs::read_to_string(root.join(&path)) else { continue };
+        let at = text.lines().enumerate().filter(|(_, l)| conflict_marker(l)).map(|(i, _)| format!("{path}:{}", i + 1));
+        found.extend(at);
+    }
+    anyhow::ensure!(found.is_empty(), "conflict markers are committed:\n{}", found.join("\n"));
+    Ok(())
+}
+
 fn check() -> Result<()> {
     let root = devstack::repo_root();
+    no_conflict_markers(&root)?;
     run(Command::new("cargo").args(["test", "--workspace", "--all-features"]).current_dir(&root))?;
     run(Command::new("cargo")
         .args(["clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"])
@@ -299,6 +323,18 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// Git's markers, the diff3 base's included, are caught at a line's
+    /// start; text that only mentions one, or a longer rule, is not.
+    #[test]
+    fn conflict_markers_are_caught_at_a_line_start() {
+        for line in ["<<<<<<< HEAD", "||||||| parent of e8dd007 (e2e: …)", "=======", ">>>>>>> e8dd007 (e2e: …)"] {
+            assert!(super::conflict_marker(line), "{line}");
+        }
+        for line in ["  <<<<<<< indented", "a ======= b", "========", "the `<<<<<<< ` marker", ">>>>>>>"] {
+            assert!(!super::conflict_marker(line), "{line}");
+        }
+    }
+
     #[test]
     fn a_failed_command_never_shows_its_environment() {
         let mut cmd = std::process::Command::new("flyctl");
