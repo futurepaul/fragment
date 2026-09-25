@@ -1,10 +1,59 @@
 # Phase 7: chats and sharing
 
-Status: **planned 2026-09-25 with Paul; wave 1 starting.** The ROADMAP
-keeps the acceptance (phase 7); this file keeps the decisions, the
-slices, and who owns which files while slices run in parallel.
-`docs/platform.md` lists every place the platform does something a
-fragment's own code cannot.
+Status: **done (2026-09-25) when the e2e's `phase7` section is green,
+except the share header.** Slices A, B1, C, and D are merged; E is the
+`phase7` section. The ROADMAP keeps the acceptance (phase 7); this file
+keeps the decisions, the slices, and who owns which files while slices
+run in parallel. `docs/platform.md` lists every place the platform does
+something a fragment's own code cannot.
+
+**Not built: the share header** (ROADMAP decision 4, and phase 7's first
+bullet: "direct URLs with the share header"). No slice took it. A
+top-level visit to a fragment someone cannot open answers the API's JSON
+error. A guest removed from a chat who reloads sees
+`{"error":"forbidden",…}`, and a signed-out visit to a members-only
+fragment gets a 401 JSON. There is no page that offers sign-in or says
+their access changed.
+
+## Acceptance
+
+`crates/e2e/src/lanes/phase7.rs` walks the ROADMAP's acceptance as one
+flow in headless Chrome with two people. Each person has their own
+browser context and signs in through WorkOS (the fake), a username page,
+and a CLI key approved in that browser.
+
+1. The owner makes a desktop from the platform's New fragment form, then
+   a chat from it (New chat). They share the chat with the guest by
+   username, clicking in the sheet the desktop's `…` menu opens (a popup
+   on the platform's origin).
+2. The guest opens the invite link, accepts at `/join`, and lands in the
+   chat as a viewer.
+3. Each sees the other's message arrive live, labeled with the sender's
+   username. The owner's agent answers both, labeled as the owner's agent.
+4. The guest asks the owner's agent about the chat, which is within the
+   guest's reach. The agent reads the chat's `fragment.json` for them and
+   answers there. The guest's page shows the tool group folded above the
+   answer.
+5. The guest asks it to read the owner's members-only app. The step fails
+   (shown as failed on the page) and nothing of the app reaches the
+   model.
+6. The owner asks it to edit that same app, and it does, acting for the
+   owner. It is still not a member of the app.
+7. The owner removes the guest in the sheet, reopened from the desktop,
+   which badges the chat as shared with one person. The guest's page says
+   their access changed (the socket closed). Their next request is a 403
+   from the browser's fetch, from their key, and on reload.
+8. That a rewritten desktop cannot share without the sheet's click is
+   the share lane's (`crates/e2e/src/lanes/share.rs`). It covers fetch,
+   the signed API, framing, scripting the window it opens, a prefilled
+   URL, and a click before the buttons arm. The `phase7` section does not
+   repeat those checks.
+
+The details of each step are proven elsewhere and not repeated here: the
+share lane (the forms and refusals of the sheet and the join page), the
+chat section's `chats_apart` (a guest's turn is capped at the guest's
+reach), its work checks (groups, the working line, Stop), and the desktop
+lane (New chat and its frames).
 
 ## Why
 
