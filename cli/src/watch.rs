@@ -15,20 +15,6 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[derive(Clone)]
-pub struct WatchConfig {
-    pub live: bool, // listen on the cell's live change channel
-}
-
-impl Default for WatchConfig {
-    fn default() -> Self {
-        WatchConfig { live: true }
-    }
-}
-
-// tuned constants: event debounce 300ms (max-latency 3x), poll fallback
-// 5s, full sweep every 60s. Nobody ever set the knobs; the defaults are
-// the product now.
 const DEBOUNCE_MS: u64 = 300;
 const POLL_INTERVAL_SECS: u64 = 5;
 const RESCAN_SECS: u64 = 60;
@@ -202,7 +188,8 @@ fn next_batch(rx: &Receiver<Wakeup>, gate: &Debounced, watcher: &Watcher<'_>) ->
     due
 }
 
-pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, cfg: &WatchConfig) -> Result<()> {
+/// Syncs `dir` until the process ends; `live` also listens on the cell's change feed.
+pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, live: bool) -> Result<()> {
     let _lock = SyncLock::acquire(dir)?; // one watcher per folder, ever
     let debounce = Duration::from_millis(DEBOUNCE_MS);
     let gate = Debounced { pending: Arc::new(AtomicBool::new(false)), debounce, max_latency: debounce * 3 };
@@ -229,7 +216,7 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, cfg: &Wa
     // ---- backend 2: live channel from the cell ----
     let live_up = Arc::new(AtomicBool::new(false));
     let mut live_state = "off";
-    if cfg.live {
+    if live {
         let host = client.host.trim_end_matches('/').to_string();
         let url = match view_token(client, name) {
             Some(t) => format!("{}/f/{}/__watch?view={}", host.replace("http", "ws"), name, t),
