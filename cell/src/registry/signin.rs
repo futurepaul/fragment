@@ -26,7 +26,7 @@ use serde::de::IgnoredAny;
 use sha2::{Digest, Sha256};
 
 use super::calls::{
-    ApproveKey, Approved, Began, Begin, EndSession, Ended, Exchange, Exchanged, LiveSession, LoggedOut, Logout, Mint, Minted, Redeem, Redeemed,
+    ApproveKey, Began, Begin, EndSession, Exchange, Exchanged, LiveSession, LoggedOut, Logout, Mint, Minted, Redeem, Redeemed,
     Session, SigninCounts, SigninsHook,
 };
 use super::*;
@@ -397,24 +397,24 @@ impl RegistryCell {
         let known = self
             .row::<HolderRow>("SELECT identity FROM subjects WHERE issuer = ? AND subject = ?", vec![issuer.into(), subject.into()])?
             .map(|r| r.identity);
-        let (id, created, linked) = match (login.link_to.as_deref(), known) {
+        let id = match (login.link_to.as_deref(), known) {
             // linking: explicit, from a signed-in session, never by email
-            (Some(to), Some(owner)) if owner == to => (owner, false, false),
+            (Some(to), Some(owner)) if owner == to => owner,
             (Some(_), Some(_)) => return Err(conflict("that sign-in already belongs to someone else")),
             (Some(to), None) => {
                 if self.count("SELECT COUNT(*) AS n FROM subjects WHERE identity = ?", vec![to.into()])? >= SUBJECTS_MAX {
                     return Err(CellError::invalid(format!("a person links at most {SUBJECTS_MAX} sign-ins")));
                 }
-                (to.to_string(), false, true)
+                to.to_string()
             }
-            (None, Some(owner)) => (owner, false, false),
+            (None, Some(owner)) => owner,
             (None, None) => {
                 let id = npub::identity(js::random_bytes::<16>());
                 self.exec(
                     "INSERT INTO identities (id, kind, owner, created_at) VALUES (?, 'person', NULL, ?)",
                     vec![id.as_str().into(), now.clone()],
                 )?;
-                (id, true, false)
+                id
             }
         };
         // the email is an attribute, refreshed at each sign-in and never matched
@@ -424,7 +424,7 @@ impl RegistryCell {
             vec![issuer.into(), subject.into(), id.as_str().into(), now, email.into()],
         )?;
         let token = self.new_session(&id, None, None, sid, js::now_ms() + SESSION_TTL_MS)?;
-        Ok(Exchanged { token, id, created, linked, return_to: login.return_to })
+        Ok(Exchanged { token, return_to: login.return_to })
     }
 
     pub(super) fn session(&self, b: Session) -> CellResult<LiveSession> {
@@ -433,13 +433,12 @@ impl RegistryCell {
 
     /// A fragment's `__signout`: the site session its cookie carries ends
     /// (its row goes; the platform session and its other sessions stay).
-    /// Answers whether there was one, so a second sign-out is no error.
-    pub(super) fn end_site_session(&self, b: EndSession) -> CellResult<Ended> {
+    /// A second sign-out is no error.
+    pub(super) fn end_site_session(&self, b: EndSession) -> CellResult<()> {
         if !well_formed(&b.token) {
-            return Ok(Ended { ended: false });
+            return Ok(());
         }
-        let ended = self.row::<IgnoredAny>("DELETE FROM sessions WHERE hash = ? AND fragment = ? RETURNING hash", vec![sha(&b.token).into(), b.fragment.as_str().into()])?;
-        Ok(Ended { ended: ended.is_some() })
+        self.exec("DELETE FROM sessions WHERE hash = ? AND fragment = ?", vec![sha(&b.token).into(), b.fragment.as_str().into()])
     }
 
     pub(super) fn logout(&self, b: Logout) -> CellResult<LoggedOut> {
@@ -515,11 +514,11 @@ impl RegistryCell {
 
     /// A key the signed-in person approved joins them (the router checked
     /// the key's own proof in the approval link).
-    pub(super) fn add_by_session(&self, b: ApproveKey) -> CellResult<Approved> {
+    pub(super) fn add_by_session(&self, b: ApproveKey) -> CellResult<()> {
         check_key(&b.key)?;
         let person = self.live_session(&b.token, None)?.1.identity;
         match self.key_row(&b.key)? {
-            Some(row) if row.identity == person.id && row.active() => return Ok(Approved { id: person.id, key: npub::encode(&b.key), added: false }),
+            Some(row) if row.identity == person.id && row.active() => return Ok(()),
             Some(_) => return Err(conflict("this key already belongs to someone (or was revoked)")),
             None => {}
         }
@@ -531,7 +530,7 @@ impl RegistryCell {
             "INSERT INTO keys (key, identity, added_at, added_by) VALUES (?, ?, ?, ?)",
             vec![b.key.as_str().into(), person.id.as_str().into(), SqlStorageValue::Integer(js::now_ms()), person.id.as_str().into()],
         )?;
-        Ok(Approved { id: person.id, key: npub::encode(&b.key), added: true })
+        Ok(())
     }
 
     /// Whether a person signs in (and so may hold no key).
