@@ -7,9 +7,10 @@ use std::time::Duration;
 use anyhow::Result;
 use base64::Engine;
 use fragment_nip98::Keys;
+use fragment_proto::{limits, ErrorCode};
 use serde_json::{json, Value};
 
-use crate::api::{now_s, Api, Call};
+use crate::api::{now_s, second_start, Api, Call};
 use crate::Suite;
 
 fn listing(api: &Api, keys: &Keys, name: &str) -> Vec<(String, u64)> {
@@ -55,7 +56,7 @@ fn files_lane(s: &mut Suite, api: &Api) -> Result<()> {
         .unwrap_or_default();
     s.ok("a storage token names the fragment's repo", r.status == 200 && r.body["repo"] == repo.as_str() && claims["repo"] == repo.as_str(), &r);
     s.ok("its scopes are git read and write only", claims["scopes"] == json!(["git:read", "git:write"]), &claims);
-    s.ok("it lives fifteen minutes at most", claims["exp"].as_i64().unwrap_or(0) - claims["iat"].as_i64().unwrap_or(0) <= 900, &claims);
+    s.ok("it lives exactly a storage token's lifetime", claims["exp"].as_i64().unwrap_or(0) - claims["iat"].as_i64().unwrap_or(0) == limits::STORAGE_TOKEN_TTL_S, &claims);
     s.ok("it names who minted it (their identity)", claims["sub"] == format!("editor:{}", api.identity(&owner)?), &claims);
     let http = reqwest::blocking::Client::new();
     let r = http.get(format!("{}/api/repos/{repo}/branch?name=main", s.fake.url)).bearer_auth(&token).send()?;
@@ -95,8 +96,20 @@ fn files_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let body = json!({ "repository": { "url": repo }, "ref": "refs/heads/main", "before": "0", "after": "1", "pushed_at": "t1" });
     let r = signed_webhook(api, &name, "wrong-secret", &body, now_s(), "push")?;
     s.ok("a webhook with a bad signature is 401", r.status == 401, &r);
-    let r = signed_webhook(api, &name, &secret, &body, now_s() - 3600, "push")?;
-    s.ok("a stale webhook is 401", r.status == 401, &r);
+    // the window's edges, on either side of now: a delivery stamped the
+    // window ahead is taken and one stamped a second past it behind is
+    // refused, however late the node reads its clock (it shares ours);
+    // sent as a second begins, the first is judged at the edge itself
+    let window = limits::WEBHOOK_WINDOW_S;
+    let edge = json!({ "repository": { "url": repo }, "ref": "refs/heads/main", "before": "0", "after": "1", "pushed_at": "t0" });
+    let now = second_start();
+    let ahead = signed_webhook(api, &name, &secret, &edge, now + window, "push")?;
+    let behind = signed_webhook(api, &name, &secret, &body, now - window - 1, "push")?;
+    s.ok(
+        "a webhook stamped at the edge of the window is taken, and one a second past it is 401",
+        ahead.status == 200 && ahead.body["interpreted"] == true && behind.code() == Some(ErrorCode::Unauthenticated),
+        format!("{ahead} {behind}"),
+    );
     let r = signed_webhook(api, &name, &secret, &body, now_s(), "push")?;
     s.ok("a signed webhook is interpreted", r.status == 200 && r.body["interpreted"] == true, &r);
     let r = signed_webhook(api, &name, &secret, &body, now_s(), "push")?;

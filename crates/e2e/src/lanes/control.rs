@@ -11,7 +11,7 @@ use fragment_nip98::Keys;
 use fragment_proto::{limits, routed, ErrorCode};
 use serde_json::json;
 
-use crate::api::{now_s, Api, Call};
+use crate::api::{now_s, second_start, Api, Call};
 use crate::Suite;
 
 /// A POST whose body is sent chunked (no length) and never finished:
@@ -81,8 +81,17 @@ pub fn auth(s: &mut Suite, api: &Api) -> Result<()> {
     };
     let r = send(signed_as(format!("{}/api/f/{name}/status", api.base), &bytes, now_s()))?;
     s.ok("a signature for another URL is 401", r.status == 401, &r);
-    let r = send(signed_as(format!("{}/api/fragments", api.base), &bytes, now_s() - 120))?;
-    s.ok("a two-minute-old signature is 401", r.status == 401, &r);
+    // the window's edges, on either side of now: the one ahead is taken and
+    // the one past it behind refused however late the node reads its clock
+    let me = format!("{}/api/identities/me", api.base);
+    let stamped = |t: i64| api.call(Call { method: "GET", url: me.clone(), extra: vec![("authorization", keys.header("GET", &me, b"", t))], ..Call::default() });
+    let now = second_start();
+    let (ahead, behind) = (stamped(now + limits::AUTH_WINDOW_S)?, stamped(now - limits::AUTH_WINDOW_S - 1)?);
+    s.ok(
+        "a signature stamped at the edge of the window is taken, and one a second past it is 401",
+        ahead.status == 200 && behind.code() == Some(ErrorCode::Unauthenticated),
+        format!("{ahead} {behind}"),
+    );
     let r = send(signed_as(format!("{}/api/fragments", api.base), br#"{"name":"x"}"#, now_s()))?;
     s.ok("a signature over another body is 401", r.status == 401, &r);
     // a signature over a body, replayed without it (to a route that reads
@@ -300,17 +309,23 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
         ..Call::default()
     })?;
     s.ok("an unsigned webhook is 401", r.status == 401, &r);
-    // Refused from its declared length before it is read: the client may see
-    // the 413, or the connection closing while it is still sending. The body
-    // is a create that would succeed but for its size (whitespace is JSON).
+    // A body of exactly the limit is read (and refused for what it says: a
+    // create takes no padding). One over it is refused from its declared
+    // length before it is read: the client may see the 413, or the
+    // connection closing while it is still sending. That one is a create
+    // that would succeed but for its size (whitespace is JSON).
     let big = s.name("big");
+    let padded = |n: usize| json!({ "name": big, "padding": "x".repeat(n) });
+    let edge = limits::BODY_MAX_BYTES - padded(0).to_string().len();
+    let r = api.create_with(&owner, padded(edge))?;
+    s.ok("a body of exactly the limit is read", r.code() == Some(ErrorCode::InvalidRequest), &r);
     let body = format!("{{\"name\":\"{big}\"}}{}", " ".repeat(limits::BODY_MAX_BYTES));
     let sent = api.call(Call { method: "POST", url: format!("{}/api/fragments", api.base), body: Some(body.into_bytes()), content_type: Some("application/json"), keys: Some(&owner), ..Call::default() });
     let refused = match sent {
         Ok(r) => r.status == 413 && r.code() == Some(ErrorCode::TooLarge),
         Err(e) => format!("{e:#}").contains("reset") || format!("{e:#}").contains("Broken pipe"),
     };
-    s.ok("a body over 2 MiB is refused unread (413)", refused, "");
+    s.ok("a create over the limit is refused unread (413)", refused, "");
     // a connection that closed because the router fell over would pass as a
     // reset too: the node answers after it, and made nothing from the body
     let (alive, made) = (api.unsigned("GET", "/healthz", None)?, api.status(&owner, &api.qualified(&owner, &big)?)?);

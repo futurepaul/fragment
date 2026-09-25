@@ -30,6 +30,12 @@ export class App extends DurableObject {
     return { text: await this.files.read(path) };
   }
 
+  // how long a file read into the app is (a large one's text would not
+  // fit a result)
+  async measure({ path }) {
+    return { length: (await this.files.read(path))?.length ?? null };
+  }
+
   async bytes({ path }) {
     const data = await this.files.readBytes(path);
     return { bytes: data === null ? null : [...data] };

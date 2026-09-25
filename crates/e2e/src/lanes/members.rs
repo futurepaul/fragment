@@ -4,7 +4,7 @@
 use anyhow::Result;
 use fragment_core::npub;
 use fragment_nip98::Keys;
-use fragment_proto::limits;
+use fragment_proto::{limits, ErrorCode};
 use serde_json::json;
 
 use crate::api::{self, Api};
@@ -179,8 +179,9 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a lower-case name is 400", r.status == 400, &r);
     let r = put(&owner, "EMPTY", b"")?;
     s.ok("an empty value is 400", r.status == 400, &r);
-    let r = put(&owner, "HUGE", &vec![b'x'; 65 * 1024])?;
-    s.ok("a value over 64 KiB is 413", r.status == 413, &r);
+    let edge = put(&owner, "EDGE", &vec![b'x'; limits::SECRET_MAX_BYTES])?;
+    let r = put(&owner, "HUGE", &vec![b'x'; limits::SECRET_MAX_BYTES + 1])?;
+    s.ok("a value of exactly the limit is set, and a byte over it is 413", edge.status == 200 && r.code() == Some(ErrorCode::TooLarge), format!("{edge} {r}"));
     let r = api.signed(&viewer, "GET", &format!("/api/f/{name}/secrets"), None)?;
     s.ok("a viewer cannot list secrets", r.status == 403, &r);
     let r = put(&viewer, "X", b"v")?;

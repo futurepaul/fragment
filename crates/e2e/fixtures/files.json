@@ -5,6 +5,7 @@
     "pair": { "kind": "mutation" },
     "bad_path": { "kind": "mutation" },
     "read": { "kind": "query" },
+    "measure": { "kind": "query" },
     "bytes": { "kind": "query" },
     "list": { "kind": "query" },
     "stat": { "kind": "query" },

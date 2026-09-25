@@ -73,8 +73,11 @@ pub fn ops(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.op(&owner, &name, "add_async", "as1", json!({ "text": "async" }))?;
     s.ok("an async mutation is refused", r.status == 422 && r.message().contains("mutations are synchronous"), &r);
     s.ok("an async mutation's write rolls back", count(api, &owner, &name) == before, before);
-    let r = api.op(&owner, &name, "add_todo", "big", json!({ "text": "x".repeat(300 * 1024) }))?;
-    s.ok("an input over 256 KiB is 413", r.status == 413 && r.error() == "too_large", &r);
+    // an input is bounded in bytes of JSON: `{"text":"…"}` is 11 around its text
+    let edge = limits::INPUT_MAX_BYTES - json!({ "text": "" }).to_string().len();
+    let at = api.op(&owner, &name, "count", "edge", json!({ "text": "x".repeat(edge) }))?;
+    let r = api.op(&owner, &name, "count", "big", json!({ "text": "x".repeat(edge + 1) }))?;
+    s.ok("an input of exactly the limit runs, and a byte over it is 413", at.status == 200 && r.code() == Some(ErrorCode::TooLarge), format!("{at} {r}"));
     let r = api.op(&owner, &name, "list", "q1", json!({}))?;
     s.ok("a query answers", r.status == 200 && r.body["result"]["todos"].as_array().map_or(0, |a| a.len()) == 3, &r);
     let r = api.op(&other, &name, "list", "q2", json!({}))?;

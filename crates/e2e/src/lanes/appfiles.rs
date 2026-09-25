@@ -6,6 +6,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use fragment_proto::{limits, ErrorCode};
 use serde_json::{json, Value};
 
 use super::app::ship;
@@ -51,9 +52,12 @@ pub fn appfiles(s: &mut Suite, api: &crate::api::Api) -> Result<()> {
     s.ok("a path that climbs out is refused in the mutation", r.status == 422 && r.message().contains("not a file path"), &r);
     let r = call("drop_note", "d1", json!({ "slug": "hello" }))?;
     s.ok("a mutation removes a file", r.status == 200 && s.fake.file_at(&repo, "main", "notes/hello.md").is_none(), &r);
-    s.commit(&c, &[("big.bin", Some(&vec![7u8; 1024 * 1024 + 1]))]);
-    let r = call("read", "q6", json!({ "path": "big.bin" }))?;
-    s.ok("a file over 1 MiB is not read into the app", r.status == 422 && r.message().contains("serve larger files from the site"), &r);
+    s.commit(&c, &[("edge.bin", Some(&vec![7u8; limits::FILE_READ_MAX_BYTES])), ("big.bin", Some(&vec![7u8; limits::FILE_READ_MAX_BYTES + 1]))]);
+    let r = call("measure", "q6", json!({ "path": "edge.bin" }))?;
+    s.ok("a file of exactly the read limit is read into the app", r.body["result"]["length"] == limits::FILE_READ_MAX_BYTES, &r);
+    // the refusal names the file's own size
+    let r = call("measure", "q7", json!({ "path": "big.bin" }))?;
+    s.ok("and a byte over it is not", r.code() == Some(ErrorCode::AppFailed) && r.message().contains(&(limits::FILE_READ_MAX_BYTES + 1).to_string()), &r);
 
     // jobs: reads and writes as steps, compare-and-swapped
     let r = call("append", "a1", json!({ "line": "one" }))?;

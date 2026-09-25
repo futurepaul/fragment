@@ -22,6 +22,15 @@ pub fn now_s() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).expect("clock after 1970").as_secs() as i64
 }
 
+/// The current second, waited for until it has just begun: a request sent
+/// now reaches the node within the same second (it shares this clock), so
+/// a timestamp at the exact edge of a window is judged at that edge.
+pub fn second_start() -> i64 {
+    let into = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock after 1970").subsec_millis();
+    std::thread::sleep(Duration::from_millis(u64::from(1000 - into) + 5));
+    now_s()
+}
+
 pub struct Reply {
     pub status: u16,
     pub body: Value,
