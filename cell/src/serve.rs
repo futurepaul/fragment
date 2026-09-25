@@ -252,7 +252,7 @@ impl FragmentCell {
             }
             Method::Post => {
                 let origin = req.headers().get("origin")?;
-                if origin.is_some_and(|o| !base.starts_with(&o)) {
+                if origin.is_some_and(|o| o != self.cfg.origin(&caller.url, name)) {
                     return Err(CellError::new(ErrorCode::Forbidden, "an invite is accepted from this fragment's own page"));
                 }
                 let token = form(&req.bytes().await?).ok_or_else(|| CellError::invalid("the form names no invite"))?;

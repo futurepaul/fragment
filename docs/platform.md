@@ -15,7 +15,7 @@ belongs in a template instead.
 | `__fragment.js` | The browser API: calls, live queries, channels, presence, push | One version for every fragment; it speaks the platform's wire protocol |
 | `__signin`, `__signout` | A fragment origin's own session, through a single-use redemption from the platform | Sessions are the platform's; a fragment's code must not mint them |
 | `__join` | Accepting an invite on the fragment's origin | Grants membership; to move to the platform's `/join/<name>` (phase 7, D) |
-| `__live`, `__watch` | The live socket and the CLI's watch stream | Platform protocol |
+| `__live`, `__watch` | The live socket and the CLI's watch stream, taken only from the fragment's own page (`Origin`; a socket has no CORS) | Platform protocol |
 | `__people` | Profiles (usernames, pictures) by identity | Reads the registry |
 | `__files`, `__file`, `__tree` | The fragment's files, read through the platform | Reads git with the platform's token |
 | `__fragments` | The signed-in owner's fragments, and making one | Owner-only, and only for a fragment that declares the `fragments` capability (the desktop) |

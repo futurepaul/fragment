@@ -17,7 +17,7 @@ use fragment_proto::{limits, ErrorCode};
 use serde_json::{json, Value};
 
 use super::app::ship;
-use crate::api::{url_enc, Api, Call, Reply};
+use crate::api::{url_enc, Api, Call, Reply, Socket};
 use crate::{Suite, SIGNINS_PENDING_MAX};
 
 const CHAT_APP: &[u8] = include_bytes!("../../fixtures/chat.mjs");
@@ -425,6 +425,32 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the member's browser reads the members-only fragment", r.status == 200 && r.text.contains("inside"), &r);
     let r = api.page(&g, "", Some(&format!("fragment_site={member_f}")))?;
     s.ok("the same cookie on another fragment's origin is nobody (members only: 401)", r.status == 401, &r);
+
+    // A socket has no CORS, and every fragment's origin is one site with
+    // the others: a page on g's origin (its author's code, or an agent's)
+    // opens one to f's, and the member's f cookie rides along. Only the
+    // upgrade's Origin says whose page asks.
+    let on_f = format!("fragment_site={member_f}");
+    let as_member = format!("opened as {} (viewer)", api.identity(&member)?);
+    let opened = |socket: Result<Socket>| match socket.and_then(|mut socket| socket.until("hello", 5)) {
+        Ok(hello) => format!("opened as {} ({})", hello["principal"].as_str().unwrap_or("?"), hello["role"].as_str().unwrap_or("?")),
+        Err(e) => format!("refused: {e:#}"),
+    };
+    let from_g = opened(Socket::on_host(api, &f, "__live", None, Some(&on_f), Some(&api.site_origin(&g))));
+    s.ok("a socket to f from g's page, with the member's f cookie, is refused (403): it would read f as them", from_g.contains("403"), &from_g);
+    let watch_from_g = match Socket::on_host(api, &f, "__watch", None, Some(&on_f), Some(&api.site_origin(&g))).and_then(|mut w| w.until("hello", 5)) {
+        Ok(hello) => format!("opened: {hello}"),
+        Err(e) => format!("refused: {e:#}"),
+    };
+    s.ok("and so is its change feed (__watch)", watch_from_g.contains("403"), &watch_from_g);
+    let from_null = opened(Socket::on_host(api, &f, "__live", None, Some(&on_f), Some("null")));
+    s.ok("and one from a page whose origin is hidden (null)", from_null.contains("403"), &from_null);
+    let from_f = opened(Socket::on_host(api, &f, "__live", None, Some(&on_f), Some(&api.site_origin(&f))));
+    s.ok("from f's own page, the same socket is the member's", from_f == as_member, &from_f);
+    let unnamed = opened(Socket::on_host(api, &f, "__live", None, Some(&on_f), None));
+    s.ok("an upgrade that names no page is no browser's: its cookie is nobody (members only: 401)", unnamed.contains("401"), &unnamed);
+    let cli = opened(Socket::open(api, &f, "__live", Some(&member), None));
+    s.ok("the CLI's socket names no page and signs: it is the member's", cli == as_member, &cli);
     let mut escaped = vec![];
     for raw in ["/%20//evil.example", "/%09//evil.example", "/http:evil.example"] {
         let r = with_session(api, "GET", &format!("/auth/fragment?name={f}&return={raw}"), &member_session)?;
@@ -654,16 +680,30 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.page(&f, &format!("__join?invite={invite}"), Some(&format!("fragment_site={outsider_f}")))?;
     s.ok("signed in, it offers to join", r.status == 200 && r.text.contains("Join"), &r);
     s.ok("and no page may frame it: another fragment's page could lay Join under a click", unframed(&r), framing(&r));
-    let r = api.call(Call {
-        method: "POST",
-        url: api.site_url(&f, "__join"),
-        body: Some(format!("invite={invite}").into_bytes()),
-        content_type: Some("application/x-www-form-urlencoded"),
-        cookie: Some(format!("fragment_site={outsider_f}")),
-        ..Call::default()
-    })?;
+    // a form's post names the page it came from; another fragment's page
+    // is one site with this one, so its post carries the outsider's cookie
+    let join_from = |origin: &str| {
+        api.call(Call {
+            method: "POST",
+            url: api.site_url(&f, "__join"),
+            body: Some(format!("invite={invite}").into_bytes()),
+            content_type: Some("application/x-www-form-urlencoded"),
+            cookie: Some(format!("fragment_site={outsider_f}")),
+            extra: vec![("origin", origin.to_string())],
+            ..Call::default()
+        })
+    };
+    let r = join_from(&api.site_origin(&g))?;
     let r2 = api.page(&f, "", Some(&format!("fragment_site={outsider_f}")))?;
-    s.ok("joining in the browser makes them a member", r.status == 302 && r2.status == 200, &r2);
+    s.ok("an invite posted from another fragment's page is refused (403), and joins no one", r.status == 403 && r2.status == 403, format!("{r} / {r2}"));
+    let mut portless = reqwest::Url::parse(&api.site_origin(&f))?;
+    let _ = portless.set_port(None);
+    let r = join_from(&portless.origin().ascii_serialization())?;
+    let r2 = api.page(&f, "", Some(&format!("fragment_site={outsider_f}")))?;
+    s.ok("and from its host on another port (another origin, whose name begins the same)", r.status == 403 && r2.status == 403, format!("{r} / {r2}"));
+    let r = join_from(&api.site_origin(&f))?;
+    let r2 = api.page(&f, "", Some(&format!("fragment_site={outsider_f}")))?;
+    s.ok("joining in the browser, from the invite's own page, makes them a member", r.status == 302 && r2.status == 200, &r2);
 
     // sign-in's rows: bounded, and swept on the registry's alarm, never on a request
     let mut minted = vec![];

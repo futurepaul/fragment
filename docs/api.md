@@ -620,7 +620,13 @@ names the live commit (its `fragment.json`). `__fragment.js` and
 file.
 
 `__live` and `__watch` are also served in place at `/f/<name>/…` for the
-CLI. The `__live` protocol is JSON frames tagged by `type`, defined once
+CLI. A socket has no CORS, and every fragment's origin is one site with
+the others, so a page on another fragment's could open one with this
+origin's cookies: an upgrade (to any path on a fragment's host) whose
+`Origin` is not the fragment's own, `null` included, is 403, and one that
+names no `Origin` is no browser's, so its cookies (the session, the share
+link's, the anonymous one) count for nothing: it is its signer's, its
+`?view=` link's, or anonymous. The `__live` protocol is JSON frames tagged by `type`, defined once
 as `LiveIn` (client → server) and `LiveOut` (server → client) in
 `crates/proto/src/live.rs`; the cell and the CLI decode through them. A
 client asks for it as `__live?v=2`. A socket opened without `v=2` is a

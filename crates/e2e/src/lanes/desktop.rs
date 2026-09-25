@@ -137,6 +137,30 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let named = format!("{}'s agent", api.username(&owner)?);
     s.ok("named as its owner's agent", s.eventually(wait, || in_chat(&mut chrome, &named)), &named);
 
+    // A socket has no CORS, and every fragment is one site with the others:
+    // a page on the todo's origin (its author's code, or an agent's) opens
+    // the chat's live socket, and the owner's session on the chat's origin
+    // rides along. The chat takes a socket only from its own page.
+    let read_chat = format!(
+        "new Promise((done) => {{ const got = {{ opened: false, read: false, frames: [] }}; const ws = new WebSocket({url:?}); \
+         const t = setTimeout(() => {{ ws.close(); done(got); }}, 5000); \
+         ws.onopen = () => {{ got.opened = true; ws.send(JSON.stringify({{ type: 'subscribe', channel: 'chat', last: 50 }})); }}; \
+         ws.onmessage = (e) => {{ got.frames.push(JSON.parse(e.data).type); if (e.data.includes('hi from the desktop')) {{ got.read = true; clearTimeout(t); ws.close(); done(got); }} }}; \
+         ws.onclose = () => {{ clearTimeout(t); done(got); }}; }})",
+        url = api.site_url(&chat, "__live?v=2").replacen("http", "ws", 1)
+    );
+    let attacker = chrome.open(&api.site_url(&todo, "__signin?return=/"))?;
+    anyhow::ensure!(chrome.until(&attacker, &on_todo, wait), "the todo's page did not open");
+    let foreign = chrome.eval(&attacker, &read_chat).unwrap_or_else(|e| json!({ "error": e.to_string() }));
+    chrome.close(attacker)?;
+    s.ok(
+        "a page on another fragment's origin cannot open the chat's live socket with the owner's session, nor read the chat through it",
+        foreign["opened"] == json!(false) && foreign["read"] == json!(false),
+        &foreign,
+    );
+    let own = chrome.eval_in_frame(&page, &format!("{}--", label(&chat)), &read_chat).unwrap_or_else(|e| json!({ "error": e.to_string() }));
+    s.ok("(the chat's own page reads it through the same socket)", own["read"] == json!(true), &own);
+
     // asked for an app, the agent makes it, and the desktop shows it
     chrome.eval_in_frame(&page, &format!("{}--", label(&chat)), "document.getElementById('text').value = 'make me a counter app'; document.getElementById('say').requestSubmit(); true")?;
     s.ok("asked for an app in the chat, the agent says it made one", s.eventually(Duration::from_secs(40), || in_chat(&mut chrome, "Your counter is in your apps.")), "");
