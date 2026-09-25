@@ -45,7 +45,7 @@ debt ledger).
   (builds the celld fork with the alarm fix into `target/celld/bin`).
 - `cargo xtask check`: host tests and clippy (host and wasm), warnings
   denied.
-- `cargo xtask e2e [--only <section>[,<section>...]]`: builds `cell/` and the CLI (with
+- `cargo xtask e2e [--only <section>[,...] | --except <section>[,...]]`: builds `cell/` and the CLI (with
   its `computer` feature), then
   runs `crates/e2e` against a fresh `celld dev` node and the in-process
   code.storage fake (sections: auth, create, lockdown, members, identities, signin, secrets,
@@ -87,8 +87,11 @@ debt ledger).
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
   logic, host-tested), `crates/nip98`, `crates/fakes` (code.storage,
   OpenRouter, a push service), `crates/devstack`, `crates/e2e`.
-- `.github/workflows/ci.yml` runs `check` and `e2e`; it has not run yet
-  (no remote).
+- `.github/workflows/ci.yml` runs `check`, and the e2e in parallel: one
+  macOS job builds what it runs (`cargo xtask e2e-kit`, the node cached
+  by its fork commit), four shards each run a slice of the sections from
+  that kit (`--only`, and `--except` for the rest), and one `e2e` check
+  passes when every shard does.
 - The hosted fleet (`fleets/fragment-club.json`, `docs/operate.md`):
   `cargo xtask deploy fragment-club` ships the cell; `--nodes` ships the
   node image (local Docker); `cargo xtask e2e --fleet fragment-club` runs

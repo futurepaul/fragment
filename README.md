@@ -50,7 +50,7 @@ alias pointed at the dev stack. Fragments are served at
 
 ```
 cargo xtask check          # host tests, clippy on host and wasm, warnings denied
-cargo xtask e2e            # the full suite against a fresh celld node (--only <section>)
+cargo xtask e2e            # the full suite against a fresh celld node (--only a,b | --except a,b)
 ```
 
 The e2e stages its own copy of the cell, so it runs alongside
