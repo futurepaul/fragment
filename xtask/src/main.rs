@@ -16,9 +16,11 @@
 //!                    or --except <section>[,...]);
 //!                    with --fleet <fleet> first, run its hosted sections against
 //!                    that fleet instead
-//!   e2e-kit <file>   build what the e2e runs and pack it into one .tar.gz, for
+//!   e2e-kit <file> [cell] [agent] [native]
+//!                    build what the e2e runs and pack it into one .tar.gz, for
 //!                    CI's shards: unpacked at the repo root, they run
-//!                    target/release/fragment-e2e with no toolchain
+//!                    target/release/fragment-e2e with no toolchain; with parts
+//!                    named, those alone (CI builds them on two machines)
 //!   check            host tests and clippy, warnings denied
 //!   deploy <fleet> [--nodes | --secrets]
 //!                    ship the cell to a hosted fleet (fleets/<fleet>.json), or
@@ -63,6 +65,14 @@ fn run(cmd: &mut Command) -> Result<()> {
 }
 
 fn build() -> Result<()> {
+    build_worker(&devstack::cell_dir())?;
+    build_worker(&devstack::agent_dir())
+}
+
+/// One celld project (`cell/` or `agent/`) for wasm32, into its `build/`.
+/// One at a time: worker-build fetches its tools into one shared cache,
+/// and two at once race there.
+fn build_worker(dir: &Path) -> Result<()> {
     let out = Command::new("worker-build").arg("--version").output().context(
         "worker-build is not installed: cargo install worker-build --version 0.8.5 --locked",
     )?;
@@ -70,8 +80,7 @@ fn build() -> Result<()> {
     if !version.contains(WORKER_BUILD_VERSION) {
         bail!("worker-build {WORKER_BUILD_VERSION} is required, found {}", version.trim());
     }
-    run(Command::new("worker-build").arg("--release").current_dir(devstack::cell_dir()))?;
-    run(Command::new("worker-build").arg("--release").current_dir(devstack::agent_dir()))
+    run(Command::new("worker-build").arg("--release").current_dir(dir))
 }
 
 /// Builds the pinned fork. Its seam builds our native services
@@ -274,32 +283,91 @@ const KIT_ESBUILD: &str = "target/e2e-kit/esbuild";
 /// What the e2e runs: the workers, the CLI (the e2e drives it too,
 /// computers included), and the suite.
 fn build_e2e() -> Result<()> {
+    build_parts(&KitPart::ALL)
+}
+
+/// The CLI and the suite, for this machine.
+fn build_native() -> Result<()> {
     let manifest = devstack::repo_root().join("Cargo.toml");
-    build()?;
     run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli", "--features", "computer"]))?;
     run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-e2e"]))
 }
 
-/// `build_e2e`, packed with the node (`xtask celld` first) and esbuild at
-/// their paths under the repo root: CI builds once and each shard unpacks
-/// this and runs the suite (`CELLD_ESBUILD` set to `KIT_ESBUILD`).
+/// The kit's parts: unpacked together, the whole kit. CI builds the rest
+/// on macOS while Linux builds the cell (with worker-build alone: this
+/// workspace would first fetch goose, which the cell does not use).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum KitPart {
+    /// `cell/` for wasm32 (wasm is wasm: it builds anywhere).
+    Cell,
+    /// `agent/` for wasm32.
+    Agent,
+    /// This machine's binaries: the node (`xtask celld` first), the CLI, the
+    /// suite, and the esbuild the node bundles with (worker-build's: a
+    /// worker has been built on this machine).
+    Native,
+}
+
+impl KitPart {
+    const ALL: [KitPart; 3] = [KitPart::Cell, KitPart::Agent, KitPart::Native];
+
+    fn parse(name: &str) -> Option<KitPart> {
+        KitPart::ALL.into_iter().find(|p| p.name() == name)
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            KitPart::Cell => "cell",
+            KitPart::Agent => "agent",
+            KitPart::Native => "native",
+        }
+    }
+}
+
+/// Builds the parts: the native binaries alongside the workers, which build
+/// one at a time (worker-build fetches its tools into one shared cache, and
+/// two at once race there).
+fn build_parts(parts: &[KitPart]) -> Result<()> {
+    std::thread::scope(|s| {
+        let native = parts.contains(&KitPart::Native).then(|| s.spawn(build_native));
+        let workers = [(KitPart::Cell, devstack::cell_dir()), (KitPart::Agent, devstack::agent_dir())];
+        let workers = workers.iter().filter(|(part, _)| parts.contains(part)).try_for_each(|(_, dir)| build_worker(dir));
+        let native = native.map_or(Ok(()), |build| build.join().expect("the native build does not panic"));
+        workers.and(native)
+    })
+}
+
+/// What the e2e runs (all of it, or the parts named), packed at its paths
+/// under the repo root: each CI shard unpacks the parts and runs the suite
+/// (`CELLD_ESBUILD` set to `KIT_ESBUILD`), no toolchain.
 fn e2e_kit(args: &[String]) -> Result<()> {
-    let [out] = args else {
-        bail!("usage: cargo xtask e2e-kit <file.tar.gz>");
-    };
-    build_e2e()?;
+    let usage = || anyhow::anyhow!("usage: cargo xtask e2e-kit <file.tar.gz> [cell] [agent] [native]");
+    let [out, names @ ..] = args else { return Err(usage()) };
+    let mut parts = names.iter().map(|n| KitPart::parse(n).ok_or_else(usage)).collect::<Result<Vec<_>>>()?;
+    if parts.is_empty() {
+        parts = KitPart::ALL.to_vec();
+    }
+    anyhow::ensure!(KitPart::ALL.iter().all(|p| parts.iter().filter(|q| *q == p).count() <= 1), "a part is named twice");
+    build_parts(&parts)?;
     let root = devstack::repo_root();
-    let esbuild = devstack::Tools::locate()?.esbuild;
-    std::fs::create_dir_all(root.join(KIT_ESBUILD).parent().expect("the kit's directory"))?;
-    std::fs::copy(&esbuild, root.join(KIT_ESBUILD)).with_context(|| format!("copy {}", esbuild.display()))?;
-    let celld = devstack::fork_celld_path();
-    let celld = celld.strip_prefix(&root).context("the node's binary sits under the repo")?;
-    run(Command::new("tar")
-        .arg("-czf")
-        .arg(std::path::absolute(out)?)
-        .current_dir(&root)
-        .args(["target/release/fragment", E2E_BIN, KIT_ESBUILD, "cell/build", "agent/build"])
-        .arg(celld))
+    let mut paths = vec![];
+    for part in parts {
+        match part {
+            KitPart::Cell => paths.push("cell/build".to_string()),
+            KitPart::Agent => paths.push("agent/build".to_string()),
+            KitPart::Native => {
+                let esbuild = devstack::esbuild()?;
+                std::fs::create_dir_all(root.join(KIT_ESBUILD).parent().expect("the kit's directory"))?;
+                std::fs::copy(&esbuild, root.join(KIT_ESBUILD)).with_context(|| format!("copy {}", esbuild.display()))?;
+                let celld = devstack::fork_celld_path();
+                anyhow::ensure!(celld.is_file(), "no node at {} (run `cargo xtask celld` first)", celld.display());
+                let celld = celld.strip_prefix(&root).context("the node's binary sits under the repo")?;
+                paths.extend(["target/release/fragment", E2E_BIN, KIT_ESBUILD].map(String::from));
+                paths.push(celld.to_string_lossy().into_owned());
+            }
+        }
+    }
+    run(Command::new("tar").arg("-czf").arg(std::path::absolute(out)?).current_dir(&root).args(paths))
 }
 
 /// A merge conflict's markers (git's diff3 style too), at the start of a
@@ -377,7 +445,7 @@ fn main() -> Result<()> {
         Some("check") => check(),
         Some("deploy") => deploy::run(&args[1..]),
         Some("fleet") => deploy::operate(&args[1..]),
-        _ => bail!("usage: cargo xtask build | celld | dev [--clean] | try <template> [name] | e2e [--fleet <fleet>] [--only | --except <section>[,...]] | e2e-kit <file> | check | deploy <fleet> [--nodes | --secrets] | fleet <fleet> <celld command...>"),
+        _ => bail!("usage: cargo xtask build | celld | dev [--clean] | try <template> [name] | e2e [--fleet <fleet>] [--only | --except <section>[,...]] | e2e-kit <file> [cell] [agent] [native] | check | deploy <fleet> [--nodes | --secrets] | fleet <fleet> <celld command...>"),
     }
 }
 
@@ -405,6 +473,18 @@ mod tests {
         assert!(super::shards_cover(&shards(&["--only a,b"])).is_err());
         assert!(super::shards_cover(&shards(&["--except a", "--except a"])).is_err());
         assert!(super::shards_cover(&std::fs::read_to_string(super::devstack::repo_root().join(".github/workflows/ci.yml")).unwrap()).is_ok());
+    }
+
+    /// CI names the parts (`e2e-kit <file> <part>...`); each name is its
+    /// part's, and no other name is one.
+    #[test]
+    fn a_kit_part_is_named_by_its_name_alone() {
+        for part in super::KitPart::ALL {
+            assert_eq!(super::KitPart::parse(part.name()), Some(part));
+        }
+        for name in ["", "all", "Cell", "workers", "native "] {
+            assert_eq!(super::KitPart::parse(name), None, "{name:?}");
+        }
     }
 
     #[test]

@@ -1,7 +1,8 @@
 # fragment-next CI: `cargo xtask check`, and the e2e as run locally, split
 # across runners. The e2e runs on macOS, where it has been proven: one job
-# builds everything it runs once (`cargo xtask e2e-kit`), and each shard
-# unpacks that and runs a slice of the sections in parallel, no toolchain.
+# builds everything it runs once (`cargo xtask e2e-kit`, in two parts on
+# parallel jobs), and each shard unpacks that and runs a slice of the
+# sections in parallel, no toolchain.
 name: ci
 
 on:
@@ -34,48 +35,127 @@ jobs:
           restore-keys: check-${{ runner.os }}-
       - run: cargo xtask check
 
-  build:
-    runs-on: macos-14
+  # The kit (`cargo xtask e2e-kit`) in two parts, built in parallel; each
+  # shard unpacks both. The cell's wasm builds on Linux (wasm is wasm, and
+  # Linux runners are plenty); on macOS, whose binaries the shards run, the
+  # agent's wasm builds alongside the node, the CLI, and the suite, and the
+  # esbuild worker-build fetched there (the node bundles with it) goes too.
+  kit:
+    strategy:
+      matrix:
+        include:
+          - name: cell
+            os: ubuntu-latest
+            # not through xtask: the main workspace would fetch its git
+            # dependency (goose), which the cell does not use
+            build: |
+              (cd cell && worker-build --release)
+              tar -czf e2e-kit-cell.tar.gz cell/build
+            tree: cell/target/ci-tree
+            paths: |
+              ~/.cargo/bin
+              cell/target
+          - name: macos
+            os: macos-14
+            build: cargo xtask e2e-kit e2e-kit-macos.tar.gz agent native
+            tree: target/ci-tree
+            paths: |
+              ~/.cargo/bin
+              ~/.cargo/git
+              target
+              agent/target
+    runs-on: ${{ matrix.os }}
+    name: kit (${{ matrix.name }})
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      # the dependencies (the workspaces' own crates build every time);
-      # cell/ and agent/ are workspaces of their own, with their own targets
-      - uses: actions/cache@v4
+      # the dependencies, and what the last run to save built: each of
+      # master's runs saves its own, so a pull request's starts from the
+      # newest master build
+      - id: cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
-            ~/.cargo/git
-            ~/.cargo/bin
-            target
-            cell/target
-            agent/target
-          key: e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'agent/Cargo.lock') }}
-          restore-keys: e2e-${{ runner.os }}-
+            ${{ matrix.paths }}
+          key: kit-${{ matrix.name }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'agent/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            kit-${{ matrix.name }}-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'agent/Cargo.lock') }}-
+            kit-${{ matrix.name }}-${{ runner.os }}-
+      # Cargo rebuilds a crate when a file it read is newer than its build,
+      # and a checkout makes every file new. A run that saves the cache
+      # (master's, or one with none to start from) records the tree (git's
+      # id for each tracked file) before it builds, the record's own mtime
+      # its time. Any other run sets each file unchanged since, and each
+      # directory with nothing added, removed, or changed beneath it (cargo
+      # reads those for `rerun-if-changed`), back to that time: everything
+      # the recorded build made is newer, so it is reused; what the cache
+      # holds from before is older, and a changed file keeps the checkout's
+      # newer time, so those rebuild. Sound while a run that restores never
+      # saves, and a run saves only the tree it recorded (verified below).
+      - id: sources
+        shell: bash
+        env:
+          m: ${{ matrix.tree }}
+          LC_ALL: C
+        run: |
+          git diff --quiet # ls-files reports the index: the files must match it
+          if [ "$GITHUB_REF" = refs/heads/master ] || [ ! -f "$m" ]; then
+            mkdir -p "$(dirname "$m")" && git ls-files -s | sort > "$m"
+            echo "save=${{ steps.cache.outputs.cache-hit != 'true' }}" >> "$GITHUB_OUTPUT"
+          else
+            dirs() { awk -F/ '{ d = $1; for (i = 2; i <= NF; i++) { print d; d = d "/" $i } }' | sort -u; }
+            now="$RUNNER_TEMP/tree"; git ls-files -s | sort > "$now"
+            comm -3 "$m" "$now" | awk -F'\t' '{ print $NF }' | sort -u > "$now.changed"
+            dirs < "$now.changed" > "$now.dirty"
+            { comm -12 "$m" "$now" | awk -F'\t' '$1 ~ /^100(644|755) / { print $2 }'
+              cut -f2 "$now" | dirs | comm -23 - "$now.dirty"; } > "$now.same"
+            tr '\n' '\0' < "$now.same" | xargs -0 -r touch -r "$m"
+            echo "changed since the record: $(wc -l < "$now.changed") paths; set back: $(wc -l < "$now.same")"
+          fi
       # the node: the pinned fork (its commit, CELLD_FORK_REV), built with
       # this repo's crates it links (crates/native and what it depends on;
       # the fork's own lock pins their dependencies)
-      - id: fork
+      - if: runner.os == 'macOS'
+        id: fork
         run: |
           rev=$(sed -n 's/^pub const CELLD_FORK_REV: &str = "\([0-9a-f]\{40\}\)";$/\1/p' crates/devstack/src/lib.rs)
           test -n "$rev" || { echo "no CELLD_FORK_REV in crates/devstack/src/lib.rs"; exit 1; }
           echo "rev=$rev" >> "$GITHUB_OUTPUT"
-      - id: celld
+          echo "built=$(test -d target/celld/src/target && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: runner.os == 'macOS'
+        id: celld
         uses: actions/cache@v4
         with:
           path: target/celld/bin/celld
           key: celld-${{ runner.os }}-${{ steps.fork.outputs.rev }}-${{ hashFiles('crates/native/**', 'crates/core/**', 'crates/proto/**', 'crates/nip98/**') }}
-      - run: worker-build --version | grep -q 0.8.5 || cargo install worker-build --version 0.8.5 --locked
-      - if: steps.celld.outputs.cache-hit != 'true'
+      # built when its cache misses; and on master whenever the kit's cache
+      # lacks the fork's own build, so a pull request that changes the
+      # crates it links rebuilds just those
+      - if: runner.os == 'macOS' && (steps.celld.outputs.cache-hit != 'true' || (github.ref == 'refs/heads/master' && steps.fork.outputs.built != 'true'))
         run: cargo xtask celld
-      - run: cargo xtask e2e-kit e2e-kit.tar.gz
+      - run: worker-build --version | grep -q 0.8.5 || cargo install worker-build --version 0.8.5 --locked
+      - run: ${{ matrix.build }}
       - uses: actions/upload-artifact@v4
         with:
-          name: e2e-kit
-          path: e2e-kit.tar.gz
+          name: e2e-kit-${{ matrix.name }}
+          path: e2e-kit-${{ matrix.name }}.tar.gz
           retention-days: 3
+      # what the cache keeps must be the recorded tree's: a build that
+      # rewrote a tracked file (a stale Cargo.lock) is not saved
+      - if: steps.sources.outputs.save == 'true'
+        id: verify
+        continue-on-error: true
+        run: git diff --quiet
+      - if: steps.verify.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ${{ matrix.paths }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
   # Each shard is a slice of the sections (crates/e2e/src/lanes/mod.rs),
   # sized by their CI times (each prints its own); `rest` is every section
@@ -83,7 +163,7 @@ jobs:
   # keeps `triggers`: its cron fragment is deployed sections earlier, and
   # there the minute it waits for passes while they run.
   shard:
-    needs: build
+    needs: kit
     runs-on: macos-14
     strategy:
       fail-fast: false
@@ -102,8 +182,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: e2e-kit
-      - run: tar -xzf e2e-kit.tar.gz
+          pattern: e2e-kit-*
+          merge-multiple: true
+      - run: for part in e2e-kit-*.tar.gz; do tar -xzf "$part"; done
       - run: target/release/fragment-e2e ${{ matrix.args }}
         env:
           CELLD_ESBUILD: ${{ github.workspace }}/target/e2e-kit/esbuild

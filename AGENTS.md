@@ -98,11 +98,14 @@ debt ledger).
   `crates/computer` (`fragment computer`), `crates/node` (the fleet's
   launcher), `crates/fakes` (code.storage, OpenRouter, WorkOS, a push
   service), `crates/devstack`, `crates/e2e`.
-- `.github/workflows/ci.yml` runs `check`, and the e2e in parallel: one
-  macOS job builds what it runs (`cargo xtask e2e-kit`, the node cached
-  by its fork commit), four shards each run a slice of the sections from
-  that kit (`--only`, and `--except` for the rest), and one `e2e` check
-  passes when every shard does (about 7 minutes on warm caches).
+- `.github/workflows/ci.yml` runs `check`, and the e2e in parallel: two
+  jobs build what it runs (`cargo xtask e2e-kit`: the cell's wasm on
+  Linux; on macOS the agent's wasm, the node cached by its fork commit,
+  the CLI, and the suite), four shards each run a slice of the sections
+  from that kit (`--only`, and `--except` for the rest), and one `e2e`
+  check passes when every shard does. Master's runs save the build
+  caches with the tree they were built from, so a pull request's run
+  rebuilds only the crates its changes reach.
 - The hosted fleet (`fleets/fragment-club.json`, `docs/operate.md`):
   `cargo xtask deploy fragment-club` ships the agents' script and the
   cell; `--nodes` ships the node image (local Docker), nodes before the

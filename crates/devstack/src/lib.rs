@@ -101,11 +101,16 @@ impl Tools {
         if !celld.is_file() {
             bail!("no celld at {} (run `cargo xtask celld`, or set CELLD_BIN)", celld.display());
         }
-        let esbuild = match std::env::var_os("CELLD_ESBUILD") {
-            Some(p) => PathBuf::from(p),
-            None => worker_build_esbuild()?,
-        };
-        Ok(Tools { celld, esbuild })
+        Ok(Tools { celld, esbuild: esbuild()? })
+    }
+}
+
+/// The esbuild the node bundles with: `CELLD_ESBUILD`, or the one
+/// worker-build downloads into its cache.
+pub fn esbuild() -> Result<PathBuf> {
+    match std::env::var_os("CELLD_ESBUILD") {
+        Some(p) => Ok(PathBuf::from(p)),
+        None => worker_build_esbuild(),
     }
 }
 
