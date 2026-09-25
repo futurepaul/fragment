@@ -46,7 +46,7 @@ pub fn desktop(s: &mut Suite, api: Api) -> Result<Api> {
 }
 
 fn run(s: &mut Suite, api: &Api) -> Result<()> {
-    let Some(mut chrome) = Browser::launch(&s.scratch)? else {
+    let Some(mut chrome) = s.browser()? else {
         s.ok("Chrome is installed for the desktop lane (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());
     };

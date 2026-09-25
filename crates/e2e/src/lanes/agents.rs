@@ -379,7 +379,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and hears nothing more", after.len() == before + 1, json!(after));
 
     // the page: the conversation so far, and a message sent from it
-    let Some(mut chrome) = crate::browser::Browser::launch(&s.scratch)? else {
+    let Some(mut chrome) = s.browser()? else {
         s.ok("Chrome is installed for the chat page (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());
     };

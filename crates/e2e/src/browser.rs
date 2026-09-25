@@ -3,9 +3,12 @@
 //! resolves `*.localhost` to the loopback address, so pages open on each
 //! fragment's own origin exactly as a person's browser would.
 
+use std::cell::Cell;
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::ops::{Deref, DerefMut};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -17,9 +20,78 @@ pub struct Browser {
     child: Child,
     ws: WebSocket<MaybeTlsStream<TcpStream>>,
     next: u64,
+    /// The browser context pages open in (`None`: Chrome's default one).
+    context: Option<String>,
     /// Chrome's own state for this launch, removed when it stops: never
     /// evidence, and tens of megabytes once a page has loaded.
     profile: PathBuf,
+}
+
+/// One Chrome for a whole run, started when a lane first asks for it.
+/// Each lane leases it with a browser context of its own: its own cookies,
+/// storage, cache, and service workers, as a fresh profile has, so no lane
+/// sees another's session. The lease's pages close when it ends.
+pub struct Shared {
+    scratch: PathBuf,
+    /// The browser between leases (`None`: not started, or out on a lease).
+    idle: Rc<Cell<Option<Browser>>>,
+}
+
+impl Shared {
+    pub fn new(scratch: &Path) -> Shared {
+        Shared { scratch: scratch.to_path_buf(), idle: Rc::new(Cell::new(None)) }
+    }
+
+    /// The browser in a fresh context (`None` when no Chrome is installed).
+    pub fn lease(&self) -> Result<Option<Lease>> {
+        let mut browser = match self.idle.take() {
+            Some(browser) => browser,
+            None => match Browser::launch(&self.scratch)? {
+                Some(browser) => browser,
+                None => return Ok(None),
+            },
+        };
+        // on an error the browser is dropped (Chrome stops); the next lease starts another
+        browser.begin_context()?;
+        Ok(Some(Lease { browser: Some(browser), idle: Rc::clone(&self.idle) }))
+    }
+
+    /// Stops Chrome (a lease still out stops it when it ends).
+    pub fn close(&self) {
+        drop(self.idle.take());
+    }
+}
+
+/// A lane's hold on the shared browser; it ends when dropped, a lane that
+/// stopped early included.
+pub struct Lease {
+    /// `Some` until the lease ends.
+    browser: Option<Browser>,
+    idle: Rc<Cell<Option<Browser>>>,
+}
+
+impl Deref for Lease {
+    type Target = Browser;
+    fn deref(&self) -> &Browser {
+        self.browser.as_ref().expect("a lease holds its browser until it ends")
+    }
+}
+
+impl DerefMut for Lease {
+    fn deref_mut(&mut self) -> &mut Browser {
+        self.browser.as_mut().expect("a lease holds its browser until it ends")
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let Some(mut browser) = self.browser.take() else { return };
+        // a browser whose context does not close is not lent again: dropped
+        // here, Chrome stops, and the next lease starts another
+        if browser.end_context().is_ok() {
+            self.idle.set(Some(browser));
+        }
+    }
 }
 
 /// One tab, addressed by its DevTools session.
@@ -40,7 +112,7 @@ fn chrome() -> Option<PathBuf> {
 
 impl Browser {
     /// `None` when no Chrome is installed (the section says so and skips).
-    pub fn launch(scratch: &std::path::Path) -> Result<Option<Browser>> {
+    pub fn launch(scratch: &Path) -> Result<Option<Browser>> {
         let Some(bin) = chrome() else { return Ok(None) };
         let port = fragment_devstack::free_port()?;
         let profile = scratch.join(format!("chrome-{port}"));
@@ -79,7 +151,23 @@ impl Browser {
         if let MaybeTlsStream::Plain(s) = ws.get_ref() {
             s.set_read_timeout(Some(Duration::from_secs(30)))?;
         }
-        Ok(Some(Browser { child, ws, next: 0, profile }))
+        Ok(Some(Browser { child, ws, next: 0, context: None, profile }))
+    }
+
+    /// Pages open in a new browser context from here on.
+    fn begin_context(&mut self) -> Result<()> {
+        assert!(self.context.is_none(), "one browser context at a time");
+        let made = self.send("Target.createBrowserContext", json!({}), None)?;
+        let id = made["browserContextId"].as_str().context("Target.createBrowserContext answers its id")?;
+        self.context = Some(id.to_string());
+        Ok(())
+    }
+
+    /// Disposes of the context, closing its pages.
+    fn end_context(&mut self) -> Result<()> {
+        let id = self.context.take().expect("a browser context to end");
+        self.send("Target.disposeBrowserContext", json!({ "browserContextId": id }), None)?;
+        Ok(())
     }
 
     /// Sends one command and waits for its answer (events are skipped).
@@ -104,7 +192,11 @@ impl Browser {
     }
 
     pub fn open(&mut self, url: &str) -> Result<Page> {
-        let target = self.send("Target.createTarget", json!({ "url": url }), None)?["targetId"].as_str().unwrap_or("").to_string();
+        let mut params = json!({ "url": url });
+        if let Some(context) = &self.context {
+            params["browserContextId"] = json!(context);
+        }
+        let target = self.send("Target.createTarget", params, None)?["targetId"].as_str().unwrap_or("").to_string();
         let session = self.send("Target.attachToTarget", json!({ "targetId": target, "flatten": true }), None)?["sessionId"]
             .as_str()
             .unwrap_or("")
@@ -144,7 +236,7 @@ impl Browser {
     }
 
     /// The page as it looks now, a PNG at `path` (evidence for a person).
-    pub fn screenshot(&mut self, page: &Page, path: &std::path::Path) -> Result<()> {
+    pub fn screenshot(&mut self, page: &Page, path: &Path) -> Result<()> {
         use base64::Engine;
         let shot = self.send("Page.captureScreenshot", json!({ "format": "png" }), Some(&page.session))?;
         let bytes = base64::engine::general_purpose::STANDARD.decode(shot["data"].as_str().unwrap_or_default())?;
@@ -154,7 +246,11 @@ impl Browser {
 
     /// A cookie the browser holds for `url`, as if a response had set it.
     pub fn set_cookie(&mut self, url: &str, name: &str, value: &str) -> Result<()> {
-        self.send("Storage.setCookies", json!({ "cookies": [{ "name": name, "value": value, "url": url, "httpOnly": true, "sameSite": "Lax" }] }), None)?;
+        let mut params = json!({ "cookies": [{ "name": name, "value": value, "url": url, "httpOnly": true, "sameSite": "Lax" }] });
+        if let Some(context) = &self.context {
+            params["browserContextId"] = json!(context);
+        }
+        self.send("Storage.setCookies", params, None)?;
         Ok(())
     }
 

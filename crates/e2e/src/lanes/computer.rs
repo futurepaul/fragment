@@ -301,7 +301,7 @@ pub fn screenshots(s: &mut Suite, api: &Api) -> Result<()> {
     let told = s.openrouter.chats().iter().any(|c| c.to_string().contains("it will be shown with your answer in the chat"));
     s.ok("the model reads that an image was kept for the chat, not the image", told, "");
     // and the chat's page shows it
-    if let Some(mut chrome) = crate::browser::Browser::launch(&s.scratch)? {
+    if let Some(mut chrome) = s.browser()? {
         let page = chrome.open(&api.site_url(&chat, &format!("?view={view_token}")))?;
         chrome.viewport(&page, 900, 900, false)?;
         let drawn = chrome.until(&page, "[...document.querySelectorAll('img.shot')].some(i => i.complete && i.naturalWidth > 500)", wait);
