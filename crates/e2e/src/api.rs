@@ -404,6 +404,14 @@ impl Socket {
         }
     }
 
+    /// The very next frame, which must be of `kind`: a check that nothing
+    /// else came first (`until` would skip it).
+    pub fn expect(&mut self, kind: &str) -> Result<Value> {
+        let v = self.next()?;
+        anyhow::ensure!(v["type"] == kind, "the next frame is not {kind}: {v}");
+        Ok(v)
+    }
+
     /// Frames until one of `kind` arrives (at most `limit` frames).
     pub fn until(&mut self, kind: &str, limit: usize) -> Result<Value> {
         for _ in 0..limit {

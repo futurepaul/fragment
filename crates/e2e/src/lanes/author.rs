@@ -342,10 +342,18 @@ pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and the old page's list drops a socket that left", left == json!({ "type": "presence", "list": [] }), &left);
     old.close();
     s.ok("a visitor's socket without a cookie gets one, as a call does", set.iter().any(|c| c.starts_with("fragment_anon=") && c.contains("HttpOnly")), format!("{set:?}"));
+    // b heard the new page's presence arrive and leave: past those two
+    for _ in 0..2 {
+        b.until("presence", 5)?;
+    }
+    // the pong says the unsubscribe was read; then a mutation's first
+    // frame is its change signal, which a record still followed would precede
     b.send(&json!({ "type": "unsubscribe", "channel": "room" }))?;
+    b.send(&json!({ "type": "ping" }))?;
+    let pong = b.expect("pong");
     api.op(&owner, &name, "say", "l4", json!({ "text": "after unsubscribe" }))?;
-    let next = b.until("changed", 5)?;
-    s.ok("unsubscribing stops the records (the change signal still comes)", next["type"] == "changed", &next);
+    let next = b.expect("changed");
+    s.ok("unsubscribing stops the records: the next frame is the change signal", pong.is_ok() && next.is_ok(), format!("{pong:?} {next:?}"));
 
     // a visitor's socket closes when the fragment stops being public
     api.signed(&owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "link" })))?;
