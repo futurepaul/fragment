@@ -117,6 +117,15 @@ fn clip(s: &str) -> String {
     s.chars().take(ERROR_MAX_CHARS).collect()
 }
 
+/// What `kept_answers` found for a run's first steps.
+enum Kept {
+    All(Vec<StepResult>),
+    /// The first step with no kept answer.
+    Missing(usize),
+    /// Together they are over `JOB_RESULTS_MAX_BYTES`.
+    TooLarge,
+}
+
 /// A `runs` row as the cell wrote it (`RUN_COLUMNS`), decoded once. Its
 /// input and output are read where they are needed.
 pub(crate) struct RunRow {
@@ -585,8 +594,10 @@ impl FragmentCell {
             self.keep_step(run_id, attempt, f.index, &StepResult { kind: f.kind, outcome: StepOutcome::Error(clip(&f.error)) })?;
         }
         let results = match self.kept_answers(run_id, attempt, count)? {
-            Ok(results) => results,
-            Err(why) => return fail(why),
+            Kept::All(results) => results,
+            Kept::Missing(_) if self.began_before_answers_were_kept(run_id)? => return self.resume(&run).await,
+            Kept::Missing(index) => return fail(format!("step {index} has no kept answer: replay it")),
+            Kept::TooLarge => return fail(format!("its step results are over {} bytes together", limits::JOB_RESULTS_MAX_BYTES)),
         };
         let op = run.op.clone();
         let input = self.run_input(run_id)?;
@@ -655,10 +666,38 @@ impl FragmentCell {
         }
     }
 
+    /// Whether a run's attempt was launched before this cell kept step
+    /// answers (`MetaKey::StepsKeptSince`): a run in flight across the
+    /// deploy that began keeping them.
+    fn began_before_answers_were_kept(&self, run: i64) -> CellResult<bool> {
+        let since: i64 = match self.meta(MetaKey::StepsKeptSince)? {
+            Some(at) => at.parse().map_err(|_| CellError::host(format!("the stored steps_kept_since {at:?} is not a time")))?,
+            None => return Err(CellError::host("the schema writes steps_kept_since, and it is not there")),
+        };
+        let rows = self.rows("SELECT launched_at FROM runs WHERE id = ?", vec![SqlStorageValue::Integer(run)])?;
+        Ok(rows.first().and_then(|r| r["launched_at"].as_i64()).is_some_and(|at| at < since))
+    }
+
+    /// A run in flight across the deploy that began keeping step answers
+    /// finds none: it starts again as its next attempt, once (that attempt
+    /// launches after the mark), as a replay would. A call step replays by
+    /// its op id; a fetch or a sleep runs again. Its Workflow stops.
+    async fn resume(&self, run: &RunRow) -> CellResult<Value> {
+        self.exec(
+            "UPDATE runs SET status = 'queued', attempt = attempt + 1, error = NULL, output = NULL, finished_at = NULL, launched_at = NULL
+             WHERE id = ? AND attempt = ?",
+            vec![SqlStorageValue::Integer(run.id), SqlStorageValue::Integer(run.attempt.into())],
+        )?;
+        let summary = format!("{} run #{} began before step answers were kept: attempt {} starts it again", run.op, run.id, run.attempt + 1);
+        self.event("run.resumed", &summary, json!({ "run": run.id, "attempt": run.attempt + 1 }));
+        self.launch_queued().await;
+        Ok(json!({ "stop": true }))
+    }
+
     /// The kept answers of a run's first `count` steps, in order, or why the
-    /// run cannot go on: one is missing (a run started before the cell kept
-    /// answers: replay it), or together they are over their limit.
-    fn kept_answers(&self, run: i64, attempt: u32, count: u32) -> CellResult<Result<Vec<StepResult>, String>> {
+    /// run cannot go on: the first step without one, or answers that are
+    /// over their limit together.
+    fn kept_answers(&self, run: i64, attempt: u32, count: u32) -> CellResult<Kept> {
         let rows: Vec<StepRow> = self.typed(
             "SELECT idx, kind, value, error FROM steps WHERE run = ? AND attempt = ? AND idx < ? ORDER BY idx",
             vec![SqlStorageValue::Integer(run), SqlStorageValue::Integer(attempt.into()), SqlStorageValue::Integer(count.into())],
@@ -671,14 +710,14 @@ impl FragmentCell {
             }
             bytes += row.size();
             if bytes > limits::JOB_RESULTS_MAX_BYTES {
-                return Ok(Err(format!("its step results are over {} bytes together", limits::JOB_RESULTS_MAX_BYTES)));
+                return Ok(Kept::TooLarge);
             }
             answers.push(row.answer());
         }
         if answers.len() != count as usize {
-            return Ok(Err(format!("step {} has no kept answer (the run began before answers were kept): replay it", answers.len())));
+            return Ok(Kept::Missing(answers.len()));
         }
-        Ok(Ok(answers))
+        Ok(Kept::All(answers))
     }
 
     /// Keeps a step's answer, once: a second answer for the same step (a

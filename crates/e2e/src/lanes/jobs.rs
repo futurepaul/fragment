@@ -293,6 +293,32 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{once}; the upstream saw {} requests", upstream.hits("/once").len()),
     );
 
+    // A run in flight across the deploy that began keeping step answers
+    // finds none: it starts again as its next attempt, once, by itself.
+    // A run that loses its answers otherwise is held, as before.
+    let forget = |deploy: bool| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": steps, "op": "forget-steps", "deploy": deploy })));
+    let r = api.op(&owner, &steps, "nap", "across", json!({ "ms": 2000 }))?;
+    let across = started(&r);
+    let napping = settle(api, &owner, &steps, across, &["running"], long);
+    let r = forget(true)?;
+    let resumed = settle(api, &owner, &steps, across, &["succeeded", "held"], long);
+    let said = events(api, &owner, &steps).into_iter().any(|e| e["kind"] == "run.resumed" && e["data"]["run"] == across);
+    s.ok(
+        "a run in flight across the deploy that began keeping answers starts again by itself, once, and finishes",
+        napping["status"] == "running" && r.status == 200 && resumed["status"] == "succeeded" && resumed["attempt"] == 2 && said,
+        format!("{resumed}; run.resumed logged: {said}"),
+    );
+    let r = api.op(&owner, &steps, "nap", "lost", json!({ "ms": 2000 }))?;
+    let lost = started(&r);
+    settle(api, &owner, &steps, lost, &["running"], long);
+    forget(false)?;
+    let held = settle(api, &owner, &steps, lost, &["succeeded", "held"], long);
+    s.ok(
+        "a run launched since, whose answers are lost, is held (replay it), not started again",
+        held["status"] == "held" && held["attempt"] == 1 && held["error"].as_str().is_some_and(|e| e.contains("no kept answer")),
+        &held,
+    );
+
     // the CLI
     let home = s.dir("jobs-cli");
     s.login(api, &home);

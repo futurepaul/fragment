@@ -391,6 +391,16 @@ impl FragmentCell {
                 self.live_forget();
                 json!({ "ok": true })
             }
+            Some("forget-steps") => {
+                // the kept answers of every run in flight go; with `deploy`,
+                // now is when answers began to be kept, as the deploy that
+                // began keeping them wrote
+                self.exec("DELETE FROM steps WHERE run IN (SELECT id FROM runs WHERE status IN ('queued', 'running'))", vec![])?;
+                if body["deploy"] == true {
+                    self.set_meta(MetaKey::StepsKeptSince, &js::now_ms().to_string())?;
+                }
+                json!({ "ok": true })
+            }
             Some("age-live") => {
                 let ms = body["ms"].as_i64().filter(|ms| *ms > 0).ok_or_else(|| CellError::invalid("ms: a positive number"))?;
                 json!({ "aged": self.live_age(ms)? })
@@ -430,7 +440,7 @@ impl FragmentCell {
                 json!({ "ok": true })
             }
             Some("code-builds") => json!({ "builds": self.app.builds() }),
-            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, forget-live, age-live, drop-live, ledger, age, members, code-before-tables, or code-builds")),
+            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, forget-steps, forget-live, age-live, drop-live, ledger, age, members, code-before-tables, or code-builds")),
         })
     }
 }
