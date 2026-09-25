@@ -2,7 +2,8 @@
 //! phase 6's acceptance): its owner's apps and files open into the viewer,
 //! panes reorder and close, both sides collapse, it works at phone width,
 //! and the layout survives a reload. Every frame is a fragment of the
-//! owner's, signed in on its own origin.
+//! owner's, signed in on its own origin through the desktop's `__frame`,
+//! which its owner allows in its share sheet (here, the signed API).
 
 use std::time::Duration;
 
@@ -17,7 +18,7 @@ use crate::browser::{Browser, Page};
 use crate::Suite;
 
 /// A picture (1×1 PNG) an answer shows.
-const DOT_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+pub(super) const DOT_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
 /// The viewer's panes, top to bottom.
 const PANES: &str = "[...document.querySelectorAll('.pane')].filter(p => !p.hidden).sort((a, b) => a.style.gridRow - b.style.gridRow).map(p => p.dataset.key)";
@@ -70,6 +71,8 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "writing a file: {r}");
     let label = |name: &str| name.split('.').next().unwrap_or("").to_string();
     let wait = Duration::from_secs(20);
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{desk}/grants/frame"), Some(&json!({ "granted": true })))?;
+    s.ok("the owner lets the desktop show their fragments inside it", r.status == 200, &r);
 
     // signed in on the platform, the browser walks to the desktop's origin
     chrome.set_cookie(&format!("http://{suffix}:{}/", api.port), "fragment_session", &session)?;
@@ -83,17 +86,18 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // frames the platform's approval of a key of its own. The two are one
     // site, so the owner's platform session rides into the frame; the
     // platform refuses to be framed, so nothing shows there to lay under a
-    // click. Its redirects still work in a frame: that is how every frame
-    // on the desktop signs in.
+    // click. Its sign-in redirects still run in a frame, but what they mint
+    // is a top-level page's, which a frame's `__signin` refuses (and spends):
+    // a frame signs in only through the page that frames it (`__frame`).
     let attacker = chrome.open(&api.site_url(&todo, "__signin?return=/"))?;
     let on_todo = format!("location.host.startsWith({:?}) && location.pathname === '/' && document.readyState === 'complete'", format!("{}--", label(&todo)));
     anyhow::ensure!(chrome.until(&attacker, &on_todo, wait), "the todo's page did not open");
     let frame = |chrome: &mut Browser, src: &str| chrome.eval(&attacker, &format!("(() => {{ const f = document.createElement('iframe'); f.src = {src:?}; document.body.append(f); return true; }})()"));
     frame(&mut chrome, &format!("{}/auth/fragment?name={notes}&return=/", api.base))?;
-    let signed_in = s.eventually(wait, || {
+    let signed_in = s.eventually(Duration::from_secs(5), || {
         chrome.eval_in_frame(&attacker, &format!("{}--", label(&notes)), "location.pathname === '/' && document.readyState === 'complete'").ok() == Some(json!(true))
     });
-    s.ok("(the owner's platform session rides into a frame on a fragment's page: a redirect through the platform signs it in on the fragment)", signed_in, "");
+    s.ok("a fragment's page that frames the platform's sign-in for another fragment gets no session there: the frame's __signin refuses a top-level page's redemption", !signed_in, "");
     let key = fragment_nip98::Keys::generate();
     frame(&mut chrome, &api.approval_link(&key, 0))?;
     let approval = |chrome: &mut Browser| chrome.eval_in_frame(&attacker, "/cli?key=", "document.body?.innerText ?? ''").ok().and_then(|v| v.as_str().map(str::to_string));

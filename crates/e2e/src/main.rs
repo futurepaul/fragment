@@ -32,6 +32,21 @@ use serde_json::Value;
 use api::Api;
 
 pub const SUFFIX: &str = "fragment.localhost";
+/// Where the next node puts the platform and the fragments, as a browser
+/// tells sites apart: Chrome takes an unknown top-level domain's last label
+/// as its suffix, so every `*.fragment.localhost` is one site, and every
+/// `*.localhost` its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// The platform on 127.0.0.1, the fragments under `fragment.localhost`.
+    Plain,
+    /// As fragment.club is: the platform on the fragments' domain
+    /// (`fragment.localhost`), one site with every fragment.
+    OneSite,
+    /// As a domain the Public Suffix List lists: every fragment its own
+    /// site (`<flat>.localhost`), the platform at `fragment.localhost`.
+    Listed,
+}
 const ORG: &str = "fragment-e2e";
 /// The poll backstop runs this often here (5 minutes in production).
 pub const POLL_S: u32 = 2;
@@ -94,8 +109,8 @@ pub struct Suite {
     agents_project: PathBuf,
     /// More environment for the next node started (celld settings a lane tries).
     pub node_env_extra: Vec<(String, String)>,
-    /// The next node's platform is on the fragments' domain (`start_as_browsers_see_it`).
-    platform_on_suffix: bool,
+    /// The next node's shape (`start_as_browsers_see_it`, `start_listed`).
+    shape: Shape,
 }
 
 impl Suite {
@@ -169,7 +184,7 @@ impl Suite {
     fn recover(&mut self) -> Result<()> {
         self.openrouter.clear_script();
         self.node_env_extra.clear();
-        self.platform_on_suffix = false;
+        self.shape = Shape::Plain;
         if let Some(node) = self.node.take() {
             // one that does not stop in time is killed, and starts all the same
             if let Err(e) = node.stop() {
@@ -203,12 +218,22 @@ impl Suite {
 
     /// Starts the node as fragment.club is shaped: the platform on the
     /// fragments' own domain (`fragment.localhost`), so a browser treats
-    /// the platform and every fragment as one site. A fragment framed in
-    /// another's page signs in through the platform only then (the desktop).
+    /// the platform and every fragment as one site.
     pub fn start_as_browsers_see_it(&mut self) -> Result<Api> {
-        self.platform_on_suffix = true;
+        self.start_shaped(Shape::OneSite)
+    }
+
+    /// Starts the node as a domain on the Public Suffix List is shaped:
+    /// every fragment its own site (`<flat>.localhost`), the platform at
+    /// `fragment.localhost` (docs/fragment-boats.md, the e2e's listed mode).
+    pub fn start_listed(&mut self) -> Result<Api> {
+        self.start_shaped(Shape::Listed)
+    }
+
+    fn start_shaped(&mut self, shape: Shape) -> Result<Api> {
+        self.shape = shape;
         let started = self.start(false, true);
-        self.platform_on_suffix = false;
+        self.shape = Shape::Plain;
         let mut api = started?;
         api.base = format!("http://{SUFFIX}:{}", self.port);
         Ok(api)
@@ -222,7 +247,7 @@ impl Suite {
             codestorage_org: ORG.into(),
             codestorage_key_pem: self.org_key.clone(),
             codestorage_url: self.fake.url.clone(),
-            host_suffix: suffix.then(|| SUFFIX.to_string()),
+            host_suffix: suffix.then(|| self.suffix().to_string()),
             poll_interval_s: POLL_S,
             egress_local: true,
             job_retry_delay_s: 1,
@@ -234,9 +259,9 @@ impl Suite {
                 api_key: WORKOS_KEY.into(),
                 api_url: Some(self.workos.url.clone()),
             }),
-            platform_url: Some(match self.platform_on_suffix && suffix {
-                true => format!("http://{SUFFIX}:{}", self.port),
-                false => format!("http://127.0.0.1:{}", self.port),
+            platform_url: Some(match (self.shape, suffix) {
+                (Shape::OneSite | Shape::Listed, true) => format!("http://{SUFFIX}:{}", self.port),
+                _ => format!("http://127.0.0.1:{}", self.port),
             }),
             openrouter_management: Some(OPENROUTER_MANAGEMENT.into()),
             budget_usd: Some(BUDGET_USD.into()),
@@ -271,7 +296,15 @@ impl Suite {
         };
         let (node, _) = devstack::Node::start(&self.tools, &opts)?;
         self.node = Some(node);
-        Ok(Api::new(self.port, suffix.then_some(SUFFIX)))
+        Ok(Api::new(self.port, suffix.then_some(self.suffix())))
+    }
+
+    /// The fragments' suffix in the next node's shape.
+    fn suffix(&self) -> &'static str {
+        match self.shape {
+            Shape::Listed => "localhost",
+            Shape::Plain | Shape::OneSite => SUFFIX,
+        }
     }
 
     /// The agents' API: the node's own (the agents' script is co-hosted),
@@ -491,7 +524,7 @@ fn main() -> Result<()> {
         project,
         agents_project,
         node_env_extra: vec![],
-        platform_on_suffix: false,
+        shape: Shape::Plain,
     };
     s.start(true, true)?;
     lanes::run(&mut s);

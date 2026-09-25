@@ -11,6 +11,7 @@ mod control;
 mod deliver;
 mod desktop;
 mod identities;
+mod isolation;
 pub(crate) mod jobs;
 mod keys;
 mod limits;
@@ -54,6 +55,8 @@ const LANES: &[Lane] = &[
     desktop::desktop,
     share::share,
     phase7::phase7,
+    isolation::isolation,
+    isolation::frames,
     app::ops,
     app::public,
     app::effects,
