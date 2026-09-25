@@ -689,11 +689,18 @@ impl FragmentCell {
     /// the anonymous standing may not read, since no one sees less than
     /// that (`access::effective_role` only adds to it). A refusal is the
     /// resolved caller's (401 or 403).
-    pub(crate) async fn reader<'a>(&self, facts: &Facts, caller: &'a Caller, link: bool) -> CellResult<Cow<'a, Caller>> {
+    ///
+    /// Asking the registry lets other requests run meanwhile (a deploy's
+    /// pin move among them), so `facts` are read again after it: the
+    /// answer's tree rows and the pin it streams from are one snapshot.
+    pub(crate) async fn reader<'a>(&self, facts: &mut Facts, caller: &'a Caller, link: bool) -> CellResult<Cow<'a, Caller>> {
         if caller.unresolved.is_some() && self.admit(facts, caller, link, Role::Public).is_ok() {
             return Ok(Cow::Borrowed(caller));
         }
         let caller = self.identified(caller, &facts.name).await?;
+        if matches!(caller, Cow::Owned(_)) {
+            *facts = self.facts()?;
+        }
         self.admit(facts, &caller, link, Role::Public)?;
         Ok(caller)
     }

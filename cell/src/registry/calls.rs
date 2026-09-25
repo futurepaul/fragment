@@ -264,8 +264,15 @@ pub(crate) enum TestHook {
     /// How many calls the Registry has had since it started (`{calls:
     /// null}`): a test counts a request's round trips by the difference.
     Calls,
+    /// The next call waits this many milliseconds (at most
+    /// `TEST_HOLD_MAX_MS`) before it is answered: a test lets other
+    /// requests run while a fragment waits on the Registry.
+    Hold(u32),
     Signins(SigninsHook),
 }
+
+/// The longest `TestHook::Hold`.
+pub(crate) const TEST_HOLD_MAX_MS: u32 = 10_000;
 
 /// The controls over sign-in's rows.
 #[derive(Serialize, Deserialize)]
@@ -292,6 +299,7 @@ pub(crate) struct SigninCounts {
 pub(crate) enum TestAnswer {
     Down { down: bool },
     Calls { calls: u64 },
+    Hold { hold: u32 },
     Signins(SigninCounts),
 }
 

@@ -183,7 +183,7 @@ impl FragmentCell {
             json_response(&answer)?
         } else if path == "__people" {
             // names for a page: a person's username and picture, or whose agent
-            self.reader(&facts, caller, link).await?;
+            self.reader(&mut facts, caller, link).await?;
             let ids: Vec<String> = url.query_pairs().filter(|(k, _)| k == "id").map(|(_, v)| v.into_owned()).collect();
             let mut answer = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids }).await?;
             let platform = self.cfg.platform(&caller.url);

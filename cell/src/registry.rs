@@ -25,8 +25,9 @@
 //!   POST /username/claim  {by, username}          the asker's username, chosen once
 //!   POST /username/lookup {username}              → the facts of whoever holds it
 //!   POST /picture/set     {by, sha, mime}         the asker's picture (its bytes are in BLOBS)
-//!   POST /test    {down} | {calls} | {signins}   dev fleets: answer 503 to everything else,
-//!                                         count the calls since the cell started, or count,
+//!   POST /test    {down} | {calls} | {hold} | {signins}   dev fleets: answer 503 to
+//!                                         everything else, count the calls since the cell
+//!                                         started, hold the next call's answer, or count,
 //!                                         expire, or sweep sign-in's rows
 //!
 //! Each route's body and answer are types in `calls.rs`, shared with the
@@ -74,7 +75,7 @@ pub(crate) mod calls;
 mod signin;
 use calls::{
     Active, AddKey, By, Call, CheckKey, ClaimUsername, Claimed, FindUsername, Holder, Lookup, Picture, Profile, Profiles, ProfilesAnswer,
-    RegisterAgent, Released, ReleaseUsername, Resolve, RevokeKey, SetPicture, TestAnswer, TestHook, View,
+    RegisterAgent, Released, ReleaseUsername, Resolve, RevokeKey, SetPicture, TestAnswer, TestHook, View, TEST_HOLD_MAX_MS,
 };
 pub use signin::SESSION_TTL_MS;
 
@@ -112,6 +113,9 @@ pub struct RegistryCell {
     /// The calls answered (or refused) since this cell started, the hooks'
     /// aside: what a test counts a request's Registry round trips by.
     calls: Cell<u64>,
+    /// Dev fleets' test hook: how long the next call waits before it is
+    /// answered (0: it does not), set only by the hook.
+    hold_ms: Cell<u32>,
 }
 
 impl DurableObject for RegistryCell {
@@ -120,7 +124,7 @@ impl DurableObject for RegistryCell {
         state.storage().sql().exec(signin::SCHEMA, None).expect("the sign-in schema applies");
         let cfg = Config::from_env(&env);
         assert!(cfg.signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
-        RegistryCell { state, env, cfg, down: Cell::new(false), calls: Cell::new(0) }
+        RegistryCell { state, env, cfg, down: Cell::new(false), calls: Cell::new(0), hold_ms: Cell::new(0) }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -613,6 +617,13 @@ impl RegistryCell {
                 Ok(TestAnswer::Down { down })
             }
             TestHook::Calls => Ok(TestAnswer::Calls { calls: self.calls.get() }),
+            TestHook::Hold(ms) => {
+                if ms > TEST_HOLD_MAX_MS {
+                    return Err(CellError::invalid(format!("hold at most {TEST_HOLD_MAX_MS} ms")));
+                }
+                self.hold_ms.set(ms);
+                Ok(TestAnswer::Hold { hold: ms })
+            }
             TestHook::Signins(hook) => Ok(TestAnswer::Signins(self.signins_hook(hook).await?)),
         }
     }
@@ -629,6 +640,11 @@ impl RegistryCell {
             return reply::<TestHook>(self.test_hook(body(&bytes)?).await);
         }
         self.calls.set(self.calls.get() + 1);
+        let hold = self.hold_ms.replace(0);
+        if hold > 0 {
+            // other calls are answered meanwhile: the Registry's turn is open
+            Delay::from(std::time::Duration::from_millis(hold.into())).await;
+        }
         if self.down.get() {
             return Err(CellError::new(ErrorCode::RegistryUnavailable, "the registry is down (a test hook)"));
         }
