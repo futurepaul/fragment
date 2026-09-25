@@ -93,9 +93,17 @@ pub mod limits {
     /// Live sockets one fragment holds open at once: each presence change
     /// and each mutation's change signal goes to all of them.
     pub const LIVE_SOCKETS_MAX: usize = 1000;
-    /// Queries one live socket may run between two changes to the
-    /// fragment (a page's live views re-run after changes), and at once.
+    /// Queries one principal may run over its live sockets between two
+    /// changes to the fragment (a page's live views re-run after changes),
+    /// and at once: its sockets share them, so reconnecting refills none.
     pub const LIVE_QUERIES_MAX: u32 = 16;
+    /// Live sockets one principal holds open on a fragment at once (a
+    /// person's tabs), so no one client takes every socket a fragment has.
+    pub const LIVE_SOCKETS_PER_PRINCIPAL: usize = 8;
+    /// How long a signed-in socket acts as who it connected as before the
+    /// fragment asks the registry again, at the socket's next frame: a
+    /// sign-out, an ended session, or a revoked key holds within this.
+    pub const LIVE_IDENTITY_MS: i64 = 60_000;
     /// Modules an app may load besides `app.mjs` (`applib/`), and their total size.
     pub const APPLIB_FILES_MAX: usize = 64;
     pub const APP_MODULES_MAX_BYTES: usize = 4 * 1024 * 1024;

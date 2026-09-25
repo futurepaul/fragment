@@ -23,12 +23,25 @@
 //! A query over the socket runs as the socket's principal and role, as its
 //! subscriptions read, and outside the public call budget (ops.rs): no
 //! HTTP request, router, or registry lookup a run. Its bound is the
-//! socket's own (`fragment_core::live::QueryBudget`).
+//! principal's (`fragment_core::live::QueryBudget`), shared by its
+//! sockets. Opening a socket at the public role is one call of the public
+//! budget, so reconnecting to get more is bounded as calls are.
 //!
-//! A fragment holds at most `LIVE_SOCKETS_MAX` sockets. Presence comes
-//! whole in `hello`, then one change at a time, each encoded once and sent
-//! to every socket (the O(N) bytes of a change, never O(N²)); a socket's
-//! changes past `PRESENCE_PER_S` a second are dropped.
+//! A signed-in socket acts as who it connected as for `LIVE_IDENTITY_MS`;
+//! at its next frame after that, the registry is asked again with the
+//! credential it connected with, which this activation holds in memory
+//! only. A socket whose credential no longer names its principal (a
+//! sign-out, an ended session, a revoked key), or whose credential this
+//! activation does not hold (it woke from hibernation), is closed with
+//! 4001, and its page reconnects as whoever it is now.
+//!
+//! A fragment holds at most `LIVE_SOCKETS_MAX` sockets, and a principal at
+//! most `LIVE_SOCKETS_PER_PRINCIPAL`. Presence comes whole in `hello`,
+//! then one change at a time, each encoded once and sent to every socket
+//! (the O(N) bytes of a change, never O(N²)); a socket's changes past
+//! `PRESENCE_PER_S` a second are dropped. A page loaded before that
+//! protocol (its library connects without `?v=2`) hears the whole list
+//! instead, as it did (`LEGACY_TAG`; docs/technical-debt-ledger.md).
 //!
 //! What this activation knows of its sockets besides their attachments
 //! (`LiveMemory`) is gathered from them again after the object wakes.
@@ -41,22 +54,32 @@ use fragment_core::npub;
 use fragment_proto::live::{Answer, Cursor, LiveIn, LiveOut, Present, Query, Subscribe};
 use fragment_proto::{limits, valid_op_id, ChannelRecord, ErrorBody, ErrorCode, OpKind, Role, Via};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
-use crate::fragment::{Caller, FragmentCell};
+use crate::fragment::{Caller, FragmentCell, MetaKey};
 use crate::js;
 use crate::ops::Invocation;
+use crate::routed::Credential;
 
 /// Channels one socket may follow.
 const SUBSCRIPTIONS_MAX: usize = 16;
 /// Records read at a time while a page fills: a page stops at its byte
 /// budget long before a thousand records of 64 KiB are in memory.
 const PAGE_READ_BATCH: usize = 50;
-/// The close code for a socket whose member's role changed: not final, so
-/// the page reconnects and hears its new role.
+/// The close code for a socket whose member's role changed, or whose
+/// identity is checked again: not final, so the page reconnects and hears
+/// who it is now.
 const ROLE_CHANGED: u16 = 4001;
+/// Every live socket's tag, and the tag of those whose page speaks the
+/// presence protocol of one change a frame (its library asks `?v=2`).
+const LIVE_TAG: &str = "live";
+const CURRENT_TAG: &str = "live2";
+/// The tag of a socket whose page was loaded before presence came one
+/// change a frame: it hears the whole list on each change, as it did.
+/// Delete with its ledger entry.
+const LEGACY_TAG: &str = "live1";
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct LiveState {
@@ -70,6 +93,18 @@ pub struct LiveState {
     /// pace was kept, lets its first changes through.
     #[serde(default)]
     pub presence_at: i64,
+    /// When the registry last said who a signed-in socket is (0, as for a
+    /// socket from before this was kept: its next frame asks again).
+    #[serde(default)]
+    pub checked_at: i64,
+}
+
+impl LiveState {
+    /// Whether someone signed in on this socket: an anonymous visitor's
+    /// principal names no one the registry knows.
+    fn signed(&self) -> bool {
+        !self.principal.starts_with(npub::ANON_PREFIX)
+    }
 }
 
 /// What this activation knows of its live sockets besides their
@@ -85,11 +120,16 @@ pub(crate) struct LiveMemory {
     /// so one that left (or went without its close event) stays at most
     /// until then. An append to a channel whose set is empty scans nothing.
     followers: Option<BTreeMap<String, BTreeSet<String>>>,
-    /// Mutations applied in this activation: each refills every socket's
-    /// query budget.
+    /// Mutations applied in this activation: each refills every
+    /// principal's query budget.
     changes: u64,
-    /// Each socket's query budget, by socket id.
+    /// Each principal's query budget, shared by its sockets.
     queries: BTreeMap<String, QueryBudget>,
+    /// The credential each signed-in socket connected with, by socket id:
+    /// what the registry is asked again once `LIVE_IDENTITY_MS` passed.
+    /// Memory only, never an attachment (a credential is not stored); a
+    /// socket this activation holds none for is closed at that point.
+    credentials: BTreeMap<String, Credential>,
 }
 
 fn state_of(ws: &WebSocket) -> Option<LiveState> {
@@ -104,15 +144,17 @@ fn send(ws: &WebSocket, frame: &LiveOut) {
 /// run ended.
 struct Running<'a> {
     cell: &'a FragmentCell,
-    socket: String,
-    id: String,
+    principal: String,
+    /// The run's name in its principal's budget: its socket's and the
+    /// page's id, so two tabs' ids never collide.
+    run: String,
 }
 
 impl Drop for Running<'_> {
     fn drop(&mut self) {
-        // the socket's budget went with it if it closed meanwhile
-        if let Some(budget) = self.cell.live.borrow_mut().queries.get_mut(&self.socket) {
-            budget.done(&self.id);
+        // the budget went if the map was pruned meanwhile
+        if let Some(budget) = self.cell.live.borrow_mut().queries.get_mut(&self.principal) {
+            budget.done(&self.run);
         }
     }
 }
@@ -122,16 +164,35 @@ fn present_on(sockets: &[WebSocket]) -> Vec<Present> {
     sockets.iter().filter_map(state_of).filter_map(|s| Some(Present { id: s.id, principal: s.principal, data: s.presence? })).collect()
 }
 
+/// The whole presence list, as a page loaded before presence came one
+/// change a frame reads it (`{type: "presence", list}`): outside `LiveOut`,
+/// since no current reader decodes it. Delete with `LEGACY_TAG`.
+fn legacy_presence_frame(list: Vec<Present>) -> String {
+    json!({ "type": "presence", "list": list }).to_string()
+}
+
 impl FragmentCell {
-    /// Opens a live socket for a caller who can see the fragment.
-    pub(crate) fn live(&self, req: &Request, caller: &Caller, principal: &str, link: bool) -> CellResult<Response> {
+    /// Opens a live socket for a caller who can see the fragment, resolved
+    /// from `credential` (kept to ask the registry again later).
+    pub(crate) fn live(&self, req: &Request, caller: &Caller, credential: Option<Credential>, principal: &str, link: bool) -> CellResult<Response> {
         if !req.headers().get("upgrade")?.is_some_and(|u| u.eq_ignore_ascii_case("websocket")) {
             return Err(CellError::invalid("__live is a WebSocket; send Upgrade: websocket"));
         }
         let role = self.require(caller, link, Role::Public)?;
-        let sockets = self.state.get_websockets_with_tag("live");
+        let sockets = self.state.get_websockets_with_tag(LIVE_TAG);
         if sockets.len() >= limits::LIVE_SOCKETS_MAX {
             return Err(CellError::new(ErrorCode::RateLimited, format!("this fragment has {} live sockets open, its most; try again later", sockets.len())));
+        }
+        let display = npub::display(principal);
+        let who = format!("who:{display}");
+        let mine = self.state.get_websockets_with_tag(&who).len();
+        if mine >= limits::LIVE_SOCKETS_PER_PRINCIPAL {
+            return Err(CellError::new(ErrorCode::RateLimited, format!("you have {mine} live sockets open on this fragment, the most one may; close a page")));
+        }
+        // Opening a socket is a public call for a caller holding the public
+        // floor alone, so a new socket's queries are paid for once.
+        if role == Role::Public && !self.rate.borrow_mut().allow(principal, js::now_ms()) {
+            return Err(CellError::new(ErrorCode::RateLimited, "too many public calls this minute; retry shortly"));
         }
         let presence = present_on(&sockets);
         let tag = match caller.principal() {
@@ -139,19 +200,47 @@ impl FragmentCell {
             _ if link => "view".to_string(),
             _ => "anon".to_string(),
         };
+        let current = caller.url.query_pairs().any(|(k, v)| k == "v" && v == "2");
         let pair = WebSocketPair::new()?;
-        self.state.accept_websocket_with_tags(&pair.server, &["live", &tag]);
-        let st = LiveState { id: js::random_hex::<8>(), principal: npub::display(principal), role, subs: vec![], presence: None, presence_at: 0 };
+        self.state.accept_websocket_with_tags(&pair.server, &[LIVE_TAG, &tag, &who, if current { CURRENT_TAG } else { LEGACY_TAG }]);
+        let signed_in = caller.principal().is_some();
+        let st = LiveState {
+            id: js::random_hex::<8>(),
+            principal: display,
+            role,
+            subs: vec![],
+            presence: None,
+            presence_at: 0,
+            checked_at: if signed_in { js::now_ms() } else { 0 },
+        };
+        assert_eq!(st.signed(), signed_in, "a signed-in socket's principal is not an anonymous one");
+        if let (true, Some(credential)) = (signed_in, credential) {
+            self.live.borrow_mut().credentials.insert(st.id.clone(), credential);
+        }
         pair.server.serialize_attachment(&st)?;
-        send(&pair.server, &LiveOut::Hello { id: st.id, principal: st.principal, role, presence });
+        send(&pair.server, &LiveOut::Hello { id: st.id, principal: st.principal, role, presence: presence.clone() });
+        if !current {
+            self.event("live.legacy-page", "a page loaded before presence came one change a frame connected", json!({}));
+            let _ = pair.server.send_with_str(legacy_presence_frame(presence));
+        }
         Ok(Response::from_websocket(pair.client)?)
     }
 
     /// One socket's presence changed, to every socket (its own too): one
-    /// frame, encoded once, and no attachment read.
+    /// frame, encoded once, and no attachment read. A page from before
+    /// that protocol hears the whole list, read only when one is open.
     fn broadcast_presence(&self, change: Present) {
+        let legacy = self.state.get_websockets_with_tag(LEGACY_TAG);
+        if !legacy.is_empty() {
+            let gone = change.data.is_null().then(|| change.id.clone());
+            let list = present_on(&self.state.get_websockets_with_tag(LIVE_TAG)).into_iter().filter(|p| Some(&p.id) != gone.as_ref()).collect();
+            let frame = legacy_presence_frame(list);
+            for ws in &legacy {
+                let _ = ws.send_with_str(&frame);
+            }
+        }
         let frame = LiveOut::Presence(change).encode();
-        for ws in self.state.get_websockets_with_tag("live") {
+        for ws in self.state.get_websockets_with_tag(CURRENT_TAG) {
             let _ = ws.send_with_str(&frame);
         }
     }
@@ -164,7 +253,7 @@ impl FragmentCell {
         }
         let frame = LiveOut::record_frame(r);
         let mut found = BTreeSet::new();
-        for ws in self.state.get_websockets_with_tag("live") {
+        for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
             let Some(st) = state_of(&ws) else { continue };
             if st.subs.contains(&r.channel) {
                 let _ = ws.send_with_str(&frame);
@@ -179,7 +268,7 @@ impl FragmentCell {
     pub(crate) fn broadcast_changed(&self, op: &str) {
         self.live.borrow_mut().changes += 1;
         let frame = LiveOut::Changed { op: op.to_string() }.encode();
-        for ws in self.state.get_websockets_with_tag("live") {
+        for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
             let _ = ws.send_with_str(&frame);
         }
     }
@@ -190,7 +279,7 @@ impl FragmentCell {
         let mut memory = self.live.borrow_mut();
         let followers = memory.followers.get_or_insert_with(|| {
             let mut gathered: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-            for st in self.state.get_websockets_with_tag("live").iter().filter_map(state_of) {
+            for st in self.state.get_websockets_with_tag(LIVE_TAG).iter().filter_map(state_of) {
                 for c in st.subs {
                     gathered.entry(c).or_default().insert(st.id.clone());
                 }
@@ -219,6 +308,21 @@ impl FragmentCell {
         *self.live.borrow_mut() = LiveMemory::default();
     }
 
+    /// Test fleets: makes every socket's identity check `ms` older, as if
+    /// that long had passed (`/api/test/fragment` `age-live`). Answers how
+    /// many sockets it aged.
+    pub(crate) fn live_age(&self, ms: i64) -> CellResult<usize> {
+        assert!(self.cfg.test_hooks, "only a test fleet ages its sockets on demand");
+        let sockets = self.state.get_websockets_with_tag(LIVE_TAG);
+        for ws in &sockets {
+            if let Some(mut st) = state_of(ws) {
+                st.checked_at -= ms;
+                ws.serialize_attachment(&st)?;
+            }
+        }
+        Ok(sockets.len())
+    }
+
     /// Closes the sockets of `tag` so that their pages reconnect: a
     /// member's role changed.
     pub(crate) fn reopen_sockets(&self, tag: &str, reason: &str) {
@@ -230,7 +334,10 @@ impl FragmentCell {
     /// One message on a live socket: decoded, then answered. A refusal
     /// goes back on the socket as an error frame; the socket stays open.
     pub(crate) async fn live_message(&self, ws: &WebSocket, text: &str) {
-        let Some(st) = state_of(ws) else { return };
+        let Some(mut st) = state_of(ws) else { return };
+        if !self.still_who(ws, &mut st).await {
+            return;
+        }
         let answered = match serde_json::from_str::<LiveIn>(text) {
             Ok(LiveIn::Query(query)) => {
                 send(ws, &LiveOut::Result(self.live_query(&st, query).await));
@@ -306,12 +413,41 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// A query over the socket, admitted by the socket's budget and
+    /// Whether a socket still acts as who it connected as: an anonymous
+    /// one always; a signed-in one for `LIVE_IDENTITY_MS`, then as long as
+    /// the registry, asked again with its credential, names the same
+    /// principal. Otherwise it is closed with 4001 (a registry that cannot
+    /// answer closes it too: fail closed), and its page reconnects.
+    async fn still_who(&self, ws: &WebSocket, st: &mut LiveState) -> bool {
+        let now = js::now_ms();
+        if !st.signed() || now - st.checked_at < limits::LIVE_IDENTITY_MS {
+            return true;
+        }
+        let credential = self.live.borrow().credentials.get(&st.id).cloned();
+        let same = match (credential, self.meta(MetaKey::Name)) {
+            (Some(credential), Ok(Some(name))) => match credential.resolve(&self.env, &name).await {
+                Ok(Some(signed)) => npub::display(&signed.identity.id) == st.principal,
+                Ok(None) | Err(_) => false,
+            },
+            _ => false,
+        };
+        if same {
+            st.checked_at = now;
+            if ws.serialize_attachment(&*st).is_ok() {
+                return true;
+            }
+        }
+        self.live.borrow_mut().credentials.remove(&st.id);
+        let _ = ws.close(Some(ROLE_CHANGED), Some("who you are is checked again: reconnect"));
+        false
+    }
+
+    /// A query over the socket, admitted by its principal's budget and
     /// answered with its id: a refusal is the answer's, as `__op` would
     /// refuse it.
     async fn live_query(&self, st: &LiveState, query: Query) -> Answer {
         let Query { id, op, input } = query;
-        let outcome = match self.admit_query(&st.id, &id) {
+        let outcome = match self.admit_query(&st.principal, &st.id, &id) {
             Ok(running) => {
                 let ran = self.socket_query(st, &op, &id, input).await;
                 drop(running);
@@ -322,25 +458,27 @@ impl FragmentCell {
         Answer { id, outcome: outcome.map_err(|e| ErrorBody { error: e.code, message: e.message }) }
     }
 
-    fn admit_query(&self, socket: &str, id: &str) -> CellResult<Running<'_>> {
+    fn admit_query(&self, principal: &str, socket: &str, id: &str) -> CellResult<Running<'_>> {
         if !valid_op_id(id) {
             return Err(CellError::invalid("a query's id must match ^[A-Za-z0-9._:-]{1,128}$"));
         }
         let mut memory = self.live.borrow_mut();
         let change = memory.changes;
-        // One budget a socket. Past as many as there may be sockets, the
-        // idle ones go (a socket gone without its close event leaves one);
-        // a live socket's budget that goes starts afresh, still bounded.
-        if memory.queries.len() >= limits::LIVE_SOCKETS_MAX && !memory.queries.contains_key(socket) {
+        // One budget a principal. Past as many as there may be sockets, the
+        // idle ones go (a principal whose sockets all left keeps one until
+        // then); one that goes while its principal is here starts afresh,
+        // which opening sockets (public calls) bounds.
+        if memory.queries.len() >= limits::LIVE_SOCKETS_MAX && !memory.queries.contains_key(principal) {
             memory.queries.retain(|_, budget| !budget.idle());
         }
-        let admitted = memory.queries.entry(socket.to_string()).or_default().admit(id, change);
+        let run = format!("{socket}/{id}");
+        let admitted = memory.queries.entry(principal.to_string()).or_default().admit(&run, change);
         match admitted {
-            Ok(()) => Ok(Running { cell: self, socket: socket.to_string(), id: id.to_string() }),
+            Ok(()) => Ok(Running { cell: self, principal: principal.to_string(), run }),
             Err(QueryRefused::InFlight) => Err(CellError::invalid(format!("query {id} is still running on this socket: one run at a time for each id"))),
             Err(QueryRefused::Spent) => Err(CellError::new(
                 ErrorCode::RateLimited,
-                format!("this socket ran {} queries since the fragment last changed: run it over HTTP, or after the next change", limits::LIVE_QUERIES_MAX),
+                format!("you ran {} queries over live sockets since the fragment last changed: run it over HTTP, or after the next change", limits::LIVE_QUERIES_MAX),
             )),
         }
     }
@@ -402,7 +540,7 @@ impl FragmentCell {
         let Some(st) = state_of(ws) else { return };
         {
             let mut memory = self.live.borrow_mut();
-            memory.queries.remove(&st.id);
+            memory.credentials.remove(&st.id);
             if let Some(followers) = memory.followers.as_mut() {
                 for c in &st.subs {
                     if let Some(sockets) = followers.get_mut(c) {

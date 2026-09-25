@@ -106,6 +106,8 @@ function connect() {
   if (socket || ended) return;
   const url = new URL("__live", base);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  // the frames this library reads: presence one change at a time
+  url.searchParams.set("v", "2");
   const ws = new WebSocket(url);
   socket = ws;
   ws.onopen = () => {
@@ -126,7 +128,7 @@ function connect() {
       const l = asked.get(m.id);
       asked.delete(m.id);
       if (!l) return;
-      // past the socket's own budget for queries: this run goes over HTTP
+      // past its principal's budget for socket queries: this run goes over HTTP
       if (m.error === "rate_limited") viaHttp(l);
       else settle(l, m.error ? { error: new FragmentError(m.status, m) } : { result: m.result });
     } else if (m.type === "record") {

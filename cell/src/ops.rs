@@ -391,6 +391,10 @@ impl FragmentCell {
                 self.live_forget();
                 json!({ "ok": true })
             }
+            Some("age-live") => {
+                let ms = body["ms"].as_i64().filter(|ms| *ms > 0).ok_or_else(|| CellError::invalid("ms: a positive number"))?;
+                json!({ "aged": self.live_age(ms)? })
+            }
             Some("drop-live") => {
                 let code = body["code"].as_u64().and_then(|c| u16::try_from(c).ok()).ok_or_else(|| CellError::invalid("drop-live names a close code"))?;
                 for ws in self.state.get_websockets_with_tag("live") {
@@ -426,7 +430,7 @@ impl FragmentCell {
                 json!({ "ok": true })
             }
             Some("code-builds") => json!({ "builds": self.app.builds() }),
-            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, forget-live, drop-live, ledger, age, members, code-before-tables, or code-builds")),
+            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, forget-live, age-live, drop-live, ledger, age, members, code-before-tables, or code-builds")),
         })
     }
 }
