@@ -1,11 +1,9 @@
 /* fragment's service worker: push only, no fetch handler, ever */
 self.addEventListener("push", (event) => {
-  let p = {};
+  let p = null;
   try {
-    p = (event.data && event.data.json()) || {};
-  } catch (e) {
-    p = {};
-  }
+    p = event.data && event.data.json();
+  } catch (e) {}
   if (!p || typeof p !== "object") p = {};
   const title = (typeof p.title === "string" && p.title) || "fragment";
   const opts = {
