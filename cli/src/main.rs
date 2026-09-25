@@ -512,7 +512,6 @@ fn save_config(key: &str, value: &str) -> Result<PathBuf> {
     Ok(p)
 }
 
-/// What a person's identity looks like in a terminal.
 fn print_identity(v: &IdentityView, this_key: &str) {
     println!("identity: {} ({})", v.id, v.kind.as_str());
     match &v.username {
@@ -762,75 +761,6 @@ fn run(cli: Cli) -> Result<()> {
             println!("key: {}", c.id.npub());
             return Ok(());
         }
-        Cmd::Username { username, release } => {
-            let c = require_client(&cli.host, cli.verbose)?;
-            if release {
-                let u = username.unwrap_or_default();
-                let v = c.call(c.delete(&format!("/api/users/{u}"))?)?;
-                if j {
-                    ok_exit(&v);
-                }
-                println!("released {u} ({}): its person chooses a username again", v["identity"].as_str().unwrap_or(""));
-                return Ok(());
-            }
-            let v = match username {
-                Some(u) => c.call(c.put_json("/api/identities/me/username", &json!({ "username": u }))?)?,
-                None => c.call(c.get("/api/identities/me")?)?,
-            };
-            if j {
-                ok_exit(&v);
-            }
-            match v["username"].as_str() {
-                Some(u) => println!("username: {u}"),
-                None => println!("no username yet: fragment username <name>"),
-            }
-            return Ok(());
-        }
-        Cmd::Whoami | Cmd::Keys { sub: None | Some(KeysCmd::List) } => {
-            let c = require_client(&cli.host, cli.verbose)?;
-            let v: IdentityView = c.call_as(c.get("/api/identities/me")?)?;
-            if j {
-                ok_exit(&json!({ "npub": c.id.npub(), "host": c.host, "identity": v }));
-            }
-            print_identity(&v, &c.id.npub());
-            println!("host: {}", c.host);
-            return Ok(());
-        }
-        Cmd::Keys { sub: Some(KeysCmd::Rotate) } => {
-            let old = require_client(&cli.host, cli.verbose)?;
-            let fresh = auth::Identity::generate();
-            // 1. the old key adds the new one, which proves itself inside
-            let url = format!("{}/api/identities/me/keys", old.host);
-            let proof = fresh.proof("POST", &url, old.id.pubkey_hex());
-            old.call_as::<IdentityView>(old.post_json("/api/identities/me/keys", &json!({ "proof": proof }))?)?;
-            // 2. this machine switches to it (both keys work until step 3)
-            save_config("secret_key", &fresh.secret_hex())?;
-            let new = require_client(&cli.host, cli.verbose)?;
-            // 3. the new key revokes the old one
-            let revoked = new.call_as::<IdentityView>(new.delete(&format!("/api/identities/me/keys/{}", old.id.pubkey_hex()))?);
-            if let Err(e) = &revoked {
-                eprintln!("the new key is in use, but revoking the old one failed: {e}\nrevoke it: fragment keys revoke {}", old.id.npub());
-            }
-            let v = revoked?;
-            if j {
-                ok_exit(&json!({ "npub": new.id.npub(), "revoked": old.id.npub(), "identity": v }));
-            }
-            println!("{} replaces {} (revoked); every grant stays with {}", new.id.npub(), old.id.npub(), v.id);
-            return Ok(());
-        }
-        Cmd::Keys { sub: Some(KeysCmd::Revoke { npub }) } => {
-            let c = require_client(&cli.host, cli.verbose)?;
-            let hex = fragment_core::npub::parse(&npub).ok_or_else(|| anyhow!("{npub} is not an npub or a 64-hex key"))?;
-            if hex == c.id.pubkey_hex() {
-                anyhow::bail!("that is the key this machine signs with: rotate it instead (`fragment keys rotate`)");
-            }
-            let v: IdentityView = c.call_as(c.delete(&format!("/api/identities/me/keys/{hex}"))?)?;
-            if j {
-                ok_exit(&v);
-            }
-            println!("revoked {npub}");
-            return Ok(());
-        }
         Cmd::Host { url } => {
             let cfg = load_config();
             match url {
@@ -898,6 +828,58 @@ fn run(cli: Cli) -> Result<()> {
     let c = require_client(&cli.host, cli.verbose)?;
 
     match cli.cmd {
+        Cmd::Username { username, release } => {
+            if release {
+                let u = username.unwrap_or_default();
+                let v = c.call(c.delete(&format!("/api/users/{u}"))?)?;
+                json_exit(j, &v);
+                println!("released {u} ({}): its person chooses a username again", v["identity"].as_str().unwrap_or(""));
+                return Ok(());
+            }
+            let v = match username {
+                Some(u) => c.call(c.put_json("/api/identities/me/username", &json!({ "username": u }))?)?,
+                None => c.call(c.get("/api/identities/me")?)?,
+            };
+            json_exit(j, &v);
+            match v["username"].as_str() {
+                Some(u) => println!("username: {u}"),
+                None => println!("no username yet: fragment username <name>"),
+            }
+        }
+        Cmd::Whoami | Cmd::Keys { sub: None | Some(KeysCmd::List) } => {
+            let v: IdentityView = c.call_as(c.get("/api/identities/me")?)?;
+            json_exit(j, &json!({ "npub": c.id.npub(), "host": c.host, "identity": v }));
+            print_identity(&v, &c.id.npub());
+            println!("host: {}", c.host);
+        }
+        Cmd::Keys { sub: Some(KeysCmd::Rotate) } => {
+            let old = c;
+            let fresh = auth::Identity::generate();
+            // 1. the old key adds the new one, which proves itself inside
+            let url = format!("{}/api/identities/me/keys", old.host);
+            let proof = fresh.proof("POST", &url, old.id.pubkey_hex());
+            old.call_as::<IdentityView>(old.post_json("/api/identities/me/keys", &json!({ "proof": proof }))?)?;
+            // 2. this machine switches to it (both keys work until step 3)
+            save_config("secret_key", &fresh.secret_hex())?;
+            let new = require_client(&cli.host, cli.verbose)?;
+            // 3. the new key revokes the old one
+            let revoked = new.call_as::<IdentityView>(new.delete(&format!("/api/identities/me/keys/{}", old.id.pubkey_hex()))?);
+            if let Err(e) = &revoked {
+                eprintln!("the new key is in use, but revoking the old one failed: {e}\nrevoke it: fragment keys revoke {}", old.id.npub());
+            }
+            let v = revoked?;
+            json_exit(j, &json!({ "npub": new.id.npub(), "revoked": old.id.npub(), "identity": v }));
+            println!("{} replaces {} (revoked); every grant stays with {}", new.id.npub(), old.id.npub(), v.id);
+        }
+        Cmd::Keys { sub: Some(KeysCmd::Revoke { npub }) } => {
+            let hex = fragment_core::npub::parse(&npub).ok_or_else(|| anyhow!("{npub} is not an npub or a 64-hex key"))?;
+            if hex == c.id.pubkey_hex() {
+                anyhow::bail!("that is the key this machine signs with: rotate it instead (`fragment keys rotate`)");
+            }
+            let v: IdentityView = c.call_as(c.delete(&format!("/api/identities/me/keys/{hex}"))?)?;
+            json_exit(j, &v);
+            println!("revoked {npub}");
+        }
         Cmd::Create { name, visibility } => {
             // the fragment's own key is made by the platform (its KEYS)
             let visibility = match visibility.as_deref() {
@@ -1251,18 +1233,13 @@ fn run(cli: Cli) -> Result<()> {
             println!("run #{run} queued again (attempt {}); follow it with `fragment runs {name} {run}`", v["attempt"]);
         }
         Cmd::Rotate { name, inbox, view } => {
-            // flags narrow the default both-scopes rotation
-            let mut scopes: Vec<&str> = Vec::new();
-            if inbox {
-                scopes.push("inbox");
-            }
-            if view {
-                scopes.push("view");
-            }
-            if scopes.is_empty() {
-                // the webhook secret is code.storage's to know: rotate it only by asking the cell
-                scopes = vec!["inbox", "view"];
-            }
+            // flags narrow the default both-scopes rotation (the webhook
+            // secret is code.storage's to know: rotate it only by asking the cell)
+            let scopes = match (inbox, view) {
+                (true, false) => vec!["inbox"],
+                (false, true) => vec!["view"],
+                _ => vec!["inbox", "view"],
+            };
             let body = json!({ "scopes": scopes });
             let v: Rotated = c.call_as(c.post_json(&format!("/api/f/{name}/rotate"), &body)?)?;
             // the whole answer, webhook secret included: the code.storage
@@ -1276,7 +1253,6 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Secret { sub } => match sub {
             SecretCmd::Set { name, key, value: argv_value } => {
-                // value from argv, else env var of the same name, else stdin
                 let value = match argv_value {
                     Some(v) if !v.is_empty() => v,
                     None => match std::env::var(&key) {
@@ -1328,22 +1304,16 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Open { name } => {
             let v: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
-            let public = v.visibility == Visibility::Public;
-            let view = v.view_token.as_deref().unwrap_or("");
-            let inbox = v.inbox_token.as_deref().unwrap_or("");
-            let suffix = if public { "" } else { "?view=" };
-            let view_part = if public { "" } else { view };
             let canon = &v.urls.canonical;
-            if j {
-                ok_exit(&json!({
-                    "canonical": format!("{}{}{}", canon, suffix, view_part),
-                    "shareLink": format!("{}{}{}", canon, suffix, view_part),
-                    "webhookUrl": format!("{}/api/f/{}/inbox?t={}", c.host, name, inbox),
-                }));
-            }
-            println!("canonical:   {}{}{}", canon, suffix, view_part);
-            println!("share link:  {}{}{}", canon, suffix, view_part);
-            println!("webhook URL: {}/api/f/{}/inbox?t={}", c.host, name, inbox);
+            let link = match v.visibility {
+                Visibility::Public => canon.clone(),
+                _ => format!("{canon}?view={}", v.view_token.as_deref().unwrap_or("")),
+            };
+            let webhook = format!("{}/api/f/{name}/inbox?t={}", c.host, v.inbox_token.as_deref().unwrap_or(""));
+            json_exit(j, &json!({ "canonical": link, "shareLink": link, "webhookUrl": webhook }));
+            println!("canonical:   {link}");
+            println!("share link:  {link}");
+            println!("webhook URL: {webhook}");
         }
         Cmd::Agent { sub } => {
             let a = agents_client(cli.verbose)?;
@@ -1390,10 +1360,7 @@ fn run(cli: Cli) -> Result<()> {
                         println!("{}", if v["steered"] == true { "steered the running turn" } else { "started" });
                         return Ok(());
                     }
-                    // a steer is answered by the running turn: wait for it too.
-                    // Each read waits in the agent's cell until the turn ends
-                    // (or AGENT_STATE_WAIT_MS_MAX), so this is a read about
-                    // every 25 s, for about ten minutes at most.
+                    // a steer is answered by the running turn: wait for it too
                     let mut ended: Option<AgentState> = None;
                     for _ in 0..SAY_STATE_READS_MAX {
                         let state: AgentState = a.call_as(a.get(&format!("/api/a/{name}/state?wait_ms={AGENT_STATE_WAIT_MS_MAX}"))?)?;
@@ -1597,7 +1564,7 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "visibility": visibility }));
             println!("{name}: {}", visibility.as_str());
         }
-        Cmd::Login { .. } | Cmd::Whoami | Cmd::Username { .. } | Cmd::Keys { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::New { .. } | Cmd::Computer { .. } => unreachable!(),
+        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::New { .. } | Cmd::Computer { .. } => unreachable!(),
     }
     Ok(())
 }
@@ -1609,8 +1576,6 @@ fn share_link(canonical: &str, token: &str) -> String {
     format!("{base}?view={token}")
 }
 
-/// 8 hex chars of the user's pubkey — the writer identity that names
-/// conflict copies and signs commits
 /// What `fragment deploy` did.
 enum Deployed {
     /// the folder's sync refused a mass deletion, so nothing moved
@@ -1653,8 +1618,6 @@ fn deploy(c: &api::Client, name: &str, dir: Option<&Path>, note: Option<&str>, p
         return Ok(Deployed::Preview { synced, slug, sha });
     }
     let msg = format!("deploy {name}{}", note.map(|n| format!(": {n}")).unwrap_or_default());
-    // move live to main's tip; create it on first deploy; bounded
-    // target_moved retries after that
     let live_tip = match storage.branch_head(LIVE).map_err(cs_anyhow)? {
         None => storage.create_branch(&main_tip, LIVE, false).map_err(cs_anyhow)?,
         Some(t) if t == main_tip => t,
@@ -1887,7 +1850,7 @@ mod tests {
     /// times, listed twice, and refreshed twice.
     #[test]
     fn a_deploy_mints_one_token_and_refreshes_once() {
-        let mock = crate::mockcs::MockServer::start();
+        let mock = crate::mockcs::start();
         mock.seed_repo("t", &[]);
         let c = api::Client::new(&mock.url, auth::fixed(7));
         let dir = std::env::temp_dir().join(format!("fragment-deploy-{}", std::process::id()));
