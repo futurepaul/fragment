@@ -109,6 +109,7 @@ CREATE INDEX IF NOT EXISTS runs_status ON runs (status, op);
 CREATE TABLE IF NOT EXISTS steps (
   run INTEGER NOT NULL, attempt INTEGER NOT NULL, idx INTEGER NOT NULL, kind TEXT NOT NULL, value TEXT, error TEXT,
   CHECK ((value IS NULL) <> (error IS NULL)), PRIMARY KEY (run, attempt, idx));
+INSERT OR IGNORE INTO meta (key, value) VALUES ('steps_kept_since', CAST(CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER) AS TEXT));
 CREATE TABLE IF NOT EXISTS schedules (idx INTEGER PRIMARY KEY, op TEXT NOT NULL, cron TEXT NOT NULL, next_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS paused_ops (op TEXT PRIMARY KEY, by TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS op_breakers (op TEXT PRIMARY KEY, reset_at INTEGER NOT NULL);
@@ -376,6 +377,10 @@ pub(crate) enum MetaKey {
     /// Test fleets only: how many more step answers are lost on their way
     /// back to the Workflow, after the step was performed (`drop-effects`).
     TestDropEffects,
+    /// When this cell began keeping job steps' answers (ms): the first
+    /// activation with the `steps` table writes it, once. A run launched
+    /// before it finds no answers kept, and starts again (jobs.rs).
+    StepsKeptSince,
 }
 
 impl MetaKey {
@@ -412,6 +417,7 @@ impl MetaKey {
             MetaKey::TestFailOutbox => "test_fail_outbox",
             MetaKey::TestFailTriggers => "test_fail_triggers",
             MetaKey::TestDropEffects => "test_drop_effects",
+            MetaKey::StepsKeptSince => "steps_kept_since",
         }
     }
 
