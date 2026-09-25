@@ -27,20 +27,35 @@ const INBOX_FILES: [(&str, &[u8]); 4] = [
     ("README.md", include_bytes!("../../../../templates/inbox/README.md")),
 ];
 
+/// A request the upstream got.
+#[derive(Debug, Clone)]
+struct Hit {
+    path: String,
+    authorization: String,
+    hops: String,
+    /// JSON bodies (a delivery's), else null.
+    body: Value,
+}
+
 /// What a job's fetch reaches: records what arrived, answers per path.
 struct Upstream {
     server: Server,
-    seen: Arc<Mutex<Vec<(String, String, String)>>>,
+    seen: Arc<Mutex<Vec<Hit>>>,
 }
 
 impl Upstream {
     fn start() -> Result<Upstream> {
-        let seen: Arc<Mutex<Vec<(String, String, String)>>> = Arc::default();
+        let seen: Arc<Mutex<Vec<Hit>>> = Arc::default();
         let flaky = Arc::new(AtomicUsize::new(0));
         let log = Arc::clone(&seen);
         let handler: Handler = Arc::new(move |req| {
             let header = |k: &str| req.header(k).unwrap_or("").to_string();
-            log.lock().expect("upstream log").push((req.path.clone(), header("authorization"), header("x-fragment-hops")));
+            log.lock().expect("upstream log").push(Hit {
+                path: req.path.clone(),
+                authorization: header("authorization"),
+                hops: header("x-fragment-hops"),
+                body: serde_json::from_slice(&req.body).unwrap_or(Value::Null),
+            });
             match req.path.as_str() {
                 "/data" => Response::json(200, &json!({ "items": ["alpha", "beta"] })),
                 "/once" => Response::json(200, &json!({ "items": ["once"] })),
@@ -59,8 +74,8 @@ impl Upstream {
         format!("{}{path}", self.server.url)
     }
 
-    fn hits(&self, path: &str) -> Vec<(String, String, String)> {
-        self.seen.lock().expect("upstream log").iter().filter(|(p, ..)| p == path).cloned().collect()
+    fn hits(&self, path: &str) -> Vec<Hit> {
+        self.seen.lock().expect("upstream log").iter().filter(|h| h.path == path).cloned().collect()
     }
 }
 
@@ -171,8 +186,8 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the run records who, how, and what", done["op"] == "digest" && done["via"] == "call" && done["input"] == input && done["attempt"] == 1, &done);
     let hits = upstream.hits("/data");
     s.ok("its fetch reached the upstream once", hits.len() == 1, format!("{hits:?}"));
-    s.ok("the upstream got the secret in the header", hits.first().is_some_and(|h| h.1 == format!("Bearer {SECRET}")), format!("{hits:?}"));
-    s.ok("a fetch says how deep in a chain it is (x-fragment-hops)", hits.first().is_some_and(|h| h.2 == "1"), format!("{hits:?}"));
+    s.ok("the upstream got the secret in the header", hits.first().is_some_and(|h| h.authorization == format!("Bearer {SECRET}")), format!("{hits:?}"));
+    s.ok("a fetch says how deep in a chain it is (x-fragment-hops)", hits.first().is_some_and(|h| h.hops == "1"), format!("{hits:?}"));
     let items = api.op(&owner, &name, "items", "q", json!({}))?;
     s.ok("the job's call step ran the mutation", items.body["result"] == json!([{ "text": "alpha", "source": "digest" }, { "text": "beta", "source": "digest" }]), &items);
     let feed = records(api, &owner, &name, "feed");
@@ -466,12 +481,24 @@ pub fn triggers(s: &mut Suite, api: &Api) -> Result<()> {
     // a move of main that touches a matching file
     s.commit(&c, &[("notes/today.md", Some(b"# today")), ("other.txt", Some(b"x"))]);
     let filed = s.eventually(long, || runs(api, &owner, &name, "&op=tick").iter().any(|r| r["via"] == "files" && r["status"] == "succeeded"));
-    let ticks = api.op(&owner, &name, "ticks", "q", json!({}))?;
-    let files_input = ticks.body["result"].as_array().and_then(|a| a.iter().find(|t| t["ref"] == "main").cloned()).unwrap_or(Value::Null);
-    s.ok("a file trigger runs with the matching paths", filed && files_input["paths"] == json!(["notes/today.md"]), &ticks);
+    let ticked_paths = || -> Vec<Value> {
+        api.op(&owner, &name, "ticks", "q", json!({}))
+            .map(|r| r.body["result"].as_array().into_iter().flatten().filter(|t| t["ref"] == "main").map(|t| t["paths"].clone()).collect())
+            .unwrap_or_default()
+    };
+    s.ok("a file trigger runs with the matching paths", filed && ticked_paths() == [json!(["notes/today.md"])], json!(ticked_paths()));
+    // a move that touches no matching file, then a sentinel move that does:
+    // moves are read in order, so once the sentinel's run has ticked the
+    // first move's would have too
     s.commit(&c, &[("other.txt", Some(b"y"))]);
-    std::thread::sleep(Duration::from_secs(1));
-    s.ok("a move that touches no matching file starts nothing", runs(api, &owner, &name, "&op=tick").iter().filter(|r| r["via"] == "files").count() == 1, "");
+    s.commit(&c, &[("notes/sentinel.md", Some(b"# sentinel"))]);
+    let sentinel = s.eventually(long, || ticked_paths().contains(&json!(["notes/sentinel.md"])));
+    let filed = runs(api, &owner, &name, "&op=tick").iter().filter(|r| r["via"] == "files").count();
+    s.ok(
+        "a move that touches no matching file starts nothing",
+        sentinel && filed == 2 && ticked_paths() == [json!(["notes/today.md"]), json!(["notes/sentinel.md"])],
+        format!("{filed} runs from files, ticked {}", json!(ticked_paths())),
+    );
 
     // cron: the minute boundary after the deploy
     let remaining = Duration::from_secs(70).saturating_sub(deployed.elapsed());
@@ -528,12 +555,18 @@ pub fn triggers(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && delivered && records(api, &owner, &fails, "alarms").len() == 2,
         format!("{r}; deliveries since: {}", hook.hits("/data").len() - sent_before),
     );
+    // a third call, then a sentinel record through the same subscription:
+    // once the sentinel's delivery is in, one the third call wrote would be
     let r = api.op(&owner, &fails, "raise", "outbox", json!({}))?;
-    std::thread::sleep(Duration::from_millis(1500));
+    api.op(&owner, &fails, "raise", "sentinel", json!({}))?;
+    let (retried, last) = (appended as i64, records(api, &owner, &fails, "alarms").len() as i64);
+    let seq_of = |h: &Hit| h.body["record"]["seq"].as_i64();
+    let sentinel = s.eventually(Duration::from_secs(10), || hook.hits("/data").iter().any(|h| seq_of(h) == Some(last)));
+    let sent = hook.hits("/data").iter().filter(|h| seq_of(h) == Some(retried)).count();
     s.ok(
         "and a third call writes nothing again",
-        r.status == 200 && hook.hits("/data").len() == sent_before + 1,
-        format!("{r}; deliveries since: {}", hook.hits("/data").len() - sent_before),
+        r.status == 200 && last == retried + 1 && sentinel && sent == 1 && hook.hits("/data").len() == sent_before + 2,
+        format!("{r}; the retried record was delivered {sent} times; deliveries since: {}", hook.hits("/data").len() - sent_before),
     );
 
     // the rate ceiling: an operation's triggers start runs up to their
