@@ -16,9 +16,10 @@ use crate::codestorage::{Author, CodeStorage, CsError, LIVE, MAIN, MAX_CAS_ATTEM
 use crate::sync::{Mode, SyncOptions};
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
+use fragment_proto::limits::AGENT_STATE_WAIT_MS_MAX;
 use fragment_proto::{
-    BudgetView, ChannelPage, Created, FragmentList, FragmentStatus, IdentityView, Invite, InviteList, Member, MemberList, OpResult, Rotated, Run,
-    RunList, Visibility,
+    AgentState, BudgetView, ChannelPage, Created, FragmentList, FragmentStatus, IdentityView, Invite, InviteList, Member, MemberList, OpResult,
+    Rotated, Run, RunList, TurnOutcome, Visibility,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -580,15 +581,11 @@ fn agents_client(verbose: bool) -> Result<api::Client> {
     require_client(&host, verbose)
 }
 
-/// The last thing an agent said in its view.
-fn last_answer(view: &Value) -> String {
-    view["messages"]
-        .as_array()
-        .and_then(|m| m.iter().rev().find(|m| m["role"] == "assistant" && m["text"].as_str().is_some_and(|t| !t.trim().is_empty())))
-        .and_then(|m| m["text"].as_str())
-        .unwrap_or("")
-        .to_string()
-}
+/// State reads `fragment agent say` makes at most while a turn runs: each
+/// waits up to `AGENT_STATE_WAIT_MS_MAX`, so about ten minutes in all.
+const SAY_STATE_READS_MAX: u64 = 600_000 / AGENT_STATE_WAIT_MS_MAX + 1;
+// a read that waits the longest still answers inside a request's timeout
+const _: () = assert!(AGENT_STATE_WAIT_MS_MAX + 5_000 <= api::REQUEST_TIMEOUT_BASE.as_millis() as u64);
 
 fn require_client(cli_host: &Option<String>, verbose: bool) -> Result<api::Client> {
     let cfg = load_config();
@@ -1533,24 +1530,26 @@ fn run(cli: Cli) -> Result<()> {
                         println!("{}", if v["steered"] == true { "steered the running turn" } else { "started" });
                         return Ok(());
                     }
-                    // a steer is answered by the running turn: wait for it too
-                    let t0 = std::time::Instant::now();
-                    let view = loop {
-                        let view = a.call(a.get(&format!("/api/a/{name}"))?)?;
-                        if view["active"] == false {
-                            break view;
+                    // a steer is answered by the running turn: wait for it too.
+                    // Each read waits in the agent's cell until the turn ends
+                    // (or AGENT_STATE_WAIT_MS_MAX), so this is a read about
+                    // every 25 s, for about ten minutes at most.
+                    let mut ended: Option<AgentState> = None;
+                    for _ in 0..SAY_STATE_READS_MAX {
+                        let state: AgentState = a.call_as(a.get(&format!("/api/a/{name}/state?wait_ms={AGENT_STATE_WAIT_MS_MAX}"))?)?;
+                        if !state.active {
+                            ended = Some(state);
+                            break;
                         }
-                        if t0.elapsed() > std::time::Duration::from_secs(600) {
-                            anyhow::bail!("the turn is still running after 10 minutes (fragment agent show {name})");
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                    };
-                    if j {
-                        ok_exit(&json!({ "outcome": view["outcome"], "answer": last_answer(&view), "error": view["error"] }));
                     }
-                    match view["outcome"].as_str() {
-                        Some("idle") => println!("{}", last_answer(&view)),
-                        Some(other) => println!("({other}) {}", view["error"].as_str().unwrap_or("")),
+                    let state = ended.ok_or_else(|| anyhow!("the turn is still running after 10 minutes (fragment agent show {name})"))?;
+                    let answer = state.answer.clone().unwrap_or_default();
+                    if j {
+                        ok_exit(&json!({ "outcome": state.outcome, "answer": answer, "error": state.error.clone().unwrap_or_default() }));
+                    }
+                    match state.outcome {
+                        Some(TurnOutcome::Idle) => println!("{answer}"),
+                        Some(other) => println!("({}) {}", other.as_str(), state.error.as_deref().unwrap_or("")),
                         None => {}
                     }
                 }

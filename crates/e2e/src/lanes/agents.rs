@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use fragment_fakes::openrouter::Reply;
 use fragment_nip98::Keys;
+use fragment_proto::limits;
 use serde_json::{json, Value};
 
 use super::app::ship;
@@ -108,6 +109,15 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     let calls_before = s.openrouter.calls().len();
     let r = agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "add milk to my list" })))?;
     s.ok("a turn starts", r.status == 200 && r.body["started"] == true, &r);
+    // one read that waits in the agent's cell, not a view read twice a second
+    let st = agents.signed(&owner, "GET", &format!("/api/a/{name}/state?wait_ms={}", limits::AGENT_STATE_WAIT_MS_MAX), None)?;
+    s.ok(
+        "one state read waits for the turn to end, and answers its outcome and answer",
+        st.status == 200 && st.body["active"] == false && st.body["outcome"] == "idle" && st.body["answer"] == "Added milk.",
+        &st,
+    );
+    let r = agents.signed(&owner, "GET", &format!("/api/a/{name}/state?wait_ms={}", limits::AGENT_STATE_WAIT_MS_MAX + 1), None)?;
+    s.ok("a state read waits at most 25 s", r.status == 400, &r);
     let v = settle(s, &agents, &owner, &name, wait);
     let last = v["messages"].as_array().and_then(|m| m.last()).cloned().unwrap_or_default();
     s.ok("it ends with the model's answer", v["outcome"] == "idle" && last["role"] == "assistant" && last["text"] == "Added milk.", &v);
@@ -177,6 +187,8 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     let before = runs_of(&view(&agents, &owner, &name), &list).len();
     agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "read my list slowly" })))?;
     s.eventually(wait, || runs_of(&view(&agents, &owner, &name), &list).len() > before);
+    let v = view(&agents, &owner, &name);
+    s.ok("a new turn drops the steers the model already read", v["steer"] == json!([]), &v["steer"]);
     let t0 = Instant::now();
     let r = agents.signed(&owner, "POST", &format!("/api/a/{name}/stop"), None)?;
     let v = settle(s, &agents, &owner, &name, wait);
@@ -254,6 +266,18 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     let v = settle(s, &agents, &owner, &name, wait);
     let last = v["messages"].as_array().and_then(|m| m.last()).cloned().unwrap_or_default();
     s.ok("and the next message starts a turn that fits", v["outcome"] == "idle" && last["text"] == "Still here.", json!({ "outcome": v["outcome"], "error": v["error"], "last": last["text"] }));
+
+    // the owner's view is bounded: the newest rows of each list (4 here,
+    // set by the test controls; the product's is 256)
+    agents.signed(&owner, "POST", &format!("/api/a/{name}/test"), Some(&json!({ "view_rows": 4 })))?;
+    let v = view(&agents, &owner, &name);
+    let lens: Vec<usize> = ["messages", "toolRuns", "steps"].iter().map(|k| v[*k].as_array().map_or(usize::MAX, Vec::len)).collect();
+    let newest = v["messages"].as_array().and_then(|m| m.last()).map(|m| m["text"].clone());
+    s.ok(
+        "the view shows the newest rows of each list, and no more than its bound",
+        lens == [4, 4, 4] && newest == Some(json!("Still here.")),
+        json!({ "lens": lens, "newest": newest }),
+    );
     agents.signed(&owner, "POST", &format!("/api/a/{name}/test"), Some(&json!({})))?;
     s.openrouter.clear_script();
     Ok(())
@@ -335,10 +359,14 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let done = s.eventually(wait, || said_by(&chat_records(api, &owner, &chat), &who, "Added bread to your list."));
     s.ok("asked in the chat, the agent changes the todo list through its operation, and says so", done && todos(api, &owner, &todo) == ["bread"], json!(chat_records(api, &owner, &chat)));
 
-    // the owner talks to the agent directly, from the CLI
+    // the owner talks to the agent directly, from the CLI (-v logs each request)
     s.openrouter.script(&[Reply::Text("Just bread.".into())]);
-    let r = s.cli_json(api, &home, &["agent", "say", &bot, "what is on my list?", "--json"]);
-    s.ok("fragment agent say waits for the answer", r.as_ref().is_ok_and(|v| v["answer"] == "Just bread."), format!("{r:?}"));
+    let out = s.cli(api, &home, &["-v", "agent", "say", &bot, "what is on my list?", "--json"]);
+    let said: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    let log = String::from_utf8_lossy(&out.stderr).to_string();
+    s.ok("fragment agent say waits for the answer", said["ok"] == true && said["data"]["answer"] == "Just bread.", &said);
+    let reads = log.lines().filter(|l| l.starts_with("GET /api/a/")).count();
+    s.ok("with one read of the turn's state, which waits in the agent's cell", reads == 1, &log);
 
     // removing the agent from the chat ends its subscription
     s.cli(api, &home, &["members", "rm", &chat, &bot_npub]);

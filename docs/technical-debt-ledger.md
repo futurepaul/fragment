@@ -378,8 +378,9 @@ without a delete condition is unfinished design, not debt.
   newest 256 messages, cut to start at a turn's first message: the
   running turn whole, and earlier turns while they total 256 KiB
   (`fragment_core::history`). Nothing summarizes what falls out, and the
-  agent's tables (`messages`, `steps`, `tool_runs`, `steer`, `heard`)
-  keep every row; the owner's view shows the newest 256 of each.
+  agent's tables `messages`, `steps`, and `tool_runs` keep every row
+  (`steer` drops what the model read at the next turn, `heard` forgets
+  after a day); the owner's view shows the newest 256 of each.
 - **Risk:** an agent answers without context it had long ago, with no
   sign that it lost it; its database grows with its age.
 - **First proof:** an agent asked about something said before its

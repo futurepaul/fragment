@@ -17,6 +17,7 @@
 //!   POST /api/agents                  {name, model?, instructions?} → {name, npub, model}
 //!                                     (again, by its owner: the same answer, `replayed`)
 //!   GET  /api/a/{name}                the conversation and the turn's state
+//!   GET  /api/a/{name}/state?wait_ms= the turn's state alone, once the turn ends (or wait_ms, at most 25 s)
 //!   POST /api/a/{name}/turns          {text}: start a turn, or steer the running one
 //!   POST /api/a/{name}/stop           stop the running turn
 //!   GET  /api/a/{name}/tools          the tools its memberships give it now
@@ -43,7 +44,8 @@ use std::rc::Rc;
 
 use fragment_core::body::{LimitedBody, TooLarge};
 use fragment_core::npub;
-use fragment_proto::{valid_channel_name, valid_fragment_name, valid_op_name, Delivery, ErrorCode, IdentityView};
+use fragment_proto::limits::AGENT_STATE_WAIT_MS_MAX;
+use fragment_proto::{valid_channel_name, valid_fragment_name, valid_op_name, AgentState, Delivery, ErrorCode, IdentityView, TurnOutcome};
 use futures::TryStreamExt;
 use goose_provider_types::conversation::message::{Message, MessageContent};
 use serde::Deserialize;
@@ -54,7 +56,7 @@ use worker::{durable_object, event, DurableObject, Env, Headers, Method, Request
 
 use crate::computer::Computer;
 use crate::fleet::Fleet;
-use crate::store::{kv_get, kv_set, kv_u64, last_message, recent_messages};
+use crate::store::{kv_get, kv_set, kv_u64, last_answer, recent_messages};
 use crate::turn::{Attached, Driver, Model, WATCHDOG_MS_DEFAULT, WATCHDOG_MS_MIN};
 
 const PRINCIPAL_HEADER: &str = fragment_proto::routed::AGENT_PRINCIPAL;
@@ -81,6 +83,14 @@ const COMPUTER_TOKEN_MAX: usize = 256;
 /// The newest rows of each list the owner's view shows (messages, steers,
 /// tool runs, steps): the view grew with the agent's age.
 const VIEW_ROWS_MAX: usize = fragment_core::history::WINDOW_MESSAGES_MAX;
+/// How often a state read that waits looks at the turn again (this cell's
+/// own SQL), and so how many looks one read takes at most.
+const STATE_CHECK_MS: u64 = 250;
+const STATE_CHECKS_MAX: u64 = AGENT_STATE_WAIT_MS_MAX / STATE_CHECK_MS + 1;
+/// A record heard is remembered this long, past the longest a delivery is
+/// redelivered (its outbox's 20 tries over about 2.5 hours, then the
+/// queue's 5 retries at most an hour apart), then forgotten.
+const HEARD_KEEP_MS: i64 = 24 * 3600 * 1000;
 
 // ---------------------------------------------------------------- errors
 
@@ -200,6 +210,11 @@ async fn route(mut req: Request, env: &Env) -> Answer<Response> {
     if !valid_fragment_name(&name) {
         return Err(Fail::invalid("an agent's name is <label>.<username>"));
     }
+    // the query rides along (a state read's wait_ms)
+    let action = match url.query() {
+        Some(query) => format!("{action}?{query}"),
+        None => action,
+    };
     forward(env, &name, &action, req.method(), Some(&principal), body).await
 }
 
@@ -258,6 +273,8 @@ struct TestControls {
     watchdog_ms: Option<u64>,
     /// A smaller conversation window, so a test can outgrow it in a few turns.
     window_messages: Option<u64>,
+    /// Fewer rows in the owner's view, so a test can outgrow it.
+    view_rows: Option<u64>,
 }
 
 fn var(env: &Env, name: &str) -> Option<String> {
@@ -591,8 +608,11 @@ impl Agent {
             return Ok(json!({ "steered": true, "driving": self.driving.get() }));
         }
         kv_set(&sql, "reply_to", reply_to)?;
-        // a new turn: images an earlier one kept and never showed are dropped
+        // a new turn: images an earlier one kept and never showed are
+        // dropped, and so are the earlier turns' steers the model read
+        // (each is in the conversation as a message of its own)
         sql.exec("DELETE FROM shots", None)?;
+        sql.exec("DELETE FROM steer WHERE consumed = 1", None)?;
         let mut kickoff = Message::user().with_text(text);
         kickoff.id = Some(format!("msg_{}", uuid::Uuid::new_v4()));
         store::append_message(&sql, &kickoff)?;
@@ -660,10 +680,13 @@ impl Agent {
         }
         // the record's place in its channel: decoding made sure it has one
         let key = format!("{fragment}/{channel}/{}", record.seq);
-        let fresh: Vec<Value> = sql.exec("INSERT OR IGNORE INTO heard (key, at) VALUES (?, ?) RETURNING key", vec![key.as_str().into(), (js::now_ms() as i64).into()])?.to_array()?;
+        let now = js::now_ms() as i64;
+        let fresh: Vec<Value> = sql.exec("INSERT OR IGNORE INTO heard (key, at) VALUES (?, ?) RETURNING key", vec![key.as_str().into(), now.into()])?.to_array()?;
         if fresh.is_empty() {
             return Ok(json!({ "ignored": "heard" }));
         }
+        // no delivery comes again after HEARD_KEEP_MS: older keys only grow the table
+        sql.exec("DELETE FROM heard WHERE at < ?", vec![(now - HEARD_KEEP_MS).into()])?;
         // a chat's record says `{text}`; any other body is heard as its JSON
         #[derive(Deserialize)]
         struct Said {
@@ -719,12 +742,52 @@ impl Agent {
             return Err(Fail::invalid(format!("window_messages is 2-{} (0: the product's)", fragment_core::history::WINDOW_MESSAGES_MAX)));
         }
         kv_set(&sql, "test_window_messages", window)?;
+        let rows = body.view_rows.unwrap_or(0);
+        if rows == 1 || rows > VIEW_ROWS_MAX as u64 {
+            return Err(Fail::invalid(format!("view_rows is 2-{VIEW_ROWS_MAX} (0: the product's)")));
+        }
+        kv_set(&sql, "test_view_rows", rows)?;
         Ok(json!({ "ok": true }))
+    }
+
+    /// The turn's state, as `state` answers it.
+    fn turn_state(&self) -> Answer<AgentState> {
+        let sql = self.sql();
+        let outcome = match kv_get(&sql, "outcome")?.unwrap_or_default().as_str() {
+            "" => None,
+            stored => Some(TurnOutcome::parse(stored).ok_or_else(|| Fail::host(format!("corrupt state: outcome {stored:?}")))?),
+        };
+        let error = kv_get(&sql, "last_error")?.filter(|e| !e.is_empty());
+        let answer = last_answer(&sql)?.map(|m| m.as_concat_text());
+        Ok(AgentState { active: kv_u64(&sql, "active")? == 1, driving: self.driving.get(), outcome, error, answer })
+    }
+
+    /// `state?wait_ms=`: the turn's state once the turn is not active, or
+    /// once `wait_ms` passed. It waits here, reading this cell's own SQL,
+    /// so a client waiting out a turn asks once every 25 s instead of
+    /// reading the whole view (signature, owner check, every list) twice a
+    /// second.
+    async fn state(&self, wait_ms: u64) -> Answer<AgentState> {
+        assert!(wait_ms <= AGENT_STATE_WAIT_MS_MAX, "the door checks wait_ms");
+        let deadline = js::now_ms() + wait_ms;
+        // bounded: a look every STATE_CHECK_MS until the deadline
+        for _ in 0..STATE_CHECKS_MAX {
+            let state = self.turn_state()?;
+            if !state.active || js::now_ms() >= deadline {
+                return Ok(state);
+            }
+            worker::Delay::from(std::time::Duration::from_millis(STATE_CHECK_MS)).await;
+        }
+        self.turn_state()
     }
 
     fn view(&self) -> Answer<Value> {
         let sql = self.sql();
-        let messages: Vec<Value> = recent_messages(&sql, VIEW_ROWS_MAX)?
+        let rows = match kv_u64(&sql, "test_view_rows")? {
+            0 => VIEW_ROWS_MAX,
+            n => (n as usize).min(VIEW_ROWS_MAX),
+        };
+        let messages: Vec<Value> = recent_messages(&sql, rows)?
             .iter()
             .map(|message| {
                 let requests: Vec<Value> = message
@@ -746,7 +809,7 @@ impl Agent {
         // the newest rows of a table, oldest first
         let table = |columns: &str, table: &str| -> Answer<Vec<Value>> {
             let query = format!("SELECT {columns} FROM (SELECT * FROM {table} ORDER BY seq DESC LIMIT ?) ORDER BY seq");
-            Ok(sql.exec(&query, vec![(VIEW_ROWS_MAX as i64).into()])?.to_array::<Value>()?)
+            Ok(sql.exec(&query, vec![(rows as i64).into()])?.to_array::<Value>()?)
         };
         let get = |k: &str| kv_get(&sql, k).map(|v| v.unwrap_or_default());
         Ok(json!({
@@ -776,6 +839,7 @@ impl Agent {
     async fn handle(&self, mut req: Request) -> Answer<Response> {
         let principal = req.headers().get(PRINCIPAL_HEADER)?.unwrap_or_default();
         let action = req.path().trim_start_matches('/').to_string();
+        let url = req.url()?;
         let parse = |bytes: &[u8]| -> Answer<Value> {
             if bytes.is_empty() {
                 return Ok(json!({}));
@@ -809,6 +873,7 @@ impl Agent {
                 self.require_owner(&principal).await?;
                 match (method.clone(), action) {
                     (Method::Get, "view") => self.view(),
+                    (Method::Get, "state") => from(serde_json::to_value(self.state(wait_ms(&url)?).await?).map_err(|e| Fail::host(e.to_string()))?),
                     (Method::Post, "turns") => self.turn(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?),
                     (Method::Post, "stop") => self.stop(),
                     (Method::Post, "listen") => self.listen(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?).await,
@@ -828,6 +893,15 @@ impl Agent {
             }
         }?;
         Ok(Response::from_json(&answer)?)
+    }
+}
+
+/// A state read's `wait_ms` (0 when absent): at most AGENT_STATE_WAIT_MS_MAX.
+fn wait_ms(url: &worker::Url) -> Answer<u64> {
+    let Some((_, given)) = url.query_pairs().find(|(k, _)| k == "wait_ms") else { return Ok(0) };
+    match given.parse::<u64>() {
+        Ok(ms) if ms <= AGENT_STATE_WAIT_MS_MAX => Ok(ms),
+        _ => Err(Fail::invalid(format!("wait_ms is 0-{AGENT_STATE_WAIT_MS_MAX}"))),
     }
 }
 
@@ -860,11 +934,8 @@ async fn reply(sql: &worker::SqlStorage, fleet: &Fleet) -> anyhow::Result<()> {
     let Some(token) = kv_get(sql, "reply_to")?.filter(|t| !t.is_empty()) else { return Ok(()) };
     let rows: Vec<Value> = sql.exec("SELECT fragment, reply FROM listens WHERE token = ?", vec![token.as_str().into()]).and_then(|c| c.to_array()).map_err(|e| anyhow::anyhow!("{e}"))?;
     let Some(listen) = rows.first() else { return Ok(()) };
-    // an idle turn ends with its answer: the newest message, read alone
-    // (reading the whole history for it grew with the agent's age). A turn
-    // that ended without text has nothing to say.
-    let answer = last_message(sql)?.filter(|m| m.role == rmcp::model::Role::Assistant && !m.as_concat_text().trim().is_empty());
-    let Some(answer) = answer else { return Ok(()) };
+    // a turn that ended without text has nothing to say
+    let Some(answer) = last_answer(sql)? else { return Ok(()) };
     let id = fragment_core::tools::reply_id(answer.id.as_deref().unwrap_or(""));
     let fragment = listen["fragment"].as_str().unwrap_or("");
     let mut text = answer.as_concat_text();

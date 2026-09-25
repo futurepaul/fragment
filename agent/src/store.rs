@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS listens (
   token TEXT PRIMARY KEY, fragment TEXT NOT NULL, channel TEXT NOT NULL, reply TEXT NOT NULL,
   sub INTEGER NOT NULL, created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS heard (key TEXT PRIMARY KEY, at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS heard_at ON heard (at);
 CREATE TABLE IF NOT EXISTS steps (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, step TEXT NOT NULL, effects INTEGER NOT NULL,
   ms INTEGER NOT NULL, at INTEGER NOT NULL, driver TEXT NOT NULL);
@@ -96,9 +97,11 @@ pub fn recent_messages(sql: &SqlStorage, limit: usize) -> anyhow::Result<Vec<Mes
     Ok(recent_rows(sql, limit)?.into_iter().map(|(message, _)| message).collect())
 }
 
-/// The newest message (a turn's answer, once the turn is idle).
-pub fn last_message(sql: &SqlStorage) -> anyhow::Result<Option<Message>> {
-    Ok(recent_rows(sql, 1)?.pop().map(|(message, _)| message))
+/// A turn's answer: its newest message, when that is the model's text.
+/// Read alone (reading the whole history for it grew with the agent's age).
+pub fn last_answer(sql: &SqlStorage) -> anyhow::Result<Option<Message>> {
+    let newest = recent_rows(sql, 1)?.pop().map(|(message, _)| message);
+    Ok(newest.filter(|m| m.role == rmcp::model::Role::Assistant && !m.as_concat_text().trim().is_empty()))
 }
 
 /// The conversation a step sees: the newest `messages_max` messages, cut
