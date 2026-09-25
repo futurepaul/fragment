@@ -134,7 +134,9 @@ pub struct SyncState {
     pub host: Option<String>,
     #[serde(default)]
     pub repo: Option<String>,
-    pub files: HashMap<String, FileState>,
+    /// by path, in order: the journal serializes the same for the same
+    /// state, so an unchanged one is recognized and not written again
+    pub files: BTreeMap<String, FileState>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -247,20 +249,28 @@ impl SyncLock {
 }
 
 pub fn load_state(dir: &Path, name: &str) -> Result<SyncState> {
+    Ok(read_state(dir, name)?.0)
+}
+
+/// The journal, and the bytes it was read from (`None` when there was
+/// none, or it was unreadable and starts fresh).
+fn read_state(dir: &Path, name: &str) -> Result<(SyncState, Option<Vec<u8>>)> {
+    let fresh = || SyncState { schema_version: 3, name: name.to_string(), host: None, repo: None, files: BTreeMap::new() };
     let p = state_path(dir);
     if !p.exists() {
-        return Ok(SyncState { schema_version: 3, name: name.to_string(), host: None, repo: None, files: HashMap::new() });
+        return Ok((fresh(), None));
     }
-    match serde_json::from_slice::<SyncState>(&fs::read(&p)?) {
+    let bytes = fs::read(&p)?;
+    match serde_json::from_slice::<SyncState>(&bytes) {
         Ok(s) if s.schema_version == 3 => {
             if s.name != name {
                 anyhow::bail!("directory is synced to fragment '{}', not '{}'", s.name, name);
             }
-            Ok(s)
+            Ok((s, Some(bytes)))
         }
         _ => {
             eprintln!("warning: {} unreadable or old format — rebuilding state", p.display());
-            Ok(SyncState { schema_version: 3, name: name.to_string(), host: None, repo: None, files: HashMap::new() })
+            Ok((fresh(), None))
         }
     }
 }
@@ -280,11 +290,49 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn save_state(dir: &Path, state: &SyncState) -> Result<()> {
+/// Writes the journal, unless it is byte for byte what was read (`before`):
+/// a pass that changed nothing leaves the file alone, with no fsync'd
+/// rewrite.
+fn save_state(dir: &Path, state: &SyncState, before: Option<&[u8]>) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(state)?;
+    if before == Some(bytes.as_slice()) {
+        return Ok(());
+    }
     if let Some(parent) = state_path(dir).parent() {
         fs::create_dir_all(parent)?;
     }
-    atomic_write(&state_path(dir), serde_json::to_string_pretty(state)?.as_bytes())
+    atomic_write(&state_path(dir), &bytes)
+}
+
+/// The folder as a pass starts: its journal (with the bytes it was read
+/// from) and a scan of the folder against it.
+pub struct Local {
+    state: SyncState,
+    journal: Option<Vec<u8>>,
+    files: BTreeMap<String, LocalFile>,
+    stats: ScanStats,
+}
+
+impl Local {
+    /// Whether the folder is what the journal says: the same paths, with
+    /// the same content. A watcher woken by the OS needs no pass when it is
+    /// (the event was the pass's own write, or touched nothing that syncs).
+    pub fn matches_journal(&self) -> bool {
+        self.files.len() == self.state.files.len()
+            && self.files.iter().all(|(path, lf)| self.state.files.get(path).is_some_and(|st| st.sha256 == lf.sha256))
+    }
+}
+
+/// Reads the folder for a pass: the mirror source overlaid first (its new
+/// and changed files copy in), then the journal and a scan against it. No
+/// network.
+pub fn read_local(dir: &Path, name: &str, opts: &SyncOptions) -> Result<Local, SyncError> {
+    if let Some(src) = &opts.mirror_from {
+        mirror_overlay(src, dir).map_err(|e| SyncError::Io(format!("mirror-from {}: {e}", src.display())))?;
+    }
+    let (state, journal) = read_state(dir, name).map_err(|e| SyncError::Io(e.to_string()))?;
+    let (files, stats) = scan_local(dir, Some(&state), opts.verify).map_err(|e| SyncError::Io(e.to_string()))?;
+    Ok(Local { state, journal, files, stats })
 }
 
 pub(crate) struct LocalFile {
@@ -509,11 +557,13 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
 /// not nudge the cell's pins: a caller whose pass `landed` calls
 /// `refresh_pins`, once for everything it moved.
 pub fn pass(client: &Client, storage: &CodeStorage, name: &str, dir: &Path, opts: &SyncOptions) -> Result<Report, SyncError> {
-    if let Some(src) = &opts.mirror_from {
-        mirror_overlay(src, dir).map_err(|e| SyncError::Io(format!("mirror-from {}: {e}", src.display())))?;
-    }
-    let mut state = load_state(dir, name).map_err(|e| SyncError::Io(e.to_string()))?;
-    let (local, stats) = scan_local(dir, Some(&state), opts.verify).map_err(|e| SyncError::Io(e.to_string()))?;
+    pass_over(client, storage, name, dir, opts, read_local(dir, name, opts)?)
+}
+
+/// `pass`, over a folder already read (`read_local`): a watcher reads it
+/// first to learn whether it needs a pass at all.
+pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path, opts: &SyncOptions, local: Local) -> Result<Report, SyncError> {
+    let Local { mut state, journal, files: local, stats } = local;
     // World binding: this folder's journal must belong to THIS host+repo.
     // A mismatch means the fragment was recreated, or this folder last
     // synced the same name somewhere else (dev vs prod) — mirroring now
@@ -564,7 +614,7 @@ pub fn pass(client: &Client, storage: &CodeStorage, name: &str, dir: &Path, opts
         for p in local_delete_candidates {
             state.files.remove(&p);
         }
-        save_state(dir, &state).map_err(|e| SyncError::Io(e.to_string()))?;
+        save_state(dir, &state, journal.as_deref()).map_err(|e| SyncError::Io(e.to_string()))?;
         report.head = listing.head;
         return Ok(report);
     }
@@ -716,7 +766,7 @@ pub fn pass(client: &Client, storage: &CodeStorage, name: &str, dir: &Path, opts
         }
     }
 
-    save_state(dir, &state).map_err(|e| SyncError::Io(e.to_string()))?;
+    save_state(dir, &state, journal.as_deref()).map_err(|e| SyncError::Io(e.to_string()))?;
     report.head = listing.head;
     Ok(report)
 }
@@ -998,7 +1048,7 @@ mod tests {
         fs::write(dir.join("site/index.html"), b"hi").unwrap();
         let (l1, s1) = scan_local(&dir, None, false).unwrap();
         assert_eq!(s1.hashed, 1);
-        let mut st = SyncState { schema_version: 3, name: "x".into(), host: None, repo: None, files: HashMap::new() };
+        let mut st = SyncState { schema_version: 3, name: "x".into(), host: None, repo: None, files: BTreeMap::new() };
         let lf = l1.get("site/index.html").unwrap();
         st.files.insert("site/index.html".into(), FileState { sha256: lf.sha256.clone(), size: lf.size, mtime_ns: lf.mtime_ns, commit: "c".into() });
         let (_, s2) = scan_local(&dir, Some(&st), false).unwrap();
@@ -1185,6 +1235,30 @@ mod tests {
         let again = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
         assert!(again.pushed.is_empty() && again.pulled.is_empty() && again.conflicts.is_empty(), "{again:?}");
         assert_eq!(mock.take_requests(""), read_once);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: the journal is written when a pass changed it, and only
+    /// then. Method: its inode across an idle pass and a pushing one (the
+    /// write is a rename, so a new inode). Before, every pass rewrote and
+    /// fsynced it.
+    #[cfg(unix)]
+    #[test]
+    fn the_journal_is_written_only_when_it_changed() {
+        use std::os::unix::fs::MetadataExt;
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("a.txt", b"a")]);
+        let c = client_for(&mock);
+        let dir = tmpdir("journal-writes");
+        sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        let journal = || fs::metadata(dir.join(".fragment/state.json")).unwrap().ino();
+        let first = journal();
+        sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_eq!(journal(), first, "an idle pass leaves it alone");
+        fs::write(dir.join("b.txt"), b"b").unwrap();
+        sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        assert_ne!(journal(), first, "a pass that pushed wrote it");
+        assert!(load_state(&dir, "t").unwrap().files.contains_key("b.txt"));
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -1522,7 +1596,7 @@ mod tests {
         let blobs = crate::blobs::Blobs::new(&c, "t");
         let listing = list_main(&storage).unwrap();
         let (local, _) = scan_local(&dir, None, true).unwrap();
-        let mut state = SyncState { schema_version: 3, name: "t".into(), host: None, repo: None, files: HashMap::new() };
+        let mut state = SyncState { schema_version: 3, name: "t".into(), host: None, repo: None, files: BTreeMap::new() };
         let mut report = Report::default();
         let mut recorded = HashSet::new();
         for path in ["a.md", "a", "a.md", "a"] {
