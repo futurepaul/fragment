@@ -20,20 +20,6 @@
 //! Expired rows go in batches on the Registry's alarm, never on a request:
 //! an anonymous `/auth/login` must not scan the tables every signed
 //! request waits on.
-//!
-//!   POST /login/begin   {returnTo, linkTo?}                 → {state}
-//!   POST /login/exchange {state, code, clientId, issuer}    → {token, id, created, linked, returnTo}:
-//!                                                            WorkOS's code exchanged through KEYS
-//!                                                            (the API key is the node's), then the
-//!                                                            sign-in finished
-//!   POST /session       {token, fragment?}                  → {id, kind, owner, username, email} (401 when
-//!                                                            not live; the email is their first sign-in's)
-//!   POST /session/end   {token, fragment}                   → {ended}: a fragment's `__signout`
-//!   POST /logout        {token}                             → {workosSid}
-//!   POST /redeem/mint   {token, fragment, returnTo}         → {redeem}
-//!   POST /redeem        {redeem, fragment}                  → {token, returnTo}
-//!   POST /cli/add       {token, key}                        → {id, key, added}: the key joins the
-//!                                                            session's person (its proof was checked)
 
 use fragment_proto::Subject;
 use serde::de::IgnoredAny;
@@ -194,7 +180,6 @@ struct EarliestRow {
     session: Option<i64>,
 }
 
-/// An alarm at `at_ms`, a time since the epoch.
 fn alarm_at(at_ms: i64) -> ScheduledTime {
     ScheduledTime::new(js_sys::Date::new(&worker::wasm_bindgen::JsValue::from_f64(at_ms as f64)))
 }
@@ -300,9 +285,7 @@ impl RegistryCell {
     /// fragment (`None`: a platform session), its parent live too. Answers
     /// the session's hash, its identity, and their first sign-in's email.
     pub(super) fn live_session(&self, token: &str, fragment: Option<&str>) -> CellResult<(String, LiveSession)> {
-        // one statement: the session (its hash is the key), its parent (by
-        // its hash), its identity, that identity's username, and the email
-        // of its first sign-in (`subjects_identity`; at most SUBJECTS_MAX)
+        // the email's subquery reads `subjects_identity` (at most SUBJECTS_MAX)
         const Q: &str = concat!(
             "SELECT s.identity, s.fragment, s.parent, p.hash AS parent_live, i.kind, i.owner, u.username, ",
             "(SELECT email FROM subjects WHERE identity = s.identity ORDER BY linked_at LIMIT 1) AS email FROM sessions s ",

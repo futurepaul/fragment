@@ -2,7 +2,7 @@
 //! its answer, defined once. The router and fragments ask with them
 //! (`crate::ask_registry`), and the Registry decodes the same body and
 //! answers the same type (`RegistryCell::route`), so the two ends agree at
-//! compile time. The JSON on the wire is what the routes carried before.
+//! compile time.
 
 use std::collections::BTreeMap;
 
@@ -289,7 +289,6 @@ pub(crate) enum SigninsHook {
     ExpireSession(String),
 }
 
-/// How many rows sign-in's tables hold.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct SigninCounts {
     pub logins: u64,
