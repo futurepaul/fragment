@@ -1,8 +1,11 @@
 //! Agents (phase 5): an agent is a key with goose's loop and its
-//! conversation in its own cell. Its tools are the operations of the
-//! fragments it belongs to, called through the signed API; the model is the
-//! OpenRouter fake, scripted. Turns steer, stop, and survive a killed node
-//! without running an operation twice (the spike's checks, on the product).
+//! conversations in its own cell. Its tools are the operations of the
+//! fragments it belongs to and the platform's verbs, called through the
+//! signed API; the model is the OpenRouter fake, scripted. Turns steer,
+//! stop, and survive a killed node without running an operation twice (the
+//! spike's checks, on the product). An agent acts for whoever asked,
+//! capped (ROADMAP decision 17): at the platform, through its turns, and
+//! in chats (phase 7, slice A).
 
 use std::time::{Duration, Instant};
 
@@ -13,11 +16,12 @@ use fragment_proto::limits;
 use serde_json::{json, Value};
 
 use super::app::ship;
-use crate::api::Api;
+use crate::api::{url_enc, Api, Reply as Answer};
 use crate::Suite;
 
 const TODO_APP: &[u8] = include_bytes!("../../fixtures/todo.mjs");
 const TODO_JSON: &[u8] = include_bytes!("../../fixtures/todo.json");
+const ROOM_JSON: &[u8] = include_bytes!("../../fixtures/room.json");
 
 pub(super) fn view(agents: &Api, owner: &Keys, name: &str) -> Value {
     agents.signed(owner, "GET", &format!("/api/a/{name}"), None).map(|r| r.body).unwrap_or_default()
@@ -81,7 +85,16 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     let r = agents.signed(&Keys::generate(), "GET", &format!("/api/a/{full}"), None)?;
     s.ok("nor a key no one registered", r.status == 401, &r);
     let r = agents.signed(&owner, "GET", &format!("/api/a/{name}/tools"), None)?;
-    let platform = ["platform__create_fragment", "platform__list_files", "platform__read_file", "platform__write_files", "platform__deploy"];
+    let platform = [
+        "platform__create_fragment",
+        "platform__list_fragments",
+        "platform__operations",
+        "platform__call",
+        "platform__list_files",
+        "platform__read_file",
+        "platform__write_files",
+        "platform__deploy",
+    ];
     s.ok("an agent in no fragment has only the platform's verbs", r.status == 200 && r.body["tools"] == json!(platform), &r);
 
     // a todo fragment the owner makes, with the agent as an editor
@@ -102,6 +115,72 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     let tools: Vec<String> = r.body["tools"].as_array().into_iter().flatten().filter_map(|t| t.as_str().map(str::to_string)).collect();
     s.ok("a membership gives it that fragment's operations as tools", tools.contains(&add) && tools.contains(&fragment_core::tools::tool_name(&todo, "list").expect("a tool name")), &r);
     s.ok("and nothing of a fragment it is not in", !tools.iter().any(|t| t.starts_with(&format!("{}__", other.replace('.', "--")))), &r);
+
+    // decision 17 at the platform: an agent acts for whoever asked, capped.
+    // A key the owner registered as an agent of theirs signs `for` itself
+    // here (the agent above signs in its cell; its turns are checked below).
+    let hand = Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &owner) })))?;
+    s.ok("the owner registers a second agent of theirs", r.status == 200 && r.body["kind"] == "agent", &r);
+    let hand_id = r.body["id"].as_str().unwrap_or("").to_string();
+    let stranger_id = api.identity(&stranger)?;
+    let acting = |who: &str| format!("for={}", url_enc(who));
+    let r = api.signed(&owner, "GET", &format!("/api/f/{todo}/status?{}", acting(&owner_id)), None)?;
+    s.ok("a person's request naming someone in `for` is refused", r.status == 403, &r);
+    let r = api.signed(&hand, "GET", &format!("/api/f/{other}/status"), None)?;
+    s.ok("an agent reaches nothing of an app it is not in, as itself", r.status == 403, &r);
+    let r = api.signed(&hand, "GET", &format!("/api/f/{other}/status?{}", acting(&owner_id)), None)?;
+    s.ok("for its owner, it reads the owner's app, as an editor at most", r.status == 200 && r.body["role"] == "editor", &r);
+    let r = api.signed(&hand, "POST", &format!("/api/f/{other}/ops/add_todo?{}", acting(&owner_id)), Some(&json!({ "id": "for-1", "input": { "text": "for the owner" } })))?;
+    s.ok("and changes it", r.status == 200 && todos(api, &owner, &other) == ["for the owner"], &r);
+    let r = api.signed(&hand, "GET", &format!("/api/f/{other}/status?{}", acting(&stranger_id)), None)?;
+    s.ok("for someone with no role there, nothing", r.status == 403, &r);
+    // owner-only actions never go through an agent, whomever it acts for
+    let owner_only = [
+        ("PUT", format!("/api/f/{other}/members/{stranger_id}"), Some(json!({ "role": "editor" }))),
+        ("PUT", format!("/api/f/{other}/visibility"), Some(json!({ "visibility": "public" }))),
+        ("POST", format!("/api/f/{other}/rotate"), None),
+        ("POST", format!("/api/f/{other}/invites"), Some(json!({ "role": "editor" }))),
+        ("DELETE", format!("/api/f/{other}"), None),
+    ];
+    let refused: Vec<(String, u16)> = owner_only
+        .iter()
+        .map(|(method, path, body)| (format!("{method} {path}"), api.signed(&hand, method, &format!("{path}?{}", acting(&owner_id)), body.as_ref()).map_or(0, |r| r.status)))
+        .collect();
+    let st = api.status(&owner, &other)?;
+    let members = api.signed(&owner, "GET", &format!("/api/f/{other}/members"), None)?;
+    s.ok(
+        "an agent never changes members, visibility, links, or invites, nor deletes, even for its owner",
+        refused.iter().all(|(_, status)| *status == 403) && st.status == 200 && st.body["visibility"] == "link" && members.body["members"].as_array().map(Vec::len) == Some(1),
+        json!({ "refused": refused, "visibility": st.body["visibility"], "members": members.body }),
+    );
+    // a post to a postable channel is decided as a call is: for its
+    // asker, capped (`notes` takes an editor's posts)
+    let room = s.named(api, &owner, "agent-room")?;
+    let c = s.create(api, &owner, &room)?;
+    s.commit(&c, &[("fragment.json", Some(ROOM_JSON))]);
+    s.deploy(&c);
+    api.signed(&owner, "PUT", &format!("/api/f/{room}/members/{stranger_id}"), Some(&json!({ "role": "viewer" })))?;
+    let post = |who: &str, id: &str| api.signed(&hand, "POST", &format!("/api/f/{room}/channels/notes?{}", acting(who)), Some(&json!({ "id": id, "body": { "text": "a note" } })));
+    // the deploy lands by the webhook: posted again (the same id) until it has
+    s.eventually(wait, || post(&owner_id, "n1").is_ok_and(|r| r.status == 200));
+    let for_owner = post(&owner_id, "n1")?;
+    let for_viewer = post(&stranger_id, "n2")?;
+    s.ok(
+        "an agent's post acts for its asker, capped: for the owner, a note, as the agent; for a viewer, none",
+        for_owner.status == 200 && for_owner.body["record"]["principal"] == hand_id.as_str() && for_viewer.status == 403,
+        json!({ "owner": for_owner.body, "viewer": for_viewer.body }),
+    );
+    let listed = |r: &Answer, name: &str| r.body["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == name).map(|f| f["role"].clone());
+    let r = api.signed(&hand, "GET", &format!("/api/fragments?{}", acting(&owner_id)), None)?;
+    s.ok("listed for its owner: the owner's fragments, each as an editor at most", listed(&r, &todo) == Some(json!("editor")) && listed(&r, &other) == Some(json!("editor")), &r);
+    let r = api.signed(&hand, "GET", &format!("/api/fragments?{}", acting(&stranger_id)), None)?;
+    s.ok(
+        "and for someone else, only what they are in too, at their own role",
+        r.status == 200 && r.body["fragments"] == json!([{ "name": room, "role": "viewer" }]),
+        &r,
+    );
 
     // a turn: the model calls the operation, then answers
     s.openrouter.clear_script();
@@ -141,6 +220,25 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
         .find(|t| t["function"]["name"] == add.as_str())
         .map(|t| t["function"]["parameters"].clone());
     s.ok("the model was offered the operation, with its input schema", schema.as_ref().is_some_and(|p| p["type"] == "object"), json!(schema));
+
+    // the owner's turn reaches an app the owner made that the agent is not
+    // in (the 403 of 2026-09-25): through the platform's verbs, for the owner
+    let marker = format!("marker-{}", &agent_id[3..11]);
+    api.signed(&owner, "POST", &format!("/api/f/{other}/files"), Some(&json!({ "files": [{ "path": "notes.txt", "text": marker }] })))?;
+    s.openrouter.clear_script();
+    s.openrouter.script(&[
+        Reply::Tools(vec![("platform__read_file".into(), json!({ "fragment": other, "path": "notes.txt" }))]),
+        Reply::Tools(vec![("platform__call".into(), json!({ "fragment": other, "operation": "add_todo", "input": { "text": "by my agent" } }))]),
+        Reply::Text("Added it to your other list.".into()),
+    ]);
+    let asked = s.openrouter.chats().len();
+    agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "add to my other list" })))?;
+    let v = settle(s, &agents, &owner, &name, wait);
+    let read = s.openrouter.chats().get(asked + 1).is_some_and(|c| c["messages"].to_string().contains(&marker));
+    s.ok("the owner's turn reads a file of an app the owner made, which its agent is not in", read && v["outcome"] == "idle", json!({ "outcome": v["outcome"], "error": v["error"] }));
+    let ops = api.signed(&owner, "GET", &format!("/api/f/{other}/channels/ops"), None)?;
+    let by_agent = ops.body["records"].as_array().into_iter().flatten().any(|r| r["body"]["op"] == "add_todo" && r["principal"] == agent_id.as_str());
+    s.ok("and calls its operation, as the agent", todos(api, &owner, &other).iter().any(|t| t == "by my agent") && by_agent, &ops);
 
     // it makes an app for its owner: a fragment, its page, a deploy
     let label = s.name("counter");
@@ -280,6 +378,31 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     );
     agents.signed(&owner, "POST", &format!("/api/a/{name}/test"), Some(&json!({})))?;
     s.openrouter.clear_script();
+
+    // an agent follows more than 16 chats: the owner's own agent joins each
+    // chat made from the template, the 17th too; and a chat deleted is
+    // dropped from what it follows
+    let many: Vec<String> = (0..17).map(|i| s.named(api, &owner, &format!("many-{i}"))).collect::<Result<_>>()?;
+    for chat in &many {
+        let r = api.create_with(&owner, json!({ "name": chat, "template": "chat" }))?;
+        anyhow::ensure!(r.status == 200, "a chat from the template: {r}");
+    }
+    let listening = |chat: &str| api.signed(&owner, "GET", &format!("/api/f/{chat}/subscriptions"), None).map_or(0, |r| r.body["subscriptions"].as_array().map_or(0, Vec::len));
+    let default = view(&agents, &owner, "agent");
+    let joined = s.eventually(wait, || listening(&many[16]) == 1);
+    let follows = |v: &Value| v["listens"]["newest"].as_array().into_iter().flatten().filter_map(|l| l["fragment"].as_str().map(str::to_string)).collect::<Vec<_>>();
+    let v = view(&agents, &owner, "agent");
+    s.ok("the owner's agent follows a 17th chat", joined && v["listens"]["count"] == 17 && many.iter().all(|c| follows(&v).contains(c)), json!({ "count": v["listens"]["count"], "name": default["name"] }));
+    let r = api.signed(&owner, "DELETE", &format!("/api/f/{}", many[0]), None)?;
+    let last = s.named(api, &owner, "many-17")?;
+    let made = api.create_with(&owner, json!({ "name": last, "template": "chat" }))?;
+    let joined = r.status == 200 && made.status == 200 && s.eventually(wait, || listening(&last) == 1);
+    let v = view(&agents, &owner, "agent");
+    s.ok(
+        "a deleted chat's listen is dropped when the agent follows another",
+        joined && v["listens"]["count"] == 17 && !follows(&v).contains(&many[0]) && follows(&v).contains(&last),
+        json!({ "count": v["listens"]["count"], "follows": follows(&v) }),
+    );
     Ok(())
 }
 
@@ -413,6 +536,9 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     // out again, so the page's message below goes unanswered
     s.cli(api, &home, &["members", "rm", &chat, &bot_npub]);
 
+    let bot = Bot { name: &bot, id: &bot_id, npub: &bot_npub };
+    chats_apart(s, api, &agents, &home, &owner, &bot, &todo)?;
+
     // the page: the conversation so far, and a message sent from it
     let Some(mut chrome) = s.browser()? else {
         s.ok("Chrome is installed for the chat page (set CHROME_BIN)", false, "no Chrome found");
@@ -426,5 +552,187 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let landed = s.eventually(wait, || chat_records(api, &owner, &chat).iter().any(|r| r["body"]["text"] == "from the page"));
     s.ok("a message sent from the page lands in the channel, and shows", landed && chrome.until(&page, "document.getElementById('messages').textContent.includes('from the page')", wait), "");
     std::env::remove_var("FRAGMENT_AGENTS");
+    Ok(())
+}
+
+/// The agent a chat lane drives: its name, identity, and key.
+struct Bot<'a> {
+    name: &'a str,
+    id: &'a str,
+    npub: &'a str,
+}
+
+/// A chat for `bot`, as the chat lane makes one with the CLI (the chat
+/// template scaffolded in a folder of its own, created, and deployed), the
+/// agent an editor that listens. Answers its name and its create answer.
+fn open_chat(s: &Suite, api: &Api, agents: &Api, home: &std::path::Path, owner: &Keys, bot: &Bot, label: &str) -> Result<(String, Value)> {
+    let dir = s.dir(&format!("chat-{label}")).join("room");
+    let dir = dir.to_str().expect("utf-8 path");
+    let scaffolded = s.cli(api, home, &["new", dir, "--template", "chat"]);
+    anyhow::ensure!(scaffolded.status.success(), "scaffold {label}: {}", String::from_utf8_lossy(&scaffolded.stderr));
+    let room = s.cli_json(api, home, &["create", &s.name(label), "--json"])?;
+    let name = room["name"].as_str().unwrap_or("").to_string();
+    s.hook(api, &room);
+    let deployed = s.cli(api, home, &["deploy", &name, "--dir", dir]);
+    anyhow::ensure!(deployed.status.success(), "deploy {name}: {}", String::from_utf8_lossy(&deployed.stderr));
+    let r = api.signed(owner, "PUT", &format!("/api/f/{name}/members/{}", bot.npub), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "the agent joins {name}: {r}");
+    let r = agents.signed(owner, "POST", &format!("/api/a/{}/listen", bot.name), Some(&json!({ "fragment": name })))?;
+    anyhow::ensure!(r.status == 200, "the agent listens to {name}: {r}");
+    Ok((name, room))
+}
+
+/// The names of the tools the model was offered in a request.
+fn offered(chat: &Value) -> Vec<String> {
+    chat["tools"].as_array().into_iter().flatten().filter_map(|t| t["function"]["name"].as_str().map(str::to_string)).collect()
+}
+
+/// Phase 7, slice A, in chats: one conversation per chat, answered there;
+/// a turn acts for whoever started it (ROADMAP decision 17); only its
+/// starter steers it; an anonymous visitor's message starts nothing.
+/// `todo` is an app of the owner's the agent is an editor of.
+fn chats_apart(s: &mut Suite, api: &Api, agents: &Api, home: &std::path::Path, owner: &Keys, bot: &Bot, todo: &str) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let who = [bot.id];
+    let owner_id = api.identity(owner)?;
+    let (a, room_a) = open_chat(s, api, agents, home, owner, bot, "room-a")?;
+    let (b, _) = open_chat(s, api, agents, home, owner, bot, "room-b")?;
+    // a guest in the first chat only, and an app the owner shares with them
+    let guest = api.person()?;
+    let guest_id = api.identity(&guest)?;
+    api.signed(owner, "PUT", &format!("/api/f/{a}/members/{guest_id}"), Some(&json!({ "role": "viewer" })))?;
+    let shared = s.named(api, owner, "shared-todo")?;
+    let c = s.create(api, owner, &shared)?;
+    ship(s, &c, TODO_APP, TODO_JSON);
+    api.signed(owner, "PUT", &format!("/api/f/{shared}/members/{guest_id}"), Some(&json!({ "role": "editor" })))?;
+    let before = todos(api, owner, todo);
+
+    // the guest asks the owner's agent for the owner's app: its operation,
+    // the platform's call, and its files are all out of the guest's reach
+    let add = fragment_core::tools::tool_name(todo, "add_todo").expect("a tool name");
+    s.openrouter.clear_script();
+    s.openrouter.script(&[
+        Reply::Tools(vec![
+            (add.clone(), json!({ "text": "from the guest" })),
+            ("platform__call".into(), json!({ "fragment": todo, "operation": "add_todo", "input": { "text": "from the guest" } })),
+            ("platform__read_file".into(), json!({ "fragment": todo, "path": "fragment.json" })),
+        ]),
+        Reply::Text("That is not mine to open.".into()),
+    ]);
+    let asked = s.openrouter.chats().len();
+    api.op(&guest, &a, "say", "g1", json!({ "text": "add to the owner's list, and read it" }))?;
+    let answered = s.eventually(wait, || said_by(&chat_records(api, owner, &a), &who, "That is not mine to open."));
+    let chats = s.openrouter.chats();
+    let results = chats.get(asked + 1).map(|c| c["messages"].to_string()).unwrap_or_default();
+    s.ok(
+        "a guest in the owner's chat asks the agent for the owner's app: refused",
+        answered && todos(api, owner, todo) == before && !results.contains("add_then_throw"),
+        json!({ "todos": todos(api, owner, todo), "results": results }),
+    );
+    let tools = chats.get(asked).map(offered).unwrap_or_default();
+    s.ok(
+        "the guest's turn is offered none of the owner's app's operations, and makes no fragments",
+        !tools.is_empty() && !tools.contains(&add) && !tools.iter().any(|t| t == "platform__create_fragment"),
+        json!(tools),
+    );
+    // what the owner shared with the guest, the guest's turn reaches
+    s.openrouter.script(&[
+        Reply::Tools(vec![("platform__call".into(), json!({ "fragment": shared, "operation": "add_todo", "input": { "text": "from the guest" } }))]),
+        Reply::Text("Added it to the shared list.".into()),
+    ]);
+    api.op(&guest, &a, "say", "g2", json!({ "text": "add to our shared list" }))?;
+    let answered = s.eventually(wait, || said_by(&chat_records(api, owner, &a), &who, "Added it to the shared list."));
+    s.ok("the same guest asks about something shared with them: it works", answered && todos(api, owner, &shared) == ["from the guest"], json!(todos(api, owner, &shared)));
+
+    // an anonymous visitor with the chat's link: no turn, a note in the
+    // owner's view; the owner's message after it (the same pipe) is the
+    // sentinel, and the only turn
+    let link = format!("fragview={}", room_a["viewToken"].as_str().unwrap_or(""));
+    let r = api.browser_op(&a, "say", "anon-1", json!({ "text": "hello from nobody" }), Some(&link))?;
+    s.openrouter.script(&[Reply::Text("Hello, owner.".into())]);
+    let asked = s.openrouter.chats().len();
+    api.op(owner, &a, "say", "o1", json!({ "text": "anyone else here?" }))?;
+    let answered = s.eventually(wait, || said_by(&chat_records(api, owner, &a), &who, "Hello, owner."));
+    let turns: Vec<String> = s.openrouter.chats()[asked..].iter().map(|c| c["messages"].to_string()).collect();
+    let v = view(agents, owner, bot.name);
+    let noted = v["ignored"].as_array().into_iter().flatten().any(|i| i["fragment"] == a.as_str() && i["principal"].as_str().is_some_and(|p| p.starts_with("anon:")));
+    s.ok(
+        "an anonymous link holder's message starts no turn, and the owner's view notes it",
+        r.status == 200 && answered && turns.len() == 1 && !turns[0].contains("hello from nobody") && noted,
+        json!({ "said": r.status, "turns": turns.len(), "ignored": v["ignored"] }),
+    );
+
+    // a message from chat B during chat A's turn: its own turn, in B's
+    // conversation, answered in B; A's turn never reads it
+    let hold = |ms: u64| agents.signed(owner, "POST", &format!("/api/a/{}/test", bot.name), Some(&json!({ "hold_in_tool_ms": ms })));
+    hold(5000)?;
+    s.openrouter.script(&[
+        Reply::Tools(vec![("platform__list_fragments".into(), json!({}))]),
+        Reply::Text("Answer in A.".into()),
+        Reply::Text("Answer in B.".into()),
+    ]);
+    let asked = s.openrouter.chats().len();
+    let runs = |v: &Value| runs_of(v, "platform__list_fragments").len();
+    let ran = runs(&view(agents, owner, bot.name));
+    api.op(owner, &a, "say", "o2", json!({ "text": "a question for room A" }))?;
+    s.eventually(wait, || runs(&view(agents, owner, bot.name)) > ran);
+    api.op(owner, &b, "say", "o3", json!({ "text": "a question for room B" }))?;
+    // it waits for a turn of its own while A's runs (held in its tool)
+    let waiting = |conv: &str, asker: &str| {
+        let v = view(agents, owner, bot.name);
+        v["waiting"].as_array().into_iter().flatten().any(|w| w["conversation"] == conv && w["asker"] == asker)
+    };
+    let queued = s.eventually(Duration::from_secs(4), || waiting(&format!("{b}/chat"), &owner_id));
+    let in_a = s.eventually(wait, || said_by(&chat_records(api, owner, &a), &who, "Answer in A."));
+    let in_b = s.eventually(wait, || said_by(&chat_records(api, owner, &b), &who, "Answer in B."));
+    let (records_a, records_b) = (chat_records(api, owner, &a), chat_records(api, owner, &b));
+    s.ok(
+        "a message from chat B during chat A's turn is answered in B, and only there",
+        queued && in_a && in_b && !said_by(&records_a, &who, "Answer in B.") && !said_by(&records_b, &who, "Answer in A."),
+        json!({ "queued": queued, "a": records_a, "b": records_b }),
+    );
+    let turns: Vec<String> = s.openrouter.chats()[asked..].iter().map(|c| c["messages"].to_string()).collect();
+    let a_turn: Vec<&String> = turns.iter().filter(|m| m.contains("a question for room A")).collect();
+    let b_turn: Vec<&String> = turns.iter().filter(|m| m.contains("a question for room B")).collect();
+    s.ok(
+        "A's turn never reads B's message, and B's conversation holds nothing of A's",
+        a_turn.len() == 2 && a_turn.iter().all(|m| !m.contains("a question for room B")) && b_turn.len() == 1 && !b_turn[0].contains("room A") && !b_turn[0].contains("Answer in A."),
+        json!({ "requests": turns.len(), "a": a_turn.len(), "b": b_turn.len() }),
+    );
+
+    // only the turn's starter steers it: the owner's next message joins the
+    // owner's turn; the guest's waits for a turn of its own
+    s.openrouter.script(&[
+        Reply::Tools(vec![("platform__list_fragments".into(), json!({}))]),
+        Reply::Text("The owner's answer.".into()),
+        Reply::Text("The guest's answer.".into()),
+    ]);
+    let asked = s.openrouter.chats().len();
+    let ran = runs(&view(agents, owner, bot.name));
+    api.op(owner, &a, "say", "o4", json!({ "text": "the owner starts" }))?;
+    s.eventually(wait, || runs(&view(agents, owner, bot.name)) > ran);
+    api.op(owner, &a, "say", "o5", json!({ "text": "the owner adds this" }))?;
+    api.op(&guest, &a, "say", "g3", json!({ "text": "the guest cuts in" }))?;
+    let queued = s.eventually(Duration::from_secs(4), || waiting(&format!("{a}/chat"), &guest_id));
+    let owners = s.eventually(wait, || said_by(&chat_records(api, owner, &a), &who, "The owner's answer."));
+    let guests = s.eventually(wait, || said_by(&chat_records(api, owner, &a), &who, "The guest's answer."));
+    let turns: Vec<String> = s.openrouter.chats()[asked..].iter().map(|c| c["messages"].to_string()).collect();
+    let v = view(agents, owner, bot.name);
+    let message = |text: &str| v["messages"].as_array().into_iter().flatten().find(|m| m["text"].as_str().is_some_and(|t| t.contains(text))).cloned().unwrap_or_default();
+    s.ok(
+        "only the turn's starter steers it: the owner's next message joins the owner's turn, the guest's gets its own",
+        queued
+            && owners
+            && guests
+            && turns.len() == 3
+            && turns[1].contains("the owner adds this")
+            && !turns[1].contains("the guest cuts in")
+            && turns[2].contains("the guest cuts in")
+            && message("the owner adds this")["steer"] == true
+            && message("the guest cuts in")["steer"] != true,
+        json!({ "queued": queued, "requests": turns.len(), "steer": message("the owner adds this"), "guest": message("the guest cuts in") }),
+    );
+    hold(0)?;
+    s.openrouter.clear_script();
     Ok(())
 }

@@ -518,3 +518,21 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** the registry is admitted ahead of alarm wakes (a
   priority in celld's gate, or a registry kept warm), or the node wakes
   its alarms in a bounded trickle.
+
+## An agent runs one turn at a time, across all its chats
+
+- **Observed:** phase 7 slice A keeps one conversation per chat, but one
+  turn runs at a time per agent (agent/src/lib.rs `begin`, `next_turn`):
+  a message for another chat, or from someone other than the running
+  turn's starter, waits (at most 64) until the running turn ends. One
+  driver, one watchdog alarm, and one cancel token per agent stay as
+  phase 5 built them.
+- **Risk:** a long turn in one chat (a computer's build, a slow model)
+  delays every other chat's answer; a busy agent turns messages away
+  (429, redelivered) past 64 waiting.
+- **First proof:** an owner whose agent is in several busy chats sees
+  answers arrive minutes late, or the delivery dead-letter queue holds
+  an agent's inbox.
+- **Delete when:** turns of different conversations run at once (a
+  driver, a watchdog, and a cancel token per conversation), proven by an
+  e2e where chat B's answer lands while chat A's turn is held in a tool.

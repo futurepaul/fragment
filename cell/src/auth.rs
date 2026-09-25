@@ -388,7 +388,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 let bytes = crate::read_body(&mut req, SHORT_FORM_MAX_BYTES).await?;
                 let field = |name: &str| url::form_urlencoded::parse(&bytes).find(|(k, _)| k == name).map(|(_, v)| v.trim().to_string()).unwrap_or_default();
                 let create = fragment_proto::CreateFragment { name: field("label"), visibility: None, template: Some(field("template")) };
-                let v: serde_json::Value = match crate::create_fragment(env, cfg, url, create, Signed { identity: live.identity, key: None }).await {
+                let v: serde_json::Value = match crate::create_fragment(env, cfg, url, create, Signed::new(live.identity, None)).await {
                     Ok(mut made) if made.status_code() == 200 => made.json().await?,
                     Ok(mut made) => {
                         let v: serde_json::Value = made.json().await.unwrap_or_default();
