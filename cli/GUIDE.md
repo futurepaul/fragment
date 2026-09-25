@@ -230,10 +230,6 @@ export class App extends DurableObject {
   video are written to `path` on `main`. A reasoning model can spend a
   small `max_tokens` thinking: pass `reasoning: {effort: "low"}`.
 
-`fragment build [dir]` compiles `.ts` sources to `.mjs` beside them,
-hashes site assets, and refuses files that would not parse. It is
-optional; plain `.mjs` needs nothing.
-
 ## Pages
 
 A page imports the browser library from its own fragment:
@@ -431,7 +427,7 @@ fragment sync <name> [--dir D] [--watch] [--mode M] [--install | --uninstall]
 fragment verify <name> [--dir D]         fragment secret set|list|rm ...
 fragment deploy <name> [--dir D] [--preview] [--note N]
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]
-fragment build [DIR]                     fragment rm <name>
+fragment rm <name>
 fragment agent create|show|say|stop|tools|listen|computer ...
 fragment computer serve [--listen A]     fragment guide
 fragment computer connect --agent U --token-file F
