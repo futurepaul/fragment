@@ -28,7 +28,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: check-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+            cell/target
+            agent/target
+          key: check-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'agent/Cargo.lock') }}
           restore-keys: check-${{ runner.os }}-
       - run: cargo xtask check
 
@@ -39,7 +41,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      # the dependencies (the workspace's own crates build every time)
+      # the dependencies (the workspaces' own crates build every time);
+      # cell/ and agent/ are workspaces of their own, with their own targets
       - uses: actions/cache@v4
         with:
           path: |
@@ -47,7 +50,9 @@ jobs:
             ~/.cargo/git
             ~/.cargo/bin
             target
-          key: e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+            cell/target
+            agent/target
+          key: e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'agent/Cargo.lock') }}
           restore-keys: e2e-${{ runner.os }}-
       # the node: the pinned fork (its commit, CELLD_FORK_REV), built with
       # this repo's crates it links (crates/native and what it depends on;
@@ -73,8 +78,10 @@ jobs:
           retention-days: 3
 
   # Each shard is a slice of the sections (crates/e2e/src/lanes/mod.rs),
-  # sized by their CI times; `rest` is every section the others do not
-  # name, so a new section always runs somewhere.
+  # sized by their CI times (each prints its own); `rest` is every section
+  # the others do not name, so a new section always runs somewhere. It
+  # keeps `triggers`: its cron fragment is deployed sections earlier, and
+  # there the minute it waits for passes while they run.
   shard:
     needs: build
     runs-on: macos-14
@@ -83,13 +90,13 @@ jobs:
       matrix:
         include:
           - name: restarts
-            args: --only restart,pathmode,node-full
+            args: --only restart,pathmode,node-full,browser
           - name: agents
-            args: --only agents,chat,computer,screenshots
+            args: --only agents,chat,computer,screenshots,sync,appfiles,blobs
           - name: deliveries
-            args: --only push,desktop,triggers,effects
+            args: --only push,desktop,effects
           - name: rest
-            args: --except restart,pathmode,node-full,agents,chat,computer,screenshots,push,desktop,triggers,effects
+            args: --except restart,pathmode,node-full,browser,agents,chat,computer,screenshots,sync,appfiles,blobs,push,desktop,effects
     name: e2e (${{ matrix.name }})
     steps:
       - uses: actions/checkout@v4
