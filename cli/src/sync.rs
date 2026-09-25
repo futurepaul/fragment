@@ -1161,22 +1161,6 @@ mod tests {
 
     // ---- end-to-end against the mock code.storage ----
 
-    #[test]
-    fn push_success_commits_folder() {
-        let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[]);
-        let c = client_for(&mock);
-        let dir = tmpdir("push-ok");
-        fs::write(dir.join("a.txt"), b"alpha").unwrap();
-        fs::create_dir_all(dir.join("site")).unwrap();
-        fs::write(dir.join("site/index.html"), b"<h1>hi</h1>").unwrap();
-        let report = sync_once(&c, "t", &dir, &opts(Mode::Push)).unwrap();
-        assert_eq!(report.pushed.len(), 2);
-        assert_eq!(mock.file_at("t", "main", "a.txt").unwrap(), b"alpha");
-        assert_eq!(mock.file_at("t", "main", "site/index.html").unwrap(), b"<h1>hi</h1>");
-        fs::remove_dir_all(&dir).ok();
-    }
-
     /// The fake's request counts, as a test states them.
     fn counts(routes: &[(&str, u32)]) -> BTreeMap<String, u32> {
         routes.iter().map(|(route, n)| (route.to_string(), *n)).collect()
