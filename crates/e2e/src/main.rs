@@ -7,6 +7,10 @@
 //! `cargo xtask e2e [--only <section>]`. Each section makes its own
 //! fragments, so any one can run alone. Every check prints `ok` or `FAIL`;
 //! the process exits non-zero when any check fails.
+//! A run's scratch (`target/e2e/<run>`: the staged cell, each node boot's
+//! log, the lanes' directories and screenshots) is
+//! removed when every check passes, and kept when one fails (or when
+//! `FRAGMENT_E2E_KEEP` is set).
 
 mod api;
 mod browser;
@@ -171,7 +175,18 @@ impl Suite {
         }
         .configure(&self.agents_project)?;
         let env = env.into_iter().chain(self.node_env_extra.iter().cloned()).collect();
-        let opts = devstack::NodeOptions { project: self.project.clone(), port: self.port, clean, watch: false, env, with: vec![self.agents_project.clone()] };
+        let opts = devstack::NodeOptions {
+            project: self.project.clone(),
+            port: self.port,
+            clean,
+            watch: false,
+            env,
+            with: vec![self.agents_project.clone()],
+            // each boot's log, in this run's scratch: a FAIL comes with the
+            // node's side of it, the logs of a node a lane killed included
+            log_dir: self.scratch.clone(),
+            node_logs: true,
+        };
         let (node, _) = devstack::Node::start(&self.tools, &opts)?;
         self.node = Some(node);
         Ok(Api::new(self.port, suffix.then_some(SUFFIX)))
@@ -298,9 +313,9 @@ impl Suite {
             .and_then(|v| v["secret_key"].as_str().and_then(Keys::from_secret_hex))
     }
 
-    /// A fresh directory for this run.
+    /// A fresh directory in this run's scratch.
     pub fn dir(&self, name: &str) -> PathBuf {
-        let d = self.scratch.join(format!("{name}-{}", self.run));
+        let d = self.scratch.join(name);
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).expect("scratch dir");
         d
@@ -331,11 +346,11 @@ fn main() -> Result<()> {
     let tools = devstack::Tools::locate()?;
     let org_key = fake::generate_org_key_pem();
     let fake = CodeStorage::start(fake::Options { org: ORG.into(), org_key_pem: Some(org_key.clone()), ..Default::default() })?;
-    let scratch = root.join("target/e2e");
+    let run = format!("{:x}", api::now_s() % 0xffffff);
+    let scratch = root.join("target/e2e").join(&run);
     std::fs::create_dir_all(&scratch)?;
     let project = devstack::stage_project(&scratch.join("cell"))?;
     let agents_project = devstack::stage_agent(&scratch.join("agent"))?;
-    let run = format!("{:x}", api::now_s() % 0xffffff);
     let mut s = Suite {
         only,
         passed: 0,
@@ -368,7 +383,13 @@ fn main() -> Result<()> {
         for f in &s.failed {
             println!("  FAIL {f}");
         }
+        println!("kept for a look: {} (each node boot's log is celld-<port>-<boot>.log there)", s.scratch.display());
         std::process::exit(1);
+    }
+    if std::env::var_os("FRAGMENT_E2E_KEEP").is_some() {
+        println!("kept: {}", s.scratch.display());
+    } else if let Err(e) = std::fs::remove_dir_all(&s.scratch) {
+        println!("could not remove {}: {e}", s.scratch.display());
     }
     Ok(())
 }

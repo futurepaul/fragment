@@ -503,10 +503,10 @@ without a delete condition is unfinished design, not debt.
   own logs on (848 passed).
 - **Risk:** a fragment.club node that dies hard, restarts, and wakes
   everything at once could die again.
-- **First proof:** the next time it happens, with `FRAGMENT_NODE_LOGS=1`
-  (the node's own logs, kept across restarts in
-  `target/devstack/celld-<port>.log`), or a node on the fleet restarting
-  twice.
+- **First proof:** the next time it happens: the e2e runs its nodes with
+  their own logs on and keeps a failing run's scratch, one log per boot
+  (`target/e2e/<run>/celld-<port>-<boot>.log`, the killed node's among
+  them); or a node on the fleet restarting twice.
 - **Delete when:** the fatal is caught and fixed in celld or here, or a
   run of full e2es under load no longer shows it.
 

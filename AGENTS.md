@@ -53,8 +53,12 @@ debt ledger).
   routes, cli, browser, jobs, triggers, appfiles, blobs, notes, push,
   ai, budget, agents, chat, computer, sync, restart, pathmode). The browser and notes sections drive headless
   Chrome (`CHROME_BIN` to choose one); `triggers` waits for a cron
-  minute (about a minute). The node runs from a staged copy of the cell
-  (`target/e2e/cell`), so the e2e and `cargo xtask dev` can run at once.
+  minute (about a minute). The node runs from a staged copy
+  of the cell in the run's own scratch (`target/e2e/<run>/cell`), so the
+  e2e and `cargo xtask dev` can run at once. That scratch holds each node
+  boot's log (`celld-<port>-<boot>.log`, the node's own logs on) and is
+  removed when every check passes, kept when one fails
+  (`FRAGMENT_E2E_KEEP=1` keeps it anyway).
 - `cargo xtask dev [--clean]`: the dev stack in the foreground: the cell
   on :8790 with fragments at `http://<label>--<username>.fragment.localhost:8790/`,
   agents (`agent/`, goose's loop) co-hosted on the same node (the router
@@ -64,7 +68,9 @@ debt ledger).
   key and the host secret are made there on first run), and sign-in at
   http://127.0.0.1:8790/ through the WorkOS fake on :8794 (any email), or
   a real WorkOS environment when `WORKOS_CLIENT_ID_FILE` and
-  `WORKOS_API_KEY_FILE` name its files. Point the CLI at it with
+  `WORKOS_API_KEY_FILE` name its files. Each boot's log is
+  `target/devstack/celld-8790-<boot>.log` (printed at start;
+  `FRAGMENT_NODE_LOGS=1` adds the node's own logs). Point the CLI at it with
   `FRAGMENT_HOST=http://127.0.0.1:8790` and run `fragment login` once. Dev fleets let jobs
   fetch local addresses (`FRAGMENT_EGRESS_LOCAL=allow`).
 - `cargo xtask try <todo|inbox|notes|chat> [name]` (with `cargo xtask dev` running):
@@ -95,7 +101,7 @@ debt ledger).
   Resources); never print them, pass them on a command line, or commit
   them.
 - `cargo xtask dev` runs `celld dev` on `cell/`, which rebuilds when it
-  changes; the e2e runs a staged copy (`target/e2e/cell`) with its own
+  changes; the e2e runs a staged copy (`target/e2e/<run>/cell`) with its own
   variables, so the two can run at once.
 - No remote of its own yet; `fragment-rs` is a fetch-only pointer to
   github.com/futurepaul/fragment. Ask Paul before adding or pushing to a
