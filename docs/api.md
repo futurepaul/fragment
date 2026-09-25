@@ -129,6 +129,7 @@ the new key and meant it for this signer.
 | `PUT /api/identities/me/picture` | a person with a username | the image (PNG, JPEG, WebP, or GIF, told by its bytes; at most 256 KiB) → `{sha, mime}` |
 | `GET /api/users/{username}` | anyone | → `{id, kind, username, picture}` (`picture`: its URL, or null) |
 | `GET /api/users/{username}/picture` | anyone | the picture's bytes |
+| `DELETE /api/users/{username}` | the fleet's operators | → `{username, identity, released}`: undoes a username taken by mistake, so its person chooses again; refused (409) while they own a fragment under it (its URLs name it) |
 
 ## Names (decision 16)
 

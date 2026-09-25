@@ -112,6 +112,23 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a username is chosen once", r.status == 409 && r.message().contains("once"), &r);
     let r = api.signed(&owner, "PUT", "/api/identities/me/username", Some(&json!({ "username": owner_u })))?;
     s.ok("taking your own username again is a no-op", r.status == 200 && r.body["claimed"] == false, &r);
+
+    // an operator undoes a username taken by mistake, while its person owns nothing under it
+    let mistaken = api.person()?;
+    let mistaken_u = api.username(&mistaken)?;
+    let r = api.signed(&owner, "DELETE", &format!("/api/users/{mistaken_u}"), None)?;
+    s.ok("only the fleet's operators release a username", r.status == 403, &r);
+    let op_session = api.sign_in("operator@e2e.test")?;
+    api.approve(&op_session, &s.operator)?;
+    let owned = s.named(api, &mistaken, "mine")?;
+    s.create(api, &mistaken, &owned)?;
+    let r = api.signed(&s.operator, "DELETE", &format!("/api/users/{mistaken_u}"), None)?;
+    s.ok("not while its person owns a fragment under it (its URLs name it)", r.status == 409 && r.message().contains(&owned), &r);
+    api.signed(&mistaken, "DELETE", &format!("/api/f/{owned}"), None)?;
+    let r = api.signed(&s.operator, "DELETE", &format!("/api/users/{mistaken_u}"), None)?;
+    let chosen = format!("{mistaken_u}b");
+    let again = api.signed(&mistaken, "PUT", "/api/identities/me/username", Some(&json!({ "username": chosen })))?;
+    s.ok("released, its person chooses again", r.status == 200 && r.body["released"] == true && again.status == 200 && again.body["username"] == chosen.as_str(), format!("{r} {again}"));
     let r = api.unsigned("GET", &format!("/api/users/{owner_u}"), None)?;
     s.ok("anyone sees who a username is", r.status == 200 && r.body["id"] == api.identity(&owner)?.as_str() && r.body["picture"].is_null(), &r);
     let png: &[u8] = b"\x89PNG\r\n\x1a\n-a-tiny-picture";

@@ -246,6 +246,15 @@ impl RegistryCell {
     }
 
     /// Whoever holds a username, and their picture (sha, mime).
+    /// An operator's undo of a username taken by mistake: its person may
+    /// choose again (the router has checked they own nothing under it).
+    fn release_username(&self, username: &str) -> CellResult<Value> {
+        let rows = self.rows("SELECT identity FROM usernames WHERE username = ?", vec![username.into()])?;
+        let id = rows.first().and_then(|r| r["identity"].as_str()).ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no one is {username}")))?.to_string();
+        self.rows("DELETE FROM usernames WHERE username = ?", vec![username.into()])?;
+        Ok(json!({ "username": username, "identity": id, "released": true }))
+    }
+
     fn username_lookup(&self, username: &str) -> CellResult<Value> {
         let rows = self.rows("SELECT identity FROM usernames WHERE username = ?", vec![username.into()])?;
         let id = rows.first().and_then(|r| r["identity"].as_str()).ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no one is {username}")))?.to_string();
@@ -505,6 +514,10 @@ impl RegistryCell {
         }
         match path.as_str() {
             "/username/claim" => self.claim_username(from(body)?),
+            "/username/release" => {
+                let b: UsernameBody = from(body)?;
+                self.release_username(&b.username)
+            }
             "/username/lookup" => {
                 let b: UsernameBody = from(body)?;
                 self.username_lookup(&b.username)

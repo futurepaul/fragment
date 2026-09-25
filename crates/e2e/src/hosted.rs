@@ -1,9 +1,11 @@
 //! The e2e against a hosted fleet (`cargo xtask e2e --fleet <fleet>`): the
 //! path a person takes, with nothing faked: the fleet's own nodes and
 //! bucket, the real code.storage, OpenRouter, and the open internet. Its
-//! fragments are made by the fleet's e2e key, a person's (username `e2e`),
-//! and deleted with their repos after. Their names are the same every run
-//! (`todo.e2e`, …), so a crashed run's leftovers are found and removed.
+//! fragments are made by the fleet's e2e key, under its person's username
+//! (which the suite never chooses: a username is chosen once, and the key
+//! may be a real person's), and deleted with their repos after. Their
+//! labels are the same every run (`e2e-todo`, …), so a crashed run's
+//! leftovers are found and removed.
 //!
 //! Inputs come from xtask, as paths to files (secret values never pass
 //! through arguments or output): `FRAGMENT_E2E_HOSTED` (the fleet's URL),
@@ -28,8 +30,6 @@ const EGRESS_JSON: &[u8] = include_bytes!("../fixtures/hosted_egress.json");
 const AI_APP: &[u8] = include_bytes!("../fixtures/hosted_ai.mjs");
 const AI_JSON: &[u8] = include_bytes!("../fixtures/hosted_ai.json");
 const RUN_WAIT: Duration = Duration::from_secs(120);
-/// The e2e person's username.
-const USERNAME: &str = "e2e";
 /// The fragments a run makes (labels): a run first removes any a crashed
 /// run left behind.
 const MADE: [&str; 5] = ["todo", "inbox", "blobs", "egress", "ai"];
@@ -54,6 +54,8 @@ pub struct Hosted {
     cs: Option<CodeStorage>,
     /// (name, repo) of each fragment this run made, removed at the end.
     made: Vec<(String, String)>,
+    /// Its person's username (the fragments are made under it).
+    username: String,
 }
 
 fn env(name: &str) -> Option<String> {
@@ -88,7 +90,7 @@ impl Hosted {
     }
 
     fn name(&self, label: &str) -> String {
-        fragment_proto::fragment_name(label, USERNAME)
+        fragment_proto::fragment_name(&format!("e2e-{label}"), &self.username)
     }
 
     fn dir(&self, name: &str) -> PathBuf {
@@ -188,6 +190,7 @@ pub fn run(cli: PathBuf, scratch: PathBuf, only: Option<String>) -> Result<()> {
         openrouter,
         cs,
         made: vec![],
+        username: String::new(),
     };
     println!("hosted e2e against {base} (run {})", h.run);
     let result = (|| -> Result<()> {
@@ -204,12 +207,9 @@ pub fn run(cli: PathBuf, scratch: PathBuf, only: Option<String>) -> Result<()> {
         }
         let me = h.signed("GET", "/api/identities/me", None)?;
         h.note("identity", me.body["id"].as_str().unwrap_or("?"));
-        if me.body["username"].is_null() {
-            let r = h.signed("PUT", "/api/identities/me/username", Some(&json!({ "username": USERNAME })))?;
-            anyhow::ensure!(r.status == 200, "the e2e person takes the username {USERNAME}: {r}");
-        } else {
-            anyhow::ensure!(me.body["username"] == USERNAME, "the e2e person's username is {}, not {USERNAME}", me.body["username"]);
-        }
+        h.username = me.body["username"].as_str().map(str::to_string).with_context(|| {
+            format!("the e2e key's person has no username yet: sign in at {base} and choose one (the hosted e2e never chooses it)")
+        })?;
         // what a crashed run left
         for label in MADE {
             let name = h.name(label);

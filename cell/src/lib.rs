@@ -218,6 +218,27 @@ fn named_identity(who: &str, signer: &Signer) -> CellResult<String> {
 
 /// A create's name under the creator's username: a bare label goes under
 /// it, and a qualified name must already be under it.
+/// An operator's undo of a username taken by mistake (it was chosen once,
+/// and URLs name it): refused while its person owns a fragment under it.
+async fn release_username(env: &Env, username: &str) -> CellResult<Response> {
+    let person = ask_registry(env, "/username/lookup", &json!({ "username": username })).await?;
+    let id = person["id"].as_str().ok_or_else(|| CellError::host("the registry answered no identity"))?;
+    let list = Request::new("https://principal.internal/list", Method::Get)?;
+    let v: Value = env.durable_object("PRINCIPAL")?.get_by_name(id)?.fetch_with_request(list).await?.json().await?;
+    let owned: Vec<&str> = v["fragments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|f| f["role"] == "owner")
+        .filter_map(|f| f["name"].as_str())
+        .filter(|n| fragment_proto::split_fragment_name(n).is_some_and(|(_, u)| u == username))
+        .collect();
+    if !owned.is_empty() {
+        return Err(CellError::new(ErrorCode::AlreadyExists, format!("{username} owns fragments under it ({}): its URLs name it", owned.join(", "))));
+    }
+    json_answer(&ask_registry(env, "/username/release", &json!({ "username": username })).await?)
+}
+
 /// Makes a fragment for a person, under their username: the API's create
 /// and the platform's "new" page. An agent makes one for its owner: the
 /// owner's, under their username, with the agent an editor of it.
@@ -585,6 +606,13 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
         (Method::Get, ["api", "users", rest @ ..]) => {
             let rest = rest.to_vec();
             users(env, &rest).await
+        }
+        (Method::Delete, ["api", "users", username]) => {
+            let who = signer(env, &req, &url, &[]).await?;
+            if !cfg.is_operator(who.key.as_deref(), &who.id)? {
+                return Err(CellError::new(ErrorCode::Forbidden, "only the fleet's operators release a username"));
+            }
+            release_username(env, username).await
         }
         (_, ["api", "identities", rest @ ..]) => {
             let rest = rest.to_vec();
