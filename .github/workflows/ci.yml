@@ -1,6 +1,7 @@
-# fragment-next CI: `cargo xtask check` and `cargo xtask e2e`, as run
-# locally. The e2e runs on macOS, where it has been proven; it builds the
-# celld fork (`cargo xtask celld`) and drives the Chrome the runner has.
+# fragment-next CI: `cargo xtask check`, and the e2e as run locally, split
+# across runners. The e2e runs on macOS, where it has been proven: one job
+# builds everything it runs once (`cargo xtask e2e-kit`), and each shard
+# unpacks that and runs a slice of the sections in parallel, no toolchain.
 name: ci
 
 on:
@@ -28,15 +29,17 @@ jobs:
             ~/.cargo/git
             target
           key: check-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: check-${{ runner.os }}-
       - run: cargo xtask check
 
-  e2e:
+  build:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      # the dependencies (the workspace's own crates build every time)
       - uses: actions/cache@v4
         with:
           path: |
@@ -45,6 +48,64 @@ jobs:
             ~/.cargo/bin
             target
           key: e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-      - run: cargo install worker-build --version 0.8.5 --locked
-      - run: cargo xtask celld
-      - run: cargo xtask e2e
+          restore-keys: e2e-${{ runner.os }}-
+      # the node: the pinned fork, built with this repo's crates it links
+      # (crates/native and what it depends on)
+      - id: celld
+        uses: actions/cache@v4
+        with:
+          path: target/celld/bin/celld
+          key: celld-${{ runner.os }}-${{ hashFiles('crates/devstack/src/lib.rs', 'Cargo.lock', 'crates/native/**', 'crates/core/**', 'crates/proto/**', 'crates/nip98/**') }}
+      - run: worker-build --version | grep -q 0.8.5 || cargo install worker-build --version 0.8.5 --locked
+      - if: steps.celld.outputs.cache-hit != 'true'
+        run: cargo xtask celld
+      - run: cargo xtask e2e-kit e2e-kit.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: e2e-kit
+          path: e2e-kit.tar.gz
+          retention-days: 3
+
+  # Each shard is a slice of the sections (crates/e2e/src/lanes/mod.rs),
+  # sized by their CI times; `rest` is every section the others do not
+  # name, so a new section always runs somewhere.
+  shard:
+    needs: build
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: restarts
+            args: --only restart,pathmode,node-full
+          - name: agents
+            args: --only agents,chat,computer,screenshots
+          - name: deliveries
+            args: --only push,desktop,triggers,effects
+          - name: rest
+            args: --except restart,pathmode,node-full,agents,chat,computer,screenshots,push,desktop,triggers,effects
+    name: e2e (${{ matrix.name }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: e2e-kit
+      - run: tar -xzf e2e-kit.tar.gz
+      - run: target/release/fragment-e2e ${{ matrix.args }}
+        env:
+          CELLD_ESBUILD: ${{ github.workspace }}/target/e2e-kit/esbuild
+      # a failed run keeps its scratch: each node boot's log, the lanes' files
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-scratch-${{ matrix.name }}
+          path: target/e2e/
+          retention-days: 7
+
+  # one check to require, whatever the shards are
+  e2e:
+    needs: shard
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.shard.result }}" = success

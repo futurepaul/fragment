@@ -12,9 +12,13 @@
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
 //!                    so nothing lands in the repo; prints what to open and paste
-//!   e2e [args...]    build, then run crates/e2e (args pass through: --only <section>[,...]);
+//!   e2e [args...]    build, then run crates/e2e (args pass through: --only <section>[,...]
+//!                    or --except <section>[,...]);
 //!                    with --fleet <fleet> first, run its hosted sections against
 //!                    that fleet instead
+//!   e2e-kit <file>   build what the e2e runs and pack it into one .tar.gz, for
+//!                    CI's shards: unpacked at the repo root, they run
+//!                    target/release/fragment-e2e with no toolchain
 //!   check            host tests and clippy, warnings denied
 //!   deploy <fleet> [--nodes | --secrets]
 //!                    ship the cell to a hosted fleet (fleets/<fleet>.json), or
@@ -258,14 +262,44 @@ fn e2e(args: &[String]) -> Result<()> {
                 .envs(deploy::hosted_e2e_env(fleet)?));
         }
     }
+    build_e2e()?;
+    run(Command::new(devstack::repo_root().join(E2E_BIN)).args(args))
+}
+
+/// The suite, as `build_e2e` leaves it.
+const E2E_BIN: &str = "target/release/fragment-e2e";
+/// Where the kit keeps worker-build's esbuild (the node bundles with it).
+const KIT_ESBUILD: &str = "target/e2e-kit/esbuild";
+
+/// What the e2e runs: the workers, the CLI (the e2e drives it too,
+/// computers included), and the suite.
+fn build_e2e() -> Result<()> {
+    let manifest = devstack::repo_root().join("Cargo.toml");
     build()?;
-    // the e2e drives the CLI too, computers included
     run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli", "--features", "computer"]))?;
-    run(Command::new("cargo")
-        .args(["run", "--quiet", "--release", "--manifest-path"])
-        .arg(&manifest)
-        .args(["-p", "fragment-e2e", "--"])
-        .args(args))
+    run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-e2e"]))
+}
+
+/// `build_e2e`, packed with the node (`xtask celld` first) and esbuild at
+/// their paths under the repo root: CI builds once and each shard unpacks
+/// this and runs the suite (`CELLD_ESBUILD` set to `KIT_ESBUILD`).
+fn e2e_kit(args: &[String]) -> Result<()> {
+    let [out] = args else {
+        bail!("usage: cargo xtask e2e-kit <file.tar.gz>");
+    };
+    build_e2e()?;
+    let root = devstack::repo_root();
+    let esbuild = devstack::Tools::locate()?.esbuild;
+    std::fs::create_dir_all(root.join(KIT_ESBUILD).parent().expect("the kit's directory"))?;
+    std::fs::copy(&esbuild, root.join(KIT_ESBUILD)).with_context(|| format!("copy {}", esbuild.display()))?;
+    let celld = devstack::fork_celld_path();
+    let celld = celld.strip_prefix(&root).context("the node's binary sits under the repo")?;
+    run(Command::new("tar")
+        .arg("-czf")
+        .arg(std::path::absolute(out)?)
+        .current_dir(&root)
+        .args(["target/release/fragment", E2E_BIN, KIT_ESBUILD, "cell/build", "agent/build"])
+        .arg(celld))
 }
 
 /// A merge conflict's markers (git's diff3 style too), at the start of a
@@ -314,6 +348,7 @@ fn main() -> Result<()> {
         Some("dev") => dev(&args[1..]),
         Some("try") => try_template(&args[1..]),
         Some("e2e") => e2e(&args[1..]),
+        Some("e2e-kit") => e2e_kit(&args[1..]),
         Some("check") => check(),
         Some("deploy") => deploy::run(&args[1..]),
         Some("fleet") => deploy::operate(&args[1..]),
