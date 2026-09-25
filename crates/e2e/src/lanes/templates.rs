@@ -62,19 +62,31 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     let agent = members.body["members"].as_array().into_iter().flatten().find(|m| m["kind"] == "agent").cloned().unwrap_or_default();
     let owner_id = api.identity(&owner)?;
     s.ok("a chat from the template has its owner's agent in it, as an editor", agent["role"] == "editor" && agent["owner"] == owner_id.as_str(), &members);
+    let listening = |subs: &Reply| subs.body["subscriptions"].as_array().map(|a| a.iter().filter(|x| x["principal"] == agent["principal"] && x["channel"] == "chat").count());
     let subs = api.signed(&owner, "GET", &format!("/api/f/{chat}/subscriptions"), None)?;
-    s.ok("listening to the chat", subs.body["subscriptions"].as_array().is_some_and(|a| a.iter().any(|x| x["principal"] == agent["principal"] && x["channel"] == "chat")), &subs);
+    s.ok("listening to the chat, once", listening(&subs) == Some(1), &subs);
+    let agent_name = api.qualified(&owner, "agent")?;
     let mine = api.signed(&owner, "GET", "/api/a/agent", None)?;
-    s.ok("it is agent.<username>, made on first need", mine.status == 200 && mine.body["name"] == api.qualified(&owner, "agent")?.as_str(), &mine);
+    s.ok("it is agent.<username>, made on first need", mine.status == 200 && mine.body["name"] == agent_name.as_str(), &mine);
+    // a join that did not finish is retried by the chat's alarm: the same
+    // listen, sent again as its owner, leaves the one subscription
+    let again = api.signed(&owner, "POST", &format!("/api/a/{agent_name}/listen"), Some(&json!({ "fragment": chat })))?;
+    let subs = api.signed(&owner, "GET", &format!("/api/f/{chat}/subscriptions"), None)?;
+    s.ok("and a join sent again leaves the one subscription", again.status == 200 && listening(&subs) == Some(1), json!({ "listen": again.body, "subscriptions": subs.body }));
+    // the model calls the chat's `say` itself, then answers: one answer lands
     s.openrouter.clear_script();
-    s.openrouter.script(&[Say::Text("Hello! I'm here.".into())]);
+    let say = fragment_core::tools::tool_name(&chat, "say").expect("a tool name");
+    s.openrouter.script(&[Say::Tools(vec![(say, json!({ "text": "Hello from the tool." }))]), Say::Text("Hello! I'm here.".into())]);
     let said = api.op(&owner, &chat, "say", "t1", json!({ "text": "hello from a template" }))?;
     s.ok("its operations answer", said.status == 200, &said);
-    let answered = s.eventually(Duration::from_secs(30), || {
-        api.signed(&owner, "GET", &format!("/api/f/{chat}/channels/chat"), None)
-            .is_ok_and(|r| r.body["records"].as_array().is_some_and(|a| a.iter().any(|x| x["principal"] == agent["principal"] && x["body"]["text"] == "Hello! I'm here.")))
-    });
-    s.ok("and the agent answers in the chat", answered, "");
+    let agents_records = || -> Vec<Value> {
+        let records = api.signed(&owner, "GET", &format!("/api/f/{chat}/channels/chat"), None).ok().and_then(|r| r.body["records"].as_array().cloned()).unwrap_or_default();
+        records.into_iter().filter(|x| x["principal"] == agent["principal"]).collect()
+    };
+    let answered = s.eventually(Duration::from_secs(30), || agents_records().iter().any(|x| x["body"]["text"] == "Hello! I'm here."));
+    // the answer comes after anything the turn did, so it is all there now
+    let records = agents_records();
+    s.ok("and the agent answers in the chat, once", answered && records.len() == 1, json!(records));
     let people = api.page(&chat, &format!("__people?id={}&id={}&id=anon:00", agent["principal"].as_str().unwrap_or(""), owner_id), Some(&chat_cookie))?;
     let username = api.username(&owner)?;
     let profiles = &people.body["profiles"];

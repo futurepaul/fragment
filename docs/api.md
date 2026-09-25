@@ -700,8 +700,8 @@ else).
 | `GET /api/a/{name}/state?wait_ms=` | owner | → `AgentState` `{active, driving, outcome, error, answer}` (`crates/proto`; `answer` is the newest message when that is the model's text), once the turn is not active or `wait_ms` (0-25000, default 0) has passed: the read waits in the agent's cell, so a client waiting out a turn asks about every 25 s (`fragment agent say` does) |
 | `POST /api/a/{name}/turns` | owner | `{text}` (at most 16 KiB) → `{started}`; during a turn, `{steered: true}` (read between steps) |
 | `POST /api/a/{name}/stop` | owner | → `{active, driving}`; a tool in flight is interrupted |
-| `GET /api/a/{name}/tools` | owner | → `{tools: ["platform__create_fragment", "platform__list_files", "platform__read_file", "platform__write_files", "platform__deploy", "<fragment>__<op>", ...]}`: the platform's verbs (a fragment the agent makes is its owner's, the agent an editor; a file write's key is the tool call's), then its fragments' operations |
-| `POST /api/a/{name}/listen` | owner | `{fragment, channel? ("chat"), reply? ("say")}` → `{fragment, channel, reply, subscription}`: the agent subscribes itself to the channel (it must be a member) with an inbox URL of its own (`AGENT_URL`); at most 16 |
+| `GET /api/a/{name}/tools` | owner | → `{tools: ["platform__create_fragment", "platform__list_files", "platform__read_file", "platform__write_files", "platform__deploy", "<fragment>__<op>", ...]}`: the platform's verbs (a fragment the agent makes is its owner's, the agent an editor; a file write's key is the tool call's), then its fragments' operations, less the reply operation of each channel it follows (its answers are posted there for it) |
+| `POST /api/a/{name}/listen` | owner | `{fragment, channel? ("chat"), reply? ("say")}` → `{fragment, channel, reply, subscription}`: the agent subscribes itself to the channel (it must be a member) with an inbox URL of its own (`AGENT_URL`); at most 16. Listening again to the same fragment's channel is the same listen: its inbox URL, so the one subscription (made again if the fragment dropped it) |
 | `POST /api/a/{name}/inbox/{token}` | the fragment's delivery (the token is the capability) | a `Delivery` (`crates/proto`), decoded whole: one that does not decode (a record without its `seq`, say) is 400. A record: someone else's starts a turn (or steers the running one); the agent's own, and one heard before (within a day: past the longest redelivery), are ignored; the turn's last answer goes back as `POST /api/f/{fragment}/ops/{reply}` `{text}` with the id `rp:<40 hex of SHA-256 of its message id>`; an unknown token is 404 |
 | `PUT /api/a/{name}/computer` | owner | `{url, token, cwd? ("work")}` → `{url, cwd, tools}`: attaches a computer once it answers `GET /tools` with that token (400 when it refuses it, 502 when it does not answer); the token is sealed like the agent's key |
 | `PUT /api/a/{name}/computer` | owner | `{connect: true, cwd?}` → `{connect, agent, token, cwd}`: a computer that connects out instead (`fragment computer connect --agent <agent> --token-file <f>`): a new connect token, answered once (the agent keeps its SHA-256), replacing any computer before |
@@ -712,7 +712,11 @@ else).
 
 An agent's tools are the operations of the fragments whose members include
 it, those its role there may call (at most 16 fragments, 128
-tools), named `<fragment>__<op>` with the operation's input schema. A call
+tools), named `<fragment>__<op>` with the operation's input schema,
+less each followed channel's reply operation: the model is told its
+answer to a chat is posted for it, and a call to a tool the turn does
+not offer is answered with an error, so the turn goes on to its answer.
+A call
 is `POST /api/f/<fragment>/ops/<op>` signed by the agent with the id
 `tc:<40 hex of SHA-256 of the tool-call id>`: a replayed call replays the
 operation. At most 64 steps a turn. Each step sends the model a window

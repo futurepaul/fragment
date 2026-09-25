@@ -7,6 +7,7 @@
 //! wasm32 is single-threaded, so `AssertSend` and `SendFuture` only satisfy
 //! goose's `Send` bounds; nothing crosses a thread.
 
+use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
@@ -21,13 +22,13 @@ use goose_agent::machine::{SessionLoader, StateMachine, Step};
 use goose_agent::operation::{applied, ends_turn, last_effective_role, messages_since_kickoff, not_applicable, Emitter, Operation, OperationResult};
 use goose_agent::tool::ToolOperation;
 use goose_provider_types::base::{MessageStream, Provider};
-use goose_provider_types::conversation::message::Message;
+use goose_provider_types::conversation::message::{Message, MessageContent};
 use goose_provider_types::conversation::{Conversation, EffectiveRole};
 use goose_provider_types::errors::ProviderError;
 use goose_provider_types::formats::openai::{create_request, response_to_streaming_message};
 use goose_provider_types::images::ImageFormat;
 use goose_provider_types::model::ModelConfig;
-use rmcp::model::Tool;
+use rmcp::model::{CallToolResult, ContentBlock, Tool};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 use worker::send::SendFuture;
@@ -81,6 +82,40 @@ impl Operation<Session, Effect> for Instructions {
 
     async fn prompt_parts(&self, _: &Session, _: &Conversation) -> anyhow::Result<Vec<(String, String)>> {
         Ok(vec![("instructions".into(), self.0.clone())])
+    }
+}
+
+/// A call to a tool the turn does not offer (one the model recalls from an
+/// earlier turn, such as a chat's reply operation, or makes up) is
+/// answered with an error. goose's tool step leaves such a call for a
+/// client to run, and nothing here would: the turn would end on it, its
+/// answer never said. It runs after the tool step, so a call it finds
+/// unanswered is one no tool took.
+struct Unoffered;
+
+#[async_trait]
+impl Operation<Session, Effect> for Unoffered {
+    fn name(&self) -> &'static str {
+        "unoffered"
+    }
+
+    async fn run(&self, _: &Session, conversation: &Conversation, emit: &Emitter) -> anyhow::Result<OperationResult<Effect>> {
+        let turn = messages_since_kickoff(conversation)?;
+        let answered: HashSet<&str> = turn.iter().flat_map(Message::get_tool_response_ids).collect();
+        let mut message = Message::user();
+        for request in turn.iter().flat_map(|m| m.content.iter()).filter_map(MessageContent::as_tool_request) {
+            if request.was_executed_externally() || answered.contains(request.id.as_str()) {
+                continue;
+            }
+            let name = request.tool_call.as_ref().map(|c| c.name.to_string()).unwrap_or_default();
+            let error = CallToolResult::error(vec![ContentBlock::text(format!("no tool named {name}"))]);
+            message.add_tool_response_with_metadata(request.id.clone(), Ok(error), request.metadata.as_ref());
+        }
+        if message.get_tool_response_ids().is_empty() {
+            return not_applicable();
+        }
+        let message = emit.message(message).await;
+        applied([Effect::Message(message)])
     }
 }
 
@@ -296,6 +331,7 @@ pub async fn drive(driver: Driver) -> anyhow::Result<TurnOutcome> {
     let machine: StateMachine<Session, Effect> = StateMachine::new(
         vec![
             Step::Operation(Arc::new(operation)),
+            Step::Operation(Arc::new(Unoffered)),
             Step::Operation(Arc::new(Steer { sql: driver.storage.sql() })),
             Step::Operation(Arc::new(Instructions(instructions))),
             Step::Inference(Arc::new(InferenceRunner::new(provider, ModelConfig::new(&driver.model.name)))),

@@ -324,6 +324,12 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the agent listens to the chat (a subscription on its channel)", r.as_ref().is_ok_and(|v| v["channel"] == "chat"), format!("{r:?}"));
     let subs = api.signed(&owner, "GET", &format!("/api/f/{chat}/subscriptions"), None)?;
     s.ok("the owner sees the agent's subscription", subs.body["subscriptions"].as_array().is_some_and(|a| a.len() == 1 && a[0]["principal"] == bot_id.as_str()), &subs);
+    // listening again (a retry, or a chat's alarm joining its owner's agent
+    // once more) is the same listen: its inbox, and one subscription
+    let again = s.cli_json(api, &home, &["agent", "listen", &bot, &chat, "--json"]);
+    let resubs = api.signed(&owner, "GET", &format!("/api/f/{chat}/subscriptions"), None)?;
+    let same = matches!((&r, &again), (Ok(first), Ok(then)) if first["subscription"] == then["subscription"]);
+    s.ok("listening again leaves the one subscription", same && resubs.body["subscriptions"] == subs.body["subscriptions"], json!({ "again": format!("{again:?}"), "subscriptions": resubs.body }));
     // the agent decodes a delivery whole: one whose record has no seq is
     // refused, never heard under the key `…/null` forever after
     let inbox = subs.body["subscriptions"][0]["url"].as_str().unwrap_or("").to_string();
@@ -338,14 +344,24 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&stranger, "POST", &format!("/api/f/{chat}/subscriptions"), Some(&json!({ "channel": "chat", "url": "http://127.0.0.1:9/x" })))?;
     s.ok("someone who is not a member cannot subscribe", r.status == 403, &r);
 
-    // a message: the agent answers in the chat, once
+    // a message: the agent answers in the chat, once. The answer is posted
+    // for it, so the chat's reply operation is not among its tools; a model
+    // that calls it anyway (from habit, or from an earlier turn) is told no
+    // such tool is here, and its answer still lands once
+    let say = fragment_core::tools::tool_name(&chat, "say").expect("a tool name");
     s.openrouter.clear_script();
-    s.openrouter.script(&[Reply::Text("Hello! I'm here.".into())]);
+    s.openrouter.script(&[Reply::Tools(vec![(say.clone(), json!({ "text": "Hello from the tool." }))]), Reply::Text("Hello! I'm here.".into())]);
     let asked = s.openrouter.chats().len();
     api.op(&owner, &chat, "say", "c1", json!({ "text": "hi bot" }))?;
     let who = [bot_id.as_str()];
     let answered = s.eventually(wait, || said_by(&chat_records(api, &owner, &chat), &who, "Hello! I'm here."));
     s.ok("a message in the chat gets the agent's answer there, as the agent", answered, json!(chat_records(api, &owner, &chat)));
+    let offered: Vec<String> = s.openrouter.chats().get(asked).and_then(|c| c["tools"].as_array().cloned()).unwrap_or_default().iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_string)).collect();
+    s.ok("the chat's reply operation is not among the agent's tools", offered.iter().any(|t| t == "platform__create_fragment") && !offered.contains(&say), json!(offered));
+    // the answer comes after anything the turn did, so it is all there now
+    let records = chat_records(api, &owner, &chat);
+    let texts: Vec<&str> = records.iter().filter_map(|r| r["body"]["text"].as_str()).collect();
+    s.ok("the chat gains the message and one answer", texts == ["hi bot", "Hello! I'm here."], json!(records));
     // a sentinel through the same subscription: the owner's next message is
     // delivered after the agent's own answer, so once the agent has answered
     // it, it has heard its own and let it be (a turn for it would have asked
@@ -355,7 +371,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let sentinel = s.eventually(wait, || said_by(&chat_records(api, &owner, &chat), &who, "Still here."));
     let records = chat_records(api, &owner, &chat);
     let turns = s.openrouter.chats().len() - asked;
-    s.ok("the agent does not answer itself", sentinel && records.len() == 4 && turns == 2, json!({ "model requests": turns, "records": records }));
+    s.ok("the agent does not answer itself", sentinel && records.len() == 4 && turns == 3, json!({ "model requests": turns, "records": records }));
 
     // a chat that works an app: the agent is also in a todo list
     let todo = s.named(api, &owner, "chat-todo")?;
