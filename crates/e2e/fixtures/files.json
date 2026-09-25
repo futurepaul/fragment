@@ -11,6 +11,7 @@
     "stat": { "kind": "query" },
     "append": { "kind": "job" },
     "stale": { "kind": "job" },
+    "sneaky": { "kind": "job" },
     "again": { "kind": "job" },
     "whoami": { "kind": "query" }
   },

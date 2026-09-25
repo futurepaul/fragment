@@ -1,7 +1,7 @@
 //! Files as an app's state (slice E): reads at `main` through the app's
 //! capability, writes from mutations and jobs as the cell's own commits,
-//! compare-and-swap, file triggers in the hop budget, and one loaded
-//! worker per fragment.
+//! compare-and-swap, a step's write the cell refuses, file triggers one hop
+//! deeper per write, and one loaded worker per fragment.
 
 use std::time::Duration;
 
@@ -81,22 +81,46 @@ pub fn appfiles(s: &mut Suite, api: &crate::api::Api) -> Result<()> {
     s.ok("a create-only write (expect null) of an existing file conflicts", exists["output"]["conflict"].as_str().is_some_and(|m| m.contains("expected absent")), &exists);
     s.ok("the conflicts wrote nothing", s.fake.file_at(&repo, "main", "log.txt").as_deref() == Some(&b"one\ntwo\n"[..]), "");
 
-    // a file trigger that writes what it watches runs into the hop budget
-    s.commit(&c, &[("loop/0.txt", Some(b"0"))]);
-    let stopped = s.eventually(Duration::from_secs(90), || {
-        let runs = |status: &str| {
-            api.signed(&owner, "GET", &format!("/api/f/{name}/runs?op=again&status={status}"), None)
-                .map(|r| r.body["runs"].as_array().map_or(0, |a| a.len()))
-                .unwrap_or(0)
-        };
-        runs("blocked") > 0 && runs("running") == 0 && runs("queued") == 0
-    });
-    let r = api.signed(&owner, "GET", &format!("/api/f/{name}/runs?op=again&limit=100"), None)?;
-    let runs = r.body["runs"].as_array().cloned().unwrap_or_default();
+    // a step's file write refused by the cell (a pointer, past an in-app
+    // check the author's code broke) fails the step for good: the job
+    // catches it, nothing reaches main, and the app goes on
+    let r = call("sneaky", "x1", json!({}))?;
+    let sneaky = settle(api, &owner, &name, started(&r), &["succeeded", "held"], long);
+    let r = call("read", "q8", json!({ "path": "notes/none.md" }))?;
     s.ok(
-        "a job writing the files that trigger it stops at the hop budget",
-        stopped && runs.iter().filter(|r| r["status"] == "succeeded").count() == 17 && runs[0]["depth"] == 17 && runs[0]["status"] == "blocked",
-        json!(runs.iter().map(|r| (r["depth"].clone(), r["status"].clone())).collect::<Vec<_>>()),
+        "a job step's write the cell refuses fails the step for good, and nothing reaches main",
+        sneaky["status"] == "succeeded"
+            && sneaky["output"]["name"] == "StepError"
+            && sneaky["output"]["refused"].as_str().is_some_and(|m| m.contains("blob pointers"))
+            && s.fake.file_at(&repo, "main", "sneaky.bin").is_none()
+            && r.status == 200,
+        &sneaky,
+    );
+
+    // a file trigger's run is one hop deeper than the write that started
+    // it, so file triggers count toward the hop budget (the triggers
+    // section's channel loop runs the budget out): a commit from outside
+    // starts a run at depth 0, whose write starts the next at 1
+    s.commit(&c, &[("loop/0.txt", Some(b"0"))]);
+    let chain = || -> Vec<Value> {
+        api.signed(&owner, "GET", &format!("/api/f/{name}/runs?op=again"), None)
+            .map(|r| r.body["runs"].as_array().cloned().unwrap_or_default())
+            .unwrap_or_default()
+    };
+    let done = s.eventually(long, || {
+        let c = chain();
+        c.len() == 2 && c.iter().all(|r| r["status"] == "succeeded")
+    });
+    // newest first: the child, then the run whose write started it
+    let (child, parent) = match chain().as_slice() {
+        [child, parent] => (child.clone(), parent.clone()),
+        _ => (Value::Null, Value::Null),
+    };
+    let input = api.signed(&owner, "GET", &format!("/api/f/{name}/runs/{}", child["id"]), None)?.body["input"].clone();
+    s.ok(
+        "a job's file write starts the trigger's next run one hop deeper",
+        done && parent["depth"] == 0 && child["depth"] == 1 && child["via"] == "files" && input["paths"] == json!(["loop/1.txt"]),
+        json!({ "chain": chain(), "child input": input }),
     );
 
     // one loaded worker per fragment: the same code reads its own files
