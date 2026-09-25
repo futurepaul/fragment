@@ -52,14 +52,16 @@ debt ledger).
   then runs `crates/e2e` against a fresh `celld dev` node and the
   in-process fakes (sections, in order: auth, create, lockdown, keys,
   members, identities, signin, secrets, files, deploy, templates,
-  desktop, ops, public, effects, facet-cap, app-lockdown, site, watch,
-  schemas, channels, live, routes, cli, browser, jobs, triggers,
-  appfiles, blobs, notes, push, ai, budget, agents, chat, computer,
-  screenshots, sync, restart, pathmode, node-full;
-  `crates/e2e/src/lanes/mod.rs`). The browser, notes, desktop, chat, and
-  screenshots sections drive headless Chrome (`CHROME_BIN` to choose
-  one; one Chrome serves the whole run, a fresh browser context per
-  section); `--only triggers` waits for a cron
+  desktop, share, phase7, ops, public, effects, facet-cap, app-lockdown,
+  site, watch, schemas, channels, live, routes, cli, browser, jobs,
+  triggers, appfiles, blobs, notes, push, ai, budget, agents, chat,
+  computer, screenshots, sync, restart, pathmode, node-full;
+  `crates/e2e/src/lanes/mod.rs`). The browser, notes, desktop, share,
+  phase7, chat, and screenshots sections drive headless Chrome
+  (`CHROME_BIN` to choose one; one Chrome serves the whole run, a fresh
+  browser context per section, and phase7's second person a context of
+  their own); `phase7` is phase 7's acceptance, the whole flow with two
+  people; `--only triggers` waits for a cron
   minute (up to a minute; a full run deploys its cron fragment sections
   earlier). A section that errors or panics is one FAIL and the sections
   after it still run. The node runs from a staged copy of the cell in the

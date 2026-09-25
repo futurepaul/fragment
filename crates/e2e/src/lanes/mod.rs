@@ -16,6 +16,7 @@ mod keys;
 mod limits;
 mod members;
 mod notes;
+mod phase7;
 mod plane;
 mod posts;
 mod restart;
@@ -52,6 +53,7 @@ const LANES: &[Lane] = &[
     templates::templates,
     desktop::desktop,
     share::share,
+    phase7::phase7,
     app::ops,
     app::public,
     app::effects,
