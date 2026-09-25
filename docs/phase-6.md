@@ -2,10 +2,9 @@
 
 Status: **built and deployed to fragment.club 2026-09-24** (nodes on the
 celld fork's `0d80ead`, cell `fd471b1`; hosted e2e 29/29), with flat hosts
-(call 2 below) and `__Host-` sessions. Merged since, not deployed:
-PRs #12–#14 (the audit's passes) and #15 (CI); deploying them needs a
-node from the fork's `f734f8f`. Open: per-step usage rows for agents'
-turns (debt ledger), phase 7's sharing sheet. Paul's framing:
+(call 2 below) and `__Host-` sessions; everything merged since was
+deployed 2026-09-25 (cell `cf96977`, nodes on `f734f8f`). Open: per-step
+usage rows for agents' turns (debt ledger); sharing is phase 7. Paul's framing:
 fragment is the core product; the desktop is a fun demonstration of what
 fragment can do: "ideally it's just a fragment that the user can deploy
 with a click". The goal is to get back what finite-next could do before
