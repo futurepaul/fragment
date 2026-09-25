@@ -323,14 +323,10 @@ enum Outcome {
 }
 
 async fn report(env: &Env, d: &Delivery, outcome: Outcome, status: u16, error: &str) -> Result<()> {
-    let headers = Headers::new();
-    headers.set("content-type", "application/json")?;
-    headers.set(REPORT_HEADER, "1")?;
     let body = Report { incarnation: d.incarnation.clone(), kind: d.kind, url: d.url.clone(), sub: d.sub, outcome, status, error: error.to_string() };
     let body = serde_json::to_string(&body).map_err(|e| Error::RustError(e.to_string()))?;
-    let mut init = RequestInit::new();
-    init.with_method(Method::Post).with_headers(headers).with_body(Some(body.into()));
-    let req = Request::new_with_init("https://fragment.internal/deliver/report", &init)?;
+    // marked as the supervisor's `deliver/report` route expects (routed.rs)
+    let req = crate::routed::internal_request("deliver/report", &body).map_err(|e| Error::RustError(e.message))?;
     env.durable_object("FRAGMENT")?.get_by_name(&d.fragment)?.fetch_with_request(req).await?;
     Ok(())
 }
