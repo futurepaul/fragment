@@ -96,13 +96,16 @@ pub enum Credential {
     Key(String),
     /// The token of the fragment origin's session cookie (64 hex).
     Session(String),
+    /// The token of its frame cookie (64 hex): a session made in a frame
+    /// of a page that framed it through `__frame`.
+    Frame(String),
 }
 
 impl Credential {
     fn well_formed(&self) -> bool {
         match self {
             Credential::Key(key) => npub::is_hex_key(key),
-            Credential::Session(token) => token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()),
+            Credential::Session(token) | Credential::Frame(token) => token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()),
         }
     }
 
@@ -116,12 +119,19 @@ impl Credential {
                 let identity = crate::ask_registry(env, &calls::Resolve { key: key.clone() }).await?;
                 Ok(Some(Signed::new(identity, Some(key))))
             }
-            Credential::Session(token) => match crate::ask_registry(env, &calls::Session { token, fragment: Some(fragment.to_string()) }).await {
-                Ok(live) => Ok(Some(Signed::new(live.identity, None))),
-                Err(e) if e.code == ErrorCode::Unauthenticated => Ok(None),
-                Err(e) => Err(e),
-            },
+            Credential::Session(token) => Ok(site_session(env, token, fragment, false).await?.map(|live| Signed::new(live.identity, None))),
+            Credential::Frame(token) => Ok(site_session(env, token, fragment, true).await?.map(|live| Signed::new(live.identity, None))),
         }
+    }
+}
+
+/// The live session a fragment origin's cookie names (a frame's when
+/// `frame`), or `None`: not live is nobody.
+pub(crate) async fn site_session(env: &Env, token: String, fragment: &str, frame: bool) -> CellResult<Option<calls::LiveSession>> {
+    match crate::ask_registry(env, &calls::Session { token, fragment: Some(fragment.to_string()), frame }).await {
+        Ok(live) => Ok(Some(live)),
+        Err(e) if e.code == ErrorCode::Unauthenticated => Ok(None),
+        Err(e) => Err(e),
     }
 }
 

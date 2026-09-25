@@ -7,7 +7,9 @@
 //!
 //!   GET  /share/<name>         the sheet: who is in (usernames and pictures) and their roles;
 //!                              for the owner, inviting by username, pending invites, roles,
-//!                              removing, who may open it, and its share link (copy, a new one)
+//!                              removing, who may open it, its share link (copy, a new one),
+//!                              and, when its fragment.json asks for `frame`, letting it show
+//!                              the owner's other fragments inside it (`__frame`)
 //!   POST /share/<name>         one of the owner's changes (`action`), then back to the sheet;
 //!                              an invite answers the sheet with the link to send
 //!   GET  /join/<name>?token=   what the invite grants, and a Join button
@@ -95,7 +97,7 @@ fn script() -> String {
 /// armed buttons. `forms_here`: its forms post only to this origin (the
 /// join page's redirects on to the fragment's, which `form-action` would
 /// refuse).
-fn sheet_page(status: u16, title: &str, body: &str, forms_here: bool) -> CellResult<Response> {
+pub(crate) fn sheet_page(status: u16, title: &str, body: &str, forms_here: bool) -> CellResult<Response> {
     let html = format!(
         r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{t}</title>
 <style>{style}
@@ -131,7 +133,7 @@ fn purpose(what: &str, name: &str) -> String {
     format!("{what}:{name}")
 }
 
-fn label(name: &str) -> &str {
+pub(crate) fn label(name: &str) -> &str {
     fragment_proto::split_fragment_name(name).map_or(name, |(label, _)| label)
 }
 
@@ -167,7 +169,7 @@ pub async fn route(req: Request, env: &Env, cfg: &Config, url: &Url, segments: &
 
 /// A fragment's handler at `inner`, asked as the signed-in person: its
 /// answer, or its refusal as it made it.
-async fn ask(env: &Env, url: &Url, name: &str, who: &Signed, method: Method, inner: &str, body: Option<Value>) -> CellResult<Value> {
+pub(crate) async fn ask(env: &Env, url: &Url, name: &str, who: &Signed, method: Method, inner: &str, body: Option<Value>) -> CellResult<Value> {
     // the page's own query string is nothing the fragment reads
     let mut at = url.clone();
     at.set_query(None);
@@ -248,6 +250,9 @@ struct Sheet {
     visibility: Visibility,
     /// The share link: the owner's only.
     link: Option<String>,
+    /// Whether its owner lets it frame their fragments (`None`: its
+    /// fragment.json does not ask for `frame`).
+    frame: Option<bool>,
     profiles: BTreeMap<String, Profile>,
     /// The page's form token.
     form: String,
@@ -290,6 +295,7 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
         invites,
         visibility,
         link,
+        frame: status["frame"].as_bool(),
         profiles: profiles(env, ids).await,
         form: form::issue(session, &purpose("share", name), js::now_ms()),
     })
@@ -386,6 +392,15 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
         out += &action_form(sheet, "rotate", "", "New link", "quiet");
         out += "<p class=\"hint\">A new link stops the old one working.</p>";
     }
+    if let Some(granted) = sheet.frame {
+        out += "<h2>Your fragments inside it</h2>";
+        out += match granted {
+            true => "<p class=\"hint\">It shows your other fragments inside its page, signed in as you.</p>",
+            false => "<p class=\"hint\">Its fragment.json asks to show your other fragments inside its page, signed in as you, as a desktop does. Allow it only for a page you trust: its code could lay its own buttons over theirs.</p>",
+        };
+        let field = format!("<input type=\"hidden\" name=\"granted\" value=\"{}\">", if granted { "no" } else { "yes" });
+        out += &action_form(sheet, "frame", &field, if granted { "Stop" } else { "Allow" }, if granted { "quiet" } else { "" });
+    }
     out
 }
 
@@ -418,7 +433,7 @@ fn form_fields(bytes: &[u8]) -> BTreeMap<String, String> {
 /// A POST's person, once its Origin and form token hold: the token is
 /// checked against the session cookie before the registry is asked who it
 /// names.
-async fn poster(req: &mut Request, env: &Env, url: &Url, platform: &str, purpose: &str) -> CellResult<Result<(String, Signed, BTreeMap<String, String>), Response>> {
+pub(crate) async fn poster(req: &mut Request, env: &Env, url: &Url, platform: &str, purpose: &str) -> CellResult<Result<(String, Signed, BTreeMap<String, String>), Response>> {
     auth::same_origin(req, platform)?;
     let bytes = crate::read_body(req, FORM_MAX_BYTES).await?;
     let fields = form_fields(&bytes);
@@ -428,7 +443,7 @@ async fn poster(req: &mut Request, env: &Env, url: &Url, platform: &str, purpose
     if let Err(refused) = form::check(&session, purpose, fields.get("form").map_or("", String::as_str), js::now_ms()) {
         return Ok(Err(notice(403, "Not sent", refused.message())?));
     }
-    match ask_registry(env, &calls::Session { token: session.clone(), fragment: None }).await {
+    match ask_registry(env, &calls::Session { token: session.clone(), fragment: None, frame: false }).await {
         Ok(live) => Ok(Ok((session, Signed::new(live.identity, None), fields))),
         Err(e) if e.code == ErrorCode::Unauthenticated => Ok(Err(notice(401, "Sign in first", "This page's session ended. Sign in, then open it again.")?)),
         Err(e) => Err(e),
@@ -479,6 +494,7 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
         // the share link only: the inbox's token and the webhook's secret are
         // integrations', rotated with the CLI
         "rotate" => ask(env, url, name, &who, Method::Post, "/api/rotate", Some(json!({ "scopes": ["view"] }))).await,
+        "frame" => ask(env, url, name, &who, Method::Put, "/api/grants/frame", Some(json!({ "granted": field("granted") == "yes" }))).await,
         _ => Err(CellError::invalid("no such change")),
     };
     match done {

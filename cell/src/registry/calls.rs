@@ -348,11 +348,15 @@ impl Call for Exchange {
 }
 
 /// `POST /session`: the identity a live session names (401 when it is
-/// not live): the platform's (`fragment` none) or one fragment's.
+/// not live): the platform's (`fragment` none) or one fragment's, a
+/// frame's (`frame`: made in a frame, for the page that framed it) or a
+/// top-level one. A token of the other kind is not live.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Session {
     pub token: String,
     pub fragment: Option<String>,
+    #[serde(default)]
+    pub frame: bool,
 }
 
 /// Whom a live session names, and the email of their first sign-in (the
@@ -362,20 +366,26 @@ pub(crate) struct LiveSession {
     #[serde(flatten)]
     pub identity: Identity,
     pub email: Option<String>,
+    /// A frame's session: the origin of the page that framed it
+    /// (`__frame`), the only page its answers may show in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedder: Option<String>,
 }
 
 impl Call for Session {
     const PATH: &'static str = "/session";
     type Answer = LiveSession;
     fn checked(answer: LiveSession) -> CellResult<LiveSession> {
-        Ok(LiveSession { identity: identity_checked(answer.identity)?, email: answer.email })
+        Ok(LiveSession { identity: identity_checked(answer.identity)?, ..answer })
     }
 }
 
-/// `POST /session/end`: a fragment's `__signout`.
+/// `POST /session/end`: a fragment's `__signout`: the sessions its
+/// cookies carry end, and the person's yes to it is forgotten.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct EndSession {
-    pub token: String,
+    pub site: Option<String>,
+    pub frame: Option<String>,
     pub fragment: String,
 }
 
@@ -403,31 +413,76 @@ impl Call for Logout {
     type Answer = LoggedOut;
 }
 
+/// Why a sign-in may tell a fragment who the person is.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum Consent {
+    /// Only if they said yes to it before: else nothing is minted.
+    Remembered,
+    /// They are in it (the router asked the fragment): it knows them.
+    Member,
+    /// They say yes now: remembered from here on.
+    Given,
+}
+
 /// `POST /redeem/mint`: a single-use redemption of a platform session for
-/// one fragment's origin.
+/// one fragment's origin, when `consent` allows it.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Mint {
     pub token: String,
     pub fragment: String,
     pub return_to: String,
+    pub consent: Consent,
 }
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Minted {
-    pub redeem: String,
+    /// `None`: the person has not said yes to this fragment.
+    pub redeem: Option<String>,
+    /// Whom the session names.
+    pub identity: Identity,
 }
 
 impl Call for Mint {
     const PATH: &'static str = "/redeem/mint";
     type Answer = Minted;
+    fn checked(answer: Minted) -> CellResult<Minted> {
+        Ok(Minted { identity: identity_checked(answer.identity)?, ..answer })
+    }
 }
 
-/// `POST /redeem`: a redemption spent on its fragment.
+/// `POST /redeem/frame`: a frame redemption (`__frame`): from the session
+/// `token` names on `from` (a site or frame session, `frame` says which),
+/// which must be `owner`'s, for `fragment` in a frame of `embedder` only.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MintFrame {
+    pub token: String,
+    pub frame: bool,
+    pub from: String,
+    pub owner: String,
+    pub fragment: String,
+    pub embedder: String,
+    pub return_to: String,
+}
+
+impl Call for MintFrame {
+    const PATH: &'static str = "/redeem/frame";
+    type Answer = Minted;
+    fn checked(answer: Minted) -> CellResult<Minted> {
+        Mint::checked(answer)
+    }
+}
+
+/// `POST /redeem`: a redemption spent on its fragment, shown to a frame
+/// (`framed`) or to a top-level page: a frame redemption only to a frame,
+/// any other only to a top-level page (else refused, and spent).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Redeem {
     pub redeem: String,
     pub fragment: String,
+    pub framed: bool,
 }
 
 #[derive(Serialize, Deserialize)]

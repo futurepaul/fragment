@@ -104,7 +104,7 @@ pub fn listed_role(asker: Option<Role>, cap: Cap) -> Option<Role> {
 
 /// Whether a control API request (`method`, and its path under
 /// `/api/f/<name>`) is one only the owner makes: members, invites,
-/// visibility, link rotation, deletion. An agent never makes one, whatever
+/// visibility, link rotation, a capability's grant, deletion. An agent never makes one, whatever
 /// it acts for; a member leaving (`DELETE members/me`) is not one.
 pub fn owner_only(method: &str, rest: &[&str]) -> bool {
     match (method, rest) {
@@ -114,6 +114,7 @@ pub fn owner_only(method: &str, rest: &[&str]) -> bool {
         (_, ["invites", ..]) => true,
         ("PUT", ["visibility"]) => true,
         ("POST", ["rotate"]) => true,
+        ("PUT", ["grants", _]) => true,
         _ => false,
     }
 }
@@ -276,6 +277,7 @@ mod tests {
             ("DELETE", &["invites", "ab12"][..]),
             ("PUT", &["visibility"][..]),
             ("POST", &["rotate"][..]),
+            ("PUT", &["grants", "frame"][..]),
         ] {
             assert!(owner_only(method, rest), "{method} {rest:?}");
         }

@@ -11,7 +11,10 @@
 //!   GET  /auth/link?return=       the same, adding a second sign-in to the signed-in person
 //!   GET  /auth/callback           WorkOS → the code exchanged here → a session cookie
 //!   GET  /auth/logout             a button; POST ends the session (and its site sessions)
-//!   GET  /auth/fragment?name=&return=      a single-use redemption for one fragment's origin
+//!   GET  /auth/fragment?name=&return=      a single-use redemption for one fragment's origin; for
+//!                                 a fragment that is not theirs, nor shared with them, a
+//!                                 question first ("Continue to X as you?"), asked once
+//!   POST /auth/fragment?name=&return=      the yes (remembered), then the redemption
 //!   GET  /cli?key=<npub>&proof=   the signed-in person approves a CLI key: the link
 //!                                 carries the key's own proof (a NIP-98 event by it for
 //!                                 `POST <platform>/cli/approve`, ten minutes good), so
@@ -33,24 +36,31 @@
 //! registry names them, so the session is checked before they are.
 //!
 //! A fragment's origin: `__signin?token=&return=` redeems the platform's
-//! redemption for this fragment only and sets its own session cookie;
-//! `__signin` without a token starts at the platform; `__signout` ends
-//! that session in the registry and drops the cookie. The session cookie
-//! is looked up live on every request whose answer depends on who is
-//! asking (the fragment decides which: `routed::Credential`).
+//! redemption for this fragment only and sets its own session cookie (a
+//! frame's partitioned one, in a frame: `__frame`); `__signin` without a
+//! token starts at the platform, from a navigation of a page of its own
+//! only; `__signout` (a POST from the fragment's own page) ends its
+//! sessions in the registry and drops the cookies. Which cookies count on
+//! a request is the router's to say (`crate::Fetched`); each is looked up
+//! live on every request whose answer depends on who is asking (the
+//! fragment decides which: `routed::Credential`).
 
-use fragment_core::{npub, site};
+use fragment_core::{form, npub, site};
 use fragment_proto::{ErrorCode, IdentityKind};
 use worker::*;
 
 use crate::ask_registry;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
-use crate::registry::calls;
+use crate::registry::calls::{self, Consent};
 use crate::routed::{Credential, Signed};
+use crate::{share, Fetched};
 
 pub const SESSION_COOKIE: &str = "fragment_session";
 pub const SITE_COOKIE: &str = "fragment_site";
+/// A frame's session cookie (`__frame`): partitioned, for the page that
+/// framed it.
+pub const FRAME_COOKIE: &str = "fragment_frame";
 const LOGIN_COOKIE: &str = "fragment_login";
 const LOGIN_HINT_MAX: usize = 320;
 const INVITATION_TOKEN_MAX: usize = 256;
@@ -103,6 +113,15 @@ pub fn set_cookie(base: &str, value: &str, path: &str, max_age_s: i64, secure: b
     let name = cookie_name(base, secure, path);
     let s = if secure { "; Secure" } else { "" };
     format!("{name}={value}; Path={path}; Max-Age={max_age_s}; HttpOnly; SameSite=Lax{s}")
+}
+
+/// A frame's session cookie: `SameSite=None`, so it is sent in a frame of
+/// another site's page, and `Partitioned` (CHIPS), so a browser that
+/// blocks third-party cookies keeps it, in that page's partition only.
+/// Both need `Secure`, which browsers take from `localhost` over http too.
+fn frame_cookie(value: &str, path: &str, max_age_s: i64, secure: bool) -> String {
+    let name = cookie_name(FRAME_COOKIE, secure, path);
+    format!("{name}={value}; Path={path}; Max-Age={max_age_s}; HttpOnly; Secure; SameSite=None; Partitioned")
 }
 
 pub(crate) fn cookie_of(req: &Request, base: &str, secure: bool, path: &str) -> CellResult<Option<String>> {
@@ -159,19 +178,22 @@ pub(crate) const STYLE: &str = "body{font:16px/1.5 system-ui,sans-serif;max-widt
 h1{font-size:1.4rem}code{background:#e8eaed;padding:1px 5px;border-radius:4px}button{font:inherit;padding:.5em 1.1em;border-radius:8px;border:1px solid #1d2126;background:#1d2126;color:#fff;cursor:pointer}
 a{color:#2a5bd7}@media (prefers-color-scheme:dark){body{background:#15181b;color:#e6e8ea}code{background:#262b30}button{background:#e6e8ea;color:#15181b;border-color:#e6e8ea}a{color:#7aa2f7}}";
 
-pub(crate) fn page(status: u16, title: &str, body: &str) -> CellResult<Response> {
-    let html = format!(
+fn html(title: &str, body: &str) -> String {
+    format!(
         r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{t}</title>
 <style>{STYLE}</style>
 <h1>{t}</h1>{body}"#,
         t = esc(title)
-    );
+    )
+}
+
+pub(crate) fn page(status: u16, title: &str, body: &str) -> CellResult<Response> {
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
     h.set("cache-control", "no-store")?;
     unframed(&h)?;
     unopened(&h)?;
-    Ok(Response::ok(html)?.with_status(status).with_headers(h))
+    Ok(Response::ok(html(title, body))?.with_status(status).with_headers(h))
 }
 
 pub(crate) fn query(url: &Url, k: &str) -> Option<String> {
@@ -182,7 +204,7 @@ pub(crate) fn query(url: &Url, k: &str) -> Option<String> {
 /// their session's token, or `None`.
 pub(crate) async fn platform_session(req: &Request, env: &Env, url: &Url) -> CellResult<Option<(String, calls::LiveSession)>> {
     let Some(token) = cookie_of(req, SESSION_COOKIE, secure(url), "/")? else { return Ok(None) };
-    match ask_registry(env, &calls::Session { token: token.clone(), fragment: None }).await {
+    match ask_registry(env, &calls::Session { token: token.clone(), fragment: None, frame: false }).await {
         Ok(live) => Ok(Some((token, live))),
         Err(e) if e.code == ErrorCode::Unauthenticated => Ok(None),
         Err(e) => Err(e),
@@ -203,6 +225,11 @@ fn site_cookie_path(name: &str, path_mode: bool) -> String {
 /// registry says whom it names, for that fragment only).
 pub fn site_token(req: &Request, name: &str, url: &Url, path_mode: bool) -> CellResult<Option<String>> {
     cookie_of(req, SITE_COOKIE, secure(url), &site_cookie_path(name, path_mode))
+}
+
+/// The token of its frame cookie, unresolved.
+pub fn frame_token(req: &Request, name: &str, url: &Url, path_mode: bool) -> CellResult<Option<String>> {
+    cookie_of(req, FRAME_COOKIE, secure(url), &site_cookie_path(name, path_mode))
 }
 
 /// A POST from a browser comes from the platform's own pages: a fragment's
@@ -452,16 +479,39 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 }
             }
             (Method::Get, ["auth", "fragment"]) => {
-                let name = query(url, "name").filter(|n| fragment_proto::valid_fragment_name(n)).ok_or_else(|| CellError::invalid("name a fragment"))?;
-                let back = site::return_path(query(url, "return").as_deref());
+                let (name, back) = fragment_asked(url)?;
                 let signed_out = || to_login(&platform, &format!("/auth/fragment?name={name}&return={}", enc(&back)));
                 let Some(token) = cookie_of(&req, SESSION_COOKIE, secure(url), "/")? else { return signed_out() };
-                // the registry checks the session is live as it mints
-                match ask_registry(env, &calls::Mint { token, fragment: name.clone(), return_to: back.clone() }).await {
-                    Ok(minted) => redirect(&format!("{}__signin?token={}", cfg.canonical(url, &name), minted.redeem), &[]),
-                    Err(e) if e.code == ErrorCode::Unauthenticated => signed_out(),
+                // the registry checks the session is live as it mints, and
+                // mints only for a fragment the person said yes to
+                let mint = |consent| calls::Mint { token: token.clone(), fragment: name.clone(), return_to: back.clone(), consent };
+                let minted = match ask_registry(env, &mint(Consent::Remembered)).await {
+                    Err(e) if e.code == ErrorCode::Unauthenticated => return signed_out(),
+                    minted => minted?,
+                };
+                if let Some(redeem) = minted.redeem {
+                    return to_signin(cfg, url, &name, &redeem);
+                }
+                // silent on their own fragments and those shared with them,
+                // which know them already (answer 1, docs/fragment-boats.md)
+                let who = Signed::new(minted.identity, None);
+                match share::ask(env, url, &name, &who, Method::Get, "/api/status", None).await {
+                    Ok(_) => {
+                        let minted = ask_registry(env, &mint(Consent::Member)).await?;
+                        to_signin(cfg, url, &name, minted.redeem.as_deref().ok_or_else(|| CellError::host("a member's mint answered no redemption"))?)
+                    }
+                    Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::Unauthenticated) => consent_page(&token, &who, &name, &back),
                     Err(e) => Err(e),
                 }
+            }
+            (Method::Post, ["auth", "fragment"]) => {
+                let (name, back) = fragment_asked(url)?;
+                let (session, _, _) = match share::poster(&mut req, env, url, &platform, &format!("consent:{name}")).await? {
+                    Ok(posted) => posted,
+                    Err(page) => return Ok(page),
+                };
+                let minted = ask_registry(env, &calls::Mint { token: session, fragment: name.clone(), return_to: back, consent: Consent::Given }).await?;
+                Ok(to_signin(cfg, url, &name, minted.redeem.as_deref().ok_or_else(|| CellError::host("a given mint answered no redemption"))?)?.with_status(303))
             }
             (Method::Get, ["cli"]) => {
                 let key = query(url, "key").unwrap_or_default();
@@ -508,6 +558,60 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
     }
 }
 
+/// The fragment and the way back `/auth/fragment` names.
+fn fragment_asked(url: &Url) -> CellResult<(String, String)> {
+    let name = query(url, "name").filter(|n| fragment_proto::valid_fragment_name(n)).ok_or_else(|| CellError::invalid("name a fragment"))?;
+    Ok((name, site::return_path(query(url, "return").as_deref())))
+}
+
+fn to_signin(cfg: &Config, url: &Url, name: &str, redeem: &str) -> CellResult<Response> {
+    redirect(&format!("{}__signin?token={redeem}", cfg.canonical(url, name)), &[])
+}
+
+/// "Continue to X as you?": a fragment that is not the person's, nor
+/// shared with them, learns who they are only once they say yes. A
+/// sharing page's protections (share.rs): unframed, a form token, a button
+/// that arms after a moment. Its form redirects on to the fragment's
+/// origin, so it has no forms-here rule.
+fn consent_page(session: &str, who: &Signed, name: &str, back: &str) -> CellResult<Response> {
+    let label = share::label(name);
+    let you = match who.username.as_deref() {
+        Some(u) => format!("@{}", esc(u)),
+        None => format!("<code>{}</code>", esc(&who.id)),
+    };
+    let body = format!(
+        "<p><b>{l}</b> (<code>{n}</code>) is not yours, and no one shared it with you. Continuing lets its author's code know who you are: {you}.</p>\
+         <form method=\"post\" action=\"/auth/fragment?name={qn}&amp;return={qb}\"><input type=\"hidden\" name=\"form\" value=\"{f}\"><button data-arm disabled>Continue as {you}</button></form>\
+         <p class=\"hint\">Asked once for each fragment; signing out of it there makes it ask again. Or <a href=\"/\">go back</a>.</p>",
+        l = esc(label),
+        n = esc(name),
+        qn = esc(&enc(name)),
+        qb = esc(&enc(back)),
+        f = esc(&form::issue(session, &format!("consent:{name}"), crate::js::now_ms())),
+    );
+    share::sheet_page(200, &format!("Continue to {label}?"), &body, false)
+}
+
+/// What a frame shows when it cannot sign in: its browser kept the frame
+/// cookie out, or a page framed its sign-in instead of going through
+/// `__frame`. A link to open the fragment in a tab of its own, and a word
+/// to the page around it (`{fragment: "signin-blocked", name}`). It holds
+/// nothing but the link, so any page may frame it.
+fn blocked(cfg: &Config, url: &Url, name: &str, back: &str) -> CellResult<Response> {
+    let label = esc(share::label(name));
+    let open = format!("{}__signin?return={}", cfg.canonical(url, name), enc(back));
+    let body = format!(
+        "<p><b>{label}</b> can't sign you in inside this page.</p><p><a href=\"{o}\" target=\"_blank\" rel=\"noopener\">Open {label} in a tab</a></p>\
+         <script>parent.postMessage({{ fragment: \"signin-blocked\", name: {n:?} }}, \"*\")</script>",
+        o = esc(&open),
+        n = name,
+    );
+    let h = Headers::new();
+    h.set("content-type", "text/html; charset=utf-8")?;
+    h.set("cache-control", "no-store")?;
+    Ok(Response::ok(html(&format!("{} is signed out here", share::label(name)), &body))?.with_headers(h))
+}
+
 /// Whether this origin's session cookie names someone on `name`.
 async fn signed_in_here(req: &Request, env: &Env, name: &str, url: &Url, path_mode: bool) -> CellResult<bool> {
     match site_token(req, name, url, path_mode)? {
@@ -521,42 +625,66 @@ pub fn is_fragment_route(rest: &str) -> bool {
     matches!(rest, "__signin" | "__signout")
 }
 
-/// `__signin` and `__signout` on a fragment's own origin.
-pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, path_mode: bool) -> CellResult<Response> {
+/// `__signin` and `__signout` on a fragment's own origin, as the
+/// request's Fetch Metadata allows (`fetched`, the router's):
+///
+/// - `__signin?token=` redeems in a frame only a frame redemption, into
+///   the frame cookie, then looks whether the browser kept it
+///   (`check=frame`); anywhere else, only a top-level one, into the site
+///   cookie;
+/// - `__signin` without one starts at the platform from a navigation of
+///   a page only: in a frame it answers `blocked`, and from an image, a
+///   script, or a fetch it is refused;
+/// - `__signout` is a button (`GET`), and a POST from this origin's own
+///   page only.
+#[allow(clippy::too_many_arguments)]
+pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, path_mode: bool, fetched: Fetched) -> CellResult<Response> {
     let cookie_path = site_cookie_path(name, path_mode);
     let base = cfg.canonical(url, name);
-    {
-        match rest {
-            "__signin" => match query(url, "token") {
-                // signed in here already (a page that embeds this one sends
-                // every frame through __signin): straight back
-                None if signed_in_here(req, env, name, url, path_mode).await? => redirect(&back_to(&base, query(url, "return").as_deref())?, &[]),
-                None => {
-                    let back = site::return_path(query(url, "return").as_deref());
-                    redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(url), enc(&back)), &[])
-                }
-                Some(redeem) => {
-                    let redeemed = ask_registry(env, &calls::Redeem { redeem, fragment: name.to_string() }).await?;
-                    redirect(
-                        &back_to(&base, Some(&redeemed.return_to))?,
-                        &[set_cookie(SITE_COOKIE, &redeemed.token, &cookie_path, crate::registry::SESSION_TTL_MS / 1000, secure(url))],
-                    )
-                }
-            },
-            "__signout" => {
-                // The session ends in the registry, so a copy of the cookie
-                // is nobody too. The browser is signed out whatever the
-                // registry answers: a registry that cannot end the session
-                // is logged, and the session lasts until it expires or the
-                // platform session ends (`/auth/logout` ends every one).
-                if let Some(token) = cookie_of(req, SITE_COOKIE, secure(url), &cookie_path)? {
-                    if let Err(e) = ask_registry(env, &calls::EndSession { token, fragment: name.to_string() }).await {
-                        console_error!("__signout on {name}: the registry did not end the session ({:?}): {}", e.code, e.message);
-                    }
-                }
-                redirect(&base, &[set_cookie(SITE_COOKIE, "", &cookie_path, 0, secure(url))])
+    let back = site::return_path(query(url, "return").as_deref());
+    let ttl_s = crate::registry::SESSION_TTL_MS / 1000;
+    match (rest, req.method()) {
+        ("__signin", Method::Get) => {
+            if let Some(redeem) = query(url, "token") {
+                let redeemed = ask_registry(env, &calls::Redeem { redeem, fragment: name.to_string(), framed: fetched.framed }).await?;
+                return match fetched.framed {
+                    true => redirect(&format!("{base}__signin?check=frame&return={}", enc(&redeemed.return_to)), &[frame_cookie(&redeemed.token, &cookie_path, ttl_s, secure(url))]),
+                    false => redirect(&back_to(&base, Some(&redeemed.return_to))?, &[set_cookie(SITE_COOKIE, &redeemed.token, &cookie_path, ttl_s, secure(url))]),
+                };
             }
-            _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {rest}"))),
+            if fetched.framed {
+                let kept = query(url, "check").as_deref() == Some("frame") && fetched.frame && frame_token(req, name, url, path_mode)?.is_some();
+                return if kept { redirect(&back_to(&base, Some(&back))?, &[]) } else { blocked(cfg, url, name, &back) };
+            }
+            if !fetched.navigation {
+                return Err(CellError::new(ErrorCode::Forbidden, "sign in by opening this page: not from another page's image, script, or fetch"));
+            }
+            // signed in here already: straight back
+            if fetched.site && signed_in_here(req, env, name, url, path_mode).await? {
+                return redirect(&back_to(&base, Some(&back))?, &[]);
+            }
+            redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(url), enc(&back)), &[])
         }
+        ("__signout", Method::Get) => page(
+            200,
+            &format!("Sign out of {}", share::label(name)),
+            "<form method=\"post\" action=\"__signout\"><button>Sign out</button></form><p>It also forgets that you let it know who you are: signing in again asks again.</p>",
+        ),
+        ("__signout", Method::Post) => {
+            same_origin(req, &cfg.origin(url, name))?;
+            // The sessions end in the registry, so a copy of a cookie is
+            // nobody too. The browser is signed out whatever the registry
+            // answers: a registry that cannot end them is logged, and they
+            // last until they expire or the platform session ends
+            // (`/auth/logout` ends every one).
+            let (site, frame) = (cookie_of(req, SITE_COOKIE, secure(url), &cookie_path)?, frame_token(req, name, url, path_mode)?);
+            if site.is_some() || frame.is_some() {
+                if let Err(e) = ask_registry(env, &calls::EndSession { site, frame, fragment: name.to_string() }).await {
+                    console_error!("__signout on {name}: the registry did not end the sessions ({:?}): {}", e.code, e.message);
+                }
+            }
+            Ok(redirect(&base, &[set_cookie(SITE_COOKIE, "", &cookie_path, 0, secure(url)), frame_cookie("", &cookie_path, 0, secure(url))])?.with_status(303))
+        }
+        (_, m) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {rest}", m.as_ref()))),
     }
 }

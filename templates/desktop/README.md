@@ -8,6 +8,10 @@ authority over any of them.
 - `fragment.json` asks for the `fragments` capability: its page, viewed
   by its owner, may list the owner's fragments and make new ones
   (`__fragments`). Anyone else, editors included, is refused.
+- It asks for `frame` too: each frame is its own `__frame`, which signs
+  the frame in on its fragment's origin for this page only. The platform
+  honors it once you allow it in the desktop's share sheet ("Your
+  fragments inside it"); until then each pane says so.
 - `app.mjs` keeps which fragments are chats (`chats`, `add_chat`,
   `remove_chat`); every other fragment is an app.
 - Sharing is the platform's: each row's `…` menu has Share, which opens

@@ -13,7 +13,10 @@
 //!
 //! A browser on a fragment's origin is its person through that origin's own
 //! session cookie (`__signin`), looked up live like a key when it matters.
-//! A socket, which has no CORS, is taken only from the fragment's own page
+//! Which of a browser's cookies count is decided here, from the Fetch
+//! Metadata it sends (`Fetched`): another fragment's page is one site with
+//! this one, so only those headers say whose page asked. A socket, which
+//! has no CORS, is taken only from the fragment's own page
 //! (`own_page_socket`), and its cookies count only when it names one.
 //!
 //! With a suffix configured, `/f/<name>/…` redirects to the fragment's own
@@ -224,15 +227,16 @@ async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) ->
 
 /// Who is asking a site request, unresolved: a signature names its key
 /// (verified here, which needs no registry: a bad one is still 401); a
-/// browser, its session on this origin.
-fn site_credential(req: &Request, url: &Url, body: &[u8], name: &str, mode: Mode) -> CellResult<Option<Credential>> {
+/// browser, its session on this origin, as far as its cookies count
+/// (`Fetched`), a frame's navigation by its frame cookie first.
+fn site_credential(req: &Request, url: &Url, body: &[u8], name: &str, mode: Mode, fetched: Fetched) -> CellResult<Option<Credential>> {
     if req.headers().get("authorization")?.is_some() {
         return Ok(Some(Credential::Key(authenticate(req, url, Payload::Read(body))?)));
     }
-    if !cookies_count(req)? {
-        return Ok(None);
-    }
-    Ok(auth::site_token(req, name, url, mode == Mode::Path)?.map(Credential::Session))
+    let path_mode = mode == Mode::Path;
+    let site = if fetched.site { auth::site_token(req, name, url, path_mode)?.map(Credential::Session) } else { None };
+    let frame = if fetched.frame { auth::frame_token(req, name, url, path_mode)?.map(Credential::Frame) } else { None };
+    Ok(if fetched.framed { frame.or(site) } else { site.or(frame) })
 }
 
 fn is_socket(req: &Request) -> CellResult<bool> {
@@ -257,11 +261,68 @@ fn own_page_socket(req: &Request, cfg: &Config, url: &Url, name: &str) -> CellRe
     }
 }
 
-/// Whether a request's cookies count. An upgrade that names no page is no
-/// browser's (a browser always names it), so its cookies are no one's: a
-/// client that is not a browser signs instead (the CLI's watch and follow).
-fn cookies_count(req: &Request) -> CellResult<bool> {
-    Ok(!is_socket(req)? || req.headers().get("origin")?.is_some())
+/// Which of a browser's cookies count on a fragment's origin, from the
+/// Fetch Metadata it sends (`Sec-Fetch-*`, which no page's script sets;
+/// docs/fragment-boats.md, decision 3). Every fragment is one site with
+/// the others, so a SameSite=Lax cookie rides along on another fragment's
+/// images, scripts, fetches, and forms; these headers say whose page asked:
+///
+/// - the fragment's own page (`same-origin`): all of them;
+/// - a top-level navigation (GET or HEAD, from anywhere): the origin's own
+///   (`fragment_site`, `fragview`, `fragment_anon`), as Lax means them;
+/// - a frame's navigation (an `iframe`, or an `object` or `embed`, which
+///   show a page too): the frame cookie (`__frame`), and the answer shows
+///   only in the page that framed it (`bound`);
+/// - anything else from another page (an image, a script, a fetch, a form
+///   or a POST navigation): none, so it is served as to a stranger;
+/// - no Fetch Metadata (a browser from before 2023, or not a browser): the
+///   origin's own, as before;
+/// - a socket: those of a page that names itself (`own_page_socket` took
+///   it only from this one's); an upgrade that names no page is no
+///   browser's, so its cookies are no one's (the CLI signs instead).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Fetched {
+    /// The origin's own cookies count.
+    pub site: bool,
+    /// The frame cookie counts.
+    pub frame: bool,
+    /// A frame's navigation.
+    pub framed: bool,
+    /// A navigation: a top-level one or a frame's, or one without Fetch Metadata.
+    pub navigation: bool,
+}
+
+fn fetched(req: &Request) -> CellResult<Fetched> {
+    if is_socket(req)? {
+        let named = req.headers().get("origin")?.is_some();
+        return Ok(Fetched { site: named, frame: named, framed: false, navigation: false });
+    }
+    let header = |k: &str| req.headers().get(k).map(Option::unwrap_or_default);
+    let site = header("sec-fetch-site")?;
+    if site.is_empty() {
+        return Ok(Fetched { site: true, frame: false, framed: false, navigation: true });
+    }
+    let get = matches!(req.method(), Method::Get | Method::Head);
+    let dest = header("sec-fetch-dest")?;
+    let framed = get && matches!(dest.as_str(), "iframe" | "frame" | "object" | "embed");
+    let top = get && dest == "document" && header("sec-fetch-mode")? == "navigate";
+    let own = site == "same-origin";
+    Ok(Fetched { site: own || top, frame: own || framed, framed, navigation: top || framed })
+}
+
+/// A navigation's answer: it differs by the kind of navigation (`Vary`),
+/// and a frame's shows only inside the page that framed it through
+/// `__frame` (its session's `embedder`), or, with no frame session, inside
+/// this origin's own pages, and is never reused from a cache without that.
+/// An app's own policy stays: a second one only narrows it.
+fn bound(resp: Response, framed: bool, embedder: Option<&str>) -> CellResult<Response> {
+    let h = resp.headers().clone();
+    h.append("vary", "sec-fetch-dest")?;
+    if framed {
+        h.append("content-security-policy", &format!("frame-ancestors {}", embedder.unwrap_or("'self'")))?;
+        h.set("cache-control", "private, no-cache")?;
+    }
+    Ok(resp.with_headers(h))
 }
 
 /// The identity a path names: `None` for `me`, whoever signed.
@@ -557,7 +618,7 @@ fn bytes_body(body: Vec<u8>) -> Option<worker::wasm_bindgen::JsValue> {
 /// Hands a request to the fragment's supervisor.
 async fn forward(env: &Env, req: &Request, body: Option<worker::wasm_bindgen::JsValue>, f: Forward) -> CellResult<Response> {
     let headers = Headers::new();
-    let cookies = cookies_count(req)?;
+    let cookies = fetched(req)?.site;
     for k in PASSED_HEADERS {
         if k == "cookie" && !cookies {
             continue;
@@ -590,18 +651,36 @@ async fn forward(env: &Env, req: &Request, body: Option<worker::wasm_bindgen::Js
 
 async fn serve(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, mode: Mode) -> CellResult<Response> {
     check_name(name)?;
+    let fetched = fetched(&req)?;
     if auth::is_fragment_route(rest) {
-        return auth::fragment(&req, env, cfg, url, name, rest, mode == Mode::Path).await;
+        return auth::fragment(&req, env, cfg, url, name, rest, mode == Mode::Path, fetched).await;
     }
     own_page_socket(&req, cfg, url, name)?;
+    // a sign-in for a frame of this origin's own page, and nowhere else
+    if rest == "__frame" && !(fetched.framed && req.headers().get("sec-fetch-site")?.as_deref() == Some("same-origin")) {
+        return Err(CellError::new(ErrorCode::Forbidden, "__frame is a frame of this fragment's own page"));
+    }
     // a GET or HEAD has no body to wait for
     let body = match req.method() {
         Method::Get | Method::Head => Vec::new(),
         _ => read_body(&mut req, limits::BODY_MAX_BYTES).await?,
     };
-    let credential = site_credential(&req, url, &body, name, mode)?;
-    let routed = Routed { name: name.to_string(), url: url.clone(), mode: Some(mode), signed: None, credential };
-    forward(env, &req, bytes_body(body), Forward { routed, inner: format!("/serve/{rest}"), extra: vec![] }).await
+    let mut credential = site_credential(&req, url, &body, name, mode, fetched)?;
+    // a frame's page shows only in the page its session was made for: that
+    // session is asked for here, for the page's origin (`bound`)
+    let (mut signed, mut embedder) = (None, None);
+    if let (true, Some(Credential::Frame(token))) = (fetched.framed && rest != "__frame", &credential) {
+        if let Some(live) = routed::site_session(env, token.clone(), name, true).await? {
+            (signed, embedder) = (Some(Signed::new(live.identity, None)), live.embedder);
+        }
+        credential = None;
+    }
+    let routed = Routed { name: name.to_string(), url: url.clone(), mode: Some(mode), signed, credential };
+    let resp = forward(env, &req, bytes_body(body), Forward { routed, inner: format!("/serve/{rest}"), extra: vec![] }).await?;
+    match fetched.navigation {
+        true => bound(resp, fetched.framed, embedder.as_deref()),
+        false => Ok(resp),
+    }
 }
 
 async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
@@ -609,14 +688,16 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
     // as its client named it: signatures, links, and cookies name the https URL
     let url = fragment_nip98::arrived_url(req.url()?, req.headers().get("x-forwarded-proto")?.as_deref());
     let path = url.path().to_string();
+    // the platform's own host first: it may sit under the suffix
+    let host = url.host_str().filter(|h| !cfg.is_platform_host(h));
     // A fragment's own host is all its own (`/api/…` included: apps have
     // routes there); the platform API answers on the platform's host.
-    if let Some(name) = url.host_str().and_then(|h| cfg.fragment_of_host(h)) {
+    if let Some(name) = host.and_then(|h| cfg.fragment_of_host(h)) {
         let rest = path.trim_start_matches('/').to_string();
         return serve(req, env, cfg, &url, &name, &rest, Mode::Host).await;
     }
     // any other name under the suffix is no one's: the platform answers on its own host only
-    if url.host_str().and_then(|h| cfg.subdomain(h)).is_some() {
+    if host.and_then(|h| cfg.subdomain(h)).is_some() {
         return Err(CellError::new(ErrorCode::NotFound, "no fragment here: a fragment's host is <label>--<username>.<suffix>"));
     }
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();

@@ -2,11 +2,13 @@
 //! template as a new fragment's first commit and first deploy,
 //! `POST /api/files` (one commit to `main`, as a CLI sync makes), and
 //! `POST /api/deploy` (`live` to `main`'s tip, as `fragment deploy` does).
-//! An agent's tools use the same two routes. Also `__fragments`, the one
-//! capability a page can ask for: its owner's fragments, listed and made.
+//! An agent's tools use the same two routes. Also the capabilities a page
+//! can ask for: its owner's fragments, listed and made (`__fragments`),
+//! and shown inside it, signed in (`__frame`).
 
 use std::collections::BTreeMap;
 
+use fragment_core::site;
 use fragment_proto::{CreateFragment, ErrorBody, ErrorCode, IdentityKind, Role};
 use fragment_templates::{Template, BLANK, CHAT, DESKTOP, INBOX, TODO};
 use serde_json::{json, Value};
@@ -16,7 +18,8 @@ use crate::error::{CellError, CellResult};
 use crate::files::{content_of, FileWrite, Wrote};
 use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 use crate::js;
-use crate::routed::Signed;
+use crate::registry::calls;
+use crate::routed::{Credential, Signed};
 
 /// The templates a fragment can start from. `notes` stays with the CLI
 /// (`fragment new --template notes`): at 3 MiB it would double the cell.
@@ -172,6 +175,20 @@ impl FragmentCell {
         json_response(&json!({ "live": live, "canonical": self.cfg.canonical(&caller.url, &name) }))
     }
 
+    /// Whether live's fragment.json asks for `capability`.
+    fn declares(&self, capability: &str) -> CellResult<bool> {
+        let caps: Vec<String> = self.meta(MetaKey::CapabilitiesLive)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        Ok(caps.iter().any(|c| c == capability))
+    }
+
+    /// `frame`, when live asks for it: whether its owner allows it.
+    pub(crate) fn framing(&self) -> CellResult<Option<bool>> {
+        match self.declares("frame")? {
+            true => Ok(Some(self.meta(MetaKey::FrameGranted)?.is_some())),
+            false => Ok(None),
+        }
+    }
+
     /// The owner, when they are the one viewing a page whose fragment.json
     /// (at live) asks for the `fragments` capability. Anyone else is
     /// refused, even an editor.
@@ -180,18 +197,84 @@ impl FragmentCell {
         if caller.principal() != Some(owner.as_str()) {
             return Err(CellError::new(ErrorCode::Forbidden, "only this fragment's owner, signed in here, has its fragments"));
         }
-        let caps: Vec<String> = self.meta(MetaKey::CapabilitiesLive)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        if !caps.iter().any(|c| c == "fragments") {
+        if !self.declares("fragments")? {
             return Err(CellError::new(ErrorCode::Forbidden, "this fragment's fragment.json does not ask for the fragments capability"));
         }
         Ok(owner)
     }
 
+    /// The fragments `owner` belongs to, as their Principal cell lists them.
+    async fn listed(&self, owner: &str) -> CellResult<Value> {
+        let list = Request::new("https://principal.internal/list", Method::Get)?;
+        Ok(self.env.durable_object("PRINCIPAL")?.get_by_name(owner)?.fetch_with_request(list).await?.json().await?)
+    }
+
+    /// `PUT /api/grants/frame {granted}`: the owner lets this fragment show
+    /// their fragments inside its page (`__frame`), or stops it.
+    pub(crate) fn grant_frame(&self, caller: &Caller, body: Value) -> CellResult<Response> {
+        if caller.principal() != Some(self.must(MetaKey::Owner)?.as_str()) {
+            return Err(CellError::new(ErrorCode::Forbidden, "only its owner lets a fragment show their fragments inside it"));
+        }
+        let granted = body["granted"].as_bool().ok_or_else(|| CellError::invalid("granted is true or false"))?;
+        match granted {
+            true => self.set_meta(MetaKey::FrameGranted, "1")?,
+            false => self.del_meta(MetaKey::FrameGranted)?,
+        }
+        let summary = if granted { "its owner lets it show their fragments inside it" } else { "its owner stopped it showing their fragments inside it" };
+        self.event("grant.frame", summary, json!({ "granted": granted }));
+        json_response(&json!({ "frame": granted }))
+    }
+
+    /// `__frame?name=&return=`: this page's frame, signed in on one of its
+    /// owner's fragments as them (docs/fragment-boats.md, decision 2). Only
+    /// for its owner, signed in here, when live asks for `frame` and they
+    /// allow it, and only for a fragment in their list. The registry mints
+    /// a frame redemption from this origin's own session, for that fragment
+    /// in a frame of this origin only, and the frame goes on to that
+    /// fragment's `__signin`: this page's code never holds it (the router
+    /// takes `__frame` only as a frame of this origin's own page).
+    pub(crate) async fn frame_redirect(&self, caller: &Caller, name: &str) -> CellResult<Response> {
+        let why = match self.framing()? {
+            Some(true) => None,
+            Some(false) => Some(format!("its owner has not let it show their fragments inside it: they allow it in its share sheet ({}/share/{name})", self.cfg.platform(&caller.url))),
+            None => Some("this fragment's fragment.json does not ask for the frame capability".to_string()),
+        };
+        if let Some(why) = why {
+            return Err(CellError::new(ErrorCode::Forbidden, why));
+        }
+        let (token, frame) = match &caller.unresolved {
+            Some(Credential::Session(t)) => (t.clone(), false),
+            Some(Credential::Frame(t)) => (t.clone(), true),
+            _ => return Err(CellError::new(ErrorCode::Unauthenticated, "only this fragment's owner, signed in here, shows their fragments inside it")),
+        };
+        let asked = |k: &str| caller.url.query_pairs().find(|(q, _)| q == k).map(|(_, v)| v.into_owned());
+        let target = asked("name").filter(|n| fragment_proto::valid_fragment_name(n)).ok_or_else(|| CellError::invalid("name a fragment"))?;
+        let owner = self.must(MetaKey::Owner)?;
+        let listed = self.listed(&owner).await?;
+        if !listed["fragments"].as_array().into_iter().flatten().any(|f| f["name"] == target.as_str()) {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("{target} is not one of its owner's fragments")));
+        }
+        let mint = calls::MintFrame {
+            token,
+            frame,
+            from: name.to_string(),
+            owner,
+            fragment: target.clone(),
+            embedder: self.cfg.origin(&caller.url, name),
+            return_to: site::return_path(asked("return").as_deref()),
+        };
+        let redeem = crate::ask_registry(&self.env, &mint).await?.redeem.ok_or_else(|| CellError::host("a frame's mint answered no redemption"))?;
+        let h = Headers::new();
+        h.set("location", &format!("{}__signin?token={redeem}", self.cfg.canonical(&caller.url, &target)))?;
+        h.set("cache-control", "no-store")?;
+        h.set("referrer-policy", "no-referrer")?;
+        Ok(Response::empty()?.with_status(302).with_headers(h))
+    }
+
     /// `GET __fragments`: the fragments the owner belongs to.
     pub(crate) async fn owner_fragments(&self, caller: &Caller) -> CellResult<Value> {
         let owner = self.owner_granted(caller)?;
-        let list = Request::new("https://principal.internal/list", Method::Get)?;
-        let v: Value = self.env.durable_object("PRINCIPAL")?.get_by_name(&owner)?.fetch_with_request(list).await?.json().await?;
+        let v = self.listed(&owner).await?;
         let fragments: Vec<Value> = v["fragments"]
             .as_array()
             .into_iter()

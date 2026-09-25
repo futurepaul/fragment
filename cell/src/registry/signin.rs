@@ -12,11 +12,21 @@
 //!
 //! Tokens and states are 32 random bytes; the cell keeps their SHA-256.
 //!
+//! A frame's session (`__frame`, docs/fragment-boats.md) is a site session
+//! bound to the origin of the page that framed it (`embedder`): minted
+//! from the framing page's own session, redeemed only in a frame, and
+//! looked up only as a frame's.
+//!
+//! A person's yes to a fragment that is not theirs or shared with them
+//! ("Continue to X as you?") is remembered (`consents`) until they sign
+//! out of it there.
+//!
 //! Every sign-in table is bounded: a pending sign-in is kept through the
 //! fleet's next `FRAGMENT_SIGNINS_PENDING_MAX` starts (default
-//! `limits::SIGNINS_PENDING_MAX_DEFAULT`), and a platform session keeps its
+//! `limits::SIGNINS_PENDING_MAX_DEFAULT`), a platform session keeps its
 //! newest `REDEMPTIONS_PER_SESSION_MAX` unspent redemptions and its newest
-//! `SITE_SESSIONS_PER_FRAGMENT_MAX` sessions on each fragment.
+//! `SITE_SESSIONS_PER_FRAGMENT_MAX` top-level sessions and as many frame
+//! sessions on each fragment, and a person their newest `CONSENTS_MAX` yeses.
 //! Expired rows go in batches on the Registry's alarm, never on a request:
 //! an anonymous `/auth/login` must not scan the tables every signed
 //! request waits on.
@@ -26,8 +36,8 @@ use serde::de::IgnoredAny;
 use sha2::{Digest, Sha256};
 
 use super::calls::{
-    ApproveKey, Began, Begin, EndSession, Exchange, Exchanged, LiveSession, LoggedOut, Logout, Mint, Minted, Redeem, Redeemed,
-    Session, SigninCounts, SigninsHook,
+    ApproveKey, Began, Begin, Consent, EndSession, Exchange, Exchanged, LiveSession, LoggedOut, Logout, Mint, MintFrame, Minted, Redeem,
+    Redeemed, Session, SigninCounts, SigninsHook,
 };
 use super::*;
 
@@ -37,6 +47,8 @@ const REDEEM_TTL_MS: i64 = 60 * 1000;
 /// Subjects one person may link, and an email's length.
 const SUBJECTS_MAX: u64 = 8;
 const EMAIL_MAX: usize = 320;
+/// The fragments a person's yes is remembered for (the oldest forgotten).
+const CONSENTS_MAX: i64 = 1000;
 /// The sweep of expired rows: at most this many from each table a run, a
 /// run this long after the earliest row expires (so one run takes many),
 /// and the next run this soon when a table held more than a batch.
@@ -48,23 +60,38 @@ const _: () = assert!(limits::SIGNINS_PENDING_MAX_DEFAULT >= 1 && limits::SITE_S
 
 /// The expiry columns are indexed for the sweep, and a site session's
 /// `(parent, fragment, created_at)` for its bound (that index replaced the
-/// parent-only one the fleet made first).
+/// parent-only one the fleet made first). `embedder` is a frame's
+/// (`migrate` adds it to tables from before frames).
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS logins (
   state TEXT PRIMARY KEY, return_to TEXT NOT NULL, link_to TEXT, created_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS logins_created ON logins (created_at);
 CREATE TABLE IF NOT EXISTS sessions (
   hash TEXT PRIMARY KEY, identity TEXT NOT NULL, fragment TEXT, parent TEXT, workos_sid TEXT,
-  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked_at INTEGER);
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked_at INTEGER, embedder TEXT);
 DROP INDEX IF EXISTS sessions_parent;
 CREATE INDEX IF NOT EXISTS sessions_parent_fragment ON sessions (parent, fragment, created_at) WHERE parent IS NOT NULL;
 CREATE INDEX IF NOT EXISTS sessions_expires ON sessions (expires_at);
 CREATE TABLE IF NOT EXISTS redemptions (
   hash TEXT PRIMARY KEY, session TEXT NOT NULL, fragment TEXT NOT NULL, return_to TEXT NOT NULL,
-  expires_at INTEGER NOT NULL);
+  expires_at INTEGER NOT NULL, embedder TEXT);
 CREATE INDEX IF NOT EXISTS redemptions_session ON redemptions (session, expires_at);
 CREATE INDEX IF NOT EXISTS redemptions_expires ON redemptions (expires_at);
+CREATE TABLE IF NOT EXISTS consents (
+  identity TEXT NOT NULL, fragment TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (identity, fragment));
+CREATE INDEX IF NOT EXISTS consents_at ON consents (identity, at);
 ";
+
+/// Sign-in tables from before frames gain their `embedder` (every row
+/// made before is a top-level one).
+pub(super) fn migrate(sql: &SqlStorage) {
+    for table in ["sessions", "redemptions"] {
+        let cols: Vec<serde_json::Value> = sql.exec(&format!("PRAGMA table_info({table})"), None).and_then(|c| c.to_array()).expect("a sign-in table's columns read");
+        if !cols.iter().any(|c| c["name"] == "embedder") {
+            sql.exec(&format!("ALTER TABLE {table} ADD COLUMN embedder TEXT"), None).expect("a sign-in table migrates");
+        }
+    }
+}
 
 fn sha(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
@@ -121,6 +148,7 @@ struct SessionRow {
     identity: String,
     fragment: Option<String>,
     parent: Option<String>,
+    embedder: Option<String>,
     /// The parent's hash when the parent is live too.
     parent_live: Option<String>,
     kind: Option<IdentityKind>,
@@ -141,6 +169,15 @@ struct LoginRow {
 struct RedemptionRow {
     session: String,
     return_to: String,
+    embedder: Option<String>,
+}
+
+/// A live session as the registry found it: its hash, the platform
+/// session it came from (a site or frame session's), and whom it names.
+pub(super) struct Live {
+    pub hash: String,
+    pub parent: Option<String>,
+    pub session: LiveSession,
 }
 
 /// A live platform session, as a redemption spends it.
@@ -270,12 +307,14 @@ impl RegistryCell {
     }
 
     /// The live session a token names: not revoked, not expired, for this
-    /// fragment (`None`: a platform session), its parent live too. Answers
-    /// the session's hash, its identity, and their first sign-in's email.
-    pub(super) fn live_session(&self, token: &str, fragment: Option<&str>) -> CellResult<(String, LiveSession)> {
+    /// fragment (`None`: a platform session), a frame's when `frame` says
+    /// so and a top-level one otherwise, its parent live too. Answers the
+    /// session's hash, its parent, its identity, and their first sign-in's
+    /// email.
+    pub(super) fn live_session(&self, token: &str, fragment: Option<&str>, frame: bool) -> CellResult<Live> {
         // the email's subquery reads `subjects_identity` (at most SUBJECTS_MAX)
         const Q: &str = concat!(
-            "SELECT s.identity, s.fragment, s.parent, p.hash AS parent_live, i.kind, i.owner, u.username, ",
+            "SELECT s.identity, s.fragment, s.parent, s.embedder, p.hash AS parent_live, i.kind, i.owner, u.username, ",
             "(SELECT email FROM subjects WHERE identity = s.identity ORDER BY linked_at LIMIT 1) AS email FROM sessions s ",
             "LEFT JOIN sessions p ON p.hash = s.parent AND p.revoked_at IS NULL AND p.expires_at > ? ",
             "LEFT JOIN identities i ON i.id = s.identity ",
@@ -288,7 +327,7 @@ impl RegistryCell {
         let hash = sha(token);
         let now = SqlStorageValue::Integer(js::now_ms());
         let row = self.row::<SessionRow>(Q, vec![now.clone(), hash.as_str().into(), now])?.ok_or_else(not_signed_in)?;
-        if row.fragment.as_deref() != fragment {
+        if row.fragment.as_deref() != fragment || row.embedder.is_some() != frame {
             return Err(not_signed_in());
         }
         // a site session lives only while the platform session it came from does
@@ -296,20 +335,21 @@ impl RegistryCell {
             return Err(not_signed_in());
         }
         let identity = joined_identity(row.identity, row.kind, row.owner, row.username, "a session")?;
-        Ok((hash, LiveSession { identity, email: row.email }))
+        Ok(Live { hash, parent: row.parent, session: LiveSession { identity, email: row.email, embedder: row.embedder } })
     }
 
-    fn new_session(&self, identity: &str, fragment: Option<&str>, parent: Option<&str>, sid: Option<&str>, expires_at: i64) -> CellResult<String> {
+    fn new_session(&self, identity: &str, fragment: Option<&str>, parent: Option<&str>, sid: Option<&str>, embedder: Option<&str>, expires_at: i64) -> CellResult<String> {
         let token = fresh_token();
         let opt = |v: Option<&str>| v.map_or(SqlStorageValue::Null, |s| s.into());
         self.exec(
-            "INSERT INTO sessions (hash, identity, fragment, parent, workos_sid, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO sessions (hash, identity, fragment, parent, workos_sid, embedder, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             vec![
                 sha(&token).into(),
                 identity.into(),
                 opt(fragment),
                 opt(parent),
                 opt(sid),
+                opt(embedder),
                 SqlStorageValue::Integer(js::now_ms()),
                 SqlStorageValue::Integer(expires_at),
             ],
@@ -318,7 +358,7 @@ impl RegistryCell {
     }
 
     pub(super) async fn begin(&self, b: Begin) -> CellResult<Began> {
-        let link_to = b.link_to.as_deref().map(|token| self.live_session(token, None)).transpose()?.map(|(_, live)| live.identity);
+        let link_to = b.link_to.as_deref().map(|token| self.live_session(token, None, false)).transpose()?.map(|live| live.session.identity);
         if link_to.as_ref().is_some_and(|p| p.kind != IdentityKind::Person) {
             return Err(CellError::new(ErrorCode::Forbidden, "only a person links a sign-in"));
         }
@@ -414,26 +454,34 @@ impl RegistryCell {
              ON CONFLICT (issuer, subject) DO UPDATE SET email = excluded.email",
             vec![issuer.into(), subject.into(), id.as_str().into(), now, email.into()],
         )?;
-        let token = self.new_session(&id, None, None, sid, js::now_ms() + SESSION_TTL_MS)?;
+        let token = self.new_session(&id, None, None, sid, None, js::now_ms() + SESSION_TTL_MS)?;
         Ok(Exchanged { token, return_to: login.return_to })
     }
 
     pub(super) fn session(&self, b: Session) -> CellResult<LiveSession> {
-        Ok(self.live_session(&b.token, b.fragment.as_deref())?.1)
+        Ok(self.live_session(&b.token, b.fragment.as_deref(), b.frame)?.session)
     }
 
-    /// A fragment's `__signout`: the site session its cookie carries ends
-    /// (its row goes; the platform session and its other sessions stay).
-    /// A second sign-out is no error.
+    /// A fragment's `__signout`: the sessions its cookies carry end (their
+    /// rows go; the platform session and its other sessions stay), and
+    /// their person's yes to the fragment is forgotten: it asks again. A
+    /// second sign-out is no error.
     pub(super) fn end_site_session(&self, b: EndSession) -> CellResult<()> {
-        if !blob::valid_sha(&b.token) {
-            return Ok(());
+        #[derive(Deserialize)]
+        struct Ended {
+            identity: String,
         }
-        self.exec("DELETE FROM sessions WHERE hash = ? AND fragment = ?", vec![sha(&b.token).into(), b.fragment.as_str().into()])
+        for token in [b.site, b.frame].into_iter().flatten().filter(|t| blob::valid_sha(t)) {
+            let ended = self.rows::<Ended>("DELETE FROM sessions WHERE hash = ? AND fragment = ? RETURNING identity", vec![sha(&token).into(), b.fragment.as_str().into()])?;
+            for e in ended {
+                self.exec("DELETE FROM consents WHERE identity = ? AND fragment = ?", vec![e.identity.into(), b.fragment.as_str().into()])?;
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn logout(&self, b: Logout) -> CellResult<LoggedOut> {
-        let (hash, _) = self.live_session(&b.token, None)?;
+        let Live { hash, .. } = self.live_session(&b.token, None, false)?;
         let now = SqlStorageValue::Integer(js::now_ms());
         let sid = self
             .row::<SidRow>("SELECT workos_sid FROM sessions WHERE hash = ?", vec![hash.as_str().into()])?
@@ -442,45 +490,94 @@ impl RegistryCell {
         Ok(LoggedOut { workos_sid: sid.workos_sid })
     }
 
+    /// A platform session's redemption for a fragment, when the person may
+    /// be known there: they said yes to it before, or now, or are in it.
     pub(super) async fn mint(&self, b: Mint) -> CellResult<Minted> {
-        let (hash, _) = self.live_session(&b.token, None)?;
+        let Live { hash, session, .. } = self.live_session(&b.token, None, false)?;
+        let identity = session.identity;
+        let (who, at) = (identity.id.as_str(), SqlStorageValue::Integer(js::now_ms()));
+        match b.consent {
+            Consent::Member => {}
+            Consent::Remembered => {
+                if self.count("SELECT COUNT(*) AS n FROM consents WHERE identity = ? AND fragment = ?", vec![who.into(), b.fragment.as_str().into()])? == 0 {
+                    return Ok(Minted { redeem: None, identity });
+                }
+            }
+            Consent::Given => {
+                self.exec(
+                    "INSERT INTO consents (identity, fragment, at) VALUES (?, ?, ?) ON CONFLICT (identity, fragment) DO UPDATE SET at = excluded.at",
+                    vec![who.into(), b.fragment.as_str().into(), at],
+                )?;
+                // bounded: the person's newest yeses are kept, the oldest forgotten
+                self.exec(
+                    "DELETE FROM consents WHERE rowid IN (SELECT rowid FROM consents WHERE identity = ? ORDER BY at DESC LIMIT -1 OFFSET ?)",
+                    vec![who.into(), SqlStorageValue::Integer(CONSENTS_MAX)],
+                )?;
+            }
+        }
+        let redeem = self.new_redemption(&hash, &b.fragment, &b.return_to, None).await?;
+        Ok(Minted { redeem: Some(redeem), identity })
+    }
+
+    /// A frame redemption (`__frame`): from the framing page's own session
+    /// on `from`, which must be its owner's, for `fragment` in a frame of
+    /// `embedder` only. It comes from that session's platform session, as
+    /// the page's own did.
+    pub(super) async fn mint_frame(&self, b: MintFrame) -> CellResult<Minted> {
+        let Live { parent, session, .. } = self.live_session(&b.token, Some(&b.from), b.frame)?;
+        if session.identity.id != b.owner {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("only {}'s owner shows their fragments inside it", b.from)));
+        }
+        let parent = parent.ok_or_else(|| CellError::host("a fragment's session has no platform session"))?;
+        let redeem = self.new_redemption(&parent, &b.fragment, &b.return_to, Some(&b.embedder)).await?;
+        Ok(Minted { redeem: Some(redeem), identity: session.identity })
+    }
+
+    async fn new_redemption(&self, session: &str, fragment: &str, return_to: &str, embedder: Option<&str>) -> CellResult<String> {
         let expires_at = js::now_ms() + REDEEM_TTL_MS;
         self.sweep_by(expires_at).await?;
         let redeem = fresh_token();
         let redeem_hash = sha(&redeem);
         self.exec(
-            "INSERT INTO redemptions (hash, session, fragment, return_to, expires_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO redemptions (hash, session, fragment, return_to, expires_at, embedder) VALUES (?, ?, ?, ?, ?, ?)",
             vec![
                 redeem_hash.as_str().into(),
-                hash.as_str().into(),
-                b.fragment.as_str().into(),
-                b.return_to.as_str().into(),
+                session.into(),
+                fragment.into(),
+                return_to.into(),
                 SqlStorageValue::Integer(expires_at),
+                embedder.map_or(SqlStorageValue::Null, |e| e.into()),
             ],
         )?;
         // bounded: the session keeps this redemption and its newest others (a
         // browser opening several fragments at once needs a few, never more)
         self.exec(
             "DELETE FROM redemptions WHERE hash IN (SELECT hash FROM redemptions WHERE session = ? AND hash != ? ORDER BY expires_at DESC LIMIT -1 OFFSET ?)",
-            vec![hash.as_str().into(), redeem_hash.as_str().into(), SqlStorageValue::Integer(limits::REDEMPTIONS_PER_SESSION_MAX as i64 - 1)],
+            vec![session.into(), redeem_hash.as_str().into(), SqlStorageValue::Integer(limits::REDEMPTIONS_PER_SESSION_MAX as i64 - 1)],
         )?;
-        Ok(Minted { redeem })
+        Ok(redeem)
     }
 
-    /// A redemption spent on its fragment: a site session, expiring with
-    /// its parent (whose row already armed the sweep for that time).
+    /// A redemption spent on its fragment: a site session (a frame's, bound
+    /// to its embedder, from a frame redemption), expiring with its parent
+    /// (whose row already armed the sweep for that time).
     pub(super) fn redeem(&self, b: Redeem) -> CellResult<Redeemed> {
         let refused = || CellError::new(ErrorCode::Unauthenticated, "this sign-in link expired, was used, or is for another fragment; sign in again");
         if !blob::valid_sha(&b.redeem) {
             return Err(refused());
         }
-        // shown to another fragment, it is refused and stays unspent
+        // shown to another fragment, it is refused and stays unspent; shown
+        // to the wrong kind of page (a frame's to a top-level page, or the
+        // other way), it is refused and spent
         let row = self
             .row::<RedemptionRow>(
-                "DELETE FROM redemptions WHERE hash = ? AND fragment = ? AND expires_at > ? RETURNING session, return_to",
+                "DELETE FROM redemptions WHERE hash = ? AND fragment = ? AND expires_at > ? RETURNING session, return_to, embedder",
                 vec![sha(&b.redeem).into(), b.fragment.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
             )?
             .ok_or_else(refused)?;
+        if row.embedder.is_some() != b.framed {
+            return Err(CellError::new(ErrorCode::Unauthenticated, "this sign-in link is for a frame of the page that asked for it, or for a page of its own: sign in again"));
+        }
         let parent = row.session.as_str();
         let p = self
             .row::<ParentRow>(
@@ -488,14 +585,17 @@ impl RegistryCell {
                 vec![parent.into(), SqlStorageValue::Integer(js::now_ms())],
             )?
             .ok_or_else(refused)?;
-        let token = self.new_session(&p.identity, Some(&b.fragment), Some(parent), None, p.expires_at)?;
-        // bounded: this session and the newest others on this fragment are
-        // kept, the oldest end (a browser holds one cookie an origin)
+        let token = self.new_session(&p.identity, Some(&b.fragment), Some(parent), None, row.embedder.as_deref(), p.expires_at)?;
+        // bounded: this session and the newest others of its kind on this
+        // fragment are kept, the oldest end (a browser holds one cookie of
+        // each an origin), so a desktop reloading its frames never ends
+        // the top-level session
         self.exec(
-            "DELETE FROM sessions WHERE hash IN (SELECT hash FROM sessions WHERE parent = ? AND fragment = ? AND hash != ? ORDER BY created_at DESC LIMIT -1 OFFSET ?)",
+            "DELETE FROM sessions WHERE hash IN (SELECT hash FROM sessions WHERE parent = ? AND fragment = ? AND (embedder IS NULL) = ? AND hash != ? ORDER BY created_at DESC LIMIT -1 OFFSET ?)",
             vec![
                 parent.into(),
                 b.fragment.as_str().into(),
+                SqlStorageValue::Integer(i64::from(row.embedder.is_none())),
                 sha(&token).into(),
                 SqlStorageValue::Integer(limits::SITE_SESSIONS_PER_FRAGMENT_MAX as i64 - 1),
             ],
@@ -507,7 +607,7 @@ impl RegistryCell {
     /// the key's own proof in the approval link).
     pub(super) fn add_by_session(&self, b: ApproveKey) -> CellResult<()> {
         check_key(&b.key)?;
-        let person = self.live_session(&b.token, None)?.1.identity;
+        let person = self.live_session(&b.token, None, false)?.session.identity;
         self.insert_key(&person.id, &b.key, &person.id)?;
         Ok(())
     }
