@@ -213,13 +213,12 @@ Each phase lands as hard cuts with its tests. A phase is done when its
 acceptance checks pass in CI and, from phase 3 on, against the hosted
 deployment.
 
-**Where it stands (2026-09-25).** fragment.club runs the cell `fd471b1`
-on nodes built from the celld fork's `0d80ead`, deployed 2026-09-24:
-phases 3 to 6, the hardening pass's H1–H3, and the first parts of 7
-and 8 (hosted e2e 29/29). `master` is ahead by PRs #12–#15 (the audit's
-source-of-truth, speed, and tests passes, and the parallel CI) and
-`d01ec3f` (the registry retry), not deployed: that needs a node image
-from the fork's `f734f8f`, then the cell (`docs/operate.md`).
+**Where it stands (2026-09-25).** fragment.club runs the cell `cf96977`
+on nodes built from the celld fork's `f734f8f`, deployed 2026-09-25
+(hosted e2e 29/29): phases 3 to 6, the hardening pass's H1–H3, the
+audit's passes (#12–#14), the clickjacking fix (#19), one answer per
+chat message (#20), and the first parts of 7 and 8. Phase 7 is under
+way (`docs/phase-7.md`).
 
 ### 0. Foundation (done 2026-09-23)
 - fragment-next created from fragment's full history (`9a381f8`, pushed
