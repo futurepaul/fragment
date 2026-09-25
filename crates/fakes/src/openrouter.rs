@@ -393,9 +393,11 @@ impl OpenRouter {
         self.state.lock().expect("openrouter state").script.extend(replies.iter().cloned());
     }
 
-    /// Drops any scripted replies not yet answered.
+    /// Drops any scripted replies not yet answered, and any delays.
     pub fn clear_script(&self) {
-        self.state.lock().expect("openrouter state").script.clear();
+        let mut s = self.state.lock().expect("openrouter state");
+        s.script.clear();
+        s.delays.clear();
     }
 
     /// Holds the next chat completions' answers back this long (ms), in
