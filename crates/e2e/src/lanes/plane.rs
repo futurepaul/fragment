@@ -58,8 +58,9 @@ fn files_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("it lives fifteen minutes at most", claims["exp"].as_i64().unwrap_or(0) - claims["iat"].as_i64().unwrap_or(0) <= 900, &claims);
     s.ok("it names who minted it (their identity)", claims["sub"] == format!("editor:{}", api.identity(&owner)?), &claims);
     let http = reqwest::blocking::Client::new();
-    let st = http.get(format!("{}/api/repos/{repo}/branch?name=main", s.fake.url)).bearer_auth(&token).send()?.status().as_u16();
-    s.ok("code.storage accepts it (a fresh repo has no main: 404)", st == 404, st);
+    let r = http.get(format!("{}/api/repos/{repo}/branch?name=main", s.fake.url)).bearer_auth(&token).send()?;
+    let (st, why) = (r.status().as_u16(), r.json::<Value>().map(|b| b["detail"].clone()).unwrap_or_default());
+    s.ok("code.storage accepts it (a fresh repo has no main: 404, branch not found)", st == 404 && why == "branch not found", format!("{st} {why}"));
 
     s.commit(&c, &[("notes/a.md", Some(b"hello v1\n"))]);
     s.ok("a pushed file is listed after the webhook", listing(api, &owner, &name).contains(&("notes/a.md".into(), 9)), "");
