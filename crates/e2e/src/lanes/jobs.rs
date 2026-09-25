@@ -151,6 +151,27 @@ pub(super) fn started(r: &Reply) -> i64 {
     r.body["result"]["run"].as_i64().unwrap_or(0)
 }
 
+/// A fragment whose cron trigger fires every minute, for the triggers
+/// section to check.
+pub struct Cron {
+    owner: Keys,
+    name: String,
+    deployed: Instant,
+}
+
+/// Deploys the cron fragment, when the triggers section will run. The
+/// suite calls this after its last node restart before that section, so in
+/// a full run a minute boundary has passed by the time it is checked, on
+/// the real alarm; alone, the section waits for one.
+pub fn cron(s: &Suite, api: &Api) -> Result<Option<Cron>> {
+    if !s.runs("triggers") {
+        return Ok(None);
+    }
+    let owner = api.person()?;
+    let (name, _) = jobs_fragment(s, api, &owner, "cron", |m| m["triggers"] = json!([{ "cron": "* * * * *", "run": "tick" }]))?;
+    Ok(Some(Cron { owner, name, deployed: Instant::now() }))
+}
+
 pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("jobs") {
         return Ok(());
@@ -379,25 +400,29 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
-pub fn triggers(s: &mut Suite, api: &Api) -> Result<()> {
+pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, String>>) -> Result<()> {
     if !s.section("triggers") {
         return Ok(());
     }
+    let cron = match cron {
+        Some(Ok(Some(cron))) => cron,
+        Some(Err(why)) => anyhow::bail!("the cron fragment was not deployed: {why}"),
+        Some(Ok(None)) | None => anyhow::bail!("the cron fragment is deployed whenever the triggers section runs, and was not"),
+    };
     let owner = api.person()?;
-    let (name, c) = jobs_fragment(s, api, &owner, "triggers", |m| {
-        m["triggers"].as_array_mut().expect("triggers").push(json!({ "cron": "* * * * *", "run": "tick" }));
-    })?;
-    let deployed = Instant::now();
+    let (name, c) = jobs_fragment(s, api, &owner, "triggers", |_| {})?;
     let token = c["inboxToken"].as_str().unwrap_or("").to_string();
     let long = Duration::from_secs(40);
     let own = api.status(&owner, &name)?.body["npub"].as_str().unwrap_or("").to_string();
 
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/triggers"), None)?;
     let list = r.body["triggers"].as_array().cloned().unwrap_or_default();
+    let r_cron = api.signed(&cron.owner, "GET", &format!("/api/f/{}/triggers", cron.name), None)?;
+    let next_at = r_cron.body["triggers"][0]["nextAt"].as_i64();
     s.ok(
-        "the triggers list names each one, with the next cron time",
-        list.len() == 5 && list[0] == json!({ "channel": "inbox", "run": "ingest", "paused": false }) && list[4]["nextAt"].as_i64().is_some(),
-        &r,
+        "the triggers list names each one, a cron trigger with its next time (on a minute)",
+        list.len() == 4 && list[0] == json!({ "channel": "inbox", "run": "ingest", "paused": false }) && next_at.is_some_and(|at| at % 60_000 == 0),
+        format!("{r} {r_cron}"),
     );
 
     // the inbox: a delivery is a record, and its trigger runs with it
@@ -499,12 +524,6 @@ pub fn triggers(s: &mut Suite, api: &Api) -> Result<()> {
         sentinel && filed == 2 && ticked_paths() == [json!(["notes/today.md"]), json!(["notes/sentinel.md"])],
         format!("{filed} runs from files, ticked {}", json!(ticked_paths())),
     );
-
-    // cron: the minute boundary after the deploy
-    let remaining = Duration::from_secs(70).saturating_sub(deployed.elapsed());
-    let ticked = s.eventually(remaining, || runs(api, &owner, &name, "&op=tick").iter().any(|r| r["via"] == "cron" && r["status"] == "succeeded"));
-    let cron = runs(api, &owner, &name, "&op=tick").into_iter().find(|r| r["via"] == "cron").unwrap_or(Value::Null);
-    s.ok("a cron trigger runs on its minute", ticked && cron["trigger"] == "* * * * *", &cron);
 
     // a trigger step that fails after its record is appended (here after
     // its first run started, before its last): the call fails visibly, the
@@ -633,5 +652,16 @@ pub fn triggers(s: &mut Suite, api: &Api) -> Result<()> {
         refused_at.map(|(i, r)| format!("{i}: {r}")).unwrap_or_default(),
     );
     s.ok("the event log says the inbox was full", events(api, &owner, &full).iter().any(|e| e["kind"] == "inbox.rejected"), "no inbox.rejected");
+
+    // cron, last: its fragment was deployed before the sections ahead of
+    // this one, so a full run has passed a minute boundary by now; alone,
+    // this waits for the one after the deploy
+    let waited = Instant::now();
+    let remaining = Duration::from_secs(70).saturating_sub(cron.deployed.elapsed()).max(Duration::from_secs(10));
+    let ticks = || runs(api, &cron.owner, &cron.name, "&op=tick");
+    let ticked = s.eventually(remaining, || ticks().iter().any(|r| r["via"] == "cron" && r["status"] == "succeeded"));
+    println!("      the cron check waited {:?}, {:?} after the deploy", waited.elapsed(), cron.deployed.elapsed());
+    let tick = ticks().into_iter().find(|r| r["via"] == "cron").unwrap_or(Value::Null);
+    s.ok("a cron trigger runs on its minute", ticked && tick["trigger"] == "* * * * *", &tick);
     Ok(())
 }

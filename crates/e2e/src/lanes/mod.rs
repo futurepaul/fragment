@@ -11,7 +11,7 @@ mod control;
 mod deliver;
 mod desktop;
 mod identities;
-mod jobs;
+pub(crate) mod jobs;
 mod keys;
 mod limits;
 mod members;
@@ -51,6 +51,13 @@ const LANES: &[Lane] = &[
     app::ops,
     app::public,
     app::effects,
+    // after the last node restart before the triggers section: the cron
+    // fragment's first minute passes while the sections between run (not
+    // a section: its outcome waits for triggers, which reports it)
+    |s, api| {
+        s.cron = Some(jobs::cron(s, api).map_err(|e| format!("{e:#}")));
+        Ok(())
+    },
     limits::facet_cap,
     limits::lockdown,
     site::site,
@@ -62,7 +69,10 @@ const LANES: &[Lane] = &[
     author::cli,
     author::browser,
     jobs::jobs,
-    jobs::triggers,
+    |s, api| {
+        let cron = s.cron.take();
+        jobs::triggers(s, api, cron)
+    },
     appfiles::appfiles,
     blobs::blobs,
     notes::notes,

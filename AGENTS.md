@@ -52,6 +52,7 @@ debt ledger).
   files, deploy, ops, public, site, watch, schemas, channels, live,
   routes, cli, browser, jobs, triggers, appfiles, blobs, notes, push,
   ai, budget, agents, chat, computer, sync, restart, pathmode). The browser and notes sections drive headless
+<<<<<<< HEAD
   Chrome (`CHROME_BIN` to choose one; one Chrome serves the whole run, a
   fresh browser context per section); `triggers` waits for a cron
   minute (about a minute). A section that errors or panics is one FAIL
@@ -61,6 +62,16 @@ debt ledger).
   boot's log (`celld-<port>-<boot>.log`, the node's own logs on) and is
   removed when every check passes, kept when one fails
   (`FRAGMENT_E2E_KEEP=1` keeps it anyway).
+||||||| parent of e8dd007 (e2e: the cron fragment is deployed sections before its tick is checked)
+  Chrome (`CHROME_BIN` to choose one); `triggers` waits for a cron
+  minute (about a minute). The node runs from a staged copy of the cell
+  (`target/e2e/cell`), so the e2e and `cargo xtask dev` can run at once.
+=======
+  Chrome (`CHROME_BIN` to choose one); `--only triggers` waits for a
+  cron minute (up to a minute; a full run deploys its cron fragment
+  sections earlier). The node runs from a staged copy of the cell
+  (`target/e2e/cell`), so the e2e and `cargo xtask dev` can run at once.
+>>>>>>> e8dd007 (e2e: the cron fragment is deployed sections before its tick is checked)
 - `cargo xtask dev [--clean]`: the dev stack in the foreground: the cell
   on :8790 with fragments at `http://<label>--<username>.fragment.localhost:8790/`,
   agents (`agent/`, goose's loop) co-hosted on the same node (the router
