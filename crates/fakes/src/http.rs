@@ -63,7 +63,13 @@ pub struct Server {
 impl Server {
     /// `port` 0 picks a free one.
     pub fn start(port: u16, handler: Handler) -> std::io::Result<Server> {
-        let listener = TcpListener::bind(("127.0.0.1", port))?;
+        Server::serve(TcpListener::bind(("127.0.0.1", port))?, handler)
+    }
+
+    /// Serves on a listener the caller bound, when it must know the port
+    /// before the handler exists: binding once means no one else can take
+    /// the port in between.
+    pub fn serve(listener: TcpListener, handler: Handler) -> std::io::Result<Server> {
         let port = listener.local_addr()?.port();
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);

@@ -836,9 +836,10 @@ impl CodeStorage {
             _ => State::default(),
         };
         // The url is known only once the server has a port; the handler
-        // reads it through `Inner`, so build Inner first with the port fixed.
-        let listener_port = if opts.port == 0 { free_port()? } else { opts.port };
-        let url = format!("http://127.0.0.1:{listener_port}");
+        // reads it through `Inner`, so bind first (port 0 picks a free one)
+        // and build Inner with the port the listener holds.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", opts.port))?;
+        let url = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
         let inner = Arc::new(Inner {
             org: opts.org,
             signing,
@@ -850,7 +851,7 @@ impl CodeStorage {
             state: Mutex::new(state),
         });
         let handler_inner = Arc::clone(&inner);
-        let server = Server::start(listener_port, Arc::new(move |req: &Request| handler_inner.handle(req)))?;
+        let server = Server::serve(listener, Arc::new(move |req: &Request| handler_inner.handle(req)))?;
         Ok(CodeStorage { url, inner, _server: server })
     }
 
@@ -1066,10 +1067,6 @@ pub fn generate_org_key_pem() -> String {
             return key.to_pkcs8_pem(Default::default()).expect("a P-256 key encodes").to_string();
         }
     }
-}
-
-fn free_port() -> std::io::Result<u16> {
-    Ok(std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
 }
 
 mod b64map {
