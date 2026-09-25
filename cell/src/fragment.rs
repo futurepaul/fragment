@@ -1,12 +1,14 @@
 //! The `Fragment` supervisor: one Durable Object per fragment. It owns the
 //! fragment's identity, members, visibility, secrets, file-plane pins, and
 //! code record, and it answers every call into the app. The router has
-//! already verified the caller and resolved their identity; it hands over
-//! a `Routed` (routed.rs: the fragment's name, the URL the request arrived
-//! on, how its site was addressed, and who is asking, with the key they
-//! signed with) in headers only it sets, decoded once here into a
-//! `Caller`. Calls from inside the platform (the internal routes below)
-//! are answered before that decode: they carry no caller.
+//! already verified the caller; it hands over a `Routed` (routed.rs: the
+//! fragment's name, the URL the request arrived on, how its site was
+//! addressed, and who is asking) in headers only it sets, decoded once
+//! here into a `Caller`. On the control API the router resolved who is
+//! asking; on the site it did not, and the fragment resolves them only
+//! where its answer depends on it (`identified`, `reader`). Calls from
+//! inside the platform (the internal routes below) are answered before
+//! that decode: they carry no caller.
 //!
 //! Routes (inner paths; the router maps the public ones onto them):
 //!
@@ -40,6 +42,7 @@
 //!   POST   /deliver/report                the delivery consumer (deliveries.rs); never routed from outside
 //!   POST   /test/keys  /test/fragment     the router's `/api/test/*`, on fleets with test hooks only (ops.rs)
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -60,7 +63,7 @@ use crate::config::Config;
 use crate::cs::Cs;
 use crate::error::{CellError, CellResult};
 use crate::js;
-use crate::routed::{Mode, Routed, Signed};
+use crate::routed::{Credential, Mode, Routed, Signed};
 
 /// How long a create in progress holds its name.
 const CLAIM_TTL_MS: i64 = 120_000;
@@ -264,10 +267,16 @@ struct Events<'a> {
 }
 
 /// Who is calling, as the router established it (`Routed`, less the name).
+#[derive(Clone)]
 pub struct Caller {
-    /// Who signed, or whose session this is (`None`: anonymous): an
-    /// identity always with its kind, and the key when one signed.
+    /// Who signed, or whose session this is (`None`: anonymous, or not
+    /// resolved yet): an identity always with its kind, and the key when
+    /// one signed.
     pub signed: Option<Signed>,
+    /// A site request's signer or session, not resolved yet (`signed` is
+    /// `None` meanwhile). Until `identified` resolves it the caller reads
+    /// as anonymous, which never sees more than who they are would.
+    pub unresolved: Option<Credential>,
     /// The URL the request arrived on: canonical URLs, cookies, and the
     /// query string derive from it.
     pub url: url::Url,
@@ -656,6 +665,30 @@ impl FragmentCell {
         decide(facts.visibility, self.standing(caller, link)?, Purpose::Read, needs)
     }
 
+    /// The caller with who they are resolved: a site request's credential,
+    /// asked of the registry here, once (a stale session is nobody; a key
+    /// no one holds is 401; a registry that cannot answer is 503). Any
+    /// other caller as it came.
+    pub(crate) async fn identified<'a>(&self, caller: &'a Caller, name: &str) -> CellResult<Cow<'a, Caller>> {
+        let Some(credential) = &caller.unresolved else { return Ok(Cow::Borrowed(caller)) };
+        let signed = credential.clone().resolve(&self.env, name).await?;
+        Ok(Cow::Owned(Caller { signed, unresolved: None, url: caller.url.clone(), mode: caller.mode }))
+    }
+
+    /// The caller of a read that answers alike for everyone who may see
+    /// the fragment (a page, a file): who they are is resolved only when
+    /// the anonymous standing may not read, since no one sees less than
+    /// that (`access::effective_role` only adds to it). A refusal is the
+    /// resolved caller's (401 or 403).
+    pub(crate) async fn reader<'a>(&self, facts: &Facts, caller: &'a Caller, link: bool) -> CellResult<Cow<'a, Caller>> {
+        if caller.unresolved.is_some() && self.admit(facts, caller, link, Role::Public).is_ok() {
+            return Ok(Cow::Borrowed(caller));
+        }
+        let caller = self.identified(caller, &facts.name).await?;
+        self.admit(facts, &caller, link, Role::Public)?;
+        Ok(caller)
+    }
+
     /// The signer's identity.
     pub(crate) fn caller_id<'a>(&self, caller: &'a Caller) -> CellResult<&'a str> {
         caller.principal().ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "sign the request"))
@@ -705,11 +738,15 @@ impl FragmentCell {
             return self.cap_files(&op, &body).await;
         }
         // Every route below is the router's: decoded once, from headers only it sets.
-        let Routed { name: routed_name, url, mode, signed } = Routed::from_headers(req.headers())?;
-        let caller = Caller { signed, url, mode };
+        let Routed { name: routed_name, url, mode, signed, credential } = Routed::from_headers(req.headers())?;
+        let caller = Caller { signed, unresolved: credential, url, mode };
         if let Some(rest) = path.strip_prefix("/serve/") {
             let rest = rest.to_string();
             return self.serve(req, &caller, &routed_name, &rest).await;
+        }
+        // the router resolves who is asking on every route but the site's
+        if caller.unresolved.is_some() {
+            return Err(CellError::host(format!("the router left the caller of {path} unresolved")));
         }
         let query = |k: &str| caller.url.query_pairs().find(|(q, _)| q == k).map(|(_, v)| v.into_owned());
         let segments: Vec<String> = path.trim_start_matches('/').split('/').map(decode_segment).collect();

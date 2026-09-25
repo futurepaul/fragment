@@ -254,6 +254,7 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
     let owner_id = api.identity(&owner)?;
     let username = name.split_once('.').map_or("", |(_, u)| u);
     let claims_owner = json!({ "id": owner_id, "kind": "person", "owner": null, "username": username, "key": owner.pubkey_hex() }).to_string();
+    let owner_key_unsigned = json!({ "key": owner.pubkey_hex() }).to_string();
     let forged_headers = || {
         routed::ALL
             .iter()
@@ -262,6 +263,7 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
                     routed::NAME => name.clone(),
                     routed::URL => format!("https://{name}.{}/", crate::SUFFIX),
                     routed::MODE => "host".to_string(),
+                    routed::CREDENTIAL => owner_key_unsigned.clone(),
                     _ => claims_owner.clone(),
                 };
                 (*h, v)

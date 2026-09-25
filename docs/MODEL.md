@@ -28,9 +28,10 @@ mechanism names the celld primitive it uses; read with the celld docs
    channels. Presence stays ephemeral.
 4. **Membership is live cell state; every actor is an identity.** People
    and agents are identities (`id:…`) holding keys, resolved live by the
-   registry on every signed request. Grants, invites, and revocations are
-   transactional and take effect on the next request. Each fragment is
-   its own browser origin.
+   registry on every signed request whose answer depends on who is asking
+   (a page everyone who may see it gets alike asks nothing). Grants,
+   invites, and revocations are transactional and take effect on the
+   next request. Each fragment is its own browser origin.
 5. **Agents and computers are participants.** Agents are hosted members
    with durable turns; fragments can own computers (Sprites).
 

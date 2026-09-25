@@ -8,6 +8,12 @@
 //! anonymous principal: a random cookie whose hash names it. A browser
 //! signed in on this origin (`__signin`, the router's) is its person, and
 //! accepts an invite at `__join?invite=<token>`.
+//!
+//! The router hands a site request's signer or session on unresolved: a
+//! page or a file answers alike for everyone who may see the fragment, so
+//! the registry is asked who is asking only when the anonymous standing may
+//! not read (`reader`), or when the answer is someone's (`answers_someone`,
+//! and the app's own routes).
 
 use fragment_core::access::Purpose;
 use fragment_core::{npub, site};
@@ -82,6 +88,14 @@ fn script(req: &Request, body: &'static str, hash: u64) -> CellResult<Response> 
     Ok(Response::ok(body)?.with_headers(h))
 }
 
+/// Whether a site path's answer is someone's, beyond whether they may see
+/// the fragment: an operation's call, a socket (`__live`'s presence; a
+/// member's `__watch` closes when they leave), an invite, a push
+/// subscription, or the owner's fragments. Its caller is resolved first.
+fn answers_someone(path: &str) -> bool {
+    path.starts_with("__op/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__fragments" | "__join" | "__watch" | "__live")
+}
+
 fn with_cookies(mut resp: Response, cookies: &[String]) -> CellResult<Response> {
     for c in cookies {
         resp.headers_mut().append("set-cookie", c)?;
@@ -109,6 +123,13 @@ impl FragmentCell {
         }
         let path: String = rest.split('/').map(decode_segment).collect::<Vec<_>>().join("/");
         let anon = site::cookie(&cookies, ANON_COOKIE).filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())).map(anon_principal);
+        let resolved;
+        let caller = if answers_someone(&path) {
+            resolved = self.identified(caller, name).await?;
+            &*resolved
+        } else {
+            caller
+        };
         let resp = if let Some(op) = path.strip_prefix("__op/") {
             if req.method() != Method::Post {
                 return Err(CellError::invalid("call an operation with POST"));
@@ -162,7 +183,7 @@ impl FragmentCell {
             json_response(&answer)?
         } else if path == "__people" {
             // names for a page: a person's username and picture, or whose agent
-            self.admit(&facts, caller, link, Role::Public)?;
+            self.reader(&facts, caller, link).await?;
             let ids: Vec<String> = url.query_pairs().filter(|(k, _)| k == "id").map(|(_, v)| v.into_owned()).collect();
             let mut answer = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids }).await?;
             let platform = self.cfg.platform(&caller.url);
@@ -181,12 +202,10 @@ impl FragmentCell {
             let principal = caller.principal().map(str::to_string).or(anon).unwrap_or_else(|| anon_principal(&js::random_hex::<32>()));
             self.live(&req, caller, &principal, link)?
         } else {
-            let role = self.admit(&facts, caller, link, Role::Public)?;
-            let who = caller.principal().map(npub::display).or(anon).unwrap_or_else(|| "anonymous".into());
             match req.method() {
-                Method::Get | Method::Head => self.site(&mut req, caller, &mut facts, &path, &url, role, &who).await?,
+                Method::Get | Method::Head => self.site(&mut req, caller, &mut facts, &path, &url, link, anon).await?,
                 // Only the app's own routes take other methods.
-                _ => self.app_fetch(&mut req, caller, name, &path, &url, role, &who).await?,
+                _ => self.app_fetch(&mut req, caller, &facts, &path, &url, link, anon).await?,
             }
         };
         with_cookies(resp, &set)
@@ -236,9 +255,12 @@ impl FragmentCell {
 
     /// The author's `fetch` for a path that is not a site file: it sees the
     /// fragment's public URL and who is asking (`x-fragment-principal`,
-    /// `x-fragment-role`).
+    /// `x-fragment-role`), so they are resolved first.
     #[allow(clippy::too_many_arguments)]
-    async fn app_fetch(&self, req: &mut Request, caller: &Caller, name: &str, path: &str, url: &url::Url, role: Role, who: &str) -> CellResult<Response> {
+    async fn app_fetch(&self, req: &mut Request, caller: &Caller, facts: &Facts, path: &str, url: &url::Url, link: bool, anon: Option<String>) -> CellResult<Response> {
+        let caller = self.identified(caller, &facts.name).await?;
+        let role = self.admit(facts, &caller, link, Role::Public)?;
+        let who = caller.principal().map(npub::display).or(anon).unwrap_or_else(|| "anonymous".into());
         let facet = match self.facet() {
             Ok(f) => f,
             Err(e) if e.code == ErrorCode::NoCode => {
@@ -252,7 +274,7 @@ impl FragmentCell {
                 headers.set(k, &v)?;
             }
         }
-        headers.set("x-fragment-principal", who)?;
+        headers.set("x-fragment-principal", &who)?;
         headers.set("x-fragment-role", role.as_str())?;
         let mut init = RequestInit::new();
         init.with_method(req.method()).with_headers(headers);
@@ -263,7 +285,7 @@ impl FragmentCell {
             }
         }
         let query = url.query().map(|q| format!("?{q}")).unwrap_or_default();
-        let target = format!("{}{path}{query}", self.cfg.canonical(&caller.url, name));
+        let target = format!("{}{path}{query}", self.cfg.canonical(&caller.url, &facts.name));
         facet.fetch(Request::new_with_init(&target, &init)?).await
     }
 
@@ -286,7 +308,10 @@ impl FragmentCell {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn site(&self, req: &mut Request, caller: &Caller, facts: &mut Facts, path: &str, url: &url::Url, role: Role, who: &str) -> CellResult<Response> {
+    async fn site(&self, req: &mut Request, caller: &Caller, facts: &mut Facts, path: &str, url: &url::Url, link: bool, anon: Option<String>) -> CellResult<Response> {
+        // a page or a file reads alike for everyone who may see the fragment
+        let reader = self.reader(facts, caller, link).await?;
+        let caller: &Caller = &reader;
         let head = req.method() == Method::Head;
         if path == "__fragment.js" {
             return script(req, CLIENT_JS, CLIENT_JS_HASH);
@@ -370,7 +395,7 @@ impl FragmentCell {
         }
         let Some(row) = found else {
             if !path.starts_with("__") {
-                return self.app_fetch(req, caller, name, path, url, role, who).await;
+                return self.app_fetch(req, caller, facts, path, url, link, anon).await;
             }
             return Err(CellError::new(ErrorCode::NotFound, format!("no page {path:?}")));
         };

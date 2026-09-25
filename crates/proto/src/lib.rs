@@ -581,7 +581,10 @@ pub mod routed {
     pub const MODE: &str = "x-fragment-mode";
     /// Who is asking (JSON: the identity and the key it signed with).
     pub const SIGNED: &str = "x-fragment-signed";
-    pub const ALL: [&str; 4] = [NAME, URL, MODE, SIGNED];
+    /// Who is asking a site request, not yet resolved (JSON: the key a
+    /// signature was verified for, or the origin's session token).
+    pub const CREDENTIAL: &str = "x-fragment-credential";
+    pub const ALL: [&str; 5] = [NAME, URL, MODE, SIGNED, CREDENTIAL];
     /// The caller's identity on a request the router hands the agents'
     /// script (`agent/`), which trusts nothing else.
     pub const AGENT_PRINCIPAL: &str = "x-agent-principal";

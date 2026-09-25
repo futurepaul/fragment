@@ -94,6 +94,7 @@ impl FragmentCell {
             let identity = fragment_proto::Identity { id: owner.clone(), kind: IdentityKind::Person, owner: None, username: Some(username.to_string()) };
             let as_owner = Caller {
                 signed: Some(Signed { identity, key: None }),
+                unresolved: None,
                 url: url::Url::parse("https://fragment.internal/").expect("a URL"),
                 mode: None,
             };

@@ -69,12 +69,21 @@ anonymous visitor (`anon:` + 32 hex, the hash of a random cookie on the
 fragment's origin). Grants, records, runs, and the ledger name
 principals. A request is signed by a key (64 hex inside, an npub in
 answers; requests may use either); the router asks the registry which
-identity holds it, live, on every signed request, and passes the fragment
-both. A key no one registered, or a revoked one, is 401; when the
-registry cannot answer, a signed request is 503 `registry_unavailable`,
-never let through (docs/finite-integration.md, rule 7). Control routes
-need NIP-98; site requests may carry it. A fragment's own key is the
-principal of its triggered runs and is not registered.
+identity holds it, live, on every signed request to the control API,
+and passes the fragment both. A key no one registered, or a revoked one,
+is 401; when the registry cannot answer, a signed request is 503
+`registry_unavailable`, never let through (docs/finite-integration.md,
+rule 7). Control routes need NIP-98; site requests may carry it. A site
+request's signature (checked by the router: a bad one is 401) or session
+cookie is resolved only when the answer depends on who is asking: a page
+or a file that everyone who may see the fragment gets alike (a `public`
+fragment's, or a `link` fragment's with its share link) is served
+without asking the registry, so neither a revoked key nor a registry that
+cannot answer changes it. An operation, a socket, an invite, push, the
+owner's fragments, an app route, and any read the anonymous standing may
+not see ask it, live, and are refused as the control API is (401, or 503
+when the registry cannot answer). A fragment's own key is the principal
+of its triggered runs and is not registered.
 
 NIP-98 (`crates/nip98`): `Authorization: Nostr <base64 of the event>`, an
 event of kind 27235 with empty content and the tags `["u", <the absolute
@@ -158,7 +167,8 @@ A person is keyed by their verified `(issuer, subject)`: the issuer is
 `workos:<client id>` (the environment), the subject WorkOS's user id. The
 email is an attribute, refreshed at each sign-in and never matched. The
 platform holds no key for a person; browsers hold sessions, each looked up
-live in the registry on every request (a 30-day lifetime; tokens are 32
+live in the registry on every request whose answer depends on who is
+asking (Principals and access, above; a 30-day lifetime; tokens are 32
 random bytes, the registry keeps their SHA-256).
 
 | method & path (platform origin) | what |
