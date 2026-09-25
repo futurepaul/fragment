@@ -7,13 +7,15 @@ keeps the decisions, the slices, and who owns which files while slices
 run in parallel. `docs/platform.md` lists every place the platform does
 something a fragment's own code cannot.
 
-**Not built: the share header** (ROADMAP decision 4, and phase 7's first
-bullet: "direct URLs with the share header"). No slice took it. A
-top-level visit to a fragment someone cannot open answers the API's JSON
-error. A guest removed from a chat who reloads sees
-`{"error":"forbidden",…}`, and a signed-out visit to a members-only
-fragment gets a 401 JSON. There is no page that offers sign-in or says
-their access changed.
+**Direct URLs: built** (PR `fix-open-by-url`, docs/api.md, Opening a
+fragment by its URL). A top-level visit to a fragment's URL with no
+session there goes through the platform's sign-in for it and back (asking
+first on a stranger's), and a refusal a browser navigates to is a page
+("You need to sign in", "You don't have access to X", "This link has
+changed"), not the API's JSON: a guest removed from a chat who reloads is
+told they have no access and whom to ask. **Not built: the share header
+itself** (ROADMAP decision 4: a bar over a fragment offering its share
+sheet).
 
 ## Acceptance
 

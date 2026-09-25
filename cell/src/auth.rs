@@ -43,7 +43,9 @@
 //! sessions in the registry and drops the cookies. Which cookies count on
 //! a request is the router's to say (`crate::Fetched`); each is looked up
 //! live on every request whose answer depends on who is asking (the
-//! fragment decides which: `routed::Credential`).
+//! fragment decides which: `routed::Credential`). A refusal a browser
+//! navigates to there is a page (`refused`): a top-level visit no session
+//! admits goes through `/auth/fragment` and back.
 
 use fragment_core::{form, npub, site};
 use fragment_proto::{ErrorCode, IdentityKind};
@@ -611,6 +613,65 @@ fn blocked(cfg: &Config, url: &Url, name: &str, back: &str) -> CellResult<Respon
     h.set("content-type", "text/html; charset=utf-8")?;
     h.set("cache-control", "no-store")?;
     Ok(Response::ok(html(&format!("{} is signed out here", share::label(name)), &body))?.with_headers(h))
+}
+
+/// Whether a refusal says who may do something (401, 403): what a page
+/// answers a browser's navigation with (`refused`).
+pub(crate) fn is_refusal(code: ErrorCode) -> bool {
+    matches!(code, ErrorCode::Unauthenticated | ErrorCode::Forbidden)
+}
+
+/// A refusal a browser navigated to on a fragment's origin, answered as the
+/// platform's page instead of the API's JSON (ROADMAP decision 4). A
+/// top-level visit that no session here admits (401) goes to the
+/// platform's sign-in for this fragment, and back to the page it asked for:
+/// at once on the person's own fragments and those shared with them, after
+/// asking on anyone else's, and through sign-in first when signed out
+/// (`/auth/fragment`). Anything else says what happened and what to do:
+/// sign in, ask its owner, or, when a `?view=` opened nothing, ask for the
+/// new link; the platform's own reason under it. From a frame, where
+/// neither sign-in nor the platform's pages show, its links open a tab.
+pub(crate) fn refused(cfg: &Config, url: &Url, name: &str, rest: &str, framed: bool, e: &CellError) -> CellResult<Response> {
+    assert!(is_refusal(e.code), "only a refusal is answered as this page");
+    let signing_in = is_fragment_route(rest);
+    // the page asked for; sign-in's own way back for sign-in's routes
+    let back = match (signing_in, url.query()) {
+        (true, _) => site::return_path(query(url, "return").as_deref()),
+        (false, Some(q)) => site::return_path(Some(&format!("/{rest}?{q}"))),
+        (false, None) => site::return_path(Some(&format!("/{rest}"))),
+    };
+    let link_changed = !signing_in && query(url, "view").is_some();
+    let signed_out = e.code == ErrorCode::Unauthenticated;
+    if signed_out && !framed && !link_changed && !signing_in {
+        return redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(url), enc(&back)), &[]);
+    }
+    let (label, ask) = match fragment_proto::split_fragment_name(name) {
+        Some((label, owner)) => (label, format!("its owner, <b>@{}</b>,", esc(owner))),
+        None => (name, "its owner".to_string()),
+    };
+    let base = cfg.canonical(url, name);
+    let tab = if framed { " target=\"_blank\" rel=\"noopener\"" } else { "" };
+    let a = |href: &str, text: &str| format!("<a href=\"{}\"{tab}>{}</a>", esc(href), esc(text));
+    let sign_in = a(&format!("{base}__signin?return={}", enc(&back)), &format!("Sign in to {label}"));
+    let home = a(&format!("{}/", cfg.platform(url)), "Your fragments");
+    let why = format!("<p style=\"opacity:.7;font-size:.9em\">{}</p>", esc(&e.message));
+    let l = esc(label);
+    let (title, body) = if rest == "__frame" {
+        // a frame's own refusal, whose page's owner acts on it
+        ("This can't be shown here".to_string(), format!("<p>{}</p><p>{home}</p>", esc(&e.message)))
+    } else if link_changed {
+        let links = if signed_out { format!("{sign_in} · {home}") } else { home };
+        ("This link has changed".to_string(), format!("<p>The link you opened no longer opens <b>{l}</b>: ask {ask} for the new one.</p>{why}<p>{links}</p>"))
+    } else if signed_out {
+        ("You need to sign in".to_string(), format!("<p>Sign in to open <b>{l}</b>.</p>{why}<p>{sign_in}</p>"))
+    } else {
+        let sign_out = a(&format!("{base}__signout"), &format!("Sign out of {label}"));
+        (format!("You don't have access to {label}"), format!("<p>Ask {ask} to share it with you.</p>{why}<p>{home} · {sign_out}</p>"))
+    };
+    let h = Headers::new();
+    h.set("content-type", "text/html; charset=utf-8")?;
+    h.set("cache-control", "no-store")?;
+    Ok(Response::ok(html(&title, &body))?.with_status(e.code.status()).with_headers(h))
 }
 
 /// Whether this origin's session cookie names someone on `name`.

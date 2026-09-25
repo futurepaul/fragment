@@ -312,6 +312,27 @@ then they are a visitor there. The yes is remembered for that person
 and fragment (their newest 1000) until they sign out of it there
 (`POST __signout`), which makes the next sign-in ask again.
 
+### Opening a fragment by its URL (ROADMAP decision 4)
+
+A browser's top-level visit to a fragment's page (a GET or HEAD
+navigation whose `Accept` names `text/html`) that no session there
+admits (401) goes to `<platform>/auth/fragment?name=<name>&return=<the
+path and query it asked for>` (`302`, `no-store`): signed in to the
+platform, it comes back signed in at once on the person's own fragments
+and those shared with them, after asking first on anyone else's (above);
+signed out, through sign-in first. A public fragment, or a share link
+that opens it, serves as before. Any other refusal a browser navigates
+to on a fragment's origin (a frame's navigation too) is a small page in
+the platform's look with the refusal's own status and reason: "You need
+to sign in" (a link to its `__signin`), "You don't have access to X"
+(ask its owner; a link to sign out of it), "This link has changed" (a
+`?view=` that opened nothing), and `__frame`'s reason. From a frame its
+links open a tab. An API call, a fetch, an operation, a socket, and any
+request whose `Accept` names no HTML keep the JSON error. Only the
+platform's refusals become pages: the fragment marks its own for the
+router (`x-fragment-refusal`, dropped before any answer leaves), so an
+app's own answer passes as it is.
+
 `return` is a path on the origin it returns to, kept only when it begins
 with one `/` and holds no byte at or below 0x20, no DEL, and no
 backslash, and when, percent-decoded once more, it still does not begin

@@ -40,6 +40,12 @@ const CLIENT_JS_HASH: u64 = site::content_hash(CLIENT_JS.as_bytes());
 const CHAT_JS_HASH: u64 = site::content_hash(CHAT_JS.as_bytes());
 const CHAT_CSS_HASH: u64 = site::content_hash(CHAT_CSS.as_bytes());
 const SW_JS_HASH: u64 = site::content_hash(crate::push::SW_JS.as_bytes());
+/// Marks a site request's refusal (401, 403) as the platform's, never an
+/// app's answer: the router answers a browser's navigation to one as a
+/// page (`auth::refused`), and drops the mark from any other answer. An
+/// app that sent it would only get its own fragment's refusal page, which
+/// a redirect of its own gets it anyway.
+pub(crate) const REFUSAL: &str = "x-fragment-refusal";
 const VIEW_COOKIE: &str = "fragview";
 const ANON_COOKIE: &str = "fragment_anon";
 const VIEW_COOKIE_AGE_S: i64 = 7 * 24 * 3600;
@@ -116,7 +122,19 @@ fn with_cookies(mut resp: Response, cookies: &[String]) -> CellResult<Response> 
 }
 
 impl FragmentCell {
-    pub(crate) async fn serve(&self, mut req: Request, caller: &Caller, name: &str, rest: &str) -> CellResult<Response> {
+    /// A site request's answer, its refusal marked as the platform's (`REFUSAL`).
+    pub(crate) async fn serve(&self, req: Request, caller: &Caller, name: &str, rest: &str) -> CellResult<Response> {
+        match self.answer(req, caller, name, rest).await {
+            Err(e) if crate::auth::is_refusal(e.code) => {
+                let mut resp = e.response()?;
+                resp.headers_mut().set(REFUSAL, "1")?;
+                Ok(resp)
+            }
+            answered => answered,
+        }
+    }
+
+    async fn answer(&self, mut req: Request, caller: &Caller, name: &str, rest: &str) -> CellResult<Response> {
         // the fragment's facts, read once for the whole request
         let mut facts = self.facts()?;
         // the query string, as the request arrived (the router's URL)

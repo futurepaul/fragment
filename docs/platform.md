@@ -63,6 +63,10 @@ honored only for the fragment's owner viewing its page.
 - **Which of a browser's cookies count** on a fragment's origin follows
   its Fetch Metadata (docs/api.md, Which cookies count): another
   fragment's page, one site with it, reaches it as a stranger does.
+- **A browser opening a fragment's URL** that no session there admits is
+  sent through the platform's sign-in for it and back; any other refusal
+  a browser navigates to is the platform's page, not JSON (docs/api.md,
+  Opening a fragment by its URL). An app's own answers pass as they are.
 
 - **The owner's agent joins every chat** made from the chat template
   (`cell/src/publish.rs`, `join_owners_agent`), as an editor that

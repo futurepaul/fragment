@@ -142,9 +142,10 @@ What moves and what does not:
   goes to `/auth/fragment` (same-origin), then to X. Unchanged.
 - **The platform's home and "new fragment":** links and redirects come
   from `canonical`, so they point at fragment.boats. Unchanged.
-- A signed-out top-level visit to a members-only fragment still answers
-  401 JSON. The "share header" that would offer sign-in is phase 7's and
-  is not built.
+- A top-level visit to a fragment's URL with no session there goes
+  through `fragment.club/auth/fragment` and back, as `__signin` does, and
+  any other refusal a browser navigates to is a page, not JSON
+  (docs/api.md, Opening a fragment by its URL).
 
 Watch item: every sign-in bounces through fragment.club. Safari's ITP
 and Chrome's bounce-tracking mitigation (on when third-party cookies are
