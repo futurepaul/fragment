@@ -16,6 +16,7 @@
 
 use std::time::Duration;
 
+use fragment_core::webpush::Tokens;
 use fragment_proto::limits;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -220,6 +221,8 @@ impl FragmentCell {
             Ok(v) => v,
             Err(e) => return self.outbox_failed(failures, id, attempts, &e.message),
         };
+        // one token per push service for all of this push's batches
+        let mut tokens = Tokens::new(&vapid, &self.cfg.push_subject, js::now_ms() / 1000);
         for _ in 0..PUSH_BATCHES_MAX {
             let subs = match self.rows(
                 "SELECT id, endpoint, p256dh, auth FROM push_subs WHERE id > ? AND id <= ? AND (? = '*' OR who = ?) ORDER BY id LIMIT ?",
@@ -232,7 +235,7 @@ impl FragmentCell {
                 return self.outbox_done(id);
             };
             assert!(last > after, "a push's cursor moves forward");
-            let deliveries = self.push_deliveries(&vapid, &subs, &payload, fragment, incarnation);
+            let deliveries = self.push_deliveries(&mut tokens, &subs, &payload, fragment, incarnation);
             if let Err(e) = self.enqueue(&deliveries).await {
                 return self.outbox_failed(failures, id, attempts, &e.message);
             }
