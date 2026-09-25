@@ -12,7 +12,7 @@
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
 //!                    so nothing lands in the repo; prints what to open and paste
-//!   e2e [args...]    build, then run crates/e2e (args pass through: --only <case>);
+//!   e2e [args...]    build, then run crates/e2e (args pass through: --only <section>[,...]);
 //!                    with --fleet <fleet> first, run its hosted sections against
 //!                    that fleet instead
 //!   check            host tests and clippy, warnings denied
@@ -293,7 +293,7 @@ fn main() -> Result<()> {
         Some("check") => check(),
         Some("deploy") => deploy::run(&args[1..]),
         Some("fleet") => deploy::operate(&args[1..]),
-        _ => bail!("usage: cargo xtask build | celld | dev [--clean] | try <template> [name] | e2e [--fleet <fleet>] [--only <case>] | check | deploy <fleet> [--nodes | --secrets] | fleet <fleet> <celld command...>"),
+        _ => bail!("usage: cargo xtask build | celld | dev [--clean] | try <template> [name] | e2e [--fleet <fleet>] [--only <section>[,...]] | check | deploy <fleet> [--nodes | --secrets] | fleet <fleet> <celld command...>"),
     }
 }
 

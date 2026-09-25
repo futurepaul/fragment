@@ -4,9 +4,10 @@
 //! (webhooks included), the real CLI, and signed HTTP the way the CLI and
 //! a browser send it.
 //!
-//! `cargo xtask e2e [--only <section>]`. Each section makes its own
-//! fragments, so any one can run alone. Every check prints `ok` or `FAIL`;
-//! the process exits non-zero when any check fails.
+//! `cargo xtask e2e [--only <section>[,<section>...]]`. Each section makes
+//! its own fragments, so any one can run alone. Every check prints `ok` or
+//! `FAIL`, and a section that stops early is one FAIL, with the sections
+//! after it still run; the process exits non-zero when any check fails.
 //! A run's scratch (`target/e2e/<run>`: the staged cell, each node boot's
 //! log, the lanes' directories and screenshots) is
 //! removed when every check passes, and kept when one fails (or when
@@ -21,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use fragment_devstack as devstack;
 use fragment_fakes::codestorage::{self as fake, CodeStorage};
 use fragment_nip98::Keys;
@@ -49,9 +50,17 @@ const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";
 
 pub struct Suite {
-    only: Option<String>,
+    /// The sections to run (`None`: all of them).
+    only: Option<Vec<String>>,
     passed: usize,
     failed: Vec<String>,
+    /// The sections that ran, in order: the last is the one running.
+    ran: Vec<String>,
+    /// A lane stopped early: the next section to run gets the node back as
+    /// the lanes expect it first.
+    recovery_due: bool,
+    /// Why the node could not be brought back: every later section is a FAIL.
+    lost: Option<String>,
     /// Chrome, started when a lane first asks for it and shared after.
     chrome: browser::Shared,
     tools: devstack::Tools,
@@ -93,11 +102,25 @@ impl Suite {
         ]
     }
 
-    pub fn section(&self, name: &str) -> bool {
-        if self.only.as_deref().is_some_and(|o| o != name) {
+    /// Whether the section `name` runs (it prints its header when it does).
+    pub fn section(&mut self, name: &str) -> bool {
+        if self.only.as_ref().is_some_and(|only| !only.iter().any(|o| o == name)) {
             return false;
         }
         println!("\n# {name}");
+        self.ran.push(name.to_string());
+        if let Some(why) = self.lost.clone() {
+            self.fail(&format!("{name} did not run: no node"), why);
+            return false;
+        }
+        if std::mem::take(&mut self.recovery_due) {
+            if let Err(e) = self.recover() {
+                let why = format!("{e:#}");
+                self.fail(&format!("{name} did not run: the node would not start again"), &why);
+                self.lost = Some(why);
+                return false;
+            }
+        }
         true
     }
 
@@ -106,9 +129,45 @@ impl Suite {
             self.passed += 1;
             println!("ok    {label}");
         } else {
-            self.failed.push(label.to_string());
-            println!("FAIL  {label}: {detail}");
+            self.fail(label, detail);
         }
+    }
+
+    pub fn fail(&mut self, label: &str, detail: impl std::fmt::Display) {
+        self.failed.push(label.to_string());
+        println!("FAIL  {label}: {detail}");
+    }
+
+    /// A lane that returned an error or panicked after its section began:
+    /// one FAIL, and the next section gets the node back first.
+    pub fn stopped_early(&mut self, why: &str) {
+        let section = self.ran.last().cloned().unwrap_or_default();
+        self.fail(&format!("{section} stopped early"), why);
+        self.recovery_due = true;
+    }
+
+    /// The node as the lanes expect it, after a lane that stopped early:
+    /// started again (so no test lever that lane pulled, the registry held
+    /// down among them, outlives it), fragments on their own hosts, the
+    /// platform on 127.0.0.1, no extra settings, and no model answers left
+    /// scripted.
+    fn recover(&mut self) -> Result<()> {
+        self.openrouter.clear_script();
+        self.node_env_extra.clear();
+        self.platform_on_suffix = false;
+        if let Some(node) = self.node.take() {
+            // one that does not stop in time is killed, and starts all the same
+            if let Err(e) = node.stop() {
+                println!("      {e:#}");
+            }
+        }
+        self.start(false, true)?;
+        Ok(())
+    }
+
+    /// The node's API as the lanes use it: fragments on their own hosts.
+    pub fn api(&self) -> Api {
+        Api::new(self.port, Some(SUFFIX))
     }
 
     /// The shared Chrome, in a context of the lane's own (`None`: no Chrome
@@ -276,40 +335,43 @@ impl Suite {
 
     /// `fragment login` in `home`, with a person approving its key in a
     /// browser: the CLI's pending login, a sign-in through the WorkOS fake,
-    /// the approval, then the CLI's login finishing.
-    pub fn login(&self, api: &Api, home: &Path) -> Output {
-        let pending = self.cli_json(api, home, &["login", "--no-wait", "--json"]);
-        if let Ok(p) = &pending {
-            if p["pending"] == true {
-                let npub = p["npub"].as_str().unwrap_or("").to_string();
-                let link = p["approve"].as_str().unwrap_or("").to_string();
-                let email = format!("cli-{}@e2e.test", &npub[5..17]);
-                let approved = api.sign_in(&email).and_then(|session| api.approve_link(&session, &link));
-                if let Err(e) = approved {
-                    println!("      the browser's approval failed: {e}");
-                }
-            }
+    /// the approval, then the CLI's login finishing, and a username taken.
+    /// A login that fails is a FAIL of its own, so the lane's checks that
+    /// fail after it have their cause printed first.
+    pub fn login(&mut self, api: &Api, home: &Path) -> Output {
+        let args = ["login", "--no-wait", "--json"];
+        let pending = self.cli(api, home, &args);
+        if let Err(e) = cli_data(&args, &pending).and_then(|p| approve_login(api, &p)) {
+            // `fragment login` would wait ten minutes for an approval that is not coming
+            self.fail("fragment login: a person approves its key in a browser", format!("{e:#}"));
+            return pending;
         }
         let out = self.cli(api, home, &["login", "--no-browser"]);
-        // and takes a username through the CLI, as a person does once
-        if let Ok(me) = self.cli_json(api, home, &["whoami", "--json"]) {
-            if me["identity"]["username"].is_null() {
-                let npub = me["npub"].as_str().unwrap_or("npub1xxxxxxxxxxxxxxx");
-                let _ = self.cli_json(api, home, &["username", &format!("c{}", &npub[5..15]), "--json"]);
-            }
+        let done = match out.status.success() {
+            true => self.take_username(api, home),
+            false => Err(anyhow!("{}", String::from_utf8_lossy(&out.stderr))),
+        };
+        if let Err(e) = done {
+            self.fail("fragment login", format!("{e:#}"));
         }
         out
     }
 
+    /// A username through the CLI, as a person takes one once.
+    fn take_username(&self, api: &Api, home: &Path) -> Result<()> {
+        let me = self.cli_json(api, home, &["whoami", "--json"])?;
+        if !me["identity"]["username"].is_null() {
+            return Ok(());
+        }
+        let npub = me["npub"].as_str().context("whoami answers the key's npub")?;
+        let username = format!("c{}", npub.get(5..15).context("an npub is longer than 15 characters")?);
+        self.cli_json(api, home, &["username", &username, "--json"])?;
+        Ok(())
+    }
+
     /// The `data` of a `--json` CLI answer.
     pub fn cli_json(&self, api: &Api, home: &Path, args: &[&str]) -> Result<Value> {
-        let out = self.cli(api, home, args);
-        let v: Value = serde_json::from_slice(&out.stdout)
-            .with_context(|| format!("fragment {args:?}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))?;
-        if v["ok"] != true {
-            bail!("fragment {args:?}: {v}");
-        }
-        Ok(v["data"].clone())
+        cli_data(args, &self.cli(api, home, args))
     }
 
     /// The key a CLI home logged in with (its config file, per platform).
@@ -330,6 +392,32 @@ impl Suite {
     }
 }
 
+/// The `data` of a `--json` CLI answer (`args`, its command, for errors).
+fn cli_data(args: &[&str], out: &Output) -> Result<Value> {
+    let v: Value = serde_json::from_slice(&out.stdout)
+        .with_context(|| format!("fragment {args:?}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))?;
+    if v["ok"] != true {
+        bail!("fragment {args:?}: {v}");
+    }
+    Ok(v["data"].clone())
+}
+
+/// A person signs in through the WorkOS fake and approves the key a
+/// pending `fragment login` names (a key already approved has nothing
+/// pending).
+fn approve_login(api: &Api, pending: &Value) -> Result<()> {
+    if pending["pending"] != true {
+        return Ok(());
+    }
+    let npub = pending["npub"].as_str().context("a pending login names its key")?;
+    let link = pending["approve"].as_str().context("a pending login answers its approval link")?;
+    let email = format!("cli-{}@e2e.test", npub.get(5..17).context("an npub is longer than 17 characters")?);
+    let session = api.sign_in(&email)?;
+    let r = api.approve_link(&session, link)?;
+    anyhow::ensure!(r.status == 200, "the approval: {r}");
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (hosted, rest) = match args.split_first() {
@@ -338,8 +426,8 @@ fn main() -> Result<()> {
     };
     let only = match rest {
         [] => None,
-        [flag, section] if flag == "--only" => Some(section.clone()),
-        _ => bail!("usage: fragment-e2e [--hosted] [--only <section>]"),
+        [flag, sections] if flag == "--only" => Some(sections.clone()),
+        _ => bail!("usage: fragment-e2e [--hosted] [--only <section>[,<section>...]]"),
     };
     let root = devstack::repo_root();
     let cli = std::env::var_os("FRAGMENT_BIN").map(PathBuf::from).unwrap_or_else(|| root.join("target/release/fragment"));
@@ -360,9 +448,12 @@ fn main() -> Result<()> {
     let project = devstack::stage_project(&scratch.join("cell"))?;
     let agents_project = devstack::stage_agent(&scratch.join("agent"))?;
     let mut s = Suite {
-        only,
+        only: only.map(|o| o.split(',').map(str::to_string).collect()),
         passed: 0,
         failed: vec![],
+        ran: vec![],
+        recovery_due: false,
+        lost: None,
         chrome: browser::Shared::new(&scratch),
         tools,
         node: None,
@@ -382,10 +473,17 @@ fn main() -> Result<()> {
         node_env_extra: vec![],
         platform_on_suffix: false,
     };
-    let api = s.start(true, true)?;
-    lanes::run(&mut s, api)?;
+    s.start(true, true)?;
+    lanes::run(&mut s);
+    for name in s.only.clone().unwrap_or_default() {
+        if !s.ran.contains(&name) {
+            s.fail(&format!("--only {name}"), "no section has that name");
+        }
+    }
     if s.node.is_some() {
-        s.stop()?;
+        if let Err(e) = s.stop() {
+            s.fail("the node stops at the end of the run", format!("{e:#}"));
+        }
     }
     s.chrome.close();
     println!("\n{} passed, {} failed", s.passed, s.failed.len());

@@ -31,18 +31,17 @@ fn centre(chrome: &mut Browser, page: &Page, selector: &str) -> Option<(f64, f64
 
 /// Runs on a node restarted with its platform on the fragments' domain
 /// (as fragment.club is), then restarts it as it was for the lanes after.
-pub fn desktop(s: &mut Suite, api: Api) -> Result<Api> {
+pub fn desktop(s: &mut Suite, _: &Api) -> Result<()> {
     if !s.section("desktop") {
-        return Ok(api);
+        return Ok(());
     }
-    drop(api);
     s.stop()?;
     let api = s.start_as_browsers_see_it()?;
     let result = run(s, &api);
     drop(api);
     s.stop()?;
-    let api = s.start(false, true)?;
-    result.map(|()| api)
+    s.start(false, true)?;
+    result
 }
 
 fn run(s: &mut Suite, api: &Api) -> Result<()> {
