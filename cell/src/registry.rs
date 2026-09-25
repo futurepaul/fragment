@@ -51,8 +51,9 @@ macro_rules! username_join {
 pub(crate) mod calls;
 mod signin;
 use calls::{
-    Active, AddKey, By, Call, CheckKey, ClaimUsername, Claimed, FindUsername, Holder, Lookup, Picture, Profile, Profiles, ProfilesAnswer,
-    RegisterAgent, Released, ReleaseUsername, Resolve, RevokeKey, SetPicture, TestAnswer, TestHook, View, TEST_HOLD_MAX_MS,
+    Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, ClaimUsername, Claimed, EndSession, Exchange, FindUsername, Holder, Logout, Lookup, Mint,
+    Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername, Resolve, RevokeKey, Session, SetPicture,
+    TestAnswer, TestHook, View, TEST_HOLD_MAX_MS,
 };
 pub use signin::SESSION_TTL_MS;
 
@@ -627,9 +628,6 @@ impl RegistryCell {
         if self.down.get() {
             return Err(CellError::new(ErrorCode::RegistryUnavailable, "the registry is down (a test hook)"));
         }
-        if let Some(resp) = self.route_signin(&path, &bytes).await? {
-            return Ok(resp);
-        }
         match path.as_str() {
             Resolve::PATH => reply::<Resolve>(self.key_holder(&body::<Resolve>(&bytes)?.key)),
             Lookup::PATH => reply::<Lookup>(self.lookup(body(&bytes)?)),
@@ -643,6 +641,14 @@ impl RegistryCell {
             FindUsername::PATH => reply::<FindUsername>(self.find_username(body(&bytes)?)),
             ReleaseUsername::PATH => reply::<ReleaseUsername>(self.release_username(body(&bytes)?)),
             SetPicture::PATH => reply::<SetPicture>(self.set_picture(body(&bytes)?)),
+            Begin::PATH => reply::<Begin>(self.begin(body(&bytes)?).await),
+            Exchange::PATH => reply::<Exchange>(self.exchange(body(&bytes)?).await),
+            Session::PATH => reply::<Session>(self.session(body(&bytes)?)),
+            EndSession::PATH => reply::<EndSession>(self.end_site_session(body(&bytes)?)),
+            Logout::PATH => reply::<Logout>(self.logout(body(&bytes)?)),
+            Mint::PATH => reply::<Mint>(self.mint(body(&bytes)?).await),
+            Redeem::PATH => reply::<Redeem>(self.redeem(body(&bytes)?)),
+            ApproveKey::PATH => reply::<ApproveKey>(self.add_by_session(body(&bytes)?)),
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
         }
     }

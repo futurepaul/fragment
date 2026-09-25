@@ -531,18 +531,4 @@ impl RegistryCell {
     pub(super) fn subjects_of(&self, id: &str) -> CellResult<Vec<Subject>> {
         self.rows::<Subject>("SELECT issuer, email, linked_at AS linkedAt FROM subjects WHERE identity = ? ORDER BY linked_at", vec![id.into()])
     }
-
-    pub(super) async fn route_signin(&self, path: &str, bytes: &[u8]) -> CellResult<Option<Response>> {
-        Ok(Some(match path {
-            Begin::PATH => reply::<Begin>(self.begin(body(bytes)?).await)?,
-            Exchange::PATH => reply::<Exchange>(self.exchange(body(bytes)?).await)?,
-            Session::PATH => reply::<Session>(self.session(body(bytes)?))?,
-            EndSession::PATH => reply::<EndSession>(self.end_site_session(body(bytes)?))?,
-            Logout::PATH => reply::<Logout>(self.logout(body(bytes)?))?,
-            Mint::PATH => reply::<Mint>(self.mint(body(bytes)?).await)?,
-            Redeem::PATH => reply::<Redeem>(self.redeem(body(bytes)?))?,
-            ApproveKey::PATH => reply::<ApproveKey>(self.add_by_session(body(bytes)?))?,
-            _ => return Ok(None),
-        }))
-    }
 }
