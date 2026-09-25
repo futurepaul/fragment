@@ -451,7 +451,24 @@ impl FragmentCell {
                 json!({ "members": self.fill_members(fill)? })
             }
             Some("code-builds") => json!({ "builds": self.app.builds() }),
-            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, forget-steps, hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, or age-outside")),
+            Some("as-before-chats") => {
+                // as a fragment from before rows said whether it is a chat:
+                // its owner's row sent again without it, and nothing recorded
+                self.del_meta(MetaKey::ListedAs)?;
+                let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
+                let incarnation: i64 = self.must(MetaKey::CreatedAt)?.parse().map_err(|_| CellError::host("created_at is a number"))?;
+                let version = self.meta(MetaKey::IndexVersion)?.and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) + 1;
+                self.set_meta(MetaKey::IndexVersion, &version.to_string())?;
+                let row = json!({ "fragment": name, "role": "owner", "incarnation": incarnation, "version": version, "sharing": self.sharing_counts()? });
+                let mut init = RequestInit::new();
+                let h = Headers::new();
+                h.set("content-type", "application/json")?;
+                init.with_method(Method::Post).with_headers(h).with_body(Some(row.to_string().into()));
+                let req = Request::new_with_init("https://principal.internal/index", &init)?;
+                let resp = self.env.durable_object("PRINCIPAL")?.get_by_name(&owner)?.fetch_with_request(req).await?;
+                json!({ "ok": resp.status_code() == 200 })
+            }
+            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, forget-steps, hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, or as-before-chats")),
         })
     }
 }

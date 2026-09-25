@@ -126,7 +126,10 @@ fn attacks(s: &mut Suite, api: &Api) -> Result<()> {
     let y = made(api, &owner, &s.name("iy"), "blank", json!([]), "members")?;
     let z = made(api, &owner, &s.name("iz"), "blank", json!([]), "members")?;
     let todo = made(api, &owner, &s.name("itodo"), "todo", json!([]), "link")?;
-    let desk = made(api, &owner, &s.name("idesk"), "desktop", json!([]), "link")?;
+    // a desktop whose code is no longer the platform's (its owner changed
+    // it): it frames only once its owner allows it in its share sheet
+    let changed = json!([{ "path": "site/mine.txt", "text": "the owner's own change" }]);
+    let desk = made(api, &owner, &s.name("idesk"), "desktop", changed, "link")?;
     let evil = made(api, &mallory, &s.name("ievil"), "blank", json!([]), "public")?;
     let r = api.signed(&member, "GET", "/api/identities/me", None)?;
     let r = api.signed(&owner, "PUT", &format!("/api/f/{y}/members/{}", r.body["id"].as_str().unwrap_or("")), Some(&json!({ "role": "viewer" })))?;
@@ -137,8 +140,12 @@ fn attacks(s: &mut Suite, api: &Api) -> Result<()> {
     let sheet = |name: &str| with_session(api, "GET", &format!("/share/{name}"), &session);
     let (desk_sheet, todo_sheet) = (sheet(&desk)?, sheet(&todo)?);
     s.ok(
-        "the owner's share sheet offers the frame grant for a fragment that asks for it (the desktop), and not for one that does not",
-        desk_sheet.text.contains("Your fragments inside it") && desk_sheet.text.contains(">Allow<") && !todo_sheet.text.contains("Your fragments inside it"),
+        "the owner's share sheet offers the frame grant for a fragment that asks for it (a changed desktop), with a warning in plain words, and not for one that does not",
+        desk_sheet.text.contains("Your fragments inside it")
+            && desk_sheet.text.contains(">Allow<")
+            && desk_sheet.text.contains("catch your clicks")
+            && desk_sheet.text.contains("Allow it only if you trust that code")
+            && !todo_sheet.text.contains("Your fragments inside it"),
         &desk_sheet,
     );
     let grant = form::issue(&session, &format!("share:{desk}"), now_ms() - form::DELAY_MS - 50);
@@ -487,10 +494,27 @@ pub fn frames(s: &mut Suite, _: &Api) -> Result<()> {
 fn listed(s: &mut Suite, api: &Api) -> Result<()> {
     let wait = Duration::from_secs(20);
     let (owner, session) = person(api)?;
-    let desk = made(api, &owner, &s.name("fdesk"), "desktop", json!([]), "link")?;
+    // the platform's desktop: it may frame the owner's fragments from the start
+    let desk = made(api, &owner, &s.name("fdesk"), "desktop", json!([]), "members")?;
     let files = json!([{ "path": "site/index.html", "text": "<p>inside the app</p>" }, { "path": "notes/hello.txt", "text": "hello from a file" }]);
     let app = made(api, &owner, &s.name("fapp"), "blank", files, "members")?;
     let shut = made(api, &owner, &s.name("fshut"), "blank", json!([{ "path": "site/index.html", "text": "<p>inside shut</p>" }]), "members")?;
+    // a desktop the platform did not make: the template's code, copied into
+    // a blank fragment (as a person or an agent could), so it declares
+    // `frame` too; and a chat, which it opens first
+    let hand = made(api, &owner, &s.name("fhand"), "blank", json!([]), "members")?;
+    copy_code(api, &owner, &desk, &hand)?;
+    let chat = made(api, &owner, &s.name("fchat"), "chat", json!([]), "members")?;
+    let st = |name: &str| api.status(&owner, name).map(|r| r.body["frame"].clone());
+    // the chat is one in the owner's list (its row says so once its code is in)
+    let is_chat = || api.signed(&owner, "GET", "/api/fragments", None).is_ok_and(|r| r.body["fragments"].as_array().into_iter().flatten().any(|f| f["name"] == chat.as_str() && f["chat"] == true));
+    let listed_chat = s.eventually(wait, is_chat);
+    s.ok("(the chat says so in its owner's list)", listed_chat, &chat);
+    s.ok(
+        "a desktop made from the template may frame from the start; one that declares frame but was not made from it may not until its owner allows it",
+        st(&desk)? == json!(true) && st(&hand)? == json!(false),
+        format!("{} / {}", st(&desk)?, st(&hand)?),
+    );
     // Third-party cookies blocked (Chrome's own switch), as Safari blocks
     // them; and every cookie of `shut`'s blocked (a site setting), as a
     // browser that keeps a fragment signed out in frames does. Frames stay
@@ -502,24 +526,57 @@ fn listed(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     };
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
+
+    // ---- without the grant: a notice in place of the panes, never the refusal
+    let h = chrome.open(&api.site_url(&hand, "__signin?return=/"))?;
+    chrome.viewport(&h, 1440, 900, false)?;
+    let row_of = |name: &str| format!("[...document.querySelectorAll('#apps .row')].find(r => r.dataset.key === {:?})", format!("app:{name}"));
+    let open_in = |chrome: &mut Browser, page: &Page, name: &str| {
+        let row = row_of(name);
+        chrome.until(page, &format!("!!{row}"), wait) && chrome.eval(page, &format!("{row}.click(); true")).is_ok()
+    };
+    let noticed = "(() => { const n = document.getElementById('notice'); return !n.hidden && n.offsetParent !== null && n.textContent.includes('Let this desktop show your fragments') && !!n.querySelector('button.allow'); })()";
+    let chat_opened = format!("document.getElementById('chat-title').textContent === {:?}", label(&chat));
+    let asked = chrome.until(&h, &format!("{chat_opened} && {noticed}"), wait);
+    let pane = open_in(&mut chrome, &h, &app) && chrome.until(&h, &format!("!!document.querySelector('.pane[data-key={:?}] .pane-note.blocked button.allow')", format!("app:{app}")), wait);
+    std::thread::sleep(Duration::from_secs(1));
+    let seen = chrome.eval(&h, "({ frames: document.querySelectorAll('iframe').length, text: document.body.innerText })")?;
+    let raw = seen["text"].as_str().is_some_and(|t| t.contains("\"error\"") || t.contains("forbidden"));
+    chrome.screenshot(&h, &s.scratch.join("frames-ungranted.png"))?;
+    s.ok(
+        "without the grant, the desktop shows a notice with its share sheet's button where the chat would be, and in the app's pane, and frames nothing (no raw refusal anywhere)",
+        asked && pane && seen["frames"] == json!(0) && !raw && cookie_of(&mut chrome, api, &app, "fragment_frame").is_none(),
+        &seen,
+    );
+    let opened_sheet = chrome.click(&h, "#notice button.allow").is_ok()
+        && s.eventually(wait, || chrome.pages().is_ok_and(|p| p.iter().any(|(_, url)| url.ends_with(&format!("/share/{hand}")))));
+    s.ok("its button opens the desktop's own share sheet", opened_sheet, format!("{:?}", chrome.pages()?));
+    if let Some((target, _)) = chrome.pages()?.into_iter().find(|(_, url)| url.ends_with(&format!("/share/{hand}"))) {
+        chrome.close_target(&target)?;
+    }
+    chrome.front(&h)?;
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{hand}/grants/frame"), Some(&json!({ "granted": true })))?;
+    let chat_host = format!("{}--", label(&chat));
+    let shown = r.status == 200 && s.eventually(Duration::from_secs(30), || chrome.eval_in_frame(&h, &chat_host, "document.title").ok() == Some(json!("Chat")));
+    s.ok("once its owner allows it, the open desktop shows the chat inside it, signed in (it notices, and reloads)", shown, &r);
+    chrome.close(h)?;
+
+    // ---- the platform's desktop: no grant asked
     let page = chrome.open(&api.site_url(&desk, "__signin?return=/"))?;
     chrome.viewport(&page, 1440, 900, false)?;
-    let open = |chrome: &mut Browser, name: &str| {
-        let row = format!("[...document.querySelectorAll('#apps .row')].find(r => r.dataset.key === {:?})", format!("app:{name}"));
-        chrome.until(&page, &format!("!!{row}"), wait) && chrome.eval(&page, &format!("{row}.click(); true")).is_ok()
-    };
-    let asked = open(&mut chrome, &app) && frame_says(s, &mut chrome, &page, "__frame?name=", "allow it in its share sheet", wait);
-    let told = chrome.until(&page, "document.getElementById('notice').textContent.includes('Let this desktop show your fragments')", wait);
-    s.ok("until its owner allows it, a desktop's pane says so (the desktop too, with its share sheet), and signs nothing in", asked && told && cookie_of(&mut chrome, api, &app, "fragment_frame").is_none(), "");
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{desk}/grants/frame"), Some(&json!({ "granted": true })))?;
-    s.ok("(the owner allows it)", r.status == 200, &r);
-    chrome.reload(&page)?;
+    let open = |chrome: &mut Browser, name: &str| open_in(chrome, &page, name);
     let app_host = format!("{}--", label(&app));
-    let inside = frame_says(s, &mut chrome, &page, &app_host, "inside the app", wait);
-    let (framed, own) = (cookie_of(&mut chrome, api, &app, "fragment_frame"), cookie_of(&mut chrome, api, &app, "fragment_site"));
+    let inside = open(&mut chrome, &app) && frame_says(s, &mut chrome, &page, &app_host, "inside the app", wait);
     let desk_host = api.site_origin(&desk).trim_start_matches("http://").split(':').next().unwrap_or("").to_string();
+    // the app's frame cookie in the desktop's partition (the other desktop's
+    // frame of it, above, has one of its own)
+    let app_host_name = api.site_url(&app, "").split("//").nth(1).and_then(|h| h.split(':').next()).unwrap_or("").to_string();
+    let framed = chrome.cookies().ok().into_iter().flatten().find(|c| {
+        c["name"] == "fragment_frame" && c["domain"] == app_host_name.as_str() && c["partitionKey"]["topLevelSite"].as_str().is_some_and(|t| t.ends_with(&desk_host))
+    });
+    let own = cookie_of(&mut chrome, api, &app, "fragment_site");
     s.ok(
-        "with third-party cookies blocked, the desktop's pane of a members-only app, another site, signs in through __frame",
+        "with third-party cookies blocked, the platform's desktop's pane of a members-only app, another site, signs in through __frame, with no grant",
         inside && framed.as_ref().is_some_and(|c| c["partitionKey"]["topLevelSite"].as_str().is_some_and(|t| t.ends_with(&desk_host))) && own.is_none(),
         json!({ "frame": framed, "site": own }),
     );
@@ -541,5 +598,43 @@ fn listed(s: &mut Suite, api: &Api) -> Result<()> {
     let heard = chrome.until(&page, "document.getElementById('notice').textContent.includes('signed out inside this page')", wait);
     chrome.screenshot(&page, &s.scratch.join("frames-blocked.png"))?;
     s.ok("a pane whose fragment the browser keeps signed out in frames offers it in a tab, and the desktop hears so", told && heard, "");
+
+    // ---- its code changed: the platform's word lapses, and the owner's is asked
+    let r = api.signed(&owner, "POST", &format!("/api/f/{desk}/files"), Some(&json!({ "files": [{ "path": "site/mine.txt", "text": "the owner's own change" }] })))?;
+    anyhow::ensure!(r.status == 200, "changing the desktop: {r}");
+    let r = api.signed(&owner, "POST", &format!("/api/f/{desk}/deploy"), None)?;
+    anyhow::ensure!(r.status == 200, "deploying the change: {r}");
+    let lapsed = st(&desk)?;
+    let asked = chrome.until(&page, noticed, Duration::from_secs(30));
+    s.ok("once its code changes, the platform's desktop may not frame until its owner allows it, and the open page says so", lapsed == json!(false) && asked, &lapsed);
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{desk}/grants/frame"), Some(&json!({ "granted": true })))?;
+    s.ok("(its owner allows it)", r.status == 200 && st(&desk)? == json!(true), &r);
+    Ok(())
+}
+
+/// Copies `from`'s files at main (its code: its fragment.json with `to`'s
+/// name) into `to`, and deploys them.
+fn copy_code(api: &Api, owner: &Keys, from: &str, to: &str) -> Result<()> {
+    let listed = api.signed(owner, "GET", &format!("/api/f/{from}/files"), None)?;
+    anyhow::ensure!(listed.status == 200, "listing {from}'s files: {listed}");
+    let mut files = vec![];
+    for f in listed.body["files"].as_array().into_iter().flatten() {
+        let path = f["path"].as_str().unwrap_or_default();
+        let r = api.signed(owner, "GET", &format!("/api/f/{from}/file?path={}", url_enc(path)), None)?;
+        anyhow::ensure!(r.status == 200, "reading {from}/{path}: {r}");
+        let text = match path {
+            "fragment.json" => {
+                let mut m: Value = serde_json::from_str(&r.text)?;
+                m["name"] = json!(to);
+                m.to_string()
+            }
+            _ => r.text,
+        };
+        files.push(json!({ "path": path, "text": text }));
+    }
+    let r = api.signed(owner, "POST", &format!("/api/f/{to}/files"), Some(&json!({ "files": files })))?;
+    anyhow::ensure!(r.status == 200, "writing {to}'s code: {r}");
+    let r = api.signed(owner, "POST", &format!("/api/f/{to}/deploy"), None)?;
+    anyhow::ensure!(r.status == 200, "deploying {to}: {r}");
     Ok(())
 }

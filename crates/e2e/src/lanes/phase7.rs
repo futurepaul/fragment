@@ -262,11 +262,15 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let desk = home;
     let brand = format!("document.getElementById('brand')?.textContent === {:?}", format!("{}'s desktop", owner.username));
     let on_desk = chrome.until(&desk, &format!("location.host.startsWith({:?}) && {brand}", format!("{desk_label}--")), WAIT);
-    // the owner lets it show their fragments inside it (its share sheet's
-    // "Your fragments inside it": the isolation lane proves the sheet's form)
+    // made through the platform's form from its template: its owner's alone,
+    // and it shows their fragments inside it with no grant asked
     let desk_name = api.qualified(&owner.keys, &desk_label)?;
-    let r = api.signed(&owner.keys, "PUT", &format!("/api/f/{desk_name}/grants/frame"), Some(&json!({ "granted": true })))?;
-    anyhow::ensure!(r.status == 200, "allowing {desk_name}'s frames: {r}");
+    let st = api.status(&owner.keys, &desk_name)?;
+    s.ok(
+        "a desktop made with the platform's New fragment form is its owner's alone (members only), and may show their fragments inside it with no grant",
+        st.body["visibility"] == "members" && st.body["frame"] == json!(true),
+        &st,
+    );
     chrome.click(&desk, "#new-chat")?;
     let opened = chrome.until(&desk, "document.querySelectorAll('#chats .row').length === 1 && !!document.querySelector('#frames iframe:not([hidden])')?.dataset.fragment", WAIT);
     let name = chrome.eval(&desk, "document.querySelector('#frames iframe:not([hidden])')?.dataset.fragment ?? ''")?.as_str().unwrap_or("").to_string();

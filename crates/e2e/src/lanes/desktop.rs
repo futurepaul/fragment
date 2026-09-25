@@ -2,8 +2,10 @@
 //! phase 6's acceptance): its owner's apps and files open into the viewer,
 //! panes reorder and close, both sides collapse, it works at phone width,
 //! and the layout survives a reload. Every frame is a fragment of the
-//! owner's, signed in on its own origin through the desktop's `__frame`,
-//! which its owner allows in its share sheet (here, the signed API).
+//! owner's, signed in on its own origin through the desktop's `__frame`:
+//! a desktop the platform made from its template may from the start (no
+//! grant), and is its owner's alone. Chats made anywhere (not only by
+//! this desktop's New chat) are listed under Chats.
 
 use std::time::Duration;
 
@@ -58,21 +60,67 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     };
     let (owner, session) = person(api)?;
-    let make = |label: &str, template: &str| -> Result<String> {
+    let make = |label: &str, template: &str| -> Result<(String, Value)> {
         let name = api.qualified(&owner, label)?;
         let r = api.create_with(&owner, json!({ "name": name, "template": template }))?;
         anyhow::ensure!(r.status == 200, "making {name}: {r}");
-        Ok(name)
+        Ok((name, r.body))
     };
-    let desk = make(&s.name("desk"), "desktop")?;
-    let todo = make(&s.name("dtodo"), "todo")?;
-    let notes = make(&s.name("dnotes"), "blank")?;
+    let (desk, made) = make(&s.name("desk"), "desktop")?;
+    let (todo, _) = make(&s.name("dtodo"), "todo")?;
+    let (notes, _) = make(&s.name("dnotes"), "blank")?;
     let r = api.signed(&owner, "POST", &format!("/api/f/{notes}/files"), Some(&json!({ "files": [{ "path": "notes/hello.txt", "text": "hello from a file" }] })))?;
     anyhow::ensure!(r.status == 200, "writing a file: {r}");
     let label = |name: &str| name.split('.').next().unwrap_or("").to_string();
     let wait = Duration::from_secs(20);
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{desk}/grants/frame"), Some(&json!({ "granted": true })))?;
-    s.ok("the owner lets the desktop show their fragments inside it", r.status == 200, &r);
+    // made from the platform's template: its owner's consent to its frames,
+    // and its owner's alone (no grant is given here, nor asked for)
+    let st = api.status(&owner, &desk)?;
+    s.ok(
+        "a desktop made from the platform's template may show its owner's fragments inside it from the start, with no grant",
+        st.body["frame"] == json!(true),
+        &st,
+    );
+    s.ok("and a new desktop is its owner's alone (members only)", made["visibility"] == "members" && st.body["visibility"] == "members", &st);
+    let todo_st = api.status(&owner, &todo)?;
+    s.ok("(other templates keep theirs: a todo opens to anyone with its link)", todo_st.body["visibility"] == "link", &todo_st);
+
+    // Chats made before, or anywhere but this desktop's New chat: one from
+    // the chat template (the platform's form, the API, another desktop),
+    // and one with the first chat template's fragment.json (a `chat`
+    // channel, and a `say` operation; its app code is not needed here).
+    // Both are chats, not apps.
+    let (old, _) = make(&s.name("dold"), "chat")?;
+    let (older, _) = make(&s.name("dolder"), "blank")?;
+    let first_chat = json!({
+        "name": older,
+        "operations": { "say": { "kind": "mutation", "role": "public", "input": { "type": "object", "required": ["text"], "additionalProperties": false, "properties": { "text": { "type": "string", "minLength": 1, "maxLength": 4000 } } } } },
+        "channels": { "chat": { "read": "public" } },
+        "meta": { "title": "Chat", "description": "A chat room, live for everyone in it; an agent can be one of them." }
+    });
+    let r = api.signed(
+        &owner,
+        "POST",
+        &format!("/api/f/{older}/files"),
+        Some(&json!({ "files": [{ "path": "fragment.json", "text": first_chat.to_string() }, { "path": "site/index.html", "text": "<title>Chat</title><p>an older chat</p>" }] })),
+    )?;
+    anyhow::ensure!(r.status == 200, "writing the older chat: {r}");
+    let r = api.signed(&owner, "POST", &format!("/api/f/{older}/deploy"), None)?;
+    anyhow::ensure!(r.status == 200, "deploying the older chat: {r}");
+    // each says so in its owner's list; then the one from the template's
+    // row is as a chat's from before rows said (the owner's two older chats)
+    let row_of = |name: &str| -> Value {
+        let r = api.signed(&owner, "GET", "/api/fragments", None).map(|r| r.body).unwrap_or_default();
+        r["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == name).cloned().unwrap_or_default()
+    };
+    let said = s.eventually(wait, || row_of(&old)["chat"] == json!(true) && row_of(&older)["chat"] == json!(true));
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": old, "op": "as-before-chats" })))?;
+    let unheard = row_of(&old);
+    s.ok(
+        "a chat says so in its owner's list (its fragment.json declares a chat channel); (one made before rows said so says nothing)",
+        said && r.status == 200 && unheard["name"] == old.as_str() && unheard.get("chat").is_none(),
+        format!("{} / {unheard}", row_of(&older)),
+    );
 
     // signed in on the platform, the browser walks to the desktop's origin
     chrome.set_cookie(&format!("http://{suffix}:{}/", api.port), "fragment_session", &session)?;
@@ -81,6 +129,15 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let listed = format!("[...document.querySelectorAll('#apps .row .label')].map(l => l.textContent).includes({:?})", label(&todo));
     s.ok("the owner's desktop lists their apps", chrome.until(&page, &listed, wait), chrome.eval(&page, "document.body.innerText.slice(0, 300)").unwrap_or_default());
     s.ok("but not itself", chrome.eval(&page, &format!("![...document.querySelectorAll('#apps .row .label')].map(l => l.textContent).includes({:?})", label(&desk)))? == json!(true), "");
+    let sorted = format!(
+        "['{old}', '{older}'].every(n => !!document.querySelector(`#chats .row[data-key=\"chat:${{n}}\"]`) && !document.querySelector(`#apps .row[data-key=\"app:${{n}}\"]`))"
+    );
+    let sidebar = |chrome: &mut Browser| chrome.eval(&page, "[...document.querySelectorAll('#chats .row, #apps .row')].map(r => r.dataset.key)").unwrap_or_default();
+    s.ok(
+        "chats it did not make (from the chat template, and with the first chat template's fragment.json) are listed under Chats, not Apps",
+        chrome.until(&page, &sorted, wait),
+        sidebar(&mut chrome),
+    );
 
     // Clickjacking: a fragment's page (its author's code, or an agent's)
     // frames the platform's approval of a key of its own. The two are one
@@ -120,10 +177,14 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         Reply::Text("Here it is.\n\n![a picture](__file?path=pics/dot.png)".into()),
     ]);
     chrome.eval(&page, "document.getElementById('new-chat').click(); true")?;
-    let chatted = chrome.until(&page, "document.querySelectorAll('#chats .row').length === 1 && !!document.querySelector('#frames iframe:not([hidden])')", wait);
+    let chatted = chrome.until(
+        &page,
+        "document.querySelectorAll('#chats .row').length === 3 && document.querySelector('#chats .row')?.dataset.key.startsWith('chat:chat-') && !!document.querySelector('#frames iframe:not([hidden])')?.dataset.fragment?.startsWith('chat-')",
+        wait,
+    );
     let mine = api.signed(&owner, "GET", "/api/fragments", None)?;
     let chat = mine.body["fragments"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str()).find(|n| n.starts_with("chat-")).unwrap_or("").to_string();
-    s.ok("New chat makes a chat fragment and opens it in the middle", chatted && !chat.is_empty(), &mine);
+    s.ok("New chat makes a chat fragment and opens it in the middle, first among the chats", chatted && !chat.is_empty(), format!("{mine} {}", sidebar(&mut chrome)));
     let chat_title = s.eventually(wait, || chrome.eval_in_frame(&page, &format!("{}--", label(&chat)), "document.title").ok() == Some(json!("Chat")));
     s.ok("the chat's own page shows there, signed in on its origin", chat_title, "");
     // the page is ready once it knows who it is (its socket said hello)

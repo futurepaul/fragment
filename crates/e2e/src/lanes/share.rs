@@ -147,6 +147,24 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = with_session(api, "GET", &sheet, &stranger_session)?;
     s.ok("someone who is not in it gets a 403 page", r.status == 403 && r.text.contains("Not yours to share") && !r.text.contains("name=\"form\"") && unframed(&r), &r);
+    // the platform's desktop: what letting it show your fragments means,
+    // plainly, and no warning (its code is the platform's)
+    let r = with_session(api, "GET", &format!("/share/{desk}"), &owner_session)?;
+    s.ok(
+        "the platform's desktop's sheet says plainly that it shows your fragments inside it, allowed from the start, with no warning",
+        r.status == 200
+            && r.text.contains("Your fragments inside it")
+            && r.text.contains("It shows your fragments inside it, signed in as you")
+            && r.text.contains(">Stop<")
+            && !r.text.contains("catch your clicks")
+            && !r.text.contains("trust"),
+        &r,
+    );
+    s.ok(
+        "and a desktop is its owner's alone from the start: only the people in it may open it",
+        r.text.contains("value=\"members\" checked") && !r.text.contains("id=\"link\""),
+        "",
+    );
 
     // ---- its forms: the page's own token, from the platform's origin, after a moment
     let invite = |form: &str, session: &str, origin: &str| {
@@ -278,6 +296,12 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         entry["sharing"] == json!({ "visibility": "link", "members": members, "guests": 1 }) && members == 3 && entry["share"] == format!("{platform}{sheet}"),
         &entry,
     );
+    let (desk_entry, whole) = (listed(&desk)?, api.call(Call { method: "GET", url: api.site_url(&desk, "__fragments"), cookie: Some(format!("fragment_site={owner_site}")), ..Call::default() })?);
+    s.ok(
+        "and which are chats (the chat is; the desktop is not), and whether the desktop may show them inside it (the platform's desktop may)",
+        entry["chat"] == json!(true) && desk_entry["chat"] == json!(false) && whole.body["frame"] == json!(true),
+        format!("{entry} / {desk_entry} / frame {}", whole.body["frame"]),
+    );
     // Goal: a __fragments read wakes no fragment. Method: a test hook adds
     // members to a fragment without it telling anyone (its index is not
     // touched): the read still says what the owner's list says, not what
@@ -399,12 +423,13 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.set_cookie(&format!("{platform}/"), "fragment_session", &owner_session)?;
     let page = chrome.open(&api.site_url(&desk, "__signin?return=/"))?;
     chrome.viewport(&page, 1440, 900, false)?;
-    let row = format!("document.querySelector('#apps .row[data-key={:?}]')", format!("app:{chat}"));
+    // the chat (made from the chat template, not by this desktop) is listed among its chats
+    let row = format!("document.querySelector('#chats .row[data-key={:?}]')", format!("chat:{chat}"));
     let badged = chrome.until(&page, &format!("{row}?.querySelector('.shared')?.textContent === '1'"), wait);
-    s.ok("the desktop badges a fragment shared with someone (the member: 1)", badged, chrome.eval(&page, "document.getElementById('apps').innerHTML").unwrap_or_default());
+    s.ok("the desktop badges a fragment shared with someone (the member: 1)", badged, chrome.eval(&page, "document.getElementById('chats').innerHTML").unwrap_or_default());
     let quiet_row = format!("document.querySelector('#apps .row[data-key={:?}]')", format!("app:{quiet}"));
     let public = chrome.until(&page, &format!("{quiet_row}?.querySelectorAll('.shared').length === 2"), wait);
-    let unbadged = chrome.eval(&page, "[...document.querySelectorAll('#apps .row')].filter(r => r.querySelector('.shared')).length === 2")? == json!(true);
+    let unbadged = chrome.eval(&page, "[...document.querySelectorAll('#chats .row, #apps .row')].filter(r => r.querySelector('.shared')).length === 2")? == json!(true);
     s.ok("(the public one with three guests has both badges, and no other fragment has any: the owner's agent is not a guest)", public && unbadged, "");
     chrome.click(&page, &format!(".more[data-fragment={chat:?}]"))?;
     let menu = chrome.until(&page, "!document.getElementById('menu').hidden", wait);

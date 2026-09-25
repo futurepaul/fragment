@@ -518,6 +518,11 @@ pub struct ListedFragment {
     /// (`None` until it has: a fragment from before sends it once).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sharing: Option<Sharing>,
+    /// Whether it is a chat (its live fragment.json declares a `chat`
+    /// channel), as the fragment last said (`None` until it has: a fragment
+    /// from before says so once).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<bool>,
 }
 
 /// A fragment's sharing, in its owner's list (the desktop's badges): who
@@ -1436,13 +1441,13 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner, sharing: None }] };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner, sharing: None, chat: None }] };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes.ann", "role": "owner" }] }));
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1 };
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "chat.ann".into(), role: Role::Owner, sharing: Some(sharing) }] };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "chat.ann".into(), role: Role::Owner, sharing: Some(sharing), chat: Some(true) }] };
         assert_eq!(
             value(&listed),
-            serde_json::json!({ "fragments": [{ "name": "chat.ann", "role": "owner", "sharing": { "visibility": "link", "members": 3, "guests": 1 } }] })
+            serde_json::json!({ "fragments": [{ "name": "chat.ann", "role": "owner", "sharing": { "visibility": "link", "members": 3, "guests": 1 }, "chat": true }] })
         );
         let members = MemberList { members: vec![] };
         assert_eq!(value(&members), serde_json::json!({ "members": [] }));

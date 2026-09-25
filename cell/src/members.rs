@@ -15,7 +15,11 @@
 //! owner's row also carries the fragment's sharing (`Sharing`: who may
 //! open it, its members and guests), made when the row is sent: a change
 //! to members or visibility sends it again (`sharing_changed`), so the
-//! desktop's badges read the owner's list alone.
+//! desktop's badges read the owner's list alone. Every row says whether the
+//! fragment is a chat (its live fragment.json declares a `chat` channel, as
+//! every chat template has): a deploy that changes that sends them all
+//! again (`relist`), so the desktop sorts its chats from its apps by what
+//! they are, from the list alone too.
 //!
 //! An invite may be for one identity (`invitee`, the share sheet's invite by
 //! username): only they may accept it, so a forwarded link admits no one
@@ -104,6 +108,33 @@ impl FragmentCell {
         self.set_meta(MetaKey::SharingSent, "1")
     }
 
+    /// Whether it is a chat: its live fragment.json declares a `chat`
+    /// channel (every chat template's has, from the first; an app's does
+    /// not).
+    pub(crate) fn is_chat(&self) -> CellResult<bool> {
+        Ok(self.declared_channel("chat")?.is_some())
+    }
+
+    /// Sends every member's row again when what the lists last said it is
+    /// (`ListedAs`) is not what it is now: a deploy added or dropped its
+    /// `chat` channel, or it is from before the rows said (its alarm asks).
+    pub(crate) fn relist(&self) -> CellResult<()> {
+        let now = if self.is_chat()? { "chat" } else { "app" };
+        if self.meta(MetaKey::ListedAs)?.as_deref() == Some(now) {
+            return Ok(());
+        }
+        #[derive(serde::Deserialize)]
+        struct Row {
+            principal: String,
+            role: String,
+        }
+        for r in self.typed::<Row>("SELECT principal, role FROM members", vec![])? {
+            let role = Role::parse(&r.role).ok_or_else(|| CellError::host(format!("members.role {:?}", r.role)))?;
+            self.index_change(&r.principal, Some(role))?;
+        }
+        self.set_meta(MetaKey::ListedAs, now)
+    }
+
     /// Delivers due index changes to the people's `Principal` cells. A
     /// failure stays in the outbox with a backoff; the alarm retries it.
     /// A fragment from before the owner's row carried its sharing sends it
@@ -121,6 +152,13 @@ impl FragmentCell {
                 vec![SqlStorageValue::Integer(js::now_ms())],
             )
             .unwrap_or_default();
+        let chat = match self.is_chat() {
+            Ok(chat) => chat,
+            Err(e) => {
+                console_error!("{name}: whether it is a chat did not read ({:?}): {}", e.code, e.message);
+                false
+            }
+        };
         for row in due {
             let principal = row["principal"].as_str().unwrap_or("").to_string();
             let version = row["version"].as_i64().unwrap_or(0);
@@ -129,6 +167,7 @@ impl FragmentCell {
                 "role": row["role"],
                 "incarnation": incarnation.parse::<i64>().unwrap_or(0),
                 "version": version,
+                "chat": chat,
             });
             // the owner's row: the sharing now, which no later change undoes
             // (a later one sends a newer version, made after it)
