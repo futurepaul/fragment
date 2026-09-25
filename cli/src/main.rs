@@ -57,8 +57,14 @@ enum Cmd {
     /// Who the host says you are: your identity, username, this key, your other keys
     Whoami,
     /// Your username, chosen once: your fragments live at
-    /// <name>.<username>.<host>
-    Username { username: Option<String> },
+    /// <label>--<username>.<host>
+    Username {
+        username: Option<String>,
+        /// Release this username instead (the fleet's operators: undoes one
+        /// taken by mistake, so its person chooses again)
+        #[arg(long, requires = "username")]
+        release: bool,
+    },
     /// Your keys: list them, rotate this one (a new key replaces it and
     /// keeps every grant), or revoke one
     Keys {
@@ -817,8 +823,17 @@ fn run(cli: Cli) -> Result<()> {
             println!("key: {}", c.id.npub());
             return Ok(());
         }
-        Cmd::Username { username } => {
+        Cmd::Username { username, release } => {
             let c = require_client(&cli.host, cli.verbose)?;
+            if release {
+                let u = username.unwrap_or_default();
+                let v = c.call(c.delete(&format!("/api/users/{u}"))?)?;
+                if j {
+                    ok_exit(&v);
+                }
+                println!("released {u} ({}): its person chooses a username again", v["identity"].as_str().unwrap_or(""));
+                return Ok(());
+            }
             let v = match username {
                 Some(u) => c.call(c.put_json("/api/identities/me/username", &json!({ "username": u }))?)?,
                 None => c.call(c.get("/api/identities/me")?)?,
