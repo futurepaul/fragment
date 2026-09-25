@@ -44,7 +44,7 @@ use worker::*;
 
 use crate::cs::FetchError;
 use crate::error::{CellError, CellResult};
-use crate::fragment::{json_response, Caller, FragmentCell};
+use crate::fragment::{json_response, missing, Caller, FragmentCell, MetaKey};
 use crate::ops::{Invocation, JOB_ID_PREFIX};
 use crate::{js, keys};
 
@@ -52,9 +52,6 @@ use crate::{js, keys};
 pub const JOB_HEADER: &str = "x-fragment-job";
 /// How far a fetch carries the chain it is part of (another fragment's inbox reads it).
 pub const HOPS_HEADER: &str = "x-fragment-hops";
-/// Test fleets: this many trigger steps from this fragment fail (a lever
-/// the e2e pulls through `/test/fragment`).
-pub const TEST_TRIGGER_FAILURES_KEY: &str = "test_fail_triggers";
 /// A run whose Workflow could not be started is tried again this soon.
 const QUEUED_RETRY_MS: i64 = 10_000;
 const LAUNCH_BATCH: usize = 25;
@@ -260,7 +257,7 @@ pub(crate) fn migrate_trigger_state(sql: &SqlStorage, now: i64) -> Vec<String> {
 impl FragmentCell {
     /// The fragment's own key: who triggered runs act as.
     fn own_key(&self) -> CellResult<String> {
-        npub::parse(&self.must("npub")?).ok_or_else(|| CellError::host("the stored npub does not parse"))
+        npub::parse(&self.must(MetaKey::Npub)?).ok_or_else(|| CellError::host("the stored npub does not parse"))
     }
 
     /// The operations whose triggers are paused, in the order they were.
@@ -382,8 +379,9 @@ impl FragmentCell {
     /// A Workflow instance id: unique across the fleet (the binding is shared
     /// by every fragment) and across a deleted fragment's reincarnations.
     fn instance_id(&self, run: i64, attempt: u32) -> CellResult<String> {
-        let npub = self.must("npub")?;
-        Ok(format!("{}-{}-r{run}-a{attempt}", &npub[5..25], self.must("created_at")?))
+        let [npub, created_at] = self.metas([MetaKey::Npub, MetaKey::CreatedAt])?;
+        let (npub, created_at) = (npub.ok_or_else(|| missing(MetaKey::Npub))?, created_at.ok_or_else(|| missing(MetaKey::CreatedAt))?);
+        Ok(format!("{}-{}-r{run}-a{attempt}", &npub[5..25], created_at))
     }
 
     /// Starts the Workflows of queued runs. A failure leaves them queued for
@@ -394,7 +392,11 @@ impl FragmentCell {
         else {
             return;
         };
-        let (Ok(name), Ok(incarnation)) = (self.name(), self.must("created_at")) else { return };
+        // most calls queue nothing: they read no more than this
+        if rows.is_empty() {
+            return;
+        }
+        let (Ok(name), Ok(incarnation)) = (self.name(), self.must(MetaKey::CreatedAt)) else { return };
         for run in rows.iter().map(run_row) {
             let (id, attempt) = (run.id, run.attempt);
             let Ok(instance) = self.instance_id(id, attempt) else { return };
@@ -438,7 +440,7 @@ impl FragmentCell {
     /// Whether a callback is from this fragment's life: a Workflow from a
     /// deleted fragment's earlier life stops.
     fn this_life(&self, incarnation: &str) -> CellResult<bool> {
-        Ok(self.meta("created_at")?.as_deref() == Some(incarnation))
+        Ok(self.meta(MetaKey::CreatedAt)?.as_deref() == Some(incarnation))
     }
 
     /// Records a run's outcome (once: a second report is ignored).
@@ -810,11 +812,11 @@ impl FragmentCell {
         if !self.cfg.test_hooks {
             return Ok(());
         }
-        let left: u64 = self.meta(TEST_TRIGGER_FAILURES_KEY)?.and_then(|n| n.parse().ok()).unwrap_or(0);
+        let left: u64 = self.meta(MetaKey::TestFailTriggers)?.and_then(|n| n.parse().ok()).unwrap_or(0);
         if left == 0 {
             return Ok(());
         }
-        self.set_meta(TEST_TRIGGER_FAILURES_KEY, &(left - 1).to_string())?;
+        self.set_meta(MetaKey::TestFailTriggers, &(left - 1).to_string())?;
         Err(CellError::host("the trigger step failed before its last run started (a test hook)"))
     }
 
@@ -1060,7 +1062,7 @@ impl FragmentCell {
     /// the cap a post is refused, so overload is a 429, not memory.
     pub(crate) async fn inbox(&self, token: &str, hops: u32, body: &[u8]) -> CellResult<Response> {
         self.name()?;
-        if !crate::serve::eq_ct(token, &self.must("inbox_token")?) {
+        if !crate::serve::eq_ct(token, &self.must(MetaKey::InboxToken)?) {
             return Err(CellError::new(ErrorCode::Forbidden, "bad inbox token (x-fragment-inbox-token, or ?t=)"));
         }
         let pending = self.count_of(
@@ -1096,7 +1098,7 @@ impl FragmentCell {
     pub(crate) async fn open_secret(&self, name: &str) -> CellResult<Option<Vec<u8>>> {
         let rows = self.rows("SELECT sealed FROM secrets WHERE name = ?", vec![name.into()])?;
         let Some(sealed) = rows.first().and_then(|r| r["sealed"].as_str()).map(str::to_string) else { return Ok(None) };
-        let opened = keys::open(&self.env, &sealed, &self.must("npub")?).await.map_err(|e| CellError::host(format!("secret {name}: {}", e.message)))?;
+        let opened = keys::open(&self.env, &sealed, &self.must(MetaKey::Npub)?).await.map_err(|e| CellError::host(format!("secret {name}: {}", e.message)))?;
         if let Some(fresh) = opened.resealed {
             self.exec("UPDATE secrets SET sealed = ? WHERE name = ? AND sealed = ?", vec![fresh.into(), name.into(), sealed.into()])?;
             self.event("secret.resealed", &format!("secret {name} resealed under the current host secret"), json!({ "name": name }));

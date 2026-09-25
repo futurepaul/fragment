@@ -14,7 +14,7 @@ use worker::*;
 
 use crate::error::{CellError, CellResult};
 use crate::files::{content_of, FileWrite, Wrote};
-use crate::fragment::{json_response, Caller, FragmentCell};
+use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 use crate::js;
 use crate::routed::Signed;
 
@@ -61,33 +61,33 @@ impl FragmentCell {
     /// and deploys it. Keyed by the fragment's incarnation, so the alarm
     /// can retry one that failed without committing twice.
     pub(crate) async fn seed(&self) -> CellResult<()> {
-        let Some(which) = self.meta("template_pending")? else { return Ok(()) };
+        let Some(which) = self.meta(MetaKey::TemplatePending)? else { return Ok(()) };
         let t = template(&which).ok_or_else(|| CellError::host(format!("no template {which}")))?;
-        let (name, owner) = (self.name()?, self.must("owner")?);
+        let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
         let writes: Vec<FileWrite> = t
             .iter()
             .map(|(path, bytes)| FileWrite { path: path.to_string(), bytes: Some(if *path == "fragment.json" { stamp(bytes, &name) } else { bytes.to_vec() }) })
             .collect();
-        let key = format!("template:{}", self.must("created_at")?);
+        let key = format!("template:{}", self.must(MetaKey::CreatedAt)?);
         if let Wrote::Conflict(why) = self.commit(&key, &writes, &BTreeMap::new(), &format!("start from the {which} template"), &owner, 0).await? {
             return Err(CellError::host(why));
         }
         self.go_live(&owner, &format!("deploy {name}")).await?;
         self.event("template", &format!("{name} starts from the {which} template"), json!({ "template": which }));
         if which == "chat" {
-            self.set_meta("agent_pending", "1")?;
+            self.set_meta(MetaKey::AgentPending, "1")?;
         }
-        self.del_meta("template_pending")
+        self.del_meta(MetaKey::TemplatePending)
     }
 
     /// A chat made from the template has its owner's own agent in it
     /// (`agent.<username>`, made on first need), as an editor that listens.
     /// The alarm retries one that did not finish.
     pub(crate) async fn join_owners_agent(&self) -> CellResult<()> {
-        if self.meta("agent_pending")?.is_none() {
+        if self.meta(MetaKey::AgentPending)?.is_none() {
             return Ok(());
         }
-        let (name, owner) = (self.name()?, self.must("owner")?);
+        let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
         let (_, username) = fragment_proto::split_fragment_name(&name).ok_or_else(|| CellError::host(format!("{name} is not <label>.<username>")))?;
         let (agent, _, agent_name) = crate::agents::own_agent(&self.env, &owner, username).await?;
         if self.member_role(&agent)?.is_none() {
@@ -101,14 +101,14 @@ impl FragmentCell {
         }
         crate::agents::ask_json(&self.env, Method::Post, &format!("/api/a/{agent_name}/listen"), &owner, &json!({ "fragment": name })).await?;
         self.event("agent.joined", &format!("{agent_name}, its owner's agent, listens here"), json!({ "agent": agent }));
-        self.del_meta("agent_pending")
+        self.del_meta(MetaKey::AgentPending)
     }
 
     /// Moves `live` to `main`'s tip: the first deploy makes the branch,
     /// later ones fast-forward it (or merge, after a rollback), each
     /// guarded against a `live` that moved meanwhile. Answers the new tip.
     pub(crate) async fn go_live(&self, principal: &str, message: &str) -> CellResult<String> {
-        let repo = self.must("repo")?;
+        let repo = self.must(MetaKey::Repo)?;
         let cs = self.cs()?;
         let main = cs.branch_head(&repo, "main").await?.ok_or_else(|| CellError::invalid("nothing to deploy: main has no commits"))?;
         let (author, email) = crate::files::author(principal);
@@ -175,11 +175,11 @@ impl FragmentCell {
     /// (at live) asks for the `fragments` capability. Anyone else is
     /// refused, even an editor.
     fn owner_granted(&self, caller: &Caller) -> CellResult<String> {
-        let owner = self.must("owner")?;
+        let owner = self.must(MetaKey::Owner)?;
         if caller.principal() != Some(owner.as_str()) {
             return Err(CellError::new(ErrorCode::Forbidden, "only this fragment's owner, signed in here, has its fragments"));
         }
-        let caps: Vec<String> = self.meta("capabilities_live")?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let caps: Vec<String> = self.meta(MetaKey::CapabilitiesLive)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         if !caps.iter().any(|c| c == "fragments") {
             return Err(CellError::new(ErrorCode::Forbidden, "this fragment's fragment.json does not ask for the fragments capability"));
         }

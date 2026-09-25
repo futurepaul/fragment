@@ -15,7 +15,7 @@ use serde_json::json;
 use worker::*;
 
 use crate::error::{CellError, CellResult};
-use crate::fragment::{json_response, Caller, FragmentCell};
+use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 use crate::js;
 
 /// A pointer file's size: 126 bytes plus the digits of the size it names.
@@ -38,7 +38,7 @@ pub(crate) fn maybe_pointer(size: u64) -> bool {
 
 impl FragmentCell {
     fn blob_key(&self, sha: &str) -> CellResult<String> {
-        Ok(format!("{}/{sha}", self.must("npub")?))
+        Ok(format!("{}/{sha}", self.must(MetaKey::Npub)?))
     }
 
     fn record_blob(&self, sha: &str, size: u64) -> CellResult<()> {
@@ -132,7 +132,7 @@ impl FragmentCell {
     /// After a pin moved: re-reads the changed paths that could be pointers.
     /// `sizes` is the new tree's size by path; a changed path absent from it was deleted.
     pub(crate) async fn track_pointers(&self, which: &str, sha: &str, changed: &[String], sizes: &std::collections::HashMap<&str, u64>) -> CellResult<()> {
-        let repo = self.must("repo")?;
+        let repo = self.must(MetaKey::Repo)?;
         let cs = self.cs()?;
         for path in changed {
             self.exec("DELETE FROM pointers WHERE ref = ? AND path = ?", vec![which.into(), path.as_str().into()])?;
@@ -155,7 +155,7 @@ impl FragmentCell {
     /// named for the grace period (uploads never committed included).
     pub(crate) async fn collect_blobs(&self) -> CellResult<()> {
         let now = js::now_ms();
-        let due: i64 = self.meta("blobs_gc_at")?.and_then(|s| s.parse().ok()).unwrap_or(0);
+        let due: i64 = self.meta(MetaKey::BlobsGcAt)?.and_then(|s| s.parse().ok()).unwrap_or(0);
         if due > now {
             return Ok(());
         }
@@ -174,12 +174,12 @@ impl FragmentCell {
             }
             self.event("blobs.collected", &format!("{} blob(s) no branch has named for the grace period", stale.len()), json!({ "count": stale.len() }));
         }
-        self.set_meta("blobs_gc_at", &(now + self.cfg.blob_grace_ms.min(GC_EVERY_MS)).to_string())
+        self.set_meta(MetaKey::BlobsGcAt, &(now + self.cfg.blob_grace_ms.min(GC_EVERY_MS)).to_string())
     }
 
     /// A deleted fragment's blobs go with it.
     pub(crate) async fn delete_blobs(&self) -> CellResult<()> {
-        let prefix = format!("{}/", self.must("npub")?);
+        let prefix = format!("{}/", self.must(MetaKey::Npub)?);
         let mut cursor: Option<String> = None;
         loop {
             let (keys, next) = js::blob_list(self.env.as_ref(), &prefix, cursor.as_deref()).await?;

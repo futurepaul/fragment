@@ -31,7 +31,7 @@ use crate::cs::FetchError;
 use crate::error::CellError;
 use crate::ledger::{self, ReleaseAnswer, Reserved, VideoSettlement};
 use crate::files::FileWrite;
-use crate::fragment::FragmentCell;
+use crate::fragment::{FragmentCell, MetaKey};
 use crate::jobs::{permanent, RunRow, StepFail};
 use crate::ops::JOB_ID_PREFIX;
 
@@ -103,7 +103,7 @@ impl FragmentCell {
     /// run, and the step's place in it (the same on a retry and a replay).
     fn step_ref(&self, run: &RunRow, index: u32) -> Result<String, StepFail> {
         let retry = |e: CellError| StepFail::Retry(e.message);
-        Ok(format!("{}@{}/run/{}/step/{index}", self.name().map_err(retry)?, self.must("created_at").map_err(retry)?, run.id))
+        Ok(format!("{}@{}/run/{}/step/{index}", self.name().map_err(retry)?, self.must(MetaKey::CreatedAt).map_err(retry)?, run.id))
     }
 
     /// Who pays for step `index` of `run`, reserving its worst case when it
@@ -113,7 +113,7 @@ impl FragmentCell {
             let own = String::from_utf8(own).map_err(|_| permanent(format!("{KEY_SECRET} is not text")))?;
             return Ok(Paying::Payer(Payer::Own(own.trim().to_string())));
         }
-        let owner = self.must("owner").map_err(|e| StepFail::Retry(e.message))?;
+        let owner = self.must(MetaKey::Owner).map_err(|e| StepFail::Retry(e.message))?;
         let org = ledger::org_of(&owner).ok_or_else(|| permanent("the fragment's owner has no billing org"))?;
         let Some(amount) = budget::reservation(step) else {
             let key = ledger::ask(&self.env, &org, &ledger::Key {}).await.map_err(ledger_fail)?.key;
@@ -200,7 +200,7 @@ impl FragmentCell {
         if rows.is_empty() {
             return;
         }
-        let Some(org) = self.must("owner").ok().and_then(|o| ledger::org_of(&o)) else { return };
+        let Some(org) = self.must(MetaKey::Owner).ok().and_then(|o| ledger::org_of(&o)) else { return };
         for row in rows {
             let reference = row["ref"].as_str().expect("spend.ref is TEXT");
             let Ok(released) = ledger::ask(&self.env, &org, &ledger::Release { reference: reference.to_string() }).await else { continue };

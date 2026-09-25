@@ -19,7 +19,7 @@ use worker::*;
 
 use crate::deliveries::{Delivery, DeliveryKind};
 use crate::error::{CellError, CellResult};
-use crate::fragment::FragmentCell;
+use crate::fragment::{FragmentCell, MetaKey};
 use crate::keys;
 use crate::js;
 
@@ -33,16 +33,16 @@ impl FragmentCell {
     /// The fragment's VAPID key, made on first use and sealed like a secret
     /// (`KEYS` opens it for this cell alone).
     pub(crate) async fn vapid(&self) -> CellResult<Vapid> {
-        if self.meta("vapid")?.is_none() {
+        if self.meta(MetaKey::Vapid)?.is_none() {
             let key = Vapid::draw(js::random_bytes);
             let sealed = keys::seal(&self.env, &key.to_bytes()).await?;
             // two first uses at once: the first stored wins, and both use it
-            self.exec("INSERT INTO meta (key, value) VALUES ('vapid', ?) ON CONFLICT (key) DO NOTHING", vec![sealed.into()])?;
+            self.exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING", vec![MetaKey::Vapid.key().into(), sealed.into()])?;
         }
-        let sealed = self.must("vapid")?;
-        let opened = keys::open(&self.env, &sealed, &self.must("npub")?).await.map_err(|e| CellError::host(format!("the VAPID key: {}", e.message)))?;
+        let sealed = self.must(MetaKey::Vapid)?;
+        let opened = keys::open(&self.env, &sealed, &self.must(MetaKey::Npub)?).await.map_err(|e| CellError::host(format!("the VAPID key: {}", e.message)))?;
         if let Some(fresh) = opened.resealed {
-            self.exec("UPDATE meta SET value = ? WHERE key = 'vapid' AND value = ?", vec![fresh.into(), sealed.into()])?;
+            self.exec("UPDATE meta SET value = ? WHERE key = ? AND value = ?", vec![fresh.into(), MetaKey::Vapid.key().into(), sealed.into()])?;
         }
         let bytes: [u8; 32] = opened.plaintext.try_into().map_err(|_| CellError::host("a stored VAPID key is not 32 bytes"))?;
         Vapid::from_bytes(bytes).ok_or_else(|| CellError::host("a stored VAPID key is out of range"))
@@ -168,7 +168,7 @@ impl FragmentCell {
         if urls.is_empty() {
             return Ok(());
         }
-        let frame = json!({ "type": "changed", "fragment": self.must("name")?, "sha": sha, "paths": paths.iter().take(50).collect::<Vec<_>>() });
+        let frame = json!({ "type": "changed", "fragment": self.must(MetaKey::Name)?, "sha": sha, "paths": paths.iter().take(50).collect::<Vec<_>>() });
         let mut queued = 0;
         for url in urls {
             if egress::check(&url, self.cfg.egress_local).is_err() {

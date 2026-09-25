@@ -24,7 +24,7 @@ use worker::*;
 use crate::config::Config;
 use crate::cs::FetchError;
 use crate::error::{CellError, CellResult};
-use crate::fragment::FragmentCell;
+use crate::fragment::{FragmentCell, MetaKey};
 use crate::js;
 
 pub const DEAD_QUEUE: &str = "fragment-deliveries-dead";
@@ -45,9 +45,6 @@ const CLAIM_MS: i64 = 60_000;
 /// wait doubling to ten minutes, about two and a half hours of a queue
 /// that will not take it.
 const OUTBOX_ATTEMPTS_MAX: i64 = 20;
-/// Test fleets: this many queue sends from this fragment fail (a lever the
-/// e2e pulls through `/test/fragment`).
-pub const TEST_FAILURES_KEY: &str = "test_fail_deliveries";
 
 const _: () = assert!(QUEUE_BATCH * (PUSH_BATCHES_MAX - 1) >= limits::PUSH_SUBS_MAX as usize, "a push's batches cover every subscription");
 
@@ -139,9 +136,9 @@ impl FragmentCell {
             return Ok(());
         }
         if self.cfg.test_hooks {
-            let failures: i64 = self.meta(TEST_FAILURES_KEY)?.and_then(|n| n.parse().ok()).unwrap_or(0);
+            let failures: i64 = self.meta(MetaKey::TestFailDeliveries)?.and_then(|n| n.parse().ok()).unwrap_or(0);
             if failures > 0 {
-                self.set_meta(TEST_FAILURES_KEY, &(failures - 1).to_string())?;
+                self.set_meta(MetaKey::TestFailDeliveries, &(failures - 1).to_string())?;
                 return Err(CellError::host("the queue send failed (a test hook)"));
             }
         }
@@ -173,7 +170,7 @@ impl FragmentCell {
             return;
         }
         rows.sort_by_key(|r| r["id"].as_i64());
-        let (Ok(fragment), Ok(incarnation)) = (self.must("name"), self.must("created_at")) else { return };
+        let (Ok(fragment), Ok(incarnation)) = (self.must(MetaKey::Name), self.must(MetaKey::CreatedAt)) else { return };
         let mut failures = Failures::default();
         // records and frames go a queue batch at a time; each push goes on its own
         let mut singles: Vec<(i64, i64, Delivery)> = vec![];
@@ -276,7 +273,7 @@ impl FragmentCell {
     /// `POST /deliver/report` from the consumer: a subscription is gone, or
     /// a delivery failed for good.
     pub(crate) fn delivery_report(&self, report: &Report) -> CellResult<Value> {
-        if Some(report.incarnation.as_str()) != self.meta("created_at")?.as_deref() {
+        if Some(report.incarnation.as_str()) != self.meta(MetaKey::CreatedAt)?.as_deref() {
             return Ok(json!({ "ok": true }));
         }
         let (kind, url) = (report.kind.as_str(), report.url.as_str());

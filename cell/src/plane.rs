@@ -18,7 +18,7 @@ use worker::*;
 
 use crate::cs::Cs;
 use crate::error::{CellError, CellResult};
-use crate::fragment::{json_response, Caller, FragmentCell};
+use crate::fragment::{json_response, missing, Caller, Facts, FragmentCell, MetaKey};
 use crate::js;
 
 /// Platform code that runs in the facet around the author's App class.
@@ -34,6 +34,17 @@ pub struct PinMove {
     pub changed: bool,
     pub to: Option<String>,
     pub paths: Vec<String>,
+}
+
+/// A file in a pin's tree index (metadata only; the bytes stay in git).
+#[derive(Deserialize)]
+pub(crate) struct TreeRow {
+    pub path: String,
+    pub size: u64,
+    pub mode: String,
+    /// The last commit that changed the file: with its path, it names
+    /// the file's bytes.
+    pub last_commit: String,
 }
 
 /// What the installed code declares, as its tables hold it: written with
@@ -141,7 +152,7 @@ pub(crate) fn migrate_code(sql: &SqlStorage) -> Option<String> {
                 Err(why) => {
                     sql.exec("DELETE FROM code", None).expect("the code row goes");
                     clear_installed(sql).expect("the code tables clear");
-                    sql.exec("DELETE FROM meta WHERE key = 'live_read_at'", None).expect("live is read again");
+                    sql.exec("DELETE FROM meta WHERE key = ?", vec![MetaKey::LiveReadAt.key().into()]).expect("live is read again");
                     Some(why)
                 }
             }
@@ -202,30 +213,30 @@ impl FragmentCell {
     }
 
     pub(crate) fn pin(&self, which: &str) -> CellResult<Option<String>> {
-        self.meta(&format!("pin_{which}"))
+        self.meta(MetaKey::pin(which))
     }
 
-    pub(crate) fn tree_row(&self, which: &str, path: &str) -> CellResult<Option<Value>> {
-        Ok(self.rows("SELECT path, size, mode, last_commit FROM tree WHERE ref = ? AND path = ?", vec![which.into(), path.into()])?.into_iter().next())
+    pub(crate) fn tree_row(&self, which: &str, path: &str) -> CellResult<Option<TreeRow>> {
+        Ok(self.typed("SELECT path, size, mode, last_commit FROM tree WHERE ref = ? AND path = ?", vec![which.into(), path.into()])?.into_iter().next())
     }
 
-    pub(crate) fn tree_rows(&self, which: &str) -> CellResult<Vec<Value>> {
-        self.rows("SELECT path, size, mode, last_commit FROM tree WHERE ref = ? ORDER BY path", vec![which.into()])
+    pub(crate) fn tree_rows(&self, which: &str) -> CellResult<Vec<TreeRow>> {
+        self.typed("SELECT path, size, mode, last_commit FROM tree WHERE ref = ? ORDER BY path", vec![which.into()])
     }
 
     /// Reads the branch head and, when it moved, the new tree; the manifest
     /// (main) or the code (live) follow. Callers hold `self.plane`.
     async fn refresh_pin(&self, which: &str) -> CellResult<PinMove> {
-        let repo = self.must("repo")?;
+        let [repo, from] = self.metas([MetaKey::Repo, MetaKey::pin(which)])?;
+        let repo = repo.ok_or_else(|| missing(MetaKey::Repo))?;
         let cs = self.cs()?;
-        let from = self.pin(which)?;
         let Some(to) = cs.branch_head(&repo, which).await? else {
             if from.is_none() {
                 return Ok(PinMove { changed: false, to: None, paths: vec![] });
             }
             self.exec("DELETE FROM tree WHERE ref = ?", vec![which.into()])?;
             self.exec("DELETE FROM pointers WHERE ref = ?", vec![which.into()])?;
-            self.del_meta(&format!("pin_{which}"))?;
+            self.del_meta(MetaKey::pin(which))?;
             self.event("git.refresh", &format!("{which}: the branch is gone; pin cleared"), json!({ "ref": which, "from": from }));
             return Ok(PinMove { changed: true, to: None, paths: vec![] });
         };
@@ -233,11 +244,7 @@ impl FragmentCell {
             return Ok(PinMove { changed: false, to: Some(to), paths: vec![] });
         }
         let entries = cs.tree(&repo, &to).await?;
-        let prior: BTreeMap<String, (u64, String)> = self
-            .tree_rows(which)?
-            .into_iter()
-            .map(|r| (r["path"].as_str().unwrap_or("").to_string(), (r["size"].as_u64().unwrap_or(0), r["last_commit"].as_str().unwrap_or("").to_string())))
-            .collect();
+        let prior: BTreeMap<String, (u64, String)> = self.tree_rows(which)?.into_iter().map(|r| (r.path, (r.size, r.last_commit))).collect();
         let mut paths: Vec<String> = entries
             .iter()
             .filter(|e| prior.get(&e.path).is_none_or(|(size, last)| *size != e.size || *last != e.last_commit_sha))
@@ -248,7 +255,7 @@ impl FragmentCell {
         let sizes: std::collections::HashMap<&str, u64> = entries.iter().map(|e| (e.path.as_str(), e.size)).collect();
         self.track_pointers(which, &to, &paths, &sizes).await?;
         self.write_tree(which, &entries)?;
-        self.set_meta(&format!("pin_{which}"), &to)?;
+        self.set_meta(MetaKey::pin(which), &to)?;
         self.event(
             "git.refresh",
             &format!("{which}: {} → {} ({} files, {} changed)", short(from.as_deref()), short(Some(&to)), entries.len(), paths.len()),
@@ -275,19 +282,19 @@ impl FragmentCell {
     /// (code.storage down) is retried by the next refresh, webhook, or poll
     /// even though the pin itself already moved.
     async fn follow(&self, which: &str) -> CellResult<()> {
-        let pin = self.pin(which)?;
-        let done_key = format!("{which}_read_at");
-        if self.meta(&done_key)? == pin {
+        let done_key = MetaKey::read_at(which);
+        let [pin, done] = self.metas([MetaKey::pin(which), done_key])?;
+        if done == pin {
             return Ok(());
         }
         match (which, pin.as_deref()) {
-            ("main", Some(sha)) => self.read_manifest(&self.must("repo")?, sha).await?,
-            ("main", None) => self.del_meta("manifest_main")?,
+            ("main", Some(sha)) => self.read_manifest(&self.must(MetaKey::Repo)?, sha).await?,
+            ("main", None) => self.del_meta(MetaKey::ManifestMain)?,
             (_, live) => self.install_code(live).await?,
         }
         match pin {
-            Some(sha) => self.set_meta(&done_key, &sha),
-            None => self.del_meta(&done_key),
+            Some(sha) => self.set_meta(done_key, &sha),
+            None => self.del_meta(done_key),
         }
     }
 
@@ -295,13 +302,13 @@ impl FragmentCell {
     /// asks for access the platform no longer takes from git.
     async fn read_manifest(&self, repo: &str, sha: &str) -> CellResult<()> {
         if self.tree_row("main", "fragment.json")?.is_none() {
-            return self.del_meta("manifest_main");
+            return self.del_meta(MetaKey::ManifestMain);
         }
-        let Some(bytes) = self.cs()?.read(repo, sha, "fragment.json", limits::MANIFEST_MAX_BYTES).await? else { return self.del_meta("manifest_main") };
+        let Some(bytes) = self.cs()?.read(repo, sha, "fragment.json", limits::MANIFEST_MAX_BYTES).await? else { return self.del_meta(MetaKey::ManifestMain) };
         match serde_json::from_slice::<Value>(&bytes) {
-            Ok(v) => self.set_meta("manifest_main", &v.to_string())?,
+            Ok(v) => self.set_meta(MetaKey::ManifestMain, &v.to_string())?,
             Err(e) => {
-                self.del_meta("manifest_main")?;
+                self.del_meta(MetaKey::ManifestMain)?;
                 self.event("manifest.invalid", &format!("fragment.json at main is not JSON: {e}"), json!({ "sha": sha }));
                 return Ok(());
             }
@@ -324,14 +331,14 @@ impl FragmentCell {
     /// the next code to judge); one with an invalid manifest keeps the last
     /// good code and records why.
     async fn install_code(&self, live: Option<&str>) -> CellResult<()> {
-        let repo = self.must("repo")?;
+        let repo = self.must(MetaKey::Repo)?;
         let Some(sha) = live else {
             self.exec("DELETE FROM code", vec![])?;
             clear_installed(&self.sql())?;
             self.sync_schedules(&[])?;
-            self.del_meta("meta_live")?;
-            self.del_meta("capabilities_live")?;
-            self.del_meta("code_error")?;
+            self.del_meta(MetaKey::MetaLive)?;
+            self.del_meta(MetaKey::CapabilitiesLive)?;
+            self.del_meta(MetaKey::CodeError)?;
             js::abort_app_facet(&self.raw, "live is gone")?;
             return Ok(());
         };
@@ -347,15 +354,15 @@ impl FragmentCell {
             }
         };
         match &manifest.meta {
-            Some(meta) => self.set_meta("meta_live", &serde_json::to_string(meta).expect("meta serializes"))?,
-            None => self.del_meta("meta_live")?,
+            Some(meta) => self.set_meta(MetaKey::MetaLive, &serde_json::to_string(meta).expect("meta serializes"))?,
+            None => self.del_meta(MetaKey::MetaLive)?,
         }
-        self.set_meta("capabilities_live", &serde_json::to_string(&manifest.capabilities).expect("a list serializes"))?;
+        self.set_meta(MetaKey::CapabilitiesLive, &serde_json::to_string(&manifest.capabilities).expect("a list serializes"))?;
         if self.tree_row("live", "app.mjs")?.is_none() {
             self.exec("DELETE FROM code", vec![])?;
             clear_installed(&self.sql())?;
             self.sync_schedules(&[])?;
-            self.del_meta("code_error")?;
+            self.del_meta(MetaKey::CodeError)?;
             js::abort_app_facet(&self.raw, "live has no app.mjs")?;
             self.event("code.none", &format!("live {} has no app.mjs", short(Some(sha))), json!({ "sha": sha }));
             return Ok(());
@@ -372,10 +379,9 @@ impl FragmentCell {
         // applib/: the modules app.mjs imports, read with it from the same commit
         let libs: Vec<String> = self
             .tree_rows("live")?
-            .iter()
-            .filter_map(|r| r["path"].as_str())
+            .into_iter()
+            .map(|r| r.path)
             .filter(|p| p.starts_with("applib/") && (p.ends_with(".mjs") || p.ends_with(".js")))
-            .map(str::to_string)
             .collect();
         if libs.len() > limits::APPLIB_FILES_MAX {
             return self.code_refused(sha, &format!("applib/ has {} modules; the limit is {}", libs.len(), limits::APPLIB_FILES_MAX));
@@ -428,7 +434,7 @@ impl FragmentCell {
         store_installed(&self.sql(), &installed)?;
         self.sync_schedules(&manifest.triggers)?;
         self.forget_undeclared_pauses()?;
-        self.del_meta("code_error")?;
+        self.del_meta(MetaKey::CodeError)?;
         js::abort_app_facet(&self.raw, "new code from live")?;
         self.event(
             "code.installed",
@@ -445,7 +451,7 @@ impl FragmentCell {
     }
 
     fn code_refused(&self, sha: &str, why: &str) -> CellResult<()> {
-        self.set_meta("code_error", &format!("live {}: {why}", short(Some(sha))))?;
+        self.set_meta(MetaKey::CodeError, &format!("live {}: {why}", short(Some(sha))))?;
         self.event("code.refused", &format!("live {} not installed: {why}", short(Some(sha))), json!({ "sha": sha }));
         Ok(())
     }
@@ -484,11 +490,15 @@ impl FragmentCell {
     }
 
     /// Pins read before either branch has been announced (a fragment
-    /// whose first push predates its webhook) are fetched on first use.
-    pub(crate) async fn ensure_pins(&self) -> CellResult<()> {
-        let missing: Vec<&str> = REFS.into_iter().filter(|w| self.pin(w).ok().flatten().is_none()).collect();
-        if !missing.is_empty() {
-            self.interpret(&missing).await?;
+    /// whose first push predates its webhook) are fetched on first use;
+    /// `facts` follows what moved.
+    pub(crate) async fn ensure_pins(&self, facts: &mut Facts) -> CellResult<()> {
+        let missing: Vec<&str> = REFS.into_iter().filter(|w| facts.pin(w).is_none()).collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        for (which, moved) in self.interpret(&missing).await? {
+            facts.set_pin(&which, moved.to);
         }
         Ok(())
     }
@@ -529,7 +539,7 @@ impl FragmentCell {
     /// delivery never moves it backwards.
     pub(crate) async fn webhook(&self, event: &str, signature: &str, body: &[u8]) -> CellResult<Response> {
         self.name()?;
-        let secret = self.must("webhook_secret")?;
+        let secret = self.must(MetaKey::WebhookSecret)?;
         if let Err(why) = webhook::verify(body, signature, &secret, js::now_ms() / 1000, limits::WEBHOOK_WINDOW_S) {
             self.event("webhook.rejected", &format!("{event}: {why}"), Value::Null);
             return Err(CellError::new(ErrorCode::Unauthenticated, why));
@@ -565,7 +575,7 @@ impl FragmentCell {
     pub(crate) async fn storage_token(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
         let who = self.caller_id(caller)?;
-        let repo = self.must("repo")?;
+        let repo = self.must(MetaKey::Repo)?;
         let token = self.cs()?.storage_token(&repo, who).await?;
         self.event(
             "storage-token.minted",
@@ -577,43 +587,51 @@ impl FragmentCell {
 
     pub(crate) fn manifest(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
-        match self.meta("manifest_main")? {
+        match self.meta(MetaKey::ManifestMain)? {
             Some(text) => json_response(&serde_json::from_str::<Value>(&text).map_err(|e| CellError::host(e.to_string()))?),
             None => Err(CellError::new(ErrorCode::NotFound, "main has no fragment.json")),
         }
     }
 
     pub(crate) async fn files(&self, caller: &Caller) -> CellResult<Response> {
-        self.require(caller, false, Role::Viewer)?;
-        self.ensure_pins().await?;
+        let mut facts = self.facts()?;
+        self.admit(&facts, caller, false, Role::Viewer)?;
+        self.ensure_pins(&mut facts).await?;
         let blobs = self.pointer_sizes("main")?;
         let files: Vec<Value> = self
             .tree_rows("main")?
             .into_iter()
             .map(|r| {
-                let path = r["path"].as_str().unwrap_or("").to_string();
-                let mut f = json!({ "path": path, "size": r["size"], "mode": r["mode"], "lastCommitSha": r["last_commit"], "machinery": site::is_machinery(&path) });
-                if let Some(size) = blobs.get(&path) {
+                let mut f = json!({ "path": r.path, "size": r.size, "mode": r.mode, "lastCommitSha": r.last_commit, "machinery": site::is_machinery(&r.path) });
+                if let Some(size) = blobs.get(&r.path) {
                     f["size"] = json!(size);
                     f["blob"] = json!(true);
                 }
                 f
             })
             .collect();
-        json_response(&json!({ "ref": self.pin("main")?, "files": files }))
+        json_response(&json!({ "ref": facts.pin_main, "files": files }))
     }
 
     /// Streams a file from a pin (`main` for the API, `live` for the site);
-    /// a pointer's bytes come from the blob store.
-    pub(crate) async fn stream_file(&self, which: &str, path: &str, range: Option<&str>) -> CellResult<Response> {
-        if let Some(resp) = self.serve_pointer(which, path, range).await? {
-            return Ok(resp);
+    /// a pointer's bytes come from the blob store. Only a file of a
+    /// pointer's size can be one, so only those look for a pointer row.
+    pub(crate) async fn stream_file(&self, facts: &Facts, which: &str, row: &TreeRow, range: Option<&str>) -> CellResult<Response> {
+        if crate::blobs::maybe_pointer(row.size) {
+            if let Some(resp) = self.serve_pointer(which, &row.path, range).await? {
+                return Ok(resp);
+            }
         }
-        let pin = self.pin(which)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no {which} pin yet")))?;
-        let upstream = self.cs()?.stream(&self.must("repo")?, &pin, path).await?;
+        self.stream_git(facts, which, &row.path).await
+    }
+
+    /// Streams a file's bytes from git at a pin.
+    pub(crate) async fn stream_git(&self, facts: &Facts, which: &str, path: &str) -> CellResult<Response> {
+        let pin = facts.pin(which).ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no {which} pin yet")))?;
+        let upstream = self.cs()?.stream(&facts.repo, pin, path).await?;
         let headers = Headers::new();
         headers.set("content-type", site::mime_for_path(path))?;
-        headers.set("x-fragment-ref", &pin)?;
+        headers.set("x-fragment-ref", pin)?;
         if let Ok(Some(len)) = upstream.headers().get("content-length") {
             headers.set("content-length", &len)?;
         }
@@ -622,35 +640,36 @@ impl FragmentCell {
     }
 
     pub(crate) async fn file(&self, caller: &Caller, path: &str) -> CellResult<Response> {
-        self.require(caller, false, Role::Viewer)?;
+        let mut facts = self.facts()?;
+        self.admit(&facts, caller, false, Role::Viewer)?;
         if !valid_repo_path(path) {
             return Err(CellError::invalid("path must be a relative repo path"));
         }
-        self.ensure_pins().await?;
-        if self.tree_row("main", path)?.is_none() {
+        self.ensure_pins(&mut facts).await?;
+        let Some(row) = self.tree_row("main", path)? else {
             return Err(CellError::new(ErrorCode::NotFound, format!("no file {path} at main")));
-        }
-        let mut resp = self.stream_file("main", path, None).await?;
+        };
+        let mut resp = self.stream_file(&facts, "main", &row, None).await?;
         resp.headers_mut().set("cache-control", "no-store")?;
         Ok(resp)
     }
 
     pub(crate) async fn stat(&self, caller: &Caller, path: &str) -> CellResult<Response> {
-        self.require(caller, false, Role::Viewer)?;
+        let mut facts = self.facts()?;
+        self.admit(&facts, caller, false, Role::Viewer)?;
         if !valid_repo_path(path) {
             return Err(CellError::invalid("path must be a relative repo path"));
         }
-        self.ensure_pins().await?;
-        let pin = self.pin("main")?;
+        self.ensure_pins(&mut facts).await?;
         let absent = json!({ "path": path, "size": 0, "blobSha": "", "lastCommitSha": "", "present": false });
-        let stat = match (&pin, self.tree_row("main", path)?) {
-            (Some(pin), Some(row)) => match self.cs()?.head(&self.must("repo")?, pin, path).await? {
+        let stat = match (&facts.pin_main, self.tree_row("main", path)?) {
+            (Some(pin), Some(row)) => match self.cs()?.head(&facts.repo, pin, path).await? {
                 Some(h) => json!({ "path": path, "size": h.size, "blobSha": h.blob_sha, "lastCommitSha": h.last_commit_sha, "present": true }),
-                None => json!({ "path": path, "size": row["size"], "blobSha": "", "lastCommitSha": row["last_commit"], "present": true }),
+                None => json!({ "path": path, "size": row.size, "blobSha": "", "lastCommitSha": row.last_commit, "present": true }),
             },
             _ => absent,
         };
-        json_response(&json!({ "stat": stat, "ref": pin }))
+        json_response(&json!({ "stat": stat, "ref": facts.pin_main }))
     }
 
     /// The installed operations (from the live commit); none without code.

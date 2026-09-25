@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
-use crate::fragment::FragmentCell;
+use crate::fragment::{FragmentCell, MetaKey};
 use crate::js;
 
 /// Set by the `Files` capability (entry.mjs); the router never sets or passes it.
@@ -112,7 +112,7 @@ impl FragmentCell {
                 return Err(CellError::invalid(format!("{:?} is not a file path (relative, no . or .. segments)", w.path)));
             }
         }
-        let repo = self.must("repo")?;
+        let repo = self.must(MetaKey::Repo)?;
         let cs = self.cs()?;
         let (author, email) = author(principal);
         for _ in 0..WRITE_ATTEMPTS {
@@ -180,11 +180,10 @@ impl FragmentCell {
         let too_large = |size: u64| {
             CellError::too_large(&format!("{path} ({size} bytes; serve larger files from the site)"), size as usize, limits::FILE_READ_MAX_BYTES)
         };
-        let size = row["size"].as_u64().unwrap_or(0);
-        if size as usize > limits::FILE_READ_MAX_BYTES {
-            return Err(too_large(size));
+        if row.size > limits::FILE_READ_MAX_BYTES as u64 {
+            return Err(too_large(row.size));
         }
-        let bytes = self.cs()?.read(&self.must("repo")?, &pin, path, limits::FILE_READ_MAX_BYTES).await?;
+        let bytes = self.cs()?.read(&self.must(MetaKey::Repo)?, &pin, path, limits::FILE_READ_MAX_BYTES).await?;
         match bytes {
             Some(b) => match blob::parse(&b) {
                 Some(p) => Err(too_large(p.size)),
@@ -200,10 +199,10 @@ impl FragmentCell {
         Ok(self
             .tree_rows("main")?
             .into_iter()
-            .filter(|r| r["path"].as_str().is_some_and(|p| p.starts_with(prefix)))
-            .map(|r| match r["path"].as_str().and_then(|p| blobs.get(p)) {
-                Some(size) => json!({ "path": r["path"], "size": size, "blob": true }),
-                None => json!({ "path": r["path"], "size": r["size"] }),
+            .filter(|r| r.path.starts_with(prefix))
+            .map(|r| match blobs.get(&r.path) {
+                Some(size) => json!({ "path": r.path, "size": size, "blob": true }),
+                None => json!({ "path": r.path, "size": r.size }),
             })
             .collect())
     }
@@ -212,7 +211,7 @@ impl FragmentCell {
     /// blob, what a compare-and-swap names); `None` when absent.
     pub(crate) async fn stat_main(&self, path: &str) -> CellResult<Option<Value>> {
         let (Some(pin), Some(_)) = (self.pin("main")?, self.tree_row("main", path)?) else { return Ok(None) };
-        let head = self.cs()?.head(&self.must("repo")?, &pin, path).await?;
+        let head = self.cs()?.head(&self.must(MetaKey::Repo)?, &pin, path).await?;
         Ok(head.map(|h| json!({ "path": path, "size": h.size, "sha": h.blob_sha, "commit": h.last_commit_sha })))
     }
 

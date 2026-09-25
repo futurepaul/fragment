@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
-use crate::fragment::{json_response, Caller, FragmentCell};
+use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 use crate::js;
 
 fn refusal(actor_is_owner: bool, why: &str) -> CellError {
@@ -67,8 +67,8 @@ impl FragmentCell {
     /// Records an index change for `principal` (`None` removes them). Runs
     /// in the caller's turn, beside the membership write it mirrors.
     pub(crate) fn index_change(&self, principal: &str, role: Option<Role>) -> CellResult<()> {
-        let version: i64 = self.meta("index_version")?.and_then(|v| v.parse().ok()).unwrap_or(0) + 1;
-        self.set_meta("index_version", &version.to_string())?;
+        let version: i64 = self.meta(MetaKey::IndexVersion)?.and_then(|v| v.parse().ok()).unwrap_or(0) + 1;
+        self.set_meta(MetaKey::IndexVersion, &version.to_string())?;
         let role = role.map_or(SqlStorageValue::Null, |r| r.as_str().into());
         self.exec(
             "INSERT INTO index_outbox (principal, role, version, attempts, next_at) VALUES (?, ?, ?, 0, ?)
@@ -80,7 +80,7 @@ impl FragmentCell {
     /// Delivers due index changes to the people's `Principal` cells. A
     /// failure stays in the outbox with a backoff; the alarm retries it.
     pub(crate) async fn flush_index(&self) {
-        let (Ok(name), Ok(Some(incarnation))) = (self.must("name"), self.meta("created_at")) else { return };
+        let (Ok(name), Ok(Some(incarnation))) = (self.must(MetaKey::Name), self.meta(MetaKey::CreatedAt)) else { return };
         let due = self
             .rows(
                 "SELECT principal, role, version, attempts FROM index_outbox WHERE next_at <= ?",
@@ -359,7 +359,7 @@ impl FragmentCell {
     pub(crate) fn set_visibility(&self, caller: &Caller, body: SetVisibility) -> CellResult<Response> {
         self.require_owner(caller)?;
         let before = self.visibility()?;
-        self.set_meta("visibility", body.visibility.as_str())?;
+        self.set_meta(MetaKey::Visibility, body.visibility.as_str())?;
         if body.visibility != Visibility::Public {
             self.close_sockets("anon", "the fragment is no longer public");
         }
@@ -387,7 +387,7 @@ impl FragmentCell {
         if let Some(bad) = want.iter().find(|s| !all.contains(&s.as_str())) {
             return Err(CellError::invalid(format!("unknown scope {bad:?} (inbox, view, webhook)")));
         }
-        for (scope, key, fresh) in [("inbox", "inbox_token", js::random_hex::<16>()), ("view", "view_token", js::random_hex::<12>()), ("webhook", "webhook_secret", js::random_hex::<16>())] {
+        for (scope, key, fresh) in [("inbox", MetaKey::InboxToken, js::random_hex::<16>()), ("view", MetaKey::ViewToken, js::random_hex::<12>()), ("webhook", MetaKey::WebhookSecret, js::random_hex::<16>())] {
             if want.iter().any(|w| w == scope) {
                 self.set_meta(key, &fresh)?;
             }
@@ -398,9 +398,9 @@ impl FragmentCell {
         let rotated: Vec<&str> = all.into_iter().filter(|s| want.iter().any(|w| w == s)).collect();
         self.event("tokens.rotated", &rotated.join("+"), json!({ "scopes": rotated }));
         json_response(&Rotated {
-            inbox_token: self.must("inbox_token")?,
-            view_token: self.must("view_token")?,
-            webhook_secret: self.must("webhook_secret")?,
+            inbox_token: self.must(MetaKey::InboxToken)?,
+            view_token: self.must(MetaKey::ViewToken)?,
+            webhook_secret: self.must(MetaKey::WebhookSecret)?,
             rotated: rotated.iter().map(|s| s.to_string()).collect(),
         })
     }
