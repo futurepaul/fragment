@@ -21,7 +21,7 @@
 //!   POST /api/a/{name}/turns          {text}: start a turn, or steer the running one
 //!   POST /api/a/{name}/stop           stop the running turn
 //!   GET  /api/a/{name}/tools          the tools its memberships give it now
-//!   POST /api/a/{name}/listen         {fragment, channel? ("chat"), reply? ("say")}: follow a channel
+//!   POST /api/a/{name}/listen         {fragment, channel? ("chat"), reply? ("say")}: follow a channel (once: again is the same listen)
 //!   PUT  /api/a/{name}/computer       {url, token, cwd? ("work")}: attach a computer (`fragment computer serve`)
 //!   DELETE /api/a/{name}/computer     detach it
 //!   POST /api/a/{name}/test           test controls (dev fleets: AGENT_TEST_HOOKS=allow)
@@ -299,6 +299,12 @@ async fn owners_key(fleet: &Fleet) -> anyhow::Result<String> {
     }
 }
 
+/// Told to the model on every turn, after the agent's instructions: those
+/// are stored when the agent is made, so a line added to
+/// `default_instructions` would never reach the agents made before it. The
+/// chat's reply operation is not among its tools (tools.rs `answer_ops`).
+const ANSWER_POSTED: &str = "Your answer to a chat message is posted to that chat for you.";
+
 fn default_instructions(name: &str) -> String {
     let name = name.split('.').next().unwrap_or(name);
     format!(
@@ -523,7 +529,7 @@ impl Agent {
         // the key is the owner's, asked for as the turn starts (below)
         let model = Model { base, key: String::new(), name: kv_get(&sql, "model")?.unwrap_or_else(|| DEFAULT_MODEL.into()) };
         let name = kv_get(&sql, "name")?.unwrap_or_default();
-        let instructions = kv_get(&sql, "instructions")?.unwrap_or_else(|| default_instructions(&name));
+        let instructions = format!("{}\n\n{ANSWER_POSTED}", kv_get(&sql, "instructions")?.unwrap_or_else(|| default_instructions(&name)));
         let token = CancellationToken::new();
         if kv_u64(&sql, "cancel")? == 1 {
             token.cancel();
@@ -625,24 +631,52 @@ impl Agent {
         Ok(json!({ "started": started }))
     }
 
+    /// Follows a channel, once: listening again to the same fragment's
+    /// channel (a retry, or a chat's alarm joining its owner's agent once
+    /// more) reuses its token, so its inbox URL is the same and the fragment
+    /// answers the one subscription it holds for that URL (or makes it
+    /// again, if it was dropped). A new listen's row is written before the
+    /// request, with no await between the read and the write, so a listen
+    /// racing it finds the token too.
     async fn listen(&self, body: ListenBody) -> Answer<Value> {
         let channel = body.channel.unwrap_or_else(|| "chat".into());
         let reply = body.reply.unwrap_or_else(|| "say".into());
         if !valid_fragment_name(&body.fragment) || !valid_channel_name(&channel) || !valid_op_name(&reply) {
             return Err(Fail::invalid("a fragment name, a channel name, and a reply operation name"));
         }
-        let sql = self.sql();
-        let listening: Vec<Value> = sql.exec("SELECT token FROM listens", None)?.to_array()?;
-        if listening.len() >= LISTENS_MAX {
-            return Err(Fail::new(ErrorCode::RateLimited, format!("an agent follows at most {LISTENS_MAX} channels")));
-        }
         let base = var(&self.env, "AGENT_URL").ok_or_else(|| Fail::host("AGENT_URL is not set on this fleet"))?;
+        let platform = self.fleet()?;
+        let sql = self.sql();
+        #[derive(Deserialize)]
+        struct Listening {
+            token: String,
+        }
+        let same: Vec<Listening> = sql
+            .exec("SELECT token FROM listens WHERE fragment = ? AND channel = ? ORDER BY created_at LIMIT 1", vec![body.fragment.as_str().into(), channel.as_str().into()])?
+            .to_array()?;
+        let token = match same.into_iter().next() {
+            Some(listening) => listening.token,
+            None => {
+                let listening: Vec<Value> = sql.exec("SELECT token FROM listens", None)?.to_array()?;
+                if listening.len() >= LISTENS_MAX {
+                    return Err(Fail::new(ErrorCode::RateLimited, format!("an agent follows at most {LISTENS_MAX} channels")));
+                }
+                let token = hex::encode(js::random_bytes::<16>());
+                // no subscription yet (0) until the fragment answers
+                sql.exec(
+                    "INSERT INTO listens (token, fragment, channel, reply, sub, created_at) VALUES (?, ?, ?, ?, 0, ?)",
+                    vec![token.as_str().into(), body.fragment.as_str().into(), channel.as_str().into(), reply.as_str().into(), (js::now_ms() as i64).into()],
+                )?;
+                token
+            }
+        };
         let name = kv_get(&sql, "name")?.unwrap_or_default();
-        let token = hex::encode(js::random_bytes::<16>());
         let url = format!("{}/api/a/{name}/inbox/{token}", base.trim_end_matches('/'));
         let path = format!("/api/f/{}/subscriptions", body.fragment);
-        let (status, answer) = self.fleet()?.call(Method::Post, &path, Some(&json!({ "channel": channel, "url": url }))).await?;
+        let (status, answer) = platform.call(Method::Post, &path, Some(&json!({ "channel": channel, "url": url }))).await?;
         if status != 200 {
+            // a listen that never subscribed leaves nothing behind
+            sql.exec("DELETE FROM listens WHERE token = ? AND sub = 0", vec![token.as_str().into()])?;
             let code = match status {
                 401 | 403 => ErrorCode::Forbidden,
                 404 => ErrorCode::NotFound,
@@ -651,8 +685,10 @@ impl Agent {
             return Err(Fail::new(code, format!("{} answered {status}: {}", body.fragment, fleet::message(&answer))));
         }
         let sub = answer["id"].as_i64().ok_or_else(|| Fail::host("the fragment named no subscription"))?;
+        // written again if a racing listen's refusal removed it meanwhile
         sql.exec(
-            "INSERT INTO listens (token, fragment, channel, reply, sub, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO listens (token, fragment, channel, reply, sub, created_at) VALUES (?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (token) DO UPDATE SET reply = excluded.reply, sub = excluded.sub",
             vec![token.as_str().into(), body.fragment.as_str().into(), channel.as_str().into(), reply.as_str().into(), sub.into(), (js::now_ms() as i64).into()],
         )?;
         Ok(json!({ "fragment": body.fragment, "channel": channel, "reply": reply, "subscription": sub }))
@@ -878,7 +914,7 @@ impl Agent {
                     (Method::Post, "stop") => self.stop(),
                     (Method::Post, "listen") => self.listen(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?).await,
                     (Method::Get, "tools") => {
-                        let mut names = tools::list(self.fleet()?).await?;
+                        let mut names = tools::list(self.fleet()?, &self.sql()).await?;
                         if let Some(attached) = self.computer().await? {
                             let manifest = attached.computer.check().await.map_err(unanswered)?;
                             names.extend(computer::tools_of(&manifest)?.iter().map(|t| t.name.to_string()));

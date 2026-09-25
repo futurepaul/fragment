@@ -2,7 +2,9 @@
 //! (MODEL.md, Agents). The catalog is read once per turn driver: the
 //! fragments that list the agent's key as a member (`GET /api/fragments`)
 //! and each one's operations (`status.code.operations`, whose input schemas
-//! are the tool schemas), filtered to those its role there may call. A call
+//! are the tool schemas), filtered to those its role there may call, less
+//! the reply operation of each channel it follows (the platform posts its
+//! answers there: `answer_ops`). A call
 //! is the operation itself, signed by the agent, with an id made from the
 //! model's tool-call id: a replayed step replays the operation, and the
 //! fragment's ledger answers it without running it again.
@@ -13,7 +15,7 @@
 //! app. A file write's key comes from the tool-call id, so a replayed step
 //! commits nothing twice.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -161,7 +163,9 @@ impl FragmentTools {
         FragmentTools { fleet, sql, driver, catalog: Mutex::new(None) }
     }
 
-    async fn read_catalog(fleet: Fleet) -> anyhow::Result<Catalog> {
+    /// `answering`: the (fragment, operation) pairs the agent's answers go
+    /// through (`answer_ops`), left out.
+    async fn read_catalog(fleet: Fleet, answering: HashSet<(String, String)>) -> anyhow::Result<Catalog> {
         let listed: FragmentList = fleet.get_as("/api/fragments").await?;
         let mut tools = Vec::new();
         let mut routes = HashMap::new();
@@ -191,7 +195,7 @@ impl FragmentTools {
                 }
             };
             for (op, decl) in status.code.operations {
-                if decl.role > f.role || tools.len() >= TOOLS_MAX {
+                if decl.role > f.role || tools.len() >= TOOLS_MAX || answering.contains(&(name.to_string(), op.clone())) {
                     continue;
                 }
                 let Some(tool) = tool_name(name, &op) else { continue };
@@ -209,15 +213,30 @@ impl FragmentTools {
             return Ok(c);
         }
         let fleet = self.fleet.clone();
-        let catalog = Arc::new(SendFuture::new(async move { FragmentTools::read_catalog(fleet).await }).await?);
+        let answering = answer_ops(&self.sql)?;
+        let catalog = Arc::new(SendFuture::new(async move { FragmentTools::read_catalog(fleet, answering).await }).await?);
         *self.catalog.lock().expect("catalog lock") = Some(catalog.clone());
         Ok(catalog)
     }
 }
 
+/// The operations the agent's answers go through: each followed channel's
+/// reply operation (`listens`). The platform posts a turn's answer there
+/// (lib.rs `reply`), so none is the model's tool: with it, the model said
+/// its answer through the tool, and the platform said it again.
+fn answer_ops(sql: &SqlStorage) -> anyhow::Result<HashSet<(String, String)>> {
+    #[derive(Deserialize)]
+    struct Row {
+        fragment: String,
+        reply: String,
+    }
+    let rows: Vec<Row> = sql.exec("SELECT fragment, reply FROM listens", None).and_then(|c| c.to_array()).map_err(|e| anyhow!("{e}"))?;
+    Ok(rows.into_iter().map(|r| (r.fragment, r.reply)).collect())
+}
+
 /// The tools an agent has now (for its owner's view).
-pub async fn list(fleet: Fleet) -> anyhow::Result<Vec<String>> {
-    let catalog = FragmentTools::read_catalog(fleet).await?;
+pub async fn list(fleet: Fleet, sql: &SqlStorage) -> anyhow::Result<Vec<String>> {
+    let catalog = FragmentTools::read_catalog(fleet, answer_ops(sql)?).await?;
     Ok(catalog.tools.iter().map(|t| t.name.to_string()).collect())
 }
 
