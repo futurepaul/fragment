@@ -29,6 +29,7 @@ use fragment_core::{npub, registry};
 use fragment_proto::{limits, ErrorCode, Identity, IdentityKind, IdentityView, KeyView};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde_json::{json, Value};
 use worker::*;
 
 use crate::config::Config;
@@ -53,7 +54,7 @@ mod signin;
 use calls::{
     Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, ClaimUsername, Claimed, EndSession, Exchange, FindUsername, Holder, Logout, Lookup, Mint,
     Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername, Resolve, RevokeKey, Session, SetPicture,
-    TestAnswer, TestHook, View, TEST_HOLD_MAX_MS,
+    TestHook, View, TEST_HOLD_MAX_MS,
 };
 pub use signin::SESSION_TTL_MS;
 
@@ -591,22 +592,21 @@ impl RegistryCell {
         Ok(Active { active })
     }
 
-    async fn test_hook(&self, hook: TestHook) -> CellResult<TestAnswer> {
-        assert!(self.cfg.test_hooks, "the hooks answer only on fleets with test hooks");
+    async fn test_hook(&self, hook: TestHook) -> CellResult<Value> {
         match hook {
             TestHook::Down(down) => {
                 self.down.set(down);
-                Ok(TestAnswer::Down { down })
+                Ok(json!({ "down": down }))
             }
-            TestHook::Calls => Ok(TestAnswer::Calls { calls: self.calls.get() }),
+            TestHook::Calls => Ok(json!({ "calls": self.calls.get() })),
             TestHook::Hold(ms) => {
                 if ms > TEST_HOLD_MAX_MS {
                     return Err(CellError::invalid(format!("hold at most {TEST_HOLD_MAX_MS} ms")));
                 }
                 self.hold_ms.set(ms);
-                Ok(TestAnswer::Hold { hold: ms })
+                Ok(json!({ "hold": ms }))
             }
-            TestHook::Signins(hook) => Ok(TestAnswer::Signins(self.signins_hook(hook).await?)),
+            TestHook::Signins(hook) => Ok(json!(self.signins_hook(hook).await?)),
         }
     }
 
