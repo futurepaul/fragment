@@ -6,12 +6,12 @@
 //! and `job.push(who, payload)` in a job send to that tag's subscriptions
 //! (`*`: all): the push is written to the delivery outbox as it is
 //! accepted, and as the outbox drains, each payload is encrypted for its
-//! browser and signed with the fragment's VAPID key here, then queued
-//! (`deliveries.rs`).
+//! browser here and carries a token signed with the fragment's VAPID key
+//! (one per push service a push reaches), then is queued (`deliveries.rs`).
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use fragment_core::webpush::{self, Subscription, Vapid};
+use fragment_core::webpush::{self, Subscription, Tokens, Vapid};
 use fragment_core::egress;
 use fragment_proto::{limits, ErrorCode};
 use serde_json::{json, Value};
@@ -128,10 +128,10 @@ impl FragmentCell {
     }
 
     /// The deliveries of one push to `subs` (rows of `push_subs`), each
-    /// encrypted for its browser and signed with the fragment's VAPID key.
-    /// A subscription that no longer checks out is skipped, not fatal.
-    pub(crate) fn push_deliveries(&self, vapid: &Vapid, subs: &[Value], payload: &str, fragment: &str, incarnation: &str) -> Vec<Delivery> {
-        let now_s = js::now_ms() / 1000;
+    /// encrypted for its browser and carrying the push's token for its push
+    /// service (`tokens`, one push's). A subscription that no longer checks
+    /// out is skipped, not fatal.
+    pub(crate) fn push_deliveries(&self, tokens: &mut Tokens, subs: &[Value], payload: &str, fragment: &str, incarnation: &str) -> Vec<Delivery> {
         let mut deliveries = Vec::with_capacity(subs.len());
         for s in subs {
             let sub = Subscription {
@@ -139,7 +139,7 @@ impl FragmentCell {
                 p256dh: s["p256dh"].as_str().unwrap_or(""),
                 auth: s["auth"].as_str().unwrap_or(""),
             };
-            let Ok(auth) = vapid.authorization(sub.endpoint, &self.cfg.push_subject, now_s) else { continue };
+            let Ok(auth) = tokens.authorization(sub.endpoint).map(str::to_string) else { continue };
             let ephemeral = webpush::Ephemeral::draw(js::random_bytes);
             let Ok(body) = webpush::encrypt(&sub, payload.as_bytes(), &ephemeral, js::random_bytes()) else { continue };
             deliveries.push(Delivery {

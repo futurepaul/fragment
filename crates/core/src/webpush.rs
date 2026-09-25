@@ -6,6 +6,8 @@
 //! from that randomness once, and checked as it is drawn: encryption takes
 //! a key already known to be in range.
 
+use std::collections::BTreeMap;
+
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes128Gcm, Nonce};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
@@ -163,15 +165,50 @@ impl Vapid {
         B64URL.encode(self.0.verifying_key().to_encoded_point(false).as_bytes())
     }
 
-    /// `Authorization` for a push to `endpoint`: `vapid t=<jwt>, k=<key>`.
-    pub fn authorization(&self, endpoint: &str, subject: &str, now_s: i64) -> Result<String, String> {
-        let url = url::Url::parse(endpoint).map_err(|e| format!("endpoint: {e}"))?;
-        let audience = url.origin().ascii_serialization();
+    /// `Authorization` for every push to one push service (`audience`,
+    /// its origin): `vapid t=<jwt>, k=<key>`.
+    fn authorization(&self, audience: &str, subject: &str, now_s: i64) -> String {
         let header = B64URL.encode(br#"{"typ":"JWT","alg":"ES256"}"#);
-        let claims = B64URL.encode(serde_json::json!({ "aud": audience, "exp": now_s + 12 * 3600, "sub": subject }).to_string());
+        let claims = B64URL.encode(serde_json::json!({ "aud": audience, "exp": now_s + TOKEN_TTL_S, "sub": subject }).to_string());
         let signing_input = format!("{header}.{claims}");
         let signature: Signature = self.0.sign(signing_input.as_bytes());
-        Ok(format!("vapid t={signing_input}.{}, k={}", B64URL.encode(signature.to_bytes()), self.public_key()))
+        format!("vapid t={signing_input}.{}, k={}", B64URL.encode(signature.to_bytes()), self.public_key())
+    }
+}
+
+/// How long a VAPID token is good for (RFC 8292 allows at most 24 hours).
+const TOKEN_TTL_S: i64 = 12 * 3600;
+
+/// The VAPID tokens of one push, one per push service: a token names only
+/// the service's origin (its audience), never the subscription, so a push
+/// to thousands of browsers on three services signs three times. Made for
+/// one push and dropped with it, so it is not a cache: its tokens were all
+/// signed at `now_s`, and each is good for `TOKEN_TTL_S`, far longer than
+/// one push takes to queue.
+pub struct Tokens<'a> {
+    vapid: &'a Vapid,
+    subject: &'a str,
+    now_s: i64,
+    by_audience: BTreeMap<String, String>,
+}
+
+impl<'a> Tokens<'a> {
+    pub fn new(vapid: &'a Vapid, subject: &'a str, now_s: i64) -> Tokens<'a> {
+        Tokens { vapid, subject, now_s, by_audience: BTreeMap::new() }
+    }
+
+    /// `Authorization` for a push to `endpoint`: signed the first time its
+    /// push service comes up, the same token after that.
+    pub fn authorization(&mut self, endpoint: &str) -> Result<&str, String> {
+        let url = url::Url::parse(endpoint).map_err(|e| format!("endpoint: {e}"))?;
+        let (vapid, subject, now_s) = (self.vapid, self.subject, self.now_s);
+        let token = self.by_audience.entry(url.origin().ascii_serialization()).or_insert_with_key(|audience| vapid.authorization(audience, subject, now_s));
+        Ok(token.as_str())
+    }
+
+    /// Tokens signed so far: one per push service.
+    pub fn signed(&self) -> usize {
+        self.by_audience.len()
     }
 }
 
@@ -237,19 +274,47 @@ mod tests {
         });
     }
 
-    #[test]
-    fn vapid_tokens_verify() {
-        let vapid = Vapid::from_bytes([11u8; 32]).unwrap();
-        let auth = vapid.authorization("https://fcm.googleapis.com/fcm/send/xyz", "mailto:ops@fragment.invalid", 1_790_000_000).unwrap();
+    /// A token's claims, once its signature verifies under `vapid`'s key.
+    fn verified_claims(vapid: &Vapid, auth: &str) -> serde_json::Value {
         let (t, k) = auth.strip_prefix("vapid t=").unwrap().split_once(", k=").unwrap();
         assert_eq!(k, vapid.public_key());
         let (signing_input, sig) = t.rsplit_once('.').unwrap();
-        let claims: serde_json::Value = serde_json::from_slice(&B64URL.decode(signing_input.split('.').nth(1).unwrap()).unwrap()).unwrap();
-        assert_eq!(claims["aud"], "https://fcm.googleapis.com");
-        assert_eq!(claims["exp"], 1_790_000_000 + 12 * 3600);
         let key = VerifyingKey::from_sec1_bytes(&B64URL.decode(k).unwrap()).unwrap();
         let sig = Signature::from_slice(&B64URL.decode(sig).unwrap()).unwrap();
         assert!(key.verify(signing_input.as_bytes(), &sig).is_ok());
+        serde_json::from_slice(&B64URL.decode(signing_input.split('.').nth(1).unwrap()).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn vapid_tokens_verify() {
+        let vapid = Vapid::from_bytes([11u8; 32]).unwrap();
+        let mut tokens = Tokens::new(&vapid, "mailto:ops@fragment.invalid", 1_790_000_000);
+        let claims = verified_claims(&vapid, tokens.authorization("https://fcm.googleapis.com/fcm/send/xyz").unwrap());
+        assert_eq!(claims["aud"], "https://fcm.googleapis.com");
+        assert_eq!(claims["exp"], 1_790_000_000 + 12 * 3600);
+        assert_eq!(claims["sub"], "mailto:ops@fragment.invalid");
+        assert!(tokens.authorization("not a url").is_err());
         assert_eq!(Vapid::from_bytes(vapid.to_bytes()).unwrap().public_key(), vapid.public_key());
+    }
+
+    /// Five subscriptions on three push services (the same host on another
+    /// port is another origin): three signatures, and each subscription's
+    /// token names its own service.
+    #[test]
+    fn one_push_signs_once_per_push_service() {
+        let vapid = Vapid::from_bytes([11u8; 32]).unwrap();
+        let mut tokens = Tokens::new(&vapid, "mailto:ops@fragment.invalid", 1_790_000_000);
+        let endpoints = [
+            ("https://fcm.googleapis.com/fcm/send/a", "https://fcm.googleapis.com"),
+            ("https://updates.push.services.mozilla.com/wpush/v2/b", "https://updates.push.services.mozilla.com"),
+            ("https://fcm.googleapis.com/fcm/send/c", "https://fcm.googleapis.com"),
+            ("https://fcm.googleapis.com:8443/fcm/send/d", "https://fcm.googleapis.com:8443"),
+            ("https://updates.push.services.mozilla.com/wpush/v2/e", "https://updates.push.services.mozilla.com"),
+        ];
+        for (endpoint, audience) in endpoints {
+            let auth = tokens.authorization(endpoint).unwrap().to_string();
+            assert_eq!(verified_claims(&vapid, &auth)["aud"], audience, "{endpoint}");
+        }
+        assert_eq!(tokens.signed(), 3, "one signature per push service, not per subscription");
     }
 }
