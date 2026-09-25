@@ -64,6 +64,7 @@ mod subscriptions;
 
 use fragment_core::body::{LimitedBody, TooLarge};
 use fragment_core::npub;
+use fragment_nip98::Payload;
 use fragment_proto::{limits, valid_fragment_name, CreateFragment, ErrorBody, ErrorCode, IdentityKind, Register};
 use futures_util::TryStreamExt;
 use serde::Deserialize;
@@ -126,10 +127,10 @@ pub(crate) async fn read_body(req: &mut Request, max: usize) -> CellResult<Vec<u
 }
 
 /// The key that signed the request (NIP-98), not yet resolved.
-fn authenticate(req: &Request, url: &Url, body: &[u8]) -> CellResult<String> {
+fn authenticate(req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<String> {
     let header = req.headers().get("authorization")?;
     let now_s = js::now_ms() / 1000;
-    fragment_nip98::verify_request(header.as_deref(), req.method().as_ref(), url, body, now_s, limits::AUTH_WINDOW_S)
+    fragment_nip98::verify_request(header.as_deref(), req.method().as_ref(), url, payload, now_s, limits::AUTH_WINDOW_S)
         .map_err(|e| CellError::new(ErrorCode::Unauthenticated, e.to_string()))
 }
 
@@ -180,9 +181,16 @@ pub(crate) async fn ask_registry<C: Call>(env: &Env, call: &C) -> CellResult<C::
     }
 }
 
-/// The signer of a request that must be signed, resolved.
+/// The signer of a request that must be signed, resolved, with the body
+/// the router read.
 pub(crate) async fn signer(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Signed> {
-    let key = authenticate(req, url, body)?;
+    signer_of(env, req, url, Payload::Read(body)).await
+}
+
+/// `signer` for any payload: a body the router read, or one it streams
+/// through unread (a blob, whose URL names its hash).
+async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<Signed> {
+    let key = authenticate(req, url, payload)?;
     let identity = ask_registry(env, &calls::Resolve { key: key.clone() }).await?;
     Ok(Signed { identity, key: Some(key) })
 }
@@ -625,7 +633,8 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
         }
         // A blob's bytes stream through: the router never holds them. The
         // signature covers the URL, which names the bytes' hash; the
-        // fragment checks the hash as they arrive.
+        // fragment checks the hash as they arrive. A payload tag may name
+        // that hash too (older CLIs sign one), or be absent.
         (Method::Put, ["api", "f", name, "blobs", sha]) => {
             let declared: Option<u64> = req.headers().get("content-length")?.and_then(|l| l.parse().ok());
             match declared {
@@ -633,7 +642,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
                 Some(n) if n > limits::BLOB_MAX_BYTES => return Err(CellError::too_large("a blob", n as usize, limits::BLOB_MAX_BYTES as usize)),
                 Some(_) => {}
             }
-            let principal = signer(env, &req, &url, &[]).await?;
+            let principal = signer_of(env, &req, &url, Payload::Streamed { sha256_hex: sha }).await?;
             let name = named_fragment(name, Some(&principal))?;
             let body = req.inner().body().map(worker::wasm_bindgen::JsValue::from);
             let routed = Routed { name, url: url.clone(), mode: None, signed: Some(principal) };

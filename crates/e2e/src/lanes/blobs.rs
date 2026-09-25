@@ -93,18 +93,28 @@ pub fn blobs(s: &mut Suite, api: &Api) -> Result<()> {
     let wrong = bytes_of(1024, 9);
     let claimed = sha256_hex(b"something else");
     // an upload is signed over its URL, which names the bytes' hash: the
-    // router never holds the bytes, so a payload tag has nothing to bind
-    let put = |keys: Option<&Keys>, sha: &str, body: Vec<u8>| {
+    // router never holds the bytes, so a payload tag may name that hash
+    // (older CLIs sign one) or be absent (`payload`: the tag, if any)
+    let put_tagged = |keys: Option<&Keys>, sha: &str, payload: Option<&str>, body: Vec<u8>| {
         let url = format!("{}{}", api.base, blob_path(sha));
-        let auth: Vec<(&str, String)> = keys.map(|k| ("authorization", k.header("PUT", &url, b"", now_s()))).into_iter().collect();
+        let auth: Vec<(&str, String)> = keys.map(|k| ("authorization", k.header_for_payload("PUT", &url, payload, now_s()))).into_iter().collect();
         api.call(Call { method: "PUT", url, body: Some(body), extra: auth, ..Call::default() })
     };
+    let put = |keys: Option<&Keys>, sha: &str, body: Vec<u8>| put_tagged(keys, sha, None, body);
     let r = put(Some(&keys), &claimed, wrong.clone())?;
     s.ok("bytes that are not what they claim are refused", r.status == 400 && r.message().contains("hash to"), &r);
     let r = api.signed(&keys, "HEAD", &blob_path(&claimed), None)?;
     s.ok("and not kept", r.status == 404, &r);
-    let r = api.call(Call { method: "PUT", url: format!("{}{}", api.base, blob_path(&sha256_hex(&wrong))), body: Some(wrong.clone()), keys: Some(&keys), ..Call::default() })?;
-    s.ok("an upload signed with a payload tag is 401 (there is no body at the router to bind)", r.status == 401, &r);
+    let tagged = bytes_of(1024, 7);
+    let r = put_tagged(Some(&keys), &sha256_hex(&tagged), Some(&sha256_hex(&tagged)), tagged.clone())?;
+    let stored = api.signed(&keys, "GET", &blob_path(&sha256_hex(&tagged)), None)?;
+    s.ok(
+        "an upload whose payload tag names the URL's hash is taken (as older CLIs sign it)",
+        r.status == 200 && stored.status == 200 && stored.bytes == tagged,
+        format!("{r} / {} ({} bytes)", stored.status, stored.bytes.len()),
+    );
+    let r = put_tagged(Some(&keys), &sha256_hex(&wrong), Some(&sha256_hex(b"other bytes")), wrong.clone())?;
+    s.ok("one whose payload tag names any other hash is 401", r.status == 401, &r);
     let r = put(None, &sha256_hex(&wrong), wrong.clone())?;
     s.ok("an unsigned upload is 401", r.status == 401, &r);
     let viewer = api.person()?;

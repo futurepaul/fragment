@@ -199,8 +199,8 @@ pub enum Signed {
     Body,
     /// The URL alone: a blob's bytes stream past the router, and its URL
     /// names their hash, which the fragment checks as they arrive. The
-    /// router holds no body to check a payload tag against, so one would
-    /// be refused.
+    /// router holds no body to hash, so a payload tag would add nothing
+    /// (the host takes one that names the URL's hash, as older CLIs sent).
     Url,
 }
 
