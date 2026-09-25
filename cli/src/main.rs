@@ -1,7 +1,6 @@
 mod api;
 mod auth;
 mod blobs;
-mod builder;
 mod codestorage;
 mod sync;
 mod watch;
@@ -162,12 +161,6 @@ enum Cmd {
     },
     /// List deploy history (commits of the `live` ref; newest is live)
     Drafts { name: String },
-    /// Compile a fragment folder: TypeScript sources -> runnable files,
-    /// hashed site assets, and a parse gate on everything served
-    Build {
-        /// The fragment folder (default: current directory)
-        dir: Option<String>,
-    },
     /// Roll `live` back to an earlier deploy (default: the one before live)
     Rollback {
         name: String,
@@ -1068,13 +1061,6 @@ fn run(cli: Cli) -> Result<()> {
             println!("roll back with: fragment rollback {name} --to <sha>");
         }
 
-        Cmd::Build { dir } => {
-            let dir = match dir {
-                Some(d) => std::path::PathBuf::from(d),
-                None => std::env::current_dir()?,
-            };
-            builder::run(&dir)?;
-        }
         Cmd::Init { name, template } => {
             let dir = std::env::current_dir()?.join(&name);
             if dir.exists() {
