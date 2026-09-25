@@ -117,14 +117,6 @@ fn sid_of(access_token: &str) -> Option<String> {
     serde_json::from_slice::<Claims>(&bytes).ok()?.sid
 }
 
-pub(super) struct Finish {
-    state: String,
-    issuer: String,
-    subject: String,
-    email: String,
-    workos_sid: Option<String>,
-}
-
 /// A live session's row, with whether its parent is live, its identity
 /// with its username, and their first sign-in's email, all in one
 /// statement (`live_session`).
@@ -386,28 +378,24 @@ impl RegistryCell {
             .filter(|a| !a.user.id.is_empty())
             .ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "WorkOS answered no user id"))?;
         self.sweep_by(js::now_ms() + SESSION_TTL_MS).await?;
-        self.finish(Finish {
-            state: b.state,
-            issuer: b.issuer,
-            subject: signed_in.user.id,
-            email: signed_in.user.email.unwrap_or_default(),
-            workos_sid: signed_in.access_token.as_deref().and_then(sid_of),
-        })
+        let email = signed_in.user.email.unwrap_or_default();
+        let sid = signed_in.access_token.as_deref().and_then(sid_of);
+        self.finish(&b.state, &b.issuer, &signed_in.user.id, &email, sid.as_deref())
     }
 
-    fn finish(&self, b: Finish) -> CellResult<Exchanged> {
-        if b.issuer.is_empty() || b.subject.is_empty() || b.email.len() > EMAIL_MAX {
+    fn finish(&self, state: &str, issuer: &str, subject: &str, email: &str, sid: Option<&str>) -> CellResult<Exchanged> {
+        if issuer.is_empty() || subject.is_empty() || email.len() > EMAIL_MAX {
             return Err(CellError::invalid("a sign-in names its issuer and subject"));
         }
         let login = self
             .row::<LoginRow>(
                 "DELETE FROM logins WHERE state = ? AND created_at > ? RETURNING return_to, link_to",
-                vec![sha(&b.state).into(), SqlStorageValue::Integer(js::now_ms() - LOGIN_TTL_MS)],
+                vec![sha(state).into(), SqlStorageValue::Integer(js::now_ms() - LOGIN_TTL_MS)],
             )?
             .ok_or_else(|| CellError::invalid("this sign-in expired or was used; start again"))?;
         let now = SqlStorageValue::Integer(js::now_ms());
         let known = self
-            .row::<HolderRow>("SELECT identity FROM subjects WHERE issuer = ? AND subject = ?", vec![b.issuer.as_str().into(), b.subject.as_str().into()])?
+            .row::<HolderRow>("SELECT identity FROM subjects WHERE issuer = ? AND subject = ?", vec![issuer.into(), subject.into()])?
             .map(|r| r.identity);
         let (id, created, linked) = match (login.link_to.as_deref(), known) {
             // linking: explicit, from a signed-in session, never by email
@@ -433,9 +421,9 @@ impl RegistryCell {
         self.exec(
             "INSERT INTO subjects (issuer, subject, identity, linked_at, email) VALUES (?, ?, ?, ?, ?)
              ON CONFLICT (issuer, subject) DO UPDATE SET email = excluded.email",
-            vec![b.issuer.as_str().into(), b.subject.as_str().into(), id.as_str().into(), now, b.email.as_str().into()],
+            vec![issuer.into(), subject.into(), id.as_str().into(), now, email.into()],
         )?;
-        let token = self.new_session(&id, None, None, b.workos_sid.as_deref(), js::now_ms() + SESSION_TTL_MS)?;
+        let token = self.new_session(&id, None, None, sid, js::now_ms() + SESSION_TTL_MS)?;
         Ok(Exchanged { token, id, created, linked, return_to: login.return_to })
     }
 
