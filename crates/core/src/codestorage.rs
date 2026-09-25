@@ -104,14 +104,6 @@ impl TokenCache {
         self.entries.insert(key, (token, expires_s));
         assert!(self.entries.len() <= self.max, "the cache is bounded");
     }
-
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
 }
 
 /// The API base when the fleet does not override it.
@@ -245,17 +237,6 @@ pub fn committed(v: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn repo_list_pages() {
-        use super::{listed_repo_url, next_repos_cursor};
-        let page = serde_json::json!({ "repos": [{ "repo_name": "a", "url": "u-a" }], "has_more": true, "next_cursor": "c2" });
-        assert_eq!(listed_repo_url(&page, "a").as_deref(), Some("u-a"));
-        assert_eq!(listed_repo_url(&page, "b"), None);
-        assert_eq!(next_repos_cursor(&page).as_deref(), Some("c2"));
-        assert_eq!(next_repos_cursor(&serde_json::json!({ "repos": [], "has_more": false, "next_cursor": "c3" })), None);
-        assert_eq!(next_repos_cursor(&serde_json::json!({ "repos": [], "has_more": true })), None);
-    }
-
     use super::*;
     use p256::ecdsa::signature::Verifier;
     use p256::ecdsa::VerifyingKey;
@@ -291,18 +272,18 @@ mod tests {
         assert_eq!(cache.get("r1", &["git:write"], 0, 60), None, "keyed by its scopes");
         cache.insert("r2", &["git:read"], "t2".into(), 500, 0);
         cache.insert("r3", &["git:read"], "t3".into(), 2_000, 0);
-        assert_eq!(cache.len(), 3);
+        assert_eq!(cache.entries.len(), 3);
         // full: the entry nearest its expiry goes
         cache.insert("r4", &["git:read"], "t4".into(), 3_000, 0);
-        assert_eq!(cache.len(), 3);
+        assert_eq!(cache.entries.len(), 3);
         assert_eq!(cache.get("r2", &["git:read"], 0, 60), None);
         assert_eq!(cache.get("r1", &["git:read"], 0, 60), Some("t1"));
         // replacing a present key evicts nothing
         cache.insert("r4", &["git:read"], "t4b".into(), 3_100, 0);
-        assert_eq!((cache.len(), cache.get("r4", &["git:read"], 0, 60)), (3, Some("t4b")));
+        assert_eq!((cache.entries.len(), cache.get("r4", &["git:read"], 0, 60)), (3, Some("t4b")));
         // an insert drops every expired entry first
         cache.insert("r5", &["git:read"], "t5".into(), 5_000, 2_500);
-        assert_eq!(cache.len(), 2, "r1 (1000) and r3 (2000) expired by 2500");
+        assert_eq!(cache.entries.len(), 2, "r1 (1000) and r3 (2000) expired by 2500");
         assert_eq!(cache.get("r4", &["git:read"], 2_500, 60), Some("t4b"));
     }
 
@@ -327,6 +308,10 @@ mod tests {
         assert_eq!(tree_page(&json!({"files": [], "has_more": false})).unwrap().1, None);
         assert!(tree_page(&json!({"files": [], "has_more": true})).is_err());
         assert!(tree_page(&json!({"files": [], "has_more": true, "next_cursor": ""})).is_err());
-        assert_eq!(listed_repo_url(&json!({"repos": [{"repo_name": "a", "url": "u-a"}, {"repo_name": "b", "url": "u-b"}]}), "b").as_deref(), Some("u-b"));
+        let repos = json!({"repos": [{"repo_name": "a", "url": "u-a"}, {"repo_name": "b", "url": "u-b"}], "has_more": true, "next_cursor": "c2"});
+        assert_eq!((listed_repo_url(&repos, "b").as_deref(), listed_repo_url(&repos, "c")), (Some("u-b"), None));
+        assert_eq!(next_repos_cursor(&repos).as_deref(), Some("c2"));
+        assert_eq!(next_repos_cursor(&json!({ "repos": [], "has_more": false, "next_cursor": "c3" })), None);
+        assert_eq!(next_repos_cursor(&json!({ "repos": [], "has_more": true })), None);
     }
 }

@@ -135,29 +135,11 @@ pub struct Mutated {
     pub run: Option<i64>,
 }
 
-/// An answer that carries an operation's result.
-pub trait WithResult {
-    fn result(&self) -> &RawValue;
-}
-
-impl WithResult for Queried {
-    fn result(&self) -> &RawValue {
-        &self.result
-    }
-}
-
-impl WithResult for Mutated {
-    fn result(&self) -> &RawValue {
-        &self.result
-    }
-}
-
 /// An operation's answer as the cell sends it: `fragment_proto::OpResult`'s
 /// shape, with the result spliced in as the JSON text the app answered.
 #[derive(Debug, Serialize)]
 pub struct Answered {
     pub result: Box<RawValue>,
-    /// True when this operation id already ran and the stored result is returned.
     pub replayed: bool,
 }
 
@@ -233,12 +215,13 @@ struct Refused {
 /// A query's or a mutation's answer, from its JSON text. A refusal is
 /// tried first: it fails at its first key otherwise, before reading on. A
 /// result is checked as JSON while it is read, never parsed into a tree,
-/// then for half characters.
-pub fn decode<T: DeserializeOwned + WithResult>(text: &str) -> Result<Answer<T>, String> {
+/// then for half characters (only its raw result can hold one: every
+/// other string in it was read as a string, which refuses them).
+pub fn decode<T: DeserializeOwned>(text: &str) -> Result<Answer<T>, String> {
     match serde_json::from_str::<Refused>(text) {
         Ok(r) => Ok(Answer::Refused(r.error)),
         Err(as_refusal) => match serde_json::from_str::<T>(text) {
-            Ok(ran) if has_lone_surrogate(ran.result().get()) => Err("its result holds half of a character (a lone surrogate)".to_string()),
+            Ok(_) if has_lone_surrogate(text) => Err("its result holds half of a character (a lone surrogate)".to_string()),
             Ok(ran) => Ok(Answer::Ran(ran)),
             Err(as_answer) => Err(format!("neither a refusal ({as_refusal}) nor an answer ({as_answer})")),
         },

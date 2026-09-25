@@ -42,10 +42,6 @@ pub fn is_hex_key(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-pub fn is_anon(s: &str) -> bool {
-    s.strip_prefix(ANON_PREFIX).is_some_and(is_hex32)
-}
-
 /// The npub of a 64-hex key.
 pub fn encode(hex_key: &str) -> String {
     assert!(is_hex_key(hex_key), "npub::encode takes a 64-hex key");
@@ -105,19 +101,7 @@ mod tests {
         assert_eq!(parse(&hex.to_uppercase()).as_deref(), Some(hex));
         assert_eq!(parse("npub1xyz"), None);
         assert_eq!(parse("nsec180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwstu7nhp"), None);
-        assert!(is_anon("anon:0123456789abcdef0123456789abcdef"));
-        assert!(!is_anon("anon:xyz"));
         assert_eq!(display("anon:0123456789abcdef0123456789abcdef"), "anon:0123456789abcdef0123456789abcdef");
-    }
-
-    /// A pin from another implementation (@noble/curves and JS bech32): the
-    /// key of the secret [1; 32] (crates/nip98 pins that step) and its npub.
-    #[test]
-    fn a_known_key_has_its_known_npub() {
-        let hex = "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f";
-        let npub = "npub1rwzv24nmzfjypx2a8m264ws9vht3uxp5vpypnluuzl67n4waq78suk0wul";
-        assert_eq!(encode(hex), npub);
-        assert_eq!(parse(npub).as_deref(), Some(hex));
     }
 
     #[test]

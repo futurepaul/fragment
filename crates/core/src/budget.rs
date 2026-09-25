@@ -42,17 +42,9 @@ pub fn dollars(m: i64) -> String {
     }
 }
 
-/// The UTC month a time falls in, `YYYY-MM` (Howard Hinnant's civil date).
+/// The UTC month a time falls in, `YYYY-MM`.
 pub fn period_of(ms: i64) -> String {
-    let days = ms.div_euclid(86_400_000);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + if month <= 2 { 1 } else { 0 };
+    let (year, month, _) = crate::cron::civil(ms.div_euclid(86_400_000));
     format!("{year:04}-{month:02}")
 }
 
