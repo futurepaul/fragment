@@ -490,16 +490,24 @@ impl FragmentCell {
     }
 
     /// Pins read before either branch has been announced (a fragment
-    /// whose first push predates its webhook) are fetched on first use;
-    /// `facts` follows what moved.
+    /// whose first push predates its webhook) are fetched on the first
+    /// request, once: after that, a branch that is still absent is left to
+    /// the webhook, `refresh`, and the poll backstop, so a fragment with
+    /// nothing deployed (or with data only) asks code.storage nothing, and
+    /// takes no plane lock, per request. A check that fails is not
+    /// recorded, so the next request asks again. `facts` follows what moved.
     pub(crate) async fn ensure_pins(&self, facts: &mut Facts) -> CellResult<()> {
-        let missing: Vec<&str> = REFS.into_iter().filter(|w| facts.pin(w).is_none()).collect();
-        if missing.is_empty() {
+        if facts.pins_checked {
             return Ok(());
         }
-        for (which, moved) in self.interpret(&missing).await? {
-            facts.set_pin(&which, moved.to);
+        let missing: Vec<&str> = REFS.into_iter().filter(|w| facts.pin(w).is_none()).collect();
+        if !missing.is_empty() {
+            for (which, moved) in self.interpret(&missing).await? {
+                facts.set_pin(&which, moved.to);
+            }
         }
+        self.set_meta(MetaKey::PinsCheckedAt, &js::now_ms().to_string())?;
+        facts.pins_checked = true;
         Ok(())
     }
 

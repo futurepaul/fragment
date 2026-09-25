@@ -232,7 +232,7 @@ deleted in batches on the registry's alarm, never on a request.
 | `GET /api/f/{name}/secrets` | editor | → `{names}`; values never leave |
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |
 | `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt}`: ES256, this repo, `git:read`+`git:write`, 15 minutes |
-| `POST /api/f/{name}/refresh` | editor | → `{ok, refs: {main: {pin, moved} \| {absent}, live: ...}}` |
+| `POST /api/f/{name}/refresh` | editor | → `{ok, refs: {main: {pin, moved} \| {absent}, live: ...}}`. A fragment reads the branches it has no pin for once, on its first request (a push may predate its webhook); after that a move arrives by the webhook, this, or the poll backstop, and a site with nothing deployed answers 404 without asking code.storage |
 | `POST /api/f/{name}/files` | editor | `{files: [{path, text \| base64} \| {path, delete: true}], message?, key?}` → `{commit}`: one commit to main, as a sync makes (at most 16 files and 256 KiB; paths relative, no `.` or `..`). The same `key` from the same person answers the first commit again. Main's pin moves at once; live does not |
 | `POST /api/f/{name}/deploy` | editor | `{note?}` → `{live, canonical}`: live to main's tip, as `fragment deploy` does (a first deploy makes the branch; after a rollback, a merge commit), guarded against a live that moved meanwhile; the app installs from it at once |
 | `POST /api/f/{name}/webhook` | code.storage | signed with the fragment's webhook secret (`X-Pierre-Signature`, 5 minutes); validate, remember (redeliveries are acknowledged), then move the pin to the branch's head as read now |

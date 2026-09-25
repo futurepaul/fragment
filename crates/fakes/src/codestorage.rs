@@ -134,6 +134,10 @@ struct State {
     /// File reads answer 503 while set (an outage).
     #[serde(skip)]
     reads_failing: bool,
+    /// Requests per (repo url, `"<method> <route>"`), so a check can count
+    /// the round trips a cell makes (`requests`).
+    #[serde(skip)]
+    requests: BTreeMap<(String, String), u32>,
 }
 
 struct Inner {
@@ -485,6 +489,7 @@ impl Inner {
         if !st.repos.contains_key(url) {
             return problem(404, "repository not found");
         }
+        *st.requests.entry((url.to_string(), format!("{m} {op}"))).or_default() += 1;
         let scope = if m == "POST" { "git:write" } else { "git:read" };
         if let Err(r) = self.authorize(req, scope, Some(url)) {
             return r;
@@ -947,6 +952,16 @@ impl CodeStorage {
 
     pub fn commit_pack_count(&self) -> u32 {
         self.with(|st| st.commit_packs)
+    }
+
+    /// Requests to `repo` (a name or url) on one route, as `"<method>
+    /// <route>"` (`"GET branch"`, `"GET file"`, `"GET files/metadata"`):
+    /// every one that named an existing repo, answered or not.
+    pub fn requests(&self, repo: &str, route: &str) -> u32 {
+        self.with(|st| {
+            let Some(url) = st.url_of(repo) else { return 0 };
+            st.requests.get(&(url, route.to_string())).copied().unwrap_or(0)
+        })
     }
 
     /// Host `refresh` nudges received (with `host_routes`).
