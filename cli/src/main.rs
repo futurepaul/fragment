@@ -16,6 +16,7 @@ use crate::codestorage::{Author, CodeStorage, CsError, LIVE, MAIN, MAX_CAS_ATTEM
 use crate::sync::{Mode, SyncOptions};
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
+use fragment_core::budget::dollars;
 use fragment_proto::limits::AGENT_STATE_WAIT_MS_MAX;
 use fragment_proto::{
     AgentState, BudgetView, ChannelPage, Created, FragmentList, FragmentStatus, IdentityView, Invite, InviteList, Member, MemberList, OpResult, Posted,
@@ -409,12 +410,6 @@ enum BudgetCmd {
     },
     /// Add dollars to someone's month (the fleet's operators)
     TopUp { who: String, usd: f64 },
-}
-
-/// Micro-dollars for people.
-fn usd(m: i64) -> String {
-    let d = m as f64 / 1_000_000.0;
-    if m % 10_000 == 0 { format!("${d:.2}") } else { format!("${d:.4}") }
 }
 
 #[derive(Subcommand)]
@@ -1174,16 +1169,16 @@ fn run(cli: Cli) -> Result<()> {
                 println!(
                     "{}: {} of {} left ({} spent{})",
                     v.period,
-                    usd(v.remaining_micros.max(0)),
-                    usd(v.allowance_micros),
-                    usd(v.spent_micros),
-                    if v.reserved_micros > 0 { format!(", {} held by steps running now", usd(v.reserved_micros)) } else { String::new() }
+                    dollars(v.remaining_micros.max(0)),
+                    dollars(v.allowance_micros),
+                    dollars(v.spent_micros),
+                    if v.reserved_micros > 0 { format!(", {} held by steps running now", dollars(v.reserved_micros)) } else { String::new() }
                 );
                 if v.warn {
                     println!("most of this month's budget is used: paid steps stop when it runs out");
                 }
                 for u in v.usage.iter().take(10) {
-                    println!("  {}\t{}\t{}\t{}", usd(u.quantity), u.kind, u.fragment, u.state.as_str());
+                    println!("  {}\t{}\t{}\t{}", dollars(u.quantity), u.kind, u.fragment, u.state.as_str());
                 }
             }
             Some(BudgetCmd::Usage { period }) => {
@@ -1194,15 +1189,13 @@ fn run(cli: Cli) -> Result<()> {
                 let v: BudgetView = c.call_as(c.get(&path)?)?;
                 json_exit(j, &v);
                 for u in &v.usage {
-                    println!("{}\t{}\t{}\t{}\t{}", usd(u.quantity), u.state.as_str(), u.kind, u.model.as_deref().unwrap_or(""), u.source_ref);
+                    println!("{}\t{}\t{}\t{}\t{}", dollars(u.quantity), u.state.as_str(), u.kind, u.model.as_deref().unwrap_or(""), u.source_ref);
                 }
             }
-            Some(BudgetCmd::TopUp { who, usd: dollars }) => {
-                let v: BudgetView = c.call_as(c.post_json(&format!("/api/budget/{who}/top-up"), &json!({ "usd": dollars }))?)?;
-                if j {
-                    ok_exit(&v);
-                }
-                println!("{who}: {} of {} left in {}", usd(v.remaining_micros), usd(v.allowance_micros), v.period);
+            Some(BudgetCmd::TopUp { who, usd }) => {
+                let v: BudgetView = c.call_as(c.post_json(&format!("/api/budget/{who}/top-up"), &json!({ "usd": usd }))?)?;
+                json_exit(j, &v);
+                println!("{who}: {} of {} left in {}", dollars(v.remaining_micros), dollars(v.allowance_micros), v.period);
             }
         },
         Cmd::Triggers { name } => {
@@ -1230,7 +1223,7 @@ fn run(cli: Cli) -> Result<()> {
             let v: RunList = c.call_as(c.get(&path)?)?;
             json_exit(j, &v);
             for r in &v.runs {
-                let cost = r.cost_micros.map(usd).unwrap_or_default();
+                let cost = r.cost_micros.map(dollars).unwrap_or_default();
                 println!("#{}\t{}\t{}\t{}\tattempt {}\t{cost}", r.id, r.via.as_str(), r.op, r.status.as_str(), r.attempt);
                 if let Some(e) = &r.error {
                     println!("  {}", e.chars().take(120).collect::<String>());
@@ -1710,23 +1703,10 @@ fn cs_anyhow(e: impl Into<crate::sync::SyncError>) -> anyhow::Error {
     }
 }
 
-/// unix seconds -> "YYYY-MM-DD HH:MM:SS" (UTC), no chrono dependency
+/// unix seconds -> "YYYY-MM-DD HH:MM:SSZ" (UTC)
 fn chrono_like(secs: u64) -> String {
-    let days = secs / 86400;
-    let rem = secs % 86400;
-    let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    // civil-from-days (Howard Hinnant's algorithm)
-    let z = days as i64 + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:{s:02}Z")
+    let (y, m, d) = fragment_core::cron::civil((secs / 86_400) as i64);
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}Z", secs % 86_400 / 3600, secs % 3600 / 60, secs % 60)
 }
 
 // ---------- sync unit (keep a folder live without a terminal) ----------
