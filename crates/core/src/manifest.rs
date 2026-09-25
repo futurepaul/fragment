@@ -27,7 +27,8 @@ pub struct Manifest {
     /// Where a `changed` frame goes on each move of `main`.
     pub notify_urls: Vec<String>,
     /// Platform powers the page asks for; each is granted only to the
-    /// fragment's owner viewing it ([`CAPABILITIES`]).
+    /// fragment's owner viewing it ([`CAPABILITIES`]), `frame` only once
+    /// they allow it too.
     pub capabilities: Vec<String>,
     /// Top-level keys that no longer do anything here.
     pub ignored: Vec<&'static str>,
@@ -36,7 +37,9 @@ pub struct Manifest {
 const ACCESS_KEYS: [&str; 3] = ["visibility", "editors", "viewers"];
 /// The capabilities a manifest may declare. `fragments`: the page may list
 /// the fragments its owner belongs to (`__fragments`), as a dashboard does.
-pub const CAPABILITIES: [&str; 1] = ["fragments"];
+/// `frame`: the page may show them inside it, signed in as its owner
+/// (`__frame`), once its owner allows it (the share sheet).
+pub const CAPABILITIES: [&str; 2] = ["fragments", "frame"];
 
 fn text(v: &Value, key: &str, max: usize) -> Result<Option<String>, String> {
     match &v[key] {

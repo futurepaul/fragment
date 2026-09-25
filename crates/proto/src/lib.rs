@@ -503,6 +503,10 @@ pub struct FragmentStatus {
     /// git (absent from hosts without blobs: the TypeScript runtime).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blob_min_bytes: Option<u64>,
+    /// When its live fragment.json asks for the `frame` capability: whether
+    /// its owner lets it show their fragments inside it (`__frame`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<bool>,
 }
 
 /// A fragment the signer holds a role on.

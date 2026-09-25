@@ -53,7 +53,7 @@ pub(crate) mod calls;
 mod signin;
 use calls::{
     Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, ClaimUsername, Claimed, EndSession, Exchange, FindUsername, Holder, Logout, Lookup, Mint,
-    Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername, Resolve, RevokeKey, Session, SetPicture,
+    MintFrame, Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername, Resolve, RevokeKey, Session, SetPicture,
     TestHook, View, TEST_HOLD_MAX_MS,
 };
 pub use signin::SESSION_TTL_MS;
@@ -101,6 +101,7 @@ impl DurableObject for RegistryCell {
     fn new(state: State, env: Env) -> Self {
         state.storage().sql().exec(SCHEMA, None).expect("the Registry schema applies");
         state.storage().sql().exec(signin::SCHEMA, None).expect("the sign-in schema applies");
+        signin::migrate(&state.storage().sql());
         let cfg = Config::from_env(&env);
         assert!(cfg.signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
         RegistryCell { state, env, cfg, down: Cell::new(false), calls: Cell::new(0), hold_ms: Cell::new(0) }
@@ -279,7 +280,7 @@ impl RegistryCell {
     fn by(&self, by: &By) -> CellResult<Identity> {
         match by {
             By::Key(key) => self.key_holder(key),
-            By::Session(token) => Ok(self.live_session(token, None)?.1.identity),
+            By::Session(token) => Ok(self.live_session(token, None, false)?.session.identity),
             By::Identity(id) => self.named_identity(id),
         }
     }
@@ -645,6 +646,7 @@ impl RegistryCell {
             EndSession::PATH => reply::<EndSession>(self.end_site_session(body(&bytes)?)),
             Logout::PATH => reply::<Logout>(self.logout(body(&bytes)?)),
             Mint::PATH => reply::<Mint>(self.mint(body(&bytes)?).await),
+            MintFrame::PATH => reply::<MintFrame>(self.mint_frame(body(&bytes)?).await),
             Redeem::PATH => reply::<Redeem>(self.redeem(body(&bytes)?)),
             ApproveKey::PATH => reply::<ApproveKey>(self.add_by_session(body(&bytes)?)),
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),

@@ -1,9 +1,11 @@
 // The desktop: its owner's fragments side by side. Chats are chat
 // fragments (the middle column shows the open one), apps open as panes in
 // the viewer, and a file opens through its own fragment's __file. Each
-// frame signs in on its own origin (through its __signin), so the desktop
-// holds no authority over any of them: the one platform power it has is
-// its owner's list (`__fragments`, which fragment.json asks for). Sharing
+// frame is this page's `__frame`: the platform signs the frame in on its
+// fragment's origin, for this page only, so the desktop's code holds no
+// authority over any of them. Its platform powers are its owner's list
+// (`__fragments`) and those frames, which fragment.json asks for and its
+// owner allows in its share sheet. Sharing
 // is the platform's too: a row's Share item opens the platform's share
 // sheet in a window of its own, which this page cannot script (the sheet
 // severs its opener); the list says who else is in each, for the badges.
@@ -52,9 +54,8 @@ async function platform(body) {
 
 const byName = (name) => state.fragments.find((f) => f.name === name);
 const label = (name) => name.split(".")[0];
-// A frame goes through the fragment's own sign-in, which comes straight
-// back when the owner is signed in there already.
-const framed = (url, path = "/") => `${url}__signin?return=${encodeURIComponent(path)}`;
+// A frame of one of the owner's fragments, signed in there by the platform.
+const framed = (name, path = "/") => `__frame?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}`;
 const fresh = (prefix) => `${prefix}-${crypto.getRandomValues(new Uint32Array(1))[0].toString(36).slice(0, 5)}`;
 
 function notice(title, text, action) {
@@ -202,7 +203,7 @@ function openChat(name) {
   if (!state.frames.has(name)) {
     const frame = el("iframe");
     frame.title = label(name);
-    frame.src = framed(f.url);
+    frame.src = framed(name);
     frame.dataset.fragment = name;
     $("frames").append(frame);
     state.frames.set(name, frame);
@@ -267,12 +268,12 @@ function frameFor(url, title) {
 function openApp(name) {
   const f = byName(name);
   if (!f) return;
-  const frame = frameFor(framed(f.url), label(name));
+  const frame = frameFor(framed(name), label(name));
   show({
     key: `app:${name}`, title: label(name), subtitle: f.role === "owner" ? undefined : f.role, icon: appIcon(label(name)), body: frame,
     actions: [
       { icon: ICON.folder, title: "Files", onClick: () => openTree(name) },
-      { icon: ICON.reload, title: "Reload", onClick: () => { frame.src = framed(f.url); } },
+      { icon: ICON.reload, title: "Reload", onClick: () => { frame.src = framed(name); } },
     ],
   });
 }
@@ -282,7 +283,7 @@ function openApp(name) {
 function openTree(name) {
   const f = byName(name);
   if (!f) return;
-  show({ key: `tree:${name}`, title: label(name), subtitle: "files", icon: paneIcon("folder"), body: frameFor(framed(f.url, "/__files"), `${label(name)} files`) });
+  show({ key: `tree:${name}`, title: label(name), subtitle: "files", icon: paneIcon("folder"), body: frameFor(framed(name, "/__files"), `${label(name)} files`) });
 }
 
 // A file, read by its own fragment (`<fragment>/__file?path=`).
@@ -294,14 +295,21 @@ function openFile(url, title) {
   const cut = path.lastIndexOf("/");
   show({
     key: `file:${url}`, title: path.slice(cut + 1), subtitle: [label(f.name), path.slice(0, Math.max(cut, 0))].filter(Boolean).join(" / "), icon: paneIcon("file"),
-    body: frameFor(url, path),
+    body: frameFor(framed(f.name, `/__file?path=${encodeURIComponent(path)}`), path),
     actions: [{ icon: ICON.folder, title: `All files in ${label(f.name)}`, onClick: () => openTree(f.name) }],
   });
 }
 
+// A frame whose browser keeps it signed out shows a link to open it in a
+// tab; said once here too.
+let blocked = false;
 // Only a frame of one of the owner's own fragments may ask for a file.
 addEventListener("message", (e) => {
   const ask = e.data;
+  if (ask?.fragment === "signin-blocked" && !blocked && state.fragments.some((f) => new URL(f.url).origin === e.origin)) {
+    blocked = true;
+    return notice("Your browser keeps your fragments signed out inside this page", "Open each in a tab of its own from its pane.");
+  }
   if (ask?.fragment !== "open" || typeof ask.url !== "string") return;
   if (!state.fragments.some((f) => new URL(f.url).origin === e.origin) || new URL(ask.url, e.origin).origin !== e.origin) return;
   openFile(new URL(ask.url, e.origin).href, String(ask.title || ""));

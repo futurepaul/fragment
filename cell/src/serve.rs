@@ -196,6 +196,9 @@ impl FragmentCell {
                 self.with_share_sheets(caller, listed)?
             };
             json_response(&answer)?
+        } else if path == "__frame" {
+            // a frame of this page, on to one of its owner's fragments (publish.rs)
+            self.frame_redirect(caller, name).await?
         } else if path == "__people" {
             // names for a page: a person's username and picture, or whose agent
             self.reader(&mut facts, caller, link).await?;

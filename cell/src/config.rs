@@ -179,6 +179,13 @@ impl Config {
         }
     }
 
+    /// Whether `host` is the platform's own (`FRAGMENT_PLATFORM_URL`'s),
+    /// which the router takes before any fragment's under the suffix.
+    pub fn is_platform_host(&self, host: &str) -> bool {
+        let platform = self.platform_url.as_deref().and_then(|u| url::Url::parse(u).ok());
+        platform.is_some_and(|u| u.host_str().is_some_and(|h| h.eq_ignore_ascii_case(host)))
+    }
+
     pub fn codestorage(&self) -> CellResult<&CodeStorageConfig> {
         self.codestorage.as_ref().ok_or_else(|| {
             CellError::new(ErrorCode::HostFailed, "code.storage is not configured on this fleet (CODESTORAGE_ORG)")

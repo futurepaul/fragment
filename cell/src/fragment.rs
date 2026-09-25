@@ -24,6 +24,7 @@
 //!   POST   /api/join/preview              the same: what joining would do, joining no one
 //!   PUT    /api/visibility                owner
 //!   POST   /api/rotate                    owner
+//!   PUT    /api/grants/frame              owner: {granted} lets it show their fragments inside it
 //!   PUT    /api/secrets/<KEY>  GET /api/secrets  DELETE /api/secrets/<KEY>   editor
 //!   GET    /api/storage-token             editor
 //!   POST   /api/refresh                   editor
@@ -346,6 +347,9 @@ pub(crate) enum MetaKey {
     MetaLive,
     /// The live manifest's `capabilities`, as a JSON list.
     CapabilitiesLive,
+    /// Its owner lets it show their fragments inside it (`__frame`), when
+    /// live asks for `frame`: set (to `1`) or absent.
+    FrameGranted,
     /// Why live's code was not installed.
     CodeError,
     /// When the blob collection runs next.
@@ -397,6 +401,7 @@ impl MetaKey {
             MetaKey::ManifestMain => "manifest_main",
             MetaKey::MetaLive => "meta_live",
             MetaKey::CapabilitiesLive => "capabilities_live",
+            MetaKey::FrameGranted => "frame_granted",
             MetaKey::CodeError => "code_error",
             MetaKey::BlobsGcAt => "blobs_gc_at",
             MetaKey::Vapid => "vapid",
@@ -827,6 +832,10 @@ impl FragmentCell {
                 let body = body_json(&mut req).await?;
                 self.set_visibility(&caller, body).await
             }
+            (Method::Put, ["api", "grants", "frame"]) => {
+                let body = body_json(&mut req).await?;
+                self.grant_frame(&caller, body)
+            }
             (Method::Post, ["api", "rotate"]) => {
                 let bytes = req.bytes().await?;
                 let body: Value =
@@ -1058,6 +1067,7 @@ impl FragmentCell {
             inbox_token: if role >= Role::Editor { Some(inbox_token.ok_or_else(|| missing(MetaKey::InboxToken))?) } else { None },
             urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name) },
             blob_min_bytes: Some(fragment_core::blob::BLOB_MIN_BYTES as u64),
+            frame: self.framing()?,
             name: facts.name,
         })
     }

@@ -1,6 +1,6 @@
 {
   "name": "desktop",
-  "capabilities": ["fragments"],
+  "capabilities": ["fragments", "frame"],
   "operations": {
     "chats": { "kind": "query" },
     "add_chat": {
