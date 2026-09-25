@@ -13,6 +13,8 @@
 //!
 //! A browser on a fragment's origin is its person through that origin's own
 //! session cookie (`__signin`), looked up live like a key when it matters.
+//! A socket, which has no CORS, is taken only from the fragment's own page
+//! (`own_page_socket`), and its cookies count only when it names one.
 //!
 //! With a suffix configured, `/f/<name>/…` redirects to the fragment's own
 //! host: fragments sharing one origin could act as each other's visitors.
@@ -67,8 +69,8 @@ pub use registry::RegistryCell;
 
 /// Client headers a fragment's supervisor sees; everything else, and any
 /// `x-fragment-*` a client sends, stays at the router.
-const PASSED_HEADERS: [&str; 8] =
-    ["content-type", "cookie", "accept", "if-none-match", "upgrade", "x-pierre-event", "x-pierre-signature", "range"];
+const PASSED_HEADERS: [&str; 9] =
+    ["content-type", "cookie", "origin", "accept", "if-none-match", "upgrade", "x-pierre-event", "x-pierre-signature", "range"];
 
 /// A WebSocket upgrade's own handshake, passed too: when the fragment's cell
 /// lives on another node, celld tunnels the upgrade there and answers the
@@ -196,7 +198,39 @@ fn site_credential(req: &Request, url: &Url, body: &[u8], name: &str, mode: Mode
     if req.headers().get("authorization")?.is_some() {
         return Ok(Some(Credential::Key(authenticate(req, url, Payload::Read(body))?)));
     }
+    if !cookies_count(req)? {
+        return Ok(None);
+    }
     Ok(auth::site_token(req, name, url, mode == Mode::Path)?.map(Credential::Session))
+}
+
+fn is_socket(req: &Request) -> CellResult<bool> {
+    Ok(req.headers().get("upgrade")?.is_some_and(|u| u.eq_ignore_ascii_case("websocket")))
+}
+
+/// A WebSocket has no CORS: a browser opens one from any page to any host,
+/// and every fragment's origin is one site with the others, so a page on
+/// another fragment's origin (its author's code, or an agent's) would bring
+/// this origin's cookies along (its session, its share link, its visitor)
+/// and read the fragment as them. A browser names the page on every
+/// upgrade (`Origin`), so a socket is taken only from the fragment's own
+/// page: another origin, `null` included, is refused before anything of
+/// the visitor's is read.
+fn own_page_socket(req: &Request, cfg: &Config, url: &Url, name: &str) -> CellResult<()> {
+    if !is_socket(req)? {
+        return Ok(());
+    }
+    match req.headers().get("origin")? {
+        Some(o) if o != cfg.origin(url, name) => Err(CellError::new(ErrorCode::Forbidden, "a fragment's socket opens from its own page")),
+        _ => Ok(()),
+    }
+}
+
+/// Whether a request's cookies count. An upgrade that names no page is no
+/// browser's (a browser always names it), so its cookies are no one's: a
+/// client that is not a browser signs instead (the CLI's watch and follow).
+fn cookies_count(req: &Request) -> CellResult<bool> {
+    Ok(!is_socket(req)? || req.headers().get("origin")?.is_some())
 }
 
 /// The identity a path names: `None` for `me`, whoever signed.
@@ -489,12 +523,16 @@ fn bytes_body(body: Vec<u8>) -> Option<worker::wasm_bindgen::JsValue> {
 /// Hands a request to the fragment's supervisor.
 async fn forward(env: &Env, req: &Request, body: Option<worker::wasm_bindgen::JsValue>, f: Forward) -> CellResult<Response> {
     let headers = Headers::new();
+    let cookies = cookies_count(req)?;
     for k in PASSED_HEADERS {
+        if k == "cookie" && !cookies {
+            continue;
+        }
         if let Some(v) = req.headers().get(k)? {
             headers.set(k, &v)?;
         }
     }
-    if req.headers().get("upgrade")?.is_some_and(|u| u.eq_ignore_ascii_case("websocket")) {
+    if is_socket(req)? {
         headers.set("connection", "Upgrade")?;
         for k in WEBSOCKET_HEADERS {
             if let Some(v) = req.headers().get(k)? {
@@ -521,6 +559,7 @@ async fn serve(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str,
     if auth::is_fragment_route(rest) {
         return auth::fragment(&req, env, cfg, url, name, rest, mode == Mode::Path).await;
     }
+    own_page_socket(&req, cfg, url, name)?;
     // a GET or HEAD has no body to wait for
     let body = match req.method() {
         Method::Get | Method::Head => Vec::new(),

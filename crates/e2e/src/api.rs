@@ -134,6 +134,11 @@ impl Api {
         }
     }
 
+    /// A fragment's own origin, as a browser on its page names it (`Origin`).
+    pub fn site_origin(&self, name: &str) -> String {
+        reqwest::Url::parse(&self.site_url(name, "")).expect("a fragment's URL parses").origin().ascii_serialization()
+    }
+
     pub fn call(&self, c: Call<'_>) -> Result<Reply> {
         let url = reqwest::Url::parse(&c.url)?;
         let body = c.body.unwrap_or_default();
@@ -368,17 +373,45 @@ impl Socket {
         Socket::open_answered(api, name, path, keys, cookie).map(|(socket, _)| socket)
     }
 
-    /// `open`, with the cookies the upgrade's answer set.
+    /// `open`, with the cookies the upgrade's answer set. A cookie rides
+    /// along as a browser's does: from a page on the fragment's own origin,
+    /// which the upgrade names (one that names none is no browser's, and
+    /// its cookies count for nothing).
     pub fn open_answered(api: &Api, name: &str, path: &str, keys: Option<&Keys>, cookie: Option<&str>) -> Result<(Socket, Vec<String>)> {
-        use tungstenite::client::IntoClientRequest;
         let path = if path == "__live" { "__live?v=2" } else { path };
-        let http = format!("{}/f/{name}/{path}", api.base);
-        let mut req = http.replacen("http", "ws", 1).into_client_request()?;
+        let origin = cookie.map(|_| api.site_origin(name));
+        Socket::connect(api, &format!("{}/f/{name}/{path}", api.base), keys, cookie, origin.as_deref())
+    }
+
+    /// A socket to `path` on the fragment's own host, opened as a page on
+    /// `origin` opens one (`None`: a client that names no page, as the CLI).
+    pub fn on_host(api: &Api, name: &str, path: &str, keys: Option<&Keys>, cookie: Option<&str>, origin: Option<&str>) -> Result<Socket> {
+        let path = if path == "__live" { "__live?v=2" } else { path };
+        Socket::connect(api, &api.site_url(name, path), keys, cookie, origin).map(|(socket, _)| socket)
+    }
+
+    fn connect(api: &Api, http: &str, keys: Option<&Keys>, cookie: Option<&str>, origin: Option<&str>) -> Result<(Socket, Vec<String>)> {
+        use tungstenite::client::IntoClientRequest;
+        let url = reqwest::Url::parse(http)?;
+        let mut to = url.clone();
+        to.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" }).map_err(|()| anyhow::anyhow!("{http} is not http(s)"))?;
+        if !api.remote {
+            // a local node is reached at 127.0.0.1, the site in `Host` (as `call` does)
+            to.set_host(Some("127.0.0.1"))?;
+            to.set_port(Some(api.port)).map_err(|()| anyhow::anyhow!("{http} takes no port"))?;
+        }
+        let mut req = to.as_str().into_client_request()?;
+        if !api.remote {
+            req.headers_mut().insert("host", format!("{}:{}", url.host_str().unwrap_or(""), url.port().unwrap_or(80)).parse()?);
+        }
         if let Some(k) = keys {
-            req.headers_mut().insert("authorization", k.header("GET", &http, &[], now_s()).parse()?);
+            req.headers_mut().insert("authorization", k.header("GET", http, &[], now_s()).parse()?);
         }
         if let Some(c) = cookie {
             req.headers_mut().insert("cookie", c.parse()?);
+        }
+        if let Some(o) = origin {
+            req.headers_mut().insert("origin", o.parse()?);
         }
         let (socket, answer) = tungstenite::connect(req)?;
         if let tungstenite::stream::MaybeTlsStream::Plain(s) = socket.get_ref() {

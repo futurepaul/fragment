@@ -204,13 +204,24 @@ impl Config {
     /// Where a fragment is served, given the URL a request arrived on (its
     /// scheme and port carry over).
     pub fn canonical(&self, arrived: &url::Url, name: &str) -> String {
+        let origin = self.origin(arrived, name);
+        match &self.host_suffix {
+            Some(_) => format!("{origin}/"),
+            None => format!("{origin}/f/{name}/"),
+        }
+    }
+
+    /// A fragment's own origin, as a browser on its page names it in
+    /// `Origin` (`scheme://host[:port]`): its host's, or, without a suffix,
+    /// the one every fragment shares.
+    pub fn origin(&self, arrived: &url::Url, name: &str) -> String {
         let port = arrived.port().map(|p| format!(":{p}")).unwrap_or_default();
         match &self.host_suffix {
             Some(suffix) => {
                 let host = flat_name(name).unwrap_or_else(|| name.to_string());
-                format!("{}://{host}.{suffix}{port}/", arrived.scheme())
+                format!("{}://{host}.{suffix}{port}", arrived.scheme())
             }
-            None => format!("{}://{}{port}/f/{name}/", arrived.scheme(), arrived.host_str().unwrap_or("localhost")),
+            None => format!("{}://{}{port}", arrived.scheme(), arrived.host_str().unwrap_or("localhost")),
         }
     }
 }
