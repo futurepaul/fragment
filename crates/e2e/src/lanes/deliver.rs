@@ -4,7 +4,7 @@
 //! report; `notifyUrls`; and OpenRouter text, images, and video as a
 //! job's steps, with generated media stored as files.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use fragment_fakes::openrouter::{image_bytes, video_bytes};
@@ -124,6 +124,30 @@ pub fn push(s: &mut Suite, api: &Api) -> Result<()> {
     });
     let after = deferred();
     s.ok("two deliveries that wait through one outage say so once", both && after == before + 1, format!("arrived {both}; deferred events {before} then {after}"));
+
+    // a batch goes out together: a receiver that takes 10 seconds to
+    // answer holds up only its own delivery, and one queued behind it in
+    // the same batch lands at once
+    subscribe(s, "slow", "race", 11)?;
+    subscribe(s, "fast", "race", 13)?;
+    s.push.slow("slow", Duration::from_secs(10));
+    let r = api.op(&owner, &name, "notify_all", "race", json!({ "title": "side by side" }))?;
+    let queued = Instant::now();
+    let fast = s.eventually(Duration::from_secs(12), || !s.push.landed("fast").is_empty());
+    let fast_after = s.push.landed("fast").first().map(|t| t.duration_since(queued));
+    println!("      the fast delivery landed {fast_after:?} after the push was queued");
+    s.ok(
+        "a delivery in the same batch as one that takes 10 seconds still lands within 2 seconds",
+        r.status == 200 && fast && fast_after.is_some_and(|d| d < Duration::from_secs(2)),
+        format!("{r}; the fast one landed after {fast_after:?}"),
+    );
+    let slow = s.eventually(Duration::from_secs(30), || !s.push.landed("slow").is_empty());
+    let slow_after = s.push.landed("slow").first().map(|t| t.duration_since(queued));
+    s.ok(
+        "and the slow one lands once it answers, once",
+        slow && slow_after.is_some_and(|d| d >= Duration::from_secs(10)) && s.push.received("slow") == vec![json!({ "title": "side by side", "body": "from a mutation" })],
+        format!("the slow one landed after {slow_after:?}: {:?}", s.push.received("slow")),
+    );
 
     let r = site("__push-unsub", Some(json!({ "endpoint": format!("{}/push/a", s.push.url) })))?;
     s.ok("a page unsubscribes by its endpoint", r.status == 200 && r.body["removed"] == 1, &r);
