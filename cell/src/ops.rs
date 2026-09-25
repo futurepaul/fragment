@@ -401,6 +401,18 @@ impl FragmentCell {
                 }
                 json!({ "ok": true })
             }
+            Some("hold-advances") => {
+                // while on, an advance after a run's first step waits
+                // (jobs.rs `held_advance`), at most 20 s
+                if body["on"] == true {
+                    self.del_meta(MetaKey::TestAdvanceHeld)?;
+                    self.set_meta(MetaKey::TestHoldAdvances, "1")?;
+                } else {
+                    self.del_meta(MetaKey::TestHoldAdvances)?;
+                }
+                json!({ "ok": true })
+            }
+            Some("advance-held") => json!({ "run": self.meta(MetaKey::TestAdvanceHeld)?.and_then(|r| r.parse::<i64>().ok()) }),
             Some("age-live") => {
                 let ms = body["ms"].as_i64().filter(|ms| *ms > 0).ok_or_else(|| CellError::invalid("ms: a positive number"))?;
                 json!({ "aged": self.live_age(ms)? })
@@ -440,7 +452,7 @@ impl FragmentCell {
                 json!({ "ok": true })
             }
             Some("code-builds") => json!({ "builds": self.app.builds() }),
-            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, forget-steps, forget-live, age-live, drop-live, ledger, age, members, code-before-tables, or code-builds")),
+            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, forget-steps, hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-before-tables, or code-builds")),
         })
     }
 }
