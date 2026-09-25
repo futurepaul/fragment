@@ -123,5 +123,6 @@ debt ledger).
   variables, so the two can run at once.
 - The remote is `fragment-rs`, github.com/futurepaul/fragment: work goes
   up as a branch and a pull request against `master` (branch names under
-  `ci/` are refused). Ask Paul before merging, adding a remote, deleting
-  Sprites, or anything else irreversible.
+  `ci/` are refused). The coordinating session reviews and merges a PR
+  once its CI is green. Deploys, adding a remote, deleting Sprites, DNS,
+  and anything else irreversible are Paul's to approve.
