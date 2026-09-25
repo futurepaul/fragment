@@ -378,6 +378,8 @@ impl Node {
         // appended: a node started again on its port (the e2e's restarts)
         // keeps the log of the one before, which a crash leaves there
         let out = fs::OpenOptions::new().create(true).append(true).open(&log)?;
+        // this start's own lines only: an earlier start's `ready` is in there too
+        let from = out.metadata()?.len() as usize;
         let mut cmd = Command::new(&tools.celld);
         cmd.arg("dev").arg(&opts.project).args(["--port", &opts.port.to_string()]);
         // the node's own warnings and info (a panic's message among them)
@@ -401,7 +403,7 @@ impl Node {
         let child = cmd.stdout(out.try_clone()?).stderr(out).stdin(Stdio::null()).spawn()?;
         let mut node = Node { child, base: format!("http://127.0.0.1:{}", opts.port), port: opts.port, reaped: false };
         loop {
-            let text = fs::read_to_string(&log).unwrap_or_default();
+            let text = fs::read(&log).map(|b| String::from_utf8_lossy(b.get(from..).unwrap_or_default()).into_owned()).unwrap_or_default();
             if text.contains("  ready  ") {
                 break;
             }
