@@ -61,6 +61,9 @@ pub struct Suite {
     recovery_due: bool,
     /// Why the node could not be brought back: every later section is a FAIL.
     lost: Option<String>,
+    /// The cron fragment, deployed sections before `triggers` checks its
+    /// tick (lanes/mod.rs), or why it was not.
+    cron: Option<Result<Option<lanes::jobs::Cron>, String>>,
     /// Chrome, started when a lane first asks for it and shared after.
     chrome: browser::Shared,
     tools: devstack::Tools,
@@ -102,9 +105,14 @@ impl Suite {
         ]
     }
 
+    /// Whether the section `name` runs in this suite (`--only` names it).
+    pub fn runs(&self, name: &str) -> bool {
+        self.only.as_ref().is_none_or(|only| only.iter().any(|o| o == name))
+    }
+
     /// Whether the section `name` runs (it prints its header when it does).
     pub fn section(&mut self, name: &str) -> bool {
-        if self.only.as_ref().is_some_and(|only| !only.iter().any(|o| o == name)) {
+        if !self.runs(name) {
             return false;
         }
         println!("\n# {name}");
@@ -454,6 +462,7 @@ fn main() -> Result<()> {
         ran: vec![],
         recovery_due: false,
         lost: None,
+        cron: None,
         chrome: browser::Shared::new(&scratch),
         tools,
         node: None,
