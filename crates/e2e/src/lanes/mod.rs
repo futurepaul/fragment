@@ -19,6 +19,7 @@ mod notes;
 mod plane;
 mod posts;
 mod restart;
+mod share;
 mod signin;
 mod site;
 mod sync;
@@ -49,6 +50,7 @@ const LANES: &[Lane] = &[
     plane::deploy,
     templates::templates,
     desktop::desktop,
+    share::share,
     app::ops,
     app::public,
     app::effects,

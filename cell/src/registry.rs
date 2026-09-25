@@ -37,7 +37,7 @@ use crate::error::{CellError, CellResult};
 use crate::js;
 
 /// The identities one `/profiles` answers.
-const PROFILES_MAX: usize = 64;
+pub(crate) const PROFILES_MAX: usize = 64;
 
 /// Joins an identity's row (`i`) to the username it makes fragments under
 /// (`u`): its own, or an agent's owner's. `usernames.identity` is UNIQUE,
