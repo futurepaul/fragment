@@ -119,17 +119,28 @@ pub fn budget(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{r} ({} calls)", after - before),
     );
 
-    // two jobs racing for the last reservation
+    // Goal: two jobs racing for the last reservation cannot both run, and it
+    // is the ledger that stops the second. Method: the month has room for
+    // one step's reservation, not two. The owner's OpenRouter key would
+    // refuse the second call too (its limit is the allowance), so the loser
+    // must be held for its budget, and only the winner may reach OpenRouter.
     let v = month(api, &owner);
-    let short = 60_000 - m(&v, "remainingMicros");
+    let room = budget::TEXT_RESERVE + budget::TEXT_RESERVE / 5;
+    let short = room - m(&v, "remainingMicros");
     if short > 0 {
         api.signed(&s.operator, "POST", &top, Some(&json!({ "usd": short as f64 / 1e6 })))?;
     }
+    let calls = chats(s).len();
     let a = api.op(&owner, &name, "summarize", "race-a", json!({ "text": "a" }))?;
     let b = api.op(&owner, &name, "summarize", "race-b", json!({ "text": "b" }))?;
     let (ra, rb) = (settle(api, &owner, &name, started(&a), &["succeeded", "held"], wait), settle(api, &owner, &name, started(&b), &["succeeded", "held"], wait));
     let won = [&ra, &rb].iter().filter(|r| r["status"] == "succeeded").count();
     s.ok("two jobs racing for the last reservation cannot both run", won == 1, format!("{ra} {rb}"));
+    // a run's error is text (a step's refusal carries no code): the ledger's says "budget used up"
+    let lost = [&ra, &rb].into_iter().find(|r| r["status"] != "succeeded").cloned().unwrap_or_default();
+    s.ok("the ledger held the other for its budget", lost["status"] == "held" && lost["error"].as_str().is_some_and(|e| e.contains("budget used up")), &lost);
+    let reached = chats(s).len() - calls;
+    s.ok("and only the winner's step reached OpenRouter", reached == 1, format!("{reached} model calls"));
     let v = month(api, &owner);
     s.ok("and the month never goes past its allowance", m(&v, "spentMicros") + m(&v, "reservedMicros") <= m(&v, "allowanceMicros"), &v);
     let spent_at_openrouter = key_of(s).map(|k| (k.usage * 1e6).round() as i64).unwrap_or(-1);
