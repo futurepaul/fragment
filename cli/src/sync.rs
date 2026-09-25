@@ -1558,24 +1558,6 @@ mod tests {
     }
 
     #[test]
-    fn stateless_bootstrap_verifies_by_content() {
-        // no state, equal size, DIFFERENT content ("12345" vs "67890"):
-        // bootstrap verifies by content — no adoption, local wins. The old
-        // size-provisional rule silently never pushed these (found live);
-        // verify audits nothing if the first sync already guessed wrong.
-        let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("a.txt", b"12345")]);
-        let c = client_for(&mock);
-        let dir = tmpdir("bootstrap");
-        fs::write(dir.join("a.txt"), b"67890").unwrap();
-        let report = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
-        assert_eq!(report.pushed, vec!["a.txt".to_string()], "content-different must push, not adopt");
-        let st = load_state(&dir, "t").unwrap();
-        assert!(st.files.contains_key("a.txt"));
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn mirror_from_overlays_before_push() {
         let mock = crate::mockcs::start();
         mock.seed_repo("t", &[]);
@@ -1690,6 +1672,7 @@ mod tests {
         let report = sync_once(&c, "t", &dir, &opts(Mode::Push)).unwrap();
         assert_eq!(report.pushed, vec!["a.txt".to_string()], "equal size, different content must push");
         assert_eq!(mock.file_at("t", "main", "a.txt").unwrap(), b"bbbb");
+        assert!(load_state(&dir, "t").unwrap().files.contains_key("a.txt"));
         fs::remove_dir_all(&dir).ok();
     }
 
