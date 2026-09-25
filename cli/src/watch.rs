@@ -217,11 +217,7 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, live: bo
     let live_up = Arc::new(AtomicBool::new(false));
     let mut live_state = "off";
     if live {
-        let host = client.host.trim_end_matches('/').to_string();
-        let url = match view_token(client, name) {
-            Some(t) => format!("{}/f/{}/__watch?view={}", host.replace("http", "ws"), name, t),
-            None => format!("{}/f/{}/__watch", host.replace("http", "ws"), name),
-        };
+        let url = watch_url(&client.host, name, view_token(client, name).as_deref());
         let (signer, feed, up) = (client.id.clone(), tx.clone(), live_up.clone());
         std::thread::spawn(move || live_listener(&url, &signer, feed, up));
         live_state = "connecting";
@@ -313,6 +309,16 @@ fn wakeup_of(frame: &str) -> Wakeup {
         Ok(Frame::Hello { sha } | Frame::Changed { sha }) => Wakeup::Head(sha),
         // a frame from a newer cell: a pass finds out what it meant
         Err(_) => Wakeup::Moved,
+    }
+}
+
+/// The change feed's URL: the host's with its scheme made a websocket's
+/// (http → ws, https → wss), and the share link's view token if any.
+fn watch_url(host: &str, name: &str, view: Option<&str>) -> String {
+    let ws = host.trim_end_matches('/').replacen("http", "ws", 1);
+    match view {
+        Some(t) => format!("{ws}/f/{name}/__watch?view={t}"),
+        None => format!("{ws}/f/{name}/__watch"),
     }
 }
 
@@ -604,5 +610,15 @@ mod tests {
         assert_eq!(report.pushed, ["c.md"]);
         assert_eq!(mock.take_requests("").get("GET storage-token"), Some(&1), "a new token after the refusal");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Goal: the change feed's URL changes only the host's scheme (http →
+    /// ws, https → wss). Method: hosts with "http" in them past the
+    /// scheme; replacing every "http" made `wss://httpbin.example` into
+    /// `wss://wsbin.example`.
+    #[test]
+    fn the_feed_url_changes_only_the_scheme() {
+        assert_eq!(watch_url("https://httpbin.example/", "t", Some("v")), "wss://httpbin.example/f/t/__watch?view=v");
+        assert_eq!(watch_url("http://http.local:8790", "t", None), "ws://http.local:8790/f/t/__watch");
     }
 }
