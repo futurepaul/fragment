@@ -283,8 +283,9 @@ impl FragmentCell {
     /// {code}` closes its live sockets; `ledger {ms | null}` sets (or
     /// clears) a shorter ledger window; `age {ms}` forgets write keys as
     /// if `ms` had passed; `members {fill}` adds placeholder members until
-    /// there are `fill`; `code-before-tables` puts its installed code back
-    /// in the shape stored before the code tables (plane.rs).
+    /// there are `fill`; `code-before-tables {fill?}` puts its installed code
+    /// back in the shape stored before the code tables (plane.rs), with
+    /// placeholder operations until there are `fill`.
     pub(crate) fn test_fragment(&self, body: &Value) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "the route answers only on fleets with test hooks");
         self.name()?;
@@ -332,7 +333,11 @@ impl FragmentCell {
                 json!({ "members": self.fill_members(fill)? })
             }
             Some("code-before-tables") => {
-                self.code_before_tables()?;
+                let fill = match &body["fill"] {
+                    Value::Null => None,
+                    v => Some(v.as_u64().ok_or_else(|| CellError::invalid("fill is a count"))?),
+                };
+                self.code_before_tables(fill)?;
                 json!({ "ok": true })
             }
             _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-live, ledger, age, members, or code-before-tables")),

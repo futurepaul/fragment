@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use fragment_nip98::Keys;
+use fragment_proto::limits;
 use serde_json::{json, Value};
 
 use super::app::ship;
@@ -55,6 +56,14 @@ pub fn restart(s: &mut Suite, api: Api) -> Result<Api> {
     let code_before = api.status(&owner, &stored)?.body["code"].clone();
     let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": stored, "op": "code-before-tables" })))?;
     anyhow::ensure!(r.status == 200 && code_before["operations"]["save"]["kind"] == "mutation", "code-before-tables setup: {r} {code_before}");
+    // and code stored with more operations than a manifest may declare
+    let past = s.named(&api, &owner, "restart-past")?;
+    let past_c = s.create(&api, &owner, &past)?;
+    ship(s, &past_c, TODO_APP, TODO_JSON);
+    let past_code = api.status(&owner, &past)?.body["code"].clone();
+    let fill = limits::OPERATIONS_MAX + 1;
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": past, "op": "code-before-tables", "fill": fill })))?;
+    anyhow::ensure!(r.status == 200 && past_code["operations"]["add_todo"]["kind"] == "mutation", "code-before-tables fill setup: {r} {past_code}");
 
     s.stop()?;
     let api = s.start(false, true)?;
@@ -88,6 +97,20 @@ pub fn restart(s: &mut Suite, api: Api) -> Result<Api> {
         ran["status"] == "succeeded" && items.body["result"].as_array().is_some_and(|a| a.iter().any(|i| i["text"] == "after the move" && i["source"] == "migrated")),
         &items,
     );
+
+    // Goal: stored data past a limit never reaches an assertion in the
+    // constructor, which would fail every activation. Method: the fragment
+    // whose stored code holds OPERATIONS_MAX + 1 operations answers, says
+    // its code was dropped and why, and a refresh installs live again.
+    let r = api.status(&owner, &past)?;
+    s.ok("code stored past a manifest's limit does not stop its fragment: it answers", r.status == 200, &r);
+    let r = api.signed(&owner, "GET", &format!("/api/f/{past}/events?tail=20"), None)?;
+    let dropped = r.body["events"].as_array().into_iter().flatten().find(|e| e["kind"] == "code.dropped").cloned().unwrap_or(Value::Null);
+    let why = format!("operations: {fill}, past the limit of {}", limits::OPERATIONS_MAX);
+    s.ok("and its code is dropped, with an event that says why", dropped["summary"].as_str().is_some_and(|m| m.contains(&why)), &r);
+    let r = api.signed(&owner, "POST", &format!("/api/f/{past}/refresh"), Some(&json!({})))?;
+    let code = api.status(&owner, &past)?.body["code"].clone();
+    s.ok("and the next refresh installs live again, as it was", r.status == 200 && code == past_code, &code);
 
     let r = api.op(&owner, &name, "add_todo", "r2", json!({ "text": "before the crash" }))?;
     s.ok("a mutation before the crash", r.status == 200, &r);

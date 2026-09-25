@@ -90,9 +90,12 @@ const CODE_JSON_COLUMNS: [&str; 3] = ["operations", "channels", "triggers"];
 /// and triggers as JSON columns of the code row (and one from before
 /// applib and notifyUrls, phase 2 slices B and C, lacks those columns).
 /// Activation moves them into their tables in place, in one step, and
-/// drops the columns. Stored JSON that does not decode (the cell wrote it,
-/// so it always has) fails closed: the code goes, and the next refresh or
-/// poll installs live again. Answers why, then.
+/// drops the columns. Stored JSON that does not decode, or holds more than
+/// a manifest may (the cell wrote it from a checked manifest, so it never
+/// has), fails closed: the code goes, and the next refresh or poll installs
+/// live again. Answers why, then. Stored data never reaches
+/// `store_installed`'s assertions: this runs in the constructor, where one
+/// that failed would fail every activation of the fragment.
 pub(crate) fn migrate_code(sql: &SqlStorage) -> Option<String> {
     let cols: Vec<Value> = sql.exec("PRAGMA table_info(code)", None).and_then(|c| c.to_array()).expect("the code table's columns read");
     let has = |col: &str| cols.iter().any(|c| c["name"] == col);
@@ -114,10 +117,20 @@ pub(crate) fn migrate_code(sql: &SqlStorage) -> Option<String> {
         }
         Some(row) => {
             let text = |col: &str, empty: &'static str| row[col].as_str().unwrap_or(empty).to_string();
+            let bounded = |what: &str, n: usize, max: usize| -> std::result::Result<(), String> {
+                if n <= max {
+                    Ok(())
+                } else {
+                    Err(format!("{what}: {n}, past the limit of {max}"))
+                }
+            };
             let decoded = (|| -> std::result::Result<_, String> {
                 let operations: BTreeMap<String, OpDecl> = serde_json::from_str(&text("operations", "{}")).map_err(|e| format!("operations: {e}"))?;
                 let channels: BTreeMap<String, ChannelDecl> = serde_json::from_str(&text("channels", "{}")).map_err(|e| format!("channels: {e}"))?;
                 let triggers: Vec<TriggerDecl> = serde_json::from_str(&text("triggers", "[]")).map_err(|e| format!("triggers: {e}"))?;
+                bounded("operations", operations.len(), limits::OPERATIONS_MAX)?;
+                bounded("channels", channels.len(), limits::CHANNELS_MAX)?;
+                bounded("triggers", triggers.len(), limits::TRIGGERS_MAX)?;
                 Ok((operations, channels, triggers))
             })();
             match decoded {
@@ -709,10 +722,28 @@ impl FragmentCell {
     /// A test hook (fleets with test hooks only): puts the installed code
     /// back into the shape fragments stored before the code tables (JSON
     /// columns of the code row), so the e2e can restart the node and watch
-    /// `migrate_code` move it.
-    pub(crate) fn code_before_tables(&self) -> CellResult<()> {
+    /// `migrate_code` move it. With `fill`, placeholder operations are
+    /// stored beside the real ones until there are `fill`, so the e2e can
+    /// store more than a manifest may and watch the move fail closed.
+    pub(crate) fn code_before_tables(&self, fill: Option<u64>) -> CellResult<()> {
         assert!(self.cfg.test_hooks, "the hook answers only on fleets with test hooks");
-        let (operations, channels, triggers) = (self.operations()?, self.declared_channels()?, self.triggers()?);
+        let (mut operations, channels, triggers) = (self.operations()?, self.declared_channels()?, self.triggers()?);
+        if let Some(fill) = fill {
+            let fill_max = 2 * limits::OPERATIONS_MAX as u64;
+            if fill > fill_max {
+                return Err(CellError::invalid(format!("fill is at most {fill_max}")));
+            }
+            // Bounded by `fill`, just checked. Of the `fill` names tried, at
+            // most as many as there are operations are taken, so the rest
+            // are enough.
+            for i in 0..fill {
+                if operations.len() as u64 >= fill {
+                    break;
+                }
+                operations.entry(format!("filler_{i}")).or_insert(OpDecl { kind: OpKind::Mutation, role: Role::Editor, input: None });
+            }
+            assert!(operations.len() as u64 >= fill, "filled to the count asked");
+        }
         for (col, empty) in CODE_JSON_COLUMNS.into_iter().zip(["{}", "{}", "[]"]) {
             self.exec(&format!("ALTER TABLE code ADD COLUMN {col} TEXT NOT NULL DEFAULT '{empty}'"), vec![])?;
         }
