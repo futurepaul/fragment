@@ -133,8 +133,8 @@ and `POST /api/fragments` (a `POST` for anyone but the agent's owner is
 A person's request naming `for` is 403, as is more than one `for` (400)
 or one that is not an identity (400). A call without `for` acts as the
 agent's own membership. Owner-only actions (members, other than leaving
-with `DELETE members/me`; invites; visibility; rotation; deletion) are
-403 for an agent whatever it names. A site request's query is its app's:
+with `DELETE members/me`; invites; visibility; rotation; grants;
+deletion) are 403 for an agent whatever it names. A site request's query is its app's:
 `for` there means nothing to the platform.
 
 Membership is cell state: `fragment.json`'s `visibility`, `editors`, and
@@ -198,7 +198,8 @@ random bytes, the registry keeps their SHA-256).
 | `GET /auth/link?return=` | the same from a signed-in browser: the sign-in that comes back joins this person (409 when it is someone else's) |
 | `GET /auth/callback?code=&state=` | the state must match the browser's cookie (400 otherwise); the code is exchanged server-side; → `fragment_session` (HttpOnly, SameSite=Lax, `Path=/`) and back to `return`; a WorkOS `error` is shown (400); a sign-in already finished or past its ten minutes, or a code WorkOS refuses (a callback sent again), is 400 `invalid_request` |
 | `POST /auth/logout` | ends the session and every fragment session made from it, clears the cookie, and sends the browser to WorkOS's logout (`session_id` from the access token's `sid`); from another origin, 403 (`GET` shows the button) |
-| `GET /auth/fragment?name=&return=` | signed in: → `<fragment origin>/__signin?token=<a single-use redemption, 60 s, for that fragment only>` (a session holds at most 16 unspent; past that, the oldest is refused); signed out: → sign in first |
+| `GET /auth/fragment?name=&return=` | signed in: → `<fragment origin>/__signin?token=<a single-use redemption, 60 s, for that fragment only>` (a session holds at most 16 unspent; past that, the oldest is refused), at once for a fragment of the person's own, one shared with them, or one they said yes to; for any other, first a page asking "Continue to X?" (Asking first, below); signed out: → sign in first |
+| `POST /auth/fragment?name=&return=` | that page's form (`form`, its token): the yes, remembered, then → the fragment's `__signin?token=` (303); another origin, or a missing or stale token, 403 |
 | `GET /cli?key=<npub>&proof=` | the link `fragment login` prints: `proof` is the key's own NIP-98 event for `POST <platform>/cli/approve`, good for ten minutes (the proof of possession; without it, stale, or by another key: 400). Signed in: a page showing the key's last eight characters, to compare with the terminal, and an Add button; signed out: → sign in first, keeping the link |
 | `POST /cli/approve` | the page's form (`key`, `proof`): the key joins the signed-in person at once (a key someone else holds, or a revoked one, is 409; another origin 403); the CLI waits for `GET /api/identities/me` to answer. People themselves come only from sign-in (`POST /api/identities {kind: "person"}` is 400) |
 
@@ -207,12 +208,12 @@ Every fragment's origin is one site with the platform
 SameSite=Lax session cookie rides along on a fragment page's form, fetch,
 or frame. So every page here answers `Content-Security-Policy:
 frame-ancestors 'none'` and `X-Frame-Options: DENY` (no page may frame
-one and lay its button under a click; the redirects need not, and the
-desktop's frames sign in through them) and `Cross-Origin-Opener-Policy:
+one and lay its button under a click; its redirects still run in a
+frame, but a frame's `__signin` refuses what they mint) and `Cross-Origin-Opener-Policy:
 same-origin` (a page that opens one in a window of its own is severed
 from it: its handle reads `closed`, and can neither navigate nor message
 it), and every form here (`/auth/new`, `/auth/username`, `/auth/picture`,
-`/auth/logout`, `/cli/approve`, and Sharing's below) is 403 from another
+`/auth/logout`, `/auth/fragment`, `/cli/approve`, and Sharing's below) is 403 from another
 origin, a fragment's page included. A browser sends `Origin` with every
 POST (`null` from a page that hides its referrer), so a POST without one
 is no browser's.
@@ -227,17 +228,89 @@ fragment's.
 On a fragment's origin, `GET __signin?token=` redeems the redemption for
 this fragment only (another fragment's is 401 and stays unspent) and sets
 `fragment_site` (HttpOnly, SameSite=Lax, host-only, `Path=/` or
-`/f/<name>/`); without a token it starts at the platform, unless this
-origin's session is live already (then straight back). A request with
-that cookie is its person, exactly as the same request signed by one of
-their keys: the same decision either way. A cookie for another fragment,
-or whose platform session ended, is nobody. A platform session keeps its
-newest 4 sessions on each fragment (the oldest ends). `__signout` ends
-the session in the registry and clears the cookie: a copy of it is
-nobody from then on. The cookie is cleared whatever the registry
-answers; when the registry cannot end the session, the failure is
-logged and a copy lasts until the session expires or its platform
-session ends (`/auth/logout`).
+`/f/<name>/`). A frame redemption (`__frame`, below) is redeemed only in
+a frame, and any other only outside one: shown to the other kind of
+page it is 401, and spent. Without a token, `__signin` starts at the
+platform, unless this origin's session is live already (then straight
+back), and only as a navigation of a page: from an image, a script, or a
+fetch it is 403, and in a frame it answers a small page offering the
+fragment in a tab of its own (it posts `{fragment: "signin-blocked",
+name}` to the page around it). A request with that cookie is its person,
+exactly as the same request signed by one of their keys: the same
+decision either way. A cookie for another fragment, or whose platform
+session ended, is nobody. A platform session keeps its newest 4
+top-level sessions and its newest 4 frame sessions on each fragment (the
+oldest of each ends). `GET __signout` is a page with a button; `POST
+__signout`, from the fragment's own page only (`Origin`; any other is
+403), ends the sessions the request's cookies carry (top-level and
+frame) in the registry, forgets the person's yes to the fragment (Asking
+first), and clears both cookies: a copy of either is nobody from then
+on. The cookies are cleared whatever the registry answers; when it
+cannot end the sessions, the failure is logged and a copy lasts until
+the session expires or its platform session ends (`/auth/logout`).
+
+### Which cookies count (docs/fragment-boats.md, decision 3)
+
+Every fragment's origin is one site with the others (and with the
+platform), so a SameSite=Lax cookie rides along on another fragment's
+images, scripts, fetches, and forms. The router counts a browser's
+cookies on a fragment's origin by the Fetch Metadata it sends
+(`Sec-Fetch-Site`, `-Mode`, `-Dest`, which no page's script sets); a
+request whose cookies do not count is served as to a stranger:
+
+| the request | `fragment_site`, `fragview`, `fragment_anon` | `fragment_frame` |
+| --- | --- | --- |
+| the fragment's own page's (`same-origin`) | count | count |
+| a top-level navigation (`navigate`, `document`), GET or HEAD, from anywhere | count | no |
+| a frame's navigation (`iframe`, or an `object` or `embed`), GET or HEAD | no | count |
+| anything else: an image, a script, a fetch, a form or any POST from another page | no | no |
+| a socket | count when it names its page (`Origin`, which must be the fragment's own) | the same |
+| no Fetch Metadata (a browser from before 2023, or not a browser) | count | no |
+
+Every navigation's answer carries `Vary: Sec-Fetch-Dest`. A frame's
+navigation is answered `Content-Security-Policy: frame-ancestors
+<origin>` naming the page its frame session was made for, or
+`frame-ancestors 'self'` without one, and `Cache-Control: private,
+no-cache`: a fragment shows signed in only in the page that framed it
+through `__frame`, and in another fragment's page not at all. A signed
+request (the CLI's, an agent's) carries no cookies and is unchanged.
+
+### Frames (`__frame`)
+
+A page shows its owner's fragments in frames, signed in, only through
+`__frame` (docs/fragment-boats.md, decision 2):
+
+- `GET <page>/__frame?name=<fragment>&return=<path>` is served on the
+  framing fragment's own origin, only as a frame of its own page
+  (`Sec-Fetch-Dest: iframe`, `Sec-Fetch-Site: same-origin`; a fetch, a
+  tab, or another page's frame is 403);
+- only when its live `fragment.json` declares `"capabilities":
+  ["frame"]` and its owner allows it (`PUT /api/f/{name}/grants/frame`,
+  the share sheet's "Your fragments inside it"; else 403, saying which),
+  for its owner signed in there (else 401), and for a fragment in the
+  owner's list (else 403);
+- the registry mints a frame redemption from that origin's own session
+  (single-use, 60 s, for `name` only, bound to the framing page's
+  origin) and it answers `302` to `<fragment>/__signin?token=`
+  (`no-store`, `Referrer-Policy: no-referrer`): the page's code never
+  holds it;
+- there it becomes `fragment_frame` (`HttpOnly; Secure; SameSite=None;
+  Partitioned`, `__Host-` over https): kept by browsers that block
+  third-party cookies (CHIPS), in the framing page's partition only. The
+  frame then goes to `__signin?check=frame&return=`: with the cookie
+  kept, on to `return`; without it, the page offering the fragment in a
+  tab of its own.
+
+### Asking first
+
+Signing in on a fragment is silent on the person's own fragments and on
+those shared with them (a member, or an agent of theirs is), which know
+them already. Any other fragment learns who they are only once they say
+yes on the platform's page ("Continue to X as @paul?": unframed, a form
+token, a button that arms after 800 ms, as Sharing's pages are); until
+then they are a visitor there. The yes is remembered for that person
+and fragment (their newest 1000) until they sign out of it there
+(`POST __signout`), which makes the next sign-in ask again.
 
 `return` is a path on the origin it returns to, kept only when it begins
 with one `/` and holds no byte at or below 0x20, no DEL, and no
@@ -292,7 +365,7 @@ platform (`Content-Security-Policy`), and keep their URL to the platform
 | `POST /api/fragments` | a person with a username (an agent is 403) | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). The fragment's own key is made by the node's `KEYS` and stays sealed there. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`desktop`, `chat`, `todo`, `inbox`, `blank`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, sharing?}]}`; `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility (a fragment from before sends it once, on its next change or alarm; until then it has none); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
 | `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
-| `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes}` |
+| `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes, frame?}` (`frame`: when live's `fragment.json` asks for it, whether its owner allows it) |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
 | `PUT /api/f/{name}/members/{id\|npub}` | owner | `{role: viewer\|editor}` → the member; a key names the identity holding it (404 when no one registered it) |
@@ -303,6 +376,7 @@ platform (`Content-Security-Policy`), and keep their URL to the platform
 | `POST /api/f/{name}/join` | any signer | `{token}` → `{name, role, joined}`; a stronger existing role is kept; a fragment at its 1000 members is 400, and the invite keeps its use; an invite for another identity is 403, and keeps its use |
 | `POST /api/f/{name}/join/preview` | any signer | `{token}` → `{name, role, invitedBy, invitee, expiresAt, current}`: what joining would grant (`current`: the signer's role now), joining no one; 404 for a token that names no open invite (the platform's `/join` page shows it) |
 | `PUT /api/f/{name}/visibility` | owner | `{visibility}` → `{ok, visibility}` |
+| `PUT /api/f/{name}/grants/frame` | owner | `{granted}` → `{frame}`: lets the fragment show its owner's fragments inside its page (`__frame`) while its live `fragment.json` asks for `frame`, or stops it (a `grant.frame` event); the share sheet's "Your fragments inside it" |
 | `POST /api/f/{name}/rotate` | owner | `{scopes?: [inbox, view, webhook]}` → `{inboxToken, viewToken, webhookSecret, rotated}` (`Rotated`): every token as it is now, and the scopes renewed; a new view token closes link holders' feeds |
 | `PUT /api/f/{name}/secrets/{KEY}` | editor | raw body (at most 64 KiB) → `{ok, name}`; sealed (AES-256-GCM, key HKDF'd from the host secret and the fragment's npub) |
 | `GET /api/f/{name}/secrets` | editor | → `{names}`; values never leave |
@@ -357,9 +431,10 @@ keeps the last good code and says why in `status.code.error`.
   class's own; `fragment_proto::RESERVED_OP_NAMES`): a manifest naming one
   is refused at deploy.
 - `capabilities` asks the platform for powers the page uses, each granted
-  only to the fragment's owner viewing it. The one there is:
-  `"fragments"` (`__fragments`, Serving). Any other name is refused at
-  deploy.
+  only to the fragment's owner viewing it. There are two: `"fragments"`
+  (`__fragments`, Serving) and `"frame"` (`__frame`, Sign-in), which the
+  platform honors only once the owner allows it too (the share sheet).
+  Any other name is refused at deploy.
 - `input` is a JSON Schema in a bounded subset (`crates/core/src/schema.rs`:
   types, `enum`, `const`, lengths, ranges, `items`, `properties`,
   `required`, `additionalProperties`, counts; annotations allowed; any
@@ -641,6 +716,7 @@ API answers on the platform's host):
 | `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; a signed-in browser (`fragment_site`) calls as its person; an unsigned caller gets an anonymous principal cookie; callers holding only `public` get 60 calls a minute each, 600 per fragment (a page's live views re-run over `__live`, outside this) |
 | `POST __op/channels/{channel}` | a browser's post (`fragment.post`), through the call's door and its checks: `{id, input}` with the record's body as `input` → `{result: record, replayed}`, as `POST /api/f/{name}/channels/{channel}` answers it; a post spends the public budget as a call does (no operation name holds a `/`) |
 | `__signin`, `__signout` | this origin's session (Sign-in, above) |
+| `__frame?name=&return=` | a frame of this page signed in on one of its owner's fragments (Sign-in, Frames) |
 | `__fragment.js` | the browser library (below) |
 | `__chat.js`, `__chat.css` | the chat's page, the platform's (docs/platform.md): `import { mount } from "./__chat.js"; mount(document.body, {suggestions?, placeholder?})` renders a chat's `chat` and `work` channels (the chat template, below) |
 | `__fragments` | `{fragments: [{name, role, url, share, sharing?}]}`: the fragments this fragment's owner belongs to, only to the owner signed in here, and only when `fragment.json` at live declares `"capabilities": ["fragments"]` (anyone else, or a page that does not ask, 403). `share` is its share sheet (`<platform>/share/<name>`); `sharing` is the owner's list's (`GET /api/fragments`): a read asks the owner's Principal cell alone and wakes none of the fragments listed. A dashboard's page, such as the desktop's. `POST` `application/json` `{label, template}` → `{name, url}` makes `<label>.<username>` for the owner, as `POST /api/fragments` would, under the same conditions |

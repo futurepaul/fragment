@@ -1,8 +1,10 @@
 # fragment.boats: fragments on a domain of their own
 
-Status: **proposed 2026-09-25, design only.** Nothing here is built. No
-DNS, Fly, or deploy change has been made. Paul approves the design and
-the three open questions at the end before any slice starts.
+Status: **decided 2026-09-25.** Paul answered the three open questions
+(Answers, at the end). Slice 1 (decisions 2–4: isolation, framed
+sign-in, sign-in and sign-out) is built for fragment.club, before the
+move (PR `isolation-and-frames`); slice 2 (the move) and the PSL are
+not. No DNS, Fly, or deploy change has been made.
 
 Fragments move from `<label>--<username>.fragment.club` to
 `<label>--<username>.fragment.boats`. The platform stays on
@@ -22,17 +24,19 @@ fragment.club.
    redirects the frame to the framed fragment's `__signin`. The framed
    fragment redeems it into a partitioned cookie (CHIPS) that is bound to
    the desktop's origin. The desktop's own code never holds a token.
+   `__frame` is a capability a fragment declares (`frame`) and its owner
+   allows in its share sheet (answer 3): the desktop is its first user.
 3. **Isolation between fragments does not wait for the PSL.** The
    router applies a Fetch Metadata policy to every fragment host. A
    visitor's cookies count only for the fragment's own requests and for
-   navigations. Another page can frame a fragment only as signed out,
-   unless the frame came through `__frame`. On its own, this policy
-   fixes the three open bugs, even on fragment.club today.
+   navigations. Another page cannot show a fragment in a frame at all
+   unless the frame came through `__frame` (answer 3). On its own, this
+   policy fixes the three open bugs, even on fragment.club today.
 4. **Sign-in and sign-out cannot be triggered from another page.**
    `__signout` becomes a POST from the fragment's own page.
    `__signin` works only as a navigation. The platform asks
-   "Continue to X?" when a sign-in was started from a page other than
-   X's.
+   "Continue to X?" before any fragment that is not yours, nor shared
+   with you, learns who you are, wherever the sign-in started (answer 1).
 5. **The Public Suffix List comes last.** Submit `fragment.boats` only
    after 1–4 are live and proven, and only once it serves thousands of
    people. The list declines smaller projects, and a listing is hard to
@@ -192,8 +196,9 @@ platform route on every fragment's origin, next to `__fragments`:
 2. The caller must be the desktop's owner, signed in on the desktop's
    origin (its `fragment_site` cookie, sent because the frame is
    same-origin with the top-level page). The fragment must declare the
-   `fragments` capability, exactly as `__fragments` requires. `name` must
-   be in the owner's list.
+   `frame` capability at live, and its owner must have allowed it (the
+   share sheet; `PUT /api/f/<name>/grants/frame`). `name` must be in the
+   owner's list.
 3. The registry mints a **frame redemption** from that site session's
    platform session: single-use, 60 s, for `name` only, bound to the
    desktop's origin.
@@ -217,8 +222,8 @@ Timing in the parent names only the frame's first URL.
   the desktop's own site.
 - It redirects to `__signin?check=frame&return=…`. If the cookie came
   back, the check goes on to `return`. If not (the browser blocks it), it
-  answers a small page: "Your browser keeps X signed out inside other
-  pages. [Open X in a tab]". The page also posts `{fragment:
+  answers a small page: "X can't sign you in inside this page. [Open X
+  in a tab]". The page also posts `{fragment:
   "signin-blocked", name}` to the embedder's origin, so the desktop can
   show one notice. This is the fallback for Safari 18.5–26.1 after the
   PSL, and for anyone who blocks all cookies in frames.
@@ -269,12 +274,10 @@ that names no `Origin`. The site's own cookies are `fragment_site`,
 | a WebSocket upgrade | counts only when `Origin` is the fragment's own (today's check) | same |
 | no `Sec-Fetch-Site` at all (a browser before 2023, or not a browser) | as today | — |
 
-A frame navigation from another fragment (`same-site`, which can happen
-only before the PSL) that brings no live frame session answers
-`frame-ancestors 'self'`. Until the PSL, one fragment can frame another
-only through `__frame`, which only a `fragments`-capability page viewed
-by its owner has. After the PSL, any page may frame a fragment, which
-is signed out there.
+A frame navigation that brings no live frame session answers
+`frame-ancestors 'self'`, before the PSL and after: one fragment shows
+another only through `__frame`, which only a page that declares `frame`,
+allowed by its owner and viewed by them, has (answer 3).
 
 How this closes the open bugs, before or after the PSL:
 
@@ -296,15 +299,17 @@ How this closes the open bugs, before or after the PSL:
   `Origin` to be the fragment's own. It ends every session the request
   carries (top-level and frame) and clears both cookies.
 - `__signin` without a token: only a top-level navigation (or no Fetch
-  Metadata). In a frame, it answers the "open X in a tab" page. Its
-  redirect to the platform carries `Referrer-Policy: origin`.
-- The platform's `/auth/fragment` mints without asking when the request
-  is same-origin (the platform's own `/auth/new` and `/join`). It also
-  mints when `Referer` is X's origin: a sign-in link on X's own page, via
-  `__signin`'s redirect. Otherwise it shows "Continue to X as @paul?" as
-  a platform page: unframed, with a button that arms after a moment,
-  like the share sheet's. This covers a link from another page and the
-  first sign-in after WorkOS (one extra click).
+  Metadata). In a frame, it answers the "open X in a tab" page; from an
+  image, a script, or a fetch, 403.
+- The platform's `/auth/fragment` mints without asking for the person's
+  own fragments and those shared with them (it asks the fragment), and
+  for one they said yes to before. Otherwise it shows "Continue to X as
+  @paul?" as a platform page: unframed, with a button that arms after a
+  moment, like the share sheet's. The yes is remembered per person and
+  fragment; signing out of X there (`__signout`) forgets it, so X asks
+  again (answer 1). The Referer rule this section first proposed is
+  gone: X's own page sending a visitor to its `__signin` is the case
+  answer 1 asks about.
 - A subresource or frame can no longer complete a sign-in at all. The
   platform's cookie is never sent to a cross-site subresource or frame.
 
@@ -463,7 +468,7 @@ slices. Slice 1 is useful on fragment.club today, so it lands before
 the move.
 
 **Slice 1: isolation, framed sign-in, sign-in and sign-out** (about
-1,000 lines)
+1,000 lines; built, e2e sections `isolation` and `frames`)
 
 - `cell/src/lib.rs` (router, about 120 lines):
   - the cookie rule;
@@ -592,7 +597,11 @@ rests on the e2e's listed mode and on the browsers' documented behavior
 
 1. Slice 1: merge (CI green), then deploy to fragment.club (Paul
    approves). The three open bugs close there and then, and the desktop
-   frames through `__frame`.
+   frames through `__frame`. A desktop made before keeps its old
+   `site/desktop.js` (frames through `__signin`), whose panes now offer
+   "open in a tab": make a new one, or copy the template's
+   `site/desktop.js` and `fragment.json` into it; then allow its frames
+   in its share sheet.
 2. DNS and certificates for fragment.boats (Paul, below).
 3. Slice 2: merge, then deploy with the new fleet variables (Paul
    approves). Then the hosted e2e.
@@ -641,28 +650,28 @@ In order:
      and keep it and more than a year of registration for as long as
      the entry is listed.
 
-## Open questions (Paul)
+## Answers (Paul, 2026-09-25)
 
-1. **Being shown to a fragment's author.** A fragment's own page can
-   send visitors to its `__signin`. Anyone signed in to fragment.club is
-   then signed in there without asking, and its author's code learns who
-   they are. The Referer rule treats X's own page as consent. Keep that
-   (ROADMAP decision 4: "a direct fragment URL signs you in"), or confirm
-   once per fragment? This is privacy posture, so it is yours.
-2. **Proof in Safari after the PSL.** The e2e drives Chrome only.
-   Options:
-   - (a) a local TLS rig, so real Safari and Firefox run the listed mode
-     (about a day);
-   - (b) rely on the listed mode in Chrome with third-party cookies
-     blocked, WebKit's documented CHIPS behavior, and the visible
-     fallback, then check real Safari once a release ships the listing.
-
-   Recommended: (b), since that check happens long before anyone
-   depends on it.
-3. **Framing between fragments before the PSL.** One fragment can frame
-   another only through `__frame` (only the desktop can). Is anything
-   planned that embeds another fragment (a chat showing an app inline)?
-   If so, it goes through `__frame` or a capability like it.
+1. **Being shown to a fragment's author: ask once, strangers only.**
+   Signing in stays silent on your own fragments and on those shared
+   with you. On anyone else's, the platform asks once ("Continue to X as
+   you?") before X learns who you are; until then you are a visitor
+   there. The answer is remembered per person and fragment; signing out
+   of X there undoes it (the next sign-in asks again). ROADMAP decision
+   4 is amended.
+2. **Safari: prove it in Chrome, plus one real check.** The e2e's
+   `frames` section runs the listed mode (every fragment its own site)
+   in a Chrome launched with `--test-third-party-cookie-phaseout`: the
+   desktop's frames sign in through `__frame`, and a fragment whose
+   cookies a site setting blocks shows the "open in a tab" fallback.
+   WebKit's documented CHIPS behavior covers Safari; Paul checks real
+   Safari once after the deploy.
+3. **Embedding: chats will embed apps.** So `__frame` is not
+   desktop-only: it is the `frame` capability a fragment declares in
+   `fragment.json`, honored only once its owner allows it in the share
+   sheet ("Your fragments inside it"). The desktop is the first user; a
+   chat showing an app inline is the next. A framed fragment shows only
+   inside a page that holds the capability and went through `__frame`.
 
 ## Not in scope
 
