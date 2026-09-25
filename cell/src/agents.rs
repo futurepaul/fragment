@@ -44,6 +44,11 @@ pub(crate) async fn route(mut req: Request, env: &Env, url: &Url, segments: &[&s
         (method, ["api", "a", name, rest @ ..]) => {
             let name = named(name, &who)?;
             let path = if rest.is_empty() { format!("/api/a/{name}") } else { format!("/api/a/{name}/{}", rest.join("/")) };
+            // the query rides along (a state read's wait_ms)
+            let path = match url.query() {
+                Some(query) => format!("{path}?{query}"),
+                None => path,
+            };
             ask(env, method, &path, &who.id, body).await
         }
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
