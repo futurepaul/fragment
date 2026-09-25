@@ -296,18 +296,10 @@ pub(crate) struct SigninCounts {
     pub sessions: u64,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(untagged)]
-pub(crate) enum TestAnswer {
-    Down { down: bool },
-    Calls { calls: u64 },
-    Hold { hold: u32 },
-    Signins(SigninCounts),
-}
-
 impl Call for TestHook {
     const PATH: &'static str = "/test";
-    type Answer = TestAnswer;
+    /// The hook's setting, `{down}`, `{calls}`, or `{hold}`, or `SigninCounts`.
+    type Answer = serde_json::Value;
 }
 
 // ------------------------------------------------------------- sign-in
