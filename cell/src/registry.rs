@@ -490,12 +490,14 @@ impl RegistryCell {
         }
     }
 
+    /// The identity a call names (`None`: the asker's own).
+    fn named_or(&self, identity: Option<&str>, by: &Identity) -> CellResult<Identity> {
+        identity.map_or_else(|| Ok(by.clone()), |id| self.named_identity(id))
+    }
+
     /// The identity whose keys change (`None`: the asker's own), if `by` manages them.
     fn managed(&self, identity: Option<&str>, by: &Identity) -> CellResult<Identity> {
-        let who = match identity {
-            Some(id) => self.named_identity(id)?,
-            None => by.clone(),
-        };
+        let who = self.named_or(identity, by)?;
         if !registry::may_manage_keys(&by.id, &who.id, who.kind, who.owner.as_deref()) {
             return Err(CellError::new(
                 ErrorCode::Forbidden,
@@ -539,8 +541,7 @@ impl RegistryCell {
         let by = self.by(&b.by)?;
         check_key(&b.key)?;
         let who = self.managed(b.identity.as_deref(), &by)?;
-        match self.key_row(&b.key)? {
-            Some(row) if row.identity != who.id => return Err(CellError::new(ErrorCode::NotFound, "not one of this identity's keys")),
+        match self.key_row(&b.key)?.filter(|row| row.identity == who.id) {
             None => return Err(CellError::new(ErrorCode::NotFound, "not one of this identity's keys")),
             Some(row) if !row.active() => return self.view(&who, Some(false)),
             Some(_) => {}
@@ -571,10 +572,7 @@ impl RegistryCell {
 
     fn view_for(&self, b: View) -> CellResult<IdentityView> {
         let by = self.by(&b.by)?;
-        let who = match &b.identity {
-            Some(id) => self.named_identity(id)?,
-            None => by.clone(),
-        };
+        let who = self.named_or(b.identity.as_deref(), &by)?;
         if !registry::may_view(&by.id, &who.id, who.owner.as_deref()) {
             return Err(CellError::new(ErrorCode::NotFound, format!("no identity {}", who.id)));
         }
