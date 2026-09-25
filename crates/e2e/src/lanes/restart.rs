@@ -1,16 +1,20 @@
 //! State survives a graceful restart and a crash of the node (a sleeping
-//! job included); then the
-//! node runs without hostnames and serves fragments from `/f/<name>/`.
+//! job, sealed secrets and keys, sessions, and a channel's sequence
+//! included); then the node runs without hostnames and serves fragments
+//! from `/f/<name>/`.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
+use fragment_fakes::http::{Handler, Response, Server};
 use fragment_nip98::Keys;
 use fragment_proto::limits;
 use serde_json::{json, Value};
 
 use super::app::ship;
 use super::jobs;
+use super::signin::{site_cookie, with_session};
 use crate::api::{Api, Call};
 use crate::Suite;
 
@@ -18,6 +22,8 @@ const TODO_APP: &[u8] = include_bytes!("../../fixtures/todo.mjs");
 const TODO_JSON: &[u8] = include_bytes!("../../fixtures/todo.json");
 const BUDGET_APP: &[u8] = include_bytes!("../../fixtures/budget.mjs");
 const BUDGET_JSON: &[u8] = include_bytes!("../../fixtures/budget.json");
+const SECRET: &str = "sk-e2e-restart-5b2e07";
+const MEMBER_EMAIL: &str = "restart-member@e2e.test";
 
 fn count(api: &Api, keys: &Keys, name: &str) -> i64 {
     api.op(keys, name, "count", "q", json!({})).ok().and_then(|r| r.body["result"]["n"].as_i64()).unwrap_or(-1)
@@ -29,12 +35,20 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     }
     let api = s.api();
     let owner = api.person()?;
-    let member = api.person()?;
+    // the member signs in with a browser too: its sessions must outlive the restart
+    let member_session = api.sign_in(MEMBER_EMAIL)?;
+    let member = Keys::generate();
+    api.approve(&member_session, &member)?;
     let name = s.named(&api, &owner, "restart")?;
     let c = s.create(&api, &owner, &name)?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", member.pubkey_hex()), Some(&json!({ "role": "editor" })))?;
-    api.signed(&owner, "PUT", &format!("/api/f/{name}/secrets/TOKEN"), None)?;
     let live = ship(s, &c, TODO_APP, TODO_JSON);
+    // a site session on the fragment, and the fragment's VAPID key (sealed like a secret)
+    let member_site = site_cookie(&api, &member_session, &name)?;
+    let push_key = |api: &Api| api.page(&name, "__push-key", Some(&format!("fragment_site={member_site}")));
+    let r = push_key(&api)?;
+    anyhow::ensure!(r.status == 200 && r.body["key"].is_string(), "push key setup: {r}");
+    let vapid = r.body["key"].clone();
     let first = api.op(&owner, &name, "add_todo", "r1", json!({ "text": "survives" }))?;
     // the registry: a key added, and one revoked, before the restart
     let (added, revoked) = (Keys::generate(), api.person()?);
@@ -54,6 +68,12 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "pause setup: {r}");
     // code stored as the fleet stored it before the code tables: JSON in the code row
     let (stored, sc) = jobs::jobs_fragment(s, &api, &owner, "restart-code", |_| {})?;
+    // a sealed secret its job fetches with, and a channel with records in it
+    let r = api.call(Call { method: "PUT", url: format!("{}/api/f/{stored}/secrets/API_KEY", api.base), body: Some(SECRET.as_bytes().to_vec()), keys: Some(&owner), ..Call::default() })?;
+    anyhow::ensure!(r.status == 200, "secret setup: {r}");
+    let r = api.op(&owner, &stored, "save", "before", json!({ "texts": ["one", "two"], "source": "restart" }))?;
+    let seq_before = jobs::records(&api, &owner, &stored, "feed").last().and_then(|r| r["seq"].as_i64()).unwrap_or(0);
+    anyhow::ensure!(r.status == 200 && seq_before == 2, "channel setup: {r} (feed at {seq_before})");
     let code_before = api.status(&owner, &stored)?.body["code"].clone();
     let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": stored, "op": "code-before-tables" })))?;
     anyhow::ensure!(r.status == 200 && code_before["operations"]["save"]["kind"] == "mutation", "code-before-tables setup: {r} {code_before}");
@@ -88,6 +108,9 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.ok("and its triggers, in their order", on == vec![json!("ingest"), json!("ping"), json!("boom"), json!("tick")], &r);
     let r = api.signed(&owner, "GET", &format!("/api/f/{stored}/channels/feed"), None)?;
     s.ok("and its channels", r.status == 200, &r);
+    let r = api.op(&owner, &stored, "save", "after", json!({ "texts": ["three"], "source": "restart" }))?;
+    let next = jobs::records(&api, &owner, &stored, "feed").iter().find(|r| r["body"]["text"] == "three").and_then(|r| r["seq"].as_i64());
+    s.ok("after a restart a channel's sequence goes on: the next record is n + 1", r.status == 200 && next == Some(seq_before + 1), format!("{next:?} after {seq_before}"));
     let token = sc["inboxToken"].as_str().unwrap_or("");
     let r = jobs::inbox(&api, &stored, token, &json!({ "source": "migrated", "payload": { "items": ["after the move"] } }), None)?;
     let run = r.body["runs"][0].as_i64().unwrap_or(0);
@@ -98,6 +121,24 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         ran["status"] == "succeeded" && items.body["result"].as_array().is_some_and(|a| a.iter().any(|i| i["text"] == "after the move" && i["source"] == "migrated")),
         &items,
     );
+    // a job's fetch opens the secret sealed before the restart
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let log = Arc::clone(&seen);
+    let handler: Handler = Arc::new(move |req| {
+        log.lock().expect("upstream log").push(req.header("authorization").unwrap_or("").to_string());
+        Response::json(200, &json!({ "items": ["fetched after the restart"] }))
+    });
+    let upstream = Server::start(0, handler)?;
+    let r = api.op(&owner, &stored, "digest", "after", json!({ "url": format!("{}/data", upstream.url) }))?;
+    let ran = jobs::settle(&api, &owner, &stored, jobs::started(&r), &["succeeded", "held"], Duration::from_secs(40));
+    let got = seen.lock().expect("upstream log").clone();
+    s.ok("after a restart a sealed secret opens: the job's fetch carries it", ran["status"] == "succeeded" && got == [format!("Bearer {SECRET}")], format!("{ran} {got:?}"));
+    // a browser's sessions, and the key its push subscriptions were made with
+    let r = with_session(&api, "GET", "/", &member_session)?;
+    s.ok("after a restart a browser's platform session still signs it in", r.status == 200 && r.text.contains(MEMBER_EMAIL), &r);
+    let r = push_key(&api)?;
+    s.ok("and its site session on a fragment still works", r.status == 200, &r);
+    s.ok("the fragment's VAPID key is the one it had (sealed, and opened again)", r.body["key"].is_string() && r.body["key"] == vapid, format!("{} vs {vapid}", r.body["key"]));
 
     // Goal: stored data past a limit never reaches an assertion in the
     // constructor, which would fail every activation. Method: the fragment
