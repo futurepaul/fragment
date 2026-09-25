@@ -114,55 +114,40 @@ impl Config {
     }
 
     fn build(env: &Env) -> Config {
-        let codestorage = var(env, "CODESTORAGE_ORG").map(|org| {
-            let api =
-                var(env, "CODESTORAGE_API_URL").map(|a| a.trim_end_matches('/').to_string()).unwrap_or_else(|| fragment_core::codestorage::default_api(&org));
-            CodeStorageConfig { org, api }
-        });
-        let host_suffix = var(env, "FRAGMENT_HOST_SUFFIX").map(|s| s.trim_start_matches('.').to_ascii_lowercase());
-        let poll_interval_ms = var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000;
-        let egress_local = var(env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow");
-        let blob_grace_ms = var(env, "FRAGMENT_BLOB_GRACE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(7 * 24 * 3600) * 1000;
-        let push_subject = var(env, "FRAGMENT_PUSH_SUBJECT").unwrap_or_else(|| "mailto:webpush@fragment.invalid".into());
         let delivery_retry_s = var(env, "FRAGMENT_DELIVERY_RETRY_S").and_then(|s| s.parse::<u32>().ok()).filter(|s| *s >= 1).unwrap_or(10);
-        let delivery_retry_max_s = var(env, "FRAGMENT_DELIVERY_RETRY_MAX_S").and_then(|s| s.parse::<u32>().ok()).unwrap_or(3600).max(delivery_retry_s);
-        let openrouter_url = var(env, "OPENROUTER_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://openrouter.ai".into());
-        let workos = var(env, "WORKOS_CLIENT_ID").map(|client_id| WorkOsConfig {
-            client_id,
-            api: var(env, "WORKOS_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.workos.com".into()),
-        });
-        let platform_url = var(env, "FRAGMENT_PLATFORM_URL").map(|u| u.trim_end_matches('/').to_string());
-        let budget_micros = var(env, "FRAGMENT_BUDGET_USD")
-            .and_then(|v| v.parse::<f64>().ok())
-            .filter(|v| v.is_finite() && *v >= 0.0)
-            .map(|v| (v * fragment_core::budget::USD as f64).round() as i64)
-            .unwrap_or(20 * fragment_core::budget::USD);
-        let operators = var(env, "FRAGMENT_OPERATORS").map(|l| fragment_core::npub::parse_list(&l));
-        let signins_pending_max = var(env, "FRAGMENT_SIGNINS_PENDING_MAX")
-            .and_then(|s| s.parse::<u64>().ok())
-            .filter(|n| *n >= 1)
-            // the registry counts rows as i64; a larger setting means "no cap to speak of"
-            .map(|n| n.min(i64::MAX as u64))
-            .unwrap_or(fragment_proto::limits::SIGNINS_PENDING_MAX_DEFAULT);
-        let test_hooks = var(env, "FRAGMENT_TEST_HOOKS").as_deref() == Some("allow");
-        let deploy_id = deploy_id(env);
         Config {
-            codestorage,
-            host_suffix,
-            poll_interval_ms,
-            egress_local,
-            blob_grace_ms,
-            push_subject,
+            codestorage: var(env, "CODESTORAGE_ORG").map(|org| {
+                let api =
+                    var(env, "CODESTORAGE_API_URL").map(|a| a.trim_end_matches('/').to_string()).unwrap_or_else(|| fragment_core::codestorage::default_api(&org));
+                CodeStorageConfig { org, api }
+            }),
+            host_suffix: var(env, "FRAGMENT_HOST_SUFFIX").map(|s| s.trim_start_matches('.').to_ascii_lowercase()),
+            poll_interval_ms: var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000,
+            egress_local: var(env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow"),
+            blob_grace_ms: var(env, "FRAGMENT_BLOB_GRACE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(7 * 24 * 3600) * 1000,
+            push_subject: var(env, "FRAGMENT_PUSH_SUBJECT").unwrap_or_else(|| "mailto:webpush@fragment.invalid".into()),
             delivery_retry_s,
-            delivery_retry_max_s,
-            openrouter_url,
-            workos,
-            platform_url,
-            budget_micros,
-            operators,
-            signins_pending_max,
-            test_hooks,
-            deploy_id,
+            delivery_retry_max_s: var(env, "FRAGMENT_DELIVERY_RETRY_MAX_S").and_then(|s| s.parse::<u32>().ok()).unwrap_or(3600).max(delivery_retry_s),
+            openrouter_url: var(env, "OPENROUTER_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://openrouter.ai".into()),
+            workos: var(env, "WORKOS_CLIENT_ID").map(|client_id| WorkOsConfig {
+                client_id,
+                api: var(env, "WORKOS_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.workos.com".into()),
+            }),
+            platform_url: var(env, "FRAGMENT_PLATFORM_URL").map(|u| u.trim_end_matches('/').to_string()),
+            budget_micros: var(env, "FRAGMENT_BUDGET_USD")
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                .map(|v| (v * fragment_core::budget::USD as f64).round() as i64)
+                .unwrap_or(20 * fragment_core::budget::USD),
+            operators: var(env, "FRAGMENT_OPERATORS").map(|l| fragment_core::npub::parse_list(&l)),
+            signins_pending_max: var(env, "FRAGMENT_SIGNINS_PENDING_MAX")
+                .and_then(|s| s.parse::<u64>().ok())
+                .filter(|n| *n >= 1)
+                // the registry counts rows as i64; a larger setting means "no cap to speak of"
+                .map(|n| n.min(i64::MAX as u64))
+                .unwrap_or(fragment_proto::limits::SIGNINS_PENDING_MAX_DEFAULT),
+            test_hooks: var(env, "FRAGMENT_TEST_HOOKS").as_deref() == Some("allow"),
+            deploy_id: deploy_id(env),
         }
     }
 

@@ -19,8 +19,6 @@ CREATE TABLE IF NOT EXISTS memberships (
 #[durable_object]
 pub struct PrincipalCell {
     state: State,
-    #[allow(dead_code)]
-    env: Env,
 }
 
 /// A fragment's change to this key's membership. `incarnation` is the
@@ -35,9 +33,9 @@ struct IndexChange {
 }
 
 impl DurableObject for PrincipalCell {
-    fn new(state: State, env: Env) -> Self {
+    fn new(state: State, _env: Env) -> Self {
         state.storage().sql().exec(SCHEMA, None).expect("the Principal schema applies");
-        PrincipalCell { state, env }
+        PrincipalCell { state }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {

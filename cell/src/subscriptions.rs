@@ -68,11 +68,10 @@ impl FragmentCell {
     pub(crate) fn subscriptions(&self, caller: &Caller) -> CellResult<Response> {
         let principal = caller.principal().map(str::to_string).ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "listing subscriptions needs a signed request"))?;
         let owner = self.must(MetaKey::Owner)? == principal;
-        let rows = if owner {
-            self.rows("SELECT id, principal, channel, url, created_at FROM subs ORDER BY id", vec![])?
-        } else {
-            self.rows("SELECT id, principal, channel, url, created_at FROM subs WHERE principal = ? ORDER BY id", vec![principal.as_str().into()])?
-        };
+        let rows = self.rows(
+            "SELECT id, principal, channel, url, created_at FROM subs WHERE principal = ? OR ? ORDER BY id",
+            vec![principal.as_str().into(), SqlStorageValue::Integer(owner as i64)],
+        )?;
         let subs: Vec<Value> = rows
             .iter()
             .map(|r| json!({ "id": r["id"], "principal": npub::display(r["principal"].as_str().unwrap_or("")), "channel": r["channel"], "url": r["url"], "createdAt": r["created_at"] }))
@@ -99,7 +98,7 @@ impl FragmentCell {
     /// caller appends, then calls this, with no await between; channels.rs
     /// `published`). Answers whether there are any to drain.
     pub(crate) fn outbox_record(&self, record: &ChannelRecord) -> CellResult<bool> {
-        self.test_outbox_failure()?;
+        self.test_countdown(MetaKey::TestFailOutbox, "the record's outbox write failed after its append")?;
         let rows = self.rows(
             "INSERT INTO delivery_outbox (kind, sub, channel, seq, next_at) SELECT 'record', id, channel, ?, ? FROM subs WHERE channel = ? RETURNING id",
             vec![SqlStorageValue::Integer(record.seq), SqlStorageValue::Integer(crate::js::now_ms()), record.channel.as_str().into()],
@@ -121,20 +120,6 @@ impl FragmentCell {
         Ok(row["outboxed"].as_i64().expect("records.outboxed is INTEGER NOT NULL") != 0)
     }
 
-    /// Test fleets: the next `times` outbox writes fail before they write
-    /// (`/api/test/fragment` `fail-outbox`), after their record's append.
-    fn test_outbox_failure(&self) -> CellResult<()> {
-        if !self.cfg.test_hooks {
-            return Ok(());
-        }
-        let left: u64 = self.meta(MetaKey::TestFailOutbox)?.and_then(|n| n.parse().ok()).unwrap_or(0);
-        if left == 0 {
-            return Ok(());
-        }
-        self.set_meta(MetaKey::TestFailOutbox, &(left - 1).to_string())?;
-        Err(CellError::host("the record's outbox write failed after its append (a test hook)"))
-    }
-
     /// The delivery of record `seq` of `channel` to subscription `sub`, or
     /// `None` when there is nothing to send: the subscription ended, or the
     /// record is past its retention.
@@ -145,14 +130,6 @@ impl FragmentCell {
         // serialized as it is: the record's body goes out as the text the cell stored
         let delivery = fragment_proto::Delivery { kind: DeliveryType::Record, fragment: fragment.to_string(), channel: channel.to_string(), record };
         let body = serde_json::to_string(&delivery).expect("a delivery serializes");
-        Ok(Some(Delivery {
-            fragment: fragment.to_string(),
-            incarnation: incarnation.to_string(),
-            kind: DeliveryKind::Record,
-            url,
-            headers: vec![("content-type".into(), "application/json".into())],
-            body: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, body),
-            sub: Some(sub),
-        }))
+        Ok(Some(Delivery::json(fragment, incarnation, DeliveryKind::Record, url, &body, Some(sub))))
     }
 }
