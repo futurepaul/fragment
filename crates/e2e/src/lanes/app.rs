@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 use fragment_nip98::Keys;
-use fragment_proto::limits;
+use fragment_proto::{limits, ErrorCode};
 use serde_json::{json, Value};
 
-use crate::api::Api;
+use crate::api::{now_s, Api};
 use crate::Suite;
 
 const TODO_APP: &[u8] = include_bytes!("../../fixtures/todo.mjs");
@@ -151,21 +151,42 @@ pub fn public(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.call(crate::api::Call { method: "GET", url: api.site_url(&name, "__op/sign"), ..Default::default() })?;
     s.ok("GET on an operation is refused", r.status == 400, &r);
 
-    // the public floor is rate limited per visitor
-    let mut statuses = vec![];
-    for i in 0..125 {
-        let r = api.browser_op(&name, "entries", &format!("r{i}"), json!({}), Some(&cookie))?;
-        statuses.push(r.status);
-        if r.status == 429 {
+    // Goal: the public floor lets a visitor exactly PUBLIC_CALLS_PER_MIN calls
+    // a clock minute, then answers 429. Method: a fresh visitor calls until
+    // refused, one call past the limit at most. A burst that crosses a
+    // minute's boundary counts across two budgets and proves nothing exact,
+    // so it runs once more with another visitor (a burst takes seconds).
+    let limit = limits::PUBLIC_CALLS_PER_MIN as usize;
+    let mut burst = None;
+    for attempt in 0..2 {
+        let minute = now_s() / 60;
+        let mut visitor: Option<String> = None;
+        let mut allowed = 0;
+        let mut refusal = None;
+        for i in 0..=limit {
+            let r = api.browser_op(&name, "entries", &format!("r{attempt}-{i}"), json!({}), visitor.as_deref())?;
+            if visitor.is_none() {
+                visitor = r.cookies().into_iter().find(|c| c.starts_with("fragment_anon="));
+            }
+            if r.status != 200 {
+                refusal = Some(r);
+                break;
+            }
+            allowed += 1;
+        }
+        if now_s() / 60 == minute {
+            burst = Some((allowed, refusal));
             break;
         }
     }
-    let allowed = statuses.iter().filter(|s| **s == 200).count();
-    s.ok(
-        "a visitor is limited to 60 public calls a minute",
-        statuses.last() == Some(&429) && (57..=120).contains(&allowed),
-        format!("{allowed} allowed, last {:?}", statuses.last()),
-    );
+    let exact = burst.as_ref().is_some_and(|(allowed, refusal)| {
+        *allowed == limit && refusal.as_ref().is_some_and(|r| r.status == 429 && r.code() == Some(ErrorCode::RateLimited))
+    });
+    let detail = match burst {
+        None => "both bursts crossed a minute's boundary".to_string(),
+        Some((allowed, refusal)) => format!("{allowed} allowed within one minute, then {}", refusal.map_or("no refusal".to_string(), |r| r.to_string())),
+    };
+    s.ok(&format!("a visitor gets exactly {limit} public calls in a minute, then 429"), exact, detail);
     let r = api.browser_op(&name, "entries", "fresh", json!({}), None)?;
     s.ok("another visitor still gets through", r.status == 200, &r);
     let r = api.op(&owner, &name, "clear", "c1", json!({}))?;
