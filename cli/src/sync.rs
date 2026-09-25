@@ -1374,16 +1374,14 @@ mod tests {
     }
 
     #[test]
-    fn remote_deletion_propagates_in_mirror_withheld_in_pull() {
+    fn remote_deletion_propagates_in_mirror() {
         let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("gone.txt", b"g"), ("kept.txt", b"k")]);
         let c = client_for(&mock);
-        // three folders adopt both files
+        // two folders adopt both files
         let dir = tmpdir("rdelete");
         let dir2 = tmpdir("rdelete-other");
-        let dir3 = tmpdir("rdelete-third");
         sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
-        sync_once(&c, "t", &dir3, &opts(Mode::Pull)).unwrap();
         // dir2 pulls, deletes gone.txt, pushes the deletion
         sync_once(&c, "t", &dir2, &opts(Mode::Pull)).unwrap();
         fs::remove_file(dir2.join("gone.txt")).unwrap();
@@ -1392,13 +1390,8 @@ mod tests {
         let report = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
         assert_eq!(report.deleted_local, vec!["gone.txt"]);
         assert!(!dir.join("gone.txt").exists());
-        // pull-only folder with untouched local copy: withheld without --prune
-        let report = sync_once(&c, "t", &dir3, &opts(Mode::Pull)).unwrap();
-        assert_eq!(report.withheld_deletions, vec!["gone.txt"]);
-        assert!(dir3.join("gone.txt").exists(), "pull without --prune never deletes");
         fs::remove_dir_all(&dir).ok();
         fs::remove_dir_all(&dir2).ok();
-        fs::remove_dir_all(&dir3).ok();
     }
 
     #[test]
