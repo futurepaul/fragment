@@ -33,6 +33,11 @@ const LIST_PAGE: u64 = 1000;
 /// platform's last 15 minutes, a pass takes seconds, a large upload
 /// minutes.
 pub const TOKEN_REMINT_BEFORE_EXPIRY_MS: i64 = 120_000;
+/// A held token is used for at most this long after it was minted. The
+/// platform checks the editor's role only when it mints, so this is how
+/// long a watcher whose editor was removed can still push; a burst of
+/// saves inside it shares one mint.
+pub const TOKEN_REUSE_MAX_MS: i64 = 60_000;
 
 #[derive(Debug)]
 pub enum CsError {
@@ -143,6 +148,8 @@ pub struct CodeStorage {
     token: String,
     /// the token's `expiresAt` (ms), as the host said
     expires_at_ms: i64,
+    /// when this machine minted it (ms, by its clock)
+    minted_at_ms: i64,
     http: reqwest::blocking::Client,
 }
 
@@ -157,6 +164,7 @@ impl CodeStorage {
             repo,
             token,
             expires_at_ms,
+            minted_at_ms: now_ms(),
             // every request sets its own total timeout (`timeout_for`)
             http: reqwest::blocking::Client::builder()
                 .connect_timeout(CONNECT_TIMEOUT)
@@ -165,15 +173,17 @@ impl CodeStorage {
         })
     }
 
-    /// Whether the token has `TOKEN_REMINT_BEFORE_EXPIRY_MS` left.
+    /// Whether the token has `TOKEN_REMINT_BEFORE_EXPIRY_MS` left and was
+    /// minted less than `TOKEN_REUSE_MAX_MS` ago.
     fn fresh(&self) -> bool {
-        now_ms() + TOKEN_REMINT_BEFORE_EXPIRY_MS < self.expires_at_ms
+        let now = now_ms();
+        now + TOKEN_REMINT_BEFORE_EXPIRY_MS < self.expires_at_ms && now - self.minted_at_ms < TOKEN_REUSE_MAX_MS
     }
 
     /// A new token for the same client: its connections stay open.
     fn renew(&mut self, minted: Minted) {
         let Minted { server, repo, token, expires_at_ms } = minted;
-        (self.server, self.repo, self.token, self.expires_at_ms) = (server, repo, token, expires_at_ms);
+        (self.server, self.repo, self.token, self.expires_at_ms, self.minted_at_ms) = (server, repo, token, expires_at_ms, now_ms());
     }
 
     /// url-form repo identity this client is scoped to — the world a sync
@@ -395,8 +405,9 @@ impl CodeStorage {
 
 /// One fragment's code.storage client, held for a watcher's life: one HTTP
 /// client, so its connections stay open across passes, and one token,
-/// minted again when it nears its `expiresAt` or after code.storage
-/// refused it. (A one-shot command connects once: `CodeStorage::connect`.)
+/// minted again a minute after it was (`TOKEN_REUSE_MAX_MS`), when it
+/// nears its `expiresAt`, or after code.storage refused it. (A one-shot
+/// command connects once: `CodeStorage::connect`.)
 pub struct Held {
     name: String,
     override_url: Option<String>,
@@ -637,6 +648,15 @@ mod tests {
         assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some());
         assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some());
         assert_eq!(short.take_requests("").get("GET storage-token"), Some(&2), "a token inside the margin is minted again");
+
+        // a token a minute old is minted again, though it has long left:
+        // a removed editor's watcher pushes for at most that long
+        let host = crate::api::Client::new(&mock.url, auth::fixed(7));
+        let mut held = Held::new("t", None);
+        assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some());
+        held.client.as_mut().expect("connected").minted_at_ms -= TOKEN_REUSE_MAX_MS;
+        assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some());
+        assert_eq!(mock.take_requests("").get("GET storage-token"), Some(&2), "a token past its reuse is minted again");
     }
 
     #[test]
