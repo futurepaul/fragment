@@ -381,6 +381,10 @@ pub(crate) enum MetaKey {
     /// activation with the `steps` table writes it, once. A run launched
     /// before it finds no answers kept, and starts again (jobs.rs).
     StepsKeptSince,
+    /// Test fleets only: while set, an advance after a run's first step
+    /// waits (`hold-advances`), naming its run in `TestAdvanceHeld`.
+    TestHoldAdvances,
+    TestAdvanceHeld,
 }
 
 impl MetaKey {
@@ -418,6 +422,8 @@ impl MetaKey {
             MetaKey::TestFailTriggers => "test_fail_triggers",
             MetaKey::TestDropEffects => "test_drop_effects",
             MetaKey::StepsKeptSince => "steps_kept_since",
+            MetaKey::TestHoldAdvances => "test_hold_advances",
+            MetaKey::TestAdvanceHeld => "test_advance_held",
         }
     }
 

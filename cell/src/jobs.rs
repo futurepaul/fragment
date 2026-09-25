@@ -65,6 +65,11 @@ pub const JOB_HEADER: &str = "x-fragment-job";
 pub const HOPS_HEADER: &str = "x-fragment-hops";
 /// A run whose Workflow could not be started is tried again this soon.
 const QUEUED_RETRY_MS: i64 = 10_000;
+
+/// Test fleets: the longest an advance is held (`hold-advances`), and how
+/// often a held one looks again.
+const TEST_HOLD_MAX_MS: u64 = 20_000;
+const TEST_HOLD_POLL_MS: u64 = 50;
 const LAUNCH_BATCH: usize = 25;
 /// Running runs checked against their Workflow per alarm, once they are this old.
 const RECONCILE_BATCH: i64 = 25;
@@ -593,6 +598,12 @@ impl FragmentCell {
             }
             self.keep_step(run_id, attempt, f.index, &StepResult { kind: f.kind, outcome: StepOutcome::Error(clip(&f.error)) })?;
         }
+        // Test fleets: an advance after the first step waits while the
+        // `hold-advances` lever is on, so a test acts on a run it knows is
+        // between steps (a latch, not a clock)
+        if self.cfg.test_hooks && count > 0 {
+            self.held_advance(run_id).await?;
+        }
         let results = match self.kept_answers(run_id, attempt, count)? {
             Kept::All(results) => results,
             Kept::Missing(_) if self.began_before_answers_were_kept(run_id)? => return self.resume(&run).await,
@@ -664,6 +675,20 @@ impl FragmentCell {
             }
             OpKind::Query => fail(format!("{op} is a query; queries do not run as jobs")),
         }
+    }
+
+    /// Test fleets: waits while `hold-advances` is on, at most
+    /// `TEST_HOLD_MAX_MS`, naming the held run (`advance-held`).
+    async fn held_advance(&self, run: i64) -> CellResult<()> {
+        assert!(self.cfg.test_hooks, "only a test fleet holds an advance");
+        for _ in 0..TEST_HOLD_MAX_MS / TEST_HOLD_POLL_MS {
+            if self.meta(MetaKey::TestHoldAdvances)?.is_none() {
+                return Ok(());
+            }
+            self.set_meta(MetaKey::TestAdvanceHeld, &run.to_string())?;
+            Delay::from(Duration::from_millis(TEST_HOLD_POLL_MS)).await;
+        }
+        Ok(())
     }
 
     /// Whether a run's attempt was launched before this cell kept step
