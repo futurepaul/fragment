@@ -134,11 +134,16 @@ fn authenticate(req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<St
         .map_err(|e| CellError::new(ErrorCode::Unauthenticated, e.to_string()))
 }
 
-/// Tries at reaching the registry: a route the node refused for now (a
-/// cell queued too long behind the others waking after a restart) is
-/// asked again after a pause.
+/// Tries at reaching the registry when the node refused its route for now
+/// (a cell queued too long behind the others waking after a restart), with
+/// a pause that doubles between them.
 const REGISTRY_ATTEMPTS: u32 = 3;
 const REGISTRY_RETRY_MS: u64 = 250;
+/// How celld names that refusal in the error a Worker's fetch throws (its
+/// routed-request error, `route failed: CapacityExhausted`): it is answered
+/// only for a request still queued at the gate, so the registry never saw
+/// it. A fetch's error reaches the Worker as its message alone.
+const REFUSED_BEFORE_IT_RAN: &str = "CapacityExhausted";
 
 /// Asks the registry cell one of its calls (`registry/calls.rs`: the path,
 /// the body, and the answer are one definition both ends compile against).
@@ -163,7 +168,12 @@ pub(crate) async fn ask_registry<C: Call>(env: &Env, call: &C) -> CellResult<C::
     let (status, bytes) = loop {
         match ask().await {
             Ok(answer) => break answer,
-            Err(_) if attempt + 1 < REGISTRY_ATTEMPTS => {
+            // Only that refusal is asked again. Any other throw may come
+            // after the registry acted (a failure inside it, a connection
+            // dropped mid-answer), and its calls are not idempotent: a
+            // second Mint is a second redemption, a second ClaimUsername
+            // answers "taken" to the person who got the name.
+            Err(e) if attempt + 1 < REGISTRY_ATTEMPTS && e.to_string().contains(REFUSED_BEFORE_IT_RAN) => {
                 Delay::from(std::time::Duration::from_millis(REGISTRY_RETRY_MS << attempt)).await;
                 attempt += 1;
             }

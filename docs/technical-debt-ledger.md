@@ -496,7 +496,10 @@ without a delete condition is unfinished design, not debt.
   served, and the registry, the one cell every signed request needs,
   waited out its 15 s deadline behind the fragments whose alarms all
   woke at once. `ask_registry` now asks again twice (after 250 ms, then
-  500 ms), so a request can wait about 45 s instead of failing.
+  500 ms) when the node refused the route that way, so a request can wait
+  about 45 s instead of failing. It retries only that refusal, which
+  celld answers for a request still queued at its gate: any other failure
+  may come after the registry acted, and its calls are not idempotent.
 - **Risk:** on a fleet with many fragments, a restarted node answers
   signed requests slowly, or with 503s, until its alarm wakes drain.
 - **First proof:** CI's e2e (three-core macOS runners), the checks that
