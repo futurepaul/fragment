@@ -506,25 +506,31 @@ impl RegistryCell {
         Ok(who)
     }
 
-    fn add_key(&self, AddKey(b): AddKey) -> CellResult<IdentityView> {
-        let by = self.by(&b.by)?;
-        check_key(&b.key)?;
-        let who = self.managed(b.identity.as_deref(), &by)?;
-        match self.key_row(&b.key)? {
-            Some(row) if row.identity == who.id && row.active() => return self.view(&who, Some(false)),
-            Some(row) if row.identity == who.id => return Err(conflict("a revoked key stays revoked; make a new one")),
+    /// `key` joins `who`, added by `by`: false when it is theirs already.
+    fn insert_key(&self, who: &str, key: &str, by: &str) -> CellResult<bool> {
+        match self.key_row(key)? {
+            Some(row) if row.identity == who && row.active() => return Ok(false),
+            Some(row) if row.identity == who => return Err(conflict("a revoked key stays revoked; make a new one")),
             Some(_) => return Err(conflict("this key already belongs to someone")),
             None => {}
         }
-        let n = self.count("SELECT COUNT(*) AS n FROM keys WHERE identity = ?", vec![who.id.as_str().into()])?;
+        let n = self.count("SELECT COUNT(*) AS n FROM keys WHERE identity = ?", vec![who.into()])?;
         if n >= limits::KEYS_PER_IDENTITY_MAX {
             return Err(CellError::invalid(format!("an identity holds at most {} keys, revoked ones included", limits::KEYS_PER_IDENTITY_MAX)));
         }
         self.exec(
             "INSERT INTO keys (key, identity, added_at, added_by) VALUES (?, ?, ?, ?)",
-            vec![b.key.as_str().into(), who.id.as_str().into(), SqlStorageValue::Integer(js::now_ms()), by.id.as_str().into()],
+            vec![key.into(), who.into(), SqlStorageValue::Integer(js::now_ms()), by.into()],
         )?;
-        self.view(&who, Some(true))
+        Ok(true)
+    }
+
+    fn add_key(&self, AddKey(b): AddKey) -> CellResult<IdentityView> {
+        let by = self.by(&b.by)?;
+        check_key(&b.key)?;
+        let who = self.managed(b.identity.as_deref(), &by)?;
+        let added = self.insert_key(&who.id, &b.key, &by.id)?;
+        self.view(&who, Some(added))
     }
 
     fn revoke(&self, RevokeKey(b): RevokeKey) -> CellResult<IdentityView> {

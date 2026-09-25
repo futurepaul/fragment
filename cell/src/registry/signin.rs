@@ -517,19 +517,7 @@ impl RegistryCell {
     pub(super) fn add_by_session(&self, b: ApproveKey) -> CellResult<()> {
         check_key(&b.key)?;
         let person = self.live_session(&b.token, None)?.1.identity;
-        match self.key_row(&b.key)? {
-            Some(row) if row.identity == person.id && row.active() => return Ok(()),
-            Some(_) => return Err(conflict("this key already belongs to someone (or was revoked)")),
-            None => {}
-        }
-        let n = self.count("SELECT COUNT(*) AS n FROM keys WHERE identity = ?", vec![person.id.as_str().into()])?;
-        if n >= limits::KEYS_PER_IDENTITY_MAX {
-            return Err(CellError::invalid(format!("an identity holds at most {} keys, revoked ones included", limits::KEYS_PER_IDENTITY_MAX)));
-        }
-        self.exec(
-            "INSERT INTO keys (key, identity, added_at, added_by) VALUES (?, ?, ?, ?)",
-            vec![b.key.as_str().into(), person.id.as_str().into(), SqlStorageValue::Integer(js::now_ms()), person.id.as_str().into()],
-        )?;
+        self.insert_key(&person.id, &b.key, &person.id)?;
         Ok(())
     }
 
