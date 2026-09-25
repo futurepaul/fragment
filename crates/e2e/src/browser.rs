@@ -120,11 +120,21 @@ fn chrome() -> Option<PathBuf> {
 impl Browser {
     /// `None` when no Chrome is installed (the section says so and skips).
     pub fn launch(scratch: &Path) -> Result<Option<Browser>> {
+        Browser::launch_with(scratch, &[], None)
+    }
+
+    /// A Chrome of a lane's own: `args` added to its command line, and
+    /// `preferences` (Chrome's own settings file) in its profile first.
+    pub fn launch_with(scratch: &Path, args: &[&str], preferences: Option<&Value>) -> Result<Option<Browser>> {
         let Some(bin) = chrome() else { return Ok(None) };
         let port = fragment_devstack::free_port()?;
         let profile = scratch.join(format!("chrome-{port}"));
-        std::fs::create_dir_all(&profile)?;
+        std::fs::create_dir_all(profile.join("Default"))?;
+        if let Some(p) = preferences {
+            std::fs::write(profile.join("Default/Preferences"), p.to_string())?;
+        }
         let child = Command::new(bin)
+            .args(args)
             .args([
                 "--headless=new",
                 &format!("--remote-debugging-port={port}"),
@@ -321,6 +331,16 @@ impl Browser {
         }
         self.send("Storage.setCookies", params, None)?;
         Ok(())
+    }
+
+    /// Every cookie the browser holds (in this lease's context): a
+    /// partitioned one with its `partitionKey`.
+    pub fn cookies(&mut self) -> Result<Vec<Value>> {
+        let mut params = json!({});
+        if let Some(context) = &self.context {
+            params["browserContextId"] = json!(context);
+        }
+        Ok(self.send("Storage.getCookies", params, None)?["cookies"].as_array().cloned().unwrap_or_default())
     }
 
     /// The page's viewport, as a phone's (`mobile`) or a desktop's.

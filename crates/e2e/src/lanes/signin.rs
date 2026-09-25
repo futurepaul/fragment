@@ -11,7 +11,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use fragment_core::npub;
+use fragment_core::{form, npub};
 use fragment_nip98::Keys;
 use fragment_proto::{limits, ErrorCode};
 use serde_json::{json, Value};
@@ -49,14 +49,40 @@ fn cookie_line(r: &Reply, name: &str) -> String {
 }
 
 /// A browser signed in on the platform walks to a fragment's origin:
-/// `/auth/fragment` mints a redemption, `__signin` redeems it. Answers the
-/// fragment's own session cookie value.
+/// `/auth/fragment` mints a redemption (saying yes first, on a fragment
+/// that is not the person's nor shared with them), `__signin` redeems it.
+/// Answers the fragment's own session cookie value.
 pub(super) fn site_cookie(api: &Api, session: &str, name: &str) -> Result<String> {
-    let r = with_session(api, "GET", &format!("/auth/fragment?name={name}&return=/"), session)?;
-    anyhow::ensure!(r.status == 302, "/auth/fragment: {r}");
+    let mut r = with_session(api, "GET", &format!("/auth/fragment?name={name}&return=/"), session)?;
+    if r.status == 200 {
+        r = consent(api, session, name, &api.base)?;
+    }
+    anyhow::ensure!(matches!(r.status, 302 | 303), "/auth/fragment: {r}");
     let r = api.call(Call { method: "GET", url: r.header("location"), ..Call::default() })?;
     anyhow::ensure!(r.status == 302, "__signin: {r}");
     r.cookies().into_iter().find_map(|c| c.strip_prefix("fragment_site=").map(str::to_string)).context("a site cookie")
+}
+
+/// The yes to "Continue to <name>?", posted from `origin` with the page's
+/// form token (made for `session`'s own cookie, as its page would hold it,
+/// long enough ago that its button has armed).
+pub(super) fn consent(api: &Api, session: &str, name: &str, origin: &str) -> Result<Reply> {
+    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as i64;
+    let token = form::issue(session, &format!("consent:{name}"), now_ms - form::DELAY_MS - 50);
+    api.call(Call {
+        method: "POST",
+        url: format!("{}/auth/fragment?name={name}&return=/", api.base),
+        body: Some(format!("form={}", url_enc(&token)).into_bytes()),
+        content_type: Some("application/x-www-form-urlencoded"),
+        cookie: Some(format!("fragment_session={session}")),
+        extra: vec![("origin", origin.to_string())],
+        ..Call::default()
+    })
+}
+
+/// `__signout`, posted from the fragment's own page with its cookies.
+pub(super) fn signout(api: &Api, name: &str, cookies: &str) -> Result<Reply> {
+    api.call(Call { method: "POST", url: api.site_url(name, "__signout"), cookie: Some(cookies.to_string()), extra: vec![("origin", api.site_origin(name))], ..Call::default() })
 }
 
 /// A browser's sign-in that began at `/auth/login?return=<raw>` (`raw` as
@@ -409,7 +435,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let (r, calls) = calls_of(api, || with_session(api, "GET", &format!("/auth/fragment?name={f}&return=%2Fa%2520b"), &member_session))?;
     let redeem = r.header("location");
     s.ok("signed in, the platform hands the fragment a single-use redemption", r.status == 302 && redeem.starts_with(&api.site_url(&f, "__signin?token=")), &r);
-    s.ok("(asking the registry once)", calls == 1, calls);
+    s.ok("(asking the registry twice for a member: whether they said yes to it, then, once the fragment says they are in it, the redemption)", calls == 2, calls);
     let other_host = redeem.replace(&api.site_url(&f, ""), &api.site_url(&g, ""));
     let r = api.call(Call { method: "GET", url: other_host, ..Call::default() })?;
     s.ok("a redemption for one fragment is refused on another", r.status == 401, &r);
@@ -624,29 +650,33 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         format!("oldest {oldest}, newest {newest}"),
     );
     let newest = on_g[on_g.len() - 1].clone();
-    let r = api.page(&g, "__signout", Some(&format!("fragment_site={newest}")))?;
-    s.ok("__signout clears the fragment's cookie", r.status == 302 && cookie_line(&r, "fragment_site").contains("Max-Age=0"), &r);
+    let r = signout(api, &g, &format!("fragment_site={newest}"))?;
+    s.ok(
+        "__signout, posted from the fragment's own page, clears both its cookies",
+        r.status == 303 && cookie_line(&r, "fragment_site").contains("Max-Age=0") && cookie_line(&r, "fragment_frame").contains("Max-Age=0"),
+        &r,
+    );
     let after = reads(&newest)?;
     s.ok("and ends its session: a copy of the cookie is nobody (members only: 401)", after == 401, after);
     let (other, platform) = (reads(&on_g[1])?, with_session(api, "GET", "/", &member_session)?);
     s.ok("(the browser's other sessions, and its platform session, stay)", other == 200 && platform.text.contains("member@e2e.test"), other);
-    let r = api.page(&g, "__signout", Some(&format!("fragment_site={newest}")))?;
-    s.ok("signing out again is no error", r.status == 302, &r);
+    let r = signout(api, &g, &format!("fragment_site={newest}"))?;
+    s.ok("signing out again is no error", r.status == 303, &r);
 
     // the registry down: the browser is signed out all the same
     let kept = site_cookie(api, &member_session, &g)?;
     api.unsigned("POST", "/api/test/registry", Some(&json!({ "down": true })))?;
-    let r = api.page(&g, "__signout", Some(&format!("fragment_site={kept}")));
+    let r = signout(api, &g, &format!("fragment_site={kept}"));
     api.unsigned("POST", "/api/test/registry", Some(&json!({ "down": false })))?;
     let r = r?;
     s.ok(
         "__signout clears the cookie even when the registry cannot answer",
-        r.status == 302 && cookie_line(&r, "fragment_site").contains("Max-Age=0"),
+        r.status == 303 && cookie_line(&r, "fragment_site").contains("Max-Age=0"),
         &r,
     );
     let copy = reads(&kept)?;
     s.ok("(the registry never heard: a copy of that cookie lasts until its session ends)", copy == 200, copy);
-    api.page(&g, "__signout", Some(&format!("fragment_site={kept}")))?;
+    signout(api, &g, &format!("fragment_site={kept}"))?;
 
     // revoking: a member removed, a person signed out
     api.signed(&owner, "DELETE", &format!("/api/f/{f}/members/{}", member.pubkey_hex()), None)?;
@@ -678,6 +708,9 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     // invites are accepted on the platform's origin (`/join/<name>`: the share lane)
 
     // sign-in's rows: bounded, and swept on the registry's alarm, never on a request
+    // (paul is not in f: he says yes to it once, and its redemptions follow)
+    let r = consent(api, &paul, &f, &api.base)?;
+    anyhow::ensure!(r.status == 303, "paul's yes to {f}: {r}");
     let mut minted = vec![];
     for _ in 0..=limits::REDEMPTIONS_PER_SESSION_MAX {
         minted.push(with_session(api, "GET", &format!("/auth/fragment?name={f}&return=/"), &paul)?.header("location"));
