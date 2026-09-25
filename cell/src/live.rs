@@ -36,9 +36,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use fragment_core::live::{presence_admit, QueryBudget, QueryRefused};
+use fragment_core::facet::Answered;
 use fragment_core::npub;
 use fragment_proto::live::{Answer, Cursor, LiveIn, LiveOut, Present, Query, Subscribe};
-use fragment_proto::{limits, valid_op_id, ChannelRecord, ErrorBody, ErrorCode, OpKind, OpResult, Role, Via};
+use fragment_proto::{limits, valid_op_id, ChannelRecord, ErrorBody, ErrorCode, OpKind, Role, Via};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use worker::*;
@@ -346,7 +347,7 @@ impl FragmentCell {
 
     /// Runs query `op` as the socket's principal and role (both fixed when
     /// it connected), as `__op` runs one but for the public call budget.
-    async fn socket_query(&self, st: &LiveState, op: &str, id: &str, input: Value) -> CellResult<OpResult> {
+    async fn socket_query(&self, st: &LiveState, op: &str, id: &str, input: Value) -> CellResult<Answered> {
         let decl = self.declared(op)?;
         if decl.kind != OpKind::Query {
             return Err(CellError::invalid(format!("{op} is not a query: only queries run over the live socket (call it through __op)")));

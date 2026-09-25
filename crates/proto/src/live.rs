@@ -5,6 +5,7 @@
 //! the browser library (cell/client.mjs) speaks the same field names.
 
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::value::RawValue;
 use serde_json::Value;
 
 use crate::{ChannelRecord, ErrorBody, ErrorCode, Role};
@@ -134,11 +135,27 @@ pub struct Present {
 /// A query's answer: `{type: "result", id, result}`, or its refusal as
 /// `__op` would answer it, `{type: "result", id, error, message, status}`
 /// (the code's HTTP status, for the browser library's `FragmentError`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// The result is the app's answer as the cell got it, JSON text passed
+/// through, never parsed on its way to the page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(try_from = "AnswerFrame", into = "AnswerFrame")]
 pub struct Answer {
     pub id: String,
-    pub outcome: Result<Value, ErrorBody>,
+    pub outcome: Result<Box<RawValue>, ErrorBody>,
+}
+
+/// Two answers are equal when their results are equal JSON, whatever the
+/// spacing or key order of the text.
+impl PartialEq for Answer {
+    fn eq(&self, other: &Answer) -> bool {
+        let json = |raw: &RawValue| serde_json::from_str::<Value>(raw.get()).expect("a raw value holds JSON");
+        self.id == other.id
+            && match (&self.outcome, &other.outcome) {
+                (Ok(a), Ok(b)) => json(a) == json(b),
+                (Err(a), Err(b)) => a == b,
+                _ => false,
+            }
+    }
 }
 
 /// An answer as it travels: a result, or an error with its message and status.
@@ -147,7 +164,7 @@ pub struct Answer {
 struct AnswerFrame {
     id: String,
     #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
-    result: Option<Value>,
+    result: Option<Box<RawValue>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error: Option<ErrorCode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -156,9 +173,14 @@ struct AnswerFrame {
     status: Option<u16>,
 }
 
-/// A key that is present, even as `null`, is `Some`: a query may answer `null`.
-fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Value>, D::Error> {
-    Value::deserialize(d).map(Some)
+/// A key that is present, even as `null`, is `Some`: a query may answer
+/// `null`. Read through a `Value`, as a record frame's record is: serde
+/// buffers a tagged frame's fields, and raw JSON text cannot pass through
+/// that buffer. Only a reader of the frame pays this (the CLI, a test); the
+/// cell writes the text it has.
+fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Box<RawValue>>, D::Error> {
+    let value = Value::deserialize(d)?;
+    serde_json::value::to_raw_value(&value).map(Some).map_err(serde::de::Error::custom)
 }
 
 impl TryFrom<AnswerFrame> for Answer {
@@ -219,6 +241,10 @@ impl LiveOut {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn raw(text: &str) -> Box<RawValue> {
+        RawValue::from_string(text.to_string()).unwrap()
+    }
 
     fn decode_in(v: Value) -> Result<LiveIn, String> {
         serde_json::from_value(v).map_err(|e| e.to_string())
@@ -298,8 +324,8 @@ mod tests {
                 json!({ "type": "presence", "id": "ab", "principal": "anon:x", "data": null }),
             ),
             (LiveOut::Changed { op: "say".into() }, json!({ "type": "changed", "op": "say" })),
-            (LiveOut::Result(Answer { id: "live-1".into(), outcome: Ok(json!({ "n": 2 })) }), json!({ "type": "result", "id": "live-1", "result": { "n": 2 } })),
-            (LiveOut::Result(Answer { id: "live-2".into(), outcome: Ok(Value::Null) }), json!({ "type": "result", "id": "live-2", "result": null })),
+            (LiveOut::Result(Answer { id: "live-1".into(), outcome: Ok(raw(r#"{ "n": 2 }"#)) }), json!({ "type": "result", "id": "live-1", "result": { "n": 2 } })),
+            (LiveOut::Result(Answer { id: "live-2".into(), outcome: Ok(raw("null")) }), json!({ "type": "result", "id": "live-2", "result": null })),
             (
                 LiveOut::Result(Answer { id: "live-3".into(), outcome: Err(ErrorBody { error: ErrorCode::Forbidden, message: "this needs the editor role".into() }) }),
                 json!({ "type": "result", "id": "live-3", "error": "forbidden", "message": "this needs the editor role", "status": 403 }),
