@@ -343,7 +343,6 @@ pub(crate) enum MetaKey {
     TemplatePending,
     /// An owner's agent still to join (publish.rs).
     AgentPending,
-    /// A certificate still to ask for.
     /// The commits the cell pins (plane.rs).
     PinMain,
     PinLive,
