@@ -8,7 +8,6 @@ use anyhow::Result;
 use serde_json::json;
 
 use crate::api::{Api, Call};
-use crate::browser::Browser;
 use crate::Suite;
 
 pub fn notes(s: &mut Suite, api: &Api) -> Result<()> {
@@ -55,7 +54,7 @@ pub fn notes(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the file trigger recorded the change", changed, "");
 
     // the viewer, in a browser: it renders the tree and follows new notes
-    let Some(mut chrome) = Browser::launch(&s.scratch)? else {
+    let Some(mut chrome) = s.browser()? else {
         s.ok("Chrome is installed for the notes viewer (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());
     };

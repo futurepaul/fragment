@@ -52,6 +52,8 @@ pub struct Suite {
     only: Option<String>,
     passed: usize,
     failed: Vec<String>,
+    /// Chrome, started when a lane first asks for it and shared after.
+    chrome: browser::Shared,
     tools: devstack::Tools,
     node: Option<devstack::Node>,
     port: u16,
@@ -107,6 +109,12 @@ impl Suite {
             self.failed.push(label.to_string());
             println!("FAIL  {label}: {detail}");
         }
+    }
+
+    /// The shared Chrome, in a context of the lane's own (`None`: no Chrome
+    /// is installed). Its pages close when the lease is dropped.
+    pub fn browser(&self) -> Result<Option<browser::Lease>> {
+        self.chrome.lease()
     }
 
     /// A label for this run (a fragment's full name adds its owner's username).
@@ -355,6 +363,7 @@ fn main() -> Result<()> {
         only,
         passed: 0,
         failed: vec![],
+        chrome: browser::Shared::new(&scratch),
         tools,
         node: None,
         port: devstack::free_port()?,
@@ -378,6 +387,7 @@ fn main() -> Result<()> {
     if s.node.is_some() {
         s.stop()?;
     }
+    s.chrome.close();
     println!("\n{} passed, {} failed", s.passed, s.failed.len());
     if !s.failed.is_empty() {
         for f in &s.failed {

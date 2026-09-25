@@ -52,7 +52,8 @@ debt ledger).
   files, deploy, ops, public, site, watch, schemas, channels, live,
   routes, cli, browser, jobs, triggers, appfiles, blobs, notes, push,
   ai, budget, agents, chat, computer, sync, restart, pathmode). The browser and notes sections drive headless
-  Chrome (`CHROME_BIN` to choose one); `triggers` waits for a cron
+  Chrome (`CHROME_BIN` to choose one; one Chrome serves the whole run, a
+  fresh browser context per section); `triggers` waits for a cron
   minute (about a minute). The node runs from a staged copy
   of the cell in the run's own scratch (`target/e2e/<run>/cell`), so the
   e2e and `cargo xtask dev` can run at once. That scratch holds each node

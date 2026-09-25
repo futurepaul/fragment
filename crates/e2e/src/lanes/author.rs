@@ -13,7 +13,6 @@ use serde_json::{json, Value};
 
 use super::app::ship;
 use crate::api::{Api, Call, Socket};
-use crate::browser::Browser;
 use crate::Suite;
 
 const CHAT_APP: &[u8] = include_bytes!("../../fixtures/chat.mjs");
@@ -762,7 +761,7 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{} todos, first {:?}, last {:?}", texts.len(), texts.first(), texts.last()),
     );
 
-    let Some(mut chrome) = Browser::launch(&s.scratch)? else {
+    let Some(mut chrome) = s.browser()? else {
         s.ok("Chrome is installed for the browser lane (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());
     };
