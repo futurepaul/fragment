@@ -4,8 +4,9 @@
 //! (webhooks included), the real CLI, and signed HTTP the way the CLI and
 //! a browser send it.
 //!
-//! `cargo xtask e2e [--only <section>[,<section>...]]`. Each section makes
-//! its own fragments, so any one can run alone. Every check prints `ok` or
+//! `cargo xtask e2e [--only <section>[,<section>...] | --except <section>[,...]]`.
+//! Each section makes its own fragments, so any set can run alone (CI's
+//! shards run it that way, in parallel). Every check prints `ok` or
 //! `FAIL`, and a section that stops early is one FAIL, with the sections
 //! after it still run; the process exits non-zero when any check fails.
 //! A run's scratch (`target/e2e/<run>`: the staged cell, each node boot's
@@ -50,8 +51,12 @@ const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";
 
 pub struct Suite {
-    /// The sections to run (`None`: all of them).
+    /// The sections to run (`None`: all of them), and those not to.
     only: Option<Vec<String>>,
+    except: Vec<String>,
+    /// Every section a lane asked for, run or not: a name given to
+    /// `--only` or `--except` that is none of them fails the run.
+    asked: Vec<String>,
     passed: usize,
     failed: Vec<String>,
     /// The sections that ran, in order: the last is the one running.
@@ -105,13 +110,15 @@ impl Suite {
         ]
     }
 
-    /// Whether the section `name` runs in this suite (`--only` names it).
+    /// Whether the section `name` runs in this suite (`--only` names it,
+    /// `--except` does not).
     pub fn runs(&self, name: &str) -> bool {
-        self.only.as_ref().is_none_or(|only| only.iter().any(|o| o == name))
+        self.only.as_ref().is_none_or(|only| only.iter().any(|o| o == name)) && !self.except.iter().any(|e| e == name)
     }
 
     /// Whether the section `name` runs (it prints its header when it does).
     pub fn section(&mut self, name: &str) -> bool {
+        self.asked.push(name.to_string());
         if !self.runs(name) {
             return false;
         }
@@ -432,10 +439,12 @@ fn main() -> Result<()> {
         Some((flag, rest)) if flag == "--hosted" => (true, rest),
         _ => (false, args.as_slice()),
     };
-    let only = match rest {
-        [] => None,
-        [flag, sections] if flag == "--only" => Some(sections.clone()),
-        _ => bail!("usage: fragment-e2e [--hosted] [--only <section>[,<section>...]]"),
+    let list = |names: &str| names.split(',').map(str::to_string).collect::<Vec<_>>();
+    let (only, except) = match rest {
+        [] => (None, vec![]),
+        [flag, sections] if flag == "--only" => (Some(list(sections)), vec![]),
+        [flag, sections] if flag == "--except" && !hosted => (None, list(sections)),
+        _ => bail!("usage: fragment-e2e [--hosted] [--only <section>[,<section>...] | --except <section>[,<section>...]]"),
     };
     let root = devstack::repo_root();
     let cli = std::env::var_os("FRAGMENT_BIN").map(PathBuf::from).unwrap_or_else(|| root.join("target/release/fragment"));
@@ -445,7 +454,7 @@ fn main() -> Result<()> {
     if hosted {
         let scratch = root.join("target/e2e-hosted");
         std::fs::create_dir_all(&scratch)?;
-        return hosted::run(cli, scratch, only);
+        return hosted::run(cli, scratch, only.map(|o| o.join(",")));
     }
     let tools = devstack::Tools::locate()?;
     let org_key = fake::generate_org_key_pem();
@@ -456,7 +465,9 @@ fn main() -> Result<()> {
     let project = devstack::stage_project(&scratch.join("cell"))?;
     let agents_project = devstack::stage_agent(&scratch.join("agent"))?;
     let mut s = Suite {
-        only: only.map(|o| o.split(',').map(str::to_string).collect()),
+        only,
+        except,
+        asked: vec![],
         passed: 0,
         failed: vec![],
         ran: vec![],
@@ -484,9 +495,9 @@ fn main() -> Result<()> {
     };
     s.start(true, true)?;
     lanes::run(&mut s);
-    for name in s.only.clone().unwrap_or_default() {
-        if !s.ran.contains(&name) {
-            s.fail(&format!("--only {name}"), "no section has that name");
+    for (flag, name) in s.only.clone().unwrap_or_default().into_iter().map(|n| ("--only", n)).chain(s.except.clone().into_iter().map(|n| ("--except", n))) {
+        if !s.asked.contains(&name) {
+            s.fail(&format!("{flag} {name}"), "no section has that name");
         }
     }
     if s.node.is_some() {
