@@ -103,7 +103,7 @@ impl Credential {
                 Ok(Some(Signed { identity, key: Some(key) }))
             }
             Credential::Session(token) => match crate::ask_registry(env, &calls::Session { token, fragment: Some(fragment.to_string()) }).await {
-                Ok(identity) => Ok(Some(Signed { identity, key: None })),
+                Ok(live) => Ok(Some(Signed { identity: live.identity, key: None })),
                 Err(e) if e.code == ErrorCode::Unauthenticated => Ok(None),
                 Err(e) => Err(e),
             },

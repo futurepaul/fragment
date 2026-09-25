@@ -219,13 +219,13 @@ fn site_credential(req: &Request, url: &Url, body: &[u8], name: &str, mode: Mode
     Ok(auth::site_token(req, name, url, mode == Mode::Path)?.map(Credential::Session))
 }
 
-/// The identity a path names: `me` is the signer.
-fn named_identity(who: &str, signer: &Signed) -> CellResult<String> {
+/// The identity a path names: `None` for `me`, whoever signed.
+fn named_identity(who: &str) -> CellResult<Option<String>> {
     if who == "me" {
-        return Ok(signer.id.clone());
+        return Ok(None);
     }
     if npub::is_identity(who) {
-        return Ok(who.to_string());
+        return Ok(Some(who.to_string()));
     }
     Err(CellError::invalid(format!("{who:?} is not an identity (id:…) or `me`")))
 }
@@ -388,7 +388,7 @@ async fn budget_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
             if !cfg.is_operator(who.key.as_deref(), &who.id)? {
                 return Err(CellError::new(ErrorCode::Forbidden, "only the fleet's operators top up budgets"));
             }
-            let id = named_identity(id, &who)?;
+            let id = named_identity(id)?.unwrap_or_else(|| who.id.clone());
             let org = ledger::org_of(&id).ok_or_else(|| CellError::invalid("name a person"))?;
             let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let usd = v["usd"].as_f64().filter(|u| u.is_finite() && *u > 0.0).ok_or_else(|| CellError::invalid("usd is a positive number of dollars"))?;
@@ -399,7 +399,10 @@ async fn budget_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
     }
 }
 
-/// `/api/identities…`: the registry's public face.
+/// `/api/identities…`: the registry's public face. The signer's key is
+/// checked here and resolved by the registry in the same turn as what it
+/// asks (`calls::By`): one round trip a call, and a key revoked a moment
+/// before cannot act.
 async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> CellResult<Response> {
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     let method = req.method();
@@ -410,15 +413,15 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
             // FIN-11's trusted initial registration: the owner signs, and the
             // agent's key proves itself inside
             IdentityKind::Agent => {
-                let owner = signer(env, &req, url, &body).await?;
-                let owner_key = owner.key.clone().expect("a signed request has a key");
+                let owner_key = authenticate(&req, url, Payload::Read(&body))?;
                 let proof = reg.proof.ok_or_else(|| CellError::invalid("registering an agent needs a proof by its key"))?;
                 let key = proven_key(&proof, &req, url, &owner_key)?;
-                json_answer(&ask_registry(env, &calls::RegisterAgent { owner: owner.id.clone(), key }).await?)
+                json_answer(&ask_registry(env, &calls::RegisterAgent { owner: calls::By::Key(owner_key), key }).await?)
             }
         };
     }
-    let who = signer(env, &req, url, &body).await?;
+    let signer_key = authenticate(&req, url, Payload::Read(&body))?;
+    let by = || calls::By::Key(signer_key.clone());
     match (method, rest) {
         (Method::Put, ["me", "username"]) => {
             /// `PUT /api/identities/me/username`'s body.
@@ -427,36 +430,39 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
                 username: String,
             }
             let choose: Choose = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            json_answer(&ask_registry(env, &calls::ClaimUsername { identity: who.id.clone(), username: choose.username }).await?)
+            json_answer(&ask_registry(env, &calls::ClaimUsername { by: by(), username: choose.username }).await?)
         }
         (Method::Put, ["me", "picture"]) => {
             if body.len() > limits::PICTURE_MAX_BYTES {
                 return Err(CellError::too_large("a picture", body.len(), limits::PICTURE_MAX_BYTES));
             }
             let mime = picture_type(&body).ok_or_else(|| CellError::invalid("a picture is a PNG, JPEG, WebP, or GIF"))?;
+            // Two round trips, on purpose: the bytes land in BLOBS before the
+            // registry names them, so no one it does not know stores any.
+            ask_registry(env, &calls::Resolve { key: signer_key.clone() }).await?;
             let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&body));
             js::blob_put_bytes(env.as_ref(), &format!("pictures/{sha}"), &body).await?;
-            json_answer(&ask_registry(env, &calls::SetPicture { identity: who.id.clone(), sha, mime: mime.to_string() }).await?)
+            json_answer(&ask_registry(env, &calls::SetPicture { by: by(), sha, mime: mime.to_string() }).await?)
         }
         (Method::Get, [id]) => {
-            let identity = named_identity(id, &who)?;
-            json_answer(&ask_registry(env, &calls::View { identity, by: who.id.clone() }).await?)
+            let identity = named_identity(id)?;
+            json_answer(&ask_registry(env, &calls::View { identity, by: by() }).await?)
         }
         (Method::Post, [id, "keys"]) => {
-            let identity = named_identity(id, &who)?;
+            let identity = named_identity(id)?;
             let add: fragment_proto::AddKey = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            let key = proven_key(&add.proof, &req, url, who.key.as_deref().expect("a signed request has a key"))?;
-            json_answer(&ask_registry(env, &calls::AddKey(calls::KeyChange { identity, key, by: who.id.clone() })).await?)
+            let key = proven_key(&add.proof, &req, url, &signer_key)?;
+            json_answer(&ask_registry(env, &calls::AddKey(calls::KeyChange { identity, key, by: by() })).await?)
         }
         (Method::Delete, [id, "keys", k]) => {
-            let identity = named_identity(id, &who)?;
+            let identity = named_identity(id)?;
             let key = key_in_path(k)?;
-            json_answer(&ask_registry(env, &calls::RevokeKey(calls::KeyChange { identity, key, by: who.id.clone() })).await?)
+            json_answer(&ask_registry(env, &calls::RevokeKey(calls::KeyChange { identity, key, by: by() })).await?)
         }
         (Method::Get, [id, "keys", k]) => {
-            let identity = named_identity(id, &who)?;
+            let identity = named_identity(id)?;
             let key = key_in_path(k)?;
-            json_answer(&ask_registry(env, &calls::CheckKey(calls::KeyChange { identity, key, by: who.id.clone() })).await?)
+            json_answer(&ask_registry(env, &calls::CheckKey(calls::KeyChange { identity, key, by: by() })).await?)
         }
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
     }

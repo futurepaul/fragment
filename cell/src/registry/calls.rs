@@ -26,6 +26,22 @@ pub(crate) trait Call: Serialize + DeserializeOwned {
     }
 }
 
+/// Who asks the Registry to act, resolved in the same turn as the act:
+/// one round trip, and a key revoked a moment before cannot act.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum By {
+    /// The key that signed the request (64 hex; the router checked the
+    /// signature): 401 when no one holds it, or it was revoked.
+    Key(String),
+    /// A platform session's token (a browser on the platform's pages): 401
+    /// when it is not live.
+    Session(String),
+    /// An identity the platform already resolved (an agent made for its
+    /// owner): 404 when there is none.
+    Identity(String),
+}
+
 fn identity_checked(identity: Identity) -> CellResult<Identity> {
     if fragment_core::npub::is_identity(&identity.id) {
         Ok(identity)
@@ -67,7 +83,7 @@ impl Call for Lookup {
 /// checked by the router).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct RegisterAgent {
-    pub owner: String,
+    pub owner: By,
     pub key: String,
 }
 
@@ -76,12 +92,13 @@ impl Call for RegisterAgent {
     type Answer = IdentityView;
 }
 
-/// A key changed on an identity by `by` (its proof checked by the router).
+/// A key changed on an identity (`None`: the asker's own) by `by` (its
+/// proof checked by the router).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct KeyChange {
-    pub identity: String,
+    pub identity: Option<String>,
     pub key: String,
-    pub by: String,
+    pub by: By,
 }
 
 /// `POST /keys`: add a key.
@@ -120,11 +137,12 @@ impl Call for CheckKey {
     type Answer = Active;
 }
 
-/// `POST /view`: an identity, as it or its owner sees it.
+/// `POST /view`: an identity (`None`: the asker's own), as it or its
+/// owner sees it.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct View {
-    pub identity: String,
-    pub by: String,
+    pub identity: Option<String>,
+    pub by: By,
 }
 
 impl Call for View {
@@ -132,10 +150,10 @@ impl Call for View {
     type Answer = IdentityView;
 }
 
-/// `POST /username/claim`: a person's username, chosen once.
+/// `POST /username/claim`: the asker's username, chosen once.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ClaimUsername {
-    pub identity: String,
+    pub by: By,
     pub username: String,
 }
 
@@ -224,10 +242,10 @@ impl Call for Profiles {
     type Answer = ProfilesAnswer;
 }
 
-/// `POST /picture/set`: a person's picture (its bytes already stored).
+/// `POST /picture/set`: the asker's picture (its bytes already stored).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct SetPicture {
-    pub identity: String,
+    pub by: By,
     pub sha: String,
     pub mime: String,
 }
@@ -338,11 +356,20 @@ pub(crate) struct Session {
     pub fragment: Option<String>,
 }
 
+/// Whom a live session names, and the email of their first sign-in (the
+/// platform's pages show it; `None` when there is none).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct LiveSession {
+    #[serde(flatten)]
+    pub identity: Identity,
+    pub email: Option<String>,
+}
+
 impl Call for Session {
     const PATH: &'static str = "/session";
-    type Answer = Identity;
-    fn checked(answer: Identity) -> CellResult<Identity> {
-        identity_checked(answer)
+    type Answer = LiveSession;
+    fn checked(answer: LiveSession) -> CellResult<LiveSession> {
+        Ok(LiveSession { identity: identity_checked(answer.identity)?, email: answer.email })
     }
 }
 

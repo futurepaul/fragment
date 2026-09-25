@@ -193,6 +193,32 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let k2 = Keys::generate();
     let r = api.approve(&again, &k2)?;
     s.ok("signing in again is the same person", r.body["id"] == paul_id.as_str(), &r);
+    let (r, calls) = calls_of(api, || with_session(api, "GET", "/", &paul))?;
+    s.ok("the platform's page asks the registry once: who is signed in, and their email", r.status == 200 && r.text.contains("paul@e2e.test") && calls == 1, format!("{calls} calls: {r}"));
+    // a username chosen on the platform's page: the session is checked in the registry's same turn
+    let chooser = api.sign_in("chooser@e2e.test")?;
+    let chosen = format!("u{}", &Keys::generate().pubkey_hex()[..12]);
+    let choose = |session: &str, username: &str| {
+        api.call(Call {
+            method: "POST",
+            url: format!("{}/auth/username", api.base),
+            body: Some(format!("username={username}").into_bytes()),
+            content_type: Some("application/x-www-form-urlencoded"),
+            cookie: Some(format!("fragment_session={session}")),
+            ..Call::default()
+        })
+    };
+    let (r, calls) = calls_of(api, || choose(&chooser, &chosen))?;
+    let home = with_session(api, "GET", "/", &chooser)?;
+    s.ok(
+        "a person chooses their username on the platform's page, asking the registry once",
+        r.status == 302 && calls == 1 && home.text.contains(&format!("Signed in as <b>{chosen}</b>")),
+        format!("{calls} calls: {r} / {home}"),
+    );
+    let r = choose(&chooser, &format!("{chosen}x"))?;
+    s.ok("and only once", r.status == 400 && r.text.contains("chosen once"), &r);
+    let r = choose(&"0".repeat(64), &format!("{chosen}y"))?;
+    s.ok("a browser whose session is not live is sent to sign in", r.status == 302 && r.header("location").contains("/auth/login"), &r);
     let user = s.workos.user("paul@e2e.test");
     s.workos.set_email(&user.id, "paul@renamed.test");
     let renamed = api.sign_in("paul@renamed.test")?;
@@ -260,9 +286,10 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a key someone else holds cannot be approved", r.status == 409, &r);
     let r = api.signed(&cli, "GET", "/api/identities/me", None)?;
     s.ok("until approved, the key is no one's", r.status == 401, &r);
-    let r = api.approve_link(&paul, &link)?;
+    let (r, calls) = calls_of(api, || api.approve_link(&paul, &link))?;
     let me = api.signed(&cli, "GET", "/api/identities/me", None)?;
     s.ok("approved, the key is the person's at once: nothing waits to claim it", r.status == 200 && me.status == 200 && me.body["id"] == paul_id.as_str(), &me);
+    s.ok("(approving asks the registry once)", calls == 1, calls);
     let r = api.approve_link(&paul, &link)?;
     s.ok("approving it again changes nothing", r.status == 200, &r);
     // a person who signs in may hold no key at all
@@ -306,9 +333,10 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a fragment's sign-in starts at the platform", r.status == 302 && r.header("location").starts_with(&format!("{}/auth/fragment?name={f}", api.base)), &r);
     let r = api.unsigned("GET", &format!("/auth/fragment?name={f}&return=/"), None)?;
     s.ok("which sends a signed-out browser to sign in, and back", r.status == 302 && r.header("location").contains("/auth/login?return="), &r);
-    let r = with_session(api, "GET", &format!("/auth/fragment?name={f}&return=%2Fa%2520b"), &member_session)?;
+    let (r, calls) = calls_of(api, || with_session(api, "GET", &format!("/auth/fragment?name={f}&return=%2Fa%2520b"), &member_session))?;
     let redeem = r.header("location");
     s.ok("signed in, the platform hands the fragment a single-use redemption", r.status == 302 && redeem.starts_with(&api.site_url(&f, "__signin?token=")), &r);
+    s.ok("(asking the registry once)", calls == 1, calls);
     let other_host = redeem.replace(&api.site_url(&f, ""), &api.site_url(&g, ""));
     let r = api.call(Call { method: "GET", url: other_host, ..Call::default() })?;
     s.ok("a redemption for one fragment is refused on another", r.status == 401, &r);

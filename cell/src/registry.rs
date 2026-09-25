@@ -5,29 +5,36 @@
 //! grant or a private key: fragments keep their members, and keys stay with
 //! whoever signs.
 //!
-//! The router asks it about every signed request (`/resolve`), live, and
-//! refuses the request when it cannot answer (rule 7). One cell keeps each
-//! key change in one transaction (an agent is never left keyless, a revoked
-//! key never comes back) and costs one hop per request.
+//! It is asked live about every signed request whose answer depends on who
+//! is asking (`/resolve`, `/session`: the router on the control API, a
+//! fragment on its site), and a request it cannot answer for is refused
+//! (rule 7). One cell keeps each key change in one transaction (an agent is
+//! never left keyless, a revoked key never comes back) and costs one hop
+//! per request that asks it (two to set a picture, whose bytes are stored
+//! between).
 //!
 //! Inner routes (only the router and fragments reach them):
 //!
 //!   POST /resolve {key}                   → {id, kind, owner} (401 unknown or revoked)
 //!   POST /lookup  {who}                   → {id, kind, owner}: an `id:` or an active key
 //!   POST /agents  {owner, key}            register an agent its owner vouches for
-//!   POST /keys    {identity, key, by}     add a key (its proof was checked by the router)
-//!   POST /revoke  {identity, key, by}     revoke one
-//!   POST /view    {identity, by}          the identity, as it or its owner sees it
-//!   POST /check   {identity, key, by}     → {active}: is `key` one of `identity`'s?
-//!   POST /username/claim  {identity, username}    a person's username, chosen once
+//!   POST /keys    {identity?, key, by}    add a key (its proof was checked by the router)
+//!   POST /revoke  {identity?, key, by}    revoke one
+//!   POST /view    {identity?, by}         the identity, as it or its owner sees it
+//!   POST /check   {identity?, key, by}    → {active}: is `key` one of `identity`'s?
+//!   POST /username/claim  {by, username}          the asker's username, chosen once
 //!   POST /username/lookup {username}              → the facts of whoever holds it
-//!   POST /picture/set     {identity, sha, mime}   a person's picture (its bytes are in BLOBS)
+//!   POST /picture/set     {by, sha, mime}         the asker's picture (its bytes are in BLOBS)
 //!   POST /test    {down} | {calls} | {signins}   dev fleets: answer 503 to everything else,
 //!                                         count the calls since the cell started, or count,
 //!                                         expire, or sweep sign-in's rows
 //!
 //! Each route's body and answer are types in `calls.rs`, shared with the
-//! askers. An `Identity` (`/resolve`, `/lookup`, a session) carries the
+//! askers. A call that acts names who asks (`by`, an `owner`: `calls::By`,
+//! a key, a platform session, or a resolved identity), and the Registry
+//! resolves them in the same turn as the act: one round trip, and a key
+//! revoked a moment before cannot act. `identity` left out is the asker's
+//! own (a path's `me`). An `Identity` (`/resolve`, `/lookup`, a session) carries the
 //! identity's username, and an agent's carries its owner's (the namespace
 //! it makes fragments in). Rows are read into structs: a NOT NULL column
 //! is never defaulted, and a row naming an identity that is not there is a
@@ -66,8 +73,8 @@ macro_rules! username_join {
 pub(crate) mod calls;
 mod signin;
 use calls::{
-    Active, AddKey, Call, CheckKey, ClaimUsername, Claimed, FindUsername, Holder, Lookup, Picture, Profile, Profiles, ProfilesAnswer, RegisterAgent,
-    Released, ReleaseUsername, Resolve, RevokeKey, SetPicture, TestAnswer, TestHook, View,
+    Active, AddKey, By, Call, CheckKey, ClaimUsername, Claimed, FindUsername, Holder, Lookup, Picture, Profile, Profiles, ProfilesAnswer,
+    RegisterAgent, Released, ReleaseUsername, Resolve, RevokeKey, SetPicture, TestAnswer, TestHook, View,
 };
 pub use signin::SESSION_TTL_MS;
 
@@ -286,9 +293,18 @@ impl RegistryCell {
         Ok(self.row::<UsernameRow>("SELECT username FROM usernames WHERE identity = ?", vec![id.into()])?.map(|r| r.username))
     }
 
+    /// Whoever asks, resolved in this turn (`calls::By`).
+    fn by(&self, by: &By) -> CellResult<Identity> {
+        match by {
+            By::Key(key) => self.key_holder(key),
+            By::Session(token) => Ok(self.live_session(token, None)?.1.identity),
+            By::Identity(id) => self.named_identity(id),
+        }
+    }
+
     /// A person's username, chosen once: taken names and reserved words are refused.
     fn claim_username(&self, b: ClaimUsername) -> CellResult<Claimed> {
-        let who = self.named_identity(&b.identity)?;
+        let who = self.by(&b.by)?;
         if who.kind != IdentityKind::Person {
             return Err(CellError::new(ErrorCode::Forbidden, "only a person chooses a username (an agent makes fragments under its owner's)"));
         }
@@ -345,7 +361,7 @@ impl RegistryCell {
     }
 
     fn set_picture(&self, b: SetPicture) -> CellResult<Picture> {
-        let who = self.named_identity(&b.identity)?;
+        let who = self.by(&b.by)?;
         if who.kind != IdentityKind::Person || who.username.is_none() {
             return Err(CellError::invalid("choose a username before a picture"));
         }
@@ -367,20 +383,20 @@ impl RegistryCell {
 
     /// The identity holding a key, in one statement: the key's row joined
     /// with its holder and the holder's username.
-    fn resolve(&self, b: Resolve) -> CellResult<Identity> {
+    fn key_holder(&self, key: &str) -> CellResult<Identity> {
         const Q: &str = concat!(
             "SELECT k.identity, k.revoked_at, i.kind, i.owner, u.username FROM keys k LEFT JOIN identities i ON i.id = k.identity ",
             username_join!(),
             " WHERE k.key = ?"
         );
-        check_key(&b.key)?;
-        match self.row::<KeyHolderRow>(Q, vec![b.key.as_str().into()])? {
+        check_key(key)?;
+        match self.row::<KeyHolderRow>(Q, vec![key.into()])? {
             None => Err(unauthenticated(format!(
                 "the key {} belongs to no one on this fleet (add it to you: `fragment login`)",
-                npub::encode(&b.key)
+                npub::encode(key)
             ))),
-            Some(row) if row.revoked_at.is_some() => Err(unauthenticated(format!("the key {} was revoked", npub::encode(&b.key)))),
-            Some(row) => joined_identity(row.identity, row.kind, row.owner, row.username, &format!("the key {}", b.key)),
+            Some(row) if row.revoked_at.is_some() => Err(unauthenticated(format!("the key {} was revoked", npub::encode(key)))),
+            Some(row) => joined_identity(row.identity, row.kind, row.owner, row.username, &format!("the key {key}")),
         }
     }
 
@@ -467,8 +483,8 @@ impl RegistryCell {
     }
 
     fn register_agent(&self, b: RegisterAgent) -> CellResult<IdentityView> {
+        let owner = self.by(&b.owner)?;
         check_key(&b.key)?;
-        let owner = self.named_identity(&b.owner)?;
         if owner.kind != IdentityKind::Person {
             return Err(CellError::new(ErrorCode::Forbidden, "an agent's owner is a person"));
         }
@@ -493,9 +509,13 @@ impl RegistryCell {
         }
     }
 
-    fn managed(&self, identity: &str, by: &str) -> CellResult<Identity> {
-        let who = self.named_identity(identity)?;
-        if !registry::may_manage_keys(by, &who.id, who.kind, who.owner.as_deref()) {
+    /// The identity whose keys change (`None`: the asker's own), if `by` manages them.
+    fn managed(&self, identity: Option<&str>, by: &Identity) -> CellResult<Identity> {
+        let who = match identity {
+            Some(id) => self.named_identity(id)?,
+            None => by.clone(),
+        };
+        if !registry::may_manage_keys(&by.id, &who.id, who.kind, who.owner.as_deref()) {
             return Err(CellError::new(
                 ErrorCode::Forbidden,
                 match who.kind {
@@ -508,8 +528,9 @@ impl RegistryCell {
     }
 
     fn add_key(&self, AddKey(b): AddKey) -> CellResult<IdentityView> {
+        let by = self.by(&b.by)?;
         check_key(&b.key)?;
-        let who = self.managed(&b.identity, &b.by)?;
+        let who = self.managed(b.identity.as_deref(), &by)?;
         match self.key_row(&b.key)? {
             Some(row) if row.identity == who.id && row.active() => return self.view(&who, Some(false)),
             Some(row) if row.identity == who.id => return Err(conflict("a revoked key stays revoked; make a new one")),
@@ -522,14 +543,15 @@ impl RegistryCell {
         }
         self.exec(
             "INSERT INTO keys (key, identity, added_at, added_by) VALUES (?, ?, ?, ?)",
-            vec![b.key.as_str().into(), who.id.as_str().into(), SqlStorageValue::Integer(js::now_ms()), b.by.as_str().into()],
+            vec![b.key.as_str().into(), who.id.as_str().into(), SqlStorageValue::Integer(js::now_ms()), by.id.as_str().into()],
         )?;
         self.view(&who, Some(true))
     }
 
     fn revoke(&self, RevokeKey(b): RevokeKey) -> CellResult<IdentityView> {
+        let by = self.by(&b.by)?;
         check_key(&b.key)?;
-        let who = self.managed(&b.identity, &b.by)?;
+        let who = self.managed(b.identity.as_deref(), &by)?;
         match self.key_row(&b.key)? {
             Some(row) if row.identity != who.id => return Err(CellError::new(ErrorCode::NotFound, "not one of this identity's keys")),
             None => return Err(CellError::new(ErrorCode::NotFound, "not one of this identity's keys")),
@@ -561,20 +583,25 @@ impl RegistryCell {
     }
 
     fn view_for(&self, b: View) -> CellResult<IdentityView> {
-        let who = self.named_identity(&b.identity)?;
-        if !registry::may_view(&b.by, &who.id, who.owner.as_deref()) {
-            return Err(CellError::new(ErrorCode::NotFound, format!("no identity {}", b.identity)));
+        let by = self.by(&b.by)?;
+        let who = match &b.identity {
+            Some(id) => self.named_identity(id)?,
+            None => by.clone(),
+        };
+        if !registry::may_view(&by.id, &who.id, who.owner.as_deref()) {
+            return Err(CellError::new(ErrorCode::NotFound, format!("no identity {}", who.id)));
         }
         self.view(&who, None)
     }
 
     fn check(&self, CheckKey(b): CheckKey) -> CellResult<Active> {
+        let by = self.by(&b.by)?;
         check_key(&b.key)?;
-        let by = self.named_identity(&b.by)?;
-        if !registry::may_check_key(&by.id, by.owner.as_deref(), &b.identity) {
+        let identity = b.identity.unwrap_or_else(|| by.id.clone());
+        if !registry::may_check_key(&by.id, by.owner.as_deref(), &identity) {
             return Err(CellError::new(ErrorCode::Forbidden, "only an identity and its agents ask about its keys"));
         }
-        let active = self.key_row(&b.key)?.is_some_and(|row| row.identity == b.identity && row.active());
+        let active = self.key_row(&b.key)?.is_some_and(|row| row.identity == identity && row.active());
         Ok(Active { active })
     }
 
@@ -609,7 +636,7 @@ impl RegistryCell {
             return Ok(resp);
         }
         match path.as_str() {
-            Resolve::PATH => reply::<Resolve>(self.resolve(body(&bytes)?)),
+            Resolve::PATH => reply::<Resolve>(self.key_holder(&body::<Resolve>(&bytes)?.key)),
             Lookup::PATH => reply::<Lookup>(self.lookup(body(&bytes)?)),
             RegisterAgent::PATH => reply::<RegisterAgent>(self.register_agent(body(&bytes)?)),
             Profiles::PATH => reply::<Profiles>(self.profiles(body(&bytes)?)),
