@@ -360,7 +360,8 @@ fn listed(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.until(&page, &format!("!!{row}"), wait) && chrome.eval(&page, &format!("{row}.click(); true")).is_ok()
     };
     let asked = open(&mut chrome, &app) && frame_says(s, &mut chrome, &page, "__frame?name=", "allow it in its share sheet", wait);
-    s.ok("until its owner allows it, a desktop's pane says so, and signs nothing in", asked && cookie_of(&mut chrome, api, &app, "fragment_frame").is_none(), "");
+    let told = chrome.until(&page, "document.getElementById('notice').textContent.includes('Let this desktop show your fragments')", wait);
+    s.ok("until its owner allows it, a desktop's pane says so (the desktop too, with its share sheet), and signs nothing in", asked && told && cookie_of(&mut chrome, api, &app, "fragment_frame").is_none(), "");
     let r = api.signed(&owner, "PUT", &format!("/api/f/{desk}/grants/frame"), Some(&json!({ "granted": true })))?;
     s.ok("(the owner allows it)", r.status == 200, &r);
     chrome.reload(&page)?;

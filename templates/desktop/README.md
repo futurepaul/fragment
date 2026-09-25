@@ -11,7 +11,8 @@ authority over any of them.
 - It asks for `frame` too: each frame is its own `__frame`, which signs
   the frame in on its fragment's origin for this page only. The platform
   honors it once you allow it in the desktop's share sheet ("Your
-  fragments inside it"); until then each pane says so.
+  fragments inside it"); until then the desktop says so, with a button
+  that opens that sheet.
 - `app.mjs` keeps which fragments are chats (`chats`, `add_chat`,
   `remove_chat`); every other fragment is an app.
 - Sharing is the platform's: each row's `…` menu has Share, which opens
