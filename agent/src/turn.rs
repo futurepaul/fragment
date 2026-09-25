@@ -13,6 +13,7 @@ use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use anyhow::anyhow;
+use fragment_proto::TurnOutcome;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use goose_agent::inference::InferenceRunner;
@@ -226,7 +227,7 @@ pub async fn arm_watchdog(storage: &Storage, sql: &SqlStorage) -> anyhow::Result
     storage.set_alarm(Duration::from_millis(watchdog)).await.map_err(|e| anyhow!("{e}"))
 }
 
-async fn run_steps(driver: &Driver, machine: &StateMachine<'_, Session, Effect>, store: &Store, emit: Emitter) -> anyhow::Result<&'static str> {
+async fn run_steps(driver: &Driver, machine: &StateMachine<'_, Session, Effect>, store: &Store, emit: Emitter) -> anyhow::Result<TurnOutcome> {
     let sql = &store.sql;
     // Arm the watchdog before any work, so a node that dies during the
     // first step still leaves a wake behind.
@@ -238,7 +239,7 @@ async fn run_steps(driver: &Driver, machine: &StateMachine<'_, Session, Effect>,
         let t0 = js::now_ms();
         let session = store.load(SESSION_ID).await?;
         let Some(mut result) = machine.step(&session, &emit).await? else {
-            return Ok("idle");
+            return Ok(TurnOutcome::Idle);
         };
         machine.apply(store, &session, &mut result, &emit).await?;
         let name = result.applied_step.unwrap_or("?");
@@ -254,15 +255,15 @@ async fn run_steps(driver: &Driver, machine: &StateMachine<'_, Session, Effect>,
             }
         }
         if result.yield_to_client {
-            return Ok("yielded");
+            return Ok(TurnOutcome::Yielded);
         }
     }
     Err(anyhow!("the turn exceeded {STEPS_PER_TURN_MAX} steps"))
 }
 
-/// Runs the turn to its end (or its cancellation): the outcome is "idle"
-/// (the model answered), "yielded", or an error.
-pub async fn drive(driver: Driver) -> anyhow::Result<&'static str> {
+/// Runs the turn to its end (or its cancellation): the outcome is idle
+/// (the model answered), yielded, stopped, or an error.
+pub async fn drive(driver: Driver) -> anyhow::Result<TurnOutcome> {
     let sql = driver.storage.sql();
     // armed before reaching a computer, which can take its retries
     arm_watchdog(&driver.storage, &sql).await?;
@@ -318,7 +319,7 @@ pub async fn drive(driver: Driver) -> anyhow::Result<&'static str> {
         SendFuture::new(async move { c.cancel_all(left).await }).await;
     }
     if kv_get(&sql, "cancel")?.as_deref() == Some("1") && outcome.is_ok() {
-        return Ok("stopped");
+        return Ok(TurnOutcome::Stopped);
     }
     outcome
 }

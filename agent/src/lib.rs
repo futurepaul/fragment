@@ -556,7 +556,7 @@ impl Agent {
                 (Err(e), _) | (_, Err(e)) => Err(e),
             };
             // a turn a channel started answers there
-            if matches!(outcome, Ok("idle")) {
+            if matches!(outcome, Ok(TurnOutcome::Idle)) {
                 if let Err(error) = reply(&sql, &fleet).await {
                     outcome = Err(error);
                 }
@@ -564,7 +564,7 @@ impl Agent {
             // a message that came in as the turn ended is read now: the turn
             // stays active and the alarm starts a driver for it
             let pending: Vec<Value> = sql.exec("SELECT seq FROM steer WHERE consumed = 0", None).and_then(|c| c.to_array()).unwrap_or_default();
-            if matches!(outcome, Ok("idle")) && !pending.is_empty() {
+            if matches!(outcome, Ok(TurnOutcome::Idle)) && !pending.is_empty() {
                 let _ = kv_set(&sql, "rerun", 1);
                 let _ = storage.set_alarm(std::time::Duration::from_millis(50)).await;
                 driving.set(false);
@@ -573,9 +573,9 @@ impl Agent {
             }
             let finish = || -> anyhow::Result<()> {
                 match &outcome {
-                    Ok(how) => kv_set(&sql, "outcome", how)?,
+                    Ok(how) => kv_set(&sql, "outcome", how.as_str())?,
                     Err(error) => {
-                        kv_set(&sql, "outcome", "error")?;
+                        kv_set(&sql, "outcome", TurnOutcome::Error.as_str())?;
                         kv_set(&sql, "last_error", error.to_string())?;
                     }
                 }
@@ -620,7 +620,7 @@ impl Agent {
         kv_set(&sql, "cancel", 0)?;
         kv_set(&sql, "last_error", "")?;
         kv_set(&sql, "turn_started_at", js::now_ms())?;
-        kv_set(&sql, "outcome", "running")?;
+        kv_set(&sql, "outcome", TurnOutcome::Running.as_str())?;
         let started = self.start_driver("turn")?;
         Ok(json!({ "started": started }))
     }
@@ -998,7 +998,7 @@ impl DurableObject for Agent {
                 }
                 Ok(false) => turn::arm_watchdog(&self.state.storage(), &sql).await.map_err(|e| worker::Error::RustError(e.to_string()))?,
                 Err(f) => {
-                    let _ = kv_set(&sql, "outcome", "error");
+                    let _ = kv_set(&sql, "outcome", TurnOutcome::Error.as_str());
                     let _ = kv_set(&sql, "last_error", &f.message);
                     let _ = kv_set(&sql, "active", 0);
                 }
