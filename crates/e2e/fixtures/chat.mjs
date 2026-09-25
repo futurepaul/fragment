@@ -32,10 +32,6 @@ export class App extends DurableObject {
     return { n };
   }
 
-  huge(_input, call) {
-    call.publish("room", { blob: "x".repeat(70 * 1024) });
-  }
-
   // reaches for the list of effects itself, to add one no check saw
   reach(_input, call) {
     this.ctx.storage.sql.exec("INSERT INTO said (text) VALUES ('reach')");

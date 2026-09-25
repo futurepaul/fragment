@@ -12,7 +12,6 @@
     },
     "note": { "kind": "mutation", "input": { "type": "object", "required": ["text"], "properties": { "text": { "type": "string" } } } },
     "undeclared": { "kind": "mutation", "role": "public" },
-    "huge": { "kind": "mutation", "role": "public" },
     "reach": { "kind": "mutation" },
     "patched": { "kind": "mutation" },
     "bulk": { "kind": "mutation" },

@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use fragment_nip98::Keys;
-use fragment_proto::limits;
 use fragment_proto::live::LiveOut;
+use fragment_proto::{limits, ErrorCode};
 use serde_json::{json, Value};
 
 use super::app::ship;
@@ -106,8 +106,15 @@ pub fn channels(s: &mut Suite, api: &Api) -> Result<()> {
 
     let r = api.op(&owner, &name, "undeclared", "u1", json!({ "text": "lost" }))?;
     s.ok("publishing to an undeclared channel refuses the mutation", r.status == 422 && r.message().contains("not declared"), &r);
-    let r = api.op(&owner, &name, "huge", "h1", json!({}))?;
-    s.ok("a record over 64 KiB refuses the mutation", r.status == 422 && r.message().contains("at most 65536 bytes"), &r);
+    // a record's body is bounded in bytes of JSON; `bulk`'s is its
+    // padding and this much around it
+    let edge = limits::RECORD_BODY_MAX_BYTES - r#"{"i":0,"pad":""}"#.len();
+    let r = api.op(&owner, &name, "bulk", "over", json!({ "n": 1, "size": edge + 1 }))?;
+    s.ok(
+        "a record one byte over its limit refuses the mutation",
+        r.code() == Some(ErrorCode::AppFailed) && r.message().contains(&limits::RECORD_BODY_MAX_BYTES.to_string()),
+        &r,
+    );
     let r = api.op(&owner, &name, "count", "q", json!({}))?;
     s.ok("a refused mutation's writes roll back", r.body["result"]["n"] == 2, &r);
 
@@ -158,6 +165,9 @@ pub fn channels(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a method sees who called it and their role", r.body["result"] == json!({ "principal": api.identity(&viewer)?, "role": "viewer" }), &r);
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/events"), None)?;
     s.ok("the event log reads from the events channel", r.status == 200 && r.body["events"][0]["kind"] == "create", &r);
+    let r = api.op(&owner, &name, "bulk", "edge", json!({ "n": 1, "size": edge }))?;
+    let size = records(api, &owner, &name, "room", 3)?.body["records"][0]["body"].to_string().len();
+    s.ok("and a record of exactly the limit is published", r.status == 200 && size == limits::RECORD_BODY_MAX_BYTES, format!("{r}; a body of {size} bytes"));
     Ok(())
 }
 
@@ -246,9 +256,19 @@ pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
     let mut d = Socket::open(api, &name, "__live", None, None)?;
     let d_hello = d.next()?;
     s.ok("a socket that connects later hears who is here in its hello", d_hello["presence"] == json!([owner_here]), &d_hello);
-    c.send(&json!({ "type": "presence", "data": "x".repeat(5000) }))?;
-    let err = c.until("error", 5)?;
-    s.ok("presence data over 4 KiB is refused", err["message"].as_str().is_some_and(|m| m.contains("4096")), &err);
+    // presence data is bounded in bytes of JSON: a string of n characters
+    // is n + 2
+    let edge = limits::PRESENCE_MAX_BYTES - 2;
+    c.send(&json!({ "type": "presence", "data": "x".repeat(edge) }))?;
+    let at_limit = d.until("presence", 5).map(|p| p["data"].as_str().map(str::len));
+    s.ok("presence data of exactly its limit reaches the others", matches!(at_limit, Ok(Some(n)) if n == edge), format!("{at_limit:?}"));
+    c.send(&json!({ "type": "presence", "data": "x".repeat(edge + 1) }))?;
+    let err = c.until("error", 5);
+    s.ok(
+        "and a byte over it is refused",
+        err.as_ref().is_ok_and(|e| e["message"].as_str().is_some_and(|m| m.contains(&limits::PRESENCE_MAX_BYTES.to_string()))),
+        format!("{err:?}"),
+    );
     // a flood of changes: a burst goes through at once, then ten a second;
     // the rest are dropped, each with an error, and the others hear only
     // the ones that went through

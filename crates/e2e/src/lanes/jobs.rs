@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use fragment_fakes::http::{Handler, Response, Server};
 use fragment_nip98::Keys;
+use fragment_proto::{limits, ErrorCode};
 use serde_json::{json, Value};
 
 use super::app::ship;
@@ -404,32 +405,55 @@ pub fn triggers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the token may come as ?t=, and a body that is not JSON is text", r.status == 200, &r);
     let r = inbox(api, &name, "wrong", &json!({ "payload": 1 }), None)?;
     s.ok("a bad inbox token is 403", r.status == 403, &r);
-    let r = inbox(api, &name, &token, &json!({ "payload": { "items": ["deep"] } }), Some(17))?;
-    let deep = settle(api, &owner, &name, r.body["runs"][0].as_i64().unwrap_or(0), &["blocked"], Duration::from_secs(5));
-    s.ok("a delivery already 17 hops deep is blocked", deep["status"] == "blocked" && deep["depth"] == 17, &deep);
+    // a delivery says how deep in a chain it already is: one at the hop
+    // budget runs, one a hop past it is blocked
+    let depth = limits::HOP_DEPTH_MAX;
+    let r = inbox(api, &name, &token, &json!({ "payload": { "items": ["at the budget"] } }), Some(depth))?;
+    let at_budget = settle(api, &owner, &name, r.body["runs"][0].as_i64().unwrap_or(0), &["succeeded", "held", "blocked"], long);
+    let r = inbox(api, &name, &token, &json!({ "payload": { "items": ["past it"] } }), Some(depth + 1))?;
+    let past = settle(api, &owner, &name, r.body["runs"][0].as_i64().unwrap_or(0), &["succeeded", "held", "blocked"], long);
+    s.ok(
+        "a delivery at the hop budget runs; one a hop past it is blocked",
+        at_budget["status"] == "succeeded" && at_budget["depth"] == depth && past["status"] == "blocked" && past["depth"] == depth + 1,
+        format!("{at_budget} {past}"),
+    );
 
-    // a channel trigger that feeds itself stops at the hop budget
+    // a channel trigger that feeds itself runs out the hop budget, the
+    // ceiling for every chain (files and jobs count the same hops)
     api.op(&owner, &name, "ping", "loop", json!({}))?;
     let looped = s.eventually(long, || runs(api, &owner, &name, "&op=ping").iter().any(|r| r["status"] == "blocked"));
-    // the blocked 17th is recorded while the 16th may still be finishing
+    // the blocked one past the budget is recorded while the last may still be finishing
     s.eventually(long, || !runs(api, &owner, &name, "&op=ping").iter().any(|r| r["status"] == "running" || r["status"] == "queued"));
     let pings = runs(api, &owner, &name, "&op=ping");
     s.ok(
-        "a trigger loop runs 16 hops, then is blocked",
-        looped && pings.iter().filter(|r| r["status"] == "succeeded").count() == 16 && pings[0]["depth"] == 17,
+        "a trigger loop runs to the hop budget, then is blocked",
+        looped
+            && pings.iter().filter(|r| r["status"] == "succeeded").count() == depth as usize
+            && pings[0]["depth"] == depth + 1
+            && pings[1]["depth"] == depth
+            && pings[1]["status"] == "succeeded",
         json!(pings.iter().map(|r| (r["depth"].clone(), r["status"].clone())).collect::<Vec<_>>()),
     );
     s.ok("the event log says a loop was stopped", events(api, &owner, &name).iter().any(|e| e["kind"] == "cycle.detected"), "no cycle.detected");
 
-    // five held runs pause an operation's triggers; calls still work
-    for i in 0..5 {
+    // held runs pause an operation's triggers at the count, not one
+    // before; calls still work
+    let held = |n: u64| s.eventually(long, || runs(api, &owner, &name, "&op=boom&status=held").len() as u64 == n);
+    let paused_ops = || api.signed(&owner, "GET", &format!("/api/f/{name}/runs"), None).map(|r| r.body["paused"].clone()).unwrap_or_default();
+    for i in 0..limits::AUTO_PAUSE_HELD - 1 {
         api.op(&owner, &name, "raise", &format!("r{i}"), json!({}))?;
     }
-    let paused = s.eventually(long, || runs(api, &owner, &name, "&op=boom&status=held").len() == 5);
+    let below = held(limits::AUTO_PAUSE_HELD - 1) && paused_ops() == json!([]);
+    api.op(&owner, &name, "raise", &format!("r{}", limits::AUTO_PAUSE_HELD - 1), json!({}))?;
+    let paused = held(limits::AUTO_PAUSE_HELD);
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/runs"), None)?;
-    s.ok("five held runs auto-pause the operation", paused && r.body["paused"] == json!(["boom"]) && r.body["counts"]["held"].as_u64() >= Some(5), &r);
+    s.ok(
+        "held runs auto-pause the operation at the count, not one before",
+        below && paused && r.body["paused"] == json!(["boom"]) && r.body["counts"]["held"].as_u64() >= Some(limits::AUTO_PAUSE_HELD),
+        &r,
+    );
     s.ok("the event log says why", events(api, &owner, &name).iter().any(|e| e["kind"] == "op.auto-paused"), "no op.auto-paused");
-    api.op(&owner, &name, "raise", "r5", json!({}))?;
+    api.op(&owner, &name, "raise", "past-the-count", json!({}))?;
     let blocked = runs(api, &owner, &name, "&op=boom");
     s.ok("a paused operation's trigger records a blocked run", blocked[0]["status"] == "blocked", json!(blocked[0]));
     let r = api.op(&owner, &name, "boom", "manual", json!({}))?;
@@ -512,16 +536,17 @@ pub fn triggers(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{r}; deliveries since: {}", hook.hits("/data").len() - sent_before),
     );
 
-    // the rate ceiling: an operation's triggers start at most 120 runs an hour
+    // the rate ceiling: an operation's triggers start runs up to their
+    // hourly count, and the next one is blocked
     let (busy, busy_c) = jobs_fragment(s, api, &owner, "ceiling", |m| m["triggers"] = json!([{ "channel": "alarms", "run": "tick" }]))?;
-    for i in 0..121 {
+    for i in 0..=limits::TRIGGERED_RUNS_PER_HOUR {
         api.op(&owner, &busy, "raise", &format!("b{i}"), json!({}))?;
     }
     let ticks = runs(api, &owner, &busy, "&op=tick");
     let r = api.signed(&owner, "GET", &format!("/api/f/{busy}/runs?limit=1"), None)?;
     s.ok(
-        "the 121st triggered run in an hour is blocked and pauses the operation",
-        ticks.len() == 121 && ticks[0]["status"] == "blocked" && ticks[1]["status"] != "blocked" && r.body["paused"] == json!(["tick"]),
+        "the triggered run one past the hourly count is blocked and pauses the operation; the last within it ran",
+        ticks.len() as u64 == limits::TRIGGERED_RUNS_PER_HOUR + 1 && ticks[0]["status"] == "blocked" && ticks[1]["status"] != "blocked" && r.body["paused"] == json!(["tick"]),
         &r,
     );
     let r = api.signed(&owner, "GET", &format!("/api/f/{busy}/triggers"), None)?;
@@ -562,7 +587,7 @@ pub fn triggers(s: &mut Suite, api: &Api) -> Result<()> {
     api.signed(&owner, "POST", &format!("/api/f/{full}/pause"), Some(&json!({ "op": "ingest", "paused": true })))?;
     let token2 = c2["inboxToken"].as_str().unwrap_or("").to_string();
     let mut refused_at = None;
-    for i in 0..1001 {
+    for i in 0..=limits::INBOX_PENDING_MAX {
         let r = inbox(api, &full, &token2, &json!({ "payload": i }), None)?;
         if r.status != 200 {
             refused_at = Some((i, r));
@@ -570,8 +595,8 @@ pub fn triggers(s: &mut Suite, api: &Api) -> Result<()> {
         }
     }
     s.ok(
-        "the inbox takes 1000 pending records, then answers 429",
-        refused_at.as_ref().is_some_and(|(i, r)| *i == 1000 && r.status == 429 && r.error() == "rate_limited"),
+        "the inbox takes its count of pending records, then answers 429",
+        refused_at.as_ref().is_some_and(|(i, r)| *i == limits::INBOX_PENDING_MAX && r.code() == Some(ErrorCode::RateLimited)),
         refused_at.map(|(i, r)| format!("{i}: {r}")).unwrap_or_default(),
     );
     s.ok("the event log says the inbox was full", events(api, &owner, &full).iter().any(|e| e["kind"] == "inbox.rejected"), "no inbox.rejected");
