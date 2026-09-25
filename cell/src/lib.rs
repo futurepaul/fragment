@@ -527,7 +527,7 @@ async fn serve(mut req: Request, env: &Env, url: &Url, name: &str, rest: &str, m
     // a signature names its key's identity; a browser, its session here
     let signed = match signer_if_signed(env, &req, url, &body).await? {
         Some(s) => Some(s),
-        None => auth::site_session(&req, env, name, url, mode == "path").await?,
+        None => auth::site_session(&req, env, name, url, mode == Mode::Path).await?,
     };
     let routed = Routed { name: name.to_string(), url: url.clone(), mode: Some(mode), signed };
     forward(env, &req, bytes_body(body), Forward { routed, inner: format!("/serve/{rest}"), extra: vec![] }).await
