@@ -101,6 +101,8 @@ pub fn isolation(s: &mut Suite, _: &Api) -> Result<()> {
     s.stop()?;
     let api = s.start_as_browsers_see_it()?;
     let result = attacks(s, &api);
+    let opened = by_url(s, &api);
+    let result = result.and(opened);
     drop(api);
     s.stop()?;
     s.start(false, true)?;
@@ -317,6 +319,153 @@ fn attacks(s: &mut Suite, api: &Api) -> Result<()> {
     let r = signout(api, &evil, &format!("fragment_site={site}"))?;
     let asks = fragment(&member_session, &evil)?;
     s.ok("signing out of it there forgets the yes: the next sign-in asks again", r.status == 303 && asks.status == 200 && asks.text.contains("Continue to"), format!("{r} / {asks}"));
+    Ok(())
+}
+
+/// A request as a browser's page sends it: `dest` and `mode` as Fetch
+/// Metadata names them, and an `Accept` that names HTML, as a navigation's
+/// does (and a script may send on a fetch).
+fn html_request(api: &Api, url: String, dest: &str, mode: &str, site: &str, cookie: Option<String>) -> Result<Reply> {
+    let extra = vec![
+        ("sec-fetch-dest", dest.to_string()),
+        ("sec-fetch-mode", mode.to_string()),
+        ("sec-fetch-site", site.to_string()),
+        ("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".to_string()),
+    ];
+    api.call(Call { method: "GET", url, cookie, extra, ..Call::default() })
+}
+
+/// Opening a fragment by its own URL (ROADMAP decision 4): a browser
+/// signed in to the platform lands on the fragment signed in, silently on
+/// the person's own and on those shared with them, asked once on anyone
+/// else's; signed out, it signs in first and comes back to the path it
+/// asked for. A refusal a browser navigates to is a page in the platform's
+/// look; any other request's (an API call, a fetch) stays JSON, and a
+/// fetch from another page still carries no session.
+fn by_url(s: &mut Suite, api: &Api) -> Result<()> {
+    let wait = Duration::from_secs(20);
+    let owner = Keys::generate();
+    let owner_email = format!("u-{}@e2e.test", &owner.pubkey_hex()[..12]);
+    let owner_session = api.sign_in(&owner_email)?;
+    api.approve(&owner_session, &owner)?;
+    let (guest, guest_session) = person(api)?;
+    let (stranger, _) = person(api)?;
+    let guest_id = api.identity(&guest)?;
+    let pages = |text: &str| json!([{ "path": "site/index.html", "text": format!("<p>{text}</p>") }, { "path": "site/page.html", "text": format!("<p>{text}, deeper</p>") }]);
+    let own = made(api, &owner, &s.name("uown"), "blank", pages("inside own"), "link")?;
+    let own_too = made(api, &owner, &s.name("uowntoo"), "blank", pages("inside own too"), "members")?;
+    let shared = made(api, &owner, &s.name("ushared"), "blank", pages("inside shared"), "members")?;
+    let theirs = made(api, &stranger, &s.name("utheirs"), "blank", pages("inside theirs"), "link")?;
+    let open = made(api, &stranger, &s.name("uopen"), "blank", pages("inside open"), "public")?;
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{shared}/members/{guest_id}"), Some(&json!({ "role": "viewer" })))?;
+    anyhow::ensure!(r.status == 200, "sharing {shared}: {r}");
+    let host_of = |name: &str| format!("{}--", label(name));
+    let says = |text: &str| format!("document.contentType === 'text/html' && (document.body?.innerText ?? '').includes({text:?})");
+    let shown = |chrome: &mut Browser, page: &Page| chrome.eval(page, "location.href + ' ' + document.contentType + ' ' + (document.body?.innerText ?? '').slice(0, 300)").unwrap_or_default();
+
+    // ---- the requests, as a browser sends them
+    let asked = html_request(api, api.site_url(&own_too, "page.html?x=1"), "document", "navigate", "none", None)?;
+    let signin = format!("{}/auth/fragment?name={own_too}&return={}", api.base, url_enc("/page.html?x=1"));
+    s.ok(
+        "a browser's top-level visit to a members-only fragment, signed in there as no one, goes to the platform's sign-in for it, to come back to the page it asked for",
+        asked.status == 302 && asked.header("location") == signin,
+        format!("{asked} {:?}", asked.header("location")),
+    );
+    let r = html_request(api, api.site_url(&open, ""), "document", "navigate", "none", None)?;
+    s.ok("a public fragment just serves", r.status == 200 && r.text.contains("inside open"), &r);
+    let navigation = || vec![("sec-fetch-dest", "document".to_string()), ("sec-fetch-mode", "navigate".to_string()), ("sec-fetch-site", "none".to_string())];
+    let bare = api.call(Call { method: "GET", url: api.site_url(&own_too, ""), extra: navigation(), ..Call::default() })?;
+    let fetched = html_request(api, api.site_url(&own_too, ""), "empty", "cors", "same-origin", None)?;
+    let called = api.call(Call {
+        method: "POST",
+        url: api.site_url(&own_too, "__op/nothing"),
+        body: Some(br#"{"id":"n","input":{}}"#.to_vec()),
+        content_type: Some("application/json"),
+        extra: vec![("sec-fetch-dest", "empty".into()), ("sec-fetch-mode", "cors".into()), ("sec-fetch-site", "same-origin".into()), ("accept", "text/html".into())],
+        ..Call::default()
+    })?;
+    let api_call = api.call(Call { method: "GET", url: format!("{}/api/f/{own_too}/status", api.base), extra: vec![("accept", "text/html".into())], ..Call::default() })?;
+    let json = |r: &Reply| r.header("content-type").starts_with("application/json") && r.body["error"] == "unauthenticated";
+    s.ok(
+        "an API call, a fetch, and an operation keep their JSON refusals, even asking for HTML; so does a navigation that asks for none (not a browser's)",
+        [&bare, &fetched, &called, &api_call].iter().all(|r| r.status == 401 && json(r)),
+        format!("{bare} / {fetched} / {called} / {api_call}"),
+    );
+    let site_owner = super::signin::site_cookie(api, &owner_session, &own_too)?;
+    let from_page = |site: &str| html_request(api, api.site_url(&own_too, ""), "empty", "cors", site, Some(format!("fragment_site={site_owner}")));
+    let (other, own_page) = (from_page("same-site")?, from_page("same-origin")?);
+    s.ok(
+        "a fetch from another fragment's page, with the owner's cookie, still counts no session (401 JSON; from the fragment's own page, 200)",
+        other.status == 401 && json(&other) && own_page.status == 200,
+        format!("{other} / {own_page}"),
+    );
+    let framed = html_request(api, api.site_url(&own_too, ""), "iframe", "navigate", "same-site", None)?;
+    s.ok(
+        "a frame's navigation is not sent to sign in (a frame cannot): it answers a page that says to, shown only in this origin's own pages",
+        framed.status == 401
+            && framed.header("content-type").starts_with("text/html")
+            && framed.text.contains("You need to sign in")
+            && framed.header("content-security-policy") == "frame-ancestors 'self'",
+        format!("{framed} {:?}", framed.header("content-security-policy")),
+    );
+    let stale = html_request(api, api.site_url(&own, "?view=0123456789abcdef"), "document", "navigate", "none", None)?;
+    s.ok("a share link that no longer opens it answers a page saying the link has changed", stale.status == 401 && stale.text.contains("This link has changed"), &stale);
+
+    let Some(mut chrome) = s.browser()? else {
+        s.ok("Chrome is installed for the isolation lane (set CHROME_BIN)", false, "no Chrome found");
+        return Ok(());
+    };
+
+    // ---- signed out: sign in (the WorkOS fake's form), then back
+    let nobody = chrome.another_context()?;
+    let p = chrome.open_in(&nobody, &api.site_url(&own, ""))?;
+    let form = chrome.until(&p, "!!document.querySelector('input[name=login_hint]')", wait);
+    if form {
+        chrome.eval(&p, &format!("document.querySelector('input[name=login_hint]').value = {owner_email:?}; document.querySelector('form').submit(); true"))?;
+    }
+    let back = chrome.until(&p, &format!("location.host.startsWith({:?}) && location.pathname === '/' && {}", host_of(&own), says("inside own")), wait);
+    s.ok("someone signed out who opens their fragment's URL signs in, and lands back on it signed in", form && back, shown(&mut chrome, &p));
+    let p = chrome.open_in(&nobody, &api.site_url(&own_too, "page.html?x=1"))?;
+    let landed = chrome.until(
+        &p,
+        &format!("location.host.startsWith({:?}) && location.pathname + location.search === '/page.html?x=1' && {}", host_of(&own_too), says("inside own too, deeper")),
+        wait,
+    );
+    s.ok("signed in to the platform, the URL of another of their own fragments lands on the page it names, signed in, asking nothing", landed, shown(&mut chrome, &p));
+
+    // ---- the guest, signed in to the platform
+    chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &guest_session)?;
+    let g = chrome.open(&api.site_url(&shared, ""))?;
+    let in_shared = chrome.until(&g, &format!("location.host.startsWith({:?}) && {}", host_of(&shared), says("inside shared")), wait);
+    s.ok("the URL of a fragment shared with them lands on it signed in, asking nothing", in_shared && cookie_of(&mut chrome, api, &shared, "fragment_site").is_some(), shown(&mut chrome, &g));
+    let t = chrome.open(&api.site_url(&theirs, ""))?;
+    let question = chrome.until(&t, "location.pathname === '/auth/fragment' && document.body.innerText.includes('Continue to')", wait);
+    s.ok(
+        "a stranger's fragment's URL asks first, on the platform, before it learns who they are",
+        question && cookie_of(&mut chrome, api, &theirs, "fragment_site").is_none(),
+        shown(&mut chrome, &t),
+    );
+    let armed = chrome.until(&t, "document.querySelector('button[data-arm]')?.disabled === false", Duration::from_secs(3));
+    if armed {
+        chrome.click(&t, "button[data-arm]")?;
+    }
+    let refused = format!("location.host.startsWith({:?}) && {}", host_of(&theirs), says("You don't have access to"));
+    let told = chrome.until(&t, &refused, wait);
+    s.ok(
+        "said yes, on a fragment shared by link they hold no link for, a page says they have no access and whom to ask: not JSON, and no sign-in loop",
+        armed && told && cookie_of(&mut chrome, api, &theirs, "fragment_site").is_some(),
+        shown(&mut chrome, &t),
+    );
+    let again = chrome.open(&api.site_url(&theirs, ""))?;
+    let once = chrome.until(&again, &refused, wait);
+    s.ok("and it asked once: its URL again goes straight there", once, shown(&mut chrome, &again));
+
+    // ---- the owner removes the guest; the guest reloads
+    let r = api.signed(&owner, "DELETE", &format!("/api/f/{shared}/members/{guest_id}"), None)?;
+    anyhow::ensure!(r.status == 200, "removing the guest from {shared}: {r}");
+    chrome.reload(&g)?;
+    let gone = chrome.until(&g, &format!("location.host.startsWith({:?}) && {}", host_of(&shared), says("You don't have access to")), wait);
+    s.ok("a guest the owner removed who reloads gets a page saying they have no access, not JSON", gone, shown(&mut chrome, &g));
     Ok(())
 }
 

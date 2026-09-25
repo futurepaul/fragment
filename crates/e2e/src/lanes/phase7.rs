@@ -438,7 +438,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let fetched = chrome.eval(&theirs, "fetch(location.origin + '/', { credentials: 'same-origin', cache: 'no-store' }).then(r => r.status, e => 'refused ' + e.name)")?;
     let signed = api.signed(&guest.keys, "GET", &format!("/api/f/{}/channels/chat", chat.name), None)?;
     chrome.reload(&theirs)?;
-    let refused = chrome.until(&theirs, "!!document.body?.innerText.includes('forbidden')", WAIT);
+    let refused = chrome.until(&theirs, "document.contentType === 'text/html' && !!document.body?.innerText.includes(\"You don't have access to\")", WAIT);
     s.ok(
         "and their next request is a 403: their browser's, their key's, and the page reloaded",
         fetched == json!(403) && signed.status == 403 && refused,
