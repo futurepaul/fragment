@@ -7,7 +7,7 @@
 // the boundary, and every retry/loop has an explicit bound. What goes over
 // the wire and what comes back is fragment_core::codestorage's, the same
 // encoder and decoders the cell uses; this file is the transport.
-use crate::api::{encode_q, timeout_for, Client as HostClient, CodedError, Replay, CONNECT_TIMEOUT, REQUEST_ATTEMPTS};
+use crate::api::{encode_q, send_retrying, timeout_for, Client as HostClient, CodedError, Failed, Replay, CONNECT_TIMEOUT};
 use fragment_core::codestorage::{self as core_cs, FileChange, TreeEntry};
 use fragment_proto::StorageToken;
 use serde_json::Value;
@@ -154,9 +154,8 @@ pub struct CodeStorage {
 }
 
 impl CodeStorage {
-    /// Mint a scoped token from the fragment host and build the client.
-    /// `override_url` (FRAGMENT_CODESTORAGE_URL / config) replaces the
-    /// server the host reports — the backend-swap knob.
+    /// Mint a scoped token from the fragment host and build the client
+    /// (`override_url`: main.rs `codestorage_override`).
     pub fn connect(host: &HostClient, name: &str, override_url: Option<&str>) -> Result<CodeStorage, CsError> {
         let Minted { server, repo, token, expires_at_ms } = mint_from_host(host, name, override_url)?;
         Ok(CodeStorage {
@@ -173,8 +172,6 @@ impl CodeStorage {
         })
     }
 
-    /// Whether the token has `TOKEN_REMINT_BEFORE_EXPIRY_MS` left and was
-    /// minted less than `TOKEN_REUSE_MAX_MS` ago.
     fn fresh(&self) -> bool {
         let now = now_ms();
         now + TOKEN_REMINT_BEFORE_EXPIRY_MS < self.expires_at_ms && now - self.minted_at_ms < TOKEN_REUSE_MAX_MS
@@ -198,49 +195,26 @@ impl CodeStorage {
     }
 
     /// One request against the spec server: its status and body. A
-    /// transport failure is retried within `REQUEST_ATTEMPTS` as
-    /// `Replay::of(method)` allows (a stale keep-alive pool must not wedge a
-    /// watcher, and a POST that may have landed is never sent again blind);
-    /// payload-level failures NEVER retry here — CAS semantics belong to
-    /// the callers' bounded retry loops.
+    /// transport failure is retried as `Replay::of(method)` allows
+    /// (`send_retrying`); payload-level failures NEVER retry here — CAS
+    /// semantics belong to the callers' bounded retry loops.
     fn req(&self, method: &str, path: &str, body: Option<Vec<u8>>, content_type: Option<&str>) -> Result<(u16, Vec<u8>), CsError> {
         let url = format!("{}/api/repos/{}{}", self.server, self.repo_seg(), path);
         let body = body.unwrap_or_default();
-        let replay = Replay::of(method);
         let timeout = timeout_for(body.len() as u64);
-        let mut last_err: Option<String> = None;
-        for attempt in 0..REQUEST_ATTEMPTS {
-            if attempt > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(300 * attempt as u64));
-            }
-            let mut r = match method {
-                "GET" => self.http.get(&url),
-                "HEAD" => self.http.head(&url),
-                "POST" => self.http.post(&url),
-                _ => return Err(CsError::Malformed(format!("bad method {method}"))),
-            };
-            r = r.bearer_auth(&self.token).timeout(timeout);
+        let verb: reqwest::Method = method.parse().map_err(|_| CsError::Malformed(format!("bad method {method}")))?;
+        let build = || {
+            let mut r = self.http.request(verb.clone(), &url).bearer_auth(&self.token).timeout(timeout);
             if let Some(ct) = content_type {
                 r = r.header("content-type", ct);
             }
-            if !body.is_empty() {
-                r = r.body(body.clone());
-            }
-            // the body is read here too: an answer cut off mid-body is as
-            // lost as one that never came
-            let answer = r.send().and_then(|resp| {
-                let status = resp.status().as_u16();
-                resp.bytes().map(|b| (status, b.to_vec()))
-            });
-            match answer {
-                Ok(answer) => return Ok(answer),
-                // a request that could not be built never left
-                Err(e) if e.is_builder() => return Err(CsError::Malformed(format!("building {method} {path}: {e}"))),
-                Err(e) if replay.allows_retry(!e.is_connect()) => last_err = Some(e.to_string()),
-                Err(e) => return Err(CsError::OutcomeUnknown(format!("{method} {path}: {e}"))),
-            }
-        }
-        Err(CsError::Transport(last_err.unwrap_or_else(|| "no error recorded".into())))
+            if body.is_empty() { r } else { r.body(body.clone()) }
+        };
+        send_retrying(build, Replay::of(method), None).map_err(|failed| match failed {
+            Failed::Unbuilt(e) => CsError::Malformed(format!("building {method} {path}: {e}")),
+            Failed::Unknown(e) => CsError::OutcomeUnknown(format!("{method} {path}: {e}")),
+            Failed::Exhausted { last, .. } => CsError::Transport(last),
+        })
     }
 
     /// Non-2xx -> typed error; problem+json `detail`/`error` preferred.
