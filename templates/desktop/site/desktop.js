@@ -4,11 +4,14 @@
 // frame is this page's `__frame`: the platform signs the frame in on its
 // fragment's origin, for this page only, so the desktop's code holds no
 // authority over any of them. Its platform powers are its owner's list
-// (`__fragments`) and those frames, which fragment.json asks for and its
-// owner allows in its share sheet. Sharing
-// is the platform's too: a row's Share item opens the platform's share
-// sheet in a window of its own, which this page cannot script (the sheet
-// severs its opener); the list says who else is in each, for the badges.
+// (`__fragments`) and those frames, which fragment.json asks for: made
+// from the platform's template, it may frame them from the start; once its
+// code changes, its owner allows it in its share sheet (the list says
+// which, as `frame`, and without it the desktop says so in place of its
+// panes). Sharing is the platform's too: a row's Share item opens the
+// platform's share sheet in a window of its own, which this page cannot
+// script (the sheet severs its opener); the list says who else is in each,
+// for the badges, and which are chats.
 import * as fragment from "./__fragment.js";
 import { createLayout, store } from "./layout.js";
 import { createViewer } from "./viewer.js";
@@ -34,7 +37,9 @@ const CATALOG = [
   { template: "blank", name: "Blank", about: "One page to start from." },
 ];
 
-const state = { fragments: [], chats: [], current: store.get(CURRENT, null), frames: new Map() };
+// `frame`: whether this page may show the owner's fragments inside it
+// (`null`: its fragment.json does not ask), as the platform last said
+const state = { fragments: [], chats: [], current: store.get(CURRENT, null), frames: new Map(), frame: undefined };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -56,30 +61,80 @@ const byName = (name) => state.fragments.find((f) => f.name === name);
 const label = (name) => name.split(".")[0];
 // A frame of one of the owner's fragments, signed in there by the platform.
 const framed = (name, path = "/") => `__frame?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}`;
-// A frame still on this page's origin once it loads is `__frame`'s refusal:
-// the owner has not allowed this desktop's frames yet (its share sheet).
-let askedToAllow = false;
-function frameOf(src, title) {
+const fresh = (prefix) => `${prefix}-${crypto.getRandomValues(new Uint32Array(1))[0].toString(36).slice(0, 5)}`;
+
+function notice(title, text, ...actions) {
+  const n = $("notice");
+  n.replaceChildren(el("strong", null, title));
+  if (text) n.append(text);
+  for (const a of actions) n.append(" ", a);
+  n.hidden = false;
+}
+
+// ---- when this page may not show them: said in place of every frame ----
+function shareButton() {
+  const b = el("button", "allow", "Open its share sheet");
+  b.type = "button";
+  b.onclick = () => share(state.self);
+  return b;
+}
+// A tab of its own signs in there as any visit does (its own `__signin`).
+function inTab(name) {
+  const a = el("a", "in-tab", `Open ${label(name)} in a tab`);
+  const url = byName(name)?.url;
+  a.href = url ? new URL(`__signin?return=${encodeURIComponent("/")}`, url).href : "#";
+  a.target = "_blank";
+  a.rel = "noopener";
+  return a;
+}
+// What stands in for the frames, and why (`frame` as the platform said).
+function why(frame) {
+  return frame === null
+    ? ["This desktop does not show your fragments", "Its fragment.json does not ask to show them inside it. You can still open each in a tab."]
+    : ["Let this desktop show your fragments", "It shows your chats and apps inside it, signed in as you, only once you allow that in its share sheet."];
+}
+// The middle column's notice, in place of a chat.
+function cannotFrame(name, frame = state.frame) {
+  const [title, text] = why(frame);
+  for (const f of state.frames.values()) f.hidden = true;
+  notice(title, text, ...(frame === null ? [] : [shareButton()]), ...(name ? [inTab(name)] : []));
+}
+// A pane's body, in place of an app or a file.
+function cannotFrameNote(name, frame = state.frame) {
+  const [title, text] = why(frame);
+  const note = el("div", "pane-note blocked");
+  note.append(el("strong", null, title), el("p", null, text));
+  const actions = el("p");
+  if (frame !== null) actions.append(shareButton(), " ");
+  if (name) actions.append(inTab(name));
+  note.append(actions);
+  return note;
+}
+// A frame of `name`, or, when this page may not frame it, a note saying so.
+// A frame still on this page's origin once it loads is `__frame`'s refusal
+// (the grant was stopped after the list said it held): it never shows, and
+// the list is asked again (a changed answer reloads the page).
+function frameOf(src, title, name) {
+  if (state.frame !== true) return cannotFrameNote(name);
   const frame = el("iframe");
   frame.title = title;
   frame.src = src;
   frame.addEventListener("load", () => {
-    if (askedToAllow || !frame.contentDocument?.location.pathname.endsWith("/__frame")) return;
-    askedToAllow = true;
-    const allow = el("button", null, "Allow in its share sheet");
-    allow.onclick = () => share(state.self);
-    notice("Let this desktop show your fragments", "It frames each one signed in as you, once you allow it; then reload. ", allow);
+    let refused = false;
+    try {
+      refused = !!frame.contentDocument?.location.pathname.endsWith("/__frame");
+    } catch {}
+    if (!refused) return;
+    if (frame.parentElement === $("frames")) {
+      state.frames.delete(frame.dataset.fragment);
+      frame.remove();
+      if (state.current === frame.dataset.fragment) cannotFrame(frame.dataset.fragment, false);
+    } else {
+      frame.replaceWith(cannotFrameNote(name, false));
+    }
+    refresh();
   });
   return frame;
-}
-const fresh = (prefix) => `${prefix}-${crypto.getRandomValues(new Uint32Array(1))[0].toString(36).slice(0, 5)}`;
-
-function notice(title, text, action) {
-  const n = $("notice");
-  n.replaceChildren(el("strong", null, title));
-  if (text) n.append(text);
-  if (action) n.append(" ", action);
-  n.hidden = false;
 }
 
 // ---- layout: sidebar | chat | viewer ----
@@ -198,10 +253,20 @@ function item(row, name) {
 }
 
 // ---- chats: each a chat fragment, shown in the middle column ----
+// A chat is a fragment that is one (the list says so: it declares a `chat`
+// channel), wherever it was made; the ones this desktop made come first,
+// newest first.
+function chatNames() {
+  const made = state.chats.filter(byName);
+  const others = state.fragments.filter((f) => f.chat && f.name !== state.self && !made.includes(f.name)).map((f) => f.name);
+  return [...made, ...others];
+}
+
 function renderChats() {
-  const chats = state.chats.filter(byName);
+  const chats = chatNames();
   $("chats").replaceChildren(...(chats.length ? chats.map((name) => {
     const row = el("button", `row${name === state.current ? " active" : ""}`);
+    row.dataset.key = `chat:${name}`;
     row.innerHTML = svg("chat");
     row.append(el("span", "label", label(name)), ...badges(byName(name)));
     row.onclick = () => { openChat(name); leaveSidebar(); };
@@ -215,9 +280,13 @@ function openChat(name) {
   state.current = name;
   store.set(CURRENT, name);
   $("chat-title").textContent = label(name);
+  if (state.frame !== true) {
+    renderChats();
+    return cannotFrame(name);
+  }
   $("notice").hidden = true;
   if (!state.frames.has(name)) {
-    const frame = frameOf(framed(name), label(name));
+    const frame = frameOf(framed(name), label(name), name);
     frame.dataset.fragment = name;
     $("frames").append(frame);
     state.frames.set(name, frame);
@@ -257,7 +326,10 @@ function paneIcon(name) {
   return i;
 }
 
-const apps = () => state.fragments.filter((f) => f.name !== state.self && !state.chats.includes(f.name));
+const apps = () => {
+  const chats = chatNames();
+  return state.fragments.filter((f) => f.name !== state.self && !chats.includes(f.name));
+};
 
 function renderApps() {
   const open = viewer.keys;
@@ -275,12 +347,12 @@ function renderApps() {
 function openApp(name) {
   const f = byName(name);
   if (!f) return;
-  const frame = frameOf(framed(name), label(name));
+  const frame = frameOf(framed(name), label(name), name);
   show({
     key: `app:${name}`, title: label(name), subtitle: f.role === "owner" ? undefined : f.role, icon: appIcon(label(name)), body: frame,
     actions: [
       { icon: ICON.folder, title: "Files", onClick: () => openTree(name) },
-      { icon: ICON.reload, title: "Reload", onClick: () => { frame.src = framed(name); } },
+      { icon: ICON.reload, title: "Reload", onClick: () => { if (frame.isConnected && frame.tagName === "IFRAME") frame.src = framed(name); } },
     ],
   });
 }
@@ -290,7 +362,7 @@ function openApp(name) {
 function openTree(name) {
   const f = byName(name);
   if (!f) return;
-  show({ key: `tree:${name}`, title: label(name), subtitle: "files", icon: paneIcon("folder"), body: frameOf(framed(name, "/__files"), `${label(name)} files`) });
+  show({ key: `tree:${name}`, title: label(name), subtitle: "files", icon: paneIcon("folder"), body: frameOf(framed(name, "/__files"), `${label(name)} files`, name) });
 }
 
 // A file, read by its own fragment (`<fragment>/__file?path=`).
@@ -302,7 +374,7 @@ function openFile(url, title) {
   const cut = path.lastIndexOf("/");
   show({
     key: `file:${url}`, title: path.slice(cut + 1), subtitle: [label(f.name), path.slice(0, Math.max(cut, 0))].filter(Boolean).join(" / "), icon: paneIcon("file"),
-    body: frameOf(framed(f.name, `/__file?path=${encodeURIComponent(path)}`), path),
+    body: frameOf(framed(f.name, `/__file?path=${encodeURIComponent(path)}`), path, f.name),
     actions: [{ icon: ICON.folder, title: `All files in ${label(f.name)}`, onClick: () => openTree(f.name) }],
   });
 }
@@ -374,7 +446,10 @@ function renderQuickOpen() {
 // ---- loading ----
 let seen = "";
 async function load() {
-  const [{ fragments }, { chats }] = await Promise.all([platform(), fragment.call("chats", {})]);
+  const [{ fragments, frame = null }, { chats }] = await Promise.all([platform(), fragment.call("chats", {})]);
+  // allowed or stopped since this page showed: it shows again, as it now may
+  if (state.frame !== undefined && frame !== state.frame) return location.reload();
+  state.frame = frame;
   const now = JSON.stringify([fragments, chats]);
   if (now === seen) return;
   seen = now;
@@ -418,8 +493,9 @@ async function start() {
   }
   const username = state.self?.split(".")[1];
   if (username) $("brand").textContent = `${username}'s desktop`;
-  const chats = state.chats.filter(byName);
+  const chats = chatNames();
   if (chats.length) openChat(chats.includes(state.current) ? state.current : chats[0]);
+  else if (state.frame !== true) cannotFrame();
   else notice("No chats yet", "Start one with New chat.");
   restoreViewer();
 }

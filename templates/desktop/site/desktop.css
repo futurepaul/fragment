@@ -117,6 +117,12 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; }
 .notice { margin: 12vh auto 0; max-width: 28rem; padding: 24px; text-align: center; color: var(--text-secondary); }
 .notice strong { display: block; color: var(--text-primary); font-size: 17px; margin-bottom: 6px; }
 .notice a, .notice button { color: var(--accent-blue); background: none; border: 0; padding: 0; text-decoration: underline; }
+/* in place of a frame this page may not show (desktop.js `cannotFrame`) */
+.notice .allow, .pane-note .allow { display: inline-block; margin-top: 12px; background: none; padding: 6px 14px; border: 1px solid var(--border-strong); border-radius: 999px; color: var(--text-primary); text-decoration: none; font-weight: 600; }
+.pane-note.blocked { max-width: 26rem; line-height: 1.5; }
+.pane-note.blocked strong { display: block; color: var(--text-primary); font-size: 14px; margin-bottom: 4px; }
+.pane-note.blocked p { margin: 0 0 8px; }
+.pane-note a { color: var(--accent-blue); }
 /* ---- viewer: panes stacked vertically (viewer.js writes the rows) ---- */
 .viewer { display: flex; flex-direction: column; background: var(--bg-sidebar); }
 .stack { flex: 1; display: grid; grid-template-columns: 100%; min-height: 0; }

@@ -199,6 +199,31 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     let owner_on_blank = site_cookie(api, &owner_session, &blank)?;
     let r = listed(Some(owner_on_blank), &blank)?;
     s.ok("a page that does not ask is refused, even to its owner", r.status == 403, &r);
+    let r = listed(Some(site_cookie(api, &owner_session, &dash)?), &dash)?;
+    let row = |name: &str| r.body["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == name).cloned().unwrap_or_default();
+    s.ok(
+        "each says whether it is a chat (its fragment.json declares a chat channel), and the page whether it may frame them (null: it does not ask)",
+        row(&chat)["chat"] == json!(true) && row(&blank)["chat"] == json!(false) && row(&dash)["chat"] == json!(false) && r.body["frame"].is_null(),
+        &r,
+    );
+    // a desktop made through a page's __fragments: its owner's alone, and it
+    // may show their fragments inside it (made from the platform's template)
+    let desk_label = s.name("tdesk");
+    let made = api.call(Call {
+        method: "POST",
+        url: api.site_url(&dash, "__fragments"),
+        body: Some(json!({ "label": desk_label, "template": "desktop" }).to_string().into_bytes()),
+        content_type: Some("application/json"),
+        cookie: Some(format!("fragment_site={}", site_cookie(api, &owner_session, &dash)?)),
+        ..Call::default()
+    })?;
+    let desk = api.qualified(&owner, &desk_label)?;
+    let st = api.status(&owner, &desk)?;
+    s.ok(
+        "a desktop made through __fragments is its owner's alone (members only), and may frame their fragments",
+        made.status == 200 && made.body["name"] == desk.as_str() && st.body["visibility"] == "members" && st.body["frame"] == json!(true),
+        format!("{made} / {st}"),
+    );
 
     // the platform's "new" page
     let home = with_session(api, "GET", "/", &owner_session)?;
@@ -214,5 +239,15 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the new fragment serves its template to its owner", r.status == 200 && r.text.contains("<title>Todo"), &r);
     let r = post_form(api, "/auth/new", &format!("label={}&template=todo", url_enc(&label)), &owner_session, &api.base)?;
     s.ok("a label already taken says so", r.status == 400 && r.text.contains("already exists"), &r);
+    let st = api.status(&owner, &name)?;
+    s.ok("(a todo made there opens to anyone with its link, as before)", st.body["visibility"] == "link", &st);
+    let desk_label = s.name("tnewdesk");
+    let r = post_form(api, "/auth/new", &format!("label={}&template=desktop", url_enc(&desk_label)), &owner_session, &api.base)?;
+    let st = api.status(&owner, &api.qualified(&owner, &desk_label)?)?;
+    s.ok(
+        "a desktop made there is its owner's alone (members only), and may frame their fragments",
+        r.status == 302 && st.body["visibility"] == "members" && st.body["frame"] == json!(true),
+        format!("{r} / {st}"),
+    );
     Ok(())
 }

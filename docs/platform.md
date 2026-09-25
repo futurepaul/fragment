@@ -19,7 +19,7 @@ belongs in a template instead.
 | `__live`, `__watch` | The live socket and the CLI's watch stream, taken only from the fragment's own page (`Origin`; a socket has no CORS) | Platform protocol |
 | `__people` | Profiles (usernames, pictures) by identity | Reads the registry |
 | `__files`, `__file`, `__tree` | The fragment's files, read through the platform | Reads git with the platform's token |
-| `__fragments` | The signed-in owner's fragments (with each one's share sheet, and the visibility and member and guest counts their list carries, for the desktop's Share item and badges), and making one | Owner-only, and only for a fragment that declares the `fragments` capability (the desktop) |
+| `__fragments` | The signed-in owner's fragments (with each one's share sheet, the visibility and member and guest counts their list carries, and whether each is a chat, for the desktop's Share item, badges, and Chats), whether this page may show them inside it (`frame`), and making one | Owner-only, and only for a fragment that declares the `fragments` capability (the desktop) |
 | `__sw.js`, `__preview.svg` | The push service worker, the link preview image | Platform assets |
 
 ## Served on the platform's origin
@@ -57,6 +57,13 @@ honored only for the fragment's owner viewing its page.
   it. The grant stays with the fragment until the owner stops it. A
   framed fragment's pages answer `frame-ancestors` naming only the page
   that framed it through `__frame`, so no other page shows it signed in.
+  One exception: a desktop the platform makes from its own `desktop`
+  template (the new-fragment form, `__fragments`, `POST /api/fragments`)
+  may from the start, since its code is the platform's; that holds only
+  while live is the commit the platform made (`publish.rs`, `framing`).
+  Once its code changes (its owner's edit, or an agent's), the owner is
+  asked in the share sheet like any other page; an allow given there on
+  the platform's code lapses with it too, and a stop always holds.
 
 ## Behavior no fragment declares
 
@@ -68,6 +75,13 @@ honored only for the fragment's owner viewing its page.
   a browser navigates to is the platform's page, not JSON (docs/api.md,
   Opening a fragment by its URL). An app's own answers pass as they are.
 
+- **A new desktop is its owner's alone**: made from the platform's
+  `desktop` template with no visibility asked, it is `members`
+  (`publish.rs`, `first_visibility`); every other template's is `link`.
+- **Whether a fragment is a chat** (its live `fragment.json` declares a
+  `chat` channel) is sent with every member's row of the owner's list
+  (`members.rs`, `relist`), so the desktop lists chats made anywhere
+  under Chats without waking them.
 - **The owner's agent joins every chat** made from the chat template
   (`cell/src/publish.rs`, `join_owners_agent`), as an editor that
   listens to its `chat` channel.

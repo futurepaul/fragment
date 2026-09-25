@@ -24,6 +24,7 @@
 //!   POST   /api/join/preview              the same: what joining would do, joining no one
 //!   PUT    /api/visibility                owner
 //!   POST   /api/rotate                    owner
+//!   GET    /api/grants/frame              owner: whether it may show their fragments inside it, and whether the platform's desktop does
 //!   PUT    /api/grants/frame              owner: {granted} lets it show their fragments inside it
 //!   PUT    /api/secrets/<KEY>  GET /api/secrets  DELETE /api/secrets/<KEY>   editor
 //!   GET    /api/storage-token             editor
@@ -44,6 +45,7 @@
 //!   POST   /job/advance|effect|finish     a run's Workflow (jobs.rs); never routed from outside
 //!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
 //!   POST   /deliver/report                the delivery consumer (deliveries.rs); never routed from outside
+//!   POST   /relist                        a desktop's `__fragments` read (publish.rs): say in the lists whether it is a chat; never routed from outside
 //!   POST   /test/keys  /test/fragment     the router's `/api/test/*`, on fleets with test hooks only (ops.rs)
 
 use std::borrow::Cow;
@@ -329,6 +331,13 @@ pub(crate) enum MetaKey {
     OutsideAt,
     /// A template still to commit (publish.rs).
     TemplatePending,
+    /// The template the platform made it from, and the commit it made
+    /// (`<template> <sha>`, publish.rs): a desktop's frames are allowed
+    /// while live is that commit.
+    Template,
+    /// What its members' lists last said it is (`chat` or `app`,
+    /// members.rs `relist`).
+    ListedAs,
     /// An owner's agent still to join (publish.rs).
     AgentPending,
     /// The commits the cell pins (plane.rs).
@@ -347,8 +356,10 @@ pub(crate) enum MetaKey {
     MetaLive,
     /// The live manifest's `capabilities`, as a JSON list.
     CapabilitiesLive,
-    /// Its owner lets it show their fragments inside it (`__frame`), when
-    /// live asks for `frame`: set (to `1`) or absent.
+    /// Its owner's word on showing their fragments inside it (`__frame`),
+    /// when live asks for `frame`: `1` allowed, `0` stopped, absent the
+    /// platform's default (allowed only while live is the platform's desktop
+    /// template: publish.rs `framing`).
     FrameGranted,
     /// Why live's code was not installed.
     CodeError,
@@ -392,6 +403,8 @@ impl MetaKey {
             MetaKey::PollAt => "poll_at",
             MetaKey::OutsideAt => "outside_at",
             MetaKey::TemplatePending => "template_pending",
+            MetaKey::Template => "template",
+            MetaKey::ListedAs => "listed_as",
             MetaKey::AgentPending => "agent_pending",
             MetaKey::PinMain => "pin_main",
             MetaKey::PinLive => "pin_live",
@@ -774,6 +787,13 @@ impl FragmentCell {
             let report = body_json(&mut req).await?;
             return json_response(&self.delivery_report(&report)?);
         }
+        if path == "/relist" {
+            // Only a desktop's `__fragments` read sets the header (publish.rs); the router never passes it.
+            if req.headers().get(crate::publish::RELIST_HEADER)?.is_none() {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            return json_response(&self.relist_now().await?);
+        }
         if let Some(op) = path.strip_prefix("/cap/files/") {
             // Only the `Files` capability sets the header; the router never passes it.
             if req.headers().get(crate::files::CAP_HEADER)?.as_deref() != Some("files") {
@@ -832,6 +852,7 @@ impl FragmentCell {
                 let body = body_json(&mut req).await?;
                 self.set_visibility(&caller, body).await
             }
+            (Method::Get, ["api", "grants", "frame"]) => self.frame_grant(&caller),
             (Method::Put, ["api", "grants", "frame"]) => {
                 let body = body_json(&mut req).await?;
                 self.grant_frame(&caller, body)
@@ -964,7 +985,7 @@ impl FragmentCell {
         };
         let now = js::now_ms();
         let fragment_npub = npub::encode(&fragment_pub);
-        let visibility = body.visibility.unwrap_or(Visibility::Link);
+        let visibility = body.visibility.unwrap_or_else(|| crate::publish::first_visibility(body.template.as_deref()));
         let (view_token, inbox_token, webhook_secret) = (js::random_hex::<12>(), js::random_hex::<16>(), js::random_hex::<16>());
         let poll_at = (now + self.cfg.poll_interval_ms).to_string();
         let created_at = now.to_string();
@@ -1110,6 +1131,10 @@ impl FragmentCell {
     async fn on_alarm(&self) -> CellResult<()> {
         if self.meta(MetaKey::CreatedAt)?.is_none() {
             return Ok(());
+        }
+        // a fragment from before its members' lists said what it is says so once
+        if let Err(e) = self.relist() {
+            self.event("relist.failed", &e.message, json!({ "code": e.code }));
         }
         self.flush_index().await;
         if let Err(e) = self.seed().await {
