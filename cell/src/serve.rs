@@ -23,6 +23,10 @@ use crate::routed::Mode;
 
 /// The browser library pages import as `./__fragment.js`.
 const CLIENT_JS: &str = include_str!("../client.mjs");
+/// The scripts' entity tags, hashed at build time: a page view revalidates
+/// them (`no-cache`) and gets 304 until a cell deploy changes their bytes.
+const CLIENT_JS_HASH: u64 = site::content_hash(CLIENT_JS.as_bytes());
+const SW_JS_HASH: u64 = site::content_hash(crate::push::SW_JS.as_bytes());
 const VIEW_COOKIE: &str = "fragview";
 const ANON_COOKIE: &str = "fragment_anon";
 const VIEW_COOKIE_AGE_S: i64 = 7 * 24 * 3600;
@@ -49,6 +53,33 @@ impl Origin {
 /// The anonymous principal a cookie names.
 fn anon_principal(cookie_value: &str) -> String {
     format!("{}{}", npub::ANON_PREFIX, &hex::encode(Sha256::digest(cookie_value.as_bytes()))[..32])
+}
+
+/// 304 for a request whose `If-None-Match` names `etag`, with the headers
+/// the full answer would carry; `None` otherwise.
+fn not_modified(req: &Request, etag: &str, cache: &str) -> CellResult<Option<Response>> {
+    match req.headers().get("if-none-match")? {
+        Some(tags) if site::not_modified(&tags, etag) => {
+            let h = Headers::new();
+            h.set("etag", etag)?;
+            h.set("cache-control", cache)?;
+            Ok(Some(Response::empty()?.with_status(304).with_headers(h)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// A script compiled into the cell, revalidated by its build-time hash.
+fn script(req: &Request, body: &'static str, hash: u64) -> CellResult<Response> {
+    let etag = site::hash_etag(hash);
+    if let Some(resp) = not_modified(req, &etag, "no-cache")? {
+        return Ok(resp);
+    }
+    let h = Headers::new();
+    h.set("content-type", "text/javascript; charset=utf-8")?;
+    h.set("cache-control", "no-cache")?;
+    h.set("etag", &etag)?;
+    Ok(Response::ok(body)?.with_headers(h))
 }
 
 fn with_cookies(mut resp: Response, cookies: &[String]) -> CellResult<Response> {
@@ -140,10 +171,7 @@ impl FragmentCell {
             }
             json_response(&answer)?
         } else if path == "__sw.js" {
-            let h = Headers::new();
-            h.set("content-type", "text/javascript; charset=utf-8")?;
-            h.set("cache-control", "no-cache")?;
-            Response::ok(crate::push::SW_JS)?.with_headers(h)
+            script(&req, crate::push::SW_JS, SW_JS_HASH)?
         } else if path == "__join" {
             self.join_page(&mut req, caller, name, &url).await?
         } else if path == "__watch" {
@@ -261,10 +289,7 @@ impl FragmentCell {
     async fn site(&self, req: &mut Request, caller: &Caller, facts: &mut Facts, path: &str, url: &url::Url, role: Role, who: &str) -> CellResult<Response> {
         let head = req.method() == Method::Head;
         if path == "__fragment.js" {
-            let h = Headers::new();
-            h.set("content-type", "text/javascript; charset=utf-8")?;
-            h.set("cache-control", "no-cache")?;
-            return Ok(Response::ok(CLIENT_JS)?.with_headers(h));
+            return script(req, CLIENT_JS, CLIENT_JS_HASH);
         }
         self.ensure_pins(facts).await?;
         let facts = &*facts;
@@ -353,34 +378,47 @@ impl FragmentCell {
         let cache = site::cache_control(&row.path, public);
         // a file of a pointer's size may be one: its bytes are a blob's
         let pointer = if crate::blobs::maybe_pointer(row.size) { self.pointer("live", &row.path)? } else { None };
+        // Only a page gets Open Graph tags, so only a page reads `meta`.
+        let page = pointer.is_none() && mime.starts_with("text/html") && row.size <= OG_MAX_BYTES;
+        let stored = if page { self.meta(MetaKey::MetaLive)? } else { None };
+        let og: Option<fragment_core::manifest::Meta> = match stored {
+            Some(text) => Some(serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?),
+            None => None,
+        };
+        // Revalidation is answered here, before code.storage is asked for
+        // anything: the tree row already names the bytes.
+        let etag = match og {
+            Some(_) => site::page_etag(&row.last_commit, live),
+            None => site::file_etag(&row.last_commit),
+        };
+        if let Some(resp) = not_modified(req, &etag, cache)? {
+            return Ok(resp);
+        }
+        let with_etag = |mut resp: Response| -> CellResult<Response> {
+            resp.headers_mut().set("content-type", mime)?;
+            resp.headers_mut().set("cache-control", cache)?;
+            resp.headers_mut().set("etag", &etag)?;
+            Ok(resp)
+        };
         if head {
-            let h = headers(mime, cache)?;
             let size = pointer.map_or(row.size, |(_, size)| size);
+            let h = headers(mime, cache)?;
             h.set("content-length", &size.to_string())?;
-            return Ok(Response::empty()?.with_headers(h));
+            return with_etag(Response::empty()?.with_headers(h));
         }
         let range = req.headers().get("range")?;
         if let Some((sha, _)) = pointer {
-            let mut resp = self.stream_blob(&sha, mime, range.as_deref()).await?;
-            resp.headers_mut().set("cache-control", cache)?;
-            return Ok(resp);
+            return with_etag(self.stream_blob(&sha, mime, range.as_deref()).await?);
         }
-        // Only a page gets Open Graph tags, so only a page reads `meta`.
-        let page = mime.starts_with("text/html") && row.size <= OG_MAX_BYTES;
-        let stored = if page { self.meta(MetaKey::MetaLive)? } else { None };
-        if let Some(stored) = stored {
-            let meta: fragment_core::manifest::Meta = serde_json::from_str(&stored).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?;
+        if let Some(meta) = og {
             if let Some(bytes) = self.cs()?.read(&facts.repo, live, &row.path, OG_MAX_BYTES as usize).await? {
                 let html = String::from_utf8_lossy(&bytes);
                 let image = format!("{}__preview.svg", self.cfg.canonical(&caller.url, name));
                 let page = site::inject_og(&html, name, &meta, &image);
-                return Ok(Response::from_html(page)?.with_headers(headers(mime, cache)?));
+                return with_etag(Response::from_html(page)?.with_headers(headers(mime, cache)?));
             }
         }
-        let mut resp = self.stream_git(facts, "live", &row.path).await?;
-        resp.headers_mut().set("content-type", mime)?;
-        resp.headers_mut().set("cache-control", cache)?;
-        Ok(resp)
+        with_etag(self.stream_git(facts, "live", &row.path).await?)
     }
 }
 
