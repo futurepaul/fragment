@@ -23,10 +23,11 @@ fn count(api: &Api, keys: &Keys, name: &str) -> i64 {
     api.op(keys, name, "count", "q", json!({})).ok().and_then(|r| r.body["result"]["n"].as_i64()).unwrap_or(-1)
 }
 
-pub fn restart(s: &mut Suite, api: Api) -> Result<Api> {
+pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     if !s.section("restart") {
-        return Ok(api);
+        return Ok(());
     }
+    let api = s.api();
     let owner = api.person()?;
     let member = api.person()?;
     let name = s.named(&api, &owner, "restart")?;
@@ -133,15 +134,14 @@ pub fn restart(s: &mut Suite, api: Api) -> Result<Api> {
     s.commit(&c, &[("after.md", Some(b"webhooks still land"))]);
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/file?path=after.md"), None)?;
     s.ok("after a crash webhooks still move the pins", r.status == 200 && r.text == "webhooks still land", &r);
-    Ok(api)
+    Ok(())
 }
 
 /// A fleet without a hostname suffix serves fragments under `/f/<name>/`.
-pub fn pathmode(s: &mut Suite, api: Api) -> Result<()> {
+pub fn pathmode(s: &mut Suite, _: &Api) -> Result<()> {
     if !s.section("pathmode") {
         return Ok(());
     }
-    drop(api);
     s.stop()?;
     let api = s.start(false, false)?;
     let owner = api.person()?;

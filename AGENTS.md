@@ -45,7 +45,7 @@ debt ledger).
   (builds the celld fork with the alarm fix into `target/celld/bin`).
 - `cargo xtask check`: host tests and clippy (host and wasm), warnings
   denied.
-- `cargo xtask e2e [--only <section>]`: builds `cell/` and the CLI (with
+- `cargo xtask e2e [--only <section>[,<section>...]]`: builds `cell/` and the CLI (with
   its `computer` feature), then
   runs `crates/e2e` against a fresh `celld dev` node and the in-process
   code.storage fake (sections: auth, create, lockdown, members, identities, signin, secrets,
@@ -54,7 +54,8 @@ debt ledger).
   ai, budget, agents, chat, computer, sync, restart, pathmode). The browser and notes sections drive headless
   Chrome (`CHROME_BIN` to choose one; one Chrome serves the whole run, a
   fresh browser context per section); `triggers` waits for a cron
-  minute (about a minute). The node runs from a staged copy
+  minute (about a minute). A section that errors or panics is one FAIL
+  and the sections after it still run. The node runs from a staged copy
   of the cell in the run's own scratch (`target/e2e/<run>/cell`), so the
   e2e and `cargo xtask dev` can run at once. That scratch holds each node
   boot's log (`celld-<port>-<boot>.log`, the node's own logs on) and is
