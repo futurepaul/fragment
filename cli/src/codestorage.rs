@@ -583,29 +583,15 @@ mod tests {
         assert_eq!(cs.branch_head(LIVE).unwrap().unwrap(), tip2);
     }
 
-    /// Goal: a held client mints once while its token lasts, and again
-    /// when the token nears its expiry or code.storage refuses it.
-    /// Method: count the fake's storage-token route across gets, with the
-    /// platform's lifetime, after a revocation, and with a lifetime shorter
-    /// than the margin.
+    /// Goal: a held client mints again when its token nears its expiry or
+    /// has served its reuse (one token while it lasts, and a new one after
+    /// a refusal: watch's a_refused_token_is_minted_again_by_the_next_pass).
+    /// Method: count the fake's storage-token route across gets, with a
+    /// lifetime shorter than the margin, and with a token a minute old.
     #[test]
     fn a_held_client_mints_again_only_near_expiry_or_when_refused() {
         let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a", b"1")]);
-        let host = crate::api::Client::new(&mock.url, auth::fixed(7));
-        let mut held = Held::new("t", None);
-        for _ in 0..3 {
-            assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some());
-        }
-        assert_eq!(mock.take_requests("").get("GET storage-token"), Some(&1), "one token for three passes");
-
-        mock.revoke_tokens();
-        let err = held.get(&host).unwrap().branch_head(MAIN).unwrap_err();
-        assert!(matches!(err, CsError::Auth(_)), "got: {err}");
-        held.refused();
-        assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some(), "a new token after the refusal");
-        assert_eq!(mock.take_requests("").get("GET storage-token"), Some(&1));
-
         let short = crate::mockcs::with_token_ttl(TOKEN_REMINT_BEFORE_EXPIRY_MS / 1000 / 2);
         short.seed_repo("t", &[("a", b"1")]);
         let host = crate::api::Client::new(&short.url, auth::fixed(7));
