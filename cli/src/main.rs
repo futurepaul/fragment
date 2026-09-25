@@ -869,29 +869,11 @@ fn run(cli: Cli) -> Result<()> {
             }
             let dir = dir.ok_or_else(|| usage("usage: fragment new <dir> [--template <name>]"))?;
             let tpl_name = template.as_deref().unwrap_or("todo");
-            let tpl = TEMPLATES
-                .iter()
-                .find(|(n, _)| *n == tpl_name)
-                .ok_or_else(|| usage(format!("unknown template '{tpl_name}' (use --list)")))?;
-            if dir.exists() && !dir.is_dir() {
-                anyhow::bail!("{} exists and is not a directory", dir.display());
+            let (created, skipped) = scaffold(&dir, tpl_name)?;
+            for rel in &created {
+                println!("  {rel}");
             }
-            std::fs::create_dir_all(&dir)?;
-            let mut created = 0usize;
-            let mut skipped = 0usize;
-            for (rel, bytes) in tpl.1 {
-                let target = dir.join(rel);
-                if target.exists() {
-                    skipped += 1; // never clobber existing files
-                    continue;
-                }
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(&target, bytes)?;
-                println!("  {}", rel);
-                created += 1;
-            }
+            let created = created.len();
             println!("scaffolded '{tpl_name}' into {} ({created} files{})", dir.display(), if skipped > 0 { format!(", {skipped} existing left alone") } else { String::new() });
             println!("next:");
             println!("  fragment init <name> --template <tpl>  (scaffold + create + deploy in one step)");
@@ -1119,24 +1101,12 @@ fn run(cli: Cli) -> Result<()> {
             builder::run(&dir)?;
         }
         Cmd::Init { name, template } => {
-            // scaffold (reuse the New machinery) + create + deploy
             let dir = std::env::current_dir()?.join(&name);
             if dir.exists() {
                 anyhow::bail!("{} already exists", dir.display());
             }
             let tpl_name = template.as_deref().unwrap_or("todo");
-            let tpl = TEMPLATES
-                .iter()
-                .find(|(n, _)| *n == tpl_name)
-                .ok_or_else(|| usage(format!("unknown template '{tpl_name}' (use `fragment new --list`)")))?;
-            std::fs::create_dir_all(&dir)?;
-            for (rel, bytes) in tpl.1 {
-                let target = dir.join(rel);
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(&target, bytes)?;
-            }
+            scaffold(&dir, tpl_name)?;
             // stamp the fragment's name into the manifest BEFORE the first
             // sync — fragment.json is a git file and rides the commit
             let mf = dir.join("fragment.json");
@@ -1158,28 +1128,20 @@ fn run(cli: Cli) -> Result<()> {
             }
             // push the scaffold, then point live at it — the first deploy
             // is the real site, not an empty one
-            // one token for the first sync and the live ref both
-            let storage = CodeStorage::connect(&c, &name, codestorage_override().as_deref()).map_err(cs_anyhow)?;
-            let report = sync::pass(&c, &storage, &name, &dir, &SyncOptions { writer_id: writer_id(&c), ..Default::default() })
-                .map_err(cs_anyhow)?;
+            let Deployed::Live { synced: Some(report), .. } = deploy(&c, &name, Some(&dir), None, false, codestorage_override().as_deref())? else {
+                anyhow::bail!("the first deploy of {name} did not go live");
+            };
             if !j {
                 report.print();
             }
-            let main_tip = report.head.clone().ok_or_else(|| anyhow!("first sync produced no commits"))?;
-            storage.create_branch(&main_tip, LIVE, false).map_err(cs_anyhow)?;
-            // the first commit and the new live ref, in one nudge: the cell
-            // learns of them now, not at its next poll
-            sync::refresh_pins(&c, &name);
             let st: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
             let canon = st.urls.canonical.clone();
-            // the share link only where the share link opens the fragment
             let shared = match (st.visibility, &st.view_token) {
                 (Visibility::Link, Some(tok)) => Some(share_link(&canon, tok)),
                 _ => None,
             };
             let webhook = st.inbox_token.as_ref().map(|tok| format!("{}/api/f/{}/inbox?t={tok}", c.host, name));
             if j {
-                // synthesized composite: the human output's three URLs plus the full status
                 let mut data = json!({
                     "canonical": canon,
                     "webhookUrl": webhook,
@@ -1914,6 +1876,27 @@ WantedBy=default.target
         }
     }
     Ok(())
+}
+
+/// Writes a template's files into `dir`, never over a file that exists:
+/// the paths it wrote, and how many it left alone.
+fn scaffold(dir: &Path, tpl_name: &str) -> Result<(Vec<&'static str>, usize)> {
+    let (_, files) = TEMPLATES.iter().find(|(n, _)| *n == tpl_name).ok_or_else(|| usage(format!("unknown template '{tpl_name}' (use `fragment new --list`)")))?;
+    if dir.exists() && !dir.is_dir() {
+        anyhow::bail!("{} exists and is not a directory", dir.display());
+    }
+    let (mut created, mut skipped) = (Vec::new(), 0);
+    for (rel, bytes) in files.iter() {
+        let target = dir.join(rel);
+        if target.exists() {
+            skipped += 1;
+            continue;
+        }
+        std::fs::create_dir_all(target.parent().unwrap_or(dir))?;
+        std::fs::write(&target, bytes)?;
+        created.push(*rel);
+    }
+    Ok((created, skipped))
 }
 
 fn uid() -> Result<String> {
