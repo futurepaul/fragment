@@ -1101,71 +1101,29 @@ fn run(cli: Cli) -> Result<()> {
             std::process::exit(report.exit_code());
         }
         Cmd::Deploy { name, dir, note, preview } => {
-            let writer = writer_id(&c);
-            let cs = codestorage_override();
-            if let Some(dir) = dir.as_deref() {
-                let report = sync::sync_once(&c, &name, dir, &SyncOptions { writer_id: writer.clone(), codestorage: cs.clone(), ..Default::default() })
-                    .map_err(cs_anyhow)?;
-                if report.mass_delete_guard.is_some() {
-                    if !j {
-                        report.print();
-                    }
+            let deployed = deploy(&c, &name, dir.as_deref(), note.as_deref(), preview, codestorage_override().as_deref())?;
+            let synced = match &deployed {
+                Deployed::Guarded(report) => Some(report),
+                Deployed::Preview { synced, .. } | Deployed::Live { synced, .. } => synced.as_ref(),
+            };
+            if let (Some(report), false) = (synced, j) {
+                report.print();
+            }
+            let (live_tip, main_tip) = match deployed {
+                Deployed::Guarded(_) => {
+                    let dir = dir.as_deref().unwrap_or(Path::new("."));
                     anyhow::bail!("sync refused a mass deletion — deploy aborted before moving live. If the deletions are intended, run `fragment sync {} --dir {} --apply-mass-delete` first, then deploy again.", name, dir.display());
                 }
-                if !j {
-                    report.print();
-                }
-                // fragment.json rides the commit (it is a git file at the
-                // repo root) — files and machinery go live together
-            }
-            let storage = CodeStorage::connect(&c, &name, cs.as_deref()).map_err(cs_anyhow)?;
-            let main_tip = storage.branch_head(MAIN).map_err(cs_anyhow)?
-                .ok_or_else(|| anyhow!("nothing to deploy: main has no commits (sync a folder with --dir first)"))?;
-            let author = Author::writer(&writer);
-            if preview {
-                // ephemeral ref at main's tip: unguessable, invisible to
-                // clones, promoted by deploying. There is no served URL —
-                // the ref IS the preview.
-                let slug = format!("preview/{:012x}", rand::random::<u64>());
-                let sha = storage.create_branch(&main_tip, &slug, true).map_err(cs_anyhow)?;
-                if j {
-                    ok_exit(&json!({ "preview": slug, "sha": sha }));
-                }
-                println!("preview: {slug} (ephemeral ref at {})", &sha[..12.min(sha.len())]);
-                println!("go live with: fragment deploy {name}");
-                return Ok(());
-            }
-            let msg = format!("deploy {name}{}", note.as_deref().map(|n| format!(": {n}")).unwrap_or_default());
-            // move live to main's tip; create it on first deploy; bounded
-            // target_moved retries after that
-            let live_tip = match storage.branch_head(LIVE).map_err(cs_anyhow)? {
-                None => storage.create_branch(&main_tip, LIVE, false).map_err(cs_anyhow)?,
-                Some(t) if t == main_tip => t,
-                Some(mut expected) => {
-                    let mut landed: Option<String> = None;
-                    for _attempt in 0..MAX_CAS_ATTEMPTS {
-                        match storage.promote_live(&expected, &msg, &author) {
-                            Ok(new_tip) => {
-                                landed = Some(new_tip);
-                                break;
-                            }
-                            Err(CsError::CasRejected { .. }) => {
-                                expected = storage.branch_head(LIVE).map_err(cs_anyhow)?
-                                    .ok_or_else(|| anyhow!("the live ref vanished mid-deploy"))?;
-                                continue;
-                            }
-                            Err(e) => return Err(cs_anyhow(e)),
-                        }
+                Deployed::Preview { slug, sha, .. } => {
+                    if j {
+                        ok_exit(&json!({ "preview": slug, "sha": sha }));
                     }
-                    landed.ok_or_else(|| anyhow!("live kept moving under {MAX_CAS_ATTEMPTS} deploy attempts; re-run"))?
+                    println!("preview: {slug} (ephemeral ref at {})", &sha[..12.min(sha.len())]);
+                    println!("go live with: fragment deploy {name}");
+                    return Ok(());
                 }
+                Deployed::Live { live_tip, main_tip, .. } => (live_tip, main_tip),
             };
-            // the live move is an external ref change from the cell's
-            // perspective — nudge the pins so serving sees THIS deploy now,
-            // not at the next poll backstop (best-effort; the poll covers)
-            if let Err(e) = c.post_json(&format!("/api/f/{name}/refresh"), &json!({})) {
-                eprintln!("warning: cell pin refresh failed ({e:#}); the poll backstop will catch up");
-            }
             let st: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
             let live_url = &st.urls.canonical;
             if j {
@@ -1189,9 +1147,7 @@ fn run(cli: Cli) -> Result<()> {
             let author = Author::writer(&writer_id(&c));
             let new_tip = storage.restore_live(&target, &live_tip, &format!("rollback {name} to {target}"), &author)
                 .map_err(cs_anyhow)?;
-            if let Err(e) = c.post_json(&format!("/api/f/{name}/refresh"), &json!({})) {
-                eprintln!("warning: cell pin refresh failed ({e:#}); the poll backstop will catch up");
-            }
+            sync::refresh_pins(&c, &name);
             if j {
                 ok_exit(&json!({ "rolledBackTo": target, "liveTip": new_tip }));
             }
@@ -1266,21 +1222,18 @@ fn run(cli: Cli) -> Result<()> {
             }
             // push the scaffold, then point live at it — the first deploy
             // is the real site, not an empty one
-            let writer = writer_id(&c);
-            let cs = codestorage_override();
-            let report = sync::sync_once(&c, &name, &dir, &SyncOptions { writer_id: writer.clone(), codestorage: cs.clone(), ..Default::default() })
+            // one token for the first sync and the live ref both
+            let storage = CodeStorage::connect(&c, &name, codestorage_override().as_deref()).map_err(cs_anyhow)?;
+            let report = sync::pass(&c, &storage, &name, &dir, &SyncOptions { writer_id: writer_id(&c), ..Default::default() })
                 .map_err(cs_anyhow)?;
             if !j {
                 report.print();
             }
-            let storage = CodeStorage::connect(&c, &name, cs.as_deref()).map_err(cs_anyhow)?;
-            let main_tip = storage.branch_head(MAIN).map_err(cs_anyhow)?
-                .ok_or_else(|| anyhow!("first sync produced no commits"))?;
+            let main_tip = report.head.clone().ok_or_else(|| anyhow!("first sync produced no commits"))?;
             storage.create_branch(&main_tip, LIVE, false).map_err(cs_anyhow)?;
-            // the new live ref is a git move the cell learns of now, not at its next poll
-            if let Err(e) = c.post_json(&format!("/api/f/{name}/refresh"), &json!({})) {
-                eprintln!("warning: cell pin refresh failed ({e:#}); the poll backstop will catch up");
-            }
+            // the first commit and the new live ref, in one nudge: the cell
+            // learns of them now, not at its next poll
+            sync::refresh_pins(&c, &name);
             let st: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
             let canon = st.urls.canonical.clone();
             // the share link only where the share link opens the fragment
@@ -1819,6 +1772,78 @@ fn share_link(canonical: &str, token: &str) -> String {
 
 /// 8 hex chars of the user's pubkey — the writer identity that names
 /// conflict copies and signs commits
+/// What `fragment deploy` did.
+enum Deployed {
+    /// the folder's sync refused a mass deletion, so nothing moved
+    Guarded(sync::Report),
+    /// an ephemeral ref at main's tip
+    Preview { synced: Option<sync::Report>, slug: String, sha: String },
+    Live { synced: Option<sync::Report>, live_tip: String, main_tip: String },
+}
+
+/// `fragment deploy`: syncs `dir` first when one is given, then points
+/// live (or a new preview ref) at main's tip. One storage token serves the
+/// sync and the ref move, main's head is the one the sync ended on, and
+/// the cell's pins get one nudge for everything that moved.
+fn deploy(c: &api::Client, name: &str, dir: Option<&Path>, note: Option<&str>, preview: bool, codestorage: Option<&str>) -> Result<Deployed> {
+    let writer = writer_id(c);
+    let storage = CodeStorage::connect(c, name, codestorage).map_err(cs_anyhow)?;
+    let synced = match dir {
+        Some(dir) => Some(sync::pass(c, &storage, name, dir, &SyncOptions { writer_id: writer.clone(), ..Default::default() }).map_err(cs_anyhow)?),
+        None => None,
+    };
+    let (main_tip, landed) = match synced {
+        Some(report) if report.mass_delete_guard.is_some() => return Ok(Deployed::Guarded(report)),
+        // fragment.json rides the commit (it is a git file at the repo
+        // root): files and machinery go live together
+        Some(ref report) => (report.head.clone(), report.landed),
+        None => (storage.branch_head(MAIN).map_err(cs_anyhow)?, false),
+    };
+    let main_tip = main_tip.ok_or_else(|| anyhow!("nothing to deploy: main has no commits (sync a folder with --dir first)"))?;
+    let author = Author::writer(&writer);
+    if preview {
+        // ephemeral ref at main's tip: unguessable, invisible to clones,
+        // promoted by deploying. There is no served URL — the ref IS the
+        // preview.
+        let slug = format!("preview/{:012x}", rand::random::<u64>());
+        let sha = storage.create_branch(&main_tip, &slug, true).map_err(cs_anyhow)?;
+        // a preview moves no pin, but the sync's commit moved main
+        if landed {
+            sync::refresh_pins(c, name);
+        }
+        return Ok(Deployed::Preview { synced, slug, sha });
+    }
+    let msg = format!("deploy {name}{}", note.map(|n| format!(": {n}")).unwrap_or_default());
+    // move live to main's tip; create it on first deploy; bounded
+    // target_moved retries after that
+    let live_tip = match storage.branch_head(LIVE).map_err(cs_anyhow)? {
+        None => storage.create_branch(&main_tip, LIVE, false).map_err(cs_anyhow)?,
+        Some(t) if t == main_tip => t,
+        Some(mut expected) => {
+            let mut landed: Option<String> = None;
+            for _attempt in 0..MAX_CAS_ATTEMPTS {
+                match storage.promote_live(&expected, &msg, &author) {
+                    Ok(new_tip) => {
+                        landed = Some(new_tip);
+                        break;
+                    }
+                    Err(CsError::CasRejected { .. }) => {
+                        expected = storage.branch_head(LIVE).map_err(cs_anyhow)?
+                            .ok_or_else(|| anyhow!("the live ref vanished mid-deploy"))?;
+                        continue;
+                    }
+                    Err(e) => return Err(cs_anyhow(e)),
+                }
+            }
+            landed.ok_or_else(|| anyhow!("live kept moving under {MAX_CAS_ATTEMPTS} deploy attempts; re-run"))?
+        }
+    };
+    // the sync's commit and the live move, in one nudge: serving sees THIS
+    // deploy now, not at the next poll backstop
+    sync::refresh_pins(c, name);
+    Ok(Deployed::Live { synced, live_tip, main_tip })
+}
+
 fn writer_id(c: &api::Client) -> String {
     c.id.pubkey_hex().chars().take(8).collect()
 }
@@ -2012,6 +2037,42 @@ fn uid() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: a deploy of a folder mints one storage token, reads main's
+    /// head once (its sync's), lists once, and nudges the pins once.
+    /// Method: count the fake's requests for a first deploy and for one
+    /// after an edit. Before, each minted two tokens, read main's head four
+    /// times, listed twice, and refreshed twice.
+    #[test]
+    fn a_deploy_mints_one_token_and_refreshes_once() {
+        let mock = crate::mockcs::MockServer::start();
+        mock.seed_repo("t", &[]);
+        let c = api::Client::new(&mock.url, auth::fixed(7));
+        let dir = std::env::temp_dir().join(format!("fragment-deploy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("site")).unwrap();
+        std::fs::write(dir.join("site/index.html"), "<h1>one</h1>").unwrap();
+        mock.take_requests("");
+        let count = |routes: &[(&str, u32)]| -> std::collections::BTreeMap<String, u32> { routes.iter().map(|(r, n)| (r.to_string(), *n)).collect() };
+
+        let Deployed::Live { live_tip, main_tip, .. } = deploy(&c, "t", Some(&dir), None, false, None).unwrap() else { panic!("a live deploy") };
+        assert_eq!((Some(&live_tip), Some(&main_tip)), (mock.branch("t", "live").as_ref(), mock.branch("t", "main").as_ref()));
+        assert_eq!(
+            mock.take_requests(""),
+            count(&[("GET storage-token", 1), ("GET branch", 2), ("GET files/metadata", 1), ("POST commit-pack", 1), ("POST branches/create", 1), ("POST refresh", 1)]),
+            "main's head and live's, one listing, one token, one nudge"
+        );
+
+        std::fs::write(dir.join("site/index.html"), "<h1>two</h1>").unwrap();
+        let Deployed::Live { live_tip, .. } = deploy(&c, "t", Some(&dir), Some("two"), false, None).unwrap() else { panic!("a live deploy") };
+        assert_eq!(mock.file_at("t", "live", "site/index.html").unwrap(), b"<h1>two</h1>");
+        assert_eq!(Some(live_tip), mock.branch("t", "live"));
+        assert_eq!(
+            mock.take_requests(""),
+            count(&[("GET storage-token", 1), ("GET branch", 2), ("GET files/metadata", 1), ("POST commit-pack", 1), ("POST merge", 1), ("POST refresh", 1)])
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     fn coded(code: Code) -> anyhow::Error {
         anyhow::Error::new(CodedError { code, msg: "the answer was lost".into() })

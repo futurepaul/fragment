@@ -493,13 +493,27 @@ fn mass_delete_trips(push_deletes: usize, local_deletes: usize, known: usize, ap
     }
 }
 
+/// `fragment sync`: connects, runs one pass, and nudges the cell's pins
+/// when a commit landed.
 pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Result<Report, SyncError> {
+    let storage = CodeStorage::connect(client, name, opts.codestorage.as_deref())?;
+    let report = pass(client, &storage, name, dir, opts)?;
+    if report.landed {
+        refresh_pins(client, name);
+    }
+    Ok(report)
+}
+
+/// One pass over the folder with a connected `storage`: a command's own
+/// (deploy's is also its live move's), or a watcher's held one. It does
+/// not nudge the cell's pins: a caller whose pass `landed` calls
+/// `refresh_pins`, once for everything it moved.
+pub fn pass(client: &Client, storage: &CodeStorage, name: &str, dir: &Path, opts: &SyncOptions) -> Result<Report, SyncError> {
     if let Some(src) = &opts.mirror_from {
         mirror_overlay(src, dir).map_err(|e| SyncError::Io(format!("mirror-from {}: {e}", src.display())))?;
     }
     let mut state = load_state(dir, name).map_err(|e| SyncError::Io(e.to_string()))?;
     let (local, stats) = scan_local(dir, Some(&state), opts.verify).map_err(|e| SyncError::Io(e.to_string()))?;
-    let storage = CodeStorage::connect(client, name, opts.codestorage.as_deref())?;
     // World binding: this folder's journal must belong to THIS host+repo.
     // A mismatch means the fragment was recreated, or this folder last
     // synced the same name somewhere else (dev vs prod) — mirroring now
@@ -526,8 +540,8 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
     // main as this pass sees it: read once, reused by the push's first
     // attempt and by the pull, and after our own commit derived rather than
     // listed again
-    let mut listing = list_main(&storage)?;
-    adopt_identical(&storage, &local, &listing, &mut state)?;
+    let mut listing = list_main(storage)?;
+    adopt_identical(storage, &local, &listing, &mut state)?;
     // candidate local deletions: known remotely before, gone from the
     // listing now, local copy untouched since we saw it
     let local_delete_candidates: Vec<String> = state
@@ -561,16 +575,16 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
         loop {
             attempt += 1;
             if attempt > 1 {
-                listing = list_main(&storage)?;
+                listing = list_main(storage)?;
                 // a commit whose answer was lost may have landed: what it
                 // wrote now equals the folder, and adopting it (here and in
                 // record_conflicts) is what keeps it from reading as a new
                 // file to push again or as a conflict with our own bytes
-                adopt_identical(&storage, &local, &listing, &mut state)?;
+                adopt_identical(storage, &local, &listing, &mut state)?;
             }
             let plan = push_plan(&local, &listing.files, &state);
             record_conflicts(
-                ConflictCtx { storage: &storage, blobs: &blobs, dir, local: &local, listing: &listing, state: &mut state, report: &mut report, recorded: &mut recorded, writer_id: &opts.writer_id },
+                ConflictCtx { storage, blobs: &blobs, dir, local: &local, listing: &listing, state: &mut state, report: &mut report, recorded: &mut recorded, writer_id: &opts.writer_id },
                 &plan.conflicts,
             )?;
             if plan.upserts.is_empty() && plan.deletes.is_empty() {
@@ -653,7 +667,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
                         // both changed and push didn't resolve it (push
                         // modes off, or a race) — same conflict treatment
                         record_conflicts(
-                            ConflictCtx { storage: &storage, blobs: &blobs, dir, local: &local, listing: &listing, state: &mut state, report: &mut report, recorded: &mut recorded, writer_id: &opts.writer_id },
+                            ConflictCtx { storage, blobs: &blobs, dir, local: &local, listing: &listing, state: &mut state, report: &mut report, recorded: &mut recorded, writer_id: &opts.writer_id },
                             std::slice::from_ref(&rf.path),
                         )?;
                         false
@@ -663,7 +677,7 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
                 }
             };
             if fetch {
-                pull_file(Pull { storage: &storage, blobs: &blobs, dir, rev: listing.rev() }, rf, &mut state, &mut report)?;
+                pull_file(Pull { storage, blobs: &blobs, dir, rev: listing.rev() }, rf, &mut state, &mut report)?;
             }
         }
         // remote deletions: known before, gone now, local copy untouched
@@ -704,16 +718,17 @@ pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) ->
 
     save_state(dir, &state).map_err(|e| SyncError::Io(e.to_string()))?;
     report.head = listing.head;
-    if report.landed {
-        // our commit is an EXTERNAL push from the cell's perspective:
-        // without this nudge the cell's pins wait out the 5-minute poll
-        // backstop before app reads and serving see it. Best-effort — the
-        // poll covers a missed nudge.
-        if let Err(e) = client.post_json(&format!("/api/f/{name}/refresh"), &serde_json::json!({})) {
-            eprintln!("warning: cell pin refresh failed ({e:#}); the poll backstop will catch up");
-        }
-    }
     Ok(report)
+}
+
+/// Tells the cell its fragment's git moved. Our commits and ref moves are
+/// EXTERNAL pushes from the cell's perspective: without this nudge its
+/// pins wait out the 5-minute poll backstop before app reads and serving
+/// see them. Best-effort: the poll covers a missed nudge.
+pub fn refresh_pins(client: &Client, name: &str) {
+    if let Err(e) = client.post_json(&format!("/api/f/{name}/refresh"), &serde_json::json!({})) {
+        eprintln!("warning: cell pin refresh failed ({e:#}); the poll backstop will catch up");
+    }
 }
 
 /// main as one pass reads it: its head, and the files at that head (read

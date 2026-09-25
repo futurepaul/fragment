@@ -11,7 +11,12 @@ pub struct MockServer {
 
 impl MockServer {
     pub fn start() -> MockServer {
-        let inner = CodeStorage::start(Options { page_size: 2, host_routes: true, ..Options::default() }).expect("start the code.storage fake");
+        MockServer::with_token_ttl(Options::default().token_ttl_s)
+    }
+
+    /// Storage tokens that last `ttl_s` seconds.
+    pub fn with_token_ttl(ttl_s: i64) -> MockServer {
+        let inner = CodeStorage::start(Options { page_size: 2, host_routes: true, token_ttl_s: ttl_s, ..Options::default() }).expect("start the code.storage fake");
         MockServer { url: inner.url.clone(), inner }
     }
 }
