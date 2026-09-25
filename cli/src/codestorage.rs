@@ -28,6 +28,11 @@ pub const MAX_CAS_ATTEMPTS: u32 = 3;
 pub const MAX_LIST_PAGES: u32 = 1000;
 /// files/metadata page size (spec max 1000).
 const LIST_PAGE: u64 = 1000;
+/// A held token is minted again once it has less than this left (by this
+/// machine's clock), so a pass that starts with it finishes with it: the
+/// platform's last 15 minutes, a pass takes seconds, a large upload
+/// minutes.
+pub const TOKEN_REMINT_BEFORE_EXPIRY_MS: i64 = 120_000;
 
 #[derive(Debug)]
 pub enum CsError {
@@ -81,26 +86,29 @@ fn host_error(e: anyhow::Error) -> CsError {
     }
 }
 
+/// A token the fragment host minted, and where it works.
+struct Minted {
+    server: String,
+    repo: String,
+    token: String,
+    expires_at_ms: i64,
+}
+
 /// The fragment host mints a short-lived, repo-scoped code.storage JWT
 /// (`StorageToken`); the CLI never sees the org key. Its `api` is the
 /// spec's server URL (endpoints append /api/repos/...).
-fn mint_from_host(host: &HostClient, name: &str, override_url: Option<&str>) -> Result<CodeStorage, CsError> {
+fn mint_from_host(host: &HostClient, name: &str, override_url: Option<&str>) -> Result<Minted, CsError> {
     let resp = host.get(&format!("/api/f/{name}/storage-token")).map_err(host_error)?;
     let minted: StorageToken = host.call_as(resp).map_err(host_error)?;
     let server = override_url.unwrap_or(&minted.api).trim_end_matches('/').to_string();
     if server.is_empty() || minted.repo.is_empty() || minted.token.is_empty() {
         return Err(CsError::Malformed(format!("a storage token needs a token, a repo, and an api (repo {:?}, api {server:?})", minted.repo)));
     }
-    Ok(CodeStorage {
-        server,
-        repo: minted.repo,
-        token: minted.token,
-        // every request sets its own total timeout (`timeout_for`)
-        http: reqwest::blocking::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .build()
-            .map_err(|e| CsError::Transport(e.to_string()))?,
-    })
+    Ok(Minted { server, repo: minted.repo, token: minted.token, expires_at_ms: minted.expires_at })
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
 #[derive(serde::Serialize)]
@@ -133,6 +141,8 @@ pub struct CodeStorage {
     server: String,
     repo: String,
     token: String,
+    /// the token's `expiresAt` (ms), as the host said
+    expires_at_ms: i64,
     http: reqwest::blocking::Client,
 }
 
@@ -141,7 +151,29 @@ impl CodeStorage {
     /// `override_url` (FRAGMENT_CODESTORAGE_URL / config) replaces the
     /// server the host reports — the backend-swap knob.
     pub fn connect(host: &HostClient, name: &str, override_url: Option<&str>) -> Result<CodeStorage, CsError> {
-        mint_from_host(host, name, override_url)
+        let Minted { server, repo, token, expires_at_ms } = mint_from_host(host, name, override_url)?;
+        Ok(CodeStorage {
+            server,
+            repo,
+            token,
+            expires_at_ms,
+            // every request sets its own total timeout (`timeout_for`)
+            http: reqwest::blocking::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .build()
+                .map_err(|e| CsError::Transport(e.to_string()))?,
+        })
+    }
+
+    /// Whether the token has `TOKEN_REMINT_BEFORE_EXPIRY_MS` left.
+    fn fresh(&self) -> bool {
+        now_ms() + TOKEN_REMINT_BEFORE_EXPIRY_MS < self.expires_at_ms
+    }
+
+    /// A new token for the same client: its connections stay open.
+    fn renew(&mut self, minted: Minted) {
+        let Minted { server, repo, token, expires_at_ms } = minted;
+        (self.server, self.repo, self.token, self.expires_at_ms) = (server, repo, token, expires_at_ms);
     }
 
     /// url-form repo identity this client is scoped to — the world a sync
@@ -361,6 +393,44 @@ impl CodeStorage {
     }
 }
 
+/// One fragment's code.storage client, held for a watcher's life: one HTTP
+/// client, so its connections stay open across passes, and one token,
+/// minted again when it nears its `expiresAt` or after code.storage
+/// refused it. (A one-shot command connects once: `CodeStorage::connect`.)
+pub struct Held {
+    name: String,
+    override_url: Option<String>,
+    client: Option<CodeStorage>,
+}
+
+impl Held {
+    pub fn new(name: &str, override_url: Option<&str>) -> Held {
+        Held { name: name.to_string(), override_url: override_url.map(str::to_string), client: None }
+    }
+
+    /// The client, with a token that has time left: the first call
+    /// connects, and a later one mints again only when it must.
+    pub fn get(&mut self, host: &HostClient) -> Result<&CodeStorage, CsError> {
+        if !self.client.as_ref().is_some_and(CodeStorage::fresh) {
+            match self.client.as_mut() {
+                Some(client) => client.renew(mint_from_host(host, &self.name, self.override_url.as_deref())?),
+                None => self.client = Some(CodeStorage::connect(host, &self.name, self.override_url.as_deref())?),
+            }
+        }
+        // a token minted just now is used whatever it has left: a host whose
+        // tokens are shorter than the margin gets a mint a pass, as before
+        Ok(self.client.as_ref().expect("connected above"))
+    }
+
+    /// code.storage refused the token (its clock and ours disagree, or it
+    /// was revoked): the next `get` mints another.
+    pub fn refused(&mut self) {
+        if let Some(client) = self.client.as_mut() {
+            client.expires_at_ms = 0;
+        }
+    }
+}
+
 /// A commit sha the service named, checked (40 lowercase hex).
 fn sha_at(v: &Value) -> Option<String> {
     v.as_str().filter(|s| core_cs::is_sha(s)).map(str::to_string)
@@ -535,6 +605,38 @@ mod tests {
         let err = cs.promote_live(&tip1, "second deploy", &author()).unwrap_err();
         assert!(matches!(err, CsError::CasRejected { .. }), "got: {err}");
         assert_eq!(cs.branch_head(LIVE).unwrap().unwrap(), tip2);
+    }
+
+    /// Goal: a held client mints once while its token lasts, and again
+    /// when the token nears its expiry or code.storage refuses it.
+    /// Method: count the fake's storage-token route across gets, with the
+    /// platform's lifetime, after a revocation, and with a lifetime shorter
+    /// than the margin.
+    #[test]
+    fn a_held_client_mints_again_only_near_expiry_or_when_refused() {
+        let mock = MockServer::start();
+        mock.seed_repo("t", &[("a", b"1")]);
+        let host = crate::api::Client::new(&mock.url, auth::fixed(7));
+        let mut held = Held::new("t", None);
+        for _ in 0..3 {
+            assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some());
+        }
+        assert_eq!(mock.take_requests("").get("GET storage-token"), Some(&1), "one token for three passes");
+
+        mock.revoke_tokens();
+        let err = held.get(&host).unwrap().branch_head(MAIN).unwrap_err();
+        assert!(matches!(err, CsError::Auth(_)), "got: {err}");
+        held.refused();
+        assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some(), "a new token after the refusal");
+        assert_eq!(mock.take_requests("").get("GET storage-token"), Some(&1));
+
+        let short = MockServer::with_token_ttl(TOKEN_REMINT_BEFORE_EXPIRY_MS / 1000 / 2);
+        short.seed_repo("t", &[("a", b"1")]);
+        let host = crate::api::Client::new(&short.url, auth::fixed(7));
+        let mut held = Held::new("t", None);
+        assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some());
+        assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some());
+        assert_eq!(short.take_requests("").get("GET storage-token"), Some(&2), "a token inside the margin is minted again");
     }
 
     #[test]

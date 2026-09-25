@@ -88,7 +88,9 @@ A deploy whose `fragment.json` does not check keeps the last good code:
 
 The repo is the truth; your folder is a working copy. Sync talks to
 code.storage directly with a short-lived, repo-scoped token the host
-mints for each pass (editors and up). No local `.git` is made.
+mints (editors and up): one per command, and one for a watcher's life,
+minted again before it expires or when code.storage refuses it. No local
+`.git` is made.
 
 ```
 fragment sync my-thing --dir .              # one mirror pass (default)

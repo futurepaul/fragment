@@ -2,7 +2,8 @@
 // from the cell + periodic stat-only sweeps as the correctness floor.
 // Falls back to polling when native watching is unavailable.
 use crate::api::Client;
-use crate::sync::{self, SyncLock, SyncOptions};
+use crate::codestorage::{CsError, Held};
+use crate::sync::{self, SyncError, SyncLock, SyncOptions};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -129,6 +130,8 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, cfg: &Wa
     );
 
     // ---- main loop: wakeups → one debounced whole-folder pass ----
+    // one code.storage client and token for the watcher's life
+    let mut storage = Held::new(name, opts.codestorage.as_deref());
     let mut last_sweep = std::time::Instant::now();
     let mut err_backoff = 1u64;
     loop {
@@ -149,8 +152,12 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, cfg: &Wa
         // seconds for as long as the host has a bad window (found live:
         // banner/error churn in watch.log during a server blip). Log it,
         // back off, keep the process and its warm watcher alive.
-        match sync::sync_once(client, name, dir, opts) {
+        let passed = storage.get(client).map_err(SyncError::from).and_then(|cs| sync::pass(client, cs, name, dir, opts));
+        match passed {
             Ok(report) => {
+                if report.landed {
+                    sync::refresh_pins(client, name);
+                }
                 err_backoff = 1;
                 if !report.pulled.is_empty() || !report.pushed.is_empty() || !report.deleted_remote.is_empty() || !report.deleted_local.is_empty() || !report.conflicts.is_empty() {
                     let at = chrono_like();
@@ -158,6 +165,9 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, cfg: &Wa
                 }
             }
             Err(e) => {
+                if matches!(e, SyncError::Cs(CsError::Auth(_))) {
+                    storage.refused(); // the next pass mints a new token
+                }
                 let at = chrono_like();
                 eprintln!("{at} sync failed (retrying in {err_backoff}s): {e}");
                 std::thread::sleep(Duration::from_secs(err_backoff));
