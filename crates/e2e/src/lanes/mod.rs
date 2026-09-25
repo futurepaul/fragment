@@ -17,6 +17,7 @@ mod limits;
 mod members;
 mod notes;
 mod plane;
+mod posts;
 mod restart;
 mod signin;
 mod site;

@@ -1,0 +1,8 @@
+{
+  "channels": {
+    "chat": { "read": "public", "post": "public" },
+    "notes": { "read": "viewer", "post": "editor" },
+    "quiet": { "read": "public" }
+  },
+  "meta": { "title": "Room", "description": "Channels people post to, and no app code at all." }
+}

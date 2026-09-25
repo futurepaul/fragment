@@ -111,19 +111,6 @@ without a delete condition is unfinished design, not debt.
   entry against the fragment (or the platform keeps delete tombstones and
   retries them), with an e2e that fails a delivery during a delete.
 
-## The poll backstop wakes every fragment every five minutes
-
-- **Observed:** phase 2 slice B, as in the old runtime: each
-  fragment's alarm re-reads both branch heads every
-  `FRAGMENT_POLL_INTERVAL_S` (300 s) in case a webhook was lost.
-- **Risk:** cost and code.storage traffic grow with the number of
-  fragments, not with their activity (1000 fragments: ~7 wakes and ~13
-  calls a second).
-- **First proof:** phase 3 load numbers on Fly.
-- **Delete when:** the interval backs off for fragments with no recent
-  pushes (or webhooks are proven reliable enough to poll daily), with a
-  test that an idle fragment's alarm spacing grows.
-
 ## The effects sweep has no fault-injection test
 
 - **Observed:** phase 2 slice C; reworked in the reliability pass. A

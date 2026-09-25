@@ -17,7 +17,7 @@ the node's environment, where only `KEYS` reads them (below).
 | `CODESTORAGE_ORG` | the code.storage org |
 | `CODESTORAGE_API_URL` | the API base (default `https://api.<org>.code.storage`) |
 | `FRAGMENT_HOST_SUFFIX` | fragments are served from `<label>--<username>.<suffix>` (any other name under it is 404, never the platform); unset, from `/f/<name>/` |
-| `FRAGMENT_POLL_INTERVAL_S` | the webhook backstop (default 300); also how often running runs are checked against their Workflows |
+| `FRAGMENT_POLL_INTERVAL_S` | the webhook backstop (default 300), and how often running runs are checked against their Workflows, for a busy fragment: one something outside the platform may have written in the last day (a storage token was minted for it, or a webhook arrived), or with a run in flight, a held run's video to settle, or a template or an owner's agent still to land. Any other fragment is polled once a day |
 | `FRAGMENT_JOB_RETRY_DELAY_S` | a failed job step's first retry delay, doubling over 4 retries (default 10) |
 | `FRAGMENT_EGRESS_LOCAL` | `allow` lets jobs fetch loopback and private addresses (dev and e2e fakes); never on a shared fleet |
 | `FRAGMENT_BLOB_GRACE_S` | how long a blob no branch names is kept before it is deleted (default 7 days) |
@@ -32,7 +32,7 @@ the node's environment, where only `KEYS` reads them (below).
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake) |
 | `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (default: the hostname suffix itself, e.g. https://fragment.club) |
 | `FRAGMENT_SIGNINS_PENDING_MAX` | sign-ins begun and not finished that the registry keeps (default 100000; at least 1): a sign-in is kept through this many later starts, so the oldest is let go only past this many starts in its ten minutes (Sign-in, below) |
-| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it); `GET /api/test/env` answers the Worker variables; `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens through `KEYS` as that fragment; `POST /api/test/fragment {fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps {deploy?}` forgets the kept answers of its runs in flight (with `deploy: true`, as the deploy that began keeping them left them: their next advance starts them again), `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-before-tables {fill?}` puts its installed code back in the shape from before the code tables (to prove their in-place migration), with placeholder operations until there are `fill` (to prove a stored manifest past a limit fails closed), and `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader |
+| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it); `GET /api/test/env` answers the Worker variables; `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens through `KEYS` as that fragment; `POST /api/test/fragment {fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps {deploy?}` forgets the kept answers of its runs in flight (with `deploy: true`, as the deploy that began keeping them left them: their next advance starts them again), `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-before-tables {fill?}` puts its installed code back in the shape from before the code tables (to prove their in-place migration), with placeholder operations until there are `fill` (to prove a stored manifest past a limit fails closed), `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, and `age-outside {ms}` makes the last sign of an outside writer (a storage token, a webhook) `ms` older |
 
 The node's environment (Fly secrets on a fleet; `devstack` in dev and
 the e2e), read by `KEYS`, the native service in our celld fork
@@ -276,8 +276,9 @@ deleted in batches on the registry's alarm, never on a request.
 | `POST /api/f/{name}/subscriptions` | a member who may read the channel | `{channel, url}` → `{id, channel, url}`: each new record of the channel is POSTed to `url` through the delivery queue as `{type: "record", fragment, channel, record}` (unsigned: the URL is the subscriber's capability; egress-checked; at most 32 a fragment; a 404 or 410 drops it; a removed member's go with it) |
 | `GET /api/f/{name}/subscriptions` | a member (the owner sees all) | → `{subscriptions: [{id, principal, channel, url, createdAt}]}` |
 | `DELETE /api/f/{name}/subscriptions/{id}` | its subscriber, or the owner | → `{ok, removed}` |
-| `GET /api/f/{name}/channels` | viewer | → `{channels: [{name, read, seq}]}`: `events`, `ops`, `inbox`, and the app's |
+| `GET /api/f/{name}/channels` | viewer | → `{channels: [{name, read, post, seq}]}`: `events`, `ops`, `inbox`, and the app's (`post`: who may post, or null) |
 | `GET /api/f/{name}/channels/{channel}?after=&limit=` | the channel's reader | → `{channel, records: [{channel, seq, at, principal, kind, body}], next}` (1000 a page) |
+| `POST /api/f/{name}/channels/{channel}` | the channel's `post` role | `{id, body}` → `{record, replayed}` (`Posted`): the platform appends `body` (any JSON, at most 64 KiB of it; 413) as a record of kind `message` naming the poster, with no app code; it reaches sockets, subscriptions, and the channel's triggers as a mutation's record does. The same id and body again answer that record and append nothing (a retry also finishes what the first try left: its deliveries, its triggers' runs); the same id with another body, or on another channel, is 409 (ids are the poster's, kept as long as the record). A channel without a `post` role, and `events`, `ops`, and `inbox`, refuse posts (403). A poster holding only `public` spends a public call (Serving, `__op`) |
 
 ## Apps
 
@@ -313,6 +314,12 @@ keeps the last good code and says why in `status.code.error`.
   400 naming the JSON pointer (`input /text: is required`).
 - `channels` declares the app's channels and their readers (default
   `viewer`); `events`, `ops`, and `inbox` are built in (readers: viewers).
+  A channel may also name who may post to it, `"post": <role>` (ROADMAP
+  decision 18): the platform appends a poster's record itself
+  (`POST /api/f/{name}/channels/{channel}`, `fragment.post`), so a
+  fragment whose live commit has channels and no `app.mjs` (a chat) runs
+  no worker at all. A `post` role looser than the channel's `read` is
+  refused at deploy (whoever may post may read).
 - `kind` is `query`, `mutation`, or `job` (below); a job's `role`
   defaults to `editor`.
 - `triggers` (at most 32) start runs of an operation: `{"cron": "0 9 * *
@@ -578,6 +585,7 @@ API answers on the platform's host):
 | `__file?path=` | a content file from live, else main |
 | `__preview.svg` | the placeholder preview image |
 | `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; a signed-in browser (`fragment_site`) calls as its person; an unsigned caller gets an anonymous principal cookie; callers holding only `public` get 60 calls a minute each, 600 per fragment (a page's live views re-run over `__live`, outside this) |
+| `POST __op/channels/{channel}` | a browser's post (`fragment.post`), through the call's door and its checks: `{id, input}` with the record's body as `input` → `{result: record, replayed}`, as `POST /api/f/{name}/channels/{channel}` answers it; a post spends the public budget as a call does (no operation name holds a `/`) |
 | `__signin`, `__signout` | this origin's session (Sign-in, above) |
 | `__join?invite=<token>` | an invite in a browser: signed out, → `__signin` and back; signed in, a Join button that posts `invite` here (form-encoded; another origin 403) and joins as the person; the page refuses every frame (`frame-ancestors 'none'`, `X-Frame-Options: DENY`), as the platform's do |
 | `__fragment.js` | the browser library (below) |
@@ -665,7 +673,9 @@ visitors holding the public role alone run at most
 sockets between changes, however they open them.
 
 The browser library (`import * as fragment from "./__fragment.js"`):
-`call(op, input, {id?})` (retries keep the id), `live(op, input,
+`call(op, input, {id?})` (retries keep the id), `post(channel, body,
+{id?})` (a record to a postable channel, as the page's principal; the
+record comes back, and the same id again is the same record), `live(op, input,
 onResult, onError?)` (re-runs a query after every change, over the socket
 when it is open and over HTTP when not, or when its principal's budget is
 spent; one run at a time, however many changes came), `subscribe(
@@ -681,6 +691,7 @@ or 4004 (the fragment was deleted) ends it, and `closed` handlers get
 `{code, reason}`.
 
 CLI: `fragment call <name> <op> --input '{...}' [--id ID]`, `fragment
+post <name> <channel> --body '{...}' [--id ID]`, `fragment
 channel <name> [<channel>] [--after N] [--follow]`.
 
 ## Agents (`agent/`, phase 5; co-hosted since phase 6)

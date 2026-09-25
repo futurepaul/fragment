@@ -784,10 +784,16 @@ pub struct OpDecl {
 pub struct ChannelDecl {
     /// The weakest role that may read it.
     pub read: Role,
+    /// The weakest role that may post to it (the platform appends the
+    /// record: no app code runs); never weaker than `read`. `None`: the
+    /// channel takes no posts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post: Option<Role>,
 }
 
 /// One record in a channel. Records are appended by the platform (`events`,
-/// `ops`) or by mutations' effects (app channels), never by clients.
+/// `ops`, and posts to a channel its fragment.json declares postable) or by
+/// mutations' effects (app channels), never by a client's own hand.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelRecord {
     pub channel: String,
@@ -800,6 +806,28 @@ pub struct ChannelRecord {
     /// neither parses a body it just wrote nor one it reads back.
     pub body: Box<RawValue>,
 }
+
+/// `POST /api/f/<name>/channels/<channel>` (the channel's `post` role): a
+/// record the platform appends as the poster. `id` is the poster's own
+/// (`^[A-Za-z0-9._:-]{1,128}$`): the same id with the same body answers the
+/// record it appended and appends nothing; with another body it is 409.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostRecord {
+    pub id: String,
+    /// At most `limits::RECORD_BODY_MAX_BYTES` of JSON.
+    pub body: Value,
+}
+
+/// A post's answer: the record, and whether this id had posted it before.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Posted {
+    pub record: ChannelRecord,
+    pub replayed: bool,
+}
+
+/// The kind of every posted record (a mutation's publish names its own).
+pub const POST_KIND: &str = "message";
 
 /// `GET /api/f/<name>/channels/<channel>?after=` (the channel's reader):
 /// a page of records after `after`, and the cursor after the page.
@@ -1286,6 +1314,18 @@ mod tests {
         };
         let text = serde_json::to_string(&record).unwrap();
         assert_eq!(text, format!(r#"{{"channel":"room","seq":7,"at":1,"principal":"platform","kind":"said","body":{stored}}}"#));
+    }
+
+    #[test]
+    fn a_channel_without_post_reads_and_writes_as_before() {
+        // code stored before posts (the code row's JSON columns) decodes
+        let old: ChannelDecl = serde_json::from_str(r#"{"read":"viewer"}"#).unwrap();
+        assert_eq!(old, ChannelDecl { read: Role::Viewer, post: None });
+        assert_eq!(serde_json::to_string(&old).unwrap(), r#"{"read":"viewer"}"#);
+        let postable = ChannelDecl { read: Role::Public, post: Some(Role::Public) };
+        assert_eq!(serde_json::from_str::<ChannelDecl>(&serde_json::to_string(&postable).unwrap()).unwrap(), postable);
+        assert!(serde_json::from_str::<PostRecord>(r#"{"id":"a","body":1,"kind":"x"}"#).is_err(), "a post names only its id and body");
+        assert!(serde_json::from_str::<PostRecord>(r#"{"id":"a"}"#).is_err(), "a post has a body");
     }
 
     #[test]

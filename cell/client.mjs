@@ -3,6 +3,7 @@
 //
 //   import * as fragment from "./__fragment.js";
 //   await fragment.call("add_todo", { text: "milk" });        // an operation
+//   await fragment.post("chat", { text: "hi" });               // a record, no app code
 //   fragment.live("list", {}, (r) => render(r.todos));         // a query, re-run on changes
 //   fragment.subscribe("activity", (rec) => log(rec.body));    // a channel, from a cursor
 //   fragment.subscribe("chat", show, { last: 100 });           // or from near its end
@@ -26,7 +27,7 @@
 // opens, then one change at a time; this page sends its own at most once
 // every 150 ms, the latest last (the fragment drops more than 10 a second).
 // A call keeps its id across retries, so a retried mutation is a replay,
-// never a second write.
+// never a second write; so does a post.
 
 const base = new URL("./", import.meta.url);
 
@@ -40,11 +41,13 @@ export class FragmentError extends Error {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export async function call(op, input = {}, { id = crypto.randomUUID() } = {}) {
+// One call's POST ({id, input}, as JSON: a cross-site form cannot send it),
+// sent again with the same id when the network fails. Returns the result.
+async function request(path, id, input) {
   for (let attempt = 0; ; attempt++) {
     let resp;
     try {
-      resp = await fetch(new URL(`__op/${op}`, base), {
+      resp = await fetch(new URL(path, base), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ id, input }),
@@ -61,6 +64,20 @@ export async function call(op, input = {}, { id = crypto.randomUUID() } = {}) {
     if (!resp.ok) throw new FragmentError(resp.status, body);
     return body.result;
   }
+}
+
+export function call(op, input = {}, { id = crypto.randomUUID() } = {}) {
+  return request(`__op/${op}`, id, input);
+}
+
+/// Appends `body` (at most 64 KiB of JSON) to a channel fragment.json
+/// declares with a `post` role, as this page's principal: the platform
+/// appends it, no app code runs. Returns the record; the same id again
+/// returns that record and appends nothing (another body under it throws,
+/// 409). A post spends a public call when the page holds only the public
+/// role, as a call does.
+export function post(channel, body, { id = crypto.randomUUID() } = {}) {
+  return request(`__op/channels/${encodeURIComponent(channel)}`, id, body);
 }
 
 let socket = null;
@@ -369,7 +386,7 @@ const b64u = {
   },
 };
 
-async function post(path, body) {
+async function pushPost(path, body) {
   const resp = await fetch(new URL(path, base), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), credentials: "same-origin" });
   const j = await resp.json().catch(() => ({}));
   return resp.ok ? j : { ok: false, reason: "server", error: j.message || `http ${resp.status}`, status: resp.status };
@@ -386,7 +403,7 @@ export const push = {
       const { key } = await (await fetch(new URL("__push-key", base), { credentials: "same-origin" })).json();
       if (!key) return { ok: false, reason: "no-key" };
       const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u.decode(key) });
-      const answer = await post("__push-sub", { who, endpoint: sub.endpoint, p256dh: b64u.encode(sub.getKey("p256dh")), auth: b64u.encode(sub.getKey("auth")) });
+      const answer = await pushPost("__push-sub", { who, endpoint: sub.endpoint, p256dh: b64u.encode(sub.getKey("p256dh")), auth: b64u.encode(sub.getKey("auth")) });
       if (answer.ok === false) await sub.unsubscribe().catch(() => {});
       return answer;
     } catch (e) {
@@ -400,7 +417,7 @@ export const push = {
     try {
       const sub = await (await sw.ready).pushManager.getSubscription();
       if (!sub) return { ok: true, removed: 0 };
-      const answer = await post("__push-unsub", { endpoint: sub.endpoint });
+      const answer = await pushPost("__push-unsub", { endpoint: sub.endpoint });
       await sub.unsubscribe().catch(() => {});
       return answer;
     } catch (e) {

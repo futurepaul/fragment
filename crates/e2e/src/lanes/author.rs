@@ -168,7 +168,7 @@ pub fn channels(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.op(&owner, &name, "bulk", "edge", json!({ "n": 1, "size": edge }))?;
     let size = records(api, &owner, &name, "room", 3)?.body["records"][0]["body"].to_string().len();
     s.ok("and a record of exactly the limit is published", r.status == 200 && size == limits::RECORD_BODY_MAX_BYTES, format!("{r}; a body of {size} bytes"));
-    Ok(())
+    super::posts::posts(s, api)
 }
 
 pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
@@ -876,5 +876,5 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
     let calls = chrome.eval(&v, "performance.getEntriesByType('resource').filter((e) => e.name.includes('__op/list')).length")?;
     println!("      its page made {calls} HTTP calls to the query");
     s.ok("and asked the query over HTTP once, before its socket opened: every re-run went over the socket", calls == 1, format!("{calls} HTTP calls to list"));
-    Ok(())
+    super::posts::browser(s, api, &mut chrome)
 }

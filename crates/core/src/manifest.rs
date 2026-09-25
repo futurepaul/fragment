@@ -79,16 +79,29 @@ fn operation(name: &str, v: &Value) -> Result<OpDecl, String> {
     Ok(OpDecl { kind, role, input })
 }
 
+/// One entry of `channels`: who reads it (default `viewer`), and who may
+/// post to it (no one by default). Whoever may post may read what they
+/// posted: a `post` weaker than `read` is refused.
 fn channel(name: &str, v: &Value) -> Result<ChannelDecl, String> {
     let obj = v.as_object().ok_or_else(|| format!("channels.{name} must be an object"))?;
-    if let Some(k) = obj.keys().find(|k| k.as_str() != "read") {
-        return Err(format!("channels.{name} has an unknown key {k:?} (read)"));
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "read" | "post")) {
+        return Err(format!("channels.{name} has an unknown key {k:?} (read, post)"));
     }
-    let read = match obj.get("read") {
-        None => Role::Viewer,
-        Some(r) => r.as_str().and_then(Role::parse).ok_or_else(|| format!("channels.{name}.read must be public, viewer, editor, or owner"))?,
+    let role = |key: &str| -> Result<Option<Role>, String> {
+        obj.get(key)
+            .map(|r| r.as_str().and_then(Role::parse).ok_or_else(|| format!("channels.{name}.{key} must be public, viewer, editor, or owner")))
+            .transpose()
     };
-    Ok(ChannelDecl { read })
+    let read = role("read")?.unwrap_or(Role::Viewer);
+    let post = role("post")?;
+    if let Some(post) = post.filter(|p| *p < read) {
+        return Err(format!(
+            "channels.{name}.post ({}) is looser than its read ({}): whoever may post to a channel may read it",
+            post.as_str(),
+            read.as_str()
+        ));
+    }
+    Ok(ChannelDecl { read, post })
 }
 
 /// One entry of `triggers`: `{"cron" | "channel" | "files": …, "run": op}`.
@@ -248,6 +261,7 @@ mod tests {
         let m = parse(br#"{"channels":{"chat":{},"news":{"read":"public"}}}"#).unwrap();
         assert_eq!(m.channels["chat"].read, Role::Viewer);
         assert_eq!(m.channels["news"].read, Role::Public);
+        assert_eq!(m.channels["chat"].post, None, "a channel takes no posts unless it names who may");
         let m = parse(br#"{"operations":{"digest":{"kind":"job"},"save":{"kind":"mutation"}},"channels":{"chat":{}},
             "triggers":[{"cron":"0 9 * * *","run":"digest"},{"channel":"inbox","run":"save"},{"channel":"chat","run":"digest"},
             {"files":"notes/**","run":"digest"}]}"#)
@@ -259,6 +273,24 @@ mod tests {
         assert_eq!(m.triggers[3].on, TriggerOn::Files("notes/**".into()));
         let back: TriggerDecl = serde_json::from_value(serde_json::to_value(&m.triggers[0]).unwrap()).unwrap();
         assert_eq!(back, m.triggers[0], "stored triggers read back");
+    }
+
+    #[test]
+    fn postable_channels() {
+        let m = parse(br#"{"channels":{"chat":{"read":"public","post":"public"},"notes":{"post":"editor"},"desk":{"read":"editor","post":"owner"}}}"#).unwrap();
+        assert_eq!(m.channels["chat"], ChannelDecl { read: Role::Public, post: Some(Role::Public) }, "a post role as loose as read");
+        assert_eq!(m.channels["notes"], ChannelDecl { read: Role::Viewer, post: Some(Role::Editor) }, "read defaults to viewer beside a post role");
+        assert_eq!(m.channels["desk"].post, Some(Role::Owner), "a post role tighter than read");
+        for (bad, says) in [
+            (&br#"{"channels":{"chat":{"read":"viewer","post":"public"}}}"#[..], "channels.chat.post (public) is looser than its read (viewer)"),
+            (br#"{"channels":{"chat":{"post":"public"}}}"#, "channels.chat.post (public) is looser than its read (viewer)"),
+            (br#"{"channels":{"chat":{"read":"owner","post":"editor"}}}"#, "channels.chat.post (editor) is looser than its read (owner)"),
+            (br#"{"channels":{"chat":{"post":"anyone"}}}"#, "channels.chat.post must be public, viewer, editor, or owner"),
+            (br#"{"channels":{"chat":{"post":true}}}"#, "channels.chat.post must be public"),
+        ] {
+            let why = parse(bad).expect_err(&String::from_utf8_lossy(bad));
+            assert!(why.contains(says), "{why}");
+        }
     }
 
     #[test]
