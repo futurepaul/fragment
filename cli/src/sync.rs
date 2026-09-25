@@ -1153,6 +1153,34 @@ mod tests {
         assert!(guide.contains(&rule), "GUIDE.md should say: {rule}");
     }
 
+    /// Goal: a pass tells a script what happened by its exit code alone,
+    /// as GUIDE.md says, and a tripped guard is the code a script sees even
+    /// beside conflicts (it needs someone to look before anything more
+    /// moves). Method: a report of each outcome, the codes written out.
+    /// The e2e's sync section checks one of them through the process.
+    #[test]
+    fn a_report_exits_with_its_outcome() {
+        let paths = |ps: &[&str]| ps.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        let busy = Report {
+            pushed: paths(&["a.md"]),
+            pulled: paths(&["b.md"]),
+            deleted_remote: paths(&["c.md"]),
+            deleted_local: paths(&["d.md"]),
+            withheld_deletions: paths(&["e.md"]),
+            ..Report::default()
+        };
+        let conflicted = Report { conflicts: paths(&["f.md (remote copy: f.conflict-1-deadbeef.md)"]), ..Report::default() };
+        let guarded = Report { mass_delete_guard: Some(15), ..Report::default() };
+        let both = Report { conflicts: paths(&["f.md"]), mass_delete_guard: Some(15), ..Report::default() };
+        assert_eq!(Report::default().exit_code(), 0);
+        assert_eq!(busy.exit_code(), 0, "work done, withheld deletions too, is a clean pass");
+        assert_eq!(conflicted.exit_code(), 3);
+        assert_eq!(guarded.exit_code(), 4);
+        assert_eq!(both.exit_code(), 4);
+        let guide = include_str!("../GUIDE.md");
+        assert!(guide.contains("**Exit codes**: 0 clean, 1 failure, 3 conflicts, 4 guard tripped."), "GUIDE.md names the codes");
+    }
+
     #[test]
     fn mass_delete_guard_semantics() {
         // rule: pending > max(3, 30% of known), or ALL of them
@@ -1641,11 +1669,15 @@ mod tests {
         let c = client_for(&mock);
         let dir = tmpdir("verify");
         sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
+        let clean = verify(&c, "t", &dir, None).unwrap();
+        assert!(clean.conflicts.is_empty(), "{:?}", clean.conflicts);
+        assert_eq!(clean.exit_code(), 0, "a folder in sync exits 0");
         // same size, different content — the exact lie the audit exists for
         fs::write(dir.join("b.txt"), b"went-drft").unwrap();
         let report = verify(&c, "t", &dir, None).unwrap();
         assert!(report.conflicts.iter().any(|c| c.starts_with("b.txt")), "{:?}", report.conflicts);
         assert!(report.conflicts.iter().all(|c| !c.starts_with("a.txt")));
+        assert_eq!(report.exit_code(), 3, "drift exits as a conflict does");
         fs::remove_dir_all(&dir).ok();
     }
 

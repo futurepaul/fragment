@@ -1,7 +1,10 @@
-//! Folder sync through the CLI against the cell and code.storage:
-//! conflicts, a commit whose answer is lost, modes, verify, the mirror
-//! source, the mass-deletion guard, chunked large files, continuous sync
-//! with the change feed, and the event log's tail.
+//! Folder sync through the real CLI against the cell and code.storage:
+//! an exit code as a script reads it, continuous sync with the change
+//! feed, and the event log's tail. What one pass does (conflicts, a
+//! commit whose answer is lost, modes, verify, the mirror source, what
+//! syncs, the mass-deletion guard) is host-tested in cli/src/sync.rs
+//! against the same code.storage fake, and large files are the `blobs`
+//! section's.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -30,7 +33,8 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
     };
     let dir_of = |p: &Path| p.to_str().expect("utf-8 path").to_string();
 
-    // both sides changed: local keeps, the remote copy lands beside it, exit 3
+    // a both-sides change exits 3 through the process, as a script reads
+    // it (cli/src/sync.rs has the rest of a conflict, and each exit code)
     let (name, c) = create(s, "sync-conflict")?;
     let dir = s.dir("sync-conflict");
     std::fs::write(dir.join("doc.md"), "base")?;
@@ -39,120 +43,6 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
     std::fs::write(dir.join("doc.md"), "ours")?;
     let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir)]);
     s.ok("a both-sides change exits 3", code(&out) == 3, String::from_utf8_lossy(&out.stdout));
-    s.ok("the local file keeps ours", std::fs::read_to_string(dir.join("doc.md"))? == "ours", "");
-    let copy = std::fs::read_dir(&dir)?.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).find(|n| n.contains(".conflict-"));
-    s.ok("the remote copy is saved beside it", copy.as_deref().is_some_and(|n| std::fs::read_to_string(dir.join(n)).is_ok_and(|t| t == "theirs")), format!("{copy:?}"));
-    let repo = c["repo"].as_str().unwrap_or("").to_string();
-    s.ok("the remote is untouched by our conflict", s.fake.file_at(&repo, "main", "doc.md").as_deref() == Some(&b"theirs"[..]), "");
-
-    // a commit that landed but lost its answer: sync never resends it
-    // blind (the old client did: a 409, then a conflict copy of its own
-    // bytes, exit 3); it rereads the branch and adopts what landed
-    let (name, c) = create(s, "sync-lost")?;
-    let dir = s.dir("sync-lost");
-    std::fs::write(dir.join("doc.md"), "base")?;
-    s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir)]);
-    std::fs::write(dir.join("doc.md"), "ours, changed")?;
-    std::fs::write(dir.join("new.md"), "new")?;
-    let repo = c["repo"].as_str().unwrap_or("").to_string();
-    s.fake.drop_commit_answers(&repo, 1);
-    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir)]);
-    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    s.ok("a commit whose answer is lost is reread, not resent, and the sync exits 0", code(&out) == 0 && said.contains("answer was lost"), &said);
-    let copies = std::fs::read_dir(&dir)?.filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains(".conflict-")).count();
-    s.ok("it leaves no conflict copy", copies == 0, copies);
-    s.ok(
-        "what it committed is in the repo",
-        s.fake.file_at(&repo, "main", "doc.md").as_deref() == Some(&b"ours, changed"[..]) && s.fake.file_at(&repo, "main", "new.md").as_deref() == Some(&b"new"[..]),
-        format!("{:?}", s.fake.paths(&repo, "main")),
-    );
-    let again = s.cli_json(api, &home, &["sync", &name, "--dir", &dir_of(&dir), "--json"])?;
-    s.ok("the next pass has nothing to do", again["pushed"] == json!([]) && again["conflicts"] == json!([]), &again);
-
-    // pull withholds deletions; --prune applies them
-    let (name, c) = create(s, "sync-mode")?;
-    let dir = s.dir("sync-mode");
-    std::fs::write(dir.join("keep.md"), "keep")?;
-    std::fs::write(dir.join("drop.md"), "drop")?;
-    s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir)]);
-    s.commit(&c, &[("drop.md", None)]);
-    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir), "--mode", "pull", "--json"]);
-    let text = String::from_utf8_lossy(&out.stdout).to_string();
-    s.ok("pull mode withholds a remote deletion", text.contains("withheld") && dir.join("drop.md").exists(), &text);
-    s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir), "--mode", "pull", "--prune"]);
-    s.ok("--prune applies it", !dir.join("drop.md").exists() && dir.join("keep.md").exists(), "");
-
-    // verify: in sync, then drift
-    let (name, _) = create(s, "sync-verify")?;
-    let dir = s.dir("sync-verify");
-    std::fs::write(dir.join("a.md"), "aaa")?;
-    s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir)]);
-    let out = s.cli(api, &home, &["verify", &name, "--dir", &dir_of(&dir)]);
-    s.ok("verify exits 0 in sync", code(&out) == 0, String::from_utf8_lossy(&out.stdout));
-    std::fs::write(dir.join("a.md"), "tampered")?;
-    let out = s.cli(api, &home, &["verify", &name, "--dir", &dir_of(&dir)]);
-    s.ok("verify exits 3 on drift", code(&out) == 3, String::from_utf8_lossy(&out.stdout));
-
-    // --mirror-from overlays a read-only source
-    let (name, c) = create(s, "sync-mirror")?;
-    let src = s.dir("sync-mirror-src");
-    let dir = s.dir("sync-mirror");
-    std::fs::write(src.join("a.md"), "one")?;
-    std::fs::create_dir_all(src.join("sub"))?;
-    std::fs::write(src.join("sub/b.md"), "two")?;
-    s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir), "--mirror-from", &dir_of(&src)]);
-    let repo = c["repo"].as_str().unwrap_or("").to_string();
-    let paths = s.fake.paths(&repo, "main");
-    s.ok("the mirror source lands in the repo", paths.contains(&"a.md".into()) && paths.contains(&"sub/b.md".into()), format!("{paths:?}"));
-    std::fs::write(src.join("c.md"), "three")?;
-    s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir), "--mirror-from", &dir_of(&src)]);
-    s.ok("new source files arrive on later passes", s.fake.paths(&repo, "main").contains(&"c.md".into()), "");
-    s.ok("the source is never written", !src.join(".fragment").exists(), "");
-
-    // one rule says what syncs: an editor's state and node_modules never upload
-    let (name, c) = create(s, "sync-rule")?;
-    let dir = s.dir("sync-rule");
-    std::fs::write(dir.join("a.md"), "a")?;
-    std::fs::create_dir_all(dir.join(".obsidian"))?;
-    std::fs::write(dir.join(".obsidian/workspace.json"), "{}")?;
-    std::fs::create_dir_all(dir.join("node_modules/x"))?;
-    std::fs::write(dir.join("node_modules/x/index.js"), "x")?;
-    s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir)]);
-    let repo = c["repo"].as_str().unwrap_or("").to_string();
-    let paths = s.fake.paths(&repo, "main");
-    s.ok("only what syncs uploads: not .obsidian/, not node_modules/", paths == ["a.md"], format!("{paths:?}"));
-
-    // the mass-deletion guard
-    let (name, c) = create(s, "sync-guard")?;
-    let dir = s.dir("sync-guard");
-    for i in 0..20 {
-        std::fs::write(dir.join(format!("f{i}.md")), "x")?;
-    }
-    s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir)]);
-    for i in 0..15 {
-        std::fs::remove_file(dir.join(format!("f{i}.md")))?;
-    }
-    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir)]);
-    let repo = c["repo"].as_str().unwrap_or("").to_string();
-    s.ok("a mass deletion trips the guard (exit 4)", code(&out) == 4, String::from_utf8_lossy(&out.stdout));
-    s.ok("the guard kept the remote files", s.fake.paths(&repo, "main").len() == 20, s.fake.paths(&repo, "main").len());
-    s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir), "--apply-mass-delete"]);
-    s.ok("--apply-mass-delete proceeds", s.fake.paths(&repo, "main").len() == 5, s.fake.paths(&repo, "main").len());
-
-    // a file of 1 MiB or more: its bytes a blob, a pointer in git (section `blobs` has the rest)
-    let (name, c) = create(s, "sync-big")?;
-    let dir = s.dir("sync-big");
-    let big: Vec<u8> = (0..5 * 1024 * 1024 + 1234).map(|i| (i % 251) as u8).collect();
-    std::fs::write(dir.join("big.bin"), &big)?;
-    s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir)]);
-    let repo = c["repo"].as_str().unwrap_or("").to_string();
-    let in_git = s.fake.file_at(&repo, "main", "big.bin").unwrap_or_default();
-    let pointer = fragment_core::blob::parse(&in_git);
-    s.ok(
-        "a 5 MiB file syncs as a pointer to its bytes",
-        pointer.is_some_and(|p| p.size == big.len() as u64 && p.sha256 == fragment_core::blob::sha256_hex(&big)),
-        String::from_utf8_lossy(&in_git),
-    );
 
     // continuous: the change feed pulls a remote write; a local edit pushes
     let (name, c) = create(s, "sync-watch")?;
