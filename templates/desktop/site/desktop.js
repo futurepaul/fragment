@@ -56,6 +56,22 @@ const byName = (name) => state.fragments.find((f) => f.name === name);
 const label = (name) => name.split(".")[0];
 // A frame of one of the owner's fragments, signed in there by the platform.
 const framed = (name, path = "/") => `__frame?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}`;
+// A frame still on this page's origin once it loads is `__frame`'s refusal:
+// the owner has not allowed this desktop's frames yet (its share sheet).
+let askedToAllow = false;
+function frameOf(src, title) {
+  const frame = el("iframe");
+  frame.title = title;
+  frame.src = src;
+  frame.addEventListener("load", () => {
+    if (askedToAllow || !frame.contentDocument?.location.pathname.endsWith("/__frame")) return;
+    askedToAllow = true;
+    const allow = el("button", null, "Allow in its share sheet");
+    allow.onclick = () => share(state.self);
+    notice("Let this desktop show your fragments", "It frames each one signed in as you, once you allow it; then reload. ", allow);
+  });
+  return frame;
+}
 const fresh = (prefix) => `${prefix}-${crypto.getRandomValues(new Uint32Array(1))[0].toString(36).slice(0, 5)}`;
 
 function notice(title, text, action) {
@@ -201,9 +217,7 @@ function openChat(name) {
   $("chat-title").textContent = label(name);
   $("notice").hidden = true;
   if (!state.frames.has(name)) {
-    const frame = el("iframe");
-    frame.title = label(name);
-    frame.src = framed(name);
+    const frame = frameOf(framed(name), label(name));
     frame.dataset.fragment = name;
     $("frames").append(frame);
     state.frames.set(name, frame);
@@ -258,17 +272,10 @@ function renderApps() {
   }) : [el("div", "empty-row", "No apps yet")]));
 }
 
-function frameFor(url, title) {
-  const frame = el("iframe");
-  frame.title = title;
-  frame.src = url;
-  return frame;
-}
-
 function openApp(name) {
   const f = byName(name);
   if (!f) return;
-  const frame = frameFor(framed(name), label(name));
+  const frame = frameOf(framed(name), label(name));
   show({
     key: `app:${name}`, title: label(name), subtitle: f.role === "owner" ? undefined : f.role, icon: appIcon(label(name)), body: frame,
     actions: [
@@ -283,7 +290,7 @@ function openApp(name) {
 function openTree(name) {
   const f = byName(name);
   if (!f) return;
-  show({ key: `tree:${name}`, title: label(name), subtitle: "files", icon: paneIcon("folder"), body: frameFor(framed(name, "/__files"), `${label(name)} files`) });
+  show({ key: `tree:${name}`, title: label(name), subtitle: "files", icon: paneIcon("folder"), body: frameOf(framed(name, "/__files"), `${label(name)} files`) });
 }
 
 // A file, read by its own fragment (`<fragment>/__file?path=`).
@@ -295,7 +302,7 @@ function openFile(url, title) {
   const cut = path.lastIndexOf("/");
   show({
     key: `file:${url}`, title: path.slice(cut + 1), subtitle: [label(f.name), path.slice(0, Math.max(cut, 0))].filter(Boolean).join(" / "), icon: paneIcon("file"),
-    body: frameFor(framed(f.name, `/__file?path=${encodeURIComponent(path)}`), path),
+    body: frameOf(framed(f.name, `/__file?path=${encodeURIComponent(path)}`), path),
     actions: [{ icon: ICON.folder, title: `All files in ${label(f.name)}`, onClick: () => openTree(f.name) }],
   });
 }
