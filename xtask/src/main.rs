@@ -325,9 +325,34 @@ fn no_conflict_markers(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// CI's e2e shards (`.github/workflows/ci.yml`, each shard's `args:`):
+/// the sections the `--only` shards name, each once, are exactly those the
+/// one `--except` shard leaves out. Otherwise a section taken off its shard
+/// but still left out of the rest would never run, and nothing would say.
+fn shards_cover(workflow: &str) -> Result<()> {
+    let mut named: Vec<&str> = vec![];
+    let mut except: Option<Vec<&str>> = None;
+    for args in workflow.lines().filter_map(|l| l.trim().strip_prefix("args: ")) {
+        match args.split_once(' ') {
+            Some(("--only", names)) => named.extend(names.split(',')),
+            Some(("--except", names)) if except.is_none() => except = Some(names.split(',').collect()),
+            _ => bail!("a shard runs --only or (one shard) --except <section,...>, not: {args}"),
+        }
+    }
+    let mut except = except.context("no --except shard: a new section would run in none")?;
+    let count = named.len();
+    named.sort_unstable();
+    named.dedup();
+    anyhow::ensure!(named.len() == count, "a section is named by two --only shards");
+    except.sort_unstable();
+    anyhow::ensure!(named == except, "the --only shards name {named:?}, but the --except shard leaves out {except:?}");
+    Ok(())
+}
+
 fn check() -> Result<()> {
     let root = devstack::repo_root();
     no_conflict_markers(&root)?;
+    shards_cover(&std::fs::read_to_string(root.join(".github/workflows/ci.yml")).context("read the CI workflow")?)?;
     run(Command::new("cargo").args(["test", "--workspace", "--all-features"]).current_dir(&root))?;
     run(Command::new("cargo")
         .args(["clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"])
@@ -352,7 +377,7 @@ fn main() -> Result<()> {
         Some("check") => check(),
         Some("deploy") => deploy::run(&args[1..]),
         Some("fleet") => deploy::operate(&args[1..]),
-        _ => bail!("usage: cargo xtask build | celld | dev [--clean] | try <template> [name] | e2e [--fleet <fleet>] [--only <section>[,...]] | check | deploy <fleet> [--nodes | --secrets] | fleet <fleet> <celld command...>"),
+        _ => bail!("usage: cargo xtask build | celld | dev [--clean] | try <template> [name] | e2e [--fleet <fleet>] [--only | --except <section>[,...]] | e2e-kit <file> | check | deploy <fleet> [--nodes | --secrets] | fleet <fleet> <celld command...>"),
     }
 }
 
@@ -368,6 +393,18 @@ mod tests {
         for line in ["  <<<<<<< indented", "a ======= b", "========", "the `<<<<<<< ` marker", ">>>>>>>"] {
             assert!(!super::conflict_marker(line), "{line}");
         }
+    }
+
+    #[test]
+    fn every_section_a_shard_leaves_out_another_names() {
+        let shards = |args: &[&str]| args.iter().map(|a| format!("          - name: s\n            args: {a}\n")).collect::<String>();
+        assert!(super::shards_cover(&shards(&["--only a,b", "--only c", "--except c,a,b"])).is_ok());
+        // taken off its shard but still left out of the rest: it would run nowhere
+        assert!(super::shards_cover(&shards(&["--only a", "--only c", "--except c,a,b"])).is_err());
+        assert!(super::shards_cover(&shards(&["--only a,b", "--only b", "--except a,b"])).is_err());
+        assert!(super::shards_cover(&shards(&["--only a,b"])).is_err());
+        assert!(super::shards_cover(&shards(&["--except a", "--except a"])).is_err());
+        assert!(super::shards_cover(&std::fs::read_to_string(super::devstack::repo_root().join(".github/workflows/ci.yml")).unwrap()).is_ok());
     }
 
     #[test]
