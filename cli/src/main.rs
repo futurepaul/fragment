@@ -639,16 +639,11 @@ fn ok_exit(data: &impl Serialize) -> ! {
     std::process::exit(0);
 }
 
-fn fail_json(code: Code, msg: &str) -> ! {
-    fail_json_with(&json!({ "code": code.as_str(), "message": msg, "hint": code.hint() }), code.exit_status())
-}
-
-fn fail_json_with(err: &Value, exit_code: i32) -> ! {
-    println!(
-        "{{\"ok\":false,\"error\":{}}}",
-        serde_json::to_string(err).unwrap_or_else(|_| "{\"code\":\"server_error\"}".into())
-    );
-    std::process::exit(exit_code);
+/// In `--json` mode: the success envelope, and exit 0.
+fn json_exit(j: bool, data: &impl Serialize) {
+    if j {
+        ok_exit(data);
+    }
 }
 
 /// A mistake in how the command was called: `invalid_usage`, exit 2.
@@ -717,38 +712,28 @@ fn error_body(e: &anyhow::Error) -> (Value, Code) {
 
 fn main() {
     let json_mode = json_env_flag();
-    let cli = match Cli::try_parse() {
-        Ok(c) => c,
-        Err(e) => {
-            if !e.use_stderr() {
-                e.exit(); // help/version: print them, exit 0
-            }
-            if json_mode {
-                fail_json(Code::InvalidUsage, &e.to_string());
-            }
-            e.exit(); // clap's own usage text + exit code 2
-        }
+    let result = match Cli::try_parse() {
+        Ok(cli) => run(cli),
+        // help and version (exit 0), and clap's own usage text for a person (exit 2)
+        Err(e) if !json_mode || !e.use_stderr() => e.exit(),
+        Err(e) => Err(usage(e.to_string())),
     };
-    let verbose = cli.verbose;
-    let host = cli.host.clone();
-    if let Err(e) = run(cli) {
-        let (err, code) = error_body(&e);
-        if json_mode {
-            fail_json_with(&err, code.exit_status());
-        }
+    let Err(e) = result else { return };
+    let (err, code) = error_body(&e);
+    if json_mode {
+        println!("{{\"ok\":false,\"error\":{err}}}");
+    } else {
         eprintln!("error: {e:#}");
         // what the host refused (or a call whose outcome is unknown), and
         // what to do about it
         if let (Some(_), Some(hint)) = (e.downcast_ref::<CodedError>(), err["hint"].as_str()) {
             eprintln!("hint: {hint}");
         }
-        std::process::exit(code.exit_status());
     }
-    let _ = (verbose, host);
+    std::process::exit(code.exit_status());
 }
 
 fn run(cli: Cli) -> Result<()> {
-    // env var is a first-class equivalent of passing --json on every command
     let j = cli.json || json_env_flag();
 
     match cli.cmd {
@@ -777,9 +762,7 @@ fn run(cli: Cli) -> Result<()> {
                 let url = format!("{}/cli?key={npub}&proof={}", c.host, encode_q(proof));
                 let tail = &npub[npub.len() - 8..];
                 if no_wait {
-                    if j {
-                        ok_exit(&json!({ "npub": npub, "pending": true, "approve": url }));
-                    }
+                    json_exit(j, &json!({ "npub": npub, "pending": true, "approve": url }));
                     println!("approve this key in a browser where you are signed in (the link is good for ten minutes):\n  {url}");
                     println!("its key ends in {tail}; then run `fragment login` again");
                     return Ok(());
@@ -799,10 +782,8 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
             let v = done.expect("approved");
-            if j {
-                // never echo the key itself
-                ok_exit(&json!({ "npub": c.id.npub(), "id": v.id, "host": c.host, "config": config_path().display().to_string(), "existing": key_existed }));
-            }
+            // never echo the key itself
+            json_exit(j, &json!({ "npub": c.id.npub(), "id": v.id, "host": c.host, "config": config_path().display().to_string(), "existing": key_existed }));
             println!("logged in as {} on {}", v.id, c.host);
             println!("key: {}", c.id.npub());
             return Ok(());
@@ -911,9 +892,7 @@ fn run(cli: Cli) -> Result<()> {
                     println!("config: {}", p.display());
                 }
                 None => {
-                    if j {
-                        ok_exit(&json!({ "host": resolve_host(&cli.host, &cfg) }));
-                    }
+                    json_exit(j, &json!({ "host": resolve_host(&cli.host, &cfg) }));
                     println!("host: {}", resolve_host(&cli.host, &cfg));
                 }
             }
@@ -992,9 +971,7 @@ fn run(cli: Cli) -> Result<()> {
             };
             let body = fragment_proto::CreateFragment { name: name.clone(), visibility, template: None };
             let v: Created = c.call_as(c.post_json("/api/fragments", &body)?)?;
-            if j {
-                ok_exit(&v);
-            }
+            json_exit(j, &v);
             println!("created fragment {}", v.name);
             println!("  npub:         {}", v.npub);
             println!("  share link:   {}", share_link(&v.canonical, &v.view_token));
@@ -1003,18 +980,14 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::List => {
             let v: FragmentList = c.call_as(c.get("/api/fragments")?)?;
-            if j {
-                ok_exit(&v);
-            }
+            json_exit(j, &v);
             for f in &v.fragments {
                 println!("{} ({})", f.name, f.role.as_str());
             }
         }
         Cmd::Status { name } => {
             let v: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
-            if j {
-                ok_exit(&v);
-            }
+            json_exit(j, &v);
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         Cmd::Events { name, since, tail } => {
@@ -1027,9 +1000,7 @@ fn run(cli: Cli) -> Result<()> {
             };
             let v = c.call(c.get(&format!("/api/f/{name}/events?{query}"))?)?;
             let evs = v["events"].as_array().cloned().unwrap_or_default();
-            if j {
-                ok_exit(&json!({ "events": evs }));
-            }
+            json_exit(j, &json!({ "events": evs }));
             for e in evs {
                 let at = e["at"].as_u64().unwrap_or(0);
                 let time = chrono_like(at / 1000);
@@ -1038,9 +1009,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Manifest { name } => {
             let v = c.call(c.get(&format!("/api/f/{name}/manifest"))?)?;
-            if j {
-                ok_exit(&v);
-            }
+            json_exit(j, &v);
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         Cmd::ManifestSet { name, file } => {
@@ -1052,9 +1021,7 @@ fn run(cli: Cli) -> Result<()> {
             let writer = writer_id(&c);
             let tip = sync::commit_single_file(&c, &name, "fragment.json", serde_json::to_vec(&v)?, &format!("manifest-set {name}"), &writer, codestorage_override().as_deref())
                 .map_err(cs_anyhow)?;
-            if j {
-                ok_exit(&json!({ "updated": true, "commit": tip, "manifest": v }));
-            }
+            json_exit(j, &json!({ "updated": true, "commit": tip, "manifest": v }));
             println!("manifest updated (commit {})", &tip[..8.min(tip.len())]);
         }
         Cmd::Sync {
@@ -1064,10 +1031,7 @@ fn run(cli: Cli) -> Result<()> {
             // never stream JSON envelopes mid-run: watch prints progress
             // lines forever; a json consumer would choke on line 2
             if j && watch {
-                fail_json(
-                    Code::InvalidUsage,
-                    "sync --watch streams progress lines continuously, so --json does not apply: run single passes with --json (`fragment sync <name> --dir .`), or drop --json to watch",
-                );
+                return Err(usage("sync --watch streams progress lines continuously, so --json does not apply: run single passes with --json (`fragment sync <name> --dir .`), or drop --json to watch"));
             }
             if install || uninstall {
                 install_sync_unit(&name, &dir, install, mirror_from.as_deref().and_then(|p| p.to_str()))?;
@@ -1098,30 +1062,28 @@ fn run(cli: Cli) -> Result<()> {
                 return Ok(());
             }
             let report = sync::sync_once(&c, &name, &dir, &opts).map_err(cs_anyhow)?;
+            // scriptable exit codes survive the envelope (3 conflicts, 4 guard)
             if j {
-                emit_ok(&serde_json::to_value(&report).unwrap_or_default());
-                // scriptable exit codes survive the envelope (3 conflicts, 4 guard)
-                std::process::exit(report.exit_code());
+                emit_ok(&report);
+            } else {
+                println!("sync {} ({})", name, dir.display());
+                report.print();
             }
-            println!("sync {} ({})", name, dir.display());
-            report.print();
             std::process::exit(report.exit_code());
         }
         Cmd::Rm { name } => {
             c.call(c.delete(&format!("/api/f/{name}"))?)?;
-            if j {
-                ok_exit(&json!({ "deleted": true, "name": name }));
-            }
+            json_exit(j, &json!({ "deleted": true, "name": name }));
             println!("deleted fragment {name} (the repo stays; the name is reusable)");
         }
         Cmd::Verify { name, dir } => {
             let report = sync::verify(&c, &name, &dir, codestorage_override().as_deref()).map_err(cs_anyhow)?;
             if j {
-                emit_ok(&serde_json::to_value(&report).unwrap_or_default());
-                std::process::exit(report.exit_code());
+                emit_ok(&report);
+            } else {
+                println!("verify {} ({})", name, dir.display());
+                report.print();
             }
-            println!("verify {} ({})", name, dir.display());
-            report.print();
             std::process::exit(report.exit_code());
         }
         Cmd::Deploy { name, dir, note, preview } => {
@@ -1139,9 +1101,7 @@ fn run(cli: Cli) -> Result<()> {
                     anyhow::bail!("sync refused a mass deletion — deploy aborted before moving live. If the deletions are intended, run `fragment sync {} --dir {} --apply-mass-delete` first, then deploy again.", name, dir.display());
                 }
                 Deployed::Preview { slug, sha, .. } => {
-                    if j {
-                        ok_exit(&json!({ "preview": slug, "sha": sha }));
-                    }
+                    json_exit(j, &json!({ "preview": slug, "sha": sha }));
                     println!("preview: {slug} (ephemeral ref at {})", &sha[..12.min(sha.len())]);
                     println!("go live with: fragment deploy {name}");
                     return Ok(());
@@ -1150,9 +1110,7 @@ fn run(cli: Cli) -> Result<()> {
             };
             let st: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
             let live_url = &st.urls.canonical;
-            if j {
-                ok_exit(&json!({ "live": live_url, "liveTip": live_tip, "mainTip": main_tip }));
-            }
+            json_exit(j, &json!({ "live": live_url, "liveTip": live_tip, "mainTip": main_tip }));
             println!("live: {live_url}");
             if let (Visibility::Link, Some(tok)) = (st.visibility, &st.view_token) {
                 println!("share link: {}", share_link(live_url, tok));
@@ -1172,17 +1130,13 @@ fn run(cli: Cli) -> Result<()> {
             let new_tip = storage.restore_live(&target, &live_tip, &format!("rollback {name} to {target}"), &author)
                 .map_err(cs_anyhow)?;
             sync::refresh_pins(&c, &name);
-            if j {
-                ok_exit(&json!({ "rolledBackTo": target, "liveTip": new_tip }));
-            }
+            json_exit(j, &json!({ "rolledBackTo": target, "liveTip": new_tip }));
             println!("rolled back to {}: live is now {}", &target[..8.min(target.len())], &new_tip[..8.min(new_tip.len())]);
         }
         Cmd::Drafts { name } => {
             let storage = CodeStorage::connect(&c, &name, codestorage_override().as_deref()).map_err(cs_anyhow)?;
             let commits = storage.list_commits(LIVE, 30).map_err(cs_anyhow)?;
-            if j {
-                ok_exit(&json!({ "deploys": commits }));
-            }
+            json_exit(j, &json!({ "deploys": commits }));
             if commits.is_empty() {
                 println!("(no deploys yet)");
                 return Ok(());
@@ -1290,17 +1244,13 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Runs { name, run: Some(id), .. } => {
             let v: Run = c.call_as(c.get(&format!("/api/f/{name}/runs/{id}"))?)?;
-            if j {
-                ok_exit(&v);
-            }
+            json_exit(j, &v);
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         Cmd::Budget { sub } => match sub {
             None => {
                 let v: BudgetView = c.call_as(c.get("/api/budget")?)?;
-                if j {
-                    ok_exit(&v);
-                }
+                json_exit(j, &v);
                 println!(
                     "{}: {} of {} left ({} spent{})",
                     v.period,
@@ -1322,9 +1272,7 @@ fn run(cli: Cli) -> Result<()> {
                     None => "/api/budget/usage".to_string(),
                 };
                 let v: BudgetView = c.call_as(c.get(&path)?)?;
-                if j {
-                    ok_exit(&v);
-                }
+                json_exit(j, &v);
                 for u in &v.usage {
                     println!("{}\t{}\t{}\t{}\t{}", usd(u.quantity), u.state.as_str(), u.kind, u.model.as_deref().unwrap_or(""), u.source_ref);
                 }
@@ -1339,9 +1287,7 @@ fn run(cli: Cli) -> Result<()> {
         },
         Cmd::Triggers { name } => {
             let v = c.call(c.get(&format!("/api/f/{name}/triggers"))?)?;
-            if j {
-                ok_exit(&v);
-            }
+            json_exit(j, &v);
             let rows = v["triggers"].as_array().cloned().unwrap_or_default();
             for t in &rows {
                 let on = ["cron", "channel", "files"]
@@ -1362,9 +1308,7 @@ fn run(cli: Cli) -> Result<()> {
                 path.push_str(&format!("&status={}", encode_q(s)));
             }
             let v: RunList = c.call_as(c.get(&path)?)?;
-            if j {
-                ok_exit(&v);
-            }
+            json_exit(j, &v);
             for r in &v.runs {
                 let cost = r.cost_micros.map(usd).unwrap_or_default();
                 println!("#{}\t{}\t{}\t{}\tattempt {}\t{cost}", r.id, r.via.as_str(), r.op, r.status.as_str(), r.attempt);
@@ -1382,23 +1326,17 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Pause { name, op } => {
             let v = c.call(c.post_json(&format!("/api/f/{name}/pause"), &json!({ "op": op, "paused": true }))?)?;
-            if j {
-                ok_exit(&v);
-            }
+            json_exit(j, &v);
             println!("paused the triggers of '{op}' (calls still work; unpause with `fragment unpause`)");
         }
         Cmd::Unpause { name, op } => {
             let v = c.call(c.post_json(&format!("/api/f/{name}/pause"), &json!({ "op": op, "paused": false }))?)?;
-            if j {
-                ok_exit(&v);
-            }
+            json_exit(j, &v);
             println!("unpaused '{op}'");
         }
         Cmd::Replay { name, run } => {
             let v = c.call(c.post_json(&format!("/api/f/{name}/replay"), &json!({ "run": run }))?)?;
-            if j {
-                ok_exit(&v);
-            }
+            json_exit(j, &v);
             println!("run #{run} queued again (attempt {}); follow it with `fragment runs {name} {run}`", v["attempt"]);
         }
         Cmd::Rotate { name, inbox, view } => {
@@ -1416,12 +1354,10 @@ fn run(cli: Cli) -> Result<()> {
             }
             let body = json!({ "scopes": scopes });
             let v: Rotated = c.call_as(c.post_json(&format!("/api/f/{name}/rotate"), &body)?)?;
-            if j {
-                // the whole answer, webhook secret included: the code.storage
-                // push HMAC is only ever visible at create/rotate, and machine
-                // consumers (dev harnesses registering push webhooks) need it
-                ok_exit(&v);
-            }
+            // the whole answer, webhook secret included: the code.storage
+            // push HMAC is only ever visible at create/rotate, and machine
+            // consumers (dev harnesses registering push webhooks) need it
+            json_exit(j, &v);
             let canon = format!("{}/f/{}/", c.host, name);
             println!("rotated: {}", v.rotated.join(", "));
             println!("New webhook URL: {}/api/f/{}/inbox?t={}", c.host, name, v.inbox_token);
@@ -1447,26 +1383,20 @@ fn run(cli: Cli) -> Result<()> {
                     return Err(usage("empty secret value"));
                 }
                 c.call(c.put_bytes(&format!("/api/f/{name}/secrets/{key}"), value.into_bytes())?)?;
-                if j {
-                    // names only — values never travel back
-                    ok_exit(&json!({ "name": name, "key": key, "set": true }));
-                }
+                // names only — values never travel back
+                json_exit(j, &json!({ "name": name, "key": key, "set": true }));
                 println!("secret {key} set on {name}");
             }
             SecretCmd::List { name } => {
                 let v = c.call(c.get(&format!("/api/f/{name}/secrets"))?)?;
-                if j {
-                    ok_exit(&v);
-                }
+                json_exit(j, &v);
                 for n in v["names"].as_array().cloned().unwrap_or_default() {
                     println!("{}", n.as_str().unwrap_or(""));
                 }
             }
             SecretCmd::Rm { name, key } => {
                 c.call(c.delete(&format!("/api/f/{name}/secrets/{key}"))?)?;
-                if j {
-                    ok_exit(&json!({ "name": name, "key": key, "removed": true }));
-                }
+                json_exit(j, &json!({ "name": name, "key": key, "removed": true }));
                 println!("secret {key} removed");
             }
         },
@@ -1482,9 +1412,7 @@ fn run(cli: Cli) -> Result<()> {
                 .send()?;
             let resp = api::Resp { status: resp.status().as_u16(), body: resp.bytes()?.to_vec() };
             let v = c.call(resp)?;
-            if j {
-                ok_exit(&v);
-            }
+            json_exit(j, &v);
             println!("{}", serde_json::to_string(&v)?);
         }
         Cmd::Open { name } => {
@@ -1519,9 +1447,7 @@ fn run(cli: Cli) -> Result<()> {
                     }
                     // made and registered as yours in one request (the platform does both)
                     let v = a.call(a.post_json("/api/agents", &body)?)?;
-                    if j {
-                        ok_exit(&v);
-                    }
+                    json_exit(j, &v);
                     let id = v["id"].as_str().unwrap_or("");
                     println!("agent {} ({}): {id}", v["name"].as_str().unwrap_or(""), v["model"].as_str().unwrap_or(""));
                     println!("  npub: {}", v["npub"].as_str().unwrap_or(""));
@@ -1530,9 +1456,7 @@ fn run(cli: Cli) -> Result<()> {
                 }
                 AgentCmd::Show { name } => {
                     let v = a.call(a.get(&format!("/api/a/{name}"))?)?;
-                    if j {
-                        ok_exit(&v);
-                    }
+                    json_exit(j, &v);
                     println!("{} ({}) {}: {}", v["name"].as_str().unwrap_or(""), v["model"].as_str().unwrap_or(""), v["npub"].as_str().unwrap_or(""), v["outcome"].as_str().unwrap_or("idle"));
                     if let Some(e) = v["error"].as_str().filter(|e| !e.is_empty()) {
                         println!("  error: {e}");
@@ -1551,9 +1475,7 @@ fn run(cli: Cli) -> Result<()> {
                 AgentCmd::Say { name, text, no_wait } => {
                     let v = a.call(a.post_json(&format!("/api/a/{name}/turns"), &json!({ "text": text }))?)?;
                     if no_wait {
-                        if j {
-                            ok_exit(&v);
-                        }
+                        json_exit(j, &v);
                         println!("{}", if v["steered"] == true { "steered the running turn" } else { "started" });
                         return Ok(());
                     }
@@ -1571,9 +1493,7 @@ fn run(cli: Cli) -> Result<()> {
                     }
                     let state = ended.ok_or_else(|| anyhow!("the turn is still running after 10 minutes (fragment agent show {name})"))?;
                     let answer = state.answer.clone().unwrap_or_default();
-                    if j {
-                        ok_exit(&json!({ "outcome": state.outcome, "answer": answer, "error": state.error.clone().unwrap_or_default() }));
-                    }
+                    json_exit(j, &json!({ "outcome": state.outcome, "answer": answer, "error": state.error.clone().unwrap_or_default() }));
                     match state.outcome {
                         Some(TurnOutcome::Idle) => println!("{answer}"),
                         Some(other) => println!("({}) {}", other.as_str(), state.error.as_deref().unwrap_or("")),
@@ -1582,25 +1502,19 @@ fn run(cli: Cli) -> Result<()> {
                 }
                 AgentCmd::Stop { name } => {
                     let v = a.call(a.post_json(&format!("/api/a/{name}/stop"), &json!({}))?)?;
-                    if j {
-                        ok_exit(&v);
-                    }
+                    json_exit(j, &v);
                     println!("{}", if v["active"] == true { "stopping" } else { "no turn was running" });
                 }
                 AgentCmd::Tools { name } => {
                     let v = a.call(a.get(&format!("/api/a/{name}/tools"))?)?;
-                    if j {
-                        ok_exit(&v);
-                    }
+                    json_exit(j, &v);
                     for t in v["tools"].as_array().cloned().unwrap_or_default() {
                         println!("{}", t.as_str().unwrap_or(""));
                     }
                 }
                 AgentCmd::Listen { name, fragment, channel, reply } => {
                     let v = a.call(a.post_json(&format!("/api/a/{name}/listen"), &json!({ "fragment": fragment, "channel": channel, "reply": reply }))?)?;
-                    if j {
-                        ok_exit(&v);
-                    }
+                    json_exit(j, &v);
                     println!("{name} follows {fragment}'s {channel} channel and answers through {reply}");
                 }
                 AgentCmd::Computer { name, url, token_file, connect, cwd, detach } => {
@@ -1611,27 +1525,21 @@ fn run(cli: Cli) -> Result<()> {
                         let token = v["token"].as_str().ok_or_else(|| anyhow!("the agent answered no connect token"))?;
                         write_secret_file(&token_file, token)?;
                         let agent = v["agent"].as_str().unwrap_or("");
-                        if j {
-                            ok_exit(&json!({ "agent": agent, "cwd": v["cwd"], "tokenFile": token_file }));
-                        }
+                        json_exit(j, &json!({ "agent": agent, "cwd": v["cwd"], "tokenFile": token_file }));
                         println!("{name} takes a computer that connects out; its token is in {} (0600).", token_file.display());
                         println!("on the computer: fragment computer connect --agent {agent} --token-file <that file>");
                         return Ok(());
                     }
                     if detach {
                         let v = a.call(a.delete(&path)?)?;
-                        if j {
-                            ok_exit(&v);
-                        }
+                        json_exit(j, &v);
                         println!("{}", if v["detached"] == true { "detached" } else { "no computer was attached" });
                         return Ok(());
                     }
                     let (url, token_file) = (url.unwrap_or_default(), token_file.unwrap_or_default());
                     let token = std::fs::read_to_string(&token_file).with_context(|| format!("reading {}", token_file.display()))?.trim().to_string();
                     let v = a.call(a.put_json(&path, &json!({ "url": url, "token": token, "cwd": cwd }))?)?;
-                    if j {
-                        ok_exit(&v);
-                    }
+                    json_exit(j, &v);
                     let tools: Vec<&str> = v["tools"].as_array().into_iter().flatten().filter_map(|t| t.as_str()).collect();
                     println!("{name} works on {} in {} ({})", v["url"].as_str().unwrap_or(""), v["cwd"].as_str().unwrap_or(""), tools.join(", "));
                 }
@@ -1640,9 +1548,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Members { sub } => match sub {
             MembersCmd::List { name } => {
                 let v: MemberList = c.call_as(c.get(&format!("/api/f/{name}/members"))?)?;
-                if j {
-                    ok_exit(&v);
-                }
+                json_exit(j, &v);
                 for m in &v.members {
                     let agent = match &m.owner {
                         Some(o) => format!("\tagent of {o}"),
@@ -1655,9 +1561,7 @@ fn run(cli: Cli) -> Result<()> {
                 let who = if who.starts_with("id:") { who } else { auth::resolve_npub(&who)? };
                 let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
                 let v: Member = c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&fragment_proto::SetRole { role })?)?)?;
-                if j {
-                    ok_exit(&v);
-                }
+                json_exit(j, &v);
                 println!("{} is now {} on {name}", v.principal, v.role.as_str());
                 if let Some(owner) = &v.owner {
                     println!("  an agent: its owner {owner} can read {name} too");
@@ -1666,16 +1570,12 @@ fn run(cli: Cli) -> Result<()> {
             MembersCmd::Rm { name, who } => {
                 let who = if who.starts_with("id:") { who } else { auth::resolve_npub(&who)? };
                 let v = c.call(c.delete(&format!("/api/f/{name}/members/{who}"))?)?;
-                if j {
-                    ok_exit(&v);
-                }
+                json_exit(j, &v);
                 println!("removed {who} from {name}");
             }
             MembersCmd::Leave { name } => {
                 let v = c.call(c.delete(&format!("/api/f/{name}/members/me"))?)?;
-                if j {
-                    ok_exit(&v);
-                }
+                json_exit(j, &v);
                 println!("left {name}");
             }
         },
@@ -1701,9 +1601,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             InviteCmd::List { name } => {
                 let v: InviteList = c.call_as(c.get(&format!("/api/f/{name}/invites"))?)?;
-                if j {
-                    ok_exit(&v);
-                }
+                json_exit(j, &v);
                 for i in &v.invites {
                     let expires_s = u64::try_from(i.expires_at / 1000).unwrap_or(0);
                     println!("{}\t{}\t{} left\texpires {}", i.id, i.role.as_str(), i.uses_left, chrono_like(expires_s));
@@ -1711,17 +1609,13 @@ fn run(cli: Cli) -> Result<()> {
             }
             InviteCmd::Revoke { name, id } => {
                 let v = c.call(c.delete(&format!("/api/f/{name}/invites/{id}"))?)?;
-                if j {
-                    ok_exit(&v);
-                }
+                json_exit(j, &v);
                 println!("revoked invite {id}");
             }
         },
         Cmd::Join { name, token } => {
             let v = c.call(c.post_json(&format!("/api/f/{name}/join"), &json!({ "token": token }))?)?;
-            if j {
-                ok_exit(&v);
-            }
+            json_exit(j, &v);
             if v["joined"].as_bool().unwrap_or(false) {
                 println!("joined {name} as {}", v["role"].as_str().unwrap_or(""));
             } else {
@@ -1738,9 +1632,7 @@ fn run(cli: Cli) -> Result<()> {
                 .post_json_by_id(&format!("/api/f/{name}/ops/{op}"), &call)
                 .and_then(|r| c.call_as(r))
                 .map_err(|e| e.context(CallId::call(&id)))?;
-            if j {
-                ok_exit(&json!({ "id": id, "result": v.result, "replayed": v.replayed }));
-            }
+            json_exit(j, &json!({ "id": id, "result": v.result, "replayed": v.replayed }));
             println!("{}", serde_json::to_string_pretty(&v.result)?);
             if v.replayed {
                 eprintln!("(replayed: operation {id} had already run)");
@@ -1755,9 +1647,7 @@ fn run(cli: Cli) -> Result<()> {
                 .post_json_by_id(&format!("/api/f/{name}/channels/{channel}"), &post)
                 .and_then(|r| c.call_as(r))
                 .map_err(|e| e.context(CallId::post(&id)))?;
-            if j {
-                ok_exit(&json!({ "id": id, "record": v.record, "replayed": v.replayed }));
-            }
+            json_exit(j, &json!({ "id": id, "record": v.record, "replayed": v.replayed }));
             println!("{}", serde_json::to_string(&v.record)?);
             if v.replayed {
                 eprintln!("(replayed: post {id} had already appended this record)");
@@ -1765,9 +1655,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Channel { name, channel: None, .. } => {
             let v = c.call(c.get(&format!("/api/f/{name}/channels"))?)?;
-            if j {
-                ok_exit(&v);
-            }
+            json_exit(j, &v);
             for ch in v["channels"].as_array().cloned().unwrap_or_default() {
                 let post = ch["post"].as_str().map(|p| format!(", {p} posts")).unwrap_or_default();
                 println!("{}\t{}{post}\t{} records", ch["name"].as_str().unwrap_or(""), ch["read"].as_str().unwrap_or(""), ch["seq"]);
@@ -1776,15 +1664,13 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Channel { name, channel: Some(channel), after, follow } => {
             if follow {
                 if j {
-                    fail_json(Code::InvalidUsage, "--follow streams JSON lines; --json does not apply");
+                    return Err(usage("--follow streams JSON lines; --json does not apply"));
                 }
                 watch::follow_channel(&c, &name, &channel, after)?;
                 return Ok(());
             }
             let v: ChannelPage = c.call_as(c.get(&format!("/api/f/{name}/channels/{channel}?after={after}"))?)?;
-            if j {
-                ok_exit(&v);
-            }
+            json_exit(j, &v);
             for r in &v.records {
                 println!("{}", serde_json::to_string(r)?);
             }
@@ -1798,9 +1684,7 @@ fn run(cli: Cli) -> Result<()> {
                     visibility
                 }
             };
-            if j {
-                ok_exit(&json!({ "visibility": visibility }));
-            }
+            json_exit(j, &json!({ "visibility": visibility }));
             println!("{name}: {}", visibility.as_str());
         }
         Cmd::Login { .. } | Cmd::Whoami | Cmd::Username { .. } | Cmd::Keys { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::New { .. } | Cmd::Computer { .. } => unreachable!(),
