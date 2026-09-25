@@ -319,6 +319,9 @@ pub(crate) enum MetaKey {
     /// The commits the cell pins (plane.rs).
     PinMain,
     PinLive,
+    /// When a request first asked code.storage for the pins (plane.rs
+    /// `ensure_pins`); after it, moves arrive by webhook, refresh, or poll.
+    PinsCheckedAt,
     /// The commit main's manifest was read from.
     MainReadAt,
     /// The commit live's code was installed from.
@@ -366,6 +369,7 @@ impl MetaKey {
             MetaKey::CertPending => "cert_pending",
             MetaKey::PinMain => "pin_main",
             MetaKey::PinLive => "pin_live",
+            MetaKey::PinsCheckedAt => "pins_checked_at",
             MetaKey::MainReadAt => "main_read_at",
             MetaKey::LiveReadAt => "live_read_at",
             MetaKey::ManifestMain => "manifest_main",
@@ -413,6 +417,8 @@ pub(crate) struct Facts {
     pub repo: String,
     pub pin_main: Option<String>,
     pub pin_live: Option<String>,
+    /// Whether a request has asked code.storage for the pins yet.
+    pub pins_checked: bool,
 }
 
 impl Facts {
@@ -562,8 +568,16 @@ impl FragmentCell {
     /// The fragment's facts for one request (`Facts`), or 404 when it was
     /// never created (or was deleted): one statement.
     pub(crate) fn facts(&self) -> CellResult<Facts> {
-        let [created_at, name, visibility, view_token, repo, pin_main, pin_live] =
-            self.metas([MetaKey::CreatedAt, MetaKey::Name, MetaKey::Visibility, MetaKey::ViewToken, MetaKey::Repo, MetaKey::PinMain, MetaKey::PinLive])?;
+        let [created_at, name, visibility, view_token, repo, pin_main, pin_live, pins_checked_at] = self.metas([
+            MetaKey::CreatedAt,
+            MetaKey::Name,
+            MetaKey::Visibility,
+            MetaKey::ViewToken,
+            MetaKey::Repo,
+            MetaKey::PinMain,
+            MetaKey::PinLive,
+            MetaKey::PinsCheckedAt,
+        ])?;
         if created_at.is_none() {
             return Err(not_created());
         }
@@ -575,6 +589,7 @@ impl FragmentCell {
             repo: repo.ok_or_else(|| missing(MetaKey::Repo))?,
             pin_main,
             pin_live,
+            pins_checked: pins_checked_at.is_some(),
         })
     }
 

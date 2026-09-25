@@ -22,6 +22,19 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("visibility is checked before anything about the site", r.status == 401, &r);
     let r = api.page(&name, &format!("?view={view}"), None)?;
     s.ok("a fragment with nothing deployed says so", r.status == 404 && r.message().contains("deploy first"), &r);
+    // The first request read the branches; later views ask code.storage
+    // nothing (before, each asked for both). The poll backstop still reads
+    // them every couple of seconds, far fewer than the views.
+    let repo = c["repo"].as_str().unwrap_or("").to_string();
+    let reads = s.fake.requests(&repo, "GET branch");
+    let views = 20;
+    let answered = (0..views).filter(|_| api.page(&name, &format!("?view={view}"), None).is_ok_and(|r| r.status == 404)).count();
+    let asked = s.fake.requests(&repo, "GET branch") - reads;
+    s.ok(
+        "while nothing is deployed, page views do not ask code.storage for the branches",
+        answered == views && (asked as usize) < views,
+        format!("{answered} of {views} views answered 404; {asked} branch reads"),
+    );
     s.commit(
         &c,
         &[
