@@ -533,20 +533,10 @@ async fn serve(mut req: Request, env: &Env, url: &Url, name: &str, rest: &str, m
     forward(env, &req, bytes_body(body), Forward { routed, inner: format!("/serve/{rest}"), extra: vec![] }).await
 }
 
-/// The URL a request arrived on, as its client named it. A proxy that ends
-/// TLS in front of celld (Fly's) forwards plain HTTP and says so in
-/// `x-forwarded-proto`; signatures, links, and cookies name the https URL.
-fn arrived_url(req: &Request) -> CellResult<Url> {
-    let mut url = req.url()?;
-    if url.scheme() == "http" && req.headers().get("x-forwarded-proto")?.as_deref() == Some("https") {
-        url.set_scheme("https").map_err(|_| CellError::host("could not name the https URL"))?;
-    }
-    Ok(url)
-}
-
 async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
     let cfg = Config::from_env(env);
-    let url = arrived_url(&req)?;
+    // as its client named it: signatures, links, and cookies name the https URL
+    let url = fragment_nip98::arrived_url(req.url()?, req.headers().get("x-forwarded-proto")?.as_deref());
     let path = url.path().to_string();
     // A fragment's own host is all its own (`/api/…` included: apps have
     // routes there); the platform API answers on the platform's host.
