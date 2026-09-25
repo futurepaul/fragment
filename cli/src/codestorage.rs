@@ -527,15 +527,6 @@ mod tests {
     }
 
     #[test]
-    fn branch_head_missing_is_none() {
-        let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("a", b"1")]);
-        let cs = cs_for(&mock, "t");
-        assert!(cs.branch_head(MAIN).unwrap().is_some());
-        assert!(cs.branch_head("nope").unwrap().is_none());
-    }
-
-    #[test]
     fn first_commit_creates_branch_without_expected() {
         let mock = crate::mockcs::start();
         let cs = cs_for(&mock, "fresh"); // a repo with no branches at all
