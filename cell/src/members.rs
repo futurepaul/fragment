@@ -118,6 +118,7 @@ impl FragmentCell {
     /// Sends every member's row again when what the lists last said it is
     /// (`ListedAs`) is not what it is now: a deploy added or dropped its
     /// `chat` channel, or it is from before the rows said (its alarm asks).
+    /// At its create it records what its first row says.
     pub(crate) fn relist(&self) -> CellResult<()> {
         let now = if self.is_chat()? { "chat" } else { "app" };
         if self.meta(MetaKey::ListedAs)?.as_deref() == Some(now) {

@@ -79,9 +79,11 @@ honored only for the fragment's owner viewing its page.
   `desktop` template with no visibility asked, it is `members`
   (`publish.rs`, `first_visibility`); every other template's is `link`.
 - **Whether a fragment is a chat** (its live `fragment.json` declares a
-  `chat` channel) is sent with every member's row of the owner's list
-  (`members.rs`, `relist`), so the desktop lists chats made anywhere
-  under Chats without waking them.
+  `chat` channel) is sent with every member's row of the list, as its
+  sharing is (`members.rs`, `relist`): on a change to its members or
+  visibility, on a deploy that makes it a chat or not, and, for one from
+  before, on its alarm. The desktop lists chats made anywhere under Chats
+  from the list alone; a row that has not said yet is an app's.
 - **The owner's agent joins every chat** made from the chat template
   (`cell/src/publish.rs`, `join_owners_agent`), as an editor that
   listens to its `chat` channel.

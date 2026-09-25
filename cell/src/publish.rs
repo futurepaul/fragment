@@ -42,12 +42,6 @@ const API_WRITE_MAX_BYTES: usize = 1024 * 1024;
 
 /// The platform's template whose frames making it allows (`framing`).
 const FRAMED_TEMPLATE: &str = "desktop";
-/// The header only `__fragments` sets on its ask to `/relist` (the router
-/// never passes it).
-pub(crate) const RELIST_HEADER: &str = "x-fragment-relist";
-/// How many fragments one `__fragments` read asks to say whether they are
-/// chats (`ask_to_relist`); a longer list is asked over the next reads.
-const RELIST_PER_READ: usize = 16;
 
 /// Who may open a fragment made from `template`, when its create does not
 /// say: a desktop is its owner's alone; anything else, whoever holds its
@@ -343,32 +337,13 @@ impl FragmentCell {
     }
 
     /// `GET __fragments`: the fragments the owner belongs to (each with
-    /// whether it is a chat, as its row says), and whether this page may
-    /// show them inside it (`frame`).
+    /// whether it is a chat, as its row last said: a row that has not said is
+    /// an app's until its fragment next sends it), and whether this page may
+    /// show them inside it (`frame`). A read asks the owner's Principal cell
+    /// alone, and wakes none of the fragments listed.
     pub(crate) async fn owner_fragments(&self, caller: &Caller) -> CellResult<Value> {
         let owner = self.owner_granted(caller)?;
-        let mut v = self.listed(&owner).await?;
-        // Rows of fragments that have never said whether they are chats
-        // (from before rows did) are asked to, and the list read again: each
-        // wakes this one time, and no later read wakes any.
-        let me = self.name()?;
-        let unheard: Vec<String> = v["fragments"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|f| f["chat"].is_null())
-            .filter_map(|f| f["name"].as_str().map(str::to_string))
-            .take(RELIST_PER_READ)
-            .collect();
-        if !unheard.is_empty() {
-            for name in &unheard {
-                if *name == me {
-                    self.relist_now().await?;
-                }
-            }
-            self.ask_to_relist(unheard.iter().filter(|n| **n != me)).await;
-            v = self.listed(&owner).await?;
-        }
+        let v = self.listed(&owner).await?;
         let fragments: Vec<Value> = v["fragments"]
             .as_array()
             .into_iter()
@@ -382,46 +357,6 @@ impl FragmentCell {
         // whether this page may frame them: without it, the desktop says so
         // in place of its panes
         Ok(json!({ "fragments": fragments, "frame": self.framing()? }))
-    }
-
-    /// Asks each fragment named to say in its members' lists whether it is a
-    /// chat (`/relist`). One that cannot is asked again on a later read.
-    async fn ask_to_relist(&self, names: impl Iterator<Item = &String>) {
-        let ns = match self.env.durable_object("FRAGMENT") {
-            Ok(ns) => ns,
-            Err(e) => return console_error!("asking fragments to relist: {e}"),
-        };
-        let asks = names.map(|name| {
-            let ns = &ns;
-            async move {
-                let asked = async {
-                    let h = Headers::new();
-                    h.set(RELIST_HEADER, "1")?;
-                    let mut init = RequestInit::new();
-                    init.with_method(Method::Post).with_headers(h);
-                    let req = Request::new_with_init("https://fragment.internal/relist", &init)?;
-                    let resp = ns.get_by_name(name)?.fetch_with_request(req).await?;
-                    Ok::<u16, worker::Error>(resp.status_code())
-                };
-                match asked.await {
-                    Ok(200) => {}
-                    Ok(status) => console_error!("{name}: asked to relist, it answered {status}"),
-                    Err(e) => console_error!("{name}: asked to relist: {e}"),
-                }
-            }
-        });
-        futures_util::future::join_all(asks).await;
-    }
-
-    /// `/relist` (internal; only `__fragments` asks): says in its members'
-    /// lists whether it is a chat, now, when they have not heard.
-    pub(crate) async fn relist_now(&self) -> CellResult<Value> {
-        if self.meta(MetaKey::CreatedAt)?.is_none() {
-            return Err(CellError::new(ErrorCode::NotFound, "no such fragment"));
-        }
-        self.relist()?;
-        self.flush_index().await;
-        Ok(json!({ "ok": true }))
     }
 
     /// `POST __fragments {label, template}`: makes `<label>.<username>` from
