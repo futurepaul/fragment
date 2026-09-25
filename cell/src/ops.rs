@@ -20,6 +20,8 @@ use crate::error::{CellError, CellResult};
 use crate::fragment::{decide, json_response, Caller, Facts, FragmentCell, MetaKey};
 use crate::jobs::NewRun;
 use crate::js::{self, AppCode};
+use serde::Deserialize;
+use worker::wasm_bindgen::JsValue;
 use crate::plane::PLATFORM_JS;
 
 /// Operation ids a job's steps use; callers cannot choose them.
@@ -95,37 +97,91 @@ fn bounded(result: OpResult) -> CellResult<OpResult> {
     Ok(result)
 }
 
-impl FragmentCell {
-    /// The running app facet for the installed code.
-    pub(crate) fn facet(&self) -> CellResult<js::Facet> {
-        let rows = self.rows("SELECT loader_id, source, modules, cpu_ms FROM code WHERE id = 1", vec![])?;
-        let row = rows.into_iter().next().ok_or_else(|| CellError::new(ErrorCode::NoCode, "the live commit has no app.mjs (deploy one)"))?;
-        let cpu_ms = row["cpu_ms"].as_u64().expect("code.cpu_ms is INTEGER");
-        assert!(cpu_ms > 0 && cpu_ms <= limits::APP_CPU_MS as u64, "stored cpu_ms is within the limit");
-        let modules: BTreeMap<String, String> = serde_json::from_str(row["modules"].as_str().unwrap_or("{}")).expect("stored modules parse");
-        // The loader memoizes a worker by its id, so the id names every
-        // byte it runs: the app's modules (the stored loader_id) and the
-        // platform code this cell carries (platform.js and limits.js), which
-        // a cell deploy changes under code installed before it. And one loaded worker per
-        // fragment: its env holds this fragment's capabilities, and its
-        // module state is this fragment's alone.
-        let loader_id = row["loader_id"].as_str().expect("code.loader_id is TEXT");
-        let platform = platform();
-        let id = format!("{loader_id}:{}:{}", platform.id, self.must(MetaKey::Npub)?);
-        js::app_facet(
-            &self.raw,
-            self.env.as_ref(),
-            &self.name()?,
-            &AppCode {
-                id: &id,
-                platform: PLATFORM_JS,
-                limits: &platform.limits,
-                source: row["source"].as_str().expect("code.source is TEXT"),
-                modules: &modules,
-                cpu_ms: cpu_ms as u32,
-                subrequests: limits::APP_SUBREQUESTS,
-            },
+/// The loader id of the code installed now, or why there is none: the
+/// loader memoizes a worker by its id, so the id names every byte it runs,
+/// the app's modules (the stored loader_id) and the platform code this cell
+/// carries (platform.js and limits.js), which a cell deploy changes under
+/// code installed before it. And one loaded worker per fragment (its key
+/// joins the id): its env holds this fragment's capabilities, and its
+/// module state is this fragment's alone.
+fn installed_id(loader_id: &str, npub: &str) -> String {
+    format!("{loader_id}:{}:{npub}", platform().id)
+}
+
+#[derive(Deserialize)]
+struct CodeRow {
+    loader_id: String,
+    npub: Option<String>,
+}
+
+/// The loader id `start` asks for: one statement.
+fn read_installed_id(sql: &SqlStorage) -> Result<String, String> {
+    let rows: Vec<CodeRow> = sql
+        .exec("SELECT c.loader_id, (SELECT value FROM meta WHERE key = ?) AS npub FROM code c WHERE c.id = 1", vec![MetaKey::Npub.key().into()])
+        .and_then(|c| c.to_array())
+        .map_err(|e| format!("the code row: {e}"))?;
+    let row = rows.into_iter().next().ok_or("the live commit has no app.mjs (deploy one)")?;
+    Ok(installed_id(&row.loader_id, row.npub.as_deref().ok_or("a created fragment has no npub")?))
+}
+
+#[derive(Deserialize)]
+struct SourceRow {
+    loader_id: String,
+    source: String,
+    modules: String,
+    cpu_ms: u32,
+    npub: Option<String>,
+    name: Option<String>,
+}
+
+/// The code the loader asks for by `id`, read now: the id is checked against
+/// the code row, so a worker is never built under an id that names other
+/// bytes (the code changed between `start` and the loader's call: the
+/// load fails, and the next call starts from the code installed then).
+fn read_installed_code(sql: &SqlStorage, id: &str) -> Result<AppCode, String> {
+    let rows: Vec<SourceRow> = sql
+        .exec(
+            "SELECT c.loader_id, c.source, c.modules, c.cpu_ms, (SELECT value FROM meta WHERE key = ?) AS npub, (SELECT value FROM meta WHERE key = ?) AS name
+             FROM code c WHERE c.id = 1",
+            vec![MetaKey::Npub.key().into(), MetaKey::Name.key().into()],
         )
+        .and_then(|c| c.to_array())
+        .map_err(|e| format!("the code row: {e}"))?;
+    let row = rows.into_iter().next().ok_or("the live commit has no app.mjs (deploy one)")?;
+    let npub = row.npub.ok_or("a created fragment has no npub")?;
+    if installed_id(&row.loader_id, &npub) != id {
+        return Err(format!("the loader asked for {id}, which is not the installed code any more"));
+    }
+    assert!(row.cpu_ms > 0 && row.cpu_ms <= limits::APP_CPU_MS, "stored cpu_ms is within the limit");
+    let modules: BTreeMap<String, String> = serde_json::from_str(&row.modules).map_err(|e| format!("the stored applib modules: {e}"))?;
+    Ok(AppCode {
+        fragment: row.name.ok_or("a created fragment has no name")?,
+        platform: PLATFORM_JS,
+        limits: &platform().limits,
+        source: row.source,
+        modules,
+        cpu_ms: row.cpu_ms,
+        subrequests: limits::APP_SUBREQUESTS,
+    })
+}
+
+/// This fragment's app loader (js.rs `AppLoader`), made once per activation:
+/// its callbacks read the code row themselves when they run.
+pub(crate) fn app_loader(ctx: &JsValue, env: &JsValue, sql: SqlStorage) -> js::AppLoader {
+    let for_id = sql.clone();
+    js::AppLoader::new(ctx, env, move || read_installed_id(&for_id), move |id| read_installed_code(&sql, id))
+}
+
+impl FragmentCell {
+    /// The running app facet for the installed code. A call reads only
+    /// whether there is code: the facet table answers the running facet,
+    /// and the loader's callbacks read the code when there is none.
+    pub(crate) fn facet(&self) -> CellResult<js::Facet> {
+        let rows = self.rows("SELECT loader_id FROM code WHERE id = 1", vec![])?;
+        if rows.is_empty() {
+            return Err(CellError::new(ErrorCode::NoCode, "the live commit has no app.mjs (deploy one)"));
+        }
+        self.app.facet(&self.raw)
     }
 
     /// `POST /api/f/<name>/ops/<op>`: a signed caller.
@@ -288,7 +344,9 @@ impl FragmentCell {
     /// if `ms` had passed; `members {fill}` adds placeholder members until
     /// there are `fill`; `code-before-tables {fill?}` puts its installed code
     /// back in the shape stored before the code tables (plane.rs), with
-    /// placeholder operations until there are `fill`.
+    /// placeholder operations until there are `fill`; `code-builds` answers
+    /// how many times this activation built its app's worker code for the
+    /// loader (js.rs `AppLoader`).
     pub(crate) fn test_fragment(&self, body: &Value) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "the route answers only on fleets with test hooks");
         self.name()?;
@@ -343,7 +401,8 @@ impl FragmentCell {
                 self.code_before_tables(fill)?;
                 json!({ "ok": true })
             }
-            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-live, ledger, age, members, or code-before-tables")),
+            Some("code-builds") => json!({ "builds": self.app.builds() }),
+            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-live, ledger, age, members, code-before-tables, or code-builds")),
         })
     }
 }

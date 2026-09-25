@@ -42,8 +42,14 @@ pub fn ops(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.status(&owner, &name)?;
     s.ok("deploying installs the app from live", r.body["code"]["sha"] == live.as_str() && r.body["code"]["error"].is_null(), &r);
 
+    // how many times the fragment's activation built its worker code for
+    // the loader (a test hook): only when the loader holds no worker by id
+    let builds = || {
+        api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "code-builds" }))).ok().and_then(|r| r.body["builds"].as_u64())
+    };
     let r = api.op(&owner, &name, "add_todo", "a1", json!({ "text": "one" }))?;
     s.ok("a mutation runs", r.status == 200 && r.body["replayed"] == false && r.body["result"]["id"] == 1, &r);
+    s.ok("the first call built the app's worker code, once", builds() == Some(1), format!("{:?}", builds()));
     let r = api.op(&owner, &name, "add_todo", "a1", json!({ "text": "one" }))?;
     s.ok("a replay returns the stored result", r.status == 200 && r.body["replayed"] == true && r.body["result"]["id"] == 1, &r);
     s.ok("a replay does not write again", count(api, &owner, &name) == 1, "count");
@@ -72,6 +78,7 @@ pub fn ops(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a query answers", r.status == 200 && r.body["result"]["todos"].as_array().map_or(0, |a| a.len()) == 3, &r);
     let r = api.op(&other, &name, "list", "q2", json!({}))?;
     s.ok("a stranger calling an operation is 403", r.status == 403, &r);
+    s.ok("the calls since ran in the running app: nothing was built again", builds() == Some(1), format!("{:?}", builds()));
 
     // a bad manifest on a later deploy keeps the good code running
     s.commit(&c, &[("fragment.json", Some(br#"{"operations":{"x":{"kind":"task"}}}"#))]);
@@ -87,15 +94,19 @@ pub fn ops(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.status(&owner, &name)?;
     s.ok("the next good deploy installs and clears the error", r.body["code"]["sha"] == live2.as_str() && r.body["code"]["error"].is_null(), &r);
     s.ok("redeploying keeps the app's data", count(api, &owner, &name) == before, "count");
+    s.ok("the same code redeployed starts again without a build: the loader holds it by id", builds() == Some(1), format!("{:?}", builds()));
     // a deploy during a code.storage outage installs once reads come back
+    let v3 = String::from_utf8_lossy(TODO_APP).replace("return { n: ", "return { v: 3, n: ");
     s.fake.fail_file_reads(true);
-    let during = ship(s, &c, &[TODO_APP, b"\n// v3\n"].concat(), TODO_JSON);
+    let during = ship(s, &c, v3.as_bytes(), TODO_JSON);
     let r = api.status(&owner, &name)?;
     s.ok("during an outage live moves but the code stays", r.body["pins"]["live"] == during.as_str() && r.body["code"]["sha"] == live2.as_str(), &r);
     s.fake.fail_file_reads(false);
     api.signed(&owner, "POST", &format!("/api/f/{name}/refresh"), Some(&json!({})))?;
     let r = api.status(&owner, &name)?;
     s.ok("after the outage the next refresh installs it", r.body["code"]["sha"] == during.as_str(), &r);
+    let r = api.op(&owner, &name, "count", "v3", json!({}))?;
+    s.ok("the new code runs, built once for it", r.body["result"]["v"] == 3 && r.body["result"]["n"] == before && builds() == Some(2), format!("{r} {:?}", builds()));
     s.commit(&c, &[("app.mjs", None)]);
     s.deploy(&c);
     let r = api.op(&owner, &name, "list", "q3", json!({}))?;

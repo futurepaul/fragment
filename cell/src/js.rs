@@ -57,17 +57,16 @@ fn from_js(v: &JsValue) -> Result<serde_json::Value, String> {
 /// What the Worker Loader compiles for an app: the platform wrapper, the
 /// limits it checks (`limits.js`, generated: `fragment_core::facet`), the
 /// author's `app.mjs` (as `app.js`), and their `applib/` modules, with no
-/// ambient network and bounded CPU.
-pub struct AppCode<'a> {
-    /// Content address of every module, the platform's included: the
-    /// loader memoizes by id (celld: per isolate, across every fragment),
-    /// so the id must name the bytes.
-    pub id: &'a str,
-    pub platform: &'a str,
-    pub limits: &'a str,
-    pub source: &'a str,
+/// ambient network and bounded CPU. Read from the code row only when the
+/// loader asks for it (`AppLoader`).
+pub struct AppCode {
+    /// The fragment its `FILES` capability is bound to.
+    pub fragment: String,
+    pub platform: &'static str,
+    pub limits: &'static str,
+    pub source: String,
     /// `applib/…` path → source.
-    pub modules: &'a std::collections::BTreeMap<String, String>,
+    pub modules: std::collections::BTreeMap<String, String>,
     pub cpu_ms: u32,
     pub subrequests: u32,
 }
@@ -93,13 +92,13 @@ fn app_env(ctx: &JsValue, fragment: &str) -> CellResult<Object> {
     Ok(env)
 }
 
-/// Starts the `app` facet from `code` (or reaches the running one).
-pub fn app_facet(ctx: &JsValue, env: &JsValue, fragment: &str, code: &AppCode<'_>) -> CellResult<Facet> {
+/// The worker code object `LOADER.get` asks its callback for.
+fn worker_code(ctx: &JsValue, code: &AppCode) -> CellResult<Object> {
     let modules = Object::new();
     set(&modules, "platform.js", code.platform);
     set(&modules, facet::LIMITS_MODULE, code.limits);
-    set(&modules, "app.js", code.source);
-    for (path, source) in code.modules {
+    set(&modules, "app.js", code.source.as_str());
+    for (path, source) in &code.modules {
         set(&modules, path, source.as_str());
     }
     let limits = Object::new();
@@ -109,25 +108,83 @@ pub fn app_facet(ctx: &JsValue, env: &JsValue, fragment: &str, code: &AppCode<'_
     set(&worker_code, "compatibilityDate", "2026-01-01");
     set(&worker_code, "mainModule", "platform.js");
     set(&worker_code, "modules", modules);
-    set(&worker_code, "env", app_env(ctx, fragment)?);
+    set(&worker_code, "env", app_env(ctx, &code.fragment)?);
     set(&worker_code, "globalOutbound", JsValue::NULL);
     set(&worker_code, "limits", limits);
+    Ok(worker_code)
+}
 
-    let loader = get(env, "LOADER")?;
-    let get_code = Closure::once_into_js(move || -> JsValue { worker_code.into() });
-    let worker = call(&loader, "get", &[code.id.into(), get_code])
-        .map_err(|e| CellError::host(format!("LOADER.get: {}", js_message(&e))))?;
-    let class = call(&worker, "getDurableObjectClass", &["App".into()])
-        .map_err(|e| CellError::host(format!("getDurableObjectClass: {}", js_message(&e))))?;
-    let start = Closure::once_into_js(move || -> JsValue {
-        let o = Object::new();
-        set(&o, "class", class);
-        o.into()
-    });
-    let facets = get(ctx, "facets")?;
-    let stub = call(&facets, "get", &[APP_FACET.into(), start])
-        .map_err(|e| CellError::host(format!("facets.get: {}", js_message(&e))))?;
-    Ok(Facet { stub })
+/// A callback's failure, thrown into JavaScript as an Error.
+fn thrown(message: &str) -> JsValue {
+    js_sys::Error::new(message).into()
+}
+
+/// A JavaScript callback the cell hands to the runtime, owned by Rust for
+/// the life of the activation: the runtime may call it any number of
+/// times, or never (a callback made for one call and never called was
+/// leaked with everything it held).
+type Callback = Closure<dyn FnMut() -> Result<JsValue, JsValue>>;
+
+/// How this fragment's app facet starts, made once per activation. Each
+/// call only asks the facet table for the running facet (`facet`); the two
+/// callbacks run when there is none. `start` names the worker the installed
+/// code needs by its loader id and asks the loader for it; the loader runs
+/// `get_code` only when it holds no worker by that id (celld memoizes
+/// `LOADER.get` by id, per isolate, and skips the callback on a hit), and
+/// only then are the app's modules read and copied for it.
+pub struct AppLoader {
+    start: Callback,
+    /// How many times this activation built worker code for the loader (a
+    /// test hook reads it: `/test/fragment code-builds`).
+    builds: std::rc::Rc<std::cell::Cell<u32>>,
+}
+
+impl AppLoader {
+    /// `id` answers the loader id of the code installed now; `code` answers
+    /// the code for a loader id, or why it cannot (that id is not installed
+    /// any more), read when the loader asks.
+    pub fn new(
+        ctx: &JsValue,
+        env: &JsValue,
+        id: impl Fn() -> Result<String, String> + 'static,
+        code: impl Fn(&str) -> Result<AppCode, String> + 'static,
+    ) -> AppLoader {
+        let ctx_for_code = ctx.clone();
+        let builds = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let built = builds.clone();
+        let get_code: Closure<dyn FnMut(String) -> Result<JsValue, JsValue>> = Closure::new(move |id: String| -> Result<JsValue, JsValue> {
+            let app = code(&id).map_err(|why| thrown(&why))?;
+            built.set(built.get() + 1);
+            Ok(worker_code(&ctx_for_code, &app).map_err(|e| thrown(&e.message))?.into())
+        });
+        let env = env.clone();
+        let start: Callback = Closure::new(move || -> Result<JsValue, JsValue> {
+            let id = id().map_err(|why| thrown(&why))?;
+            // the loader calls its callback with no arguments: bound, it
+            // is told which id it builds (a fresh bound function a call,
+            // collected with it; the closure itself lives here)
+            let bound = call(get_code.as_ref(), "bind", &[JsValue::NULL, JsValue::from_str(&id)])?;
+            let loader = Reflect::get(&env, &JsValue::from_str("LOADER"))?;
+            let worker = call(&loader, "get", &[JsValue::from_str(&id), bound])?;
+            let class = call(&worker, "getDurableObjectClass", &["App".into()])?;
+            let options = Object::new();
+            set(&options, "class", class);
+            Ok(options.into())
+        });
+        AppLoader { start, builds }
+    }
+
+    pub fn builds(&self) -> u32 {
+        self.builds.get()
+    }
+
+    /// The running `app` facet, or a new one started from the installed
+    /// code (the caller has checked there is some).
+    pub fn facet(&self, ctx: &JsValue) -> CellResult<Facet> {
+        let facets = get(ctx, "facets")?;
+        let stub = call(&facets, "get", &[APP_FACET.into(), self.start.as_ref().clone()]).map_err(|e| CellError::host(format!("facets.get: {}", js_message(&e))))?;
+        Ok(Facet { stub })
+    }
 }
 
 /// Stops the running `app` facet (its database stays), so the next call
