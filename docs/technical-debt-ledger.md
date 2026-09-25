@@ -487,3 +487,22 @@ without a delete condition is unfinished design, not debt.
   twice.
 - **Delete when:** the fatal is caught and fixed in celld or here, or a
   run of full e2es under load no longer shows it.
+
+## After a restart the registry waits behind every alarm wake
+
+- **Observed:** phase 6, 2026-09-24. On CI's runners the checks right
+  after a node restart failed with `registry_unavailable` ("route
+  failed: CapacityExhausted"): celld admits cold cells first come, first
+  served, and the registry, the one cell every signed request needs,
+  waited out its 15 s deadline behind the fragments whose alarms all
+  woke at once. `ask_registry` now asks again twice (after 250 ms, then
+  500 ms), so a request can wait about 45 s instead of failing.
+- **Risk:** on a fleet with many fragments, a restarted node answers
+  signed requests slowly, or with 503s, until its alarm wakes drain.
+- **First proof:** CI's e2e (three-core macOS runners), the checks that
+  restart the node in the agents and restart lanes. A gate narrowed
+  locally with `CELLD_ACTIVATIONS=1` is not a stand-in: celld's own
+  readiness gives up first.
+- **Delete when:** the registry is admitted ahead of alarm wakes (a
+  priority in celld's gate, or a registry kept warm), or the node wakes
+  its alarms in a bounded trickle.

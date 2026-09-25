@@ -143,12 +143,18 @@ pub(crate) struct Signer {
     pub username: Option<String>,
 }
 
+/// Tries at reaching the registry: a route the node refused for now (a
+/// cell queued too long behind the others waking after a restart) is
+/// asked again after a pause.
+const REGISTRY_ATTEMPTS: u32 = 3;
+const REGISTRY_RETRY_MS: u64 = 250;
+
 /// Asks the registry cell. Its refusals pass through; not reaching it, or
 /// a failure inside it, is `registry_unavailable`: nothing signed is
 /// decided without it (docs/finite-integration.md, rule 7).
 pub(crate) async fn ask_registry(env: &Env, path: &str, body: &Value) -> CellResult<Value> {
     let unavailable = |why: String| CellError::new(ErrorCode::RegistryUnavailable, format!("the identity registry did not answer ({why}); try again shortly"));
-    let asked = async {
+    let ask = || async {
         let headers = Headers::new();
         headers.set("content-type", "application/json")?;
         let mut init = RequestInit::new();
@@ -159,7 +165,17 @@ pub(crate) async fn ask_registry(env: &Env, path: &str, body: &Value) -> CellRes
         let bytes = resp.bytes().await?;
         Ok::<_, worker::Error>((status, bytes))
     };
-    let (status, bytes) = asked.await.map_err(|e| unavailable(e.to_string()))?;
+    let mut attempt = 0;
+    let (status, bytes) = loop {
+        match ask().await {
+            Ok(answer) => break answer,
+            Err(_) if attempt + 1 < REGISTRY_ATTEMPTS => {
+                Delay::from(std::time::Duration::from_millis(REGISTRY_RETRY_MS << attempt)).await;
+                attempt += 1;
+            }
+            Err(e) => return Err(unavailable(e.to_string())),
+        }
+    };
     if status == 200 {
         return serde_json::from_slice(&bytes).map_err(|e| unavailable(format!("its answer: {e}")));
     }
