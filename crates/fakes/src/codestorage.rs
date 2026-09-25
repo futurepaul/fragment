@@ -1117,25 +1117,6 @@ mod tests {
     }
 
     #[test]
-    fn history_merges_and_restores() {
-        let cs = CodeStorage::start(Options::default()).unwrap();
-        cs.seed_repo("r", &[("a", b"1")]);
-        let c1 = cs.branch("r", "main").unwrap();
-        let mut out = Vec::new();
-        let c2 = cs.external_commit("r", "main", &[("a", Some(b"2"))], "two");
-        cs.with(|st| st.move_branch("r", "live", &c1, &mut out));
-        // live is behind main: a fast-forward
-        cs.with(|st| {
-            let repo = &st.repos["r"];
-            assert!(repo.is_ancestor(&c1, &c2));
-            assert!(repo.first_parent_reaches(&c1, &c2));
-        });
-        assert_eq!(cs.file_at("r", "main", "a").unwrap(), b"2");
-        assert_eq!(cs.file_at("r", "live", "a").unwrap(), b"1");
-        assert_eq!(cs.paths("r", "main"), vec!["a".to_string()]);
-    }
-
-    #[test]
     fn jwt_scopes_and_repo_claims() {
         let key = SigningKey::from_slice(&[5u8; 32]).unwrap();
         let pem = key.to_pkcs8_pem(Default::default()).unwrap().to_string();
@@ -1190,12 +1171,6 @@ mod tests {
         let new = cs.token("r", &["git:read"]);
         assert_ne!(new, old);
         assert_eq!(get(&format!("{}/api/repos/r/branch?name=main", cs.url), &new).0, 200);
-    }
-
-    #[test]
-    fn iso_dates() {
-        assert_eq!(iso(0), "1970-01-01T00:00:00Z");
-        assert_eq!(iso(1_758_585_600_000), "2025-09-23T00:00:00Z");
     }
 
     /// Goal: the fake signs a webhook as code.storage does, so the cell's

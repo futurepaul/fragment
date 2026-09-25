@@ -632,8 +632,7 @@ pub fn routes(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.page(&name, "", None)?;
     s.ok("a site file wins over the app's routes", r.status == 200 && r.text.contains("the site"), &r);
     let r = api.page(&name, "hello", None)?;
-    s.ok("any other path goes to the App's fetch", r.status == 200 && r.text.contains("HELLO!"), &r);
-    s.ok("which imports applib/ modules", r.text.contains("HELLO!"), &r);
+    s.ok("any other path goes to the App's fetch, which imports applib/ modules (HELLO! is theirs)", r.status == 200 && r.text.contains("HELLO!"), &r);
     s.ok("and sees who is asking", r.text.contains("anonymous as public at /hello"), &r);
     let r = api.call(Call { method: "GET", url: api.site_url(&name, "hello"), keys: Some(&owner), ..Call::default() })?;
     s.ok("a signed member is named to the app", r.text.contains(&api.identity(&owner)?) && r.text.contains("as owner"), &r);

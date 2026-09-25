@@ -6,7 +6,7 @@
 //! cannot answer is a visible 503, never an allow; and each call asks the
 //! registry once, resolving its signer in the same turn.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
 use fragment_core::npub;
@@ -24,18 +24,6 @@ const FORMAT_MJS: &[u8] = include_bytes!("../../fixtures/format.mjs");
 
 fn keys_of(v: &Value) -> Vec<(String, bool)> {
     v["keys"].as_array().into_iter().flatten().map(|k| (k["npub"].as_str().unwrap_or("").to_string(), k["revokedAt"].is_null())).collect()
-}
-
-fn median_ms(mut f: impl FnMut() -> Result<u16>, n: usize) -> Result<f64> {
-    let mut times = vec![];
-    for _ in 0..n {
-        let t0 = Instant::now();
-        let status = f()?;
-        anyhow::ensure!(status == 200, "a timed request answered {status}");
-        times.push(t0.elapsed().as_secs_f64() * 1000.0);
-    }
-    times.sort_by(|a, b| a.total_cmp(b));
-    Ok(times[n / 2])
 }
 
 pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
@@ -203,11 +191,6 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("which still owns what the old one made", r.status == 200 && r.body["role"] == "owner" && api.identity(&second)? == cli_id, &r);
     let r = api.status(&first, &made)?;
     s.ok("and the old key is revoked", r.status == 401, &r);
-
-    // what the registry costs: one cell hop per signed request
-    let signed = median_ms(|| Ok(api.signed(&new, "GET", "/api/identities/me", None)?.status), 21)?;
-    let unsigned = median_ms(|| Ok(api.unsigned("GET", "/healthz", None)?.status), 21)?;
-    println!("      a signed request resolved by the registry: {signed:.1} ms median; an unsigned one: {unsigned:.1} ms");
 
     // the registry down: a visible 503, never an allow
     let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "down": true })))?;
