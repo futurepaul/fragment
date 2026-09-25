@@ -22,6 +22,9 @@ const ROOM_JSON: &[u8] = include_bytes!("../../fixtures/room.json");
 /// Channels an app hears through a trigger, beside a public query.
 const HEARD_APP: &[u8] = include_bytes!("../../fixtures/heard.mjs");
 const HEARD_JSON: &[u8] = include_bytes!("../../fixtures/heard.json");
+/// A postable channel, and a mutation that fills it 64 records a call.
+const WALL_APP: &[u8] = include_bytes!("../../fixtures/wall.mjs");
+const WALL_JSON: &[u8] = include_bytes!("../../fixtures/wall.json");
 
 fn post(api: &Api, keys: &Keys, name: &str, channel: &str, id: &str, body: Value) -> Result<Reply> {
     api.signed(keys, "POST", &format!("/api/f/{name}/channels/{channel}"), Some(&json!({ "id": id, "body": body })))
@@ -192,7 +195,49 @@ pub fn posts(s: &mut Suite, api: &Api) -> Result<()> {
     let r = post(api, &stranger, &name, "chat", "s1", json!({ "text": "still open" }))?;
     s.ok("and the channels deployed before it stand", r.status == 200, &r);
 
-    heard(s, api, &owner, &stranger)
+    heard(s, api, &owner, &stranger)?;
+    retention(s, api, &owner)
+}
+
+/// A channel people may post to keeps its newest `limits::POSTED_KEPT`
+/// records (the oldest go, whoever appended them), as `events` does: a
+/// public chat would otherwise grow for good. Filled by a mutation, 64
+/// records a call, then one post more.
+fn retention(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let name = s.named(api, owner, "wall")?;
+    let c = s.create(api, owner, &name)?;
+    ship(s, &c, WALL_APP, WALL_JSON);
+    let fill = |id: &str, n: i64| api.op(owner, &name, "fill", id, json!({ "n": n }));
+    // the deploy lands by the webhook: the first fill again until it has
+    s.eventually(Duration::from_secs(15), || fill("f0", 64).is_ok_and(|r| r.status == 200));
+    let kept = limits::POSTED_KEPT;
+    let calls = kept / 64 + 1;
+    let mut failed = None;
+    for i in 1..calls {
+        let r = fill(&format!("f{i}"), 64)?;
+        if r.status != 200 {
+            failed = Some(r.to_string());
+            break;
+        }
+    }
+    let appended = calls * 64;
+    let first = |api: &Api| records(api, owner, &name, "wall").first().and_then(|r| r["seq"].as_i64());
+    let newest = || -> Option<i64> {
+        let r = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None).ok()?;
+        r.body["channels"].as_array()?.iter().find(|c| c["name"] == "wall")?["seq"].as_i64()
+    };
+    s.ok(
+        &format!("a postable channel keeps its newest {kept} records: past them, the oldest go"),
+        failed.is_none() && newest() == Some(appended) && first(api) == Some(appended - kept + 1),
+        format!("{failed:?}; newest {:?}, oldest kept {:?}", newest(), first(api)),
+    );
+    let r = post(api, owner, &name, "wall", "last", json!({ "text": "one more" }))?;
+    s.ok(
+        "a post past them drops one more of the oldest",
+        r.status == 200 && r.body["record"]["seq"] == appended + 1 && first(api) == Some(appended - kept + 2),
+        format!("{} oldest kept {:?}", r.status, first(api)),
+    );
+    Ok(())
 }
 
 /// Who hears a post (a subscriber's socket, a subscribed URL, the triggers

@@ -16,6 +16,9 @@ use crate::api::Api;
 use crate::browser::{Browser, Page};
 use crate::Suite;
 
+/// A picture (1×1 PNG) an answer shows.
+const DOT_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
 /// The viewer's panes, top to bottom.
 const PANES: &str = "[...document.querySelectorAll('.pane')].filter(p => !p.hidden).sort((a, b) => a.style.gridRow - b.style.gridRow).map(p => p.dataset.key)";
 
@@ -110,6 +113,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         Reply::Tools(vec![("platform__write_files".into(), json!({ "fragment": app, "files": [{ "path": "site/index.html", "text": "<h1>A counter your agent made</h1>" }] }))]),
         Reply::Tools(vec![("platform__deploy".into(), json!({ "fragment": app }))]),
         Reply::Text("Your counter is in your apps.".into()),
+        Reply::Text("Here it is.\n\n![a picture](__file?path=pics/dot.png)".into()),
     ]);
     chrome.eval(&page, "document.getElementById('new-chat').click(); true")?;
     let chatted = chrome.until(&page, "document.querySelectorAll('#chats .row').length === 1 && !!document.querySelector('#frames iframe:not([hidden])')", wait);
@@ -118,9 +122,9 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("New chat makes a chat fragment and opens it in the middle", chatted && !chat.is_empty(), &mine);
     let chat_title = s.eventually(wait, || chrome.eval_in_frame(&page, &format!("{}--", label(&chat)), "document.title").ok() == Some(json!("Chat")));
     s.ok("the chat's own page shows there, signed in on its origin", chat_title, "");
-    // the page is ready once it is connected (its module has run)
+    // the page is ready once it knows who it is (its socket said hello)
     let ready = s.eventually(wait, || {
-        chrome.eval_in_frame(&page, &format!("{}--", label(&chat)), "document.getElementById('here').textContent !== 'connecting…'").ok() == Some(json!(true))
+        chrome.eval_in_frame(&page, &format!("{}--", label(&chat)), "document.getElementById('say')?.dataset.ready === '1'").ok() == Some(json!(true))
     });
     let said = ready
         && chrome.eval_in_frame(&page, &format!("{}--", label(&chat)), "document.getElementById('text').value = 'hi from the desktop'; document.getElementById('say').requestSubmit(); true").is_ok();
@@ -170,6 +174,18 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let made = s.eventually(wait, || chrome.eval_in_frame(&page, &format!("{app_label}--"), "document.body.innerText").ok().and_then(|v| v.as_str().map(|t| t.contains("A counter your agent made"))) == Some(true));
     s.ok("opened, it is the page the agent wrote", made, "");
     chrome.eval(&page, &format!("document.querySelector('.pane[data-key={:?}] .pane-action[title=Close]').click(); true", format!("app:{app}")))?;
+
+    // a picture in an answer (a screenshot, as a computer's land) opens in
+    // the viewer: the chat's page asks the desktop around it to open it
+    let r = api.signed(&owner, "POST", &format!("/api/f/{chat}/files"), Some(&json!({ "files": [{ "path": "pics/dot.png", "base64": DOT_PNG }] })))?;
+    anyhow::ensure!(r.status == 200, "writing a picture to the chat: {r}");
+    chrome.eval_in_frame(&page, &format!("{}--", label(&chat)), "document.getElementById('text').value = 'show me a picture'; document.getElementById('say').requestSubmit(); true")?;
+    let pictured = s.eventually(wait, || {
+        chrome.eval_in_frame(&page, &format!("{}--", label(&chat)), "(() => { const i = document.querySelector('img.shot'); if (!i || !i.complete) return false; i.click(); return true; })()").ok() == Some(json!(true))
+    });
+    let viewed = pictured && chrome.until(&page, "[...document.querySelectorAll('.pane')].some(p => p.dataset.key.startsWith('file:') && p.dataset.key.includes('pics/dot.png'))", wait);
+    s.ok("a picture in an answer opens in the viewer when clicked", viewed, format!("{:?}", panes(&mut chrome, &page)));
+    chrome.eval(&page, "document.querySelector('.pane[data-key^=\"file:\"] .pane-action[title=Close]')?.click(); true")?;
 
     // apps and files open into the viewer, newest on top
     chrome.eval(&page, &format!("[...document.querySelectorAll('#apps .row')].find(r => r.dataset.key === {:?}).click(); true", format!("app:{todo}")))?;

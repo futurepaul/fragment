@@ -13,6 +13,7 @@ belongs in a template instead.
 | Path | What | Why the platform |
 |---|---|---|
 | `__fragment.js` | The browser API: calls, live queries, channels, presence, push | One version for every fragment; it speaks the platform's wire protocol |
+| `__chat.js`, `__chat.css` | The chat's page (phase 7, C): messages, each turn's steps grouped above its answer, the working line, a composer, Stop for a turn's starter; the chat template's `index.html` is a shell that mounts it | It renders the records agents write (`work`, docs/api.md), so it ships with the platform rather than frozen into each chat |
 | `__signin`, `__signout` | A fragment origin's own session, through a single-use redemption from the platform | Sessions are the platform's; a fragment's code must not mint them |
 | `__live`, `__watch` | The live socket and the CLI's watch stream, taken only from the fragment's own page (`Origin`; a socket has no CORS) | Platform protocol |
 | `__people` | Profiles (usernames, pictures) by identity | Reads the registry |
@@ -44,11 +45,16 @@ moment (docs/api.md, Sharing).
   listens to its `chat` channel.
 - **An agent's authority** in a turn is the lower of its asker's role
   and a cap (phase 7, decision 1).
+- **An agent in a chat posts its work** (phase 7, C): a turn a chat
+  started posts its start, each tool call, and its end to the chat's
+  `work` channel, and its answer to `chat` naming the turn, when the chat
+  declares them postable; a stop the turn's starter posts on `chat` stops
+  it. The records' shape is docs/api.md's (the chat template).
+- **Postable channels keep their newest 10,000 records**
+  (`limits::POSTED_KEPT`), the oldest dropped with their posts' keys, as
+  `events` and `ops` keep theirs: not declarable yet.
 
 ## Planned (phase 7)
 
-- `__chat.js` and `__chat.css` on every fragment's origin: the chat UI,
-  which renders the records the agent writes, so it ships with the
-  platform rather than frozen into each chat.
 - Postable channels (a declared channel's `post` role) are a vanilla
   feature, not a special case: any fragment may declare one.

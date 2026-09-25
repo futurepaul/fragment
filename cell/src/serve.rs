@@ -30,9 +30,15 @@ use crate::routed::Mode;
 
 /// The browser library pages import as `./__fragment.js`.
 const CLIENT_JS: &str = include_str!("../client.mjs");
+/// The chat's page (`./__chat.js`, `./__chat.css`): it renders the records
+/// agents write, so it ships with the platform (docs/platform.md).
+const CHAT_JS: &str = include_str!("../chat.mjs");
+const CHAT_CSS: &str = include_str!("../chat.css");
 /// The scripts' entity tags, hashed at build time: a page view revalidates
 /// them (`no-cache`) and gets 304 until a cell deploy changes their bytes.
 const CLIENT_JS_HASH: u64 = site::content_hash(CLIENT_JS.as_bytes());
+const CHAT_JS_HASH: u64 = site::content_hash(CHAT_JS.as_bytes());
+const CHAT_CSS_HASH: u64 = site::content_hash(CHAT_CSS.as_bytes());
 const SW_JS_HASH: u64 = site::content_hash(crate::push::SW_JS.as_bytes());
 const VIEW_COOKIE: &str = "fragview";
 const ANON_COOKIE: &str = "fragment_anon";
@@ -78,12 +84,17 @@ fn not_modified(req: &Request, etag: &str, cache: &str) -> CellResult<Option<Res
 
 /// A script compiled into the cell, revalidated by its build-time hash.
 fn script(req: &Request, body: &'static str, hash: u64) -> CellResult<Response> {
+    compiled_in(req, body, hash, "text/javascript; charset=utf-8")
+}
+
+/// A file compiled into the cell, revalidated by its build-time hash.
+fn compiled_in(req: &Request, body: &'static str, hash: u64, content_type: &str) -> CellResult<Response> {
     let etag = site::hash_etag(hash);
     if let Some(resp) = not_modified(req, &etag, "no-cache")? {
         return Ok(resp);
     }
     let h = Headers::new();
-    h.set("content-type", "text/javascript; charset=utf-8")?;
+    h.set("content-type", content_type)?;
     h.set("cache-control", "no-cache")?;
     h.set("etag", &etag)?;
     Ok(Response::ok(body)?.with_headers(h))
@@ -298,6 +309,12 @@ impl FragmentCell {
         let head = req.method() == Method::Head;
         if path == "__fragment.js" {
             return script(req, CLIENT_JS, CLIENT_JS_HASH);
+        }
+        if path == "__chat.js" {
+            return script(req, CHAT_JS, CHAT_JS_HASH);
+        }
+        if path == "__chat.css" {
+            return compiled_in(req, CHAT_CSS, CHAT_CSS_HASH, "text/css; charset=utf-8");
         }
         self.ensure_pins(facts).await?;
         let facts = &*facts;

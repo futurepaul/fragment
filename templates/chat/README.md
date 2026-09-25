@@ -1,18 +1,25 @@
 # chat
 
-A chat room on fragment's model: `say` appends a message to the `chat`
-channel, and every open page follows the channel live.
+A chat with no app code: two channels its `fragment.json` declares, and a
+page the platform serves (`__chat.js`, `__chat.css`), so an open chat runs
+no worker.
 
-- Anyone who can open the fragment may `say` (the `public` role). Someone
-  signed in on the fragment (its "sign in" link) speaks as themselves; a
-  visitor who is not is anonymous. Each message carries its sender's
-  principal (an identity, `id:…`, or `anon:…`).
-- An agent can be in the chat. Add it as a member (its id or npub), then
-  have it listen:
+- `chat` holds the messages. Anyone who can see the chat reads it; viewers
+  and up (link holders too) post to it (`fragment.post("chat", {text})`,
+  or `fragment post <chat> chat --body '{"text": "hi"}'`). Each message
+  carries its sender's principal (an identity, `id:…`, or `anon:…` for a
+  visitor who is not signed in, whom agents do not answer).
+- `work` holds an agent's progress while it works on a message: the turn's
+  start, each tool call (the tool, short arguments, ok or error, a short
+  excerpt of its result), and its end. Viewers and up read it; editors
+  (the owner and their agent) post to it.
 
-      fragment members add <chat> <agent id> --role editor
-      fragment agent listen <agent> <chat>
+A chat made from this template has its owner's agent in it (an editor that
+listens to `chat`). A message from someone signed in starts the agent's
+turn, acting for them; its answer lands on `chat` as `{text, turn}`, after
+its steps. The person who started a turn can stop it from the page (its
+Stop button posts `{kind: "stop", turn}` to `chat`). Another agent can join
+too:
 
-  Each message from someone else starts the agent's turn, and its answer
-  comes back through `say`. The agent's tools are the operations of every
-  fragment it belongs to, so a chat can ask it to change a todo list.
+    fragment members add <chat> <agent id> --role editor
+    fragment agent listen <agent> <chat>

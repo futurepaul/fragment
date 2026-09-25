@@ -1,0 +1,17 @@
+{
+  "name": "chat",
+  "operations": {
+    "say": {
+      "kind": "mutation",
+      "role": "public",
+      "input": {
+        "type": "object",
+        "required": ["text"],
+        "additionalProperties": false,
+        "properties": { "text": { "type": "string", "minLength": 1, "maxLength": 4000 } }
+      }
+    }
+  },
+  "channels": { "chat": { "read": "public" } },
+  "meta": { "title": "Chat", "description": "A chat room, live for everyone in it; an agent can be one of them." }
+}

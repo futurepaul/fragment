@@ -200,6 +200,17 @@ pub fn append_message(sql: &SqlStorage, conv: &str, message: &Message) -> anyhow
     Ok(())
 }
 
+/// Where a stored message is in the table (a turn's first message marks
+/// where its progress is read from: progress.rs).
+pub fn message_seq(sql: &SqlStorage, id: &str) -> anyhow::Result<i64> {
+    #[derive(Deserialize)]
+    struct Row {
+        seq: i64,
+    }
+    let rows: Vec<Row> = ah(ah(sql.exec("SELECT seq FROM messages WHERE id = ?", vec![id.into()]))?.to_array())?;
+    rows.first().map(|r| r.seq).ok_or_else(|| anyhow!("message {id} is not stored"))
+}
+
 pub fn steer(sql: &SqlStorage, text: &str) -> anyhow::Result<()> {
     ah(sql.exec("INSERT INTO steer (text) VALUES (?)", vec![text.into()]))?;
     Ok(())

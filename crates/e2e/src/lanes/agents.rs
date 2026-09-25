@@ -406,16 +406,34 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
-fn chat_records(api: &Api, owner: &Keys, chat: &str) -> Vec<Value> {
+/// A message in a chat, as `keys`: a post to its `chat` channel (the chat
+/// template's chats have no `say` since phase 7, slice C).
+pub(super) fn say(api: &Api, keys: &Keys, chat: &str, id: &str, text: &str) -> Result<Answer> {
+    api.signed(keys, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": id, "body": { "text": text } })))
+}
+
+/// A message from a browser (`fragment.post`), with its cookie.
+pub(super) fn site_say(api: &Api, chat: &str, id: &str, text: &str, cookie: Option<&str>) -> Result<Answer> {
+    api.call(crate::api::Call {
+        method: "POST",
+        url: api.site_url(chat, "__op/channels/chat"),
+        body: Some(json!({ "id": id, "input": { "text": text } }).to_string().into_bytes()),
+        content_type: Some("application/json"),
+        cookie: cookie.map(str::to_string),
+        ..crate::api::Call::default()
+    })
+}
+
+pub(super) fn chat_records(api: &Api, owner: &Keys, chat: &str) -> Vec<Value> {
     api.signed(owner, "GET", &format!("/api/f/{chat}/channels/chat"), None).ok().and_then(|r| r.body["records"].as_array().cloned()).unwrap_or_default()
 }
 
-fn said_by(records: &[Value], who: &[&str], text: &str) -> bool {
+pub(super) fn said_by(records: &[Value], who: &[&str], text: &str) -> bool {
     records.iter().any(|r| who.contains(&r["principal"].as_str().unwrap_or("")) && r["body"]["text"] == text)
 }
 
 /// Phase 7's chat: the chat template, an agent that follows its channel and
-/// answers through `say`, and a chat that works an app through the agent.
+/// answers there, and a chat that works an app through the agent.
 /// Driven the way a person would, with the CLI (`fragment agent`).
 pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("chat") {
@@ -468,19 +486,20 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("someone who is not a member cannot subscribe", r.status == 403, &r);
 
     // a message: the agent answers in the chat, once. The answer is posted
-    // for it, so the chat's reply operation is not among its tools; a model
-    // that calls it anyway (from habit, or from an earlier turn) is told no
+    // for it, so no reply operation is among its tools (the template's chat
+    // has none since phase 7; a chat made before has `say`); a model that
+    // calls one anyway (from habit, or from an earlier turn) is told no
     // such tool is here, and its answer still lands once
-    let say = fragment_core::tools::tool_name(&chat, "say").expect("a tool name");
+    let say_tool = fragment_core::tools::tool_name(&chat, "say").expect("a tool name");
     s.openrouter.clear_script();
-    s.openrouter.script(&[Reply::Tools(vec![(say.clone(), json!({ "text": "Hello from the tool." }))]), Reply::Text("Hello! I'm here.".into())]);
+    s.openrouter.script(&[Reply::Tools(vec![(say_tool.clone(), json!({ "text": "Hello from the tool." }))]), Reply::Text("Hello! I'm here.".into())]);
     let asked = s.openrouter.chats().len();
-    api.op(&owner, &chat, "say", "c1", json!({ "text": "hi bot" }))?;
+    say(api, &owner, &chat, "c1", "hi bot")?;
     let who = [bot_id.as_str()];
     let answered = s.eventually(wait, || said_by(&chat_records(api, &owner, &chat), &who, "Hello! I'm here."));
     s.ok("a message in the chat gets the agent's answer there, as the agent", answered, json!(chat_records(api, &owner, &chat)));
     let offered: Vec<String> = s.openrouter.chats().get(asked).and_then(|c| c["tools"].as_array().cloned()).unwrap_or_default().iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_string)).collect();
-    s.ok("the chat's reply operation is not among the agent's tools", offered.iter().any(|t| t == "platform__create_fragment") && !offered.contains(&say), json!(offered));
+    s.ok("the chat's reply operation is not among the agent's tools", offered.iter().any(|t| t == "platform__create_fragment") && !offered.contains(&say_tool), json!(offered));
     // the answer comes after anything the turn did, so it is all there now
     let records = chat_records(api, &owner, &chat);
     let texts: Vec<&str> = records.iter().filter_map(|r| r["body"]["text"].as_str()).collect();
@@ -490,7 +509,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     // it, it has heard its own and let it be (a turn for it would have asked
     // the model once more)
     s.openrouter.script(&[Reply::Text("Still here.".into())]);
-    api.op(&owner, &chat, "say", "c1b", json!({ "text": "still there?" }))?;
+    say(api, &owner, &chat, "c1b", "still there?")?;
     let sentinel = s.eventually(wait, || said_by(&chat_records(api, &owner, &chat), &who, "Still here."));
     let records = chat_records(api, &owner, &chat);
     let turns = s.openrouter.chats().len() - asked;
@@ -502,7 +521,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     ship(s, &c, TODO_APP, TODO_JSON);
     api.signed(&owner, "PUT", &format!("/api/f/{todo}/members/{bot_id}"), Some(&json!({ "role": "editor" })))?;
     s.openrouter.script(&[Reply::Tools(vec![(fragment_core::tools::tool_name(&todo, "add_todo").expect("a tool name"), json!({ "text": "bread" }))]), Reply::Text("Added bread to your list.".into())]);
-    api.op(&owner, &chat, "say", "c2", json!({ "text": "please add bread to my todo list" }))?;
+    say(api, &owner, &chat, "c2", "please add bread to my todo list")?;
     let done = s.eventually(wait, || said_by(&chat_records(api, &owner, &chat), &who, "Added bread to your list."));
     s.ok("asked in the chat, the agent changes the todo list through its operation, and says so", done && todos(api, &owner, &todo) == ["bread"], json!(chat_records(api, &owner, &chat)));
 
@@ -521,14 +540,14 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a member removed loses its subscriptions", subs.body["subscriptions"] == json!([]), &subs);
     let before = chat_records(api, &owner, &chat).len();
     let asked = s.openrouter.chats().len();
-    api.op(&owner, &chat, "say", "c3", json!({ "text": "anyone there?" }))?;
+    say(api, &owner, &chat, "c3", "anyone there?")?;
     // the sentinel is the same pipe opened again: the agent back in the chat,
     // listening anew, answers the next message; a delivery of the one
     // before would have reached it first, and started a turn with it
     s.cli(api, &home, &["members", "add", &chat, &bot_npub, "--role", "editor"]);
     let relisten = s.cli_json(api, &home, &["agent", "listen", &bot, &chat, "--json"]);
     s.openrouter.script(&[Reply::Text("Back again.".into())]);
-    api.op(&owner, &chat, "say", "c4", json!({ "text": "are you back?" }))?;
+    say(api, &owner, &chat, "c4", "are you back?")?;
     let back = s.eventually(wait, || said_by(&chat_records(api, &owner, &chat), &who, "Back again."));
     let heard = s.openrouter.chats()[asked..].iter().any(|c| c["messages"].to_string().contains("anyone there?"));
     let after = chat_records(api, &owner, &chat);
@@ -539,20 +558,22 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let bot = Bot { name: &bot, id: &bot_id, npub: &bot_npub };
     chats_apart(s, api, &agents, &home, &owner, &bot, &todo)?;
 
-    // the page: the conversation so far, and a message sent from it
-    let Some(mut chrome) = s.browser()? else {
+    // the page: the conversation so far, and a message sent from it (by a
+    // link holder, who is a viewer)
+    if let Some(mut chrome) = s.browser()? {
+        let page = chrome.open(&api.site_url(&chat, &format!("?view={}", room["viewToken"].as_str().unwrap_or(""))))?;
+        let shows = chrome.until(&page, "document.getElementById('messages')?.textContent.includes('Added bread to your list.')", wait);
+        let seen = chrome.eval(&page, "location.href + ' | ' + document.title + ' | ' + (document.body?.innerText || '').slice(0, 300)").unwrap_or_default();
+        s.ok("the chat page shows the conversation", shows, seen);
+        let ready = chrome.until(&page, "document.getElementById('say')?.dataset.ready === '1'", wait);
+        chrome.eval(&page, "document.getElementById('text').value = 'from the page'; document.getElementById('say').requestSubmit(); true")?;
+        let landed = ready && s.eventually(wait, || chat_records(api, &owner, &chat).iter().any(|r| r["body"]["text"] == "from the page"));
+        s.ok("a message sent from the page lands in the channel, and shows", landed && chrome.until(&page, "document.getElementById('messages').textContent.includes('from the page')", wait), "");
+    } else {
         s.ok("Chrome is installed for the chat page (set CHROME_BIN)", false, "no Chrome found");
-        return Ok(());
-    };
-    let page = chrome.open(&api.site_url(&chat, &format!("?view={}", room["viewToken"].as_str().unwrap_or(""))))?;
-    let shows = chrome.until(&page, "document.getElementById('messages')?.textContent.includes('Added bread to your list.')", wait);
-    let seen = chrome.eval(&page, "location.href + ' | ' + document.title + ' | ' + (document.body?.innerText || '').slice(0, 300)").unwrap_or_default();
-    s.ok("the chat page shows the conversation", shows, seen);
-    chrome.eval(&page, "document.getElementById('text').value = 'from the page'; document.getElementById('say').requestSubmit(); true")?;
-    let landed = s.eventually(wait, || chat_records(api, &owner, &chat).iter().any(|r| r["body"]["text"] == "from the page"));
-    s.ok("a message sent from the page lands in the channel, and shows", landed && chrome.until(&page, "document.getElementById('messages').textContent.includes('from the page')", wait), "");
+    }
     std::env::remove_var("FRAGMENT_AGENTS");
-    Ok(())
+    super::work::work(s, api)
 }
 
 /// The agent a chat lane drives: its name, identity, and key.
@@ -620,7 +641,7 @@ fn chats_apart(s: &mut Suite, api: &Api, agents: &Api, home: &std::path::Path, o
         Reply::Text("That is not mine to open.".into()),
     ]);
     let asked = s.openrouter.chats().len();
-    api.op(&guest, &a, "say", "g1", json!({ "text": "add to the owner's list, and read it" }))?;
+    say(api, &guest, &a, "g1", "add to the owner's list, and read it")?;
     let answered = s.eventually(wait, || said_by(&chat_records(api, owner, &a), &who, "That is not mine to open."));
     let chats = s.openrouter.chats();
     let results = chats.get(asked + 1).map(|c| c["messages"].to_string()).unwrap_or_default();
@@ -640,7 +661,7 @@ fn chats_apart(s: &mut Suite, api: &Api, agents: &Api, home: &std::path::Path, o
         Reply::Tools(vec![("platform__call".into(), json!({ "fragment": shared, "operation": "add_todo", "input": { "text": "from the guest" } }))]),
         Reply::Text("Added it to the shared list.".into()),
     ]);
-    api.op(&guest, &a, "say", "g2", json!({ "text": "add to our shared list" }))?;
+    say(api, &guest, &a, "g2", "add to our shared list")?;
     let answered = s.eventually(wait, || said_by(&chat_records(api, owner, &a), &who, "Added it to the shared list."));
     s.ok("the same guest asks about something shared with them: it works", answered && todos(api, owner, &shared) == ["from the guest"], json!(todos(api, owner, &shared)));
 
@@ -648,10 +669,10 @@ fn chats_apart(s: &mut Suite, api: &Api, agents: &Api, home: &std::path::Path, o
     // owner's view; the owner's message after it (the same pipe) is the
     // sentinel, and the only turn
     let link = format!("fragview={}", room_a["viewToken"].as_str().unwrap_or(""));
-    let r = api.browser_op(&a, "say", "anon-1", json!({ "text": "hello from nobody" }), Some(&link))?;
+    let r = site_say(api, &a, "anon-1", "hello from nobody", Some(&link))?;
     s.openrouter.script(&[Reply::Text("Hello, owner.".into())]);
     let asked = s.openrouter.chats().len();
-    api.op(owner, &a, "say", "o1", json!({ "text": "anyone else here?" }))?;
+    say(api, owner, &a, "o1", "anyone else here?")?;
     let answered = s.eventually(wait, || said_by(&chat_records(api, owner, &a), &who, "Hello, owner."));
     let turns: Vec<String> = s.openrouter.chats()[asked..].iter().map(|c| c["messages"].to_string()).collect();
     let v = view(agents, owner, bot.name);
@@ -674,9 +695,9 @@ fn chats_apart(s: &mut Suite, api: &Api, agents: &Api, home: &std::path::Path, o
     let asked = s.openrouter.chats().len();
     let runs = |v: &Value| runs_of(v, "platform__list_fragments").len();
     let ran = runs(&view(agents, owner, bot.name));
-    api.op(owner, &a, "say", "o2", json!({ "text": "a question for room A" }))?;
+    say(api, owner, &a, "o2", "a question for room A")?;
     s.eventually(wait, || runs(&view(agents, owner, bot.name)) > ran);
-    api.op(owner, &b, "say", "o3", json!({ "text": "a question for room B" }))?;
+    say(api, owner, &b, "o3", "a question for room B")?;
     // it waits for a turn of its own while A's runs (held in its tool)
     let waiting = |conv: &str, asker: &str| {
         let v = view(agents, owner, bot.name);
@@ -709,10 +730,10 @@ fn chats_apart(s: &mut Suite, api: &Api, agents: &Api, home: &std::path::Path, o
     ]);
     let asked = s.openrouter.chats().len();
     let ran = runs(&view(agents, owner, bot.name));
-    api.op(owner, &a, "say", "o4", json!({ "text": "the owner starts" }))?;
+    say(api, owner, &a, "o4", "the owner starts")?;
     s.eventually(wait, || runs(&view(agents, owner, bot.name)) > ran);
-    api.op(owner, &a, "say", "o5", json!({ "text": "the owner adds this" }))?;
-    api.op(&guest, &a, "say", "g3", json!({ "text": "the guest cuts in" }))?;
+    say(api, owner, &a, "o5", "the owner adds this")?;
+    say(api, &guest, &a, "g3", "the guest cuts in")?;
     let queued = s.eventually(Duration::from_secs(4), || waiting(&format!("{a}/chat"), &guest_id));
     let owners = s.eventually(wait, || said_by(&chat_records(api, owner, &a), &who, "The owner's answer."));
     let guests = s.eventually(wait, || said_by(&chat_records(api, owner, &a), &who, "The guest's answer."));

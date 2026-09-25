@@ -9,7 +9,9 @@
 //! app code (a chat needs no worker). A post is checked as a call is (the
 //! role, the public call budget, the id), bounded as a record is, keyed by
 //! its poster and id as a mutation is, and reaches sockets, subscriptions,
-//! and triggers as a mutation's record does (`post`).
+//! and triggers as a mutation's record does (`post`). Such a channel keeps
+//! its newest `limits::POSTED_KEPT` records, as `events` and `ops` keep
+//! theirs (`append`): the oldest go, with their posts' keys.
 //!
 //! A mutation's effects are applied after the facet commits it. Before it
 //! calls the facet, the supervisor records the mutation as pending: its
@@ -222,10 +224,18 @@ impl FragmentCell {
         let Some(row) = rows.first() else { return Ok(None) };
         let seq = row["seq"].as_i64().expect("records.seq is INTEGER");
         assert!(seq > 0, "a channel's records number from 1");
-        if BUILTIN_CHANNELS.contains(&channel) {
+        // retention: the built-in channels, and those people may post to,
+        // keep their newest records (a post's key goes with its record)
+        let kept = if BUILTIN_CHANNELS.contains(&channel) {
+            Some(limits::AUDIT_KEPT)
+        } else {
+            self.declared_channel(channel)?.and_then(|d| d.post).map(|_| limits::POSTED_KEPT)
+        };
+        if let Some(kept) = kept {
+            assert!(kept >= 1, "a channel keeps the record just appended");
             self.exec(
                 "DELETE FROM records WHERE channel = ? AND seq <= (SELECT MAX(seq) FROM records WHERE channel = ?) - ?",
-                vec![channel.into(), channel.into(), SqlStorageValue::Integer(limits::AUDIT_KEPT)],
+                vec![channel.into(), channel.into(), SqlStorageValue::Integer(kept)],
             )?;
         }
         let record = ChannelRecord { channel: channel.to_string(), seq, at: now, principal: npub::display(principal), kind: kind.to_string(), body };
