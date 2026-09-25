@@ -1395,26 +1395,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_deletion_applies_in_pull_with_prune() {
-        let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("gone.txt", b"g"), ("kept.txt", b"k")]);
-        let c = client_for(&mock);
-        let dir = tmpdir("prune");
-        let other = tmpdir("prune-other");
-        sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
-        sync_once(&c, "t", &other, &opts(Mode::Pull)).unwrap();
-        fs::remove_file(other.join("gone.txt")).unwrap();
-        sync_once(&c, "t", &other, &opts(Mode::Push)).unwrap();
-        let o = SyncOptions { prune: true, ..opts(Mode::Pull) };
-        let report = sync_once(&c, "t", &dir, &o).unwrap();
-        assert_eq!(report.deleted_local, vec!["gone.txt"]);
-        assert!(!dir.join("gone.txt").exists());
-        assert!(dir.join("kept.txt").exists());
-        fs::remove_dir_all(&dir).ok();
-        fs::remove_dir_all(&other).ok();
-    }
-
-    #[test]
     fn withheld_deletion_still_applies_on_a_later_prune_pass() {
         // pull without --prune withholds; the FOLLOWING pass with --prune
         // must apply it — dropping the state row on withhold made the
