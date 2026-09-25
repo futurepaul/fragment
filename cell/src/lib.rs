@@ -1,11 +1,15 @@
 //! The fragment platform on celld, in Rust.
 //!
-//! The router (this file's `fetch`) verifies NIP-98, asks the registry
-//! (`registry.rs`) which identity the signing key belongs to, bounds request
+//! The router (this file's `fetch`) verifies NIP-98, bounds request
 //! bodies, decides which fragment a request is for, and hands it to that
-//! fragment's supervisor (`fragment.rs`) with the identity and the key.
-//! A signed request the registry cannot answer for is refused (503), never
-//! let through. Public routes:
+//! fragment's supervisor (`fragment.rs`). On the control API it asks the
+//! registry (`registry.rs`) which identity the signing key belongs to first,
+//! and hands on the identity and the key; a signed request the registry
+//! cannot answer for is refused (503), never let through. A site request's
+//! signer or session goes on unresolved (`routed::Credential`): the
+//! fragment asks the registry only when its answer depends on who is
+//! asking, so a page anyone who may see it gets alike costs no hop. Public
+//! routes:
 //!
 //!   POST   /api/identities                 register an agent the signer owns
 //!                                          ({kind: agent, proof}: a key proof by its key)
@@ -28,7 +32,7 @@
 //!   GET    /, /auth/…, /cli                sign-in on the platform origin (`auth.rs`)
 //!
 //! A browser on a fragment's origin is its person through that origin's own
-//! session cookie (`__signin`), looked up live like a key.
+//! session cookie (`__signin`), looked up live like a key when it matters.
 //!
 //! With a suffix configured, `/f/<name>/…` redirects to the fragment's own
 //! host: fragments sharing one origin could act as each other's visitors.
@@ -74,7 +78,7 @@ use worker::*;
 use config::Config;
 use error::{CellError, CellResult};
 use registry::calls::{self, Call};
-use routed::{Mode, Routed, Signed};
+use routed::{Credential, Mode, Routed, Signed};
 
 pub use fragment::FragmentCell;
 pub use principal::PrincipalCell;
@@ -205,12 +209,14 @@ async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) ->
     Ok(Signed { identity, key: Some(key) })
 }
 
-/// The signer when the request carries a signature (a bad one is still a 401).
-async fn signer_if_signed(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Option<Signed>> {
-    match req.headers().get("authorization")? {
-        Some(_) => signer(env, req, url, body).await.map(Some),
-        None => Ok(None),
+/// Who is asking a site request, unresolved: a signature names its key
+/// (verified here, which needs no registry: a bad one is still 401); a
+/// browser, its session on this origin.
+fn site_credential(req: &Request, url: &Url, body: &[u8], name: &str, mode: Mode) -> CellResult<Option<Credential>> {
+    if req.headers().get("authorization")?.is_some() {
+        return Ok(Some(Credential::Key(authenticate(req, url, Payload::Read(body))?)));
     }
+    Ok(auth::site_token(req, name, url, mode == Mode::Path)?.map(Credential::Session))
 }
 
 /// The identity a path names: `me` is the signer.
@@ -260,12 +266,12 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
     let body = serde_json::to_vec(&create).map_err(|e| CellError::host(e.to_string()))?;
     // a fresh request: nothing of the caller's but what the router decided
     let bare = Request::new(url.as_str(), Method::Post)?;
-    let routed = Routed { name: create.name.clone(), url: url.clone(), mode: None, signed: Some(maker.clone()) };
+    let routed = Routed { name: create.name.clone(), url: url.clone(), mode: None, signed: Some(maker.clone()), credential: None };
     let made = forward(env, &bare, bytes_body(body), Forward { routed, inner: "/create".into(), extra: vec![] }).await?;
     if let (Some(agent), 200) = (agent, made.status_code()) {
         let put = Request::new(url.as_str(), Method::Put)?;
         let role = serde_json::to_vec(&json!({ "role": "editor" })).map_err(|e| CellError::host(e.to_string()))?;
-        let routed = Routed { name: create.name.clone(), url: url.clone(), mode: None, signed: Some(maker) };
+        let routed = Routed { name: create.name.clone(), url: url.clone(), mode: None, signed: Some(maker), credential: None };
         let mut added = forward(env, &put, bytes_body(role), Forward { routed, inner: format!("/api/members/{agent}"), extra: vec![] }).await?;
         if added.status_code() != 200 {
             return Err(CellError::host(format!("{} was made, but its agent was not made an editor: {}", create.name, added.text().await.unwrap_or_default())));
@@ -529,13 +535,13 @@ async fn serve(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str,
     if auth::is_fragment_route(rest) {
         return auth::fragment(&req, env, cfg, url, name, rest, mode == Mode::Path).await;
     }
-    let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
-    // a signature names its key's identity; a browser, its session here
-    let signed = match signer_if_signed(env, &req, url, &body).await? {
-        Some(s) => Some(s),
-        None => auth::site_session(&req, env, name, url, mode == Mode::Path).await?,
+    // a GET or HEAD has no body to wait for
+    let body = match req.method() {
+        Method::Get | Method::Head => Vec::new(),
+        _ => read_body(&mut req, limits::BODY_MAX_BYTES).await?,
     };
-    let routed = Routed { name: name.to_string(), url: url.clone(), mode: Some(mode), signed };
+    let credential = site_credential(&req, url, &body, name, mode)?;
+    let routed = Routed { name: name.to_string(), url: url.clone(), mode: Some(mode), signed: None, credential };
     forward(env, &req, bytes_body(body), Forward { routed, inner: format!("/serve/{rest}"), extra: vec![] }).await
 }
 
@@ -640,7 +646,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             let principal = signer_of(env, &req, &url, Payload::Streamed { sha256_hex: sha }).await?;
             let name = named_fragment(name, Some(&principal))?;
             let body = req.inner().body().map(worker::wasm_bindgen::JsValue::from);
-            let routed = Routed { name, url: url.clone(), mode: None, signed: Some(principal) };
+            let routed = Routed { name, url: url.clone(), mode: None, signed: Some(principal), credential: None };
             forward(env, &req, body, Forward { routed, inner: format!("/api/blobs/{sha}"), extra: vec![] }).await
         }
         (method, ["api", "f", name, rest @ ..]) => {
@@ -669,7 +675,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
                 _ => Some(signer(env, &req, &url, &body).await?),
             };
             let name = named_fragment(name, principal.as_ref())?;
-            let routed = Routed { name, url: url.clone(), mode: None, signed: principal };
+            let routed = Routed { name, url: url.clone(), mode: None, signed: principal, credential: None };
             forward(env, &req, bytes_body(body), Forward { routed, inner, extra }).await
         }
         (_, ["f", name]) => {

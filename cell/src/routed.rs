@@ -5,6 +5,11 @@
 //! written once by `to_headers` and read once by `from_headers`, side by
 //! side here so the two cannot drift.
 //!
+//! Who is asking arrives resolved (`Signed`) on the control API, and
+//! unresolved (`Credential`) on a site request: most of a site's requests
+//! answer alike for everyone who may see the fragment, so the fragment asks
+//! the registry only when its answer depends on who is asking.
+//!
 //! Calls from inside the platform (a run's Workflow, the app's `Files`
 //! capability, the delivery consumer, the router's test hooks) are not
 //! routed requests: they carry no caller and no URL, and the supervisor
@@ -14,13 +19,14 @@
 use std::ops::Deref;
 
 use fragment_core::npub;
-use fragment_proto::{routed, valid_fragment_name, Identity};
+use fragment_proto::{routed, valid_fragment_name, ErrorCode, Identity};
 use serde::{Deserialize, Serialize};
 // the macro's generated code names `wasm_bindgen`: worker's re-export
 use worker::wasm_bindgen::{self, prelude::*};
-use worker::{Headers, Method, Request, RequestInit, Url};
+use worker::{Env, Headers, Method, Request, RequestInit, Url};
 
 use crate::error::{CellError, CellResult};
+use crate::registry::calls;
 
 /// How a fragment's site was addressed: its own origin, or `/f/<name>/`
 /// on the platform's (a dev fleet without hostnames).
@@ -64,6 +70,47 @@ impl Deref for Signed {
     }
 }
 
+/// Who is asking a site request, as the router found them: not yet
+/// resolved, since most of a site's requests answer alike for everyone who
+/// may see the fragment (a page, a file). The fragment resolves it when its
+/// answer depends on who is asking (`FragmentCell::identified`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Credential {
+    /// The key a NIP-98 signature over the request was verified for (64
+    /// hex): checking a signature needs no registry, so the router did.
+    Key(String),
+    /// The token of the fragment origin's session cookie (64 hex).
+    Session(String),
+}
+
+impl Credential {
+    fn well_formed(&self) -> bool {
+        match self {
+            Credential::Key(key) => npub::is_hex_key(key),
+            Credential::Session(token) => token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()),
+        }
+    }
+
+    /// Who the credential names on `fragment`, asked of the registry: a key
+    /// no one holds, or a revoked one, is 401; a session that is not live
+    /// is nobody (a stale cookie leaves the request anonymous); a registry
+    /// that cannot answer is 503, never anonymous (rule 7).
+    pub async fn resolve(self, env: &Env, fragment: &str) -> CellResult<Option<Signed>> {
+        match self {
+            Credential::Key(key) => {
+                let identity = crate::ask_registry(env, &calls::Resolve { key: key.clone() }).await?;
+                Ok(Some(Signed { identity, key: Some(key) }))
+            }
+            Credential::Session(token) => match crate::ask_registry(env, &calls::Session { token, fragment: Some(fragment.to_string()) }).await {
+                Ok(identity) => Ok(Some(Signed { identity, key: None })),
+                Err(e) if e.code == ErrorCode::Unauthenticated => Ok(None),
+                Err(e) => Err(e),
+            },
+        }
+    }
+}
+
 /// A request the router hands a fragment's supervisor.
 pub struct Routed {
     /// The fragment's full name (`<label>.<username>`).
@@ -73,14 +120,19 @@ pub struct Routed {
     pub url: Url,
     /// Set on site requests only.
     pub mode: Option<Mode>,
-    /// `None`: anonymous.
+    /// Who is asking, resolved (the control API). `None` with no
+    /// `credential`: anonymous.
     pub signed: Option<Signed>,
+    /// Who is asking a site request, unresolved. Never beside `signed`.
+    pub credential: Option<Credential>,
 }
 
 impl Routed {
     /// Writes the route into `headers` (the router's side).
     pub fn to_headers(&self, headers: &Headers) -> CellResult<()> {
         assert!(valid_fragment_name(&self.name), "the router routes to a valid name");
+        assert!(self.signed.is_none() || self.credential.is_none(), "who is asking is resolved or not, never both");
+        assert!(self.credential.as_ref().is_none_or(Credential::well_formed), "the router forwards a credential it checked");
         headers.set(routed::NAME, &self.name)?;
         headers.set(routed::URL, self.url.as_str())?;
         if let Some(mode) = self.mode {
@@ -89,6 +141,10 @@ impl Routed {
         if let Some(signed) = &self.signed {
             let json = serde_json::to_string(signed).map_err(|e| CellError::host(format!("the signer: {e}")))?;
             headers.set(routed::SIGNED, &json)?;
+        }
+        if let Some(credential) = &self.credential {
+            let json = serde_json::to_string(credential).map_err(|e| CellError::host(format!("the credential: {e}")))?;
+            headers.set(routed::CREDENTIAL, &json)?;
         }
         Ok(())
     }
@@ -112,7 +168,17 @@ impl Routed {
             }
             None => None,
         };
-        Ok(Routed { name, url, mode, signed })
+        let credential = match headers.get(routed::CREDENTIAL)? {
+            Some(json) => {
+                let credential: Credential = serde_json::from_str(&json).map_err(|e| CellError::host(format!("the router's credential: {e}")))?;
+                if !credential.well_formed() || signed.is_some() {
+                    return Err(CellError::host("the router named a malformed credential"));
+                }
+                Some(credential)
+            }
+            None => None,
+        };
+        Ok(Routed { name, url, mode, signed, credential })
     }
 }
 

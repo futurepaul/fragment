@@ -22,7 +22,8 @@
 //! redemption for this fragment only and sets its own session cookie;
 //! `__signin` without a token starts at the platform; `__signout` ends
 //! that session in the registry and drops the cookie. The session cookie
-//! is looked up live on every request.
+//! is looked up live on every request whose answer depends on who is
+//! asking (the fragment decides which: `routed::Credential`).
 
 use fragment_core::{npub, site};
 use fragment_proto::{ErrorCode, Identity, IdentityKind};
@@ -32,7 +33,7 @@ use crate::ask_registry;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::registry::calls;
-use crate::routed::Signed;
+use crate::routed::{Credential, Signed};
 
 pub const SESSION_COOKIE: &str = "fragment_session";
 pub const SITE_COOKIE: &str = "fragment_site";
@@ -159,16 +160,10 @@ fn site_cookie_path(name: &str, path_mode: bool) -> String {
     }
 }
 
-/// The session a fragment's own cookie carries, for that fragment only (a
-/// session holds no key).
-pub async fn site_session(req: &Request, env: &Env, name: &str, url: &Url, path_mode: bool) -> CellResult<Option<Signed>> {
-    let Some(token) = cookie_of(req, SITE_COOKIE, secure(url), &site_cookie_path(name, path_mode))? else { return Ok(None) };
-    match ask_registry(env, &calls::Session { token, fragment: Some(name.to_string()) }).await {
-        Ok(identity) => Ok(Some(Signed { identity, key: None })),
-        // a stale cookie is no session: the request goes on unsigned
-        Err(e) if e.code == ErrorCode::Unauthenticated => Ok(None),
-        Err(e) => Err(e),
-    }
+/// The token of a fragment origin's own session cookie, unresolved (the
+/// registry says whom it names, for that fragment only).
+pub fn site_token(req: &Request, name: &str, url: &Url, path_mode: bool) -> CellResult<Option<String>> {
+    cookie_of(req, SITE_COOKIE, secure(url), &site_cookie_path(name, path_mode))
 }
 
 /// A POST from a browser comes from the platform's own pages.
@@ -463,6 +458,14 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
     }
 }
 
+/// Whether this origin's session cookie names someone on `name`.
+async fn signed_in_here(req: &Request, env: &Env, name: &str, url: &Url, path_mode: bool) -> CellResult<bool> {
+    match site_token(req, name, url, path_mode)? {
+        Some(token) => Ok(Credential::Session(token).resolve(env, name).await?.is_some()),
+        None => Ok(false),
+    }
+}
+
 /// Whether a path on a fragment's origin is sign-in's.
 pub fn is_fragment_route(rest: &str) -> bool {
     matches!(rest, "__signin" | "__signout")
@@ -477,7 +480,7 @@ pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &
             "__signin" => match query(url, "token") {
                 // signed in here already (a page that embeds this one sends
                 // every frame through __signin): straight back
-                None if site_session(req, env, name, url, path_mode).await?.is_some() => redirect(&back_to(&base, query(url, "return").as_deref())?, &[]),
+                None if signed_in_here(req, env, name, url, path_mode).await? => redirect(&back_to(&base, query(url, "return").as_deref())?, &[]),
                 None => {
                     let back = site::return_path(query(url, "return").as_deref());
                     redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(url), enc(&back)), &[])

@@ -4,7 +4,9 @@
 //! joins a person through a browser approval, and a browser and the CLI
 //! get the same answers from a fragment. A sign-in never sends a browser
 //! off the platform, and its rows in the registry stay bounded and are
-//! swept off the request path.
+//! swept off the request path. A site file answers alike for everyone who
+//! may see the fragment, so a signed-in page view there costs the registry
+//! nothing, and one it must vouch for fails closed when it cannot.
 
 use std::time::{Duration, Instant};
 
@@ -61,6 +63,31 @@ fn same_origin(to: &str, base: &str) -> bool {
     }
 }
 
+/// How many calls the registry has had since it started: a request's round
+/// trips are the difference across it.
+pub(super) fn registry_calls(api: &Api) -> Result<u64> {
+    let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "calls": null })))?;
+    r.body["calls"].as_u64().with_context(|| format!("the calls test hook: {r}"))
+}
+
+/// What `f` answered, and the registry calls it made.
+pub(super) fn calls_of<T>(api: &Api, f: impl FnOnce() -> Result<T>) -> Result<(T, u64)> {
+    let before = registry_calls(api)?;
+    let out = f()?;
+    Ok((out, registry_calls(api)? - before))
+}
+
+/// `f`, run while the registry answers 503 to everything (a test hook),
+/// which it answers again after, whatever `f` did.
+pub(super) fn registry_down<T>(api: &Api, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "down": true })))?;
+    anyhow::ensure!(r.status == 200, "taking the registry down: {r}");
+    let out = f();
+    let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "down": false })))?;
+    anyhow::ensure!(r.status == 200, "bringing the registry back: {r}");
+    out
+}
+
 /// The registry's count of sign-in rows, after a test hook (`count`,
 /// `expire`, or `sweep`).
 fn signins(api: &Api, hook: &str) -> Result<Value> {
@@ -84,7 +111,7 @@ fn signed_median_ms(api: &Api, keys: &Keys, n: usize) -> Result<f64> {
 
 /// What a browser with a fragment's session gets, and what the CLI signing
 /// the same request gets.
-fn both(api: &Api, name: &str, method: &str, path: &str, body: Option<&Value>, cookie: Option<&str>, keys: Option<&Keys>) -> Result<(u16, u16)> {
+fn both(api: &Api, name: &str, method: &str, path: &str, body: Option<&Value>, cookie: Option<&str>, keys: Option<&Keys>) -> Result<(Reply, Reply)> {
     let call = |cookie: Option<String>, keys: Option<&Keys>| {
         api.call(Call {
             method,
@@ -98,7 +125,7 @@ fn both(api: &Api, name: &str, method: &str, path: &str, body: Option<&Value>, c
     };
     let browser = call(cookie.map(|c| format!("fragment_site={c}")), None)?;
     let cli = call(None, keys)?;
-    Ok((browser.status, cli.status))
+    Ok((browser, cli))
 }
 
 pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
@@ -256,9 +283,21 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let outsider_session = api.sign_in("outsider@e2e.test")?;
     api.approve(&outsider_session, &outsider)?;
     let (f, g) = (s.named(api, &owner, "signin-f")?, s.named(api, &owner, "signin-g")?);
+    let mut f_view = String::new();
     for name in [&f, &g] {
         let c = s.create(api, &owner, name)?;
-        s.commit(&c, &[("applib/format.mjs", Some(FORMAT_MJS)), ("site/index.html", Some(b"<p>inside</p>"))]);
+        if name == &f {
+            f_view = format!("?view={}", c["viewToken"].as_str().unwrap_or(""));
+        }
+        s.commit(
+            &c,
+            &[
+                ("applib/format.mjs", Some(FORMAT_MJS)),
+                ("site/index.html", Some(b"<p>inside</p><script src=app.js></script>")),
+                ("site/app.js", Some(b"console.log(1)")),
+                ("site/style.css", Some(b"p{margin:0}")),
+            ],
+        );
         ship(s, &c, CHAT_APP, CHAT_JSON);
         api.signed(&owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
         api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", member.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
@@ -298,30 +337,117 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     }
     s.ok("nor does a fragment origin's sign-in", escaped.is_empty(), format!("{escaped:?}"));
 
-    // the browser and the CLI decide alike: public, link, members
+    // the browser and the CLI decide alike: public, link, members; a page,
+    // a file, the tree, an app route (which sees who is asking), operations
     let member_f2 = site_cookie(api, &member_session, &f)?;
     let outsider_f = site_cookie(api, &outsider_session, &f)?;
     let mut mismatches = vec![];
     let mut decided = 0;
     for visibility in ["public", "link", "members"] {
         api.signed(&owner, "PUT", &format!("/api/f/{f}/visibility"), Some(&json!({ "visibility": visibility })))?;
-        for (who, cookie, keys) in [("member", Some(member_f2.as_str()), Some(&member)), ("outsider", Some(outsider_f.as_str()), Some(&outsider)), ("nobody", None, None)] {
+        let askers = [
+            ("member", Some(member_f2.as_str()), Some(&member), ""),
+            ("outsider", Some(outsider_f.as_str()), Some(&outsider), ""),
+            ("outsider with the link", Some(outsider_f.as_str()), Some(&outsider), f_view.as_str()),
+            ("nobody", None, None, ""),
+            ("nobody with the link", None, None, f_view.as_str()),
+        ];
+        for (who, cookie, keys, view) in askers {
             let n = decided;
             let say = json!({ "id": format!("say-{visibility}-{who}-{n}"), "input": { "text": "hi" } });
             let count = json!({ "id": "c", "input": {} });
             let note = json!({ "id": format!("note-{visibility}-{who}-{n}"), "input": { "text": "n" } });
-            for (method, path, body) in [("GET", "", None), ("POST", "__op/count", Some(&count)), ("POST", "__op/say", Some(&say)), ("POST", "__op/note", Some(&note))] {
-                let (browser, cli) = both(api, &f, method, path, body, cookie, keys)?;
+            let paths = [
+                ("GET", "", None),
+                ("HEAD", "", None),
+                ("GET", "app.js", None),
+                ("GET", "__tree", None),
+                ("GET", "hello", None),
+                ("POST", "__op/count", Some(&count)),
+                ("POST", "__op/say", Some(&say)),
+                ("POST", "__op/note", Some(&note)),
+            ];
+            for (method, path, body) in paths {
+                let (browser, cli) = both(api, &f, method, &format!("{path}{view}"), body, cookie, keys)?;
                 decided += 1;
-                // an anonymous call is rate limited per cookie, and a signed one is not: equal status is the check
-                if browser != cli {
+                // an anonymous call is rate limited per cookie, and a signed one is not: equal status is the check;
+                // the app's route says whom it saw, and as what
+                let saw_alike = path != "hello" || browser.text == cli.text;
+                if browser.status != cli.status || !saw_alike {
                     mismatches.push(format!("{visibility} {who} {method} /{path}: browser {browser}, CLI {cli}"));
                 }
             }
         }
     }
     s.ok(&format!("the browser and the CLI decide alike ({decided} decisions across public, link, and members)"), mismatches.is_empty(), format!("{mismatches:?}"));
+    api.signed(&owner, "PUT", &format!("/api/f/{f}/visibility"), Some(&json!({ "visibility": "public" })))?;
+    let member_id = api.identity(&member)?;
+    let (browser, cli) = both(api, &f, "GET", "hello", None, Some(&member_f2), Some(&member))?;
+    s.ok(
+        "an app's route on a public fragment sees the signed-in person, not a visitor",
+        browser.text.contains(&member_id) && browser.text.contains("as viewer") && cli.text == browser.text,
+        format!("{browser} / {cli}"),
+    );
+
+    // what a page view costs the registry: a file answers alike for everyone
+    // who may see the fragment, so the registry is asked only where it decides
+    let page = ["", "app.js", "style.css", "__fragment.js"];
+    let mut costs = vec![];
+    for (visibility, view) in [("public", ""), ("link", f_view.as_str()), ("members", "")] {
+        api.signed(&owner, "PUT", &format!("/api/f/{f}/visibility"), Some(&json!({ "visibility": visibility })))?;
+        let viewed = |cookie: Option<String>, keys: Option<&Keys>| {
+            calls_of(api, || {
+                for path in page {
+                    let r = api.call(Call { method: "GET", url: api.site_url(&f, &format!("{path}{view}")), cookie: cookie.clone(), keys, ..Call::default() })?;
+                    anyhow::ensure!(r.status == 200, "{visibility} {path}: {r}");
+                }
+                Ok(())
+            })
+            .map(|(_, calls)| calls)
+        };
+        costs.push((visibility, viewed(Some(format!("fragment_site={member_f2}")), None)?, viewed(None, Some(&member))?));
+    }
+    println!("      registry calls for a page view of {} requests, (visibility, browser, CLI): {costs:?}", page.len());
+    s.ok(
+        "a signed-in page view on a public or shared fragment asks the registry nothing",
+        costs[0].1 == 0 && costs[0].2 == 0 && costs[1].1 == 0 && costs[1].2 == 0,
+        format!("{costs:?}"),
+    );
+    s.ok("on a members-only fragment, once a request: membership decides", costs[2].1 == page.len() as u64 && costs[2].2 == page.len() as u64, format!("{costs:?}"));
+    api.signed(&owner, "PUT", &format!("/api/f/{f}/visibility"), Some(&json!({ "visibility": "public" })))?;
+    let op = json!({ "id": "c", "input": {} });
+    let (_, calls) = calls_of(api, || {
+        let r = api.browser_op(&f, "count", "c", json!({}), Some(&format!("fragment_site={member_f2}")))?;
+        anyhow::ensure!(r.status == 200, "an operation: {r}");
+        let (browser, _) = both(api, &f, "GET", "hello", None, Some(&member_f2), None)?;
+        anyhow::ensure!(browser.status == 200, "an app route: {browser}");
+        Ok(())
+    })?;
+    s.ok("an operation and an app route, which see who is asking, ask it once each", calls == 2, calls);
+
+    // the registry down: what needs no one is served, and what it must vouch for is 503
+    let public = registry_down(api, || {
+        let mut got = vec![];
+        for (label, method, path, body) in [("a page", "GET", "", None), ("a file", "GET", "app.js", None), ("an app route", "GET", "hello", None), ("an operation", "POST", "__op/count", Some(&op))] {
+            let (browser, cli) = both(api, &f, method, path, body, Some(&member_f2), Some(&member))?;
+            got.push((label, browser.status, cli.status));
+        }
+        Ok(got)
+    })?;
+    s.ok(
+        "registry down, a public fragment's page and files are still served to a signed-in browser and the CLI",
+        public[..2].iter().all(|(_, b, c)| *b == 200 && *c == 200),
+        format!("{public:?}"),
+    );
+    s.ok("and its app route and operations, which see who asks, are 503 (never anonymous)", public[2..].iter().all(|(_, b, c)| *b == 503 && *c == 503), format!("{public:?}"));
     api.signed(&owner, "PUT", &format!("/api/f/{f}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    let members = registry_down(api, || {
+        let (browser, cli) = both(api, &f, "GET", "app.js", None, Some(&member_f2), Some(&member))?;
+        let nobody = api.page(&f, "app.js", None)?;
+        Ok((browser.status, cli.status, nobody.status))
+    })?;
+    s.ok("a members-only fragment's file is 503 to a member while the registry cannot vouch for them", members.0 == 503 && members.1 == 503, format!("{members:?}"));
+    s.ok("(and 401 to nobody: there is no one to ask about)", members.2 == 401, format!("{members:?}"));
 
     // a browser's sessions on a fragment: its newest few, and signing out ends one
     let mut on_g = vec![];
