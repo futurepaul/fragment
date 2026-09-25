@@ -268,11 +268,25 @@ mod tests {
         assert!(!is_machinery("notes/a.md"));
     }
 
+    /// Goal: only a name with a content hash in it is cached for a year,
+    /// and a public fragment's such file by shared caches too. The e2e's
+    /// site section reads the other three rows off served pages. Method:
+    /// names at the edges of the hash rule, on a public fragment.
     #[test]
-    fn caching() {
-        assert_eq!(cache_control("app.3f9a1c2e.js", true), "public, max-age=31536000, immutable");
-        assert_eq!(cache_control("index.html", false), "private, no-cache");
-        assert_eq!(cache_control("index.html", true), "public, max-age=60");
+    fn only_a_hashed_name_is_immutable() {
+        for (path, hashed) in [
+            ("app.3f9a1c2e.js", true),
+            ("assets/app.3F9A1C2E.min.css", true),
+            ("app.0123456789abcdef.js", true),
+            ("app.3f9a1c2.js", false), // seven hex digits: too short to be a hash
+            ("app.3f9a1c2g.js", false),
+            ("deadbeef", false), // the last part is the extension, never the hash
+            ("app.deadbeef", false),
+            ("3f9a1c2e.d/app.js", false), // a hashed folder names no file's bytes
+        ] {
+            let expected = if hashed { "public, max-age=31536000, immutable" } else { "public, max-age=60" };
+            assert_eq!(cache_control(path, true), expected, "{path}");
+        }
     }
 
     /// Goal: a conditional GET is answered 304 exactly when it names the

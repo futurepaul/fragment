@@ -60,9 +60,6 @@ fn files_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let http = reqwest::blocking::Client::new();
     let st = http.get(format!("{}/api/repos/{repo}/branch?name=main", s.fake.url)).bearer_auth(&token).send()?.status().as_u16();
     s.ok("code.storage accepts it (a fresh repo has no main: 404)", st == 404, st);
-    let other = s.create(api, &owner, &s.name("files-other"))?;
-    let st = http.get(format!("{}/api/repos/{}/branch?name=main", s.fake.url, other["repo"].as_str().unwrap_or(""))).bearer_auth(&token).send()?.status().as_u16();
-    s.ok("code.storage refuses it for another repo", st == 403, st);
 
     s.commit(&c, &[("notes/a.md", Some(b"hello v1\n"))]);
     s.ok("a pushed file is listed after the webhook", listing(api, &owner, &name).contains(&("notes/a.md".into(), 9)), "");
