@@ -42,9 +42,6 @@
 //! `PRESENCE_PER_S` a second are dropped. A page loaded before that
 //! protocol (its library connects without `?v=2`) hears the whole list
 //! instead, as it did (`LEGACY_TAG`; docs/technical-debt-ledger.md).
-//!
-//! What this activation knows of its sockets besides their attachments
-//! (`LiveMemory`) is gathered from them again after the object wakes.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -369,9 +366,7 @@ impl FragmentCell {
                     Cursor::After(n) => n.max(0),
                 };
                 let (frames, next, more) = self.live_page(&channel, after)?;
-                // Live only with the last page: a record appended while the
-                // client pages would otherwise arrive ahead of the pages it
-                // has not read, and its cursor would jump them.
+                // live only with the last page (the module doc)
                 if more && live {
                     st.subs.retain(|c| c != &channel);
                     ws.serialize_attachment(&st)?;
@@ -413,11 +408,8 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// Whether a socket still acts as who it connected as: an anonymous
-    /// one always; a signed-in one for `LIVE_IDENTITY_MS`, then as long as
-    /// the registry, asked again with its credential, names the same
-    /// principal. Otherwise it is closed with 4001 (a registry that cannot
-    /// answer closes it too: fail closed), and its page reconnects.
+    /// Whether a socket still acts as who it connected as (the module doc);
+    /// a registry that cannot answer closes it too: fail closed.
     async fn still_who(&self, ws: &WebSocket, st: &mut LiveState) -> bool {
         let now = js::now_ms();
         if !st.signed() || now - st.checked_at < limits::LIVE_IDENTITY_MS {
@@ -503,10 +495,8 @@ impl FragmentCell {
         Ok(rows.first().and_then(|r| r["n"].as_i64()).unwrap_or(0))
     }
 
-    /// One page of a channel after `after`, as record frames: at most
-    /// `CHANNEL_PAGE` records, and no more than `CHANNEL_PAGE_MAX_BYTES` of
-    /// frames past the first. Answers the frames, the cursor after them,
-    /// and whether more may follow.
+    /// One page of a channel after `after` (the module doc's bounds): the
+    /// frames, the cursor after them, and whether more may follow.
     fn live_page(&self, channel: &str, after: i64) -> CellResult<(Vec<String>, i64, bool)> {
         let mut frames: Vec<String> = vec![];
         let (mut next, mut bytes) = (after, 0usize);
