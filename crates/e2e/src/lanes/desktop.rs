@@ -76,6 +76,28 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the owner's desktop lists their apps", chrome.until(&page, &listed, wait), chrome.eval(&page, "document.body.innerText.slice(0, 300)").unwrap_or_default());
     s.ok("but not itself", chrome.eval(&page, &format!("![...document.querySelectorAll('#apps .row .label')].map(l => l.textContent).includes({:?})", label(&desk)))? == json!(true), "");
 
+    // Clickjacking: a fragment's page (its author's code, or an agent's)
+    // frames the platform's approval of a key of its own. The two are one
+    // site, so the owner's platform session rides into the frame; the
+    // platform refuses to be framed, so nothing shows there to lay under a
+    // click. Its redirects still work in a frame: that is how every frame
+    // on the desktop signs in.
+    let attacker = chrome.open(&api.site_url(&todo, "__signin?return=/"))?;
+    let on_todo = format!("location.host.startsWith({:?}) && location.pathname === '/' && document.readyState === 'complete'", format!("{}--", label(&todo)));
+    anyhow::ensure!(chrome.until(&attacker, &on_todo, wait), "the todo's page did not open");
+    let frame = |chrome: &mut Browser, src: &str| chrome.eval(&attacker, &format!("(() => {{ const f = document.createElement('iframe'); f.src = {src:?}; document.body.append(f); return true; }})()"));
+    frame(&mut chrome, &format!("{}/auth/fragment?name={notes}&return=/", api.base))?;
+    let signed_in = s.eventually(wait, || {
+        chrome.eval_in_frame(&attacker, &format!("{}--", label(&notes)), "location.pathname === '/' && document.readyState === 'complete'").ok() == Some(json!(true))
+    });
+    s.ok("(the owner's platform session rides into a frame on a fragment's page: a redirect through the platform signs it in on the fragment)", signed_in, "");
+    let key = fragment_nip98::Keys::generate();
+    frame(&mut chrome, &api.approval_link(&key, 0))?;
+    let approval = |chrome: &mut Browser| chrome.eval_in_frame(&attacker, "/cli?key=", "document.body?.innerText ?? ''").ok().and_then(|v| v.as_str().map(str::to_string));
+    let shown = s.eventually(Duration::from_secs(5), || approval(&mut chrome).is_some_and(|t| t.contains("Add this key")));
+    s.ok("but a fragment's page that frames the platform's key approval gets a frame without it", !shown, format!("{:?}", approval(&mut chrome)));
+    chrome.close(attacker)?;
+
     // a chat: a chat fragment of the owner's, in the middle column, with
     // the owner's agent in it (its model is the OpenRouter fake, scripted:
     // a greeting, then an app when asked for one)

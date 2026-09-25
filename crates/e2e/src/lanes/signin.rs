@@ -28,6 +28,22 @@ pub(super) fn with_session(api: &Api, method: &str, path: &str, session: &str) -
     api.call(Call { method, url: format!("{}{path}", api.base), cookie: Some(format!("fragment_session={session}")), ..Call::default() })
 }
 
+/// An origin a fragment's page posts from: one site with the platform (a
+/// SameSite=Lax session cookie rides along), but not its origin.
+const A_FRAGMENTS_PAGE: &str = "http://page--mallory.fragment.localhost";
+
+/// Whether a page refuses every frame (`frame-ancestors 'none'`, and
+/// `X-Frame-Options: DENY` for browsers without it). Every fragment's
+/// origin is one site with the platform, so the platform's session rides
+/// into a frame, and a page there could lay a button under a click.
+fn unframed(r: &Reply) -> bool {
+    r.header("content-security-policy").contains("frame-ancestors 'none'") && r.header("x-frame-options") == "DENY"
+}
+
+fn framing(r: &Reply) -> String {
+    format!("{} content-security-policy {:?}, x-frame-options {:?}", r.status, r.header("content-security-policy"), r.header("x-frame-options"))
+}
+
 fn cookie_line(r: &Reply, name: &str) -> String {
     r.headers.get_all("set-cookie").iter().filter_map(|v| v.to_str().ok()).find(|c| c.starts_with(&format!("{name}="))).unwrap_or("").to_string()
 }
@@ -224,6 +240,42 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and only once", r.status == 400 && r.text.contains("chosen once"), &r);
     let r = choose(&"0".repeat(64), &format!("{chosen}y"))?;
     s.ok("a browser whose session is not live is sent to sign in", r.status == 302 && r.header("location").contains("/auth/login"), &r);
+    // a fragment's page is one site with the platform: its form, or its
+    // fetch, carries the session, and only the Origin says where it came from
+    let newcomer = api.sign_in("newcomer@e2e.test")?;
+    let r = api.call(Call {
+        method: "POST",
+        url: format!("{}/auth/username", api.base),
+        body: Some(format!("username={chosen}z").into_bytes()),
+        content_type: Some("application/x-www-form-urlencoded"),
+        cookie: Some(format!("fragment_session={newcomer}")),
+        extra: vec![("origin", A_FRAGMENTS_PAGE.into())],
+        ..Call::default()
+    })?;
+    let home = with_session(api, "GET", "/", &newcomer)?;
+    s.ok(
+        "a username posted from a fragment's page is refused (403): the person still chooses their own",
+        r.status == 403 && home.text.contains("Choose your username"),
+        format!("{r} / {home}"),
+    );
+    let picture = |origin: &str| {
+        let mut body = b"--frag\r\nContent-Disposition: form-data; name=\"picture\"; filename=\"p.png\"\r\nContent-Type: image/png\r\n\r\n".to_vec();
+        body.extend_from_slice(b"\x89PNG\r\n\x1a\n-a-tiny-picture\r\n--frag--\r\n");
+        api.call(Call {
+            method: "POST",
+            url: format!("{}/auth/picture", api.base),
+            body: Some(body),
+            content_type: Some("multipart/form-data; boundary=frag"),
+            cookie: Some(format!("fragment_session={chooser}")),
+            extra: vec![("origin", origin.to_string())],
+            ..Call::default()
+        })
+    };
+    let r = picture(A_FRAGMENTS_PAGE)?;
+    s.ok("so is a picture (403)", r.status == 403, &r);
+    let r = picture(&api.base)?;
+    let shown = api.unsigned("GET", &format!("/api/users/{chosen}/picture"), None)?;
+    s.ok("(from the platform's own page, the picture is set)", r.status == 302 && shown.status == 200, format!("{r} / {shown}"));
     let user = s.workos.user("paul@e2e.test");
     s.workos.set_email(&user.id, "paul@renamed.test");
     let renamed = api.sign_in("paul@renamed.test")?;
@@ -267,6 +319,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = with_session(api, "GET", &path, &paul)?;
     s.ok("signed in, it shows the key's ending to compare with the terminal", r.status == 200 && r.text.contains(&cli_npub[cli_npub.len() - 8..]), &r);
+    s.ok("and no page may frame it: a fragment's page could lay \"Add this key\" under a click (the desktop lane tries, in Chrome)", unframed(&r), framing(&r));
     let r = with_session(api, "GET", &format!("/cli?key={cli_npub}"), &paul)?;
     s.ok("a link without the key's proof is refused", r.status == 400, &r);
     let stale = api.approval_link(&cli, 11 * 60);
@@ -297,6 +350,18 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("(approving asks the registry once)", calls == 1, calls);
     let r = api.approve_link(&paul, &link)?;
     s.ok("approving it again changes nothing", r.status == 200, &r);
+    // every platform page refuses frames; its redirects need not (the
+    // desktop's frames sign in through them, and a redirect shows nothing)
+    let pages = [
+        ("the home page's forms", "Make it", with_session(api, "GET", "/", &paul)?),
+        ("the username form", "Take it", with_session(api, "GET", "/", &newcomer)?),
+        ("the signed-out home", "Sign in", api.unsigned("GET", "/", None)?),
+        ("the sign-out button", "Sign out", with_session(api, "GET", "/auth/logout", &paul)?),
+        ("an expired approval link", "fragment login", with_session(api, "GET", stale.trim_start_matches(&api.base), &paul)?),
+        ("a key added", "Key added", r),
+    ];
+    let framable: Vec<String> = pages.iter().filter(|(_, shows, r)| !(r.text.contains(shows) && unframed(r))).map(|(page, _, r)| format!("{page}: {}", framing(r))).collect();
+    s.ok(&format!("and so does every other platform page ({} of them)", pages.len()), framable.is_empty(), format!("{framable:?}"));
     // a person who signs in may hold no key at all
     let lone = api.sign_in("lone@e2e.test")?;
     let lone_key = Keys::generate();
@@ -588,6 +653,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an invite link sends a signed-out browser to sign in first", r.status == 302 && r.header("location").contains("__signin?return="), &r);
     let r = api.page(&f, &format!("__join?invite={invite}"), Some(&format!("fragment_site={outsider_f}")))?;
     s.ok("signed in, it offers to join", r.status == 200 && r.text.contains("Join"), &r);
+    s.ok("and no page may frame it: another fragment's page could lay Join under a click", unframed(&r), framing(&r));
     let r = api.call(Call {
         method: "POST",
         url: api.site_url(&f, "__join"),

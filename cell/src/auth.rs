@@ -18,6 +18,11 @@
 //!                                 approving adds the key at once
 //!   POST /cli/approve             (the form)
 //!
+//! Every fragment's origin is one site with the platform, so its pages'
+//! forms, fetches, and frames carry the platform's session cookie: every
+//! page here refuses frames (`unframed`), and every form is refused from
+//! another origin (`same_origin`).
+//!
 //! Each platform page asks the registry once: a call that needs the
 //! signed-in person carries the session's token, and the registry checks
 //! it in the same turn (`calls::By::Session`, `Mint`, `ApproveKey`,
@@ -129,6 +134,16 @@ fn redirect(to: &str, cookies: &[String]) -> CellResult<Response> {
     Ok(resp)
 }
 
+/// No page may frame one that acts for its person: the platform's, or a
+/// fragment's `__join`. Every fragment's origin is one site with the
+/// platform, so a session cookie rides into a frame, and a page there could
+/// lay the button under a click of its own. A redirect stays framable: it
+/// shows nothing, and the desktop's frames sign in through them.
+pub(crate) fn unframed(h: &Headers) -> worker::Result<()> {
+    h.set("content-security-policy", "frame-ancestors 'none'")?;
+    h.set("x-frame-options", "DENY")
+}
+
 fn page(status: u16, title: &str, body: &str) -> CellResult<Response> {
     let html = format!(
         r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{t}</title>
@@ -141,6 +156,7 @@ a{{color:#2a5bd7}}@media (prefers-color-scheme:dark){{body{{background:#15181b;c
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
     h.set("cache-control", "no-store")?;
+    unframed(&h)?;
     Ok(Response::ok(html)?.with_status(status).with_headers(h))
 }
 
@@ -175,7 +191,11 @@ pub fn site_token(req: &Request, name: &str, url: &Url, path_mode: bool) -> Cell
     cookie_of(req, SITE_COOKIE, secure(url), &site_cookie_path(name, path_mode))
 }
 
-/// A POST from a browser comes from the platform's own pages.
+/// A POST from a browser comes from the platform's own pages: a fragment's
+/// page is one site with the platform, so its form or fetch carries the
+/// session cookie, and only the Origin tells them apart. A browser sends
+/// Origin with every POST (`null` from a page that hides its referrer), so
+/// a POST without one is no browser's.
 fn same_origin(req: &Request, platform: &str) -> CellResult<()> {
     match req.headers().get("origin")? {
         Some(o) if o.trim_end_matches('/') != platform => Err(CellError::new(ErrorCode::Forbidden, "this form posts from the platform's own page")),
@@ -347,6 +367,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
             },
             (Method::Get, ["auth", "callback"]) => callback(&req, env, cfg, url).await,
             (Method::Post, ["auth", "username"]) => {
+                same_origin(&req, &platform)?;
                 let Some(token) = cookie_of(&req, SESSION_COOKIE, secure(url), "/")? else { return to_login(&platform, "/") };
                 // read before the registry says who is signed in: bounded as it arrives
                 let bytes = crate::read_body(&mut req, SHORT_FORM_MAX_BYTES).await?;
@@ -382,6 +403,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
             (Method::Post, ["auth", "picture"]) => {
                 // Two round trips, on purpose: the bytes land in BLOBS before
                 // the registry names them, so the session is checked first.
+                same_origin(&req, &platform)?;
                 let Some((token, _)) = platform_session(&req, env, url).await? else { return to_login(&platform, "/") };
                 let form = req.form_data().await?;
                 let Some(FormEntry::File(file)) = form.get("picture") else { return Err(CellError::invalid("choose a picture")) };
