@@ -22,6 +22,8 @@ pub struct Browser {
     next: u64,
     /// The browser context pages open in (`None`: Chrome's default one).
     context: Option<String>,
+    /// More contexts the lease made (`another_context`), ended with it.
+    others: Vec<String>,
     /// Chrome's own state for this launch, removed when it stops: never
     /// evidence, and tens of megabytes once a page has loaded.
     profile: PathBuf,
@@ -100,6 +102,11 @@ pub struct Page {
     target: String,
 }
 
+/// A second person's browser beside the lease's own: a browser context of
+/// its own in the same Chrome (its own cookies, storage, and cache), which
+/// ends with the lease. Its pages open with `Browser::open_in`.
+pub struct BrowserContext(String);
+
 fn chrome() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("CHROME_BIN") {
         return Some(PathBuf::from(p));
@@ -151,7 +158,7 @@ impl Browser {
         if let MaybeTlsStream::Plain(s) = ws.get_ref() {
             s.set_read_timeout(Some(Duration::from_secs(30)))?;
         }
-        Ok(Some(Browser { child, ws, next: 0, context: None, profile }))
+        Ok(Some(Browser { child, ws, next: 0, context: None, others: vec![], profile }))
     }
 
     /// Pages open in a new browser context from here on.
@@ -163,11 +170,24 @@ impl Browser {
         Ok(())
     }
 
-    /// Disposes of the context, closing its pages.
+    /// Disposes of the context, and any more the lease made, closing their pages.
     fn end_context(&mut self) -> Result<()> {
         let id = self.context.take().expect("a browser context to end");
+        for other in std::mem::take(&mut self.others) {
+            self.send("Target.disposeBrowserContext", json!({ "browserContextId": other }), None)?;
+        }
         self.send("Target.disposeBrowserContext", json!({ "browserContextId": id }), None)?;
         Ok(())
+    }
+
+    /// Another browser context for this lease: a second person's browser,
+    /// signed in to nothing, ended with the lease.
+    pub fn another_context(&mut self) -> Result<BrowserContext> {
+        assert!(self.context.is_some(), "a leased browser makes more contexts");
+        let made = self.send("Target.createBrowserContext", json!({}), None)?;
+        let id = made["browserContextId"].as_str().context("Target.createBrowserContext answers its id")?.to_string();
+        self.others.push(id.clone());
+        Ok(BrowserContext(id))
     }
 
     /// Sends one command and waits for its answer (events are skipped).
@@ -192,16 +212,31 @@ impl Browser {
     }
 
     pub fn open(&mut self, url: &str) -> Result<Page> {
+        let context = self.context.clone();
+        self.open_at(context.as_deref(), url)
+    }
+
+    /// Opens a page in another of the lease's contexts (`another_context`).
+    pub fn open_in(&mut self, context: &BrowserContext, url: &str) -> Result<Page> {
+        self.open_at(Some(&context.0), url)
+    }
+
+    fn open_at(&mut self, context: Option<&str>, url: &str) -> Result<Page> {
         let mut params = json!({ "url": url });
-        if let Some(context) = &self.context {
+        if let Some(context) = context {
             params["browserContextId"] = json!(context);
         }
         let target = self.send("Target.createTarget", params, None)?["targetId"].as_str().unwrap_or("").to_string();
+        self.attach(&target)
+    }
+
+    /// A page `pages` listed (a popup a page opened), to drive as one `open` answered.
+    pub fn attach(&mut self, target: &str) -> Result<Page> {
         let session = self.send("Target.attachToTarget", json!({ "targetId": target, "flatten": true }), None)?["sessionId"]
             .as_str()
             .unwrap_or("")
             .to_string();
-        Ok(Page { session, target })
+        Ok(Page { session, target: target.to_string() })
     }
 
     pub fn close(&mut self, page: Page) -> Result<()> {
@@ -209,16 +244,17 @@ impl Browser {
         Ok(())
     }
 
-    /// The pages open in this lease's context, popups a page opened
+    /// The pages open in this lease's contexts, popups a page opened
     /// included: (target id, URL).
     pub fn pages(&mut self) -> Result<Vec<(String, String)>> {
         let v = self.send("Target.getTargets", json!({}), None)?;
         let context = self.context.clone();
+        let ours = |id: &Value| context.as_deref().is_none_or(|c| id == c || self.others.iter().any(|o| id == o.as_str()));
         Ok(v["targetInfos"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|t| t["type"] == "page" && context.as_deref().is_none_or(|c| t["browserContextId"] == c))
+            .filter(|t| t["type"] == "page" && ours(&t["browserContextId"]))
             .map(|t| (t["targetId"].as_str().unwrap_or("").to_string(), t["url"].as_str().unwrap_or("").to_string()))
             .collect())
     }
