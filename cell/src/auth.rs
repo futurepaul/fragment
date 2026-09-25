@@ -18,6 +18,13 @@
 //!                                 approving adds the key at once
 //!   POST /cli/approve             (the form)
 //!
+//! Each platform page asks the registry once: a call that needs the
+//! signed-in person carries the session's token, and the registry checks
+//! it in the same turn (`calls::By::Session`, `Mint`, `ApproveKey`,
+//! `Begin`'s `link_to`); a page that shows them gets their email with the
+//! session. Only a picture asks twice: its bytes are stored before the
+//! registry names them, so the session is checked before they are.
+//!
 //! A fragment's origin: `__signin?token=&return=` redeems the platform's
 //! redemption for this fragment only and sets its own session cookie;
 //! `__signin` without a token starts at the platform; `__signout` ends
@@ -26,7 +33,7 @@
 //! asking (the fragment decides which: `routed::Credential`).
 
 use fragment_core::{npub, site};
-use fragment_proto::{ErrorCode, Identity, IdentityKind};
+use fragment_proto::{ErrorCode, IdentityKind};
 use worker::*;
 
 use crate::ask_registry;
@@ -47,8 +54,9 @@ const LINK_PROOF_MAX: usize = 4096;
 /// that form encoding may triple.
 const APPROVE_FORM_MAX_BYTES: usize = 16 * 1024;
 const _: () = assert!(APPROVE_FORM_MAX_BYTES >= 3 * LINK_PROOF_MAX + 256, "the form holds the longest proof, encoded");
-/// The new-fragment form: a label and a template's name.
-const NEW_FORM_MAX_BYTES: usize = 4 * 1024;
+/// A form of a few short fields: a new fragment's label and template, or a
+/// username.
+const SHORT_FORM_MAX_BYTES: usize = 4 * 1024;
 
 /// The key an approval link's proof is by, if it is good: a NIP-98 event
 /// by that key for `POST <platform>/cli/approve`, made within ten minutes.
@@ -140,11 +148,12 @@ fn query(url: &Url, k: &str) -> Option<String> {
     url.query_pairs().find(|(q, _)| q == k).map(|(_, v)| v.into_owned())
 }
 
-/// The signed-in person on the platform origin, and their session's token, or `None`.
-async fn platform_session(req: &Request, env: &Env, url: &Url) -> CellResult<Option<(String, Identity)>> {
+/// The signed-in person on the platform origin, with their email, and
+/// their session's token, or `None`.
+async fn platform_session(req: &Request, env: &Env, url: &Url) -> CellResult<Option<(String, calls::LiveSession)>> {
     let Some(token) = cookie_of(req, SESSION_COOKIE, secure(url), "/")? else { return Ok(None) };
     match ask_registry(env, &calls::Session { token: token.clone(), fragment: None }).await {
-        Ok(identity) => Ok(Some((token, identity))),
+        Ok(live) => Ok(Some((token, live))),
         Err(e) if e.code == ErrorCode::Unauthenticated => Ok(None),
         Err(e) => Err(e),
     }
@@ -190,16 +199,6 @@ async fn budget_line(env: &Env, id: &str) -> String {
         }
         Err(_) => String::new(),
     }
-}
-
-/// The email of a person's first sign-in, for the platform's pages.
-async fn email_of(env: &Env, id: &str) -> String {
-    ask_registry(env, &calls::View { identity: id.to_string(), by: id.to_string() })
-        .await
-        .ok()
-        .and_then(|view| view.subjects.into_iter().next())
-        .and_then(|subject| subject.email)
-        .unwrap_or_default()
 }
 
 /// The fragments a person belongs to, as links.
@@ -306,8 +305,8 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
             (Method::Get, [""]) => {
                 let body = match platform_session(&req, env, url).await? {
                     // a username first: fragments live under it (decision 16)
-                    Some((_, who)) if who.username.is_none() && who.kind == IdentityKind::Person => {
-                        let email = email_of(env, &who.id).await;
+                    Some((_, live)) if live.identity.username.is_none() && live.identity.kind == IdentityKind::Person => {
+                        let email = live.email.unwrap_or_default();
                         format!(
                             "<h1>Choose your username</h1><p>Signed in as <b>{}</b>. Your fragments will live at <code>&lt;name&gt;.<i>username</i>.{}</code>; a username is chosen once.</p>\
                              <form method=\"post\" action=\"/auth/username\"><p><input name=\"username\" required minlength=\"3\" maxlength=\"32\" pattern=\"[a-z0-9]([a-z0-9-]*[a-z0-9])?\" autocomplete=\"username\" style=\"font:inherit;padding:.4em .6em;border-radius:8px;border:1px solid #aab\"> <button>Take it</button></p></form>\
@@ -316,9 +315,11 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                             esc(cfg.platform(url).split("://").nth(1).unwrap_or("fragment.club")),
                         )
                     }
-                    Some((_, who)) => {
-                        let email = email_of(env, &who.id).await;
+                    Some((_, live)) => {
+                        let (who, email) = (live.identity, live.email.unwrap_or_default());
                         let username = who.username.clone().unwrap_or_default();
+                        // the month and the fragments, asked of their cells at once
+                        let (budget, fragments) = futures_util::future::join(budget_line(env, &who.id), fragments_list(env, cfg, url, &who.id)).await;
                         format!(
                             "<p><img src=\"/api/users/{u}/picture\" alt=\"\" width=\"48\" height=\"48\" style=\"border-radius:50%;vertical-align:middle;object-fit:cover\" onerror=\"this.remove()\"> Signed in as <b>{u}</b> ({e}, <code>{id}</code>).</p>{b}{f}{n}\
                              <form method=\"post\" action=\"/auth/picture\" enctype=\"multipart/form-data\"><p>Picture: <input type=\"file\" name=\"picture\" accept=\"image/png,image/jpeg,image/webp,image/gif\" required> <button>Set</button></p></form>\
@@ -326,8 +327,8 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                             u = esc(&username),
                             e = esc(&email),
                             id = esc(&who.id),
-                            b = budget_line(env, &who.id).await,
-                            f = fragments_list(env, cfg, url, &who.id).await,
+                            b = budget,
+                            f = fragments,
                             n = new_form(&username, &cfg.platform(url)),
                         )
                     }
@@ -336,17 +337,24 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 page(200, "fragment", &body)
             }
             (Method::Get, ["auth", "login"]) => begin(env, cfg, url, None).await,
-            (Method::Get, ["auth", "link"]) => match platform_session(&req, env, url).await? {
-                Some((token, _)) => begin(env, cfg, url, Some(token)).await,
+            // the registry checks the session is live as the sign-in begins
+            (Method::Get, ["auth", "link"]) => match cookie_of(&req, SESSION_COOKIE, secure(url), "/")? {
+                Some(token) => match begin(env, cfg, url, Some(token)).await {
+                    Err(e) if e.code == ErrorCode::Unauthenticated => to_login(&platform, "/auth/link"),
+                    begun => begun,
+                },
                 None => to_login(&platform, "/auth/link"),
             },
             (Method::Get, ["auth", "callback"]) => callback(&req, env, cfg, url).await,
             (Method::Post, ["auth", "username"]) => {
-                let Some((_, who)) = platform_session(&req, env, url).await? else { return to_login(&platform, "/") };
-                let form = req.form_data().await?;
-                let Some(FormEntry::Field(username)) = form.get("username") else { return Err(CellError::invalid("choose a username")) };
-                match ask_registry(env, &calls::ClaimUsername { identity: who.id.clone(), username: username.trim().to_string() }).await {
+                let Some(token) = cookie_of(&req, SESSION_COOKIE, secure(url), "/")? else { return to_login(&platform, "/") };
+                // read before the registry says who is signed in: bounded as it arrives
+                let bytes = crate::read_body(&mut req, SHORT_FORM_MAX_BYTES).await?;
+                let username = url::form_urlencoded::parse(&bytes).find(|(k, _)| k == "username").map(|(_, v)| v.trim().to_string());
+                let Some(username) = username else { return Err(CellError::invalid("choose a username")) };
+                match ask_registry(env, &calls::ClaimUsername { by: calls::By::Session(token), username }).await {
                     Ok(_) => redirect("/", &[]),
+                    Err(e) if e.code == ErrorCode::Unauthenticated => to_login(&platform, "/"),
                     Err(e) if matches!(e.code, ErrorCode::AlreadyExists | ErrorCode::InvalidRequest) => {
                         page(400, "Choose your username", &format!("<p>{}</p><p><a href=\"/\">Try another</a></p>", esc(&e.message)))
                     }
@@ -355,11 +363,11 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
             }
             (Method::Post, ["auth", "new"]) => {
                 same_origin(&req, &platform)?;
-                let Some((_, who)) = platform_session(&req, env, url).await? else { return to_login(&platform, "/") };
-                let bytes = crate::read_body(&mut req, NEW_FORM_MAX_BYTES).await?;
+                let Some((_, live)) = platform_session(&req, env, url).await? else { return to_login(&platform, "/") };
+                let bytes = crate::read_body(&mut req, SHORT_FORM_MAX_BYTES).await?;
                 let field = |name: &str| url::form_urlencoded::parse(&bytes).find(|(k, _)| k == name).map(|(_, v)| v.trim().to_string()).unwrap_or_default();
                 let create = fragment_proto::CreateFragment { name: field("label"), visibility: None, template: Some(field("template")) };
-                let v: serde_json::Value = match crate::create_fragment(env, cfg, url, create, Signed { identity: who, key: None }).await {
+                let v: serde_json::Value = match crate::create_fragment(env, cfg, url, create, Signed { identity: live.identity, key: None }).await {
                     Ok(mut made) if made.status_code() == 200 => made.json().await?,
                     Ok(mut made) => {
                         let v: serde_json::Value = made.json().await.unwrap_or_default();
@@ -372,7 +380,9 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 redirect(&format!("/auth/fragment?name={}&return=/", enc(name)), &[])
             }
             (Method::Post, ["auth", "picture"]) => {
-                let Some((_, who)) = platform_session(&req, env, url).await? else { return to_login(&platform, "/") };
+                // Two round trips, on purpose: the bytes land in BLOBS before
+                // the registry names them, so the session is checked first.
+                let Some((token, _)) = platform_session(&req, env, url).await? else { return to_login(&platform, "/") };
                 let form = req.form_data().await?;
                 let Some(FormEntry::File(file)) = form.get("picture") else { return Err(CellError::invalid("choose a picture")) };
                 let bytes = file.bytes().await?;
@@ -384,7 +394,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 };
                 let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes));
                 crate::js::blob_put_bytes(env.as_ref(), &format!("pictures/{sha}"), &bytes).await?;
-                ask_registry(env, &calls::SetPicture { identity: who.id.clone(), sha, mime: mime.to_string() }).await?;
+                ask_registry(env, &calls::SetPicture { by: calls::By::Session(token), sha, mime: mime.to_string() }).await?;
                 redirect("/", &[])
             }
             (Method::Get, ["auth", "logout"]) => page(200, "Sign out", "<form method=\"post\" action=\"/auth/logout\"><button>Sign out</button></form>"),
@@ -408,11 +418,14 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
             (Method::Get, ["auth", "fragment"]) => {
                 let name = query(url, "name").filter(|n| fragment_proto::valid_fragment_name(n)).ok_or_else(|| CellError::invalid("name a fragment"))?;
                 let back = site::return_path(query(url, "return").as_deref());
-                let Some((token, _)) = platform_session(&req, env, url).await? else {
-                    return to_login(&platform, &format!("/auth/fragment?name={name}&return={}", enc(&back)));
-                };
-                let minted = ask_registry(env, &calls::Mint { token, fragment: name.clone(), return_to: back }).await?;
-                redirect(&format!("{}__signin?token={}", cfg.canonical(url, &name), minted.redeem), &[])
+                let signed_out = || to_login(&platform, &format!("/auth/fragment?name={name}&return={}", enc(&back)));
+                let Some(token) = cookie_of(&req, SESSION_COOKIE, secure(url), "/")? else { return signed_out() };
+                // the registry checks the session is live as it mints
+                match ask_registry(env, &calls::Mint { token, fragment: name.clone(), return_to: back.clone() }).await {
+                    Ok(minted) => redirect(&format!("{}__signin?token={}", cfg.canonical(url, &name), minted.redeem), &[]),
+                    Err(e) if e.code == ErrorCode::Unauthenticated => signed_out(),
+                    Err(e) => Err(e),
+                }
             }
             (Method::Get, ["cli"]) => {
                 let key = query(url, "key").unwrap_or_default();
@@ -421,10 +434,10 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 if let Err(e) = link_proof(&platform, &hex, &proof) {
                     return page(400, "This link has expired", &format!("<p>{}</p>", esc(&e.message)));
                 }
-                let Some((_, who)) = platform_session(&req, env, url).await? else {
+                let Some((_, live)) = platform_session(&req, env, url).await? else {
                     return to_login(&platform, &format!("/cli?key={}&proof={}", enc(&key), enc(&proof)));
                 };
-                let email = email_of(env, &who.id).await;
+                let (who, email) = (live.identity, live.email.unwrap_or_default());
                 let npub = npub::encode(&hex);
                 let tail = &npub[npub.len() - 8..];
                 page(
@@ -446,10 +459,11 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 let bytes = crate::read_body(&mut req, APPROVE_FORM_MAX_BYTES).await?;
                 let field = |name: &str| url::form_urlencoded::parse(&bytes).find(|(k, _)| k == name).map(|(_, v)| v.into_owned()).unwrap_or_default();
                 let hex = npub::parse(&field("key")).ok_or_else(|| CellError::invalid("the form names no key"))?;
-                let Some((token, _)) = platform_session(&req, env, url).await? else {
+                let Some(token) = cookie_of(&req, SESSION_COOKIE, secure(url), "/")? else {
                     return Err(CellError::new(ErrorCode::Unauthenticated, "sign in first"));
                 };
                 link_proof(&platform, &hex, &field("proof"))?;
+                // the registry checks the session is live as it adds the key
                 ask_registry(env, &calls::ApproveKey { token, key: hex }).await?;
                 page(200, "Key added", "<p>This key is yours now. A <code>fragment login</code> waiting in a terminal finishes on its own.</p>")
             }

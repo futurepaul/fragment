@@ -2,8 +2,9 @@
 //! request resolves to an identity in the registry, live; grants name
 //! identities, so a key replaced with a proof keeps every grant; a revoked
 //! key is refused from the next request and never comes back; an agent's
-//! owner reads what it reads and never acts through it; and a registry that
-//! cannot answer is a visible 503, never an allow.
+//! owner reads what it reads and never acts through it; a registry that
+//! cannot answer is a visible 503, never an allow; and each call asks the
+//! registry once, resolving its signer in the same turn.
 
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,7 @@ use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
 use super::app::ship;
+use super::signin::calls_of;
 use crate::api::{now_s, Api};
 use crate::Suite;
 
@@ -90,7 +92,7 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("nobody else adds a key to a person", r.status == 403, &r);
     let r = api.signed(&paul, "POST", add, Some(&json!({ "proof": api.proof(&friend, "POST", add, &paul) })))?;
     s.ok("a key someone else holds cannot be added", r.status == 409, &r);
-    let r = api.signed(&paul, "POST", add, Some(&json!({ "proof": api.proof(&new, "POST", add, &paul) })))?;
+    let (r, add_calls) = calls_of(api, || api.signed(&paul, "POST", add, Some(&json!({ "proof": api.proof(&new, "POST", add, &paul) }))))?;
     s.ok("with a proof by the new key, it is added", r.status == 200 && r.body["created"] == true && keys_of(&r.body).iter().filter(|k| k.1).count() == 2, &r);
     let r = api.signed(&paul, "POST", add, Some(&json!({ "proof": api.proof(&new, "POST", add, &paul) })))?;
     s.ok("adding it again changes nothing", r.status == 200 && r.body["created"] == false, &r);
@@ -101,7 +103,7 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&new, "POST", &format!("/api/f/{mine}/rotate"), Some(&json!({ "scopes": ["view"] })))?;
     s.ok("the new key acts as the owner", r.status == 200, &r);
     let old_hex = paul.pubkey_hex().to_string();
-    let r = api.signed(&new, "DELETE", &format!("/api/identities/me/keys/{}", npub::encode(&old_hex)), None)?;
+    let (r, revoke_calls) = calls_of(api, || api.signed(&new, "DELETE", &format!("/api/identities/me/keys/{}", npub::encode(&old_hex)), None))?;
     s.ok("the new key revokes the old one", r.status == 200 && keys_of(&r.body).iter().filter(|k| k.1).count() == 1, &r);
     let after = api.signed(&friend, "GET", &format!("/api/f/{theirs}/members"), None)?;
     s.ok("no grant was rewritten: the members are the same identities", after.body["members"] == before.body["members"], &after);
@@ -126,11 +128,12 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
     let reg = "/api/identities";
     let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent" })))?;
     s.ok("an agent registers with a proof by its key", r.status == 400, &r);
-    let r = api.signed(&Keys::generate(), "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&agent, "POST", reg, &owner) })))?;
-    s.ok("a key no one registered cannot vouch for an agent", r.status == 401, &r);
+    let nobody = Keys::generate();
+    let r = api.signed(&nobody, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&agent, "POST", reg, &nobody) })))?;
+    s.ok("a key no one registered cannot vouch for an agent", r.status == 401 && r.message().contains("fragment login"), &r);
     let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&agent, "POST", reg, &friend) })))?;
     s.ok("a proof meant for another owner is refused", r.status == 400, &r);
-    let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&agent, "POST", reg, &owner) })))?;
+    let (r, register_calls) = calls_of(api, || api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&agent, "POST", reg, &owner) }))))?;
     let agent_id = r.body["id"].as_str().unwrap_or("").to_string();
     s.ok("the owner registers an agent they own", r.status == 200 && r.body["kind"] == "agent" && r.body["owner"] == owner_id.as_str(), &r);
     let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&agent, "POST", reg, &owner) })))?;
@@ -142,8 +145,16 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
     let agent_keys = format!("/api/identities/{agent_id}/keys");
     let r = api.signed(&agent, "POST", &agent_keys, Some(&json!({ "proof": api.proof(&Keys::generate(), "POST", &agent_keys, &agent) })))?;
     s.ok("an agent does not add keys to itself", r.status == 403, &r);
-    let r = api.signed(&owner, "GET", "/api/identities/me", None)?;
+    let (r, whoami_calls) = calls_of(api, || api.signed(&owner, "GET", "/api/identities/me", None))?;
     s.ok("the owner's identity lists the agent", r.body["agents"] == json!([agent_id]), &r);
+    let (r, check_calls) = calls_of(api, || api.signed(&agent, "GET", &format!("/api/identities/{owner_id}/keys/{}", npub::encode(owner.pubkey_hex())), None))?;
+    s.ok("an agent asks whether a key is its owner's", r.status == 200 && r.body["active"] == true, &r);
+    let calls = [("whoami", whoami_calls), ("add a key", add_calls), ("revoke one", revoke_calls), ("check one", check_calls), ("register an agent", register_calls)];
+    s.ok(
+        "each identities call asks the registry once: the signer is resolved in the same turn as what it asks",
+        calls.iter().all(|(_, n)| *n == 1),
+        format!("{calls:?}"),
+    );
     let r = api.signed(&owner, "DELETE", &format!("/api/identities/{agent_id}/keys/{}", agent.pubkey_hex()), None)?;
     s.ok("an agent's last key cannot be revoked", r.status == 400, &r);
 

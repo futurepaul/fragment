@@ -109,7 +109,7 @@ pub(crate) async fn create(env: &Env, who: &Signed, label: &str, options: &Value
     let body = json!({ "name": name, "model": options["model"], "instructions": options["instructions"] });
     let mut made = ask_json(env, Method::Post, "/api/agents", &who.id, &body).await?;
     let hex = made["npub"].as_str().and_then(npub::parse).ok_or_else(|| CellError::host("the agents' script answered no key"))?;
-    let registered = ask_registry(env, &calls::RegisterAgent { owner: who.id.clone(), key: hex }).await?;
+    let registered = ask_registry(env, &calls::RegisterAgent { owner: calls::By::Identity(who.id.clone()), key: hex }).await?;
     made["id"] = json!(registered.id);
     Ok(made)
 }

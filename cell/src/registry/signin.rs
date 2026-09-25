@@ -26,7 +26,8 @@
 //!                                                            WorkOS's code exchanged through KEYS
 //!                                                            (the API key is the node's), then the
 //!                                                            sign-in finished
-//!   POST /session       {token, fragment?}                  → {id, kind, owner} (401 when not live)
+//!   POST /session       {token, fragment?}                  → {id, kind, owner, username, email} (401 when
+//!                                                            not live; the email is their first sign-in's)
 //!   POST /session/end   {token, fragment}                   → {ended}: a fragment's `__signout`
 //!   POST /logout        {token}                             → {workosSid}
 //!   POST /redeem/mint   {token, fragment, returnTo}         → {redeem}
@@ -39,8 +40,8 @@ use serde::de::IgnoredAny;
 use sha2::{Digest, Sha256};
 
 use super::calls::{
-    ApproveKey, Approved, Began, Begin, EndSession, Ended, Exchange, Exchanged, LoggedOut, Logout, Mint, Minted, Redeem, Redeemed, Session,
-    SigninCounts, SigninsHook,
+    ApproveKey, Approved, Began, Begin, EndSession, Ended, Exchange, Exchanged, LiveSession, LoggedOut, Logout, Mint, Minted, Redeem, Redeemed,
+    Session, SigninCounts, SigninsHook,
 };
 use super::*;
 
@@ -138,8 +139,9 @@ pub(super) struct Finish {
     workos_sid: Option<String>,
 }
 
-/// A live session's row, with whether its parent is live and its
-/// identity with its username, all in one statement (`live_session`).
+/// A live session's row, with whether its parent is live, its identity
+/// with its username, and their first sign-in's email, all in one
+/// statement (`live_session`).
 #[derive(Deserialize)]
 struct SessionRow {
     identity: String,
@@ -150,6 +152,7 @@ struct SessionRow {
     kind: Option<IdentityKind>,
     owner: Option<String>,
     username: Option<String>,
+    email: Option<String>,
 }
 
 /// `logins` (a pending sign-in, spent).
@@ -292,12 +295,14 @@ impl RegistryCell {
 
     /// The live session a token names: not revoked, not expired, for this
     /// fragment (`None`: a platform session), its parent live too. Answers
-    /// the session's hash and its identity.
-    fn live_session(&self, token: &str, fragment: Option<&str>) -> CellResult<(String, Identity)> {
+    /// the session's hash, its identity, and their first sign-in's email.
+    pub(super) fn live_session(&self, token: &str, fragment: Option<&str>) -> CellResult<(String, LiveSession)> {
         // one statement: the session (its hash is the key), its parent (by
-        // its hash), its identity, and that identity's username
+        // its hash), its identity, that identity's username, and the email
+        // of its first sign-in (`subjects_identity`; at most SUBJECTS_MAX)
         const Q: &str = concat!(
-            "SELECT s.identity, s.fragment, s.parent, p.hash AS parent_live, i.kind, i.owner, u.username FROM sessions s ",
+            "SELECT s.identity, s.fragment, s.parent, p.hash AS parent_live, i.kind, i.owner, u.username, ",
+            "(SELECT email FROM subjects WHERE identity = s.identity ORDER BY linked_at LIMIT 1) AS email FROM sessions s ",
             "LEFT JOIN sessions p ON p.hash = s.parent AND p.revoked_at IS NULL AND p.expires_at > ? ",
             "LEFT JOIN identities i ON i.id = s.identity ",
             username_join!(),
@@ -316,8 +321,8 @@ impl RegistryCell {
         if row.parent.is_some() && row.parent_live.is_none() {
             return Err(not_signed_in());
         }
-        let who = joined_identity(row.identity, row.kind, row.owner, row.username, "a session")?;
-        Ok((hash, who))
+        let identity = joined_identity(row.identity, row.kind, row.owner, row.username, "a session")?;
+        Ok((hash, LiveSession { identity, email: row.email }))
     }
 
     fn new_session(&self, identity: &str, fragment: Option<&str>, parent: Option<&str>, sid: Option<&str>, expires_at: i64) -> CellResult<String> {
@@ -340,7 +345,7 @@ impl RegistryCell {
 
     pub(super) async fn begin(&self, b: Begin) -> CellResult<Began> {
         let link_to = match &b.link_to {
-            Some(token) => Some(self.live_session(token, None)?.1),
+            Some(token) => Some(self.live_session(token, None)?.1.identity),
             None => None,
         };
         if let Some(p) = &link_to {
@@ -444,7 +449,7 @@ impl RegistryCell {
         Ok(Exchanged { token, id, created, linked, return_to: login.return_to })
     }
 
-    pub(super) fn session(&self, b: Session) -> CellResult<Identity> {
+    pub(super) fn session(&self, b: Session) -> CellResult<LiveSession> {
         Ok(self.live_session(&b.token, b.fragment.as_deref())?.1)
     }
 
@@ -534,7 +539,7 @@ impl RegistryCell {
     /// the key's own proof in the approval link).
     pub(super) fn add_by_session(&self, b: ApproveKey) -> CellResult<Approved> {
         check_key(&b.key)?;
-        let (_, person) = self.live_session(&b.token, None)?;
+        let person = self.live_session(&b.token, None)?.1.identity;
         match self.key_row(&b.key)? {
             Some(row) if row.identity == person.id && row.active() => return Ok(Approved { id: person.id, key: npub::encode(&b.key), added: false }),
             Some(_) => return Err(conflict("this key already belongs to someone (or was revoked)")),
