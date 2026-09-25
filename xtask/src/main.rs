@@ -171,9 +171,20 @@ fn dev(args: &[String]) -> Result<()> {
         egress_local: true,
     }
     .configure(&devstack::agent_dir())?;
-    let opts = devstack::NodeOptions { project: devstack::cell_dir(), port: DEV_PORT, clean, watch: true, env: node_env, with: vec![devstack::agent_dir()] };
+    let opts = devstack::NodeOptions {
+        project: devstack::cell_dir(),
+        port: DEV_PORT,
+        clean,
+        watch: true,
+        env: node_env,
+        with: vec![devstack::agent_dir()],
+        log_dir: devstack::repo_root().join("target/devstack"),
+        // the node's own warnings and information, when asked for
+        node_logs: std::env::var_os("FRAGMENT_NODE_LOGS").is_some(),
+    };
     let (node, took) = devstack::Node::start(&tools, &opts)?;
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
+    println!("  node log:     {}", node.log.display());
     println!("  fragments:    http://<label>--<username>.fragment.localhost:{DEV_PORT}/");
     println!("  agents:       {}/api/agents (co-hosted; signed)", node.base);
     println!("  code.storage: {} (the fake)", fake.url);

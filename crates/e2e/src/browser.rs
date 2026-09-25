@@ -17,7 +17,9 @@ pub struct Browser {
     child: Child,
     ws: WebSocket<MaybeTlsStream<TcpStream>>,
     next: u64,
-    _profile: PathBuf,
+    /// Chrome's own state for this launch, removed when it stops: never
+    /// evidence, and tens of megabytes once a page has loaded.
+    profile: PathBuf,
 }
 
 /// One tab, addressed by its DevTools session.
@@ -77,7 +79,7 @@ impl Browser {
         if let MaybeTlsStream::Plain(s) = ws.get_ref() {
             s.set_read_timeout(Some(Duration::from_secs(30)))?;
         }
-        Ok(Some(Browser { child, ws, next: 0, _profile: profile }))
+        Ok(Some(Browser { child, ws, next: 0, profile }))
     }
 
     /// Sends one command and waits for its answer (events are skipped).
@@ -206,5 +208,6 @@ impl Drop for Browser {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.profile);
     }
 }

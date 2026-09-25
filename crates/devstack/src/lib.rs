@@ -359,6 +359,32 @@ pub struct NodeOptions {
     /// Projects co-hosted beside it for its service bindings (`celld dev
     /// --with`): the agents' script, as the fleet runs it.
     pub with: Vec<PathBuf>,
+    /// Where each boot's log goes (`celld-<port>-<boot>.log`).
+    pub log_dir: PathBuf,
+    /// `celld dev --logs`: the node's own warnings and information in the
+    /// log, beside the workers' output (a panic's message among them).
+    pub node_logs: bool,
+}
+
+/// Boots of one port whose logs one directory keeps; a start past this
+/// asks for the directory to be cleared rather than scanning without end.
+pub const BOOT_LOGS_MAX: u32 = 10_000;
+
+/// A new log for a boot on `port`: `celld-<port>-<boot>.log`, the first
+/// boot number `dir` has no log for. A node started again on its port (the
+/// e2e's restarts) never truncates the log of the one before, which a
+/// crash leaves there, and its own `ready` is the only one in its file.
+fn boot_log(dir: &Path, port: u16) -> Result<(PathBuf, fs::File)> {
+    fs::create_dir_all(dir)?;
+    for boot in 1..=BOOT_LOGS_MAX {
+        let path = dir.join(format!("celld-{port}-{boot}.log"));
+        match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("create {}", path.display())),
+        }
+    }
+    bail!("{} holds {BOOT_LOGS_MAX} logs of nodes on :{port} already; clear it", dir.display())
 }
 
 /// One `celld dev` node. `celld dev` runs the node as a child process, so
@@ -367,23 +393,17 @@ pub struct Node {
     child: Child,
     pub base: String,
     pub port: u16,
+    /// This boot's log.
+    pub log: PathBuf,
     reaped: bool,
 }
 
 impl Node {
     pub fn start(tools: &Tools, opts: &NodeOptions) -> Result<(Node, Duration)> {
-        let logs = repo_root().join("target/devstack");
-        fs::create_dir_all(&logs)?;
-        let log = logs.join(format!("celld-{}.log", opts.port));
-        // appended: a node started again on its port (the e2e's restarts)
-        // keeps the log of the one before, which a crash leaves there
-        let out = fs::OpenOptions::new().create(true).append(true).open(&log)?;
-        // this start's own lines only: an earlier start's `ready` is in there too
-        let from = out.metadata()?.len() as usize;
+        let (log, out) = boot_log(&opts.log_dir, opts.port)?;
         let mut cmd = Command::new(&tools.celld);
         cmd.arg("dev").arg(&opts.project).args(["--port", &opts.port.to_string()]);
-        // the node's own warnings and info (a panic's message among them)
-        if std::env::var_os("FRAGMENT_NODE_LOGS").is_some() {
+        if opts.node_logs {
             cmd.arg("--logs");
         }
         for other in &opts.with {
@@ -401,9 +421,9 @@ impl Node {
         }
         let t0 = Instant::now();
         let child = cmd.stdout(out.try_clone()?).stderr(out).stdin(Stdio::null()).spawn()?;
-        let mut node = Node { child, base: format!("http://127.0.0.1:{}", opts.port), port: opts.port, reaped: false };
+        let mut node = Node { child, base: format!("http://127.0.0.1:{}", opts.port), port: opts.port, log: log.clone(), reaped: false };
         loop {
-            let text = fs::read(&log).map(|b| String::from_utf8_lossy(b.get(from..).unwrap_or_default()).into_owned()).unwrap_or_default();
+            let text = fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
             if text.contains("  ready  ") {
                 break;
             }
@@ -464,5 +484,26 @@ impl Drop for Node {
         if !self.reaped {
             self.kill();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A node started again on its port gets a log of its own, numbered
+    /// after the last, and the earlier boot's log keeps what it holds.
+    #[test]
+    fn each_boot_on_a_port_gets_its_own_log() {
+        let dir = std::env::temp_dir().join(format!("devstack-boot-log-{}", random_hex(6)));
+        let (first, mut file) = boot_log(&dir, 4321).expect("a first log");
+        writeln!(file, "the first boot's last words").expect("write the first log");
+        let (second, _) = boot_log(&dir, 4321).expect("a second log");
+        let (other, _) = boot_log(&dir, 4322).expect("another port's log");
+        assert_eq!(first, dir.join("celld-4321-1.log"));
+        assert_eq!(second, dir.join("celld-4321-2.log"));
+        assert_eq!(other, dir.join("celld-4322-1.log"));
+        assert_eq!(fs::read_to_string(&first).expect("read the first log"), "the first boot's last words\n");
+        fs::remove_dir_all(&dir).expect("remove the test's directory");
     }
 }
