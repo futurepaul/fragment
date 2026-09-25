@@ -468,3 +468,22 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** a paid step's answer is kept before anything else
   runs (the image as a blob by its hash first), so a retry settles
   without calling again.
+
+## A node restarted after a kill has twice died of SIGILL
+
+- **Observed:** phase 6, 2026-09-24. In two of about six full e2e runs
+  (both with the machine's load at 20 to 30 from other sessions' runs),
+  the computer lane's check that kills the node mid-command ended with
+  the restarted node exiting on SIGILL: a V8 fatal error, most likely,
+  as hundreds of cells from the earlier lanes woke at once, the agents'
+  script co-hosted beside the cell. It never happened with the lane run
+  alone (five runs, one at load 30), nor in the full run with the node's
+  own logs on (848 passed).
+- **Risk:** a fragment.club node that dies hard, restarts, and wakes
+  everything at once could die again.
+- **First proof:** the next time it happens, with `FRAGMENT_NODE_LOGS=1`
+  (the node's own logs, kept across restarts in
+  `target/devstack/celld-<port>.log`), or a node on the fleet restarting
+  twice.
+- **Delete when:** the fatal is caught and fixed in celld or here, or a
+  run of full e2es under load no longer shows it.
