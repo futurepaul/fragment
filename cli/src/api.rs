@@ -2,7 +2,7 @@
 // CLI's error codes: every answer is decoded at this door, a refusal from
 // the platform's `ErrorBody` and a success into its fragment_proto type.
 use crate::auth::Identity;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use fragment_proto::{ErrorBody, ErrorCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -222,7 +222,8 @@ pub enum Signed {
 pub struct Client {
     pub host: String,
     pub id: Identity,
-    verbose: bool,
+    /// `-v`: one stderr line per signed request
+    pub verbose: bool,
     http: reqwest::blocking::Client,
 }
 
@@ -266,12 +267,6 @@ impl Client {
         }
     }
 
-    /// Builder-style toggle for `-v`: one stderr line per signed request.
-    pub fn with_verbose(mut self) -> Self {
-        self.verbose = true;
-        self
-    }
-
     fn request(&self, method: &str, path: &str, body: Option<Vec<u8>>) -> Result<Resp> {
         let body = body.unwrap_or_default();
         let timeout = timeout_for(body.len() as u64);
@@ -279,91 +274,30 @@ impl Client {
     }
 
     /// One signed request, retried within [`REQUEST_ATTEMPTS`] as `replay`
-    /// allows: long-lived sync clients hold keep-alive pools that go stale
-    /// when the host restarts, and without retries a watcher wedges until
-    /// its process is restarted (observed live on relay-vault).
+    /// allows (`send_retrying`).
     fn send(&self, method: &str, path: &str, body: Vec<u8>, replay: Replay, signed: Signed, timeout: Duration) -> Result<Resp> {
         let url = format!("{}{}", self.host, path);
-        let mut last_err = None;
-        // whether any try's connection opened: its request may have landed
-        let mut reached = false;
-        for attempt in 0..REQUEST_ATTEMPTS {
-            if attempt > 0 {
-                std::thread::sleep(Duration::from_millis(300 * attempt as u64));
+        let verb: reqwest::Method = method.parse()?;
+        let what = format!("{method} {path}");
+        let build = || {
+            let auth = self.id.nip98_header(method, &url, if signed == Signed::Body { &body } else { &[] });
+            let req = self.http.request(verb.clone(), &url).header("authorization", auth).timeout(timeout);
+            if body.is_empty() { req } else { req.body(body.clone()) }
+        };
+        let (host, coded) = (&self.host, |code, msg| Err(anyhow::Error::new(CodedError { code, msg })));
+        match send_retrying(build, replay, self.verbose.then_some(what.as_str())) {
+            Ok((status, body)) => Ok(Resp { status, body }),
+            Err(Failed::Unbuilt(e)) => Err(e).context("building the request"),
+            // the request may have been applied: say so, and never send it again blind
+            Err(Failed::Unknown(e)) => coded(Code::OutcomeUnknown, format!("{what}: the request may have reached {host}, but its answer was lost ({e}); it may have been applied, so check before repeating it")),
+            Err(Failed::Exhausted { last, reached: true }) if replay == Replay::ById => {
+                coded(Code::OutcomeUnknown, format!("{what}: {REQUEST_ATTEMPTS} tries reached {host} or may have, and none got an answer ({last}); it may have been applied"))
             }
-            let auth = match signed {
-                Signed::Body => self.id.nip98_header(method, &url, &body),
-                Signed::Url => self.id.nip98_header(method, &url, &[]),
-            };
-            let t0 = std::time::Instant::now();
-            let mut req = match method {
-                "GET" => self.http.get(&url),
-                "POST" => self.http.post(&url),
-                "PUT" => self.http.put(&url),
-                "DELETE" => self.http.delete(&url),
-                "HEAD" => self.http.head(&url),
-                _ => return Err(anyhow!("bad method")),
-            };
-            req = req.header("authorization", auth).timeout(timeout);
-            if !body.is_empty() {
-                req = req.body(body.clone());
-            }
-            // the body is read here too: an answer cut off mid-body is as
-            // lost as one that never came
-            let answer = req.send().and_then(|resp| {
-                let status = resp.status().as_u16();
-                resp.bytes().map(|b| Resp { status, body: b.to_vec() })
-            });
-            match answer {
-                Ok(resp) => {
-                    if self.verbose {
-                        eprintln!("{method} {path} -> {} ({}ms [retries={attempt}])", resp.status, t0.elapsed().as_millis());
-                    }
-                    return Ok(resp);
-                }
-                // a request that could not be built never left
-                Err(e) if e.is_builder() => return Err(e).context("building the request"),
-                Err(e) if replay.allows_retry(!e.is_connect()) => {
-                    if self.verbose {
-                        eprintln!("{method} {path} -> retry after error ({}ms [retries={attempt}])", t0.elapsed().as_millis());
-                    }
-                    reached |= !e.is_connect();
-                    last_err = Some(e);
-                }
-                Err(e) => {
-                    // the request may have been applied: say so, and never
-                    // send it again blind
-                    return Err(anyhow::Error::new(CodedError {
-                        code: Code::OutcomeUnknown,
-                        msg: format!(
-                            "{method} {path}: the request may have reached {host}, but its answer was lost ({e}); it may have been applied, so check before repeating it",
-                            host = self.host
-                        ),
-                    }));
-                }
-            }
+            // every attempt failed: surface the last error with its cause — a
+            // bare "failed after retries" turned a host dropping large bodies
+            // into a silent 90s mystery
+            Err(Failed::Exhausted { last, .. }) => coded(Code::Unavailable, format!("request failed after retries ({host} unreachable, or it dropped the connection mid-body — check the request size): {last}")),
         }
-        let last = last_err.map(|e| e.to_string()).unwrap_or_else(|| "no error recorded".into());
-        if replay == Replay::ById && reached {
-            return Err(anyhow::Error::new(CodedError {
-                code: Code::OutcomeUnknown,
-                msg: format!(
-                    "{method} {path}: {REQUEST_ATTEMPTS} tries reached {host} or may have, and none got an answer ({last}); it may have been applied",
-                    host = self.host
-                ),
-            }));
-        }
-        // every attempt failed: surface the last error with its cause — a
-        // bare "failed after retries" turned a host dropping large bodies
-        // into a silent 90s mystery (and before that, an unreachable!()
-        // panicked here; found by restore agents)
-        Err(anyhow::Error::new(CodedError {
-            code: Code::Unavailable,
-            msg: format!(
-                "request failed after retries ({host} unreachable, or it dropped the connection mid-body — check the request size): {last}",
-                host = self.host,
-            ),
-        }))
     }
 
     pub fn get(&self, path: &str) -> Result<Resp> {
@@ -421,6 +355,56 @@ impl Client {
     pub fn call(&self, resp: Resp) -> Result<Value> {
         self.call_as(resp)
     }
+}
+
+/// How every try of a request failed.
+pub enum Failed {
+    /// it could not be built, so it never left
+    Unbuilt(reqwest::Error),
+    /// it may have reached the server, and its `Replay` forbids another try
+    Unknown(reqwest::Error),
+    /// every try failed, and `reached`: one may have reached the server
+    Exhausted { last: String, reached: bool },
+}
+
+/// Sends `build()`'s request up to [`REQUEST_ATTEMPTS`] times, as `replay`
+/// allows: long-lived sync clients hold keep-alive pools that go stale when
+/// the host restarts, and without retries a watcher wedges until its
+/// process is restarted (observed live on relay-vault). `log` names the
+/// request in a stderr line per try (`-v`).
+pub fn send_retrying(build: impl Fn() -> reqwest::blocking::RequestBuilder, replay: Replay, log: Option<&str>) -> std::result::Result<(u16, Vec<u8>), Failed> {
+    let (mut last, mut reached) = (None, false);
+    for attempt in 0..REQUEST_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(300 * attempt as u64));
+        }
+        let t0 = std::time::Instant::now();
+        // the body is read here too: an answer cut off mid-body is as
+        // lost as one that never came
+        let answer = build().send().and_then(|resp| {
+            let status = resp.status().as_u16();
+            resp.bytes().map(|b| (status, b.to_vec()))
+        });
+        let ms = t0.elapsed().as_millis();
+        match answer {
+            Ok(answer) => {
+                if let Some(what) = log {
+                    eprintln!("{what} -> {} ({ms}ms [retries={attempt}])", answer.0);
+                }
+                return Ok(answer);
+            }
+            Err(e) if e.is_builder() => return Err(Failed::Unbuilt(e)),
+            Err(e) if replay.allows_retry(!e.is_connect()) => {
+                if let Some(what) = log {
+                    eprintln!("{what} -> retry after error ({ms}ms [retries={attempt}])");
+                }
+                reached |= !e.is_connect();
+                last = Some(e.to_string());
+            }
+            Err(e) => return Err(Failed::Unknown(e)),
+        }
+    }
+    Err(Failed::Exhausted { last: last.unwrap_or_else(|| "no error recorded".into()), reached })
 }
 
 pub fn encode_q(s: &str) -> String {

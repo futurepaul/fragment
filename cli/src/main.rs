@@ -587,8 +587,9 @@ fn require_client(cli_host: &Option<String>, verbose: bool) -> Result<api::Clien
         })
     })?;
     let id = auth::Identity::from_secret_hex(&sk).ok_or_else(|| anyhow!("the config's secret_key is not a 64-hex secp256k1 secret ({})", config_path().display()))?;
-    let c = api::Client::new(&host, id);
-    Ok(if verbose { c.with_verbose() } else { c })
+    let mut c = api::Client::new(&host, id);
+    c.verbose = verbose;
+    Ok(c)
 }
 
 /// Did the operator ask for machine output? `--json` may sit anywhere on the
