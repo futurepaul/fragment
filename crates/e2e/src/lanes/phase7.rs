@@ -140,12 +140,12 @@ fn label(name: &str) -> &str {
 
 /// Where a page is and what it says, for a FAIL's detail.
 fn shown(chrome: &mut Browser, page: &Page) -> String {
-    let v = chrome.eval(page, "location.href + ' | ' + (document.body?.innerText ?? '').slice(-600)");
+    let v = chrome.eval(page, "location.href + ' (' + document.visibilityState + ') | ' + (document.body?.innerText ?? '').slice(-600)");
     v.map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_else(|e| format!("{e:#}"))
 }
 
 /// What a chat's page shows, for a FAIL's detail.
-const MESSAGES: &str = "document.getElementById('messages')?.innerText.slice(-600) ?? ''";
+const MESSAGES: &str = "document.visibilityState + ' | ' + (document.getElementById('messages')?.innerText.slice(-600) ?? '')";
 
 /// JavaScript that sends `text` from a chat's page, as its composer does.
 fn send(text: &str) -> String {
@@ -210,6 +210,7 @@ fn sign_in(chrome: &mut Browser, api: &Api, email: &str, username: &str) -> Resu
 /// on its row's … menu and on Share…: a window of its own, on the platform's
 /// origin at `sheet`.
 fn open_sheet(s: &Suite, chrome: &mut Browser, desk: &Page, chat: &str, sheet: &str) -> Result<Page> {
+    chrome.front(desk)?;
     let before: Vec<String> = chrome.pages()?.into_iter().map(|(target, _)| target).collect();
     chrome.click(desk, &format!(".more[data-fragment={chat:?}]"))?;
     anyhow::ensure!(chrome.until(desk, "!document.getElementById('menu').hidden", WAIT), "the chat's … menu did not open");
@@ -220,7 +221,9 @@ fn open_sheet(s: &Suite, chrome: &mut Browser, desk: &Page, chat: &str, sheet: &
         found.is_some()
     });
     let (target, _) = found.with_context(|| format!("Share… opened no window on {sheet}: {:?}", chrome.pages()))?;
-    chrome.attach(&target)
+    let popup = chrome.attach(&target)?;
+    chrome.front(&popup)?;
+    Ok(popup)
 }
 
 fn run(s: &mut Suite, api: &Api) -> Result<()> {
@@ -301,6 +304,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- 2. the guest accepts at /join, and lands in the chat
     let theirs = chrome.open_in(&guest.browser, &link)?;
+    chrome.front(&theirs)?;
     let join = "button[data-arm]";
     let can_join = chrome.until(&theirs, &armed(join), WAIT);
     chrome.click(&theirs, join)?;
@@ -317,6 +321,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.openrouter.clear_script();
     s.openrouter.script(&[Reply::Text(WELCOME.into()), Reply::Text(GLAD.into())]);
     chrome.eval_in_frame(&desk, &chat_host, &send(OWNER_SAYS))?;
+    chrome.front(&theirs)?;
     let guest_sees = chrome.until(&theirs, &from_other(OWNER_SAYS, &owner.username), WAIT);
     s.ok(
         "the guest sees the owner's message arrive live, labeled with the owner's username",
@@ -325,6 +330,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let welcomed = chat.answered(s, WELCOME).is_some();
     chrome.eval(&theirs, &send(GUEST_SAYS))?;
+    chrome.front(&desk)?;
     let owner_sees = s.eventually(WAIT, || in_desk(&mut chrome, &from_other(GUEST_SAYS, &guest.username)));
     s.ok(
         "the owner sees the guest's arrive live, labeled with the guest's",
@@ -332,7 +338,9 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.eval_in_frame(&desk, &chat_host, MESSAGES).unwrap_or_default(),
     );
     let glad = chat.answered(s, GLAD).is_some();
+    chrome.front(&theirs)?;
     let answers_both = [WELCOME, GLAD].iter().all(|text| chrome.until(&theirs, &from_agent(text, &agent_label), WAIT));
+    chrome.front(&desk)?;
     let answers_owner = [WELCOME, GLAD].iter().all(|text| s.eventually(WAIT, || in_desk(&mut chrome, &from_agent(text, &agent_label))));
     s.ok(
         "the owner's agent answers each of them, and both see its answers, labeled as the owner's agent",
@@ -354,6 +362,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         !turn.is_empty() && asker == guest.id && step["tool"] == "platform__read_file" && step["ok"] == true && read,
         json!({ "turn": turn, "read": read, "work": work }),
     );
+    chrome.front(&theirs)?;
     let grouped = chrome.until(&theirs, &group_above(&turn, ABOUT, "platform__read_file", false), WAIT) && chrome.until(&theirs, &from_agent(ABOUT, &agent_label), WAIT);
     s.ok("the guest's page shows its tool group, folded above the answer", grouped, chrome.eval(&theirs, MESSAGES).unwrap_or_default());
 
@@ -371,6 +380,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         theirs_to_open == 403 && !turn.is_empty() && asker == guest.id && step["tool"] == "platform__read_file" && step["ok"] == false && !leaked && notes() == secret,
         json!({ "guest opens it": theirs_to_open, "leaked": leaked, "work": work }),
     );
+    chrome.front(&theirs)?;
     let failed = chrome.until(&theirs, &group_above(&turn, CANNOT, "platform__read_file", true), WAIT);
     s.ok("the guest's page shows that step failed, above the answer", failed, chrome.eval(&theirs, MESSAGES).unwrap_or_default());
     chrome.screenshot(&theirs, &s.scratch.join("phase7-guest.png"))?;
@@ -392,6 +402,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         !turn.is_empty() && asker == owner.id && step["tool"] == "platform__write_files" && step["ok"] == true && edited && owner_alone,
         json!({ "notes": notes(), "members": members.body, "work": work }),
     );
+    chrome.front(&desk)?;
     let grouped = s.eventually(WAIT, || in_desk(&mut chrome, &group_above(&turn, DONE, "platform__write_files", false)));
     s.ok("the owner's page shows its tool group above the answer", grouped, chrome.eval_in_frame(&desk, &chat_host, MESSAGES).unwrap_or_default());
     chrome.screenshot(&desk, &s.scratch.join("phase7-owner.png"))?;
@@ -401,6 +412,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         "[...document.querySelectorAll('#chats .row')].find(r => r.querySelector('.label')?.textContent === {:?})?.querySelector('.shared')?.textContent === '1'",
         label(&chat.name)
     );
+    chrome.front(&desk)?;
     let badged = chrome.until(&desk, &badge, WAIT);
     s.ok("the owner's desktop shows the chat shared with one person", badged, chrome.eval(&desk, "document.getElementById('chats')?.innerHTML ?? ''").unwrap_or_default());
     let popup = open_sheet(s, &mut chrome, &desk, &chat.name, &sheet)?;
@@ -415,6 +427,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         shown(&mut chrome, &popup),
     );
     let said = "document.getElementById('banner-text')?.textContent ?? ''";
+    chrome.front(&theirs)?;
     let closed = chrome.until(&theirs, &format!("!document.getElementById('banner').hidden && ({said}).includes('access to this chat changed')"), WAIT);
     s.ok("the guest's socket closes: their page says their access changed", closed, chrome.eval(&theirs, said).unwrap_or_default());
     let fetched = chrome.eval(&theirs, "fetch(location.origin + '/', { credentials: 'same-origin', cache: 'no-store' }).then(r => r.status, e => 'refused ' + e.name)")?;
