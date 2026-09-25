@@ -3,8 +3,12 @@
 //! video generation (create, poll, download), each checking the bearer key.
 //! Answers are deterministic from the request, so tests can assert on them.
 //! Chat completions stream (server-sent events, OpenAI's chunk format) when
-//! asked to, and answer scripted replies (text, or tool calls) in order
-//! before falling back to an echo. Every answer reports its cost
+//! asked to, and answer scripted replies (text, tool calls, nothing, or
+//! reasoning alone) in order before falling back to an echo. A streamed
+//! answer keeps to the request's `max_tokens` (`CHARS_PER_TOKEN` characters
+//! each): one longer is cut there and ends `length`, as the service's do.
+//! An answer can be held back first (`delay_next`), as a slow model's is,
+//! its script consumed as the request arrives. Every answer reports its cost
 //! (`usage.cost`, dollars) unless told to leave it out. A video's prompt
 //! decides how it ends: one naming "expire" expires and one naming
 //! "cancel" is cancelled (no cost, nothing to save), one naming "vanish"
@@ -32,7 +36,17 @@ pub enum Reply {
     Text(String),
     /// Tool calls: (name, arguments).
     Tools(Vec<(String, Value)>),
+    /// No text and no tool call.
+    Empty,
+    /// Reasoning, and nothing else.
+    Thinking(String),
 }
+
+/// The characters one token of a streamed answer stands for, where the
+/// fake keeps to a request's `max_tokens`.
+pub const CHARS_PER_TOKEN: usize = 4;
+/// A tool call's arguments stream in pieces of at most this many characters.
+const ARGS_PIECE_CHARS: usize = 1024;
 
 /// A key the management key minted.
 #[derive(Clone, Debug)]
@@ -78,6 +92,10 @@ struct State {
     minted: Vec<Minted>,
     /// (hash, body) of each PATCH.
     patches: Vec<(String, Value)>,
+    /// How long the next chat completions wait before answering, in order.
+    delays: VecDeque<u64>,
+    /// The wait the answer being made takes (set by a chat completion).
+    sleep_ms: u64,
 }
 
 impl State {
@@ -109,31 +127,207 @@ fn chunk(id: &str, model: &Value, delta: Value, finish: Option<&str>, usage: Opt
     format!("data: {c}\n\n")
 }
 
+/// At most `budget` characters of `text` (all of it with no budget), and
+/// whether it was cut.
+fn within(text: &str, budget: &mut Option<usize>) -> (String, bool) {
+    let Some(left) = budget.as_mut() else { return (text.to_string(), false) };
+    let kept: String = text.chars().take(*left).collect();
+    let n = kept.chars().count();
+    *left -= n;
+    (kept, n < text.chars().count())
+}
+
 /// A reply as server-sent events (OpenAI's streaming format); each reply
-/// has its own id, as the service's generations do.
-fn stream(model: &Value, reply: &Reply, ids: &mut u64, cost: Option<f64>) -> String {
+/// has its own id, as the service's generations do. `budget`: the
+/// characters the request's `max_tokens` allows; a reply longer is cut
+/// there and ends `length`.
+fn stream(model: &Value, reply: &Reply, ids: &mut u64, cost: Option<f64>, mut budget: Option<usize>) -> String {
     let mut out = String::new();
     *ids += 1;
     let id = format!("chatcmpl-fake-{ids}");
+    let finish = |cut: bool, whole: &'static str| if cut { "length" } else { whole };
     match reply {
         Reply::Text(text) => {
+            let (text, cut) = within(text, &mut budget);
             out += &chunk(&id, model, json!({ "role": "assistant", "content": text }), None, None);
+            out += &chunk(&id, model, json!({}), Some(finish(cut, "stop")), cost);
+        }
+        Reply::Empty => {
+            out += &chunk(&id, model, json!({ "role": "assistant", "content": "" }), None, None);
+            out += &chunk(&id, model, json!({}), Some("stop"), cost);
+        }
+        Reply::Thinking(text) => {
+            out += &chunk(&id, model, json!({ "role": "assistant", "reasoning": text }), None, None);
             out += &chunk(&id, model, json!({}), Some("stop"), cost);
         }
         Reply::Tools(calls) => {
-            let calls: Vec<Value> = calls
-                .iter()
-                .enumerate()
-                .map(|(i, (name, args))| {
-                    *ids += 1;
-                    json!({ "index": i, "id": format!("call_{ids}"), "type": "function", "function": { "name": name, "arguments": args.to_string() } })
-                })
-                .collect();
-            out += &chunk(&id, model, json!({ "role": "assistant", "tool_calls": calls }), None, None);
-            out += &chunk(&id, model, json!({}), Some("tool_calls"), cost);
+            let mut cut = false;
+            for (i, (name, args)) in calls.iter().enumerate() {
+                if cut {
+                    break;
+                }
+                *ids += 1;
+                let (args, was_cut) = within(&args.to_string(), &mut budget);
+                cut = was_cut;
+                // the call's id and name, then its arguments in pieces
+                let chars: Vec<char> = args.chars().collect();
+                let mut pieces: Vec<String> = chars.chunks(ARGS_PIECE_CHARS).map(|c| c.iter().collect()).collect();
+                if pieces.is_empty() {
+                    pieces.push(String::new());
+                }
+                for (n, piece) in pieces.iter().enumerate() {
+                    let call = match n {
+                        0 => json!({ "index": i, "id": format!("call_{ids}"), "type": "function", "function": { "name": name, "arguments": piece } }),
+                        _ => json!({ "index": i, "function": { "arguments": piece } }),
+                    };
+                    let delta = match (i, n) {
+                        (0, 0) => json!({ "role": "assistant", "tool_calls": [call] }),
+                        _ => json!({ "tool_calls": [call] }),
+                    };
+                    out += &chunk(&id, model, delta, None, None);
+                }
+            }
+            out += &chunk(&id, model, json!({}), Some(finish(cut, "tool_calls")), cost);
         }
     }
     out + "data: [DONE]\n\n"
+}
+
+/// One request's answer, from the state (locked by the caller).
+fn answer(s: &mut State, req: &Request, expected: &str, manager: &str, base_in: &Mutex<String>) -> Response {
+    let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+    let auth = req.header("authorization").unwrap_or("").to_string();
+    let reasoning = if body["reasoning"].is_null() { String::new() } else { body["reasoning"].to_string() };
+    s.calls.push((req.method.clone(), req.path.clone(), body["model"].as_str().unwrap_or("").to_string(), auth.clone(), reasoning));
+    let path = req.path.as_str();
+    if path == "/api/v1/keys" || path.starts_with("/api/v1/keys/") {
+        if auth != manager {
+            return problem(401, "a management key is required");
+        }
+        return match (req.method.as_str(), path.strip_prefix("/api/v1/keys/")) {
+            ("POST", None) => {
+                let n = s.minted.len() + 1;
+                let m = Minted {
+                    hash: format!("{:064x}", n),
+                    key: format!("sk-or-v1-minted-{n:04}-{}", "f".repeat(40)),
+                    name: body["name"].as_str().unwrap_or("").to_string(),
+                    limit: body["limit"].as_f64(),
+                    limit_reset: body["limit_reset"].as_str().map(str::to_string),
+                    usage: 0.0,
+                    usage_period: 0.0,
+                };
+                s.minted.push(m.clone());
+                Response::json(
+                    201,
+                    &json!({ "data": { "hash": m.hash, "name": m.name, "label": format!("sk-or-v1-min...{n:04}"), "limit": m.limit, "limit_reset": m.limit_reset, "disabled": false, "usage": 0 }, "key": m.key }),
+                )
+            }
+            ("PATCH", Some(hash)) => {
+                let hash = hash.to_string();
+                let Some(m) = s.minted.iter_mut().find(|m| m.hash == hash) else { return problem(404, "no such key") };
+                if let Some(l) = body.get("limit") {
+                    m.limit = l.as_f64();
+                }
+                let data = json!({ "hash": m.hash, "limit": m.limit, "limit_reset": m.limit_reset, "usage": m.usage });
+                s.patches.push((hash, body.clone()));
+                Response::json(200, &json!({ "data": data }))
+            }
+            _ => problem(404, "no such route"),
+        };
+    }
+    let minted = s.minted.iter().any(|m| auth == format!("Bearer {}", m.key));
+    if auth != expected && !minted {
+        return problem(401, "No auth credentials found");
+    }
+    if let Some(status) = s.failures.pop_front() {
+        return problem(status, "a failure the test asked for");
+    }
+    let base = base_in.lock().expect("base").clone();
+    let costs = s.costs;
+    let costless = s.costless;
+    match (req.method.as_str(), path) {
+        ("POST", "/api/v1/chat/completions") => {
+            if let Err(r) = s.charge(&auth, costs.text) {
+                return r;
+            }
+            let last = body["messages"].as_array().and_then(|m| m.last()).map(|m| m["content"].clone()).unwrap_or(Value::Null);
+            s.chats.push(body.clone());
+            let scripted = s.script.pop_front();
+            s.sleep_ms = s.delays.pop_front().unwrap_or(0);
+            if body["stream"] == true {
+                let reply = scripted.unwrap_or_else(|| Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))));
+                let cost = (!costless).then_some(costs.text);
+                let budget = body["max_tokens"].as_u64().or(body["max_completion_tokens"].as_u64()).map(|t| t as usize * CHARS_PER_TOKEN);
+                let events = stream(&body["model"], &reply, &mut s.tool_calls, cost, budget);
+                return Response::bytes(200, "text/event-stream", events.into_bytes());
+            }
+            let usage = with_cost(json!({ "prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6 }), costs.text, costless);
+            Response::json(
+                200,
+                &json!({
+                    "id": "chatcmpl-fake", "object": "chat.completion", "created": 0, "model": body["model"],
+                    "choices": [{ "index": 0, "finish_reason": "stop", "message": { "role": "assistant", "content": format!("echo: {}", last.as_str().unwrap_or("")) } }],
+                    "usage": usage,
+                }),
+            )
+        }
+        ("POST", "/api/v1/images") => {
+            if let Err(r) = s.charge(&auth, costs.image) {
+                return r;
+            }
+            let bytes = image_bytes(body["prompt"].as_str().unwrap_or(""));
+            let usage = with_cost(json!({}), costs.image, costless);
+            Response::json(
+                200,
+                &json!({ "created": 0, "data": [{ "b64_json": base64::engine::general_purpose::STANDARD.encode(bytes), "media_type": "image/png" }], "usage": usage }),
+            )
+        }
+        ("POST", "/api/v1/videos") => {
+            let seconds = body["duration"].as_u64().unwrap_or(5) as usize;
+            let cost = costs.video_per_s * seconds as f64;
+            if let Err(r) = s.charge(&auth, cost) {
+                return r;
+            }
+            s.video_ids += 1;
+            let id = format!("gen-vid-{}", s.video_ids);
+            let prompt = body["prompt"].as_str().unwrap_or("");
+            if !prompt.contains("vanish") {
+                let status = if prompt.contains("expire") {
+                    "expired"
+                } else if prompt.contains("cancel") {
+                    "cancelled"
+                } else {
+                    "completed"
+                };
+                s.videos.insert(id.clone(), (seconds, cost, status));
+            }
+            Response::json(202, &json!({ "id": id, "generation_id": id, "polling_url": format!("/api/v1/videos/{id}"), "status": "pending" }))
+        }
+        ("GET", p) if p.starts_with("/api/v1/videos/") => {
+            let rest = &p["/api/v1/videos/".len()..];
+            let (id, content) = match rest.strip_suffix("/content") {
+                Some(id) => (id, true),
+                None => (rest, false),
+            };
+            let Some((seconds, cost, status)) = s.videos.get(id).copied() else { return problem(404, "no such video job") };
+            if status != "completed" {
+                return Response::json(200, &json!({ "id": id, "status": status, "error": format!("the generation ended {status}") }));
+            }
+            if content {
+                return Response::bytes(200, "video/mp4", video_bytes(seconds));
+            }
+            let usage = with_cost(json!({ "is_byok": false }), cost, costless);
+            Response::json(
+                200,
+                &json!({
+                    "id": id, "status": "completed",
+                    "unsigned_urls": [format!("{base}/api/v1/videos/{id}/content?index=0")],
+                    "usage": usage,
+                }),
+            )
+        }
+        _ => problem(404, "no such route"),
+    }
 }
 
 pub struct OpenRouter {
@@ -177,138 +371,17 @@ impl OpenRouter {
         let base = Arc::new(Mutex::new(String::new()));
         let base_in = Arc::clone(&base);
         let handler: Handler = Arc::new(move |req: &Request| {
-            let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
-            let auth = req.header("authorization").unwrap_or("").to_string();
-            let mut s = st.lock().expect("openrouter state");
-            let reasoning = if body["reasoning"].is_null() { String::new() } else { body["reasoning"].to_string() };
-            s.calls.push((req.method.clone(), req.path.clone(), body["model"].as_str().unwrap_or("").to_string(), auth.clone(), reasoning));
-            let path = req.path.as_str();
-            if path == "/api/v1/keys" || path.starts_with("/api/v1/keys/") {
-                if auth != manager {
-                    return problem(401, "a management key is required");
-                }
-                return match (req.method.as_str(), path.strip_prefix("/api/v1/keys/")) {
-                    ("POST", None) => {
-                        let n = s.minted.len() + 1;
-                        let m = Minted {
-                            hash: format!("{:064x}", n),
-                            key: format!("sk-or-v1-minted-{n:04}-{}", "f".repeat(40)),
-                            name: body["name"].as_str().unwrap_or("").to_string(),
-                            limit: body["limit"].as_f64(),
-                            limit_reset: body["limit_reset"].as_str().map(str::to_string),
-                            usage: 0.0,
-                            usage_period: 0.0,
-                        };
-                        s.minted.push(m.clone());
-                        Response::json(
-                            201,
-                            &json!({ "data": { "hash": m.hash, "name": m.name, "label": format!("sk-or-v1-min...{n:04}"), "limit": m.limit, "limit_reset": m.limit_reset, "disabled": false, "usage": 0 }, "key": m.key }),
-                        )
-                    }
-                    ("PATCH", Some(hash)) => {
-                        let hash = hash.to_string();
-                        let Some(m) = s.minted.iter_mut().find(|m| m.hash == hash) else { return problem(404, "no such key") };
-                        if let Some(l) = body.get("limit") {
-                            m.limit = l.as_f64();
-                        }
-                        let data = json!({ "hash": m.hash, "limit": m.limit, "limit_reset": m.limit_reset, "usage": m.usage });
-                        s.patches.push((hash, body.clone()));
-                        Response::json(200, &json!({ "data": data }))
-                    }
-                    _ => problem(404, "no such route"),
-                };
+            // an answer held back (`delay_next`) waits here, with the state
+            // unlocked, after its script was consumed
+            let (response, sleep_ms) = {
+                let mut s = st.lock().expect("openrouter state");
+                let response = answer(&mut s, req, &expected, &manager, &base_in);
+                (response, std::mem::take(&mut s.sleep_ms))
+            };
+            if sleep_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
             }
-            let minted = s.minted.iter().any(|m| auth == format!("Bearer {}", m.key));
-            if auth != expected && !minted {
-                return problem(401, "No auth credentials found");
-            }
-            if let Some(status) = s.failures.pop_front() {
-                return problem(status, "a failure the test asked for");
-            }
-            let base = base_in.lock().expect("base").clone();
-            let costs = s.costs;
-            let costless = s.costless;
-            match (req.method.as_str(), path) {
-                ("POST", "/api/v1/chat/completions") => {
-                    if let Err(r) = s.charge(&auth, costs.text) {
-                        return r;
-                    }
-                    let last = body["messages"].as_array().and_then(|m| m.last()).map(|m| m["content"].clone()).unwrap_or(Value::Null);
-                    s.chats.push(body.clone());
-                    let scripted = s.script.pop_front();
-                    if body["stream"] == true {
-                        let reply = scripted.unwrap_or_else(|| Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))));
-                        let cost = (!costless).then_some(costs.text);
-                        let events = stream(&body["model"], &reply, &mut s.tool_calls, cost);
-                        return Response::bytes(200, "text/event-stream", events.into_bytes());
-                    }
-                    let usage = with_cost(json!({ "prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6 }), costs.text, costless);
-                    Response::json(
-                        200,
-                        &json!({
-                            "id": "chatcmpl-fake", "object": "chat.completion", "created": 0, "model": body["model"],
-                            "choices": [{ "index": 0, "finish_reason": "stop", "message": { "role": "assistant", "content": format!("echo: {}", last.as_str().unwrap_or("")) } }],
-                            "usage": usage,
-                        }),
-                    )
-                }
-                ("POST", "/api/v1/images") => {
-                    if let Err(r) = s.charge(&auth, costs.image) {
-                        return r;
-                    }
-                    let bytes = image_bytes(body["prompt"].as_str().unwrap_or(""));
-                    let usage = with_cost(json!({}), costs.image, costless);
-                    Response::json(
-                        200,
-                        &json!({ "created": 0, "data": [{ "b64_json": base64::engine::general_purpose::STANDARD.encode(bytes), "media_type": "image/png" }], "usage": usage }),
-                    )
-                }
-                ("POST", "/api/v1/videos") => {
-                    let seconds = body["duration"].as_u64().unwrap_or(5) as usize;
-                    let cost = costs.video_per_s * seconds as f64;
-                    if let Err(r) = s.charge(&auth, cost) {
-                        return r;
-                    }
-                    s.video_ids += 1;
-                    let id = format!("gen-vid-{}", s.video_ids);
-                    let prompt = body["prompt"].as_str().unwrap_or("");
-                    if !prompt.contains("vanish") {
-                        let status = if prompt.contains("expire") {
-                            "expired"
-                        } else if prompt.contains("cancel") {
-                            "cancelled"
-                        } else {
-                            "completed"
-                        };
-                        s.videos.insert(id.clone(), (seconds, cost, status));
-                    }
-                    Response::json(202, &json!({ "id": id, "generation_id": id, "polling_url": format!("/api/v1/videos/{id}"), "status": "pending" }))
-                }
-                ("GET", p) if p.starts_with("/api/v1/videos/") => {
-                    let rest = &p["/api/v1/videos/".len()..];
-                    let (id, content) = match rest.strip_suffix("/content") {
-                        Some(id) => (id, true),
-                        None => (rest, false),
-                    };
-                    let Some((seconds, cost, status)) = s.videos.get(id).copied() else { return problem(404, "no such video job") };
-                    if status != "completed" {
-                        return Response::json(200, &json!({ "id": id, "status": status, "error": format!("the generation ended {status}") }));
-                    }
-                    if content {
-                        return Response::bytes(200, "video/mp4", video_bytes(seconds));
-                    }
-                    let usage = with_cost(json!({ "is_byok": false }), cost, costless);
-                    Response::json(
-                        200,
-                        &json!({
-                            "id": id, "status": "completed",
-                            "unsigned_urls": [format!("{base}/api/v1/videos/{id}/content?index=0")],
-                            "usage": usage,
-                        }),
-                    )
-                }
-                _ => problem(404, "no such route"),
-            }
+            response
         });
         let server = Server::start(0, handler)?;
         *base.lock().expect("base") = server.url.clone();
@@ -323,6 +396,12 @@ impl OpenRouter {
     /// Drops any scripted replies not yet answered.
     pub fn clear_script(&self) {
         self.state.lock().expect("openrouter state").script.clear();
+    }
+
+    /// Holds the next chat completions' answers back this long (ms), in
+    /// order, as a slow model's are: a client that gives up first sees none.
+    pub fn delay_next(&self, ms: &[u64]) {
+        self.state.lock().expect("openrouter state").delays.extend(ms);
     }
 
     /// The chat completion request bodies, in order.
