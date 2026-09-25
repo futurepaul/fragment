@@ -845,7 +845,9 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
 
     // a public list changing past 60 times a minute: an anonymous
     // visitor's live view re-runs over its socket, not as HTTP calls (which
-    // the public rate limit counts), so it keeps up with every change
+    // the public rate limit counts), so it keeps up with every change. Ten
+    // past the limit proves it; each change is a round trip to the page.
+    let busy_changes = limits::PUBLIC_CALLS_PER_MIN + 10;
     let busy = s.named(api, &owner, "busy")?;
     let c = s.create(api, &owner, &busy)?;
     api.signed(&owner, "PUT", &format!("/api/f/{busy}/visibility"), Some(&json!({ "visibility": "public" })))?;
@@ -855,7 +857,7 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("(an anonymous visitor opens the public list)", chrome.until(&v, "document.getElementById('here')?.textContent === 'just you here'", wait), "");
     let t0 = std::time::Instant::now();
     let mut kept_up = 0;
-    for i in 1..=125 {
+    for i in 1..=busy_changes {
         let r = api.op(&owner, &busy, "add", &format!("busy-{i}"), json!({ "text": format!("busy {i}") }))?;
         let shown = format!("[...document.querySelectorAll('#todos li span')].some((s) => s.textContent === 'busy {i}')");
         if r.status != 200 || !chrome.until(&v, &shown, Duration::from_secs(5)) {
@@ -867,8 +869,8 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
     println!("      the visitor's page kept up with {kept_up} changes in {took:?}");
     let error = chrome.eval(&v, "document.getElementById('error').textContent")?;
     s.ok(
-        "an anonymous visitor's live view keeps up with 125 changes, one after another",
-        kept_up == 125 && error == "",
+        &format!("an anonymous visitor's live view keeps up with {busy_changes} changes (past the public limit), one after another"),
+        kept_up == busy_changes && error == "",
         format!("kept up with {kept_up} in {took:?}; the page says {error}"),
     );
     let calls = chrome.eval(&v, "performance.getEntriesByType('resource').filter((e) => e.name.includes('__op/list')).length")?;

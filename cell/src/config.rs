@@ -55,6 +55,9 @@ pub struct Config {
     /// `FRAGMENT_DELIVERY_RETRY_S`: the shortest wait before a delivery is
     /// tried again (default 10; the wait grows with the delivery's age).
     pub delivery_retry_s: u32,
+    /// `FRAGMENT_DELIVERY_RETRY_MAX_S`: the longest (default an hour, and
+    /// never under the shortest; a test fleet sets both, for a fixed pace).
+    pub delivery_retry_max_s: u32,
     /// `OPENROUTER_API_URL`: where AI calls go (default https://openrouter.ai; the e2e's fake).
     pub openrouter_url: String,
     workos: Option<WorkOsConfig>,
@@ -122,6 +125,7 @@ impl Config {
         let blob_grace_ms = var(env, "FRAGMENT_BLOB_GRACE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(7 * 24 * 3600) * 1000;
         let push_subject = var(env, "FRAGMENT_PUSH_SUBJECT").unwrap_or_else(|| "mailto:webpush@fragment.invalid".into());
         let delivery_retry_s = var(env, "FRAGMENT_DELIVERY_RETRY_S").and_then(|s| s.parse::<u32>().ok()).filter(|s| *s >= 1).unwrap_or(10);
+        let delivery_retry_max_s = var(env, "FRAGMENT_DELIVERY_RETRY_MAX_S").and_then(|s| s.parse::<u32>().ok()).unwrap_or(3600).max(delivery_retry_s);
         let openrouter_url = var(env, "OPENROUTER_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://openrouter.ai".into());
         let workos = var(env, "WORKOS_CLIENT_ID").map(|client_id| WorkOsConfig {
             client_id,
@@ -150,6 +154,7 @@ impl Config {
             blob_grace_ms,
             push_subject,
             delivery_retry_s,
+            delivery_retry_max_s,
             openrouter_url,
             workos,
             platform_url,

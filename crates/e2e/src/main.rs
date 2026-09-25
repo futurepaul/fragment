@@ -501,11 +501,15 @@ fn main() -> Result<()> {
         }
     }
     if s.node.is_some() {
+        let t0 = Instant::now();
         if let Err(e) = s.stop() {
             s.fail("the node stops at the end of the run", format!("{e:#}"));
         }
+        println!("      (the node stopped in {:.1?})", t0.elapsed());
     }
+    let t0 = Instant::now();
     s.chrome.close();
+    println!("      (Chrome closed in {:.1?})", t0.elapsed());
     println!("\n{} passed, {} failed", s.passed, s.failed.len());
     if !s.failed.is_empty() {
         for f in &s.failed {
