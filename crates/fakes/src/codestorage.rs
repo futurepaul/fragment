@@ -26,12 +26,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
+use hmac::{Hmac, Mac};
 use p256::ecdsa::signature::Verifier;
 use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
 use p256::pkcs8::DecodePrivateKey;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha1::{Digest as _, Sha1};
+use sha2::Sha256;
 
 use crate::http::{self, Request, Response, Server};
 use fragment_core::codestorage::{Claims, OrgKey};
@@ -749,6 +751,18 @@ fn restore(st: &mut State, url: &str, req: &Request, out: &mut Vec<Delivery>) ->
     )
 }
 
+/// `X-Pierre-Signature` for a delivery at `t` (unix seconds), as
+/// code.storage signs one: `t=<t>,sha256=<hex>`, the hex HMAC-SHA256 of
+/// `<t>.<body>` under the webhook's secret. The cell only verifies
+/// (`fragment_core::webhook`); this side is the fake's, pinned to a
+/// signature computed outside this code.
+pub fn signature(body: &[u8], secret: &str, t: i64) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC takes any key length");
+    mac.update(format!("{t}.").as_bytes());
+    mac.update(body);
+    format!("t={t},sha256={}", hex::encode(mac.finalize().into_bytes()))
+}
+
 fn deliver(d: &Delivery, state: &Mutex<State>) {
     let mut result = Err(String::new());
     for attempt in 0..3 {
@@ -756,7 +770,7 @@ fn deliver(d: &Delivery, state: &Mutex<State>) {
             std::thread::sleep(std::time::Duration::from_millis(300));
         }
         let t = now_ms() / 1000;
-        let sig = fragment_core::webhook::sign(d.body.as_bytes(), &d.secret, t);
+        let sig = signature(d.body.as_bytes(), &d.secret, t);
         result = http::post(&d.url, &[("content-type", "application/json"), ("x-pierre-event", "push"), ("x-pierre-signature", &sig)], d.body.as_bytes());
         if matches!(result, Ok(200..=299)) {
             break;
@@ -1182,5 +1196,16 @@ mod tests {
     fn iso_dates() {
         assert_eq!(iso(0), "1970-01-01T00:00:00Z");
         assert_eq!(iso(1_758_585_600_000), "2025-09-23T00:00:00Z");
+    }
+
+    /// Goal: the fake signs a webhook as code.storage does, so the cell's
+    /// verifier is held to the real format, not to the fake's agreement
+    /// with it. Method: the signature OpenSSL computes (`printf '%s'
+    /// "1790000000.$BODY" | openssl dgst -sha256 -hmac s3cret`), written
+    /// out; fragment_core::webhook's test verifies the same answer.
+    #[test]
+    fn a_webhook_is_signed_as_code_storage_signs_it() {
+        let body = br#"{"ref":"refs/heads/main","before":"0","after":"1"}"#;
+        assert_eq!(signature(body, "s3cret", 1_790_000_000), "t=1790000000,sha256=4d38e01ea6039c2094e98395081b85c0efd6af8ae2740ebfab403ded420cb4b8");
     }
 }

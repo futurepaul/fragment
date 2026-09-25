@@ -13,5 +13,10 @@ sha1 = "0.10"
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
+# The fakes' own halves of the platform's crypto: code.storage signs its
+# webhooks (HMAC), and the push service decrypts as a browser (HKDF, AES-GCM).
+hmac = "0.12"
+hkdf = "0.12"
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 p256 = { version = "0.13", features = ["ecdsa", "ecdh", "pem", "pkcs8"] }
 fragment-core = { path = "../core" }

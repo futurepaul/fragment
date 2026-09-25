@@ -34,7 +34,7 @@ fn signed_webhook(api: &Api, name: &str, secret: &str, body: &Value, at: i64, ev
         url: format!("{}/api/f/{name}/webhook", api.base),
         body: Some(bytes.clone()),
         content_type: Some("application/json"),
-        extra: vec![("x-pierre-event", event.into()), ("x-pierre-signature", fragment_core::webhook::sign(&bytes, secret, at))],
+        extra: vec![("x-pierre-event", event.into()), ("x-pierre-signature", fragment_fakes::codestorage::signature(&bytes, secret, at))],
         ..Call::default()
     })
 }

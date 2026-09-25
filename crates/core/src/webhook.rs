@@ -1,5 +1,6 @@
 //! code.storage push webhooks: `X-Pierre-Signature: t=<unix>,sha256=<hex>`
-//! where the hex is HMAC-SHA256(secret, "<t>.<body>").
+//! where the hex is HMAC-SHA256(secret, "<t>.<body>"). The cell only
+//! verifies; the code.storage fake signs (crates/fakes).
 
 use hmac::{Hmac, Mac};
 use serde_json::Value;
@@ -22,15 +23,6 @@ pub fn verify(body: &[u8], header: &str, secret: &str, now_s: i64, window_s: i64
     h.update(b".");
     h.update(body);
     h.verify_slice(&expected).map_err(|_| "the signature does not match".to_string())
-}
-
-/// Signs a delivery (the fake's side, and tests).
-pub fn sign(body: &[u8], secret: &str, t: i64) -> String {
-    let mut h = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC takes any key length");
-    h.update(t.to_string().as_bytes());
-    h.update(b".");
-    h.update(body);
-    format!("t={t},sha256={}", hex::encode(h.finalize().into_bytes()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,14 +63,34 @@ pub fn dedupe_key(event: &str, body: &Value) -> String {
 mod tests {
     use super::*;
 
+    /// A delivery signed outside this code: the hex is HMAC-SHA256 of
+    /// `1790000000.<BODY>` under the secret `s3cret`, as OpenSSL computes
+    /// it (`printf '%s' "1790000000.$BODY" | openssl dgst -sha256 -hmac
+    /// s3cret`). crates/fakes signs to the same answer.
+    const BODY: &[u8] = br#"{"ref":"refs/heads/main","before":"0","after":"1"}"#;
+    const SIGNED: &str = "t=1790000000,sha256=4d38e01ea6039c2094e98395081b85c0efd6af8ae2740ebfab403ded420cb4b8";
+    const T: i64 = 1_790_000_000;
+
+    /// Goal: a delivery signed as code.storage signs one verifies, and one
+    /// edit to its body, secret, timestamp, or header does not. Method:
+    /// the known answer above, then one edit at a time; the window's edges
+    /// with the signature intact, so time is the only fault.
     #[test]
-    fn sign_verify() {
-        let h = sign(b"{}", "s3cret", 1000);
-        assert!(verify(b"{}", &h, "s3cret", 1010, 300).is_ok());
-        assert!(verify(b"{} ", &h, "s3cret", 1010, 300).is_err());
-        assert!(verify(b"{}", &h, "other", 1010, 300).is_err());
-        assert!(verify(b"{}", &h, "s3cret", 1400, 300).unwrap_err().contains("window"));
-        assert!(verify(b"{}", "sha256=00", "s3cret", 1000, 300).is_err());
+    fn a_known_signature_verifies() {
+        assert_eq!(verify(BODY, SIGNED, "s3cret", T + 10, 300), Ok(()));
+        assert_eq!(verify(BODY, &format!("  {SIGNED}\n"), "s3cret", T, 300), Ok(()), "the header is trimmed");
+        assert!(verify(&[BODY, b" "].concat(), SIGNED, "s3cret", T, 300).is_err(), "another body");
+        assert!(verify(BODY, SIGNED, "s3cret ", T, 300).is_err(), "another secret");
+        let moved = SIGNED.replace("t=1790000000", "t=1790000001");
+        assert!(verify(BODY, &moved, "s3cret", T, 300).is_err(), "the timestamp is signed too");
+        assert!(verify(BODY, &SIGNED.replace("sha256=4d", "sha256=4e"), "s3cret", T, 300).is_err(), "another signature");
+        assert!(verify(BODY, SIGNED.split_once(',').unwrap().1, "s3cret", T, 300).is_err(), "no timestamp");
+        assert!(verify(BODY, &SIGNED.replace("sha256=4d", "sha256=zz"), "s3cret", T, 300).is_err(), "not hex");
+        // the window: its edges are inside it, a second past either is not
+        assert_eq!(verify(BODY, SIGNED, "s3cret", T + 300, 300), Ok(()));
+        assert_eq!(verify(BODY, SIGNED, "s3cret", T - 300, 300), Ok(()));
+        assert!(verify(BODY, SIGNED, "s3cret", T + 301, 300).is_err());
+        assert!(verify(BODY, SIGNED, "s3cret", T - 301, 300).is_err());
     }
 
     #[test]
