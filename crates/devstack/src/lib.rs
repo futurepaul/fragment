@@ -375,9 +375,15 @@ impl Node {
         let logs = repo_root().join("target/devstack");
         fs::create_dir_all(&logs)?;
         let log = logs.join(format!("celld-{}.log", opts.port));
-        let out = fs::File::create(&log)?;
+        // appended: a node started again on its port (the e2e's restarts)
+        // keeps the log of the one before, which a crash leaves there
+        let out = fs::OpenOptions::new().create(true).append(true).open(&log)?;
         let mut cmd = Command::new(&tools.celld);
         cmd.arg("dev").arg(&opts.project).args(["--port", &opts.port.to_string()]);
+        // the node's own warnings and info (a panic's message among them)
+        if std::env::var_os("FRAGMENT_NODE_LOGS").is_some() {
+            cmd.arg("--logs");
+        }
         for other in &opts.with {
             cmd.arg("--with").arg(other);
         }
