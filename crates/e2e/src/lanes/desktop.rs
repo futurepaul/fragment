@@ -107,19 +107,21 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "writing the older chat: {r}");
     let r = api.signed(&owner, "POST", &format!("/api/f/{older}/deploy"), None)?;
     anyhow::ensure!(r.status == 200, "deploying the older chat: {r}");
-    // each says so in its owner's list; then the one from the template's
-    // row is as a chat's from before rows said (the owner's two older chats)
+    // each says so in its owner's list; then both rows are as a chat's from
+    // before rows said (the owner's two older chats)
     let row_of = |name: &str| -> Value {
         let r = api.signed(&owner, "GET", "/api/fragments", None).map(|r| r.body).unwrap_or_default();
         r["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == name).cloned().unwrap_or_default()
     };
     let said = s.eventually(wait, || row_of(&old)["chat"] == json!(true) && row_of(&older)["chat"] == json!(true));
-    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": old, "op": "as-before-chats" })))?;
-    let unheard = row_of(&old);
+    // (the hook answers once the list took the row without the flag; the
+    // fragment's own alarm may say so again at any moment after, as it should)
+    let before = |name: &str| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "as-before-chats" }))).map(|r| r.body["ok"] == json!(true));
+    let (a, b) = (before(&old)?, before(&older)?);
     s.ok(
-        "a chat says so in its owner's list (its fragment.json declares a chat channel); (one made before rows said so says nothing)",
-        said && r.status == 200 && unheard["name"] == old.as_str() && unheard.get("chat").is_none(),
-        format!("{} / {unheard}", row_of(&older)),
+        "a chat says so in its owner's list (its fragment.json declares a chat channel); (both made as before rows said so)",
+        said && a && b,
+        format!("{} / {}", row_of(&old), row_of(&older)),
     );
 
     // signed in on the platform, the browser walks to the desktop's origin
@@ -133,8 +135,14 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         "['{old}', '{older}'].every(n => !!document.querySelector(`#chats .row[data-key=\"chat:${{n}}\"]`) && !document.querySelector(`#apps .row[data-key=\"app:${{n}}\"]`))"
     );
     let sidebar = |chrome: &mut Browser| chrome.eval(&page, "[...document.querySelectorAll('#chats .row, #apps .row')].map(r => r.dataset.key)").unwrap_or_default();
+    // each sends its row again as it sends its sharing: one on a change to
+    // who may open it, the other on its alarm (within a day, run here now)
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{old}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    anyhow::ensure!(r.status == 200, "{old}'s visibility: {r}");
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": older, "op": "run-alarm" })))?;
+    anyhow::ensure!(r.status == 200, "{older}'s alarm: {r}");
     s.ok(
-        "chats it did not make (from the chat template, and with the first chat template's fragment.json) are listed under Chats, not Apps",
+        "chats it did not make, from before rows said so, are listed under Chats once they send their rows (a visibility change, their alarm), not Apps",
         chrome.until(&page, &sorted, wait),
         sidebar(&mut chrome),
     );

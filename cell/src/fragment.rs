@@ -45,7 +45,6 @@
 //!   POST   /job/advance|effect|finish     a run's Workflow (jobs.rs); never routed from outside
 //!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
 //!   POST   /deliver/report                the delivery consumer (deliveries.rs); never routed from outside
-//!   POST   /relist                        a desktop's `__fragments` read (publish.rs): say in the lists whether it is a chat; never routed from outside
 //!   POST   /test/keys  /test/fragment     the router's `/api/test/*`, on fleets with test hooks only (ops.rs)
 
 use std::borrow::Cow;
@@ -787,13 +786,6 @@ impl FragmentCell {
             let report = body_json(&mut req).await?;
             return json_response(&self.delivery_report(&report)?);
         }
-        if path == "/relist" {
-            // Only a desktop's `__fragments` read sets the header (publish.rs); the router never passes it.
-            if req.headers().get(crate::publish::RELIST_HEADER)?.is_none() {
-                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
-            }
-            return json_response(&self.relist_now().await?);
-        }
         if let Some(op) = path.strip_prefix("/cap/files/") {
             // Only the `Files` capability sets the header; the router never passes it.
             if req.headers().get(crate::files::CAP_HEADER)?.as_deref() != Some("files") {
@@ -1016,6 +1008,11 @@ impl FragmentCell {
             ],
         )?;
         self.index_change(&owner, Some(Role::Owner))?;
+        // Its first row says what it is now (nothing is installed: an app),
+        // and records so: its template's install sends the row again only
+        // when that makes it a chat, never just to say the same thing (a
+        // send the alarm would make later, with whatever counts it has then).
+        self.relist()?;
         if let Some(t) = &body.template {
             self.set_meta(MetaKey::TemplatePending, t)?;
         }
@@ -1128,11 +1125,12 @@ impl FragmentCell {
     /// queued runs, and the pass: the poll backstop, which also checks
     /// running runs. The next pass is a day away, or within the poll
     /// interval while the fragment is busy (`arm`). Then it re-arms.
-    async fn on_alarm(&self) -> CellResult<()> {
+    pub(crate) async fn on_alarm(&self) -> CellResult<()> {
         if self.meta(MetaKey::CreatedAt)?.is_none() {
             return Ok(());
         }
-        // a fragment from before its members' lists said what it is says so once
+        // a fragment from before its members' lists said what it is says so
+        // once, here (a list read never wakes it to ask)
         if let Err(e) = self.relist() {
             self.event("relist.failed", &e.message, json!({ "code": e.code }));
         }

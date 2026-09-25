@@ -451,6 +451,11 @@ impl FragmentCell {
                 json!({ "members": self.fill_members(fill)? })
             }
             Some("code-builds") => json!({ "builds": self.app.builds() }),
+            Some("run-alarm") => {
+                // what its alarm does, now (as it would within a day)
+                self.on_alarm().await?;
+                json!({ "ok": true })
+            }
             Some("as-before-chats") => {
                 // as a fragment from before rows said whether it is a chat:
                 // its owner's row sent again without it, and nothing recorded
@@ -468,7 +473,7 @@ impl FragmentCell {
                 let resp = self.env.durable_object("PRINCIPAL")?.get_by_name(&owner)?.fetch_with_request(req).await?;
                 json!({ "ok": resp.status_code() == 200 })
             }
-            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, forget-steps, hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, or as-before-chats")),
+            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, forget-steps, hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, as-before-chats, or run-alarm")),
         })
     }
 }
