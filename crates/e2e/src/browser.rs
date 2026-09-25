@@ -133,6 +133,12 @@ impl Browser {
                 "--no-default-browser-check",
                 "--disable-gpu",
                 "--disable-extensions",
+                // two people's windows at once (the phase7 section): one
+                // that covers another must not hide it, or the hidden page
+                // stops drawing (no requestAnimationFrame) and pausing its timers
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+                "--disable-background-timer-throttling",
                 "about:blank",
             ])
             .stdin(Stdio::null())
@@ -284,6 +290,13 @@ impl Browser {
             std::thread::sleep(Duration::from_millis(100));
         }
         false
+    }
+
+    /// Brings the page's window to the front, as a person looks at the
+    /// window they are using: shown, it draws.
+    pub fn front(&mut self, page: &Page) -> Result<()> {
+        self.send("Page.bringToFront", json!({}), Some(&page.session))?;
+        Ok(())
     }
 
     pub fn reload(&mut self, page: &Page) -> Result<()> {
