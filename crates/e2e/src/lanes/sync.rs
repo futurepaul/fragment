@@ -109,6 +109,19 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("new source files arrive on later passes", s.fake.paths(&repo, "main").contains(&"c.md".into()), "");
     s.ok("the source is never written", !src.join(".fragment").exists(), "");
 
+    // one rule says what syncs: an editor's state and node_modules never upload
+    let (name, c) = create(s, "sync-rule")?;
+    let dir = s.dir("sync-rule");
+    std::fs::write(dir.join("a.md"), "a")?;
+    std::fs::create_dir_all(dir.join(".obsidian"))?;
+    std::fs::write(dir.join(".obsidian/workspace.json"), "{}")?;
+    std::fs::create_dir_all(dir.join("node_modules/x"))?;
+    std::fs::write(dir.join("node_modules/x/index.js"), "x")?;
+    s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir)]);
+    let repo = c["repo"].as_str().unwrap_or("").to_string();
+    let paths = s.fake.paths(&repo, "main");
+    s.ok("only what syncs uploads: not .obsidian/, not node_modules/", paths == ["a.md"], format!("{paths:?}"));
+
     // the mass-deletion guard
     let (name, c) = create(s, "sync-guard")?;
     let dir = s.dir("sync-guard");
@@ -163,6 +176,18 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
     let repo = c["repo"].as_str().unwrap_or("").to_string();
     let pushed = s.eventually(Duration::from_secs(15), || s.fake.file_at(&repo, "main", "local.md").as_deref() == Some(&b"from the client"[..]));
     s.ok("continuous sync pushes a local edit", pushed, "");
+    // a save is one pass by the watcher (one head read, one listing, one
+    // commit), and the feed's echo of its commit starts none: two saves,
+    // each waited for, so the first's echo has come before the second
+    s.fake.take_requests("");
+    let mut saved = true;
+    for (file, text) in [("second.md", "two"), ("third.md", "three")] {
+        std::fs::write(dir.join(file), text)?;
+        saved &= s.eventually(Duration::from_secs(15), || s.fake.file_at(&repo, "main", file).as_deref() == Some(text.as_bytes()));
+    }
+    let asked = s.fake.take_requests("editor:");
+    let expected: std::collections::BTreeMap<String, u32> = [("GET branch", 2), ("GET files/metadata", 2), ("POST commit-pack", 2)].iter().map(|(r, n)| (r.to_string(), *n)).collect();
+    s.ok("two saves are two passes of one head read, one listing, and one commit each", saved && asked == expected, format!("{asked:?}"));
     let err = s.scratch.join(format!("sync-watch-second-{name}.log"));
     let mut second = Command::new(&s.cli)
         .args(["sync", &name, "--dir", &dir_of(&dir), "--watch"])

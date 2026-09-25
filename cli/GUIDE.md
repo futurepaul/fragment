@@ -124,6 +124,12 @@ fragment verify my-thing --dir .            # full-content audit
   One rule for both directions: such a file in the repo is never pulled,
   and never deleted for being absent from your folder. In a git repo,
   `.gitignore`d files never upload.
+- **Watching** (`--watch`): a save is one pass, and so is a burst of
+  saves; the change feed's echo of your own commit, and the folder's
+  echo of a pull, cost nothing. After 60 s of quiet a sweep compares the
+  folder with its journal and main with the last head it saw (one
+  request), and passes only when either moved or the change feed is
+  down.
 - **Exit codes**: 0 clean, 1 failure, 3 conflicts, 4 guard tripped.
 
 ## The app
