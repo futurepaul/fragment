@@ -104,6 +104,21 @@ pub fn arrived_url(mut url: Url, forwarded_proto: Option<&str>) -> Url {
     url
 }
 
+/// What a request's `payload` tag is held to.
+#[derive(Debug, Clone, Copy)]
+pub enum Payload<'a> {
+    /// The body the router read, whole (empty when it holds none): a tag
+    /// names its SHA-256, and no tag means no body.
+    Read(&'a [u8]),
+    /// A body the router streams through without reading (a blob upload),
+    /// whose SHA-256 (hex) the signed URL names; the receiver checks the
+    /// bytes against it as they arrive. The signature binds the URL and the
+    /// URL binds the bytes, so a tag adds nothing: it may name that hash
+    /// (as a signer that hashed the body does), or be absent, or name the
+    /// hash of nothing (the router holds no body).
+    Streamed { sha256_hex: &'a str },
+}
+
 fn decode(header: Option<&str>) -> Result<Event, AuthError> {
     let header = header.ok_or(AuthError::MissingHeader)?;
     let b64 = header.strip_prefix("Nostr ").ok_or(AuthError::MissingHeader)?.trim();
@@ -121,7 +136,7 @@ fn decode(header: Option<&str>) -> Result<Event, AuthError> {
 
 /// Checks a decoded event against the request, in the order a refusal is
 /// named: kind, key, clock, URL, method, body, id, signature.
-fn check(event: &Event, method: &str, url: &Url, body: &[u8], now_s: i64, window_s: i64) -> Result<(), AuthError> {
+fn check(event: &Event, method: &str, url: &Url, payload: Payload<'_>, now_s: i64, window_s: i64) -> Result<(), AuthError> {
     assert!(window_s >= 0, "an auth window is a duration");
     if event.kind != KIND {
         return Err(AuthError::WrongKind);
@@ -146,9 +161,11 @@ fn check(event: &Event, method: &str, url: &Url, body: &[u8], now_s: i64, window
     // A payload tag binds the body the router read, so an empty body is
     // held to it too: a signature over a body, replayed without one, is
     // refused. No payload tag means no body.
-    let payload_signed = match event.tag("payload") {
-        Some(payload) => payload == hex::encode(Sha256::digest(body)),
-        None => body.is_empty(),
+    let payload_signed = match (event.tag("payload"), payload) {
+        (Some(tag), Payload::Read(body)) => tag == hex::encode(Sha256::digest(body)),
+        (None, Payload::Read(body)) => body.is_empty(),
+        (Some(tag), Payload::Streamed { sha256_hex }) => tag == sha256_hex || tag == hex::encode(Sha256::digest(b"")),
+        (None, Payload::Streamed { .. }) => true,
     };
     if !payload_signed {
         return Err(AuthError::PayloadMismatch);
@@ -168,23 +185,23 @@ fn check(event: &Event, method: &str, url: &Url, body: &[u8], now_s: i64, window
     key.verify_raw(&id, &sig).map_err(|_| AuthError::BadSignature)
 }
 
-/// Verifies a NIP-98 header for `method url` with the body the router read
-/// (empty when it holds none: then the event must carry no payload tag,
-/// or the hash of nothing), at `now_s` (seconds since the epoch). `url` is
-/// the URL the request arrived on (`arrived_url`). Returns the signer's
-/// public key, hex.
-pub fn verify_request(header: Option<&str>, method: &str, url: &Url, body: &[u8], now_s: i64, window_s: i64) -> Result<String, AuthError> {
+/// Verifies a NIP-98 header for `method url` with its `payload`: the body
+/// the router read (empty when it holds none: then the event must carry no
+/// payload tag, or the hash of nothing), or one it streams through, at
+/// `now_s` (seconds since the epoch). `url` is the URL the request arrived
+/// on (`arrived_url`). Returns the signer's public key, hex.
+pub fn verify_request(header: Option<&str>, method: &str, url: &Url, payload: Payload<'_>, now_s: i64, window_s: i64) -> Result<String, AuthError> {
     let event = decode(header)?;
-    check(&event, method, url, body, now_s, window_s)?;
+    check(&event, method, url, payload, now_s, window_s)?;
     assert!(is_hex64(&event.pubkey), "a verified event names a 64-hex key");
     Ok(event.pubkey)
 }
 
 /// `verify_request` for a URL held as text (an unparseable one names no
-/// request, so it is a mismatch).
+/// request, so it is a mismatch) and a body read whole.
 pub fn verify(header: Option<&str>, method: &str, url: &str, body: &[u8], now_s: i64, window_s: i64) -> Result<String, AuthError> {
     let url = Url::parse(url).map_err(|_| AuthError::UrlMismatch)?;
-    verify_request(header, method, &url, body, now_s, window_s)
+    verify_request(header, method, &url, Payload::Read(body), now_s, window_s)
 }
 
 /// Verifies a key proof: a NIP-98 event by a new key for the same request
@@ -196,7 +213,7 @@ pub fn verify(header: Option<&str>, method: &str, url: &str, body: &[u8], now_s:
 pub fn verify_proof(proof: &str, method: &str, url: &str, signer_hex: &str, now_s: i64, window_s: i64) -> Result<String, AuthError> {
     let url = Url::parse(url).map_err(|_| AuthError::UrlMismatch)?;
     let event = decode(Some(proof))?;
-    check(&event, method, &url, &[], now_s, window_s)?;
+    check(&event, method, &url, Payload::Read(&[]), now_s, window_s)?;
     if event.tag("p") != Some(signer_hex) {
         return Err(AuthError::NotForSigner);
     }
@@ -311,7 +328,7 @@ mod tests {
     }
 
     fn verify_at(header: &str, method: &str, at: &str, body: &[u8]) -> Result<String, AuthError> {
-        verify_request(Some(header), method, &url(at), body, NOW, 60)
+        verify_request(Some(header), method, &url(at), Payload::Read(body), NOW, 60)
     }
 
     fn encode(event: &Event) -> String {
@@ -364,14 +381,14 @@ mod tests {
         assert!(verify_at(&k.header("GET", "http://x/a?", b"", NOW), "GET", "http://x/a", b"").is_ok());
         assert!(verify_at(&k.header("GET", "https://x:443/a", b"", NOW), "GET", "https://x/a", b"").is_ok());
         // the edge of the window is inside it
-        assert!(verify_request(Some(&k.header("GET", URL, b"", NOW - 60)), "GET", &url(URL), b"", NOW, 60).is_ok());
+        assert!(verify_request(Some(&k.header("GET", URL, b"", NOW - 60)), "GET", &url(URL), Payload::Read(b""), NOW, 60).is_ok());
     }
 
     #[test]
     fn a_header_that_is_not_an_event_is_refused() {
         let k = keys(1);
         let good = k.header("POST", URL, b"", NOW);
-        assert_eq!(verify_request(None, "POST", &url(URL), b"", NOW, 60), Err(AuthError::MissingHeader));
+        assert_eq!(verify_request(None, "POST", &url(URL), Payload::Read(b""), NOW, 60), Err(AuthError::MissingHeader));
         assert_eq!(verify_at("Bearer x", "POST", URL, b""), Err(AuthError::MissingHeader));
         assert_eq!(verify_at("Nostr %%%", "POST", URL, b""), Err(AuthError::Malformed("not base64")));
         let not_json = format!("Nostr {}", base64::engine::general_purpose::STANDARD.encode("{not json"));
@@ -402,8 +419,8 @@ mod tests {
         assert_eq!(verify_at(&signed(&k, |e| e.pubkey = e.pubkey.to_uppercase()), "POST", URL, b""), Err(AuthError::BadPubkey));
         // 64 hex that is no point on the curve (x past the field's prime)
         assert_eq!(verify_at(&signed(&k, |e| e.pubkey = "f".repeat(64)), "POST", URL, b""), Err(AuthError::BadPubkey));
-        assert_eq!(verify_request(Some(&h), "POST", &url(URL), body, NOW + 61, 60), Err(AuthError::Stale { skew_s: -61 }));
-        assert_eq!(verify_request(Some(&h), "POST", &url(URL), body, NOW - 61, 60), Err(AuthError::Stale { skew_s: 61 }));
+        assert_eq!(verify_request(Some(&h), "POST", &url(URL), Payload::Read(body), NOW + 61, 60), Err(AuthError::Stale { skew_s: -61 }));
+        assert_eq!(verify_request(Some(&h), "POST", &url(URL), Payload::Read(body), NOW - 61, 60), Err(AuthError::Stale { skew_s: 61 }));
         // the ends of i64 are stale, not a subtraction that wraps to fresh
         for created_at in [i64::MIN, i64::MIN + NOW, i64::MAX] {
             let far = signed(&k, |e| e.created_at = created_at);
@@ -442,6 +459,33 @@ mod tests {
             e.tags.push(tag("p", &signer));
         });
         assert_eq!(verify_proof(&lifted, "POST", URL, &signer, NOW, 60), Err(AuthError::PayloadMismatch));
+    }
+
+    /// Goal: a blob upload, whose bytes the router never holds, is signed
+    /// over its URL, which names the bytes' hash; a payload tag naming
+    /// that hash (what older CLIs sent) is as good as none, and one naming
+    /// other bytes is refused. Method: headers with each tag, against a
+    /// streamed payload and against an empty body read whole.
+    #[test]
+    fn a_streamed_body_is_bound_by_its_url() {
+        let k = keys(1);
+        let bytes = b"the blob's bytes";
+        let sha = hex::encode(Sha256::digest(bytes));
+        let at = format!("http://127.0.0.1:8790/api/f/a.b/blobs/{sha}");
+        let streamed = |header: &str| verify_request(Some(header), "PUT", &url(&at), Payload::Streamed { sha256_hex: &sha }, NOW, 60);
+        let (by_sha, bare) = (k.header("PUT", &at, bytes, NOW), k.header("PUT", &at, b"", NOW));
+        let of_nothing = k.header_for_payload("PUT", &at, Some(&hex::encode(Sha256::digest(b""))), NOW);
+        let of_other = k.header("PUT", &at, b"other bytes", NOW);
+        assert_eq!(streamed(&by_sha).as_deref(), Ok(k.pubkey_hex()), "a tag naming the URL's hash");
+        assert_eq!(streamed(&bare).as_deref(), Ok(k.pubkey_hex()), "no tag");
+        assert_eq!(streamed(&of_nothing).as_deref(), Ok(k.pubkey_hex()), "the hash of nothing");
+        assert_eq!(streamed(&of_other), Err(AuthError::PayloadMismatch), "a tag naming other bytes");
+        // a route that reads its body holds the tag to the body it read
+        assert_eq!(verify_at(&by_sha, "PUT", &at, b""), Err(AuthError::PayloadMismatch));
+        // the tag is held to the hash the route names, never taken on its word
+        let other_sha = hex::encode(Sha256::digest(b"other bytes"));
+        let elsewhere = verify_request(Some(&by_sha), "PUT", &url(&at), Payload::Streamed { sha256_hex: &other_sha }, NOW, 60);
+        assert_eq!(elsewhere, Err(AuthError::PayloadMismatch));
     }
 
     #[test]
@@ -496,6 +540,6 @@ mod tests {
         let k = keys(1);
         let arrived = arrived_url(url("http://fragment.club/api/fragments"), Some("https"));
         let h = k.header("GET", "https://fragment.club/api/fragments", b"", NOW);
-        assert!(verify_request(Some(&h), "GET", &arrived, b"", NOW, 60).is_ok());
+        assert!(verify_request(Some(&h), "GET", &arrived, Payload::Read(b""), NOW, 60).is_ok());
     }
 }
