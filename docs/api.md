@@ -653,9 +653,9 @@ API answers on the platform's host):
 A site file carries an `ETag` that names its bytes: the last commit that
 changed it, or, for a page given Open Graph tags, a weak tag that also
 names the live commit (its `fragment.json`). `__fragment.js`, `__sw.js`,
-`__chat.js`, and `__chat.css` carry a hash of their bytes. A `GET` or `HEAD` whose
-`If-None-Match` names the current tag answers 304 without reading the
-file.
+`__chat.js`, and `__chat.css` carry a hash of their bytes. A `GET` or
+`HEAD` whose `If-None-Match` names the current tag answers 304 without
+reading the file.
 
 `__live` and `__watch` are also served in place at `/f/<name>/…` for the
 CLI. A socket has no CORS, and every fragment's origin is one site with
