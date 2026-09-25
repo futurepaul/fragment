@@ -228,7 +228,7 @@ impl DurableObject for FragmentCell {
     async fn websocket_message(&self, ws: WebSocket, message: WebSocketIncomingMessage) -> Result<()> {
         let WebSocketIncomingMessage::String(s) = message else { return Ok(()) };
         if self.state.get_tags(&ws).iter().any(|t| t == "live") {
-            self.live_message(&ws, &s);
+            self.live_message(&ws, &s).await;
         } else if serde_json::from_str::<Value>(&s).is_ok_and(|v| v["type"] == "ping") {
             ws.send_with_str(r#"{"type":"pong"}"#)?;
         }

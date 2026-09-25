@@ -17,7 +17,8 @@
     "patched": { "kind": "mutation" },
     "bulk": { "kind": "mutation" },
     "count": { "kind": "query", "role": "public" },
-    "whoami": { "kind": "query", "role": "public" }
+    "whoami": { "kind": "query", "role": "public" },
+    "backstage": { "kind": "query", "role": "editor" }
   },
   "channels": {
     "room": { "read": "public" },

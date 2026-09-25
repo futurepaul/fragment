@@ -561,14 +561,14 @@ API answers on the platform's host):
 | `__tree` | `{type, ref: "live", sha, count, files}`, content only |
 | `__file?path=` | a content file from live, else main |
 | `__preview.svg` | the placeholder preview image |
-| `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; a signed-in browser (`fragment_site`) calls as its person; an unsigned caller gets an anonymous principal cookie; callers holding only `public` get 60 calls a minute each, 600 per fragment |
+| `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; a signed-in browser (`fragment_site`) calls as its person; an unsigned caller gets an anonymous principal cookie; callers holding only `public` get 60 calls a minute each, 600 per fragment (a page's live views re-run over `__live`, outside this) |
 | `__signin`, `__signout` | this origin's session (Sign-in, above) |
 | `__join?invite=<token>` | an invite in a browser: signed out, → `__signin` and back; signed in, a Join button that posts `invite` here (form-encoded; another origin 403) and joins as the person |
 | `__fragment.js` | the browser library (below) |
 | `__fragments` | `{fragments: [{name, role, url}]}`: the fragments this fragment's owner belongs to, only to the owner signed in here, and only when `fragment.json` at live declares `"capabilities": ["fragments"]` (anyone else, or a page that does not ask, 403). A dashboard's page, such as the desktop's. `POST` `application/json` `{label, template}` → `{name, url}` makes `<label>.<username>` for the owner, as `POST /api/fragments` would, under the same conditions |
 | `__people?id=…&id=…` | anyone who can see the fragment: `{profiles: {<id>: {kind, username, picture}}}` for up to 64 identities (an agent's `username` is its owner's; a picture is an absolute platform URL); an id the registry does not hold is left out |
 | `__files` | an HTML list of the content files (live and main) linking to `__file`; framed, a click asks the page around it to open the file (`postMessage({fragment: "open", url, title})`) |
-| `__live` | WebSocket, anyone who can see the fragment: channel subscriptions from a cursor, presence, change signals (below) |
+| `__live` | WebSocket, anyone who can see the fragment: channel subscriptions from a cursor, presence, change signals, queries (below) |
 | `__watch` | WebSocket, viewers and up (the share link, or a signed upgrade): `{type: "hello", ref, sha}`, then `{type: "changed", ref: "main", sha, paths}` per external move of main |
 | anything else | the app's `fetch`, when it has one |
 
@@ -589,7 +589,9 @@ as `LiveIn` (client → server) and `LiveOut` (server → client) in
   `last` records, at most 1000): exactly one of `after` and `last`;
   `{type: "unsubscribe", channel}`, `{type: "presence", data}` (at most
   4 KiB; `null` or no `data` clears; at most 10 a second after a burst
-  of 10: a faster change is dropped, with an error), `{type: "ping"}`
+  of 10: a faster change is dropped, with an error), `{type: "query",
+  id, op, input}` (a query run as the socket's principal and role; `id`
+  is the page's, `^[A-Za-z0-9._:-]{1,128}$`), `{type: "ping"}`
 - server → client: `{type: "hello", id, principal, role, presence:
   [{id, principal, data}]}` (everyone sharing presence as it opens),
   `{type: "record", channel, seq, at, principal, kind, body}`,
@@ -597,6 +599,9 @@ as `LiveIn` (client → server) and `LiveOut` (server → client) in
   `{type: "presence", id, principal, data}` (one socket's change, to
   every socket, its own too; `data: null` once it cleared or left),
   `{type: "changed", op}` (after every applied mutation),
+  `{type: "result", id, result}` or `{type: "result", id, error,
+  message, status}` (a query's answer, or its refusal as `__op` would
+  refuse it, with the code's HTTP status),
   `{type: "pong"}` (to a ping), `{type: "error", message}` (a frame
   that does not decode, with what was wrong, or a refusal; the socket
   stays open)
@@ -609,13 +614,25 @@ client pages arrives in its turn, never ahead of the records before it.
 
 A socket's role is fixed when it connects. Removing a member closes their
 sockets; rotating the share link closes link holders'; a fragment that
-stops being public closes its anonymous visitors'. A fragment holds at
+stops being public closes its anonymous visitors'. Changing a member's
+role closes theirs (and, for an agent, its owner's) with 4001, which the
+browser library reconnects after, at the new role. A fragment holds at
 most 1000 live sockets (`limits::LIVE_SOCKETS_MAX`); past that a new one
 is refused (429).
 
+A query over the socket runs as `__op` runs it, as the socket's
+principal and role, with no HTTP request, router, or registry lookup,
+and outside the public call budget: a socket may run 16 queries between
+two changes to the fragment (`limits::LIVE_QUERIES_MAX`; a page re-runs
+its live views after changes), no more than that at once, and one at a
+time for each id. Past that, a query is refused `rate_limited` (429).
+Only queries run there: a mutation or a job is refused, and not run.
+
 The browser library (`import * as fragment from "./__fragment.js"`):
 `call(op, input, {id?})` (retries keep the id), `live(op, input,
-onResult, onError?)` (re-runs a query after every change), `subscribe(
+onResult, onError?)` (re-runs a query after every change, over the socket
+when it is open and over HTTP when not, or when the socket's budget is
+spent; one run at a time, however many changes came), `subscribe(
 channel, onRecord, {after?, last?})` (pages through the backlog, then
 follows live; after a reconnect it resumes after the last record),
 `presence.set(data)` (changes within 150 ms go as one, the latest),

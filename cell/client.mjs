@@ -11,8 +11,9 @@
 //   await fragment.push.register("everyone");                  // web push (after a click)
 //   fragment.closed(({ code }) => showGone(code));             // the fragment ended this page's socket
 //
-// One socket per page carries subscriptions, presence, and change signals;
-// it reconnects by itself, after a jittered wait (a deploy drops every page
+// One socket per page carries subscriptions, presence, change signals, and
+// the live queries' runs (they go over HTTP only while it is not open); it
+// reconnects by itself, after a jittered wait (a deploy drops every page
 // at once; they should not all come back in the same second), and resumes
 // each channel after its last record. A close the fragment means for good
 // (4003: this page's access was revoked; 4004: the fragment was deleted)
@@ -20,9 +21,10 @@
 // A channel's backlog comes a page at a time: the library asks for the next
 // page until the last one, which makes the channel live, so no record is
 // skipped however far behind the page starts.
-// Presence comes whole when the socket opens, then one change at a time;
-// this page sends its own at most once every 150 ms, the latest last (the
-// fragment drops more than 10 a second).
+// A live query runs one at a time: changes while it runs ask for one more
+// run after it, however many came. Presence comes whole when the socket
+// opens, then one change at a time; this page sends its own at most once
+// every 150 ms, the latest last (the fragment drops more than 10 a second).
 // A call keeps its id across retries, so a retried mutation is a replay,
 // never a second write.
 
@@ -69,6 +71,7 @@ let presenceData = null;
 let presenceSentAt = 0;
 let presenceTimer = null;
 let ended = null; // { code, reason } once the fragment closed the socket for good
+let liveIds = 0;
 const helloWaiters = [];
 const closedHandlers = new Set();
 // Close codes after which reconnecting cannot help (live.rs, fragment.rs).
@@ -76,12 +79,17 @@ const FINAL_CLOSE_CODES = [4003, 4004];
 // Under the fragment's 10 presence changes a second (limits::PRESENCE_PER_S).
 const PRESENCE_EVERY_MS = 150;
 const subs = new Map(); // channel -> { after, last, handlers }
-const lives = new Set(); // { op, input, onResult, onError }
+const lives = new Set(); // { id, op, input, onResult, onError, running, again }
+const asked = new Map(); // live id -> the live query whose run the socket has not answered
 const present = new Map(); // socket id -> { id, principal, data }
 const presenceHandlers = new Set();
 
+function open() {
+  return socket !== null && socket.readyState === WebSocket.OPEN;
+}
+
 function send(message) {
-  if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+  if (open()) socket.send(JSON.stringify(message));
 }
 
 // Resumes after the cursor; a subscription that asked for the last N
@@ -114,6 +122,13 @@ function connect() {
       for (const p of m.presence) present.set(p.id, p);
       helloWaiters.splice(0).forEach((resolve) => resolve(hello));
       showPresence();
+    } else if (m.type === "result") {
+      const l = asked.get(m.id);
+      asked.delete(m.id);
+      if (!l) return;
+      // past the socket's own budget for queries: this run goes over HTTP
+      if (m.error === "rate_limited") viaHttp(l);
+      else settle(l, m.error ? { error: new FragmentError(m.status, m) } : { result: m.result });
     } else if (m.type === "record") {
       const s = subs.get(m.channel);
       if (s && m.seq > s.after) {
@@ -141,6 +156,10 @@ function connect() {
   };
   ws.onclose = (event) => {
     socket = null;
+    // runs the socket will not answer now go over HTTP
+    const unanswered = [...asked.values()];
+    asked.clear();
+    unanswered.forEach(viaHttp);
     if (FINAL_CLOSE_CODES.includes(event.code)) {
       ended = { code: event.code, reason: event.reason };
       closedHandlers.forEach((h) => h(ended));
@@ -152,18 +171,53 @@ function connect() {
   };
 }
 
-async function run(l) {
-  try {
-    l.onResult(await call(l.op, l.input));
-  } catch (e) {
-    if (l.onError) l.onError(e);
-    else console.error(e);
+// One run of a live query: over the socket when it is open, else over
+// HTTP; one at a time, and one asked for while it runs follows it.
+function run(l) {
+  if (!lives.has(l)) return;
+  if (l.running) {
+    l.again = true;
+    return;
   }
+  l.running = true;
+  l.again = false;
+  if (open()) {
+    asked.set(l.id, l);
+    send({ type: "query", id: l.id, op: l.op, input: l.input });
+  } else {
+    viaHttp(l);
+  }
+}
+
+async function viaHttp(l) {
+  let outcome;
+  try {
+    outcome = { result: await call(l.op, l.input) };
+  } catch (e) {
+    outcome = { error: e };
+  }
+  settle(l, outcome);
+}
+
+// A run's outcome to its handlers (a throw from onResult goes to onError),
+// then the run asked for meanwhile.
+function settle(l, { result, error }) {
+  l.running = false;
+  if (lives.has(l)) {
+    try {
+      if (error !== undefined) throw error;
+      l.onResult(result);
+    } catch (e) {
+      if (l.onError) l.onError(e);
+      else console.error(e);
+    }
+  }
+  if (l.again) run(l);
 }
 
 /// Runs a query now and again after every change; returns a stop function.
 export function live(op, input, onResult, onError) {
-  const l = { op, input, onResult, onError };
+  const l = { id: `live-${++liveIds}`, op, input, onResult, onError, running: false, again: false };
   lives.add(l);
   connect();
   run(l);
