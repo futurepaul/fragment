@@ -282,6 +282,189 @@ impl Caller {
     }
 }
 
+/// The fragment's `meta` rows, one variant per key: every read and write
+/// names its row here, so each key is spelled once (`key`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MetaKey {
+    /// `<label>.<username>`, written when a create claims it.
+    Name,
+    /// When a create in progress claimed the name (the claim expires).
+    ClaimedAt,
+    /// When the fragment was created, its incarnation: a fragment exists
+    /// once it has this row, written last.
+    CreatedAt,
+    /// The identity that created it.
+    Owner,
+    /// The fragment's own key.
+    Npub,
+    /// Its secret key, sealed by `KEYS`.
+    FragmentSecret,
+    Visibility,
+    /// The share link's token.
+    ViewToken,
+    InboxToken,
+    WebhookSecret,
+    /// Its code.storage repo.
+    Repo,
+    /// The latest members index change (members.rs).
+    IndexVersion,
+    /// When the poll backstop runs next.
+    PollAt,
+    /// A template still to commit (publish.rs).
+    TemplatePending,
+    /// An owner's agent still to join (publish.rs).
+    AgentPending,
+    /// A certificate still to ask for.
+    CertPending,
+    /// The commits the cell pins (plane.rs).
+    PinMain,
+    PinLive,
+    /// The commit main's manifest was read from.
+    MainReadAt,
+    /// The commit live's code was installed from.
+    LiveReadAt,
+    /// `fragment.json` at main, as JSON text.
+    ManifestMain,
+    /// The live manifest's `meta`, as JSON text: a page's Open Graph tags.
+    MetaLive,
+    /// The live manifest's `capabilities`, as a JSON list.
+    CapabilitiesLive,
+    /// Why live's code was not installed.
+    CodeError,
+    /// When the blob collection runs next.
+    BlobsGcAt,
+    /// The fragment's VAPID key, sealed (push.rs).
+    Vapid,
+    /// Test fleets only: a shorter ledger window (`/test/fragment ledger`).
+    TestLedgerMs,
+    /// Test fleets only: how many more queue sends fail (`fail-deliveries`).
+    TestFailDeliveries,
+    /// Test fleets only: how many more outbox writes fail (`fail-outbox`).
+    TestFailOutbox,
+    /// Test fleets only: how many more trigger steps fail (`fail-triggers`).
+    TestFailTriggers,
+}
+
+impl MetaKey {
+    pub(crate) const fn key(self) -> &'static str {
+        match self {
+            MetaKey::Name => "name",
+            MetaKey::ClaimedAt => "claimed_at",
+            MetaKey::CreatedAt => "created_at",
+            MetaKey::Owner => "owner",
+            MetaKey::Npub => "npub",
+            MetaKey::FragmentSecret => "fragment_secret",
+            MetaKey::Visibility => "visibility",
+            MetaKey::ViewToken => "view_token",
+            MetaKey::InboxToken => "inbox_token",
+            MetaKey::WebhookSecret => "webhook_secret",
+            MetaKey::Repo => "repo",
+            MetaKey::IndexVersion => "index_version",
+            MetaKey::PollAt => "poll_at",
+            MetaKey::TemplatePending => "template_pending",
+            MetaKey::AgentPending => "agent_pending",
+            MetaKey::CertPending => "cert_pending",
+            MetaKey::PinMain => "pin_main",
+            MetaKey::PinLive => "pin_live",
+            MetaKey::MainReadAt => "main_read_at",
+            MetaKey::LiveReadAt => "live_read_at",
+            MetaKey::ManifestMain => "manifest_main",
+            MetaKey::MetaLive => "meta_live",
+            MetaKey::CapabilitiesLive => "capabilities_live",
+            MetaKey::CodeError => "code_error",
+            MetaKey::BlobsGcAt => "blobs_gc_at",
+            MetaKey::Vapid => "vapid",
+            MetaKey::TestLedgerMs => "test_ledger_ms",
+            MetaKey::TestFailDeliveries => "test_fail_deliveries",
+            MetaKey::TestFailOutbox => "test_fail_outbox",
+            MetaKey::TestFailTriggers => "test_fail_triggers",
+        }
+    }
+
+    /// The pin of `which`, one of `plane::REFS`.
+    pub(crate) fn pin(which: &str) -> MetaKey {
+        match which {
+            "main" => MetaKey::PinMain,
+            "live" => MetaKey::PinLive,
+            other => panic!("{other} is not a pinned ref"),
+        }
+    }
+
+    /// The commit what follows `which` was read from (plane.rs `follow`).
+    pub(crate) fn read_at(which: &str) -> MetaKey {
+        match which {
+            "main" => MetaKey::MainReadAt,
+            "live" => MetaKey::LiveReadAt,
+            other => panic!("{other} is not a pinned ref"),
+        }
+    }
+}
+
+/// A created fragment's facts as one request reads them (`facts`): the
+/// `meta` rows its routes consult, in one statement. It is that request's
+/// snapshot and is never kept, so nothing invalidates it: a handler that
+/// writes one of these rows and reads it back in the same request
+/// (create, rotate, visibility) reads `meta` directly, and `ensure_pins`
+/// updates the pins it moves.
+pub(crate) struct Facts {
+    pub name: String,
+    pub visibility: Visibility,
+    pub view_token: String,
+    pub repo: String,
+    pub pin_main: Option<String>,
+    pub pin_live: Option<String>,
+}
+
+impl Facts {
+    /// The pin of `which`, one of `plane::REFS`.
+    pub(crate) fn pin(&self, which: &str) -> Option<&str> {
+        match which {
+            "main" => self.pin_main.as_deref(),
+            "live" => self.pin_live.as_deref(),
+            other => panic!("{other} is not a pinned ref"),
+        }
+    }
+
+    pub(crate) fn set_pin(&mut self, which: &str, pin: Option<String>) {
+        match which {
+            "main" => self.pin_main = pin,
+            "live" => self.pin_live = pin,
+            other => panic!("{other} is not a pinned ref"),
+        }
+    }
+}
+
+pub(crate) fn missing(key: MetaKey) -> CellError {
+    CellError::host(format!("a created fragment has no {}", key.key()))
+}
+
+fn not_created() -> CellError {
+    CellError::new(ErrorCode::NotFound, "no such fragment")
+}
+
+/// Whether a standing is the caller's own (a membership, or an agent
+/// member's owner), not a share link or a visibility floor.
+pub(crate) fn as_themselves(standing: Standing) -> bool {
+    standing.member.is_some() || standing.owns_member_agent
+}
+
+/// The caller's role for `purpose`, or the refusal and why: pure, over the
+/// visibility and standing a request read once. `needs` is the weakest
+/// role that may do it.
+pub(crate) fn decide(visibility: Visibility, standing: Standing, purpose: Purpose, needs: Role) -> CellResult<Role> {
+    let why = || match (needs, visibility) {
+        _ if standing.owns_member_agent && purpose == Purpose::Act => "you read this fragment through your agent's membership; acting here needs your own".to_string(),
+        (Role::Public, Visibility::Link) => "this fragment is shared by link: open it with its share link (?view=)".to_string(),
+        (Role::Public, Visibility::Members) => "this fragment is for its members only".to_string(),
+        _ => format!("this needs the {} role", needs.as_str()),
+    };
+    match access::decide(visibility, standing, purpose, needs) {
+        Decision::Allow(role) => Ok(role),
+        Decision::Unauthenticated => Err(CellError::new(ErrorCode::Unauthenticated, format!("{}; sign in or sign the request", why()))),
+        Decision::Forbidden => Err(CellError::new(ErrorCode::Forbidden, why())),
+    }
+}
+
 pub(crate) async fn body_json<T: DeserializeOwned>(req: &mut Request) -> CellResult<T> {
     let bytes = req.bytes().await?;
     serde_json::from_slice(&bytes).map_err(|e| CellError::invalid(format!("body: {e}")))
@@ -321,22 +504,40 @@ impl FragmentCell {
         Ok(())
     }
 
-    pub(crate) fn meta(&self, key: &str) -> CellResult<Option<String>> {
-        let rows = self.rows("SELECT value FROM meta WHERE key = ?", vec![key.into()])?;
-        Ok(rows.first().map(|r| r["value"].as_str().expect("meta.value is TEXT").to_string()))
+    pub(crate) fn meta(&self, key: MetaKey) -> CellResult<Option<String>> {
+        let [value] = self.metas([key])?;
+        Ok(value)
     }
 
-    pub(crate) fn set_meta(&self, key: &str, value: &str) -> CellResult<()> {
-        self.exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", vec![key.into(), value.into()])
+    /// Several `meta` rows in one statement, in the order `keys` names them.
+    pub(crate) fn metas<const N: usize>(&self, keys: [MetaKey; N]) -> CellResult<[Option<String>; N]> {
+        #[derive(serde::Deserialize)]
+        struct Row {
+            key: String,
+            value: String,
+        }
+        let marks = vec!["?"; N].join(", ");
+        let rows: Vec<Row> = self.typed(&format!("SELECT key, value FROM meta WHERE key IN ({marks})"), keys.iter().map(|k| k.key().into()).collect())?;
+        assert!(rows.len() <= N, "meta.key is the primary key");
+        let mut out: [Option<String>; N] = std::array::from_fn(|_| None);
+        for row in rows {
+            let i = keys.iter().position(|k| k.key() == row.key).expect("the IN list answers only the keys it names");
+            out[i] = Some(row.value);
+        }
+        Ok(out)
     }
 
-    pub(crate) fn del_meta(&self, key: &str) -> CellResult<()> {
-        self.exec("DELETE FROM meta WHERE key = ?", vec![key.into()])
+    pub(crate) fn set_meta(&self, key: MetaKey, value: &str) -> CellResult<()> {
+        self.exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", vec![key.key().into(), value.into()])
+    }
+
+    pub(crate) fn del_meta(&self, key: MetaKey) -> CellResult<()> {
+        self.exec("DELETE FROM meta WHERE key = ?", vec![key.key().into()])
     }
 
     /// A meta value every created fragment has.
-    pub(crate) fn must(&self, key: &str) -> CellResult<String> {
-        self.meta(key)?.ok_or_else(|| CellError::host(format!("a created fragment has no {key}")))
+    pub(crate) fn must(&self, key: MetaKey) -> CellResult<String> {
+        self.meta(key)?.ok_or_else(|| missing(key))
     }
 
     pub(crate) fn count(&self, q: &str) -> CellResult<u64> {
@@ -351,14 +552,34 @@ impl FragmentCell {
 
     /// The fragment's name, or 404 when it was never created (or was deleted).
     pub(crate) fn name(&self) -> CellResult<String> {
-        match self.meta("created_at")? {
-            Some(_) => self.must("name"),
-            None => Err(CellError::new(ErrorCode::NotFound, "no such fragment")),
+        match self.metas([MetaKey::CreatedAt, MetaKey::Name])? {
+            [Some(_), Some(name)] => Ok(name),
+            [Some(_), None] => Err(missing(MetaKey::Name)),
+            [None, _] => Err(not_created()),
         }
     }
 
+    /// The fragment's facts for one request (`Facts`), or 404 when it was
+    /// never created (or was deleted): one statement.
+    pub(crate) fn facts(&self) -> CellResult<Facts> {
+        let [created_at, name, visibility, view_token, repo, pin_main, pin_live] =
+            self.metas([MetaKey::CreatedAt, MetaKey::Name, MetaKey::Visibility, MetaKey::ViewToken, MetaKey::Repo, MetaKey::PinMain, MetaKey::PinLive])?;
+        if created_at.is_none() {
+            return Err(not_created());
+        }
+        let visibility = visibility.ok_or_else(|| missing(MetaKey::Visibility))?;
+        Ok(Facts {
+            name: name.ok_or_else(|| missing(MetaKey::Name))?,
+            visibility: Visibility::parse(&visibility).ok_or_else(|| CellError::host(format!("stored visibility {visibility:?}")))?,
+            view_token: view_token.ok_or_else(|| missing(MetaKey::ViewToken))?,
+            repo: repo.ok_or_else(|| missing(MetaKey::Repo))?,
+            pin_main,
+            pin_live,
+        })
+    }
+
     pub(crate) fn visibility(&self) -> CellResult<Visibility> {
-        let v = self.must("visibility")?;
+        let v = self.must(MetaKey::Visibility)?;
         Visibility::parse(&v).ok_or_else(|| CellError::host(format!("stored visibility {v:?}")))
     }
 
@@ -367,57 +588,45 @@ impl FragmentCell {
         Ok(rows.first().and_then(|r| r["role"].as_str()).and_then(Role::parse))
     }
 
-    /// What the caller brings: their membership, or an agent of theirs that
-    /// is a member (they read what it reads).
-    fn standing(&self, caller: &Caller, link: bool) -> CellResult<Standing> {
-        let member = match caller.principal() {
-            Some(p) => self.member_role(p)?,
-            None => None,
+    /// What the caller brings, in one statement: their membership, or an
+    /// agent of theirs that is a member (they read what it reads). A
+    /// request reads it once and decides with it (`decide`) as often as
+    /// it asks.
+    pub(crate) fn standing(&self, caller: &Caller, link: bool) -> CellResult<Standing> {
+        let Some(principal) = caller.principal() else {
+            return Ok(Standing { member: None, owns_member_agent: false, link, signed: false });
         };
-        let owns_member_agent = match (caller.principal(), member) {
-            (Some(p), None) => !self.rows("SELECT principal FROM members WHERE owner = ? LIMIT 1", vec![p.into()])?.is_empty(),
-            _ => false,
-        };
-        Ok(Standing { member, owns_member_agent, link, signed: caller.principal().is_some() })
+        #[derive(serde::Deserialize)]
+        struct Row {
+            role: Option<String>,
+            agent: i64,
+        }
+        let rows: Vec<Row> = self.typed(
+            "SELECT (SELECT role FROM members WHERE principal = ?) AS role, EXISTS (SELECT 1 FROM members WHERE owner = ?) AS agent",
+            vec![principal.into(), principal.into()],
+        )?;
+        let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
+        let member = row.role.as_deref().and_then(Role::parse);
+        Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true })
     }
 
     /// Whether the caller sees the fragment as themselves (a member, or an
     /// agent's owner), not by its link or its visibility: their sockets are
     /// tagged `p:<id>` and close when that standing is revoked.
     pub(crate) fn has_standing(&self, caller: &Caller) -> CellResult<bool> {
-        let s = self.standing(caller, false)?;
-        Ok(s.member.is_some() || s.owns_member_agent)
+        Ok(as_themselves(self.standing(caller, false)?))
     }
 
     /// The caller's role for reading, or the refusal: `needs` is the weakest
     /// role that may read.
     pub(crate) fn require(&self, caller: &Caller, link: bool, needs: Role) -> CellResult<Role> {
-        self.decide(caller, link, needs, Purpose::Read)
+        self.admit(&self.facts()?, caller, link, needs)
     }
 
-    /// The caller's role for acting (an operation): an agent's owner reads
-    /// through it and never acts through it.
-    pub(crate) fn require_to_act(&self, caller: &Caller, link: bool, needs: Role) -> CellResult<Role> {
-        self.decide(caller, link, needs, Purpose::Act)
-    }
-
-    fn decide(&self, caller: &Caller, link: bool, needs: Role, purpose: Purpose) -> CellResult<Role> {
-        self.name()?;
-        let standing = self.standing(caller, link)?;
-        let visibility = self.visibility()?;
-        let why = match (needs, visibility) {
-            _ if standing.owns_member_agent && purpose == Purpose::Act => {
-                "you read this fragment through your agent's membership; acting here needs your own".to_string()
-            }
-            (Role::Public, Visibility::Link) => "this fragment is shared by link: open it with its share link (?view=)".to_string(),
-            (Role::Public, Visibility::Members) => "this fragment is for its members only".to_string(),
-            _ => format!("this needs the {} role", needs.as_str()),
-        };
-        match access::decide(visibility, standing, purpose, needs) {
-            Decision::Allow(role) => Ok(role),
-            Decision::Unauthenticated => Err(CellError::new(ErrorCode::Unauthenticated, format!("{why}; sign in or sign the request"))),
-            Decision::Forbidden => Err(CellError::new(ErrorCode::Forbidden, why)),
-        }
+    /// `require` over facts the request already read. A route that decides
+    /// more than once reads its standing itself and calls `decide`.
+    pub(crate) fn admit(&self, facts: &Facts, caller: &Caller, link: bool, needs: Role) -> CellResult<Role> {
+        decide(facts.visibility, self.standing(caller, link)?, Purpose::Read, needs)
     }
 
     /// The signer's identity.
@@ -608,12 +817,13 @@ impl FragmentCell {
         // Claim the name before the first await: a concurrent create for the
         // same name reaches this same object and must see it taken.
         // A claim left by a create that crashed mid-flight expires.
-        let claimed_at: i64 = self.meta("claimed_at")?.and_then(|s| s.parse().ok()).unwrap_or(0);
-        if self.meta("created_at")?.is_some() || js::now_ms() - claimed_at < CLAIM_TTL_MS {
+        let [created_at, claimed_at] = self.metas([MetaKey::CreatedAt, MetaKey::ClaimedAt])?;
+        let claimed_at: i64 = claimed_at.and_then(|s| s.parse().ok()).unwrap_or(0);
+        if created_at.is_some() || js::now_ms() - claimed_at < CLAIM_TTL_MS {
             return Err(CellError::new(ErrorCode::AlreadyExists, format!("fragment {} already exists", body.name)));
         }
-        self.set_meta("name", &body.name)?;
-        self.set_meta("claimed_at", &js::now_ms().to_string())?;
+        self.set_meta(MetaKey::Name, &body.name)?;
+        self.set_meta(MetaKey::ClaimedAt, &js::now_ms().to_string())?;
         // the fragment's own key is made by KEYS; its secret stays sealed there
         let made = async {
             let repo_name = fragment_proto::flat_name(&body.name).ok_or_else(|| CellError::invalid("a fragment's name is <label>.<username>"))?;
@@ -624,8 +834,8 @@ impl FragmentCell {
         let (repo, fragment_pub, sealed) = match made.await {
             Ok(r) => r,
             Err(e) => {
-                self.del_meta("name")?;
-                self.del_meta("claimed_at")?;
+                self.del_meta(MetaKey::Name)?;
+                self.del_meta(MetaKey::ClaimedAt)?;
                 return Err(e);
             }
         };
@@ -636,18 +846,18 @@ impl FragmentCell {
         let poll_at = (now + self.cfg.poll_interval_ms).to_string();
         let created_at = now.to_string();
         for (k, v) in [
-            ("owner", owner.as_str()),
-            ("npub", fragment_npub.as_str()),
-            ("fragment_secret", sealed.as_str()),
-            ("visibility", visibility.as_str()),
-            ("view_token", view_token.as_str()),
-            ("inbox_token", inbox_token.as_str()),
-            ("webhook_secret", webhook_secret.as_str()),
-            ("repo", repo.as_str()),
-            ("index_version", "0"),
-            ("poll_at", poll_at.as_str()),
+            (MetaKey::Owner, owner.as_str()),
+            (MetaKey::Npub, fragment_npub.as_str()),
+            (MetaKey::FragmentSecret, sealed.as_str()),
+            (MetaKey::Visibility, visibility.as_str()),
+            (MetaKey::ViewToken, view_token.as_str()),
+            (MetaKey::InboxToken, inbox_token.as_str()),
+            (MetaKey::WebhookSecret, webhook_secret.as_str()),
+            (MetaKey::Repo, repo.as_str()),
+            (MetaKey::IndexVersion, "0"),
+            (MetaKey::PollAt, poll_at.as_str()),
             // written last: a fragment exists once it has created_at
-            ("created_at", created_at.as_str()),
+            (MetaKey::CreatedAt, created_at.as_str()),
         ] {
             self.set_meta(k, v)?;
         }
@@ -663,7 +873,7 @@ impl FragmentCell {
         )?;
         self.index_change(&owner, Some(Role::Owner))?;
         if let Some(t) = &body.template {
-            self.set_meta("template_pending", t)?;
+            self.set_meta(MetaKey::TemplatePending, t)?;
         }
         self.event("create", &format!("fragment {} created by {owner} (repo {repo})", body.name), json!({ "repo": repo, "key": caller.key().map(npub::display) }));
         self.flush_index().await;
@@ -710,30 +920,31 @@ impl FragmentCell {
     pub(crate) fn code_status(&self) -> CellResult<CodeStatus> {
         let rows = self.rows("SELECT sha FROM code WHERE id = 1", vec![])?;
         let sha = rows.first().map(|r| r["sha"].as_str().expect("code.sha is TEXT").to_string());
-        Ok(CodeStatus { sha, operations: self.operations()?, error: self.meta("code_error")? })
+        Ok(CodeStatus { sha, operations: self.operations()?, error: self.meta(MetaKey::CodeError)? })
     }
 
     fn status(&self, caller: &Caller) -> CellResult<Response> {
-        let role = self.require(caller, false, Role::Viewer)?;
-        let name = self.name()?;
+        let facts = self.facts()?;
+        let role = decide(facts.visibility, self.standing(caller, false)?, Purpose::Read, Role::Viewer)?;
+        let [npub, owner, inbox_token] = self.metas([MetaKey::Npub, MetaKey::Owner, MetaKey::InboxToken])?;
         json_response(&FragmentStatus {
-            npub: self.must("npub")?,
-            owner: npub::display(&self.must("owner")?),
+            npub: npub.ok_or_else(|| missing(MetaKey::Npub))?,
+            owner: npub::display(&owner.ok_or_else(|| missing(MetaKey::Owner))?),
             role,
-            visibility: self.visibility()?,
-            repo: self.must("repo")?,
-            pins: Pins { main: self.meta("pin_main")?, live: self.meta("pin_live")? },
+            visibility: facts.visibility,
+            repo: facts.repo,
+            pins: Pins { main: facts.pin_main, live: facts.pin_live },
             counts: Counts {
                 files: self.count("SELECT COUNT(*) AS n FROM tree WHERE ref = 'main'")?,
                 events: self.count("SELECT COUNT(*) AS n FROM records WHERE channel = 'events'")?,
                 members: self.count("SELECT COUNT(*) AS n FROM members")?,
             },
             code: self.code_status()?,
-            view_token: Some(self.must("view_token")?),
-            inbox_token: if role >= Role::Editor { Some(self.must("inbox_token")?) } else { None },
-            urls: Urls { canonical: self.cfg.canonical(&caller.url, &name) },
+            view_token: Some(facts.view_token),
+            inbox_token: if role >= Role::Editor { Some(inbox_token.ok_or_else(|| missing(MetaKey::InboxToken))?) } else { None },
+            urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name) },
             blob_min_bytes: Some(fragment_core::blob::BLOB_MIN_BYTES as u64),
-            name,
+            name: facts.name,
         })
     }
 
@@ -772,7 +983,7 @@ impl FragmentCell {
     /// queued runs, and the poll backstop (which also checks running runs),
     /// then re-arms.
     async fn on_alarm(&self) -> CellResult<()> {
-        if self.meta("created_at")?.is_none() {
+        if self.meta(MetaKey::CreatedAt)?.is_none() {
             return Ok(());
         }
         self.flush_index().await;
@@ -787,7 +998,7 @@ impl FragmentCell {
         self.sweep_due().await?;
         self.fire_cron()?;
         self.launch_queued().await;
-        let poll_at: i64 = self.meta("poll_at")?.and_then(|s| s.parse().ok()).unwrap_or(0);
+        let poll_at: i64 = self.meta(MetaKey::PollAt)?.and_then(|s| s.parse().ok()).unwrap_or(0);
         if poll_at <= js::now_ms() {
             self.trim_audit()?;
             self.trim_runs()?;
@@ -799,7 +1010,7 @@ impl FragmentCell {
             self.reconcile_runs().await;
             self.release_held_videos().await;
             self.launch_queued().await;
-            self.set_meta("poll_at", &(js::now_ms() + self.cfg.poll_interval_ms).to_string())?;
+            self.set_meta(MetaKey::PollAt, &(js::now_ms() + self.cfg.poll_interval_ms).to_string())?;
         }
         self.schedule().await
     }
@@ -817,10 +1028,11 @@ impl FragmentCell {
     /// Arms the alarm for the earliest due work (or `also`), but no sooner
     /// than `min_ms` from now.
     async fn arm(&self, also: Option<i64>, min_ms: i64) -> CellResult<()> {
-        if self.meta("created_at")?.is_none() {
+        let [created_at, poll_at] = self.metas([MetaKey::CreatedAt, MetaKey::PollAt])?;
+        if created_at.is_none() {
             return Ok(());
         }
-        let poll_at: i64 = self.meta("poll_at")?.and_then(|s| s.parse().ok()).unwrap_or_else(|| js::now_ms() + self.cfg.poll_interval_ms);
+        let poll_at: i64 = poll_at.and_then(|s| s.parse().ok()).unwrap_or_else(|| js::now_ms() + self.cfg.poll_interval_ms);
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
         let due = [outbox, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, also];
         let at = due.into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + min_ms);

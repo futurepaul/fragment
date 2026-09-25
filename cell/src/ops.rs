@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use fragment_core::access::Purpose;
 use fragment_core::facet::{self, Answer, Refusal};
 use fragment_core::npub;
 use fragment_proto::{canonical_json, limits, valid_op_id, ErrorCode, OpCall, OpDecl, OpKind, OpResult, Role, Via};
@@ -16,7 +17,7 @@ use worker::*;
 
 use crate::channels::Settled;
 use crate::error::{CellError, CellResult};
-use crate::fragment::{json_response, Caller, FragmentCell};
+use crate::fragment::{decide, json_response, Caller, Facts, FragmentCell, MetaKey};
 use crate::jobs::NewRun;
 use crate::js::{self, AppCode};
 use crate::plane::PLATFORM_JS;
@@ -110,7 +111,7 @@ impl FragmentCell {
         // module state is this fragment's alone.
         let loader_id = row["loader_id"].as_str().expect("code.loader_id is TEXT");
         let platform = platform();
-        let id = format!("{loader_id}:{}:{}", platform.id, self.must("npub")?);
+        let id = format!("{loader_id}:{}:{}", platform.id, self.must(MetaKey::Npub)?);
         js::app_facet(
             &self.raw,
             self.env.as_ref(),
@@ -130,26 +131,28 @@ impl FragmentCell {
     /// `POST /api/f/<name>/ops/<op>`: a signed caller.
     pub(crate) async fn api_op(&self, caller: &Caller, op: &str, body: OpCall) -> CellResult<Response> {
         let who = self.caller_id(caller)?.to_string();
-        let result = self.call_op(caller, &who, false, op, body).await?;
+        let facts = self.facts()?;
+        let result = self.call_op(caller, &facts, &who, false, op, body).await?;
         json_response(&result)
     }
 
     /// Checks and runs one call from outside. `principal` is who the ledger
     /// records (an identity, or an anonymous visitor's id); `link` says the
-    /// caller holds the share link.
-    pub(crate) async fn call_op(&self, caller: &Caller, principal: &str, link: bool, op: &str, body: OpCall) -> CellResult<OpResult> {
+    /// caller holds the share link. The caller's standing is read once and
+    /// decided twice.
+    pub(crate) async fn call_op(&self, caller: &Caller, facts: &Facts, principal: &str, link: bool, op: &str, body: OpCall) -> CellResult<OpResult> {
+        let standing = self.standing(caller, link)?;
         // Whether the caller can see the fragment at all comes before
         // anything about its operations.
-        self.require(caller, link, Role::Public)?;
+        decide(facts.visibility, standing, Purpose::Read, Role::Public)?;
         let decl = self.declared(op)?;
         // a query reads (docs/MODEL.md), so an agent's owner may ask it; a
         // mutation or a job acts, which takes a membership of one's own
-        let role = match decl.kind {
-            OpKind::Query => self.require(caller, link, decl.role)?,
-            _ => self.require_to_act(caller, link, decl.role)?,
-        };
-        let is_member = caller.principal().map(|p| self.member_role(p)).transpose()?.flatten().is_some();
-        if role == Role::Public && !is_member && !self.rate.borrow_mut().allow(principal, js::now_ms()) {
+        let purpose = if decl.kind == OpKind::Query { Purpose::Read } else { Purpose::Act };
+        let role = decide(facts.visibility, standing, purpose, decl.role)?;
+        // Members act with their own role, which is never `public`: only
+        // callers holding the public floor alone are rate limited.
+        if role == Role::Public && !self.rate.borrow_mut().allow(principal, js::now_ms()) {
             return Err(CellError::new(ErrorCode::RateLimited, "too many public calls this minute; retry shortly"));
         }
         if !valid_op_id(&body.id) || body.id.starts_with(JOB_ID_PREFIX) {
@@ -272,7 +275,7 @@ impl FragmentCell {
         if !self.cfg.test_hooks {
             return Ok(LEDGER_KEPT_MS);
         }
-        Ok(self.meta("test_ledger_ms")?.and_then(|v| v.parse().ok()).unwrap_or(LEDGER_KEPT_MS))
+        Ok(self.meta(MetaKey::TestLedgerMs)?.and_then(|v| v.parse().ok()).unwrap_or(LEDGER_KEPT_MS))
     }
 
     /// `POST /api/test/fragment {fragment, op, …}`, the router's, on fleets
@@ -293,17 +296,17 @@ impl FragmentCell {
         Ok(match body["op"].as_str() {
             Some("fail-deliveries") => {
                 let times = body["times"].as_u64().ok_or_else(|| CellError::invalid("fail-deliveries names how many times"))?;
-                self.set_meta(crate::deliveries::TEST_FAILURES_KEY, &times.to_string())?;
+                self.set_meta(MetaKey::TestFailDeliveries, &times.to_string())?;
                 json!({ "ok": true })
             }
             Some("fail-outbox") => {
                 let times = body["times"].as_u64().ok_or_else(|| CellError::invalid("fail-outbox names how many times"))?;
-                self.set_meta(crate::subscriptions::TEST_OUTBOX_FAILURES_KEY, &times.to_string())?;
+                self.set_meta(MetaKey::TestFailOutbox, &times.to_string())?;
                 json!({ "ok": true })
             }
             Some("fail-triggers") => {
                 let times = body["times"].as_u64().ok_or_else(|| CellError::invalid("fail-triggers names how many times"))?;
-                self.set_meta(crate::jobs::TEST_TRIGGER_FAILURES_KEY, &times.to_string())?;
+                self.set_meta(MetaKey::TestFailTriggers, &times.to_string())?;
                 json!({ "ok": true })
             }
             Some("drop-live") => {
@@ -315,11 +318,11 @@ impl FragmentCell {
             }
             Some("ledger") => match body["ms"].as_i64() {
                 Some(ms) if ms > 0 => {
-                    self.set_meta("test_ledger_ms", &ms.to_string())?;
+                    self.set_meta(MetaKey::TestLedgerMs, &ms.to_string())?;
                     json!({ "ledgerMs": ms })
                 }
                 _ => {
-                    self.del_meta("test_ledger_ms")?;
+                    self.del_meta(MetaKey::TestLedgerMs)?;
                     json!({ "ledgerMs": LEDGER_KEPT_MS })
                 }
             },

@@ -14,13 +14,11 @@ use worker::*;
 
 use crate::deliveries::{Delivery, DeliveryKind};
 use crate::error::{CellError, CellResult};
-use crate::fragment::{json_response, Caller, FragmentCell};
+use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 
 /// The subscriptions one fragment holds, and a URL's length.
 const SUBS_MAX: u64 = 32;
 const SUB_URL_MAX_BYTES: usize = 1024;
-/// Test fleets: how many more outbox writes fail (`fail-outbox`).
-pub const TEST_OUTBOX_FAILURES_KEY: &str = "test_fail_outbox";
 
 impl FragmentCell {
     /// The subscriber: a member whose role may read `channel`.
@@ -69,7 +67,7 @@ impl FragmentCell {
     /// `GET /api/subscriptions`: the caller's (the owner sees every one).
     pub(crate) fn subscriptions(&self, caller: &Caller) -> CellResult<Response> {
         let principal = caller.principal().map(str::to_string).ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "listing subscriptions needs a signed request"))?;
-        let owner = self.must("owner")? == principal;
+        let owner = self.must(MetaKey::Owner)? == principal;
         let rows = if owner {
             self.rows("SELECT id, principal, channel, url, created_at FROM subs ORDER BY id", vec![])?
         } else {
@@ -86,7 +84,7 @@ impl FragmentCell {
     pub(crate) fn unsubscribe(&self, caller: &Caller, id: &str) -> CellResult<Response> {
         let principal = caller.principal().map(str::to_string).ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "unsubscribing needs a signed request"))?;
         let id: i64 = id.parse().map_err(|_| CellError::invalid("a subscription id is a number"))?;
-        let owner = self.must("owner")? == principal;
+        let owner = self.must(MetaKey::Owner)? == principal;
         let gone = self.rows("DELETE FROM subs WHERE id = ? AND (principal = ? OR ?) RETURNING id", vec![SqlStorageValue::Integer(id), principal.as_str().into(), SqlStorageValue::Integer(owner as i64)])?;
         json_response(&json!({ "ok": true, "removed": gone.len() }))
     }
@@ -129,11 +127,11 @@ impl FragmentCell {
         if !self.cfg.test_hooks {
             return Ok(());
         }
-        let left: u64 = self.meta(TEST_OUTBOX_FAILURES_KEY)?.and_then(|n| n.parse().ok()).unwrap_or(0);
+        let left: u64 = self.meta(MetaKey::TestFailOutbox)?.and_then(|n| n.parse().ok()).unwrap_or(0);
         if left == 0 {
             return Ok(());
         }
-        self.set_meta(TEST_OUTBOX_FAILURES_KEY, &(left - 1).to_string())?;
+        self.set_meta(MetaKey::TestFailOutbox, &(left - 1).to_string())?;
         Err(CellError::host("the record's outbox write failed after its append (a test hook)"))
     }
 

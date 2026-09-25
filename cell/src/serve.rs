@@ -9,6 +9,7 @@
 //! signed in on this origin (`__signin`, the router's) is its person, and
 //! accepts an invite at `__join?invite=<token>`.
 
+use fragment_core::access::Purpose;
 use fragment_core::{npub, site};
 use fragment_proto::{valid_repo_path, ErrorCode, OpCall, Role, Visibility};
 use serde_json::{json, Value};
@@ -16,7 +17,7 @@ use sha2::{Digest, Sha256};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
-use crate::fragment::{decode_segment, json_response, Caller, FragmentCell};
+use crate::fragment::{as_themselves, decide, decode_segment, json_response, Caller, Facts, FragmentCell, MetaKey};
 use crate::js;
 use crate::routed::Mode;
 
@@ -59,7 +60,8 @@ fn with_cookies(mut resp: Response, cookies: &[String]) -> CellResult<Response> 
 
 impl FragmentCell {
     pub(crate) async fn serve(&self, mut req: Request, caller: &Caller, name: &str, rest: &str) -> CellResult<Response> {
-        self.name()?;
+        // the fragment's facts, read once for the whole request
+        let mut facts = self.facts()?;
         // the query string, as the request arrived (the router's URL)
         let url = caller.url.clone();
         let origin = Origin {
@@ -67,13 +69,12 @@ impl FragmentCell {
             secure: caller.url.scheme() == "https",
         };
         let cookies = req.headers().get("cookie")?.unwrap_or_default();
-        let view_token = self.must("view_token")?;
-        let via_query = url.query_pairs().any(|(k, v)| k == "view" && eq_ct(&v, &view_token));
-        let via_cookie = site::cookie(&cookies, VIEW_COOKIE).is_some_and(|v| eq_ct(v, &view_token));
+        let via_query = url.query_pairs().any(|(k, v)| k == "view" && eq_ct(&v, &facts.view_token));
+        let via_cookie = site::cookie(&cookies, VIEW_COOKIE).is_some_and(|v| eq_ct(v, &facts.view_token));
         let link = via_query || via_cookie;
         let mut set = vec![];
         if via_query {
-            set.push(origin.cookie(VIEW_COOKIE, &view_token, VIEW_COOKIE_AGE_S));
+            set.push(origin.cookie(VIEW_COOKIE, &facts.view_token, VIEW_COOKIE_AGE_S));
         }
         let path: String = rest.split('/').map(decode_segment).collect::<Vec<_>>().join("/");
         let anon = site::cookie(&cookies, ANON_COOKIE).filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())).map(anon_principal);
@@ -96,11 +97,11 @@ impl FragmentCell {
                     anon_principal(&fresh)
                 }
             };
-            let result = self.call_op(caller, &principal, link, op, body).await?;
+            let result = self.call_op(caller, &facts, &principal, link, op, body).await?;
             json_response(&result)?
         } else if let Some(op) = path.strip_prefix("__push-").filter(|op| matches!(*op, "key" | "sub" | "unsub")) {
             // web push: anyone who can see the fragment (push.rs)
-            self.require(caller, link, Role::Public)?;
+            self.admit(&facts, caller, link, Role::Public)?;
             let answer = if op == "key" {
                 self.push_key().await?
             } else {
@@ -130,7 +131,7 @@ impl FragmentCell {
             json_response(&answer)?
         } else if path == "__people" {
             // names for a page: a person's username and picture, or whose agent
-            self.require(caller, link, Role::Public)?;
+            self.admit(&facts, caller, link, Role::Public)?;
             let ids: Vec<String> = url.query_pairs().filter(|(k, _)| k == "id").map(|(_, v)| v.into_owned()).collect();
             let mut answer = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids }).await?;
             let platform = self.cfg.platform(&caller.url);
@@ -146,16 +147,16 @@ impl FragmentCell {
         } else if path == "__join" {
             self.join_page(&mut req, caller, name, &url).await?
         } else if path == "__watch" {
-            self.watch(&req, caller, link)?
+            self.watch(&req, caller, &facts, link)?
         } else if path == "__live" {
             // an unsigned visitor without a cookie yet is anonymous for this socket only
             let principal = caller.principal().map(str::to_string).or(anon).unwrap_or_else(|| anon_principal(&js::random_hex::<32>()));
             self.live(&req, caller, &principal, link)?
         } else {
-            let role = self.require(caller, link, Role::Public)?;
+            let role = self.admit(&facts, caller, link, Role::Public)?;
             let who = caller.principal().map(npub::display).or(anon).unwrap_or_else(|| "anonymous".into());
             match req.method() {
-                Method::Get | Method::Head => self.site(&mut req, caller, name, &path, &url, role, &who).await?,
+                Method::Get | Method::Head => self.site(&mut req, caller, &mut facts, &path, &url, role, &who).await?,
                 // Only the app's own routes take other methods.
                 _ => self.app_fetch(&mut req, caller, name, &path, &url, role, &who).await?,
             }
@@ -240,23 +241,24 @@ impl FragmentCell {
 
     /// The change feed for `fragment sync --watch`: a frame per external
     /// move of main. Viewers and up; a revoked member's feed closes.
-    fn watch(&self, req: &Request, caller: &Caller, link: bool) -> CellResult<Response> {
+    fn watch(&self, req: &Request, caller: &Caller, facts: &Facts, link: bool) -> CellResult<Response> {
         if !req.headers().get("upgrade")?.is_some_and(|u| u.eq_ignore_ascii_case("websocket")) {
             return Err(CellError::invalid("__watch is a WebSocket; send Upgrade: websocket"));
         }
-        self.require(caller, link, Role::Viewer)?;
+        let standing = self.standing(caller, link)?;
+        decide(facts.visibility, standing, Purpose::Read, Role::Viewer)?;
         let pair = WebSocketPair::new()?;
         let who = match caller.principal() {
-            Some(p) if self.has_standing(caller)? => format!("p:{p}"),
+            Some(p) if as_themselves(standing) => format!("p:{p}"),
             _ => "view".to_string(),
         };
         self.state.accept_websocket_with_tags(&pair.server, &["watch", &who]);
-        pair.server.send_with_str(json!({ "type": "hello", "ref": "main", "sha": self.pin("main")? }).to_string())?;
+        pair.server.send_with_str(json!({ "type": "hello", "ref": "main", "sha": facts.pin_main }).to_string())?;
         Ok(Response::from_websocket(pair.client)?)
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn site(&self, req: &mut Request, caller: &Caller, name: &str, path: &str, url: &url::Url, role: Role, who: &str) -> CellResult<Response> {
+    async fn site(&self, req: &mut Request, caller: &Caller, facts: &mut Facts, path: &str, url: &url::Url, role: Role, who: &str) -> CellResult<Response> {
         let head = req.method() == Method::Head;
         if path == "__fragment.js" {
             let h = Headers::new();
@@ -264,14 +266,16 @@ impl FragmentCell {
             h.set("cache-control", "no-cache")?;
             return Ok(Response::ok(CLIENT_JS)?.with_headers(h));
         }
-        self.ensure_pins().await?;
-        let live = self.pin("live")?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("{name} has no live commit yet: deploy first")))?;
-        let public = self.visibility()? == Visibility::Public;
+        self.ensure_pins(facts).await?;
+        let facts = &*facts;
+        let name = facts.name.as_str();
+        let live = facts.pin_live.as_deref().ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("{name} has no live commit yet: deploy first")))?;
+        let public = facts.visibility == Visibility::Public;
         let headers = |ct: &str, cache: &str| -> CellResult<Headers> {
             let h = Headers::new();
             h.set("content-type", ct)?;
             h.set("cache-control", cache)?;
-            h.set("x-fragment-ref", &live)?;
+            h.set("x-fragment-ref", live)?;
             Ok(h)
         };
         match path {
@@ -284,10 +288,10 @@ impl FragmentCell {
                 let files: Vec<Value> = self
                     .tree_rows("live")?
                     .into_iter()
-                    .filter(|r| !site::is_machinery(r["path"].as_str().unwrap_or("")))
+                    .filter(|r| !site::is_machinery(&r.path))
                     .map(|r| {
-                        let size = r["path"].as_str().and_then(|p| blobs.get(p)).map_or(r["size"].clone(), |s| json!(s));
-                        json!({ "path": r["path"], "size": size, "mode": r["mode"], "lastCommitSha": r["last_commit"] })
+                        let size = blobs.get(&r.path).copied().unwrap_or(r.size);
+                        json!({ "path": r.path, "size": size, "mode": r.mode, "lastCommitSha": r.last_commit })
                     })
                     .collect();
                 return json_response(&json!({ "type": "tree", "ref": "live", "sha": live, "count": files.len(), "files": files }));
@@ -299,7 +303,7 @@ impl FragmentCell {
                     .collect::<CellResult<Vec<_>>>()?
                     .into_iter()
                     .flatten()
-                    .filter_map(|r| r["path"].as_str().map(str::to_string))
+                    .map(|r| r.path)
                     .filter(|p| !site::is_machinery(p))
                     .collect();
                 paths.sort();
@@ -312,18 +316,18 @@ impl FragmentCell {
                     return Err(CellError::invalid("path must be a content path (not the fragment's own machinery)"));
                 }
                 // Data an app writes lands on main; a path not yet on live reads from there.
-                let which = if self.tree_row("live", &p)?.is_some() {
-                    "live"
-                } else if self.tree_row("main", &p)?.is_some() {
-                    "main"
-                } else {
-                    return Err(CellError::new(ErrorCode::NotFound, format!("no file {p}")));
+                let (which, row) = match self.tree_row("live", &p)? {
+                    Some(row) => ("live", row),
+                    None => match self.tree_row("main", &p)? {
+                        Some(row) => ("main", row),
+                        None => return Err(CellError::new(ErrorCode::NotFound, format!("no file {p}"))),
+                    },
                 };
                 if head {
                     return Ok(Response::empty()?.with_headers(headers(site::mime_for_path(&p), "no-store")?));
                 }
                 let range = req.headers().get("range")?;
-                let mut resp = self.stream_file(which, &p, range.as_deref()).await?;
+                let mut resp = self.stream_file(facts, which, &row, range.as_deref()).await?;
                 resp.headers_mut().set("cache-control", "no-store")?;
                 return Ok(resp);
             }
@@ -332,36 +336,48 @@ impl FragmentCell {
         if !path.is_empty() && !valid_repo_path(path.trim_end_matches('/')) {
             return Err(CellError::new(ErrorCode::NotFound, "no such page"));
         }
-        let Some((file, row)) = site::site_candidates(path).into_iter().find_map(|c| self.tree_row("live", &c).ok().flatten().map(|r| (c, r))) else {
+        let mut found = None;
+        for candidate in site::site_candidates(path) {
+            if let Some(row) = self.tree_row("live", &candidate)? {
+                found = Some(row);
+                break;
+            }
+        }
+        let Some(row) = found else {
             if !path.starts_with("__") {
                 return self.app_fetch(req, caller, name, path, url, role, who).await;
             }
             return Err(CellError::new(ErrorCode::NotFound, format!("no page {path:?}")));
         };
-        let mime = site::mime_for_path(&file);
-        let cache = site::cache_control(&file, public);
+        let mime = site::mime_for_path(&row.path);
+        let cache = site::cache_control(&row.path, public);
+        // a file of a pointer's size may be one: its bytes are a blob's
+        let pointer = if crate::blobs::maybe_pointer(row.size) { self.pointer("live", &row.path)? } else { None };
         if head {
             let h = headers(mime, cache)?;
-            let size = match self.pointer("live", &file)? {
-                Some((_, size)) => size,
-                None => row["size"].as_u64().unwrap_or(0),
-            };
+            let size = pointer.map_or(row.size, |(_, size)| size);
             h.set("content-length", &size.to_string())?;
             return Ok(Response::empty()?.with_headers(h));
         }
+        let range = req.headers().get("range")?;
+        if let Some((sha, _)) = pointer {
+            let mut resp = self.stream_blob(&sha, mime, range.as_deref()).await?;
+            resp.headers_mut().set("cache-control", cache)?;
+            return Ok(resp);
+        }
         // Only a page gets Open Graph tags, so only a page reads `meta`.
-        let page = mime.starts_with("text/html") && row["size"].as_u64().unwrap_or(u64::MAX) <= OG_MAX_BYTES;
-        if let (true, Some(stored)) = (page, self.meta("meta_live")?) {
+        let page = mime.starts_with("text/html") && row.size <= OG_MAX_BYTES;
+        let stored = if page { self.meta(MetaKey::MetaLive)? } else { None };
+        if let Some(stored) = stored {
             let meta: fragment_core::manifest::Meta = serde_json::from_str(&stored).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?;
-            if let Some(bytes) = self.cs()?.read(&self.must("repo")?, &live, &file, OG_MAX_BYTES as usize).await? {
+            if let Some(bytes) = self.cs()?.read(&facts.repo, live, &row.path, OG_MAX_BYTES as usize).await? {
                 let html = String::from_utf8_lossy(&bytes);
                 let image = format!("{}__preview.svg", self.cfg.canonical(&caller.url, name));
                 let page = site::inject_og(&html, name, &meta, &image);
                 return Ok(Response::from_html(page)?.with_headers(headers(mime, cache)?));
             }
         }
-        let range = req.headers().get("range")?;
-        let mut resp = self.stream_file("live", &file, range.as_deref()).await?;
+        let mut resp = self.stream_git(facts, "live", &row.path).await?;
         resp.headers_mut().set("content-type", mime)?;
         resp.headers_mut().set("cache-control", cache)?;
         Ok(resp)
