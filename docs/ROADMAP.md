@@ -55,9 +55,8 @@ a computer's wake/exec.
    File-based apps (a vault) stay first-class.
 3. **Chats are fragments.** The transcript is an append-only, paged room
    history (rooms today persist one document, which a transcript
-   outgrows). A chat guest is a member with the owner's full authority
-   ("you can do everything I can"); a less privileged guest mode may
-   follow.
+   outgrows). A chat guest acts with decision 17's authority, which
+   replaced "a member with the owner's full authority" on 2026-09-25.
 4. Sharing UI is **platform-owned**: the desktop's `...` menu asks the
    shell to open a trusted share sheet; invites are accepted in the
    platform bar; a direct fragment URL signs you in and shows the
@@ -141,6 +140,22 @@ a computer's wake/exec.
     V3's shape behind a seam, tracked in `docs/finite-integration.md`.
     Visibility keeps fragment's own link: `link` means anyone holding the
     unguessable link is a viewer; `public` means anyone, no link needed.
+
+### 17. An agent acts for whoever asked, capped (Paul, 2026-09-25)
+
+Each call in an agent's turn acts with the lower of the role of the
+person who started the turn and a cap: the agent's own membership, or
+`editor` on fragments its owner belongs to. Owner-only actions never go
+through an agent. Replaces decision 3's "a chat guest has the owner's
+full authority", which let a guest reach everything the owner has.
+`docs/phase-7.md`.
+
+### 18. Channels a fragment declares postable (Paul, 2026-09-25)
+
+A declared channel may name a `post` role; the platform appends a
+member's record itself (role check, rate limit, size cap, deduped by
+principal and id). Chats use it, so a chat needs no app code and no
+worker. The one exception to "clients never append" (docs/MODEL.md).
 
 ### 16. Usernames, and fragments under them (Paul, 2026-09-24)
 

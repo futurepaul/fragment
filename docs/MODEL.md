@@ -157,7 +157,9 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   were applied), and app-declared channels (a chat transcript, a room's
   messages), declared in `fragment.json` with the role that may read
   them. Clients never append: records come from the platform and from
-  mutations' effects.
+  mutations' effects, except on a channel the fragment declares
+  postable, where the platform appends a member's record for them
+  (ROADMAP decision 18).
 - Subscribers: hibernatable WebSockets that resume from a cursor (a
   WebSocket closes when the cell moves, so clients reconnect with their
   last `seq`); channel-triggered operations; agents; and outbound
