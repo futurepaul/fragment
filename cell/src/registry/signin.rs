@@ -289,6 +289,9 @@ impl RegistryCell {
                 self.exec("UPDATE redemptions SET expires_at = ?", vec![SqlStorageValue::Integer(now)])?;
             }
             SigninsHook::Sweep => self.state.storage().set_alarm(alarm_at(js::now_ms())).await?,
+            SigninsHook::ExpireSession(token) => {
+                self.exec("UPDATE sessions SET expires_at = ? WHERE hash = ?", vec![SqlStorageValue::Integer(js::now_ms()), sha(&token).into()])?;
+            }
         }
         self.signin_counts()
     }

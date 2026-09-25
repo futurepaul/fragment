@@ -245,6 +245,20 @@ pub fn budget(s: &mut Suite, api: &Api) -> Result<()> {
         r["status"] == "held" && released && m(&v, "spentMicros") == m(&before, "spentMicros"),
         format!("{r} {v}"),
     );
+    // cancelled is final too (audit R13: the platform once settled only
+    // completed and failed, and a cancelled video's reservation stayed)
+    let before = month(api, &owner);
+    let r = run(&owner, "film", "cancelled", json!({ "prompt": "a video that will be cancelled", "path": "v/cancelled.mp4" }))?;
+    let v = month(api, &owner);
+    s.ok(
+        "a video that is cancelled holds its run, and is charged nothing: its reservation comes back",
+        r["status"] == "held"
+            && r["error"].as_str().is_some_and(|e| e.contains("cancelled"))
+            && r["costMicros"] == 0
+            && m(&v, "spentMicros") == m(&before, "spentMicros")
+            && m(&v, "reservedMicros") == 0,
+        format!("{r} {before} then {v}"),
+    );
     s.openrouter.set_costs(Costs::default());
     Ok(())
 }

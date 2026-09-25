@@ -613,8 +613,11 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         oldest.status == 401 && newest.status == 302,
         format!("oldest {oldest}, newest {newest}"),
     );
-    with_session(api, "GET", &format!("/auth/fragment?name={f}&return=/"), &paul)?;
-    api.unsigned("GET", "/auth/login", None)?;
+    // a redemption, and a sign-in back from WorkOS, each left unfinished
+    let late_redeem = with_session(api, "GET", &format!("/auth/fragment?name={f}&return=/"), &paul)?.header("location");
+    let late = api.unsigned("GET", "/auth/login?login_hint=late@e2e.test", None)?;
+    let late_cookie = late.cookies().into_iter().find(|c| c.starts_with("fragment_login=")).context("a login cookie")?;
+    let late_back = api.external(&late.header("location"))?;
     let expired = signins(api, "expire")?;
     s.ok(
         "(the test hook expires every pending sign-in and unspent redemption)",
@@ -628,6 +631,15 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         r["logins"].as_u64() == expired["logins"].as_u64().map(|n| n + 1) && r["redemptions"] == expired["redemptions"],
         &r,
     );
+    // expired rows the sweep has not reached yet are refused all the same
+    let r = api.call(Call { method: "GET", url: late_redeem, ..Call::default() })?;
+    s.ok("a redemption past its time is refused (401), unspent or not", r.status == 401 && r.code() == Some(ErrorCode::Unauthenticated), &r);
+    let r = api.call(Call { method: "GET", url: late_back.header("location"), cookie: Some(late_cookie), ..Call::default() })?;
+    s.ok(
+        "and so is finishing a sign-in past its time (400: start again)",
+        r.status == 400 && r.code() == Some(ErrorCode::InvalidRequest) && cookie_line(&r, "fragment_session").is_empty(),
+        &r,
+    );
     signins(api, "sweep")?;
     let mut last = Value::Null;
     let swept = s.eventually(Duration::from_secs(10), || {
@@ -636,6 +648,29 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     });
     s.ok("the alarm's sweep takes every expired row, and keeps the live sign-in", swept, &last);
     s.ok("and every live session", last["sessions"] == expired["sessions"], &last);
+
+    // Goal: a session past its time is nobody, whether the sweep has taken
+    // its row or not. Method: a test hook moves one session's expiry to now.
+    // A site session ends alone; a platform session takes every site
+    // session made from it (they live only while it does).
+    let again = api.sign_in("member@e2e.test")?;
+    let (one, two) = (site_cookie(api, &again, &g)?, site_cookie(api, &again, &g)?);
+    let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "signins": { "expireSession": one } })))?;
+    anyhow::ensure!(r.status == 200, "expiring a site session: {r}");
+    let (ended, kept, platform) = (reads(&one)?, reads(&two)?, with_session(api, "GET", "/", &again)?);
+    s.ok(
+        "a site session past its time is nobody (members only: 401); the browser's others, and its platform session, stay",
+        ended == 401 && kept == 200 && platform.text.contains("member@e2e.test"),
+        format!("{ended} {kept}"),
+    );
+    let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "signins": { "expireSession": again } })))?;
+    anyhow::ensure!(r.status == 200, "expiring a platform session: {r}");
+    let (kept, platform) = (reads(&two)?, with_session(api, "GET", "/", &again)?);
+    s.ok(
+        "a platform session past its time is nobody, and so is every site session made from it",
+        kept == 401 && platform.text.contains("Sign in") && !platform.text.contains("member@e2e.test"),
+        kept,
+    );
 
     let before_ms = signed_median_ms(api, &keys, 21)?;
     let first = api.unsigned("GET", "/auth/login?login_hint=oldest@e2e.test", None)?;

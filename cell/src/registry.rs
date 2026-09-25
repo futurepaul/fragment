@@ -28,7 +28,7 @@
 //!   POST /test    {down} | {calls} | {hold} | {signins}   dev fleets: answer 503 to
 //!                                         everything else, count the calls since the cell
 //!                                         started, hold the next call's answer, or count,
-//!                                         expire, or sweep sign-in's rows
+//!                                         expire, or sweep sign-in's rows, or expire one session
 //!
 //! Each route's body and answer are types in `calls.rs`, shared with the
 //! askers. A call that acts names who asks (`by`, an `owner`: `calls::By`,
