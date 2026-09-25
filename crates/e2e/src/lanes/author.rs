@@ -371,6 +371,104 @@ pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
         tail == (total - 2..=total + 2).collect::<Vec<_>>() && sub["more"] == false && sub["next"] == total + 2,
         format!("{tail:?} {sub}"),
     );
+    live_queries(s, api, &owner)
+}
+
+/// Queries over the live socket: run as the socket's principal and role,
+/// refused as `__op` would refuse them, and bounded by the socket's own
+/// budget between changes, never by the public call budget.
+fn live_queries(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let (name, _) = chat(s, api, owner, "queries")?;
+    let mut v = Socket::open(api, &name, "__live", None, None)?;
+    let v_hello = v.until("hello", 5)?;
+    let ask = |sock: &mut Socket, id: &str, op: &str, input: Value| -> Result<Value> {
+        sock.send(&json!({ "type": "query", "id": id, "op": op, "input": input }))?;
+        sock.until("result", 10)
+    };
+    let who = ask(&mut v, "who", "whoami", json!({}))?;
+    s.ok(
+        "a query over a visitor's socket answers as the socket's principal and role",
+        who == json!({ "type": "result", "id": "who", "result": { "principal": v_hello["principal"], "role": "public" } }),
+        &who,
+    );
+    let mut o = Socket::open(api, &name, "__live", Some(owner), None)?;
+    let o_hello = o.until("hello", 5)?;
+    let who_owner = ask(&mut o, "who", "whoami", json!({}))?;
+    s.ok(
+        "and over a member's socket, as the member and their role",
+        who_owner["result"] == json!({ "principal": o_hello["principal"], "role": "owner" }) && o_hello["principal"] == api.identity(owner)?.as_str(),
+        &who_owner,
+    );
+    let above = ask(&mut v, "staff", "backstage", json!({}))?;
+    s.ok(
+        "a query above the socket's role is refused as __op refuses it",
+        above["id"] == "staff" && above["error"] == "forbidden" && above["status"] == 403 && above.get("result").is_none(),
+        &above,
+    );
+    let act = ask(&mut v, "act", "say", json!({ "text": "over the socket" }))?;
+    let count = ask(&mut v, "count", "count", json!({}))?;
+    s.ok(
+        "only a query runs over the socket: a mutation is refused there, and not run",
+        act["error"] == "invalid_request" && act["status"] == 400 && count["result"] == json!({ "n": 0 }),
+        format!("{act} {count}"),
+    );
+    let bad = ask(&mut v, "not an id!", "count", json!({}))?;
+    let schema = ask(&mut v, "unknown", "no_such_query", json!({}))?;
+    s.ok(
+        "a bad id or an unknown query is refused, with the id it came with",
+        bad["error"] == "invalid_request" && bad["id"] == "not an id!" && schema["error"] == "unknown_operation" && schema["status"] == 404,
+        format!("{bad} {schema}"),
+    );
+    // the socket's own budget: LIVE_QUERIES_MAX between two changes
+    let r = api.op(owner, &name, "say", "refill-1", json!({ "text": "a change" }))?;
+    let mut answered = vec![];
+    for i in 0..=limits::LIVE_QUERIES_MAX {
+        answered.push(ask(&mut v, &format!("n{i}"), "count", json!({}))?);
+    }
+    let ran = answered.iter().filter(|a| a["result"] == json!({ "n": 1 })).count();
+    let last = answered.last().cloned().unwrap_or_default();
+    s.ok(
+        "a socket runs 16 queries between two changes; the 17th is refused (429)",
+        r.status == 200 && ran == limits::LIVE_QUERIES_MAX as usize && last["error"] == "rate_limited" && last["status"] == 429,
+        format!("{ran} ran; the last answered {last}"),
+    );
+    api.op(owner, &name, "say", "refill-2", json!({ "text": "another change" }))?;
+    let after = ask(&mut v, "after", "count", json!({}))?;
+    s.ok("and the next change refills it", after["result"] == json!({ "n": 2 }), &after);
+    s.ok(
+        "result frames decode as LiveOut",
+        [&who, &who_owner, &above, &act, &bad, &last, &after].iter().all(|f| serde_json::from_value::<LiveOut>((*f).clone()).is_ok()),
+        "",
+    );
+
+    // a socket's role is fixed while it is open: a member whose role
+    // changes has theirs reopened (4001, which the library reconnects
+    // after), and the new one runs queries at the new role
+    let member = api.person()?;
+    api.signed(owner, "PUT", &format!("/api/f/{name}/members/{}", member.pubkey_hex()), Some(&json!({ "role": "editor" })))?;
+    let mut m = Socket::open(api, &name, "__live", Some(&member), None)?;
+    m.until("hello", 5)?;
+    let as_editor = ask(&mut m, "staff", "backstage", json!({}))?;
+    api.signed(owner, "PUT", &format!("/api/f/{name}/members/{}", member.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
+    let mut closed = String::new();
+    for _ in 0..20 {
+        match m.next() {
+            Ok(_) => continue,
+            Err(e) => {
+                closed = e.to_string();
+                break;
+            }
+        }
+    }
+    s.ok(
+        "an editor's queries run as an editor; their role changing closes their socket with 4001",
+        as_editor["result"] == json!({ "role": "editor" }) && closed.contains("4001"),
+        format!("{as_editor}; closed: {closed}"),
+    );
+    let mut m = Socket::open(api, &name, "__live", Some(&member), None)?;
+    let again = m.until("hello", 5)?;
+    let as_viewer = ask(&mut m, "staff", "backstage", json!({}))?;
+    s.ok("their new socket has the new role, and its queries run at it", again["role"] == "viewer" && as_viewer["error"] == "forbidden", format!("{again} {as_viewer}"));
     Ok(())
 }
 
@@ -586,5 +684,37 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
     // following a channel would open a socket at once if the page still tried
     let sockets = chrome.eval(&a, "import(new URL('./__fragment.js', location.href).href).then((f) => { f.subscribe('activity', () => {}); return window.__sockets; })")?;
     s.ok("and opens no socket again, even to follow a channel", sockets == 1, &sockets);
+
+    // a public list changing past 60 times a minute: an anonymous
+    // visitor's live view re-runs over its socket, not as HTTP calls (which
+    // the public rate limit counts), so it keeps up with every change
+    let busy = s.named(api, &owner, "busy")?;
+    let c = s.create(api, &owner, &busy)?;
+    api.signed(&owner, "PUT", &format!("/api/f/{busy}/visibility"), Some(&json!({ "visibility": "public" })))?;
+    s.commit(&c, &changes);
+    s.deploy(&c);
+    let v = chrome.open(&api.site_url(&busy, ""))?;
+    s.ok("(an anonymous visitor opens the public list)", chrome.until(&v, "document.getElementById('here')?.textContent === 'just you here'", wait), "");
+    let t0 = std::time::Instant::now();
+    let mut kept_up = 0;
+    for i in 1..=125 {
+        let r = api.op(&owner, &busy, "add", &format!("busy-{i}"), json!({ "text": format!("busy {i}") }))?;
+        let shown = format!("[...document.querySelectorAll('#todos li span')].some((s) => s.textContent === 'busy {i}')");
+        if r.status != 200 || !chrome.until(&v, &shown, Duration::from_secs(5)) {
+            break;
+        }
+        kept_up = i;
+    }
+    let took = t0.elapsed();
+    println!("      the visitor's page kept up with {kept_up} changes in {took:?}");
+    let error = chrome.eval(&v, "document.getElementById('error').textContent")?;
+    s.ok(
+        "an anonymous visitor's live view keeps up with 125 changes, one after another",
+        kept_up == 125 && error == "",
+        format!("kept up with {kept_up} in {took:?}; the page says {error}"),
+    );
+    let calls = chrome.eval(&v, "performance.getEntriesByType('resource').filter((e) => e.name.includes('__op/list')).length")?;
+    println!("      its page made {calls} HTTP calls to the query");
+    s.ok("and asked the query over HTTP once, before its socket opened: every re-run went over the socket", calls == 1, format!("{calls} HTTP calls to list"));
     Ok(())
 }

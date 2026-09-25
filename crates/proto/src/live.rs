@@ -7,7 +7,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use crate::{ChannelRecord, Role};
+use crate::{ChannelRecord, ErrorBody, ErrorCode, Role};
 
 /// A frame a page sends. One that does not decode is answered with
 /// `LiveOut::Error`, naming what was wrong.
@@ -18,6 +18,9 @@ pub enum LiveIn {
     /// reaches the end makes the socket live on the channel.
     Subscribe(Subscribe),
     Unsubscribe { channel: String },
+    /// Runs a query as the socket's principal and role; a `result` with the
+    /// same id answers it.
+    Query(Query),
     /// Shares `data` with everyone on the page (at most
     /// `limits::PRESENCE_MAX_BYTES`); `null`, or no `data`, clears it. At
     /// most `limits::PRESENCE_PER_S` a second, after a burst: faster
@@ -36,6 +39,18 @@ pub enum LiveIn {
 pub struct Subscribe {
     pub channel: String,
     pub from: Cursor,
+}
+
+/// `{type: "query", id, op, input}`: the page's own `id` for the run
+/// (`^[A-Za-z0-9._:-]{1,128}$`, one run at a time each), the query, and
+/// its input (`null` when absent).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Query {
+    pub id: String,
+    pub op: String,
+    #[serde(default)]
+    pub input: Value,
 }
 
 /// Where a subscribe's page starts.
@@ -101,6 +116,8 @@ pub enum LiveOut {
     Presence(Present),
     /// A mutation applied: re-run live queries.
     Changed { op: String },
+    /// A query's answer.
+    Result(Answer),
     /// A frame the fragment refused, and why.
     Error { message: String },
     Pong,
@@ -112,6 +129,59 @@ pub struct Present {
     pub id: String,
     pub principal: String,
     pub data: Value,
+}
+
+/// A query's answer: `{type: "result", id, result}`, or its refusal as
+/// `__op` would answer it, `{type: "result", id, error, message, status}`
+/// (the code's HTTP status, for the browser library's `FragmentError`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "AnswerFrame", into = "AnswerFrame")]
+pub struct Answer {
+    pub id: String,
+    pub outcome: Result<Value, ErrorBody>,
+}
+
+/// An answer as it travels: a result, or an error with its message and status.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnswerFrame {
+    id: String,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<ErrorCode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    status: Option<u16>,
+}
+
+/// A key that is present, even as `null`, is `Some`: a query may answer `null`.
+fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(d).map(Some)
+}
+
+impl TryFrom<AnswerFrame> for Answer {
+    type Error = String;
+
+    fn try_from(f: AnswerFrame) -> Result<Answer, String> {
+        let outcome = match (f.result, f.error, f.message, f.status) {
+            (Some(result), None, None, None) => Ok(result),
+            (None, Some(error), Some(message), Some(status)) if status == error.status() => Err(ErrorBody { error, message }),
+            (None, Some(error), Some(_), Some(status)) => return Err(format!("status {status} is not {}'s", error.status())),
+            _ => return Err("a result carries a result, or an error with its message and status".into()),
+        };
+        Ok(Answer { id: f.id, outcome })
+    }
+}
+
+impl From<Answer> for AnswerFrame {
+    fn from(a: Answer) -> AnswerFrame {
+        match a.outcome {
+            Ok(result) => AnswerFrame { id: a.id, result: Some(result), error: None, message: None, status: None },
+            Err(e) => AnswerFrame { id: a.id, result: None, error: Some(e.error), status: Some(e.error.status()), message: Some(e.message) },
+        }
+    }
 }
 
 /// A record frame's record, read through a `Value`: serde buffers a tagged
@@ -169,6 +239,15 @@ mod tests {
         assert_eq!(decode_in(json!({ "type": "presence", "data": null })), Ok(LiveIn::Presence { data: Value::Null }));
         assert_eq!(decode_in(json!({ "type": "presence" })), Ok(LiveIn::Presence { data: Value::Null }), "no data clears, as null does");
         assert_eq!(decode_in(json!({ "type": "ping" })), Ok(LiveIn::Ping));
+        assert_eq!(
+            decode_in(json!({ "type": "query", "id": "live-1", "op": "list", "input": { "n": 1 } })),
+            Ok(LiveIn::Query(Query { id: "live-1".into(), op: "list".into(), input: json!({ "n": 1 }) }))
+        );
+        assert_eq!(
+            decode_in(json!({ "type": "query", "id": "live-1", "op": "list" })),
+            Ok(LiveIn::Query(Query { id: "live-1".into(), op: "list".into(), input: Value::Null })),
+            "no input is null, as over __op"
+        );
     }
 
     #[test]
@@ -183,6 +262,9 @@ mod tests {
         refused(json!({ "type": "subscribe", "channel": "chat", "after": "0" }), "invalid type");
         refused(json!({ "type": "subscribe", "channel": "chat", "after": 0, "extra": 1 }), "unknown field");
         refused(json!({ "type": "unsubscribe" }), "channel");
+        refused(json!({ "type": "query", "op": "list" }), "missing field `id`");
+        refused(json!({ "type": "query", "id": "q", "input": {} }), "missing field `op`");
+        refused(json!({ "type": "query", "id": "q", "op": "list", "extra": 1 }), "unknown field");
         refused(json!({ "type": "shout" }), "unknown variant");
         refused(json!({ "channel": "chat" }), "type");
         assert!(serde_json::from_str::<LiveIn>("not json").is_err());
@@ -216,6 +298,12 @@ mod tests {
                 json!({ "type": "presence", "id": "ab", "principal": "anon:x", "data": null }),
             ),
             (LiveOut::Changed { op: "say".into() }, json!({ "type": "changed", "op": "say" })),
+            (LiveOut::Result(Answer { id: "live-1".into(), outcome: Ok(json!({ "n": 2 })) }), json!({ "type": "result", "id": "live-1", "result": { "n": 2 } })),
+            (LiveOut::Result(Answer { id: "live-2".into(), outcome: Ok(Value::Null) }), json!({ "type": "result", "id": "live-2", "result": null })),
+            (
+                LiveOut::Result(Answer { id: "live-3".into(), outcome: Err(ErrorBody { error: ErrorCode::Forbidden, message: "this needs the editor role".into() }) }),
+                json!({ "type": "result", "id": "live-3", "error": "forbidden", "message": "this needs the editor role", "status": 403 }),
+            ),
             (LiveOut::Error { message: "no".into() }, json!({ "type": "error", "message": "no" })),
             (LiveOut::Pong, json!({ "type": "pong" })),
         ];
@@ -225,6 +313,21 @@ mod tests {
             let decoded: LiveOut = serde_json::from_str(&wire.to_string()).unwrap();
             assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
         }
+    }
+
+    /// An answer is a result or an error, never both or neither, and its
+    /// status is its code's.
+    #[test]
+    fn an_answer_is_a_result_or_an_error() {
+        let refused = |v: Value, says: &str| {
+            let e = serde_json::from_value::<LiveOut>(v.clone()).expect_err(&v.to_string()).to_string();
+            assert!(e.contains(says), "{v}: {e}");
+        };
+        refused(json!({ "type": "result", "id": "q" }), "a result, or an error");
+        refused(json!({ "type": "result", "id": "q", "result": 1, "error": "forbidden", "message": "no", "status": 403 }), "a result, or an error");
+        refused(json!({ "type": "result", "id": "q", "error": "forbidden", "status": 403 }), "a result, or an error");
+        refused(json!({ "type": "result", "id": "q", "error": "forbidden", "message": "no", "status": 404 }), "is not 403's");
+        refused(json!({ "type": "result", "id": "q", "error": "shrug", "message": "no", "status": 400 }), "unknown variant");
     }
 
     #[test]

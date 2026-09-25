@@ -93,6 +93,9 @@ pub mod limits {
     /// Live sockets one fragment holds open at once: each presence change
     /// and each mutation's change signal goes to all of them.
     pub const LIVE_SOCKETS_MAX: usize = 1000;
+    /// Queries one live socket may run between two changes to the
+    /// fragment (a page's live views re-run after changes), and at once.
+    pub const LIVE_QUERIES_MAX: u32 = 16;
     /// Modules an app may load besides `app.mjs` (`applib/`), and their total size.
     pub const APPLIB_FILES_MAX: usize = 64;
     pub const APP_MODULES_MAX_BYTES: usize = 4 * 1024 * 1024;

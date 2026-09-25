@@ -209,6 +209,15 @@ impl FragmentCell {
             None => format!("{} is now {}", target.id, body.role.as_str()),
         };
         self.event("member.set", &summary, json!({ "principal": target.id, "role": body.role, "kind": target.kind, "owner": target.owner }));
+        // A socket's role is fixed when it opens, and it answers queries at
+        // that role: a changed role reopens the member's sockets (and their
+        // owner's, who reads through an agent), at the new one.
+        if current.is_some_and(|was| was != body.role) {
+            self.reopen_sockets(&format!("p:{}", target.id), "your role changed");
+            if let Some(owner) = &target.owner {
+                self.reopen_sockets(&format!("p:{owner}"), "your agent's role changed");
+            }
+        }
         self.flush_index().await;
         let row = self.rows(&format!("SELECT {MEMBER_COLUMNS} FROM members WHERE principal = ?"), vec![target.id.as_str().into()])?;
         json_response(&member_json(&row[0])?)

@@ -63,6 +63,11 @@ export class App extends DurableObject {
     return { principal: call.principal, role: call.role };
   }
 
+  // a query for editors and up
+  backstage(_input, call) {
+    return { role: call.role };
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname.endsWith("/hello")) {
