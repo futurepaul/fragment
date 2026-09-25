@@ -146,6 +146,8 @@ pub struct FragmentCell {
     pub(crate) swept: Cell<bool>,
     /// The ledger ids a call or a sweep is settling now (channels.rs).
     pub(crate) settling: RefCell<BTreeMap<String, Arc<futures_util::lock::Mutex<()>>>>,
+    /// How the app facet starts (ops.rs `app_loader`).
+    pub(crate) app: js::AppLoader,
 }
 
 impl DurableObject for FragmentCell {
@@ -174,7 +176,18 @@ impl DurableObject for FragmentCell {
         let paused_by_migration = crate::jobs::migrate_trigger_state(&sql, js::now_ms());
         let cfg = Config::from_env(&env);
         let rate = fragment_core::ratelimit::Rate::new(limits::PUBLIC_CALLS_PER_MIN, limits::PUBLIC_CALLS_PER_MIN_FRAGMENT);
-        let cell = FragmentCell { state, raw, env, cfg, plane: futures_util::lock::Mutex::new(()), rate: RefCell::new(rate), swept: Cell::new(false), settling: RefCell::default() };
+        let app = crate::ops::app_loader(&raw, env.as_ref(), sql.clone());
+        let cell = FragmentCell {
+            state,
+            raw,
+            env,
+            cfg,
+            plane: futures_util::lock::Mutex::new(()),
+            rate: RefCell::new(rate),
+            swept: Cell::new(false),
+            settling: RefCell::default(),
+            app,
+        };
         if !paused_by_migration.is_empty() {
             let summary = format!("the stored pause list did not parse; paused every triggered operation: {}", paused_by_migration.join(", "));
             cell.event("op.paused", &summary, json!({ "ops": paused_by_migration, "by": "migration" }));
@@ -315,7 +328,6 @@ pub(crate) enum MetaKey {
     /// An owner's agent still to join (publish.rs).
     AgentPending,
     /// A certificate still to ask for.
-    CertPending,
     /// The commits the cell pins (plane.rs).
     PinMain,
     PinLive,
@@ -366,7 +378,6 @@ impl MetaKey {
             MetaKey::PollAt => "poll_at",
             MetaKey::TemplatePending => "template_pending",
             MetaKey::AgentPending => "agent_pending",
-            MetaKey::CertPending => "cert_pending",
             MetaKey::PinMain => "pin_main",
             MetaKey::PinLive => "pin_live",
             MetaKey::PinsCheckedAt => "pins_checked_at",
