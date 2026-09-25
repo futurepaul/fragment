@@ -14,9 +14,9 @@
 //!        and keep its answer
 //!   POST /job/finish  {run, attempt, error}     the Workflow gave up
 //!
-//! Every callback also names the fragment's incarnation, and each is
-//! decoded once into its struct below; a step's kind and args decode into
-//! `fragment_core::steps::Step`, and a run's row into `RunRow`.
+//! Every callback names the fragment's incarnation, checked before the
+//! callback decodes into its struct below; a step's kind and args decode
+//! into `fragment_core::steps::Step`, and a run's row into `RunRow`.
 //!
 //! Each step's answer is kept here (`steps`, by run, attempt, and index)
 //! before the Workflow hears that the step is done, and the job's body
@@ -186,10 +186,7 @@ fn stored_json(r: &Value, column: &str) -> Value {
 
 /// A run as `GET runs` shows it; `detail` is its input and output, when one run is read.
 fn run_view(row: RunRow, cost_micros: Option<i64>, detail: Option<(Value, Option<Value>)>) -> Run {
-    let (input, output) = match detail {
-        Some((input, output)) => (Some(input), output),
-        None => (None, None),
-    };
+    let (input, output) = detail.map_or((None, None), |(input, output)| (Some(input), output));
     Run {
         id: row.id,
         op: row.op,
@@ -211,7 +208,6 @@ fn run_view(row: RunRow, cost_micros: Option<i64>, detail: Option<(Value, Option
 /// `POST /job/advance`
 #[derive(Deserialize)]
 struct AdvanceCall {
-    incarnation: String,
     run: i64,
     attempt: u32,
     /// Steps taken so far: the cell kept each one's answer.
@@ -260,7 +256,6 @@ impl StepRow {
 /// args decode into a `Step` (a step that does not is the job's failure).
 #[derive(Deserialize)]
 struct EffectCall {
-    incarnation: String,
     run: i64,
     attempt: u32,
     index: u32,
@@ -271,7 +266,6 @@ struct EffectCall {
 /// `POST /job/finish`
 #[derive(Deserialize)]
 struct FinishCall {
-    incarnation: String,
     run: i64,
     attempt: u32,
     error: String,
@@ -541,37 +535,32 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// A callback from a run's Workflow (`/job/<route>`), decoded once.
+    /// A callback from a run's Workflow (`/job/<route>`); one from an
+    /// earlier life of the fragment is told to stop.
     pub(crate) async fn job_callback(&self, route: &str, body: &[u8]) -> CellResult<Value> {
         fn decode<'a, T: Deserialize<'a>>(body: &'a [u8]) -> CellResult<T> {
             serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("a job callback: {e}")))
         }
-        let stop = json!({ "stop": true });
+        /// Every callback names the fragment's life it is from.
+        #[derive(Deserialize)]
+        struct Life {
+            incarnation: String,
+        }
+        if !self.this_life(&decode::<Life>(body)?.incarnation)? {
+            return Ok(json!({ "stop": true }));
+        }
         match route {
             "advance" => {
-                let call: AdvanceCall = decode(body)?;
-                if !self.this_life(&call.incarnation)? {
-                    return Ok(stop);
-                }
-                let answer = self.advance(call).await?;
+                let answer = self.advance(decode(body)?).await?;
                 if answer.get("failed").is_some() {
                     // the held run polls its videos no more: their reservations go back
                     self.release_held_videos().await;
                 }
                 Ok(answer)
             }
-            "effect" => {
-                let call: EffectCall = decode(body)?;
-                if !self.this_life(&call.incarnation)? {
-                    return Ok(stop);
-                }
-                self.job_effect(call).await
-            }
+            "effect" => self.job_effect(decode(body)?).await,
             "finish" => {
                 let call: FinishCall = decode(body)?;
-                if !self.this_life(&call.incarnation)? {
-                    return Ok(stop);
-                }
                 if let Some(run) = self.current_run(call.run, call.attempt)? {
                     self.finish_run(&run, Err(call.error))?;
                 }
@@ -812,7 +801,8 @@ impl FragmentCell {
                 }
                 self.keep_step(run.id, run.attempt, index, &answer)?;
                 let kept = self.kept_kind(run.id, run.attempt, index)?.ok_or_else(|| CellError::host(format!("step {index}'s answer was not kept")))?;
-                self.test_drop_effect()?;
+                // lost after the step ran and its answer was kept: the Workflow tries it again
+                self.test_countdown(MetaKey::TestDropEffects, "the step's answer was lost on its way back")?;
                 kept
             }
         };
@@ -822,21 +812,6 @@ impl FragmentCell {
         }
         self.launch_queued().await;
         Ok(json!({ "kept": index }))
-    }
-
-    /// Test fleets: the next `times` step answers are lost after their step
-    /// was performed and its answer kept (`/api/test/fragment`
-    /// `drop-effects`): the Workflow sees a failure and tries the step again.
-    fn test_drop_effect(&self) -> CellResult<()> {
-        if !self.cfg.test_hooks {
-            return Ok(());
-        }
-        let left: u64 = self.meta(MetaKey::TestDropEffects)?.and_then(|n| n.parse().ok()).unwrap_or(0);
-        if left == 0 {
-            return Ok(());
-        }
-        self.set_meta(MetaKey::TestDropEffects, &(left - 1).to_string())?;
-        Err(CellError::host("the step's answer was lost on its way back (a test hook)"))
     }
 
     /// Performs one step of `run`.
@@ -1009,7 +984,8 @@ impl FragmentCell {
         let mut started = vec![];
         for (i, op) in ops.iter().enumerate() {
             if i + 1 == ops.len() {
-                self.test_trigger_failure()?;
+                // after the record, its deliveries, and the runs before this one are written
+                self.test_countdown(MetaKey::TestFailTriggers, "the trigger step failed before its last run started")?;
             }
             let call_id = format!("record:{}:{}:{op}", record.channel, record.seq);
             let sha = crate::ops::input_sha(op, &fragment_proto::canonical_json(&input));
@@ -1026,21 +1002,6 @@ impl FragmentCell {
             started.push(s.id);
         }
         Ok(started)
-    }
-
-    /// Test fleets: the next `times` trigger steps fail just before their
-    /// last run starts (`/api/test/fragment` `fail-triggers`), after the
-    /// record and its deliveries, and any runs before it, are written.
-    fn test_trigger_failure(&self) -> CellResult<()> {
-        if !self.cfg.test_hooks {
-            return Ok(());
-        }
-        let left: u64 = self.meta(MetaKey::TestFailTriggers)?.and_then(|n| n.parse().ok()).unwrap_or(0);
-        if left == 0 {
-            return Ok(());
-        }
-        self.set_meta(MetaKey::TestFailTriggers, &(left - 1).to_string())?;
-        Err(CellError::host("the trigger step failed before its last run started (a test hook)"))
     }
 
     /// Starts the runs a move of `main` triggers.

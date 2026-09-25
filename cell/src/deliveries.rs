@@ -52,15 +52,6 @@ const OUTBOX_ATTEMPTS_MAX: i64 = 20;
 
 const _: () = assert!(QUEUE_BATCH * (PUSH_BATCHES_MAX - 1) >= limits::PUSH_SUBS_MAX as usize, "a push's batches cover every subscription");
 
-/// One drain's failures. The first asks once whether any row already
-/// waited: if none did, an outage begins here and `delivery.deferred`
-/// says so (one event an outage, and one indexed lookup a drain, never a
-/// count of the outbox for each row that fails).
-#[derive(Default)]
-struct Failures {
-    seen: bool,
-}
-
 /// One outbox row, decoded once.
 enum Pending {
     /// Record `seq` of `channel`, to the channel subscription `sub`.
@@ -98,10 +89,6 @@ impl DeliveryKind {
             DeliveryKind::Notify => "notify",
         }
     }
-
-    fn parse(s: &str) -> Option<DeliveryKind> {
-        [DeliveryKind::Record, DeliveryKind::Push, DeliveryKind::Notify].into_iter().find(|k| k.as_str() == s)
-    }
 }
 
 /// Only this module and its callers write the outbox: a row that does not
@@ -109,8 +96,7 @@ impl DeliveryKind {
 fn decode(row: &Value) -> Pending {
     let text = |k: &str| row[k].as_str().unwrap_or_else(|| panic!("a delivery_outbox row has no {k}: {row}")).to_string();
     let int = |k: &str| row[k].as_i64().unwrap_or_else(|| panic!("a delivery_outbox row has no {k}: {row}"));
-    let kind = row["kind"].as_str().and_then(DeliveryKind::parse);
-    match kind.unwrap_or_else(|| panic!("a delivery_outbox row of kind {}", row["kind"])) {
+    match DeliveryKind::deserialize(&row["kind"]).unwrap_or_else(|_| panic!("a delivery_outbox row of kind {}", row["kind"])) {
         DeliveryKind::Record => Pending::Record { sub: int("sub"), channel: text("channel"), seq: int("seq") },
         DeliveryKind::Push => Pending::Push(PendingPush { who: text("who"), payload: text("body"), after: int("after_sub"), upto: int("upto_sub") }),
         DeliveryKind::Notify => Pending::Notify { url: text("url"), frame: text("body") },
@@ -132,6 +118,15 @@ pub struct Delivery {
     pub sub: Option<i64>,
 }
 
+impl Delivery {
+    /// A JSON body to `url`.
+    pub(crate) fn json(fragment: &str, incarnation: &str, kind: DeliveryKind, url: String, body: &str, sub: Option<i64>) -> Delivery {
+        let (fragment, incarnation) = (fragment.to_string(), incarnation.to_string());
+        let body = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, body);
+        Delivery { fragment, incarnation, kind, url, headers: vec![("content-type".into(), "application/json".into())], body, sub }
+    }
+}
+
 impl FragmentCell {
     /// Puts deliveries on the queue (at most `QUEUE_BATCH` a call).
     async fn enqueue(&self, deliveries: &[Delivery]) -> CellResult<()> {
@@ -139,13 +134,7 @@ impl FragmentCell {
         if deliveries.is_empty() {
             return Ok(());
         }
-        if self.cfg.test_hooks {
-            let failures: i64 = self.meta(MetaKey::TestFailDeliveries)?.and_then(|n| n.parse().ok()).unwrap_or(0);
-            if failures > 0 {
-                self.set_meta(MetaKey::TestFailDeliveries, &(failures - 1).to_string())?;
-                return Err(CellError::host("the queue send failed (a test hook)"));
-            }
-        }
+        self.test_countdown(MetaKey::TestFailDeliveries, "the queue send failed")?;
         let bodies: Vec<Value> = deliveries.iter().map(|d| serde_json::to_value(d).expect("a delivery serializes")).collect();
         js::queue_send(self.env.as_ref(), "DELIVERIES", &bodies).await
     }
@@ -175,7 +164,7 @@ impl FragmentCell {
         }
         rows.sort_by_key(|r| r["id"].as_i64());
         let (Ok(fragment), Ok(incarnation)) = (self.must(MetaKey::Name), self.must(MetaKey::CreatedAt)) else { return };
-        let mut failures = Failures::default();
+        let mut failed = false;
         // records and frames go a queue batch at a time; each push goes on its own
         let mut singles: Vec<(i64, i64, Delivery)> = vec![];
         for row in &rows {
@@ -184,15 +173,10 @@ impl FragmentCell {
                 Pending::Record { sub, channel, seq } => match self.record_delivery(sub, &channel, seq, &fragment, &incarnation) {
                     Ok(Some(d)) => singles.push((id, attempts, d)),
                     Ok(None) => self.outbox_done(id),
-                    Err(e) => self.outbox_failed(&mut failures, id, attempts, &e.message),
+                    Err(e) => self.outbox_failed(&mut failed, id, attempts, &e.message),
                 },
-                Pending::Notify { url, frame } => {
-                    let body = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, frame);
-                    let headers = vec![("content-type".into(), "application/json".into())];
-                    let d = Delivery { fragment: fragment.clone(), incarnation: incarnation.clone(), kind: DeliveryKind::Notify, url, headers, body, sub: None };
-                    singles.push((id, attempts, d));
-                }
-                Pending::Push(push) => self.drain_push(&mut failures, id, attempts, push, &fragment, &incarnation).await,
+                Pending::Notify { url, frame } => singles.push((id, attempts, Delivery::json(&fragment, &incarnation, DeliveryKind::Notify, url, &frame, None))),
+                Pending::Push(push) => self.drain_push(&mut failed, id, attempts, push, &fragment, &incarnation).await,
             }
         }
         let mut chunks = singles.chunks(QUEUE_BATCH);
@@ -201,28 +185,28 @@ impl FragmentCell {
             match self.enqueue(&deliveries).await {
                 Ok(()) => chunk.iter().for_each(|(id, ..)| self.outbox_done(*id)),
                 Err(e) => {
-                    chunk.iter().for_each(|(id, attempts, _)| self.outbox_failed(&mut failures, *id, *attempts, &e.message));
+                    chunk.iter().for_each(|(id, attempts, _)| self.outbox_failed(&mut failed, *id, *attempts, &e.message));
                     break;
                 }
             }
         }
         // after a failure the rest wait too: the queue is refusing
         for chunk in chunks {
-            chunk.iter().for_each(|(id, attempts, _)| self.outbox_failed(&mut failures, *id, *attempts, "an earlier batch was refused"));
+            chunk.iter().for_each(|(id, attempts, _)| self.outbox_failed(&mut failed, *id, *attempts, "an earlier batch was refused"));
         }
-        if failures.seen || rows.len() as i64 == DRAIN_ROWS {
+        if failed || rows.len() as i64 == DRAIN_ROWS {
             let _ = self.schedule().await;
         }
     }
 
     /// One push row: its subscriptions a batch at a time, the cursor
     /// moving as each batch is queued, so a failure re-sends none of the
-    /// batches before it. A row not done is in `failures`.
-    async fn drain_push(&self, failures: &mut Failures, id: i64, attempts: i64, push: PendingPush, fragment: &str, incarnation: &str) {
+    /// batches before it. A row not done sets `failed`.
+    async fn drain_push(&self, failed: &mut bool, id: i64, attempts: i64, push: PendingPush, fragment: &str, incarnation: &str) {
         let PendingPush { who, payload, mut after, upto } = push;
         let vapid = match self.vapid().await {
             Ok(v) => v,
-            Err(e) => return self.outbox_failed(failures, id, attempts, &e.message),
+            Err(e) => return self.outbox_failed(failed, id, attempts, &e.message),
         };
         // one token per push service for all of this push's batches
         let mut tokens = Tokens::new(&vapid, &self.cfg.push_subject, js::now_ms() / 1000);
@@ -232,7 +216,7 @@ impl FragmentCell {
                 vec![SqlStorageValue::Integer(after), SqlStorageValue::Integer(upto), who.as_str().into(), who.as_str().into(), SqlStorageValue::Integer(QUEUE_BATCH as i64)],
             ) {
                 Ok(s) => s,
-                Err(e) => return self.outbox_failed(failures, id, attempts, &e.message),
+                Err(e) => return self.outbox_failed(failed, id, attempts, &e.message),
             };
             let Some(last) = subs.last().map(|s| s["id"].as_i64().expect("push_subs.id")) else {
                 return self.outbox_done(id);
@@ -240,7 +224,7 @@ impl FragmentCell {
             assert!(last > after, "a push's cursor moves forward");
             let deliveries = self.push_deliveries(&mut tokens, &subs, &payload, fragment, incarnation);
             if let Err(e) = self.enqueue(&deliveries).await {
-                return self.outbox_failed(failures, id, attempts, &e.message);
+                return self.outbox_failed(failed, id, attempts, &e.message);
             }
             after = last;
             let _ = self.exec("UPDATE delivery_outbox SET after_sub = ? WHERE id = ?", vec![SqlStorageValue::Integer(after), SqlStorageValue::Integer(id)]);
@@ -258,9 +242,9 @@ impl FragmentCell {
     /// rows: one lookup, not a scan); when none does, this row's first
     /// failure begins an outage and says so once (an outage is one event,
     /// not one per delivery).
-    fn outbox_failed(&self, failures: &mut Failures, id: i64, attempts: i64, why: &str) {
-        let begins_outage = !failures.seen && self.rows("SELECT id FROM delivery_outbox WHERE attempts > 0 LIMIT 1", vec![]).is_ok_and(|w| w.is_empty());
-        failures.seen = true;
+    fn outbox_failed(&self, failed: &mut bool, id: i64, attempts: i64, why: &str) {
+        let begins_outage = !*failed && self.rows("SELECT id FROM delivery_outbox WHERE attempts > 0 LIMIT 1", vec![]).is_ok_and(|w| w.is_empty());
+        *failed = true;
         let attempts = attempts + 1;
         if attempts >= OUTBOX_ATTEMPTS_MAX {
             self.outbox_done(id);

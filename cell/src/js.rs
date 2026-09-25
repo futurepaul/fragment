@@ -293,24 +293,27 @@ pub fn delete_app_facet(ctx: &JsValue) -> CellResult<()> {
     Ok(())
 }
 
-/// The Workflows binding that runs jobs (`JOBS`, class `Job` in entry.mjs).
-fn jobs(env: &JsValue) -> CellResult<JsValue> {
-    let binding = get(env, "JOBS")?;
+/// A binding of the node's; `section` is where wrangler.jsonc declares it.
+fn binding(env: &JsValue, name: &str, section: &str) -> CellResult<JsValue> {
+    let binding = get(env, name)?;
     if binding.is_undefined() {
-        return Err(CellError::host("this node has no JOBS Workflow binding (wrangler.jsonc `workflows`)"));
+        return Err(CellError::host(format!("this node has no {name} binding (wrangler.jsonc `{section}`)")));
     }
     Ok(binding)
+}
+
+/// The Workflows binding that runs jobs (`JOBS`, class `Job` in entry.mjs).
+fn jobs(env: &JsValue) -> CellResult<JsValue> {
+    binding(env, "JOBS", "workflows")
 }
 
 /// Starts a job's Workflow instance; an instance that already exists is
 /// left as it is, so starting twice is harmless.
 pub async fn jobs_create(env: &JsValue, id: &str, params: &serde_json::Value) -> CellResult<()> {
-    let binding = jobs(env)?;
     let item = Object::new();
     set(&item, "id", id);
     set(&item, "params", to_js(params));
-    let pending = call(&binding, "createBatch", &[Array::of1(&item).into()]).map_err(|e| CellError::host(format!("createBatch: {}", js_message(&e))))?;
-    settle(pending).await.map_err(|e| CellError::host(format!("createBatch: {}", js_message(&e))))?;
+    await_js(call(&jobs(env)?, "createBatch", &[Array::of1(&item).into()]), "createBatch").await?;
     Ok(())
 }
 
@@ -334,11 +337,7 @@ pub async fn jobs_status(env: &JsValue, id: &str) -> Result<Option<serde_json::V
 
 /// The fleet's blob store (`BLOBS`, an R2 binding over the fleet bucket).
 fn blobs(env: &JsValue) -> CellResult<JsValue> {
-    let binding = get(env, "BLOBS")?;
-    if binding.is_undefined() {
-        return Err(CellError::host("this node has no BLOBS bucket binding (wrangler.jsonc `r2_buckets`)"));
-    }
-    Ok(binding)
+    binding(env, "BLOBS", "r2_buckets")
 }
 
 async fn await_js(v: Result<JsValue, JsValue>, what: &str) -> CellResult<JsValue> {
@@ -370,10 +369,7 @@ pub async fn blob_put(env: &JsValue, key: &str, body: JsValue) -> CellResult<(u6
 /// workers-rs 0.8.5 refuses celld's queue binding (its constructor is not
 /// named `WorkerQueue`), so this goes to the binding itself.
 pub async fn queue_send(env: &JsValue, binding: &str, bodies: &[serde_json::Value]) -> CellResult<()> {
-    let queue = get(env, binding)?;
-    if queue.is_undefined() {
-        return Err(CellError::host(format!("this node has no {binding} queue binding (wrangler.jsonc `queues`)")));
-    }
+    let queue = self::binding(env, binding, "queues")?;
     for chunk in bodies.chunks(100) {
         let list = Array::new();
         for b in chunk {
@@ -390,10 +386,7 @@ pub async fn queue_send(env: &JsValue, binding: &str, bodies: &[serde_json::Valu
 /// workers-rs 0.8.5 refuses celld's service stubs (its constructor is not
 /// named `Fetcher`), so this goes to the binding itself.
 pub async fn service_post(env: &JsValue, binding: &str, url: &str, body: &str) -> CellResult<(u16, String)> {
-    let service = get(env, binding)?;
-    if service.is_undefined() {
-        return Err(CellError::host(format!("this node has no {binding} binding (wrangler.jsonc `services`)")));
-    }
+    let service = self::binding(env, binding, "services")?;
     let headers = Object::new();
     set(&headers, "content-type", "application/json");
     let init = Object::new();
@@ -409,10 +402,7 @@ pub async fn service_post(env: &JsValue, binding: &str, url: &str, body: &str) -
 /// Hands a request, as it came (method, URL, headers, body), to a service
 /// binding: the agents' script, co-hosted in this fleet.
 pub async fn service_fetch(env: &JsValue, binding: &str, req: worker::Request) -> CellResult<worker::Response> {
-    let service = get(env, binding)?;
-    if service.is_undefined() {
-        return Err(CellError::host(format!("this node has no {binding} binding (wrangler.jsonc `services`)")));
-    }
+    let service = self::binding(env, binding, "services")?;
     let out = await_js(call(&service, "fetch", &[JsValue::from(req.inner())]), binding).await?;
     let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host(format!("{binding} answered no Response")))?;
     Ok(worker::Response::from(resp))

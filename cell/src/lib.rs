@@ -8,28 +8,8 @@
 //! cannot answer for is refused (503), never let through. A site request's
 //! signer or session goes on unresolved (`routed::Credential`): the
 //! fragment asks the registry only when its answer depends on who is
-//! asking, so a page anyone who may see it gets alike costs no hop. Public
-//! routes:
-//!
-//!   POST   /api/identities                 register an agent the signer owns
-//!                                          ({kind: agent, proof}: a key proof by its key)
-//!   GET    /api/identities/<id|me>         an identity, as it or its owner sees it
-//!   POST   /api/identities/<id|me>/keys    add a key ({proof}: a key proof by the new key)
-//!   DELETE /api/identities/<id|me>/keys/<npub>   revoke one
-//!   GET    /api/identities/<id>/keys/<npub>      {active}: for the identity and its agents
-//!   GET    /api/budget                     the signer's month: allowance, spent, reserved, recent usage
-//!   GET    /api/budget/usage?period=       a month's usage rows (FIN-10's shape)
-//!   POST   /api/budget/<id>/top-up         {usd}: operators (FRAGMENT_OPERATORS)
-//!   POST   /api/budget/key                 an agent: its owner's org OpenRouter key, for its turns
-//!   POST   /api/fragments                  create (signed; the signer owns it)
-//!   GET    /api/fragments                  the fragments the signer belongs to
-//!   *      /api/agents, /api/a/...         the agents' script (agent/), co-hosted (agents.rs)
-//!   DELETE /api/f/<name>                   delete (owner)
-//!   *      /api/f/<name>/<route>           the control API (signed; the code.storage webhook is HMAC,
-//!                                          the inbox is its token)
-//!   *      <label>--<username>.<suffix>/<path>  the fragment's site, on its own origin (every path)
-//!   *      /f/<name>/<path>                the same, when no suffix is configured (dev)
-//!   GET    /, /auth/…, /cli                sign-in on the platform origin (`auth.rs`)
+//! asking, so a page anyone who may see it gets alike costs no hop. The
+//! public routes are docs/api.md's.
 //!
 //! A browser on a fragment's origin is its person through that origin's own
 //! session cookie (`__signin`), looked up live like a key when it matters.

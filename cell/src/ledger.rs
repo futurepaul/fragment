@@ -14,21 +14,8 @@
 //! limit: OpenRouter itself stops the org at it.
 //!
 //! Inner routes (fragments and the router reach them through `ask`): each
-//! is a POST of its request type, answered with its `Route::Answer`, so
-//! both ends are the same Rust types:
-//!
-//!   /reserve       Reserve → Reserved::Held {key} | Replay {result} | 402 budget_used_up
-//!   /key           Key → KeyAnswer {key}: for steps that cost nothing (a video's polls)
-//!   /settle        Settle → Settlement: Now | Before {cost} | Waiting {video} (a video
-//!                  waits for its cost; any other step without a cost is charged its
-//!                  reservation)
-//!   /settle-video  SettleVideo → VideoSettlement: Now | Before {cost} | NoReservation
-//!                  (without a cost: its reservation)
-//!   /release       Release → ReleaseAnswer: Released | Settled {cost} | Gone
-//!   /status        Status → the month (BudgetView) with the newest usage
-//!   /usage         Usage {period?} → the month with all of its usage
-//!   /top-up        TopUp {micros, by} → the month
-//!   /test          SetClock {offsetMs} → Clock: dev fleets move this ledger's clock
+//! is a POST of a `Route`'s request type, answered with its `Route::Answer`,
+//! so both ends are the same Rust types.
 
 use fragment_core::budget::{self, Month};
 use fragment_core::npub;
@@ -306,10 +293,6 @@ impl LedgerCell {
         Ok(())
     }
 
-    fn sum(&self, q: &str, binds: Vec<SqlStorageValue>) -> CellResult<i64> {
-        Ok(self.rows(q, binds)?.first().and_then(|r| r["n"].as_i64()).expect("a COALESCE(SUM(…), 0) answers one integer"))
-    }
-
     fn meta(&self, k: &str) -> CellResult<Option<String>> {
         Ok(self.rows("SELECT value FROM meta WHERE key = ?", vec![k.into()])?.first().and_then(|r| r["value"].as_str().map(str::to_string)))
     }
@@ -340,12 +323,6 @@ impl LedgerCell {
         let row = rows.first().expect("a SELECT of sums answers one row");
         let sum = |k: &str| row[k].as_i64().unwrap_or_else(|| panic!("a COALESCE(SUM(…), 0) answers an integer ({k})"));
         Ok(Month { allowance: self.cfg.budget_micros + sum("topped"), spent: sum("spent"), reserved: sum("reserved") })
-    }
-
-    /// A month's allowance alone: the budget and that month's top-ups.
-    fn allowance(&self, period: &str) -> CellResult<i64> {
-        let topped = self.sum("SELECT COALESCE(SUM(micros), 0) AS n FROM topups WHERE period = ?", vec![period.into()])?;
-        Ok(self.cfg.budget_micros + topped)
     }
 
     /// Holds a step's reservation; answers the stored result instead when
@@ -428,7 +405,7 @@ impl LedgerCell {
         // Read under the lock, not handed in by a reservation: one that
         // waited here behind a top-up's key change would set its limit back.
         let period = budget::period_of(self.now()?);
-        let allowance = self.allowance(&period)?;
+        let allowance = self.month(&period)?.allowance;
         let usd = allowance as f64 / budget::USD as f64;
         if let (Some(sealed), Some(hash)) = (self.meta("or_key")?, self.meta("or_hash")?) {
             let set = format!("{period}:{allowance}");

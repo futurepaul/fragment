@@ -129,21 +129,22 @@ impl<'a> Cs<'a> {
         Ok(token)
     }
 
-    async fn request(&self, method: Method, path: &str, repo: &str, scopes: &[&str], body: Option<Value>) -> CellResult<Request> {
+    /// `body`: its content type and text.
+    async fn request(&self, method: Method, path: &str, repo: &str, scopes: &[&str], body: Option<(&str, String)>) -> CellResult<Request> {
         let headers = Headers::new();
         headers.set("authorization", &format!("Bearer {}", self.runtime_token(repo, scopes).await?))?;
         let mut init = RequestInit::new();
         init.with_method(method);
-        if let Some(b) = body {
-            headers.set("content-type", "application/json")?;
-            init.with_body(Some(b.to_string().into()));
+        if let Some((content_type, text)) = body {
+            headers.set("content-type", content_type)?;
+            init.with_body(Some(text.into()));
         }
         init.with_headers(headers);
         Ok(Request::new_with_init(&format!("{}{path}", self.cfg.api), &init)?)
     }
 
     /// (status, body) of a call; the body is read within the same deadline.
-    async fn call(&self, method: Method, path: &str, repo: &str, scopes: &[&str], body: Option<Value>) -> CellResult<(u16, Vec<u8>)> {
+    async fn call(&self, method: Method, path: &str, repo: &str, scopes: &[&str], body: Option<(&str, String)>) -> CellResult<(u16, Vec<u8>)> {
         let req = self.request(method, path, repo, scopes, body).await?;
         let mut resp = fetch(req, CALL_TIMEOUT).await?;
         let status = resp.status_code();
@@ -152,7 +153,7 @@ impl<'a> Cs<'a> {
     }
 
     async fn json(&self, method: Method, path: &str, repo: &str, scopes: &[&str], body: Option<Value>) -> CellResult<(u16, Value)> {
-        let (status, bytes) = self.call(method, path, repo, scopes, body).await?;
+        let (status, bytes) = self.call(method, path, repo, scopes, body.map(|b| ("application/json", b.to_string()))).await?;
         if !(200..300).contains(&status) {
             return Ok((status, Value::String(String::from_utf8_lossy(&bytes).chars().take(300).collect())));
         }
@@ -282,15 +283,8 @@ impl<'a> Cs<'a> {
     /// Answers the new head, or `None` when the branch moved from the head
     /// the pack expected (409: read the head again and rebuild).
     pub async fn commit(&self, repo: &str, pack: String) -> CellResult<Option<String>> {
-        let headers = Headers::new();
-        headers.set("authorization", &format!("Bearer {}", self.runtime_token(repo, &["git:write"]).await?))?;
-        headers.set("content-type", "application/x-ndjson")?;
-        let mut init = RequestInit::new();
-        init.with_method(Method::Post).with_headers(headers).with_body(Some(pack.into()));
-        let req = Request::new_with_init(&format!("{}/api/repos/{}/commit-pack", self.cfg.api, seg(repo)), &init)?;
-        let mut resp = fetch(req, CALL_TIMEOUT).await?;
-        let status = resp.status_code();
-        let bytes = resp.bytes().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("reading commit-pack: {e}")))?;
+        let path = format!("/api/repos/{}/commit-pack", seg(repo));
+        let (status, bytes) = self.call(Method::Post, &path, repo, &["git:write"], Some(("application/x-ndjson", pack))).await?;
         match status {
             409 => Ok(None),
             200 | 201 => {

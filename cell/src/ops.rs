@@ -346,45 +346,34 @@ impl FragmentCell {
         Ok(self.meta(MetaKey::TestLedgerMs)?.and_then(|v| v.parse().ok()).unwrap_or(LEDGER_KEPT_MS))
     }
 
+    /// Test fleets: while a `fail-*` or `drop-effects` lever (`test_fragment`)
+    /// counts above zero, one less, and `why` fails.
+    pub(crate) fn test_countdown(&self, key: MetaKey, why: &str) -> CellResult<()> {
+        let left: u64 = if self.cfg.test_hooks { self.meta(key)?.and_then(|n| n.parse().ok()).unwrap_or(0) } else { 0 };
+        if left == 0 {
+            return Ok(());
+        }
+        self.set_meta(key, &(left - 1).to_string())?;
+        Err(CellError::host(format!("{why} (a test hook)")))
+    }
+
     /// `POST /api/test/fragment {fragment, op, …}`, the router's, on fleets
-    /// with test hooks only: the levers the e2e pulls on one fragment.
-    /// `fail-deliveries {times}` fails its next queue sends; `fail-outbox
-    /// {times}` fails its next records' outbox writes after their append; `fail-triggers
-    /// {times}` fails its next trigger steps before their last run; `drop-effects
-    /// {times}` loses its next job step answers after their step ran;
-    /// `forget-live` forgets what the activation knows of its live sockets
-    /// (as waking from hibernation does); `drop-live {code}` closes its
-    /// live sockets; `ledger {ms | null}` sets (or
-    /// clears) a shorter ledger window; `age {ms}` forgets write keys as
-    /// if `ms` had passed; `members {fill}` adds placeholder members until
-    /// there are `fill`; `code-before-tables {fill?}` puts its installed code
-    /// back in the shape stored before the code tables (plane.rs), with
-    /// placeholder operations until there are `fill`; `code-builds` answers
-    /// how many times this activation built its app's worker code for the
-    /// loader (js.rs `AppLoader`).
+    /// with test hooks only: the levers the e2e pulls on one fragment
+    /// (docs/api.md, `FRAGMENT_TEST_HOOKS`).
     pub(crate) fn test_fragment(&self, body: &Value) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "the route answers only on fleets with test hooks");
         self.name()?;
         let ms = || body["ms"].as_i64().filter(|ms| *ms >= 0).ok_or_else(|| CellError::invalid("ms is a duration"));
         Ok(match body["op"].as_str() {
-            Some("fail-deliveries") => {
-                let times = body["times"].as_u64().ok_or_else(|| CellError::invalid("fail-deliveries names how many times"))?;
-                self.set_meta(MetaKey::TestFailDeliveries, &times.to_string())?;
-                json!({ "ok": true })
-            }
-            Some("fail-outbox") => {
-                let times = body["times"].as_u64().ok_or_else(|| CellError::invalid("fail-outbox names how many times"))?;
-                self.set_meta(MetaKey::TestFailOutbox, &times.to_string())?;
-                json!({ "ok": true })
-            }
-            Some("fail-triggers") => {
-                let times = body["times"].as_u64().ok_or_else(|| CellError::invalid("fail-triggers names how many times"))?;
-                self.set_meta(MetaKey::TestFailTriggers, &times.to_string())?;
-                json!({ "ok": true })
-            }
-            Some("drop-effects") => {
-                let times = body["times"].as_u64().ok_or_else(|| CellError::invalid("drop-effects names how many times"))?;
-                self.set_meta(MetaKey::TestDropEffects, &times.to_string())?;
+            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects")) => {
+                let key = match lever {
+                    "fail-deliveries" => MetaKey::TestFailDeliveries,
+                    "fail-outbox" => MetaKey::TestFailOutbox,
+                    "fail-triggers" => MetaKey::TestFailTriggers,
+                    _ => MetaKey::TestDropEffects,
+                };
+                let times = body["times"].as_u64().ok_or_else(|| CellError::invalid(format!("{lever} names how many times")))?;
+                self.set_meta(key, &times.to_string())?;
                 json!({ "ok": true })
             }
             Some("forget-live") => {
