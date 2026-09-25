@@ -17,6 +17,11 @@
 //! theirs, and rotating the share link closes link holders' (4003);
 //! deleting the fragment closes every socket (4004). Both codes are
 //! final: the browser library does not reconnect after them.
+//!
+//! What this activation knows of its sockets besides their attachments
+//! (`LiveMemory`) is gathered from them again after the object wakes.
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use fragment_core::npub;
 use fragment_proto::live::{Cursor, LiveIn, LiveOut, Present, Subscribe};
@@ -42,6 +47,21 @@ pub struct LiveState {
     pub role: Role,
     pub subs: Vec<String>,
     pub presence: Option<Value>,
+}
+
+/// What this activation knows of its live sockets besides their
+/// attachments, which are the source: after the object wakes, it starts
+/// empty and is gathered from them again. Nothing here is authoritative.
+#[derive(Default)]
+pub(crate) struct LiveMemory {
+    /// The sockets (ids) that may follow each channel, gathered from the
+    /// attachments at the first append of the activation (`None` before).
+    /// A subscribe that makes a socket live adds it in the same step that
+    /// writes its attachment, so a follower is never missing; each append
+    /// that scans puts its channel's set back to the followers it found,
+    /// so one that left (or went without its close event) stays at most
+    /// until then. An append to a channel whose set is empty scans nothing.
+    followers: Option<BTreeMap<String, BTreeSet<String>>>,
 }
 
 fn state_of(ws: &WebSocket) -> Option<LiveState> {
@@ -92,12 +112,23 @@ impl FragmentCell {
         }
     }
 
+    /// A record to the sockets following its channel: none are looked at
+    /// when no socket may follow it (`LiveMemory::followers`).
     pub(crate) fn broadcast_record(&self, r: &ChannelRecord) {
-        let frame = LiveOut::Record(r.clone()).encode();
+        if !self.followed(&r.channel) {
+            return;
+        }
+        let frame = LiveOut::record_frame(r);
+        let mut found = BTreeSet::new();
         for ws in self.state.get_websockets_with_tag("live") {
-            if state_of(&ws).is_some_and(|s| s.subs.contains(&r.channel)) {
+            let Some(st) = state_of(&ws) else { continue };
+            if st.subs.contains(&r.channel) {
                 let _ = ws.send_with_str(&frame);
+                found.insert(st.id);
             }
+        }
+        if let Some(followers) = self.live.borrow_mut().followers.as_mut() {
+            followers.insert(r.channel.clone(), found);
         }
     }
 
@@ -106,6 +137,41 @@ impl FragmentCell {
         for ws in self.state.get_websockets_with_tag("live") {
             let _ = ws.send_with_str(&frame);
         }
+    }
+
+    /// Whether any socket may follow `channel`, from the followers this
+    /// activation gathered (the first call gathers them).
+    fn followed(&self, channel: &str) -> bool {
+        let mut memory = self.live.borrow_mut();
+        let followers = memory.followers.get_or_insert_with(|| {
+            let mut gathered: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+            for st in self.state.get_websockets_with_tag("live").iter().filter_map(state_of) {
+                for c in st.subs {
+                    gathered.entry(c).or_default().insert(st.id.clone());
+                }
+            }
+            gathered
+        });
+        followers.get(channel).is_some_and(|sockets| !sockets.is_empty())
+    }
+
+    /// A socket goes live on a channel, or stops following it.
+    fn set_follower(&self, channel: &str, socket: &str, follows: bool) {
+        let mut memory = self.live.borrow_mut();
+        let Some(followers) = memory.followers.as_mut() else { return };
+        let sockets = followers.entry(channel.to_string()).or_default();
+        if follows {
+            sockets.insert(socket.to_string());
+        } else {
+            sockets.remove(socket);
+        }
+    }
+
+    /// Test fleets: forgets what this activation knows of its sockets, as
+    /// waking from hibernation does (`/api/test/fragment` `forget-live`).
+    pub(crate) fn live_forget(&self) {
+        assert!(self.cfg.test_hooks, "only a test fleet forgets its sockets on demand");
+        *self.live.borrow_mut() = LiveMemory::default();
     }
 
     /// One message on a live socket: decoded, then answered. A refusal
@@ -145,9 +211,11 @@ impl FragmentCell {
                 if more && live {
                     st.subs.retain(|c| c != &channel);
                     ws.serialize_attachment(&st)?;
+                    self.set_follower(&channel, &st.id, false);
                 } else if !more && !live {
                     st.subs.push(channel.clone());
                     ws.serialize_attachment(&st)?;
+                    self.set_follower(&channel, &st.id, true);
                 }
                 for f in &frames {
                     let _ = ws.send_with_str(f);
@@ -157,6 +225,7 @@ impl FragmentCell {
             LiveIn::Unsubscribe { channel } => {
                 st.subs.retain(|c| c != &channel);
                 ws.serialize_attachment(&st)?;
+                self.set_follower(&channel, &st.id, false);
             }
             LiveIn::Presence { data } => {
                 let size = data.to_string().len();
@@ -190,7 +259,7 @@ impl FragmentCell {
             for r in batch {
                 assert!(r.seq > next, "a channel reads in order");
                 let seq = r.seq;
-                let frame = LiveOut::Record(r).encode();
+                let frame = LiveOut::record_frame(&r);
                 if !frames.is_empty() && bytes + frame.len() > limits::CHANNEL_PAGE_MAX_BYTES {
                     return Ok((frames, next, true));
                 }
@@ -208,12 +277,18 @@ impl FragmentCell {
         panic!("a page read {} full batches without filling {} records", limits::CHANNEL_PAGE.div_ceil(PAGE_READ_BATCH), limits::CHANNEL_PAGE);
     }
 
-    /// A live socket closed: its presence goes.
+    /// A live socket closed: its presence goes, and its place among followers.
     pub(crate) fn live_closed(&self, ws: &WebSocket) {
-        if let Some(st) = state_of(ws) {
-            if st.presence.is_some() {
-                self.broadcast_presence(Some(&st.id));
+        let Some(st) = state_of(ws) else { return };
+        if let Some(followers) = self.live.borrow_mut().followers.as_mut() {
+            for c in &st.subs {
+                if let Some(sockets) = followers.get_mut(c) {
+                    sockets.remove(&st.id);
+                }
             }
+        }
+        if st.presence.is_some() {
+            self.broadcast_presence(Some(&st.id));
         }
     }
 }

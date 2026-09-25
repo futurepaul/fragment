@@ -155,6 +155,8 @@ pub struct FragmentCell {
     pub(crate) settling: RefCell<BTreeMap<String, Arc<futures_util::lock::Mutex<()>>>>,
     /// How the app facet starts (ops.rs `app_loader`).
     pub(crate) app: js::AppLoader,
+    /// What this activation knows of its live sockets (live.rs).
+    pub(crate) live: RefCell<crate::live::LiveMemory>,
 }
 
 impl DurableObject for FragmentCell {
@@ -194,6 +196,7 @@ impl DurableObject for FragmentCell {
             swept: Cell::new(false),
             settling: RefCell::default(),
             app,
+            live: RefCell::default(),
         };
         if !paused_by_migration.is_empty() {
             let summary = format!("the stored pause list did not parse; paused every triggered operation: {}", paused_by_migration.join(", "));
