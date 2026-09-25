@@ -482,6 +482,7 @@ struct Config {
     /// optional code.storage server override (backend-swap knob; the
     /// storage-token response is the default source)
     codestorage: Option<String>,
+    agents: Option<String>,
 }
 
 fn config_path() -> PathBuf {
@@ -506,25 +507,13 @@ fn write_secret_file(path: &Path, secret: &str) -> Result<()> {
     Ok(())
 }
 
-/// Writes `secret_key` into the config, keeping its other fields; the file
-/// holds the secret key, so it stays 0600.
-fn save_secret_key(secret_hex: &str) -> Result<PathBuf> {
+/// Sets one key of the config, keeping the others; the file holds the
+/// secret key, so it stays 0600.
+fn save_config(key: &str, value: &str) -> Result<PathBuf> {
     let p = config_path();
-    std::fs::create_dir_all(p.parent().expect("the config has a directory"))?;
     let mut obj: Value = std::fs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()).filter(Value::is_object).unwrap_or(json!({}));
-    obj["secret_key"] = json!(secret_hex);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&p)?;
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))?;
-        serde_json::to_writer_pretty(&mut f, &obj)?;
-    }
-    #[cfg(not(unix))]
-    {
-        let f = std::fs::File::create(&p)?;
-        serde_json::to_writer_pretty(f, &obj)?;
-    }
+    obj[key] = json!(value);
+    write_secret_file(&p, &serde_json::to_string_pretty(&obj)?)?;
     Ok(p)
 }
 
@@ -550,17 +539,9 @@ fn print_identity(v: &IdentityView, this_key: &str) {
 }
 
 fn load_config() -> Config {
-    let p = config_path();
-    if let Ok(bytes) = std::fs::read(&p) {
-        let v: Value = serde_json::from_slice(&bytes).unwrap_or(json!({}));
-        Config {
-            host: v["host"].as_str().map(|s| s.to_string()),
-            secret_key: v["secret_key"].as_str().map(|s| s.to_string()),
-            codestorage: v["codestorage"].as_str().map(|s| s.trim_end_matches('/').to_string()),
-        }
-    } else {
-        Config { host: None, secret_key: None, codestorage: None }
-    }
+    let v: Value = std::fs::read(config_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
+    let text = |k: &str| v[k].as_str().map(str::to_string);
+    Config { host: text("host"), secret_key: text("secret_key"), codestorage: text("codestorage").map(|u| u.trim_end_matches('/').to_string()), agents: text("agents") }
 }
 
 /// code.storage server override: FRAGMENT_CODESTORAGE_URL env, then the
@@ -586,10 +567,7 @@ fn resolve_host(cli_host: &Option<String>, cfg: &Config) -> String {
 /// Where agents answer: FRAGMENT_AGENTS, else the config's `agents`, else
 /// the platform itself (the agents' script is co-hosted in its fleet).
 fn agents_client(verbose: bool) -> Result<api::Client> {
-    let host = std::env::var("FRAGMENT_AGENTS")
-        .ok()
-        .filter(|h| !h.trim().is_empty())
-        .or_else(|| std::fs::read(config_path()).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).and_then(|v| v["agents"].as_str().map(str::to_string)));
+    let host = std::env::var("FRAGMENT_AGENTS").ok().filter(|h| !h.trim().is_empty()).or_else(|| load_config().agents);
     require_client(&host, verbose)
 }
 
@@ -741,7 +719,7 @@ fn run(cli: Cli) -> Result<()> {
             // the key this machine signs with: the one it has, or a new one
             let key_existed = !force && load_config().secret_key.is_some();
             if !key_existed {
-                save_secret_key(&auth::Identity::generate().secret_hex())?;
+                save_config("secret_key", &auth::Identity::generate().secret_hex())?;
             }
             let c = require_client(&cli.host, cli.verbose)?;
             // whose is this key? (401 until someone signed in approves it)
@@ -830,7 +808,7 @@ fn run(cli: Cli) -> Result<()> {
             let proof = fresh.proof("POST", &url, old.id.pubkey_hex());
             old.call_as::<IdentityView>(old.post_json("/api/identities/me/keys", &json!({ "proof": proof }))?)?;
             // 2. this machine switches to it (both keys work until step 3)
-            save_secret_key(&fresh.secret_hex())?;
+            save_config("secret_key", &fresh.secret_hex())?;
             let new = require_client(&cli.host, cli.verbose)?;
             // 3. the new key revokes the old one
             let revoked = new.call_as::<IdentityView>(new.delete(&format!("/api/identities/me/keys/{}", old.id.pubkey_hex()))?);
@@ -865,29 +843,8 @@ fn run(cli: Cli) -> Result<()> {
                     if !url.starts_with("https://") && !url.starts_with("http://") {
                         return Err(usage("host must be an http(s) URL, e.g. http://127.0.0.1:8790"));
                     }
-                    let p = config_path();
-                    std::fs::create_dir_all(p.parent().unwrap())?;
-                    let mut obj = json!({ "host": url });
-                    if let Some(sk) = &cfg.secret_key {
-                        obj["secret_key"] = json!(sk);
-                    }
-                    // the file holds the secret key: keep it 0600
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::OpenOptionsExt;
-                        let mut f = std::fs::OpenOptions::new()
-                            .write(true).create(true).truncate(true).mode(0o600)
-                            .open(&p)?;
-                        serde_json::to_writer_pretty(&mut f, &obj)?;
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        let f = std::fs::File::create(&p)?;
-                        serde_json::to_writer_pretty(f, &obj)?;
-                    }
-                    if j {
-                        ok_exit(&json!({ "host": url, "config": p.display().to_string() }));
-                    }
+                    let p = save_config("host", &url)?;
+                    json_exit(j, &json!({ "host": url, "config": p.display().to_string() }));
                     println!("default host set: {url}");
                     println!("config: {}", p.display());
                 }
@@ -2025,5 +1982,34 @@ mod tests {
 
         let (err, _) = error_body(&coded(Code::OutcomeUnknown));
         assert!(err.get("id").is_none() && !err["hint"].as_str().unwrap_or("").contains("--id"), "{err}");
+    }
+
+    /// Goal: `fragment host <url>` changes the host and keeps the config's
+    /// other keys (it rewrote the file with `host` and `secret_key` only,
+    /// so `codestorage` and `agents` were lost). Method: the config lives
+    /// under HOME, so this test runs the command in a copy of itself with a
+    /// HOME of its own, then reads the file.
+    #[test]
+    fn host_keeps_the_other_config_keys() {
+        if std::env::var_os("FRAGMENT_TEST_RUN_HOST").is_some() {
+            return run(Cli::parse_from(["fragment", "host", "http://127.0.0.1:2"])).unwrap();
+        }
+        let home = std::env::temp_dir().join(format!("fragment-host-config-{}", std::process::id()));
+        let dir = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = |host: &str| json!({ "host": host, "secret_key": "07".repeat(32), "codestorage": "http://127.0.0.1:3", "agents": "http://127.0.0.1:4" });
+        std::fs::write(dir.join("config.json"), config("http://127.0.0.1:1").to_string()).unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::host_keeps_the_other_config_keys"])
+            .env("FRAGMENT_TEST_RUN_HOST", "1")
+            .env("HOME", &home)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("FRAGMENT_OUTPUT")
+            .output()
+            .unwrap();
+        let after: Value = serde_json::from_slice(&std::fs::read(dir.join("config.json")).unwrap()).unwrap();
+        std::fs::remove_dir_all(&home).ok();
+        assert!(child.status.success(), "{}", String::from_utf8_lossy(&child.stdout));
+        assert_eq!(after, config("http://127.0.0.1:2"));
     }
 }
