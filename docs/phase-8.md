@@ -2,7 +2,10 @@
 
 Built 2026-09-23 overnight on Paul's word ("work on 5-8, the stuff that's
 obvious"). The ROADMAP keeps the acceptance; this file keeps what was
-built and the choices made without him, for his review.
+built and the choices made without him, for his review. Live on
+fragment.club since 2026-09-24, with what phase 6 (step 5) added: `fragment
+computer connect`, which reaches the agent without a public URL, and
+screenshots in the chat.
 
 ## What landed
 
@@ -50,7 +53,8 @@ A smoke run the same night, on a Sprite made for it and destroyed after
   org auth in the same `authorization` header the computer's token
   uses, so reaching a computer at its URL still needs a design (a public
   URL with the computer's token, as the spike ran, or a token in another
-  header).
+  header); `fragment computer connect` avoids the question by connecting
+  out.
 - With the real model (`z-ai/glm-5.3-flash` on OpenRouter), an agent
   wrote two pages and listed them in 3 to 8 seconds a turn; each tool
   call through the proxy took 0.1 to 0.9 s. The first run put its files
@@ -110,5 +114,3 @@ back too. The root and `cell/` lockfiles have none.
 - A release artifact for computers (a Linux build of the CLI with
   `computer`), and file sync between a computer and its fragment through
   git (builder workspaces).
-- Phases 6 (the desktop) and 7's sharing (the share sheet, invites in the
-  shell): both need phase 4's sign-in.

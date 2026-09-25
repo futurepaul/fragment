@@ -213,9 +213,17 @@ Each phase lands as hard cuts with its tests. A phase is done when its
 acceptance checks pass in CI and, from phase 3 on, against the hosted
 deployment.
 
+**Where it stands (2026-09-25).** fragment.club runs the cell `fd471b1`
+on nodes built from the celld fork's `0d80ead`, deployed 2026-09-24:
+phases 3 to 6, the hardening pass's H1–H3, and the first parts of 7
+and 8 (hosted e2e 29/29). `master` is ahead by PRs #12–#15 (the audit's
+source-of-truth, speed, and tests passes, and the parallel CI) and
+`d01ec3f` (the registry retry), not deployed: that needs a node image
+from the fork's `f734f8f`, then the cell (`docs/operate.md`).
+
 ### 0. Foundation (done 2026-09-23)
 - fragment-next created from fragment's full history (`9a381f8`, pushed
-  to `futurepaul/fragment` first); no remote of its own yet.
+  to `futurepaul/fragment` first).
 - Baseline: runtime 32/32, CLI 38/38, `clippy -D warnings` clean, e2e
   312/312 (`E2E_FAL_FAKE=1`) after one fix. Workflow instance ids were
   fleet-global (`r1a1`), so two fragments' first runs collided and one
@@ -248,8 +256,7 @@ deployment.
 - Done in seven slices on Paul's go; the record (what landed, every
   decision, what was deferred and to whom) is `docs/phase-2.md`. The
   Rust e2e passes 444 of 444; the TypeScript runtime, `scripts/`,
-  `deploy/`, `notify-relay/`, and the Node packages are deleted; CI is
-  written for `cargo xtask` but has not run (no remote).
+  `deploy/`, `notify-relay/`, and the Node packages are deleted.
 - Operations, channels, membership, the app facet, blob pointers, and
   OpenRouter (text, image, video) replace workflows-as-files, rooms
   documents, inbox tables, `ctx.state`, git grants, and fal, in hard
@@ -294,7 +301,7 @@ deployment.
   obvious problem (2026-09-23); reshaped to finite.computer's identity
   model (decision 15, 2026-09-24; slices in `docs/phase-4.md`; slices A,
   the registry and identities, B, sign-in and sessions, and C, budgets,
-  built 2026-09-24; D, hosted, next). A
+  built 2026-09-24; D, the deploy, live on fragment.club the same day). A
   registry of identities (person, agent, fragment), their public keys,
   and each agent's owner, in BANKS's shape. Members name identities.
   Sign-in is fragment's own WorkOS environment with sign-up switched off;
@@ -336,6 +343,8 @@ deployment.
 - **Acceptance:** the goose spike's checks, ported to the Rust e2e (steer
   mid-tool, stop, SIGKILL mid-tool runs the effect once, SIGKILL between
   steps); an agent uses the todo fragment only through its operations.
+  *Met 2026-09-23 (`docs/phase-5.md`); hosted since phase 6, co-hosted
+  on the cell's nodes, on the owner's budget.*
 
 ### 6. The desktop
 - **Reframed 2026-09-24 (Paul): `docs/phase-6.md` is the plan.** Fragment
@@ -354,7 +363,8 @@ deployment.
 - **Acceptance:** a browser e2e opens apps and files into the viewer,
   reorders and closes panes, collapses both sides, and works at phone
   width; the layout survives a reload. **Met 2026-09-24** (e2e lane
-  `desktop`, 17 checks; the desktop is `templates/desktop`).
+  `desktop`, 17 checks; the desktop is `templates/desktop`), and live on
+  fragment.club the same day with the rest of `docs/phase-6.md`.
 
 ### 7. Chats and sharing
 - A chat template (a `chat` channel) whose agent member answers new
@@ -364,6 +374,10 @@ deployment.
   stream live and labeled by sender; the guest drives the owner's agent;
   revoking closes the guest's socket and returns 403; a rewritten
   desktop cannot share without the sheet click.
+- *Live:* the chat template, an agent that listens and answers
+  (`docs/phase-5.md`), the owner's agent in every new chat (phase 6),
+  and invites accepted in the browser (phase 4). *Not built:* the share
+  sheet, the share header, shared badges.
 
 ### 8. Computers and builder workspaces on Sprites
 - A `Computer` cell per Sprite (ownership by principal, fragments
@@ -379,6 +393,12 @@ deployment.
   a platform kill mid-tool runs the tool once; a computer restart
   resumes the turn from the cell's conversation; no credential is on the
   Sprite's disk.
+- *Live:* the first part (`docs/phase-8.md`): `fragment computer serve`
+  attached to an agent by URL and token, the loop still in the agent's
+  cell; phase 6 added `fragment computer connect` (no public URL) and
+  screenshots in the chat. *Not built:* the `Computer` cell and Sprites
+  lifecycle, the loop on the computer, credentials through connectors,
+  builder workspaces.
 
 ### 9. Cutover
 - `fragment.club` moves to Fly in phase 3. What remains: the VPS
@@ -419,7 +439,3 @@ Product semantics (roles, what a chat guest can do), privacy posture,
 irreversible actions (DNS cutover, deleting the VPS or Sprites, pushing
 to a new remote), spend beyond the agreed budget, and any change to a
 decision above.
-
-## Open decisions
-
-- A GitHub remote for fragment-next (none yet).

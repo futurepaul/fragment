@@ -21,8 +21,7 @@ paths of files that hold them, all under `~/.config/finite-next/secrets/`).
   listener serve only fleet-signed peers, `CELLD_DYNAMIC_LOCKDOWN=1` and
   `CELLD_FACET_MAX_BYTES` bound what an app can do (docs/hardening.md),
   and `CELLD_MAX_REQUEST_BODY_BYTES` (256 MiB, a blob's limit) replaces
-  celld's 1 GiB default for any request body. The live Machines take it
-  at the next `cargo xtask deploy --nodes`.
+  celld's 1 GiB default for any request body.
 - **Two scripts, one application:** the cell (`fragment`, the fleet's
   application: the fleet-wide pointer names it) and the agents'
   (`fragment-agent`, from `agent/`), which the cell's `AGENTS` binding
@@ -42,7 +41,8 @@ paths of files that hold them, all under `~/.config/finite-next/secrets/`).
   controls the fleet** (they can deploy code). The Worker variables in
   each deployment hold no secret since the hardening pass; the
   deployments before it do (docs/technical-debt-ledger.md).
-- **code.storage org `finite`**: one repo per fragment, named after it.
+- **code.storage org `finite`**: one repo per fragment,
+  `<label>--<username>`.
 - **DNS** at Namecheap: `fragment.club` and `*.fragment.club` to the app
   (A `66.241.125.20`, AAAA `2a09:8280:1::199:8a1c:0`), and
   `_acme-challenge.fragment.club` CNAME `fragment.club.nwd56j0.flydns.net.`
@@ -148,9 +148,11 @@ Machines one at a time. Then revoke the old value at its issuer.
 - celld upgrades: read the release's upgrade notes first; some need every
   node stopped before the new version starts (`flyctl scale count 0`,
   then deploy, then scale back).
-- Never publish the internal port (8081) as a Fly service: its operator
-  API has no authentication.
+- Never publish the internal port (8081) as a Fly service: it is for
+  peers, and without `CELLD_INTERNAL_PEER_ONLY` its operator API has no
+  authentication.
 - A re-created fragment name finds its old repo in code.storage (and its
   files); the cell does not delete repos. The hosted e2e deletes its own.
 - The old runtime's repos (`linecount`, `events-rfc`, …) are in the same
-  org; a new fragment with one of those names attaches to that repo.
+  org; a new fragment attaches to one only if its `<label>--<username>`
+  is that repo's name.

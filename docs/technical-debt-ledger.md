@@ -107,9 +107,9 @@ without a delete condition is unfinished design, not debt.
 - **Risk:** `fragment list` shows a fragment the person no longer has
   (calls to it answer 404; nothing leaks).
 - **First proof:** a Principal cell unreachable during a delete.
-- **Delete when:** phase 4 grows the person cell; its list checks each
-  entry against the fragment (or the platform keeps delete tombstones and
-  retries them), with an e2e that fails a delivery during a delete.
+- **Delete when:** the list checks each entry against the fragment (or
+  the platform keeps delete tombstones and retries them), with an e2e
+  that fails a delivery during a delete.
 
 ## The effects sweep has no fault-injection test
 
@@ -249,7 +249,7 @@ without a delete condition is unfinished design, not debt.
 - **Risk:** a node deploy needs this machine (or one like it) with Docker.
 - **First proof:** already present.
 - **Delete when:** a remote build pushes (a newer flyctl, or a token the
-  builders accept), or CI builds the image once a remote exists.
+  builders accept), or CI builds the image.
 
 ## Three fleet secrets that sat in the bucket are not rotated yet
 
@@ -422,17 +422,21 @@ without a delete condition is unfinished design, not debt.
 ## A socket opened with a key outlives that key's revocation
 
 - **Observed:** phase 4 slice A. Every request resolves its key live, so
-  a revoked key is refused from its next request. A `__watch` or
-  `__live` socket opened before the revocation stays open until it
-  reconnects, or until the membership it rests on changes (member and
-  agent removals do close sockets).
+  a revoked key is refused from its next request. Since the speed pass
+  (#13), a signed-in `__live` socket asks the registry again at its
+  first frame after `LIVE_IDENTITY_MS` (60 s) and is closed with 4001
+  when its credential no longer names its principal. But the check runs
+  only when the client sends a frame: a `__live` socket that only
+  listens, and every `__watch` socket, stays open until it reconnects or
+  the membership it rests on changes (member and agent removals do
+  close sockets).
 - **Risk:** a stolen, revoked key keeps a change feed it already had:
   reads only, and only of fragments that identity can still read.
 - **First proof:** a revoked key's feed still receiving frames.
 - **Delete when:** revoking a key tells the fragments in its identity's
   index to close the sockets tagged with that key (the index cell
-  already lists them), with an e2e check; or sockets re-resolve their
-  key on a timer.
+  already lists them), with an e2e check; or every socket re-resolves
+  its key on a timer, not only at a frame it sends.
 
 ## A paid step's reservation is an estimate per kind of step
 

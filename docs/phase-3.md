@@ -1,8 +1,9 @@
 # Phase 3: hosted on fragment.club
 
 Status: started 2026-09-23 on Paul's go (costs approved; fragment.club
-itself, no staging name). The ROADMAP keeps the acceptance; this file
-keeps the slices. Update it in the same commit as the work.
+itself, no staging name); cut over the same day (F). Left: slice D and
+cell-to-Sprite latency (phase 8), the push to a phone, and retiring the
+VPS. The ROADMAP keeps the acceptance; this file keeps the slices.
 
 ## Shape
 
@@ -172,5 +173,6 @@ the fleet serves `https://fragment.club` and `<name>.fragment.club`, and
 the hosted e2e passes 28 of 28 there (its `egress` section included).
 Paul made a new Fly token; the leaked one (`fragment-next`) still
 lists as valid until it is revoked. Left: the push to Paul's phone
-(`https://push-check.fragment.club/`, a public fragment made by the e2e
-key: subscribe, then send), and retiring the VPS (Paul's call).
+(from a public fragment that registers push: subscribe, then send; the
+`push-check` fragment made for it went with phase 6's hard cut), and
+retiring the VPS (Paul's call).

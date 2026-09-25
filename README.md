@@ -13,9 +13,11 @@ This repo holds:
   fragment's app in its own loaded worker, and runs jobs as Workflows.
 - **the `fragment` CLI** (`cli/`): the whole control surface, built for
   agents. `fragment guide` prints the agent guide.
+- **the agents** (`agent/`): goose's loop in a Durable Object per agent,
+  co-hosted on the cell's nodes; an agent joins fragments as a member.
 - **the harness** (`xtask/`, `crates/`): the dev stack, Rust fakes for
-  code.storage, OpenRouter, and a push service, and the e2e suite that
-  drives the real cell, CLI, and a browser.
+  code.storage, OpenRouter, WorkOS, and a push service, and the e2e suite
+  that drives the real cell, CLI, and a browser.
 
 Read [docs/MODEL.md](docs/MODEL.md) for the model,
 [docs/api.md](docs/api.md) for the wire contract, and
@@ -37,8 +39,8 @@ cargo xtask celld          # builds the celld fork into target/celld/bin
 Then:
 
 ```
-cargo xtask dev            # the cell on :8790 and the code.storage fake on :8792
-cargo xtask try todo       # in another terminal: todo | inbox | notes
+cargo xtask dev            # the cell and its agents on :8790, the code.storage and WorkOS fakes
+cargo xtask try todo       # in another terminal: todo | inbox | notes | chat
 ```
 
 `try` creates and deploys a fragment from a template under
@@ -62,18 +64,22 @@ runs the hosted sections against the live fleet (see
 ## Layout
 
 ```
-cell/          the cell: router, fragment supervisor, jobs, files, blobs, deliveries
+cell/          the cell: router, registry, fragment supervisor, jobs, files, blobs, deliveries, ledger
+agent/         the agents' celld project (goose's loop)
 cli/           the fragment CLI and GUIDE.md (the agent guide)
 crates/proto   wire types and limits
-crates/core    the cell's pure logic, host-tested (schemas, cron, globs, sealing, web push)
+crates/core    the cell's pure logic, host-tested (schemas, cron, globs, budgets, web push)
 crates/nip98   NIP-98 signing and verification
-crates/fakes   code.storage, OpenRouter, and push-service fakes
+crates/native  KEYS: the fleet's keys, served by the celld fork
+crates/computer  `fragment computer`: goose's developer tools on a computer
+crates/templates  templates/, embedded in the CLI and the cell
+crates/fakes   code.storage, OpenRouter, WorkOS, and push-service fakes
 crates/devstack  runs a celld node and the fakes
 crates/e2e     the end-to-end suite
-templates/     todo, inbox, notes
+templates/     blank, chat, desktop, inbox, notes, todo
 fleets/        hosted fleets' settings (no secrets) and the node image's Dockerfile
 crates/node    the launcher that starts celld on a fleet Machine
-xtask/         build, celld, dev, try, check, e2e, deploy, fleet
+xtask/         build, celld, dev, try, check, e2e, e2e-kit, deploy, fleet
 docs/          model, contract, roadmap, phase records, the debt ledger
 spikes/        the phase 1 spikes and their verdicts
 ```

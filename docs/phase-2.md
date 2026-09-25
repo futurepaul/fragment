@@ -12,7 +12,8 @@ conflicting-body tests for every mutation (e2e `ops`, `schemas`);
 restart tests for the supervisor and facet storage (e2e `restart`: a
 graceful stop, a SIGKILL, a job sleeping through a SIGKILL); the
 published-fragment table green with no gap rows; no `.sh` or `.py` in the
-repo. The one gap: CI is written but has never run (no remote yet).
+repo. The one gap then: CI was written but had not run (no remote yet;
+it runs on every pull request now).
 
 **At the end:** `cargo xtask e2e` passes 444 of 444 checks in 27
 sections; `cargo xtask check` is clean (host tests, clippy on host and

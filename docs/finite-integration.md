@@ -75,8 +75,8 @@ is a viewer; `public` means anyone at all, no link needed.
 | Private keys and platform secrets | callers (FIN-11); Core with SOPS (FIN-60) | cell secrets sealed per cell by the node's `KEYS`; fleet secrets in the node's environment (Fly secrets), used only by `KEYS` (`docs/secrets.md`, `docs/hardening.md`) | platform secrets follow FIN-60 when fragment runs inside Finite's deploy; `KEYS` reads them from wherever the node's environment comes from |
 | Google Workspace and other connections | Core: consent, encrypted refresh tokens, short-lived access tokens (FIN-10) | not built | an agent or computer asks Core for a short-lived token for its assigned connection |
 | Chat channels (SimpleX, web chat) | Hermes on the agent's runtime (FIN-15) | fragment chats are fragments (`templates/chat`); no SimpleX | SimpleX belongs to a Hermes agent; a Hermes agent can join fragment chats through a bridge |
-| Agent runtimes | Hermes on Sprites (FIN-21) | goose agents in cells; computers on Sprites (`fragment computer serve`) | share one Sprite adapter and its lessons (FIN-66) |
-| Reaching a computer or agent | stable `<agentid>.agents.finite.computer`, owner-only (FIN-15); bearer vs Iroh open (FIN-39) | open: the Sprite URL's org auth and the computer's token both want `authorization` | decide once for both (see below) |
+| Agent runtimes | Hermes on Sprites (FIN-21) | goose agents in cells; computers on Sprites (`fragment computer serve`, or `connect`) | share one Sprite adapter and its lessons (FIN-66) |
+| Reaching a computer or agent | stable `<agentid>.agents.finite.computer`, owner-only (FIN-15); bearer vs Iroh open (FIN-39) | a computer connects out to its agent (`fragment computer connect`, a long poll through the platform: phase 6); by URL, the Sprite URL's org auth and the computer's token both want `authorization` | decide once for both (see below) |
 
 ## Not built in fragment, on purpose
 
