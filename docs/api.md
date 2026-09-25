@@ -554,6 +554,13 @@ API answers on the platform's host):
 | `__watch` | WebSocket, viewers and up (the share link, or a signed upgrade): `{type: "hello", ref, sha}`, then `{type: "changed", ref: "main", sha, paths}` per external move of main |
 | anything else | the app's `fetch`, when it has one |
 
+A site file carries an `ETag` that names its bytes: the last commit that
+changed it, or, for a page given Open Graph tags, a weak tag that also
+names the live commit (its `fragment.json`). `__fragment.js` and
+`__sw.js` carry a hash of their bytes. A `GET` or `HEAD` whose
+`If-None-Match` names the current tag answers 304 without reading the
+file.
+
 `__live` and `__watch` are also served in place at `/f/<name>/…` for the
 CLI. The `__live` protocol is JSON frames tagged by `type`, defined once
 as `LiveIn` (client → server) and `LiveOut` (server → client) in

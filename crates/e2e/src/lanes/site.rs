@@ -41,6 +41,7 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
             ("site/index.html", Some(b"<!doctype html><html><head></head><body>front</body></html>")),
             ("site/docs/index.html", Some(b"<p>docs</p>")),
             ("site/app.3f9a1c2e.js", Some(b"console.log(1)")),
+            ("site/style.css", Some(b"body{color:red}")),
             ("notes/a.md", Some(b"alpha")),
             ("workflows/w.mjs", Some(b"code")),
             ("fragment.json", Some(br#"{"meta":{"title":"Site <Test>","description":"d"}}"#)),
@@ -81,6 +82,35 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("HEAD answers without a body", r.status == 200 && r.text.is_empty(), &r);
     let r = api.call(Call { method: "DELETE", url: api.site_url(&name, ""), cookie: Some(cookie.clone()), ..Call::default() })?;
     s.ok("other methods are for the app's routes (none here: 404)", r.status == 404 && r.message().contains("no page or app route for DELETE /"), &r);
+
+    // revalidation: each file names its bytes in an ETag, and a conditional
+    // GET naming it is answered before code.storage is asked for anything
+    let repo = c["repo"].as_str().unwrap_or("").to_string();
+    let conditional = |path: &str, tag: &str| {
+        api.call(Call { method: "GET", url: api.site_url(&name, path), cookie: Some(cookie.clone()), extra: vec![("if-none-match", tag.to_string())], ..Call::default() })
+    };
+    let tag = |path: &str| api.page(&name, path, Some(&cookie)).map(|r| r.header("etag")).unwrap_or_default();
+    let (css, hashed, page) = (tag("style.css"), tag("app.3f9a1c2e.js"), tag(""));
+    s.ok("site files carry strong ETags, a page with Open Graph tags a weak one", css.starts_with('"') && hashed.starts_with('"') && page.starts_with("W/\""), format!("{css} {hashed} {page}"));
+    let reads = s.fake.requests(&repo, "GET file");
+    let r = conditional("style.css", &css)?;
+    s.ok("a conditional GET naming a file's ETag is 304, without a body", r.status == 304 && r.text.is_empty() && r.header("etag") == css, &r);
+    let r = conditional("", &format!("\"other\", {page}"))?;
+    s.ok("a page revalidates too, by any tag in the list", r.status == 304 && r.header("cache-control") == "private, no-cache", &r);
+    s.ok("revalidating asks code.storage for nothing", s.fake.requests(&repo, "GET file") == reads, s.fake.requests(&repo, "GET file") - reads);
+    for script in ["__fragment.js", "__sw.js"] {
+        let first = tag(script);
+        let r = conditional(script, &first)?;
+        s.ok(&format!("{script} revalidates by its build-time hash"), first.len() == 18 && r.status == 304, format!("{first} {r}"));
+    }
+    s.commit(&c, &[("site/style.css", Some(b"body{color:blue}"))]);
+    s.deploy(&c);
+    let r = conditional("style.css", &css)?;
+    s.ok("a deploy that changes a file changes its ETag: the old one gets the new bytes", r.status == 200 && r.text == "body{color:blue}" && r.header("etag") != css, &r);
+    let r = conditional("", &page)?;
+    s.ok("a deploy changes a page's ETag (its tags follow live's fragment.json)", r.status == 200 && r.text.contains("front") && r.header("etag") != page, &r);
+    let r = conditional("app.3f9a1c2e.js", &hashed)?;
+    s.ok("a file the deploy did not touch keeps its ETag", r.status == 304, &r);
 
     // the machine-read plane
     let r = api.page(&name, "__tree", Some(&cookie))?;

@@ -78,6 +78,54 @@ pub fn cache_control(path: &str, public_fragment: bool) -> &'static str {
     }
 }
 
+/// A site file's entity tag: its tree row's last commit, which with its
+/// path names its bytes. A strong validator: the file's bytes change only
+/// with a commit that touches it.
+pub fn file_etag(last_commit: &str) -> String {
+    format!("\"{last_commit}\"")
+}
+
+/// A page served with Open Graph tags: its body also follows the live
+/// commit's `fragment.json` (its `meta`), so the tag names the live pin
+/// too, and is weak (the page is made, not stored).
+pub fn page_etag(last_commit: &str, live: &str) -> String {
+    format!("W/\"{last_commit}.{live}\"")
+}
+
+/// A hash of bytes compiled into the cell (the browser library, the
+/// service worker), taken at build time for their entity tags: 64-bit
+/// FNV-1a, which needs no dependency and runs in a `const`. Not for
+/// anything an adversary chooses: these bytes are the platform's own.
+pub const fn content_hash(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut i = 0;
+    // bounded: one turn per byte of a constant
+    while i < bytes.len() {
+        hash ^= bytes[i] as u64;
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+        i += 1;
+    }
+    hash
+}
+
+/// The entity tag for a `content_hash`.
+pub fn hash_etag(hash: u64) -> String {
+    format!("\"{hash:016x}\"")
+}
+
+/// Whether an `If-None-Match` header names `etag`, so the answer is 304:
+/// `*`, or any of its tags by the weak comparison `If-None-Match` uses
+/// (RFC 9110 13.1.2: a `W/` prefix on either side is ignored).
+pub fn not_modified(if_none_match: &str, etag: &str) -> bool {
+    let opaque = |tag: &str| {
+        let tag = tag.trim();
+        tag.strip_prefix("W/").unwrap_or(tag).to_string()
+    };
+    let wanted = opaque(etag);
+    // bounded by the header's length: one turn per comma
+    if_none_match.trim() == "*" || if_none_match.split(',').any(|tag| opaque(tag) == wanted)
+}
+
 /// One cookie's value from a `Cookie` header.
 pub fn cookie<'a>(header: &'a str, name: &str) -> Option<&'a str> {
     header.split(';').find_map(|pair| {
@@ -225,6 +273,41 @@ mod tests {
         assert_eq!(cache_control("app.3f9a1c2e.js", true), "public, max-age=31536000, immutable");
         assert_eq!(cache_control("index.html", false), "private, no-cache");
         assert_eq!(cache_control("index.html", true), "public, max-age=60");
+    }
+
+    /// Goal: a conditional GET is answered 304 exactly when it names the
+    /// file's current tag. Method: tags as browsers and caches send them
+    /// (weak, strong, lists, `*`) against strong and weak tags, and the
+    /// ones that must miss (another commit, a tag cut short, no tag).
+    #[test]
+    fn entity_tags() {
+        let file = file_etag("3f9a1c2e3f9a1c2e3f9a1c2e3f9a1c2e3f9a1c2e");
+        assert_eq!(file, "\"3f9a1c2e3f9a1c2e3f9a1c2e3f9a1c2e3f9a1c2e\"");
+        let page = page_etag("aaaa", "bbbb");
+        assert_eq!(page, "W/\"aaaa.bbbb\"");
+        for header in [file.as_str(), &format!("W/{file}"), &format!("\"x\", {file}"), &format!(" {file} ,\"y\""), "*"] {
+            assert!(not_modified(header, &file), "{header}");
+        }
+        for header in ["W/\"aaaa.bbbb\"", "\"aaaa.bbbb\"", "\"zz\", W/\"aaaa.bbbb\""] {
+            assert!(not_modified(header, &page), "{header}");
+        }
+        for header in ["", "\"3f9a1c2e\"", "\"aaaa.cccc\"", "W/\"aaaa\"", "3f9a1c2e3f9a1c2e3f9a1c2e3f9a1c2e3f9a1c2e", "**"] {
+            assert!(!not_modified(header, &file) && !not_modified(header, &page), "{header}");
+        }
+        // a tag names a live pin: another deploy is another tag
+        assert!(!not_modified(&page_etag("aaaa", "bbbb"), &page_etag("aaaa", "cccc")));
+    }
+
+    /// Goal: the build-time hash is FNV-1a 64 (so its tags are stable
+    /// across builds of the same bytes). Method: the algorithm's published
+    /// test vectors, and a `const` use.
+    #[test]
+    fn content_hashes() {
+        const EMPTY: u64 = content_hash(b"");
+        assert_eq!(EMPTY, 0xcbf2_9ce4_8422_2325);
+        assert_eq!(content_hash(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(content_hash(b"foobar"), 0x8594_4171_f739_67e8);
+        assert_eq!(hash_etag(0xaf63_dc4c_8601_ec8c), "\"af63dc4c8601ec8c\"");
     }
 
     #[test]
