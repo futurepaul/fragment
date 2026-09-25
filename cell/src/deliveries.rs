@@ -37,6 +37,10 @@ const RETRY_MAX_S: u32 = 3600;
 const DRAIN_ROWS: i64 = 100;
 /// Messages per `sendBatch` (the queue's cap), and so per push batch.
 const QUEUE_BATCH: usize = 100;
+/// Messages one consumer batch may hold: the queues' `max_batch_size`
+/// (wrangler.jsonc: 20 for deliveries, the default 10 for dead letters)
+/// is at most this, and all of a batch's sends are in flight at once.
+const CONSUME_BATCH_MAX: usize = 100;
 /// Batches one push may take: its subscriptions are capped.
 const PUSH_BATCHES_MAX: usize = limits::PUSH_SUBS_MAX as usize / QUEUE_BATCH + 1;
 /// How long a drain holds the rows it is sending: another drain (a
@@ -366,26 +370,34 @@ async fn send(env: &Env, d: &Delivery) -> Result<Option<String>> {
     })
 }
 
-/// The queue consumer: `fragment-deliveries` sends, its dead-letter queue reports.
+/// The queue consumer: `fragment-deliveries` sends, its dead-letter queue
+/// reports. A batch's messages go out together, each acked or retried on
+/// its own: one slow receiver holds up only its own delivery, never the
+/// rest of the batch (other fragments' included). The queue's
+/// `max_batch_size` (wrangler.jsonc) bounds how many are in flight.
 pub async fn consume(batch: MessageBatch<Delivery>, env: Env) -> Result<()> {
     let cfg = Config::from_env(&env);
     let dead = batch.queue() == DEAD_QUEUE;
-    for message in batch.messages()? {
-        let d = message.body().clone();
-        if dead {
-            let _ = report(&env, &d, Outcome::Failed, 0, "out of retries").await;
-            message.ack();
-            continue;
-        }
-        match send(&env, &d).await {
-            Ok(None) => message.ack(),
-            Ok(Some(_)) | Err(_) => {
-                // no attempt count in workers-rs 0.8.5: the delay grows with the message's age
-                let age_s = ((js::now_ms() - message.timestamp().as_millis() as i64) / 1000).max(0) as u32;
-                let delay = age_s.clamp(cfg.delivery_retry_s, RETRY_MAX_S);
-                message.retry_with_options(&QueueRetryOptionsBuilder::new().with_delay_seconds(delay).build());
-            }
+    let messages = batch.messages()?;
+    assert!(messages.len() <= CONSUME_BATCH_MAX, "a delivery batch holds at most {CONSUME_BATCH_MAX} messages, not {}", messages.len());
+    futures_util::future::join_all(messages.into_iter().map(|message| consume_one(message, &env, &cfg, dead))).await;
+    Ok(())
+}
+
+async fn consume_one(message: Message<Delivery>, env: &Env, cfg: &Config, dead: bool) {
+    let d = message.body();
+    if dead {
+        let _ = report(env, d, Outcome::Failed, 0, "out of retries").await;
+        message.ack();
+        return;
+    }
+    match send(env, d).await {
+        Ok(None) => message.ack(),
+        Ok(Some(_)) | Err(_) => {
+            // no attempt count in workers-rs 0.8.5: the delay grows with the message's age
+            let age_s = ((js::now_ms() - message.timestamp().as_millis() as i64) / 1000).max(0) as u32;
+            let delay = age_s.clamp(cfg.delivery_retry_s, RETRY_MAX_S);
+            message.retry_with_options(&QueueRetryOptionsBuilder::new().with_delay_seconds(delay).build());
         }
     }
-    Ok(())
 }

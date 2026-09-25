@@ -3,10 +3,12 @@
 //! and an auth secret per endpoint); a push is accepted only with a valid
 //! VAPID token for this service's origin, and decrypted as the browser
 //! would (RFC 8291), so tests read what the page would have shown.
-//! Levers: an endpoint that is gone (410), or that fails a few times (503).
+//! Levers: an endpoint that is gone (410), that fails a few times (503),
+//! or that is slow to answer. Each push is recorded with when it landed.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
@@ -23,8 +25,12 @@ struct Sub {
     secret: SecretKey,
     auth: Vec<u8>,
     received: Vec<Value>,
+    /// When each push in `received` landed.
+    landed: Vec<Instant>,
     gone: bool,
     failures: u32,
+    /// How long the endpoint waits before it answers each push.
+    delay: Duration,
 }
 
 #[derive(Default)]
@@ -66,6 +72,9 @@ impl PushService {
         let origin = Arc::new(Mutex::new(String::new()));
         let origin_in = Arc::clone(&origin);
         let handler: Handler = Arc::new(move |req: &Request| {
+            // a slow endpoint waits without holding the others up
+            let delay = req.path.strip_prefix("/push/").and_then(|id| st.lock().expect("push state").subs.get(id).map(|sub| sub.delay));
+            std::thread::sleep(delay.unwrap_or_default());
             let mut s = st.lock().expect("push state");
             if req.path == "/notify" {
                 s.notified.push(serde_json::from_slice(&req.body).unwrap_or(Value::Null));
@@ -92,6 +101,7 @@ impl PushService {
             match webpush::decrypt(&sub.secret, &sub.auth, &req.body) {
                 Ok(plain) => {
                     sub.received.push(serde_json::from_slice(&plain).unwrap_or(Value::Null));
+                    sub.landed.push(Instant::now());
                     Response::json(201, &serde_json::json!({}))
                 }
                 Err(why) => {
@@ -110,7 +120,7 @@ impl PushService {
         let secret = SecretKey::from_slice(&[seed.max(1); 32]).expect("a valid scalar");
         let auth = vec![seed; 16];
         let p256dh = B64URL.encode(secret.public_key().to_encoded_point(false).as_bytes());
-        let sub = Sub { secret, auth: auth.clone(), received: vec![], gone: false, failures: 0 };
+        let sub = Sub { secret, auth: auth.clone(), received: vec![], landed: vec![], gone: false, failures: 0, delay: Duration::ZERO };
         self.state.lock().expect("push state").subs.insert(id.to_string(), sub);
         Subscribed { endpoint: format!("{}/push/{id}", self.url), p256dh, auth: B64URL.encode(auth) }
     }
@@ -131,6 +141,18 @@ impl PushService {
         if let Some(s) = self.state.lock().expect("push state").subs.get_mut(id) {
             s.failures = times;
         }
+    }
+
+    /// The endpoint waits this long before it answers each push.
+    pub fn slow(&self, id: &str, delay: Duration) {
+        if let Some(s) = self.state.lock().expect("push state").subs.get_mut(id) {
+            s.delay = delay;
+        }
+    }
+
+    /// When each push the endpoint took landed, in order.
+    pub fn landed(&self, id: &str) -> Vec<Instant> {
+        self.state.lock().expect("push state").subs.get(id).map(|s| s.landed.clone()).unwrap_or_default()
     }
 
     pub fn notified(&self) -> Vec<Value> {
