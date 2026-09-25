@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::Result;
 use base64::Engine;
 use fragment_nip98::Keys;
-use fragment_proto::{limits, routed};
+use fragment_proto::{limits, routed, ErrorCode};
 use serde_json::json;
 
 use crate::api::{now_s, Api, Call};
@@ -301,13 +301,20 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
     })?;
     s.ok("an unsigned webhook is 401", r.status == 401, &r);
     // Refused from its declared length before it is read: the client may see
-    // the 413, or the connection closing while it is still sending.
-    let big = json!({ "name": s.name("big"), "padding": "x".repeat(3 * 1024 * 1024) });
-    let refused = match api.create_with(&owner, big) {
-        Ok(r) => r.status == 413 && r.error() == "too_large",
+    // the 413, or the connection closing while it is still sending. The body
+    // is a create that would succeed but for its size (whitespace is JSON).
+    let big = s.name("big");
+    let body = format!("{{\"name\":\"{big}\"}}{}", " ".repeat(limits::BODY_MAX_BYTES));
+    let sent = api.call(Call { method: "POST", url: format!("{}/api/fragments", api.base), body: Some(body.into_bytes()), content_type: Some("application/json"), keys: Some(&owner), ..Call::default() });
+    let refused = match sent {
+        Ok(r) => r.status == 413 && r.code() == Some(ErrorCode::TooLarge),
         Err(e) => format!("{e:#}").contains("reset") || format!("{e:#}").contains("Broken pipe"),
     };
     s.ok("a body over 2 MiB is refused unread (413)", refused, "");
+    // a connection that closed because the router fell over would pass as a
+    // reset too: the node answers after it, and made nothing from the body
+    let (alive, made) = (api.unsigned("GET", "/healthz", None)?, api.status(&owner, &api.qualified(&owner, &big)?)?);
+    s.ok("after it the node answers, and no fragment was made", alive.status == 200 && made.status == 404 && made.code() == Some(ErrorCode::NotFound), format!("{alive} / {made}"));
     // a body without a length is measured as it arrives: refused at the
     // chunk that crosses the limit, not after it has all been buffered
     let wait = Duration::from_secs(15);

@@ -389,7 +389,11 @@ impl RegistryCell {
         if status != 200 {
             let refusal = serde_json::from_value::<Refusal>(answer).ok();
             let why = refusal.and_then(|r| r.error_description.or(r.message)).unwrap_or_else(|| "no reason given".into());
-            return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS refused the sign-in ({status}): {why}")));
+            // a 400 is the code's: used (a callback sent again), expired, or
+            // never WorkOS's. The browser starts again; the Registry answered,
+            // so this is no outage. Anything else is WorkOS failing.
+            let code = if status == 400 { ErrorCode::InvalidRequest } else { ErrorCode::UpstreamFailed };
+            return Err(CellError::new(code, format!("WorkOS refused the sign-in ({status}): {why}")));
         }
         let signed_in = serde_json::from_value::<Authenticated>(answer)
             .ok()

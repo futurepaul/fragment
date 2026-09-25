@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use fragment_core::npub;
 use fragment_nip98::Keys;
-use fragment_proto::limits;
+use fragment_proto::{limits, ErrorCode};
 use serde_json::{json, Value};
 
 use super::app::ship;
@@ -158,7 +158,12 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         &r,
     );
     let r = api.call(Call { method: "GET", url: callback, cookie: Some(bound), ..Call::default() })?;
-    s.ok("the same callback again signs no one in", r.status != 302 && cookie_line(&r, "fragment_session").is_empty(), &r);
+    // refused as a spent sign-in (400), never as a fault: a 500 signs no one in either
+    s.ok(
+        "the same callback again signs no one in (400: that sign-in was used)",
+        r.status == 400 && r.code() == Some(ErrorCode::InvalidRequest) && cookie_line(&r, "fragment_session").is_empty(),
+        &r,
+    );
     let r = api.unsigned("GET", "/auth/login?invitation_token=Z1uX3Rbw_cIl-5fIG", None)?;
     s.ok("an invitation's token rides along to WorkOS (it lets its invitee sign up)", r.header("location").contains("&invitation_token=Z1uX3Rbw_cIl-5fIG"), &r);
     let r = api.unsigned("GET", "/auth/login?invitation_token=%22%3E%3Cscript%3E", None)?;

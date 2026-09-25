@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use fragment_nip98::Keys;
+use fragment_proto::ErrorCode;
 use serde_json::{json, Value};
 
 pub fn url_enc(s: &str) -> String {
@@ -43,6 +44,12 @@ impl Reply {
 
     pub fn message(&self) -> &str {
         self.body["message"].as_str().unwrap_or("")
+    }
+
+    /// The refusal's typed code (`{"error": code}`), when the body names one:
+    /// a check matches it, never the message.
+    pub fn code(&self) -> Option<ErrorCode> {
+        serde_json::from_value(self.body["error"].clone()).ok()
     }
 
     pub fn header(&self, name: &str) -> String {
