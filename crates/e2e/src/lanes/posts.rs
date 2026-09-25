@@ -206,12 +206,13 @@ fn heard(s: &mut Suite, api: &Api, owner: &Keys, stranger: &Keys) -> Result<()> 
     let mut socket = Socket::open(api, &name, "__live", None, None)?;
     socket.until("hello", 5)?;
     socket.send(&json!({ "type": "subscribe", "channel": "chat", "after": 0 }))?;
-    socket.until("subscribed", 5)?;
+    // (on to the checks, which say what is missing, even if it never subscribes)
+    let _ = socket.until("subscribed", 5);
     let r = api.signed(owner, "POST", &format!("/api/f/{name}/subscriptions"), Some(&json!({ "channel": "chat", "url": format!("{}/notify", s.push.url) })))?;
     s.ok("(the owner subscribes a URL to the channel)", r.status == 200, &r);
 
     let r = post(api, stranger, &name, "chat", "hello", json!({ "text": "hello, room" }))?;
-    let live = socket.until("record", 5)?;
+    let live = socket.until("record", 5).unwrap_or_else(|e| json!({ "error": e.to_string() }));
     s.ok(
         "a posted record reaches a subscriber's socket live, naming its poster",
         r.status == 200 && live["channel"] == "chat" && live["body"]["text"] == "hello, room" && live["principal"] == stranger_id.as_str(),
