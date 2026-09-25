@@ -159,7 +159,8 @@ pub(crate) fn redirect(to: &str, cookies: &[String]) -> CellResult<Response> {
 /// platform's. Every fragment's origin is one site with the platform, so a
 /// session cookie rides into a frame, and a page there could lay the button
 /// under a click of its own. A redirect stays framable: it shows nothing,
-/// and the desktop's frames sign in through them.
+/// and a frame's `__signin` refuses what the platform's sign-in mints (a
+/// frame signs in only through `__frame`).
 pub(crate) fn unframed(h: &Headers) -> worker::Result<()> {
     h.set("content-security-policy", "frame-ancestors 'none'")?;
     h.set("x-frame-options", "DENY")
