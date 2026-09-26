@@ -327,19 +327,22 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         !sprite.is_empty()
     });
     let computer = s.cli_keys(&s.scratch.join("sprites/sprites").join(&sprite)).context("the pet's computer, paired on its Sprite")?;
-    let frame = |keys: &Keys, id: &str, jpeg: &str, title: &str| {
-        let input = json!({ "jpeg": jpeg, "width": 8, "height": 5, "title": title, "driver": viewer_id });
+    let frame = |keys: &Keys, id: &str, jpeg: &str, title: &str, driver: Option<&str>| {
+        let mut input = json!({ "jpeg": jpeg, "width": 8, "height": 5, "title": title });
+        if let Some(driver) = driver {
+            input["driver"] = json!(driver);
+        }
         api.signed(keys, "POST", &format!("/api/f/{name}/ops/frame"), Some(&json!({ "id": id, "input": input })))
     };
-    let r = frame(&viewer, "f1", JPEG, "a viewer's")?;
+    let r = frame(&viewer, "f1", JPEG, "a viewer's", None)?;
     s.ok("a viewer cannot store a frame", r.status == 403, &r);
-    let r = frame(&computer, "f2", "iVBORw0KGgo", "a PNG")?;
+    let r = frame(&computer, "f2", "iVBORw0KGgo", "a PNG", None)?;
     s.ok("nor can anyone store what is not a JPEG", r.status == 422, &r);
-    let stored = [frame(&computer, "f3", JPEG, "first")?, frame(&computer, "f4", JPEG, "Hello from your pet")?];
+    let stored = [frame(&computer, "f3", JPEG, "first", Some(&viewer_id))?, frame(&computer, "f4", JPEG, "Hello from your pet", None)?];
     let screen = api.signed(&viewer, "POST", &format!("/api/f/{name}/ops/screen"), Some(&json!({ "id": "s1", "input": {} })))?;
     let got = &screen.body["result"];
     s.ok(
-        "its computer stores frames, and the live query answers the latest: the JPEG, what is on screen, who drove it",
+        "its computer stores frames, and the live query answers the latest: the JPEG, what is on screen, and who drove it (kept by a frame that names no one)",
         stored.iter().all(|r| r.status == 200) && got["jpeg"] == JPEG && got["title"] == "Hello from your pet" && got["driver"] == viewer_id.as_str() && got["width"] == 8,
         format!("{} / {screen}", stored[1]),
     );

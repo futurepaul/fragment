@@ -17,8 +17,11 @@ export class App extends DurableObject {
     // a JPEG's first bytes (FF D8 FF), in base64
     if (!jpeg.startsWith("/9j/")) throw new Error("a frame is a base64 JPEG");
     const at = Date.now();
+    // a frame that names no driver (its computer just started) keeps the last one
     this.ctx.storage.sql.exec(
-      "INSERT OR REPLACE INTO screen (id, jpeg, width, height, title, driver, at) VALUES (1, ?, ?, ?, ?, ?, ?)",
+      `INSERT INTO screen (id, jpeg, width, height, title, driver, at) VALUES (1, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (id) DO UPDATE SET jpeg = excluded.jpeg, width = excluded.width, height = excluded.height,
+         title = excluded.title, driver = coalesce(excluded.driver, screen.driver), at = excluded.at`,
       jpeg, width, height, title, driver, at,
     );
     return { at };
