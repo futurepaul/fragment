@@ -270,6 +270,10 @@ pub fn sprites(s: &mut Suite, api: &Api) -> Result<()> {
     // awake while a page is open, each tick charged; asleep after
     let held = |s: &Suite| s.sprites.sprites().get(&sprite).is_some_and(|f| f.held);
     s.ok("with no page open it is not held awake", !held(s), "");
+    let own = Socket::open(api, &name, "__live", Some(&key), None)?;
+    std::thread::sleep(Duration::from_secs(2 * crate::COMPUTER_TICK_S as u64 + 1));
+    s.ok("nor with its own socket open (a computer's, as a pet follows its channel): that is no page", !held(s), "");
+    own.close();
     let page = Socket::open(api, &name, "__live", Some(&owner), None)?;
     s.ok("a page open holds it awake", soon(s, || held(s)), "");
     s.ok("each tick awake is charged to its owner at list price", soon(s, || usage("computer.awake") >= 3), usage("computer.awake"));
