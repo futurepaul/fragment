@@ -37,12 +37,12 @@ const API_WRITE_MAX_BYTES: usize = 1024 * 1024;
 
 /// Who may open a fragment made from a template, when its create does not
 /// say, from what the template declares (fragment.json holds no access): a
-/// computer (awake on its owner's budget while a page is open) or its
-/// owner's fragments (`fragments`, the desktop) make it its owner's alone;
-/// anything else, whoever holds its link.
+/// computer (awake on its owner's budget while a page is open) or any
+/// capability (its owner's powers: `fragments`, `frame`; the desktop) make
+/// it its owner's alone; anything else, whoever holds its link.
 pub(crate) fn first_visibility(name: Option<&str>) -> Visibility {
     let m = name.and_then(template).map(manifest).unwrap_or_default();
-    if m["computer"].is_object() || m["capabilities"].as_array().is_some_and(|c| c.iter().any(|c| c == "fragments")) {
+    if m["computer"].is_object() || m["capabilities"].as_array().is_some_and(|c| !c.is_empty()) {
         Visibility::Members
     } else {
         Visibility::Link

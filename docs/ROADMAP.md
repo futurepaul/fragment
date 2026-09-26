@@ -524,8 +524,8 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   names) and the desktop's framing (one consent, the new-fragment form's).
   The new desktop's visibility stayed (`publish.rs`, `first_visibility`):
   fragment.json holds no access. *Since `pet-followups`:* it reads what
-  the template declares (a computer, or its owner's `fragments`), naming
-  no template. The chat's three wait for D.
+  the template declares (a computer, or any capability), naming no
+  template; platform.md's row for it is gone. The chat's three wait for D.
 
 ### D. The agent add-on
 - *Built 2026-09-26 (#47, #48; decision 20 says what):* the `agent`
