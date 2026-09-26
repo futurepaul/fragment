@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use fragment_core::npub;
 use fragment_fakes::openrouter::Reply as Say;
 use fragment_nip98::Keys;
@@ -128,7 +128,7 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
 
     let none = s.name("tnone");
     let r = api.create_with(&owner, json!({ "name": none, "template": "nope" }))?;
-    s.ok("an unknown template is refused, naming the templates", r.status == 400 && r.message().contains("blank, todo, inbox, calories, chat, desktop"), &r);
+    s.ok("an unknown template is refused, naming the templates", r.status == 400 && r.message().contains("blank, todo, inbox, calories, pet, chat, desktop"), &r);
     let r = api.status(&owner, &api.qualified(&owner, &none)?)?;
     s.ok("and nothing is made", r.status == 404, &r);
 
@@ -233,11 +233,11 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let theirs = with_session(api, "GET", "/", &editor_session)?;
     s.ok("and says which are shared with them, and as what", row(&theirs, &blank).contains("shared with you · editor"), &theirs);
-    let offered: Vec<usize> = ["blank", "todo", "inbox", "calories", "chat", "desktop"].iter().filter_map(|t| home.text.find(&format!("value=\"{t}\""))).collect();
+    let offered: Vec<usize> = ["blank", "todo", "inbox", "calories", "pet", "chat", "desktop"].iter().filter_map(|t| home.text.find(&format!("value=\"{t}\""))).collect();
     s.ok(
         "and offers the templates, the simplest first and the desktop last, as the demo it is, saying it will show their fragments inside it",
         home.text.contains("New fragment")
-            && offered.len() == 6
+            && offered.len() == 7
             && offered.is_sorted()
             && home.text.contains("A demo of what fragments can do")
             && home.text.contains("It will show your fragments inside it, signed in as you"),
@@ -263,6 +263,85 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
         "a desktop made there is its owner's alone (members only), and may frame their fragments: the form's submit is their grant",
         r.status == 302 && st.body["visibility"] == "members" && st.body["frame"] == json!(true),
         format!("{r} / {st}"),
+    );
+    pet(s, api, &owner)
+}
+
+/// An 8×5 JPEG, as the pet's computer sends its screen.
+const JPEG: &str = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAAFAAgDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFAEBAAAAAAAAAAAAAAAAAAAABf/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AIcA2Kf/2Q==";
+
+/// The pet (templates/pet): a computer, a `control` channel people drive it
+/// through, and its screen, one row its computer stores through `frame` and
+/// `screen` answers. Its display loop needs a real Sprite (docs/computers.md).
+fn pet(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let viewer = api.person()?;
+    let viewer_id = api.identity(&viewer)?;
+    let name = s.named(api, owner, "tpet")?;
+    let made = api.create_with(owner, json!({ "name": name, "template": "pet" }))?;
+    s.hook(api, &made.body);
+    let st = api.status(owner, &name)?;
+    let m = api.signed(owner, "GET", &format!("/api/f/{name}/manifest"), None)?;
+    let ops = &st.body["code"]["operations"];
+    s.ok(
+        "a pet from its template declares its computer, and its code installs: frame for editors, screen for viewers",
+        made.status == 200
+            && m.body["computer"]["start"] == "node computer/pet.mjs"
+            && st.body["code"]["error"].is_null()
+            && ops["frame"]["role"] == "editor"
+            && ops["screen"]["kind"] == "query",
+        format!("{made} / {st}"),
+    );
+    let channels = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None)?;
+    let control = channels.body["channels"].as_array().into_iter().flatten().find(|c| c["name"] == "control").cloned().unwrap_or_default();
+    s.ok("and a control channel viewers post to", control["read"] == "viewer" && control["post"] == "viewer", &channels);
+    let link = format!("fragview={}", made.body["viewToken"].as_str().unwrap_or(""));
+    let page = api.page(&name, "", Some(&link))?;
+    s.ok("its page is the template's", page.status == 200 && page.text.contains("<title>Pet"), &page);
+
+    // driving: someone signed in posts; someone who is not, does not
+    let r = api.signed(owner, "PUT", &format!("/api/f/{name}/members/{}", npub::encode(viewer.pubkey_hex())), Some(&json!({ "role": "viewer" })))?;
+    anyhow::ensure!(r.status == 200, "adding a viewer: {r}");
+    let click = json!({ "kind": "click", "x": 100, "y": 60 });
+    let r = api.signed(&viewer, "POST", &format!("/api/f/{name}/channels/control"), Some(&json!({ "id": "p1", "body": click })))?;
+    s.ok("a signed-in viewer posts a control record", r.status == 200 && r.body["record"]["principal"] == viewer_id.as_str(), &r);
+    let anonymous = |cookie: Option<&str>| {
+        let body = json!({ "id": "p2", "input": click }).to_string().into_bytes();
+        let url = api.site_url(&name, "__op/channels/control");
+        api.call(Call { method: "POST", url, body: Some(body), content_type: Some("application/json"), cookie: cookie.map(str::to_string), ..Call::default() })
+    };
+    let r = anonymous(None)?;
+    s.ok("an anonymous visitor cannot", r.status == 401 || r.status == 403, &r);
+    let r = anonymous(Some(&link))?;
+    s.ok(
+        "(one holding the link posts as its viewer, anonymously: the pet's computer skips records not from an identity)",
+        r.status == 200 && r.body["result"]["principal"].as_str().is_some_and(|p| p.starts_with("anon:")),
+        &r,
+    );
+
+    // frames: its computer's (an editor here), one row that screen answers
+    let mut sprite = String::new();
+    s.eventually(Duration::from_secs(30), || {
+        let events = api.signed(owner, "GET", &format!("/api/f/{name}/events?tail=50"), None).map(|r| r.body).unwrap_or_default();
+        let ready = events["events"].as_array().into_iter().flatten().find(|e| e["kind"] == "computer.ready");
+        sprite = ready.and_then(|e| e["data"]["sprite"].as_str()).unwrap_or_default().to_string();
+        !sprite.is_empty()
+    });
+    let computer = s.cli_keys(&s.scratch.join("sprites/sprites").join(&sprite)).context("the pet's computer, paired on its Sprite")?;
+    let frame = |keys: &Keys, id: &str, jpeg: &str, title: &str| {
+        let input = json!({ "jpeg": jpeg, "width": 8, "height": 5, "title": title, "driver": viewer_id });
+        api.signed(keys, "POST", &format!("/api/f/{name}/ops/frame"), Some(&json!({ "id": id, "input": input })))
+    };
+    let r = frame(&viewer, "f1", JPEG, "a viewer's")?;
+    s.ok("a viewer cannot store a frame", r.status == 403, &r);
+    let r = frame(&computer, "f2", "iVBORw0KGgo", "a PNG")?;
+    s.ok("nor can anyone store what is not a JPEG", r.status == 422, &r);
+    let stored = [frame(&computer, "f3", JPEG, "first")?, frame(&computer, "f4", JPEG, "Hello from your pet")?];
+    let screen = api.signed(&viewer, "POST", &format!("/api/f/{name}/ops/screen"), Some(&json!({ "id": "s1", "input": {} })))?;
+    let got = &screen.body["result"];
+    s.ok(
+        "its computer stores frames, and the live query answers the latest: the JPEG, what is on screen, who drove it",
+        stored.iter().all(|r| r.status == 200) && got["jpeg"] == JPEG && got["title"] == "Hello from your pet" && got["driver"] == viewer_id.as_str() && got["width"] == 8,
+        format!("{} / {screen}", stored[1]),
     );
     Ok(())
 }
