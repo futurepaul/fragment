@@ -249,6 +249,46 @@ export class App extends DurableObject {
   video are written to `path` on `main`. A reasoning model can spend a
   small `max_tokens` thinking: pass `reasoning: {effort: "low"}`.
 
+## An agent in your fragment
+
+A fragment can bring its own agent: signed-in people talk to it through
+a channel, and it calls your operations for them. Declare it, with its
+instructions in a file of the fragment (`fragment new --template
+calories` is a working example):
+
+```json
+{
+  "operations": { "log_food": { "kind": "mutation", "role": "viewer", "input": { … } },
+                  "today":    { "kind": "query",    "role": "viewer" } },
+  "channels":   { "ask":  { "read": "viewer", "post": "viewer" },
+                  "work": { "read": "viewer", "post": "editor" } },
+  "agent": { "instructions": "agent.md", "tools": ["log_food", "today"], "channel": "ask",
+             "model": "z-ai/glm-5.3-flash" }
+}
+```
+
+- Deploying makes it: an agent named as the fragment is, yours, an
+  editor of this fragment and of nothing else, listening to `channel`
+  (declared, with a `post` role). Redeploying updates it; a deploy
+  without the block removes it. A fragment with no block carries nothing
+  of one.
+- `tools` are operations of this fragment (never an owner-only one): the
+  model is offered those, as the person asking may call them, and no
+  other fragment's, no files, no deploy. `model` is optional.
+- A signed-in person's post to the channel (`fragment.post("ask",
+  {text})`) starts a turn; an anonymous one starts nothing. Someone
+  signed in who holds the link counts as a viewer for it, as they do on
+  the page. Each person has a conversation of their own with it, and each call acts for them,
+  with the lower of their role and the agent's: `call.principal` is the
+  person (`call.agent` the agent), so what it logs is theirs.
+- Its answer lands on the channel as `{text, turn}`, and its steps on
+  `work` (a start naming who asked, each tool call, an end), the chat
+  template's records: render them as you like.
+- You pay for its model calls, from your budget.
+
+`"agent": {"personal": true, "channel": "chat"}` (the chat template's)
+has your own agent answer there instead, with its own tools.
+
 ## Pages
 
 A page imports the browser library from its own fragment:
@@ -331,7 +371,7 @@ Only the owner manages members, invites, visibility, and tokens.
 
 The fragments you own pay for their AI (`job.ai`) from your monthly
 budget, whoever started the run, unless a fragment sets its own
-`OPENROUTER_API_KEY`. A step reserves its worst case first; one the month
+`OPENROUTER_API_KEY`; so do your agents' model calls, whoever asked them. A step reserves its worst case first; one the month
 cannot cover is held ("budget used up"): replay it after a top-up or next
 month.
 

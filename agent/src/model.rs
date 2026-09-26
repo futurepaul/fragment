@@ -22,6 +22,10 @@
 //!   the text written so far, marked `cut_off`, and its answer says where
 //!   the file stops (tools.rs), so a long file lands in pieces. Any other cut
 //!   call is refused, saying why.
+//!
+//! Every call is paid on its owner's month (ROADMAP decision 14), as a
+//! job's `ai.text` step is (`Spend`): it reserves its worst case first,
+//! with the key that answers, and settles to the cost its answer reports.
 
 use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
@@ -41,7 +45,9 @@ use goose_provider_types::model::ModelConfig;
 use rmcp::model::{CallToolRequestParams, ErrorData, Tool};
 use serde_json::{json, Map, Value};
 use worker::send::SendFuture;
-use worker::{AbortController, AbortSignal, Delay, Fetch, Headers, Method, Request, RequestInit};
+use worker::{AbortController, AbortSignal, Delay, Fetch, Headers, Method, Request, RequestInit, SqlStorage};
+
+use crate::fleet::{self, Fleet};
 
 /// The most one completion writes (reasoning included): at the rates the
 /// platform's models write, it ends well inside `DEADLINE_MS`. A file of
@@ -102,9 +108,75 @@ impl Drop for Abort {
 pub struct OpenRouter {
     /// The OpenRouter base (`OPENROUTER_API_URL`).
     pub base: String,
-    pub key: String,
     /// One call's deadline (`DEADLINE_MS`, or a test control's).
     pub deadline_ms: u64,
+    pub spend: Spend,
+}
+
+/// Where a turn's model calls are paid: its owner's month, through the
+/// platform's ledger (`POST /api/budget/reserve` and `/settle`, signed by
+/// the agent). Each call reserves before it runs, which answers the
+/// owner's key (whose limit is the month's allowance, OpenRouter's own
+/// stop), and settles after: to the cost its answer reports, to its
+/// reservation when it reports none, or back when nothing was billed.
+#[derive(Clone)]
+pub struct Spend {
+    /// The agent's own: the ledger is its owner's, whoever asked.
+    pub fleet: Fleet,
+    pub sql: SqlStorage,
+    /// The turn's id, and for its usage rows where it was asked (its
+    /// fragment, or the agent's own name for its owner's conversation) and
+    /// by whom.
+    pub turn: String,
+    pub fragment: String,
+    pub asker: String,
+}
+
+/// A call's reservation: the key it runs with, and its reference (the
+/// turn, and the messages stored in it so far: a call made again after a
+/// crash is the same call, and holds the same reservation).
+struct Held {
+    key: String,
+    reference: String,
+    /// It settled before (a crash after the settle, before the answer was
+    /// stored): run again, it is not charged again.
+    settled: bool,
+}
+
+impl Spend {
+    async fn reserve(&self, model: &str) -> Result<Held, ProviderError> {
+        let n = crate::store::turn_length(&self.sql).map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+        let reference = format!("{}/{n}", self.turn);
+        let body = json!({ "ref": reference, "model": model, "fragment": self.fragment, "asker": self.asker });
+        let (status, answer) = self.fleet.call(Method::Post, "/api/budget/reserve", Some(&body)).await.map_err(|e| ProviderError::NetworkError(format!("the owner's budget: {e}")))?;
+        match (status, answer["key"].as_str()) {
+            (200, Some(key)) => Ok(Held { key: key.to_string(), reference, settled: answer["settled"] == true }),
+            (402, _) => Err(ProviderError::CreditsExhausted { details: fleet::message(&answer), top_up_url: None }),
+            _ => Err(ProviderError::RequestFailed(format!("no model key from the owner's budget ({status}): {}", fleet::message(&answer)))),
+        }
+    }
+
+    /// Settles a call to what it cost (`spent`), or gives its reservation
+    /// back when nothing was billed. A settle that fails is tried again
+    /// once, then logged: the reservation stays held against the month.
+    async fn settle(&self, held: &Held, spent: Option<&ProviderUsage>) {
+        if held.settled {
+            return;
+        }
+        let body = match spent {
+            Some(usage) => json!({ "ref": held.reference, "cost": usage.cost }),
+            None => json!({ "ref": held.reference, "release": true }),
+        };
+        let mut last = String::new();
+        for _ in 0..2 {
+            match self.fleet.call(Method::Post, "/api/budget/settle", Some(&body)).await {
+                Ok((200, _)) => return,
+                Ok((status, answer)) => last = format!("{status}: {}", fleet::message(&answer)),
+                Err(e) => last = e.to_string(),
+            }
+        }
+        worker::console_error!("settling model call {}: {last}", held.reference);
+    }
 }
 
 /// The model config a turn uses: goose's, with the output bound.
@@ -119,18 +191,30 @@ impl Provider for OpenRouter {
     }
 
     async fn stream(&self, model_config: &ModelConfig, system: &str, messages: &[Message], tools: &[Tool]) -> Result<MessageStream, ProviderError> {
-        let call = Call {
+        let mut call = Call {
             url: format!("{}/api/v1/chat/completions", self.base),
-            key: self.key.clone(),
+            key: String::new(),
             deadline_ms: self.deadline_ms,
             config: model_config.clone(),
             system: system.to_string(),
             messages: messages.to_vec(),
             tools: tools.to_vec(),
         };
+        let (spend, model) = (self.spend.clone(), model_config.model_name.clone());
+        let paid = async move {
+            let held = spend.reserve(&model).await.map_err(|error| Box::new(Failure { spent: None, error }))?;
+            call.key = held.key.clone();
+            let done = call.complete().await;
+            let spent = match &done {
+                Ok(items) => items.iter().fold(None, |sum, (_, usage)| add(sum, usage.clone())),
+                Err(failure) => failure.spent.clone(),
+            };
+            spend.settle(&held, spent.as_ref()).await;
+            done
+        };
         // the whole answer is read in the stream's first poll, so a stop
         // (goose selects on it against this stream) still cuts it short
-        let items = futures::stream::once(SendFuture::new(call.complete())).flat_map(|done| {
+        let items = futures::stream::once(SendFuture::new(paid)).flat_map(|done| {
             let items: Vec<Result<Item, ProviderError>> = match done {
                 Ok(items) => items.into_iter().map(Ok).collect(),
                 Err(failed) => failed.spent.map(|u| Ok((None, Some(u)))).into_iter().chain([Err(failed.error)]).collect(),

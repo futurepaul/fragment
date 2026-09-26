@@ -1,5 +1,6 @@
 //! The sections, in the order they run.
 
+mod addon;
 mod agents;
 mod app;
 mod appfiles;
@@ -92,6 +93,7 @@ const LANES: &[Lane] = &[
     deliver::ai,
     budget::budget,
     agents::agents,
+    addon::addon,
     agents::chat,
     computer::computer,
     computer::screenshots,

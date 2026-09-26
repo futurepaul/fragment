@@ -64,6 +64,10 @@ fn platform() -> &'static Platform {
 pub(crate) struct Invocation<'a> {
     /// Who the ledger records: an identity, an anonymous visitor, or the fragment itself (its key).
     pub principal: &'a str,
+    /// Whom an agent calls for (`for`, ROADMAP decision 17): the app's
+    /// `call.principal`, so what it does for someone is theirs, while the
+    /// ledger and the records name the agent (`call.agent`).
+    pub asker: Option<&'a str>,
     pub role: Role,
     pub op: &'a str,
     pub decl: OpDecl,
@@ -228,7 +232,8 @@ impl FragmentCell {
         if !valid_op_id(&body.id) || body.id.starts_with(JOB_ID_PREFIX) {
             return Err(CellError::invalid("operation id must match ^[A-Za-z0-9._:-]{1,128}$ and not start with job:"));
         }
-        let inv = Invocation { principal, role, op, decl, id: body.id, input: body.input, depth: 0, via: Via::Call, trigger: None };
+        let asker = caller.signed.as_ref().and_then(|s| s.acting_for.as_deref());
+        let inv = Invocation { principal, asker, role, op, decl, id: body.id, input: body.input, depth: 0, via: Via::Call, trigger: None };
         let result = self.invoke(inv).await?;
         self.launch_queued().await;
         Ok(result)
@@ -263,10 +268,11 @@ impl FragmentCell {
         }
         let facet = self.facet()?;
         self.sweep(&facet).await?;
+        let agent = inv.asker.map(|_| npub::display(inv.principal));
         match inv.decl.kind {
             OpKind::Query => {
                 // a query publishes nothing, so it is told no channels
-                let meta = json!({ "principal": npub::display(inv.principal), "role": inv.role });
+                let meta = json!({ "principal": npub::display(inv.asker.unwrap_or(inv.principal)), "agent": agent, "role": inv.role });
                 match facet.query(inv.op, &input_text, &meta).await? {
                     Answer::Ran(q) => bounded(Answered { result: q.result, replayed: false }),
                     Answer::Refused(why) => Err(refused(why, inv.op)),
@@ -274,7 +280,8 @@ impl FragmentCell {
             }
             OpKind::Mutation => {
                 let meta = json!({
-                    "principal": npub::display(inv.principal),
+                    "principal": npub::display(inv.asker.unwrap_or(inv.principal)),
+                    "agent": agent,
                     "role": inv.role,
                     "channels": self.declared_channels()?.keys().collect::<Vec<_>>(),
                 });

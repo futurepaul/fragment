@@ -1,0 +1,34 @@
+{
+  "name": "calories",
+  "operations": {
+    "log_food": {
+      "kind": "mutation",
+      "role": "viewer",
+      "input": {
+        "type": "object",
+        "required": ["food", "calories"],
+        "additionalProperties": false,
+        "properties": {
+          "food": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "calories": { "type": "integer", "minimum": 0, "maximum": 10000 }
+        }
+      }
+    },
+    "today": {
+      "kind": "query",
+      "role": "viewer",
+      "input": { "type": "object", "additionalProperties": false, "properties": { "since": { "type": "integer", "minimum": 0 } } }
+    },
+    "forget": {
+      "kind": "mutation",
+      "role": "viewer",
+      "input": { "type": "object", "required": ["id"], "additionalProperties": false, "properties": { "id": { "type": "integer", "minimum": 1 } } }
+    }
+  },
+  "channels": {
+    "ask": { "read": "viewer", "post": "viewer" },
+    "work": { "read": "viewer", "post": "editor" }
+  },
+  "agent": { "instructions": "agent.md", "tools": ["log_food", "today"], "channel": "ask" },
+  "meta": { "title": "Calories", "description": "Say what you ate in plain words: an agent logs it, and your day adds up live." }
+}

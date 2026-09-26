@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Calories</title>
+  <style>
+    :root { --bg: #f7f5f0; --fg: #1d1b16; --muted: #857f72; --line: #e2ddd2; --accent: #8a4b2a; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #16150f; --fg: #eeeae0; --muted: #9a9384; --line: #2d2b24; --accent: #e0a37c; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 ui-sans-serif, system-ui, sans-serif; }
+    main { max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }
+    h1 { font: 600 1.6rem/1.2 Georgia, serif; margin: 0 0 .25rem; }
+    #note { color: var(--muted); font-size: .85rem; margin-bottom: 1.5rem; }
+    form { display: flex; gap: .5rem; }
+    input { flex: 1; padding: .6rem .75rem; border: 1px solid var(--line); border-radius: .5rem; background: transparent; color: inherit; font: inherit; }
+    button { padding: .6rem 1rem; border: 0; border-radius: .5rem; background: var(--accent); color: var(--bg); font: inherit; cursor: pointer; }
+    #answer { min-height: 1.5rem; margin: .75rem 0 1.25rem; color: var(--muted); }
+    ul { list-style: none; padding: 0; margin: 0; }
+    li { display: flex; gap: .6rem; padding: .5rem 0; border-bottom: 1px solid var(--line); }
+    li span:first-child { flex: 1; }
+    li button { background: none; color: var(--muted); padding: 0 .3rem; }
+    #total { margin-top: 1rem; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Calories</h1>
+    <div id="note">connecting…</div>
+    <form id="ask"><input id="text" placeholder="What did you eat? (2 eggs and toast)" maxlength="500" autocomplete="off" disabled><button>Log</button></form>
+    <div id="answer"></div>
+    <ul id="entries"></ul>
+    <div id="total"></div>
+  </main>
+  <script type="module">
+    import * as fragment from "./__fragment.js";
+
+    const $ = (id) => document.getElementById(id);
+    const el = (tag, text) => Object.assign(document.createElement(tag), { textContent: text });
+    const midnight = new Date().setHours(0, 0, 0, 0);
+    let me = null;
+    // the agent's turns this person started (`work`'s turn.start), and its answers (`ask`)
+    const mine = new Set();
+    const answers = new Map();
+
+    fragment.live("today", { since: midnight }, ({ entries, total }) => {
+      $("entries").replaceChildren(...entries.map((e) => {
+        const li = document.createElement("li");
+        const x = Object.assign(el("button", "×"), { title: "Forget it" });
+        x.onclick = () => fragment.call("forget", { id: e.id }).catch((err) => ($("answer").textContent = err.message));
+        li.append(el("span", e.food), el("span", `${e.calories} kcal`), x);
+        return li;
+      }));
+      $("total").textContent = `${total} kcal today`;
+    }, (err) => ($("answer").textContent = err.message));
+
+    const shown = () => {
+      const turn = [...answers.keys()].filter((t) => mine.has(t)).pop();
+      if (turn) $("answer").textContent = answers.get(turn);
+    };
+    fragment.subscribe("work", (r) => {
+      if (r.body.kind === "turn.start" && r.body.asker === me?.principal) mine.add(r.body.turn);
+      if (r.body.kind === "turn.end" && mine.has(r.body.turn) && r.body.error) $("answer").textContent = r.body.error;
+      shown();
+    }, { last: 200 });
+    fragment.subscribe("ask", (r) => {
+      if (r.body.turn && typeof r.body.text === "string") answers.set(r.body.turn, r.body.text);
+      shown();
+    }, { last: 200 });
+
+    fragment.me().then((hello) => {
+      me = hello;
+      if (hello.principal.startsWith("anon:")) {
+        const a = Object.assign(el("a", "Sign in"), { href: "./__signin?return=/" });
+        $("note").replaceChildren(a, " to log what you eat.");
+        return;
+      }
+      $("note").textContent = "Say what you ate; the agent logs it for you.";
+      $("text").disabled = false;
+      shown();
+    });
+
+    $("ask").onsubmit = async (e) => {
+      e.preventDefault();
+      const text = $("text").value.trim();
+      if (!text) return;
+      try {
+        await fragment.post("ask", { text });
+        $("text").value = "";
+        $("answer").textContent = "Logging…";
+      } catch (err) {
+        $("answer").textContent = err.message;
+      }
+    };
+  </script>
+</body>
+</html>

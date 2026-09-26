@@ -15,6 +15,23 @@ pub const WINDOW_MESSAGES_MAX: usize = 256;
 /// only while they fit.
 pub const WINDOW_EARLIER_BYTES_MAX: usize = 256 * 1024;
 
+/// The characters of an earlier turn's tool result the model reads again.
+/// A result matters to the turn that called for it, whose answer says what
+/// came of it: one chat carried a failed turn's 22k tokens of tool output,
+/// and every later model call there outlasted its deadline (2026-09-26).
+pub const EARLIER_RESULT_KEEP_CHARS: usize = 400;
+
+/// An earlier turn's tool result as a model request carries it: its first
+/// `EARLIER_RESULT_KEEP_CHARS` characters and a note of how many more were
+/// cut. `None` when it is that short already. The stored conversation keeps
+/// the whole result; only what is sent is cut.
+pub fn cut_earlier_result(text: &str) -> Option<String> {
+    let (at, _) = text.char_indices().nth(EARLIER_RESULT_KEEP_CHARS)?;
+    let cut = text[at..].chars().count();
+    assert!(cut > 0, "a cut drops something");
+    Some(format!("{}… [{cut} more characters of this earlier tool result were cut]", &text[..at]))
+}
+
 /// One loaded message, as the window sees it.
 #[derive(Clone, Copy, Debug)]
 pub struct Row {
@@ -63,6 +80,21 @@ mod tests {
     }
     fn m(bytes: usize) -> Row {
         Row { kickoff: false, bytes }
+    }
+
+    #[test]
+    fn earlier_results_are_cut_to_a_prefix_and_a_note() {
+        let keep = EARLIER_RESULT_KEEP_CHARS;
+        assert_eq!(cut_earlier_result(""), None);
+        assert_eq!(cut_earlier_result(&"a".repeat(keep)), None, "a result as long as what is kept stays whole");
+        let cut = cut_earlier_result(&"a".repeat(keep + 1)).unwrap();
+        assert_eq!(cut, format!("{}… [1 more characters of this earlier tool result were cut]", "a".repeat(keep)));
+        // 22k tokens of output become a line: the prefix, then how much went
+        let long = format!("{}{}", "é".repeat(keep), "x".repeat(88_000));
+        let cut = cut_earlier_result(&long).unwrap();
+        assert!(cut.starts_with(&"é".repeat(keep)), "cut on a character, never inside one");
+        assert!(cut.ends_with("[88000 more characters of this earlier tool result were cut]"), "{cut}");
+        assert!(cut.len() < 2 * keep + 100);
     }
 
     #[test]

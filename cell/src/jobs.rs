@@ -788,6 +788,7 @@ impl FragmentCell {
         let child = decl.kind == OpKind::Job;
         let inv = Invocation {
             principal: &run.principal,
+            asker: None,
             role: run.role,
             op,
             decl,

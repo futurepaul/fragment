@@ -33,10 +33,10 @@ use worker::{Delay, SqlStorage, Storage};
 use crate::computer::{self, Computer, ComputerTools};
 use crate::fleet::Fleet;
 use crate::js;
-use crate::model::{self, OpenRouter};
+use crate::model::{self, OpenRouter, Spend};
 use crate::progress::Progress;
 use crate::store::{self, kv_get, kv_set, kv_u64, Effect, Session, Store};
-use crate::tools::FragmentTools;
+use crate::tools::{FragmentTools, Scope};
 
 /// Every loop and input is bounded.
 pub const STEPS_PER_TURN_MAX: u32 = 64;
@@ -47,10 +47,11 @@ const EVENTS_BUFFER: usize = 1024;
 pub struct Model {
     /// The OpenRouter base (`OPENROUTER_API_URL`, default https://openrouter.ai).
     pub base: String,
-    pub key: String,
     pub name: String,
     /// One model call's deadline (model.rs `DEADLINE_MS`, or a test control's).
     pub deadline_ms: u64,
+    /// Where its calls are paid (the owner's month).
+    pub spend: Spend,
 }
 
 /// A computer attached to the agent, and the project directory its tools work in.
@@ -78,6 +79,8 @@ pub struct Driver {
     pub owner_turn: bool,
     /// A chat turn's progress records (progress.rs), when its chat takes them.
     pub progress: Option<Rc<Progress>>,
+    /// A fragment's own agent's: its tools are that fragment's (tools.rs).
+    pub scope: Option<Scope>,
 }
 
 // ---------------------------------------------------------------- operations
@@ -249,9 +252,9 @@ pub async fn drive(driver: Driver) -> anyhow::Result<TurnOutcome> {
     arm_watchdog(&driver.storage, &sql).await?;
     let store = Store { sql: driver.storage.sql() };
     let provider: Arc<dyn Provider> =
-        Arc::new(OpenRouter { base: driver.model.base.clone(), key: driver.model.key.clone(), deadline_ms: driver.model.deadline_ms });
+        Arc::new(OpenRouter { base: driver.model.base.clone(), deadline_ms: driver.model.deadline_ms, spend: driver.model.spend.clone() });
     let fleet = driver.fleet.acting_for(&driver.asker);
-    let tools = FragmentTools::new(fleet, driver.storage.sql(), driver.id.clone(), driver.conv.clone(), driver.owner_turn);
+    let tools = FragmentTools::new(fleet, driver.storage.sql(), driver.id.clone(), driver.conv.clone(), driver.owner_turn, driver.scope.clone());
     let mut operation = ToolOperation::new().with_provider(Arc::new(tools));
     let mut instructions = driver.instructions.clone();
     let in_flight = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));

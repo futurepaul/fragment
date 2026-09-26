@@ -21,7 +21,8 @@
 //! fragments the asker reaches, read one's operations, call one, list,
 //! read, and write its files, and deploy it, each the signed API the CLI
 //! uses; and, in its owner's turns only, make a fragment for the owner (an
-//! app). A file write's key comes from the tool-call id, so a replayed step
+//! app). A fragment's own agent (`Scope`) has neither kind but one: the
+//! operations of its fragment that its block names. A file write's key comes from the tool-call id, so a replayed step
 //! commits nothing twice.
 
 use std::collections::{HashMap, HashSet};
@@ -251,6 +252,23 @@ struct Catalog {
     routes: HashMap<String, Route>,
 }
 
+/// A fragment's own agent (its `agent` block): the fragment it answers in,
+/// and the operations of it the block names. Its catalog is those alone,
+/// as its asker may call them: no other fragment, and no platform verb.
+#[derive(Clone)]
+pub struct Scope {
+    pub fragment: String,
+    pub tools: Vec<String>,
+}
+
+/// The fragment agent's scope (set by the fragment's deploy: lib.rs
+/// `scope`); `None` for a person's agent.
+pub fn scope_of(sql: &SqlStorage) -> anyhow::Result<Option<Scope>> {
+    let Some(fragment) = crate::store::kv_get(sql, "scope")?.filter(|f| !f.is_empty()) else { return Ok(None) };
+    let tools = serde_json::from_str(&crate::store::kv_get(sql, "tools")?.unwrap_or_else(|| "[]".into()))?;
+    Ok(Some(Scope { fragment, tools }))
+}
+
 /// One turn's tools: its calls act for its asker.
 pub struct FragmentTools {
     /// Acting for the turn's asker.
@@ -261,6 +279,7 @@ pub struct FragmentTools {
     pub conv: String,
     /// Whether its owner started the turn.
     pub owner_turn: bool,
+    pub scope: Option<Scope>,
     catalog: Mutex<Option<Arc<Catalog>>>,
 }
 
@@ -275,15 +294,41 @@ struct Reading {
     listens: Vec<(String, String)>,
     chat: Option<String>,
     owner_turn: bool,
+    scope: Option<Scope>,
 }
 
 impl FragmentTools {
-    pub fn new(fleet: Fleet, sql: SqlStorage, driver: String, conv: String, owner_turn: bool) -> FragmentTools {
+    pub fn new(fleet: Fleet, sql: SqlStorage, driver: String, conv: String, owner_turn: bool, scope: Option<Scope>) -> FragmentTools {
         assert!(fleet.acting_for.is_some(), "a turn's tools act for its asker");
-        FragmentTools { fleet, sql, driver, conv, owner_turn, catalog: Mutex::new(None) }
+        FragmentTools { fleet, sql, driver, conv, owner_turn, scope, catalog: Mutex::new(None) }
+    }
+
+    /// A fragment agent's catalog: the operations its block names, those
+    /// its asker's role there may call (read `for` them).
+    async fn scoped_catalog(fleet: Fleet, scope: Scope) -> anyhow::Result<Catalog> {
+        let (mut tools, mut routes) = (Vec::new(), HashMap::new());
+        let status = match fleet.get_as::<FragmentStatus>(&format!("/api/f/{}/status", scope.fragment)).await {
+            Ok(status) => status,
+            // an asker with no role there gets no tools, and an answer still
+            Err(e) => {
+                worker::console_warn!("the agent's tools leave out {}: {e:#}", scope.fragment);
+                return Ok(Catalog { tools, routes });
+            }
+        };
+        for (op, decl) in status.code.operations.into_iter().filter(|(op, _)| scope.tools.contains(op)) {
+            let Some(tool) = tool_name(&scope.fragment, &op).filter(|_| decl.role <= status.role) else { continue };
+            let schema = decl.input.clone().filter(Value::is_object).unwrap_or_else(|| json!({ "type": "object" }));
+            tools.push(Tool::new(tool.clone(), describe(&scope.fragment, &op, &decl), Arc::new(serde_json::from_value(schema)?)));
+            routes.insert(tool, Route::Op { fragment: scope.fragment.clone(), op });
+        }
+        assert!(tools.len() <= scope.tools.len(), "a fragment agent is offered only the operations its block names");
+        Ok(Catalog { tools, routes })
     }
 
     async fn read_catalog(r: Reading) -> anyhow::Result<Catalog> {
+        if let Some(scope) = r.scope {
+            return FragmentTools::scoped_catalog(r.fleet, scope).await;
+        }
         // the agent's own memberships: what it is in, whoever asks
         let listed: FragmentList = Fleet { acting_for: None, ..r.fleet.clone() }.get_as("/api/fragments").await?;
         let mut tools = Vec::new();
@@ -369,6 +414,7 @@ impl FragmentTools {
             listens: listens(&self.sql)?,
             chat: chat_of(&self.conv).map(|(fragment, _)| fragment.to_string()),
             owner_turn: self.owner_turn,
+            scope: self.scope.clone(),
         };
         let catalog = Arc::new(SendFuture::new(async move { FragmentTools::read_catalog(reading).await }).await?);
         *self.catalog.lock().expect("catalog lock") = Some(catalog.clone());
@@ -393,7 +439,7 @@ fn listens(sql: &SqlStorage) -> anyhow::Result<Vec<(String, String)>> {
 /// The tools an agent's owner's turn has now (for the owner's view):
 /// `fleet` acts for the owner.
 pub async fn list(fleet: Fleet, sql: &SqlStorage) -> anyhow::Result<Vec<String>> {
-    let reading = Reading { fleet, listens: listens(sql)?, chat: None, owner_turn: true };
+    let reading = Reading { fleet, listens: listens(sql)?, chat: None, owner_turn: true, scope: scope_of(sql)? };
     let catalog = FragmentTools::read_catalog(reading).await?;
     Ok(catalog.tools.iter().map(|t| t.name.to_string()).collect())
 }

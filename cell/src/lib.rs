@@ -515,6 +515,49 @@ fn billing_org(who: &Signed) -> CellResult<String> {
     ledger::org_of(person).ok_or_else(|| CellError::host("no billing org"))
 }
 
+/// An agent's model call, paid on its owner's month as a job's `ai.text`
+/// step is (agent/src/model.rs `Spend`): `reserve {ref, model, fragment,
+/// asker}` holds its worst case and answers the org's key, whose limit is
+/// the allowance (`settled` too when the call settled before: made again,
+/// it is not charged again); `settle {ref, cost}` charges the reported cost
+/// (none: its reservation), and `{ref, release: true}` gives it back when
+/// nothing was billed.
+async fn agent_spend(env: &Env, who: &Signed, step: &str, body: &[u8]) -> CellResult<Value> {
+    if who.kind != IdentityKind::Agent {
+        return Err(CellError::new(ErrorCode::Forbidden, "only an agent pays for its model calls here"));
+    }
+    let org = billing_org(who)?;
+    let v: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+    let local = v["ref"].as_str().filter(|r| (1..=128).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b)));
+    let local = local.ok_or_else(|| CellError::invalid("ref is 1-128 of [A-Za-z0-9/._-]"))?;
+    // namespaced by the agent: no agent's call is another's, nor a job's step
+    let reference = format!("agent:{}/{local}", who.id);
+    let text = |k: &str| v[k].as_str().map(str::to_string);
+    if step == "reserve" {
+        let reserve = ledger::Reserve {
+            reference,
+            kind: "agent.text".into(),
+            model: text("model"),
+            amount: fragment_core::budget::TEXT_RESERVE,
+            fragment: text("fragment").unwrap_or_default(),
+            run: 0,
+            principal: text("asker").filter(|a| npub::is_identity(a)).unwrap_or_else(|| who.id.clone()),
+            agent: Some(who.id.clone()),
+        };
+        return Ok(match ledger::ask(env, &org, &reserve).await? {
+            ledger::Reserved::Held { key } => json!({ "key": key }),
+            ledger::Reserved::Replay { .. } => json!({ "key": ledger::ask(env, &org, &ledger::Key {}).await?.key, "settled": true }),
+        });
+    }
+    if v["release"] == true {
+        ledger::ask(env, &org, &ledger::Release { reference }).await?;
+        return Ok(json!({ "released": true }));
+    }
+    let cost = fragment_core::budget::charge(v["cost"].as_f64(), None);
+    let settled = ledger::ask(env, &org, &ledger::Settle { reference, cost, result: Value::Null, video: None }).await?;
+    Ok(json!({ "cost": settled.charged() }))
+}
+
 /// `/api/budget…`: a billing org's month (ledger.rs).
 async fn budget_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest: &[&str]) -> CellResult<Response> {
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
@@ -530,14 +573,7 @@ async fn budget_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
             };
             json_answer(&ledger::ask(env, &billing_org(&who)?, &ledger::Usage { period }).await?)
         }
-        // an agent's turns spend its owner's month: their org's OpenRouter
-        // key, whose limit is the allowance (OpenRouter stops it there)
-        (Method::Post, ["key"]) => {
-            if who.kind != IdentityKind::Agent {
-                return Err(CellError::new(ErrorCode::Forbidden, "only an agent asks for its owner's model key"));
-            }
-            json_answer(&ledger::ask(env, &billing_org(&who)?, &ledger::Key {}).await?)
-        }
+        (Method::Post, [step @ ("reserve" | "settle")]) => json_answer(&agent_spend(env, &who, step, &body).await?),
         (Method::Post, [id, "top-up"]) => {
             if !cfg.is_operator(who.key.as_deref(), &who.id)? {
                 return Err(CellError::new(ErrorCode::Forbidden, "only the fleet's operators top up budgets"));

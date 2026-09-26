@@ -361,24 +361,23 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** the fork refuses Wasm from bytes with an error in a
   locked-down worker (or allows it deliberately), with a test.
 
-## An agent's turns have no usage rows
+## A deleted fragment leaves its agent registered
 
-- **Observed:** phase 6 step 4b. An agent's model calls spend its
-  owner's month on the owner's own OpenRouter key (the `Ledger` mints it,
-  its limit the allowance, so OpenRouter stops the owner there), fetched
-  per turn through `POST /api/budget/key`. But nothing reserves or
-  settles per step, so the month's view (`fragment budget`) does not show
-  what agents spent until OpenRouter refuses the key, and the key is in
-  the agent script's heap for the turn (as a `job.ai` step's is in the
-  cell's).
-- **Risk:** a person's budget looks unspent while their agent spends it;
-  their fragments' AI steps then fail at OpenRouter's limit with less
-  warning than the ledger gives.
-- **First proof:** a person whose agent works a lot.
-- **Delete when:** each turn step reserves and settles in the owner's
-  ledger as `job.ai` steps do (reserve the step's worst case, settle to
-  the stream's `usage.cost`, one usage row per step keyed by agent, turn,
-  and step).
+- **Observed:** the agent add-on (`fragment.json`'s `agent` block). A
+  fragment's own agent is an identity in the registry, owned by the
+  fragment's owner and named as the fragment. Deleting the fragment
+  wipes the fragment's cell and so the agent's membership and
+  subscription, but not the agent: its identity, key, and conversations
+  stay, and it counts toward its owner's agents
+  (`limits::AGENTS_PER_OWNER_MAX`).
+- **Risk:** an owner who makes and deletes many fragments with agents
+  runs into the agents limit; a fragment made again under the same name
+  gets the old agent back, with its conversations.
+- **First proof:** an owner whose agents count nears the limit, or a
+  re-made fragment whose agent recalls the old one's visitors.
+- **Delete when:** deleting a fragment retires its own agent (its
+  registry entry and key revoked, its cell wiped), with an e2e that
+  deletes a fragment with an agent and checks both.
 
 ## An agent forgets what falls out of its conversation window
 

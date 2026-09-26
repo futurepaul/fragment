@@ -9,7 +9,8 @@
 // spikes/apps/README.md.)
 //
 // Every method receives (input, call): `call.principal` and `call.role`
-// name the caller; in a mutation, `call.publish(channel, body, kind)`
+// name the caller (an agent acting for someone: them, the agent in
+// `call.agent`); in a mutation, `call.publish(channel, body, kind)`
 // appends a record to a channel declared in fragment.json once the
 // mutation commits, and `call.files.write(path, content)` /
 // `call.files.remove(path)` change files on `main` then (one commit).
@@ -191,6 +192,7 @@ class Call {
 
   constructor(meta, mutation) {
     this.principal = meta.principal;
+    this.agent = meta.agent ?? null;
     this.role = meta.role;
     this.#channels = new Set(meta.channels || []);
     this.#effects = mutation ? [] : null;
