@@ -212,6 +212,11 @@ together, built only from what any fragment may declare:
   blob a second for the week's grace. Not a channel: a channel is
   history, and a record is at most 64 KiB. A frame fits one argument of
   `fragment call --input`, which Linux caps at 128 KiB.
+- **Awake** is the platform's to decide; the pet holds nothing itself.
+  Its follower is a live socket, but a computer's socket is no page: its
+  opening and its close neither wake the computer nor hold it. If the
+  Tasks API hold turns out not to keep a Sprite from pausing, the pet's
+  service is where a holding connection would go (above).
 - **Its limit:** each frame is a mutation whose id the app's ledger keeps
   for a week, in the app's 16 MiB database: a pet driven nonstop fills it
   within a day, and `frame` then answers 507 until old ids expire.
