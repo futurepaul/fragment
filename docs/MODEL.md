@@ -32,8 +32,10 @@ mechanism names the celld primitive it uses; read with the celld docs
    (a page everyone who may see it gets alike asks nothing). Grants,
    invites, and revocations are transactional and take effect on the
    next request. Each fragment is its own browser origin.
-5. **Agents and computers are participants.** Agents are hosted members
-   with durable turns; fragments can own computers (Sprites).
+5. **Agents and computers are add-ons a fragment declares** (ROADMAP
+   decisions 19–21); a fragment that declares neither carries nothing of
+   them. Agents are hosted members with durable turns; a computer is an
+   identity owned by a person, which a fragment can declare (a Sprite).
 
 ## Anatomy of a fragment, in celld terms
 
@@ -170,8 +172,8 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
 
 ## Principals and membership
 
-- A principal is an identity: a person, an agent, or a fragment, with
-  one or more public keys in the registry (finite.computer's BANKS
+- A principal is an identity: a person, an agent, a computer, or a
+  fragment, with one or more public keys in the registry (finite.computer's BANKS
   model, ROADMAP decision 15). The CLI proves a key with NIP-98 and the
   registry names its identity; a browser has a platform session that
   maps to the person (phase 4 slice B); an agent signs with its cell's
@@ -211,6 +213,10 @@ replaces libfx in cells and fx over ACP on computers (Paul, 2026-09-23;
 the spike and its handoff are on branch `spike/goose-agent`,
 `spikes/goose-agent/HANDOFF.md`).
 
+- A fragment declares its agent in `fragment.json`: instructions, the
+  operations it may call, the postable channel it answers, and its model
+  (ROADMAP decision 20). A turn starts from a signed-in visitor's message
+  there or from a job step, `job.agent`.
 - An agent is a Durable Object with a key, memberships in fragments, and
   its conversation in SQL. It runs as its own celld project (`agent/`,
   a workers-rs Durable Object, ~6 MB of wasm), so fragment cells do not
@@ -233,8 +239,8 @@ the spike and its handoff are on branch `spike/goose-agent`,
   the operation id, so the operation ledger dedupes a replayed call.
 - People steer a running turn (a durable queue drained between steps) and
   stop it (11–15 ms in a cell).
-- A chat is a fragment with a `chat` channel. The agent member
-  subscribes; a member's message starts a turn; the messages people
+- A chat is a fragment whose agent answers its `chat` channel. A
+  member's message starts a turn; the messages people
   should see are the turn's effects appended to that channel, while the
   full working conversation (tool calls and results) stays in the agent's
   cell. The agent keeps one conversation per chat, and a turn answers in
@@ -245,20 +251,23 @@ the spike and its handoff are on branch `spike/goose-agent`,
 
 ## Computers
 
-- A computer is a Sprite with an owner principal (a person, an agent, or
-  a fragment). One `Computer` Durable Object per Sprite holds ownership,
-  lifecycle, and idle policy (an alarm), and speaks to the Sprites API
-  with the owner's Sprites org token: ours by default, the owner's own if
-  they bring a Sprites org. No computer holds that token.
+- A computer is an identity with its own key, owned by a person; it
+  works on whatever its owner delegated or authorized, including
+  fragments it publishes (ROADMAP decision 21). A fragment can declare
+  one, and the platform provisions a Sprite for it (later: the Sprites
+  token is Paul's call). One `Computer` Durable Object per Sprite holds
+  ownership, lifecycle, and idle policy (an alarm), and speaks to the
+  Sprites API with the owner's Sprites org token: ours by default, the
+  owner's own if they bring a Sprites org. No computer holds that token.
 - The computer runs one binary, `fragment computer serve` (the CLI):
   goose's loop and tools over HTTP with a journal keyed by tool-call id,
-  file sync through git, and nothing secret on disk. Credentials reach it
-  through Sprites connectors (`docs/secrets.md`).
-- A fragment that owns a computer calls it through a capability in its
-  app `env`; output streams into a channel (the Blender example).
-- Builder workspaces are computers owned by the fragment they build,
-  running the `fragment` CLI with an editor key delegated for that one
-  fragment.
+  file sync through git, and no credential on disk but its own revocable
+  key; others stay in Sprites connectors (`docs/secrets.md`).
+- A fragment that declares a computer calls it through a capability in
+  its app `env`; output streams into a channel (the Blender example).
+- A builder workspace is a computer its fragment declares, running the
+  `fragment` CLI as itself to talk back to that fragment and to build and
+  publish fancier ones.
 
 ## Limits (initial; each enforced and tested)
 

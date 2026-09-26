@@ -1,8 +1,17 @@
 # fragment-next
 
-A fragment is one small place on the web: a folder of files in git, an
-app of named operations over its own SQLite, channels that pages follow
-live, and members with roles. Fragments run on
+Fragment publishes stateful, multiplayer web apps from the CLI. Sign up
+(invite-only for now), pair the `fragment` CLI, and publish. fragment.club
+lists your fragments, and serves them until they move to fragment.boats.
+Hosting, permissions, sharing, crons, jobs, and channels are built in.
+
+A fragment is a folder of files in git, an app of named operations over
+its own SQLite, channels that pages follow live, and members with roles.
+Two add-ons are optional, and a fragment that declares neither carries
+nothing of them: an **agent** (goose, so a calorie tracker can take "2
+eggs and toast") and a **computer** (a Sprite that runs the `fragment`
+CLI and can build and publish fragments of its own). The **desktop** is
+a template that shows them off. Fragments run on
 [celld](https://celld.dev) (self-hosted Durable Objects that keep their
 state in a bucket); each is a cell that sleeps when idle.
 
