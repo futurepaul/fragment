@@ -521,6 +521,8 @@ fn relay(ctx: &Context, env: &Env, org: String, reference: String, mut answer: R
                 break;
             }
         }
+        // what is left unread is dropped now: a computer that left ends the call
+        drop(chunks);
         let _ = wasm_bindgen_futures::JsFuture::from(writer.close()).await;
         let settle = ledger::Settle { reference, cost: fragment_core::budget::charge(cost.finish(), None), result: Value::Null, video: None };
         let reference = settle.reference.clone();
