@@ -311,6 +311,14 @@ impl Client {
     pub fn post_json_waiting(&self, path: &str, v: &impl serde::Serialize, timeout: Duration) -> Result<Resp> {
         self.send("POST", path, serde_json::to_vec(v)?, Replay::of("POST"), Signed::Body, timeout)
     }
+    /// A signed POST answered as it arrives (`model --serve` relays it),
+    /// sent once: a model call that may have reached the host is not made
+    /// again blind.
+    pub fn post_streaming(&self, path: &str, body: Vec<u8>, timeout: Duration) -> Result<reqwest::blocking::Response> {
+        let url = format!("{}{}", self.host, path);
+        let auth = self.id.nip98_header("POST", &url, &body);
+        Ok(self.http.post(&url).header("authorization", auth).header("content-type", "application/json").timeout(timeout).body(body).send()?)
+    }
     /// A POST whose body carries its idempotency id (an operation call):
     /// retried like a read (`Replay::ById`).
     pub fn post_json_by_id(&self, path: &str, v: &impl serde::Serialize) -> Result<Resp> {

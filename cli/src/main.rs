@@ -2,6 +2,7 @@ mod api;
 mod auth;
 mod blobs;
 mod codestorage;
+mod serve;
 mod sync;
 mod watch;
 
@@ -74,11 +75,20 @@ enum Cmd {
     Whoami,
     /// Ask the model through the platform, as this computer (its owner's
     /// budget pays): a prompt, or with --request an OpenAI-style chat
-    /// request on stdin, answered with the response's JSON
+    /// request on stdin, answered with the response's JSON; or --serve
     Model {
         prompt: Option<String>,
-        #[arg(long, conflicts_with = "prompt")]
+        #[arg(long, conflicts_with_all = ["prompt", "serve"])]
         request: bool,
+        /// Serve an OpenAI-compatible endpoint on 127.0.0.1 (POST
+        /// /v1/chat/completions, streamed or not) that signs each call as
+        /// this computer: goose, or anything that speaks to such a
+        /// provider, needs no key
+        #[arg(long, conflicts_with = "prompt")]
+        serve: bool,
+        /// The port --serve listens on (0: any free one)
+        #[arg(long, requires = "serve", default_value_t = serve::PORT)]
+        port: u16,
     },
     /// Your computers (machines paired with `fragment login --computer`):
     /// list them, or remove one (its keys are revoked, and it leaves every
@@ -950,7 +960,8 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "npub": new.id.npub(), "revoked": old.id.npub(), "identity": v }));
             println!("{} replaces {} (revoked); every grant stays with {}", new.id.npub(), old.id.npub(), v.id);
         }
-        Cmd::Model { prompt, request } => {
+        Cmd::Model { serve: true, port, .. } => serve::serve(c, port)?,
+        Cmd::Model { prompt, request, .. } => {
             let body: Value = match (prompt, request) {
                 (Some(p), false) => json!({ "messages": [{ "role": "user", "content": p }] }),
                 (None, true) => {
