@@ -90,11 +90,6 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; }
 .menu svg { width: 15px; height: 15px; color: var(--text-secondary); }
 .empty-row { font-size: 13px; color: var(--text-tertiary); padding: 6px 8px; }
 .spacer { flex: 1; }
-.computer { display: flex; align-items: center; gap: 8px; padding: 8px; border-top: 1px solid var(--border); font-size: 13px; color: var(--text-secondary); }
-.computer .label { flex: 1; }
-.computer .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-tertiary); }
-.computer.awake .dot { background: var(--success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--success), transparent 80%); }
-.computer.awake .state { color: var(--success); }
 
 /* ---- chat column ---- */
 .chat { position: relative; flex: 1; min-width: 0; display: flex; flex-direction: column; }

@@ -1059,7 +1059,11 @@ owner's turns only,
 the agent an editor). A call is `POST /api/f/<fragment>/ops/<op>?for=<asker>`
 signed by the agent with the id `tc:<40 hex of SHA-256 of the tool-call
 id>`: a replayed call replays the operation; a file write's key is the
-tool call's. At most 64 steps a turn. Each step sends the model a window
+tool call's. A job's call (either kind of tool) answers when its run
+ends, reading it `for` the asker every second for up to 90 s: `{run,
+status, output}` (succeeded) or `{run, status, error}` (held, blocked),
+else `{run, status, note}` (still going), so an agent that runs a command
+on a computer (the pet's `run`) reads what it printed. At most 64 steps a turn. Each step sends the model a window
 of its conversation, not all of it: the newest 256 messages, cut to
 start at a turn's first message (so a tool call and its result stay
 together), with the running turn whole and earlier turns while they

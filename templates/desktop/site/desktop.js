@@ -1,6 +1,6 @@
 // The desktop: its owner's fragments side by side. Chats are chat
-// fragments (the middle column shows the open one), apps open as panes in
-// the viewer, and a file opens through its own fragment's __file. Each
+// fragments (the middle column shows the open one), apps and computers
+// open as panes in the viewer, a file through its own fragment's __file. Each
 // frame is this page's `__frame`: the platform signs the frame in on its
 // fragment's origin, for this page only, so the desktop's code holds no
 // authority over any of them. Its platform powers are its owner's list
@@ -26,6 +26,7 @@ const ICON = {
   people: '<circle cx="9" cy="8" r="3.2"/><path d="M3 19a6 6 0 0 1 12 0"/><path d="M16 5.2a3.2 3.2 0 0 1 0 5.6M18 19a6 6 0 0 0-2.5-4.9"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
   share: '<path d="M12 15V3M7 8l5-5 5 5"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/>',
+  computer: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
 };
 const svg = (name) => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON[name]}</svg>`;
 const CURRENT = "desktop.chat.v1";
@@ -148,7 +149,7 @@ const viewer = createViewer({
     $("viewer").classList.toggle("is-empty", !keys.length);
     $("viewer-count").hidden = !keys.length;
     $("viewer-count").textContent = keys.length;
-    for (const row of $("apps").querySelectorAll(".row[data-key]")) row.classList.toggle("open", keys.includes(row.dataset.key));
+    for (const row of document.querySelectorAll("#apps .row[data-key], #computers .row[data-key]")) row.classList.toggle("open", keys.includes(row.dataset.key));
     if (!keys.length) renderQuickOpen();
   },
 });
@@ -324,30 +325,55 @@ function paneIcon(name) {
   return i;
 }
 
+// A computer is a fragment New computer named (`computer-…`, from the pet
+// template), wherever it was made: a pane like an app, awake while its page
+// is open (the platform's rule, on its owner's budget) and asleep a few
+// minutes after its pane closes.
+const isComputer = (name) => label(name).startsWith("computer-") && name !== state.self;
+const iconOf = (name) => (isComputer(name) ? paneIcon("computer") : appIcon(label(name)));
+
 const apps = () => {
   const chats = chatNames();
-  return state.fragments.filter((f) => f.name !== state.self && !chats.includes(f.name));
+  return state.fragments.filter((f) => f.name !== state.self && !chats.includes(f.name) && !isComputer(f.name));
 };
 
-function renderApps() {
-  const open = viewer.keys;
-  const list = apps();
-  $("apps").replaceChildren(...(list.length ? list.map((f) => {
-    const row = el("button", `row${open.includes(`app:${f.name}`) ? " open" : ""}`);
-    row.dataset.key = `app:${f.name}`;
-    row.append(appIcon(label(f.name)), el("span", "label", label(f.name)), ...badges(f));
-    if (f.role !== "owner") row.append(el("span", "meta", f.role));
-    row.onclick = () => { openApp(f.name); leaveSidebar(); };
-    return item(row, f.name);
-  }) : [el("div", "empty-row", "No apps yet")]));
+function appRow(f) {
+  const row = el("button", `row${viewer.keys.includes(`app:${f.name}`) ? " open" : ""}`);
+  row.dataset.key = `app:${f.name}`;
+  row.append(iconOf(f.name), el("span", "label", label(f.name)), ...badges(f));
+  if (f.role !== "owner") row.append(el("span", "meta", f.role));
+  row.onclick = () => { openApp(f.name); leaveSidebar(); };
+  return item(row, f.name);
 }
+
+function renderApps() {
+  const list = apps();
+  $("apps").replaceChildren(...(list.length ? list.map(appRow) : [el("div", "empty-row", "No apps yet")]));
+  const computers = state.fragments.filter((f) => isComputer(f.name));
+  $("computers").replaceChildren(...(computers.length ? computers.map(appRow) : [el("div", "empty-row", "No computers yet")]));
+}
+
+// A new computer: a pet fragment of the owner's, opened as a pane (which wakes it).
+$("new-computer").onclick = async () => {
+  $("new-computer").disabled = true;
+  try {
+    const made = await platform({ label: fresh("computer"), template: "pet" });
+    await load();
+    openApp(made.name);
+    leaveSidebar();
+  } catch (e) {
+    notice("A new computer could not be made", e.message);
+  } finally {
+    $("new-computer").disabled = false;
+  }
+};
 
 function openApp(name) {
   const f = byName(name);
   if (!f) return;
   const frame = frameOf(framed(name), label(name), name);
   show({
-    key: `app:${name}`, title: label(name), subtitle: f.role === "owner" ? undefined : f.role, icon: appIcon(label(name)), body: frame,
+    key: `app:${name}`, title: label(name), subtitle: f.role === "owner" ? undefined : f.role, icon: iconOf(name), body: frame,
     actions: [
       { icon: ICON.folder, title: "Files", onClick: () => openTree(name) },
       { icon: ICON.reload, title: "Reload", onClick: () => { if (frame.isConnected && frame.tagName === "IFRAME") frame.src = framed(name); } },

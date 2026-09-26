@@ -12,6 +12,7 @@ use fragment_nip98::Keys;
 use fragment_proto::ErrorCode;
 use serde_json::{json, Value};
 
+use super::jobs::{settle, started};
 use super::signin::{site_cookie, with_session};
 use crate::api::{url_enc, Api, Call, Reply, Socket};
 use crate::Suite;
@@ -269,7 +270,7 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 302 && st.body["visibility"] == "members" && st.body["frame"] == json!(true),
         format!("{r} / {st}"),
     );
-    pet(s, api, &owner)
+    pet(s, api, &owner, &chat)
 }
 
 /// An 8×5 JPEG, as the pet's computer sends its screen.
@@ -278,7 +279,7 @@ const JPEG: &str = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJ
 /// The pet (templates/pet): a computer, a `control` channel people drive it
 /// through, and its screen, one row its computer stores through `frame` and
 /// `screen` answers. Its display loop needs a real Sprite (docs/computers.md).
-fn pet(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
     let viewer = api.person()?;
     let viewer_id = api.identity(&viewer)?;
     let name = s.named(api, owner, "tpet")?;
@@ -288,14 +289,16 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let m = api.signed(owner, "GET", &format!("/api/f/{name}/manifest"), None)?;
     let ops = &st.body["code"]["operations"];
     s.ok(
-        "a pet from its template declares its computer, so it starts its owner's alone (members), and its code installs: frame (ephemeral) for editors, screen for viewers",
+        "a pet from its template declares its computer, so it starts its owner's alone (members), and its code installs: frame (ephemeral) for editors, screen for viewers, the run job for editors",
         made.status == 200
             && made.body["visibility"] == "members"
             && m.body["computer"]["start"] == "node computer/pet.mjs"
             && st.body["code"]["error"].is_null()
             && ops["frame"]["role"] == "editor"
             && ops["frame"]["ephemeral"] == true
-            && ops["screen"]["kind"] == "query",
+            && ops["screen"]["kind"] == "query"
+            && ops["run"]["kind"] == "job"
+            && ops["run"]["role"] == "editor",
         format!("{made} / {st}"),
     );
     let channels = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None)?;
@@ -378,6 +381,44 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         "and follows control: a signed-in poster's record, taken once, makes them its driver",
         drove && log.matches(&format!("#{seq} {{")).count() == 1,
         &log,
+    );
+
+    // run: a command on its computer, answered with what it printed; editors only
+    let r = api.op(&viewer, &name, "run", "r1", json!({ "command": "echo nope" }))?;
+    s.ok("a viewer cannot run a command on it", r.status == 403, &r);
+    let r = api.op(owner, &name, "run", "r2", json!({ "command": "echo ran $((6 * 7)); echo oops >&2; exit 3" }))?;
+    let ran = settle(api, owner, &name, started(&r), &["succeeded", "held"], Duration::from_secs(60));
+    let out = &ran["output"];
+    s.ok(
+        "its owner runs a command on it: the run answers the command's code and output",
+        ran["status"] == "succeeded" && out["code"] == 3 && out["stdout"] == "ran 42\n" && out["stderr"] == "oops\n" && out["truncated"] == false,
+        &ran,
+    );
+
+    // its owner's agent runs a command there, asked in their chat: the
+    // platform's verbs reach it (the agent is no member of the pet, so no
+    // tool of its own names it), as an editor, and a job's call answers
+    // what the job answered
+    let r = api.signed(owner, "GET", "/api/a/agent/tools", None)?;
+    let tools: Vec<&str> = r.body["tools"].as_array().into_iter().flatten().filter_map(|t| t.as_str()).collect();
+    s.ok("its owner's agent has the platform's verbs that reach it", tools.contains(&"platform__operations") && tools.contains(&"platform__call"), &r);
+    s.openrouter.clear_script();
+    s.openrouter.script(&[
+        Say::Tools(vec![("platform__operations".into(), json!({ "fragment": name }))]),
+        Say::Tools(vec![("platform__call".into(), json!({ "fragment": name, "operation": "run", "input": { "command": "echo ran $((6 * 7))" } }))]),
+        Say::Text("Your computer says 42.".into()),
+    ]);
+    let asked = api.signed(owner, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": "t-run", "body": { "text": "what is 6 times 7 on my computer?" } })))?;
+    let answer = || {
+        let records = api.signed(owner, "GET", &format!("/api/f/{chat}/channels/chat"), None).ok().and_then(|r| r.body["records"].as_array().cloned()).unwrap_or_default();
+        records.iter().any(|x| x["body"]["text"] == "Your computer says 42.")
+    };
+    let answered = asked.status == 200 && s.eventually(Duration::from_secs(60), answer);
+    let read = s.openrouter.chats().last().map(|c| c["messages"].to_string()).unwrap_or_default();
+    s.ok(
+        "asked in its owner's chat, their agent finds run on the pet, as an editor, runs a command there, and reads what it printed",
+        answered && read.contains(r#"\"role\":\"editor\""#) && read.contains(r#"\"run\":{"#) && read.contains(r#"\"stdout\":\"ran 42\\n\""#),
+        &read,
     );
     page.close();
     Ok(())

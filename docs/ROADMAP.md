@@ -571,6 +571,15 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   declare. Phase 6's look and quality; no new features.
 - **Acceptance:** the desktop lane and the phase7 flow pass, and
   `docs/platform.md` has no special case for the desktop.
+- *Built 2026-09-26 (PR `desktop-computers`):* the sidebar's Computers.
+  New computer makes a pet fragment (`computer-…`) through `__fragments`,
+  told apart by its name as chats are; it opens as a pane and is awake
+  while that pane is open. The pet's editor-only `run` job
+  (`job.computer.exec`) is how your agent runs commands there, from any
+  chat, through the platform's verbs; a job's call now answers what the
+  job answered (docs/computers.md). Since #60 keyed `first_visibility` on
+  what a template declares, docs/platform.md names the desktop only as the
+  first user of `fragments` and `frame`: no special case is left.
 
 ### 9. Cutover
 - `fragment.club` moves to Fly in phase 3. What remains: the VPS

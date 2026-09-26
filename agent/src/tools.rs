@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
-use fragment_proto::{valid_fragment_name, valid_op_name, FragmentList, FragmentStatus, ListedFragment, OpDecl, OpKind, OpResult};
+use fragment_proto::{valid_fragment_name, valid_op_name, FragmentList, FragmentStatus, ListedFragment, OpDecl, OpKind, OpResult, Run, RunStatus};
 use futures::StreamExt;
 use serde::Deserialize;
 use goose_agent::operation::Emitter;
@@ -55,12 +55,21 @@ pub const TOOLS_MAX: usize = 128;
 const STATUS_READS_AT_ONCE: usize = 6;
 /// The most of an operation's answer the model reads back.
 const RESULT_TEXT_MAX: usize = 16 * 1024;
+/// How long a job's call waits for its run to end, and how often it looks.
+const JOB_WAIT_MS: u64 = 90_000;
+const JOB_POLL_MS: u64 = 1_000;
+
+/// The run a job's call started: a job's call answers exactly `{run, status}`.
+fn started_run(result: &Value) -> Option<i64> {
+    let o = result.as_object().filter(|o| o.len() == 2 && o.get("status").is_some_and(Value::is_string))?;
+    o.get("run")?.as_i64()
+}
 
 fn describe(fragment: &str, op: &str, decl: &OpDecl) -> String {
     let what = match decl.kind {
         OpKind::Query => "Reads",
         OpKind::Mutation => "Changes",
-        OpKind::Job => "Starts a job on",
+        OpKind::Job => "Runs a job on",
     };
     format!("{what} the fragment `{fragment}`: its `{op}` operation. Answers the operation's result as JSON.")
 }
@@ -240,7 +249,6 @@ fn platform_answer(tool: &str, answer: Value) -> Result<String, String> {
             let status = FragmentStatus::deserialize(&answer).map_err(|e| format!("the fragment's status: {e}"))?;
             json!({ "fragment": status.name, "role": status.role, "operations": status.code.operations }).to_string()
         }
-        ("platform__call", answer) => OpResult::deserialize(&answer).map_err(|e| format!("the fragment's answer is not an operation's result: {e}"))?.result.to_string(),
         // a file's bytes come back as text; the rest are JSON
         (_, Value::String(s)) => s,
         (_, v) => v.to_string(),
@@ -405,6 +413,34 @@ impl FragmentTools {
         Ok((Method::Post, format!("/api/f/{fragment}/files"), Some(body)))
     }
 
+    /// An operation's answer, as the model reads it. A job's call answers
+    /// only the run it started (`{run, status}`), so the tool waits for the
+    /// run to end (at most `JOB_WAIT_MS`, read `for` the asker) and answers
+    /// what the job answered, or why it was held: an agent that runs a
+    /// command on a computer reads what it printed. A run still going by
+    /// then is said to be.
+    async fn op_answer(&self, fragment: &str, op: &str, answer: &Value) -> Result<String, String> {
+        let done = OpResult::deserialize(answer).map_err(|e| format!("the fragment's answer is not an operation's result: {e}"))?;
+        let Some(run) = started_run(&done.result) else { return Ok(done.result.to_string()) };
+        let deadline = js::now_ms() + JOB_WAIT_MS;
+        loop {
+            let (fleet, path) = (self.fleet.clone(), format!("/api/f/{fragment}/runs/{run}"));
+            // a run it cannot read, or one of another operation: the call's own answer
+            let read = SendFuture::new(async move { fleet.get_as::<Run>(&path).await }).await.ok().filter(|r| r.op == op);
+            let Some(read) = read else { return Ok(done.result.to_string()) };
+            let out = match read.status {
+                RunStatus::Succeeded => json!({ "run": run, "status": read.status, "output": read.output }),
+                RunStatus::Held | RunStatus::Blocked => json!({ "run": run, "status": read.status, "error": read.error }),
+                _ if js::now_ms() >= deadline => json!({ "run": run, "status": read.status, "note": format!("still running after {} s", JOB_WAIT_MS / 1000) }),
+                _ => {
+                    SendFuture::new(Delay::from(Duration::from_millis(JOB_POLL_MS))).await;
+                    continue;
+                }
+            };
+            return Ok(out.to_string());
+        }
+    }
+
     async fn catalog(&self) -> anyhow::Result<Arc<Catalog>> {
         if let Some(c) = self.catalog.lock().expect("catalog lock").clone() {
             return Ok(c);
@@ -488,7 +524,8 @@ impl ToolProvider<Session> for FragmentTools {
             return Ok(CallToolResult::error(vec![ContentBlock::text(format!("{status}: {}", fleet::message(&answer)))]));
         }
         let text = match &route {
-            Route::Op { .. } => OpResult::deserialize(&answer).map(|done| done.result.to_string()).map_err(|e| format!("the fragment's answer is not an operation's result: {e}")),
+            Route::Op { fragment, op } => self.op_answer(fragment, op, &answer).await,
+            Route::Platform("platform__call") => self.op_answer(args["fragment"].as_str().unwrap_or(""), args["operation"].as_str().unwrap_or(""), &answer).await,
             Route::Platform(tool) => platform_answer(tool, answer),
         };
         let mut text = match text {

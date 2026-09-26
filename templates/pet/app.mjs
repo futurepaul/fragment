@@ -31,4 +31,11 @@ export class App extends DurableObject {
   screen() {
     return this.ctx.storage.sql.exec("SELECT jpeg, width, height, title, driver, at FROM screen").toArray()[0] ?? null;
   }
+
+  // A job, for editors (the owner, and their agent, capped at editor): one
+  // command on the computer, as the computer, answered once it ended:
+  // {code, stdout, stderr, truncated}. It wakes the computer as a page does.
+  async run({ command }, job) {
+    return job.computer.exec(command);
+  }
 }

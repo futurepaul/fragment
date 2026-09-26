@@ -1,7 +1,8 @@
 # desktop
 
-Your fragments side by side: chats in the middle, apps and files stacked
-in a viewer on the right, all of them fragments of yours. Each shows in
+Your fragments side by side: chats in the middle, apps, computers, and
+files stacked in a viewer on the right, all of them fragments of yours.
+Each shows in
 its own frame, signed in on its own origin; the desktop holds no
 authority over any of them.
 
@@ -16,9 +17,15 @@ authority over any of them.
   the desktop shows a notice in place of its panes, with a button that
   opens that sheet, and opens nothing in a frame.
 - A new desktop is yours alone (`members`) until you share it.
-- A chat is a fragment New chat named (`chat-…`), wherever you made it;
-  every other fragment is an app. `app.mjs` keeps the chats this desktop
-  made (`chats`, `add_chat`, `remove_chat`), listed first, newest first.
+- A chat is a fragment New chat named (`chat-…`), and a computer one New
+  computer named (`computer-…`, from the pet template: a Sprite of its
+  own, on your budget), wherever you made it; every other fragment is an
+  app. `app.mjs` keeps the chats this desktop made (`chats`, `add_chat`,
+  `remove_chat`), listed first, newest first.
+- A computer opens as a pane, like an app. Its page is what keeps it
+  awake: while its pane is open, and 5 minutes after it closes. Your
+  agent runs commands on it from any chat (its `run` job;
+  docs/computers.md).
 - Sharing is the platform's: each row's `…` menu has Share, which opens
   the platform's share sheet (`/share/<name>`, from `__fragments`) in a
   window of its own; this page cannot drive it. Rows are badged with how

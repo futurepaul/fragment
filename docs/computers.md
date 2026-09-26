@@ -292,6 +292,27 @@ together, built only from what any fragment may declare:
   second per viewer. Streaming the screen to pages directly is the end
   state (being scoped); this is the quick fix.
 
+## Your computer on the desktop, and your agent on it
+
+The desktop (`templates/desktop`, ROADMAP phase F) lists your computers
+in its sidebar: the fragments New computer named (`computer-…`, made from
+the pet template through `__fragments`, as New chat makes a chat),
+wherever they were made. It tells them by their names, so reading the
+list wakes none of them; the platform's list carries no flag for them.
+Opening one shows its page as a pane, framed like any app; the open page
+is what wakes the computer, so it is awake while its pane is open (the
+viewer collapsed included) and asleep 5 minutes after it closes. Awake
+all day, one would spend a $20 month in about 12 days ($0.0726 an hour).
+
+The pet declares one job for commands, `run({command})`: editors only
+(its owner, their agent, the computer itself), `bash -lc` on the computer
+through `job.computer.exec`, answered with `{code, stdout, stderr,
+truncated}`. A viewer is refused. Your own agent reaches it from any chat
+through the platform's verbs, `platform__operations` and `platform__call`
+(it is no member of the pet, so no tool of its own names it; decision 17
+caps it at editor there), and a job's call answers once its run ends
+(docs/api.md, Agents), so it reads what the command printed.
+
 ## Next
 
 - **The builder on a real Sprite**: `fragment new b --template builder`,
