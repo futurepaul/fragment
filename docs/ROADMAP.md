@@ -1,7 +1,8 @@
-# ROADMAP — fragment-next: places for people and agents
+# ROADMAP — fragment: stateful web apps, multiplayer built in
 
 Decided 2026-09-23. This supersedes fragment's 2026-09-07 roadmap (git
 history keeps it); its truth map and wire contract carry forward below.
+Reshaped 2026-09-26: the fragment is the product (decisions 19–22).
 Engineering style: `/Users/futurepaul/dev/finite/engineering-style/
 engineering-style.md` (the Finite contract), including hard cuts, the
 debt ledger (`docs/technical-debt-ledger.md`), and assertions on in
@@ -17,29 +18,34 @@ be cheap while idle, safe to share, easy for an agent to build and fix,
 and simple enough that the system does not collapse under its own
 weight.
 
-## The model: four nouns
+## The model: one fragment, two add-ons
 
-1. **Identity.** A person, an agent, or a fragment: a stable identity
-   with one or more nostr keys, in a registry shaped like finite.computer's
-   BANKS (which identity a key belongs to, which person owns an agent).
-   Grants name identities, not keys. Resource permissions belong to the
-   service that owns the resource, never to the registry
-   (`docs/finite-integration.md`, decision 15).
-2. **Fragment.** A place: one code.storage repo (files, history, `main`
-   and `live`), one supervisor cell (members, operations, channels) with
-   the app's own SQLite in a facet, URLs, and members (key → role). **Apps, chats, and desktops are all
-   fragments; they differ only in their files.** Sharing anything is a
-   grant. Opening any fragment URL shows it under a platform share
-   header.
-3. **Agent.** An identity with a brain (a libfx cell with durable turns)
-   that joins fragments as a member and acts through the same signed API
-   as the CLI.
-4. **Computer.** A Fly Sprite owned by an identity. Fragments have keys,
-   so a fragment can own a computer.
+1. **Fragment.** The product: a stateful web app with multiplayer built
+   in, published from the CLI. One code.storage repo (files, history,
+   `main` and `live`), one supervisor cell (members, operations, jobs,
+   crons, channels) with the app's own SQLite in a facet, its own origin,
+   and members (identity → role). Hosting, permissions, sharing, crons,
+   jobs, and channels are built in; sharing anything is a grant.
+   fragment.club lists your fragments; fragment.boats serves them.
+2. **Two add-ons a fragment declares** in `fragment.json`. A fragment
+   that declares neither carries nothing of them.
+   - **An agent** (decision 20): goose's loop in its own cell, answering
+     one postable channel or a job step, calling the operations it may.
+   - **A computer** (decision 21): an identity with its own key, and
+     later a Sprite running the `fragment` CLI, which talks back to its
+     fragment and can build and publish fancier ones.
+3. **Identities underneath.** People, agents, computers, and fragments
+   are identities with one or more nostr keys, in a registry shaped like
+   finite.computer's BANKS (which identity a key belongs to, who owns an
+   agent or a computer). Grants name identities, not keys. Resource
+   permissions belong to the service that owns the resource, never to
+   the registry (`docs/finite-integration.md`, decision 15).
+4. **One showcase: the desktop**, a template (chats, apps, and files on
+   one page) that shows off the add-ons. It is not the core.
 
-The verbs are the CLI's: create, sync, deploy (preview, rollback),
-members and invites, call (operations), read and follow (channels), and
-a computer's wake/exec.
+The verbs are the CLI's: login (pairing), create, sync, deploy (preview,
+rollback), members and invites, call (operations), and read and follow
+(channels).
 
 ## Decisions (made 2026-09-23)
 
@@ -57,6 +63,7 @@ a computer's wake/exec.
    history (rooms today persist one document, which a transcript
    outgrows). A chat guest acts with decision 17's authority, which
    replaced "a member with the owner's full authority" on 2026-09-25.
+   *Amended 2026-09-26 by decision 19* (a chat declares an agent).
 4. Sharing UI is **platform-owned**: the desktop's `...` menu asks the
    shell to open a trusted share sheet; invites are accepted in the
    platform bar; a direct fragment URL signs you in and shows the
@@ -67,6 +74,7 @@ a computer's wake/exec.
    asks once, on the platform ("Continue to X as you?"), before it learns
    who you are, and signing out of it there makes it ask again
    (docs/fragment-boats.md, answer 1).
+   *Amended 2026-09-26 by decision 19* (the desktop is one way in).
 5. **All computers are Sprites** (personal computers and builder
    workspaces); Agent Substrate and GKE are dropped. A `Computer` cell per
    Sprite (ownership, quotas, sleep policy) holds the owner's Sprites org
@@ -101,7 +109,8 @@ a computer's wake/exec.
     credentials through Sprites connectors. *Amended 2026-09-23 by
     decision 14:* the platform pays for AI up to each person's budget;
     connecting your own OpenRouter account (OAuth PKCE) comes back later
-    as the way past the limit.
+    as the way past the limit. *Amended 2026-09-26 by decision 21:* a
+    computer holds its own revocable key and no other credential.
 12. **Sign-in for fragment.club is WorkOS** (phase 4): WorkOS
     authenticates people; the CLI and agents keep signing with NIP-98.
     *Amended 2026-09-24 (Paul):* fragment has its own WorkOS environment
@@ -174,6 +183,41 @@ site). Sessions are `__Host-` cookies, since every fragment shares the
 platform's domain. The fragments made before this were not migrated (a
 hard cut).
 
+### 19. Fragment is the product (Paul, 2026-09-26)
+
+Fragment is easy stateful web-app publishing with multiplayer built in,
+the successor to finite sites: sign up, pair the CLI, publish (the
+model, above). Agents and computers are add-ons a fragment declares; a
+fragment that declares neither carries nothing of them. The desktop is a
+showcase template kept at its current quality: fix breakage, no new
+features. Amends decisions 3 and 4 where they make chats and the desktop
+central.
+
+### 20. The agent add-on (Paul, 2026-09-26)
+
+A fragment declares an agent in `fragment.json`: its instructions, the
+operations it may call, the postable channel it answers (decision 18),
+and its model. A turn starts from a message on that channel, or from a
+job step, `job.agent`. Only signed-in visitors can start one; an
+anonymous visitor's message starts nothing. The owner pays, as for
+everything a fragment spends (decision 14); there are no per-visitor
+budgets yet. Think of a calorie tracker you tell "2 eggs and toast", or
+an image iterated on with a little agentic help.
+
+### 21. Computers are identities (Paul, 2026-09-26)
+
+A computer has its own npub and is owned by a person. It works on
+whatever its owner delegated or authorized it to do, including fragments
+it publishes. It holds its own revocable key and no other credential
+(amends decision 11). A fragment can declare a computer, and the
+platform provisions a Sprite for it that runs the `fragment` CLI to talk
+back to its parent fragment. That is a later step, which needs Paul's
+call on the Sprites token.
+
+### 22. Sign-up stays invite-only (Paul, 2026-09-26)
+
+For now; decision 12 is unchanged.
+
 ## Truth map (every change is checked against this)
 
 | Thing | Source of truth | Derived/copies must be |
@@ -218,12 +262,12 @@ Each phase lands as hard cuts with its tests. A phase is done when its
 acceptance checks pass in CI and, from phase 3 on, against the hosted
 deployment.
 
-**Where it stands (2026-09-25).** fragment.club runs the cell `cf96977`
-on nodes built from the celld fork's `f734f8f`, deployed 2026-09-25
-(hosted e2e 29/29): phases 3 to 6, the hardening pass's H1–H3, the
-audit's passes (#12–#14), the clickjacking fix (#19), one answer per
-chat message (#20), and the first parts of 7 and 8. Phase 7 is under
-way (`docs/phase-7.md`).
+**Where it stands (2026-09-26).** fragment.club runs master `9a5c518`
+(hosted e2e 29/29): phases 3 to 7 (7 without the share header), the
+hardening pass's H1–H3, fragment.boats slice 1 (isolation, frames
+through `__frame`, asking first), and phase 8's first part. The plan
+from here (Paul, 2026-09-26) is phases A to F in order, then 9 and 10;
+phase 7's chat half and phase 8 fold into D to F and stay as records.
 
 ### 0. Foundation (done 2026-09-23)
 - fragment-next created from fragment's full history (`9a381f8`, pushed
@@ -236,7 +280,7 @@ way (`docs/phase-7.md`).
   fail on the old ids.
 - Published-fragment inventory and its coverage gaps recorded.
 
-### 1. Model spikes
+### 1. Model spikes (built 2026-09-23)
 - The four spikes in `docs/MODEL.md`: Rust platform cells (workers-rs,
   with Worker Loader and facets), the app facet as author SQL,
   deterministic agent turns in Workflows, and celld v0.5.1. Verdicts live
@@ -280,7 +324,7 @@ way (`docs/phase-7.md`).
   the published-fragment table fully green with no gap rows; no `.sh` or
   `.py` in the repo.
 
-### 3. Hosted on Fly
+### 3. Hosted on Fly (built 2026-09-23)
 - `celld diagnose` against a new Tigris `ord` bucket before any state
   lands there. celld v0.5.1 on two always-on Fly Machines in `ord` with a
   restart-always policy (celld self-fences and must be restarted),
@@ -300,7 +344,7 @@ way (`docs/phase-7.md`).
   write latency (fleet proof), cold cell load, and cell-to-Sprite
   latency recorded; an operator runbook.
 
-### 4. Friends alpha: invite-only sign-in and budgets
+### 4. Friends alpha: invite-only sign-in and budgets (built 2026-09-24)
 - Pulled forward so Paul can share fragment.club with friends without an
   obvious problem (2026-09-23); reshaped to finite.computer's identity
   model (decision 15, 2026-09-24; slices in `docs/phase-4.md`; slices A,
@@ -337,7 +381,7 @@ way (`docs/phase-7.md`).
   a fragment with its own key is not metered; the person's OpenRouter
   key carries their limit.
 
-### 5. Agents as members
+### 5. Agents as members (built 2026-09-23)
 - The agent cell: goose's loop as a workers-rs Durable Object in its own
   celld project (`agent/`), ported from `spike/goose-agent`'s `cell/`
   (store, effects, durable steer queue, watchdog). Its tools are the
@@ -350,7 +394,7 @@ way (`docs/phase-7.md`).
   *Met 2026-09-23 (`docs/phase-5.md`); hosted since phase 6, co-hosted
   on the cell's nodes, on the owner's budget.*
 
-### 6. The desktop
+### 6. The desktop (built 2026-09-24)
 - **Reframed 2026-09-24 (Paul): `docs/phase-6.md` is the plan.** Fragment
   is the core product and the desktop is a template anyone deploys with a
   click; people get usernames and fragments live at
@@ -370,7 +414,7 @@ way (`docs/phase-7.md`).
   `desktop`, 17 checks; the desktop is `templates/desktop`), and live on
   fragment.club the same day with the rest of `docs/phase-6.md`.
 
-### 7. Chats and sharing
+### 7. Chats and sharing (built 2026-09-25, except the share header)
 - A chat template (a `chat` channel) whose agent member answers new
   messages. Platform shell: share sheet, invites, direct URLs with the
   share header, shared badges in the desktop's sidebar.
@@ -378,12 +422,13 @@ way (`docs/phase-7.md`).
   stream live and labeled by sender; the guest drives the owner's agent;
   revoking closes the guest's socket and returns 403; a rewritten
   desktop cannot share without the sheet click.
-- *Live:* the chat template, an agent that listens and answers
-  (`docs/phase-5.md`), the owner's agent in every new chat (phase 6),
-  and invites accepted in the browser (phase 4). *Not built:* the share
-  sheet, the share header, shared badges.
+- *Built:* the chat template, the owner's agent in every new chat, the
+  share sheet, invites, direct URLs, and shared badges (`docs/phase-7.md`,
+  e2e `phase7`). *Not built:* the share header (decision 4), unscheduled.
+- *Folded 2026-09-26 (decision 19):* the chat half becomes the agent
+  add-on (D) and the desktop rebuilt on it (F).
 
-### 8. Computers and builder workspaces on Sprites
+### 8. Computers and builder workspaces on Sprites (first part built)
 - A `Computer` cell per Sprite (ownership by principal, fragments
   included; lifecycle and idle policy on its alarm; the owner's Sprites
   org and token, ours by default). The computer runs `fragment computer
@@ -403,6 +448,66 @@ way (`docs/phase-7.md`).
   screenshots in the chat. *Not built:* the `Computer` cell and Sprites
   lifecycle, the loop on the computer, credentials through connectors,
   builder workspaces.
+- *Folded 2026-09-26 into phase E (decision 21):* what is not built is
+  E's, reshaped around computers as identities.
+
+### A. The front door
+- A released `fragment` CLI (macOS and Linux) with a one-line install; a
+  skill that teaches a coding agent to install, pair, and publish, made
+  from `fragment guide` so they cannot drift; fragment.club's home as the
+  product (what it is, signed out; your fragments and pairing, signed in).
+- **Acceptance:** on clean macOS and Linux machines the one line installs
+  the release, `fragment login` pairs it, and it publishes a todo; a
+  coding agent given only the skill does the same from an empty folder;
+  a browser e2e checks the home page; the hosted e2e runs the release.
+
+### B. fragment.boats, slice 2
+- The move (`docs/fragment-boats.md`): fragments at
+  `<label>--<username>.fragment.boats`, old hosts and the apex
+  redirecting. DNS, certificates, and the deploy are Paul's.
+- **Acceptance:** that doc's e2e shapes pass; the hosted e2e passes on
+  fragment.boats, redirects included; Paul checks it in three browsers.
+
+### C. Declutter
+- Take the desktop's and chats' special cases out of the core
+  (`docs/platform.md`: the chat page, the owner's agent in every chat,
+  the `work` channel, "is it a chat", the new desktop's visibility and
+  framing). Each becomes something any fragment may declare, moves into
+  its template, or waits behind one seam that D replaces.
+- **Acceptance:** no platform path names a chat or the desktop outside
+  that seam; the chat, desktop, and phase7 lanes stay green; the phase
+  deletes more lines than it adds.
+
+### D. The agent add-on
+- Decision 20: `agent` in `fragment.json`; turns from signed-in
+  visitors' messages and `job.agent` steps, acting as decision 17 says,
+  on the owner's budget. The chat template declares one; C's seam goes.
+- **Acceptance:** in a calorie-tracker template, "2 eggs and toast" from
+  a signed-in member is logged through a declared operation, and an
+  undeclared one is refused; an anonymous message starts nothing; a
+  `job.agent` step killed mid-turn runs each tool call once; a turn over
+  the owner's budget is held; a fragment without an agent gets no agent
+  identity, member, or code.
+
+### E. Computers
+- Computers as identities first (decision 21): a computer's npub in the
+  registry, owned by a person, revocable, acting on what its owner
+  granted and on fragments it publishes. Then, on Paul's call on the
+  Sprites token, fragment-declared computers: a Sprite (a `Computer`
+  cell for its lifecycle) running the `fragment` CLI as that computer,
+  which talks back to its parent and can build and publish fragments.
+- **Acceptance:** a revoked computer is refused; it reaches only what it
+  was granted; its key is the only credential on its disk. On Sprites: a
+  declared computer publishes a fragment; Stop cancels its command and
+  publishes nothing; a kill mid-tool runs the tool once; a fragment
+  without a computer carries nothing of one.
+
+### F. The desktop rebuilt on the add-ons
+- `templates/desktop` becomes an ordinary fragment that declares an
+  agent (and a computer, after E) and uses only what any fragment may
+  declare. Phase 6's look and quality; no new features.
+- **Acceptance:** the desktop lane and the phase7 flow pass, and
+  `docs/platform.md` has no special case for the desktop.
 
 ### 9. Cutover
 - `fragment.club` moves to Fly in phase 3. What remains: the VPS
