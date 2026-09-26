@@ -71,6 +71,8 @@ CREATE TABLE IF NOT EXISTS steps (
 CREATE TABLE IF NOT EXISTS tunnel (
   rid TEXT PRIMARY KEY, method TEXT NOT NULL, path TEXT NOT NULL, body TEXT,
   created_at INTEGER NOT NULL, sent_at INTEGER, status INTEGER, answer TEXT);
+CREATE TABLE IF NOT EXISTS jobs (
+  turn TEXT PRIMARY KEY, conv TEXT NOT NULL, outcome TEXT, error TEXT, text TEXT, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS shots (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, mime TEXT NOT NULL, data TEXT NOT NULL, at INTEGER NOT NULL);
 ";
@@ -83,6 +85,11 @@ pub fn migrate(sql: &SqlStorage) -> anyhow::Result<()> {
         ah(sql.exec("ALTER TABLE messages ADD COLUMN conv TEXT NOT NULL DEFAULT 'direct'", None))?;
     }
     ah(sql.exec("CREATE INDEX IF NOT EXISTS messages_conv ON messages (conv, seq)", None))?;
+    // a job's turn (lib.rs `job`) names its first message
+    let cols: Vec<Value> = ah(ah(sql.exec("PRAGMA table_info(pending)", None))?.to_array())?;
+    if !cols.iter().any(|c| c["name"] == "kick") {
+        ah(sql.exec("ALTER TABLE pending ADD COLUMN kick TEXT", None))?;
+    }
     Ok(())
 }
 

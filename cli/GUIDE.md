@@ -227,7 +227,8 @@ export class App extends DurableObject {
   secret `NAME`, filled in outside your code), `job.publish(channel,
   body)`, `job.sleep("2 hours")`, `job.files.read|list|stat|write|remove`
   (`write(path, content, {expect: sha})` compares and swaps),
-  `job.push(who, payload)`, `job.ai.text|image|video(...)`. A step that
+  `job.push(who, payload)`, `job.ai.text|image|video(...)`,
+  `job.agent({prompt})` (below). A step that
   may pass later (429, 5xx, timeout) is retried with backoff; one that
   cannot throws a `StepError` you may catch. A job that throws is
   **held** until someone replays it.
@@ -285,6 +286,21 @@ calories` is a working example):
   `work` (a start naming who asked, each tool call, an end), the chat
   template's records: render them as you like.
 - You pay for its model calls, from your budget.
+
+A job asks it too, for the run's principal (a triggered run's: the
+fragment, as an editor), and waits for the answer:
+
+```js
+async summarize(input, job) {
+  const { text, turn } = await job.agent({ prompt: "Summarize what I ate today.", channel: "ask" });
+  return { text };
+}
+```
+
+`conversation` (a key you choose) continues one across runs; without it
+each run has its own. `channel` posts the turn's steps and answer there
+too. A replayed run reattaches to the turn it started; a turn that fails
+or is stopped throws a `StepError`.
 
 `"agent": {"personal": true, "channel": "chat"}` (the chat template's)
 has your own agent answer there instead, with its own tools.

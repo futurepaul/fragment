@@ -36,6 +36,8 @@
 //!   GET  /api/a/{name}/tools          the tools the owner's turn has now
 //!   POST /api/a/{name}/listen         {fragment, channel? ("chat"), reply? ("say")}: follow a channel (once: again is the same listen)
 //!   PUT  /api/a/{name}/scope          {fragment, tools, instructions, model?}: a fragment's own agent takes its block
+//!   POST /api/a/{name}/job            {id, asker, conversation, channel?, text}: a job's turn (`job.agent`), once per id
+//!   GET  /api/a/{name}/job?turn=      that turn's state: {ended, outcome, text, error}
 //!   PUT  /api/a/{name}/computer       {url, token, cwd? ("work")}: attach a computer (`fragment computer serve`)
 //!   DELETE /api/a/{name}/computer     detach it
 //!   POST /api/a/{name}/test           test controls (dev fleets: AGENT_TEST_HOOKS=allow)
@@ -288,6 +290,17 @@ struct CreateBody {
     /// A fragment's own agent: the fragment it serves (the platform's
     /// deploy makes it; `POST /api/agents` never sets it).
     scope: Option<String>,
+}
+
+/// `POST job`: a turn a fragment's job asks for (`job.agent`), for the
+/// run's principal (`asker`), named by the run and its step (`id`).
+#[derive(Deserialize)]
+struct JobBody {
+    id: String,
+    asker: String,
+    conversation: String,
+    channel: Option<String>,
+    text: String,
 }
 
 /// `PUT scope`: a fragment agent's declaration, as its fragment's deploy
@@ -649,6 +662,56 @@ impl Agent {
         Ok(json!({ "fragment": body.fragment, "tools": body.tools, "model": model }))
     }
 
+    /// A job's turn (`job.agent`): started once per id, which the fragment
+    /// makes from the run and its step, so a retried or replayed step gets
+    /// the turn it started, never a second. Its conversation is the job's
+    /// key for the asker (two principals never share one), posting to
+    /// `channel` when one is named. It waits for a turn of its own, and
+    /// never steers another (two runs may share a conversation).
+    fn job(&self, body: JobBody) -> Answer<Value> {
+        let short = |s: &str, max: usize| (1..=max).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+        let fits = short(&body.id, 128) && short(&body.conversation, 64) && npub::is_identity(&body.asker) && body.channel.as_deref().is_none_or(valid_channel_name);
+        if !fits || body.text.is_empty() || body.text.len() > MESSAGE_TEXT_MAX {
+            return Err(Fail::invalid(format!("an id, a conversation of 1-64 of [A-Za-z0-9._-], an identity, a channel, and text of 1-{MESSAGE_TEXT_MAX} bytes")));
+        }
+        let sql = self.sql();
+        let scope = tools::scope_of(&sql)?.ok_or_else(|| Fail::invalid("job.agent runs a fragment's own agent"))?;
+        let kick = format!("job_{}", body.id);
+        let turn = work::turn_id(&kick);
+        let known: Vec<Value> = sql.exec("SELECT turn FROM jobs WHERE turn = ?", vec![turn.as_str().into()])?.to_array()?;
+        if !known.is_empty() {
+            return Ok(json!({ "turn": turn, "replayed": true }));
+        }
+        let active = kv_u64(&sql, "active")? == 1;
+        if active && waiting(&sql)? >= WAITING_MAX {
+            return Err(Fail::new(ErrorCode::RateLimited, format!("at most {WAITING_MAX} messages wait for the agent")));
+        }
+        let key = format!("job:{}:{}", body.asker, body.conversation);
+        let conv = match &body.channel {
+            Some(channel) => store::conv_of(&scope.fragment, channel, Some(&key)),
+            None => key,
+        };
+        sql.exec("INSERT INTO jobs (turn, conv, at) VALUES (?, ?, ?)", vec![turn.as_str().into(), conv.as_str().into(), (js::now_ms() as i64).into()])?;
+        wait(&sql, &conv, &body.asker, &body.text, Some(&kick))?;
+        if !active {
+            next_turn(&sql)?;
+            self.start_driver("job")?;
+        }
+        Ok(json!({ "turn": turn }))
+    }
+
+    /// A job's turn as its polls read it: running until it ends, then how,
+    /// and its answer.
+    fn job_state(&self, url: &worker::Url) -> Answer<Value> {
+        let turn = url.query_pairs().find(|(k, _)| k == "turn").map(|(_, v)| v.into_owned()).unwrap_or_default();
+        let rows: Vec<Value> = self.sql().exec("SELECT outcome, error, text FROM jobs WHERE turn = ?", vec![turn.as_str().into()])?.to_array()?;
+        let row = rows.first().ok_or_else(|| Fail::new(ErrorCode::NotFound, format!("no job turn {turn}")))?;
+        Ok(match row["outcome"].as_str() {
+            None => json!({ "ended": false, "outcome": TurnOutcome::Running.as_str() }),
+            Some(outcome) => json!({ "ended": true, "outcome": outcome, "text": row["text"], "error": row["error"] }),
+        })
+    }
+
     /// Starts a driver for the active turn, unless one is running: it runs
     /// that turn, answers it, and then each turn waiting, back to back.
     fn start_driver(&self, reason: &str) -> Answer<bool> {
@@ -743,12 +806,12 @@ impl Agent {
                 store::steer(&sql, &text)?;
                 return Ok(json!({ "steered": true, "driving": self.driving.get() }));
             }
-            wait(&sql, conv, asker, &text)?;
+            wait(&sql, conv, asker, &text, None)?;
             return Ok(json!({ "queued": true, "driving": self.driving.get() }));
         }
         // at rest: the oldest message waiting goes first (a driver drains
         // them before it rests, so there is none unless one died between)
-        wait(&sql, conv, asker, &text)?;
+        wait(&sql, conv, asker, &text, None)?;
         next_turn(&sql)?;
         let started = self.start_driver("turn")?;
         Ok(json!({ "started": started }))
@@ -1151,6 +1214,8 @@ impl Agent {
                     (Method::Post, "stop") => self.stop(),
                     (Method::Post, "listen") => self.listen(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?).await,
                     (Method::Put, "scope") => self.scope(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?),
+                    (Method::Post, "job") => self.job(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?),
+                    (Method::Get, "job") => self.job_state(&url),
                     (Method::Get, "tools") => {
                         // what the owner's own turn has
                         let mut names = tools::list(self.fleet()?.acting_for(&principal), &self.sql()).await?;
@@ -1368,6 +1433,16 @@ fn finish_turn(sql: &worker::SqlStorage, outcome: &anyhow::Result<TurnOutcome>) 
          ON CONFLICT (conv) DO UPDATE SET outcome = excluded.outcome, error = excluded.error, asker = excluded.asker, at = excluded.at",
         vec![conv.as_str().into(), how.as_str().into(), error.as_str().into(), asker.as_str().into(), now.into()],
     )?;
+    // a job's turn (`job`) keeps how it ended, and its answer, for its polls
+    let answer = match how {
+        TurnOutcome::Idle => last_answer(sql, &conv)?.map(|m| m.as_concat_text()),
+        _ => None,
+    };
+    let turn = kv_get(sql, "turn_id")?.unwrap_or_default();
+    sql.exec(
+        "UPDATE jobs SET outcome = ?, error = ?, text = ? WHERE turn = ? AND outcome IS NULL",
+        vec![how.as_str().into(), error.as_str().into(), answer.map_or(worker::SqlStorageValue::Null, |a| a.into()), turn.into()],
+    )?;
     if how != TurnOutcome::Stopped && npub::is_identity(&asker) {
         sql.exec(
             "INSERT INTO pending (conv, asker, text, at) SELECT ?, ?, text, ? FROM steer WHERE consumed = 0 ORDER BY seq",
@@ -1387,15 +1462,16 @@ fn next_turn(sql: &worker::SqlStorage) -> anyhow::Result<bool> {
         conv: String,
         asker: String,
         text: String,
+        kick: Option<String>,
     }
-    let rows: Vec<Waiting> = sql.exec("SELECT seq, conv, asker, text FROM pending ORDER BY seq LIMIT 1", None)?.to_array()?;
+    let rows: Vec<Waiting> = sql.exec("SELECT seq, conv, asker, text, kick FROM pending ORDER BY seq LIMIT 1", None)?.to_array()?;
     let Some(next) = rows.into_iter().next() else { return Ok(false) };
     sql.exec("DELETE FROM pending WHERE seq = ?", vec![next.seq.into()])?;
     // the steers an earlier turn's model read are in its conversation, and
     // the images it kept and never showed are dropped
     sql.exec("DELETE FROM steer", None)?;
     sql.exec("DELETE FROM shots", None)?;
-    let id = format!("msg_{}", uuid::Uuid::new_v4());
+    let id = next.kick.unwrap_or_else(|| format!("msg_{}", uuid::Uuid::new_v4()));
     let mut kickoff = Message::user().with_text(next.text);
     kickoff.id = Some(id.clone());
     store::append_message(sql, &next.conv, &kickoff)?;
@@ -1414,9 +1490,11 @@ fn next_turn(sql: &worker::SqlStorage) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-/// Puts a message in line for a turn of its own.
-fn wait(sql: &worker::SqlStorage, conv: &str, asker: &str, text: &str) -> anyhow::Result<()> {
-    sql.exec("INSERT INTO pending (conv, asker, text, at) VALUES (?, ?, ?, ?)", vec![conv.into(), asker.into(), text.into(), (js::now_ms() as i64).into()])?;
+/// Puts a message in line for a turn of its own (`kick`: its first
+/// message's id, when a job names it).
+fn wait(sql: &worker::SqlStorage, conv: &str, asker: &str, text: &str, kick: Option<&str>) -> anyhow::Result<()> {
+    let kick = kick.map_or(worker::SqlStorageValue::Null, |k| k.into());
+    sql.exec("INSERT INTO pending (conv, asker, text, at, kick) VALUES (?, ?, ?, ?, ?)", vec![conv.into(), asker.into(), text.into(), (js::now_ms() as i64).into(), kick])?;
     Ok(())
 }
 
@@ -1445,10 +1523,19 @@ async fn reply(sql: &worker::SqlStorage, fleet: &Fleet, conv: &str, shape: Optio
         reply: String,
     }
     let rows: Vec<Listen> = sql.exec("SELECT reply FROM listens WHERE fragment = ? AND channel = ?", vec![fragment.into(), channel.into()])?.to_array()?;
-    // a listen dropped since: nowhere to answer
-    let Some(listen) = rows.into_iter().next() else { return Ok(()) };
     // a turn that ended without text has nothing to say
     let Some(answer) = last_answer(sql, conv)? else { return Ok(()) };
+    let shape = match shape {
+        Some(shape) => shape,
+        None => progress::shape(fleet, fragment, channel).await?,
+    };
+    // a channel that takes posts gets it (a job's names one it need not
+    // follow); one that takes none, its listen's reply operation, if any
+    let reply_op = match (shape.posts, rows.into_iter().next()) {
+        (true, _) => None,
+        (false, Some(listen)) => Some(listen.reply),
+        (false, None) => return Ok(()),
+    };
     let id = fragment_core::tools::reply_id(answer.id.as_deref().unwrap_or(""));
     let mut text = answer.as_concat_text();
     // the turn's images (a screenshot) land in the chat's files, shown with the answer
@@ -1468,13 +1555,9 @@ async fn reply(sql: &worker::SqlStorage, fleet: &Fleet, conv: &str, shape: Optio
             text.push_str(&format!("\n\n(the screenshot could not be shown here: {})", fleet::message(&body)));
         }
     }
-    let shape = match shape {
-        Some(shape) => shape,
-        None => progress::shape(fleet, fragment, channel).await?,
-    };
-    let (path, body) = match shape.posts {
-        true => (format!("/api/f/{fragment}/channels/{channel}"), json!({ "id": id, "body": fragment_core::work::answer(&text, turn) })),
-        false => (format!("/api/f/{fragment}/ops/{}", listen.reply), json!({ "id": id, "input": { "text": text } })),
+    let (path, body) = match reply_op {
+        None => (format!("/api/f/{fragment}/channels/{channel}"), json!({ "id": id, "body": fragment_core::work::answer(&text, turn) })),
+        Some(op) => (format!("/api/f/{fragment}/ops/{op}"), json!({ "id": id, "input": { "text": text } })),
     };
     let (status, body) = fleet.call(Method::Post, &path, Some(&body)).await?;
     if matches!(status, 403 | 404) {

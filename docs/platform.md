@@ -71,7 +71,8 @@ not carries nothing of it. What the platform does for it, a fragment's
 code cannot: its deploy makes the agent (named as the fragment, its
 owner's, an editor of that fragment alone, listening to the declared
 channel) or removes it, offers it only the operations the block names,
-and pays for its model calls from the owner's budget. The chat template
+runs its turns for the fragment's jobs (`job.agent`), and pays for its
+model calls from the owner's budget. The chat template
 has its owner's own agent answer by the same block (`"personal": true`),
 so no platform code names a template (`cell/src/agents.rs`,
 `sync_agent`).

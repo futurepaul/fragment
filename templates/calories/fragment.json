@@ -23,7 +23,8 @@
       "kind": "mutation",
       "role": "viewer",
       "input": { "type": "object", "required": ["id"], "additionalProperties": false, "properties": { "id": { "type": "integer", "minimum": 1 } } }
-    }
+    },
+    "summarize": { "kind": "job", "role": "viewer", "input": { "type": "object", "additionalProperties": false, "properties": {} } }
   },
   "channels": {
     "ask": { "read": "viewer", "post": "viewer" },

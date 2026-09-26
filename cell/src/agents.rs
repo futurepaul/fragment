@@ -23,10 +23,12 @@ use std::collections::HashMap;
 use fragment_core::access::{listed_role, Cap};
 use fragment_core::manifest::AgentDecl;
 use fragment_core::npub;
+use fragment_core::steps::AgentTurn;
 use fragment_proto::{limits, split_fragment_name, valid_fragment_name, valid_label, ErrorCode, FragmentList, IdentityKind, ListedFragment, Role};
 
 use crate::error::{CellError, CellResult};
 use crate::fragment::{Caller, FragmentCell, MetaKey};
+use crate::jobs::{permanent, RunRow, StepFail};
 use crate::registry::calls;
 use crate::routed::Signed;
 use crate::{ask_registry, js, read_body, signer};
@@ -292,5 +294,62 @@ impl FragmentCell {
         ask_json(&self.env, Method::Put, &format!("/api/a/{name}/scope"), &owner.id, &scope).await?;
         let id = made["id"].as_str().ok_or_else(|| CellError::host("the agents' script answered no identity"))?;
         Ok((id.to_string(), name.to_string()))
+    }
+
+    /// The fragment's own agent a job's turn runs on (`job.agent`), and its
+    /// owner, as whom the platform asks it.
+    fn job_agent(&self) -> Result<(Joined, String), StepFail> {
+        let retry = |e: CellError| StepFail::Retry(e.message);
+        let [live, joined, owner] = self.metas([MetaKey::AgentLive, MetaKey::AgentJoined, MetaKey::Owner]).map_err(retry)?;
+        let (live, joined): (Option<AgentLive>, Option<Joined>) = (stored(live, "agent block").map_err(retry)?, stored(joined, "agent joined").map_err(retry)?);
+        match (live, joined, owner) {
+            (Some(live), _, _) if live.decl.personal => Err(permanent("job.agent runs the fragment's own agent; its agent block names its owner's")),
+            (Some(_), Some(joined), Some(owner)) => Ok((joined, owner)),
+            (Some(_), None, _) => Err(StepFail::Retry("the fragment's agent is still being made".into())),
+            _ => Err(permanent("job.agent needs an agent of the fragment's own: declare one in fragment.json (`agent`)")),
+        }
+    }
+
+    /// `job.agent`'s start: one turn of the fragment's own agent for the
+    /// run's principal (a triggered run's is the fragment itself, so the
+    /// agent acts as its own member, an editor), named by the run and this
+    /// step, not the attempt: a retried or replayed step reattaches.
+    pub(crate) async fn step_agent_start(&self, run: &RunRow, index: u32, turn: AgentTurn) -> Result<Value, StepFail> {
+        let (joined, owner) = self.job_agent()?;
+        if let Some(channel) = turn.channel.as_deref() {
+            // the agent is an editor here: a channel only the owner posts to would refuse it
+            let postable = self.declared_channel(channel).map_err(|e| StepFail::Retry(e.message))?.and_then(|c| c.post).is_some_and(|p| p <= Role::Editor);
+            if !postable {
+                return Err(permanent(format!("job.agent's channel {channel:?} is not one this fragment declares for editors to post to")));
+            }
+        }
+        let asker = if npub::is_identity(&run.principal) { run.principal.clone() } else { joined.agent.clone() };
+        let id = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(self.step_ref(run, index)?.as_bytes()));
+        let body = json!({
+            "id": id,
+            "asker": asker,
+            "conversation": turn.conversation.unwrap_or_else(|| format!("run-{}", run.id)),
+            "channel": turn.channel,
+            "text": turn.prompt,
+        });
+        ask_json(&self.env, Method::Post, &format!("/api/a/{}/job", joined.name), &owner, &body).await.map_err(agent_fail)
+    }
+
+    /// `job.agent`'s poll: its turn's state (`{ended, outcome, text, error}`).
+    pub(crate) async fn step_agent_poll(&self, turn: &str) -> Result<Value, StepFail> {
+        if turn.len() != 24 || !turn.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(permanent(format!("{turn:?} is not a turn's id")));
+        }
+        let (joined, owner) = self.job_agent()?;
+        ask_json(&self.env, Method::Get, &format!("/api/a/{}/job?turn={turn}", joined.name), &owner, &Value::Null).await.map_err(agent_fail)
+    }
+}
+
+/// The agent's refusal as a step's failure: one it will give again is for
+/// good (the job sees it); any other may pass (the step is retried).
+fn agent_fail(e: CellError) -> StepFail {
+    match e.code {
+        ErrorCode::InvalidRequest | ErrorCode::NotFound | ErrorCode::Forbidden => permanent(e.message),
+        _ => StepFail::Retry(format!("the fragment's agent: {}", e.message)),
     }
 }

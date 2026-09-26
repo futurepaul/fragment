@@ -101,7 +101,7 @@ fn ledger_fail(e: CellError) -> StepFail {
 impl FragmentCell {
     /// This step's source reference: unique to the fragment's life, the
     /// run, and the step's place in it (the same on a retry and a replay).
-    fn step_ref(&self, run: &RunRow, index: u32) -> Result<String, StepFail> {
+    pub(crate) fn step_ref(&self, run: &RunRow, index: u32) -> Result<String, StepFail> {
         let retry = |e: CellError| StepFail::Retry(e.message);
         Ok(format!("{}@{}/run/{}/step/{index}", self.name().map_err(retry)?, self.must(MetaKey::CreatedAt).map_err(retry)?, run.id))
     }
