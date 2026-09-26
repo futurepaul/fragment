@@ -148,6 +148,10 @@ enum Cmd {
         /// In pull mode, delete local files that were deleted remotely
         #[arg(long)]
         prune: bool,
+        /// Pull what is live (the files served), not main: into the folder
+        /// only, deletions included (a computer's copy of its fragment)
+        #[arg(long, conflicts_with_all = ["mode", "watch", "install", "uninstall", "mirror_from"])]
+        live: bool,
         /// Overlay this read-only source folder into --dir before each
         /// pass (new/changed files copy in; source never written)
         #[arg(long)]
@@ -1069,7 +1073,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("manifest updated (commit {})", &tip[..8.min(tip.len())]);
         }
         Cmd::Sync {
-            name, dir, watch, mode, prune, mirror_from, apply_mass_delete,
+            name, dir, watch, mode, prune, live, mirror_from, apply_mass_delete,
             rebuild_state, no_live, install, uninstall,
         } => {
             // never stream JSON envelopes mid-run: watch prints progress
@@ -1089,13 +1093,15 @@ fn run(cli: Cli) -> Result<()> {
             let opts = SyncOptions {
                 mirror_from,
                 mode: match mode.as_deref() {
+                    _ if live => Mode::Pull,
                     Some("push") => Mode::Push,
                     Some("pull") => Mode::Pull,
                     Some("mirror") | None => Mode::Mirror,
                     other => return Err(usage(format!("--mode must be push|pull|mirror, got {other:?}"))),
                 },
                 apply_mass_delete,
-                prune,
+                prune: prune || live,
+                live,
                 writer_id: writer_id(&c),
                 codestorage: codestorage_override(),
             };

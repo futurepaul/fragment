@@ -126,6 +126,7 @@ fragment sync my-thing --dir .              # one mirror pass (default)
 fragment sync my-thing --dir . --watch      # continuous: OS events + the change feed + 60 s sweeps
 fragment sync my-thing --dir . --mode pull  # read-only copy (never deletes; --prune to apply)
 fragment sync my-thing --dir . --mode push  # local → repo only
+fragment sync my-thing --dir . --live       # what is live, not main: repo → folder, deletions included
 fragment sync my-thing --dir . --install    # keep syncing after logout (LaunchAgent / systemd unit)
 fragment verify my-thing --dir .            # full-content audit
 ```
@@ -339,6 +340,22 @@ async build(input, job) {
   your budget. No computer declared, or no budget left, throws a
   `StepError`.
 
+The computer keeps your fragment's live files at `~/fragment`, synced
+when it is made and after each deploy. `"computer": {"start": "node
+server.js"}` runs a command from there as a long-lived service while the
+computer is awake:
+
+- It runs as the computer, like `exec`, with `FRAGMENT_NAME` set:
+  `fragment post "$FRAGMENT_NAME" screen --body '{...}'` reaches the
+  page's channels.
+- If it exits, it runs again (1 s later, doubling to a minute; back to 1
+  s after a minute up). A deploy restarts it with the new files.
+- Its output is in `~/fragment.log` (the last MiB or so); a job reads it
+  with `job.computer.exec("tail -n 50 ~/fragment.log")`.
+- Keep what it writes outside `~/fragment` (say `~/data`): a file it
+  changes there keeps its change, and a deploy's copy lands beside it as
+  a conflict copy.
+
 ## Pages
 
 A page imports the browser library from its own fragment:
@@ -534,7 +551,7 @@ fragment open <name>                     fragment members list|add|rm|leave ...
 fragment events <name> [--since N | --tail N]
 fragment manifest <name>                 fragment invite create|list|revoke ...
 fragment manifest-set <name> FILE        fragment join <name> <token>
-fragment sync <name> [--dir D] [--watch] [--mode M] [--install | --uninstall]
+fragment sync <name> [--dir D] [--watch] [--mode M | --live] [--install | --uninstall]
 fragment verify <name> [--dir D]         fragment secret set|list|rm ...
 fragment deploy <name> [--dir D] [--preview] [--note N]
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]

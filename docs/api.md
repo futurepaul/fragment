@@ -486,21 +486,34 @@ keeps the last good code and says why in `status.code.error`.
   platform honors only once the owner allows it too (the share sheet, or
   the new-fragment form that made it).
   Any other name is refused at deploy.
-- `"computer": {}` gives the fragment a computer of its own (it takes no
-  settings yet; docs/computers.md). The deploy that declares it makes a
-  Sprite (its `Computer` cell, through `KEYS`), which installs the CLI's
-  release (the one-line install, from `FRAGMENT_CLI_RELEASE_URL`) and
-  pairs as a computer the fragment's owner owns, named by the fragment,
-  with a single-use token it is handed on stdin (`fragment login
-  --pair`); the platform makes it an editor of the fragment. It is held
-  awake while a page of the fragment is open and `FRAGMENT_COMPUTER_IDLE_S`
-  (300) after the last closes; each `FRAGMENT_COMPUTER_TICK_S` (60) awake
-  is charged to the owner first, at list price, and its disk asleep when
-  it next wakes (`computer.awake`, `computer.asleep` usage). A tick that
+- `"computer": {}` gives the fragment a computer of its own
+  (docs/computers.md); `"computer": {"start": "<command>"}` also runs a
+  command there (below). The deploy that declares it makes a Sprite (its
+  `Computer` cell, through `KEYS`), which installs the CLI's release
+  (the one-line install, from `FRAGMENT_CLI_RELEASE_URL`) and pairs as a
+  computer the fragment's owner owns, named by the fragment, with a
+  single-use token it is handed on stdin (`fragment login --pair`); the
+  platform makes it an editor of the fragment. It is held awake while a
+  page of the fragment is open and `FRAGMENT_COMPUTER_IDLE_S` (300)
+  after the last closes; each `FRAGMENT_COMPUTER_TICK_S` (60) awake is
+  charged to the owner first, at list price, and its disk asleep when it
+  next wakes (`computer.awake`, `computer.asleep` usage). A tick that
   does not fit the budget lets it sleep. Its jobs run commands there
-  (`job.computer.exec`, Jobs and triggers), each waking it as a page does. A deploy without the block keeps
-  it asleep; `fragment computers rm <fragment>` destroys it. Its steps
-  are in the fragment's `events` (`computer.ready`, `computer.failed`,
+  (`job.computer.exec`, Jobs and triggers), each waking it as a page
+  does. The computer keeps the fragment's live files at `~/fragment`
+  (`fragment sync <name> --dir ~/fragment --live`): synced after its
+  first boot, and after each deploy that moves live, at once while it is
+  awake, or else when it next wakes. `start` (a string of at most 4096
+  bytes) runs from there, as a job's command does but with no timeout
+  and `FRAGMENT_NAME` set, as a Sprites service (`fragment`) while the
+  computer is awake: run again when it exits (after 1 s, doubling to 60
+  s; back to 1 s after a minute up), restarted after each sync, its
+  output in `~/fragment.log` (trimmed to its last 512 KiB past 1 MiB). A
+  sync that fails is said once in `events` (`computer.failed`) and tried
+  again when it next wakes, or at the next deploy. A block without
+  `start` runs nothing. A deploy without the block keeps it asleep;
+  `fragment computers rm <fragment>` destroys it. Its steps are in the
+  fragment's `events` (`computer.ready`, `computer.failed`,
   `computer.budget`, `computer.destroyed`).
 - `input` is a JSON Schema in a bounded subset (`crates/core/src/schema.rs`:
   types, `enum`, `const`, lengths, ranges, `items`, `properties`,

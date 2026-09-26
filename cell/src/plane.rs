@@ -315,7 +315,7 @@ impl FragmentCell {
             self.sync_schedules(&[])?;
             self.del_meta(MetaKey::MetaLive)?;
             self.del_meta(MetaKey::CapabilitiesLive)?;
-            self.want_computer(false)?;
+            self.want_computer(None, None)?;
             self.del_meta(MetaKey::CodeError)?;
             self.set_agent_live(None)?;
             js::abort_app_facet(&self.raw, "live is gone")?;
@@ -346,7 +346,7 @@ impl FragmentCell {
         }
         self.set_meta(MetaKey::CapabilitiesLive, &serde_json::to_string(&manifest.capabilities).expect("a list serializes"))?;
         self.set_agent_live(agent.as_ref())?;
-        self.want_computer(manifest.computer)?;
+        self.want_computer(manifest.computer.as_ref(), Some(sha))?;
         if self.tree_row("live", "app.mjs")?.is_none() {
             self.exec("DELETE FROM code", vec![])?;
             // no operations to run, so nothing for a trigger to start
