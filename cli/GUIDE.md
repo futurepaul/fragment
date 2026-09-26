@@ -235,7 +235,7 @@ export class App extends DurableObject {
   body)`, `job.sleep("2 hours")`, `job.files.read|list|stat|write|remove`
   (`write(path, content, {expect: sha})` compares and swaps),
   `job.push(who, payload)`, `job.ai.text|image|video(...)`,
-  `job.agent({prompt})` (below). A step that
+  `job.agent({prompt})`, `job.computer.exec(command)` (below). A step that
   may pass later (429, 5xx, timeout) is retried with backoff; one that
   cannot throws a `StepError` you may catch. A job that throws is
   **held** until someone replays it.
@@ -311,6 +311,33 @@ or is stopped throws a `StepError`.
 
 `"agent": {"personal": true, "channel": "chat"}` (the chat template's)
 has your own agent answer there instead, with its own tools.
+
+## A computer in your fragment
+
+With `"computer": {}` in `fragment.json`, a job runs shell commands on
+the fragment's own Linux machine:
+
+```js
+async build(input, job) {
+  const r = await job.computer.exec("npm ci && npm test", { timeout: "20 minutes", env: { CI: "1" } });
+  if (r.code !== 0) return { failed: r.stderr };
+  return { ok: r.stdout };
+}
+```
+
+- It is `bash -lc <command>` as the computer, in `~/fragment` (or
+  `cwd`), with this CLI on its PATH signed in as the computer: `fragment
+  post`, `fragment call`, `fragment sync` reach your fragments as it.
+- It answers `{code, stdout, stderr, truncated}`; a nonzero exit is an
+  answer, not a throw. Each stream keeps its first 256 KiB. `timeout` is
+  ms or "N seconds|minutes" (default 10 minutes, at most 60); past it the
+  command is stopped and answers code 124.
+- It runs once: a retried or replayed run gets the same command's answer
+  and never runs it again. `env` takes plain values; for a secret, use
+  `job.fetch`.
+- The computer is woken for it and sleeps 5 minutes after, billed to
+  your budget. No computer declared, or no budget left, throws a
+  `StepError`.
 
 ## Pages
 

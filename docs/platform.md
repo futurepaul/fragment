@@ -83,8 +83,9 @@ so no platform code names a template (`cell/src/agents.rs`,
   made on the deploy that declares it and paired as a computer its owner
   owns, an editor of the fragment. Declaring is enough (Paul,
   2026-09-26: resources are declarative, and the owner pays for what the
-  fragment spends); it is awake while a page is open, and destroyed only
-  by `fragment computers rm`. The platform holds the Sprites token in the
+  fragment spends); it is awake while a page is open or a job's command
+  (`job.computer.exec`) runs there, and destroyed only by `fragment
+  computers rm`. The platform holds the Sprites token in the
   node (`KEYS`); each `Computer` cell reaches only its own Sprite.
 
 ## Behavior no fragment declares
