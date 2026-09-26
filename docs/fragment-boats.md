@@ -2,9 +2,17 @@
 
 Status: **decided 2026-09-25.** Paul answered the three open questions
 (Answers, at the end). Slice 1 (decisions 2–4: isolation, framed
-sign-in, sign-in and sign-out) is built for fragment.club, before the
-move (PR `isolation-and-frames`); slice 2 (the move) and the PSL are
-not. No DNS, Fly, or deploy change has been made.
+sign-in, sign-in and sign-out) is built and live on fragment.club (PR
+`isolation-and-frames`). Slice 2 (the move, ROADMAP decision 23) is
+built (PR `boats-move`) and waits for fragment.boats's DNS and
+certificates, then a deploy; the PSL is not started. As built, slice 2
+differs from the plan below in three small ways: a write or socket on an
+old host answers a new error code, `moved` (410); both redirects are
+sent `no-store`, so a move can be undone; and the e2e's one-site shape
+became the two-sites one for the lanes that used it (`desktop`, `share`,
+`phase7`, `isolation`), while the default stays the platform on
+`127.0.0.1` (already cross-site from the fragments, and the CLI reaches
+it there).
 
 Fragments move from `<label>--<username>.fragment.club` to
 `<label>--<username>.fragment.boats`. The platform stays on
@@ -513,8 +521,8 @@ Docs each slice updates:
 - `docs/platform.md`: a `__frame` row; the framing note now says the
   platform is cross-site.
 - `docs/operate.md`: DNS, certificates, the fleet variables.
-- `docs/ROADMAP.md`: a decision 19 amending decision 16, whose "every
-  fragment shares the platform's domain" no longer holds.
+- `docs/ROADMAP.md`: a decision (23, as built) amending decision 16,
+  whose "every fragment shares the platform's domain" no longer holds.
 - `docs/finite-integration.md`: the browser-sessions row (the
   per-origin exchange gains frames).
 - Comments that say "one site" in `auth.rs`, `share.rs`, and `lib.rs`.

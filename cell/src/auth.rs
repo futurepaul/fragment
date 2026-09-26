@@ -23,11 +23,13 @@
 //!                                 (an identity they own); its proof names it, in its URL
 //!   POST /cli/approve             (the form)
 //!
-//! Every fragment's origin is one site with the platform, so its pages'
-//! forms, fetches, and frames carry the platform's session cookie: every
-//! page here refuses frames (`unframed`) and severs a window that opened it
-//! (`unopened`), and every form is refused from another origin
-//! (`same_origin`). Sharing's pages (share.rs) add a form token and armed
+//! On fragment.club the platform is cross-site from every fragment (they
+//! are on fragment.boats), so its session cookie reaches a fragment's page
+//! only on a top-level visit; a fleet whose platform shares the fragments'
+//! domain puts them on one site, where the pages' forms, fetches, and
+//! frames carry it. Either way every page here refuses frames (`unframed`)
+//! and severs a window that opened it (`unopened`), and every form is
+//! refused from another origin (`same_origin`). Sharing's pages (share.rs) add a form token and armed
 //! buttons.
 //!
 //! Each platform page asks the registry once: a call that needs the
@@ -116,8 +118,8 @@ pub(crate) fn secure(url: &Url) -> bool {
 }
 
 /// A session cookie's name: `__Host-` first wherever it can be (https,
-/// `Path=/`). Every fragment's page shares `fragment.club` with the
-/// platform and may set a cookie for the whole domain; a browser takes a
+/// `Path=/`). Every fragment's page shares its domain (`fragment.boats`)
+/// with the others, and may set a cookie for all of it; a browser takes a
 /// `__Host-` cookie only host-only and Secure, so none such can stand in
 /// for the platform's session or another fragment's. The session is read
 /// under that name only.
@@ -176,9 +178,10 @@ pub(crate) fn redirect(to: &str, cookies: &[String]) -> CellResult<Response> {
 }
 
 /// No page may frame one that acts for its person: every one of the
-/// platform's. Every fragment's origin is one site with the platform, so a
-/// session cookie rides into a frame, and a page there could lay the button
-/// under a click of its own. A redirect stays framable: it shows nothing,
+/// platform's. Where a fragment's origin is one site with the platform (a
+/// fleet whose platform shares the fragments' domain), a session cookie
+/// rides into a frame, and a page there could lay the button under a click
+/// of its own. A redirect stays framable: it shows nothing,
 /// and a frame's `__signin` refuses what the platform's sign-in mints (a
 /// frame signs in only through `__frame`).
 pub(crate) fn unframed(h: &Headers) -> worker::Result<()> {
@@ -253,9 +256,9 @@ pub fn frame_token(req: &Request, name: &str, url: &Url, path_mode: bool) -> Cel
     cookie_of(req, FRAME_COOKIE, secure(url), &site_cookie_path(name, path_mode))
 }
 
-/// A POST from a browser comes from the platform's own pages: a fragment's
-/// page is one site with the platform, so its form or fetch carries the
-/// session cookie, and only the Origin tells them apart. A browser sends
+/// A POST from a browser comes from the platform's own pages: where a
+/// fragment's page is one site with the platform, its form or fetch carries
+/// the session cookie, and only the Origin tells them apart. A browser sends
 /// Origin with every POST (`null` from a page that hides its referrer), so
 /// a POST without one is no browser's.
 pub(crate) fn same_origin(req: &Request, platform: &str) -> CellResult<()> {

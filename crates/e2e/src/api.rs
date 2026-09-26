@@ -390,7 +390,9 @@ impl Socket {
         Socket::connect(api, &api.site_url(name, path), keys, cookie, origin).map(|(socket, _)| socket)
     }
 
-    fn connect(api: &Api, http: &str, keys: Option<&Keys>, cookie: Option<&str>, origin: Option<&str>) -> Result<(Socket, Vec<String>)> {
+    /// A socket to `http`, whichever host it names, opened as a page on
+    /// `origin` opens one.
+    pub fn connect(api: &Api, http: &str, keys: Option<&Keys>, cookie: Option<&str>, origin: Option<&str>) -> Result<(Socket, Vec<String>)> {
         use tungstenite::client::IntoClientRequest;
         let url = reqwest::Url::parse(http)?;
         let mut to = url.clone();

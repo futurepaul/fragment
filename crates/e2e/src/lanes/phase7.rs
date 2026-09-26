@@ -55,7 +55,7 @@ const CANNOT: &str = "I can't open that app for you: it isn't shared with you.";
 const EDITED: &str = "The plan is on.";
 const DONE: &str = "Done: your notes say the plan is on.";
 
-/// Runs on a node restarted with its platform on the fragments' domain
+/// Runs on a node restarted with the platform and the fragments on two domains
 /// (as fragment.club is), then restarts it as it was for the lanes after.
 pub fn phase7(s: &mut Suite, _: &Api) -> Result<()> {
     if !s.section("phase7") {

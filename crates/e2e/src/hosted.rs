@@ -10,7 +10,8 @@
 //! Inputs come from xtask, as paths to files (secret values never pass
 //! through arguments or output): `FRAGMENT_E2E_HOSTED` (the fleet's URL),
 //! `FRAGMENT_E2E_SUFFIX`, `FRAGMENT_E2E_KEY_FILE`, and optionally
-//! `FRAGMENT_E2E_OPENROUTER_KEY_FILE` (the live AI check) and
+//! `FRAGMENT_E2E_LEGACY_SUFFIX` (the fleet's old suffix: the move's
+//! redirects), `FRAGMENT_E2E_OPENROUTER_KEY_FILE` (the live AI check), and
 //! `FRAGMENT_E2E_CODESTORAGE_{ORG,API,KEY_FILE}` (removing the repos).
 
 use std::path::{Path, PathBuf};
@@ -56,6 +57,8 @@ pub struct Hosted {
     made: Vec<(String, String)>,
     /// Its person's username (the fragments are made under it).
     username: String,
+    /// Where the fleet served fragments before its suffix moved.
+    legacy: Option<String>,
 }
 
 fn env(name: &str) -> Option<String> {
@@ -191,6 +194,7 @@ pub fn run(cli: PathBuf, scratch: PathBuf, only: Option<String>) -> Result<()> {
         cs,
         made: vec![],
         username: String::new(),
+        legacy: env("FRAGMENT_E2E_LEGACY_SUFFIX"),
     };
     println!("hosted e2e against {base} (run {})", h.run);
     let result = (|| -> Result<()> {
@@ -219,6 +223,7 @@ pub fn run(cli: PathBuf, scratch: PathBuf, only: Option<String>) -> Result<()> {
         }
         cleanup(&mut h);
         creators(&mut h)?;
+        hosts(&mut h)?;
         todo(&mut h)?;
         inbox(&mut h)?;
         blobs(&mut h)?;
@@ -258,6 +263,33 @@ fn creators(h: &mut Hosted) -> Result<()> {
     }
     let r = h.api.create(&Keys::generate(), &h.name("stranger"))?;
     h.ok("a key no one approved cannot create", r.status == 401, &r);
+    Ok(())
+}
+
+/// The move (docs/fragment-boats.md, slice 2): a fragment's old host sends
+/// a browser on to its new one and refuses a write, and the suffix's own
+/// name is the platform's. A fleet whose suffix never moved skips it.
+fn hosts(h: &mut Hosted) -> Result<()> {
+    if !h.section("hosts") {
+        return Ok(());
+    }
+    let (Some(legacy), Some(suffix)) = (h.legacy.clone(), h.api.suffix.clone()) else {
+        h.note("hosts", "skipped: the fleet names no old suffix (FRAGMENT_LEGACY_HOST_SUFFIX)");
+        return Ok(());
+    };
+    let flat = fragment_proto::flat_name(&h.name("todo")).context("a fragment's flat name")?;
+    let get = |h: &Hosted, url: String| h.api.call(Call { method: "GET", url, ..Call::default() });
+    let r = get(h, format!("https://{flat}.{legacy}/docs/?view=abc"))?;
+    let new = format!("https://{flat}.{suffix}/docs/?view=abc");
+    h.ok("a fragment's old host answers 308 to its new one, path and query kept, cached nowhere", r.status == 308 && r.header("location") == new && r.header("cache-control") == "no-store", format!("{r} → {}", r.header("location")));
+    let r = h.api.call(Call { method: "POST", url: format!("https://{flat}.{legacy}/__op/add"), body: Some(b"{}".to_vec()), content_type: Some("application/json"), ..Call::default() })?;
+    h.ok("and a write there is 410, naming the new host", r.status == 410 && r.error() == "moved" && r.message().contains(&format!("https://{flat}.{suffix}/__op/add")), &r);
+    let r = get(h, format!("https://{suffix}/cli?key=x"))?;
+    h.ok("the suffix's own name answers 308 to the platform", r.status == 308 && r.header("location") == format!("{}/cli?key=x", h.api.base), format!("{r} → {}", r.header("location")));
+    for host in [legacy.as_str(), suffix.as_str()] {
+        let r = get(h, format!("https://no-such-host.{host}/"))?;
+        h.ok(&format!("another name under {host} is no one's (404)"), r.status == 404, &r);
+    }
     Ok(())
 }
 

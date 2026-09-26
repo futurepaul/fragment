@@ -40,6 +40,11 @@ pub struct Config {
     /// `FRAGMENT_HOST_SUFFIX`: fragments are served from `<label>--<username>.<suffix>`.
     /// Unset (dev without hostnames), they are served from `/f/<name>/`.
     pub host_suffix: Option<String>,
+    /// `FRAGMENT_LEGACY_HOST_SUFFIX`: where fragments were served before the
+    /// suffix changed (fragment.club, before fragment.boats): a fragment's
+    /// host under it sends a browser to its host under the suffix. It counts
+    /// only beside a suffix, and one that differs from it.
+    legacy_host_suffix: Option<String>,
     /// `FRAGMENT_POLL_INTERVAL_S`: the webhook backstop (default 300).
     pub poll_interval_ms: i64,
     /// `FRAGMENT_EGRESS_LOCAL=allow`: jobs may fetch private and loopback
@@ -107,7 +112,7 @@ impl Config {
     /// The isolate's settings (`CONFIG`): built once, from `env`'s variables.
     pub fn from_env(env: &Env) -> &'static Config {
         let cfg = CONFIG.get_or_init(|| Config::build(env));
-        // one variable read, against the 17 a build takes: variables that
+        // one variable read, against the 18 a build takes: variables that
         // changed under a running isolate would break the contract above
         assert_eq!(deploy_id(env), cfg.deploy_id, "celld changed a Worker variable under a running isolate");
         cfg
@@ -115,13 +120,17 @@ impl Config {
 
     fn build(env: &Env) -> Config {
         let delivery_retry_s = var(env, "FRAGMENT_DELIVERY_RETRY_S").and_then(|s| s.parse::<u32>().ok()).filter(|s| *s >= 1).unwrap_or(10);
+        let suffix = |name: &str| var(env, name).map(|s| s.trim_start_matches('.').to_ascii_lowercase());
+        let host_suffix = suffix("FRAGMENT_HOST_SUFFIX");
+        let legacy_host_suffix = suffix("FRAGMENT_LEGACY_HOST_SUFFIX").filter(|l| host_suffix.as_ref().is_some_and(|s| s != l));
         Config {
             codestorage: var(env, "CODESTORAGE_ORG").map(|org| {
                 let api =
                     var(env, "CODESTORAGE_API_URL").map(|a| a.trim_end_matches('/').to_string()).unwrap_or_else(|| fragment_core::codestorage::default_api(&org));
                 CodeStorageConfig { org, api }
             }),
-            host_suffix: var(env, "FRAGMENT_HOST_SUFFIX").map(|s| s.trim_start_matches('.').to_ascii_lowercase()),
+            host_suffix,
+            legacy_host_suffix,
             poll_interval_ms: var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000,
             egress_local: var(env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow"),
             blob_grace_ms: var(env, "FRAGMENT_BLOB_GRACE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(7 * 24 * 3600) * 1000,
@@ -179,11 +188,21 @@ impl Config {
         }
     }
 
-    /// Whether `host` is the platform's own (`FRAGMENT_PLATFORM_URL`'s),
-    /// which the router takes before any fragment's under the suffix.
+    /// Whether `host` is the platform's own (`FRAGMENT_PLATFORM_URL`'s, else
+    /// the suffix's own name, as `platform` says), which the router takes
+    /// before any fragment's under the suffix.
     pub fn is_platform_host(&self, host: &str) -> bool {
-        let platform = self.platform_url.as_deref().and_then(|u| url::Url::parse(u).ok());
-        platform.is_some_and(|u| u.host_str().is_some_and(|h| h.eq_ignore_ascii_case(host)))
+        let named = match &self.platform_url {
+            Some(u) => url::Url::parse(u).ok().and_then(|u| u.host_str().map(str::to_string)),
+            None => self.host_suffix.clone(),
+        };
+        named.is_some_and(|h| h.eq_ignore_ascii_case(host))
+    }
+
+    /// Whether `host` is the suffix's own name. Past `is_platform_host`, it
+    /// is no one's: the platform is elsewhere.
+    pub fn is_suffix(&self, host: &str) -> bool {
+        self.host_suffix.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(host))
     }
 
     pub fn codestorage(&self) -> CellResult<&CodeStorageConfig> {
@@ -197,15 +216,20 @@ impl Config {
     /// fragment). celld does not vouch for `Host`, so this is the only way a
     /// host becomes a fragment: an exact single label under the suffix.
     pub fn fragment_of_host(&self, host: &str) -> Option<String> {
-        from_flat_name(self.subdomain(host)?.as_str())
+        from_flat_name(&label_under(host, self.host_suffix.as_deref()?)?)
     }
 
-    /// The label a host has under the suffix (`x` of `x.<suffix>`), if it is
-    /// one: such a host is a fragment's or no one's, never the platform's.
+    /// The fragment an old host names (`<label>--<username>.<legacy
+    /// suffix>`): it is served under the suffix now.
+    pub fn fragment_of_legacy_host(&self, host: &str) -> Option<String> {
+        from_flat_name(&label_under(host, self.legacy_host_suffix.as_deref()?)?)
+    }
+
+    /// The label a host has under the suffix or the old one (`x` of
+    /// `x.<suffix>`), if it is one: such a host is a fragment's or no one's,
+    /// never the platform's.
     pub fn subdomain(&self, host: &str) -> Option<String> {
-        let suffix = self.host_suffix.as_deref()?;
-        let host = host.to_ascii_lowercase();
-        host.strip_suffix(suffix)?.strip_suffix('.').map(str::to_string)
+        [&self.host_suffix, &self.legacy_host_suffix].into_iter().flatten().find_map(|s| label_under(host, s))
     }
 
     /// Where a fragment is served, given the URL a request arrived on (its
@@ -231,4 +255,10 @@ impl Config {
             None => format!("{}://{}{port}", arrived.scheme(), arrived.host_str().unwrap_or("localhost")),
         }
     }
+}
+
+/// The label `host` has under `suffix` (`x` of `x.<suffix>`), if it is one.
+fn label_under(host: &str, suffix: &str) -> Option<String> {
+    let host = host.to_ascii_lowercase();
+    host.strip_suffix(suffix)?.strip_suffix('.').map(str::to_string)
 }
