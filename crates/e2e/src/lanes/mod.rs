@@ -8,6 +8,7 @@ mod author;
 mod budget;
 mod build;
 mod computer;
+mod computers;
 mod control;
 mod deliver;
 mod desktop;
@@ -49,6 +50,7 @@ const LANES: &[Lane] = &[
     members::members,
     identities::identities,
     signin::signin,
+    computers::computers,
     members::secrets,
     plane::files,
     plane::deploy,

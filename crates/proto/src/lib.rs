@@ -144,9 +144,11 @@ pub mod limits {
     /// Unspent single-use redemptions (a fragment origin's way in) one
     /// platform session holds: past this, the oldest go first.
     pub const REDEMPTIONS_PER_SESSION_MAX: u64 = 16;
-    /// Keys one identity has held (active and revoked), and agents one person owns.
+    /// Keys one identity has held (active and revoked), and agents and
+    /// computers one person owns (a removed computer no longer counts).
     pub const KEYS_PER_IDENTITY_MAX: u64 = 64;
     pub const AGENTS_PER_OWNER_MAX: u64 = 100;
+    pub const COMPUTERS_PER_OWNER_MAX: u64 = 32;
     /// A file an app reads (a larger one is served from the site).
     pub const FILE_READ_MAX_BYTES: usize = 1024 * 1024;
     /// What one mutation or one job step may write to files, and in how many.
@@ -550,10 +552,10 @@ pub struct Member {
     /// The identity that granted it (the owner), or `invite:<id>`.
     pub added_by: String,
     pub added_at: i64,
-    /// `person` or `agent`.
+    /// `person`, `agent`, or `computer`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<IdentityKind>,
-    /// An agent member's owner, who reads what it reads.
+    /// An agent or computer member's owner, who reads what it reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
 }
@@ -565,12 +567,16 @@ pub struct MemberList {
 }
 
 /// What an identity is (docs/finite-integration.md). A fragment's own key
-/// stays the fragment's and is not registered.
+/// stays the fragment's and is not registered. An agent and a computer each
+/// have a designated owner, a person; a computer is a machine its owner
+/// paired (`fragment login --computer`), which acts only where it is a
+/// member, never as its owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdentityKind {
     Person,
     Agent,
+    Computer,
 }
 
 impl IdentityKind {
@@ -578,6 +584,7 @@ impl IdentityKind {
         match self {
             IdentityKind::Person => "person",
             IdentityKind::Agent => "agent",
+            IdentityKind::Computer => "computer",
         }
     }
 
@@ -585,6 +592,7 @@ impl IdentityKind {
         match s {
             "person" => Some(IdentityKind::Person),
             "agent" => Some(IdentityKind::Agent),
+            "computer" => Some(IdentityKind::Computer),
             _ => None,
         }
     }
@@ -598,11 +606,11 @@ pub struct Identity {
     /// `id:` and 32 hex.
     pub id: String,
     pub kind: IdentityKind,
-    /// An agent's owner.
+    /// An agent's or a computer's owner.
     #[serde(default)]
     pub owner: Option<String>,
-    /// A person's username; an agent's owner's (the namespace its fragments
-    /// go in). `None` until a person chooses one.
+    /// A person's username; an agent's or computer's owner's (the namespace
+    /// its fragments go in). `None` until a person chooses one.
     #[serde(default)]
     pub username: Option<String>,
 }
@@ -673,9 +681,12 @@ pub struct KeyView {
 pub struct IdentityView {
     pub id: String,
     pub kind: IdentityKind,
-    /// An agent's owner.
+    /// An agent's or a computer's owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// A computer's name, as its owner paired it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// A person's username (decision 16): their fragments are
     /// `<label>.<username>`. An agent's fragments go under its owner's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -688,12 +699,25 @@ pub struct IdentityView {
     /// A person's agents.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<String>,
+    /// A person's computers (a removed one is not listed).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub computers: Vec<ComputerRef>,
     /// A person's sign-ins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subjects: Vec<Subject>,
     /// Whether this answer made it (a registration's replay answers false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<bool>,
+}
+
+/// One of a person's computers, as their identity lists it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerRef {
+    pub id: String,
+    /// A label, unique among its owner's computers.
+    pub name: String,
+    pub paired_at: i64,
 }
 
 /// `PUT /api/f/<name>/members/<npub>` (owner)
@@ -1262,6 +1286,11 @@ mod tests {
         let bare: Identity = serde_json::from_str(r#"{"id":"id:0123456789abcdef0123456789abcdef","kind":"person"}"#).unwrap();
         assert_eq!((bare.owner, bare.username), (None, None));
         assert!(serde_json::from_str::<Identity>(r#"{"id":"id:0123456789abcdef0123456789abcdef","kind":"robot"}"#).is_err(), "an unknown kind is refused");
+        let computer: Identity = serde_json::from_str(r#"{"id":"id:0123456789abcdef0123456789abcdef","kind":"computer","owner":"id:ffffffffffffffffffffffffffffffff"}"#).unwrap();
+        assert_eq!(computer.kind, IdentityKind::Computer);
+        for kind in [IdentityKind::Person, IdentityKind::Agent, IdentityKind::Computer] {
+            assert_eq!(IdentityKind::parse(kind.as_str()), Some(kind), "a kind's column reads back as itself");
+        }
         let subject = Subject { issuer: "workos:client_1".into(), email: None, linked_at: 7 };
         assert_eq!(serde_json::to_value(&subject).unwrap(), serde_json::json!({ "issuer": "workos:client_1", "email": null, "linkedAt": 7 }));
     }

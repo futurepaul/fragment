@@ -221,12 +221,12 @@ async fn profiles(env: &Env, mut ids: Vec<String>) -> BTreeMap<String, Profile> 
 }
 
 /// Someone as a page shows them: a picture (or an initial), and their
-/// username, or whose agent they are.
+/// username, or whose agent or computer they are.
 fn person(id: &str, p: Option<&Profile>, me: &str) -> String {
     let (name, initial) = match p {
-        Some(Profile { kind: fragment_proto::IdentityKind::Agent, username, .. }) => {
+        Some(Profile { kind: kind @ (fragment_proto::IdentityKind::Agent | fragment_proto::IdentityKind::Computer), username, .. }) => {
             let u = username.as_deref().unwrap_or("someone");
-            (format!("{}'s agent", esc(u)), "✦".to_string())
+            (format!("{}'s {}", esc(u), kind.as_str()), "✦".to_string())
         }
         Some(Profile { username: Some(u), .. }) => (format!("@{}", esc(u)), u.chars().next().unwrap_or('?').to_uppercase().to_string()),
         _ => (format!("<code>{}</code>", esc(&npub::display(id))), "?".to_string()),

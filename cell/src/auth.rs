@@ -19,6 +19,8 @@
 //!                                 carries the key's own proof (a NIP-98 event by it for
 //!                                 `POST <platform>/cli/approve`, ten minutes good), so
 //!                                 approving adds the key at once
+//!   GET  /cli?key=&proof=&computer=<name>   a machine's key, as the person's computer
+//!                                 (an identity they own); its proof names it, in its URL
 //!   POST /cli/approve             (the form)
 //!
 //! Every fragment's origin is one site with the platform, so its pages'
@@ -73,20 +75,36 @@ const LINK_PROOF_MAX: usize = 4096;
 /// that form encoding may triple.
 const APPROVE_FORM_MAX_BYTES: usize = 16 * 1024;
 const _: () = assert!(APPROVE_FORM_MAX_BYTES >= 3 * LINK_PROOF_MAX + 256, "the form holds the longest proof, encoded");
+/// The computer an approval names (`computer=`, a label), if any: `None`
+/// for a person's own key.
+fn computer_named(raw: Option<String>) -> CellResult<Option<String>> {
+    match raw.filter(|n| !n.is_empty()) {
+        Some(name) if fragment_proto::valid_label(&name) => Ok(Some(name)),
+        Some(_) => Err(CellError::invalid("a computer's name is a label: lowercase letters, digits, and single dashes")),
+        None => Ok(None),
+    }
+}
+
 /// A form of a few short fields: a new fragment's label and template, or a
 /// username.
 const SHORT_FORM_MAX_BYTES: usize = 4 * 1024;
 
 /// The key an approval link's proof is by, if it is good: a NIP-98 event
-/// by that key for `POST <platform>/cli/approve`, made within ten minutes.
-fn link_proof(platform: &str, key_hex: &str, proof: &str) -> CellResult<()> {
+/// by that key for `POST <platform>/cli/approve`, made within ten minutes;
+/// a computer's names it in the URL (`?computer=<name>`), so a proof made
+/// to pair a computer never adds its key to the person, nor the other way.
+fn link_proof(platform: &str, key_hex: &str, proof: &str, computer: Option<&str>) -> CellResult<()> {
     let stale = || CellError::invalid("this approval link is not good (it is older than ten minutes, or for another key): run `fragment login` again for a fresh one");
     if proof.is_empty() || proof.len() > LINK_PROOF_MAX {
         return Err(stale());
     }
+    assert!(computer.is_none_or(fragment_proto::valid_label), "a computer's name is checked before its proof");
+    let approve = match computer {
+        Some(name) => format!("{platform}/cli/approve?computer={name}"),
+        None => format!("{platform}/cli/approve"),
+    };
     let now_s = crate::js::now_ms() / 1000;
-    let signer = fragment_nip98::verify(Some(&format!("Nostr {proof}")), "POST", &format!("{platform}/cli/approve"), &[], now_s, LINK_PROOF_WINDOW_S)
-        .map_err(|_| stale())?;
+    let signer = fragment_nip98::verify(Some(&format!("Nostr {proof}")), "POST", &approve, &[], now_s, LINK_PROOF_WINDOW_S).map_err(|_| stale())?;
     if signer != key_hex {
         return Err(stale());
     }
@@ -557,23 +575,38 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 let key = query(url, "key").unwrap_or_default();
                 let proof = query(url, "proof").unwrap_or_default();
                 let Some(hex) = npub::parse(&key) else { return page(400, "Not a key", "<p>This link names no key. Run <code>fragment login</code> again.</p>") };
-                if let Err(e) = link_proof(&platform, &hex, &proof) {
+                let computer = match computer_named(query(url, "computer")) {
+                    Ok(computer) => computer,
+                    Err(e) => return page(400, "Not a computer's name", &format!("<p>{}</p>", esc(&e.message))),
+                };
+                if let Err(e) = link_proof(&platform, &hex, &proof, computer.as_deref()) {
                     return page(400, "This link has expired", &format!("<p>{}</p>", esc(&e.message)));
                 }
                 let Some((_, live)) = platform_session(&req, env, url).await? else {
-                    return to_login(&platform, &format!("/cli?key={}&proof={}", enc(&key), enc(&proof)));
+                    let named = computer.as_deref().map(|c| format!("&computer={c}")).unwrap_or_default();
+                    return to_login(&platform, &format!("/cli?key={}&proof={}{named}", enc(&key), enc(&proof)));
                 };
                 let (who, email) = (live.identity, live.email.unwrap_or_default());
+                let you = esc(if email.is_empty() { &who.id } else { &email });
                 let npub = npub::encode(&hex);
                 let tail = &npub[npub.len() - 8..];
+                // a computer is not its owner: its page says so, and what it may do, first
+                let (title, lead, button, named) = match &computer {
+                    Some(c) => (
+                        "Pair a computer",
+                        format!("<p>A machine wants to be your computer <b>{c}</b>: an identity of its own, owned by <b>{you}</b>, that never acts as you. It works only in the fragments you add it to (<code>fragment members add &lt;fragment&gt; {c} --role editor</code>) and in those it makes, which are yours, on your budget. It cannot add keys, share anything, or make agents; <code>fragment computers rm {c}</code> removes it.</p>"),
+                        format!("Pair {c} as your computer"),
+                        format!("<input type=\"hidden\" name=\"computer\" value=\"{c}\">"),
+                    ),
+                    None => ("Add a key to you", format!("<p>A <code>fragment</code> CLI wants to act as <b>{you}</b>.</p>"), "Add this key".to_string(), String::new()),
+                };
                 page(
                     200,
-                    "Add a key to you",
+                    title,
                     &format!(
-                        "<p>A <code>fragment</code> CLI wants to act as <b>{}</b>. Its key ends in <code>{tail}</code>; check that your terminal shows the same ending.</p>
-<form method=\"post\" action=\"/cli/approve\"><input type=\"hidden\" name=\"key\" value=\"{}\"><input type=\"hidden\" name=\"proof\" value=\"{}\"><button>Add this key</button></form>
+                        "{lead}<p>Its key ends in <code>{tail}</code>; check that its terminal shows the same ending.</p>
+<form method=\"post\" action=\"/cli/approve\"><input type=\"hidden\" name=\"key\" value=\"{}\"><input type=\"hidden\" name=\"proof\" value=\"{}\">{named}<button>{button}</button></form>
 <p>Didn't run <code>fragment login</code>? Close this page.</p>",
-                        esc(if email.is_empty() { &who.id } else { &email }),
                         esc(&npub),
                         esc(&proof)
                     ),
@@ -585,13 +618,19 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 let bytes = crate::read_body(&mut req, APPROVE_FORM_MAX_BYTES).await?;
                 let field = |name: &str| url::form_urlencoded::parse(&bytes).find(|(k, _)| k == name).map(|(_, v)| v.into_owned()).unwrap_or_default();
                 let hex = npub::parse(&field("key")).ok_or_else(|| CellError::invalid("the form names no key"))?;
+                let computer = computer_named(Some(field("computer")))?;
                 let Some(token) = cookie_of(&req, SESSION_COOKIE, secure(url), "/")? else {
                     return Err(CellError::new(ErrorCode::Unauthenticated, "sign in first"));
                 };
-                link_proof(&platform, &hex, &field("proof"))?;
+                link_proof(&platform, &hex, &field("proof"), computer.as_deref())?;
                 // the registry checks the session is live as it adds the key
-                ask_registry(env, &calls::ApproveKey { token, key: hex }).await?;
-                page(200, "Key added", "<p>This key is yours now. A <code>fragment login</code> waiting in a terminal finishes on its own.</p>")
+                let Some(name) = computer else {
+                    ask_registry(env, &calls::ApproveKey { token, key: hex }).await?;
+                    return page(200, "Key added", "<p>This key is yours now. A <code>fragment login</code> waiting in a terminal finishes on its own.</p>");
+                };
+                ask_registry(env, &calls::PairComputer { token, key: hex, name: name.clone() }).await?;
+                let done = format!("<p><b>{name}</b> is your computer now, acting only where you let it. A <code>fragment login --computer</code> waiting on it finishes on its own.</p>");
+                page(200, "Computer paired", &done)
             }
             (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
         }

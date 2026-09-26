@@ -286,9 +286,12 @@ impl FragmentCell {
         )?;
         self.index_change(&target.id, Some(body.role))?;
         self.sharing_changed()?;
-        // sharing with an agent says so: its owner reads what it reads (FIN-11)
+        // sharing with an agent or a computer says so: its owner reads what it reads (FIN-11)
         let summary = match &target.owner {
-            Some(owner) => format!("{} (an agent) is now {}; its owner {owner} reads what it reads", target.id, body.role.as_str()),
+            Some(owner) => {
+                let what = if target.kind == IdentityKind::Computer { "a computer" } else { "an agent" };
+                format!("{} ({what}) is now {}; its owner {owner} reads what it reads", target.id, body.role.as_str())
+            }
             None => format!("{} is now {}", target.id, body.role.as_str()),
         };
         self.event("member.set", &summary, json!({ "principal": target.id, "role": body.role, "kind": target.kind, "owner": target.owner }));

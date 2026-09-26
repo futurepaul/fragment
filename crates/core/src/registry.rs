@@ -5,11 +5,12 @@
 use fragment_proto::IdentityKind;
 
 /// Who manages an identity's keys (rule 4): a person manages their own; an
-/// agent's are managed by its owner, never by the agent itself.
+/// agent's and a computer's are managed by their owner, never by
+/// themselves (a computer that approved keys would be its owner's reach).
 pub fn may_manage_keys(by: &str, identity: &str, kind: IdentityKind, owner: Option<&str>) -> bool {
     match kind {
         IdentityKind::Person => by == identity,
-        IdentityKind::Agent => owner == Some(by),
+        IdentityKind::Agent | IdentityKind::Computer => owner == Some(by),
     }
 }
 
@@ -38,6 +39,10 @@ mod tests {
         // an agent never manages its own keys, and nobody else's
         assert!(!may_manage_keys("id:a", "id:a", Agent, Some("id:p")));
         assert!(!may_manage_keys("id:q", "id:a", Agent, Some("id:p")));
+        // nor does a computer: its owner does
+        assert!(may_manage_keys("id:p", "id:c", Computer, Some("id:p")));
+        assert!(!may_manage_keys("id:c", "id:c", Computer, Some("id:p")));
+        assert!(!may_manage_keys("id:c", "id:p", Person, None));
     }
 
     #[test]
