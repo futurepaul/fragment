@@ -1691,6 +1691,9 @@ fn run(cli: Cli) -> Result<()> {
                 if j {
                     return Err(usage("--follow streams JSON lines; --json does not apply"));
                 }
+                // the live socket takes a full name (`<label>.<username>`); the
+                // signed API resolves a bare label to one of yours, so ask it
+                let name = if name.contains('.') { name } else { c.call_as::<FragmentStatus>(c.get(&format!("/api/f/{name}/status"))?)?.name };
                 watch::follow_channel(&c, &name, &channel, after)?;
                 return Ok(());
             }
