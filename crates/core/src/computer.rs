@@ -299,6 +299,8 @@ mod tests {
 
     impl Drop for Home {
         fn drop(&mut self) {
+            // what a test left running there (a killed runner's timeout watcher)
+            let _ = Command::new("pkill").arg("-f").arg(&self.0).status();
             let _ = std::fs::remove_dir_all(Path::new(&self.0));
         }
     }
@@ -347,7 +349,10 @@ mod tests {
     #[test]
     fn a_command_whose_runner_died_was_interrupted() {
         let home = Home::new("died");
-        home.start("c1", &exec("sleep 5"));
+        let mut e = exec("sleep 5");
+        // its timeout watcher outlives the killed runner as long as this
+        e.timeout_ms = Some(3000);
+        home.start("c1", &e);
         let pid = || std::fs::read_to_string(home.path(".fragment/exec/c1/pid")).map(|p| p.trim().to_string()).unwrap_or_default();
         let t0 = Instant::now();
         while pid().is_empty() && t0.elapsed() < Duration::from_secs(5) {
