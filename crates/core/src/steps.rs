@@ -73,6 +73,30 @@ pub enum Step {
     /// A started turn's state, by its id (the start's answer).
     #[serde(rename = "agent.poll")]
     AgentPoll { turn: String },
+    /// `job.computer.exec`'s first step: a command on the fragment's own
+    /// computer, named by the run and this step, so a retried or replayed
+    /// step reattaches to it rather than run it again.
+    #[serde(rename = "computer.exec")]
+    ComputerExec(ComputerExec),
+    /// A started command's state, by its id (the start's answer).
+    #[serde(rename = "computer.exec.poll")]
+    ComputerExecPoll { exec: String },
+}
+
+/// `job.computer.exec(command, {timeout, cwd, env})`: `bash -lc command`
+/// on the computer (checks: `crate::computer::check`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComputerExec {
+    pub command: String,
+    /// None: `computer::TIMEOUT_DEFAULT_MS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    /// None: `~/fragment`; relative or `~/…`: under the computer's home.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Plain values: no secret is added to them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 /// `job.agent({prompt, conversation?, channel?})`: the message, the
@@ -214,6 +238,8 @@ impl Step {
             Step::AiVideoSave { .. } => "ai.video.save",
             Step::AgentStart(_) => "agent.start",
             Step::AgentPoll { .. } => "agent.poll",
+            Step::ComputerExec(_) => "computer.exec",
+            Step::ComputerExecPoll { .. } => "computer.exec.poll",
         }
     }
 }
@@ -273,13 +299,15 @@ mod tests {
             ("ai.video.save", json!({ "id": "v1", "path": "cat.mp4", "url": "https://openrouter.ai/v1" })),
             ("agent.start", json!({ "prompt": "summarize today", "conversation": "daily", "channel": "ask" })),
             ("agent.poll", json!({ "turn": "0123456789abcdef01234567" })),
+            ("computer.exec", json!({ "command": "echo hi", "timeout_ms": 5000, "cwd": "app", "env": { "N": "1" } })),
+            ("computer.exec.poll", json!({ "exec": "0123456789abcdef01234567" })),
         ]
     }
 
     #[test]
     fn every_kind_platform_mjs_sends_decodes_as_itself() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 17, "a new kind of step is added here too");
+        assert_eq!(kinds.len(), 19, "a new kind of step is added here too");
         for (kind, args) in kinds {
             let s = step(kind, args.clone()).unwrap_or_else(|e| panic!("{kind}: {e}"));
             assert_eq!(s.kind(), kind);
@@ -302,6 +330,8 @@ mod tests {
         assert_eq!((v.duration, v.model), (None, None));
         let Ok(Step::AgentStart(a)) = step("agent.start", json!({ "prompt": "p" })) else { panic!() };
         assert_eq!((a.conversation, a.channel), (None, None), "the run's own conversation, posted nowhere");
+        let Ok(Step::ComputerExec(e)) = step("computer.exec", json!({ "command": "ls" })) else { panic!() };
+        assert_eq!((e.timeout_ms, e.cwd, e.env.len()), (None, None, 0), "10 minutes, in ~/fragment, no env");
         let Ok(Step::AiText(t)) = step("ai.text", json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }], "extra": true })) else { panic!() };
         assert_eq!((t.prompt, t.messages.map(|m| m.len())), (None, Some(1)), "a key the platform does not read is ignored");
     }
@@ -327,6 +357,9 @@ mod tests {
         refused("agent.start", json!({ "conversation": "daily" }), "missing field `prompt`");
         refused("agent.start", json!({ "prompt": 7 }), "invalid type");
         refused("agent.poll", json!({}), "missing field `turn`");
+        refused("computer.exec", json!({ "timeout_ms": 5 }), "missing field `command`");
+        refused("computer.exec", json!({ "command": "ls", "env": { "N": 1 } }), "invalid type");
+        refused("computer.exec.poll", json!({}), "missing field `exec`");
     }
 
     #[test]

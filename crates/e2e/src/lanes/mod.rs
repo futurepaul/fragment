@@ -24,6 +24,7 @@ mod phase7;
 mod plane;
 mod posts;
 mod restart;
+mod runtime;
 mod share;
 mod signin;
 mod site;
@@ -53,6 +54,7 @@ const LANES: &[Lane] = &[
     signin::signin,
     computers::computers,
     computers::sprites,
+    runtime::computer_runtime,
     members::secrets,
     plane::files,
     plane::deploy,

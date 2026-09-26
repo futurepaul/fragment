@@ -52,7 +52,7 @@ debt ledger).
   builds `cell/`, `agent/`, and the CLI (with its `computer` feature),
   then runs `crates/e2e` against a fresh `celld dev` node and the
   in-process fakes (sections, in order: auth, create, lockdown, keys,
-  members, identities, signin, computers, sprites, secrets, files, deploy, templates,
+  members, identities, signin, computers, sprites, computer-runtime, secrets, files, deploy, templates,
   desktop, share, phase7, ops, public, effects, facet-cap, app-lockdown,
   site, watch, schemas, channels, live, routes, cli, browser, jobs,
   triggers, appfiles, blobs, notes, push, ai, budget, agents, addon, chat,
