@@ -420,7 +420,13 @@ pub fn follow_channel(client: &Client, name: &str, channel: &str, after: i64) ->
                 let body = resp.body().as_deref().map(String::from_utf8_lossy).unwrap_or_default().to_string();
                 anyhow::bail!("the live socket refused ({}): {body}", resp.status());
             }
-            Err(_) => {}
+            // said, not swallowed: a socket that never connects (a wss:// URL
+            // this build cannot speak, a host that is down) must not look idle
+            Err(tungstenite::Error::Http(resp)) => {
+                let body = resp.body().as_deref().map(String::from_utf8_lossy).unwrap_or_default().to_string();
+                eprintln!("warning: the live socket answered {}: {body} (trying again in {backoff} s)", resp.status());
+            }
+            Err(e) => eprintln!("warning: the live socket: {e} (trying again in {backoff} s)"),
         }
         std::thread::sleep(Duration::from_secs(backoff));
         backoff = (backoff * 2).min(30);
@@ -430,6 +436,18 @@ pub fn follow_channel(client: &Client, name: &str, channel: &str, after: i64) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hosted fleets serve the live socket over TLS: a build without
+    /// tungstenite's TLS feature refuses every `wss://` URL before it dials,
+    /// and `--follow` waited forever (found on fragment.club, 2026-09-26).
+    #[test]
+    fn the_live_socket_speaks_wss() {
+        match tungstenite::connect("wss://127.0.0.1:9/") {
+            Err(tungstenite::Error::Url(tungstenite::error::UrlError::TlsFeatureNotEnabled)) => panic!("this build cannot speak wss://"),
+            Err(_) => {} // it dialed, and nothing answers on port 9: the TLS path exists
+            Ok(_) => panic!("something answered on 127.0.0.1:9"),
+        }
+    }
     use crate::auth;
     use crate::sync::Mode;
     use std::collections::BTreeMap;
