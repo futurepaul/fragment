@@ -4,7 +4,7 @@
 //! person, signed in and holding its link but no member, says what they
 //! ate from its page; the agent calls `log_food` for each item for them
 //! (the rows are theirs) and answers on the channel. An
-//! anonymous post starts nothing; the agent is offered only the operations
+//! anonymous post is refused (`ask` says `signedIn`); the agent is offered only the operations
 //! its block names; its owner's budget pays for it; a job's turn
 //! (`job.agent`) runs once across a replay; a redeploy keeps the one agent,
 //! and one without the block removes it.
@@ -14,6 +14,7 @@ use std::time::Duration;
 use anyhow::Result;
 use fragment_fakes::openrouter::Reply;
 use fragment_nip98::Keys;
+use fragment_proto::ErrorCode;
 use serde_json::{json, Value};
 
 use super::jobs::{settle, started};
@@ -120,8 +121,8 @@ pub fn addon(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "owner": budget.body, "visitor": visitors.body["spentMicros"] }),
     );
 
-    // an anonymous visitor holding the link may post; the agent notes it and starts nothing
-    let before = s.openrouter.chats().len();
+    // an anonymous visitor holding the link is a viewer, and `ask` takes posts from people signed in
+    let before = (s.openrouter.chats().len(), records(api, &owner, &name, "ask").len());
     let anon = api.call(Call {
         method: "POST",
         url: api.site_url(&name, "__op/channels/ask"),
@@ -130,9 +131,11 @@ pub fn addon(s: &mut Suite, api: &Api) -> Result<()> {
         cookie: Some(link.clone()),
         ..Call::default()
     })?;
-    let noted = || agents.signed(&owner, "GET", &format!("/api/a/{name}"), None).map(|v| v.body["ignored"].as_array().is_some_and(|i| i.iter().any(|i| i["fragment"] == name.as_str()))).unwrap_or(false);
-    let ignored = s.eventually(wait, noted);
-    s.ok("an anonymous post starts nothing", anon.status == 200 && ignored && s.openrouter.chats().len() == before, &anon);
+    s.ok(
+        "an anonymous post is refused (401, signed in only): it appends nothing and starts nothing",
+        anon.code() == Some(ErrorCode::Unauthenticated) && (s.openrouter.chats().len(), records(api, &owner, &name, "ask").len()) == before,
+        &anon,
+    );
 
     job_turn(s, api, &owner, &visiting, &name, &agent)?;
 

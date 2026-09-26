@@ -99,6 +99,17 @@ caller (`principal`, `role`) and, in a mutation, collects its effects
   **effects** through `call`; the ledger row keeps them, so the ledger is
   also an outbox. Ledger rows are kept seven days: a replay after that
   runs again.
+  An **ephemeral** mutation (`"ephemeral": true`, for a "latest value"
+  write such as a screen's frame) keeps no ledger row, which is a few
+  hundred bytes of the app's 16 MiB a call. It keeps: its writes and its
+  answer in one `transactionSync` (a throw rolls them back), the role and
+  schema checks, the database's cap, and the change signal to live
+  views. It gives up: the replay (the same id runs again, with any input:
+  a retried call, job step, or triggered run may run it twice), its
+  effects (their outbox is the ledger row, so publishing, pushing, or
+  writing files rolls it back, 422), the `ops` record, and the pending
+  row: nothing is left to settle after a crash (its writes committed or
+  did not).
 - **job** — runs as a Workflow instance, one per run; its method gets
   `(input, job)`, and each `await job.call(op)` (a query, a mutation, or
   another job), `job.fetch(url)` (the external effect: secrets are added
@@ -161,7 +172,9 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   them. Clients never append: records come from the platform and from
   mutations' effects, except on a channel the fragment declares
   postable, where the platform appends a member's record for them
-  (ROADMAP decision 18).
+  (ROADMAP decision 18); one that says `"signedIn": true` takes posts
+  from signed-in posters only (an anonymous visitor holding the role is
+  refused).
 - Subscribers: hibernatable WebSockets that resume from a cursor (a
   WebSocket closes when the cell moves, so clients reconnect with their
   last `seq`); channel-triggered operations; agents; and outbound

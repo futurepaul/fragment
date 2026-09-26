@@ -60,6 +60,23 @@ export class App extends DurableObject {
     }
   }
 
+  // ephemeral (fragment.json): a row, and no ledger row
+  latest({ slug }) {
+    this.ctx.storage.sql.exec("INSERT INTO notes (slug) VALUES (?)", slug);
+    return { n: this.count().n };
+  }
+
+  // ephemeral, and publishes: refused, and rolled back
+  loud(_input, call) {
+    this.ctx.storage.sql.exec("INSERT INTO notes (slug) VALUES ('loud')");
+    call.publish("feed", { slug: "loud" }, "noted");
+  }
+
+  // the ledger rows of an operation id (keyed <principal>/<id>)
+  ledgered({ id }) {
+    return { n: this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM _fragment_ops WHERE substr(id, instr(id, '/') + 1) = ?", id).one().n };
+  }
+
   // a ledger row of the app's own making, naming its caller as the author
   forge(_input, call) {
     const effects = [{ channel: "feed", kind: "forged", body: { by: "the app" } }];

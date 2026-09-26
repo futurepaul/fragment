@@ -478,14 +478,17 @@ export class App extends AuthorApp {
 
   // meta.run is the supervisor's number for this run, kept with the row;
   // meta.ledgerMs is how long an id is a replay (ops::LEDGER_KEPT_MS).
+  // meta.ephemeral (fragment.json's): no ledger row, so no replay, and no
+  // effects, which would have no outbox.
   #mutate(id, name, inputSha, input, meta) {
     const sql = this.ctx.storage.sql;
-    if (!Number.isSafeInteger(meta.run) || !Number.isSafeInteger(meta.ledgerMs) || meta.ledgerMs <= 0) {
+    const ephemeral = meta.ephemeral === true;
+    if (!ephemeral && (!Number.isSafeInteger(meta.run) || !Number.isSafeInteger(meta.ledgerMs) || meta.ledgerMs <= 0)) {
       throw new Error("the supervisor names the run and the ledger's window");
     }
     const now = Date.now();
     return this.ctx.storage.transactionSync(() => {
-      const prior = sql.exec(`SELECT input_sha, result, effects, run, at FROM ${LEDGER} WHERE id = ?`, id).toArray()[0];
+      const prior = ephemeral ? undefined : sql.exec(`SELECT input_sha, result, effects, run, at FROM ${LEDGER} WHERE id = ?`, id).toArray()[0];
       if (prior && prior.at >= now - meta.ledgerMs) {
         if (prior.input_sha !== inputSha) return JSON.stringify({ error: "conflicting_body" });
         // the stored texts as they are: the supervisor checks them
@@ -501,6 +504,11 @@ export class App extends AuthorApp {
       }
       const text = resultText(out);
       const effects = JSON.stringify(effectsOf(call));
+      if (ephemeral) {
+        if (effects !== "[]") throw new Error(`${name} is ephemeral (fragment.json): with no ledger row to apply them from, it may not publish, push, or write files`);
+        if (sql.databaseSize > APP_DB_MAX_BYTES) throw STORAGE_FULL;
+        return mutated(false, null, effects, text);
+      }
       if (LONE_SURROGATE.test(effects)) {
         throw new Error("a mutation's effects hold whole characters: this text holds half of one (a lone surrogate)");
       }

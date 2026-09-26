@@ -77,12 +77,14 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
             Some(schema) => SqlStorageValue::from(schema.to_string()),
             None => SqlStorageValue::Null,
         };
-        sql.exec("INSERT INTO code_ops (op, kind, role, input) VALUES (?, ?, ?, ?)", vec![op.as_str().into(), d.kind.as_str().into(), d.role.as_str().into(), input])?;
+        let ephemeral = SqlStorageValue::Integer(d.ephemeral.into());
+        sql.exec("INSERT INTO code_ops (op, kind, role, input, ephemeral) VALUES (?, ?, ?, ?, ?)", vec![op.as_str().into(), d.kind.as_str().into(), d.role.as_str().into(), input, ephemeral])?;
     }
     for (channel, d) in code.channels {
         assert!(d.post.is_none_or(|p| p >= d.read), "a checked manifest's post role is never looser than its read");
         let post = d.post.map_or(SqlStorageValue::Null, |p| p.as_str().into());
-        sql.exec("INSERT INTO code_channels (channel, read, post) VALUES (?, ?, ?)", vec![channel.as_str().into(), d.read.as_str().into(), post])?;
+        let signed_in = SqlStorageValue::Integer(d.signed_in.into());
+        sql.exec("INSERT INTO code_channels (channel, read, post, signed_in) VALUES (?, ?, ?, ?)", vec![channel.as_str().into(), d.read.as_str().into(), post, signed_in])?;
     }
     for (i, t) in code.triggers.iter().enumerate() {
         let (kind, target) = t.on.parts();
@@ -107,12 +109,18 @@ fn clear_installed(sql: &SqlStorage) -> Result<()> {
 }
 
 /// Who may post to a channel came after the channel table (phase 7 slice
-/// B1): a table from before gains the column, and its channels take no
-/// posts. Runs in the constructor, before anything reads the channels.
+/// B1), then whether they must be signed in, and ephemeral mutations after
+/// the operation table: a table from before gains the columns, and its
+/// channels take no posts, from anyone, and its mutations keep ledger rows.
+/// Runs in the constructor, before anything reads the code tables.
 pub(crate) fn migrate_code(sql: &SqlStorage) {
-    let cols: Vec<Value> = sql.exec("PRAGMA table_info(code_channels)", None).and_then(|c| c.to_array()).expect("the channel table's columns read");
-    if !cols.iter().any(|c| c["name"] == "post") {
-        sql.exec("ALTER TABLE code_channels ADD COLUMN post TEXT", None).expect("the channel table migrates");
+    for (table, column, decl) in
+        [("code_channels", "post", "TEXT"), ("code_channels", "signed_in", "INTEGER NOT NULL DEFAULT 0"), ("code_ops", "ephemeral", "INTEGER NOT NULL DEFAULT 0")]
+    {
+        let cols: Vec<Value> = sql.exec(&format!("PRAGMA table_info({table})"), None).and_then(|c| c.to_array()).expect("a code table's columns read");
+        if !cols.iter().any(|c| c["name"] == column) {
+            sql.exec(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), None).expect("a code table migrates");
+        }
     }
 }
 
@@ -122,6 +130,7 @@ struct OpRow {
     kind: String,
     role: String,
     input: Option<String>,
+    ephemeral: i64,
 }
 
 /// One way to fail for a stored row that does not decode: the cell wrote
@@ -137,7 +146,7 @@ fn op_decl(row: OpRow) -> CellResult<(String, OpDecl)> {
         Some(text) => Some(serde_json::from_str(&text).map_err(|e| stored(&format!("operation {}", row.op), e))?),
         None => None,
     };
-    Ok((row.op, OpDecl { kind, role, input }))
+    Ok((row.op, OpDecl { kind, role, input, ephemeral: row.ephemeral != 0 }))
 }
 
 #[derive(Deserialize)]
@@ -145,13 +154,14 @@ struct ChannelRow {
     channel: String,
     read: String,
     post: Option<String>,
+    signed_in: i64,
 }
 
 fn channel_decl(row: ChannelRow) -> CellResult<(String, ChannelDecl)> {
     let role = |key: &str, text: &str| Role::parse(text).ok_or_else(|| stored(&format!("channel {}", row.channel), format!("{key} {text:?}")));
     let read = role("read", &row.read)?;
     let post = row.post.as_deref().map(|p| role("post", p)).transpose()?;
-    Ok((row.channel, ChannelDecl { read, post }))
+    Ok((row.channel, ChannelDecl { read, post, signed_in: row.signed_in != 0 }))
 }
 
 #[derive(Deserialize)]
@@ -713,7 +723,7 @@ impl FragmentCell {
 
     /// The installed operations (from the live commit); none without code.
     pub(crate) fn operations(&self) -> CellResult<BTreeMap<String, OpDecl>> {
-        self.typed::<OpRow>("SELECT op, kind, role, input FROM code_ops ORDER BY op", vec![])?.into_iter().map(op_decl).collect()
+        self.typed::<OpRow>("SELECT op, kind, role, input, ephemeral FROM code_ops ORDER BY op", vec![])?.into_iter().map(op_decl).collect()
     }
 
     /// The declared operation, or why there is none: no code, or no such
@@ -725,28 +735,29 @@ impl FragmentCell {
             kind: Option<String>,
             role: Option<String>,
             input: Option<String>,
+            ephemeral: Option<i64>,
         }
         let rows: Vec<Found> =
-            self.typed("SELECT o.op, o.kind, o.role, o.input FROM code c LEFT JOIN code_ops o ON o.op = ? WHERE c.id = 1", vec![op.into()])?;
+            self.typed("SELECT o.op, o.kind, o.role, o.input, o.ephemeral FROM code c LEFT JOIN code_ops o ON o.op = ? WHERE c.id = 1", vec![op.into()])?;
         let Some(found) = rows.into_iter().next() else {
             return Err(CellError::new(ErrorCode::NoCode, "the live commit has no app.mjs (deploy one)"));
         };
-        match (found.op, found.kind, found.role) {
-            (Some(op), Some(kind), Some(role)) => Ok(op_decl(OpRow { op, kind, role, input: found.input })?.1),
-            (None, None, None) => Err(CellError::new(ErrorCode::UnknownOperation, format!("no operation named {op:?}"))),
+        match (found.op, found.kind, found.role, found.ephemeral) {
+            (Some(op), Some(kind), Some(role), Some(ephemeral)) => Ok(op_decl(OpRow { op, kind, role, input: found.input, ephemeral })?.1),
+            (None, None, None, None) => Err(CellError::new(ErrorCode::UnknownOperation, format!("no operation named {op:?}"))),
             _ => Err(stored(&format!("operation {op}"), "a partial row")),
         }
     }
 
     /// The app channels the live code declares.
     pub(crate) fn declared_channels(&self) -> CellResult<BTreeMap<String, ChannelDecl>> {
-        self.typed::<ChannelRow>("SELECT channel, read, post FROM code_channels ORDER BY channel", vec![])?.into_iter().map(channel_decl).collect()
+        self.typed::<ChannelRow>("SELECT channel, read, post, signed_in FROM code_channels ORDER BY channel", vec![])?.into_iter().map(channel_decl).collect()
     }
 
     /// An app channel the live code declares (who reads it, who may post
     /// to it); `None` when it declares no such channel.
     pub(crate) fn declared_channel(&self, channel: &str) -> CellResult<Option<ChannelDecl>> {
-        let rows: Vec<ChannelRow> = self.typed("SELECT channel, read, post FROM code_channels WHERE channel = ?", vec![channel.into()])?;
+        let rows: Vec<ChannelRow> = self.typed("SELECT channel, read, post, signed_in FROM code_channels WHERE channel = ?", vec![channel.into()])?;
         Ok(rows.into_iter().next().map(channel_decl).transpose()?.map(|(_, d)| d))
     }
 

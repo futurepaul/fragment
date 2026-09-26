@@ -842,6 +842,10 @@ pub struct OpDecl {
     /// Its input's JSON Schema (the supported subset); also its tool schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<Value>,
+    /// A mutation whose calls leave no ledger row (`"ephemeral": true`):
+    /// no replay (the same id runs again) and no effects (docs/MODEL.md).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ephemeral: bool,
 }
 
 /// A channel as `fragment.json` declares it (app channels), or a built-in.
@@ -854,6 +858,10 @@ pub struct ChannelDecl {
     /// channel takes no posts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post: Option<Role>,
+    /// Only a signed-in poster's post is appended (`"signedIn": true`): an
+    /// anonymous visitor holding the `post` role is refused (401).
+    #[serde(default, rename = "signedIn", skip_serializing_if = "std::ops::Not::not")]
+    pub signed_in: bool,
 }
 
 /// One record in a channel. Records are appended by the platform (`events`,
@@ -1390,9 +1398,9 @@ mod tests {
     fn a_channel_without_post_reads_and_writes_as_before() {
         // code stored before posts (the code row's JSON columns) decodes
         let old: ChannelDecl = serde_json::from_str(r#"{"read":"viewer"}"#).unwrap();
-        assert_eq!(old, ChannelDecl { read: Role::Viewer, post: None });
+        assert_eq!(old, ChannelDecl { read: Role::Viewer, post: None, signed_in: false });
         assert_eq!(serde_json::to_string(&old).unwrap(), r#"{"read":"viewer"}"#);
-        let postable = ChannelDecl { read: Role::Public, post: Some(Role::Public) };
+        let postable = ChannelDecl { read: Role::Public, post: Some(Role::Public), signed_in: true };
         assert_eq!(serde_json::from_str::<ChannelDecl>(&serde_json::to_string(&postable).unwrap()).unwrap(), postable);
         assert!(serde_json::from_str::<PostRecord>(r#"{"id":"a","body":1,"kind":"x"}"#).is_err(), "a post names only its id and body");
         assert!(serde_json::from_str::<PostRecord>(r#"{"id":"a"}"#).is_err(), "a post has a body");

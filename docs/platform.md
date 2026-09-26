@@ -99,10 +99,6 @@ so no platform code names a template (`cell/src/agents.rs`,
   sent through the platform's sign-in for it and back; any other refusal
   a browser navigates to is the platform's page, not JSON (docs/api.md,
   Opening a fragment by its URL). An app's own answers pass as they are.
-
-- **A new desktop is its owner's alone**: made from the platform's
-  `desktop` template with no visibility asked, it is `members`
-  (`publish.rs`, `first_visibility`); every other template's is `link`.
 - **An agent's authority** in a turn is the lower of its asker's role
   and a cap (phase 7, decision 1).
 - **An agent in a chat posts its work** (phase 7, C): a turn a chat

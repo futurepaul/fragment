@@ -55,6 +55,10 @@ export class App extends DurableObject {
     return { n: this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM said").one().n };
   }
 
+  measure({ text }) {
+    return { chars: text.length };
+  }
+
   whoami(_input, call) {
     return { principal: call.principal, role: call.role };
   }

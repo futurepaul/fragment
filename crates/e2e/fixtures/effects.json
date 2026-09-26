@@ -10,7 +10,10 @@
     "wide": { "kind": "mutation" },
     "half": { "kind": "mutation" },
     "sneaky": { "kind": "mutation" },
-    "forge": { "kind": "mutation" }
+    "forge": { "kind": "mutation" },
+    "latest": { "kind": "mutation", "ephemeral": true, "input": { "type": "object", "required": ["slug"], "properties": { "slug": { "type": "string" } } } },
+    "loud": { "kind": "mutation", "ephemeral": true },
+    "ledgered": { "kind": "query", "input": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string" } } } }
   },
   "channels": { "feed": {} }
 }

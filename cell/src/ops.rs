@@ -297,6 +297,9 @@ impl FragmentCell {
         // Ids are the caller's: the ledger keys them by principal, so one
         // caller can neither replay nor block another's id.
         let ledger_id = format!("{}/{}", inv.principal, inv.id);
+        if inv.decl.ephemeral {
+            return self.mutate_ephemeral(facet, inv, &ledger_id, input_sha, input_text, meta).await;
+        }
         // One call settles an id at a time: a retry that arrives while the
         // first is still running waits for it, then replays.
         let _held = self.hold(&ledger_id).await;
@@ -353,6 +356,28 @@ impl FragmentCell {
             self.forget(&pending)?;
         }
         bounded(Answered { result: ran.result, replayed })
+    }
+
+    /// An ephemeral mutation (docs/MODEL.md): the facet runs it in its own
+    /// transaction and keeps no ledger row, so there is no pending row, no
+    /// `ops` record, and nothing to settle after a crash; the same id runs
+    /// again. It has no effects (their outbox is the ledger row): the facet
+    /// refuses them, and any that got past it (the app's code can defeat
+    /// that check) are refused here, its own writes standing.
+    async fn mutate_ephemeral(&self, facet: &js::Facet, inv: &Invocation<'_>, ledger_id: &str, input_sha: &str, input_text: &str, mut meta: Value) -> CellResult<Answered> {
+        meta["ephemeral"] = true.into();
+        let call = js::Mutation { ledger_id, op: inv.op, input_sha, input: input_text, meta: &meta };
+        let ran = match facet.mutate(call).await? {
+            Answer::Ran(ran) => ran,
+            Answer::Refused(why) => return Err(refused(why, inv.op)),
+        };
+        self.broadcast_changed(inv.op);
+        if ran.effects.as_array().is_none_or(|e| !e.is_empty()) {
+            let why = "an ephemeral mutation has no effects";
+            self.event("effects.refused", &format!("{} {}: {why}", inv.op, inv.id), json!({ "op": inv.op, "id": inv.id, "principal": npub::display(inv.principal), "why": why }));
+            return Err(CellError::new(ErrorCode::AppFailed, format!("{} committed, but the platform refused its effects: {why}", inv.op)));
+        }
+        bounded(Answered { result: ran.result, replayed: false })
     }
 
     /// The ledger window this fragment's facet keeps: `LEDGER_KEPT_MS`, or

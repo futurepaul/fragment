@@ -283,7 +283,8 @@ enum Cmd {
     Call {
         name: String,
         op: String,
-        /// The input, as JSON
+        /// The input, as JSON; @<file> reads it from a file, - from stdin
+        /// (for inputs over the 128 KiB a Linux argument holds)
         #[arg(long, default_value = "{}")]
         input: String,
         /// The operation id (default: a fresh one)
@@ -1641,6 +1642,11 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Call { name, op, input, id } => {
+            let input = match (input.as_str(), input.strip_prefix('@')) {
+                ("-", _) => std::io::read_to_string(std::io::stdin()).map_err(|e| usage(format!("--input -: reading stdin: {e}")))?,
+                (_, Some(path)) => std::fs::read_to_string(path).map_err(|e| usage(format!("--input @{path}: {e}")))?,
+                _ => input,
+            };
             let input: Value = serde_json::from_str(&input).map_err(|e| usage(format!("--input must be JSON: {e}")))?;
             let id = id.unwrap_or_else(|| format!("cli-{:016x}", rand::random::<u64>()));
             // the id makes the call safe to send again: it is retried like a
@@ -1675,7 +1681,8 @@ fn run(cli: Cli) -> Result<()> {
             let v = c.call(c.get(&format!("/api/f/{name}/channels"))?)?;
             json_exit(j, &v);
             for ch in v["channels"].as_array().cloned().unwrap_or_default() {
-                let post = ch["post"].as_str().map(|p| format!(", {p} posts")).unwrap_or_default();
+                let signed_in = if ch["signedIn"] == true { " (signed in)" } else { "" };
+                let post = ch["post"].as_str().map(|p| format!(", {p} posts{signed_in}")).unwrap_or_default();
                 println!("{}\t{}{post}\t{} records", ch["name"].as_str().unwrap_or(""), ch["read"].as_str().unwrap_or(""), ch["seq"]);
             }
         }

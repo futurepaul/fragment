@@ -9,7 +9,7 @@ use fragment_nip98::Keys;
 use fragment_proto::{limits, ErrorCode};
 use serde_json::{json, Value};
 
-use crate::api::{now_s, Api};
+use crate::api::{now_s, Api, Socket};
 use crate::Suite;
 
 const TODO_APP: &[u8] = include_bytes!("../../fixtures/todo.mjs");
@@ -299,5 +299,24 @@ pub fn effects(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and applies mutations", r.status == 200 && note(s, "four").as_deref() == Some(&b"four"[..]), &r);
     let forged = channel("feed").into_iter().filter(|r| r["kind"] == "forged").count();
     s.ok("the app's own ledger row is never applied", forged == 0 && applied("forged-1") == 0, json!(channel("feed")));
+
+    // an ephemeral mutation (fragment.json): its writes, no ledger row, no effects
+    let mut page = Socket::open(api, c["name"].as_str().unwrap_or_default(), "__live", Some(&owner), None)?;
+    page.until("hello", 5)?;
+    let before = notes();
+    let first = call("latest", "l1", json!({ "slug": "latest" }))?;
+    let changed = page.until("changed", 5).unwrap_or_default();
+    let again = [call("latest", "l1", json!({ "slug": "latest" }))?, call("latest", "l1", json!({ "slug": "other" }))?];
+    let ledgered = |id: &str| call("ledgered", "q", json!({ "id": id })).ok().and_then(|r| r.body["result"]["n"].as_i64());
+    s.ok(
+        "an ephemeral mutation writes and leaves no ledger row: the same id runs again (with any input), never a replay",
+        std::iter::once(&first).chain(&again).all(|r| r.status == 200 && r.body["replayed"] == false) && notes() == before + 3 && ledgered("l1") == Some(0),
+        format!("{first} {} {}", again[0], again[1]),
+    );
+    s.ok("while a mutation that is not keeps its row", ledgered("n4") == Some(1), format!("{:?}", ledgered("n4")));
+    s.ok("it writes no ops record, and its change still reaches live pages", applied("l1") == 0 && changed["op"] == "latest", &changed);
+    let r = call("loud", "l2", json!({}))?;
+    s.ok("an ephemeral mutation that publishes is refused, and rolled back (422)", r.status == 422 && r.message().contains("ephemeral") && notes() == before + 3, &r);
+    page.close();
     Ok(())
 }

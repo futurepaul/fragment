@@ -300,7 +300,8 @@ impl FragmentCell {
     /// A post to a channel its fragment.json declares postable: the
     /// platform appends the record as the poster, and no app code runs.
     /// `principal` is who the record names (an identity, or an anonymous
-    /// visitor's id); `link` says the caller holds the share link. The
+    /// visitor's id, whom a `signedIn` channel refuses); `link` says the
+    /// caller holds the share link. The
     /// caller's standing is read once and decided twice, as a call's is
     /// (ops.rs `call_op`), and a caller holding the public floor alone
     /// spends a public call. The same (principal, id) again answers the
@@ -327,6 +328,9 @@ impl FragmentCell {
         // its membership and never posts through it
         let role = decide(facts.visibility, standing, Purpose::Act, needs)?;
         assert!(role >= decl.read, "whoever may post to a channel may read it (checked at deploy)");
+        if decl.signed_in && caller.principal().is_none() {
+            return Err(CellError::new(ErrorCode::Unauthenticated, format!("channel {channel} takes posts from people signed in: sign in to post")));
+        }
         if role == Role::Public && !self.rate.borrow_mut().allow(principal, js::now_ms()) {
             return Err(CellError::new(ErrorCode::RateLimited, "too many public calls this minute; retry shortly"));
         }
@@ -390,16 +394,16 @@ impl FragmentCell {
     pub(crate) fn channels(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
         let mut out: Vec<Value> = vec![];
-        let mut add = |name: &str, read: Role, post: Option<Role>| -> CellResult<()> {
+        let mut add = |name: &str, read: Role, post: Option<Role>, signed_in: bool| -> CellResult<()> {
             let last = self.rows("SELECT MAX(seq) AS n FROM records WHERE channel = ?", vec![name.into()])?;
-            out.push(json!({ "name": name, "read": read, "post": post, "seq": last.first().and_then(|r| r["n"].as_i64()).unwrap_or(0) }));
+            out.push(json!({ "name": name, "read": read, "post": post, "signedIn": signed_in, "seq": last.first().and_then(|r| r["n"].as_i64()).unwrap_or(0) }));
             Ok(())
         };
         for b in BUILTIN_CHANNELS {
-            add(b, Role::Viewer, None)?;
+            add(b, Role::Viewer, None, false)?;
         }
         for (name, decl) in self.declared_channels()? {
-            add(&name, decl.read, decl.post)?;
+            add(&name, decl.read, decl.post, decl.signed_in)?;
         }
         json_response(&json!({ "channels": out }))
     }
