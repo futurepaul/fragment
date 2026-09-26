@@ -313,6 +313,7 @@ impl FragmentCell {
             self.del_meta(MetaKey::MetaLive)?;
             self.del_meta(MetaKey::CapabilitiesLive)?;
             self.del_meta(MetaKey::CodeError)?;
+            self.set_agent_live(None)?;
             js::abort_app_facet(&self.raw, "live is gone")?;
             return Ok(());
         };
@@ -327,11 +328,20 @@ impl FragmentCell {
                 }
             }
         };
+        // its agent's instructions are read here, so one that cannot be is refused with the rest
+        let agent = match &manifest.agent {
+            None => None,
+            Some(decl) => match self.agent_at_live(&repo, sha, decl).await? {
+                Ok(agent) => Some(agent),
+                Err(why) => return self.code_refused(sha, &why),
+            },
+        };
         match &manifest.meta {
             Some(meta) => self.set_meta(MetaKey::MetaLive, &serde_json::to_string(meta).expect("meta serializes"))?,
             None => self.del_meta(MetaKey::MetaLive)?,
         }
         self.set_meta(MetaKey::CapabilitiesLive, &serde_json::to_string(&manifest.capabilities).expect("a list serializes"))?;
+        self.set_agent_live(agent.as_ref())?;
         if self.tree_row("live", "app.mjs")?.is_none() {
             self.exec("DELETE FROM code", vec![])?;
             // no operations to run, so nothing for a trigger to start
@@ -507,7 +517,7 @@ impl FragmentCell {
     /// written its repo in the last day (a storage token was minted for it,
     /// or a webhook arrived), a run is in flight (each pass checks it
     /// against its Workflow) or held with a video's reservation to give
-    /// back, or a template or an owner's agent is still to land (each pass
+    /// back, or a template or a declared agent is still to land (each pass
     /// tries again). The rest of the alarm's work has due times of its own.
     /// A fragment nothing touches (a chat, from its second day) is woken
     /// once a day, and asks code.storage twice.

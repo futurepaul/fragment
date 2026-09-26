@@ -169,6 +169,9 @@ pub mod limits {
     /// How long `GET /api/a/{name}/state?wait_ms=` may wait in the agent's
     /// cell for its turn to end (inside a client's 30 s request timeout).
     pub const AGENT_STATE_WAIT_MS_MAX: u64 = 25_000;
+    /// An agent's model (an OpenRouter model id), and its instructions.
+    pub const AGENT_MODEL_MAX_BYTES: usize = 128;
+    pub const AGENT_INSTRUCTIONS_MAX_BYTES: usize = 8 * 1024;
 }
 
 /// A secret's name: `^[A-Z][A-Z0-9_]{0,63}$`.

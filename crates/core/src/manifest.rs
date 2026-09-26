@@ -6,7 +6,8 @@
 use std::collections::BTreeMap;
 
 use fragment_proto::{
-    limits, valid_channel_name, valid_op_name, ChannelDecl, OpDecl, OpKind, Role, TriggerDecl, TriggerOn, BUILTIN_CHANNELS, RESERVED_OP_NAMES,
+    limits, valid_channel_name, valid_op_name, valid_repo_path, ChannelDecl, OpDecl, OpKind, Role, TriggerDecl, TriggerOn, BUILTIN_CHANNELS,
+    RESERVED_OP_NAMES,
 };
 use serde_json::Value;
 
@@ -30,8 +31,28 @@ pub struct Manifest {
     /// fragment's owner viewing it ([`CAPABILITIES`]), `frame` only once
     /// they allow it too.
     pub capabilities: Vec<String>,
+    /// The agent people talk to through one of its channels (`agent`).
+    pub agent: Option<AgentDecl>,
     /// Top-level keys that no longer do anything here.
     pub ignored: Vec<&'static str>,
+}
+
+/// `agent`: the fragment's own agent, with instructions from a file of
+/// its repo (read at live), the operations of this fragment it may call,
+/// and a model; or, with `personal`, its owner's own agent
+/// (`agent.<username>`, with its own instructions and tools). Either
+/// answers messages posted to `channel`.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct AgentDecl {
+    pub channel: String,
+    #[serde(default)]
+    pub personal: bool,
+    #[serde(default)]
+    pub instructions: Option<String>,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 const ACCESS_KEYS: [&str; 3] = ["visibility", "editors", "viewers"];
@@ -146,6 +167,56 @@ fn trigger(i: usize, v: &Value, m: &Manifest) -> Result<TriggerDecl, String> {
     Ok(TriggerDecl { on, run })
 }
 
+/// `agent`, checked against the channels and operations declared: people
+/// post to its channel, and it calls only this fragment's operations an
+/// agent may (never an owner's: an agent acts as an editor at most).
+fn agent(v: &Value, m: &Manifest) -> Result<AgentDecl, String> {
+    let obj = v.as_object().ok_or("agent must be an object")?;
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "channel" | "personal" | "instructions" | "tools" | "model")) {
+        return Err(format!("agent has an unknown key {k:?} (channel, personal, instructions, tools, model)"));
+    }
+    let text = |k: &str| obj.get(k).map(|v| v.as_str().map(str::to_string).ok_or_else(|| format!("agent.{k} must be a string"))).transpose();
+    let channel = text("channel")?.ok_or("agent needs channel: a channel this fragment.json declares, which people post to")?;
+    match m.channels.get(&channel) {
+        Some(ChannelDecl { post: Some(_), .. }) => {}
+        Some(_) => return Err(format!("agent.channel: {channel} takes no posts (give it a post role)")),
+        None => return Err(format!("agent.channel names no declared channel: {channel:?}")),
+    }
+    let personal = match obj.get("personal") {
+        None => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err("agent.personal must be true or false".into()),
+    };
+    let tools: Vec<String> = match obj.get("tools") {
+        None => Vec::new(),
+        Some(Value::Array(list)) => list.iter().map(|t| t.as_str().map(str::to_string).ok_or("agent.tools are operation names")).collect::<Result<_, _>>()?,
+        Some(_) => return Err("agent.tools must be an array of operation names".into()),
+    };
+    let (instructions, model) = (text("instructions")?, text("model")?);
+    if personal {
+        if instructions.is_some() || model.is_some() || !tools.is_empty() {
+            return Err("agent.personal is its owner's own agent, with its own instructions, model, and tools: name only its channel".into());
+        }
+        return Ok(AgentDecl { channel, personal, ..AgentDecl::default() });
+    }
+    let instructions = instructions.ok_or("agent needs instructions (a file of this fragment, such as agent.md), or personal: true")?;
+    if !valid_repo_path(&instructions) {
+        return Err(format!("agent.instructions must be a relative path in the repo, not {instructions:?}"));
+    }
+    if model.as_ref().is_some_and(|m| m.is_empty() || m.len() > limits::AGENT_MODEL_MAX_BYTES) {
+        return Err(format!("agent.model is an OpenRouter model id of 1-{} bytes", limits::AGENT_MODEL_MAX_BYTES));
+    }
+    for (i, tool) in tools.iter().enumerate() {
+        match m.operations.get(tool) {
+            None => return Err(format!("agent.tools: {tool:?} is not an operation this fragment.json declares")),
+            Some(decl) if decl.role > Role::Editor => return Err(format!("agent.tools: {tool} needs the owner role; an agent acts as an editor at most")),
+            Some(_) if tools[..i].contains(tool) => return Err(format!("agent.tools names {tool} twice")),
+            Some(_) => {}
+        }
+    }
+    Ok(AgentDecl { channel, personal, instructions: Some(instructions), tools, model })
+}
+
 pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
     if bytes.len() > limits::MANIFEST_MAX_BYTES {
         return Err(format!("fragment.json is over {} bytes", limits::MANIFEST_MAX_BYTES));
@@ -239,6 +310,10 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
         }
         Some(_) => return Err("triggers must be an array".into()),
     }
+    match obj.get("agent") {
+        None | Some(Value::Null) => {}
+        Some(decl) => m.agent = Some(agent(decl, &m)?),
+    }
     Ok(m)
 }
 
@@ -293,6 +368,48 @@ mod tests {
         ] {
             let why = parse(bad).expect_err(&String::from_utf8_lossy(bad));
             assert!(why.contains(says), "{why}");
+        }
+    }
+
+    /// Goal: the agent block holds only what can work at live. Method: a
+    /// fragment with two operations and two channels, one postable; each
+    /// refusal names what is wrong.
+    #[test]
+    fn agents() {
+        let with = |agent: &str| {
+            let text = format!(
+                r#"{{"operations":{{"log":{{"kind":"mutation","role":"viewer"}},"wipe":{{"kind":"mutation","role":"owner"}},"today":{{"kind":"query"}}}},
+                "channels":{{"ask":{{"post":"viewer"}},"news":{{}}}},"agent":{agent}}}"#
+            );
+            parse(text.as_bytes())
+        };
+        let own = with(r#"{"instructions":"agent.md","tools":["log","today"],"channel":"ask","model":"z-ai/glm-5.3-flash"}"#).unwrap().agent.unwrap();
+        assert_eq!(
+            own,
+            AgentDecl { channel: "ask".into(), personal: false, instructions: Some("agent.md".into()), tools: vec!["log".into(), "today".into()], model: Some("z-ai/glm-5.3-flash".into()) }
+        );
+        let personal = with(r#"{"personal":true,"channel":"ask"}"#).unwrap().agent.unwrap();
+        assert_eq!(personal, AgentDecl { channel: "ask".into(), personal: true, ..AgentDecl::default() });
+        assert_eq!(with(r#"{"instructions":"a.md","channel":"ask"}"#).unwrap().agent.unwrap().tools, Vec::<String>::new(), "an agent that only talks");
+        assert_eq!(with("null").unwrap().agent, None, "no agent");
+        for (bad, says) in [
+            (r#"[]"#, "agent must be an object"),
+            (r#"{"instructions":"a.md","channel":"ask","memory":true}"#, "unknown key \"memory\""),
+            (r#"{"instructions":"a.md"}"#, "agent needs channel"),
+            (r#"{"instructions":"a.md","channel":"chat"}"#, "names no declared channel"),
+            (r#"{"instructions":"a.md","channel":"news"}"#, "news takes no posts"),
+            (r#"{"channel":"ask"}"#, "agent needs instructions"),
+            (r#"{"instructions":"../a.md","channel":"ask"}"#, "relative path"),
+            (r#"{"instructions":"a.md","channel":"ask","tools":["fetch"]}"#, "\"fetch\" is not an operation"),
+            (r#"{"instructions":"a.md","channel":"ask","tools":["wipe"]}"#, "wipe needs the owner role"),
+            (r#"{"instructions":"a.md","channel":"ask","tools":["log","log"]}"#, "names log twice"),
+            (r#"{"instructions":"a.md","channel":"ask","tools":"log"}"#, "array of operation names"),
+            (r#"{"instructions":"a.md","channel":"ask","model":""}"#, "agent.model"),
+            (r#"{"personal":true,"channel":"ask","tools":["log"]}"#, "name only its channel"),
+            (r#"{"personal":"yes","channel":"ask"}"#, "true or false"),
+        ] {
+            let why = with(bad).expect_err(bad);
+            assert!(why.contains(says), "{bad}: {why}");
         }
     }
 

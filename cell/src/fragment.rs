@@ -329,8 +329,13 @@ pub(crate) enum MetaKey {
     OutsideAt,
     /// A template still to commit (publish.rs).
     TemplatePending,
-    /// An owner's agent still to join (publish.rs).
+    /// What live's `agent` block declares, still to make so (agents.rs
+    /// `sync_agent`).
     AgentPending,
+    /// Live's `agent` block and its instructions' text (agents.rs `AgentLive`).
+    AgentLive,
+    /// The agent the platform last made answer here, and on which channel.
+    AgentJoined,
     /// The commits the cell pins (plane.rs).
     PinMain,
     PinLive,
@@ -393,6 +398,8 @@ impl MetaKey {
             MetaKey::OutsideAt => "outside_at",
             MetaKey::TemplatePending => "template_pending",
             MetaKey::AgentPending => "agent_pending",
+            MetaKey::AgentLive => "agent_live",
+            MetaKey::AgentJoined => "agent_joined",
             MetaKey::PinMain => "pin_main",
             MetaKey::PinLive => "pin_live",
             MetaKey::PinsCheckedAt => "pins_checked_at",
@@ -1000,11 +1007,11 @@ impl FragmentCell {
         }
         self.event("create", &format!("fragment {} created by {owner} (repo {repo})", body.name), json!({ "repo": repo, "key": caller.key().map(npub::display) }));
         self.flush_index().await;
-        // a template that did not land, or a chat's agent that did not
-        // join, is retried by the alarm
+        // a template that did not land, or an agent it declares that did
+        // not join, is retried by the alarm
         if let Err(e) = self.seed().await {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
-        } else if let Err(e) = self.join_owners_agent().await {
+        } else if let Err(e) = self.sync_agent().await {
             self.event("agent.join-failed", &e.message, json!({ "code": e.code }));
         }
         self.schedule().await?;
@@ -1114,7 +1121,7 @@ impl FragmentCell {
         self.flush_index().await;
         if let Err(e) = self.seed().await {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
-        } else if let Err(e) = self.join_owners_agent().await {
+        } else if let Err(e) = self.sync_agent().await {
             self.event("agent.join-failed", &e.message, json!({ "code": e.code }));
         }
         self.drain_deliveries().await;

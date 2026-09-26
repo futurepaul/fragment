@@ -55,7 +55,7 @@ debt ledger).
   members, identities, signin, computers, secrets, files, deploy, templates,
   desktop, share, phase7, ops, public, effects, facet-cap, app-lockdown,
   site, watch, schemas, channels, live, routes, cli, browser, jobs,
-  triggers, appfiles, blobs, notes, push, ai, budget, agents, chat,
+  triggers, appfiles, blobs, notes, push, ai, budget, agents, addon, chat,
   computer, screenshots, sync, restart, pathmode, node-full;
   `crates/e2e/src/lanes/mod.rs`). The browser, notes, desktop, share,
   phase7, chat, and screenshots sections drive headless Chrome

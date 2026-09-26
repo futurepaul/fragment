@@ -127,7 +127,9 @@ floor; never the share link, which the agent does not hold) and the
 agent's cap: the agent's own role there, or its owner's membership role
 if higher, and never above `editor`. The owner's part is the owner's own
 role, so an agent never reaches further than its owner could. The
-principal is still the agent (records, runs, and the ledger name it).
+principal is still the agent (records, runs, and the ledger name it),
+but an operation it calls `for` someone tells the app so: `call.principal`
+is them and `call.agent` the agent, so what it does for them is theirs.
 `for` is honored on a fragment's routes (`/api/f/{name}/…`) and on `GET`
 and `POST /api/fragments` (a `POST` for anyone but the agent's owner is
 403: what an agent makes is its owner's); on any other route it is 400.
@@ -508,8 +510,9 @@ keeps the last good code and says why in `status.code.error`.
 
 `app.mjs` exports `class App extends DurableObject` with one method per
 operation, each called `(input, call)`: `call.principal` (an identity,
-`anon:…`, or the fragment's own npub for its triggered runs) and
-`call.role`. A mutation is synchronous over the app's own
+`anon:…`, or the fragment's own npub for its triggered runs; for an
+agent's call `for` someone, them, with the agent in `call.agent`, else
+null) and `call.role`. A mutation is synchronous over the app's own
 SQLite; `call.publish(channel, body, kind = "message")` appends a record
 (body at most 64 KiB, 64 per mutation) once the mutation commits, and an
 exception rolls back its writes and its records (422). The ledger keys a
@@ -675,12 +678,17 @@ there. Running out stops only paid steps, never sites or mutations.
 | `GET /api/budget` | a person (an agent: its owner's) | → `{billingOrg, period, budgetMicros, toppedUpMicros, allowanceMicros, spentMicros, reservedMicros, remainingMicros, warn, usage}`: `warn` at 80% of the allowance; the newest 20 usage rows |
 | `GET /api/budget/usage?period=YYYY-MM` | the same | → the same with every usage row of the month |
 | `POST /api/budget/{id}/top-up` | the fleet's operators | `{usd}` → the month: the allowance rises, and the org's key limit with it |
+| `POST /api/budget/reserve` | an agent (its owner's month) | `{ref, model, fragment, asker}` → `{key}`: one model call's worst case ($0.05) held, and the org's key to make it with; `{key, settled: true}` when that call settled before (made again after a crash, it is not charged again); 402 `budget_used_up` when the month cannot cover it |
+| `POST /api/budget/settle` | the same | `{ref, cost}` (dollars, as OpenRouter reported; none: charged the reservation) → `{cost}` in micro-dollars; `{ref, release: true}` gives the reservation back when nothing was billed |
 
 A usage row is FIN-10's report shape: `{sourceRef, agent?, billingOrg,
 period, unit: "usd_micro", quantity, state (reserved, settled), kind,
 model, fragment, principal, at}`, one per paid step
-(`sourceRef` is `<fragment>@<incarnation>/run/<run>/step/<index>`),
-recorded once.
+(`sourceRef` is `<fragment>@<incarnation>/run/<run>/step/<index>`), or
+per agent model call (kind `agent.text`, `sourceRef` `agent:<agent
+id>/<turn>/<messages stored in the turn so far>`, `fragment` where it was
+asked: a chat, a fragment, or the agent itself for its owner's own
+conversation; `principal` who asked), recorded once.
 
 ### Jobs and triggers
 
@@ -906,11 +914,14 @@ signing with their own keys. An agent's name is `<label>.<username>`,
 its owner's (a bare label is one of the signer's own); making one also
 registers it as its maker's, in the same request. Owner routes check the
 caller is the agent's registered owner. Each agent's key is made by the
-node's `KEYS` and signs there. Its turns spend its owner's month: as a
-turn starts it asks for its owner's org key (`POST /api/budget/key`,
-signed by the agent). Every person has their own agent,
-`agent.<username>`, made on first need: a chat made from the `chat`
-template has it as an editor that listens. Its variables: `FRAGMENT_API`
+node's `KEYS` and signs there. Its turns spend its owner's month: each
+model call reserves its worst case there first, with the owner's org key
+that answers, and settles to the cost reported after (`POST
+/api/budget/reserve` and `/settle`, signed by the agent; Budgets). Every
+person has their own agent, `agent.<username>`, made on first need: a
+fragment whose live `fragment.json` declares `"agent": {"personal":
+true, "channel": …}` (the `chat` template's) has it as an editor that
+listens there. Its variables: `FRAGMENT_API`
 (the platform it acts on), `OPENROUTER_API_URL` (its model service),
 `AGENT_URL` (the base of the inboxes it hands out: the platform's),
 `AGENT_TEST_HOOKS=allow` (dev and e2e only). The script reads a request
@@ -926,6 +937,7 @@ else).
 | `POST /api/a/{name}/stop` | owner | → `{active, driving}`; a tool in flight is interrupted; the messages waiting run next |
 | `GET /api/a/{name}/tools` | owner | → `{tools: ["platform__create_fragment", "platform__list_fragments", "platform__operations", "platform__call", "platform__list_files", "platform__read_file", "platform__write_file", "platform__append_file", "platform__write_files", "platform__deploy", "<fragment>__<op>", ...]}`: what the owner's own turn has (below) |
 | `POST /api/a/{name}/listen` | owner | `{fragment, channel? ("chat"), reply? ("say")}` → `{fragment, channel, reply, subscription}`: the agent subscribes itself to the channel (it must be a member) with an inbox URL of its own (`AGENT_URL`); at most 500. `reply` answers a chat whose channel takes no posts (one made before phase 7); a postable channel is answered by a post. A new listen first drops those of fragments the agent is no longer in: of the fragments its memberships leave out, up to 16 are asked, and one that answers 404 or 403 loses its listens (so does one whose subscribe answers either, and a chat whose answer's post does). Listening again to the same fragment's channel is the same listen: its inbox URL, so the one subscription (made again if the fragment dropped it) |
+| `PUT /api/a/{name}/scope` | owner (a fragment's deploy) | `{fragment, tools, instructions, model?}` → `{fragment, tools, model}`: a fragment's own agent takes what its block declares (A fragment's agent, below); 403 for any agent not made for that fragment |
 | `POST /api/a/{name}/inbox/{token}` | the fragment's delivery (the token is the capability) | a `Delivery` (`crates/proto`), decoded whole: one that does not decode (a record without its `seq`, say) is 400. A message (a body with no `kind`, or `kind: "message"`: its `text`, else its JSON) from an identity starts a turn in the chat's conversation, acting for that identity; from the running turn's starter in its conversation, it steers that turn; any other waits for a turn of its own (429 past 64 waiting: the fragment delivers it again). `{kind: "stop", turn?}` from the running turn's starter, in its chat, naming that turn (or none), stops it; from anyone else, or another kind, it is ignored, never a message. The agent's own, one heard before (within a day: past the longest redelivery), and a message from an anonymous visitor (`anon:`) are ignored (the owner's view keeps the newest 32 anonymous ones). The turn's last answer goes back as the agent, with the id `rp:<40 hex of SHA-256 of its message id>`: posted to the channel as `{text, turn}` when it takes posts (`POST /api/f/{fragment}/channels/{channel}`), else `POST /api/f/{fragment}/ops/{reply}` `{text}`; an unknown token is 404 |
 | `PUT /api/a/{name}/computer` | owner | `{url, token, cwd? ("work")}` → `{url, cwd, tools}`: attaches a computer once it answers `GET /tools` with that token (400 when it refuses it, 502 when it does not answer); the token is sealed like the agent's key |
 | `PUT /api/a/{name}/computer` | owner | `{connect: true, cwd?}` → `{connect, agent, token, cwd}`: a computer that connects out instead (`fragment computer connect --agent <agent> --token-file <f>`): a new connect token, answered once (the agent keeps its SHA-256), replacing any computer before |
@@ -942,9 +954,9 @@ steer the turn ended before reading (unless it was stopped). The driver
 that ends a turn starts the next one waiting in the same step. A turn
 records who started it (the owner, or the identity whose record it was),
 and every call it makes on the platform acts for them (`for`, above);
-the agent's own calls (listening, its model key, a chat's answer) name no
-one. An attached computer is its owner's: it joins its owner's turns
-only.
+the agent's own calls (listening, its model calls' budget, a chat's
+answer) name no one. An attached computer is its owner's: it joins its
+owner's turns only, and never a fragment's own agent's.
 
 A turn's tools, read as it starts, are of two kinds. Per-operation
 tools, for the turn's chat and the other fragments the agent is a member
@@ -971,8 +983,11 @@ tool call's. At most 64 steps a turn. Each step sends the model a window
 of its conversation, not all of it: the newest 256 messages, cut to
 start at a turn's first message (so a tool call and its result stay
 together), with the running turn whole and earlier turns while they
-total 256 KiB. A turn that alone outgrows the window ends in an error;
-the next message starts a turn that fits. A chat turn's answer is its
+total 256 KiB. The earlier turns' tool results are sent cut to their
+first 400 characters and a note of how many more were cut (their images
+to a note), so old output cannot push a model call past its deadline;
+the stored conversation keeps them whole. A turn that alone outgrows the
+window ends in an error; the next message starts a turn that fits. A chat turn's answer is its
 last message, when that is the model's text.
 
 Every turn tells the model, after the agent's instructions, that its
@@ -1002,16 +1017,61 @@ finish: <why>. Ask me to try again." is its answer, stored in its
 conversation and posted to its chat as an answer is, and the chat's
 `turn.end` carries the error.
 
+### A fragment's agent (the `agent` block)
+
+A fragment may declare an agent people talk to through one of its
+channels, in `fragment.json` (checked at deploy like the rest of it):
+
+```json
+"agent": { "instructions": "agent.md", "tools": ["log_food", "today"], "channel": "ask", "model": "z-ai/glm-5.3-flash" }
+```
+
+`channel` is a channel it declares with a `post` role; `instructions` a
+file of its repo, read at live (at most 8 KiB: one missing, empty, or
+larger is refused as an invalid manifest is, live's code not installed
+and `code.error` saying why); `tools` operations it declares, none
+owner-only; `model` is optional. `{"personal": true, "channel": …}`
+names its owner's own agent instead, with that agent's instructions,
+model, and tools (the chat template's).
+
+A deploy whose live manifest declares one makes it so, each part
+idempotent (the alarm retries one that did not finish). The fragment's
+own agent is named as the fragment is, made its owner's on first need
+(`POST /api/agents` with a `scope`, which only a deploy names), and given
+what the block declares (`PUT /api/a/{name}/scope {fragment, tools,
+instructions, model}`, owner, for the fragment it was made for only); it
+is an editor of this fragment, a member of nothing else, listening to
+`channel`. A deploy that drops the block, or names another agent or
+channel, removes the one before (its membership and its subscription).
+Each change is an event (`agent.joined`, `agent.left`). An agent of that
+name made otherwise is not taken over, nor is `agent.<username>`.
+
+A fragment's own agent differs from a person's three ways. Its tools are
+the block's operations, read with the fragment's status `for` the asker
+and offered as their role may call them: no other fragment, no platform
+verb, no computer. It keeps one conversation per person who posts
+(`<fragment>/<channel>/<identity>`), so strangers never share one. And
+it is told, after its instructions, that its answer is posted for it and
+each call acts as the asker (no build guide). A signed-in person's post
+to the channel starts a turn for them (an anonymous one starts nothing);
+each call acts for them (`for`: the lower of their role and the agent's,
+and the app's `call.principal` is them); the answer goes to the channel as `{text,
+turn}` and the steps to `work` when the fragment declares it postable,
+the chat template's records (below). Its model calls are its owner's to
+pay.
+
 ### The chat template (phase 7, slice C)
 
 A chat made from the `chat` template is two channels and no app code (no
-worker), with the platform's page (`__chat.js`, `__chat.css`):
+worker), with the platform's page (`__chat.js`, `__chat.css`), and its
+owner's own agent answering (the `agent` block, above):
 
 ```json
 "channels": {
   "chat": { "read": "public", "post": "viewer" },
   "work": { "read": "viewer", "post": "editor" }
-}
+},
+"agent": { "personal": true, "channel": "chat" }
 ```
 
 - `chat`: messages, `{text}`, posted by viewers and up (link holders

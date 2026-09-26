@@ -452,6 +452,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let dir = s.dir("chat").join("room");
     let dir_s = dir.to_str().expect("utf-8 path").to_string();
     let out = s.cli(api, &home, &["new", &dir_s, "--template", "chat"]);
+    without_owners_agent(&dir)?;
     let room = s.cli_json(api, &home, &["create", &s.name("chat"), "--json"])?;
     let chat = room["name"].as_str().unwrap_or("").to_string();
     s.hook(api, &room);
@@ -579,6 +580,16 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     super::build::build(s, api)
 }
 
+/// A chat scaffolded for the lane's own agent: the template's block that
+/// makes its owner's own agent answer there is dropped, so only one answers.
+fn without_owners_agent(dir: &std::path::Path) -> Result<()> {
+    let path = dir.join("fragment.json");
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    anyhow::ensure!(manifest.as_object_mut().and_then(|m| m.remove("agent")).is_some(), "the chat template declares its owner's agent");
+    std::fs::write(&path, serde_json::to_vec_pretty(&manifest)?)?;
+    Ok(())
+}
+
 /// The agent a chat lane drives: its name, identity, and key.
 struct Bot<'a> {
     name: &'a str,
@@ -594,6 +605,7 @@ fn open_chat(s: &Suite, api: &Api, agents: &Api, home: &std::path::Path, owner: 
     let dir = dir.to_str().expect("utf-8 path");
     let scaffolded = s.cli(api, home, &["new", dir, "--template", "chat"]);
     anyhow::ensure!(scaffolded.status.success(), "scaffold {label}: {}", String::from_utf8_lossy(&scaffolded.stderr));
+    without_owners_agent(std::path::Path::new(dir))?;
     let room = s.cli_json(api, home, &["create", &s.name(label), "--json"])?;
     let name = room["name"].as_str().unwrap_or("").to_string();
     s.hook(api, &room);

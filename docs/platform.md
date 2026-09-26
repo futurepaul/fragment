@@ -63,6 +63,19 @@ honored only for the fragment's owner viewing its page.
   template that asks for `frame` (the desktop), it says so plainly, and
   its submit records the same grant (`auth.rs`, `/auth/new`).
 
+## An agent a fragment declares
+
+`fragment.json`'s `agent` block (docs/api.md, A fragment's agent) is a
+vanilla feature: any fragment may declare one, and a fragment that does
+not carries nothing of it. What the platform does for it, a fragment's
+code cannot: its deploy makes the agent (named as the fragment, its
+owner's, an editor of that fragment alone, listening to the declared
+channel) or removes it, offers it only the operations the block names,
+and pays for its model calls from the owner's budget. The chat template
+has its owner's own agent answer by the same block (`"personal": true`),
+so no platform code names a template (`cell/src/agents.rs`,
+`sync_agent`).
+
 ## Behavior no fragment declares
 
 - **Which of a browser's cookies count** on a fragment's origin follows
@@ -76,9 +89,6 @@ honored only for the fragment's owner viewing its page.
 - **A new desktop is its owner's alone**: made from the platform's
   `desktop` template with no visibility asked, it is `members`
   (`publish.rs`, `first_visibility`); every other template's is `link`.
-- **The owner's agent joins every chat** made from the chat template
-  (`cell/src/publish.rs`, `join_owners_agent`), as an editor that
-  listens to its `chat` channel.
 - **An agent's authority** in a turn is the lower of its asker's role
   and a cap (phase 7, decision 1).
 - **An agent in a chat posts its work** (phase 7, C): a turn a chat

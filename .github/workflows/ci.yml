@@ -172,11 +172,11 @@ jobs:
           - name: restarts
             args: --only restart,pathmode,node-full,browser
           - name: agents
-            args: --only agents,chat,computer,screenshots,sync,appfiles,blobs
+            args: --only agents,addon,chat,computer,screenshots,sync,appfiles,blobs
           - name: deliveries
             args: --only push,desktop,effects
           - name: rest
-            args: --except restart,pathmode,node-full,browser,agents,chat,computer,screenshots,sync,appfiles,blobs,push,desktop,effects
+            args: --except restart,pathmode,node-full,browser,agents,addon,chat,computer,screenshots,sync,appfiles,blobs,push,desktop,effects
     name: e2e (${{ matrix.name }})
     steps:
       - uses: actions/checkout@v4

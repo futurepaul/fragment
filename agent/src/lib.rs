@@ -35,6 +35,7 @@
 //!   POST /api/a/{name}/stop           stop the running turn
 //!   GET  /api/a/{name}/tools          the tools the owner's turn has now
 //!   POST /api/a/{name}/listen         {fragment, channel? ("chat"), reply? ("say")}: follow a channel (once: again is the same listen)
+//!   PUT  /api/a/{name}/scope          {fragment, tools, instructions, model?}: a fragment's own agent takes its block
 //!   PUT  /api/a/{name}/computer       {url, token, cwd? ("work")}: attach a computer (`fragment computer serve`)
 //!   DELETE /api/a/{name}/computer     detach it
 //!   POST /api/a/{name}/test           test controls (dev fleets: AGENT_TEST_HOOKS=allow)
@@ -48,6 +49,12 @@
 //! goes through the fragment's reply operation otherwise (chats made
 //! before). Such a turn also posts its progress to the chat's `work`
 //! channel (progress.rs).
+//!
+//! A fragment's own agent (its `fragment.json` `agent` block; its deploy
+//! makes it, with a `scope`) is this same agent with three differences:
+//! its tools are the operations its block names, of that fragment alone
+//! (tools.rs `Scope`); it keeps one conversation per person who posts
+//! there; and it gets no build guide and no computer.
 
 mod computer;
 mod fleet;
@@ -78,6 +85,7 @@ use worker::{durable_object, event, DurableObject, Env, Headers, Method, Request
 
 use crate::computer::Computer;
 use crate::fleet::Fleet;
+use crate::model::Spend;
 use crate::progress::{Progress, Shape};
 use crate::store::{kv_get, kv_set, kv_u64, last_answer, recent_messages};
 use crate::turn::{Attached, Driver, Model, WATCHDOG_MS_DEFAULT, WATCHDOG_MS_MIN};
@@ -92,8 +100,8 @@ const RESEND_MS: i64 = 40_000;
 /// A computer's answer (a screenshot inside) is at most this.
 const ANSWER_BODY_MAX: usize = 6 * 1024 * 1024;
 const MESSAGE_TEXT_MAX: usize = 16 * 1024;
-const MODEL_MAX: usize = 128;
-const INSTRUCTIONS_MAX: usize = 8 * 1024;
+const MODEL_MAX: usize = fragment_proto::limits::AGENT_MODEL_MAX_BYTES;
+const INSTRUCTIONS_MAX: usize = fragment_proto::limits::AGENT_INSTRUCTIONS_MAX_BYTES;
 const TEST_HOLD_MS_MAX: u64 = 60_000;
 const BODY_MAX: usize = 64 * 1024;
 /// The channels one agent follows (the desktop's own limit on a person's
@@ -277,6 +285,19 @@ struct CreateBody {
     name: String,
     model: Option<String>,
     instructions: Option<String>,
+    /// A fragment's own agent: the fragment it serves (the platform's
+    /// deploy makes it; `POST /api/agents` never sets it).
+    scope: Option<String>,
+}
+
+/// `PUT scope`: a fragment agent's declaration, as its fragment's deploy
+/// read it (the `agent` block, its instructions' text).
+#[derive(Deserialize)]
+struct ScopeBody {
+    fragment: String,
+    tools: Vec<String>,
+    instructions: String,
+    model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -323,17 +344,6 @@ fn unanswered(why: computer::Unanswered) -> Fail {
     match why {
         computer::Unanswered::Refused => Fail::invalid("the computer refused this token (it is in the file `fragment computer serve --token-file` names)"),
         computer::Unanswered::Unreachable(e) => Fail::new(ErrorCode::UpstreamFailed, format!("the computer did not answer: {e}")),
-    }
-}
-
-/// The model key a turn spends: the owner's org key, whose limit is their
-/// month's allowance (the platform's `Ledger` mints it; OpenRouter stops
-/// the owner there). Kept only for the turn, never stored.
-async fn owners_key(fleet: &Fleet) -> anyhow::Result<String> {
-    let (status, answer) = fleet.call(Method::Post, "/api/budget/key", None).await?;
-    match (status, answer["key"].as_str()) {
-        (200, Some(key)) if !key.is_empty() => Ok(key.to_string()),
-        _ => Err(anyhow::anyhow!("no model key from the owner's budget ({status}): {}", fleet::message(&answer))),
     }
 }
 
@@ -391,14 +401,22 @@ fn default_instructions_before_the_guide(name: &str) -> String {
     )
 }
 
+/// Told to a fragment's own agent on every turn, after the instructions
+/// its fragment declares (it builds nothing, so no build guide).
+const SCOPED_NOTES: &str = "Your answer to a message is posted where it was asked, for you. You act for the person who \
+     asked: your tools are this fragment's operations, and each acts as them.";
+
 /// What a turn tells the model: the agent's instructions, then the notes
-/// and the build guide every turn gets.
-fn turn_instructions(stored: Option<String>, name: &str) -> String {
+/// and the build guide every turn gets (a fragment's own agent, its notes).
+fn turn_instructions(stored: Option<String>, name: &str, scoped: bool) -> String {
     let own = match stored {
         Some(s) if s != default_instructions_before_the_guide(name) => s,
         _ => default_instructions(name),
     };
-    format!("{own}\n\n{TURN_NOTES}\n\n{BUILD_GUIDE}")
+    match scoped {
+        true => format!("{own}\n\n{SCOPED_NOTES}"),
+        false => format!("{own}\n\n{TURN_NOTES}\n\n{BUILD_GUIDE}"),
+    }
 }
 
 impl Agent {
@@ -575,7 +593,7 @@ impl Agent {
                 return Err(Fail::new(ErrorCode::AlreadyExists, format!("agent {} already exists", body.name)));
             }
             let get = |k: &str| kv_get(&sql, k).map(|v| v.unwrap_or_default());
-            return Ok(json!({ "name": get("name")?, "npub": get("npub")?, "model": get("model")?, "replayed": true }));
+            return Ok(json!({ "name": get("name")?, "npub": get("npub")?, "model": get("model")?, "scope": get("scope")?, "replayed": true }));
         }
         let model = body.model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
         if model.is_empty() || model.len() > MODEL_MAX {
@@ -591,7 +609,12 @@ impl Agent {
             return Err(Fail::new(ErrorCode::AlreadyExists, format!("agent {} already exists", body.name)));
         }
         let agent_npub = npub::encode(&pubkey);
+        let scope = body.scope.unwrap_or_default();
+        if !scope.is_empty() && !valid_fragment_name(&scope) {
+            return Err(Fail::invalid("a scope is a fragment's name"));
+        }
         for (k, v) in [
+            ("scope", scope.as_str()),
             ("name", body.name.as_str()),
             // who made it (an identity), until the registry names its owner
             ("creator", principal),
@@ -603,7 +626,27 @@ impl Agent {
             kv_set(&sql, k, v)?;
         }
         kv_set(&sql, "created_at", js::now_ms())?;
-        Ok(json!({ "name": body.name, "npub": agent_npub, "model": model }))
+        Ok(json!({ "name": body.name, "npub": agent_npub, "model": model, "scope": scope }))
+    }
+
+    /// A fragment's own agent takes what its fragment's live block
+    /// declares (its deploy calls this as the owner): its instructions, the
+    /// operations it may call there, and its model. Only the fragment it
+    /// was made for.
+    fn scope(&self, body: ScopeBody) -> Answer<Value> {
+        let sql = self.sql();
+        if kv_get(&sql, "scope")?.as_deref() != Some(body.fragment.as_str()) {
+            return Err(Fail::new(ErrorCode::Forbidden, format!("this agent is not {}'s", body.fragment)));
+        }
+        let model = body.model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
+        let tools_fit = body.tools.len() <= fragment_proto::limits::OPERATIONS_MAX && body.tools.iter().all(|t| valid_op_name(t));
+        if model.is_empty() || model.len() > MODEL_MAX || body.instructions.is_empty() || body.instructions.len() > INSTRUCTIONS_MAX || !tools_fit {
+            return Err(Fail::invalid(format!("a model of 1-{MODEL_MAX} bytes, instructions of 1-{INSTRUCTIONS_MAX}, and operation names")));
+        }
+        kv_set(&sql, "tools", serde_json::to_string(&body.tools).map_err(Fail::host)?)?;
+        kv_set(&sql, "instructions", &body.instructions)?;
+        kv_set(&sql, "model", &model)?;
+        Ok(json!({ "fragment": body.fragment, "tools": body.tools, "model": model }))
     }
 
     /// Starts a driver for the active turn, unless one is running: it runs
@@ -615,10 +658,12 @@ impl Agent {
         let sql = self.sql();
         let base = var(&self.env, "OPENROUTER_API_URL").unwrap_or_else(|| "https://openrouter.ai".into()).trim_end_matches('/').to_string();
         let name = kv_get(&sql, "name")?.unwrap_or_default();
+        let scope = tools::scope_of(&sql)?;
         let setup = Setup {
             base,
             model: kv_get(&sql, "model")?.unwrap_or_else(|| DEFAULT_MODEL.into()),
-            instructions: turn_instructions(kv_get(&sql, "instructions")?, &name),
+            instructions: turn_instructions(kv_get(&sql, "instructions")?, &name, scope.is_some()),
+            scope,
             deadline_ms: match kv_u64(&sql, "test_model_timeout_ms")? {
                 0 => model::DEADLINE_MS,
                 ms => ms,
@@ -859,9 +904,12 @@ impl Agent {
         }
         // no delivery comes again after HEARD_KEEP_MS: older keys only grow the table
         sql.exec("DELETE FROM heard WHERE at < ?", vec![(now - HEARD_KEEP_MS).into()])?;
+        // a fragment's own agent keeps one conversation per person
+        let scoped = tools::scope_of(&sql)?.is_some();
+        let conv = store::conv_of(fragment, channel, scoped.then_some(record.principal.as_str()));
         let said = match said {
             Said::Message(text) => text,
-            Said::Stop { turn } => return self.stop_from(&store::conv_of(fragment, channel), &record.principal, turn.as_deref()),
+            Said::Stop { turn } => return self.stop_from(&conv, &record.principal, turn.as_deref()),
             Said::Other => return Ok(json!({ "ignored": "kind" })),
         };
         if !signed_in {
@@ -878,7 +926,7 @@ impl Agent {
         if text.len() > MESSAGE_TEXT_MAX {
             text.truncate(text.floor_char_boundary(MESSAGE_TEXT_MAX));
         }
-        self.begin(&store::conv_of(fragment, channel), &record.principal, text)
+        self.begin(&conv, &record.principal, text)
     }
 
     /// A stop posted in a chat: it stops the running turn only when that
@@ -1102,6 +1150,7 @@ impl Agent {
                     (Method::Post, "turns") => self.turn(&principal, serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?),
                     (Method::Post, "stop") => self.stop(),
                     (Method::Post, "listen") => self.listen(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?).await,
+                    (Method::Put, "scope") => self.scope(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?),
                     (Method::Get, "tools") => {
                         // what the owner's own turn has
                         let mut names = tools::list(self.fleet()?.acting_for(&principal), &self.sql()).await?;
@@ -1161,6 +1210,8 @@ struct Setup {
     /// The model's name.
     model: String,
     instructions: String,
+    /// A fragment's own agent's (tools.rs).
+    scope: Option<tools::Scope>,
     /// One model call's deadline.
     deadline_ms: u64,
     /// The agent's own; each turn's tools act for its asker through it.
@@ -1246,12 +1297,23 @@ async fn drive_turn(setup: &Setup, cancel: CancellationToken, conv: &str, asker:
     let sql = setup.storage.sql();
     // the owner is learned before any turn can start (`registration`)
     let owner_turn = kv_get(&sql, "owner")?.is_some_and(|owner| owner == asker);
-    let key = owners_key(&setup.fleet).await?;
-    // the computer is its owner's: it joins its owner's turns only
-    let computer = if owner_turn { open_computer(&setup.env, &sql).await? } else { None };
+    // the computer is its owner's: it joins its owner's own agent's turns only
+    let computer = if owner_turn && setup.scope.is_none() { open_computer(&setup.env, &sql).await? } else { None };
+    let spend = Spend {
+        fleet: setup.fleet.clone(),
+        sql: sql.clone(),
+        turn: kv_get(&sql, "turn_id")?.unwrap_or_default(),
+        // where it was asked: its chat, or the agent itself (its owner's own conversation)
+        fragment: match store::chat_of(conv) {
+            Some((fragment, _)) => fragment.to_string(),
+            None => kv_get(&sql, "name")?.unwrap_or_default(),
+        },
+        asker: asker.clone(),
+    };
     let driver = Driver {
         storage: setup.storage.clone(),
-        model: Model { base: setup.base.clone(), key, name: setup.model.clone(), deadline_ms: setup.deadline_ms },
+        model: Model { base: setup.base.clone(), name: setup.model.clone(), deadline_ms: setup.deadline_ms, spend },
+        scope: setup.scope.clone(),
         fleet: setup.fleet.clone(),
         instructions: setup.instructions.clone(),
         computer,

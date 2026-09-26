@@ -485,7 +485,7 @@ impl FragmentCell {
         if st.role < decl.role {
             return Err(CellError::new(ErrorCode::Forbidden, format!("this needs the {} role", decl.role.as_str())));
         }
-        let inv = Invocation { principal: &st.principal, role: st.role, op, decl, id: id.to_string(), input, depth: 0, via: Via::Call, trigger: None };
+        let inv = Invocation { principal: &st.principal, asker: None, role: st.role, op, decl, id: id.to_string(), input, depth: 0, via: Via::Call, trigger: None };
         self.invoke(inv).await
     }
 

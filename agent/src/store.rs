@@ -15,9 +15,10 @@ use fragment_core::history;
 use goose_agent::inference::InferenceEffect;
 use goose_agent::machine::{EffectHandler, MachineSession, SessionLoader};
 use goose_agent::operation::{Emitter, MachineEffect};
-use goose_provider_types::conversation::message::Message;
+use goose_provider_types::conversation::message::{Message, MessageContent};
 use goose_provider_types::conversation::token_usage::ProviderUsage;
 use goose_provider_types::conversation::Conversation;
+use rmcp::model::ContentBlock;
 use serde::Deserialize;
 use serde_json::Value;
 use worker::SqlStorage;
@@ -26,14 +27,19 @@ use worker::SqlStorage;
 /// A chat's is `<fragment>/<channel>`, which always holds a `/`.
 pub const DIRECT: &str = "direct";
 
-/// A chat's conversation.
-pub fn conv_of(fragment: &str, channel: &str) -> String {
-    format!("{fragment}/{channel}")
+/// A chat's conversation: the whole chat's, or, for a fragment's own agent,
+/// one per person in it (`asker`), so strangers never share one.
+pub fn conv_of(fragment: &str, channel: &str, asker: Option<&str>) -> String {
+    match asker {
+        Some(asker) => format!("{fragment}/{channel}/{asker}"),
+        None => format!("{fragment}/{channel}"),
+    }
 }
 
 /// A chat conversation's fragment and channel; `None` for `DIRECT`.
 pub fn chat_of(conv: &str) -> Option<(&str, &str)> {
-    conv.split_once('/')
+    let (fragment, rest) = conv.split_once('/')?;
+    Some((fragment, rest.split_once('/').map_or(rest, |(channel, _)| channel)))
 }
 
 pub const SCHEMA: &str = "
@@ -167,9 +173,35 @@ pub fn load_window(sql: &SqlStorage, conv: &str, messages_max: usize) -> anyhow:
     let shape: Vec<history::Row> = rows.iter().map(|(message, bytes)| history::Row { kickoff: is_kickoff(message), bytes: *bytes }).collect();
     let start = history::window_start(&shape, history::WINDOW_EARLIER_BYTES_MAX)
         .ok_or_else(|| anyhow!("the running turn outgrew the conversation window ({messages_max} messages); send a new message to start a turn"))?;
-    let window: Vec<Message> = rows.drain(start..).map(|(message, _)| message).collect();
+    let mut window: Vec<Message> = rows.drain(start..).map(|(message, _)| message).collect();
     assert!(window.first().is_some_and(is_kickoff), "the window starts at a kickoff");
+    cut_earlier_results(&mut window);
     Ok(window)
+}
+
+/// The tool results of the turns before the running one (which starts at
+/// its last kickoff that is not a steer), cut to a prefix and a note
+/// (`history::cut_earlier_result`), their images to a note: old output
+/// cannot grow a request past the model call's deadline.
+fn cut_earlier_results(window: &mut [Message]) {
+    let Some(running) = window.iter().rposition(|m| is_kickoff(m) && !m.metadata.steer) else { return };
+    let earlier = window[..running].iter_mut().flat_map(|m| m.content.iter_mut());
+    for result in earlier.filter_map(|c| match c {
+        MessageContent::ToolResponse(r) => r.tool_result.as_mut().ok(),
+        _ => None,
+    }) {
+        for block in result.content.iter_mut() {
+            match block {
+                ContentBlock::Text(t) => {
+                    if let Some(cut) = history::cut_earlier_result(&t.text) {
+                        t.text = cut;
+                    }
+                }
+                ContentBlock::Image(_) => *block = ContentBlock::text("[an image from an earlier turn, left out]"),
+                _ => {}
+            }
+        }
+    }
 }
 
 /// How many messages a step loads: the product's window, or a smaller one
@@ -209,6 +241,18 @@ pub fn message_seq(sql: &SqlStorage, id: &str) -> anyhow::Result<i64> {
     }
     let rows: Vec<Row> = ah(ah(sql.exec("SELECT seq FROM messages WHERE id = ?", vec![id.into()]))?.to_array())?;
     rows.first().map(|r| r.seq).ok_or_else(|| anyhow!("message {id} is not stored"))
+}
+
+/// How many messages the running turn has stored (from its first,
+/// `turn_seq`): the same when a step is made again after a crash.
+pub fn turn_length(sql: &SqlStorage) -> anyhow::Result<u64> {
+    #[derive(Deserialize)]
+    struct Row {
+        n: i64,
+    }
+    let (conv, from) = (kv_get(sql, "turn_conv")?.unwrap_or_default(), kv_u64(sql, "turn_seq")? as i64);
+    let rows: Vec<Row> = ah(ah(sql.exec("SELECT COUNT(*) AS n FROM messages WHERE conv = ? AND seq >= ?", vec![conv.into(), from.into()]))?.to_array())?;
+    Ok(rows.first().map_or(0, |r| r.n.max(0) as u64))
 }
 
 pub fn steer(sql: &SqlStorage, text: &str) -> anyhow::Result<()> {

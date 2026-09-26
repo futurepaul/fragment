@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::site;
 use fragment_proto::{CreateFragment, ErrorBody, ErrorCode, IdentityKind, Role, Visibility};
-use fragment_templates::{Template, BLANK, CHAT, DESKTOP, INBOX, TODO};
+use fragment_templates::{Template, BLANK, CALORIES, CHAT, DESKTOP, INBOX, TODO};
 use serde_json::{json, Value};
 use worker::*;
 
@@ -25,7 +25,8 @@ use crate::routed::{Credential, Signed};
 /// offers them: the simplest first, the desktop (a demo) last. `notes`
 /// stays with the CLI (`fragment new --template notes`): at 3 MiB it would
 /// double the cell.
-pub(crate) const TEMPLATES: [(&str, Template); 5] = [("blank", BLANK), ("todo", TODO), ("inbox", INBOX), ("chat", CHAT), ("desktop", DESKTOP)];
+pub(crate) const TEMPLATES: [(&str, Template); 6] =
+    [("blank", BLANK), ("todo", TODO), ("inbox", INBOX), ("calories", CALORIES), ("chat", CHAT), ("desktop", DESKTOP)];
 
 /// `live` moving under a deploy this many times is an error.
 const DEPLOY_ATTEMPTS: usize = 5;
@@ -96,35 +97,7 @@ impl FragmentCell {
         }
         self.go_live(&owner, &format!("deploy {name}")).await?;
         self.event("template", &format!("{name} starts from the {which} template"), json!({ "template": which }));
-        if which == "chat" {
-            self.set_meta(MetaKey::AgentPending, "1")?;
-        }
         self.del_meta(MetaKey::TemplatePending)
-    }
-
-    /// A chat made from the template has its owner's own agent in it
-    /// (`agent.<username>`, made on first need), as an editor that listens.
-    /// The alarm retries one that did not finish.
-    pub(crate) async fn join_owners_agent(&self) -> CellResult<()> {
-        if self.meta(MetaKey::AgentPending)?.is_none() {
-            return Ok(());
-        }
-        let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
-        let (_, username) = fragment_proto::split_fragment_name(&name).ok_or_else(|| CellError::host(format!("{name} is not <label>.<username>")))?;
-        let (agent, _, agent_name) = crate::agents::own_agent(&self.env, &owner, username).await?;
-        if self.member_role(&agent)?.is_none() {
-            let identity = fragment_proto::Identity { id: owner.clone(), kind: IdentityKind::Person, owner: None, username: Some(username.to_string()) };
-            let as_owner = Caller {
-                signed: Some(Signed::new(identity, None)),
-                unresolved: None,
-                url: url::Url::parse("https://fragment.internal/").expect("a URL"),
-                mode: None,
-            };
-            self.set_member(&as_owner, &agent, fragment_proto::SetRole { role: Role::Editor }).await?;
-        }
-        crate::agents::ask_json(&self.env, Method::Post, &format!("/api/a/{agent_name}/listen"), &owner, &json!({ "fragment": name })).await?;
-        self.event("agent.joined", &format!("{agent_name}, its owner's agent, listens here"), json!({ "agent": agent }));
-        self.del_meta(MetaKey::AgentPending)
     }
 
     /// Moves `live` to `main`'s tip: the first deploy makes the branch,

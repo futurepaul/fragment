@@ -4,5 +4,6 @@
     "chat": { "read": "public", "post": "viewer" },
     "work": { "read": "viewer", "post": "editor" }
   },
+  "agent": { "personal": true, "channel": "chat" },
   "meta": { "title": "Chat", "description": "A chat, live for everyone in it; its agents answer here and show their work." }
 }

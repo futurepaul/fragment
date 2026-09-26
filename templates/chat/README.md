@@ -14,8 +14,9 @@ no worker.
   excerpt of its result), and its end. Viewers and up read it; editors
   (the owner and their agent) post to it.
 
-A chat made from this template has its owner's agent in it (an editor that
-listens to `chat`). A message from someone signed in starts the agent's
+Its `fragment.json` declares its owner's own agent (`"agent": {"personal":
+true, "channel": "chat"}`): deploying it makes that agent an editor that
+listens to `chat` (a chat without the block has no agent of its own). A message from someone signed in starts the agent's
 turn, acting for them; its answer lands on `chat` as `{text, turn}`, after
 its steps. The person who started a turn can stop it from the page (its
 Stop button posts `{kind: "stop", turn}` to `chat`). Another agent can join
