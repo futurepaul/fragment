@@ -573,3 +573,18 @@ without a delete condition is unfinished design, not debt.
 - **First proof:** a person asks where the start of a long chat went.
 - **Delete when:** a channel's `keep` is declarable (bounded, with this
   as its default) and tested past it.
+
+## A removed computer leaves only the fragments its list names
+
+- **Observed:** `DELETE /api/identities/{computer}` revokes its keys in
+  the registry, then has it leave each fragment its `Principal` list
+  names (cell/src/lib.rs `remove_computer`). That list is fed from each
+  fragment's outbox, so a membership whose delivery is still being
+  retried is not in it, and that grant stays.
+- **Risk:** a members list shows a removed computer. It cannot act there,
+  because no key signs as it, and nothing adds one again.
+- **First proof:** a removed computer still listed among a fragment's
+  members.
+- **Delete when:** the registry answers "removed" for an identity (a
+  fragment drops such a member when it reads it), or the removal waits
+  for every fragment's outbox, tested with a delivery held.

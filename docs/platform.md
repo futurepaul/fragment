@@ -26,7 +26,7 @@ belongs in a template instead.
 
 | Path | What |
 |---|---|
-| `/`, `/auth/*`, `/cli` | Sign-in, choosing a username, the home (your fragments, a new one, pairing your CLI), approving the CLI's key |
+| `/`, `/auth/*`, `/cli` | Sign-in, choosing a username, the home (your fragments, a new one, pairing your CLI), approving the CLI's key or pairing a computer |
 | `/share/<name>` | The share sheet, in a window the desktop opens: who is in; the owner invites by username, sets roles, removes, revokes invites, sets who can open it, copies and renews the link, and allows `frame` (below). Sharing grants, so no fragment's code (which its author or an agent rewrites) may do it |
 | `/auth/fragment` | Signing in on a fragment's origin; on one that is not the person's nor shared with them, it asks "Continue to X?" first, once (docs/api.md, Asking first) |
 | `/join/<name>?token=` | Accepting an invite: what it grants, then a click; an invite by username is its invitee's alone. Replaced a fragment-origin `__join` (a page there is its author's) |
