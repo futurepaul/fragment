@@ -97,8 +97,8 @@ async fn queue(batch: MessageBatch<deliveries::Delivery>, env: Env, _ctx: Contex
 }
 
 #[event(fetch)]
-async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
-    match route(req, &env).await {
+async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
+    match route(req, &env, &ctx).await {
         Ok(resp) => Ok(resp),
         Err(e) => e.response(),
     }
@@ -440,8 +440,9 @@ const MODEL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 /// chat request, on the model the agents use, paid from its owner's month
 /// as an agent's call is (`agent_spend`: the same ledger reserve, settle,
 /// and release), except that the platform makes the call: the owner's
-/// OpenRouter key never reaches the computer. No streaming yet.
-async fn model_call(mut req: Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
+/// OpenRouter key never reaches the computer. A request that streams is
+/// answered as its chunks arrive (`relay`).
+async fn model_call(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, url: &Url) -> CellResult<Response> {
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     let who = signer(env, &req, url, &body).await?;
     let owner = match (who.kind, who.owner.as_deref()) {
@@ -449,10 +450,15 @@ async fn model_call(mut req: Request, env: &Env, cfg: &Config, url: &Url) -> Cel
         _ => return Err(CellError::new(ErrorCode::Forbidden, "only a computer calls the model here, on its owner's budget")),
     };
     let mut ask: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-    if !ask["messages"].is_array() || ask["stream"] == json!(true) {
-        return Err(CellError::invalid("a chat request's messages are an array, and it does not stream"));
+    if !ask["messages"].is_array() {
+        return Err(CellError::invalid("a chat request's messages are an array"));
     }
     ask["model"] = json!(fragment_proto::AGENT_MODEL);
+    let streams = ask["stream"] == json!(true);
+    if streams {
+        // its last chunk then carries the answer's usage, and its cost
+        ask["stream_options"] = json!({ "include_usage": true });
+    }
     let org = ledger::org_of(&owner).ok_or_else(|| CellError::host("a computer's owner is an identity"))?;
     // namespaced by the computer, as an agent's are by the agent
     let reference = format!("computer:{}/{}", who.id, js::random_hex::<16>());
@@ -475,25 +481,57 @@ async fn model_call(mut req: Request, env: &Env, cfg: &Config, url: &Url) -> Cel
     let mut init = RequestInit::new();
     init.with_method(Method::Post).with_headers(headers).with_body(Some(ask.to_string().into()));
     let call = Request::new_with_init(&format!("{}/api/v1/chat/completions", cfg.openrouter_url), &init)?;
-    let answered = match cs::fetch(call, MODEL_CALL_TIMEOUT).await {
-        Ok(mut resp) => Ok((resp.status_code(), resp.bytes().await?)),
-        Err(e) => Err(CellError::from(e)),
+    let failed = match cs::fetch(call, MODEL_CALL_TIMEOUT).await {
+        Ok(answer) if streams && answer.status_code() == 200 => return relay(ctx, env, org, reference, answer),
+        Ok(mut answer) => match (answer.status_code(), answer.bytes().await) {
+            (200, Ok(bytes)) if serde_json::from_slice::<Value>(&bytes).is_ok_and(|v| v.get("error").is_none()) => {
+                let v: Value = serde_json::from_slice(&bytes).expect("parsed just above");
+                let cost = fragment_core::budget::charge(v["usage"]["cost"].as_f64(), None);
+                ledger::ask(env, &org, &ledger::Settle { reference, cost, result: Value::Null, video: None }).await?;
+                return Ok(Response::from_bytes(bytes)?.with_headers(Headers::from_iter([("content-type", "application/json")])));
+            }
+            (status, Ok(bytes)) => CellError::new(ErrorCode::UpstreamFailed, format!("OpenRouter ({status}): {}", String::from_utf8_lossy(&bytes))),
+            (_, Err(e)) => CellError::from(e),
+        },
+        Err(e) => CellError::from(e),
     };
-    let v: Value = answered.as_ref().ok().and_then(|(_, b)| serde_json::from_slice(b).ok()).unwrap_or_default();
-    let (status, bytes) = match answered {
-        Ok((200, bytes)) if v.get("error").is_none() => (200, bytes),
-        failed => {
-            // nothing was answered: the reservation goes back
-            ledger::ask(env, &org, &ledger::Release { reference }).await?;
-            return match failed {
-                Ok((status, bytes)) => Err(CellError::new(ErrorCode::UpstreamFailed, format!("OpenRouter ({status}): {}", String::from_utf8_lossy(&bytes)))),
-                Err(e) => Err(e),
-            };
+    // nothing was answered: the reservation goes back
+    ledger::ask(env, &org, &ledger::Release { reference }).await?;
+    Err(failed)
+}
+
+/// A streamed answer, relayed to the computer as its chunks arrive. The
+/// relay runs past the response (`wait_until`), so the call settles once
+/// whether the computer reads it all or leaves: to the cost its last chunk
+/// reports, or its reservation when it reported none (cut off, or the
+/// computer gone, which stops the read and so the call). The node ends the
+/// answer at its fetch timeout (120 s, to the last byte).
+fn relay(ctx: &Context, env: &Env, org: String, reference: String, mut answer: Response) -> CellResult<Response> {
+    let js_failed = |e: wasm_bindgen::JsValue| CellError::host(format!("the relay: {e:?}"));
+    let mut chunks = answer.stream()?;
+    let pipe = web_sys::TransformStream::new().map_err(js_failed)?;
+    let writer = pipe.writable().get_writer().map_err(js_failed)?;
+    let env = env.clone();
+    ctx.wait_until(async move {
+        let mut cost = fragment_core::budget::StreamCost::default();
+        while let Ok(Some(chunk)) = chunks.try_next().await {
+            cost.push(&chunk);
+            let piece = js_sys::Uint8Array::from(chunk.as_slice());
+            if wasm_bindgen_futures::JsFuture::from(writer.write_with_chunk(&piece)).await.is_err() {
+                break;
+            }
         }
-    };
-    let cost = fragment_core::budget::charge(v["usage"]["cost"].as_f64(), None);
-    ledger::ask(env, &org, &ledger::Settle { reference, cost, result: Value::Null, video: None }).await?;
-    Ok(Response::from_bytes(bytes)?.with_status(status).with_headers(Headers::from_iter([("content-type", "application/json")])))
+        // what is left unread is dropped now: a computer that left ends the call
+        drop(chunks);
+        let _ = wasm_bindgen_futures::JsFuture::from(writer.close()).await;
+        let settle = ledger::Settle { reference, cost: fragment_core::budget::charge(cost.finish(), None), result: Value::Null, video: None };
+        let reference = settle.reference.clone();
+        if let Err(e) = ledger::ask(&env, &org, &settle).await {
+            console_error!("{reference}: a streamed model call did not settle (it stays reserved): {}", e.message);
+        }
+    });
+    let headers = Headers::from_iter([("content-type", "text/event-stream"), ("cache-control", "no-store")]);
+    Ok(Response::from_body(ResponseBody::Stream(pipe.readable()))?.with_headers(headers))
 }
 
 /// Makes a fragment for a person, under their username: the API's create
@@ -922,7 +960,7 @@ fn moved(to: &str) -> CellResult<Response> {
     Ok(resp)
 }
 
-async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
+async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     // as its client named it: signatures, links, and cookies name the https URL
     let url = fragment_nip98::arrived_url(req.url()?, req.headers().get("x-forwarded-proto")?.as_deref());
@@ -1014,7 +1052,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             release_username(env, username).await
         }
         (Method::Post, ["api", "computers", "pair"]) => pair_computer(req, env, &url).await,
-        (Method::Post, ["api", "model", "chat", "completions"]) => model_call(req, env, cfg, &url).await,
+        (Method::Post, ["api", "model", "chat", "completions"]) => model_call(req, env, ctx, cfg, &url).await,
         (_, ["api", "identities", rest @ ..]) => {
             let rest = rest.to_vec();
             identities(req, env, &url, &rest).await

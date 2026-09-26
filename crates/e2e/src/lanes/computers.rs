@@ -8,7 +8,7 @@
 //! next request, having left every fragment it was in.
 
 use std::path::Path;
-use std::process::Output;
+use std::process::{Child, Command, Output, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -170,6 +170,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("billed to its owner, naming the computer", billed, &usage);
     let r = api.signed(&owner, "POST", "/api/model/chat/completions", Some(&json!({ "messages": [{ "role": "user", "content": "hi" }] })))?;
     s.ok("a person does not call the model here", r.status == 403, &r);
+    serve_model(s, api, &home, &owner_home, &owner, &computer_id)?;
 
     // removed: its keys revoked, it leaves every fragment, it is refused
     let removed = s.cli_json(api, &owner_home, &["computers", "rm", "builder", "--json"])?;
@@ -195,6 +196,64 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("removing it again changes nothing", r.status == 200 && r.body["removed"] == false, &r);
     let listed = s.cli_json(api, &owner_home, &["computers", "--json"])?;
     s.ok("and its owner lists it no more", listed["computers"] == json!([]), &listed);
+    Ok(())
+}
+
+/// `fragment model --serve` as a local process, logging to `log`: its
+/// endpoint's base URL once it says where it listens.
+fn served(s: &Suite, api: &Api, home: &Path, log: &Path) -> Result<(Child, String)> {
+    let child = Command::new(&s.cli)
+        .args(["model", "--serve", "--port", "0"])
+        .env("HOME", home)
+        .env("FRAGMENT_HOST", &api.base)
+        .stdin(Stdio::null())
+        .stdout(std::fs::File::create(log)?)
+        .stderr(Stdio::null())
+        .spawn()?;
+    let at = || std::fs::read_to_string(log).ok().and_then(|t| t.split_whitespace().find(|w| w.starts_with("http://127.0.0.1:")).map(str::to_string));
+    s.eventually(Duration::from_secs(10), || at().is_some());
+    Ok((child, at().context("model --serve says where it listens")?))
+}
+
+/// `fragment model --serve`: an OpenAI-compatible endpoint on loopback
+/// that signs each call as the computer, streamed or not, each billed once
+/// to its owner at the cost the answer reported; a person's CLI serving it
+/// is refused as the platform refuses the person.
+fn serve_model(s: &mut Suite, api: &Api, home: &Path, owner_home: &Path, owner: &Keys, computer_id: &str) -> Result<()> {
+    let rows = || -> Vec<Value> {
+        let usage = api.signed(owner, "GET", "/api/budget/usage", None).map(|r| r.body).unwrap_or_default();
+        usage["usage"].as_array().into_iter().flatten().filter(|u| u["kind"] == "computer.text" && u["fragment"] == computer_id).cloned().collect()
+    };
+    let before: Vec<Value> = rows().iter().map(|u| u["sourceRef"].clone()).collect();
+    let fresh = || -> Vec<Value> { rows().into_iter().filter(|u| !before.contains(&u["sourceRef"])).collect() };
+    let (mut child, base) = served(s, api, home, &s.scratch.join("model-serve.log"))?;
+    let http = reqwest::blocking::Client::new();
+    let ask = |body: Value| http.post(format!("{base}/chat/completions")).bearer_auth("no key here").json(&body).send();
+    let plain = ask(json!({ "model": "anything", "messages": [{ "role": "user", "content": "served plain" }] }))?;
+    let (status, v) = (plain.status().as_u16(), plain.json::<Value>().unwrap_or_default());
+    s.ok("model --serve answers a chat request, with no key of its own", status == 200 && v["choices"][0]["message"]["content"] == "echo: served plain", &v);
+    let streamed = ask(json!({ "messages": [{ "role": "user", "content": "served streamed" }], "stream": true }))?;
+    let kind = streamed.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let (status, text) = (streamed.status().as_u16(), streamed.text().unwrap_or_default());
+    s.ok(
+        "and a streamed one, as server-sent events",
+        status == 200 && kind.starts_with("text/event-stream") && text.contains("echo: served streamed") && text.trim_end().ends_with("data: [DONE]"),
+        format!("{status} {kind} {text}"),
+    );
+    let asked = s.openrouter.chats().into_iter().rev().find(|c| c["stream"] == true).unwrap_or_default();
+    s.ok("on the agents' model, asking for its usage", asked["model"] == fragment_proto::AGENT_MODEL && asked["stream_options"]["include_usage"] == true, &asked);
+    // the stream settles as it ends, just after the computer has read it
+    let reported = fragment_core::budget::micros(fragment_fakes::openrouter::Costs::default().text);
+    let billed = s.eventually(Duration::from_secs(10), || fresh().len() == 2 && fresh().iter().all(|u| u["state"] == "settled"));
+    let costs: Vec<Value> = fresh().iter().map(|u| u["quantity"].clone()).collect();
+    s.ok("each is billed once, to its owner, at the cost its answer reported", billed && costs.iter().all(|c| *c == json!(reported)), format!("{costs:?}"));
+    let _ = child.kill();
+    let _ = child.wait();
+    let (mut child, base) = served(s, api, owner_home, &s.scratch.join("model-serve-person.log"))?;
+    let r = http.post(format!("{base}/chat/completions")).json(&json!({ "messages": [{ "role": "user", "content": "hi" }] })).send()?;
+    s.ok("a person's CLI serves it, but the platform refuses the person", r.status().as_u16() == 403, r.text().unwrap_or_default());
+    let _ = child.kill();
+    let _ = child.wait();
     Ok(())
 }
 

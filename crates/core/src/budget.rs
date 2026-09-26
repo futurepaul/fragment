@@ -96,6 +96,62 @@ pub fn charge(reported_usd: Option<f64>, video: Option<VideoEnd>) -> Option<i64>
     }
 }
 
+/// The longest server-sent event line a streamed answer's cost is looked
+/// for in: the chunk that carries `usage` is small, so a longer line (a
+/// big piece of text) is passed over, never held.
+pub const STREAM_LINE_MAX: usize = 64 * 1024;
+
+/// The cost a streamed chat completion reports (OpenAI's chunk format):
+/// fed the answer's bytes as they pass, it keeps the last `usage.cost` a
+/// `data:` line carried, which OpenRouter sends in the answer's last
+/// chunk. An answer cut off before then has none, which `charge` settles
+/// at the reservation.
+#[derive(Default)]
+pub struct StreamCost {
+    line: Vec<u8>,
+    /// The line being read is over `STREAM_LINE_MAX`: skipped to its end.
+    skipping: bool,
+    cost: Option<f64>,
+}
+
+impl StreamCost {
+    pub fn push(&mut self, mut bytes: &[u8]) {
+        while let Some(end) = bytes.iter().position(|b| *b == b'\n') {
+            self.take(&bytes[..end]);
+            self.end_line();
+            bytes = &bytes[end + 1..];
+        }
+        self.take(bytes);
+    }
+
+    fn take(&mut self, piece: &[u8]) {
+        if self.skipping || self.line.len() + piece.len() > STREAM_LINE_MAX {
+            (self.skipping, self.line) = (true, Vec::new());
+            return;
+        }
+        self.line.extend_from_slice(piece);
+    }
+
+    fn end_line(&mut self) {
+        let line = std::mem::take(&mut self.line);
+        if std::mem::take(&mut self.skipping) {
+            return;
+        }
+        let Some(data) = line.strip_prefix(b"data:".as_slice()) else { return };
+        let cost = serde_json::from_slice::<serde_json::Value>(data).ok().and_then(|v| v["usage"]["cost"].as_f64());
+        if cost.is_some() {
+            self.cost = cost;
+        }
+    }
+
+    /// The cost reported, once the answer has ended (a last line without
+    /// its newline counts).
+    pub fn finish(mut self) -> Option<f64> {
+        self.end_line();
+        self.cost
+    }
+}
+
 /// A month's standing: the allowance (the budget plus top-ups), what has
 /// been spent (settled), and what is reserved by steps still running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +270,26 @@ mod tests {
         assert_eq!(charge(None, Some(VideoEnd::Completed)), None, "a delivered video that reported no cost");
         assert_eq!(charge(None, Some(VideoEnd::Undelivered)), Some(0));
         assert_eq!(charge(Some(0.01), Some(VideoEnd::Undelivered)), Some(10_000), "a reported cost is charged, delivered or not");
+    }
+
+    #[test]
+    fn a_streamed_answer_s_cost_is_its_last_usage() {
+        let answer = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n: keep-alive\n\ndata: {\"choices\":[],\"usage\":{\"cost\":0.0021}}\n\ndata: [DONE]\n\n";
+        for size in [1, 7, answer.len()] {
+            let mut scan = StreamCost::default();
+            answer.as_bytes().chunks(size).for_each(|c| scan.push(c));
+            assert_eq!(scan.finish(), Some(0.0021), "in pieces of {size}");
+        }
+        let mut cut = StreamCost::default();
+        cut.push(b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: {\"usage\":{\"co");
+        assert_eq!(cut.finish(), None, "cut off before its usage: charged the reservation");
+        let mut unended = StreamCost::default();
+        unended.push(b"data: {\"usage\":{\"cost\":0.5}}");
+        assert_eq!(unended.finish(), Some(0.5), "a last line without its newline");
+        let mut long = StreamCost::default();
+        long.push(format!("data: {{\"x\":\"{}\",\"usage\":{{\"cost\":9}}}}\n", "a".repeat(STREAM_LINE_MAX)).as_bytes());
+        long.push(b"data: {\"usage\":{\"cost\":0.25}}\n");
+        assert_eq!(long.finish(), Some(0.25), "a line over the limit is passed over, and the next one read");
     }
 
     #[test]

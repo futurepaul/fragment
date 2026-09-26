@@ -190,7 +190,10 @@ fragment verify my-thing --dir .            # full-content audit
   5 minutes after), billed to your budget; `fragment computers rm
   <fragment>` destroys it. On it, `fragment model "<prompt>"` (or
   `--request` with an OpenAI-style chat request on stdin) asks the model
-  through the platform, on your budget, with no key of its own.
+  through the platform, on your budget, with no key of its own; `fragment
+  model --serve` serves the same as an OpenAI-compatible endpoint on
+  `http://127.0.0.1:8765/v1` (streamed or not), so a coding agent there
+  (goose) needs no key either.
 
 ```js
 // app.mjs
@@ -492,6 +495,7 @@ secret values into files.
 fragment login [--force] [--no-wait]     fragment call <name> <op> [--input JSON] [--id ID]
 fragment login --computer <name>         fragment computers [rm <name>]
 fragment model <prompt> | --request      (a computer: the model, on its owner's budget)
+fragment model --serve [--port N]        (a computer: that model at http://127.0.0.1:N/v1)
 fragment whoami                          fragment channel <name> [<channel>] [--after N] [--follow]
 fragment username [<name>]
 fragment keys [list|rotate|revoke <npub>]

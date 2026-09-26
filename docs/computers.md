@@ -70,7 +70,22 @@ with an OpenAI-style chat request on stdin (`POST
 agents' model (`fragment_proto::AGENT_MODEL`), calls OpenRouter with the
 owner's own key, which never reaches the computer, and reserves and
 settles on the owner's month as `job.ai` does. Any computer may call it:
-a fragment's own, or a machine a person paired.
+a fragment's own, or a machine a person paired. A streamed request's
+chunks are relayed as they arrive, and it settles once, as the stream
+ends, to the cost its last chunk reports (docs/api.md).
+
+`fragment model --serve [--port N]` (8765 by default; 0 picks one) serves
+the same as an OpenAI-compatible endpoint on this machine alone:
+`http://127.0.0.1:N/v1`, `POST /v1/chat/completions`, streamed or not,
+and `GET /health`. It binds the loopback address only (there is no flag
+to bind another), forwards each request's bytes to the platform signed
+with the computer's key, sends each once (a call that may have reached
+the platform is never made again blind), and relays the answer's status
+and bytes as they arrive. Whatever speaks to an OpenAI-compatible
+provider (goose's `openai` provider with `OPENAI_HOST` pointed at it)
+then needs no key: any key it sends is ignored, and the platform picks
+the model. Any process on the machine may call it, on the owner's
+budget: a computer is one person's machine (a Sprite has one user).
 
 ## Running the first real one
 
@@ -130,9 +145,8 @@ and was destroyed. Fixed since:
 
 ## Next
 
-- **goose on a computer**: a local OpenAI-compatible endpoint
-  (`fragment model --serve`) that signs each call, so goose, or anything
-  that speaks to a provider, needs no key; and streaming.
+- **goose on a computer**: goose's own CLI, pointed at `fragment model
+  --serve`, run by a job step on the fragment's computer.
 - **How a page shows it: a CUA "pet".** A declared `desktop` service
   (Xvfb, Chromium, and a control endpoint, from finite-next's
   `computer/*`) takes a screenshot on each change (at most one a second),
