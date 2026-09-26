@@ -80,10 +80,12 @@ function fail(why) {
   throw new Error(why);
 }
 
-function daemon(label, cmd, args) {
-  const out = fs.openSync(path.join(STATE, `${label}.log`), "a");
-  const child = spawn(cmd, args, { stdio: ["ignore", out, out] });
-  fs.closeSync(out);
+// A child of this run, its output in ~/.pet/<label>.log unless `stdio` says
+// otherwise. Its pid is kept, so the next run ends it if this one could not.
+function daemon(label, cmd, args, stdio) {
+  const out = stdio ? null : fs.openSync(path.join(STATE, `${label}.log`), "a");
+  const child = spawn(cmd, args, { stdio: stdio ?? ["ignore", out, out] });
+  if (out !== null) fs.closeSync(out);
   fs.writeFileSync(path.join(STATE, `${label}.pid`), String(child.pid));
   child.on("exit", (code, signal) => {
     child.gone = true;
@@ -105,15 +107,24 @@ function browser() {
   });
 }
 
-async function desktop() {
-  // what the run before this one left (it restarts on exit and after a deploy)
-  for (const label of ["browser", "openbox", "xvfb"]) {
+// What the run before this one left (the platform restarts it on exit and
+// after a deploy).
+function reap() {
+  for (const label of ["follow", "browser", "openbox", "xvfb"]) {
     try {
       process.kill(Number(fs.readFileSync(path.join(STATE, `${label}.pid`), "utf8")), "SIGTERM");
     } catch {}
   }
+}
+
+function stop(code) {
+  for (const child of Object.values(kids)) child.kill();
+  process.exit(code);
+}
+
+async function desktop() {
   await sleep(1000);
-  // and a display's lock a pause left behind
+  // a display's lock a pause left behind
   for (const f of ["/tmp/.X99-lock", "/tmp/.X11-unix/X99"]) fs.rmSync(f, { force: true });
   daemon("xvfb", "Xvfb", [DISPLAY, "-screen", "0", `${SCREEN.width}x${SCREEN.height}x24`, "-nolisten", "tcp"]);
   for (let i = 0; i < 50 && spawnSync("xdotool", ["getmouselocation"]).status !== 0; i++) await sleep(200);
@@ -144,6 +155,10 @@ async function frames() {
   let sent = {};
   for (;;) {
     await sleep(Date.now() - droveAt < DRIVEN_MS ? FAST_MS : SLOW_MS);
+    if (!FAKE && (kids.xvfb.gone || kids.openbox.gone)) {
+      log("the display stopped: starting over");
+      stop(1);
+    }
     try {
       // closed from the page: open it again
       if (!FAKE && kids.browser.gone) browser();
@@ -198,7 +213,7 @@ function apply({ seq, at, principal, body }) {
 }
 
 function follow() {
-  const child = spawn(CLI, ["channel", NAME, "control", "--follow", "--after", String(applied)], { stdio: ["ignore", "pipe", "inherit"] });
+  const child = daemon("follow", CLI, ["channel", NAME, "control", "--follow", "--after", String(applied)], ["ignore", "pipe", "inherit"]);
   createInterface({ input: child.stdout }).on("line", (line) => {
     try {
       const frame = JSON.parse(line);
@@ -207,20 +222,13 @@ function follow() {
       log(`control: ${e.message}`);
     }
   });
-  child.on("exit", (code) => {
-    log(`following control stopped (${code}): again in 5 s`);
-    setTimeout(follow, 5000);
-  });
+  child.on("exit", () => setTimeout(follow, 5000));
 }
 
 fs.mkdirSync(STATE, { recursive: true });
 log(`the pet of ${NAME}${FAKE ? `, showing ${FAKE}` : ""}`);
-for (const signal of ["SIGTERM", "SIGINT"]) {
-  process.on(signal, () => {
-    for (const child of Object.values(kids)) child.kill();
-    process.exit(0);
-  });
-}
+for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => stop(0));
+reap();
 if (!FAKE) {
   // it installs packages and runs a display: only on its own Sprite
   if (!has("sprite-env")) fail("not on a Sprite: PET_FAKE_SCREEN=<a JPEG> shows that image instead");
