@@ -697,6 +697,28 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an --id reused with another input is conflicting_body", exit == Some(1) && v["error"]["code"] == "conflicting_body", &v);
     let (exit, v) = refused(s, &["call", &name, "say", "--input", "{not json", "--json"]);
     s.ok("input that is not JSON is invalid_usage (exit 2)", exit == Some(2) && v["error"]["code"] == "invalid_usage", &v);
+    // an input over the 128 KiB one argument holds on Linux: from a file, or stdin
+    let big = s.scratch.join("big-input.json");
+    let chars = 200 * 1024;
+    std::fs::write(&big, json!({ "text": "x".repeat(chars) }).to_string())?;
+    let from_file = s.cli_json(api, &home, &["call", &name, "measure", "--input", &format!("@{}", big.display()), "--json"])?;
+    let mut piped = Command::new(&s.cli)
+        .args(["call", &name, "measure", "--input", "-", "--json"])
+        .env("HOME", &home)
+        .env("FRAGMENT_HOST", &api.base)
+        .env_remove("FRAGMENT_OUTPUT")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    std::io::Write::write_all(&mut piped.stdin.take().expect("its stdin is piped"), &std::fs::read(&big)?)?;
+    let from_stdin: Value = serde_json::from_slice(&piped.wait_with_output()?.stdout).unwrap_or_default();
+    s.ok(
+        &format!("fragment call --input @file, or - for stdin, sends an input of {chars} characters whole"),
+        from_file["result"]["chars"] == chars && from_stdin["data"]["result"]["chars"] == chars,
+        json!({ "file": from_file, "stdin": from_stdin }),
+    );
+    let (exit, v) = refused(s, &["call", &name, "measure", "--input", "@/nowhere/at-all.json", "--json"]);
+    s.ok("a file that is not there is invalid_usage (exit 2)", exit == Some(2) && v["error"]["code"] == "invalid_usage", &v);
     let r = s.cli_json(api, &home, &["channel", &name, "--json"])?;
     s.ok("fragment channel lists the channels", r["channels"].as_array().is_some_and(|a| a.iter().any(|c| c["name"] == "room")), &r);
     let r = s.cli_json(api, &home, &["channel", &name, "room", "--json"])?;

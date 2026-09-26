@@ -13,7 +13,8 @@ them. The page lists today's entries and their total, live.
   answers there as `{text, turn}`, and its steps go to `work` (as a chat's
   do). Each person has a conversation of their own with it, and each of
   its calls acts for them (`call.principal` is them), so the rows it
-  logs are theirs. An anonymous visitor's message starts nothing.
+  logs are theirs. `ask` says `"signedIn": true`: the platform refuses
+  an anonymous visitor's message (401).
 - `summarize` is a job that runs one turn of the agent for its caller
   (`job.agent`): its answer lands on `ask` too, and is the run's output.
 - The owner pays for its model calls, from their monthly budget.

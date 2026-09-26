@@ -17,6 +17,7 @@
     "bulk": { "kind": "mutation" },
     "count": { "kind": "query", "role": "public" },
     "whoami": { "kind": "query", "role": "public" },
+    "measure": { "kind": "query", "input": { "type": "object", "required": ["text"], "properties": { "text": { "type": "string" } } } },
     "backstage": { "kind": "query", "role": "editor" }
   },
   "channels": {

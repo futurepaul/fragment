@@ -412,7 +412,7 @@ platform (`Content-Security-Policy`), and keep their URL to the platform
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/fragments` | a person with a username; an agent or a computer for its owner (the fragment is the owner's, under their username, on their budget, with its maker an editor) | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). `visibility` defaults to `link`, and to `members` for the `desktop` template (a desktop is its owner's alone). The fragment's own key is made by the node's `KEYS` and stays sealed there. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`desktop`, `chat`, `todo`, `inbox`, `calories`, `pet`, `blank`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
+| `POST /api/fragments` | a person with a username; an agent or a computer for its owner (the fragment is the owner's, under their username, on their budget, with its maker an editor) | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). `visibility` defaults to `link`, and to `members` for a template that declares a computer (the pet) or its owner's fragments (`fragments`: the desktop): its owner's alone until they share it (`publish.rs`, `first_visibility`). The fragment's own key is made by the node's `KEYS` and stays sealed there. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`desktop`, `chat`, `todo`, `inbox`, `calories`, `pet`, `blank`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, sharing?}]}`; `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility (a fragment from before sends it once, on its next change or alarm; until then it has none); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
 | `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes, frame?}` (`frame`: when live's `fragment.json` asks for it, whether its owner allows it) |
@@ -453,9 +453,9 @@ platform (`Content-Security-Policy`), and keep their URL to the platform
 | `POST /api/f/{name}/subscriptions` | a member who may read the channel | `{channel, url}` → `{id, channel, url}`: each new record of the channel is POSTed to `url` through the delivery queue as `{type: "record", fragment, channel, record}` (unsigned: the URL is the subscriber's capability; egress-checked; at most 32 a fragment; a 404 or 410 drops it; a removed member's go with it) |
 | `GET /api/f/{name}/subscriptions` | a member (the owner sees all) | → `{subscriptions: [{id, principal, channel, url, createdAt}]}` |
 | `DELETE /api/f/{name}/subscriptions/{id}` | its subscriber, or the owner | → `{ok, removed}` |
-| `GET /api/f/{name}/channels` | viewer | → `{channels: [{name, read, post, seq}]}`: `events`, `ops`, `inbox`, and the app's (`post`: who may post, or null) |
+| `GET /api/f/{name}/channels` | viewer | → `{channels: [{name, read, post, signedIn, seq}]}`: `events`, `ops`, `inbox`, and the app's (`post`: who may post, or null; `signedIn`: only people signed in) |
 | `GET /api/f/{name}/channels/{channel}?after=&limit=` | the channel's reader | → `{channel, records: [{channel, seq, at, principal, kind, body}], next}` (1000 a page) |
-| `POST /api/f/{name}/channels/{channel}` | the channel's `post` role | `{id, body}` → `{record, replayed}` (`Posted`): the platform appends `body` (any JSON, at most 64 KiB of it; 413) as a record of kind `message` naming the poster, with no app code; it reaches sockets, subscriptions, and the channel's triggers as a mutation's record does. The same id and body again answer that record and append nothing (a retry also finishes what the first try left: its deliveries, its triggers' runs); the same id with another body, or on another channel, is 409 (ids are the poster's, kept as long as the record). A channel without a `post` role, and `events`, `ops`, and `inbox`, refuse posts (403). A poster holding only `public` spends a public call (Serving, `__op`) |
+| `POST /api/f/{name}/channels/{channel}` | the channel's `post` role | `{id, body}` → `{record, replayed}` (`Posted`): the platform appends `body` (any JSON, at most 64 KiB of it; 413) as a record of kind `message` naming the poster, with no app code; it reaches sockets, subscriptions, and the channel's triggers as a mutation's record does. The same id and body again answer that record and append nothing (a retry also finishes what the first try left: its deliveries, its triggers' runs); the same id with another body, or on another channel, is 409 (ids are the poster's, kept as long as the record). A channel without a `post` role, and `events`, `ops`, and `inbox`, refuse posts (403); one that says `signedIn` refuses an anonymous poster (401). A poster holding only `public` spends a public call (Serving, `__op`) |
 
 ## Apps
 
@@ -527,7 +527,10 @@ keeps the last good code and says why in `status.code.error`.
   (`POST /api/f/{name}/channels/{channel}`, `fragment.post`), so a
   fragment whose live commit has channels and no `app.mjs` (a chat) runs
   no worker at all. A `post` role looser than the channel's `read` is
-  refused at deploy (whoever may post may read). Such a channel keeps its
+  refused at deploy (whoever may post may read). `"signedIn": true`
+  (beside a `post` role) takes posts from people signed in only: an
+  anonymous visitor holding the role (a link holder is a viewer) is 401
+  `unauthenticated`, and nothing is appended. Such a channel keeps its
   newest 10 000 records (`limits::POSTED_KEPT`; the oldest go, whoever
   appended them, and with them their posts' ids), as `events` and `ops`
   keep theirs; the number is not declarable yet.
@@ -551,7 +554,15 @@ exception rolls back its writes and its records (422). The ledger keys a
 mutation by (principal, id) for seven days: a retry with the same id
 returns the stored result and applies nothing again; the same id with
 another input is 409; after seven days the same id runs again, as a new
-run. Every applied mutation also appends `{op, id}` to `ops`. A query's
+run. Every applied mutation also appends `{op, id}` to `ops`. An
+operation may say `"ephemeral": true` (a mutation only; refused at
+deploy on a query or a job): its calls leave no ledger row, no pending
+row, and no `ops` record, so the same id runs again, with any input
+(never 409 or a replay), and it may not publish, push, or write files
+(422, rolled back: their outbox is the ledger row); its writes, the
+role and schema checks, the 16 MiB cap, and the live views' change
+signal stay (docs/MODEL.md). For a "latest value" write sent often,
+whose ids would fill the database within the week. A query's
 or a mutation's result is at most 1 MiB of JSON
 (`limits::RESULT_MAX_BYTES`) of whole characters: a larger one is refused
 in the app (422; a mutation rolls back), and the cell checks it again
@@ -945,7 +956,9 @@ close the fragment means for good: 4003 (the page's access was revoked)
 or 4004 (the fragment was deleted) ends it, and `closed` handlers get
 `{code, reason}`.
 
-CLI: `fragment call <name> <op> --input '{...}' [--id ID]`, `fragment
+CLI: `fragment call <name> <op> --input '{...}' | @file | - [--id ID]`
+(a file, or stdin, for an input over the 128 KiB one argument holds on
+Linux), `fragment
 post <name> <channel> --body '{...}' [--id ID]`, `fragment
 channel <name> [<channel>] [--after N] [--follow]`.
 

@@ -255,6 +255,9 @@ together, built only from what any fragment may declare:
   fonts-liberation fonts-noto-color-emoji`; Chromium from Playwright
   1.63.0, since Ubuntu's own is a snap), then runs a 1024×640 display
   with Chromium on the fragment's `computer/start.html`.
+- **Private by default**: a template that declares a computer starts
+  `members` when made on the platform (its owner pays while anyone has
+  it open), until they share it (`first_visibility`).
 - **Driving** is a `control` channel viewers post to (decision 18):
   `{kind: "click", x, y}` in screen pixels (the page scales its click),
   `{kind: "type", text}`, `{kind: "key", key}`, `{kind: "open", url}`. The
@@ -262,26 +265,32 @@ together, built only from what any fragment may declare:
   --follow`) and applies each record once, by seq, with xdotool. Its
   cursor (`~/.pet/applied`) moves before it applies a record, so a crash
   skips one rather than applying it twice. It skips records older than
-  30 seconds, and records from anyone who is not an identity: on a `link`
-  fragment an anonymous link holder is a viewer, and may post.
-- **Frames** go through `frame`, a mutation editors call (the computer
-  is one), with `fragment call`: a JPEG of at most 85 KB as base64, when
-  the screen changed, at most one a second for a minute after someone
-  drives it and one each 5 seconds otherwise. The app keeps one row (the
+  30 seconds. `control` says `"signedIn": true`: on a `link` fragment an
+  anonymous link holder is a viewer, and the platform refuses their post
+  (401), so every record names an identity.
+- **Frames** go through `frame`, an ephemeral mutation editors call (the
+  computer is one), with `fragment call`: a JPEG of at most 85 KB as
+  base64, when the screen changed, at most one a second for a minute
+  after someone drives it and one each 5 seconds otherwise. The app keeps one row (the
   latest frame, what is on screen, who drove it last), which `screen`
   answers, and every page follows it live. Not a blob: a page cannot read
   one (the site serves files at live), and a frame a second would keep a
   blob a second for the week's grace. Not a channel: a channel is
-  history, and a record is at most 64 KiB. A frame fits one argument of
-  `fragment call --input`, which Linux caps at 128 KiB.
+  history, and a record is at most 64 KiB. A frame goes from a file
+  (`--input @file`): as an argument, Linux caps it at 128 KiB.
 - **Awake** is the platform's to decide; the pet holds nothing itself.
   Its follower is a live socket, but a computer's socket is no page: its
   opening and its close neither wake the computer nor hold it. If the
   Tasks API hold turns out not to keep a Sprite from pausing, the pet's
   service is where a holding connection would go (above).
-- **Its limit:** each frame is a mutation whose id the app's ledger keeps
-  for a week, in the app's 16 MiB database: a pet driven nonstop fills it
-  within a day, and `frame` then answers 507 until old ids expire.
+- **Its limit:** `frame` is ephemeral (`"ephemeral": true`), so its calls
+  leave no ledger row: the app's database holds the one row however long
+  it is driven (before, each frame's id was kept a week, and a pet driven
+  nonstop filled the 16 MiB within a day). What is left is the path: each
+  frame is a whole JPEG of up to 85 KB through a mutation, and every open
+  page re-runs `screen` after it, so a frame a second costs about 85 KB a
+  second per viewer. Streaming the screen to pages directly is the end
+  state (being scoped); this is the quick fix.
 
 ## Next
 

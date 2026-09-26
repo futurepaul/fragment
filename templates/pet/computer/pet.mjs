@@ -22,8 +22,8 @@ const DISPLAY = ":99";
 const FAST_MS = 1000;
 const SLOW_MS = 5000;
 const DRIVEN_MS = 60_000;
-// a frame goes as `fragment call --input`, one argument: Linux takes 128 KiB
-const FRAME_MAX_CHARS = 120_000;
+// the longest JPEG `frame` takes (its input schema), as base64
+const FRAME_MAX_CHARS = 180_000;
 // a control record older than this is skipped: its poster saw another screen
 const STALE_MS = 30_000;
 const KEYS = { Enter: "Return", Backspace: "BackSpace", Escape: "Escape", Tab: "Tab", ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right" };
@@ -33,9 +33,11 @@ const PLAYWRIGHT = "playwright@1.63.0";
 const FAKE = process.env.PET_FAKE_SCREEN;
 const CLI = process.env.FRAGMENT_BIN ?? "fragment";
 const NAME = process.env.FRAGMENT_NAME ?? fail("FRAGMENT_NAME names the fragment (the platform sets it)");
-// the control cursor, pid files, the display's and browser's logs, the browser's profile
+// the control cursor, the frame being sent, pid files, the display's and
+// browser's logs, the browser's profile
 const STATE = path.join(os.homedir(), ".pet");
 const CURSOR = path.join(STATE, "applied");
+const FRAME = path.join(STATE, "frame.json");
 const START = `file://${path.resolve("computer/start.html")}`;
 
 const log = (...parts) => console.log(new Date().toISOString(), ...parts);
@@ -170,11 +172,12 @@ async function frames() {
         log(`a frame of ${jpeg.length} characters is over ${FRAME_MAX_CHARS}: skipped`);
         continue;
       }
-      await run(CLI, ["call", NAME, "frame", "--input", JSON.stringify(frame)]);
+      // from a file: a frame is more than one argument holds (128 KiB)
+      fs.writeFileSync(FRAME, JSON.stringify(frame));
+      await run(CLI, ["call", NAME, "frame", "--input", `@${FRAME}`]);
       sent = frame;
     } catch (e) {
-      // not e.message: it holds the command, frame and all
-      log(`frame: ${String(e.stderr || e.code).trim().slice(0, 300)}`);
+      log(`frame: ${String(e.stderr || e.message).trim().slice(0, 300)}`);
     }
   }
 }
@@ -202,7 +205,7 @@ function apply({ seq, at, principal, body }) {
   applied = seq;
   fs.writeFileSync(CURSOR, String(seq));
   const what = `#${seq} ${JSON.stringify(body).slice(0, 120)}`;
-  if (!principal.startsWith("id:")) return log(`${what}: not signed in, ignored`);
+  // (only people signed in post here: `control` says signedIn)
   if (Date.now() - at > STALE_MS) return log(`${what}: stale, skipped`);
   const steps = input(body);
   if (!steps) return log(`${what}: not a control record, ignored`);

@@ -86,8 +86,8 @@ fn text(v: &Value, key: &str, max: usize) -> Result<Option<String>, String> {
 
 fn operation(name: &str, v: &Value) -> Result<OpDecl, String> {
     let obj = v.as_object().ok_or_else(|| format!("operations.{name} must be an object"))?;
-    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "kind" | "role" | "input")) {
-        return Err(format!("operations.{name} has an unknown key {k:?} (kind, role, input)"));
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "kind" | "role" | "input" | "ephemeral")) {
+        return Err(format!("operations.{name} has an unknown key {k:?} (kind, role, input, ephemeral)"));
     }
     let kind = match obj.get("kind").and_then(Value::as_str) {
         Some("query") => OpKind::Query,
@@ -113,16 +113,23 @@ fn operation(name: &str, v: &Value) -> Result<OpDecl, String> {
         }
         Some(_) => return Err(format!("operations.{name}.input must be a JSON Schema object")),
     };
-    Ok(OpDecl { kind, role, input })
+    let ephemeral = match obj.get("ephemeral") {
+        None | Some(Value::Bool(false)) => false,
+        Some(Value::Bool(true)) if kind == OpKind::Mutation => true,
+        Some(Value::Bool(true)) => return Err(format!("operations.{name}.ephemeral is for a mutation: it keeps no ledger row")),
+        Some(_) => return Err(format!("operations.{name}.ephemeral must be true or false")),
+    };
+    Ok(OpDecl { kind, role, input, ephemeral })
 }
 
-/// One entry of `channels`: who reads it (default `viewer`), and who may
-/// post to it (no one by default). Whoever may post may read what they
-/// posted: a `post` weaker than `read` is refused.
+/// One entry of `channels`: who reads it (default `viewer`), who may post
+/// to it (no one by default), and whether a poster must be signed in.
+/// Whoever may post may read what they posted: a `post` weaker than `read`
+/// is refused.
 fn channel(name: &str, v: &Value) -> Result<ChannelDecl, String> {
     let obj = v.as_object().ok_or_else(|| format!("channels.{name} must be an object"))?;
-    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "read" | "post")) {
-        return Err(format!("channels.{name} has an unknown key {k:?} (read, post)"));
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "read" | "post" | "signedIn")) {
+        return Err(format!("channels.{name} has an unknown key {k:?} (read, post, signedIn)"));
     }
     let role = |key: &str| -> Result<Option<Role>, String> {
         obj.get(key)
@@ -138,7 +145,13 @@ fn channel(name: &str, v: &Value) -> Result<ChannelDecl, String> {
             read.as_str()
         ));
     }
-    Ok(ChannelDecl { read, post })
+    let signed_in = match obj.get("signedIn") {
+        None | Some(Value::Bool(false)) => false,
+        Some(Value::Bool(true)) if post.is_some() => true,
+        Some(Value::Bool(true)) => return Err(format!("channels.{name}.signedIn is about who may post: give it a post role")),
+        Some(_) => return Err(format!("channels.{name}.signedIn must be true or false")),
+    };
+    Ok(ChannelDecl { read, post, signed_in })
 }
 
 /// One entry of `triggers`: `{"cron" | "channel" | "files": …, "run": op}`.
@@ -352,10 +365,15 @@ mod tests {
             "operations":{"list":{"kind":"query"},"add":{"kind":"mutation","input":{"type":"object"}},
             "sign":{"kind":"mutation","role":"public"}},"meta":{"title":"T"}}"#)
         .unwrap();
-        assert_eq!(m.operations["list"], OpDecl { kind: OpKind::Query, role: Role::Viewer, input: None });
+        assert_eq!(m.operations["list"], OpDecl { kind: OpKind::Query, role: Role::Viewer, input: None, ephemeral: false });
         assert_eq!(m.operations["add"].role, Role::Editor);
         assert_eq!(m.operations["add"].input, Some(serde_json::json!({"type":"object"})));
         assert_eq!(m.operations["sign"].role, Role::Public);
+        let ops = parse(br#"{"operations":{"frame":{"kind":"mutation","ephemeral":true},"add":{"kind":"mutation","ephemeral":false}}}"#).unwrap().operations;
+        assert!(ops["frame"].ephemeral && !ops["add"].ephemeral, "a mutation may keep no ledger row");
+        for bad in [&br#"{"operations":{"q":{"kind":"query","ephemeral":true}}}"#[..], br#"{"operations":{"j":{"kind":"job","ephemeral":true}}}"#, br#"{"operations":{"m":{"kind":"mutation","ephemeral":1}}}"#] {
+            assert!(parse(bad).expect_err(&String::from_utf8_lossy(bad)).contains(".ephemeral"), "only a mutation is ephemeral, with a boolean");
+        }
         assert_eq!(m.meta.unwrap().title.as_deref(), Some("T"));
         assert_eq!(m.ignored, vec!["visibility", "editors"]);
         assert_eq!(parse(b"{}").unwrap(), Manifest::default());
@@ -377,7 +395,7 @@ mod tests {
             "triggers":[{"cron":"0 9 * * *","run":"digest"},{"channel":"inbox","run":"save"},{"channel":"chat","run":"digest"},
             {"files":"notes/**","run":"digest"}]}"#)
         .unwrap();
-        assert_eq!(m.operations["digest"], OpDecl { kind: OpKind::Job, role: Role::Editor, input: None });
+        assert_eq!(m.operations["digest"], OpDecl { kind: OpKind::Job, role: Role::Editor, input: None, ephemeral: false });
         assert_eq!(m.triggers.len(), 4);
         assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Cron("0 9 * * *".into()), run: "digest".into() });
         assert_eq!(m.triggers[1].on, TriggerOn::Channel("inbox".into()));
@@ -389,8 +407,10 @@ mod tests {
     #[test]
     fn postable_channels() {
         let m = parse(br#"{"channels":{"chat":{"read":"public","post":"public"},"notes":{"post":"editor"},"desk":{"read":"editor","post":"owner"}}}"#).unwrap();
-        assert_eq!(m.channels["chat"], ChannelDecl { read: Role::Public, post: Some(Role::Public) }, "a post role as loose as read");
-        assert_eq!(m.channels["notes"], ChannelDecl { read: Role::Viewer, post: Some(Role::Editor) }, "read defaults to viewer beside a post role");
+        assert_eq!(m.channels["chat"], ChannelDecl { read: Role::Public, post: Some(Role::Public), signed_in: false }, "a post role as loose as read");
+        assert_eq!(m.channels["notes"], ChannelDecl { read: Role::Viewer, post: Some(Role::Editor), signed_in: false }, "read defaults to viewer beside a post role");
+        let control = parse(br#"{"channels":{"control":{"post":"viewer","signedIn":true}}}"#).unwrap().channels["control"].clone();
+        assert_eq!(control, ChannelDecl { read: Role::Viewer, post: Some(Role::Viewer), signed_in: true }, "a post role for signed-in posters only");
         assert_eq!(m.channels["desk"].post, Some(Role::Owner), "a post role tighter than read");
         for (bad, says) in [
             (&br#"{"channels":{"chat":{"read":"viewer","post":"public"}}}"#[..], "channels.chat.post (public) is looser than its read (viewer)"),
@@ -398,6 +418,8 @@ mod tests {
             (br#"{"channels":{"chat":{"read":"owner","post":"editor"}}}"#, "channels.chat.post (editor) is looser than its read (owner)"),
             (br#"{"channels":{"chat":{"post":"anyone"}}}"#, "channels.chat.post must be public, viewer, editor, or owner"),
             (br#"{"channels":{"chat":{"post":true}}}"#, "channels.chat.post must be public"),
+            (br#"{"channels":{"chat":{"signedIn":true}}}"#, "channels.chat.signedIn is about who may post: give it a post role"),
+            (br#"{"channels":{"chat":{"post":"viewer","signedIn":"yes"}}}"#, "channels.chat.signedIn must be true or false"),
         ] {
             let why = parse(bad).expect_err(&String::from_utf8_lossy(bad));
             assert!(why.contains(says), "{why}");

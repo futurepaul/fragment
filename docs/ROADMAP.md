@@ -170,6 +170,8 @@ A declared channel may name a `post` role; the platform appends a
 member's record itself (role check, rate limit, size cap, deduped by
 principal and id). Chats use it, so a chat needs no app code and no
 worker. The one exception to "clients never append" (docs/MODEL.md).
+*Amended (Paul, 2026-09-26):* `"signedIn": true` beside the role refuses
+an anonymous poster (401); the pet's `control` and calories' `ask` say it.
 
 ### 16. Usernames, and fragments under them (Paul, 2026-09-24)
 
@@ -520,8 +522,10 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   deletes more lines than it adds.
 - *Done (PR #45):* "is it a chat" (the desktop tells by its New chat's
   names) and the desktop's framing (one consent, the new-fragment form's).
-  The new desktop's visibility stays (`publish.rs`, `first_visibility`):
-  fragment.json holds no access. The chat's three wait for D.
+  The new desktop's visibility stayed (`publish.rs`, `first_visibility`):
+  fragment.json holds no access. *Since `pet-followups`:* it reads what
+  the template declares (a computer, or its owner's `fragments`), naming
+  no template. The chat's three wait for D.
 
 ### D. The agent add-on
 - *Built 2026-09-26 (#47, #48; decision 20 says what):* the `agent`

@@ -27,7 +27,7 @@
     "summarize": { "kind": "job", "role": "viewer", "input": { "type": "object", "additionalProperties": false, "properties": {} } }
   },
   "channels": {
-    "ask": { "read": "viewer", "post": "viewer" },
+    "ask": { "read": "viewer", "post": "viewer", "signedIn": true },
     "work": { "read": "viewer", "post": "editor" }
   },
   "agent": { "instructions": "agent.md", "tools": ["log_food", "today"], "channel": "ask" },

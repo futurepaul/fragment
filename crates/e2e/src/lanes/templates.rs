@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use fragment_core::npub;
 use fragment_fakes::openrouter::Reply as Say;
 use fragment_nip98::Keys;
+use fragment_proto::ErrorCode;
 use serde_json::{json, Value};
 
 use super::signin::{site_cookie, with_session};
@@ -47,7 +48,11 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     // a create from a template is a working fragment at once
     let chat = s.named(api, &owner, "tchat")?;
     let r = api.create_with(&owner, json!({ "name": chat, "template": "chat" }))?;
-    s.ok("a create from a template answers the fragment", r.status == 200 && r.body["name"] == chat.as_str(), &r);
+    s.ok(
+        "a create from a template answers the fragment, open to whoever holds its link (the template declares no computer)",
+        r.status == 200 && r.body["name"] == chat.as_str() && r.body["visibility"] == "link",
+        &r,
+    );
     s.hook(api, &r.body);
     let chat_cookie = format!("fragview={}", r.body["viewToken"].as_str().unwrap_or(""));
     let st = api.status(&owner, &chat)?;
@@ -283,17 +288,22 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let m = api.signed(owner, "GET", &format!("/api/f/{name}/manifest"), None)?;
     let ops = &st.body["code"]["operations"];
     s.ok(
-        "a pet from its template declares its computer, and its code installs: frame for editors, screen for viewers",
+        "a pet from its template declares its computer, so it starts its owner's alone (members), and its code installs: frame (ephemeral) for editors, screen for viewers",
         made.status == 200
+            && made.body["visibility"] == "members"
             && m.body["computer"]["start"] == "node computer/pet.mjs"
             && st.body["code"]["error"].is_null()
             && ops["frame"]["role"] == "editor"
+            && ops["frame"]["ephemeral"] == true
             && ops["screen"]["kind"] == "query",
         format!("{made} / {st}"),
     );
     let channels = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None)?;
     let control = channels.body["channels"].as_array().into_iter().flatten().find(|c| c["name"] == "control").cloned().unwrap_or_default();
-    s.ok("and a control channel viewers post to", control["read"] == "viewer" && control["post"] == "viewer", &channels);
+    s.ok("and a control channel viewers signed in post to", control["read"] == "viewer" && control["post"] == "viewer" && control["signedIn"] == true, &channels);
+    // shared by its link: who holds it is a viewer, signed in or not
+    let r = api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "link" })))?;
+    anyhow::ensure!(r.status == 200, "sharing the pet by its link: {r}");
     let link = format!("fragview={}", made.body["viewToken"].as_str().unwrap_or(""));
     let page = api.page(&name, "", Some(&link))?;
     s.ok("its page is the template's", page.status == 200 && page.text.contains("<title>Pet"), &page);
@@ -312,10 +322,11 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let r = anonymous(None)?;
     s.ok("an anonymous visitor cannot", r.status == 401 || r.status == 403, &r);
     let r = anonymous(Some(&link))?;
+    let held = api.signed(owner, "GET", &format!("/api/f/{name}/channels/control"), None)?;
     s.ok(
-        "(one holding the link posts as its viewer, anonymously: the pet's computer skips records not from an identity)",
-        r.status == 200 && r.body["result"]["principal"].as_str().is_some_and(|p| p.starts_with("anon:")),
-        &r,
+        "nor can one holding the link, a viewer but anonymous: control is for people signed in (401), and nothing is appended",
+        r.code() == Some(ErrorCode::Unauthenticated) && held.body["records"].as_array().map(Vec::len) == Some(1),
+        format!("{r} / {held}"),
     );
 
     // frames: its computer's (an editor here), one row that screen answers
@@ -364,8 +375,8 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let log = std::fs::read_to_string(s.scratch.join("sprites/sprites").join(&sprite).join("fragment.log")).unwrap_or_default();
     let seq = r.body["record"]["seq"].clone();
     s.ok(
-        "and follows control: a signed-in poster's record, taken once, makes them its driver; an anonymous one's is skipped",
-        drove && log.matches(&format!("#{seq} {{")).count() == 1 && log.contains("not signed in, ignored"),
+        "and follows control: a signed-in poster's record, taken once, makes them its driver",
+        drove && log.matches(&format!("#{seq} {{")).count() == 1,
         &log,
     );
     page.close();

@@ -158,10 +158,14 @@ pub fn posts(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a platform channel refuses posts (403), and an undeclared one is 404", r.status == 403 && unknown.status == 404, format!("{r} {unknown}"));
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/channels"), None)?;
     let list = r.body["channels"].as_array().cloned().unwrap_or_default();
-    let post_of = |n: &str| list.iter().find(|c| c["name"] == n).map(|c| c["post"].clone()).unwrap_or(json!("missing"));
+    let post_of = |n: &str| list.iter().find(|c| c["name"] == n).map(|c| (c["post"].clone(), c["signedIn"].clone())).unwrap_or_default();
     s.ok(
-        "the channel list names who may post to each",
-        post_of("chat") == "public" && post_of("notes") == "editor" && post_of("quiet").is_null() && post_of("events").is_null(),
+        "the channel list names who may post to each, and whether they must be signed in",
+        post_of("chat") == (json!("public"), json!(false))
+            && post_of("notes").0 == "editor"
+            && post_of("signed") == (json!("public"), json!(true))
+            && post_of("quiet").0.is_null()
+            && post_of("events").0.is_null(),
         &r,
     );
 
@@ -175,6 +179,13 @@ pub fn posts(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let again = site_post(api, &name, "chat", "v1", json!({ "text": "from a visitor" }), Some(&cookie), "application/json")?;
     s.ok("the visitor's retry is the same record", again.body["replayed"] == true && again.body["result"]["seq"] == r.body["result"]["seq"], &again);
+    let refused = site_post(api, &name, "signed", "v3", json!({ "text": "from a visitor" }), Some(&cookie), "application/json")?;
+    let signed = post(api, &stranger, &name, "signed", "s0", json!({ "text": "signed in" }))?;
+    s.ok(
+        "a channel that says signedIn refuses the visitor's post (401), though their role may post, and a signed-in poster's lands",
+        refused.code() == Some(ErrorCode::Unauthenticated) && signed.status == 200 && records(api, &owner, &name, "signed").len() == 1,
+        format!("{refused} {signed}"),
+    );
     let form = site_post(api, &name, "chat", "v2", json!({ "text": "a form" }), Some(&cookie), "application/x-www-form-urlencoded")?;
     let signed = api.signed(&owner, "POST", &format!("/api/f/{name}/ops/channels%2Fchat"), Some(&json!({ "id": "o1", "input": {} })))?;
     s.ok(

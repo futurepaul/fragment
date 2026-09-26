@@ -190,6 +190,14 @@ fragment verify my-thing --dir .            # full-content audit
 - `input` is a JSON Schema (types, enums, lengths, ranges, `properties`,
   `required`, `additionalProperties`, `items`). A call that does not fit
   is refused before your code runs, naming the field.
+- `"ephemeral": true` on a mutation you call often with a "latest value"
+  (a screen's frame): its calls keep no ledger row (a mutation's id is
+  otherwise kept a week in your app's 16 MiB database), so the same id
+  runs again rather than replaying, and it may not publish, push, or
+  write files.
+- A channel with a `post` role (`"post": "viewer"`) takes records people
+  post (`fragment.post`, `fragment post`); `"signedIn": true` beside it
+  refuses anyone not signed in (a link holder is a viewer).
 - `"computer": {}` gives the fragment a Linux machine of its own (a Fly
   Sprite) with this CLI installed, paired as your computer and an editor
   of the fragment. It is awake while a page of the fragment is open (and
@@ -286,7 +294,8 @@ calories` is a working example):
 
 - Deploying makes it: an agent named as the fragment is, yours, an
   editor of this fragment and of nothing else, listening to `channel`
-  (declared, with a `post` role). Redeploying updates it; a deploy
+  (declared, with a `post` role; `"signedIn": true` refuses anonymous
+  posts outright). Redeploying updates it; a deploy
   without the block removes it. A fragment with no block carries nothing
   of one.
 - `tools` are operations of this fragment (never an owner-only one): the
@@ -422,6 +431,7 @@ An operation pauses its own triggers after 5 held runs in 10 minutes or
 
 ```
 fragment call my-thing add --input '{"text":"hi"}' [--id ID]   # a retry with the same --id is a replay
+fragment call my-thing add --input @input.json                 # or - for stdin: an input over 128 KiB
 fragment channel my-thing                                      # list channels
 fragment channel my-thing activity --follow                     # the backlog a page at a time, then new records, as JSON lines
 ```
@@ -541,7 +551,7 @@ secret values into files.
 ## Command reference
 
 ```
-fragment login [--force] [--no-wait]     fragment call <name> <op> [--input JSON] [--id ID]
+fragment login [--force] [--no-wait]     fragment call <name> <op> [--input JSON|@file|-] [--id ID]
 fragment login --computer <name>         fragment computers [rm <name>]
 fragment model <prompt> | --request      (a computer: the model, on its owner's budget)
 fragment model --serve [--port N]        (a computer: that model at http://127.0.0.1:N/v1)
