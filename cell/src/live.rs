@@ -298,6 +298,11 @@ impl FragmentCell {
         }
     }
 
+    /// How many of its pages are open (a computer stays awake for them).
+    pub(crate) fn viewers(&self) -> usize {
+        self.state.get_websockets_with_tag(LIVE_TAG).len()
+    }
+
     /// Test fleets: forgets what this activation knows of its sockets, as
     /// waking from hibernation does (`/api/test/fragment` `forget-live`).
     pub(crate) fn live_forget(&self) {

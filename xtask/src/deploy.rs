@@ -120,6 +120,23 @@ fn read_secret(path: &str) -> Result<String> {
     Ok(text)
 }
 
+/// Node secrets a fleet runs without: until their file exists, a deploy
+/// leaves them out, and says so, rather than failing. Without the Sprites
+/// token every fragment runs, and one that declares a computer waits for
+/// it (its events say `computer.failed`; its computer tries again, at
+/// least hourly).
+const OPTIONAL_NODE_SECRETS: [&str; 1] = ["FRAGMENT_KEYS_SPRITES_TOKEN"];
+
+/// A node secret's value, or `None` for an optional one whose file is not
+/// there yet (one that is there must hold a value).
+fn node_secret(name: &str, path: &str) -> Result<Option<String>> {
+    if OPTIONAL_NODE_SECRETS.contains(&name) && !expand(path).exists() {
+        println!("{name}: {path} does not exist yet, so it is left out (what needs it waits for it)");
+        return Ok(None);
+    }
+    read_secret(path).map(Some)
+}
+
 /// `NAME=value` or `NAME: value` lines → (name, value).
 fn parse_env_lines(text: &str) -> BTreeMap<String, String> {
     text.lines()
@@ -188,7 +205,7 @@ pub fn run(args: &[String]) -> Result<()> {
 /// restarts the Machines). Values go through stdin and are never printed.
 fn import_secrets(fleet: &Fleet, token: &str, stage: bool) -> Result<()> {
     let (import, values) = secrets_import(fleet)?;
-    println!("{} {} secrets on {} (values never printed)", if stage { "staging" } else { "setting" }, fleet.node_secrets.len() + 2, fleet.fly.app);
+    println!("{} {} secrets on {} (values never printed)", if stage { "staging" } else { "setting" }, values.len(), fleet.fly.app);
     let mut cmd = Command::new("flyctl");
     cmd.args(["secrets", "import", "--app", &fleet.fly.app]);
     if stage {
@@ -289,7 +306,7 @@ fn deploy_cell(name: &str, fleet: &Fleet) -> Result<()> {
     for (k, path) in &fleet.var_files {
         vars.insert(k.clone(), read_secret(path)?);
     }
-    let mut secrets = fleet.node_secrets.values().map(|p| read_secret(p)).collect::<Result<Vec<_>>>()?;
+    let mut secrets = fleet.node_secrets.iter().filter_map(|(k, p)| node_secret(k, p).transpose()).collect::<Result<Vec<_>>>()?;
     check_vars(&vars, &secrets)?;
     let id = deploy_id();
     vars.insert("FRAGMENT_DEPLOY_ID".into(), id.clone());
@@ -449,7 +466,7 @@ fn secrets_import(fleet: &Fleet) -> Result<(String, Vec<String>)> {
         if !k.starts_with("FRAGMENT_KEYS_") {
             bail!("node_secrets holds {k}: only KEYS reads the node's secrets (FRAGMENT_KEYS_*)");
         }
-        let v = read_secret(path)?;
+        let Some(v) = node_secret(k, path)? else { continue };
         text.push_str(&format!("{k}={}\n", v.replace('\n', "\\n")));
         values.push(v);
     }
@@ -518,6 +535,20 @@ fn deploy_nodes(name: &str, fleet: &Fleet) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A missing Sprites token leaves it out; any other missing secret, or
+    /// an empty optional one, stops the deploy.
+    #[test]
+    fn only_optional_secrets_may_be_missing() {
+        let missing = std::env::temp_dir().join(format!("fragment-no-such-secret-{}", std::process::id()));
+        let missing = missing.to_str().unwrap();
+        assert!(node_secret("FRAGMENT_KEYS_SPRITES_TOKEN", missing).unwrap().is_none());
+        assert!(node_secret("FRAGMENT_KEYS_HOST_SECRET", missing).is_err());
+        let empty = std::env::temp_dir().join(format!("fragment-empty-secret-{}", std::process::id()));
+        std::fs::write(&empty, "\n").unwrap();
+        assert!(node_secret("FRAGMENT_KEYS_SPRITES_TOKEN", empty.to_str().unwrap()).is_err());
+        let _ = std::fs::remove_file(&empty);
+    }
 
     #[test]
     fn vars_go_inside_the_config() {

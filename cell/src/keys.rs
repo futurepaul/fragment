@@ -3,7 +3,7 @@
 //! with them. The service knows which cell is asking (the host attests it),
 //! so a value sealed here opens only for this cell, a code.storage token is
 //! signed only for a `Fragment`, WorkOS's exchange only for the `Registry`,
-//! and OpenRouter's key API only for a `Ledger`.
+//! OpenRouter's key API only for a `Ledger`, and a Sprite only for its `Computer`.
 
 use base64::Engine;
 use fragment_proto::ErrorCode;
@@ -96,4 +96,12 @@ pub async fn openrouter_keys(env: &Env, method: &str, hash: Option<&str>, body: 
         (503, _) => Ok(None),
         (status, answer) => Err(refused(route, status, &answer)),
     }
+}
+
+/// The Sprites API on this `Computer` cell's own Sprite: `op` is `create`,
+/// `get`, `delete`, or `exec` (`cmd` its argv, `stdin` its input), and the
+/// answer is (Sprites' status, its text).
+pub async fn sprites(env: &Env, op: &str, cmd: &[&str], stdin: &str) -> CellResult<(u16, String)> {
+    let answer = call(env, "sprites", &json!({ "op": op, "cmd": cmd, "stdin": stdin })).await?;
+    Ok((answer["status"].as_u64().unwrap_or(0) as u16, answer["body"].as_str().unwrap_or_default().to_string()))
 }

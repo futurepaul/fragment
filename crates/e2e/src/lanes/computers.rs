@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use super::app::ship;
 use super::jobs::{settle, started};
 use super::signin::with_session;
-use crate::api::{now_s, url_enc, Api};
+use crate::api::{now_s, url_enc, Api, Socket};
 use crate::Suite;
 
 const TODO_APP: &[u8] = include_bytes!("../../fixtures/todo.mjs");
@@ -180,5 +180,87 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("removing it again changes nothing", r.status == 200 && r.body["removed"] == false, &r);
     let listed = s.cli_json(api, &owner_home, &["computers", "--json"])?;
     s.ok("and its owner lists it no more", listed["computers"] == json!([]), &listed);
+    Ok(())
+}
+
+/// Whether `f` holds within the suite's wait for a computer.
+fn soon(s: &Suite, f: impl FnMut() -> bool) -> bool {
+    s.eventually(Duration::from_secs(20), f)
+}
+
+/// A fragment's own computer, on the Sprites fake: a deploy that declares
+/// it makes a Sprite, which installs the CLI's release and pairs itself
+/// (its key made there, with a single-use token on its stdin) as a
+/// computer its owner owns, an editor of the fragment. A page viewer keeps
+/// it awake, each tick charged to the owner; after the last one leaves it
+/// sleeps. Dropping the block keeps it, asleep; `computers rm` destroys it.
+pub fn sprites(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("sprites") {
+        return Ok(());
+    }
+    let home = s.dir("sprites-owner");
+    s.login(api, &home);
+    let owner = s.cli_keys(&home).context("the owner's CLI logged in")?;
+    let owner_id = api.identity(&owner)?;
+    let made = s.cli_json(api, &home, &["create", "pet", "--json"])?;
+    let name = made["name"].as_str().unwrap_or("").to_string();
+    s.hook(api, &made);
+    let site = s.dir("sprites-site");
+    std::fs::write(site.join("index.html"), "<h1>pet</h1>")?;
+    std::fs::write(site.join("fragment.json"), r#"{"computer":{}}"#)?;
+    let before = s.sprites.sprites().len();
+    let o = s.cli(api, &home, &["deploy", &name, "--dir", &dir_of(&site)]);
+    s.ok("a deploy that declares a computer goes live", o.status.success(), out(&o));
+
+    // made, booted, and paired: the owner's, an editor here
+    let members = || api.signed(&owner, "GET", &format!("/api/f/{name}/members"), None).map(|r| r.body["members"].clone()).unwrap_or_default();
+    let paired = soon(s, || members().as_array().is_some_and(|m| m.iter().any(|m| m["kind"] == "computer" && m["role"] == "editor")));
+    let sprites = s.sprites.sprites();
+    let (sprite, fake) = sprites.iter().last().map(|(n, f)| (n.clone(), f.clone())).unwrap_or_default();
+    let events = api.signed(&owner, "GET", &format!("/api/f/{name}/events?tail=50"), None)?;
+    let said: Vec<String> = events.body["events"].as_array().into_iter().flatten().map(|e| format!("{}: {}", e["kind"], e["summary"])).collect();
+    s.ok("it makes one Sprite, which installs the CLI and pairs as an editor of the fragment", paired && sprites.len() == before + 1, format!("{sprites:?} {} {said:?}", members()));
+    let listed = s.cli_json(api, &home, &["computers", "--json"])?;
+    let computer = listed["computers"].as_array().and_then(|c| c.iter().find(|c| c["name"] == name.as_str())).cloned().unwrap_or_default();
+    let computer_id = computer["id"].as_str().unwrap_or("").to_string();
+    s.ok("its owner's, named by its fragment", !computer_id.is_empty(), &listed);
+    let its_home = s.scratch.join("sprites/sprites").join(&sprite);
+    let key = s.cli_keys(&its_home).context("the Sprite's CLI holds its key")?;
+    let r = api.signed(&key, "GET", "/api/identities/me", None)?;
+    s.ok("its key, made on it, signs as the computer", r.body["id"] == computer_id.as_str() && r.body["owner"] == owner_id.as_str(), &r);
+    let token = fake.stdin.trim().to_string();
+    let pair = |keys: &Keys| api.signed(keys, "POST", "/api/computers/pair", Some(&json!({ "token": token })));
+    let r = pair(&Keys::generate())?;
+    s.ok("its pairing token is spent: another key is refused", r.status == 401, &r);
+    let r = pair(&key)?;
+    s.ok("the same key again pairs the same computer", r.status == 200 && r.body["id"] == computer_id.as_str(), &r);
+    let ready = soon(s, || {
+        let events = api.signed(&owner, "GET", &format!("/api/f/{name}/events?tail=50"), None).map(|r| r.body).unwrap_or_default();
+        events["events"].as_array().is_some_and(|e| e.iter().any(|e| e["kind"] == "computer.ready" && e["data"]["sprite"] == sprite.as_str()))
+    });
+    s.ok("the fragment's events say so, naming the Sprite KEYS reaches", ready, &sprite);
+
+    // awake while a page is open, each tick charged; asleep after
+    let held = |s: &Suite| s.sprites.sprites().get(&sprite).is_some_and(|f| f.held);
+    s.ok("with no page open it is not held awake", !held(s), "");
+    let page = Socket::open(api, &name, "__live", Some(&owner), None)?;
+    s.ok("a page open holds it awake", soon(s, || held(s)), "");
+    let usage = api.signed(&owner, "GET", "/api/budget/usage", None)?;
+    let awake = usage.body["usage"].as_array().map_or(0, |u| u.iter().filter(|u| u["kind"] == "computer.awake" && u["fragment"] == name.as_str()).count());
+    s.ok("each tick awake is charged to its owner at list price", awake >= 2, &usage);
+    page.close();
+    s.ok("the page closed, it sleeps after the idle wait", soon(s, || !held(s) && s.sprites.sprites().get(&sprite).is_some_and(|f| f.releases >= 1)), "");
+
+    // dropped from fragment.json: kept, asleep; removed: destroyed
+    std::fs::write(site.join("fragment.json"), "{}")?;
+    s.cli(api, &home, &["deploy", &name, "--dir", &dir_of(&site)]);
+    let page = Socket::open(api, &name, "__live", Some(&owner), None)?;
+    std::thread::sleep(Duration::from_secs(2 * crate::COMPUTER_TICK_S as u64 + 1));
+    s.ok("dropped from fragment.json, it is kept and not woken", s.sprites.sprites().contains_key(&sprite) && !held(s), "");
+    page.close();
+    let removed = s.cli_json(api, &home, &["computers", "rm", &name, "--json"])?;
+    s.ok("computers rm destroys its Sprite", soon(s, || s.sprites.deleted().contains(&sprite)), &removed);
+    let r = api.signed(&key, "GET", "/api/fragments", None)?;
+    s.ok("and its key is refused", r.status == 401, &r);
     Ok(())
 }

@@ -12,6 +12,8 @@ pub struct Request {
     pub method: String,
     pub path: String,
     pub query: HashMap<String, String>,
+    /// The query's pairs in order, a repeated key's each time.
+    pub pairs: Vec<(String, String)>,
     headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
@@ -172,7 +174,7 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
     }
     body.truncate(len);
     let (path, q) = target.split_once('?').unwrap_or((&target, ""));
-    let query = q
+    let pairs: Vec<(String, String)> = q
         .split('&')
         .filter(|s| !s.is_empty())
         .map(|pair| {
@@ -180,7 +182,7 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
             (decode(k), decode(v))
         })
         .collect();
-    Some(Request { method, path: decode(path), query, headers, body })
+    Some(Request { method, path: decode(path), query: pairs.iter().cloned().collect(), pairs, headers, body })
 }
 
 /// Percent-decoding (and `+` as space in queries, which paths never carry).

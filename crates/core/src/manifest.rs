@@ -33,6 +33,9 @@ pub struct Manifest {
     pub capabilities: Vec<String>,
     /// The agent people talk to through one of its channels (`agent`).
     pub agent: Option<AgentDecl>,
+    /// `"computer": {}`: a deploy with it provisions the fragment's own
+    /// computer, a Sprite, on its owner's budget (docs/computers.md).
+    pub computer: bool,
     /// Top-level keys that no longer do anything here.
     pub ignored: Vec<&'static str>,
 }
@@ -297,6 +300,11 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
         }
         Some(_) => return Err("capabilities must be an array".into()),
     }
+    match obj.get("computer") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(c)) if c.is_empty() => m.computer = true,
+        Some(_) => return Err("computer is {} (it takes no settings yet)".into()),
+    }
     match obj.get("triggers") {
         None | Some(Value::Null) => {}
         Some(Value::Array(list)) => {
@@ -336,6 +344,9 @@ mod tests {
         assert_eq!(parse(b"{}").unwrap(), Manifest::default());
         assert_eq!(parse(br#"{"capabilities":["fragments"]}"#).unwrap().capabilities, vec!["fragments"]);
         assert!(parse(br#"{"capabilities":["everything"]}"#).is_err());
+        assert!(parse(br#"{"computer":{}}"#).unwrap().computer);
+        assert!(!parse(br#"{}"#).unwrap().computer);
+        assert!(parse(br#"{"computer":{"size":"xl"}}"#).is_err() && parse(br#"{"computer":true}"#).is_err());
         let m = parse(br#"{"channels":{"chat":{},"news":{"read":"public"}}}"#).unwrap();
         assert_eq!(m.channels["chat"].read, Role::Viewer);
         assert_eq!(m.channels["news"].read, Role::Public);

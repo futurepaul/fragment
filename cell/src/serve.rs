@@ -243,7 +243,9 @@ impl FragmentCell {
                     anon_principal(&fresh)
                 }
             };
-            self.live(&req, caller, credential, &principal, link)?
+            let socket = self.live(&req, caller, credential, &principal, link)?;
+            self.viewed().await;
+            socket
         } else {
             match req.method() {
                 Method::Get | Method::Head => self.site(&mut req, caller, &mut facts, &path, &url, link, anon).await?,

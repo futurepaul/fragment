@@ -69,6 +69,10 @@ pub const BUDGET_USD: &str = "0.1";
 /// The WorkOS fake's environment.
 const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";
+/// The Sprites fake's token, and a computer's tick and idle wait here.
+const SPRITES_TOKEN: &str = "sprites-e2e-token";
+pub const COMPUTER_TICK_S: u32 = 1;
+pub const COMPUTER_IDLE_S: u32 = 3;
 
 pub struct Suite {
     /// The sections to run (`None`: all of them), and those not to.
@@ -99,6 +103,7 @@ pub struct Suite {
     pub fake: CodeStorage,
     pub openrouter: fragment_fakes::openrouter::OpenRouter,
     pub push: fragment_fakes::push::PushService,
+    pub sprites: fragment_fakes::sprites::Sprites,
     org_key: String,
     host_secret: String,
     /// Sign-in's stand-in: people sign in through it (`Api::person`).
@@ -127,6 +132,7 @@ impl Suite {
             ("code.storage key", self.org_key.lines().find(|l| !l.starts_with("-----") && !l.trim().is_empty()).unwrap_or_default().trim().to_string()),
             ("WorkOS API key", WORKOS_KEY.into()),
             ("OpenRouter management key", OPENROUTER_MANAGEMENT.into()),
+            ("Sprites token", SPRITES_TOKEN.into()),
         ]
     }
 
@@ -273,6 +279,13 @@ impl Suite {
             operators: Some(fragment_core::npub::encode(self.operator.pubkey_hex())),
             signins_pending_max: Some(SIGNINS_PENDING_MAX),
             test_hooks: true,
+            computers: Some(devstack::ComputerVars {
+                sprites_url: self.sprites.url.clone(),
+                sprites_token: SPRITES_TOKEN.into(),
+                release_url: format!("{}/download", self.sprites.url),
+                tick_s: COMPUTER_TICK_S,
+                idle_s: COMPUTER_IDLE_S,
+            }),
         }
         .configure(&self.project)?;
         // the agents' script is co-hosted, as the fleet runs it: the
@@ -526,6 +539,7 @@ fn main() -> Result<()> {
         fake,
         openrouter: fragment_fakes::openrouter::OpenRouter::start(OPENROUTER_KEY, OPENROUTER_MANAGEMENT)?,
         push: fragment_fakes::push::PushService::start()?,
+        sprites: fragment_fakes::sprites::Sprites::start(SPRITES_TOKEN, &scratch.join("sprites"), &cli)?,
         org_key,
         host_secret: devstack::random_hex(32),
         workos: fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY)?,

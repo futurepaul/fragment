@@ -191,6 +191,18 @@ pub struct Fleet {
     /// Test controls (`FRAGMENT_TEST_HOOKS=allow`: the registry can be made
     /// to fail). Never on a shared fleet.
     pub test_hooks: bool,
+    /// Computers on Sprites (`None`: a fragment that declares one waits for them).
+    pub computers: Option<ComputerVars>,
+}
+
+/// Computers on Sprites: the Sprites API and its token (for `KEYS`), where
+/// the CLI's release is, and how long a tick and an idle page last.
+pub struct ComputerVars {
+    pub sprites_url: String,
+    pub sprites_token: String,
+    pub release_url: String,
+    pub tick_s: u32,
+    pub idle_s: u32,
 }
 
 /// A WorkOS environment as the cell reads it.
@@ -238,8 +250,13 @@ impl Fleet {
                 env.push(("FRAGMENT_KEYS_OPENROUTER_URL".into(), u.clone()));
             }
         }
+        if let Some(c) = &self.computers {
+            env.push(("FRAGMENT_KEYS_SPRITES_TOKEN".into(), c.sprites_token.clone()));
+            env.push(("FRAGMENT_KEYS_SPRITES_URL".into(), c.sprites_url.clone()));
+        }
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
+        let (tick, idle) = self.computers.as_ref().map_or((String::new(), String::new()), |c| (c.tick_s.to_string(), c.idle_s.to_string()));
         let mut vars = vec![
             ("CODESTORAGE_ORG", self.codestorage_org.as_str()),
             ("CODESTORAGE_API_URL", self.codestorage_url.as_str()),
@@ -288,6 +305,9 @@ impl Fleet {
         }
         if self.test_hooks {
             vars.push(("FRAGMENT_TEST_HOOKS", "allow"));
+        }
+        if let Some(c) = &self.computers {
+            vars.extend([("FRAGMENT_CLI_RELEASE_URL", c.release_url.as_str()), ("FRAGMENT_COMPUTER_TICK_S", &tick), ("FRAGMENT_COMPUTER_IDLE_S", &idle)]);
         }
         write_dev_vars(project, &vars)?;
         Ok(env)

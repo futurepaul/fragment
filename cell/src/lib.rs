@@ -33,6 +33,7 @@ mod agents;
 mod ai;
 mod auth;
 mod blobs;
+mod computer;
 mod config;
 mod channels;
 mod deliveries;
@@ -71,6 +72,7 @@ use error::{CellError, CellResult};
 use registry::calls::{self, Call};
 use routed::{Credential, Mode, Routed, Signed};
 
+pub use computer::ComputerCell;
 pub use fragment::FragmentCell;
 pub use principal::PrincipalCell;
 pub use ledger::LedgerCell;
@@ -372,6 +374,10 @@ const LEAVES_AT_ONCE: usize = 16;
 /// key signs as.
 async fn remove_computer(env: &Env, url: &Url, removed: calls::RemovedComputer) -> CellResult<Response> {
     let id = removed.identity.id.clone();
+    // a fragment's own computer is named by its fragment: its Sprite goes too
+    if let Some(fragment) = removed.name.as_deref().filter(|n| valid_fragment_name(n)) {
+        computer::ask(env, fragment, &computer::Ask::Destroy).await?;
+    }
     let list = Request::new("https://principal.internal/list", Method::Get)?;
     let listed: fragment_proto::FragmentList = env.durable_object("PRINCIPAL")?.get_by_name(&id)?.fetch_with_request(list).await?.json().await?;
     let (mut left, mut failed) = (vec![], vec![]);
@@ -397,6 +403,33 @@ async fn remove_computer(env: &Env, url: &Url, removed: calls::RemovedComputer) 
     }
     assert!(left.len() + failed.len() == listed.fragments.len(), "every listed fragment is left or named as failed");
     json_answer(&json!({ "id": id, "removed": removed.removed, "left": left, "failed": failed }))
+}
+
+/// `POST /api/computers/pair`: a fragment's own computer pairs, signed by
+/// the key it just made, with the token its fragment's computer cell
+/// handed it: the computer becomes its fragment's editor, for its owner.
+async fn pair_computer(mut req: Request, env: &Env, url: &Url) -> CellResult<Response> {
+    #[derive(Deserialize)]
+    struct Pair {
+        token: String,
+    }
+    let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+    let key = authenticate(&req, url, Payload::Read(&body))?;
+    let Pair { token } = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+    let view = ask_registry(env, &calls::PairWithToken { token, key }).await?;
+    let (Some(fragment), Some(owner)) = (view.name.clone(), view.owner.clone()) else {
+        return Err(CellError::host("a paired computer has a name and an owner"));
+    };
+    let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: None };
+    let routed = Routed { name: fragment.clone(), url: url.clone(), mode: None, signed: Some(Signed::new(identity, None)), credential: None };
+    let role = serde_json::to_vec(&json!({ "role": "editor" })).map_err(|e| CellError::host(e.to_string()))?;
+    let put = Request::new(url.as_str(), Method::Put)?;
+    let mut added = forward(env, &put, bytes_body(role), Forward { routed, inner: format!("/api/members/{}", view.id), extra: vec![] }).await?;
+    if added.status_code() != 200 {
+        return Err(CellError::host(format!("{} paired, but did not join {fragment}: {}", view.id, added.text().await.unwrap_or_default())));
+    }
+    computer::ask(env, &fragment, &computer::Ask::Paired).await?;
+    json_answer(&view)
 }
 
 /// Makes a fragment for a person, under their username: the API's create
@@ -916,6 +949,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             }
             release_username(env, username).await
         }
+        (Method::Post, ["api", "computers", "pair"]) => pair_computer(req, env, &url).await,
         (_, ["api", "identities", rest @ ..]) => {
             let rest = rest.to_vec();
             identities(req, env, &url, &rest).await

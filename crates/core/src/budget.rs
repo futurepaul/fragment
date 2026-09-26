@@ -121,10 +121,43 @@ impl Month {
     }
 }
 
+/// A computer's Sprite at list price (docs/computers.md): an awake hour is
+/// billed as the idle footprint measured on one (a tenth of a CPU at
+/// $0.07 a CPU-hour, 1.5 GB at $0.04375 a GB-hour; Sprites meter what is
+/// used, which the platform cannot see), and its disk, measured when it
+/// wakes, at $0.000683 a GB-hour while awake and $0.000027 while asleep.
+pub const AWAKE_PER_HOUR: i64 = 70_000 / 10 + 43_750 * 3 / 2;
+pub const DISK_HOT_PER_GB_HOUR: i64 = 683;
+pub const DISK_COLD_PER_GB_HOUR: i64 = 27;
+const HOUR_MS: i128 = 3_600_000;
+const GB: i128 = 1_000_000_000;
+
+/// What `ms` of a computer costs, awake or asleep, with `disk_bytes` on
+/// its disk: rounded up, so a charge is never zero.
+pub fn computer(ms: i64, disk_bytes: i64, awake: bool) -> i64 {
+    assert!(ms >= 0 && disk_bytes >= 0, "a span and a size are not negative");
+    let disk_rate = if awake { DISK_HOT_PER_GB_HOUR } else { DISK_COLD_PER_GB_HOUR };
+    // micro-dollars times GB·ms: i128, so a year of a 100 GB disk fits
+    let per_hour_gb = i128::from(if awake { AWAKE_PER_HOUR } else { 0 }) * GB + i128::from(disk_rate) * i128::from(disk_bytes);
+    let (n, d) = (per_hour_gb * i128::from(ms), HOUR_MS * GB);
+    let micros = ((n + d - 1) / d).max(1);
+    i64::try_from(micros).expect("a computer's charge fits an i64")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn computers_at_list_price() {
+        assert_eq!(AWAKE_PER_HOUR, 72_625);
+        assert_eq!(computer(3_600_000, 0, true), 72_625);
+        assert_eq!(computer(60_000, 0, true), 1_211, "a minute, rounded up");
+        assert_eq!(computer(3_600_000, 10_000_000_000, true), 72_625 + 6_830);
+        assert_eq!(computer(30 * 24 * 3_600_000, 10_000_000_000, false), 194_400, "a month asleep with 10 GB");
+        assert_eq!(computer(1, 0, false), 1, "never zero");
+    }
 
     #[test]
     fn months_are_utc() {

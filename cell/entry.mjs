@@ -37,6 +37,15 @@ export class Ledger extends DurableObject {
   fetch(request) { return this.rs.fetch(request); }
 }
 
+export class Computer extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.rs = new rs.ComputerCell(ctx, env);
+  }
+  fetch(request) { return this.rs.fetch(request); }
+  alarm(info) { return this.rs.alarm(info); }
+}
+
 export class Registry extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);

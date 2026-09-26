@@ -24,7 +24,7 @@ cell names that salt, and are resealed as `w2` on first use.
 |---|---|
 | A person's model credential (their OpenRouter key, minted by the platform with their budget as its limit), their GitHub token, other personal keys | the person's own cell |
 | A key an app needs (a third-party API key, a webhook signing key) | the fragment's supervisor |
-| The Sprites org token a person's computers run under | the person's own cell (ours by default; theirs if they bring their own Sprites org) |
+| The Sprites org token fragments' computers run under | the node's environment (`FRAGMENT_KEYS_SPRITES_TOKEN`), used only by `KEYS`, for a `Computer` cell and only on its own Sprite (a person's own Sprites org comes later) |
 | The fleet's host secret, the code.storage org key, the OpenRouter management key, the WorkOS API key | the node's environment (Fly secrets; `node_secrets` in the fleet file), used only by `KEYS`: never a Worker variable, a JS heap, or the deployment manifest in the bucket |
 | A fragment's own nostr key, an agent's nostr key | made by `KEYS` and sealed for their cell; `KEYS` signs with them (an agent's NIP-98 headers), so they never reach a cell unsealed |
 | A browser's sessions (the platform's, and one per fragment origin) | the registry cell, as SHA-256 hashes of random tokens; the tokens live only in HttpOnly cookies |
