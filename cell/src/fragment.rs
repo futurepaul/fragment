@@ -220,7 +220,9 @@ impl DurableObject for FragmentCell {
         if self.state.get_tags(&ws).iter().any(|t| t == "live") {
             self.live_closed(&ws);
             // its computer's idle wait runs from the last page's close
-            self.viewed().await;
+            if self.is_page(&ws) {
+                self.viewed().await;
+            }
         }
         let code = if code == 1005 || code == 1006 { 1000 } else { code as u16 };
         let _ = ws.close(Some(code), Some(reason));

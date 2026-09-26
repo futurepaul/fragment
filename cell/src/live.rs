@@ -49,7 +49,7 @@ use fragment_core::live::{presence_admit, QueryBudget, QueryRefused};
 use fragment_core::facet::Answered;
 use fragment_core::npub;
 use fragment_proto::live::{Answer, Cursor, LiveIn, LiveOut, Present, Query, Subscribe};
-use fragment_proto::{limits, valid_op_id, ChannelRecord, ErrorBody, ErrorCode, OpKind, Role, Via};
+use fragment_proto::{limits, valid_op_id, ChannelRecord, ErrorBody, ErrorCode, IdentityKind, OpKind, Role, Via};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use worker::*;
@@ -73,6 +73,9 @@ const ROLE_CHANGED: u16 = 4001;
 /// presence protocol of one change a frame (its library asks `?v=2`).
 const LIVE_TAG: &str = "live";
 const CURRENT_TAG: &str = "live2";
+/// The tag of a computer's socket (a pet's own `--follow`): no page, so it
+/// neither wakes the fragment's computer nor holds it awake.
+const COMPUTER_TAG: &str = "computer";
 /// The tag of a socket whose page was loaded before presence came one
 /// change a frame: it hears the whole list on each change, as it did.
 /// Delete with its ledger entry.
@@ -199,7 +202,11 @@ impl FragmentCell {
         };
         let current = caller.url.query_pairs().any(|(k, v)| k == "v" && v == "2");
         let pair = WebSocketPair::new()?;
-        self.state.accept_websocket_with_tags(&pair.server, &[LIVE_TAG, &tag, &who, if current { CURRENT_TAG } else { LEGACY_TAG }]);
+        let mut tags = vec![LIVE_TAG, &tag, &who, if current { CURRENT_TAG } else { LEGACY_TAG }];
+        if caller.kind() == Some(IdentityKind::Computer) {
+            tags.push(COMPUTER_TAG);
+        }
+        self.state.accept_websocket_with_tags(&pair.server, &tags);
         let signed_in = caller.principal().is_some();
         let st = LiveState {
             id: js::random_hex::<8>(),
@@ -298,9 +305,15 @@ impl FragmentCell {
         }
     }
 
-    /// How many of its pages are open (a computer stays awake for them).
+    /// Whether a live socket is a page: a computer's is not.
+    pub(crate) fn is_page(&self, ws: &WebSocket) -> bool {
+        !self.state.get_tags(ws).iter().any(|t| t == COMPUTER_TAG)
+    }
+
+    /// How many of its pages are open (a computer stays awake for them): a
+    /// computer's sockets are none.
     pub(crate) fn viewers(&self) -> usize {
-        self.state.get_websockets_with_tag(LIVE_TAG).len()
+        self.state.get_websockets_with_tag(LIVE_TAG).len().saturating_sub(self.state.get_websockets_with_tag(COMPUTER_TAG).len())
     }
 
     /// Test fleets: forgets what this activation knows of its sockets, as

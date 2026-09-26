@@ -44,7 +44,8 @@ Status, 2026-09-26 (ROADMAP phase E). Built:
    signed by that key), so the key never leaves the Sprite. The computer
    is named by its fragment (`pet.paul`), and the platform makes it an
    editor there.
-4. **Awake and asleep.** A page opening on the fragment wakes it. Each
+4. **Awake and asleep.** A page opening on the fragment wakes it (a
+   computer's own live socket, such as the pet's follower, is no page). Each
    tick (a minute) it is charged first, then held awake through the
    Sprite's Tasks API (a hold that expires after two ticks). Each tick,
    the cell asks the fragment for open pages; 5 minutes after the last
@@ -181,19 +182,54 @@ and was destroyed. Fixed since:
   own desktop service, holding a connection while a page shows it, is
   the natural holder. That is the pet-desktop PR's choice.
 
+## How a page shows it: the pet (`templates/pet`)
+
+A computer everyone who has the fragment watches live and drives
+together, built only from what any fragment may declare:
+
+- **Its computer** is declared with `"start": "node computer/pet.mjs"`
+  (a Sprite has Node 24). On its first start the script installs what is
+  missing (apt with `sudo -n`: `xvfb openbox xdotool imagemagick
+  fonts-liberation fonts-noto-color-emoji`; Chromium from Playwright
+  1.63.0, since Ubuntu's own is a snap), then runs a 1024×640 display
+  with Chromium on the fragment's `computer/start.html`.
+- **Driving** is a `control` channel viewers post to (decision 18):
+  `{kind: "click", x, y}` in screen pixels (the page scales its click),
+  `{kind: "type", text}`, `{kind: "key", key}`, `{kind: "open", url}`. The
+  computer follows it with the CLI (`fragment channel <name> control
+  --follow`) and applies each record once, by seq, with xdotool. Its
+  cursor (`~/.pet/applied`) moves before it applies a record, so a crash
+  skips one rather than applying it twice. It skips records older than
+  30 seconds, and records from anyone who is not an identity: on a `link`
+  fragment an anonymous link holder is a viewer, and may post.
+- **Frames** go through `frame`, a mutation editors call (the computer
+  is one), with `fragment call`: a JPEG of at most 85 KB as base64, when
+  the screen changed, at most one a second for a minute after someone
+  drives it and one each 5 seconds otherwise. The app keeps one row (the
+  latest frame, what is on screen, who drove it last), which `screen`
+  answers, and every page follows it live. Not a blob: a page cannot read
+  one (the site serves files at live), and a frame a second would keep a
+  blob a second for the week's grace. Not a channel: a channel is
+  history, and a record is at most 64 KiB. A frame fits one argument of
+  `fragment call --input`, which Linux caps at 128 KiB.
+- **Awake** is the platform's to decide; the pet holds nothing itself.
+  Its follower is a live socket, but a computer's socket is no page: its
+  opening and its close neither wake the computer nor hold it. If the
+  Tasks API hold turns out not to keep a Sprite from pausing, the pet's
+  service is where a holding connection would go (above).
+- **Its limit:** each frame is a mutation whose id the app's ledger keeps
+  for a week, in the app's 16 MiB database: a pet driven nonstop fills it
+  within a day, and `frame` then answers 507 until old ids expire.
+
 ## Next
 
 - **goose on a computer**: a local OpenAI-compatible endpoint
   (`fragment model --serve`) that signs each call, so goose, or anything
   that speaks to a provider, needs no key; and streaming.
-- **How a page shows it: a CUA "pet".** A `start` service
-  (Xvfb, Chromium, and a control endpoint, from finite-next's
-  `computer/*`) takes a screenshot on each change (at most one a second),
-  stores it as a blob, and posts `{sha, at}` to a declared `screen`
-  channel: every viewer sees the same frame live. The page calls
-  operations (`poke {x, y}`, `type {text}`) that append to a `control`
-  channel, which the computer follows and applies once each (keyed by
-  seq). An agent drives it through the same operations.
+- **The pet's agent**: `click`, `type`, and `open` operations an `agent`
+  block offers, which publish to `control`. It waits for tool results
+  that carry an image: an agent that cannot see the screen can only open
+  addresses.
 - **Alerts** about computers awake longer than expected, and what a
   deleted fragment's computer becomes (today it stays, asleep, until
   `fragment computers rm`).
