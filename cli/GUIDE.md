@@ -68,7 +68,7 @@ yours (`fragment status todo` is `todo.<your username>`).
 fragment login                            # once per machine: sign in in a browser, approve this machine's key
 fragment init my-thing                    # scaffold (todo) + create + deploy → live URL,
                                           #   share link, webhook URL
-fragment init my-inbox --template inbox   # or: todo | notes | chat | desktop | blank
+fragment init my-inbox --template inbox   # or: todo | notes | calories | pet | chat | desktop | blank
 ```
 
 `fragment new <dir> --template T` scaffolds without creating;
@@ -77,6 +77,8 @@ fragment init my-inbox --template inbox   # or: todo | notes | chat | desktop | 
 - `todo`: mutations over SQLite, a public activity channel, a live page.
 - `inbox`: webhook deliveries start a job that fetches and records.
 - `notes`: a folder of markdown as a live site; the files are the state.
+- `calories`: a food log you tell what you ate; its own agent logs it.
+- `pet`: a computer everyone here shares: its screen live, driven together.
 - `chat`: a live chat room; an agent member can answer in it.
 - `desktop`: a demo: your fragments side by side (chats, apps, files).
 - `blank`: one page, to build on.
