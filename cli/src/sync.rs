@@ -10,7 +10,7 @@
 // repo is the truth, the folder is a disposable working copy.
 use crate::api::Client;
 use crate::api::CodedError;
-use crate::codestorage::{Author, Change, CodeStorage, CsError, MAIN, MAX_CAS_ATTEMPTS};
+use crate::codestorage::{Author, Change, CodeStorage, CsError, LIVE, MAIN, MAX_CAS_ATTEMPTS};
 use fragment_core::codestorage::TreeEntry;
 use anyhow::{anyhow, Result};
 use fs2::FileExt;
@@ -41,6 +41,8 @@ pub struct SyncOptions {
     /// in pull mode, delete local files that were deleted remotely
     /// (pull never deletes without it; mirror always propagates)
     pub prune: bool,
+    /// in pull mode, pull `live` rather than main
+    pub live: bool,
     pub writer_id: String, // 8 hex of our pubkey, for conflict-copy names
     pub codestorage: Option<String>,
 }
@@ -52,6 +54,7 @@ impl Default for SyncOptions {
             mirror_from: None,
             apply_mass_delete: false,
             prune: false,
+            live: false,
             writer_id: "anon".into(),
             codestorage: None,
         }
@@ -569,7 +572,8 @@ pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path,
     // main as this pass sees it: read once, reused by the push's first
     // attempt and by the pull, and after our own commit derived rather than
     // listed again
-    let mut listing = list_main(storage)?;
+    assert!(!opts.live || opts.mode == Mode::Pull, "live is only pulled");
+    let mut listing = list_branch(storage, if opts.live { LIVE } else { MAIN })?;
     adopt_identical(storage, &local, &listing, &mut state)?;
     // candidate local deletions: known remotely before, gone from the
     // listing now, local copy untouched since we saw it
@@ -784,7 +788,11 @@ impl Listing {
 const FILE_MODE: &str = "100644";
 
 fn list_main(storage: &CodeStorage) -> Result<Listing, SyncError> {
-    let Some(head) = storage.branch_head(MAIN)? else {
+    list_branch(storage, MAIN)
+}
+
+fn list_branch(storage: &CodeStorage, branch: &str) -> Result<Listing, SyncError> {
+    let Some(head) = storage.branch_head(branch)? else {
         return Ok(Listing { head: None, files: HashMap::new() }); // empty repo: everything local is new
     };
     let files = storage.list_files(&head)?.into_iter().filter(|f| syncable(&f.path)).map(|f| (f.path.clone(), f)).collect();
@@ -1347,6 +1355,27 @@ mod tests {
         assert_eq!(report.pulled, vec!["site/remote-only.txt"]);
         assert_eq!(fs::read(dir.join("site/remote-only.txt")).unwrap(), b"r");
         assert!(mock.file_at("t", "main", "local-only.txt").is_some());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn live_is_pulled_not_main() {
+        let mock = crate::mockcs::start();
+        mock.seed_repo("t", &[("a.txt", b"a1"), ("gone.txt", b"g")]);
+        mock.set_branch("t", "live", &mock.branch("t", "main").unwrap());
+        mock.external_commit("t", "main", &[("a.txt", Some(b"a2")), ("new.txt", Some(b"n"))], "not deployed");
+        let c = client_for(&mock);
+        let dir = tmpdir("live");
+        let live = SyncOptions { live: true, prune: true, ..opts(Mode::Pull) };
+        sync_once(&c, "t", &dir, &live).unwrap();
+        assert_eq!((fs::read(dir.join("a.txt")).unwrap(), dir.join("new.txt").exists()), (b"a1".to_vec(), false), "live's files, not main's");
+        fs::write(dir.join("local.txt"), b"l").unwrap();
+        // a deploy moves live: the next pull brings it, deletions included, and pushes nothing
+        mock.external_commit("t", "main", &[("gone.txt", None)], "remove");
+        mock.set_branch("t", "live", &mock.branch("t", "main").unwrap());
+        let report = sync_once(&c, "t", &dir, &live).unwrap();
+        assert_eq!((fs::read(dir.join("a.txt")).unwrap(), dir.join("new.txt").exists(), dir.join("gone.txt").exists()), (b"a2".to_vec(), true, false));
+        assert!(report.pushed.is_empty() && mock.file_at("t", "main", "local.txt").is_none());
         fs::remove_dir_all(&dir).ok();
     }
 

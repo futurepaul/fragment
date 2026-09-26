@@ -5,15 +5,19 @@
 //! `HOME`, so a computer's first boot (the release's one-line install,
 //! then `fragment login --pair`) really runs. The Sprite runtime's Tasks
 //! API (`sprite-env curl … /v1/tasks/…`, which holds a Sprite awake) is
-//! answered here: a hold is recorded, and a DELETE drops it. The release
-//! the install fetches (`/download/fragment-<os>-<arch>.tar.gz`) is the
-//! binary the fake was started with.
+//! answered here: a hold is recorded, and a DELETE drops it. So are its
+//! services (`sprite-env services create|delete <name>`): a process per
+//! Sprite and name, started in its home, and stopped as the runtime stops
+//! one (TERM, then KILL 5 s later), as every one is when the fake goes. The
+//! release the install fetches (`/download/fragment-<os>-<arch>.tar.gz`)
+//! is the binary the fake was started with.
 
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 
@@ -26,7 +30,7 @@ pub struct Sprite {
     pub held: bool,
     pub holds: u32,
     pub releases: u32,
-    /// Commands run (the Tasks API's aside), and the last one's input.
+    /// Commands run (the Tasks API's aside), and the last input one was given.
     pub runs: u32,
     pub stdin: String,
     /// Every call that named it.
@@ -39,6 +43,8 @@ struct State {
     deleted: Vec<String>,
     /// Every call is refused as a bad token's is (a lever).
     refusing: bool,
+    /// Running services, by Sprite and name.
+    services: BTreeMap<(String, String), Child>,
 }
 
 pub struct Sprites {
@@ -55,6 +61,9 @@ fn valid_name(name: &str) -> bool {
 fn exec(state: &Mutex<State>, home: &Path, name: &str, req: &Request) -> Response {
     let argv: Vec<&str> = req.pairs.iter().filter(|(k, _)| k == "cmd").map(|(_, v)| v.as_str()).collect();
     let Some((program, args)) = argv.split_first() else { return Response::json(400, &json!({ "error": "cmd is required" })) };
+    if let ("sprite-env", ["services", verb, service, flags @ ..]) = (*program, args) {
+        return services(state, home, name, verb, service, flags);
+    }
     if *program == "sprite-env" {
         let method = args.iter().position(|a| *a == "-X").and_then(|i| args.get(i + 1)).copied().unwrap_or("GET");
         let mut s = state.lock().expect("sprites state");
@@ -73,7 +82,10 @@ fn exec(state: &Mutex<State>, home: &Path, name: &str, req: &Request) -> Respons
     let stdin = if req.query.get("stdin").map(String::as_str) == Some("true") { req.body.clone() } else { Vec::new() };
     let mut s = state.lock().expect("sprites state");
     let sprite = s.sprites.get_mut(name).expect("exec checked the Sprite exists");
-    (sprite.runs, sprite.stdin) = (sprite.runs + 1, String::from_utf8_lossy(&stdin).into_owned());
+    sprite.runs += 1;
+    if !stdin.is_empty() {
+        sprite.stdin = String::from_utf8_lossy(&stdin).into_owned();
+    }
     drop(s);
     let child = Command::new(program).args(args).env("HOME", home).current_dir(home).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
     let out = child.and_then(|mut c| {
@@ -83,6 +95,58 @@ fn exec(state: &Mutex<State>, home: &Path, name: &str, req: &Request) -> Respons
     match out {
         Ok(o) => Response::bytes(200, "text/plain", [o.stdout, o.stderr].concat()),
         Err(e) => Response::json(500, &json!({ "error": e.to_string() })),
+    }
+}
+
+/// A Sprite's services: `create <name> --cmd C [--args a,b] [--dir D]`
+/// starts one in its home; `delete <name>` stops it.
+fn services(state: &Mutex<State>, home: &Path, sprite: &str, verb: &str, service: &str, flags: &[&str]) -> Response {
+    let key = (sprite.to_string(), service.to_string());
+    let flag = |f: &str| flags.iter().position(|a| *a == f).and_then(|i| flags.get(i + 1)).copied();
+    let mut s = state.lock().expect("sprites state");
+    match (verb, s.services.contains_key(&key), flag("--cmd")) {
+        ("delete", true, _) => {
+            let child = s.services.remove(&key).expect("a service it has");
+            drop(s);
+            stop(child);
+            Response::json(200, &json!({}))
+        }
+        ("delete", false, _) => Response::json(404, &json!({ "error": "service not found" })),
+        ("create", true, _) => Response::json(409, &json!({ "error": "a service has that name" })),
+        ("create", false, Some(cmd)) => {
+            let args = flag("--args").map_or(vec![], |a| a.split(',').collect());
+            let dir = flag("--dir").map_or(home.to_path_buf(), PathBuf::from);
+            let spawned = Command::new(cmd).args(args).env("HOME", home).current_dir(dir).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+            match spawned {
+                Ok(child) => {
+                    s.services.insert(key, child);
+                    Response::json(200, &json!({ "name": service }))
+                }
+                Err(e) => Response::json(500, &json!({ "error": e.to_string() })),
+            }
+        }
+        _ => Response::json(400, &json!({ "error": "services create <name> --cmd C, or delete <name>" })),
+    }
+}
+
+/// Stops a service as the runtime does: TERM, then KILL 5 s later.
+fn stop(mut child: Child) {
+    let _ = Command::new("kill").args(["-TERM", &child.id().to_string()]).status();
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(5) {
+        if let Ok(Some(_)) = child.try_wait() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+impl Drop for Sprites {
+    fn drop(&mut self) {
+        let services = std::mem::take(&mut self.state.lock().expect("sprites state").services);
+        services.into_values().for_each(stop);
     }
 }
 

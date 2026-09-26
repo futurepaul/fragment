@@ -3,7 +3,9 @@
 //! its declared computer (`job.computer.exec`), awake and billed to its
 //! owner for them. A nonzero exit is a result; a replayed run reattaches
 //! to its command and never runs it twice; a fragment without a computer
-//! is told to declare one.
+//! is told to declare one. A computer keeps its fragment's live files and
+//! runs its `start` from them as a service, restarted when it exits and
+//! after a deploy.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -12,8 +14,8 @@ use anyhow::{Context, Result};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
-use super::jobs::{settle, started};
-use crate::api::Api;
+use super::jobs::{records, settle, started};
+use crate::api::{Api, Socket};
 use crate::Suite;
 
 const APP: &[u8] = include_bytes!("../../fixtures/runtime.mjs");
@@ -23,7 +25,7 @@ fn dir_of(p: &Path) -> String {
     p.to_str().expect("a UTF-8 path").to_string()
 }
 
-/// A fragment its owner's CLI makes and deploys from `files`.
+/// A fragment its owner's CLI makes and deploys from `files` (in its folder, `runtime-<label>`).
 fn deployed(s: &mut Suite, api: &Api, home: &Path, label: &str, files: &[(&str, &[u8])]) -> Result<String> {
     let made = s.cli_json(api, home, &["create", label, "--json"])?;
     let name = made["name"].as_str().context("create answers its name")?.to_string();
@@ -118,5 +120,30 @@ pub fn computer_runtime(s: &mut Suite, api: &Api) -> Result<()> {
         r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("StepError") && e.contains(r#""computer": {}"#)),
         &r,
     );
+
+    // `start`: run from the fragment's live files as a service
+    let manifest = br#"{"channels": {"said": {"post": "editor"}}, "computer": {"start": "bash said.sh"}}"#;
+    let say = |v: u32, then: &str| format!("fragment post \"$FRAGMENT_NAME\" said --body '{{\"v\": {v}}}'\n{then}\n");
+    let pet = deployed(s, api, &home, "said", &[("fragment.json", manifest), ("said.sh", say(1, "exit 0").as_bytes())])?;
+    let pet_home = s.scratch.join("sprites/sprites").join(ready(s, api, &owner, &pet).unwrap_or_default());
+    let said = |v: u32| records(api, &owner, &pet, "said").iter().filter(|r| r["body"]["v"] == v).count();
+    s.ok("its computer syncs the live files at boot and runs start: its record appears", s.eventually(Duration::from_secs(20), || said(1) >= 1), &pet);
+    s.ok("start that exits is run again (with backoff)", s.eventually(Duration::from_secs(10), || said(1) >= 2), said(1));
+    let log = std::fs::read_to_string(pet_home.join("fragment.log")).unwrap_or_default();
+    s.ok("from ~/fragment, its output in ~/fragment.log", pet_home.join("fragment/said.sh").exists() && log.contains("[fragment] exited 0"), &log);
+    // awake (a page open), a redeploy that changes the script restarts it
+    let page = Socket::open(api, &pet, "__live", Some(&owner), None)?;
+    let site = s.scratch.join("runtime-said");
+    std::fs::write(site.join("said.sh"), say(2, "exec sleep 600"))?;
+    let o = s.cli(api, &home, &["deploy", &pet, "--dir", &dir_of(&site)]);
+    let restarted = s.eventually(Duration::from_secs(20), || said(2) == 1);
+    let ones = said(1);
+    std::thread::sleep(Duration::from_secs(3));
+    s.ok(
+        "a redeploy that changes the script restarts it: the new record appears, and the old script runs no more",
+        o.status.success() && restarted && said(1) == ones && said(2) == 1,
+        format!("v1 {ones} then {}, v2 {}", said(1), said(2)),
+    );
+    page.close();
     Ok(())
 }
