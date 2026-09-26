@@ -188,7 +188,9 @@ fragment verify my-thing --dir .            # full-content audit
   Sprite) with this CLI installed, paired as your computer and an editor
   of the fragment. It is awake while a page of the fragment is open (and
   5 minutes after), billed to your budget; `fragment computers rm
-  <fragment>` destroys it.
+  <fragment>` destroys it. On it, `fragment model "<prompt>"` (or
+  `--request` with an OpenAI-style chat request on stdin) asks the model
+  through the platform, on your budget, with no key of its own.
 
 ```js
 // app.mjs
@@ -489,6 +491,7 @@ secret values into files.
 ```
 fragment login [--force] [--no-wait]     fragment call <name> <op> [--input JSON] [--id ID]
 fragment login --computer <name>         fragment computers [rm <name>]
+fragment model <prompt> | --request      (a computer: the model, on its owner's budget)
 fragment whoami                          fragment channel <name> [<channel>] [--after N] [--follow]
 fragment username [<name>]
 fragment keys [list|rotate|revoke <npub>]

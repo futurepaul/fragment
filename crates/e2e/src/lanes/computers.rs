@@ -156,6 +156,19 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&computer, "GET", "/api/budget", None)?;
     s.ok("and the computer reads no budget", r.status == 403, &r);
 
+    // the model, through the platform: the agents' model, its owner's key and budget
+    let o = s.cli(api, &home, &["model", "hello from the computer"]);
+    s.ok("it asks the model through the platform", o.status.success() && out(&o).contains("echo: hello from the computer"), out(&o));
+    let org = format!("org:{}", owner_id.trim_start_matches("id:"));
+    let key = s.openrouter.minted().into_iter().find(|k| k.name.contains(&org)).map(|k| format!("Bearer {}", k.key)).unwrap_or_default();
+    let call = s.openrouter.calls().into_iter().rev().find(|c| c.1 == "/api/v1/chat/completions").unwrap_or_default();
+    s.ok("on the agents' model, with its owner's OpenRouter key", call.2 == fragment_proto::AGENT_MODEL && !key.is_empty() && call.3 == key, format!("{call:?}"));
+    let usage = api.signed(&owner, "GET", "/api/budget/usage", None)?;
+    let billed = usage.body["usage"].as_array().is_some_and(|u| u.iter().any(|u| u["kind"] == "computer.text" && u["fragment"] == computer_id.as_str() && u["state"] == "settled"));
+    s.ok("billed to its owner, naming the computer", billed, &usage);
+    let r = api.signed(&owner, "POST", "/api/model/chat/completions", Some(&json!({ "messages": [{ "role": "user", "content": "hi" }] })))?;
+    s.ok("a person does not call the model here", r.status == 403, &r);
+
     // removed: its keys revoked, it leaves every fragment, it is refused
     let removed = s.cli_json(api, &owner_home, &["computers", "rm", "builder", "--json"])?;
     let left = removed["left"].as_array().cloned().unwrap_or_default();

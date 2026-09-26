@@ -432,6 +432,70 @@ async fn pair_computer(mut req: Request, env: &Env, url: &Url) -> CellResult<Res
     json_answer(&view)
 }
 
+/// How long a computer's model call may take (a reasoning step can take 96 s).
+const MODEL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// `POST /api/model/chat/completions`: a computer calls the model through
+/// the platform (docs/computers.md), signed by its own key: an OpenAI-style
+/// chat request, on the model the agents use, paid from its owner's month
+/// as an agent's call is (`agent_spend`: the same ledger reserve, settle,
+/// and release), except that the platform makes the call: the owner's
+/// OpenRouter key never reaches the computer. No streaming yet.
+async fn model_call(mut req: Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
+    let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+    let who = signer(env, &req, url, &body).await?;
+    let owner = match (who.kind, who.owner.as_deref()) {
+        (IdentityKind::Computer, Some(owner)) => owner.to_string(),
+        _ => return Err(CellError::new(ErrorCode::Forbidden, "only a computer calls the model here, on its owner's budget")),
+    };
+    let mut ask: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+    if !ask["messages"].is_array() || ask["stream"] == json!(true) {
+        return Err(CellError::invalid("a chat request's messages are an array, and it does not stream"));
+    }
+    ask["model"] = json!(fragment_proto::AGENT_MODEL);
+    let org = ledger::org_of(&owner).ok_or_else(|| CellError::host("a computer's owner is an identity"))?;
+    // namespaced by the computer, as an agent's are by the agent
+    let reference = format!("computer:{}/{}", who.id, js::random_hex::<16>());
+    let reserve = ledger::Reserve {
+        reference: reference.clone(),
+        kind: "computer.text".into(),
+        model: Some(fragment_proto::AGENT_MODEL.into()),
+        amount: fragment_core::budget::TEXT_RESERVE,
+        fragment: who.id.clone(),
+        run: 0,
+        principal: who.id.clone(),
+        agent: None,
+    };
+    let ledger::Reserved::Held { key } = ledger::ask(env, &org, &reserve).await? else {
+        return Err(CellError::host("a fresh model call's reservation answered a replay"));
+    };
+    let headers = Headers::new();
+    headers.set("authorization", &format!("Bearer {key}"))?;
+    headers.set("content-type", "application/json")?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post).with_headers(headers).with_body(Some(ask.to_string().into()));
+    let call = Request::new_with_init(&format!("{}/api/v1/chat/completions", cfg.openrouter_url), &init)?;
+    let answered = match cs::fetch(call, MODEL_CALL_TIMEOUT).await {
+        Ok(mut resp) => Ok((resp.status_code(), resp.bytes().await?)),
+        Err(e) => Err(CellError::from(e)),
+    };
+    let v: Value = answered.as_ref().ok().and_then(|(_, b)| serde_json::from_slice(b).ok()).unwrap_or_default();
+    let (status, bytes) = match answered {
+        Ok((200, bytes)) if v.get("error").is_none() => (200, bytes),
+        failed => {
+            // nothing was answered: the reservation goes back
+            ledger::ask(env, &org, &ledger::Release { reference }).await?;
+            return match failed {
+                Ok((status, bytes)) => Err(CellError::new(ErrorCode::UpstreamFailed, format!("OpenRouter ({status}): {}", String::from_utf8_lossy(&bytes)))),
+                Err(e) => Err(e),
+            };
+        }
+    };
+    let cost = fragment_core::budget::charge(v["usage"]["cost"].as_f64(), None);
+    ledger::ask(env, &org, &ledger::Settle { reference, cost, result: Value::Null, video: None }).await?;
+    Ok(Response::from_bytes(bytes)?.with_status(status).with_headers(Headers::from_iter([("content-type", "application/json")])))
+}
+
 /// Makes a fragment for a person, under their username: the API's create
 /// and the platform's "new" page. An agent or a computer makes one for its
 /// owner: the owner's (on their budget, in their list), under their
@@ -950,6 +1014,7 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             release_username(env, username).await
         }
         (Method::Post, ["api", "computers", "pair"]) => pair_computer(req, env, &url).await,
+        (Method::Post, ["api", "model", "chat", "completions"]) => model_call(req, env, cfg, &url).await,
         (_, ["api", "identities", rest @ ..]) => {
             let rest = rest.to_vec();
             identities(req, env, &url, &rest).await

@@ -72,6 +72,14 @@ enum Cmd {
     },
     /// Who the host says you are: your identity, username, this key, your other keys
     Whoami,
+    /// Ask the model through the platform, as this computer (its owner's
+    /// budget pays): a prompt, or with --request an OpenAI-style chat
+    /// request on stdin, answered with the response's JSON
+    Model {
+        prompt: Option<String>,
+        #[arg(long, conflicts_with = "prompt")]
+        request: bool,
+    },
     /// Your computers (machines paired with `fragment login --computer`):
     /// list them, or remove one (its keys are revoked, and it leaves every
     /// fragment it is in)
@@ -941,6 +949,25 @@ fn run(cli: Cli) -> Result<()> {
             let v = revoked?;
             json_exit(j, &json!({ "npub": new.id.npub(), "revoked": old.id.npub(), "identity": v }));
             println!("{} replaces {} (revoked); every grant stays with {}", new.id.npub(), old.id.npub(), v.id);
+        }
+        Cmd::Model { prompt, request } => {
+            let body: Value = match (prompt, request) {
+                (Some(p), false) => json!({ "messages": [{ "role": "user", "content": p }] }),
+                (None, true) => {
+                    let mut text = String::new();
+                    std::io::stdin().read_to_string(&mut text)?;
+                    serde_json::from_str(&text).context("stdin is not a JSON chat request")?
+                }
+                _ => return Err(usage("fragment model <prompt>, or --request with a chat request on stdin")),
+            };
+            // a model call may take two minutes (the platform's own bound)
+            let v = c.call(c.post_json_waiting("/api/model/chat/completions", &body, std::time::Duration::from_secs(150))?)?;
+            if request {
+                println!("{v}");
+                return Ok(());
+            }
+            json_exit(j, &v);
+            println!("{}", v["choices"][0]["message"]["content"].as_str().unwrap_or_default());
         }
         Cmd::Computers { sub } => {
             let me: IdentityView = c.call_as(c.get("/api/identities/me")?)?;

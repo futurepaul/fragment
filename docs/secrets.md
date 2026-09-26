@@ -46,7 +46,13 @@ uses it reads it from there.
   (slice F) uses the same path for the fragment's `OPENROUTER_API_KEY`.
 - **Agents in cells** call models through the platform, which attaches
   the user's own model credential.
-- **Computers** (Sprites) use **Sprites connectors**, Fly's credential
+- **Computers** hold only their own key (ROADMAP decision 21), and call
+  the model through the platform, signed by it (`POST
+  /api/model/chat/completions`, `fragment model`; Paul, 2026-09-26): the
+  platform attaches their owner's model credential, which never reaches
+  the computer, and revoking the computer's key cuts it off. *Superseded
+  for model calls* (connectors may still carry other credentials later):
+  Computers (Sprites) use **Sprites connectors**, Fly's credential
   proxy (https://docs.sprites.dev/concepts/connectors/). The platform
   creates one connector per credential through the Sprites API: an
   OpenRouter connector with the person's key, a GitHub connector (OAuth),
