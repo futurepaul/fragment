@@ -68,7 +68,7 @@ yours (`fragment status todo` is `todo.<your username>`).
 fragment login                            # once per machine: sign in in a browser, approve this machine's key
 fragment init my-thing                    # scaffold (todo) + create + deploy → live URL,
                                           #   share link, webhook URL
-fragment init my-inbox --template inbox   # or: todo | notes | chat | desktop | blank
+fragment init my-inbox --template inbox   # or: todo | notes | chat | desktop | builder | blank
 ```
 
 `fragment new <dir> --template T` scaffolds without creating;
@@ -79,6 +79,9 @@ fragment init my-inbox --template inbox   # or: todo | notes | chat | desktop | 
 - `notes`: a folder of markdown as a live site; the files are the state.
 - `chat`: a live chat room; an agent member can answer in it.
 - `desktop`: a demo: your fragments side by side (chats, apps, files).
+- `builder`: a fragment that builds fragments: say what you want, and goose,
+  on the fragment's own computer, makes it as a new fragment and deploys
+  it (the computer's time and goose's model calls are on your budget).
 - `blank`: one page, to build on.
 
 `fragment status my-thing` shows the URLs, the view token (the share

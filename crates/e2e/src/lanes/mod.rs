@@ -8,6 +8,7 @@ mod blobs;
 mod author;
 mod budget;
 mod build;
+pub(crate) mod builder;
 mod computer;
 mod computers;
 mod control;
@@ -55,6 +56,7 @@ const LANES: &[Lane] = &[
     computers::computers,
     computers::sprites,
     runtime::computer_runtime,
+    builder::builder,
     members::secrets,
     plane::files,
     plane::deploy,

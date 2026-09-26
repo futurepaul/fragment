@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Builder</title>
+  <style>
+    :root { --bg: #f7f5f0; --fg: #1d1b16; --muted: #857f72; --line: #e2ddd2; --accent: #2f5d50; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #16150f; --fg: #eeeae0; --muted: #9a9384; --line: #2d2b24; --accent: #7fb5a3; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 ui-sans-serif, system-ui, sans-serif; }
+    main { max-width: 40rem; margin: 3rem auto; padding: 0 1rem; }
+    h1 { font: 600 1.6rem/1.2 Georgia, serif; margin: 0 0 .25rem; }
+    p { color: var(--muted); font-size: .9rem; margin-top: 0; }
+    textarea { width: 100%; min-height: 6rem; padding: .6rem .75rem; border: 1px solid var(--line); border-radius: .5rem; background: transparent; color: inherit; font: inherit; }
+    button { margin-top: .5rem; padding: .6rem 1rem; border: 0; border-radius: .5rem; background: var(--accent); color: var(--bg); font: inherit; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: default; }
+    #error { color: #b3261e; min-height: 1.5rem; font-size: .9rem; }
+    ul { list-style: none; padding: 0; margin: 1rem 0 0; }
+    li { padding: .75rem 0; border-bottom: 1px solid var(--line); }
+    .status { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-right: .5rem; }
+    .built .status { color: var(--accent); }
+    .failed .status { color: #b3261e; }
+    li a { display: inline-block; margin: .25rem .75rem 0 0; color: var(--accent); }
+    details { color: var(--muted); font-size: .85rem; margin-top: .25rem; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: .25rem 0 0; font-size: .8rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Builder</h1>
+    <p>Say what to build. goose, on this fragment's own computer, makes it as a new fragment of yours and deploys it
+      (up to ten minutes; its model calls and the computer's time come from your budget).</p>
+    <form id="ask"><textarea id="task" maxlength="4000" placeholder="A pomodoro timer that everyone on the page shares"></textarea><button id="go">Build</button></form>
+    <div id="error"></div>
+    <ul id="builds"></ul>
+  </main>
+  <script type="module">
+    import * as fragment from "./__fragment.js";
+
+    const $ = (id) => document.getElementById(id);
+    const show = (e) => { $("error").textContent = e ? e.message : ""; };
+    const el = (tag, props = {}, ...kids) => {
+      const n = Object.assign(document.createElement(tag), props);
+      n.append(...kids);
+      return n;
+    };
+
+    fragment.live("builds", {}, ({ builds }) => {
+      $("builds").replaceChildren(...builds.map((b) => {
+        const links = b.built.map((f) => el("a", { href: f.url, target: "_blank", textContent: f.live ? f.name : `${f.name} (not live)` }));
+        const said = b.message ? el("details", {}, el("summary", { textContent: b.status === "failed" ? "why" : "what goose said" }), el("pre", { textContent: b.message })) : "";
+        return el("li", { className: b.status }, el("span", { className: "status", textContent: b.status }), b.task, el("div", {}, ...links), said);
+      }));
+    }, show);
+
+    $("ask").onsubmit = async (e) => {
+      e.preventDefault();
+      const task = $("task").value.trim();
+      if (!task) return;
+      $("go").disabled = true;
+      try {
+        await fragment.call("build", { task });
+        $("task").value = "";
+        show();
+      } catch (err) {
+        show(err);
+      } finally {
+        $("go").disabled = false;
+      }
+    };
+  </script>
+</body>
+</html>
