@@ -5,14 +5,6 @@
 //! An agent's tools use the same two routes. Also the capabilities a page
 //! can ask for: its owner's fragments, listed and made (`__fragments`),
 //! and shown inside it, signed in (`__frame`).
-//!
-//! Making a desktop from the platform's own template is its owner's consent
-//! to its frames: the platform's code shows their fragments inside it, so
-//! it starts allowed, and stays allowed while live is the commit the
-//! platform made (`framing`). Once its code changes (its owner's edit, or
-//! an agent's), the owner is asked in its share sheet, as for any other
-//! page that declares `frame`. A new desktop is its owner's alone
-//! (`members`).
 
 use std::collections::BTreeMap;
 
@@ -42,15 +34,12 @@ const DEPLOY_ATTEMPTS: usize = 5;
 /// bigger files go through the CLI as blobs.
 const API_WRITE_MAX_BYTES: usize = 1024 * 1024;
 
-/// The platform's template whose frames making it allows (`framing`).
-const FRAMED_TEMPLATE: &str = "desktop";
-
 /// Who may open a fragment made from `template`, when its create does not
 /// say: a desktop is its owner's alone; anything else, whoever holds its
-/// link.
+/// link. (fragment.json holds no access, so a template cannot say.)
 pub(crate) fn first_visibility(template: Option<&str>) -> Visibility {
     match template {
-        Some(FRAMED_TEMPLATE) => Visibility::Members,
+        Some("desktop") => Visibility::Members,
         _ => Visibility::Link,
     }
 }
@@ -59,16 +48,23 @@ pub(crate) fn template(name: &str) -> Option<Template> {
     TEMPLATES.iter().find(|(n, _)| *n == name).map(|(_, t)| *t)
 }
 
+/// A template's fragment.json.
+fn manifest(t: Template) -> Value {
+    t.iter().find(|(p, _)| *p == "fragment.json").and_then(|(_, b)| serde_json::from_slice(b).ok()).unwrap_or_default()
+}
+
 /// A template's title and description, from its fragment.json.
 pub(crate) fn describe(t: Template) -> (String, String) {
-    let meta = t
-        .iter()
-        .find(|(p, _)| *p == "fragment.json")
-        .and_then(|(_, b)| serde_json::from_slice::<Value>(b).ok())
-        .map(|v| v["meta"].clone())
-        .unwrap_or_default();
+    let meta = manifest(t)["meta"].clone();
     let text = |k: &str| meta[k].as_str().unwrap_or_default().to_string();
     (text("title"), text("description"))
+}
+
+/// Whether the template named `name` asks to show its owner's fragments
+/// inside it (`frame`): the new-fragment form says so, and making one there
+/// is its owner's grant (auth.rs).
+pub(crate) fn frames(name: &str) -> bool {
+    template(name).is_some_and(|t| manifest(t)["capabilities"].as_array().is_some_and(|c| c.iter().any(|c| c == "frame")))
 }
 
 /// The template's fragment.json with the fragment's own name in it.
@@ -95,18 +91,11 @@ impl FragmentCell {
             .map(|(path, bytes)| FileWrite { path: path.to_string(), bytes: Some(if *path == "fragment.json" { stamp(bytes, &name) } else { bytes.to_vec() }) })
             .collect();
         let key = format!("template:{}", self.must(MetaKey::CreatedAt)?);
-        let commit = match self.commit(&key, &writes, &BTreeMap::new(), &format!("start from the {which} template"), &owner, 0).await? {
-            Wrote::Commit(sha) => sha,
-            Wrote::Conflict(why) => return Err(CellError::host(why)),
-        };
-        // the same key answers the same commit, so a retry records it again
-        self.set_meta(MetaKey::Template, &format!("{which} {commit}"))?;
-        self.go_live(&owner, &format!("deploy {name}")).await?;
-        self.event("template", &format!("{name} starts from the {which} template"), json!({ "template": which, "commit": commit }));
-        if which == FRAMED_TEMPLATE {
-            let summary = "the platform lets it show its owner's fragments inside it while its code is the desktop template's";
-            self.event("grant.frame", summary, json!({ "granted": true, "by": "template", "commit": commit }));
+        if let Wrote::Conflict(why) = self.commit(&key, &writes, &BTreeMap::new(), &format!("start from the {which} template"), &owner, 0).await? {
+            return Err(CellError::host(why));
         }
+        self.go_live(&owner, &format!("deploy {name}")).await?;
+        self.event("template", &format!("{name} starts from the {which} template"), json!({ "template": which }));
         if which == "chat" {
             self.set_meta(MetaKey::AgentPending, "1")?;
         }
@@ -211,43 +200,17 @@ impl FragmentCell {
         Ok(caps.iter().any(|c| c == capability))
     }
 
-    /// Whether live is the commit the platform made from its desktop
-    /// template: that code, the platform's, shows the owner's fragments
-    /// inside it and nothing else. Any change to it (a deploy, a rollback to
-    /// another commit) is code the platform did not write.
-    fn platform_desktop(&self) -> CellResult<bool> {
-        let [made, live] = self.metas([MetaKey::Template, MetaKey::PinLive])?;
-        let Some(made) = made else { return Ok(false) };
-        let (template, commit) = made.split_once(' ').ok_or_else(|| CellError::host(format!("the stored template {made:?}")))?;
-        Ok(template == FRAMED_TEMPLATE && live.as_deref() == Some(commit))
-    }
-
-    /// `frame`, when live asks for it: whether it may show its owner's
-    /// fragments inside it. The owner's word decides (`1` or `0`); without
-    /// one, only the platform's desktop may, while its code is the
-    /// platform's (`platform_desktop`).
+    /// `frame`, when live asks for it: whether its owner allows it (`1`; a
+    /// stop is `0`).
     pub(crate) fn framing(&self) -> CellResult<Option<bool>> {
         if !self.declares("frame")? {
             return Ok(None);
         }
-        let granted = match self.meta(MetaKey::FrameGranted)?.as_deref() {
-            Some("1") => true,
-            Some("0") => false,
-            None => self.platform_desktop()?,
-            Some(other) => return Err(CellError::host(format!("the stored frame grant {other:?}"))),
-        };
-        Ok(Some(granted))
-    }
-
-    /// `GET /api/grants/frame`: for its owner (the share sheet), whether it
-    /// may show their fragments inside it (`frame`, `null` when live does
-    /// not ask), and whether it is the platform's desktop (`template`),
-    /// which the sheet explains without a warning.
-    pub(crate) fn frame_grant(&self, caller: &Caller) -> CellResult<Response> {
-        if caller.principal() != Some(self.must(MetaKey::Owner)?.as_str()) {
-            return Err(CellError::new(ErrorCode::Forbidden, "only its owner sees whether a fragment shows their fragments inside it"));
+        match self.meta(MetaKey::FrameGranted)?.as_deref() {
+            Some("1") => Ok(Some(true)),
+            Some("0") | None => Ok(Some(false)),
+            Some(other) => Err(CellError::host(format!("the stored frame grant {other:?}"))),
         }
-        json_response(&json!({ "frame": self.framing()?, "template": self.platform_desktop()? }))
     }
 
     /// The owner, when they are the one viewing a page whose fragment.json
@@ -271,24 +234,15 @@ impl FragmentCell {
     }
 
     /// `PUT /api/grants/frame {granted}`: the owner lets this fragment show
-    /// their fragments inside its page (`__frame`), or stops it. An allow
-    /// holds until they stop it, whatever its code becomes; on the
-    /// platform's desktop it holds only while its code is the platform's
-    /// (the sheet warned of nothing there: there was nothing to warn of).
+    /// their fragments inside its page (`__frame`), or stops it.
     pub(crate) fn grant_frame(&self, caller: &Caller, body: Value) -> CellResult<Response> {
         if caller.principal() != Some(self.must(MetaKey::Owner)?.as_str()) {
             return Err(CellError::new(ErrorCode::Forbidden, "only its owner lets a fragment show their fragments inside it"));
         }
         let granted = body["granted"].as_bool().ok_or_else(|| CellError::invalid("granted is true or false"))?;
-        match (granted, self.platform_desktop()?) {
-            // the platform's desktop goes back to the platform's default:
-            // allowed while its code is the template's, asked again after
-            (true, true) => self.del_meta(MetaKey::FrameGranted)?,
-            (true, false) => self.set_meta(MetaKey::FrameGranted, "1")?,
-            (false, _) => self.set_meta(MetaKey::FrameGranted, "0")?,
-        }
+        self.set_meta(MetaKey::FrameGranted, if granted { "1" } else { "0" })?;
         let summary = if granted { "its owner lets it show their fragments inside it" } else { "its owner stopped it showing their fragments inside it" };
-        self.event("grant.frame", summary, json!({ "granted": granted, "by": "owner" }));
+        self.event("grant.frame", summary, json!({ "granted": granted }));
         json_response(&json!({ "frame": granted }))
     }
 
@@ -338,11 +292,9 @@ impl FragmentCell {
         Ok(Response::empty()?.with_status(302).with_headers(h))
     }
 
-    /// `GET __fragments`: the fragments the owner belongs to (each with
-    /// whether it is a chat, as its row last said: a row that has not said is
-    /// an app's until its fragment next sends it), and whether this page may
-    /// show them inside it (`frame`). A read asks the owner's Principal cell
-    /// alone, and wakes none of the fragments listed.
+    /// `GET __fragments`: the fragments the owner belongs to (a read asks
+    /// the owner's Principal cell alone, and wakes none of them), and
+    /// whether this page may show them inside it (`frame`).
     pub(crate) async fn owner_fragments(&self, caller: &Caller) -> CellResult<Value> {
         let owner = self.owner_granted(caller)?;
         let v = self.listed(&owner).await?;
@@ -352,12 +304,10 @@ impl FragmentCell {
             .flatten()
             .filter_map(|f| {
                 let name = f["name"].as_str()?;
-                let chat = f["chat"].as_bool().unwrap_or(false);
-                Some(json!({ "name": name, "role": f["role"], "url": self.cfg.canonical(&caller.url, name), "sharing": f["sharing"], "chat": chat }))
+                Some(json!({ "name": name, "role": f["role"], "url": self.cfg.canonical(&caller.url, name), "sharing": f["sharing"] }))
             })
             .collect();
-        // whether this page may frame them: without it, the desktop says so
-        // in place of its panes
+        // without it, the desktop says so in place of its panes
         Ok(json!({ "fragments": fragments, "frame": self.framing()? }))
     }
 

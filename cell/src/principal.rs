@@ -3,9 +3,8 @@
 //! lists). The fragments are the authority; each delivers its changes here
 //! from an outbox, versioned so a late delivery never undoes a newer one.
 //! A fragment's row in its owner's list also carries its sharing (who may
-//! open it, its members and guests), sent with each change to them, and
-//! every row says whether it is a chat, so the desktop's badges and its
-//! chats read this one cell and wake no fragment.
+//! open it, its members and guests), sent with each change to them, so
+//! the desktop's badges read this one cell and wake no fragment.
 //! Which keys an identity holds is the registry's (registry.rs).
 
 use fragment_proto::{FragmentList, ListedFragment, Role, Sharing};
@@ -28,9 +27,7 @@ pub struct PrincipalCell {
 /// A fragment's change to this key's membership. `incarnation` is the
 /// fragment's creation time (a deleted and re-created fragment is a new
 /// incarnation); `version` orders changes within one. The owner's row
-/// carries the fragment's sharing, as it was when the change was sent;
-/// each row, whether it was a chat then (none from a fragment from before
-/// rows said: the list keeps that unknown, `NULL`).
+/// carries the fragment's sharing, as it was when the change was sent.
 #[derive(Deserialize)]
 struct IndexChange {
     fragment: String,
@@ -39,8 +36,6 @@ struct IndexChange {
     version: i64,
     #[serde(default)]
     sharing: Option<Sharing>,
-    #[serde(default)]
-    chat: Option<bool>,
 }
 
 /// A `memberships` row as `/list` reads it.
@@ -49,7 +44,6 @@ struct Listed {
     name: String,
     role: Role,
     sharing: Option<String>,
-    chat: Option<i64>,
 }
 
 impl DurableObject for PrincipalCell {
@@ -61,9 +55,9 @@ impl DurableObject for PrincipalCell {
         if !cols.iter().any(|c| c["name"] == "sharing") {
             sql.exec("ALTER TABLE memberships ADD COLUMN sharing TEXT", None).expect("the memberships table migrates");
         }
-        // and from before rows said whether a fragment is a chat
-        if !cols.iter().any(|c| c["name"] == "chat") {
-            sql.exec("ALTER TABLE memberships ADD COLUMN chat INTEGER", None).expect("the memberships table migrates");
+        // and one from when rows said whether a fragment is a chat: the desktop tells by its label now
+        if cols.iter().any(|c| c["name"] == "chat") {
+            sql.exec("ALTER TABLE memberships DROP COLUMN chat", None).expect("the memberships table migrates");
         }
         PrincipalCell { state }
     }
@@ -100,23 +94,16 @@ impl PrincipalCell {
                         None => SqlStorageValue::Null,
                     };
                     self.rows(
-                        "INSERT INTO memberships (fragment, role, incarnation, version, sharing, chat) VALUES (?, ?, ?, ?, ?, ?)
-                         ON CONFLICT (fragment) DO UPDATE SET role = excluded.role, incarnation = excluded.incarnation, version = excluded.version, sharing = excluded.sharing, chat = excluded.chat",
-                        vec![
-                            c.fragment.as_str().into(),
-                            role,
-                            SqlStorageValue::Integer(c.incarnation),
-                            SqlStorageValue::Integer(c.version),
-                            sharing,
-                            c.chat.map_or(SqlStorageValue::Null, |chat| SqlStorageValue::Integer(i64::from(chat))),
-                        ],
+                        "INSERT INTO memberships (fragment, role, incarnation, version, sharing) VALUES (?, ?, ?, ?, ?)
+                         ON CONFLICT (fragment) DO UPDATE SET role = excluded.role, incarnation = excluded.incarnation, version = excluded.version, sharing = excluded.sharing",
+                        vec![c.fragment.as_str().into(), role, SqlStorageValue::Integer(c.incarnation), SqlStorageValue::Integer(c.version), sharing],
                     )?;
                 }
                 Ok(Response::from_json(&json!({ "ok": true, "applied": newer }))?)
             }
             (Method::Get, "/list") => {
                 // `GET /api/fragments`'s answer, whole: the router passes it through
-                let q = "SELECT fragment AS name, role, sharing, chat FROM memberships WHERE role IS NOT NULL ORDER BY fragment";
+                let q = "SELECT fragment AS name, role, sharing FROM memberships WHERE role IS NOT NULL ORDER BY fragment";
                 let rows: Vec<Listed> = self.state.storage().sql().exec(q, None)?.to_array()?;
                 let fragments = rows
                     .into_iter()
@@ -129,7 +116,7 @@ impl PrincipalCell {
                             Some(Err(e)) => return Err(CellError::host(format!("{}'s stored sharing: {e}", r.name))),
                             None => None,
                         };
-                        Ok(ListedFragment { name: r.name, role: r.role, sharing, chat: r.chat.map(|c| c == 1) })
+                        Ok(ListedFragment { name: r.name, role: r.role, sharing })
                     })
                     .collect::<CellResult<Vec<_>>>()?;
                 Ok(Response::from_json(&FragmentList { fragments })?)

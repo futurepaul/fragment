@@ -23,7 +23,7 @@ pub(super) fn person(api: &Api) -> Result<(Keys, String)> {
     Ok((keys, session))
 }
 
-fn post_form(api: &Api, path: &str, form: &str, session: &str, origin: &str) -> Result<Reply> {
+pub(super) fn post_form(api: &Api, path: &str, form: &str, session: &str, origin: &str) -> Result<Reply> {
     api.call(Call {
         method: "POST",
         url: format!("{}{path}", api.base),
@@ -200,14 +200,9 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     let r = listed(Some(owner_on_blank), &blank)?;
     s.ok("a page that does not ask is refused, even to its owner", r.status == 403, &r);
     let r = listed(Some(site_cookie(api, &owner_session, &dash)?), &dash)?;
-    let row = |name: &str| r.body["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == name).cloned().unwrap_or_default();
-    s.ok(
-        "each says whether it is a chat (its fragment.json declares a chat channel), and the page whether it may frame them (null: it does not ask)",
-        row(&chat)["chat"] == json!(true) && row(&blank)["chat"] == json!(false) && row(&dash)["chat"] == json!(false) && r.body["frame"].is_null(),
-        &r,
-    );
-    // a desktop made through a page's __fragments: its owner's alone, and it
-    // may show their fragments inside it (made from the platform's template)
+    s.ok("and the page whether it may frame them (null: it does not ask)", r.status == 200 && r.body["frame"].is_null(), &r);
+    // a desktop made through a page's __fragments: its owner's alone, and no
+    // grant (a page's code never gives one)
     let desk_label = s.name("tdesk");
     let made = api.call(Call {
         method: "POST",
@@ -220,8 +215,8 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     let desk = api.qualified(&owner, &desk_label)?;
     let st = api.status(&owner, &desk)?;
     s.ok(
-        "a desktop made through __fragments is its owner's alone (members only), and may frame their fragments",
-        made.status == 200 && made.body["name"] == desk.as_str() && st.body["visibility"] == "members" && st.body["frame"] == json!(true),
+        "a desktop made through __fragments is its owner's alone (members only), and may not frame their fragments until they allow it",
+        made.status == 200 && made.body["name"] == desk.as_str() && st.body["visibility"] == "members" && st.body["frame"] == json!(false),
         format!("{made} / {st}"),
     );
 
@@ -240,13 +235,18 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and says which are shared with them, and as what", row(&theirs, &blank).contains("shared with you · editor"), &theirs);
     let offered: Vec<usize> = ["blank", "todo", "inbox", "chat", "desktop"].iter().filter_map(|t| home.text.find(&format!("value=\"{t}\""))).collect();
     s.ok(
-        "and offers the templates, the simplest first and the desktop last, as the demo it is",
-        home.text.contains("New fragment") && offered.len() == 5 && offered.is_sorted() && home.text.contains("A demo of what fragments can do"),
+        "and offers the templates, the simplest first and the desktop last, as the demo it is, saying it will show their fragments inside it",
+        home.text.contains("New fragment")
+            && offered.len() == 5
+            && offered.is_sorted()
+            && home.text.contains("A demo of what fragments can do")
+            && home.text.contains("It will show your fragments inside it, signed in as you"),
         &home,
     );
     let label = s.name("tnew");
-    let r = post_form(api, "/auth/new", &format!("label={}&template=todo", url_enc(&label)), &owner_session, "https://elsewhere.example")?;
-    s.ok("a form from another origin is refused", r.status == 403, &r);
+    let r = post_form(api, "/auth/new", &format!("label={}&template=desktop", url_enc(&label)), &owner_session, &api.site_origin(&dash))?;
+    let st = api.status(&owner, &api.qualified(&owner, &label)?)?;
+    s.ok("a form from another origin (a fragment's page) is refused, and makes nothing", r.status == 403 && st.status == 404, format!("{r} / {st}"));
     let r = post_form(api, "/auth/new", &format!("label={}&template=todo", url_enc(&label)), &owner_session, &api.base)?;
     let name = api.qualified(&owner, &label)?;
     s.ok("the form makes it and walks to its sign-in", r.status == 302 && r.header("location") == format!("/auth/fragment?name={}&return=/", url_enc(&name)), &r);
@@ -260,7 +260,7 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     let r = post_form(api, "/auth/new", &format!("label={}&template=desktop", url_enc(&desk_label)), &owner_session, &api.base)?;
     let st = api.status(&owner, &api.qualified(&owner, &desk_label)?)?;
     s.ok(
-        "a desktop made there is its owner's alone (members only), and may frame their fragments",
+        "a desktop made there is its owner's alone (members only), and may frame their fragments: the form's submit is their grant",
         r.status == 302 && st.body["visibility"] == "members" && st.body["frame"] == json!(true),
         format!("{r} / {st}"),
     );

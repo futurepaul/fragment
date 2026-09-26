@@ -9,18 +9,16 @@ authority over any of them.
   by its owner, may list the owner's fragments and make new ones
   (`__fragments`). Anyone else, editors included, is refused.
 - It asks for `frame` too: each frame is its own `__frame`, which signs
-  the frame in on its fragment's origin for this page only. A desktop the
-  platform made from this template may from the start, while its code is
-  the template's; once its code changes, the platform honors it only after
-  you allow it in the desktop's share sheet ("Your fragments inside it").
-  `__fragments` says which (`frame`); without it the desktop shows a
-  notice in place of its panes, with a button that opens that sheet, and
-  opens nothing in a frame.
+  the frame in on its fragment's origin for this page only. The platform
+  honors it once you allow it: making the desktop with the platform's
+  new-fragment form does (the form says so), or its share sheet ("Your
+  fragments inside it"). `__fragments` says which (`frame`); without it
+  the desktop shows a notice in place of its panes, with a button that
+  opens that sheet, and opens nothing in a frame.
 - A new desktop is yours alone (`members`) until you share it.
-- A chat is any fragment of yours that is one (its fragment.json declares
-  a `chat` channel: `chat` in `__fragments`), wherever you made it; every
-  other fragment is an app. `app.mjs` keeps the chats this desktop made
-  (`chats`, `add_chat`, `remove_chat`), listed first, newest first.
+- A chat is a fragment New chat named (`chat-…`), wherever you made it;
+  every other fragment is an app. `app.mjs` keeps the chats this desktop
+  made (`chats`, `add_chat`, `remove_chat`), listed first, newest first.
 - Sharing is the platform's: each row's `…` menu has Share, which opens
   the platform's share sheet (`/share/<name>`, from `__fragments`) in a
   window of its own; this page cannot drive it. Rows are badged with how

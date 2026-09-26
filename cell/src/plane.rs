@@ -263,11 +263,7 @@ impl FragmentCell {
         match (which, pin.as_deref()) {
             ("main", Some(sha)) => self.read_manifest(&self.must(MetaKey::Repo)?, sha).await?,
             ("main", None) => self.del_meta(MetaKey::ManifestMain)?,
-            (_, live) => {
-                self.install_code(live).await?;
-                // a deploy that made it a chat, or an app, says so in its members' lists
-                self.relist()?;
-            }
+            (_, live) => self.install_code(live).await?,
         }
         match pin {
             Some(sha) => self.set_meta(done_key, &sha),
