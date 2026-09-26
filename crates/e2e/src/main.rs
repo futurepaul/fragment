@@ -492,6 +492,10 @@ fn approve_login(api: &Api, pending: &Value) -> Result<()> {
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // the builder section's goose, where the Sprites fake runs an exec
+    if args.first().map(String::as_str) == Some("goose") {
+        return lanes::builder::stand_in_goose(&args[1..]);
+    }
     let (hosted, rest) = match args.split_first() {
         Some((flag, rest)) if flag == "--hosted" => (true, rest),
         _ => (false, args.as_slice()),

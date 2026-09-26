@@ -1,0 +1,34 @@
+{
+  "name": "builder",
+  "computer": {},
+  "operations": {
+    "build": {
+      "kind": "job",
+      "role": "editor",
+      "input": {
+        "type": "object",
+        "required": ["task"],
+        "additionalProperties": false,
+        "properties": { "task": { "type": "string", "minLength": 1, "maxLength": 4000 } }
+      }
+    },
+    "record": {
+      "kind": "mutation",
+      "role": "editor",
+      "input": {
+        "type": "object",
+        "required": ["run", "task", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "run": { "type": "integer", "minimum": 1 },
+          "task": { "type": "string", "maxLength": 4000 },
+          "status": { "enum": ["installing", "building", "built", "failed"] },
+          "built": { "type": "array", "maxItems": 20 },
+          "message": { "type": "string", "maxLength": 4000 }
+        }
+      }
+    },
+    "builds": { "kind": "query", "role": "viewer", "input": { "type": "object", "additionalProperties": false } }
+  },
+  "meta": { "title": "Builder", "description": "Say what to build: goose, on this fragment's own computer, makes it as a new fragment and deploys it." }
+}
