@@ -104,6 +104,8 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         added["principal"] == computer_id.as_str() && added["kind"] == "computer" && added["owner"] == owner_id.as_str(),
         &added,
     );
+    let o = s.cli(api, &owner_home, &["members", "list", &app]);
+    s.ok("members list says it is a computer, and whose", out(&o).contains(&format!("{computer_id}\tcomputer of {owner_id}")), out(&o));
     let r = api.op(&computer, &app, "add_todo", "c1", json!({ "text": "from the computer" }))?;
     s.ok("then it calls there", r.status == 200, &r);
     let o = s.cli(api, &home, &["sync", &app, "--dir", &dir_of(&work)]);
@@ -222,8 +224,20 @@ pub fn sprites(s: &mut Suite, api: &Api) -> Result<()> {
     std::fs::write(site.join("index.html"), "<h1>pet</h1>")?;
     std::fs::write(site.join("fragment.json"), r#"{"computer":{}}"#)?;
     let before = s.sprites.sprites().len();
+    let usage = |kind: &str| -> usize {
+        let r = api.signed(&owner, "GET", "/api/budget/usage", None).map(|r| r.body).unwrap_or_default();
+        r["usage"].as_array().map_or(0, |u| u.iter().filter(|u| u["kind"] == kind && u["fragment"] == name.as_str()).count())
+    };
+    // Sprites refusing (a bad token): each boot fails before a Sprite runs, and charges nothing
+    s.sprites.refuse(true);
     let o = s.cli(api, &home, &["deploy", &name, "--dir", &dir_of(&site)]);
     s.ok("a deploy that declares a computer goes live", o.status.success(), out(&o));
+    let failed = soon(s, || {
+        let events = api.signed(&owner, "GET", &format!("/api/f/{name}/events?tail=50"), None).map(|r| r.body).unwrap_or_default();
+        events["events"].as_array().map_or(0, |e| e.iter().filter(|e| e["kind"] == "computer.failed").count()) >= 2
+    });
+    s.ok("boots Sprites refuses fail, say so, and charge nothing", failed && usage("computer.awake") == 0, usage("computer.awake"));
+    s.sprites.refuse(false);
 
     // made, booted, and paired: the owner's, an editor here
     let members = || api.signed(&owner, "GET", &format!("/api/f/{name}/members"), None).map(|r| r.body["members"].clone()).unwrap_or_default();
@@ -258,11 +272,22 @@ pub fn sprites(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("with no page open it is not held awake", !held(s), "");
     let page = Socket::open(api, &name, "__live", Some(&owner), None)?;
     s.ok("a page open holds it awake", soon(s, || held(s)), "");
-    let usage = api.signed(&owner, "GET", "/api/budget/usage", None)?;
-    let awake = usage.body["usage"].as_array().map_or(0, |u| u.iter().filter(|u| u["kind"] == "computer.awake" && u["fragment"] == name.as_str()).count());
-    s.ok("each tick awake is charged to its owner at list price", awake >= 2, &usage);
+    s.ok("each tick awake is charged to its owner at list price", soon(s, || usage("computer.awake") >= 3), usage("computer.awake"));
+    let events = api.signed(&owner, "GET", &format!("/api/f/{name}/events?tail=50"), None)?;
+    let unheld = events.body["events"].as_array().is_some_and(|e| e.iter().any(|e| e["kind"] == "computer.unheld"));
+    s.ok("its Tasks API shows the hold", !unheld, &events);
+    // open longer than the idle wait: its viewer, not its opening, keeps it
+    std::thread::sleep(Duration::from_secs(u64::from(crate::COMPUTER_IDLE_S + 2 * crate::COMPUTER_TICK_S)));
+    let fake = s.sprites.sprites().get(&sprite).cloned().unwrap_or_default();
+    s.ok("a page open past the idle wait still holds it", fake.held && fake.releases == 0, format!("{fake:?}"));
     page.close();
+    let closed = std::time::Instant::now();
     s.ok("the page closed, it sleeps after the idle wait", soon(s, || !held(s) && s.sprites.sprites().get(&sprite).is_some_and(|f| f.releases >= 1)), "");
+    let (grace, idle) = (closed.elapsed(), Duration::from_secs(u64::from(crate::COMPUTER_IDLE_S)));
+    s.ok("the idle wait after the last viewer left, not a tick more", grace >= idle && grace < idle + Duration::from_millis(1500), format!("{grace:?}"));
+    let calls = s.sprites.sprites().get(&sprite).map(|f| f.calls);
+    std::thread::sleep(Duration::from_secs(u64::from(2 * crate::COMPUTER_TICK_S)));
+    s.ok("asleep, the platform calls its Sprite no more", s.sprites.sprites().get(&sprite).map(|f| f.calls) == calls, format!("{calls:?}"));
 
     // dropped from fragment.json: kept, asleep; removed: destroyed
     std::fs::write(site.join("fragment.json"), "{}")?;

@@ -219,6 +219,8 @@ impl DurableObject for FragmentCell {
     async fn websocket_close(&self, ws: WebSocket, code: usize, reason: String, _clean: bool) -> Result<()> {
         if self.state.get_tags(&ws).iter().any(|t| t == "live") {
             self.live_closed(&ws);
+            // its computer's idle wait runs from the last page's close
+            self.viewed().await;
         }
         let code = if code == 1005 || code == 1006 { 1000 } else { code as u16 };
         let _ = ws.close(Some(code), Some(reason));

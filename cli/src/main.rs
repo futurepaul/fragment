@@ -1548,11 +1548,13 @@ fn run(cli: Cli) -> Result<()> {
                 let v: MemberList = c.call_as(c.get(&format!("/api/f/{name}/members"))?)?;
                 json_exit(j, &v);
                 for m in &v.members {
-                    let agent = match &m.owner {
-                        Some(o) => format!("\tagent of {o}"),
-                        None => String::new(),
+                    // an agent's or a computer's owner, named with what it is
+                    let owned = match (&m.owner, m.kind) {
+                        (Some(o), Some(kind)) => format!("\t{} of {o}", kind.as_str()),
+                        (Some(o), None) => format!("\towned by {o}"),
+                        (None, _) => String::new(),
                     };
-                    println!("{}\t{}{agent}", m.role.as_str(), m.principal);
+                    println!("{}\t{}{owned}", m.role.as_str(), m.principal);
                 }
             }
             MembersCmd::Add { name, who, role } => {

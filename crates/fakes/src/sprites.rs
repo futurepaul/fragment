@@ -29,12 +29,16 @@ pub struct Sprite {
     /// Commands run (the Tasks API's aside), and the last one's input.
     pub runs: u32,
     pub stdin: String,
+    /// Every call that named it.
+    pub calls: u32,
 }
 
 #[derive(Default)]
 struct State {
     sprites: BTreeMap<String, Sprite>,
     deleted: Vec<String>,
+    /// Every call is refused as a bad token's is (a lever).
+    refusing: bool,
 }
 
 pub struct Sprites {
@@ -60,7 +64,11 @@ fn exec(state: &Mutex<State>, home: &Path, name: &str, req: &Request) -> Respons
             "DELETE" => (sprite.held, sprite.releases) = (false, sprite.releases + 1),
             _ => {}
         }
-        return Response::json(200, &json!({}));
+        // the task, as the Tasks API answers it, while there is one
+        return match sprite.held {
+            true => Response::json(200, &json!({ "name": "fragment", "started_at": "2026-09-26T00:00:00Z", "expires_at": "2026-09-26T00:02:00Z" })),
+            false => Response::json(200, &json!({ "error": "task not found" })),
+        };
     }
     let stdin = if req.query.get("stdin").map(String::as_str) == Some("true") { req.body.clone() } else { Vec::new() };
     let mut s = state.lock().expect("sprites state");
@@ -98,7 +106,7 @@ impl Sprites {
                     false => Response::json(404, &json!({ "error": "no such release file" })),
                 };
             }
-            if req.header("authorization") != Some(bearer.as_str()) {
+            if req.header("authorization") != Some(bearer.as_str()) || st.lock().expect("sprites state").refusing {
                 return Response::json(401, &json!({ "error": "Missing or invalid authentication" }));
             }
             let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
@@ -111,7 +119,13 @@ impl Sprites {
                 return Response::json(400, &json!({ "error": "a Sprite's name is lowercase letters, digits, and dashes" }));
             }
             let home = root.join(name);
-            let exists = st.lock().expect("sprites state").sprites.contains_key(name);
+            let exists = match st.lock().expect("sprites state").sprites.get_mut(name) {
+                Some(sprite) => {
+                    sprite.calls += 1;
+                    true
+                }
+                None => false,
+            };
             let sprite = json!({ "id": format!("sprite-{name}"), "name": name, "organization": "fake", "status": "cold", "url": format!("https://{name}.sprites.app") });
             match (req.method.as_str(), &parts[2..], exists) {
                 ("POST", [], true) => Response::json(409, &json!({ "error": "a Sprite has that name" })),
@@ -142,6 +156,11 @@ impl Sprites {
     /// The Sprites there are now.
     pub fn sprites(&self) -> BTreeMap<String, Sprite> {
         self.state.lock().expect("sprites state").sprites.clone()
+    }
+
+    /// While set, every call is refused (401), as with a bad token.
+    pub fn refuse(&self, refusing: bool) {
+        self.state.lock().expect("sprites state").refusing = refusing;
     }
 
     /// The Sprites deleted, in order.
