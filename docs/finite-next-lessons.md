@@ -59,7 +59,8 @@ time; read it before touching the matching phase.
   the Rust object fixes that (`spikes/cells-rs/entry.mjs`).
 - A root storage transaction cannot enclose a facet call past ~1.6 MB of
   facet database, and a capability call inside one deadlocks
-  (`spikes/apps/README.md`).
+  (`spikes/apps/README.md`; celld v0.5.1). Since v0.6.0 a facet is a
+  database of its own that never joins a root transaction.
 - libfx's host `fetch` must speak AI SDK LanguageModelV3 stream parts
   (`finishReason: {unified, raw}`, nested usage); a V2-shaped `finish`
   fails with `InvalidProviderFinishReason`.

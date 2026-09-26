@@ -45,7 +45,8 @@ debt ledger).
 
 - One-time setup: `cargo install worker-build --version 0.8.5 --locked`,
   `rustup target add wasm32-unknown-unknown`, then `cargo xtask celld`
-  (builds the celld fork with the alarm fix into `target/celld/bin`).
+  (builds our celld fork, v0.6.0 with `KEYS` and the hardening settings,
+  into `target/celld/bin`).
 - `cargo xtask check`: host tests and clippy (host and wasm), warnings
   denied.
 - `cargo xtask e2e [--only <section>[,...] | --except <section>[,...]]`:

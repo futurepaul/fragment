@@ -94,8 +94,11 @@ rollback), members and invites, call (operations), and read and follow
 8. **Rust wherever it runs.** Tooling, e2e, fakes, the computer binary,
    and deploy are Rust; the platform cells are Rust (workers-rs on celld;
    spike 1 held). Author code stays JavaScript. No shell or Python. The
-   Cloudflare host path is deleted (celld only: v0.5.1 plus our fork's
-   alarm fix, `futurepaul/celld@b5f57ea`, until upstream ships it).
+   Cloudflare host path is deleted (celld only). *Amended 2026-09-26:*
+   celld v0.6.0 plus our fork (`futurepaul/celld` branch
+   `hardening-v0.6.0`): the `KEYS` seam and the hardening settings
+   (docs/hardening.md). v0.6.0 shipped the alarm fix upstream (#228), so
+   the fork no longer carries it.
 9. fragment.club's published fragments are not migrated; every primitive
    they used stays expressible and proven (`docs/published-fragments.md`).
 10. **One agent loop: goose** (`goose-agent`, pinned to the fork

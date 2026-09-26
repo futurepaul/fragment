@@ -5,7 +5,9 @@
 //! the deployment to the bucket with `celld deploy`, and waits until the
 //! fleet answers with it. `--nodes` stages the fleet's secrets as Fly
 //! secrets (the node's environment, where only `KEYS` reads them) and rolls
-//! the Machines to a new node image (`fleets/Dockerfile`), one at a time.
+//! the Machines to a new node image (`fleets/Dockerfile`), one at a time;
+//! `--nodes --stop-first` stops every Machine first and brings them up
+//! together, for a celld upgrade whose notes need the whole fleet down.
 //! `--secrets` sets the fleet's secrets alone (a rotation): Fly restarts
 //! the Machines on the image they run.
 //!
@@ -184,16 +186,18 @@ fn redact(text: &str, secrets: &[String]) -> String {
 }
 
 pub fn run(args: &[String]) -> Result<()> {
-    let usage = "usage: cargo xtask deploy <fleet> [--nodes | --secrets]";
+    let usage = "usage: cargo xtask deploy <fleet> [--nodes [--stop-first] | --secrets]";
     let (name, mode) = match args {
         [name] => (name, None),
         [name, flag] if flag == "--nodes" || flag == "--secrets" => (name, Some(flag.as_str())),
+        [name, nodes, stop] if nodes == "--nodes" && stop == "--stop-first" => (name, Some("--stop-first")),
         _ => bail!(usage),
     };
     let fleet = load(name)?;
     match mode {
         None => deploy_cell(name, &fleet),
-        Some("--nodes") => deploy_nodes(name, &fleet),
+        Some("--nodes") => deploy_nodes(name, &fleet, false),
+        Some("--stop-first") => deploy_nodes(name, &fleet, true),
         // the fleet's secrets changed (a rotation): Fly restarts the
         // Machines, one at a time, on the image they run
         _ => import_secrets(&fleet, &read_secret(&fleet.fly.token)?, false),
@@ -481,7 +485,12 @@ fn secrets_import(fleet: &Fleet) -> Result<(String, Vec<String>)> {
 /// to it. Fly's remote builders are not used: their push to the registry
 /// is refused for this org's token (flyctl 0.3.145), while a push from here
 /// with the same token is accepted.
-fn deploy_nodes(name: &str, fleet: &Fleet) -> Result<()> {
+///
+/// `stop_first`: every Machine stops before the roll, the deploy updates
+/// them while stopped, and they start together after, so no node of the
+/// old celld runs beside one of the new (celld v0.5.1 → v0.6.0 under fleet
+/// durability, its release notes). The fleet is down meanwhile.
+fn deploy_nodes(name: &str, fleet: &Fleet, stop_first: bool) -> Result<()> {
     let root = devstack::repo_root();
     let dir = root.join("target/fleets").join(name);
     std::fs::create_dir_all(&dir)?;
@@ -520,16 +529,43 @@ fn deploy_nodes(name: &str, fleet: &Fleet) -> Result<()> {
     pushed?;
     // the fleet's secrets, staged so the roll below brings them up with the image
     import_secrets(fleet, &token, true)?;
+    let flyctl = |args: &[&str]| {
+        let mut cmd = Command::new("flyctl");
+        cmd.args(args).args(["--app", &fleet.fly.app]).current_dir(&root).env("FLY_API_TOKEN", &token);
+        cmd
+    };
+    let before = if stop_first { machines(&mut flyctl(&["machine", "list", "--json"]))? } else { vec![] };
+    if stop_first {
+        println!("stopping all {} Machines of {} before the roll (the fleet is down until they start)", before.len(), fleet.fly.app);
+        let ids: Vec<&str> = before.iter().map(|(id, _)| id.as_str()).collect();
+        crate::run(flyctl(&["machine", "stop", "--wait-timeout", "2m"]).args(&ids))?;
+    }
     println!("rolling {} ({}) to {tag}", fleet.fly.app, fleet.fly.org);
-    crate::run(
-        Command::new("flyctl")
-            .arg("deploy")
-            .arg("--config")
-            .arg(&config)
-            .args(["--image", &tag, "--ha=false", "--wait-timeout", "10m"])
-            .current_dir(&root)
-            .env("FLY_API_TOKEN", token),
-    )
+    let strategy = if stop_first { "immediate" } else { "rolling" };
+    crate::run(flyctl(&["deploy", "--image", &tag, "--ha=false", "--wait-timeout", "10m", "--strategy", strategy]).arg("--config").arg(&config))?;
+    if stop_first {
+        // a deploy updates a stopped Machine and leaves it stopped
+        let stopped: Vec<String> = machines(&mut flyctl(&["machine", "list", "--json"]))?.into_iter().filter(|(_, state)| state != "started").map(|(id, _)| id).collect();
+        if !stopped.is_empty() {
+            println!("starting {} Machines together", stopped.len());
+            crate::run(flyctl(&["machine", "start"]).args(&stopped))?;
+        }
+    }
+    Ok(())
+}
+
+/// The app's Machines, `(id, state)`, from `flyctl machine list --json`.
+fn machines(cmd: &mut Command) -> Result<Vec<(String, String)>> {
+    let out = cmd.output().context("could not run flyctl machine list")?;
+    if !out.status.success() {
+        bail!("flyctl machine list failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let list: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).context("flyctl machine list --json")?;
+    let found: Vec<(String, String)> = list.iter().filter_map(|m| Some((m["id"].as_str()?.to_string(), m["state"].as_str().unwrap_or("").to_string()))).collect();
+    if found.is_empty() {
+        bail!("the app has no Machines");
+    }
+    Ok(found)
 }
 
 #[cfg(test)]

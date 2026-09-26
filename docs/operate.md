@@ -10,8 +10,8 @@ paths of files that hold them, all under `~/.config/finite-next/secrets/`).
 - **Fly app `fragment-club`** (org `personal`, region `ord`): two
   `shared-cpu-2x` 2 GB Machines, each with a 3 GB volume `celld_data` at
   `/data`. Each runs the node image: the celld fork at the rev in
-  `crates/devstack` (`CELLD_FORK_REV`: v0.5.1, the alarm fix, public-only
-  Worker egress, and the hardening pass: `KEYS` built in from
+  `crates/devstack` (`CELLD_FORK_REV`: v0.6.0 with public-only Worker
+  egress, and the hardening pass: `KEYS` built in from
   `crates/native`) and `fragment-node` (`crates/node`), which binds
   celld's peer listener to the Machine's private address
   (`[fdaa:…]:8081`, never a Fly service) and pairs the volume with the
@@ -55,6 +55,7 @@ paths of files that hold them, all under `~/.config/finite-next/secrets/`).
 ```
 cargo xtask deploy fragment-club            # ship the agents' script (--named) and the cell: build, render vars, celld deploy, wait for adoption
 cargo xtask deploy fragment-club --nodes    # ship the node image (celld fork, fragment-node): local build, rolling update
+cargo xtask deploy fragment-club --nodes --stop-first  # the same, every Machine stopped first (a celld upgrade that says so)
 cargo xtask e2e --fleet fragment-club       # the hosted e2e (spends a few cents on OpenRouter)
 cargo xtask fleet fragment-club diagnose    # leases and the storage contract (peers are unreachable from outside Fly)
 cargo xtask fleet fragment-club cell list   # the fleet's Durable Objects
@@ -159,8 +160,13 @@ Machines one at a time. Then revoke the old value at its issuer.
 - A volume serves one bucket for life (`fragment-node` refuses another).
   A new bucket means new volumes.
 - celld upgrades: read the release's upgrade notes first; some need every
-  node stopped before the new version starts (`flyctl scale count 0`,
-  then deploy, then scale back).
+  node stopped before the new version starts. `cargo xtask deploy
+  <fleet> --nodes --stop-first` stops every Machine, updates them while
+  stopped, and starts them together (the fleet is down for the minute or
+  two between). v0.5.1 → v0.6.0 is one (the fleet runs celld's default
+  fleet durability): `--nodes --stop-first`, then the cell, then the hosted
+  e2e. v0.6.0 moves each app's database into a file of its own on first
+  open, so going back to a v0.5.1 node after that is not supported.
 - Never publish the internal port (8081) as a Fly service: it is for
   peers, and without `CELLD_INTERNAL_PEER_ONLY` its operator API has no
   authentication.

@@ -60,14 +60,16 @@ secret injection) or `null` to remove ambient network entirely.
 `WorkerCode.limits` bounds `cpuMs` and `subRequests` per invocation.
 
 Why a facet and not our own SQL loopback: a facet gives author code a
-real, private SQLite database that replicates with the supervisor in one
-upload and cannot see platform tables. finite-next filtered SQL strings
-with a regex instead; that is deleted. The supervisor's root transaction
-cannot enclose a facet call (spike 2: celld writes the facet's whole
-image into one root row at commit, which fails past ~1.6 MB, and a
-capability call inside it deadlocks), so atomicity lives inside the
-facet: platform code runs each mutation and its ledger row in the facet's
-own `transactionSync`.
+real, private SQLite database that cannot see platform tables.
+finite-next filtered SQL strings with a regex instead; that is deleted.
+Since celld v0.6.0 a facet is a SQLite file of its own with its own
+replication stream, as a facet is on Cloudflare: a facet write no longer
+copies the facet's database into the root or joins a root transaction.
+So the supervisor's transaction never encloses a facet call (under
+v0.5.1 it could not either: spike 2 found the image copy failing past
+~1.6 MB and a capability call inside it deadlocking), and atomicity lives
+inside the facet: platform code runs each mutation and its ledger row in
+the facet's own `transactionSync`.
 
 ## Operations
 
@@ -279,7 +281,7 @@ the spike and its handoff are on branch `spike/goose-agent`,
 | operation or step result | 1 MiB | the Workflows step-result limit |
 | channel record body | 64 KiB | records are messages, not files |
 | channel page | 1000 records | bounded reads |
-| app facet database | 16 MiB | celld copies the whole facet image into the root after each changed turn: a mutation took ~9 ms at 1 MiB, ~18 ms at 16 MiB, ~55–61 ms at 64 MiB, where root snapshots carrying the image added ~2 MB of replication per mutation (spike 2) |
+| app facet database | 16 MiB | Paul's cap (large files belong in git storage). It was set when celld v0.5.1 copied the whole facet image into the root after each changed turn (spike 2: ~9 ms a mutation at 1 MiB, ~18 ms at 16 MiB, ~55–61 ms at 64 MiB, and ~2 MB of replication a mutation at 64 MiB); since v0.6.0 a facet replicates its own changes: the same benchmark (JS, 30 mutations, `celld dev`, 2026-09-26) gives ~15 ms a mutation at 1, 16, and 64 MiB alike and ~2 KB replicated a mutation, against 8.5 / 17.6 / 54 ms before (a small app pays ~7 ms more; a supervisor-only write is ~8 ms either way). Size no longer costs per write, so the cap can rise if Paul wants |
 | `cpuMs` per invocation | 30 000 | a runaway loop cannot hold the fragment |
 | `subRequests` per invocation | 50 | bounds fan-out |
 | inbox pending | 1000 | overload is a 429, not memory pressure |
@@ -313,8 +315,9 @@ the spike and its handoff are on branch `spike/goose-agent`,
 3. **Deterministic agent turns** — passed (a libfx turn as a Workflow,
    SIGKILL-tested), then superseded for agent turns by goose's own
    step loop (see Agents); Workflows stay for app jobs.
-4. **celld v0.5.1** — adopted; one alarm regression is in the debt
-   ledger.
+4. **celld v0.5.1** — adopted, with an alarm regression fixed in our
+   fork; celld v0.6.0 (2026-09-26) fixed it upstream (#228), and the
+   fork now carries only our own additions (docs/hardening.md).
 
 ## Answered (2026-09-23)
 

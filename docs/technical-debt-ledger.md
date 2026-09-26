@@ -61,25 +61,6 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** a manual check on a hosted fleet (phase 3) is recorded,
   or a browser test can run with a local push service.
 
-## celld 0.5.1 holds an alarm open while its handler's timers run
-
-- **Observed:** 2026-09-23, `spikes/celld-0.5.1/README.md`. An `alarm()`
-  that leaves a timer pending (fragment's `csFetch` uses
-  `AbortSignal.timeout(30 s)`) holds the alarm firing until the timer ends
-  or the 15 s operation deadline; every re-arm meanwhile waits. The e2e
-  check "paused trigger recorded as blocked, not run" failed on 10 of 12
-  runs; 312/312 passed on 0.4.0.
-- **Risk:** every schedule, retry, and inbox run shares one alarm per
-  fragment, so work armed during or right after a firing waits up to 15 s.
-- **First proof:** already present (the red e2e check).
-- **Fix in hand:** a one-hunk patch in the fork worktree
-  `celld-worktrees/alarm-fix` (branch `fix/alarm-completion`) passes
-  `--only paused` 10 of 10 and the full e2e 312 of 312. Paul chose to run the fork and upstream the
-  fix.
-- **Delete when:** a celld release from denoland carries the fix and
-  passes `--only paused` 10 of 10; until then dev and hosting run the fork
-  build, and its timeout is not widened to hide a regression.
-
 ## Fragments share one origin when no hostname suffix is configured
 
 - **Observed:** phase 2 slice B. Without `FRAGMENT_HOST_SUFFIX` the cell
