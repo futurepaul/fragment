@@ -20,6 +20,9 @@
 //!   `fragment computers rm` destroys it. Nothing destroys it on its own.
 //! - A job's command (`job.computer.exec`) wakes it as a page does, then
 //!   runs detached on it, journaled on its disk (fragment_core::computer).
+//! - Its fragment's live files are kept at `~/fragment` on it, and its
+//!   `start` runs from them as a Sprites service: synced after its boot,
+//!   and while it is awake after each deploy (`sync_files`).
 //!
 //! Every step is the alarm's, from the row below: a failed one is retried
 //! with backoff, and its fragment's `events` says why.
@@ -27,6 +30,7 @@
 use std::time::Duration;
 
 use fragment_core::computer::{self as exec, ExecState};
+use fragment_core::manifest::ComputerDecl;
 use fragment_core::steps::ComputerExec;
 use fragment_core::budget;
 use serde::{Deserialize, Serialize};
@@ -56,12 +60,56 @@ CREATE TABLE IF NOT EXISTS computer (
   phase TEXT NOT NULL, awake_until INTEGER NOT NULL, held INTEGER NOT NULL, billed_to INTEGER NOT NULL,
   asleep_since INTEGER, disk_bytes INTEGER NOT NULL, tries INTEGER NOT NULL);";
 
+/// What live declares of a computer, as its fragment keeps it until the
+/// computer heard it (`computer_pending`).
+#[derive(Serialize, Deserialize)]
+struct Declared {
+    declared: bool,
+    start: Option<String>,
+    /// The live commit it was declared at.
+    live: Option<String>,
+}
+
+/// Its fragment's files on it: what live declares (its commit and
+/// `start`), what it last synced and started, and what last failed to.
+const FILES_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS files (one INTEGER PRIMARY KEY CHECK (one = 1), start TEXT, live TEXT, synced TEXT, failed TEXT)";
+/// The Sprites service `start` runs as.
+const SERVICE: &str = "fragment";
+
+#[derive(Serialize, Deserialize, Default)]
+struct Files {
+    start: Option<String>,
+    live: Option<String>,
+    synced: Option<String>,
+    failed: Option<String>,
+}
+
+impl Files {
+    /// What it is to be synced to: live, and its `start`.
+    fn wanted(&self) -> Option<String> {
+        self.live.as_ref().map(|live| json!([live, self.start]).to_string())
+    }
+
+    fn stale(&self) -> bool {
+        self.wanted().is_some() && self.synced != self.wanted()
+    }
+}
+
 /// What is asked of a computer.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum Ask {
-    /// A deploy of `fragment` (its owner's) declares a computer, or no longer does.
-    Declare { fragment: String, owner: String, declared: bool },
+    /// A deploy of `fragment` (its owner's) declares a computer, or no
+    /// longer does; with its `start`, at the `live` commit.
+    Declare {
+        fragment: String,
+        owner: String,
+        declared: bool,
+        #[serde(default)]
+        start: Option<String>,
+        #[serde(default)]
+        live: Option<String>,
+    },
     /// Something needs it awake until then (ms).
     Wake { until: i64 },
     /// Its Sprite paired as its computer, now its fragment's editor.
@@ -154,6 +202,7 @@ pub struct ComputerCell {
 impl DurableObject for ComputerCell {
     fn new(state: State, env: Env) -> Self {
         state.storage().sql().exec(SCHEMA, None).expect("the Computer schema applies");
+        state.storage().sql().exec(FILES_SCHEMA, None).expect("the Computer schema applies");
         let cfg = Config::from_env(&env);
         ComputerCell { state, env, cfg }
     }
@@ -207,6 +256,17 @@ impl ComputerCell {
         Ok(())
     }
 
+    fn files(&self) -> CellResult<Files> {
+        Ok(self.sql().exec("SELECT start, live, synced, failed FROM files", None)?.to_array::<Files>()?.pop().unwrap_or_default())
+    }
+
+    fn save_files(&self, f: &Files) -> CellResult<()> {
+        let text = |v: &Option<String>| v.as_deref().map_or(SqlStorageValue::Null, SqlStorageValue::from);
+        let binds = vec![text(&f.start), text(&f.live), text(&f.synced), text(&f.failed)];
+        self.sql().exec("INSERT OR REPLACE INTO files (one, start, live, synced, failed) VALUES (1, ?, ?, ?, ?)", binds)?;
+        Ok(())
+    }
+
     async fn arm(&self, in_ms: i64) -> CellResult<()> {
         let at = js::now_ms() + in_ms;
         Ok(self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&worker::wasm_bindgen::JsValue::from_f64(at as f64)))).await?)
@@ -219,8 +279,13 @@ impl ComputerCell {
 
     async fn asked(&self, what: Ask) -> CellResult<()> {
         let now = js::now_ms();
+        if let Ask::Declare { start, live, .. } = &what {
+            let mut f = self.files()?;
+            (f.start, f.live) = (start.clone(), live.clone());
+            self.save_files(&f)?;
+        }
         let mut c = match (self.row()?, what) {
-            (None, Ask::Declare { fragment, owner, declared }) => {
+            (None, Ask::Declare { fragment, owner, declared, .. }) => {
                 let phase = if declared { Phase::Boot } else { Phase::Gone };
                 Row { fragment, owner, declared, phase, awake_until: 0, held: false, billed_to: 0, asleep_since: None, disk_bytes: 0, tries: 0 }
             }
@@ -252,7 +317,8 @@ impl ComputerCell {
         };
         let due = match c.phase {
             Phase::Boot | Phase::Destroy => true,
-            Phase::Ready => c.held != (c.declared && now < c.awake_until),
+            // awake, its files are synced at once
+            Phase::Ready => c.held != (c.declared && now < c.awake_until) || (c.held && self.files()?.stale()),
             Phase::Gone => false,
         };
         c.tries = if due { 0 } else { c.tries };
@@ -383,6 +449,7 @@ impl ComputerCell {
         (now.billed_to, now.disk_bytes) = (0, last_number(&out) * 1024);
         self.save(&now)?;
         self.tell(&now, "computer.ready", &format!("{} is {}'s computer, an editor here", self.sprite(), now.fragment)).await;
+        self.sync_files(&now, true).await;
         self.arm(0).await
     }
 
@@ -426,6 +493,7 @@ impl ComputerCell {
                 c.disk_bytes = last_number(&out) * 1024;
                 self.check_held(c).await;
             }
+            self.sync_files(c, woke).await;
             (c.held, c.tries) = (true, 0);
             self.save(c)?;
             // next: the paid tick's end, or the idle wait's, whichever first
@@ -464,7 +532,7 @@ impl ComputerCell {
     /// it waits a while for the alarm to hold it (its first tick paid).
     /// Refused for good when it is not declared, or its owner's month cannot
     /// pay a tick; one still waking or booting is tried again.
-    async fn awake(&self, until: i64) -> CellResult<()> {
+    async fn awake(&self, until: i64) -> CellResult<Row> {
         let refused = |m: &str| CellError::invalid(format!("job.computer.exec: {m}"));
         let (t0, mut asked) = (js::now_ms(), false);
         loop {
@@ -491,7 +559,7 @@ impl ComputerCell {
             }
             asked = true;
             if c.phase == Phase::Ready && c.held {
-                return Ok(());
+                return Ok(c);
             }
             if js::now_ms() - t0 > WAKE_WAIT_MS {
                 let what = if c.phase == Phase::Boot { "is still being made" } else { "did not wake in time" };
@@ -512,8 +580,8 @@ impl ComputerCell {
     /// started on it, once (`exec::START`).
     async fn exec(&self, id: &str, e: &ComputerExec) -> CellResult<Value> {
         exec::check(e).map_err(CellError::invalid)?;
-        self.awake(js::now_ms() + self.cfg.computer_idle_ms).await?;
-        let script = exec::job_script(e, &self.cfg.computer_platform()?);
+        let c = self.awake(js::now_ms() + self.cfg.computer_idle_ms).await?;
+        let script = exec::job_script(e, &self.cfg.computer_platform()?, &c.fragment);
         let timeout = exec::timeout_s(e).to_string();
         let (status, out) = keys::sprites(&self.env, "exec", &["bash", "-c", exec::START, "fragment-exec", id, &timeout], &script).await?;
         match (status, exec::state(&out)) {
@@ -558,6 +626,52 @@ impl ComputerCell {
         Ok(bytes)
     }
 
+    /// Its fragment's live files at `~/fragment`, and `start` running from
+    /// them, as live declares: synced once per deploy (after its boot, and
+    /// while it is awake), and restarted with them. A sync that fails is
+    /// said once in its fragment's events, and tried again when it next
+    /// wakes (`woke`) or at the next deploy.
+    async fn sync_files(&self, c: &Row, woke: bool) {
+        let Ok(f) = self.files() else { return };
+        let Some(want) = f.wanted().filter(|_| f.stale()) else { return };
+        if f.failed.as_ref() == Some(&want) && !woke {
+            return;
+        }
+        let synced = self.sync(c, &f).await;
+        let Ok(mut now) = self.files() else { return };
+        match synced {
+            Ok(()) => now.synced = Some(want),
+            Err(e) if now.failed.as_ref() != Some(&want) => {
+                self.tell(c, "computer.failed", &format!("its files did not sync: {}", e.message)).await;
+                now.failed = Some(want);
+            }
+            Err(_) => return,
+        }
+        if let Err(e) = self.save_files(&now) {
+            console_error!("{}: its files' sync was not recorded: {}", c.fragment, e.message);
+        }
+    }
+
+    /// Pulls live into `~/fragment` (`exec::SYNC`), then its `start`
+    /// service goes and, when declared, comes again from the new files.
+    async fn sync(&self, c: &Row, f: &Files) -> CellResult<()> {
+        let host = self.cfg.computer_platform()?;
+        let start = f.start.as_deref().map_or(String::new(), |s| exec::start_script(s, &host, &c.fragment));
+        let argv = ["bash", "-c", exec::SYNC, "fragment-sync", &c.fragment, &host, &self.cfg.cli_release_url];
+        let (status, out) = keys::sprites(&self.env, "exec", &argv, &start).await?;
+        let home = exec::answer(&out).filter(|_| status == 200).and_then(|h| String::from_utf8(h).ok());
+        let home = home.ok_or_else(|| upstream(format!("{} did not sync ({status}): {}", self.sprite(), tail(&out))))?;
+        keys::sprites(&self.env, "exec", &["sprite-env", "services", "delete", SERVICE], "").await?;
+        if f.start.is_some() {
+            let serve = format!("{home}/.fragment/serve.sh");
+            let (status, out) = keys::sprites(&self.env, "exec", &["sprite-env", "services", "create", SERVICE, "--cmd", "bash", "--args", &serve, "--no-stream"], "").await?;
+            if status != 200 {
+                return Err(upstream(format!("{} would not run start as a service ({status}): {}", self.sprite(), tail(&out))));
+            }
+        }
+        Ok(())
+    }
+
     /// An entry in its fragment's `events`; one that does not land is logged.
     async fn tell(&self, c: &Row, kind: &str, summary: &str) {
         let body = json!({ "kind": kind, "summary": summary, "sprite": self.sprite() }).to_string();
@@ -585,22 +699,36 @@ fn exec_fail(e: CellError) -> StepFail {
 /// A fragment's side: its computer is told what live declares, woken for
 /// its pages, runs its jobs' commands, and is answered.
 impl FragmentCell {
-    /// Live's `computer` block, installed: its computer is to be told (a
-    /// fragment that never declared one tells nothing, and has no computer).
-    pub(crate) fn want_computer(&self, declared: bool) -> CellResult<()> {
-        if declared || self.meta(MetaKey::ComputerDeclared)?.is_some() {
-            self.set_meta(MetaKey::ComputerPending, if declared { "1" } else { "0" })?;
+    /// Live's `computer` block at the `live` commit, installed: its computer
+    /// is to be told (a fragment that never declared one tells nothing, and
+    /// has no computer).
+    pub(crate) fn want_computer(&self, decl: Option<&ComputerDecl>, live: Option<&str>) -> CellResult<()> {
+        if decl.is_some() || self.meta(MetaKey::ComputerDeclared)?.is_some() {
+            let d = Declared { declared: decl.is_some(), start: decl.and_then(|d| d.start.clone()), live: live.map(str::to_string) };
+            self.set_meta(MetaKey::ComputerPending, &serde_json::to_string(&d).expect("a declaration serializes"))?;
         }
         Ok(())
+    }
+
+    /// What its computer is yet to hear (`"1"` or `"0"`: from before `start`).
+    fn pending_computer(&self) -> CellResult<Option<(String, Declared)>> {
+        Ok(self.meta(MetaKey::ComputerPending)?.map(|v| {
+            let d = match v.as_str() {
+                "1" | "0" => Declared { declared: v == "1", start: None, live: None },
+                json => serde_json::from_str(json).expect("computer_pending is the JSON the cell wrote"),
+            };
+            (v, d)
+        }))
     }
 
     /// Tells its computer what live declares; one that did not hear is
     /// told again by the alarm.
     pub(crate) async fn tell_computer(&self) {
         let told = async {
-            let Some(pending) = self.meta(MetaKey::ComputerPending)? else { return Ok(()) };
-            let (name, declared) = (self.name()?, pending == "1");
-            ask(&self.env, &name, &Ask::Declare { fragment: name.clone(), owner: self.must(MetaKey::Owner)?, declared }).await?;
+            let Some((pending, d)) = self.pending_computer()? else { return Ok(()) };
+            let (name, declared) = (self.name()?, d.declared);
+            let what = Ask::Declare { fragment: name.clone(), owner: self.must(MetaKey::Owner)?, declared, start: d.start, live: d.live };
+            ask(&self.env, &name, &what).await?;
             match declared {
                 true => self.set_meta(MetaKey::ComputerDeclared, "1")?,
                 false => self.del_meta(MetaKey::ComputerDeclared)?,
@@ -619,10 +747,11 @@ impl FragmentCell {
     /// That its live commit declares a computer, for a job's command; one a
     /// deploy just declared, which its computer has not heard, is waited for.
     fn job_computer(&self) -> Result<(), StepFail> {
-        let [declared, pending] = self.metas([MetaKey::ComputerDeclared, MetaKey::ComputerPending]).map_err(|e| StepFail::Retry(e.message))?;
-        match (declared, pending.as_deref()) {
-            (Some(_), None | Some("1")) => Ok(()),
-            (None, Some("1")) => Err(StepFail::Retry("its computer has not heard the deploy that declares it yet".into())),
+        let retry = |e: CellError| StepFail::Retry(e.message);
+        let (declared, pending) = (self.meta(MetaKey::ComputerDeclared).map_err(retry)?, self.pending_computer().map_err(retry)?);
+        match (declared, pending.map(|(_, d)| d.declared)) {
+            (Some(_), None | Some(true)) => Ok(()),
+            (None, Some(true)) => Err(StepFail::Retry("its computer has not heard the deploy that declares it yet".into())),
             _ => Err(permanent("job.computer.exec needs the fragment's own computer: add \"computer\": {} to its fragment.json and deploy")),
         }
     }

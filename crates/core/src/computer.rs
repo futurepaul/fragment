@@ -76,6 +76,41 @@ printf 'FRAGMENT-EXEC-BEGIN\n%s\nFRAGMENT-EXEC-END\n' "$(printf '%s' "$s" | base
 /// `bash -c READ fragment-exec <id> <stdout|stderr> <offset> <length>`.
 pub const READ: &str = r#"printf 'FRAGMENT-EXEC-BEGIN\n'; tail -c +$(( $3 + 1 )) "$HOME/.fragment/exec/$1/$2" | head -c $4 | base64; printf 'FRAGMENT-EXEC-END\n'"#;
 
+/// `bash -c SYNC fragment-sync <fragment> <host> <release URL>`, its
+/// `start` script (`job_script`) on stdin, or nothing: pulls what is live
+/// into `~/fragment` (a CLI from before `sync --live` updates itself from
+/// the release first), then writes `start` and the service that keeps it
+/// up (`serve.sh`: restarted with backoff when it exits, its output in
+/// `~/fragment.log`, trimmed to its last 512 KiB past 1 MiB). Answers the
+/// computer's home.
+pub const SYNC: &str = r#"set -e
+export PATH="$HOME/.local/bin:$PATH" FRAGMENT_HOST="$2"; mkdir -p "$HOME/fragment" "$HOME/.fragment"
+fragment sync --help 2> /dev/null | grep -q -e --live || curl -fsSL "$3/fragment-$(uname -s)-$(uname -m).tar.gz" | tar -xzf - -C "$HOME/.local/bin"
+fragment sync "$1" --dir "$HOME/fragment" --live --apply-mass-delete >&2 || [ $? = 3 ]
+start=$(cat)
+if [ -n "$start" ]; then printf '%s
+' "$start" > "$HOME/.fragment/start.sh"; cat > "$HOME/.fragment/serve.sh" << 'SERVE'
+cd "$HOME/fragment" || exit 1
+log="$HOME/fragment.log"; backoff=1
+trap 'pkill -TERM -P $pid 2> /dev/null; kill -TERM $pid 2> /dev/null; exit 0' TERM INT HUP
+while :; do
+t0=$(date +%s); echo "[fragment] start $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$log"
+bash "$HOME/.fragment/start.sh" >> "$log" 2>&1 < /dev/null & pid=$!
+while kill -0 $pid 2> /dev/null; do
+if [ $(( $(wc -c < "$log") )) -gt 1048576 ]; then tail -c 524288 "$log" > "$log.t"; cat "$log.t" > "$log"; rm -f "$log.t"; fi
+sleep 1 & wait $!
+done
+wait $pid; echo "[fragment] exited $?" >> "$log"
+if [ $(( $(date +%s) - t0 )) -ge 60 ]; then backoff=1; fi
+sleep $backoff & wait $!; backoff=$(( backoff * 2 > 60 ? 60 : backoff * 2 ))
+done
+SERVE
+else rm -f "$HOME/.fragment/start.sh" "$HOME/.fragment/serve.sh"; fi
+printf 'FRAGMENT-EXEC-BEGIN
+%s
+FRAGMENT-EXEC-END
+' "$(printf '%s' "$HOME" | base64)""#;
+
 /// What `POLL` says.
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -136,10 +171,10 @@ fn place(path: &str) -> String {
 }
 
 /// The script a command runs as: the platform's host for the computer's
-/// CLI, the job's env, its directory, then `bash -lc` with the CLI's
-/// directory on its PATH (a login shell sets PATH anew).
-pub fn job_script(e: &ComputerExec, host: &str) -> String {
-    let mut s = format!("export FRAGMENT_HOST={}\n", quote(host));
+/// CLI and the fragment's name, the job's env, its directory, then `bash
+/// -lc` with the CLI's directory on its PATH (a login shell sets PATH anew).
+pub fn job_script(e: &ComputerExec, host: &str, fragment: &str) -> String {
+    let mut s = format!("export FRAGMENT_HOST={} FRAGMENT_NAME={}\n", quote(host), quote(fragment));
     for (k, v) in &e.env {
         s.push_str(&format!("export {k}={}\n", quote(v)));
     }
@@ -149,6 +184,11 @@ pub fn job_script(e: &ComputerExec, host: &str) -> String {
     }
     s.push_str(&format!("exec bash -lc {}\n", quote(&format!("export PATH=\"$HOME/.local/bin:$PATH\"\n{}", e.command))));
     s
+}
+
+/// The script `start` runs as: a job's, in `~/fragment`, with no timeout.
+pub fn start_script(start: &str, host: &str, fragment: &str) -> String {
+    job_script(&ComputerExec { command: start.into(), timeout_ms: None, cwd: None, env: Default::default() }, host, fragment)
 }
 
 /// The bytes between the markers of an answer, or None when it has none
@@ -267,7 +307,7 @@ mod tests {
         }
 
         fn start(&self, id: &str, e: &ComputerExec) -> Option<ExecState> {
-            state(&self.run(START, &[id, &timeout_s(e).to_string()], &job_script(e, "https://fragment.test")))
+            state(&self.run(START, &[id, &timeout_s(e).to_string()], &job_script(e, "https://fragment.test", "pet.paul")))
         }
 
         /// Polls until it ended, as the platform does, then reads it.
@@ -308,12 +348,12 @@ mod tests {
     #[test]
     fn a_command_runs_once_on_the_computer() {
         let home = Home::new("once");
-        let mut e = exec("n=$(cat count 2> /dev/null || echo 0); echo $((n + 1)) > count; cat count; pwd; echo \"$GREETING $FRAGMENT_HOST\"; echo oops >&2; exit 3");
+        let mut e = exec("n=$(cat count 2> /dev/null || echo 0); echo $((n + 1)) > count; cat count; pwd; echo \"$GREETING $FRAGMENT_HOST $FRAGMENT_NAME\"; echo oops >&2; exit 3");
         e.env.insert("GREETING".into(), "it's".into());
         assert_eq!(home.start("a1", &e), Some(ExecState::Started));
         let first = home.finish("a1");
         let dir = home.path("fragment");
-        let want = format!("1\n{}\nit's https://fragment.test\n", dir.display());
+        let want = format!("1\n{}\nit's https://fragment.test pet.paul\n", dir.display());
         assert_eq!(first, json!({ "code": 3, "stdout": want, "stderr": "oops\n", "truncated": false }));
         // a retried or replayed step: the same id reattaches, and it does not run again
         assert_eq!(home.start("a1", &e), Some(ExecState::Started));
@@ -344,6 +384,33 @@ mod tests {
         slow.timeout_ms = Some(1000);
         home.start("b3", &slow);
         assert_eq!(home.finish("b3"), json!({ "code": 124, "stdout": "before\n", "stderr": "", "truncated": false }));
+    }
+
+    #[test]
+    fn start_is_synced_then_kept_up_by_its_service() {
+        let home = Home::new("serve");
+        // a stand-in CLI that knows `sync --live`, and syncs nothing
+        std::fs::create_dir_all(home.path(".local/bin")).unwrap();
+        std::fs::write(home.path(".local/bin/fragment"), "#!/bin/sh\n[ \"$2\" = --help ] && echo --live\nexit 0\n").unwrap();
+        Command::new("chmod").args(["755", home.path(".local/bin/fragment").to_str().unwrap()]).status().unwrap();
+        let args = ["pet.paul", "https://fragment.test", "https://release.test"];
+        let start = start_script("echo run >> runs; echo \"said $FRAGMENT_NAME\"; exit 1", args[1], args[0]);
+        let out = home.run(SYNC, &args, &start);
+        assert_eq!(answer(&out), Some(home.0.display().to_string().into_bytes()), "{out}");
+        let mut serve = Command::new("bash").arg(home.path(".fragment/serve.sh")).env("HOME", &home.0).spawn().unwrap();
+        // it exits at once: restarted a second later, then two
+        let runs = || std::fs::read_to_string(home.path("fragment/runs")).unwrap_or_default().lines().count();
+        let t0 = Instant::now();
+        while runs() < 2 && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Command::new("kill").args(["-TERM", &serve.id().to_string()]).status().unwrap();
+        serve.wait().unwrap();
+        let log = std::fs::read_to_string(home.path("fragment.log")).unwrap();
+        assert!(runs() >= 2 && log.contains("said pet.paul") && log.contains("[fragment] exited 1"), "{log}");
+        // no start: its service's files go
+        home.run(SYNC, &args, "");
+        assert!(!home.path(".fragment/serve.sh").exists() && !home.path(".fragment/start.sh").exists());
     }
 
     #[test]
