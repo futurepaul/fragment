@@ -3,7 +3,8 @@
 // platform runs this from ~/fragment (the fragment's live files) while the
 // computer is awake, as fragment.json's `computer.start` says, and restarts
 // it when it exits and after a deploy; what it prints is in ~/fragment.log.
-// The `fragment` CLI here is signed in as the computer, an editor.
+// The `fragment` CLI here is signed in as the computer, an editor, and
+// FRAGMENT_NAME names the fragment.
 //
 // PET_FAKE_SCREEN=<a JPEG> shows that fixed image instead: nothing is
 // installed or started, and control records are logged, not applied.
@@ -31,7 +32,7 @@ const PLAYWRIGHT = "playwright@1.63.0";
 
 const FAKE = process.env.PET_FAKE_SCREEN;
 const CLI = process.env.FRAGMENT_BIN ?? "fragment";
-const NAME = process.env.FRAGMENT_NAME ?? JSON.parse(fs.readFileSync("fragment.json", "utf8")).name;
+const NAME = process.env.FRAGMENT_NAME ?? fail("FRAGMENT_NAME names the fragment (the platform sets it)");
 // the control cursor, pid files, the display's and browser's logs, the browser's profile
 const STATE = path.join(os.homedir(), ".pet");
 const CURSOR = path.join(STATE, "applied");
