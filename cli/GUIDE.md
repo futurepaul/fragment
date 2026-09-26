@@ -28,7 +28,11 @@ browser, it prints the link to open anywhere you are signed in
 https://fragment.club unless `--host`, `FRAGMENT_HOST`, or `fragment
 host <url>` names another. The host knows which identity (`id:…`) each
 key belongs to: memberships name you, not the key. `fragment keys
-rotate` replaces the key and keeps everything you have.
+rotate` replaces the key and keeps everything you have. A machine that
+works for someone without being them pairs as their computer instead:
+`fragment login --computer <name>`, approved by its owner. It acts only
+in the fragments it is added to and those it makes (its owner's); its
+owner lists and removes it with `fragment computers [rm <name>]`.
 
 A person chooses a username once (`fragment username <name>`, or the
 host's page after the first sign-in) and can create nothing before. A
@@ -423,6 +427,7 @@ secret values into files.
 
 ```
 fragment login [--force] [--no-wait]     fragment call <name> <op> [--input JSON] [--id ID]
+fragment login --computer <name>         fragment computers [rm <name>]
 fragment whoami                          fragment channel <name> [<channel>] [--after N] [--follow]
 fragment username [<name>]
 fragment keys [list|rotate|revoke <npub>]

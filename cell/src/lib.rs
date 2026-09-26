@@ -355,14 +355,54 @@ async fn release_username(env: &Env, username: &str) -> CellResult<Response> {
     json_answer(&ask_registry(env, &calls::ReleaseUsername { username: username.to_string() }).await?)
 }
 
+/// How many fragments a removed computer leaves at once.
+const LEAVES_AT_ONCE: usize = 16;
+
+/// A removed computer (its keys revoked already: `RemoveComputer`) leaves
+/// every fragment its list names, as a member may, so no grant names it
+/// and its sockets close: `{id, removed, left, failed}`. A leave that
+/// fails is named in `failed`; removing it again retries them. Its list
+/// is fed from each fragment's outbox, so a membership granted a moment
+/// before may not be there yet: that grant stays, naming an identity no
+/// key signs as.
+async fn remove_computer(env: &Env, url: &Url, removed: calls::RemovedComputer) -> CellResult<Response> {
+    let id = removed.identity.id.clone();
+    let list = Request::new("https://principal.internal/list", Method::Get)?;
+    let listed: fragment_proto::FragmentList = env.durable_object("PRINCIPAL")?.get_by_name(&id)?.fetch_with_request(list).await?.json().await?;
+    let (mut left, mut failed) = (vec![], vec![]);
+    // bounded by the list, which is finite: a batch at a time, each leave one hop
+    for batch in listed.fragments.chunks(LEAVES_AT_ONCE) {
+        let leaves = batch.iter().map(|f| {
+            let who = Signed::new(removed.identity.clone(), None);
+            let routed = Routed { name: f.name.clone(), url: url.clone(), mode: None, signed: Some(who), credential: None };
+            async move {
+                let delete = Request::new(url.as_str(), Method::Delete)?;
+                let answer = forward(env, &delete, None, Forward { routed, inner: "/api/members/me".into(), extra: vec![] }).await?;
+                Ok::<u16, CellError>(answer.status_code())
+            }
+        });
+        for (f, answer) in batch.iter().zip(futures_util::future::join_all(leaves).await) {
+            match answer {
+                // 404: not a member there (any more): nothing to leave
+                Ok(200 | 404) => left.push(f.name.clone()),
+                Ok(status) => failed.push(json!({ "fragment": f.name, "status": status })),
+                Err(e) => failed.push(json!({ "fragment": f.name, "error": e.message })),
+            }
+        }
+    }
+    assert!(left.len() + failed.len() == listed.fragments.len(), "every listed fragment is left or named as failed");
+    json_answer(&json!({ "id": id, "removed": removed.removed, "left": left, "failed": failed }))
+}
+
 /// Makes a fragment for a person, under their username: the API's create
-/// and the platform's "new" page. An agent makes one for its owner: the
-/// owner's, under their username, with the agent an editor of it.
+/// and the platform's "new" page. An agent or a computer makes one for its
+/// owner: the owner's (on their budget, in their list), under their
+/// username, with its maker an editor of it.
 pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut create: CreateFragment, principal: Signed) -> CellResult<Response> {
     let (maker, agent) = match principal.kind {
         IdentityKind::Person => (principal, None),
-        IdentityKind::Agent => {
-            let owner = principal.owner.clone().ok_or_else(|| CellError::host("an agent without an owner"))?;
+        IdentityKind::Agent | IdentityKind::Computer => {
+            let owner = principal.owner.clone().ok_or_else(|| CellError::host(format!("{} {} has no owner", principal.kind.as_str(), principal.id)))?;
             let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: principal.username.clone() };
             (Signed::new(identity, None), Some(principal.identity.id))
         }
@@ -458,11 +498,14 @@ fn json_answer<T: serde::Serialize>(v: &T) -> CellResult<Response> {
     Ok(Response::from_json(v)?)
 }
 
-/// Whose budget a signer sees: a person's own org; an agent's owner's.
+/// Whose budget a signer sees: a person's own org; an agent's owner's. A
+/// computer sees none: it spends only through the fragments it is in,
+/// whose owners pay, and reads nothing else of its owner's.
 fn billing_org(who: &Signed) -> CellResult<String> {
     let person = match who.kind {
         IdentityKind::Person => who.id.as_str(),
         IdentityKind::Agent => who.owner.as_deref().ok_or_else(|| CellError::host("an agent without an owner"))?,
+        IdentityKind::Computer => return Err(CellError::new(ErrorCode::Forbidden, "a computer has no budget: the fragments it works in bill their owners")),
     };
     ledger::org_of(person).ok_or_else(|| CellError::host("no billing org"))
 }
@@ -519,6 +562,7 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
         let reg: Register = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
         return match reg.kind {
             IdentityKind::Person => Err(CellError::invalid("people sign in: `fragment login` adds a key to you")),
+            IdentityKind::Computer => Err(CellError::invalid("a computer pairs on the platform: `fragment login --computer <name>` on it, approved by its owner")),
             // FIN-11's trusted initial registration: the owner signs, and the
             // agent's key proves itself inside
             IdentityKind::Agent => {
@@ -572,6 +616,11 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
             let identity = named_identity(id)?;
             let key = key_in_path(k)?;
             json_answer(&ask_registry(env, &calls::CheckKey(calls::KeyChange { identity, key, by: by() })).await?)
+        }
+        (Method::Delete, [id]) => {
+            let computer = named_identity(id)?.ok_or_else(|| CellError::invalid("name the computer to remove (id:…); `me` is not one"))?;
+            let removed = ask_registry(env, &calls::RemoveComputer { by: by(), computer }).await?;
+            remove_computer(env, url, removed).await
         }
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
     }
@@ -861,9 +910,10 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
                 }
                 _ => Some(signer_for(env, &req, &url, &body).await?),
             };
-            // owner-only actions never go through an agent, whatever it acts for
-            if owner_only && principal.as_ref().is_some_and(|p| p.kind == IdentityKind::Agent) {
-                return Err(CellError::new(ErrorCode::Forbidden, "an agent never manages members, invites, visibility, or links, nor deletes a fragment: its owner does"));
+            // owner-only actions never go through an agent, whatever it acts
+            // for, nor a computer: only a person owns a fragment
+            if owner_only && principal.as_ref().is_some_and(|p| p.kind != IdentityKind::Person) {
+                return Err(CellError::new(ErrorCode::Forbidden, "an agent or a computer never manages members, invites, visibility, or links, nor deletes a fragment: its owner does"));
             }
             let name = named_fragment(name, principal.as_ref())?;
             let routed = Routed { name, url: url.clone(), mode: None, signed: principal, credential: None };

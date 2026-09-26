@@ -92,6 +92,46 @@ impl Call for RegisterAgent {
     type Answer = IdentityView;
 }
 
+/// `POST /computers/pair`: a machine's key the signed-in person approved
+/// as their computer `name` (the router checked the key's own proof, made
+/// for that name): a new computer identity they own, holding it. Again,
+/// the same one.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PairComputer {
+    pub token: String,
+    pub key: String,
+    pub name: String,
+}
+
+impl Call for PairComputer {
+    const PATH: &'static str = "/computers/pair";
+    type Answer = IdentityView;
+}
+
+/// `POST /computers/remove`: its owner removes a computer: every key it
+/// holds is revoked at once, and its name is free again.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct RemoveComputer {
+    pub by: By,
+    pub computer: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct RemovedComputer {
+    /// Whom it removed, as the fragments it was in name it.
+    pub identity: Identity,
+    /// Whether this call removed it (again: `false`).
+    pub removed: bool,
+}
+
+impl Call for RemoveComputer {
+    const PATH: &'static str = "/computers/remove";
+    type Answer = RemovedComputer;
+    fn checked(answer: RemovedComputer) -> CellResult<RemovedComputer> {
+        Ok(RemovedComputer { identity: identity_checked(answer.identity)?, ..answer })
+    }
+}
+
 /// A key changed on an identity (`None`: the asker's own) by `by` (its
 /// proof checked by the router).
 #[derive(Serialize, Deserialize)]
@@ -222,7 +262,7 @@ pub(crate) struct Profiles {
     pub ids: Vec<String>,
 }
 
-/// A person's username and picture, or an agent's owner's username.
+/// A person's username and picture, or an agent's or computer's owner's username.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Profile {
     pub kind: IdentityKind,

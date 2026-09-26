@@ -65,8 +65,8 @@ jobs), `BLOBS` (R2 over the fleet bucket: the bytes of large files),
 
 ## Principals and access
 
-A principal is an identity (`id:` + 32 hex: a person or an agent) or an
-anonymous visitor (`anon:` + 32 hex, the hash of a random cookie on the
+A principal is an identity (`id:` + 32 hex: a person, an agent, or a
+computer) or an anonymous visitor (`anon:` + 32 hex, the hash of a random cookie on the
 fragment's origin). Grants, records, runs, and the ledger name
 principals. A request is signed by a key (64 hex inside, an npub in
 answers; requests may use either); the router asks the registry which
@@ -137,6 +137,13 @@ with `DELETE members/me`; invites; visibility; rotation; grants;
 deletion) are 403 for an agent whatever it names. A site request's query is its app's:
 `for` there means nothing to the platform.
 
+A computer (Identities, below) acts as itself only: it holds the role
+its own membership gives it, like anyone (decision 17's cap is an
+agent's, for an asker it does not have), and never names `for` (403).
+Owner-only actions are 403 for a computer as for an agent. Its owner
+reads what it reads, as an agent's owner does. What it makes is its
+owner's (`POST /api/fragments`).
+
 Membership is cell state: `fragment.json`'s `visibility`, `editors`, and
 `viewers` grant nothing (the cell records a `manifest.ignored` event).
 Only the owner manages members, invites, visibility, and tokens; a
@@ -147,7 +154,17 @@ member may leave. Each identity's list of fragments is kept in its
 
 The registry (`cell/src/registry.rs`; finite.computer's BANKS stands
 behind the same routes later) holds identities, the public keys each has
-held, each agent's owner, and, from slice B, sign-in subjects. It holds
+held, each agent's and computer's owner, each computer's name, and, from
+slice B, sign-in subjects.
+
+A **computer** is a machine a person paired as theirs (`fragment login
+--computer <name>`, approved on `/cli`: Sign-in, below): an identity of
+its own, owned as an agent is, whose key signs as the computer and never
+as the person. It acts only where it is a member, and in what it makes,
+which is its owner's. It adds no keys (its owner manages them, as an
+agent's), registers or makes no agents, chooses no username, and reads no
+budget (403). A person owns at most 32; names are labels, one per name
+among a person's computers. It holds
 no grant and no private key. A **key proof** is a NIP-98 event by a new
 key for the same method and URL as the request that carries it, with
 `["p", <the signing key, 64 hex>]`: whoever sent the request also holds
@@ -156,9 +173,10 @@ the new key and meant it for this signer.
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/identities` | a person | `{kind: "agent", proof}` → a new agent identity they own, holding the proof's key (FIN-11's trusted initial registration); again, the same one; a key someone else holds is 409; an agent owns no agents (403) |
-| `GET /api/identities/{id\|me}` | the identity, or its owner | → `{id, kind, owner?, createdAt, keys: [{npub, addedAt, addedBy, revokedAt?}], agents: [id], subjects: [{issuer, email, linkedAt}]}`; anyone else 404 |
-| `POST /api/identities/{id\|me}/keys` | a person for themselves; an owner for their agent | `{proof}` → the identity with the key added (at most 64 keys, revoked ones included); a key someone else holds, or a revoked one, is 409 |
-| `DELETE /api/identities/{id\|me}/keys/{npub}` | the same | → the identity; the key is 401 from the next request and never comes back; an agent's last active key cannot be revoked (400); a person who signs in may hold none |
+| `GET /api/identities/{id\|me}` | the identity, or its owner | → `{id, kind, owner?, name?, createdAt, keys: [{npub, addedAt, addedBy, revokedAt?}], agents: [id], computers: [{id, name, pairedAt}], subjects: [{issuer, email, linkedAt}]}` (`name`: a computer's; `computers`: a person's, removed ones left out); anyone else 404 |
+| `POST /api/identities/{id\|me}/keys` | a person for themselves; an owner for their agent or computer | `{proof}` → the identity with the key added (at most 64 keys, revoked ones included); a key someone else holds, or a revoked one, is 409; a removed computer's, 409 |
+| `DELETE /api/identities/{id\|me}/keys/{npub}` | the same | → the identity; the key is 401 from the next request and never comes back; an agent's or computer's last active key cannot be revoked (400); a person who signs in may hold none |
+| `DELETE /api/identities/{id}` | a computer's owner | → `{id, removed, left: [fragment], failed: [{fragment, status\|error}]}`: every key it holds is revoked at once (401 from its next request), its name is free, and it leaves every fragment its list names, closing its sockets; again, `removed: false` and the leaves retried; another's computer 404, an agent 400 (`fragment computers rm`) |
 | `GET /api/identities/{id}/keys/{npub}` | the identity, or an agent it owns | → `{active}` (an agent's runtime checks its owner's keys with it) |
 | `PUT /api/identities/me/username` | a person | `{username}` → `{username, claimed}`: chosen once (3 to 32 of lowercase letters, digits, and single dashes, not starting or ending with one, and not a reserved word); taken 409, another after yours 409, yours again `claimed: false` |
 | `PUT /api/identities/me/picture` | a person with a username | the image (PNG, JPEG, WebP, or GIF, told by its bytes; at most 256 KiB) → `{sha, mime}` |
@@ -201,7 +219,8 @@ random bytes, the registry keeps their SHA-256).
 | `GET /auth/fragment?name=&return=` | signed in: → `<fragment origin>/__signin?token=<a single-use redemption, 60 s, for that fragment only>` (a session holds at most 16 unspent; past that, the oldest is refused), at once for a fragment of the person's own, one shared with them, or one they said yes to; for any other, first a page asking "Continue to X?" (Asking first, below); signed out: → sign in first |
 | `POST /auth/fragment?name=&return=` | that page's form (`form`, its token): the yes, remembered, then → the fragment's `__signin?token=` (303); another origin, or a missing or stale token, 403 |
 | `GET /cli?key=<npub>&proof=` | the link `fragment login` prints: `proof` is the key's own NIP-98 event for `POST <platform>/cli/approve`, good for ten minutes (the proof of possession; without it, stale, or by another key: 400). Signed in: a page showing the key's last eight characters, to compare with the terminal, and an Add button; signed out: → sign in first, keeping the link |
-| `POST /cli/approve` | the page's form (`key`, `proof`): the key joins the signed-in person at once (a key someone else holds, or a revoked one, is 409; another origin 403); the CLI waits for `GET /api/identities/me` to answer. People themselves come only from sign-in (`POST /api/identities {kind: "person"}` is 400) |
+| `GET /cli?key=&proof=&computer=<name>` | the link `fragment login --computer <name>` prints: the proof is for `POST <platform>/cli/approve?computer=<name>`, so it pairs that computer and nothing else (the same key without the name, or under another, is 400). The page says it is a computer named `<name>`, owned by the person, acting only in the fragments they add it to and those it makes (theirs, on their budget), never as them; and a Pair button |
+| `POST /cli/approve` | the page's form (`key`, `proof`, `computer`): the key joins the signed-in person at once, or, with `computer`, becomes their new computer of that name (again, the same one; a name they already use is 409); a key someone else holds, or a revoked one, is 409; another origin 403; the CLI waits for `GET /api/identities/me` to answer. People themselves come only from sign-in (`POST /api/identities {kind: "person"}` is 400), and computers from this page (`{kind: "computer"}` is 400) |
 
 Every fragment's origin is one site with the platform
 (`<label>--<username>.fragment.club` and `fragment.club`), so a
@@ -385,7 +404,7 @@ platform (`Content-Security-Policy`), and keep their URL to the platform
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/fragments` | a person with a username (an agent is 403) | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). `visibility` defaults to `link`, and to `members` for the `desktop` template (a desktop is its owner's alone). The fragment's own key is made by the node's `KEYS` and stays sealed there. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`desktop`, `chat`, `todo`, `inbox`, `blank`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
+| `POST /api/fragments` | a person with a username; an agent or a computer for its owner (the fragment is the owner's, under their username, on their budget, with its maker an editor) | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). `visibility` defaults to `link`, and to `members` for the `desktop` template (a desktop is its owner's alone). The fragment's own key is made by the node's `KEYS` and stays sealed there. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`desktop`, `chat`, `todo`, `inbox`, `blank`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, sharing?, chat?}]}`; `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility (a fragment from before sends it once, on its next change or alarm; until then it has none); `chat` on every row: whether it is a chat (its live `fragment.json` declares a `chat` channel), as the fragment last sent its row (every send carries it; a deploy that adds or drops that channel sends every member's row again; a fragment from before says so on its next send or its alarm, and until then its row has none); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
 | `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes, frame?}` (`frame`: when live's `fragment.json` asks for it, whether its owner allows it) |

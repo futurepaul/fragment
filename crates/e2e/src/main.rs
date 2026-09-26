@@ -450,6 +450,12 @@ fn cli_data(args: &[&str], out: &Output) -> Result<Value> {
     Ok(v["data"].clone())
 }
 
+/// Whom `Suite::login` signs in as for a CLI key (its npub): the same
+/// person again when a lane signs in with it.
+pub fn cli_email(npub: &str) -> Result<String> {
+    Ok(format!("cli-{}@e2e.test", npub.get(5..17).context("an npub is longer than 17 characters")?))
+}
+
 /// A person signs in through the WorkOS fake and approves the key a
 /// pending `fragment login` names (a key already approved has nothing
 /// pending).
@@ -459,8 +465,7 @@ fn approve_login(api: &Api, pending: &Value) -> Result<()> {
     }
     let npub = pending["npub"].as_str().context("a pending login names its key")?;
     let link = pending["approve"].as_str().context("a pending login answers its approval link")?;
-    let email = format!("cli-{}@e2e.test", npub.get(5..17).context("an npub is longer than 17 characters")?);
-    let session = api.sign_in(&email)?;
+    let session = api.sign_in(&cli_email(npub)?)?;
     let r = api.approve_link(&session, link)?;
     anyhow::ensure!(r.status == 200, "the approval: {r}");
     Ok(())

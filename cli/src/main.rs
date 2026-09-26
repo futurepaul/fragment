@@ -50,10 +50,15 @@ struct Cli {
 enum Cmd {
     /// Make a nostr key (or use the one you have) and add it to you: sign
     /// in on the host in a browser and approve it there (--force makes a
-    /// new key)
+    /// new key). With --computer, pair this machine as your computer instead
     Login {
         #[arg(long)]
         force: bool,
+        /// Pair this machine as your computer <name>: an identity of its own
+        /// that you own, acting only in the fragments you add it to (and
+        /// those it makes for you), never as you
+        #[arg(long, value_name = "NAME")]
+        computer: Option<String>,
         /// Print the approval link and return (run `fragment login` again after approving)
         #[arg(long)]
         no_wait: bool,
@@ -63,6 +68,13 @@ enum Cmd {
     },
     /// Who the host says you are: your identity, username, this key, your other keys
     Whoami,
+    /// Your computers (machines paired with `fragment login --computer`):
+    /// list them, or remove one (its keys are revoked, and it leaves every
+    /// fragment it is in)
+    Computers {
+        #[command(subcommand)]
+        sub: Option<ComputersCmd>,
+    },
     /// Your username, chosen once: your fragments live at
     /// <label>--<username>.<host>
     Username {
@@ -409,6 +421,12 @@ enum BudgetCmd {
 }
 
 #[derive(Subcommand)]
+enum ComputersCmd {
+    /// Remove a computer (its name, or id:…)
+    Rm { name: String },
+}
+
+#[derive(Subcommand)]
 enum KeysCmd {
     /// Your identity's keys (the same as `fragment whoami`)
     List,
@@ -426,7 +444,8 @@ enum MembersCmd {
     /// Add a member, or change their role (owner only)
     Add {
         name: String,
-        /// identity (id:…), npub, 64-hex key, or NIP-05 name (name@domain)
+        /// identity (id:…), npub, 64-hex key, NIP-05 name (name@domain), or
+        /// the name of one of your computers
         who: String,
         /// viewer | editor
         #[arg(long, default_value = "viewer")]
@@ -510,6 +529,9 @@ fn save_config(key: &str, value: &str) -> Result<PathBuf> {
 
 fn print_identity(v: &IdentityView, this_key: &str) {
     println!("identity: {} ({})", v.id, v.kind.as_str());
+    if let (Some(name), Some(owner)) = (&v.name, &v.owner) {
+        println!("computer: {name}, owned by {owner}: it acts only where it is a member, never as them");
+    }
     match &v.username {
         Some(u) => println!("username: {u} (your fragments are <name>.{u})"),
         None if v.kind == fragment_proto::IdentityKind::Person => println!("username: none yet (fragment username <name>, or on the host's page)"),
@@ -526,6 +548,23 @@ fn print_identity(v: &IdentityView, this_key: &str) {
     for a in &v.agents {
         println!("  agent {a}");
     }
+    for m in &v.computers {
+        println!("  computer {} {}", m.name, m.id);
+    }
+}
+
+/// Whom `members add|rm` names: an identity (`id:…`), a key (an npub, 64
+/// hex, or a NIP-05 name), or one of the signer's computers by its name.
+fn member_named(c: &api::Client, who: String) -> Result<String> {
+    if who.starts_with("id:") {
+        return Ok(who);
+    }
+    if fragment_proto::valid_label(&who) && fragment_core::npub::parse(&who).is_none() {
+        let me: IdentityView = c.call_as(c.get("/api/identities/me")?)?;
+        let computer = me.computers.into_iter().find(|m| m.name == who);
+        return computer.map(|m| m.id).ok_or_else(|| usage(format!("{who} is none of your computers (`fragment computers`), and not an identity, npub, or NIP-05 name")));
+    }
+    auth::resolve_npub(&who)
 }
 
 fn load_config() -> Config {
@@ -706,7 +745,10 @@ fn run(cli: Cli) -> Result<()> {
     let j = cli.json || json_env_flag();
 
     match cli.cmd {
-        Cmd::Login { force, no_wait, no_browser } => {
+        Cmd::Login { force, no_wait, no_browser, computer } => {
+            if computer.as_deref().is_some_and(|n| !fragment_proto::valid_label(n)) {
+                return Err(usage("a computer's name is a label: lowercase letters, digits, and single dashes, at most 63"));
+            }
             // the key this machine signs with: the one it has, or a new one
             let key_existed = !force && load_config().secret_key.is_some();
             if !key_existed {
@@ -722,13 +764,24 @@ fn run(cli: Cli) -> Result<()> {
                 }
             };
             let mut done = me()?;
+            // a computer pairs with a key of its own: one that signs as someone else stays theirs
+            if let (Some(name), Some(v)) = (&computer, &done) {
+                if v.name.as_ref() != Some(name) {
+                    return Err(usage(format!("this key signs as {} ({}): `fragment login --computer {name} --force` makes the computer's own", v.id, v.kind.as_str())));
+                }
+            }
             if done.is_none() {
-                // the link carries this key's own proof (ten minutes good):
-                // approving it in a signed-in browser adds the key at once
+                // the link carries this key's own proof (ten minutes good),
+                // naming the computer it pairs as: approving it in a
+                // signed-in browser adds the key at once
                 let npub = c.id.npub();
-                let proof = c.id.nip98_header("POST", &format!("{}/cli/approve", c.host), &[]);
+                let (approve, named) = match &computer {
+                    Some(name) => (format!("{}/cli/approve?computer={name}", c.host), format!("&computer={name}")),
+                    None => (format!("{}/cli/approve", c.host), String::new()),
+                };
+                let proof = c.id.nip98_header("POST", &approve, &[]);
                 let proof = proof.strip_prefix("Nostr ").unwrap_or(&proof);
-                let url = format!("{}/cli?key={npub}&proof={}", c.host, encode_q(proof));
+                let url = format!("{}/cli?key={npub}&proof={}{named}", c.host, encode_q(proof));
                 let tail = &npub[npub.len() - 8..];
                 if no_wait {
                     json_exit(j, &json!({ "npub": npub, "pending": true, "approve": url }));
@@ -752,8 +805,14 @@ fn run(cli: Cli) -> Result<()> {
             }
             let v = done.expect("approved");
             // never echo the key itself
-            json_exit(j, &json!({ "npub": c.id.npub(), "id": v.id, "host": c.host, "config": config_path().display().to_string(), "existing": key_existed }));
-            println!("logged in as {} on {}", v.id, c.host);
+            json_exit(
+                j,
+                &json!({ "npub": c.id.npub(), "id": v.id, "kind": v.kind, "name": v.name, "owner": v.owner, "host": c.host, "config": config_path().display().to_string(), "existing": key_existed }),
+            );
+            match (&v.name, &v.owner) {
+                (Some(name), Some(owner)) => println!("paired as computer {name} ({}), owned by {owner}, on {}", v.id, c.host),
+                _ => println!("logged in as {} on {}", v.id, c.host),
+            }
             println!("key: {}", c.id.npub());
             return Ok(());
         }
@@ -870,6 +929,35 @@ fn run(cli: Cli) -> Result<()> {
             let v = revoked?;
             json_exit(j, &json!({ "npub": new.id.npub(), "revoked": old.id.npub(), "identity": v }));
             println!("{} replaces {} (revoked); every grant stays with {}", new.id.npub(), old.id.npub(), v.id);
+        }
+        Cmd::Computers { sub } => {
+            let me: IdentityView = c.call_as(c.get("/api/identities/me")?)?;
+            match sub {
+                None => {
+                    json_exit(j, &json!({ "computers": me.computers }));
+                    if me.computers.is_empty() {
+                        println!("no computers: pair one with `fragment login --computer <name>` on it");
+                    }
+                    for m in &me.computers {
+                        println!("{}  {}", m.name, m.id);
+                    }
+                }
+                Some(ComputersCmd::Rm { name }) => {
+                    // an id removes one whose name is gone already (a removal tried again)
+                    let id = match me.computers.iter().find(|m| m.name == name) {
+                        Some(m) => m.id.clone(),
+                        None if name.starts_with("id:") => name.clone(),
+                        None => return Err(usage(format!("{name} is none of your computers (`fragment computers`)"))),
+                    };
+                    let v = c.call(c.delete(&format!("/api/identities/{id}"))?)?;
+                    json_exit(j, &v);
+                    let left = v["left"].as_array().map_or(0, Vec::len);
+                    println!("removed computer {name} ({id}): its keys are revoked, and it left {left} fragment(s)");
+                    if let Some(failed) = v["failed"].as_array().filter(|f| !f.is_empty()) {
+                        println!("it could not leave {} fragment(s) yet: run `fragment computers rm {id}` again", failed.len());
+                    }
+                }
+            }
         }
         Cmd::Keys { sub: Some(KeysCmd::Revoke { npub }) } => {
             let hex = fragment_core::npub::parse(&npub).ok_or_else(|| anyhow!("{npub} is not an npub or a 64-hex key"))?;
@@ -1429,17 +1517,18 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
             MembersCmd::Add { name, who, role } => {
-                let who = if who.starts_with("id:") { who } else { auth::resolve_npub(&who)? };
+                let who = member_named(&c, who)?;
                 let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
                 let v: Member = c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&fragment_proto::SetRole { role })?)?)?;
                 json_exit(j, &v);
                 println!("{} is now {} on {name}", v.principal, v.role.as_str());
                 if let Some(owner) = &v.owner {
-                    println!("  an agent: its owner {owner} can read {name} too");
+                    let what = if v.kind == Some(fragment_proto::IdentityKind::Computer) { "a computer" } else { "an agent" };
+                    println!("  {what}: its owner {owner} can read {name} too");
                 }
             }
             MembersCmd::Rm { name, who } => {
-                let who = if who.starts_with("id:") { who } else { auth::resolve_npub(&who)? };
+                let who = member_named(&c, who)?;
                 let v = c.call(c.delete(&format!("/api/f/{name}/members/{who}"))?)?;
                 json_exit(j, &v);
                 println!("removed {who} from {name}");

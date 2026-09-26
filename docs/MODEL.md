@@ -254,8 +254,8 @@ the spike and its handoff are on branch `spike/goose-agent`,
 - A computer is an identity with its own key, owned by a person; it
   works on whatever its owner delegated or authorized, including
   fragments it publishes (ROADMAP decision 21). A fragment can declare
-  one, and the platform provisions a Sprite for it (later: the Sprites
-  token is Paul's call). One `Computer` Durable Object per Sprite holds
+  one, and the platform provisions a Sprite for it (later, designed in
+  `docs/computers.md`: the Sprites token is Paul's call). One `Computer` Durable Object per Sprite holds
   ownership, lifecycle, and idle policy (an alarm), and speaks to the
   Sprites API with the owner's Sprites org token: ours by default, the
   owner's own if they bring a Sprites org. No computer holds that token.

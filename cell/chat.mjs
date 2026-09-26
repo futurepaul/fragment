@@ -106,7 +106,7 @@ export function mount(root, options = {}) {
           .then((r) => r.json())
           .then((v) => v.profiles?.[principal] ?? {})
           .catch(() => ({}))
-          .then((p) => ({ agent: p.kind === "agent", label: p.kind === "agent" ? `${p.username ?? "someone"}'s agent` : (p.username ?? `id:…${principal.slice(-6)}`) }))
+          .then((p) => ({ agent: p.kind === "agent", label: p.kind === "agent" || p.kind === "computer" ? `${p.username ?? "someone"}'s ${p.kind}` : (p.username ?? `id:…${principal.slice(-6)}`) }))
           .then((p) => {
             known.set(principal, p);
             // a name that arrives later: the nodes that show it are made again
