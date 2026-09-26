@@ -1,0 +1,7 @@
+{
+  "operations": {
+    "shell": { "kind": "job", "input": { "type": "object", "required": ["command"], "properties": { "command": { "type": "string" }, "opts": { "type": "object" } } } },
+    "count": { "kind": "job" }
+  },
+  "computer": {}
+}

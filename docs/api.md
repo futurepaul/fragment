@@ -497,7 +497,8 @@ keeps the last good code and says why in `status.code.error`.
   (300) after the last closes; each `FRAGMENT_COMPUTER_TICK_S` (60) awake
   is charged to the owner first, at list price, and its disk asleep when
   it next wakes (`computer.awake`, `computer.asleep` usage). A tick that
-  does not fit the budget lets it sleep. A deploy without the block keeps
+  does not fit the budget lets it sleep. Its jobs run commands there
+  (`job.computer.exec`, Jobs and triggers), each waking it as a page does. A deploy without the block keeps
   it asleep; `fragment computers rm <fragment>` destroys it. Its steps
   are in the fragment's `events` (`computer.ready`, `computer.failed`,
   `computer.budget`, `computer.destroyed`).
@@ -742,6 +743,27 @@ and the AI steps (`job.ai.*`), all above:
   starts a second; then `agent.poll`, with sleeps of 2, 4, 8, 16, then
   30 seconds between, at most 40 times. A turn that fails or is stopped
   throws a `StepError`; the model calls are the owner's to pay.
+- `job.computer.exec(command, {timeout?, cwd?, env?})` → `{code, stdout,
+  stderr, truncated}`: `bash -lc command` on the fragment's own computer
+  (`"computer": {}`, Apps), as the computer: in `~/fragment` unless
+  `cwd` says (relative, or `~/…`: under its home), with the `fragment`
+  CLI on its PATH, signed in as the computer (`FRAGMENT_HOST` set), and
+  `env`'s plain values (no secrets). `timeout` is ms or "N
+  seconds|minutes" (default 10 minutes, at most 60); a command past it is
+  stopped (TERM, then KILL 5 s later) and answers code 124, as
+  `timeout(1)` does. A nonzero exit is a result. Each stream keeps its
+  first 256 KiB (`truncated` says the rest was dropped; a result also
+  fits a step's 1 MiB). The command wakes the computer as a page does
+  (its first tick paid before it starts) and keeps it awake until 5
+  minutes after, on the owner's budget. It is two steps: `computer.exec`
+  starts it, detached, named by the run and the step (not the attempt)
+  and journaled on the computer's disk (`~/.fragment/exec/<id>`, kept 30
+  days), so a retried or replayed step reattaches to it and never runs
+  it twice; then `computer.exec.poll`, each waiting on the computer up to
+  100 s for it to end, at most 45 times. A fragment that declares no
+  computer, an owner's month that cannot pay its first tick, and a
+  computer that stopped before the command ended (which does not run
+  again) each throw a `StepError`.
 
 `job.principal`, `job.role`, `job.run`, and `job.attempt` say who and
 which. The method re-runs from the top at every step with the results so
