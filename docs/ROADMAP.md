@@ -206,6 +206,18 @@ everything a fragment spends (decision 14); there are no per-visitor
 budgets yet. Think of a calorie tracker you tell "2 eggs and toast", or
 an image iterated on with a little agentic help.
 
+*Built 2026-09-26 (#47, #48; phase D).* `fragment.json`'s `agent` block
+(instructions from a file, the operations it may call, the postable
+channel whose messages start its turns, a model): a deploy makes the
+agent (named as the fragment, its owner's, an editor there and nowhere
+else) or removes it. The chat template says `"personal": true`: its
+owner's own agent answers there, and no platform code names a template.
+`job.agent({prompt, conversation?, channel?})` runs one turn from a job
+step, reattaching on a retry. Earlier turns' tool results are trimmed to
+400 characters in a model request. Every agent model call is reserved
+on the owner's month and settled to its reported cost (`agent.text`
+usage rows; `POST /api/budget/reserve`, `/settle`).
+
 ### 21. Computers are identities (Paul, 2026-09-26)
 
 A computer has its own npub and is owned by a person. It works on
@@ -213,8 +225,20 @@ whatever its owner delegated or authorized it to do, including fragments
 it publishes. It holds its own revocable key and no other credential
 (amends decision 11). A fragment can declare a computer, and the
 platform provisions a Sprite for it that runs the `fragment` CLI to talk
-back to its parent fragment. That is a later step, which needs Paul's
-call on the Sprites token.
+back to its parent fragment.
+
+Paul's answers for declared computers (2026-09-26; docs/computers.md):
+1. **Sprites org:** the org used so far; its token is the node secret
+   `FRAGMENT_KEYS_SPRITES_TOKEN`, used only by `KEYS`, and each
+   `Computer` cell reaches only its own Sprite.
+2. **Cost:** list price for awake time and disk, to the owner's budget.
+3. **Idle policy:** awake while a job step or a page viewer needs it,
+   asleep 5 minutes after the last viewer leaves; never destroyed
+   automatically (alerts about "accidentally awake" ones come later).
+4. **Grant:** none: declaring `"computer": {}` provisions one on deploy,
+   and the owner pays, as for everything a fragment spends.
+5. **Model calls:** through the platform, signed by the computer's own
+   key, on the model the agents in cells use.
 
 ### 22. Sign-up stays invite-only (Paul, 2026-09-26)
 
@@ -500,6 +524,9 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   fragment.json holds no access. The chat's three wait for D.
 
 ### D. The agent add-on
+- *Built 2026-09-26 (#47, #48; decision 20 says what):* the `agent`
+  block, `"personal": true` for the chat template, `job.agent`, the
+  history trim, and agent spend on the ledger.
 - Decision 20: `agent` in `fragment.json`; turns from signed-in
   visitors' messages and `job.agent` steps, acting as decision 17 says,
   on the owner's budget. The chat template declares one; C's seam goes.
@@ -511,6 +538,17 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   identity, member, or code.
 
 ### E. Computers
+- *Built 2026-09-26:* computers as identities (#44), a computer a
+  fragment declares, on a Sprite (#49), and model calls through the
+  platform (#50); the first real Sprite ran on fragment.club the same
+  day. Open: the pet-desktop page (a `screen` and a `control` channel);
+  `job.computer` (the `Wake` hook is there); a local OpenAI-compatible
+  endpoint so goose on a computer needs no key, and streaming; alerts
+  about computers awake longer than expected; what a deleted fragment's
+  computer becomes (it stays asleep until `fragment computers rm`);
+  billing what a computer uses rather than a footprint; and whether the
+  Tasks-API hold keeps a Sprite running between ticks
+  (docs/computers.md).
 - Computers as identities first (decision 21): a computer's npub in the
   registry, owned by a person, revocable, acting on what its owner
   granted and on fragments it publishes. Then, on Paul's call on the

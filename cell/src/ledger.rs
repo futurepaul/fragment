@@ -121,19 +121,19 @@ impl Route for Reserve {
     type Answer = Reserved;
 }
 
-/// A span of a computer (computer.rs), charged at once: its cost is known
-/// before it is spent, so it holds (`hold`) and settles (`settle`) in one
-/// turn, as `reserve` then `settle` would, without `reserve`'s OpenRouter
-/// key (a computer's awake time needs none, on a fleet with no AI too).
-/// Refused as a reservation that does not fit is; the same reference again
-/// answers its first charge, never a second.
+/// A span of a computer's (computer.rs), held before the computer is: as
+/// `reserve` holds a paid step, refused past the month, but without
+/// `reserve`'s OpenRouter key (a computer's awake time needs none, on a
+/// fleet with no AI too). It is then settled (`settle`) once the computer
+/// was held, or given back (`release`) when it never was; the same
+/// reference again holds nothing more.
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct Charge(pub Reserve);
+pub struct Hold(pub Reserve);
 
-impl Route for Charge {
-    const PATH: &'static str = "/charge";
-    type Answer = Settlement;
+impl Route for Hold {
+    const PATH: &'static str = "/hold";
+    type Answer = ();
 }
 
 /// The org's OpenRouter key, for a step that costs nothing (a video's polls).
@@ -449,14 +449,14 @@ impl LedgerCell {
         Ok(key.to_string())
     }
 
-    fn charge(&self, Charge(b): Charge) -> CellResult<Settlement> {
+    fn hold_span(&self, Hold(b): Hold) -> CellResult<()> {
         if b.amount <= 0 || b.reference.is_empty() || b.reference.len() > 512 {
-            return Err(CellError::invalid("a charge names its span and a positive amount"));
+            return Err(CellError::invalid("a hold names its span and a positive amount"));
         }
         if self.rows("SELECT state FROM usage WHERE ref = ?", vec![b.reference.as_str().into()])?.is_empty() {
             self.hold(&b)?;
         }
-        self.settle(Settle { reference: b.reference, cost: Some(b.amount), result: Value::Null, video: None })
+        Ok(())
     }
 
     fn settle(&self, b: Settle) -> CellResult<Settlement> {
@@ -593,7 +593,7 @@ impl LedgerCell {
                 reply::<Key>(self.key().await.map(|key| KeyAnswer { key }))
             }
             Settle::PATH => reply::<Settle>(self.settle(decode(&body)?)),
-            Charge::PATH => reply::<Charge>(self.charge(decode(&body)?)),
+            Hold::PATH => reply::<Hold>(self.hold_span(decode(&body)?)),
             SettleVideo::PATH => reply::<SettleVideo>(self.settle_video(decode(&body)?)),
             Release::PATH => reply::<Release>(self.release(decode(&body)?)),
             Status::PATH => {

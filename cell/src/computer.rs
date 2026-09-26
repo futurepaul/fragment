@@ -30,7 +30,7 @@ use worker::*;
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, FragmentCell, MetaKey};
-use crate::ledger::{self, Charge, Reserve};
+use crate::ledger::{self, Hold, Reserve};
 use crate::registry::calls;
 use crate::{js, keys};
 
@@ -258,44 +258,71 @@ impl ComputerCell {
         }
     }
 
-    /// Charges `ms` of it, awake or asleep, under `reference` (a retry of
-    /// the same span is not charged twice).
-    async fn charge(&self, c: &Row, reference: String, ms: i64, awake: bool) -> CellResult<()> {
+    /// Its owner's ledger.
+    async fn ledger<R: ledger::Route>(&self, c: &Row, r: &R) -> CellResult<R::Answer> {
         let org = ledger::org_of(&c.owner).ok_or_else(|| CellError::host("a computer's owner is an identity"))?;
+        ledger::ask(&self.env, &org, r).await
+    }
+
+    /// The cost of a span of it, under `reference`: held first (refused
+    /// past the month), then settled once the span happened, or given back.
+    fn span(&self, c: &Row, reference: &str, amount: i64, awake: bool) -> Hold {
         let kind = if awake { "computer.awake" } else { "computer.asleep" };
-        let reserve = Reserve {
-            reference,
+        Hold(Reserve {
+            reference: reference.into(),
             kind: kind.into(),
             model: None,
-            amount: budget::computer(ms, c.disk_bytes, awake),
+            amount,
             fragment: c.fragment.clone(),
             run: 0,
             principal: c.owner.clone(),
             agent: None,
-        };
-        ledger::ask(&self.env, &org, &Charge(reserve)).await.map(|_| ())
+        })
     }
 
-    /// The next tick awake is charged, then held (the Sprite's own Tasks
-    /// API: a hold outlives a missed tick, never two).
+    async fn settle(&self, c: &Row, reference: &str, cost: i64) -> CellResult<()> {
+        let settle = ledger::Settle { reference: reference.into(), cost: Some(cost), result: Value::Null, video: None };
+        self.ledger(c, &settle).await.map(|_| ())
+    }
+
+    /// Gives back what a span held, if it never settled (a step that
+    /// failed, or died, before the computer was held): nothing is charged.
+    async fn unhold(&self, c: &Row, reference: &str) -> CellResult<()> {
+        self.ledger(c, &ledger::Release { reference: reference.into() }).await.map(|_| ())
+    }
+
+    /// The awake span that starts at `at`.
+    fn awake_ref(&self, at: i64) -> String {
+        format!("{}@{at}", self.sprite())
+    }
+
+    /// The next tick awake: held on the month, then held on the Sprite
+    /// (its own Tasks API: a hold outlives a missed tick, never two), then
+    /// settled. A Sprite that did not hold gives the tick back.
     async fn hold(&self, c: &mut Row) -> CellResult<()> {
-        let tick = self.cfg.computer_tick_ms;
-        self.charge(c, format!("{}@{}", self.sprite(), c.billed_to), tick, true).await?;
+        let (tick, reference) = (self.cfg.computer_tick_ms, self.awake_ref(c.billed_to));
+        let amount = budget::computer(tick, c.disk_bytes, true);
+        self.ledger(c, &self.span(c, &reference, amount, true)).await?;
         let expire = json!({ "expire": 2 * tick / 1000 }).to_string();
         let (status, body) = keys::sprites(&self.env, "exec", &tasks("PUT", &expire), "").await?;
         if status != 200 {
+            self.unhold(c, &reference).await?;
             return Err(upstream(format!("{} would not stay awake ({status}): {body}", self.sprite())));
         }
+        self.settle(c, &reference, amount).await?;
         c.billed_to += tick;
         Ok(())
     }
 
     /// Makes the Sprite (or finds it made), then boots it: the release's
-    /// one-line install, and a pairing with a token only it is handed.
+    /// one-line install, and a pairing with a token only it is handed. Only
+    /// the boot's own run is charged: a step Sprites refuses before it
+    /// charges nothing.
     async fn boot(&self, c: &mut Row) -> CellResult<()> {
-        c.billed_to = js::now_ms();
-        let tick = self.cfg.computer_tick_ms;
-        self.charge(c, format!("{}@{}", self.sprite(), c.billed_to), tick, true).await?;
+        // a boot that died between its hold and its end gives its hold back
+        if c.billed_to != 0 {
+            self.unhold(c, &self.awake_ref(c.billed_to)).await?;
+        }
         let (status, body) = keys::sprites(&self.env, "get", &[], "").await?;
         if status == 404 {
             let (status, body) = keys::sprites(&self.env, "create", &[], "").await?;
@@ -312,20 +339,31 @@ impl ComputerCell {
             "set -e; mkdir -p \"$HOME/.local/bin\"; curl -fsSL '{release}/fragment-'\"$(uname -s)-$(uname -m)\"'.tar.gz' | tar -xzf - -C \"$HOME/.local/bin\"; \
              \"$HOME/.local/bin/fragment\" --host '{host}' login --pair; du -sk \"$HOME\""
         );
+        c.billed_to = js::now_ms();
+        self.save(c)?;
+        let (tick, reference) = (self.cfg.computer_tick_ms, self.awake_ref(c.billed_to));
+        self.ledger(c, &self.span(c, &reference, budget::computer(tick, 0, true), true)).await?;
         let (status, out) = keys::sprites(&self.env, "exec", &["sh", "-c", &script], &minted.token).await?;
+        let ran = js::now_ms() - c.billed_to;
+        match status {
+            // it ran: its time is charged, whatever it did
+            200 => self.settle(c, &reference, budget::computer(ran, 0, true)).await?,
+            _ => self.unhold(c, &reference).await?,
+        }
         // the pairing says so itself (`Paired`), before the command ends
         let Some(mut now) = self.row()?.filter(|r| r.phase == Phase::Ready) else {
             let tail = out.char_indices().rev().nth(400).map_or(0, |(i, _)| i);
             return Err(upstream(format!("{} did not pair ({status}): {}", self.sprite(), &out[tail..])));
         };
-        (now.billed_to, now.disk_bytes) = (c.billed_to + tick, last_number(&out) * 1024);
+        (now.billed_to, now.disk_bytes) = (0, last_number(&out) * 1024);
         self.save(&now)?;
         self.tell(&now, "computer.ready", &format!("{} is {}'s computer, an editor here", self.sprite(), now.fragment)).await;
         self.arm(0).await
     }
 
-    /// Awake while something needs it: a viewer on its fragment's page
-    /// keeps it `FRAGMENT_COMPUTER_IDLE_S` more.
+    /// Awake while something needs it: a page of its fragment open, and
+    /// `FRAGMENT_COMPUTER_IDLE_S` after the last one closes (its fragment
+    /// says when: `viewed`); asleep at that moment, not a tick later.
     async fn keep(&self, c: &mut Row) -> CellResult<()> {
         let now = js::now_ms();
         if c.declared && self.viewers(c).await? > 0 {
@@ -334,13 +372,22 @@ impl ComputerCell {
         if c.declared && now < c.awake_until {
             let woke = !c.held;
             if woke {
-                // its disk asleep, since it slept, then awake from now
+                // what a wake that died before its end held goes back; its
+                // disk asleep is charged; then it is awake from now
+                if c.billed_to != 0 {
+                    self.unhold(c, &self.awake_ref(c.billed_to)).await?;
+                }
                 if let Some(since) = c.asleep_since {
-                    self.charge(c, format!("{}@asleep-{since}", self.sprite()), now - since, false).await?;
+                    let reference = format!("{}@asleep-{since}", self.sprite());
+                    let cost = budget::computer(now - since, c.disk_bytes, false);
+                    self.ledger(c, &self.span(c, &reference, cost, false)).await?;
+                    self.settle(c, &reference, cost).await?;
                 }
                 (c.asleep_since, c.billed_to) = (None, now);
+                self.save(c)?;
             }
-            match self.hold(c).await {
+            // a tick is held when the last one paid for runs out
+            match if now >= c.billed_to { self.hold(c).await } else { Ok(()) } {
                 Ok(()) => {}
                 Err(e) if e.code == fragment_proto::ErrorCode::BudgetUsedUp => {
                     self.tell(c, "computer.budget", &e.message).await;
@@ -352,12 +399,25 @@ impl ComputerCell {
             if woke {
                 let (_, out) = keys::sprites(&self.env, "exec", &["sh", "-c", "du -sk \"$HOME\""], "").await?;
                 c.disk_bytes = last_number(&out) * 1024;
+                self.check_held(c).await;
             }
             (c.held, c.tries) = (true, 0);
             self.save(c)?;
-            return self.arm(self.cfg.computer_tick_ms).await;
+            // next: the paid tick's end, or the idle wait's, whichever first
+            return self.arm((c.billed_to - now).min(c.awake_until - now)).await;
         }
         self.release(c, now).await
+    }
+
+    /// Whether the Sprite's Tasks API says it is held: a hold that did not
+    /// take is said in its fragment's events (the Sprite would pause
+    /// between ticks), not failed on, since only the Sprite knows.
+    async fn check_held(&self, c: &Row) {
+        match keys::sprites(&self.env, "exec", &tasks("GET", ""), "").await {
+            Ok((200, out)) if out.contains("expires_at") => {}
+            Ok((status, out)) => self.tell(c, "computer.unheld", &format!("its Tasks API does not show the hold ({status}): {out}")).await,
+            Err(e) => self.tell(c, "computer.unheld", &format!("its Tasks API did not answer: {}", e.message)).await,
+        }
     }
 
     async fn release(&self, c: &mut Row, now: i64) -> CellResult<()> {
@@ -423,7 +483,8 @@ impl FragmentCell {
         }
     }
 
-    /// A page opened: its computer, if it has one, is awake for it.
+    /// A page opened, or closed: its computer, if it has one, is awake from
+    /// now for `FRAGMENT_COMPUTER_IDLE_S` (and while any page stays open).
     pub(crate) async fn viewed(&self) {
         if !matches!(self.meta(MetaKey::ComputerDeclared), Ok(Some(_))) {
             return;

@@ -90,14 +90,43 @@ Machines), and the node and cell deploy as usual. Then, as one person, on a scra
    `fragment members list pet-smoke` shows it as an editor. A
    `computer.failed` event names the step and Sprites' answer.
 3. Open the fragment's page: `sprite list` shows its Sprite running.
-   Close it: after 5 minutes and a tick, it is warm, then cold.
-   `fragment budget usage` shows `computer.awake` rows.
+   Close it: 5 minutes after, it is warm, then cold. `fragment budget
+   usage` shows `computer.awake` rows.
 4. `fragment computers rm pet-smoke.<you>`: the Sprite is gone from
    `sprite list`.
 
 Things only the real one shows: the exec answer's shape (the cell reads
 the last number `du -sk` printed), the install's time (the exec waits up
 to 180 s), and whether `sprite-env curl` holds it awake from an exec.
+
+### What the first one showed (2026-09-26)
+
+It booted, paired, woke for a page, slept, answered `fragment model`,
+and was destroyed. Fixed since:
+
+- **Failed boots were charged.** A boot charged a tick before asking
+  Sprites anything, so each attempt against a bad token charged one. Now
+  a tick is held on the month before the Sprite is, and settled only
+  once the Sprite held (a boot: once its command ran, for the time it
+  ran); a step that fails first gives it back (`ledger` `hold`, then
+  `settle` or `release`).
+- **The idle wait was short** (about 4 minutes): it ran from the last
+  tick that saw a page open, up to a tick before the page closed. Now a
+  page's close starts it (the fragment tells its computer), and the
+  alarm comes at its end, not at the next tick.
+- **The hold looked broken.** Sampling `status` every 8 s showed a held
+  Sprite `cold` for a moment, and, after release, `warm` and `cold`
+  alternating about once a minute. The platform makes no Sprites call
+  after a release (the e2e counts them), so the alternating is Sprites'
+  own, or the sampling's. Whether the hold took is now checked once each
+  wake (`sprite-env curl /v1/tasks/fragment` must show `expires_at`; if
+  not, the fragment's events say `computer.unheld`, with the answer).
+  If the hold takes and the Sprite still pauses, the Tasks API is not
+  the mechanism for a CUA pet: an open exec session (a websocket exec
+  that keeps running after disconnect, `max_run_after_disconnect`) or a
+  Service with an open connection counts as activity too, and the pet's
+  own desktop service, holding a connection while a page shows it, is
+  the natural holder. That is the pet-desktop PR's choice.
 
 ## Next
 
