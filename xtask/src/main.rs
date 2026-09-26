@@ -421,6 +421,10 @@ fn check() -> Result<()> {
     let root = devstack::repo_root();
     no_conflict_markers(&root)?;
     shards_cover(&std::fs::read_to_string(root.join(".github/workflows/ci.yml")).context("read the CI workflow")?)?;
+    let read = |path: &str| std::fs::read_to_string(root.join(path)).with_context(|| format!("read {path}"));
+    let copies = ["cli/GUIDE.md", "README.md", "cell/src/auth.rs"].map(|path| read(path).map(|text| (path, text)));
+    let copies: Vec<(&str, String)> = copies.into_iter().collect::<Result<_>>()?;
+    skill_installs_release(&read("cli/SKILL.md")?, &read(".github/workflows/release.yml")?, &copies)?;
     run(Command::new("cargo").args(["test", "--workspace", "--all-features"]).current_dir(&root))?;
     run(Command::new("cargo")
         .args(["clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"])
@@ -431,6 +435,36 @@ fn check() -> Result<()> {
     run(Command::new("cargo")
         .args(["clippy", "--target", "wasm32-unknown-unknown", "--", "-D", "warnings"])
         .current_dir(Path::new(&devstack::agent_dir())))
+}
+
+/// Where the one-line install fetches the CLI from.
+const RELEASES: &str = "https://github.com/futurepaul/fragment/releases/latest/download/";
+/// Each target the release builds, and its asset's name: the `uname -s` and
+/// `uname -m` of the machines it runs on, which the install command names.
+const RELEASE_ASSETS: [(&str, &str); 3] =
+    [("aarch64-apple-darwin", "Darwin-arm64"), ("x86_64-apple-darwin", "Darwin-x86_64"), ("x86_64-unknown-linux-musl", "Linux-x86_64")];
+
+/// cli/SKILL.md (`fragment skill`) is a skill, and its one-line install,
+/// which the platform's home page, GUIDE.md, and the README copy, fetches
+/// the latest release's `fragment-$(uname -s)-$(uname -m).tar.gz`: the
+/// release workflow (`.github/workflows/release.yml`) must build exactly
+/// those assets, each a tarball of `fragment` alone. Otherwise a renamed
+/// asset or a stale copy breaks the install, and nothing says so until
+/// someone runs it.
+fn skill_installs_release(skill: &str, workflow: &str, copies: &[(&str, String)]) -> Result<()> {
+    anyhow::ensure!(skill.starts_with("---\nname: fragment\ndescription: "), "cli/SKILL.md opens with a skill's name and description");
+    let install = skill.lines().map(str::trim).find(|l| l.contains(RELEASES)).context("cli/SKILL.md shows no install command")?;
+    let fetched = format!("{RELEASES}fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin");
+    anyhow::ensure!(install.ends_with(&fetched), "the install command unpacks {fetched}, not: {install}");
+    for (path, text) in copies {
+        anyhow::ensure!(text.contains(install), "{path} does not show cli/SKILL.md's install command: {install}");
+    }
+    let field = |key: &str| workflow.lines().filter_map(|l| l.trim().strip_prefix(key)).collect::<Vec<_>>();
+    let built: Vec<(&str, &str)> = field("target: ").into_iter().zip(field("asset: ")).collect();
+    anyhow::ensure!(built == RELEASE_ASSETS, "the release builds {built:?}, not the assets the install fetches: {RELEASE_ASSETS:?}");
+    let packed = r#"tar -czf "$RUNNER_TEMP/fragment-${{ matrix.asset }}.tar.gz" -C "target/${{ matrix.target }}/release" fragment"#;
+    anyhow::ensure!(workflow.contains(packed), "each release asset is a tarball of `fragment` alone: {packed}");
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -485,6 +519,19 @@ mod tests {
         for name in ["", "all", "Cell", "workers", "native "] {
             assert_eq!(super::KitPart::parse(name), None, "{name:?}");
         }
+    }
+
+    /// The repo's own skill, release workflow, and copies agree; a renamed
+    /// asset, a stale copy, or a skill without its frontmatter does not.
+    #[test]
+    fn the_install_fetches_what_the_release_builds() {
+        let read = |path: &str| std::fs::read_to_string(super::devstack::repo_root().join(path)).unwrap();
+        let (skill, workflow) = (read("cli/SKILL.md"), read(".github/workflows/release.yml"));
+        let copies = [("README.md", read("README.md"))];
+        assert!(super::skill_installs_release(&skill, &workflow, &copies).is_ok());
+        assert!(super::skill_installs_release(&skill, &workflow.replace("asset: Darwin-arm64", "asset: Darwin-aarch64"), &copies).is_err());
+        assert!(super::skill_installs_release(&skill, &workflow, &[("README.md", read("README.md").replace("uname -m", "arch"))]).is_err());
+        assert!(super::skill_installs_release(&skill.replacen("name: fragment", "title: fragment", 1), &workflow, &copies).is_err());
     }
 
     #[test]

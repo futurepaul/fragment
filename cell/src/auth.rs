@@ -4,7 +4,7 @@
 //!
 //! Platform origin:
 //!
-//!   GET  /                        who is signed in, and links to sign in or out
+//!   GET  /                        the home: your fragments, a new one, pairing your CLI; or sign in
 //!   GET  /auth/login?return=&login_hint=&invitation_token=   → WorkOS (a state cookie binds the
 //!                                 round trip; an invitation's token lets its invitee sign up, since
 //!                                 sign-up is off: WorkOS's "User invitation URL" points here)
@@ -48,7 +48,7 @@
 //! admits goes through `/auth/fragment` and back.
 
 use fragment_core::{form, npub, site};
-use fragment_proto::{ErrorCode, IdentityKind};
+use fragment_proto::{ErrorCode, FragmentList, IdentityKind, Role, Visibility};
 use worker::*;
 
 use crate::ask_registry;
@@ -179,7 +179,7 @@ pub(crate) fn unopened(h: &Headers) -> worker::Result<()> {
 /// The platform's look, shared by its pages (`page`, and share.rs's).
 pub(crate) const STYLE: &str = "body{font:16px/1.5 system-ui,sans-serif;max-width:34rem;margin:12vh auto;padding:0 16px;color:#1d2126;background:#f6f7f8}
 h1{font-size:1.4rem}code{background:#e8eaed;padding:1px 5px;border-radius:4px}button{font:inherit;padding:.5em 1.1em;border-radius:8px;border:1px solid #1d2126;background:#1d2126;color:#fff;cursor:pointer}
-a{color:#2a5bd7}@media (prefers-color-scheme:dark){body{background:#15181b;color:#e6e8ea}code{background:#262b30}button{background:#e6e8ea;color:#15181b;border-color:#e6e8ea}a{color:#7aa2f7}}";
+a{color:#2a5bd7}pre code{display:block;padding:.6em .8em;white-space:pre-wrap;word-break:break-all}@media (prefers-color-scheme:dark){body{background:#15181b;color:#e6e8ea}code{background:#262b30}button{background:#e6e8ea;color:#15181b;border-color:#e6e8ea}a{color:#7aa2f7}}";
 
 fn html(title: &str, body: &str) -> String {
     format!(
@@ -265,29 +265,66 @@ async fn budget_line(env: &Env, id: &str) -> String {
     }
 }
 
-/// The fragments a person belongs to, as links.
+/// The fragments a person belongs to: each one's link, whose it is (and,
+/// on the owner's rows, which carry its sharing, who may open it), and its
+/// share sheet, where a member sees who is in.
 async fn fragments_list(env: &Env, cfg: &Config, url: &Url, id: &str) -> String {
     let asked = async {
         let list = Request::new("https://principal.internal/list", Method::Get)?;
-        let v: serde_json::Value = env.durable_object("PRINCIPAL")?.get_by_name(id)?.fetch_with_request(list).await?.json().await?;
-        Ok::<_, worker::Error>(v)
+        env.durable_object("PRINCIPAL")?.get_by_name(id)?.fetch_with_request(list).await?.json::<FragmentList>().await
     };
-    let Ok(v) = asked.await else { return String::new() };
-    let items: String = v["fragments"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|f| {
-            let name = f["name"].as_str()?;
-            Some(format!("<li><a href=\"{}\">{}</a> <small>{}</small></li>", esc(&cfg.canonical(url, name)), esc(name), esc(f["role"].as_str().unwrap_or(""))))
+    let Ok(list) = asked.await else { return String::new() };
+    let items: String = list
+        .fragments
+        .iter()
+        .map(|f| {
+            let link = cfg.canonical(url, &f.name);
+            let whose = match (f.role, f.sharing.as_ref().map(|s| s.visibility)) {
+                (Role::Owner, Some(Visibility::Public)) => "yours · anyone".to_string(),
+                (Role::Owner, Some(Visibility::Link)) => "yours · anyone with the link".to_string(),
+                (Role::Owner, Some(Visibility::Members)) => "yours · only the people in it".to_string(),
+                (Role::Owner, None) => "yours".to_string(),
+                (role, _) => format!("shared with you · {}", role.as_str()),
+            };
+            let shown = link.split("://").nth(1).unwrap_or(&link).trim_end_matches('/');
+            format!("<li><a href=\"{}\">{}</a> <small>{whose} · <a href=\"/share/{}\">Share</a></small></li>", esc(&link), esc(shown), esc(&f.name))
         })
         .collect();
-    if items.is_empty() { String::new() } else { format!("<h2>Your fragments</h2><ul>{items}</ul>") }
+    match items.is_empty() {
+        true => "<h2>Your fragments</h2><p>None yet: make one below, or with <code>fragment init</code> in your terminal.</p>".to_string(),
+        false => format!("<h2>Your fragments</h2><ul>{items}</ul>"),
+    }
 }
 
-/// The "new fragment" form: a label and one of the platform's templates.
-fn new_form(username: &str, platform: &str) -> String {
-    let host = platform.split("://").nth(1).unwrap_or("fragment.club");
+/// What follows a label in a fragment's address: `--<username>.<suffix>`
+/// (decision 16), or, on a fleet without a suffix, `.<username>`.
+fn after_label(cfg: &Config, username: &str) -> String {
+    match &cfg.host_suffix {
+        Some(suffix) => format!("--{username}.{suffix}"),
+        None => format!(".{username}"),
+    }
+}
+
+/// The CLI's one-line install, for macOS and Linux: the latest release's
+/// tarball for this machine (`.github/workflows/release.yml`). `cargo xtask
+/// check` holds it to cli/SKILL.md's, and that to the release's assets.
+const INSTALL: &str = "mkdir -p ~/.local/bin && curl -fsSL https://github.com/futurepaul/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin";
+/// A coding agent's skill, in Claude Code's folder (other agents take the
+/// same file in their own).
+const SKILL: &str = "mkdir -p ~/.claude/skills/fragment && fragment skill > ~/.claude/skills/fragment/SKILL.md";
+
+/// Pairing a CLI, and a coding agent that drives it.
+fn pair() -> String {
+    format!(
+        "<h2>Pair your CLI</h2><p>Install it (macOS or Linux; if <code>fragment</code> is not found after, put <code>~/.local/bin</code> on your PATH):</p><pre><code>{}</code></pre>\
+         <p>Then run <code>fragment login</code>: it opens this site to approve its key. To have your coding agent (Claude Code, Codex) do the work, give it the skill:</p><pre><code>{}</code></pre>",
+        esc(INSTALL),
+        esc(SKILL)
+    )
+}
+
+/// The "new fragment" form: a label, and one of the platform's templates.
+fn new_form(after: &str) -> String {
     let choices: String = crate::publish::TEMPLATES
         .iter()
         .enumerate()
@@ -304,9 +341,8 @@ fn new_form(username: &str, platform: &str) -> String {
         .collect();
     format!(
         "<h2>New fragment</h2><form method=\"post\" action=\"/auth/new\">{choices}\
-         <p><input name=\"label\" required maxlength=\"63\" pattern=\"[a-z0-9]([a-z0-9-]*[a-z0-9])?\" placeholder=\"name\" style=\"font:inherit;padding:.4em .6em;border-radius:8px;border:1px solid #aab\"><code>.{u}.{h}</code> <button>Make it</button></p></form>",
-        u = esc(username),
-        h = esc(host),
+         <p><input name=\"label\" required maxlength=\"63\" pattern=\"[a-z0-9]([a-z0-9-]*[a-z0-9])?\" placeholder=\"name\" style=\"font:inherit;padding:.4em .6em;border-radius:8px;border:1px solid #aab\"><code>{a}</code> <button>Make it</button></p></form>",
+        a = esc(after),
     )
 }
 
@@ -372,11 +408,11 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                     Some((_, live)) if live.identity.username.is_none() && live.identity.kind == IdentityKind::Person => {
                         let email = live.email.unwrap_or_default();
                         format!(
-                            "<h1>Choose your username</h1><p>Signed in as <b>{}</b>. Your fragments will live at <code>&lt;name&gt;.<i>username</i>.{}</code>; a username is chosen once.</p>\
+                            "<h1>Choose your username</h1><p>Signed in as <b>{}</b>. Your fragments will live at <code>&lt;label&gt;{}</code>; a username is chosen once.</p>\
                              <form method=\"post\" action=\"/auth/username\"><p><input name=\"username\" required minlength=\"3\" maxlength=\"32\" pattern=\"[a-z0-9]([a-z0-9-]*[a-z0-9])?\" autocomplete=\"username\" style=\"font:inherit;padding:.4em .6em;border-radius:8px;border:1px solid #aab\"> <button>Take it</button></p></form>\
                              <p><a href=\"/auth/logout\">Sign out</a></p>",
                             esc(&email),
-                            esc(cfg.platform(url).split("://").nth(1).unwrap_or("fragment.club")),
+                            esc(&after_label(cfg, "username")),
                         )
                     }
                     Some((_, live)) => {
@@ -385,18 +421,19 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                         // the month and the fragments, asked of their cells at once
                         let (budget, fragments) = futures_util::future::join(budget_line(env, &who.id), fragments_list(env, cfg, url, &who.id)).await;
                         format!(
-                            "<p><img src=\"/api/users/{u}/picture\" alt=\"\" width=\"48\" height=\"48\" style=\"border-radius:50%;vertical-align:middle;object-fit:cover\" onerror=\"this.remove()\"> Signed in as <b>{u}</b> ({e}, <code>{id}</code>).</p>{b}{f}{n}\
-                             <form method=\"post\" action=\"/auth/picture\" enctype=\"multipart/form-data\"><p>Picture: <input type=\"file\" name=\"picture\" accept=\"image/png,image/jpeg,image/webp,image/gif\" required> <button>Set</button></p></form>\
-                             <p><a href=\"/auth/logout\">Sign out</a> · <a href=\"/auth/link\">Add another sign-in to you</a></p>",
+                            "<p><img src=\"/api/users/{u}/picture\" alt=\"\" width=\"48\" height=\"48\" style=\"border-radius:50%;vertical-align:middle;object-fit:cover\" onerror=\"this.remove()\"> Signed in as <b>{u}</b> ({e}).</p>{b}{f}{n}{p}\
+                             <h2>You</h2><form method=\"post\" action=\"/auth/picture\" enctype=\"multipart/form-data\"><p>Picture: <input type=\"file\" name=\"picture\" accept=\"image/png,image/jpeg,image/webp,image/gif\" required> <button>Set</button></p></form>\
+                             <p><a href=\"/auth/logout\">Sign out</a> · <a href=\"/auth/link\">Add another sign-in to you</a> · <code>{id}</code></p>",
                             u = esc(&username),
                             e = esc(&email),
                             id = esc(&who.id),
                             b = budget,
                             f = fragments,
-                            n = new_form(&username, &cfg.platform(url)),
+                            n = new_form(&after_label(cfg, &username)),
+                            p = pair(),
                         )
                     }
-                    None => "<p>Places for people and agents.</p><p><a href=\"/auth/login\">Sign in</a></p>".to_string(),
+                    None => "<p>Small web apps that keep their state, live for everyone who opens them. Invite-only for now.</p><p><a href=\"/auth/login\">Sign in</a></p>".to_string(),
                 };
                 page(200, "fragment", &body)
             }

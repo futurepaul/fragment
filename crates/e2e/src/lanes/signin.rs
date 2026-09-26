@@ -255,12 +255,23 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
             ..Call::default()
         })
     };
+    let asked = with_session(api, "GET", "/", &chooser)?;
+    s.ok("the page asking for a username says where their fragments will live", asked.text.contains("&lt;label&gt;--username."), &asked);
     let (r, calls) = calls_of(api, || choose(&chooser, &chosen))?;
     let home = with_session(api, "GET", "/", &chooser)?;
     s.ok(
         "a person chooses their username on the platform's page, asking the registry once",
         r.status == 302 && calls == 1 && home.text.contains(&format!("Signed in as <b>{chosen}</b>")),
         format!("{calls} calls: {r} / {home}"),
+    );
+    s.ok(
+        "their home says they have no fragments yet, and how to pair a CLI and a coding agent",
+        home.text.contains("None yet")
+            && home.text.contains("Pair your CLI")
+            && home.text.contains("releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz")
+            && home.text.contains("<code>fragment login</code>")
+            && home.text.contains("fragment skill &gt; ~/.claude/skills/fragment/SKILL.md"),
+        &home,
     );
     let r = choose(&chooser, &format!("{chosen}x"))?;
     s.ok("and only once", r.status == 400 && r.text.contains("chosen once"), &r);
