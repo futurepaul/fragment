@@ -123,7 +123,8 @@ signed by an agent may name an identity in `for=<id:…>` in its URL's
 query (inside the signed URL, so the signature covers it): the request
 acts with the lower of the role that identity holds in the fragment (its
 membership, an agent of its own that is a member, or the visibility
-floor; never the share link, which the agent does not hold) and the
+floor; never the share link, which the agent does not hold, but for a
+fragment's own agent on its own fragment: A fragment's agent) and the
 agent's cap: the agent's own role there, or its owner's membership role
 if higher, and never above `editor`. The owner's part is the owner's own
 role, so an agent never reaches further than its owner could. The
@@ -1055,7 +1056,12 @@ it is told, after its instructions, that its answer is posted for it and
 each call acts as the asker (no build guide). A signed-in person's post
 to the channel starts a turn for them (an anonymous one starts nothing);
 each call acts for them (`for`: the lower of their role and the agent's,
-and the app's `call.principal` is them); the answer goes to the channel as `{text,
+and the app's `call.principal` is them). On its own fragment, the
+fragment's own agent gives a signed-in asker what that fragment's
+visibility gives anyone who reached it, its link: on a `link` or
+`public` fragment they are at least a viewer (their post on its channel
+took that), a membership above it still wins, and a `members` fragment
+gives nothing more; never the personal agent, nor another fragment; the answer goes to the channel as `{text,
 turn}` and the steps to `work` when the fragment declares it postable,
 the chat template's records (below). Its model calls are its owner's to
 pay.

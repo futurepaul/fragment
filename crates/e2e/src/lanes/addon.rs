@@ -1,8 +1,9 @@
 //! The agent add-on, in the `addon` section: a fragment declares its own
 //! agent (fragment.json's `agent` block), and signed-in people talk to it
 //! through a channel. The calories template: its owner makes it; a second
-//! person, a viewer, says what they ate; the agent calls `log_food` for
-//! each item as them (the rows are theirs) and answers on the channel. An
+//! person, signed in and holding its link but no member, says what they
+//! ate from its page; the agent calls `log_food` for each item for them
+//! (the rows are theirs) and answers on the channel. An
 //! anonymous post starts nothing; the agent is offered only the operations
 //! its block names; its owner's budget pays for it; a redeploy keeps the
 //! one agent, and one without the block removes it.
@@ -14,6 +15,8 @@ use fragment_fakes::openrouter::Reply;
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
+use super::signin::site_cookie;
+use super::templates::person;
 use crate::api::{Api, Call};
 use crate::Suite;
 
@@ -22,8 +25,9 @@ fn records(api: &Api, keys: &Keys, name: &str, channel: &str) -> Vec<Value> {
     r.ok().and_then(|r| r.body["records"].as_array().cloned()).unwrap_or_default()
 }
 
-fn today(api: &Api, keys: &Keys, name: &str) -> Value {
-    api.op(keys, name, "today", "t", json!({})).map(|r| r.body["result"].clone()).unwrap_or_default()
+/// `today`, as a page with `cookie` asks it.
+fn today(api: &Api, cookie: &str, name: &str) -> Value {
+    api.browser_op(name, "today", "t", json!({}), Some(cookie)).map(|r| r.body["result"].clone()).unwrap_or_default()
 }
 
 /// Whom `name`'s subscriptions deliver to, and on which channel.
@@ -43,14 +47,16 @@ pub fn addon(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let agents = s.agents()?;
     let wait = Duration::from_secs(30);
-    let (owner, visitor) = (api.person()?, api.person()?);
+    let ((owner, owner_session), (visitor, visitor_session)) = (person(api)?, person(api)?);
     let (owner_id, visitor_id) = (api.identity(&owner)?, api.identity(&visitor)?);
     let name = s.named(api, &owner, "calories")?;
     let made = api.create_with(&owner, json!({ "name": name, "template": "calories" }))?;
     anyhow::ensure!(made.status == 200, "calories from its template: {made}");
     s.hook(api, &made.body);
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{visitor_id}"), Some(&json!({ "role": "viewer" })))?;
-    anyhow::ensure!(r.status == 200, "the visitor joins as a viewer: {r}");
+    // the visitor opens its link, signed in: no member, a viewer by the link
+    let link = format!("fragview={}", made.body["viewToken"].as_str().unwrap_or(""));
+    let visiting = format!("fragment_site={}; {link}", site_cookie(api, &visitor_session, &name)?);
+    let owning = format!("fragment_site={}", site_cookie(api, &owner_session, &name)?);
 
     // the block makes the fragment's own agent, named as the fragment is
     let view = agents.signed(&owner, "GET", &format!("/api/a/{name}"), None)?;
@@ -66,7 +72,7 @@ pub fn addon(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "agent": view.body, "members": members.body }),
     );
 
-    // a signed-in viewer says what they ate; the agent logs it as them
+    // a signed-in visitor holding the link says what they ate; the agent logs it for them
     let tool = |op: &str| fragment_core::tools::tool_name(&name, op).expect("a tool name");
     let (log, answer) = (tool("log_food"), "Logged 2 eggs and toast: 220 kcal today.");
     s.openrouter.clear_script();
@@ -75,21 +81,23 @@ pub fn addon(s: &mut Suite, api: &Api) -> Result<()> {
         Reply::Text(answer.into()),
     ]);
     let asked = s.openrouter.chats().len();
-    let r = api.signed(&visitor, "POST", &format!("/api/f/{name}/channels/ask"), Some(&json!({ "id": "a1", "body": { "text": "2 eggs and toast" } })))?;
-    anyhow::ensure!(r.status == 200, "the visitor's post: {r}");
+    let r = api.browser_op(&name, "channels/ask", "a1", json!({ "text": "2 eggs and toast" }), Some(&visiting))?;
+    anyhow::ensure!(r.status == 200 && r.body["result"]["principal"] == visitor_id.as_str(), "the visitor's post from the page: {r}");
     let answered = || records(api, &owner, &name, "ask").into_iter().find(|r| r["principal"] == agent.as_str() && r["body"]["text"] == answer);
     let landed = s.eventually(wait, || answered().is_some());
     let turn = answered().map(|r| r["body"]["turn"].clone()).unwrap_or_default();
     let started = records(api, &owner, &name, "work").into_iter().find(|r| r["body"]["kind"] == "turn.start" && r["body"]["turn"] == turn);
-    let (theirs, owners) = (today(api, &visitor, &name), today(api, &owner, &name));
+    let (theirs, owners) = (today(api, &visiting, &name), today(api, &owning, &name));
+    let members = api.signed(&owner, "GET", &format!("/api/f/{name}/members"), None)?;
     s.ok(
-        "a viewer's message starts a turn: log_food runs once per item, as them (the rows are theirs), and the answer lands on the channel",
+        "a signed-in link holder's message starts a turn: log_food runs once per item for them (the rows are theirs), and the answer lands on the channel",
         landed
             && turn.is_string()
             && started.is_some_and(|r| r["body"]["asker"] == visitor_id.as_str())
             && theirs["total"] == 220
             && theirs["entries"].as_array().map(Vec::len) == Some(2)
-            && owners["total"] == 0,
+            && owners["total"] == 0
+            && role_of(&members.body, &visitor_id).is_none(),
         json!({ "theirs": theirs, "owners": owners, "ask": records(api, &owner, &name, "ask") }),
     );
     let offered: Vec<String> = s.openrouter.chats().get(asked).and_then(|c| c["tools"].as_array().cloned()).unwrap_or_default().iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_string)).collect();
@@ -117,7 +125,7 @@ pub fn addon(s: &mut Suite, api: &Api) -> Result<()> {
         url: api.site_url(&name, "__op/channels/ask"),
         body: Some(json!({ "id": "anon-1", "input": { "text": "a free lunch" } }).to_string().into_bytes()),
         content_type: Some("application/json"),
-        cookie: Some(format!("fragview={}", made.body["viewToken"].as_str().unwrap_or(""))),
+        cookie: Some(link.clone()),
         ..Call::default()
     })?;
     let noted = || agents.signed(&owner, "GET", &format!("/api/a/{name}"), None).map(|v| v.body["ignored"].as_array().is_some_and(|i| i.iter().any(|i| i["fragment"] == name.as_str()))).unwrap_or(false);

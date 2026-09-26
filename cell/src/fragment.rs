@@ -669,9 +669,14 @@ impl FragmentCell {
     /// An agent acting for someone (ROADMAP decision 17), in one statement:
     /// the asker's standing (their membership, or an agent of theirs that is
     /// a member), capped by the agent's own membership and its owner's
-    /// (`access::effective_role`).
+    /// (`access::effective_role`). The fragment's own agent (its `agent`
+    /// block) acting here for a signed-in asker gives them what this
+    /// fragment's visibility gives anyone who reached it, its link: their
+    /// post on its channel took that. A membership above it still wins, and
+    /// on a `members` fragment the link gives nothing.
     fn standing_for(&self, agent: &Signed, link: bool) -> CellResult<Standing> {
         let asker = agent.acting_for.as_deref().expect("standing_for is for an agent acting for someone");
+        let link = link || self.own_agent()?.as_deref() == Some(agent.id.as_str());
         let owner = agent.owner.as_deref().ok_or_else(|| CellError::host("an agent acting for someone has no owner"))?;
         #[derive(serde::Deserialize)]
         struct Row {

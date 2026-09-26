@@ -206,6 +206,15 @@ impl FragmentCell {
         }))
     }
 
+    /// The fragment's own agent (not its owner's personal one: that is
+    /// named `agent.<username>`, and a fragment's own is named as the
+    /// fragment), once the platform has made it answer here.
+    pub(crate) fn own_agent(&self) -> CellResult<Option<String>> {
+        let joined: Option<Joined> = stored(self.meta(MetaKey::AgentJoined)?, "agent joined")?;
+        let name = self.name()?;
+        Ok(joined.filter(|j| j.name == name).map(|j| j.agent))
+    }
+
     /// Keeps what a new live declares, and has `sync_agent` make it so. A
     /// fragment that never declared an agent carries nothing of one.
     pub(crate) fn set_agent_live(&self, live: Option<&AgentLive>) -> CellResult<()> {

@@ -276,8 +276,9 @@ calories` is a working example):
   model is offered those, as the person asking may call them, and no
   other fragment's, no files, no deploy. `model` is optional.
 - A signed-in person's post to the channel (`fragment.post("ask",
-  {text})`) starts a turn; an anonymous one starts nothing. Each person
-  has a conversation of their own with it, and each call acts for them,
+  {text})`) starts a turn; an anonymous one starts nothing. Someone
+  signed in who holds the link counts as a viewer for it, as they do on
+  the page. Each person has a conversation of their own with it, and each call acts for them,
   with the lower of their role and the agent's: `call.principal` is the
   person (`call.agent` the agent), so what it logs is theirs.
 - Its answer lands on the channel as `{text, turn}`, and its steps on
