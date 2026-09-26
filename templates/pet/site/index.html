@@ -60,8 +60,9 @@
     const me = await fragment.me();
     let shown = null;
 
-    // a record on `control`, which the pet's computer follows and applies once
-    const send = (body) => fragment.post("control", body).then(() => show(), show);
+    // a record on `control`, which the pet's computer follows and applies
+    // once; whether it was posted
+    const send = (body) => fragment.post("control", body).then(() => (show(), true), (e) => (show(e), false));
 
     // who drove it last: you, or a username
     const names = new Map();
@@ -102,13 +103,13 @@
       let url = $("url").value.trim();
       if (!url) return;
       if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
-      send({ kind: "open", url }).then(() => ($("url").value = ""));
+      send({ kind: "open", url }).then((sent) => sent && ($("url").value = ""));
     };
     $("type").onsubmit = (e) => {
       e.preventDefault();
       const text = $("text").value;
       if (!text) return;
-      send({ kind: "type", text }).then(() => ($("text").value = ""));
+      send({ kind: "type", text }).then((sent) => sent && ($("text").value = ""));
     };
     for (const b of document.querySelectorAll("[data-key]")) b.onclick = () => send({ kind: "key", key: b.dataset.key });
 
