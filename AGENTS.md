@@ -1,7 +1,8 @@
 # fragment-next
 
-Places for people and agents: apps, chats, and desktops are all
-fragments; agents join them as members; computers are Fly Sprites.
+Fragment is the product: stateful, multiplayer web apps published from
+the CLI. Agents and computers are optional add-ons a fragment declares;
+the desktop is a showcase template (ROADMAP decision 19).
 Built on fragment (this repo carries fragment's full history; its
 TypeScript runtime was cut in phase 2; this repo is
 github.com/futurepaul/fragment's `master`, which fragment.club runs) and on celld
