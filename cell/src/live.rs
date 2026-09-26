@@ -305,6 +305,11 @@ impl FragmentCell {
         }
     }
 
+    /// Whether a live socket is a page: a computer's is not.
+    pub(crate) fn is_page(&self, ws: &WebSocket) -> bool {
+        !self.state.get_tags(ws).iter().any(|t| t == COMPUTER_TAG)
+    }
+
     /// How many of its pages are open (a computer stays awake for them): a
     /// computer's sockets are none.
     pub(crate) fn viewers(&self) -> usize {
