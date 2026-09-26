@@ -27,11 +27,12 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const GUIDE: &str = include_str!("../GUIDE.md");
+const SKILL: &str = include_str!("../SKILL.md");
 
 #[derive(Parser)]
 #[command(name = "fragment", version, about = "make and run fragments: a folder in git, an app of operations and jobs, channels, members; on celld")]
 struct Cli {
-    /// Host base URL (else FRAGMENT_HOST, else config, else http://127.0.0.1:8790)
+    /// Host base URL (else FRAGMENT_HOST, else config, else https://fragment.club)
     #[arg(long, global = true)]
     host: Option<String>,
     /// Machine-readable output: one-line {"ok":true/false} envelope on stdout
@@ -290,6 +291,8 @@ enum Cmd {
     Open { name: String },
     /// Print the agent guide (start here if you are an agent)
     Guide,
+    /// Print a SKILL.md that teaches a coding agent (Claude Code, Codex) to use fragment
+    Skill,
     /// Scaffold a fragment folder from a template
     New {
         /// Target directory (created if missing)
@@ -548,7 +551,7 @@ fn resolve_host(cli_host: &Option<String>, cfg: &Config) -> String {
         .clone()
         .or_else(|| std::env::var("FRAGMENT_HOST").ok())
         .or_else(|| cfg.host.clone())
-        .unwrap_or_else(|| "http://127.0.0.1:8790".to_string())
+        .unwrap_or_else(|| "https://fragment.club".to_string())
 }
 
 /// Where agents answer: FRAGMENT_AGENTS, else the config's `agents`, else
@@ -776,6 +779,10 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Guide => {
             print!("{GUIDE}");
+            return Ok(());
+        }
+        Cmd::Skill => {
+            print!("{SKILL}");
             return Ok(());
         }
         Cmd::New { dir, template, list } => {
@@ -1551,7 +1558,7 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "visibility": visibility }));
             println!("{name}: {}", visibility.as_str());
         }
-        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::New { .. } | Cmd::Computer { .. } => unreachable!(),
+        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Computer { .. } => unreachable!(),
     }
     Ok(())
 }

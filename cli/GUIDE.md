@@ -3,17 +3,32 @@
 A **fragment** is one small place on the web: a folder of files in git,
 an app of named operations over its own SQLite, channels that pages
 follow live, members with roles, and URLs. Fragments live on a celld
-host and sleep when idle; a request, a trigger, or an inbox delivery
-wakes them.
+host, fragment.club (invite-only for now), and sleep when idle; a
+request, a trigger, or an inbox delivery wakes them.
 
-You drive fragments with the `fragment` CLI. Every request is signed with
-this machine's nostr key. `fragment login` makes it and opens a page on
-the host: sign in (WorkOS) and approve the key, whose ending the page and
-the terminal both show. On a machine without a browser, it prints the link
-to open anywhere you are signed in (`--no-wait` returns at once; run it
-again after approving). The host knows which identity (`id:…`) each key
-belongs to: memberships name you, not the key. `fragment keys rotate`
-replaces the key and keeps everything you have.
+## Install and pair
+
+You drive fragments with the `fragment` CLI. On macOS or Linux, with no
+sudo (the same command updates it):
+
+```
+mkdir -p ~/.local/bin && curl -fsSL https://github.com/futurepaul/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin
+```
+
+If `fragment` is then not found, put `~/.local/bin` on your PATH:
+`export PATH="$HOME/.local/bin:$PATH"`, in `~/.zshrc` or `~/.bashrc`.
+`fragment skill` prints a SKILL.md for a coding agent (Claude Code,
+Codex) that points it here.
+
+Every request is signed with this machine's nostr key. `fragment login`
+makes it and opens a page on the host: sign in and approve the key,
+whose ending the page and the terminal both show. On a machine without a
+browser, it prints the link to open anywhere you are signed in
+(`--no-wait` returns at once; run it again after approving). The host is
+https://fragment.club unless `--host`, `FRAGMENT_HOST`, or `fragment
+host <url>` names another. The host knows which identity (`id:…`) each
+key belongs to: memberships name you, not the key. `fragment keys
+rotate` replaces the key and keeps everything you have.
 
 A person chooses a username once (`fragment username <name>`, or the
 host's page after the first sign-in) and can create nothing before. A
@@ -59,7 +74,7 @@ fragment init my-inbox --template inbox   # or: todo | notes | chat | desktop | 
 - `inbox`: webhook deliveries start a job that fetches and records.
 - `notes`: a folder of markdown as a live site; the files are the state.
 - `chat`: a live chat room; an agent member can answer in it.
-- `desktop`: your fragments side by side: chats, apps, and files.
+- `desktop`: a demo: your fragments side by side (chats, apps, files).
 - `blank`: one page, to build on.
 
 `fragment status my-thing` shows the URLs, the view token (the share
@@ -429,7 +444,7 @@ fragment deploy <name> [--dir D] [--preview] [--note N]
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name>
 fragment agent create|show|say|stop|tools|listen|computer ...
-fragment computer serve [--listen A]     fragment guide
+fragment computer serve [--listen A]     fragment guide | skill
 fragment computer connect --agent U --token-file F
 ```
 

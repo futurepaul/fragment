@@ -29,9 +29,11 @@ use crate::js;
 use crate::registry::calls;
 use crate::routed::{Credential, Signed};
 
-/// The templates a fragment can start from. `notes` stays with the CLI
-/// (`fragment new --template notes`): at 3 MiB it would double the cell.
-pub(crate) const TEMPLATES: [(&str, Template); 5] = [("desktop", DESKTOP), ("chat", CHAT), ("todo", TODO), ("inbox", INBOX), ("blank", BLANK)];
+/// The templates a fragment can start from, in the order the home page
+/// offers them: the simplest first, the desktop (a demo) last. `notes`
+/// stays with the CLI (`fragment new --template notes`): at 3 MiB it would
+/// double the cell.
+pub(crate) const TEMPLATES: [(&str, Template); 5] = [("blank", BLANK), ("todo", TODO), ("inbox", INBOX), ("chat", CHAT), ("desktop", DESKTOP)];
 
 /// `live` moving under a deploy this many times is an error.
 const DEPLOY_ATTEMPTS: usize = 5;

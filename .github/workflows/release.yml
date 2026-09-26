@@ -1,7 +1,12 @@
 name: release
-# Binary releases from tags: push v0.6.0 and CI builds + attaches both
-# tarballs. Hand-written release notes live in a draft release created
-# before tagging; if none exists the workflow falls back to --generate-notes.
+# Binary releases from tags: push v0.9.0 and CI builds the tarballs,
+# attaches them, and publishes the release as the latest. Each tarball is
+# fragment-<uname -s>-<uname -m>.tar.gz holding one binary, `fragment`, so
+# the one-line install (cli/SKILL.md) fetches
+# releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz;
+# `cargo xtask check` holds the matrix and that command to each other.
+# Hand-written release notes can live in a draft release created before
+# tagging; if none exists the workflow falls back to --generate-notes.
 on:
   push:
     tags: ["v*"]
@@ -16,8 +21,13 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
+            asset: Darwin-arm64
+          - os: macos-14
+            target: x86_64-apple-darwin
+            asset: Darwin-x86_64
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
+            asset: Linux-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -30,15 +40,14 @@ jobs:
       - name: build
         run: cargo build --release -p fragment-cli --target ${{ matrix.target }}
       - name: package
-        run: |
-          v="${GITHUB_REF_NAME#v}"
-          cd "target/${{ matrix.target }}/release"
-          cp fragment "fragment-${v}-${{ matrix.target }}"
-          tar -czf "$RUNNER_TEMP/fragment-${v}-${{ matrix.target }}.tar.gz" "fragment-${v}-${{ matrix.target }}"
+        # macOS's tar adds no AppleDouble `._fragment` beside the binary
+        env:
+          COPYFILE_DISABLE: 1
+        run: tar -czf "$RUNNER_TEMP/fragment-${{ matrix.asset }}.tar.gz" -C "target/${{ matrix.target }}/release" fragment
       - uses: actions/upload-artifact@v4
         with:
-          name: fragment-${{ matrix.target }}
-          path: ${{ runner.temp }}/fragment-*.tar.gz
+          name: fragment-${{ matrix.asset }}
+          path: ${{ runner.temp }}/fragment-${{ matrix.asset }}.tar.gz
           retention-days: 7
 
   release:
@@ -58,5 +67,7 @@ jobs:
             gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" \
-              --draft --title "fragment $tag" --generate-notes
+              --title "fragment $tag" --generate-notes
           fi
+          # published, and the latest: the install command fetches from releases/latest
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest

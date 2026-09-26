@@ -192,7 +192,7 @@ random bytes, the registry keeps their SHA-256).
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /` | who is signed in, with links to sign in, sign out, and link another sign-in; with a username, their fragments and the "new fragment" form |
+| `GET /` | the home. Signed out: a link to sign in. Signed in without a username: choosing one. Then: who is signed in, what is left of this month's AI budget, their fragments (each one's link; theirs or shared with them, as what; on their own, who may open it; its share sheet, `/share/<name>`), the "new fragment" form (blank, todo, inbox, chat, then the desktop, a demo), pairing a CLI (the one-line install, `fragment login`, and `fragment skill` for a coding agent), their picture, signing out, and linking another sign-in |
 | `POST /auth/new` | the form (`label`, `template`): makes `<label>.<username>` from the template, then → `/auth/fragment?name=…&return=/` (signed in on its origin, and there); a refusal is a 400 page saying why; another origin 403 |
 | `GET /auth/login?return=&login_hint=` | → WorkOS's authorize URL (`provider=authkit`, `redirect_uri` `<platform>/auth/callback`, a state); the state is bound to the browser by `fragment_login` (HttpOnly, SameSite=Lax, `Path=/`, ten minutes) |
 | `GET /auth/link?return=` | the same from a signed-in browser: the sign-in that comes back joins this person (409 when it is someone else's) |

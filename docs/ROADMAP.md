@@ -357,7 +357,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   stands in locally). Signing in finds or creates the person for that
   `(issuer, subject)`; the platform holds no key for them. A session on
   the platform origin maps a browser to that person; each fragment is
-  served from its own origin (`<name>.fragment.club`, the suffix from
+  served from its own origin (`<label>--<username>.fragment.club`, the suffix from
   configuration) and gets its own cookie through a single-use exchange,
   with the hostname checked before it is trusted. `fragment login`
   becomes a browser sign-in that adds the CLI's key to the person, with

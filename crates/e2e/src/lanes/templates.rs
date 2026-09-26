@@ -128,7 +128,7 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
 
     let none = s.name("tnone");
     let r = api.create_with(&owner, json!({ "name": none, "template": "nope" }))?;
-    s.ok("an unknown template is refused, naming the templates", r.status == 400 && r.message().contains("desktop, chat, todo, inbox, blank"), &r);
+    s.ok("an unknown template is refused, naming the templates", r.status == 400 && r.message().contains("blank, todo, inbox, chat, desktop"), &r);
     let r = api.status(&owner, &api.qualified(&owner, &none)?)?;
     s.ok("and nothing is made", r.status == 404, &r);
 
@@ -225,10 +225,25 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{made} / {st}"),
     );
 
-    // the platform's "new" page
+    // the platform's home: the person's fragments, and making one
     let home = with_session(api, "GET", "/", &owner_session)?;
-    s.ok("the platform's home lists the person's fragments", home.text.contains("Your fragments") && home.text.contains(&chat), &home);
-    s.ok("and offers the templates", home.text.contains("New fragment") && home.text.contains("value=\"todo\""), &home);
+    let row = |page: &Reply, name: &str| page.text.split("<li>").find(|li| li.contains(&format!("/share/{name}\""))).unwrap_or_default().to_string();
+    s.ok(
+        "the platform's home lists the person's fragments: each one's link, who may open it, and its share sheet",
+        home.text.contains("Your fragments")
+            && row(&home, &chat).contains(&format!("href=\"{}\"", api.site_url(&chat, "")))
+            && row(&home, &chat).contains("yours · anyone with the link")
+            && row(&home, &desk).contains("yours · only the people in it"),
+        &home,
+    );
+    let theirs = with_session(api, "GET", "/", &editor_session)?;
+    s.ok("and says which are shared with them, and as what", row(&theirs, &blank).contains("shared with you · editor"), &theirs);
+    let offered: Vec<usize> = ["blank", "todo", "inbox", "chat", "desktop"].iter().filter_map(|t| home.text.find(&format!("value=\"{t}\""))).collect();
+    s.ok(
+        "and offers the templates, the simplest first and the desktop last, as the demo it is",
+        home.text.contains("New fragment") && offered.len() == 5 && offered.is_sorted() && home.text.contains("A demo of what fragments can do"),
+        &home,
+    );
     let label = s.name("tnew");
     let r = post_form(api, "/auth/new", &format!("label={}&template=todo", url_enc(&label)), &owner_session, "https://elsewhere.example")?;
     s.ok("a form from another origin is refused", r.status == 403, &r);
