@@ -85,8 +85,10 @@ so no platform code names a template (`cell/src/agents.rs`,
   2026-09-26: resources are declarative, and the owner pays for what the
   fragment spends); it is awake while a page is open or a job's command
   (`job.computer.exec`) runs there, and destroyed only by `fragment
-  computers rm`. The platform holds the Sprites token in the
-  node (`KEYS`); each `Computer` cell reaches only its own Sprite.
+  computers rm`. The platform keeps the fragment's live files on it and
+  runs the block's `start` from them as a service (docs/api.md, Apps).
+  The platform holds the Sprites token in the node (`KEYS`); each
+  `Computer` cell reaches only its own Sprite.
 
 ## Behavior no fragment declares
 

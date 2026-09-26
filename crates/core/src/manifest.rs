@@ -35,10 +35,20 @@ pub struct Manifest {
     pub agent: Option<AgentDecl>,
     /// `"computer": {}`: a deploy with it provisions the fragment's own
     /// computer, a Sprite, on its owner's budget (docs/computers.md).
-    pub computer: bool,
+    pub computer: Option<ComputerDecl>,
     /// Top-level keys that no longer do anything here.
     pub ignored: Vec<&'static str>,
 }
+
+/// `computer`: `{}`, or `{"start": "<command>"}`, run from the fragment's
+/// live files on it as a long-lived service while it is awake.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct ComputerDecl {
+    pub start: Option<String>,
+}
+
+/// A `start` command's longest.
+pub const COMPUTER_START_MAX_BYTES: usize = 4096;
 
 /// `agent`: the fragment's own agent, with instructions from a file of
 /// its repo (read at live), the operations of this fragment it may call,
@@ -302,8 +312,15 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
     }
     match obj.get("computer") {
         None | Some(Value::Null) => {}
-        Some(Value::Object(c)) if c.is_empty() => m.computer = true,
-        Some(_) => return Err("computer is {} (it takes no settings yet)".into()),
+        Some(Value::Object(c)) if c.keys().all(|k| k == "start") => {
+            let start = match c.get("start") {
+                None => None,
+                Some(Value::String(s)) if !s.trim().is_empty() && s.len() <= COMPUTER_START_MAX_BYTES && !s.contains('\0') => Some(s.clone()),
+                Some(_) => return Err(format!("computer.start is a command: a string of 1 to {COMPUTER_START_MAX_BYTES} bytes")),
+            };
+            m.computer = Some(ComputerDecl { start });
+        }
+        Some(_) => return Err("computer is {} or {\"start\": \"<command>\"}".into()),
     }
     match obj.get("triggers") {
         None | Some(Value::Null) => {}
@@ -344,9 +361,14 @@ mod tests {
         assert_eq!(parse(b"{}").unwrap(), Manifest::default());
         assert_eq!(parse(br#"{"capabilities":["fragments"]}"#).unwrap().capabilities, vec!["fragments"]);
         assert!(parse(br#"{"capabilities":["everything"]}"#).is_err());
-        assert!(parse(br#"{"computer":{}}"#).unwrap().computer);
-        assert!(!parse(br#"{}"#).unwrap().computer);
+        assert_eq!(parse(br#"{"computer":{}}"#).unwrap().computer, Some(ComputerDecl { start: None }));
+        assert_eq!(parse(br#"{}"#).unwrap().computer, None);
+        assert_eq!(parse(br#"{"computer":{"start":"node serve.js"}}"#).unwrap().computer.and_then(|c| c.start).as_deref(), Some("node serve.js"));
         assert!(parse(br#"{"computer":{"size":"xl"}}"#).is_err() && parse(br#"{"computer":true}"#).is_err());
+        let long = format!(r#"{{"computer":{{"start":"{}"}}}}"#, "x".repeat(COMPUTER_START_MAX_BYTES + 1));
+        for start in [r#"{"computer":{"start":""}}"#, r#"{"computer":{"start":7}}"#, r#"{"computer":{"start":"a","size":1}}"#, &long] {
+            assert!(parse(start.as_bytes()).is_err(), "{}", &start[..40.min(start.len())]);
+        }
         let m = parse(br#"{"channels":{"chat":{},"news":{"read":"public"}}}"#).unwrap();
         assert_eq!(m.channels["chat"].read, Role::Viewer);
         assert_eq!(m.channels["news"].read, Role::Public);

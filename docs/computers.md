@@ -91,6 +91,34 @@ again. Every answer is base64 between marker lines (whatever else a
 Sprite's exec adds is dropped). The journal is kept 30 days, as long as a
 run can be replayed.
 
+## Its files, and `start`
+
+The `Computer` cell keeps what live declares (its commit, and `start`)
+and what the computer last synced, in its own `files` table. After the
+first boot, and on any tick awake while they differ (a deploy while it is
+awake arms the alarm at once), one exec runs `exec::SYNC`: a CLI from
+before `sync --live` updates itself from the release, `fragment sync
+<name> --dir ~/fragment --live` pulls live, and `~/.fragment/start.sh`
+(a job script for `start`) and `serve.sh` are written. Then `sprite-env
+services delete fragment`, and `create fragment --cmd bash --args
+~/.fragment/serve.sh`: a Sprites service, so the runtime keeps it up
+across cold boots and restarts it if `serve.sh` dies. `serve.sh` itself
+runs `start` again when it exits, with backoff, logs to
+`~/fragment.log`, and on TERM stops `start` and its children. A deploy
+while it is asleep is synced when it next wakes: `start` cannot run while
+it sleeps anyway. Only awake time is billed (the seconds of a boot's sync
+are the boot's).
+
+**Holding it awake from the service** (not built). The cell holds the
+Sprite with the Tasks API, a tick at a time, and whether that keeps a
+real Sprite running between ticks is the next smoke's to show. Sprites
+also counts an open connection to a service as activity, so a `start`
+that serves the page could be what holds it: made with `--http-port`,
+the page's open connection to the Sprite's URL (the pet's screen) keeps
+it awake while the page shows it, and it pauses when the page goes. The
+cell would still charge a tick at a time while its fragment has viewers,
+and would hold it with the Tasks API only for a job's commands.
+
 ## Running the first real one
 
 `fleets/fragment-club.json` names the token's file
@@ -119,7 +147,10 @@ the last number `du -sk` printed), the install's time (the exec waits up
 to 180 s), and whether `sprite-env curl` holds it awake from an exec. For
 `job.computer.exec`: that the detached runner outlives the exec that
 started it (`setsid`), and that a poll's 100 s exec, a blank line every
-10 s, comes back whole.
+10 s, comes back whole. For `start`: that `sprite-env services create`
+and `delete` behave as the docs say (the cell reads only the exec's
+status), and how the runtime stops a service (TERM to `serve.sh`, which
+stops `start`).
 
 ### What the first one showed (2026-09-26)
 
@@ -155,7 +186,7 @@ and was destroyed. Fixed since:
 - **goose on a computer**: a local OpenAI-compatible endpoint
   (`fragment model --serve`) that signs each call, so goose, or anything
   that speaks to a provider, needs no key; and streaming.
-- **How a page shows it: a CUA "pet".** A declared `desktop` service
+- **How a page shows it: a CUA "pet".** A `start` service
   (Xvfb, Chromium, and a control endpoint, from finite-next's
   `computer/*`) takes a screenshot on each change (at most one a second),
   stores it as a blob, and posts `{sha, at}` to a declared `screen`
