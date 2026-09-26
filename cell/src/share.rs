@@ -9,8 +9,7 @@
 //!                              for the owner, inviting by username, pending invites, roles,
 //!                              removing, who may open it, its share link (copy, a new one),
 //!                              and, when its fragment.json asks for `frame`, letting it show
-//!                              the owner's other fragments inside it (`__frame`): plainly for
-//!                              the platform's desktop, with a warning for any other page
+//!                              the owner's other fragments inside it (`__frame`)
 //!   POST /share/<name>         one of the owner's changes (`action`), then back to the sheet;
 //!                              an invite answers the sheet with the link to send
 //!   GET  /join/<name>?token=   what the invite grants, and a Join button
@@ -254,9 +253,6 @@ struct Sheet {
     /// Whether its owner lets it frame their fragments (`None`: its
     /// fragment.json does not ask for `frame`).
     frame: Option<bool>,
-    /// It is the platform's desktop, its code the template's (the owner's
-    /// only): the sheet says what it does, without a warning.
-    platform_desktop: bool,
     profiles: BTreeMap<String, Profile>,
     /// The page's form token.
     form: String,
@@ -286,11 +282,6 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
         vec![]
     };
     let visibility: Visibility = decoded(status["visibility"].clone(), "the status's visibility")?;
-    let frame = status["frame"].as_bool();
-    let platform_desktop = match (role, frame) {
-        (Some(Role::Owner), Some(_)) => ask(env, url, name, who, Method::Get, "/api/grants/frame", None).await?["template"].as_bool().unwrap_or(false),
-        _ => false,
-    };
     let link = match (role, status["viewToken"].as_str()) {
         (Some(Role::Owner), Some(token)) => Some(format!("{}?view={token}", cfg.canonical(url, name))),
         _ => None,
@@ -304,23 +295,10 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
         invites,
         visibility,
         link,
-        frame,
-        platform_desktop,
+        frame: status["frame"].as_bool(),
         profiles: profiles(env, ids).await,
         form: form::issue(session, &purpose("share", name), js::now_ms()),
     })
-}
-
-/// What letting it show your fragments inside it means: plain for the
-/// platform's desktop (its code is the platform's), a warning for any other
-/// page that asks (its code is whoever last changed it).
-fn frame_hint(platform_desktop: bool, granted: bool) -> &'static str {
-    match (platform_desktop, granted) {
-        (true, true) => "<p class=\"hint\">It shows your fragments inside it, signed in as you, so you can use them side by side. If its code is ever changed, it asks you here again.</p>",
-        (true, false) => "<p class=\"hint\">It can show your fragments inside it, signed in as you, so you can use them side by side. You stopped it.</p>",
-        (false, true) => "<p class=\"hint\">It shows your other fragments inside it, signed in as you. The platform can't vouch for its code: whoever changes it could put its own buttons on top of your fragments and catch your clicks. Stop it if you no longer trust that code.</p>",
-        (false, false) => "<p class=\"hint\">It asks to show your other fragments inside it, signed in as you. The platform can't vouch for its code: whoever changes that code (you, someone you share it with, or an agent) could put its own buttons on top of your fragments and catch your clicks. Allow it only if you trust that code.</p>",
-    }
 }
 
 /// A form of the owner's: one action, with the page's token.
@@ -416,7 +394,10 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     }
     if let Some(granted) = sheet.frame {
         out += "<h2>Your fragments inside it</h2>";
-        out += frame_hint(sheet.platform_desktop, granted);
+        out += match granted {
+            true => "<p class=\"hint\">It shows your other fragments inside it, signed in as you. The platform can't vouch for its code: whoever changes it could put its own buttons on top of your fragments and catch your clicks. Stop it if you no longer trust that code.</p>",
+            false => "<p class=\"hint\">It asks to show your other fragments inside it, signed in as you. The platform can't vouch for its code: whoever changes that code (you, someone you share it with, or an agent) could put its own buttons on top of your fragments and catch your clicks. Allow it only if you trust that code.</p>",
+        };
         let field = format!("<input type=\"hidden\" name=\"granted\" value=\"{}\">", if granted { "no" } else { "yes" });
         out += &action_form(sheet, "frame", &field, if granted { "Stop" } else { "Allow" }, if granted { "quiet" } else { "" });
     }

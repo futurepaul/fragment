@@ -109,7 +109,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         anyhow::ensure!(r.status == 200, "making {name}: {r}");
         Ok(name)
     };
-    let chat = make(&s.name("schat"), "chat")?;
+    let chat = make(&s.name("chat"), "chat")?;
     let desk = make(&s.name("sdesk"), "desktop")?;
     // the owner's agent joins the chat on its alarm
     let agent_in = s.eventually(wait, || {
@@ -147,17 +147,16 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = with_session(api, "GET", &sheet, &stranger_session)?;
     s.ok("someone who is not in it gets a 403 page", r.status == 403 && r.text.contains("Not yours to share") && !r.text.contains("name=\"form\"") && unframed(&r), &r);
-    // the platform's desktop: what letting it show your fragments means,
-    // plainly, and no warning (its code is the platform's)
+    // a desktop made without the platform's form (the API, as the CLI makes
+    // one): its sheet asks, and says plainly what allowing it risks
     let r = with_session(api, "GET", &format!("/share/{desk}"), &owner_session)?;
     s.ok(
-        "the platform's desktop's sheet says plainly that it shows your fragments inside it, allowed from the start, with no warning",
+        "a desktop made without the platform's form asks in its sheet whether it may show your fragments inside it, saying plainly what that risks",
         r.status == 200
             && r.text.contains("Your fragments inside it")
-            && r.text.contains("It shows your fragments inside it, signed in as you")
-            && r.text.contains(">Stop<")
-            && !r.text.contains("catch your clicks")
-            && !r.text.contains("trust"),
+            && r.text.contains("It asks to show your other fragments inside it, signed in as you")
+            && r.text.contains("catch your clicks")
+            && r.text.contains(">Allow<"),
         &r,
     );
     s.ok(
@@ -296,11 +295,11 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         entry["sharing"] == json!({ "visibility": "link", "members": members, "guests": 1 }) && members == 3 && entry["share"] == format!("{platform}{sheet}"),
         &entry,
     );
-    let (desk_entry, whole) = (listed(&desk)?, api.call(Call { method: "GET", url: api.site_url(&desk, "__fragments"), cookie: Some(format!("fragment_site={owner_site}")), ..Call::default() })?);
+    let whole = api.call(Call { method: "GET", url: api.site_url(&desk, "__fragments"), cookie: Some(format!("fragment_site={owner_site}")), ..Call::default() })?;
     s.ok(
-        "and which are chats (the chat is; the desktop is not), and whether the desktop may show them inside it (the platform's desktop may)",
-        entry["chat"] == json!(true) && desk_entry["chat"] == json!(false) && whole.body["frame"] == json!(true),
-        format!("{entry} / {desk_entry} / frame {}", whole.body["frame"]),
+        "and whether the desktop may show them inside it (not until its owner allows it)",
+        whole.status == 200 && whole.body["frame"] == json!(false),
+        &whole,
     );
     // Goal: a __fragments read wakes no fragment. Method: a test hook adds
     // members to a fragment without it telling anyone (its index is not
@@ -423,7 +422,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.set_cookie(&format!("{platform}/"), "fragment_session", &owner_session)?;
     let page = chrome.open(&api.site_url(&desk, "__signin?return=/"))?;
     chrome.viewport(&page, 1440, 900, false)?;
-    // the chat (made from the chat template, not by this desktop) is listed among its chats
+    // the chat (made elsewhere, named as New chat names one) is listed among its chats
     let row = format!("document.querySelector('#chats .row[data-key={:?}]')", format!("chat:{chat}"));
     let badged = chrome.until(&page, &format!("{row}?.querySelector('.shared')?.textContent === '1'"), wait);
     s.ok("the desktop badges a fragment shared with someone (the member: 1)", badged, chrome.eval(&page, "document.getElementById('chats').innerHTML").unwrap_or_default());

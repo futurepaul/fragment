@@ -349,11 +349,13 @@ fn new_form(after: &str) -> String {
         .map(|(i, (name, t))| {
             let (title, description) = crate::publish::describe(t);
             format!(
-                "<p><label><input type=\"radio\" name=\"template\" value=\"{n}\"{c}> <b>{t}</b> {d}</label></p>",
+                "<p><label><input type=\"radio\" name=\"template\" value=\"{n}\"{c}> <b>{t}</b> {d}{f}</label></p>",
                 n = esc(name),
                 c = if i == 0 { " checked" } else { "" },
                 t = esc(if title.is_empty() { name } else { &title }),
                 d = esc(&description),
+                // making it here is the owner's frame grant (`/auth/new`), so the form says what it allows
+                f = if crate::publish::frames(name) { "<br><small>It will show your fragments inside it, signed in as you: making it here allows that. You can stop it in its share sheet.</small>" } else { "" },
             )
         })
         .collect();
@@ -487,7 +489,8 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 let bytes = crate::read_body(&mut req, SHORT_FORM_MAX_BYTES).await?;
                 let field = |name: &str| url::form_urlencoded::parse(&bytes).find(|(k, _)| k == name).map(|(_, v)| v.trim().to_string()).unwrap_or_default();
                 let create = fragment_proto::CreateFragment { name: field("label"), visibility: None, template: Some(field("template")) };
-                let v: serde_json::Value = match crate::create_fragment(env, cfg, url, create, Signed::new(live.identity, None)).await {
+                let owner = Signed::new(live.identity, None);
+                let v: serde_json::Value = match crate::create_fragment(env, cfg, url, create, owner.clone()).await {
                     Ok(mut made) if made.status_code() == 200 => made.json().await?,
                     Ok(mut made) => {
                         let v: serde_json::Value = made.json().await.unwrap_or_default();
@@ -496,6 +499,15 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                     Err(e) => return page(400, "New fragment", &format!("<p>{}</p><p><a href=\"/\">Back</a></p>", esc(&e.message))),
                 };
                 let name = v["name"].as_str().ok_or_else(|| CellError::host("the create answered no name"))?;
+                // The form said it will show their fragments inside it: its submit is the owner's grant, the
+                // share sheet's own. No page can send it (the Origin is the platform's). One that does not land
+                // leaves the desktop asking, with its share sheet's button.
+                if crate::publish::frames(&field("template")) {
+                    let allow = Some(serde_json::json!({ "granted": true }));
+                    if let Err(e) = crate::share::ask(env, url, name, &owner, Method::Put, "/api/grants/frame", allow).await {
+                        console_error!("{name}: the form's frame grant did not land ({:?}): {}", e.code, e.message);
+                    }
+                }
                 // signed in on its own origin, then there
                 redirect(&format!("/auth/fragment?name={}&return=/", enc(name)), &[])
             }

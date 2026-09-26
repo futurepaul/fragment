@@ -24,7 +24,6 @@
 //!   POST   /api/join/preview              the same: what joining would do, joining no one
 //!   PUT    /api/visibility                owner
 //!   POST   /api/rotate                    owner
-//!   GET    /api/grants/frame              owner: whether it may show their fragments inside it, and whether the platform's desktop does
 //!   PUT    /api/grants/frame              owner: {granted} lets it show their fragments inside it
 //!   PUT    /api/secrets/<KEY>  GET /api/secrets  DELETE /api/secrets/<KEY>   editor
 //!   GET    /api/storage-token             editor
@@ -330,13 +329,6 @@ pub(crate) enum MetaKey {
     OutsideAt,
     /// A template still to commit (publish.rs).
     TemplatePending,
-    /// The template the platform made it from, and the commit it made
-    /// (`<template> <sha>`, publish.rs): a desktop's frames are allowed
-    /// while live is that commit.
-    Template,
-    /// What its members' lists last said it is (`chat` or `app`,
-    /// members.rs `relist`).
-    ListedAs,
     /// An owner's agent still to join (publish.rs).
     AgentPending,
     /// The commits the cell pins (plane.rs).
@@ -355,10 +347,8 @@ pub(crate) enum MetaKey {
     MetaLive,
     /// The live manifest's `capabilities`, as a JSON list.
     CapabilitiesLive,
-    /// Its owner's word on showing their fragments inside it (`__frame`),
-    /// when live asks for `frame`: `1` allowed, `0` stopped, absent the
-    /// platform's default (allowed only while live is the platform's desktop
-    /// template: publish.rs `framing`).
+    /// Its owner lets it show their fragments inside it (`__frame`), when
+    /// live asks for `frame`: `1` allowed; `0` (a stop) or absent, not.
     FrameGranted,
     /// Why live's code was not installed.
     CodeError,
@@ -402,8 +392,6 @@ impl MetaKey {
             MetaKey::PollAt => "poll_at",
             MetaKey::OutsideAt => "outside_at",
             MetaKey::TemplatePending => "template_pending",
-            MetaKey::Template => "template",
-            MetaKey::ListedAs => "listed_as",
             MetaKey::AgentPending => "agent_pending",
             MetaKey::PinMain => "pin_main",
             MetaKey::PinLive => "pin_live",
@@ -844,7 +832,6 @@ impl FragmentCell {
                 let body = body_json(&mut req).await?;
                 self.set_visibility(&caller, body).await
             }
-            (Method::Get, ["api", "grants", "frame"]) => self.frame_grant(&caller),
             (Method::Put, ["api", "grants", "frame"]) => {
                 let body = body_json(&mut req).await?;
                 self.grant_frame(&caller, body)
@@ -1008,11 +995,6 @@ impl FragmentCell {
             ],
         )?;
         self.index_change(&owner, Some(Role::Owner))?;
-        // Its first row says what it is now (nothing is installed: an app),
-        // and records so: its template's install sends the row again only
-        // when that makes it a chat, never just to say the same thing (a
-        // send the alarm would make later, with whatever counts it has then).
-        self.relist()?;
         if let Some(t) = &body.template {
             self.set_meta(MetaKey::TemplatePending, t)?;
         }
@@ -1125,14 +1107,9 @@ impl FragmentCell {
     /// queued runs, and the pass: the poll backstop, which also checks
     /// running runs. The next pass is a day away, or within the poll
     /// interval while the fragment is busy (`arm`). Then it re-arms.
-    pub(crate) async fn on_alarm(&self) -> CellResult<()> {
+    async fn on_alarm(&self) -> CellResult<()> {
         if self.meta(MetaKey::CreatedAt)?.is_none() {
             return Ok(());
-        }
-        // a fragment from before its members' lists said what it is says so
-        // once, here (a list read never wakes it to ask)
-        if let Err(e) = self.relist() {
-            self.event("relist.failed", &e.message, json!({ "code": e.code }));
         }
         self.flush_index().await;
         if let Err(e) = self.seed().await {

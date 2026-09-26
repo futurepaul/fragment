@@ -4,14 +4,13 @@
 // frame is this page's `__frame`: the platform signs the frame in on its
 // fragment's origin, for this page only, so the desktop's code holds no
 // authority over any of them. Its platform powers are its owner's list
-// (`__fragments`) and those frames, which fragment.json asks for: made
-// from the platform's template, it may frame them from the start; once its
-// code changes, its owner allows it in its share sheet (the list says
-// which, as `frame`, and without it the desktop says so in place of its
-// panes). Sharing is the platform's too: a row's Share item opens the
-// platform's share sheet in a window of its own, which this page cannot
-// script (the sheet severs its opener); the list says who else is in each,
-// for the badges, and which are chats.
+// (`__fragments`) and those frames, which fragment.json asks for and its
+// owner allows (making it with the platform's form, or its share sheet;
+// the list says which, as `frame`, and without it the desktop says so in
+// place of its panes). Sharing is the platform's too: a row's Share item
+// opens the platform's share sheet in a window of its own, which this page
+// cannot script (the sheet severs its opener); the list says who else is
+// in each, for the badges.
 import * as fragment from "./__fragment.js";
 import { createLayout, store } from "./layout.js";
 import { createViewer } from "./viewer.js";
@@ -253,12 +252,11 @@ function item(row, name) {
 }
 
 // ---- chats: each a chat fragment, shown in the middle column ----
-// A chat is a fragment that is one (the list says so: it declares a `chat`
-// channel), wherever it was made; the ones this desktop made come first,
-// newest first.
+// A chat is a fragment New chat named (`chat-…`), wherever it was made; the
+// ones this desktop made come first, newest first.
 function chatNames() {
   const made = state.chats.filter(byName);
-  const others = state.fragments.filter((f) => f.chat && f.name !== state.self && !made.includes(f.name)).map((f) => f.name);
+  const others = state.fragments.filter((f) => label(f.name).startsWith("chat-") && f.name !== state.self && !made.includes(f.name)).map((f) => f.name);
   return [...made, ...others];
 }
 

@@ -477,6 +477,10 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
 - **Acceptance:** no platform path names a chat or the desktop outside
   that seam; the chat, desktop, and phase7 lanes stay green; the phase
   deletes more lines than it adds.
+- *Done (PR #45):* "is it a chat" (the desktop tells by its New chat's
+  names) and the desktop's framing (one consent, the new-fragment form's).
+  The new desktop's visibility stays (`publish.rs`, `first_visibility`):
+  fragment.json holds no access. The chat's three wait for D.
 
 ### D. The agent add-on
 - Decision 20: `agent` in `fragment.json`; turns from signed-in

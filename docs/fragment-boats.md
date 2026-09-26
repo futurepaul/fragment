@@ -673,10 +673,9 @@ In order:
    sheet ("Your fragments inside it"). The desktop is the first user; a
    chat showing an app inline is the next. A framed fragment shows only
    inside a page that holds the capability and went through `__frame`.
-   Amended the same day (Paul): a desktop the platform makes from its own
-   template is allowed from the start, while live is the commit the
-   platform made; once its code changes, its owner is asked in the share
-   sheet like any other page (docs/platform.md, `frame`).
+   Amended 2026-09-26 (Paul): making a desktop with the platform's
+   new-fragment form is that allow (the form says so); any other way asks
+   in the share sheet (docs/platform.md, `frame`).
 
 ## Not in scope
 

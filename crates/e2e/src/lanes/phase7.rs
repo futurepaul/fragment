@@ -262,12 +262,12 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let desk = home;
     let brand = format!("document.getElementById('brand')?.textContent === {:?}", format!("{}'s desktop", owner.username));
     let on_desk = chrome.until(&desk, &format!("location.host.startsWith({:?}) && {brand}", format!("{desk_label}--")), WAIT);
-    // made through the platform's form from its template: its owner's alone,
-    // and it shows their fragments inside it with no grant asked
+    // made through the platform's form: its owner's alone, and it shows
+    // their fragments inside it (the form's submit was their grant)
     let desk_name = api.qualified(&owner.keys, &desk_label)?;
     let st = api.status(&owner.keys, &desk_name)?;
     s.ok(
-        "a desktop made with the platform's New fragment form is its owner's alone (members only), and may show their fragments inside it with no grant",
+        "a desktop made with the platform's New fragment form is its owner's alone (members only), and may show their fragments inside it with no visit to the share sheet",
         st.body["visibility"] == "members" && st.body["frame"] == json!(true),
         &st,
     );
