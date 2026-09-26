@@ -121,7 +121,7 @@ const IGNORED_KEEP: i64 = 32;
 /// to the alarm.
 const TURNS_PER_DRIVER_MAX: usize = 256;
 /// The platform's default model (ROADMAP decision 7).
-const DEFAULT_MODEL: &str = "z-ai/glm-5.3-flash";
+const DEFAULT_MODEL: &str = fragment_proto::AGENT_MODEL;
 /// A computer's URL, and its token.
 const COMPUTER_URL_MAX: usize = 1024;
 const COMPUTER_TOKEN_MAX: usize = 256;

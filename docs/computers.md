@@ -25,7 +25,7 @@ Status, 2026-09-26 (ROADMAP phase E). Built:
    provisions one on deploy, and the owner pays, as for everything a
    fragment spends.
 5. **Model calls:** through the platform, signed with the computer's own
-   key, on the model the agents in cells use (the next PR).
+   key, on the model the agents in cells use: `fragment model` (below).
 
 ## How it works
 
@@ -63,7 +63,14 @@ Status, 2026-09-26 (ROADMAP phase E). Built:
    keys. The fragment's next deploy that declares one makes a new one.
 
 The only credential a computer holds is its own key, in its CLI config
-(0600) on the Sprite's disk (decision 21).
+(0600) on the Sprite's disk (decision 21). It reaches the model through
+the platform: `fragment model "<prompt>"`, or `fragment model --request`
+with an OpenAI-style chat request on stdin (`POST
+/api/model/chat/completions`, signed by its key). The platform forces the
+agents' model (`fragment_proto::AGENT_MODEL`), calls OpenRouter with the
+owner's own key, which never reaches the computer, and reserves and
+settles on the owner's month as `job.ai` does. Any computer may call it:
+a fragment's own, or a machine a person paired.
 
 ## Running the first real one
 
@@ -94,8 +101,9 @@ to 180 s), and whether `sprite-env curl` holds it awake from an exec.
 
 ## Next
 
-- **Model calls** through the platform, signed by the computer's key (the
-  next PR).
+- **goose on a computer**: a local OpenAI-compatible endpoint
+  (`fragment model --serve`) that signs each call, so goose, or anything
+  that speaks to a provider, needs no key; and streaming.
 - **How a page shows it: a CUA "pet".** A declared `desktop` service
   (Xvfb, Chromium, and a control endpoint, from finite-next's
   `computer/*`) takes a screenshot on each change (at most one a second),

@@ -568,6 +568,10 @@ pub struct MemberList {
     pub members: Vec<Member>,
 }
 
+/// The model agents in cells use unless they name another, and the only one
+/// a computer calls through the platform (`POST /api/model/chat/completions`).
+pub const AGENT_MODEL: &str = "z-ai/glm-5.3-flash";
+
 /// What an identity is (docs/finite-integration.md). A fragment's own key
 /// stays the fragment's and is not registered. An agent and a computer each
 /// have a designated owner, a person; a computer is a machine its owner
