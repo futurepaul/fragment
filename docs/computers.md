@@ -48,9 +48,9 @@ Status, 2026-09-26 (ROADMAP phase E). Built:
    tick (a minute) it is charged first, then held awake through the
    Sprite's Tasks API (a hold that expires after two ticks). Each tick,
    the cell asks the fragment for open pages; 5 minutes after the last
-   one closes, the hold is released and the Sprite pauses itself. A job
-   step will wake it the same way (`Wake`), with `job.computer`. A tick
-   that does not fit the budget lets it sleep (`computer.budget`).
+   one closes, the hold is released and the Sprite pauses itself. A job's
+   command wakes it the same way (below). A tick that does not fit the
+   budget lets it sleep (`computer.budget`).
 5. **Billed at list price.** Sprites meter the CPU and memory a Sprite
    actually uses, which the platform cannot see, so an awake hour is
    billed as the idle footprint measured on one: a tenth of a CPU
@@ -87,6 +87,25 @@ then needs no key: any key it sends is ignored, and the platform picks
 the model. Any process on the machine may call it, on the owner's
 budget: a computer is one person's machine (a Sprite has one user).
 
+## A job's commands (`job.computer.exec`)
+
+A job runs `bash -lc <command>` on its fragment's computer (docs/api.md,
+Jobs and triggers), in shell over `KEYS`' exec only
+(`fragment_core::computer`), so it needs nothing of the CLI's release
+beyond pairing. The start wakes the computer as a page does and waits up
+to 20 s for the alarm to hold it (its first tick paid, or refused: a
+`StepError`). It then makes `~/.fragment/exec/<id>` (the run's and
+step's id, never the attempt's) as its lock and starts a detached runner
+(`setsid nohup`) that records its pid, runs the command with its output
+in files, stops it at its timeout, keeps 256 KiB of each stream, and
+writes its code last; a start that finds the directory starts nothing.
+Each poll waits there up to 100 s for the code (a blank line every 10 s),
+then reads the output in chunks that fit `KEYS`' 64 KiB answer. No code
+and no runner, or 60 s past the deadline, is interrupted: it never runs
+again. Every answer is base64 between marker lines (whatever else a
+Sprite's exec adds is dropped). The journal is kept 30 days, as long as a
+run can be replayed.
+
 ## Running the first real one
 
 `fleets/fragment-club.json` names the token's file
@@ -112,7 +131,10 @@ Machines), and the node and cell deploy as usual. Then, as one person, on a scra
 
 Things only the real one shows: the exec answer's shape (the cell reads
 the last number `du -sk` printed), the install's time (the exec waits up
-to 180 s), and whether `sprite-env curl` holds it awake from an exec.
+to 180 s), and whether `sprite-env curl` holds it awake from an exec. For
+`job.computer.exec`: that the detached runner outlives the exec that
+started it (`setsid`), and that a poll's 100 s exec, a blank line every
+10 s, comes back whole.
 
 ## Next
 
@@ -126,8 +148,6 @@ to 180 s), and whether `sprite-env curl` holds it awake from an exec.
   operations (`poke {x, y}`, `type {text}`) that append to a `control`
   channel, which the computer follows and applies once each (keyed by
   seq). An agent drives it through the same operations.
-- **`job.computer(tool, args)`**, a durable job step over the `computer
-  serve` call protocol, waking the computer for the step.
 - **Alerts** about computers awake longer than expected, and what a
   deleted fragment's computer becomes (today it stays, asleep, until
   `fragment computers rm`).

@@ -777,6 +777,8 @@ impl FragmentCell {
             }
             Step::AgentStart(turn) => self.step_agent_start(run, index, turn).await,
             Step::AgentPoll { turn } => self.step_agent_poll(&turn).await,
+            Step::ComputerExec(e) => self.step_computer_exec(run, index, e).await,
+            Step::ComputerExecPoll { exec } => self.step_computer_poll(&exec).await,
         }
     }
 
