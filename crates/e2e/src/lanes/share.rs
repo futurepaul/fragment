@@ -1,8 +1,8 @@
 //! Sharing (phase 7, decision 4; the ROADMAP's phase 7 acceptance): the
 //! share sheet and the join page on the platform's origin, on a node
-//! shaped as fragment.club is (the platform one site with every fragment,
-//! so its session rides along on a fragment page's fetches, forms, and
-//! frames), in Chrome where the browser is the point.
+//! shaped as fragment.club is (the platform cross-site from every fragment,
+//! so its session reaches a fragment's page only on a top-level visit), in
+//! Chrome where the browser is the point.
 //!
 //! The owner shares a chat by username; the guest accepts at `/join`, sees
 //! it live, and posts in it; the owner removes them, and their socket
@@ -25,7 +25,7 @@ use crate::api::{url_enc, Api, Call, Reply};
 use crate::browser::{Browser, Page};
 use crate::Suite;
 
-/// Runs on a node restarted with its platform on the fragments' domain
+/// Runs on a node restarted with the platform and the fragments on two domains
 /// (as fragment.club is), then restarts it as it was for the lanes after.
 pub fn share(s: &mut Suite, _: &Api) -> Result<()> {
     if !s.section("share") {

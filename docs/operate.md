@@ -43,10 +43,12 @@ paths of files that hold them, all under `~/.config/finite-next/secrets/`).
   deployments before it do (docs/technical-debt-ledger.md).
 - **code.storage org `finite`**: one repo per fragment,
   `<label>--<username>`.
-- **DNS** at Namecheap: `fragment.club` and `*.fragment.club` to the app
-  (A `66.241.125.20`, AAAA `2a09:8280:1::199:8a1c:0`), and
-  `_acme-challenge.fragment.club` CNAME `fragment.club.nwd56j0.flydns.net.`
-  for the certificates.
+- **DNS** at Namecheap, for both domains: `fragment.club` (the platform)
+  and `fragment.boats` (the fragments, ROADMAP decision 23), each apex
+  and its wildcard to the app (A `66.241.125.20`, AAAA
+  `2a09:8280:1::199:8a1c:0`), and each `_acme-challenge` a CNAME to
+  `<domain>.nwd56j0.flydns.net.` for the certificates: Fly's, one for
+  each apex and one for each wildcard.
 
 ## Everyday commands
 
@@ -83,6 +85,17 @@ rolls the Machines. Budgets (phase 4 slice C):
 person's OpenRouter key; `FRAGMENT_BUDGET_USD` (default 20) and
 `FRAGMENT_OPERATORS` (who may top up: `fragment budget top-up <id>
 <usd>`) in `vars`.
+
+Hosts: `FRAGMENT_PLATFORM_URL` (`https://fragment.club`) is the
+platform, `FRAGMENT_HOST_SUFFIX` (`fragment.boats`) the fragments, and
+`FRAGMENT_LEGACY_HOST_SUFFIX` (`fragment.club`) their old hosts, which
+redirect (docs/api.md, Moved hosts). A change to the suffix moves every
+fragment at the next `cargo xtask deploy fragment-club`, so the new
+domain's DNS and certificates come first (`flyctl certs check` until
+Issued). Keep the old domain's wildcard record and certificate for at
+least a year after a move: old links and invites go through them.
+Undoing a move is the old suffix back, `FRAGMENT_LEGACY_HOST_SUFFIX`
+out, and a deploy: no browser kept a redirect (they are sent uncached).
 
 Sign-in is WorkOS (phase 4 slice B): `WORKOS_CLIENT_ID` in `var_files`,
 `FRAGMENT_KEYS_WORKOS_API_KEY` in `node_secrets`; the environment's
@@ -138,8 +151,8 @@ Machines one at a time. Then revoke the old value at its issuer.
    Machine, with its own volume.
 7. The peer check above; then the hosted e2e.
 8. Certificates: `flyctl certs add <apex>` and `flyctl certs add
-   "*.<apex>"`; the `_acme-challenge` CNAME validates both before any
-   traffic moves.
+   "*.<apex>"` for each domain; the `_acme-challenge` CNAME validates
+   both before any traffic moves.
 
 ## Rules
 

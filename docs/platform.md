@@ -33,10 +33,12 @@ belongs in a template instead.
 | `/api/*` | The signed API: fragments, members, identities, budgets, agents (`/api/agents`, `/api/a/*`, co-hosted) |
 
 Every platform page must refuse to be framed (`frame-ancestors 'none'`;
-PR `platform-no-framing`): until the move to fragment.boats
-(docs/fragment-boats.md), fragments share the platform's site, so its
-session cookie reaches a same-site frame. And every one severs a window
-that opened it (`Cross-Origin-Opener-Policy: same-origin`), so a
+PR `platform-no-framing`). Since the move to fragment.boats
+(docs/fragment-boats.md, ROADMAP decision 23) the platform is cross-site
+from every fragment, so its session cookie never reaches a fragment's
+frame; the header stays for any fleet whose platform shares the
+fragments' domain, and against every other site. And every one severs a
+window that opened it (`Cross-Origin-Opener-Policy: same-origin`), so a
 fragment's page cannot script the window it opened on one. The sharing
 pages' forms also carry a token bound to the session and arm after a
 moment (docs/api.md, Sharing).

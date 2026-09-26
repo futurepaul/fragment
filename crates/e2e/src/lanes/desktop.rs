@@ -35,7 +35,7 @@ fn centre(chrome: &mut Browser, page: &Page, selector: &str) -> Option<(f64, f64
     Some((v[0].as_f64()?, v[1].as_f64()?))
 }
 
-/// Runs on a node restarted with its platform on the fragments' domain
+/// Runs on a node restarted with the platform and the fragments on two domains
 /// (as fragment.club is), then restarts it as it was for the lanes after.
 pub fn desktop(s: &mut Suite, _: &Api) -> Result<()> {
     if !s.section("desktop") {
@@ -55,10 +55,10 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok("Chrome is installed for the desktop lane (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());
     };
-    let Some(suffix) = api.suffix.clone() else {
+    if api.suffix.is_none() {
         s.ok("the desktop lane runs with fragment hosts", false, "no suffix");
         return Ok(());
-    };
+    }
     let (owner, session) = person(api)?;
     let make = |label: &str, template: &str| -> Result<String> {
         let name = api.qualified(&owner, label)?;
@@ -92,7 +92,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let elsewhere = make(&s.name("chat"), "chat")?;
 
     // signed in on the platform, the browser walks to the desktop's origin
-    chrome.set_cookie(&format!("http://{suffix}:{}/", api.port), "fragment_session", &session)?;
+    chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
     let page = chrome.open(&api.site_url(&desk, "__signin?return=/"))?;
     chrome.viewport(&page, 1440, 900, false)?;
     let listed = format!("[...document.querySelectorAll('#apps .row .label')].map(l => l.textContent).includes({:?})", label(&todo));

@@ -23,6 +23,11 @@
 //! host: fragments sharing one origin could act as each other's visitors.
 //! `__watch` and `__live` stay reachable there for the CLI, which carries
 //! no cookies.
+//!
+//! When the suffix moves (`FRAGMENT_LEGACY_HOST_SUFFIX`: fragment.club's
+//! fragments to fragment.boats, the platform staying on fragment.club), a
+//! fragment's old host sends a browser to its new one, and the suffix's own
+//! name sends it to the platform.
 
 mod agents;
 mod ai;
@@ -767,6 +772,23 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
     }
 }
 
+/// A URL's path and query, as a redirect to another host keeps them.
+fn path_and_query(url: &Url) -> String {
+    match url.query() {
+        Some(q) => format!("{}?{q}", url.path()),
+        None => url.path().to_string(),
+    }
+}
+
+/// A move's redirect (docs/fragment-boats.md, slice 2). No cache keeps it,
+/// so the move can still be undone: a browser caches a bare `308` for good.
+fn moved(to: &str) -> CellResult<Response> {
+    let mut resp = Response::empty()?.with_status(308);
+    resp.headers_mut().set("location", to)?;
+    resp.headers_mut().set("cache-control", "no-store")?;
+    Ok(resp)
+}
+
 async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     // as its client named it: signatures, links, and cookies name the https URL
@@ -780,7 +802,21 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
         let rest = path.trim_start_matches('/').to_string();
         return serve(req, env, cfg, &url, &name, &rest, Mode::Host).await;
     }
-    // any other name under the suffix is no one's: the platform answers on its own host only
+    // the suffix's own name, with the platform elsewhere, is the platform's
+    if host.is_some_and(|h| cfg.is_suffix(h)) {
+        return moved(&format!("{}{}", cfg.platform(&url), path_and_query(&url)));
+    }
+    // A fragment's old host: a browser's visit goes on to its new one. A
+    // write or a socket is refused, so nothing acts where no one looks: a
+    // page loaded before the move reloads onto the new host.
+    if let Some(name) = host.and_then(|h| cfg.fragment_of_legacy_host(h)) {
+        let to = format!("{}{}", cfg.origin(&url, &name), path_and_query(&url));
+        if matches!(req.method(), Method::Get | Method::Head) && !is_socket(&req)? {
+            return moved(&to);
+        }
+        return Err(CellError::new(ErrorCode::Moved, format!("this fragment moved to {to}")));
+    }
+    // any other name under the suffix, or the old one, is no one's: the platform answers on its own host only
     if host.and_then(|h| cfg.subdomain(h)).is_some() {
         return Err(CellError::new(ErrorCode::NotFound, "no fragment here: a fragment's host is <label>--<username>.<suffix>"));
     }

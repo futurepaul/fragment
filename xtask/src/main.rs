@@ -156,6 +156,7 @@ fn dev(args: &[String]) -> Result<()> {
         codestorage_key_pem: key,
         codestorage_url: fake.url.clone(),
         host_suffix: Some("fragment.localhost".into()),
+        legacy_host_suffix: None,
         // No webhooks reach dev fragments (the CLI's refresh and this poll do).
         poll_interval_s: 10,
         egress_local: true,

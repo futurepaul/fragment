@@ -17,7 +17,9 @@
   },
   "vars": {
     "CODESTORAGE_ORG": "finite",
-    "FRAGMENT_HOST_SUFFIX": "fragment.club",
+    "FRAGMENT_HOST_SUFFIX": "fragment.boats",
+    "FRAGMENT_LEGACY_HOST_SUFFIX": "fragment.club",
+    "FRAGMENT_PLATFORM_URL": "https://fragment.club",
     "FRAGMENT_PUSH_SUBJECT": "https://fragment.club",
     "FRAGMENT_OPERATORS": "npub1w352vpm92yvdlar2vunk8ctjrz609jwtdf8svfr3hnequ52agv9qeqf9h2"
   },

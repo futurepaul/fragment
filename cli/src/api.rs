@@ -59,7 +59,8 @@ impl Code {
             ErrorCode::InvalidRequest => Code::InvalidRequest,
             ErrorCode::Unauthenticated => Code::AuthFailed,
             ErrorCode::Forbidden => Code::Forbidden,
-            ErrorCode::NotFound | ErrorCode::UnknownOperation | ErrorCode::NoCode => Code::NotFound,
+            // the CLI calls the platform's host, which never moves
+            ErrorCode::NotFound | ErrorCode::UnknownOperation | ErrorCode::NoCode | ErrorCode::Moved => Code::NotFound,
             ErrorCode::AlreadyExists => Code::NameTaken,
             ErrorCode::ConflictingBody => Code::ConflictingBody,
             ErrorCode::TooLarge => Code::TooLarge,
@@ -545,6 +546,7 @@ mod tests {
             (ErrorCode::BudgetUsedUp, "budget_used_up"),
             (ErrorCode::StorageFull, "storage_full"),
             (ErrorCode::NodeFull, "unavailable"),
+            (ErrorCode::Moved, "not_found"),
         ];
         for (error, cli) in table {
             let body = serde_json::to_vec(&ErrorBody { error, message: "name taken, already exists".into() }).unwrap();

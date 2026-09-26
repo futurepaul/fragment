@@ -16,7 +16,8 @@ the node's environment, where only `KEYS` reads them (below).
 |---|---|
 | `CODESTORAGE_ORG` | the code.storage org |
 | `CODESTORAGE_API_URL` | the API base (default `https://api.<org>.code.storage`) |
-| `FRAGMENT_HOST_SUFFIX` | fragments are served from `<label>--<username>.<suffix>` (any other name under it is 404, never the platform); unset, from `/f/<name>/` |
+| `FRAGMENT_HOST_SUFFIX` | fragments are served from `<label>--<username>.<suffix>` (any other name under it is 404, never the platform; the suffix's own name is the platform's, or redirects to it: Moved hosts, below); unset, from `/f/<name>/` |
+| `FRAGMENT_LEGACY_HOST_SUFFIX` | where fragments were served before the suffix moved: a fragment's host under it redirects to its host under the suffix (Moved hosts, below); counted only beside a different suffix. fragment.club's is `fragment.club`, its suffix `fragment.boats` |
 | `FRAGMENT_POLL_INTERVAL_S` | the webhook backstop (default 300), and how often running runs are checked against their Workflows, for a busy fragment: one something outside the platform may have written in the last day (a storage token was minted for it, or a webhook arrived), or with a run in flight, a held run's video to settle, or a template or an owner's agent still to land. Any other fragment is polled once a day |
 | `FRAGMENT_JOB_RETRY_DELAY_S` | a failed job step's first retry delay, doubling over 4 retries (default 10) |
 | `FRAGMENT_EGRESS_LOCAL` | `allow` lets jobs fetch loopback and private addresses (dev and e2e fakes); never on a shared fleet |
@@ -30,7 +31,7 @@ the node's environment, where only `KEYS` reads them (below).
 | `FRAGMENT_DEPLOY_ID` | which deployment this is (`cargo xtask deploy` sets it); `GET /healthz` answers it in `x-fragment-deploy` |
 | `WORKOS_CLIENT_ID` | sign-in: fragment's WorkOS environment; unset, sign-in answers 500 |
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake) |
-| `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (default: the hostname suffix itself, e.g. https://fragment.club) |
+| `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (default: the hostname suffix itself; fragment.club's is https://fragment.club, on no fragment's domain) |
 | `FRAGMENT_SIGNINS_PENDING_MAX` | sign-ins begun and not finished that the registry keeps (default 100000; at least 1): a sign-in is kept through this many later starts, so the oldest is let go only past this many starts in its ten minutes (Sign-in, below) |
 | `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it); `GET /api/test/env` answers the Worker variables; `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens through `KEYS` as that fragment; `POST /api/test/fragment {fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, and `age-outside {ms}` makes the last sign of an outside writer (a storage token, a webhook) `ms` older |
 
@@ -222,10 +223,13 @@ random bytes, the registry keeps their SHA-256).
 | `GET /cli?key=&proof=&computer=<name>` | the link `fragment login --computer <name>` prints: the proof is for `POST <platform>/cli/approve?computer=<name>`, so it pairs that computer and nothing else (the same key without the name, or under another, is 400). The page says it is a computer named `<name>`, owned by the person, acting only in the fragments they add it to and those it makes (theirs, on their budget), never as them; and a Pair button |
 | `POST /cli/approve` | the page's form (`key`, `proof`, `computer`): the key joins the signed-in person at once, or, with `computer`, becomes their new computer of that name (again, the same one; a name they already use is 409); a key someone else holds, or a revoked one, is 409; another origin 403; the CLI waits for `GET /api/identities/me` to answer. People themselves come only from sign-in (`POST /api/identities {kind: "person"}` is 400), and computers from this page (`{kind: "computer"}` is 400) |
 
-Every fragment's origin is one site with the platform
-(`<label>--<username>.fragment.club` and `fragment.club`), so a
-SameSite=Lax session cookie rides along on a fragment page's form, fetch,
-or frame. So every page here answers `Content-Security-Policy:
+On fragment.club the platform is cross-site from every fragment
+(`fragment.club` and `<label>--<username>.fragment.boats`), so its
+SameSite=Lax session cookie reaches a fragment's page only on a
+top-level visit. A fleet whose platform shares the fragments' domain
+(`FRAGMENT_PLATFORM_URL` unset) puts them on one site, where the cookie
+rides along on a fragment page's form, fetch, or frame. Either way every
+page here answers `Content-Security-Policy:
 frame-ancestors 'none'` and `X-Frame-Options: DENY` (no page may frame
 one and lay its button under a click; its redirects still run in a
 frame, but a frame's `__signin` refuses what they mint) and `Cross-Origin-Opener-Policy:
@@ -270,10 +274,11 @@ the session expires or its platform session ends (`/auth/logout`).
 
 ### Which cookies count (docs/fragment-boats.md, decision 3)
 
-Every fragment's origin is one site with the others (and with the
-platform), so a SameSite=Lax cookie rides along on another fragment's
-images, scripts, fetches, and forms. The router counts a browser's
-cookies on a fragment's origin by the Fetch Metadata it sends
+Every fragment's origin is one site with the others (all of them are
+under `fragment.boats`, which the Public Suffix List does not list:
+docs/fragment-boats.md), so a SameSite=Lax cookie rides along on another
+fragment's images, scripts, fetches, and forms. The router counts a
+browser's cookies on a fragment's origin by the Fetch Metadata it sends
 (`Sec-Fetch-Site`, `-Mode`, `-Dest`, which no page's script sets); a
 request whose cookies do not count is served as to a stranger:
 
@@ -870,6 +875,25 @@ or 4004 (the fragment was deleted) ends it, and `closed` handlers get
 CLI: `fragment call <name> <op> --input '{...}' [--id ID]`, `fragment
 post <name> <channel> --body '{...}' [--id ID]`, `fragment
 channel <name> [<channel>] [--after N] [--follow]`.
+
+### Moved hosts (docs/fragment-boats.md, slice 2)
+
+fragment.club's fragments moved to `fragment.boats` (ROADMAP decision
+23); the platform stayed on `fragment.club`. The router takes a host in
+this order: the platform's own host (even under the suffix); a
+fragment's host; the suffix's own name (`fragment.boats`), which
+answers `308` to the same path and query on the platform, when the
+platform is elsewhere; a fragment's old host
+(`<label>--<username>.<FRAGMENT_LEGACY_HOST_SUFFIX>`), which answers a
+GET or HEAD `308` to the same path and query on its new host, and
+anything else there (a write, a socket) `410` `moved`, whose message
+names that URL; any other name under either suffix, 404; anything else,
+the platform. Neither redirect checks that the fragment exists, and both
+answer `Cache-Control: no-store`, so the move can be undone. Old links
+keep working through them (a share link's `?view=` rides along); a
+browser's cookies and storage on the old host stay there, so each person
+signs in once more on each fragment, and a page loaded before the move
+has its calls refused until it is reloaded onto the new host.
 
 ## Agents (`agent/`, phase 5; co-hosted since phase 6)
 

@@ -258,6 +258,7 @@ pub fn hosted_e2e_env(name: &str) -> Result<Vec<(String, String)>> {
     let mut env = vec![
         ("FRAGMENT_E2E_HOSTED".to_string(), fleet.url.clone()),
         ("FRAGMENT_E2E_SUFFIX".to_string(), fleet.vars.get("FRAGMENT_HOST_SUFFIX").cloned().unwrap_or_default()),
+        ("FRAGMENT_E2E_LEGACY_SUFFIX".to_string(), fleet.vars.get("FRAGMENT_LEGACY_HOST_SUFFIX").cloned().unwrap_or_default()),
         ("FRAGMENT_E2E_KEY_FILE".to_string(), path(&e2e.key)),
     ];
     if let Some(k) = &e2e.openrouter_key {

@@ -16,9 +16,10 @@
 //!   POST /join/<name>          joins, then → the fragment, signed in on its origin
 //!
 //! A fragment's page (its author's code, or an agent that rewrote the
-//! desktop) is one site with the platform, so the platform's session rides
-//! along on its fetches, forms, and frames. Neither page can be driven by
-//! one:
+//! desktop) is cross-site from the platform on fragment.club, but one site
+//! with it on a fleet whose platform shares the fragments' domain, where
+//! the platform's session rides along on its fetches, forms, and frames.
+//! Either way neither page can be driven by one:
 //!
 //! - it cannot read them: they send no CORS headers, and they refuse
 //!   every frame (`auth::unframed`);

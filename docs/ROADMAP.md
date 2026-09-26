@@ -181,7 +181,9 @@ Encrypt's ~50 new names a week with every chat a fragment; ChatGPT's
 `site.user.chatgpt.site` needs Cloudflare issuing a certificate per
 site). Sessions are `__Host-` cookies, since every fragment shares the
 platform's domain. The fragments made before this were not migrated (a
-hard cut).
+hard cut). *Amended by decision 23:* fragments share `fragment.boats`
+with each other, not the platform's domain; sessions stay `__Host-`
+cookies for that.
 
 ### 19. Fragment is the product (Paul, 2026-09-26)
 
@@ -217,6 +219,19 @@ call on the Sprites token.
 ### 22. Sign-up stays invite-only (Paul, 2026-09-26)
 
 For now; decision 12 is unchanged.
+
+### 23. Fragments on fragment.boats, the platform on fragment.club (Paul, 2026-09-25)
+
+Fragments are served at `<label>--<username>.fragment.boats`; the
+platform (sign-in, the share sheet, `/join`, `/cli`, `/api`) stays on
+`fragment.club`, cross-site from every fragment, so its session cookie
+reaches a fragment's page only on a top-level visit. The move is a hard
+cut: a fragment's old host redirects to its new one (a write there is
+410), `fragment.boats` itself to the platform, and fragment.club's
+records and certificates stay at least a year. The fragments are one
+site with each other until the Public Suffix List lists
+`fragment.boats`, which waits for thousands of people
+(docs/fragment-boats.md; the fleet: docs/operate.md).
 
 ## Truth map (every change is checked against this)
 
@@ -467,6 +482,8 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   redirecting. DNS, certificates, and the deploy are Paul's.
 - **Acceptance:** that doc's e2e shapes pass; the hosted e2e passes on
   fragment.boats, redirects included; Paul checks it in three browsers.
+- *Built 2026-09-26 (PR `boats-move`, decision 23):* waits for the DNS,
+  the certificates, and the deploy.
 
 ### C. Declutter
 - Take the desktop's and chats' special cases out of the core

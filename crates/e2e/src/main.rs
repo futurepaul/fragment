@@ -32,6 +32,9 @@ use serde_json::Value;
 use api::Api;
 
 pub const SUFFIX: &str = "fragment.localhost";
+/// The fragments' suffix on a node shaped as fragment.club is since the
+/// move to fragment.boats (`Shape::TwoSites`).
+pub const BOATS: &str = "boats.localhost";
 /// Where the next node puts the platform and the fragments, as a browser
 /// tells sites apart: Chrome takes an unknown top-level domain's last label
 /// as its suffix, so every `*.fragment.localhost` is one site, and every
@@ -40,9 +43,11 @@ pub const SUFFIX: &str = "fragment.localhost";
 enum Shape {
     /// The platform on 127.0.0.1, the fragments under `fragment.localhost`.
     Plain,
-    /// As fragment.club is: the platform on the fragments' domain
-    /// (`fragment.localhost`), one site with every fragment.
-    OneSite,
+    /// As fragment.club is since the move (docs/fragment-boats.md): the
+    /// platform at `fragment.localhost`, cross-site from the fragments
+    /// (`<flat>.boats.localhost`, one site with each other), whose old
+    /// hosts under `fragment.localhost` redirect to their new ones.
+    TwoSites,
     /// As a domain the Public Suffix List lists: every fragment its own
     /// site (`<flat>.localhost`), the platform at `fragment.localhost`.
     Listed,
@@ -216,11 +221,10 @@ impl Suite {
         api.qualified(owner, &self.name(base))
     }
 
-    /// Starts the node as fragment.club is shaped: the platform on the
-    /// fragments' own domain (`fragment.localhost`), so a browser treats
-    /// the platform and every fragment as one site.
+    /// Starts the node as fragment.club is shaped (`Shape::TwoSites`): a
+    /// browser treats the platform and the fragments as two sites.
     pub fn start_as_browsers_see_it(&mut self) -> Result<Api> {
-        self.start_shaped(Shape::OneSite)
+        self.start_shaped(Shape::TwoSites)
     }
 
     /// Starts the node as a domain on the Public Suffix List is shaped:
@@ -248,6 +252,7 @@ impl Suite {
             codestorage_key_pem: self.org_key.clone(),
             codestorage_url: self.fake.url.clone(),
             host_suffix: suffix.then(|| self.suffix().to_string()),
+            legacy_host_suffix: (suffix && self.shape == Shape::TwoSites).then(|| SUFFIX.to_string()),
             poll_interval_s: POLL_S,
             egress_local: true,
             job_retry_delay_s: 1,
@@ -260,7 +265,7 @@ impl Suite {
                 api_url: Some(self.workos.url.clone()),
             }),
             platform_url: Some(match (self.shape, suffix) {
-                (Shape::OneSite | Shape::Listed, true) => format!("http://{SUFFIX}:{}", self.port),
+                (Shape::TwoSites | Shape::Listed, true) => format!("http://{SUFFIX}:{}", self.port),
                 _ => format!("http://127.0.0.1:{}", self.port),
             }),
             openrouter_management: Some(OPENROUTER_MANAGEMENT.into()),
@@ -303,7 +308,8 @@ impl Suite {
     fn suffix(&self) -> &'static str {
         match self.shape {
             Shape::Listed => "localhost",
-            Shape::Plain | Shape::OneSite => SUFFIX,
+            Shape::TwoSites => BOATS,
+            Shape::Plain => SUFFIX,
         }
     }
 

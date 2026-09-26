@@ -201,10 +201,11 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   as a viewer. Operation ids belong to their caller: the ledger keys a
   mutation by principal and id.
 - Origins: each fragment is served from
-  `<label>--<username>.fragment.club`; the platform (login, share sheet,
-  invites, the share header) from `fragment.club`. celld does not vouch
-  for `Host`, so the router checks the hostname against the configured
-  suffix before it trusts it.
+  `<label>--<username>.fragment.boats` (its old host on fragment.club
+  redirects there); the platform (login, share sheet, invites, the share
+  header) from `fragment.club`, another site (ROADMAP decision 23).
+  celld does not vouch for `Host`, so the router checks the hostname
+  against the configured suffix before it trusts it.
 
 ## Agents
 

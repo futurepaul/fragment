@@ -159,6 +159,9 @@ pub struct Fleet {
     pub codestorage_url: String,
     /// Fragments are served from `<label>--<username>.<suffix>` when set.
     pub host_suffix: Option<String>,
+    /// Where fragments were served before the suffix moved: a fragment's
+    /// host there redirects to its host under the suffix.
+    pub legacy_host_suffix: Option<String>,
     pub poll_interval_s: u32,
     /// Jobs may fetch loopback and private addresses (the local fakes).
     pub egress_local: bool,
@@ -260,6 +263,9 @@ impl Fleet {
         }
         if let Some(s) = &self.host_suffix {
             vars.push(("FRAGMENT_HOST_SUFFIX", s.as_str()));
+        }
+        if let Some(s) = &self.legacy_host_suffix {
+            vars.push(("FRAGMENT_LEGACY_HOST_SUFFIX", s.as_str()));
         }
         if let Some(w) = &self.workos {
             vars.push(("WORKOS_CLIENT_ID", w.client_id.as_str()));

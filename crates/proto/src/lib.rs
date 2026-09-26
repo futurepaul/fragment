@@ -334,6 +334,9 @@ pub enum ErrorCode {
     /// 503: the node serving this fragment cannot load another app until it
     /// restarts (celld's loaded-worker limit; docs/hardening.md).
     NodeFull,
+    /// 410: the fragment moved to another host; the message names its URL
+    /// there (a write or a socket to its old host: docs/api.md, Moved hosts).
+    Moved,
 }
 
 impl ErrorCode {
@@ -353,6 +356,7 @@ impl ErrorCode {
             ErrorCode::BudgetUsedUp => 402,
             ErrorCode::StorageFull => 507,
             ErrorCode::NodeFull => 503,
+            ErrorCode::Moved => 410,
         }
     }
 }
