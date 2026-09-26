@@ -121,6 +121,21 @@ impl Route for Reserve {
     type Answer = Reserved;
 }
 
+/// A span of a computer (computer.rs), charged at once: its cost is known
+/// before it is spent, so it holds (`hold`) and settles (`settle`) in one
+/// turn, as `reserve` then `settle` would, without `reserve`'s OpenRouter
+/// key (a computer's awake time needs none, on a fleet with no AI too).
+/// Refused as a reservation that does not fit is; the same reference again
+/// answers its first charge, never a second.
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Charge(pub Reserve);
+
+impl Route for Charge {
+    const PATH: &'static str = "/charge";
+    type Answer = Settlement;
+}
+
 /// The org's OpenRouter key, for a step that costs nothing (a video's polls).
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -434,6 +449,16 @@ impl LedgerCell {
         Ok(key.to_string())
     }
 
+    fn charge(&self, Charge(b): Charge) -> CellResult<Settlement> {
+        if b.amount <= 0 || b.reference.is_empty() || b.reference.len() > 512 {
+            return Err(CellError::invalid("a charge names its span and a positive amount"));
+        }
+        if self.rows("SELECT state FROM usage WHERE ref = ?", vec![b.reference.as_str().into()])?.is_empty() {
+            self.hold(&b)?;
+        }
+        self.settle(Settle { reference: b.reference, cost: Some(b.amount), result: Value::Null, video: None })
+    }
+
     fn settle(&self, b: Settle) -> CellResult<Settlement> {
         let rows = self.rows("SELECT state, reserved, cost FROM usage WHERE ref = ?", vec![b.reference.as_str().into()])?;
         let Some(row) = rows.first() else { return Err(CellError::new(ErrorCode::NotFound, "no such reservation")) };
@@ -568,6 +593,7 @@ impl LedgerCell {
                 reply::<Key>(self.key().await.map(|key| KeyAnswer { key }))
             }
             Settle::PATH => reply::<Settle>(self.settle(decode(&body)?)),
+            Charge::PATH => reply::<Charge>(self.charge(decode(&body)?)),
             SettleVideo::PATH => reply::<SettleVideo>(self.settle_video(decode(&body)?)),
             Release::PATH => reply::<Release>(self.release(decode(&body)?)),
             Status::PATH => {

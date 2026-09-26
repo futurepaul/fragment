@@ -167,6 +167,7 @@ fn dev(args: &[String]) -> Result<()> {
         workos: Some(workos),
         // the CLI's host: sign-in and approvals happen where it points
         platform_url: Some(format!("http://127.0.0.1:{DEV_PORT}")),
+        computers: None,
         // budgets pay for AI only with a management key (real OpenRouter: real money)
         openrouter_management: read("OPENROUTER_MANAGEMENT_KEY_FILE")?,
         budget_usd: None,

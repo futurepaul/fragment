@@ -587,3 +587,20 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** the registry answers "removed" for an identity (a
   fragment drops such a member when it reads it), or the removal waits
   for every fragment's outbox, tested with a delivery held.
+
+## A computer is billed for a footprint, not what it used
+
+- **Observed:** Sprites meter a Sprite's actual CPU and memory, which the
+  platform cannot read, so each awake tick is charged as the idle
+  footprint measured on one ($0.0726 an hour), and its disk as its home
+  directory's size when it last woke (`fragment_core::budget::computer`,
+  cell/src/computer.rs). Nothing alerts anyone to a computer that stays
+  awake longer than expected (Paul, 2026-09-26: later).
+- **Risk:** a busy computer (a build, image generation) costs Paul more
+  than its owner is charged; files written outside its home are not
+  charged; a page left open keeps one awake, charged, and unnoticed.
+- **First proof:** the Sprites org's bill for a month against the
+  `computer.awake` and `computer.asleep` usage rows.
+- **Delete when:** the charge comes from what the Sprite reports it used
+  (Sprites' own usage, or its cgroup's `cpu.stat` and memory read on each
+  tick), and an owner hears of a computer awake past a bound.

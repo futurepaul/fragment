@@ -80,6 +80,14 @@ pub struct Config {
     /// the Registry keeps before it lets the oldest go (default
     /// `SIGNINS_PENDING_MAX_DEFAULT`).
     pub signins_pending_max: u64,
+    /// `FRAGMENT_COMPUTER_TICK_S` (default 60): how long a computer is held
+    /// awake, and charged, at a time; `FRAGMENT_COMPUTER_IDLE_S` (default
+    /// 300): how long it stays awake after its fragment's last page closes.
+    pub computer_tick_ms: i64,
+    pub computer_idle_ms: i64,
+    /// `FRAGMENT_CLI_RELEASE_URL`: where a computer's one-line install
+    /// fetches `fragment-<os>-<arch>.tar.gz` (default the latest release).
+    pub cli_release_url: String,
     /// `FRAGMENT_TEST_HOOKS=allow`: dev and e2e fleets only.
     pub test_hooks: bool,
     /// `FRAGMENT_DEPLOY_ID`: which deployment this is (`cargo xtask deploy`
@@ -155,6 +163,11 @@ impl Config {
                 // the registry counts rows as i64; a larger setting means "no cap to speak of"
                 .map(|n| n.min(i64::MAX as u64))
                 .unwrap_or(fragment_proto::limits::SIGNINS_PENDING_MAX_DEFAULT),
+            computer_tick_ms: var(env, "FRAGMENT_COMPUTER_TICK_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(60) * 1000,
+            computer_idle_ms: var(env, "FRAGMENT_COMPUTER_IDLE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 0).unwrap_or(300) * 1000,
+            cli_release_url: var(env, "FRAGMENT_CLI_RELEASE_URL")
+                .map(|u| u.trim_end_matches('/').to_string())
+                .unwrap_or_else(|| "https://github.com/futurepaul/fragment/releases/latest/download".into()),
             test_hooks: var(env, "FRAGMENT_TEST_HOOKS").as_deref() == Some("allow"),
             deploy_id: deploy_id(env),
         }
@@ -185,6 +198,16 @@ impl Config {
         match &self.host_suffix {
             Some(suffix) => format!("{}://{suffix}{port}", arrived.scheme()),
             None => format!("{}://{}{port}", arrived.scheme(), arrived.host_str().unwrap_or("localhost")),
+        }
+    }
+
+    /// The platform's origin as a computer's CLI reaches it: no request
+    /// names one, so the fleet's (`FRAGMENT_PLATFORM_URL`, or its suffix).
+    pub fn computer_platform(&self) -> CellResult<String> {
+        match (&self.platform_url, &self.host_suffix) {
+            (Some(p), _) => Ok(p.clone()),
+            (None, Some(suffix)) => Ok(format!("https://{suffix}")),
+            (None, None) => Err(CellError::new(ErrorCode::HostFailed, "computers need FRAGMENT_PLATFORM_URL or FRAGMENT_HOST_SUFFIX")),
         }
     }
 

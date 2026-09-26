@@ -58,7 +58,7 @@ pub(crate) mod calls;
 mod signin;
 use calls::{
     Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, ClaimUsername, Claimed, EndSession, Exchange, FindUsername, Holder, Logout, Lookup, Mint,
-    MintFrame, PairComputer, Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername, RemoveComputer, RemovedComputer,
+    MintFrame, MintPairing, PairComputer, PairWithToken, PairingToken, Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername, RemoveComputer, RemovedComputer,
     Resolve, RevokeKey, Session, SetPicture, TestHook, View, TEST_HOLD_MAX_MS,
 };
 pub use signin::SESSION_TTL_MS;
@@ -84,7 +84,11 @@ CREATE TABLE IF NOT EXISTS pictures (
   identity TEXT PRIMARY KEY, sha TEXT NOT NULL, mime TEXT NOT NULL, set_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS computers (
   identity TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL, paired_at INTEGER NOT NULL, UNIQUE (owner, name));
+CREATE TABLE IF NOT EXISTS pairings (
+  hash TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL, expires_at INTEGER NOT NULL, identity TEXT, UNIQUE (owner, name));
 ";
+/// How long a fragment's computer has to pair with the token it was handed.
+const PAIRING_TTL_MS: i64 = 3_600_000;
 
 #[durable_object]
 pub struct RegistryCell {
@@ -530,7 +534,6 @@ impl RegistryCell {
         if owner.kind != IdentityKind::Person {
             return Err(CellError::new(ErrorCode::Forbidden, "a computer's owner is a person"));
         }
-        let (owner_v, name_v) = (|| owner.id.as_str().into(), || b.name.as_str().into());
         match self.key_row(&b.key)? {
             Some(row) if !row.active() => Err(conflict("this key was revoked: pair with a new one (`fragment login --computer <name> --force`)")),
             Some(row) => {
@@ -541,20 +544,69 @@ impl RegistryCell {
                 }
                 Err(conflict("this key already belongs to someone: a computer pairs with a key of its own"))
             }
-            None => {
-                if self.count("SELECT COUNT(*) AS n FROM computers WHERE owner = ? AND name = ?", vec![owner_v(), name_v()])? > 0 {
-                    return Err(conflict(format!("you have a computer named {0}: remove it first (`fragment computers rm {0}`), or pair this one under another name", b.name)));
-                }
-                if self.count("SELECT COUNT(*) AS n FROM computers WHERE owner = ?", vec![owner_v()])? >= limits::COMPUTERS_PER_OWNER_MAX {
-                    return Err(CellError::invalid(format!("a person owns at most {} computers", limits::COMPUTERS_PER_OWNER_MAX)));
-                }
-                let computer = self.make(IdentityKind::Computer, Some(&owner.id), &b.key, &owner.id)?;
-                self.exec(
-                    "INSERT INTO computers (identity, owner, name, paired_at) VALUES (?, ?, ?, ?)",
-                    vec![computer.id.as_str().into(), owner_v(), name_v(), SqlStorageValue::Integer(js::now_ms())],
-                )?;
-                let view = self.view(&computer, Some(true))?;
-                assert!(view.name.as_deref() == Some(b.name.as_str()), "a paired computer reads back under its name");
+            None => self.new_computer(&owner.id, &b.key, &b.name),
+        }
+    }
+
+    /// A new computer `name` of `owner`'s, holding `key` (no one holds it
+    /// yet: the caller checked), in one transaction.
+    fn new_computer(&self, owner: &str, key: &str, name: &str) -> CellResult<IdentityView> {
+        if self.count("SELECT COUNT(*) AS n FROM computers WHERE owner = ? AND name = ?", vec![owner.into(), name.into()])? > 0 {
+            return Err(conflict(format!("you have a computer named {name}: remove it first (`fragment computers rm {name}`), or pair this one under another name")));
+        }
+        if self.count("SELECT COUNT(*) AS n FROM computers WHERE owner = ?", vec![owner.into()])? >= limits::COMPUTERS_PER_OWNER_MAX {
+            return Err(CellError::invalid(format!("a person owns at most {} computers", limits::COMPUTERS_PER_OWNER_MAX)));
+        }
+        let computer = self.make(IdentityKind::Computer, Some(owner), key, owner)?;
+        self.exec(
+            "INSERT INTO computers (identity, owner, name, paired_at) VALUES (?, ?, ?, ?)",
+            vec![computer.id.as_str().into(), owner.into(), name.into(), SqlStorageValue::Integer(js::now_ms())],
+        )?;
+        let view = self.view(&computer, Some(true))?;
+        assert!(view.name.as_deref() == Some(name), "a paired computer reads back under its name");
+        Ok(view)
+    }
+
+    /// A token that pairs a fragment's own computer (named by its fragment)
+    /// for its owner: the platform hands it to the Sprite it made, which
+    /// pairs with a key it made itself. One a name: a new one replaces it.
+    fn mint_pairing(&self, b: MintPairing) -> CellResult<PairingToken> {
+        assert!(fragment_proto::valid_fragment_name(&b.name), "a fragment's computer is named by its fragment");
+        if self.named_identity(&b.owner)?.kind != IdentityKind::Person {
+            return Err(CellError::host(format!("{} is not a person, and owns no computer", b.owner)));
+        }
+        let token = signin::fresh_token();
+        self.exec(
+            "INSERT INTO pairings (hash, owner, name, expires_at) VALUES (?, ?, ?, ?)
+             ON CONFLICT (owner, name) DO UPDATE SET hash = excluded.hash, expires_at = excluded.expires_at, identity = NULL",
+            vec![signin::sha(&token).into(), b.owner.as_str().into(), b.name.as_str().into(), SqlStorageValue::Integer(js::now_ms() + PAIRING_TTL_MS)],
+        )?;
+        Ok(PairingToken { token })
+    }
+
+    /// A key pairs as the computer a token names, spending it; the same key
+    /// again answers the same computer.
+    fn pair_with_token(&self, b: PairWithToken) -> CellResult<IdentityView> {
+        #[derive(Deserialize)]
+        struct Pairing {
+            owner: String,
+            name: String,
+            expires_at: i64,
+            identity: Option<String>,
+        }
+        check_key(&b.key)?;
+        let refused = || unauthenticated("this pairing token expired, was spent, or was never made: its fragment's next deploy makes the computer again");
+        let hash = signin::sha(&b.token);
+        let p = self.row::<Pairing>("SELECT owner, name, expires_at, identity FROM pairings WHERE hash = ?", vec![hash.as_str().into()])?.ok_or_else(refused)?;
+        let held = self.key_row(&b.key)?;
+        match (p.identity, held) {
+            (Some(id), Some(k)) if k.identity == id && k.active() => self.view(&self.stored_identity(&id, "a pairing")?, Some(false)),
+            (Some(_), _) => Err(refused()),
+            (None, _) if p.expires_at <= js::now_ms() => Err(refused()),
+            (None, Some(_)) => Err(conflict("this key already belongs to someone: a computer pairs with a key of its own")),
+            (None, None) => {
+                let view = self.new_computer(&p.owner, &b.key, &p.name)?;
+                self.exec("UPDATE pairings SET identity = ? WHERE hash = ?", vec![view.id.as_str().into(), hash.as_str().into()])?;
                 Ok(view)
             }
         }
@@ -574,12 +626,12 @@ impl RegistryCell {
             return Err(CellError::invalid(format!("{} is your agent, not a computer", computer.id)));
         }
         let id = || computer.id.as_str().into();
-        let paired = self.computer_name(&computer.id)?.is_some();
+        let name = self.computer_name(&computer.id)?;
         self.exec("UPDATE keys SET revoked_at = ? WHERE identity = ? AND revoked_at IS NULL", vec![SqlStorageValue::Integer(js::now_ms()), id()])?;
         self.exec("DELETE FROM computers WHERE identity = ?", vec![id()])?;
         let active = self.count("SELECT COUNT(*) AS n FROM keys WHERE identity = ? AND revoked_at IS NULL", vec![id()])?;
         assert!(active == 0, "a removed computer holds no active key");
-        Ok(RemovedComputer { identity: computer, removed: paired })
+        Ok(RemovedComputer { identity: computer, removed: name.is_some(), name })
     }
 
     /// The identity a call names (`None`: the asker's own).
@@ -755,6 +807,8 @@ impl RegistryCell {
             ApproveKey::PATH => reply::<ApproveKey>(self.add_by_session(body(&bytes)?)),
             PairComputer::PATH => reply::<PairComputer>(self.pair_computer(body(&bytes)?)),
             RemoveComputer::PATH => reply::<RemoveComputer>(self.remove_computer(body(&bytes)?)),
+            MintPairing::PATH => reply::<MintPairing>(self.mint_pairing(body(&bytes)?)),
+            PairWithToken::PATH => reply::<PairWithToken>(self.pair_with_token(body(&bytes)?)),
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
         }
     }

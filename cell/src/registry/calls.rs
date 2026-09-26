@@ -122,6 +122,9 @@ pub(crate) struct RemovedComputer {
     pub identity: Identity,
     /// Whether this call removed it (again: `false`).
     pub removed: bool,
+    /// Its name, when this call removed it: a fragment's own computer is
+    /// named by its fragment, whose Sprite goes too.
+    pub name: Option<String>,
 }
 
 impl Call for RemoveComputer {
@@ -130,6 +133,39 @@ impl Call for RemoveComputer {
     fn checked(answer: RemovedComputer) -> CellResult<RemovedComputer> {
         Ok(RemovedComputer { identity: identity_checked(answer.identity)?, ..answer })
     }
+}
+
+/// `POST /computers/mint`: a single-use token (an hour good) that pairs
+/// `owner`'s computer `name` (a fragment's own, named by its fragment),
+/// for the Sprite the platform made for it; a new one replaces the last.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct MintPairing {
+    pub owner: String,
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PairingToken {
+    pub token: String,
+}
+
+impl Call for MintPairing {
+    const PATH: &'static str = "/computers/mint";
+    type Answer = PairingToken;
+}
+
+/// `POST /computers/redeem`: a key pairs as the computer a token names
+/// (the router checked the key signed the request). Again, by the same
+/// key, the same computer.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PairWithToken {
+    pub token: String,
+    pub key: String,
+}
+
+impl Call for PairWithToken {
+    const PATH: &'static str = "/computers/redeem";
+    type Answer = IdentityView;
 }
 
 /// A key changed on an identity (`None`: the asker's own) by `by` (its

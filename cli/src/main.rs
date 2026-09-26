@@ -59,6 +59,10 @@ enum Cmd {
         /// those it makes for you), never as you
         #[arg(long, value_name = "NAME")]
         computer: Option<String>,
+        /// Pair as a fragment's own computer, with the single-use token the
+        /// platform hands its Sprite on stdin (the platform runs this)
+        #[arg(long, conflicts_with_all = ["computer", "no_wait"])]
+        pair: bool,
         /// Print the approval link and return (run `fragment login` again after approving)
         #[arg(long)]
         no_wait: bool,
@@ -745,7 +749,7 @@ fn run(cli: Cli) -> Result<()> {
     let j = cli.json || json_env_flag();
 
     match cli.cmd {
-        Cmd::Login { force, no_wait, no_browser, computer } => {
+        Cmd::Login { force, no_wait, no_browser, computer, pair } => {
             if computer.as_deref().is_some_and(|n| !fragment_proto::valid_label(n)) {
                 return Err(usage("a computer's name is a label: lowercase letters, digits, and single dashes, at most 63"));
             }
@@ -763,7 +767,15 @@ fn run(cli: Cli) -> Result<()> {
                     _ => c.call_as(r).map(Some),
                 }
             };
-            let mut done = me()?;
+            let mut done = match pair {
+                // this key, made here, pairs with the token: it never leaves this machine
+                true => {
+                    let mut token = String::new();
+                    std::io::stdin().read_to_string(&mut token)?;
+                    Some(c.call_as(c.post_json("/api/computers/pair", &json!({ "token": token.trim() }))?)?)
+                }
+                false => me()?,
+            };
             // a computer pairs with a key of its own: one that signs as someone else stays theirs
             if let (Some(name), Some(v)) = (&computer, &done) {
                 if v.name.as_ref() != Some(name) {

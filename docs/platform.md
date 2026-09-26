@@ -77,6 +77,16 @@ has its owner's own agent answer by the same block (`"personal": true`),
 so no platform code names a template (`cell/src/agents.rs`,
 `sync_agent`).
 
+## Resources a fragment declares
+
+- `computer` (`"computer": {}`, docs/computers.md): a Sprite of its own,
+  made on the deploy that declares it and paired as a computer its owner
+  owns, an editor of the fragment. Declaring is enough (Paul,
+  2026-09-26: resources are declarative, and the owner pays for what the
+  fragment spends); it is awake while a page is open, and destroyed only
+  by `fragment computers rm`. The platform holds the Sprites token in the
+  node (`KEYS`); each `Computer` cell reaches only its own Sprite.
+
 ## Behavior no fragment declares
 
 - **Which of a browser's cookies count** on a fragment's origin follows

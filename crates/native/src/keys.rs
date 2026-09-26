@@ -25,6 +25,12 @@
 //!   answer's refresh token is dropped.
 //! - `openrouter/keys {method, hash?, body?}` → `{status, body}`:
 //!   OpenRouter's key API with the management key, for `Ledger` cells only.
+//! - `sprites {op, cmd?, stdin?}` → `{status, body, sprite}` (`body` the
+//!   answer's text): the Sprites API with the fleet's token, for `Computer`
+//!   cells only, on one Sprite each: `fragment-` and the first 24 hex of
+//!   the caller's id (`sprite_of`), so no cell reaches another's Sprite or
+//!   anything else in the org. `op` is `create`, `get`, `delete`, or
+//!   `exec` (`cmd` its argv, `stdin` its input).
 //!
 //! The outbound calls go straight from the node to the operator-configured
 //! hosts (`FRAGMENT_KEYS_*_URL`), not through a Worker's egress.
@@ -51,6 +57,12 @@ const CODESTORAGE_SCOPES: [&str; 4] = ["git:read", "git:write", "repo:write", "o
 const CODESTORAGE_CLASS: &str = "Fragment";
 const WORKOS_CLASS: &str = "Registry";
 const OPENROUTER_CLASS: &str = "Ledger";
+const SPRITES_CLASS: &str = "Computer";
+/// An exec runs until its command ends (a computer's first boot installs
+/// the CLI and pairs), and its answer is kept to this much text.
+const SPRITES_TIMEOUT: Duration = Duration::from_secs(180);
+const SPRITES_ANSWER_MAX_BYTES: usize = 64 * 1024;
+const SPRITES_ARGV_MAX: usize = 32;
 
 /// A credential for one operator-configured host.
 pub struct Outbound {
@@ -66,6 +78,7 @@ pub struct Config {
     pub codestorage: Option<Result<(String, OrgKey), String>>,
     pub workos: Option<Outbound>,
     pub openrouter: Option<Outbound>,
+    pub sprites: Option<Outbound>,
 }
 
 pub struct Keys {
@@ -110,7 +123,8 @@ impl Keys {
     /// The node's keys: `FRAGMENT_KEYS_HOST_SECRET` (and `_PREVIOUS` during
     /// a rotation), `FRAGMENT_KEYS_CODESTORAGE_ORG` and `_PRIVATE_KEY`,
     /// `FRAGMENT_KEYS_WORKOS_API_KEY` (`_URL`), and
-    /// `FRAGMENT_KEYS_OPENROUTER_MANAGEMENT_KEY` (`FRAGMENT_KEYS_OPENROUTER_URL`).
+    /// `FRAGMENT_KEYS_OPENROUTER_MANAGEMENT_KEY` (`FRAGMENT_KEYS_OPENROUTER_URL`),
+    /// and `FRAGMENT_KEYS_SPRITES_TOKEN` (`FRAGMENT_KEYS_SPRITES_URL`).
     pub fn from_env() -> Keys {
         let host_secrets = ["FRAGMENT_KEYS_HOST_SECRET", "FRAGMENT_KEYS_HOST_SECRET_PREVIOUS"].iter().filter_map(|n| env(n)).collect();
         let codestorage = match (env("FRAGMENT_KEYS_CODESTORAGE_ORG"), env("FRAGMENT_KEYS_CODESTORAGE_PRIVATE_KEY")) {
@@ -123,6 +137,7 @@ impl Keys {
             codestorage,
             workos: outbound_from_env("FRAGMENT_KEYS_WORKOS_API_KEY", "FRAGMENT_KEYS_WORKOS_URL", "https://api.workos.com"),
             openrouter: outbound_from_env("FRAGMENT_KEYS_OPENROUTER_MANAGEMENT_KEY", "FRAGMENT_KEYS_OPENROUTER_URL", "https://openrouter.ai"),
+            sprites: outbound_from_env("FRAGMENT_KEYS_SPRITES_TOKEN", "FRAGMENT_KEYS_SPRITES_URL", "https://api.sprites.dev"),
         })
     }
 
@@ -166,6 +181,7 @@ impl Config {
             "codestorage/token" => self.codestorage_token(caller, &body),
             "workos/authenticate" => self.workos(caller, &body).await,
             "openrouter/keys" => self.openrouter_keys(caller, &body).await,
+            "sprites" => self.sprites(caller, &body).await,
             p => Err(Response::error(404, format!("no route POST /{p}"))),
         };
         answer.unwrap_or_else(|r| r)
@@ -309,6 +325,51 @@ impl Config {
     }
 }
 
+/// The one Sprite a `Computer` cell reaches: named for its id, which the
+/// host attests.
+pub fn sprite_of(caller: &str) -> String {
+    let hex = caller.split_once(':').map_or("", |(_, h)| h);
+    assert!(hex.len() >= 24, "a cell's scope ends in its 64-hex id");
+    format!("fragment-{}", &hex[..24])
+}
+
+impl Config {
+    async fn sprites(&self, caller: &str, body: &Value) -> Result<Response, Response> {
+        only(caller, SPRITES_CLASS, "the Sprites API")?;
+        let sp = self.sprites.as_ref().ok_or_else(|| Response::error(503, "FRAGMENT_KEYS_SPRITES_TOKEN is not set on this node"))?;
+        let sprite = sprite_of(caller);
+        let base = format!("{}/v1/sprites", sp.base);
+        let req = match str_field(body, "op")? {
+            "create" => sprites_client().post(base).json_body(&json!({ "name": sprite })),
+            "get" => sprites_client().get(format!("{base}/{sprite}")),
+            "delete" => sprites_client().delete(format!("{base}/{sprite}")),
+            "exec" => {
+                let argv: Vec<&str> = body["cmd"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+                if argv.is_empty() || argv.len() > SPRITES_ARGV_MAX {
+                    return Err(Response::error(400, format!("cmd is 1..={SPRITES_ARGV_MAX} strings")));
+                }
+                let mut query: Vec<(&str, &str)> = argv.into_iter().map(|a| ("cmd", a)).collect();
+                let stdin = body["stdin"].as_str().unwrap_or("");
+                if !stdin.is_empty() {
+                    query.push(("stdin", "true"));
+                }
+                sprites_client().post(format!("{base}/{sprite}/exec")).query(&query).body(stdin.to_string())
+            }
+            op => return Err(Response::error(400, format!("op {op:?} is create, get, delete, or exec"))),
+        };
+        let resp = req.bearer_auth(&sp.key).send().await.map_err(|e| Response::error(502, format!("Sprites did not answer: {}", e.without_url())))?;
+        let status = resp.status().as_u16();
+        let bytes = resp.bytes().await.map_err(|e| Response::error(502, format!("Sprites' answer: {}", e.without_url())))?;
+        let text = String::from_utf8_lossy(&bytes[..bytes.len().min(SPRITES_ANSWER_MAX_BYTES)]).into_owned();
+        Ok(Response::json(200, &json!({ "status": status, "body": text, "sprite": sprite })))
+    }
+}
+
+fn sprites_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| reqwest::Client::builder().timeout(SPRITES_TIMEOUT).build().expect("a reqwest client builds"))
+}
+
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| reqwest::Client::builder().timeout(OUTBOUND_TIMEOUT).build().expect("a reqwest client builds"))
@@ -352,6 +413,7 @@ mod tests {
             codestorage: Some(OrgKey::from_pem(&pem).map(|k| ("org".to_string(), k))),
             workos: None,
             openrouter: None,
+            sprites: None,
         })
     }
 
@@ -462,5 +524,10 @@ mod tests {
         // the right class, on a node without the credential
         assert_eq!(call(&k, Some("Registry:dddd"), "POST", "workos/authenticate", json!({ "clientId": "c", "code": "x" })).0, 503);
         assert_eq!(call(&k, Some(LEDGER), "POST", "openrouter/keys", json!({ "method": "GET" })).0, 503);
+        assert_eq!(call(&k, Some(ALICE), "POST", "sprites", json!({ "op": "get" })).0, 403);
+        assert_eq!(call(&k, Some("Computer:eeee"), "POST", "sprites", json!({ "op": "get" })).0, 503);
+        // each computer cell reaches its own Sprite, named for its id
+        let id = "0123456789abcdef".repeat(4);
+        assert_eq!(sprite_of(&format!("Computer:{id}")), "fragment-0123456789abcdef01234567");
     }
 }

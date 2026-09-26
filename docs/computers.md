@@ -1,117 +1,111 @@
-# Computers: a fragment's own machine (design, the next step)
+# Computers: a fragment's own machine
 
-Status: design only, 2026-09-26 (ROADMAP phase E's second half). Nothing
-here is built. What is built (decision 21): a computer is an identity
-(docs/api.md, Identities). A person pairs a
-machine with `fragment login --computer <name>`, and from then on it signs
-as that computer, never as them. It works only in fragments where it is a
-member and in the fragments it makes. Those are its owner's, on its
-owner's budget. `fragment computers rm` revokes its keys and removes its
-memberships.
+Status, 2026-09-26 (ROADMAP phase E). Built:
 
-The next step: a fragment declares a computer, and the platform provisions
-a Sprite for it (ROADMAP decision 5).
+- **Computers are identities** (decision 21; docs/api.md, Identities). A
+  person pairs a machine with `fragment login --computer <name>`, and from
+  then on it signs as that computer, never as them. It works only in
+  fragments where it is a member and in the fragments it makes, which are
+  its owner's, on its owner's budget. `fragment computers rm` revokes its
+  keys and removes its memberships.
+- **A fragment declares one** (`"computer": {}`; docs/api.md, Apps), and
+  the platform gives it a Sprite: the rest of this page.
 
-## The shape
+## Paul's answers (2026-09-26)
 
-1. **Declared.** `fragment.json` asks for one:
-   `"computer": {"services": ["desktop"], "setup": "computer/setup.sh"}`.
-   `services` names platform-provided Sprite services. `desktop` is Xvfb,
-   Chromium, and a control endpoint for screenshots, clicks, and typing,
-   ported from finite-next's `computer/*`. `setup` names a script in the
-   repo that runs once on the Sprite. Declaring works like the `frame`
-   capability (docs/platform.md): the owner allows it once in the share
-   sheet, because a computer costs money and an agent can rewrite a
-   manifest.
-2. **Provisioned.** On a deploy whose live manifest declares a computer
-   the owner allowed, the fragment asks its `Computer` cell (one per
-   Sprite, decision 5) to ensure one. The cell creates the Sprite
-   through `KEYS`, which holds the Sprites token. It installs the
-   `fragment` CLI, a Linux release built with `computer`. Then it runs
-   `fragment login --computer <label> --no-wait --json` there and
-   registers the returned key and proof directly with the registry, as
-   the owner (a `PairComputer` by `By::Identity`, as
-   `agents::own_agent` registers an agent). The key is made on the Sprite
-   and never leaves it. The proof of possession is checked as on `/cli`.
-3. **A member.** Platform code adds the computer to the fragment as an
-   editor for its owner, as `join_owners_agent` does for a chat's agent.
-   It is a member like any other: it can call, post, sync, and deploy,
-   and it can make fragments for its owner. One fragment spawning a
-   computer to build a fancier fragment needs nothing more.
-4. **Running.** The Sprite runs `fragment sync <fragment> --watch` (files
-   both ways) and the declared services. It talks back with the CLI as
-   itself: `fragment call`, `fragment post`, `fragment channel --follow`.
-   The fragment reaches it by connecting out, as `fragment computer
-   connect` does today, but signed with its key instead of a bearer
-   token. That settles docs/finite-integration.md's "reaching a computer
-   on a Sprite" for fragment: no Sprite URL and no second token. App
-   code gets `job.computer(tool, args)`, a durable job step over the
-   `computer serve` call protocol, keyed by step id.
-5. **Removed.** Deleting the fragment, or `fragment computers rm`,
-   revokes the computer's keys and destroys its Sprite. Destroying a
-   Sprite is irreversible, so the owner confirms it.
+1. **Sprites org:** the org used for Sprites so far. Its token is the
+   node secret `FRAGMENT_KEYS_SPRITES_TOKEN`, used only by `KEYS`.
+2. **Cost:** list price for awake time and disk, to the fragment owner's
+   budget.
+3. **Idle policy:** awake while a job step needs it, then asleep 5
+   minutes after the last page viewer leaves. Never destroyed
+   automatically. Alerts about "accidentally awake" Sprites come later
+   (docs/technical-debt-ledger.md).
+4. **Grant:** none. Resources are declarative: declaring `"computer"`
+   provisions one on deploy, and the owner pays, as for everything a
+   fragment spends.
+5. **Model calls:** through the platform, signed with the computer's own
+   key, on the model the agents in cells use (the next PR).
+
+## How it works
+
+1. **Declared.** A deploy whose live `fragment.json` has `"computer": {}`
+   tells the fragment's `Computer` cell (one per fragment, named by it;
+   `cell/src/computer.rs`). A deploy without it tells it too.
+2. **Made.** The cell's alarm charges a tick, makes the Sprite through
+   `KEYS`, and runs its first boot there: the one-line install of the
+   CLI's release, then `fragment login --pair`. A `Computer` cell reaches
+   only the Sprite named for its own id (`fragment-` and 24 hex:
+   crates/native `sprite_of`), so no cell can touch another Sprite in the
+   org.
+3. **Paired.** The boot's stdin carries a single-use token the registry
+   minted for the fragment's owner (an hour good). The CLI makes its key
+   on the Sprite and pairs with the token (`POST /api/computers/pair`,
+   signed by that key), so the key never leaves the Sprite. The computer
+   is named by its fragment (`pet.paul`), and the platform makes it an
+   editor there.
+4. **Awake and asleep.** A page opening on the fragment wakes it. Each
+   tick (a minute) it is charged first, then held awake through the
+   Sprite's Tasks API (a hold that expires after two ticks). Each tick,
+   the cell asks the fragment for open pages; 5 minutes after the last
+   one closes, the hold is released and the Sprite pauses itself. A job
+   step will wake it the same way (`Wake`), with `job.computer`. A tick
+   that does not fit the budget lets it sleep (`computer.budget`).
+5. **Billed at list price.** Sprites meter the CPU and memory a Sprite
+   actually uses, which the platform cannot see, so an awake hour is
+   billed as the idle footprint measured on one: a tenth of a CPU
+   ($0.07 a CPU-hour) and 1.5 GB ($0.04375 a GB-hour), $0.0726 an hour.
+   Its disk (its home directory, measured each time it wakes) costs
+   $0.000683 a GB-hour awake and $0.000027 asleep, charged when it next
+   wakes (`fragment_core::budget::computer`).
+6. **Kept or destroyed.** Dropping the block lets it sleep and keeps it.
+   `fragment computers rm <fragment>` destroys its Sprite and revokes its
+   keys. The fragment's next deploy that declares one makes a new one.
 
 The only credential a computer holds is its own key, in its CLI config
-(0600) on the Sprite's disk (decision 21). Proposed:
-its model calls go through the platform, signed with that key and billed
-to the fragment's owner, instead of the Sprites connectors docs/secrets.md
-planned. Then revoking the key cuts off everything at once.
+(0600) on the Sprite's disk (decision 21).
 
-## How a page shows it: a CUA "pet"
+## Running the first real one
 
-The page is the fragment's own UI. The computer stays out of sight.
+`fleets/fragment-club.json` names the token's file
+(`~/.config/finite-next/secrets/sprites-token`, in `node_secrets`). Until
+that file exists, a deploy leaves the secret out and says so
+(`xtask/src/deploy.rs`, `OPTIONAL_NODE_SECRETS`): everything else deploys,
+and a fragment that declares a computer waits (`computer.failed`, "not set
+on this node", retried at least hourly). Once Paul makes the file, a
+`cargo xtask deploy fragment-club --secrets` sets it (and restarts the
+Machines), and the node and cell deploy as usual. Then, as one person, on a scratch fragment:
 
-- The desktop service takes a screenshot on each change (at most one a
-  second). The computer stores it as a blob and posts `{sha, at}` to a
-  declared `screen` channel. The page shows the newest frame. Everyone
-  viewing sees the same frame live, because channels are multiplayer
-  already.
-- Input goes the other way. The page calls operations (`poke {x, y}`,
-  `type {text}`) that append to a `control` channel. The computer
-  follows that channel, applies each record once (keyed by its seq), and
-  then posts the next frame.
-- An agent drives it the same way, through those operations. A
-  VNC-grade stream, a Sprite HTTP service proxied by the platform, can
-  come later if a frame a second is too slow.
+1. `fragment create pet-smoke`, then deploy a folder whose
+   `fragment.json` is `{"computer": {}}`.
+2. Within a minute or two, `fragment events pet-smoke` shows
+   `computer.ready`, `fragment computers` lists `pet-smoke.<you>`, and
+   `fragment members list pet-smoke` shows it as an editor. A
+   `computer.failed` event names the step and Sprites' answer.
+3. Open the fragment's page: `sprite list` shows its Sprite running.
+   Close it: after 5 minutes and a tick, it is warm, then cold.
+   `fragment budget usage` shows `computer.awake` rows.
+4. `fragment computers rm pet-smoke.<you>`: the Sprite is gone from
+   `sprite list`.
 
-## What it needs from Paul
+Things only the real one shows: the exec answer's shape (the cell reads
+the last number `du -sk` printed), the install's time (the exec waits up
+to 180 s), and whether `sprite-env curl` holds it awake from an exec.
 
-- **The Sprites token and where it lives.** Today's token is org
-  `paul-miller` (`~/Downloads/sprite-token.txt`, per
-  docs/finite-next-lessons.md). The proposal is a dedicated org for
-  fragment.club. Its token becomes a node secret
-  (`FRAGMENT_SPRITES_TOKEN`, set as a Fly secret from a file) that only
-  `KEYS` uses, as with the WorkOS and OpenRouter management keys. No
-  cell and no computer ever holds it. Per decision 13, an owner's own
-  Sprites token comes later.
-- **The cost.** At $0.07 per CPU-hour and $0.04375 per GB-hour, a mostly
-  idle 1.5 GB computer costs about $0.076 per awake hour. A 10 GB disk
-  costs about $5 a month hot and $0.20 a month cold. The proposal is to
-  charge awake hours and disk to the owner's monthly budget as usage
-  rows (decision 14), reserving an hour at each wake. On the default
-  $20 budget, that is about 250 awake hours. The org is capped at 10
-  running and 10 warm Sprites, so the fleet runs at most 10 at once
-  until Fly raises it. Paul decides whether it is list price or a
-  markup, and whether there is a per-person cap on computers.
-- **The idle policy.** Sprites pause themselves about 30 s after
-  activity (warm) and go cold later. The `Computer` cell's alarm needs:
-  how long a job or an open page keeps it awake (proposed: while a job
-  step runs, through a Sprites Task, plus 5 minutes after the last page
-  viewer), and whether and when an unused computer is destroyed
-  (proposed: never automatically; a cold disk costs cents).
-- **The grant.** Does the owner allow each fragment's computer once in
-  the share sheet (proposed), or does declaring it provision one on
-  deploy?
-- **Model access.** Should a computer's model calls go through the
-  platform, signed by its key (proposed), instead of Sprites connectors?
+## Next
 
-## Order of work
-
-1. The Sprites adapter in `KEYS` and the `Computer` cell (create, wake,
-   destroy, alarm), against a Sprites fake in `crates/fakes`.
-2. A Linux release artifact of the CLI with `computer`.
-3. Platform pairing (`By::Identity`) and the computer's membership.
-   Connect-out signed by the computer's key replaces the connect token.
-4. The desktop service and a `pet` template, with a browser e2e.
-5. Budget rows for awake hours and disk. Then one live Sprite on
-   fragment.club, with Paul's go.
+- **Model calls** through the platform, signed by the computer's key (the
+  next PR).
+- **How a page shows it: a CUA "pet".** A declared `desktop` service
+  (Xvfb, Chromium, and a control endpoint, from finite-next's
+  `computer/*`) takes a screenshot on each change (at most one a second),
+  stores it as a blob, and posts `{sha, at}` to a declared `screen`
+  channel: every viewer sees the same frame live. The page calls
+  operations (`poke {x, y}`, `type {text}`) that append to a `control`
+  channel, which the computer follows and applies once each (keyed by
+  seq). An agent drives it through the same operations.
+- **`job.computer(tool, args)`**, a durable job step over the `computer
+  serve` call protocol, waking the computer for the step.
+- **Alerts** about computers awake longer than expected, and what a
+  deleted fragment's computer becomes (today it stays, asleep, until
+  `fragment computers rm`).

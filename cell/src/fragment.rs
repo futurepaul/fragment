@@ -336,6 +336,11 @@ pub(crate) enum MetaKey {
     AgentLive,
     /// The agent the platform last made answer here, and on which channel.
     AgentJoined,
+    /// What its computer is still to be told: `1` live declares one, `0`
+    /// it no longer does (computer.rs).
+    ComputerPending,
+    /// Its computer was last told live declares one.
+    ComputerDeclared,
     /// The commits the cell pins (plane.rs).
     PinMain,
     PinLive,
@@ -400,6 +405,8 @@ impl MetaKey {
             MetaKey::AgentPending => "agent_pending",
             MetaKey::AgentLive => "agent_live",
             MetaKey::AgentJoined => "agent_joined",
+            MetaKey::ComputerPending => "computer_pending",
+            MetaKey::ComputerDeclared => "computer_declared",
             MetaKey::PinMain => "pin_main",
             MetaKey::PinLive => "pin_live",
             MetaKey::PinsCheckedAt => "pins_checked_at",
@@ -786,6 +793,14 @@ impl FragmentCell {
             let report = body_json(&mut req).await?;
             return json_response(&self.delivery_report(&report)?);
         }
+        if let Some(what) = path.strip_prefix("/computer/") {
+            // Only its computer sets the header; the router never passes it.
+            if req.headers().get(crate::computer::HEADER)?.is_none() {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            let what = what.to_string();
+            return self.computer_asks(&what, &body_json::<Value>(&mut req).await?);
+        }
         if let Some(op) = path.strip_prefix("/cap/files/") {
             // Only the `Files` capability sets the header; the router never passes it.
             if req.headers().get(crate::files::CAP_HEADER)?.as_deref() != Some("files") {
@@ -1129,6 +1144,7 @@ impl FragmentCell {
         } else if let Err(e) = self.sync_agent().await {
             self.event("agent.join-failed", &e.message, json!({ "code": e.code }));
         }
+        self.tell_computer().await;
         self.drain_deliveries().await;
         // Settles pending mutations that are due; one that fails waits for
         // its own next try and never fails the alarm.

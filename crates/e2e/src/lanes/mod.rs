@@ -52,6 +52,7 @@ const LANES: &[Lane] = &[
     identities::identities,
     signin::signin,
     computers::computers,
+    computers::sprites,
     members::secrets,
     plane::files,
     plane::deploy,

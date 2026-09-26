@@ -184,6 +184,11 @@ fragment verify my-thing --dir .            # full-content audit
 - `input` is a JSON Schema (types, enums, lengths, ranges, `properties`,
   `required`, `additionalProperties`, `items`). A call that does not fit
   is refused before your code runs, naming the field.
+- `"computer": {}` gives the fragment a Linux machine of its own (a Fly
+  Sprite) with this CLI installed, paired as your computer and an editor
+  of the fragment. It is awake while a page of the fragment is open (and
+  5 minutes after), billed to your budget; `fragment computers rm
+  <fragment>` destroys it.
 
 ```js
 // app.mjs

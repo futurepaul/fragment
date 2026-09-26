@@ -224,6 +224,7 @@ random bytes, the registry keeps their SHA-256).
 | `POST /auth/fragment?name=&return=` | that page's form (`form`, its token): the yes, remembered, then → the fragment's `__signin?token=` (303); another origin, or a missing or stale token, 403 |
 | `GET /cli?key=<npub>&proof=` | the link `fragment login` prints: `proof` is the key's own NIP-98 event for `POST <platform>/cli/approve`, good for ten minutes (the proof of possession; without it, stale, or by another key: 400). Signed in: a page showing the key's last eight characters, to compare with the terminal, and an Add button; signed out: → sign in first, keeping the link |
 | `GET /cli?key=&proof=&computer=<name>` | the link `fragment login --computer <name>` prints: the proof is for `POST <platform>/cli/approve?computer=<name>`, so it pairs that computer and nothing else (the same key without the name, or under another, is 400). The page says it is a computer named `<name>`, owned by the person, acting only in the fragments they add it to and those it makes (theirs, on their budget), never as them; and a Pair button |
+| `POST /api/computers/pair` | signed by a new key | `{token}` → the computer the token names (a fragment's own, which its Sprite was handed at its boot), holding that key, now an editor of its fragment; again by the same key, the same one; a spent, expired, or unknown token 401 |
 | `POST /cli/approve` | the page's form (`key`, `proof`, `computer`): the key joins the signed-in person at once, or, with `computer`, becomes their new computer of that name (again, the same one; a name they already use is 409); a key someone else holds, or a revoked one, is 409; another origin 403; the CLI waits for `GET /api/identities/me` to answer. People themselves come only from sign-in (`POST /api/identities {kind: "person"}` is 400), and computers from this page (`{kind: "computer"}` is 400) |
 
 On fragment.club the platform is cross-site from every fragment
@@ -484,6 +485,21 @@ keeps the last good code and says why in `status.code.error`.
   platform honors only once the owner allows it too (the share sheet, or
   the new-fragment form that made it).
   Any other name is refused at deploy.
+- `"computer": {}` gives the fragment a computer of its own (it takes no
+  settings yet; docs/computers.md). The deploy that declares it makes a
+  Sprite (its `Computer` cell, through `KEYS`), which installs the CLI's
+  release (the one-line install, from `FRAGMENT_CLI_RELEASE_URL`) and
+  pairs as a computer the fragment's owner owns, named by the fragment,
+  with a single-use token it is handed on stdin (`fragment login
+  --pair`); the platform makes it an editor of the fragment. It is held
+  awake while a page of the fragment is open and `FRAGMENT_COMPUTER_IDLE_S`
+  (300) after the last closes; each `FRAGMENT_COMPUTER_TICK_S` (60) awake
+  is charged to the owner first, at list price, and its disk asleep when
+  it next wakes (`computer.awake`, `computer.asleep` usage). A tick that
+  does not fit the budget lets it sleep. A deploy without the block keeps
+  it asleep; `fragment computers rm <fragment>` destroys it. Its steps
+  are in the fragment's `events` (`computer.ready`, `computer.failed`,
+  `computer.budget`, `computer.destroyed`).
 - `input` is a JSON Schema in a bounded subset (`crates/core/src/schema.rs`:
   types, `enum`, `const`, lengths, ranges, `items`, `properties`,
   `required`, `additionalProperties`, counts; annotations allowed; any

@@ -93,11 +93,11 @@ pub(super) fn migrate(sql: &SqlStorage) {
     }
 }
 
-fn sha(token: &str) -> String {
+pub(super) fn sha(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
-fn fresh_token() -> String {
+pub(super) fn fresh_token() -> String {
     hex::encode(js::random_bytes::<32>())
 }
 
