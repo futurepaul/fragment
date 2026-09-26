@@ -12,7 +12,7 @@ use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
 use super::signin::{site_cookie, with_session};
-use crate::api::{url_enc, Api, Call, Reply};
+use crate::api::{url_enc, Api, Call, Reply, Socket};
 use crate::Suite;
 
 /// A person with a CLI key and a platform session.
@@ -346,5 +346,28 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         stored.iter().all(|r| r.status == 200) && got["jpeg"] == JPEG && got["title"] == "Hello from your pet" && got["driver"] == viewer_id.as_str() && got["width"] == 8,
         format!("{} / {screen}", stored[1]),
     );
+
+    // its computer runs start from the live files: shown a fixed screen (as
+    // off a Sprite), it stores that frame, and follows control
+    let mut manifest = m.body.clone();
+    manifest["computer"]["start"] = json!("PET_FAKE_SCREEN=computer/screen.jpg node computer/pet.mjs");
+    let files = json!({ "files": [{ "path": "fragment.json", "text": manifest.to_string() }, { "path": "computer/screen.jpg", "base64": JPEG }] });
+    let page = Socket::open(api, &name, "__live", Some(owner), None)?;
+    let wrote = api.signed(owner, "POST", &format!("/api/f/{name}/files"), Some(&files))?;
+    let deployed = api.signed(owner, "POST", &format!("/api/f/{name}/deploy"), None)?;
+    let screen = || api.op(&viewer, &name, "screen", "s2", json!({})).map(|r| r.body["result"].clone()).unwrap_or_default();
+    let shown = s.eventually(Duration::from_secs(60), || screen()["width"] == 1024 && screen()["jpeg"] == JPEG);
+    s.ok("its computer runs start from the live files: shown a fixed screen, it stores that frame", wrote.status == 200 && shown, format!("{deployed} / {}", screen()));
+    let owner_id = api.identity(owner)?;
+    let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/control"), Some(&json!({ "id": "p3", "body": { "kind": "key", "key": "Enter" } })))?;
+    let drove = s.eventually(Duration::from_secs(20), || screen()["driver"] == owner_id.as_str());
+    let log = std::fs::read_to_string(s.scratch.join("sprites/sprites").join(&sprite).join("fragment.log")).unwrap_or_default();
+    let seq = r.body["record"]["seq"].clone();
+    s.ok(
+        "and follows control: a signed-in poster's record, taken once, makes them its driver; an anonymous one's is skipped",
+        drove && log.matches(&format!("#{seq} {{")).count() == 1 && log.contains("not signed in, ignored"),
+        &log,
+    );
+    page.close();
     Ok(())
 }
