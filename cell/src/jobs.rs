@@ -775,6 +775,8 @@ impl FragmentCell {
             ai @ (Step::AiText(_) | Step::AiImage(_) | Step::AiVideoStart(_) | Step::AiVideoPoll { .. } | Step::AiVideoSave { .. }) => {
                 self.step_ai(run, index, &ai).await
             }
+            Step::AgentStart(turn) => self.step_agent_start(run, index, turn).await,
+            Step::AgentPoll { turn } => self.step_agent_poll(&turn).await,
         }
     }
 

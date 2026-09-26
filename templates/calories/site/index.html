@@ -20,7 +20,7 @@
     li { display: flex; gap: .6rem; padding: .5rem 0; border-bottom: 1px solid var(--line); }
     li span:first-child { flex: 1; }
     li button { background: none; color: var(--muted); padding: 0 .3rem; }
-    #total { margin-top: 1rem; font-weight: 600; }
+    #total { margin: 1rem 0; font-weight: 600; }
   </style>
 </head>
 <body>
@@ -31,6 +31,7 @@
     <div id="answer"></div>
     <ul id="entries"></ul>
     <div id="total"></div>
+    <button id="summarize" hidden>Sum up my day</button>
   </main>
   <script type="module">
     import * as fragment from "./__fragment.js";
@@ -77,8 +78,14 @@
       }
       $("note").textContent = "Say what you ate; the agent logs it for you.";
       $("text").disabled = false;
+      $("summarize").hidden = false;
       shown();
     });
+
+    $("summarize").onclick = () => {
+      $("answer").textContent = "Summing up…";
+      fragment.call("summarize", {}).catch((err) => ($("answer").textContent = err.message));
+    };
 
     $("ask").onsubmit = async (e) => {
       e.preventDefault();

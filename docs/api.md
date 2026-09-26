@@ -695,7 +695,7 @@ conversation; `principal` who asked), recorded once.
 
 A job is a method called `(input, job)` that runs as a celld Workflow,
 outside any request. Each `await` on a `job.*` step is durable. The
-steps are the four below, the files steps (`job.files.*`), `job.push`,
+steps are the five below, the files steps (`job.files.*`), `job.push`,
 and the AI steps (`job.ai.*`), all above:
 
 - `job.call(op, input)`: an operation of this fragment as the run's
@@ -713,6 +713,18 @@ and the AI steps (`job.ai.*`), all above:
   seconds. Every fetch carries `x-fragment-hops`.
 - `job.publish(channel, body, kind)`: a record, once per step.
 - `job.sleep(ms | "N seconds|minutes|hours|days")`, up to 30 days.
+- `job.agent({prompt, conversation?, channel?})` → `{text, turn}`: one
+  turn of the fragment's own agent (A fragment's agent, below) for the
+  run's principal; a triggered run's is the fragment itself, so the agent
+  acts as its own member, an editor. `conversation` is a key the job
+  chooses (`[A-Za-z0-9._-]{1,64}`, the principal's own; default one per
+  run, `run-<run>`); `channel`, a channel editors may post to (the agent
+  is one), where the turn posts its steps and answer (default none). It is two steps: `agent.start`
+  starts the turn, named by the run and the step (not the attempt), so a
+  retried or replayed step reattaches to the turn it started and never
+  starts a second; then `agent.poll`, with sleeps of 2, 4, 8, 16, then
+  30 seconds between, at most 40 times. A turn that fails or is stopped
+  throws a `StepError`; the model calls are the owner's to pay.
 
 `job.principal`, `job.role`, `job.run`, and `job.attempt` say who and
 which. The method re-runs from the top at every step with the results so
@@ -938,6 +950,8 @@ else).
 | `POST /api/a/{name}/stop` | owner | → `{active, driving}`; a tool in flight is interrupted; the messages waiting run next |
 | `GET /api/a/{name}/tools` | owner | → `{tools: ["platform__create_fragment", "platform__list_fragments", "platform__operations", "platform__call", "platform__list_files", "platform__read_file", "platform__write_file", "platform__append_file", "platform__write_files", "platform__deploy", "<fragment>__<op>", ...]}`: what the owner's own turn has (below) |
 | `POST /api/a/{name}/listen` | owner | `{fragment, channel? ("chat"), reply? ("say")}` → `{fragment, channel, reply, subscription}`: the agent subscribes itself to the channel (it must be a member) with an inbox URL of its own (`AGENT_URL`); at most 500. `reply` answers a chat whose channel takes no posts (one made before phase 7); a postable channel is answered by a post. A new listen first drops those of fragments the agent is no longer in: of the fragments its memberships leave out, up to 16 are asked, and one that answers 404 or 403 loses its listens (so does one whose subscribe answers either, and a chat whose answer's post does). Listening again to the same fragment's channel is the same listen: its inbox URL, so the one subscription (made again if the fragment dropped it) |
+| `POST /api/a/{name}/job` | owner (a fragment's job) | `{id, asker, conversation, channel?, text}` → `{turn}`: a turn of a fragment's own agent for `asker`, once per `id` (again: the same `turn`, `replayed`); it waits for a turn of its own and never steers another. Its conversation is `job:<asker>:<conversation>`, under `<fragment>/<channel>/` when it names a channel |
+| `GET /api/a/{name}/job?turn=` | the same | → `{ended, outcome, text?, error?}`: `running` until it ends, then `idle` (answered, `text` its answer), `stopped`, `yielded`, or `error` |
 | `PUT /api/a/{name}/scope` | owner (a fragment's deploy) | `{fragment, tools, instructions, model?}` → `{fragment, tools, model}`: a fragment's own agent takes what its block declares (A fragment's agent, below); 403 for any agent not made for that fragment |
 | `POST /api/a/{name}/inbox/{token}` | the fragment's delivery (the token is the capability) | a `Delivery` (`crates/proto`), decoded whole: one that does not decode (a record without its `seq`, say) is 400. A message (a body with no `kind`, or `kind: "message"`: its `text`, else its JSON) from an identity starts a turn in the chat's conversation, acting for that identity; from the running turn's starter in its conversation, it steers that turn; any other waits for a turn of its own (429 past 64 waiting: the fragment delivers it again). `{kind: "stop", turn?}` from the running turn's starter, in its chat, naming that turn (or none), stops it; from anyone else, or another kind, it is ignored, never a message. The agent's own, one heard before (within a day: past the longest redelivery), and a message from an anonymous visitor (`anon:`) are ignored (the owner's view keeps the newest 32 anonymous ones). The turn's last answer goes back as the agent, with the id `rp:<40 hex of SHA-256 of its message id>`: posted to the channel as `{text, turn}` when it takes posts (`POST /api/f/{fragment}/channels/{channel}`), else `POST /api/f/{fragment}/ops/{reply}` `{text}`; an unknown token is 404 |
 | `PUT /api/a/{name}/computer` | owner | `{url, token, cwd? ("work")}` → `{url, cwd, tools}`: attaches a computer once it answers `GET /tools` with that token (400 when it refuses it, 502 when it does not answer); the token is sealed like the agent's key |

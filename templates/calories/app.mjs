@@ -30,6 +30,12 @@ export class App extends DurableObject {
     return { entries, total: entries.reduce((sum, e) => sum + e.calories, 0) };
   }
 
+  // a job: one turn of the agent, for whoever called it, whose answer (and
+  // steps) land on `ask` like any other; the run's output is its answer
+  async summarize(input, job) {
+    return await job.agent({ prompt: "Summarize what I ate today, in one sentence.", channel: "ask" });
+  }
+
   forget({ id }, call) {
     const gone = this.ctx.storage.sql.exec("DELETE FROM food WHERE id = ? AND who = ? RETURNING id", id, call.principal).toArray();
     if (gone.length === 0) throw new Error(`no entry ${id} of yours`);

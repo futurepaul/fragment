@@ -65,6 +65,26 @@ pub enum Step {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         url: Option<String>,
     },
+    /// `job.agent`'s first step: a turn of the fragment's own agent for
+    /// the run's principal, named by the run and this step, so a retried or
+    /// replayed step reattaches to it rather than start another.
+    #[serde(rename = "agent.start")]
+    AgentStart(AgentTurn),
+    /// A started turn's state, by its id (the start's answer).
+    #[serde(rename = "agent.poll")]
+    AgentPoll { turn: String },
+}
+
+/// `job.agent({prompt, conversation?, channel?})`: the message, the
+/// conversation it continues (a key the job chooses; none: the run's own),
+/// and the channel its steps and answer are posted to (none: nowhere).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentTurn {
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
 }
 
 /// `job.fetch`'s request. Header values may name secrets as `{{NAME}}`.
@@ -192,6 +212,8 @@ impl Step {
             Step::AiVideoStart(_) => "ai.video.start",
             Step::AiVideoPoll { .. } => "ai.video.poll",
             Step::AiVideoSave { .. } => "ai.video.save",
+            Step::AgentStart(_) => "agent.start",
+            Step::AgentPoll { .. } => "agent.poll",
         }
     }
 }
@@ -249,13 +271,15 @@ mod tests {
             ("ai.video.start", json!({ "prompt": "a cat", "duration": 6, "resolution": "768p" })),
             ("ai.video.poll", json!({ "id": "v1" })),
             ("ai.video.save", json!({ "id": "v1", "path": "cat.mp4", "url": "https://openrouter.ai/v1" })),
+            ("agent.start", json!({ "prompt": "summarize today", "conversation": "daily", "channel": "ask" })),
+            ("agent.poll", json!({ "turn": "0123456789abcdef01234567" })),
         ]
     }
 
     #[test]
     fn every_kind_platform_mjs_sends_decodes_as_itself() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 15, "a new kind of step is added here too");
+        assert_eq!(kinds.len(), 17, "a new kind of step is added here too");
         for (kind, args) in kinds {
             let s = step(kind, args.clone()).unwrap_or_else(|e| panic!("{kind}: {e}"));
             assert_eq!(s.kind(), kind);
@@ -276,6 +300,8 @@ mod tests {
         assert_eq!((f.method.as_str(), f.body.as_deref()), ("post", Some("{}")));
         let Ok(Step::AiVideoStart(v)) = step("ai.video.start", json!({ "prompt": "p" })) else { panic!() };
         assert_eq!((v.duration, v.model), (None, None));
+        let Ok(Step::AgentStart(a)) = step("agent.start", json!({ "prompt": "p" })) else { panic!() };
+        assert_eq!((a.conversation, a.channel), (None, None), "the run's own conversation, posted nowhere");
         let Ok(Step::AiText(t)) = step("ai.text", json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }], "extra": true })) else { panic!() };
         assert_eq!((t.prompt, t.messages.map(|m| m.len())), (None, Some(1)), "a key the platform does not read is ignored");
     }
@@ -298,6 +324,9 @@ mod tests {
         refused("push", json!({ "payload": {} }), "missing field `who`");
         refused("ai.video.save", json!({ "path": "v.mp4" }), "missing field `id`");
         refused("files.read", json!("log.txt"), "invalid type");
+        refused("agent.start", json!({ "conversation": "daily" }), "missing field `prompt`");
+        refused("agent.start", json!({ "prompt": 7 }), "invalid type");
+        refused("agent.poll", json!({}), "missing field `turn`");
     }
 
     #[test]

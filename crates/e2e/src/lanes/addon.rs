@@ -5,8 +5,9 @@
 //! ate from its page; the agent calls `log_food` for each item for them
 //! (the rows are theirs) and answers on the channel. An
 //! anonymous post starts nothing; the agent is offered only the operations
-//! its block names; its owner's budget pays for it; a redeploy keeps the
-//! one agent, and one without the block removes it.
+//! its block names; its owner's budget pays for it; a job's turn
+//! (`job.agent`) runs once across a replay; a redeploy keeps the one agent,
+//! and one without the block removes it.
 
 use std::time::Duration;
 
@@ -15,6 +16,7 @@ use fragment_fakes::openrouter::Reply;
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
+use super::jobs::{settle, started};
 use super::signin::site_cookie;
 use super::templates::person;
 use crate::api::{Api, Call};
@@ -132,6 +134,8 @@ pub fn addon(s: &mut Suite, api: &Api) -> Result<()> {
     let ignored = s.eventually(wait, noted);
     s.ok("an anonymous post starts nothing", anon.status == 200 && ignored && s.openrouter.chats().len() == before, &anon);
 
+    job_turn(s, api, &owner, &visiting, &name, &agent)?;
+
     // a redeploy with the same block keeps the one agent; one without it removes it
     let joins = events(api, &owner, &name, "agent.joined");
     s.commit(&made.body, &[("README.md", Some(b"calories, again".as_slice()))]);
@@ -157,5 +161,38 @@ pub fn addon(s: &mut Suite, api: &Api) -> Result<()> {
     let refused = s.eventually(wait, || api.status(&owner, &name).is_ok_and(|r| r.body["code"]["error"].as_str().is_some_and(|e| e.contains("nowhere.md is not in live"))));
     s.ok("an agent whose instructions are not in live is refused at deploy", refused && listening(api, &owner, &name).is_empty(), json!(api.status(&owner, &name)?.body["code"]));
     s.openrouter.clear_script();
+    Ok(())
+}
+
+/// `job.agent` (the template's `summarize`): the run is caught after its
+/// first step (the turn's start) and its kept answers are forgotten, so it
+/// is held; its replay starts the step again, which reattaches to the same
+/// turn: the model is asked once, the turn's answer is the run's output,
+/// and the owner pays.
+fn job_turn(s: &mut Suite, api: &Api, owner: &Keys, visiting: &str, name: &str, agent: &str) -> Result<()> {
+    let (wait, summary) = (Duration::from_secs(30), "You ate 2 eggs and toast today: 220 kcal.");
+    let lever = |op: &str, on: Option<bool>| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": op, "on": on })));
+    let paid = || api.signed(owner, "GET", "/api/budget", None).map_or(0, |r| r.body["usage"].as_array().into_iter().flatten().filter(|u| u["kind"] == "agent.text").count());
+    s.openrouter.clear_script();
+    s.openrouter.script(&[Reply::Text(summary.into())]);
+    let (asked, paid_before) = (s.openrouter.chats().len(), paid());
+    lever("hold-advances", Some(true))?;
+    let run = started(&api.browser_op(name, "summarize", "sum-1", json!({}), Some(visiting))?);
+    let caught = s.eventually(wait, || lever("advance-held", None).is_ok_and(|r| r.body["run"] == run));
+    lever("forget-steps", None)?;
+    lever("hold-advances", Some(false))?;
+    let held = settle(api, owner, name, run, &["succeeded", "held"], wait);
+    let answered = s.eventually(wait, || records(api, owner, name, "ask").iter().any(|r| r["principal"] == agent && r["body"]["text"] == summary));
+    let r = api.signed(owner, "POST", &format!("/api/f/{name}/replay"), Some(&json!({ "run": run })))?;
+    let done = settle(api, owner, name, run, &["succeeded"], wait);
+    let turn = records(api, owner, name, "ask").into_iter().find(|r| r["body"]["text"] == summary).map(|r| r["body"]["turn"].clone()).unwrap_or_default();
+    s.ok(
+        "a job's turn (job.agent) runs once across a replay: its answer is the step's result, on the channel it named",
+        caught && held["status"] == "held" && answered && r.status == 200 && done["status"] == "succeeded" && done["attempt"] == 2
+            && done["output"] == json!({ "text": summary, "turn": turn })
+            && s.openrouter.chats().len() == asked + 1,
+        json!({ "held": held, "run": done, "model requests": s.openrouter.chats().len() - asked }),
+    );
+    s.ok("and its owner pays for it", paid() == paid_before + 1, json!({ "before": paid_before, "after": paid() }));
     Ok(())
 }

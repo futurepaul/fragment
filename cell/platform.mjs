@@ -109,6 +109,10 @@ function base64(data) {
 
 // 20 seconds apart: a video has about 15 minutes to finish.
 const VIDEO_POLLS_MAX = 45;
+// 2, 4, 8, 16, then 30 seconds apart: an agent's turn has about 20 minutes
+// to end, in at most 81 of a run's 256 steps.
+const AGENT_POLLS_MAX = 40;
+const AGENT_POLL_MS_MAX = 30_000;
 
 function checkPush(who, payload) {
   if (typeof who !== "string" || [...who].length > PUSH_WHO_MAX_CHARS) {
@@ -357,6 +361,23 @@ class Job {
         throw new Error(`video ${id} was not ready after ${VIDEO_POLLS_MAX} polls`);
       },
     };
+  }
+
+  // One turn of the fragment's own agent (fragment.json's `agent`), for
+  // the run's principal: resolves to { text, turn }. The turn is named by
+  // the run and this step, so a retried or replayed run reattaches to it;
+  // the job waits for it in polls and sleeps, as for a video. A turn that
+  // fails or is stopped throws a StepError.
+  async agent({ prompt, conversation, channel } = {}) {
+    if (typeof prompt !== "string" || prompt === "") throw new TypeError("job.agent({ prompt }): prompt is a string");
+    const { turn } = await this.#step("agent.start", JSON.parse(JSON.stringify({ prompt, conversation, channel })));
+    for (let i = 0; i < AGENT_POLLS_MAX; i++) {
+      const st = await this.#step("agent.poll", { turn });
+      if (st.ended && st.outcome === "idle") return { text: st.text ?? "", turn };
+      if (st.ended) throw new StepError("agent.poll", `the agent's turn ended ${st.outcome}${st.error ? `: ${st.error}` : ""}`);
+      await this.sleep(Math.min(2000 * 2 ** i, AGENT_POLL_MS_MAX));
+    }
+    throw new StepError("agent.poll", `the agent's turn ${turn} did not end after ${AGENT_POLLS_MAX} polls`);
   }
 
   // A web push to the subscriptions tagged `who` ("*": all).
