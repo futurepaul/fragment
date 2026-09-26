@@ -44,7 +44,8 @@ Status, 2026-09-26 (ROADMAP phase E). Built:
    signed by that key), so the key never leaves the Sprite. The computer
    is named by its fragment (`pet.paul`), and the platform makes it an
    editor there.
-4. **Awake and asleep.** A page opening on the fragment wakes it. Each
+4. **Awake and asleep.** A page opening on the fragment wakes it (a
+   computer's own live socket, such as the pet's follower, is no page). Each
    tick (a minute) it is charged first, then held awake through the
    Sprite's Tasks API (a hold that expires after two ticks). Each tick,
    the cell asks the fragment for open pages; 5 minutes after the last

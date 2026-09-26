@@ -494,8 +494,8 @@ keeps the last good code and says why in `status.code.error`.
   computer the fragment's owner owns, named by the fragment, with a
   single-use token it is handed on stdin (`fragment login --pair`); the
   platform makes it an editor of the fragment. It is held awake while a
-  page of the fragment is open and `FRAGMENT_COMPUTER_IDLE_S` (300)
-  after the last closes; each `FRAGMENT_COMPUTER_TICK_S` (60) awake is
+  page of the fragment is open (a live socket; a computer's is none) and
+  `FRAGMENT_COMPUTER_IDLE_S` (300) after the last closes; each `FRAGMENT_COMPUTER_TICK_S` (60) awake is
   charged to the owner first, at list price, and its disk asleep when it
   next wakes (`computer.awake`, `computer.asleep` usage). A tick that
   does not fit the budget lets it sleep. Its jobs run commands there
