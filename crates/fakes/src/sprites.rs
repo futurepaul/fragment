@@ -43,6 +43,9 @@ struct State {
     deleted: Vec<String>,
     /// Every call is refused as a bad token's is (a lever).
     refusing: bool,
+    /// Each hold (the Tasks API's PUT) answers this late, as a Sprite slow
+    /// to wake does (a lever).
+    slow_holds: Option<Duration>,
     /// Running services, by Sprite and name.
     services: BTreeMap<(String, String), Child>,
 }
@@ -66,6 +69,10 @@ fn exec(state: &Mutex<State>, home: &Path, name: &str, req: &Request) -> Respons
     }
     if *program == "sprite-env" {
         let method = args.iter().position(|a| *a == "-X").and_then(|i| args.get(i + 1)).copied().unwrap_or("GET");
+        let slow = state.lock().expect("sprites state").slow_holds;
+        if let (Some(late), "PUT") = (slow, method) {
+            std::thread::sleep(late);
+        }
         let mut s = state.lock().expect("sprites state");
         let sprite = s.sprites.get_mut(name).expect("exec checked the Sprite exists");
         match method {
@@ -225,6 +232,11 @@ impl Sprites {
     /// While set, every call is refused (401), as with a bad token.
     pub fn refuse(&self, refusing: bool) {
         self.state.lock().expect("sprites state").refusing = refusing;
+    }
+
+    /// While set, each hold answers this late, as a Sprite slow to wake does.
+    pub fn slow_holds(&self, late: Option<Duration>) {
+        self.state.lock().expect("sprites state").slow_holds = late;
     }
 
     /// The Sprites deleted, in order.

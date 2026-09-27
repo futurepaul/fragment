@@ -354,6 +354,32 @@ pub fn sprites(s: &mut Suite, api: &Api) -> Result<()> {
     std::thread::sleep(Duration::from_secs(u64::from(2 * crate::COMPUTER_TICK_S)));
     s.ok("asleep, the platform calls its Sprite no more", s.sprites.sprites().get(&sprite).map(|f| f.calls) == calls, format!("{calls:?}"));
 
+    // a wake that outlives the node's operation deadline (15 s; here its
+    // Sprite answers the hold 18 s late): celld fires the alarm again while
+    // the first still runs, which must not give back the first's hold
+    // (fragment.club, 2026-09-27: `no such reservation`, again and again)
+    let rows = || -> Vec<Value> {
+        let r = api.signed(&owner, "GET", "/api/budget/usage", None).map(|r| r.body).unwrap_or_default();
+        r["usage"].as_array().into_iter().flatten().filter(|u| u["fragment"] == name.as_str()).cloned().collect()
+    };
+    let paid = || rows().iter().filter(|u| u["kind"] == "computer.awake" && u["state"] == "settled").count();
+    let lost = || -> Vec<String> {
+        let events = api.signed(&owner, "GET", &format!("/api/f/{name}/events?tail=50"), None).map(|r| r.body).unwrap_or_default();
+        events["events"].as_array().into_iter().flatten().filter(|e| e["summary"].as_str().is_some_and(|m| m.contains("no such reservation"))).map(|e| e["summary"].to_string()).collect()
+    };
+    let before = paid();
+    s.sprites.slow_holds(Some(Duration::from_secs(18)));
+    let page = Socket::open(api, &name, "__live", Some(&owner), None)?;
+    let woke = s.eventually(Duration::from_secs(40), || paid() > before);
+    s.sprites.slow_holds(None);
+    s.ok("a wake slower than the node's deadline is held and paid, not undone by its alarm fired again", woke && lost().is_empty(), format!("{:?}", lost()));
+    let then = paid();
+    s.ok("then each tick is paid as before", s.eventually(Duration::from_secs(40), || paid() >= then + 3), paid());
+    page.close();
+    s.ok("it sleeps after the idle wait", soon(s, || !held(s)), "");
+    let open: Vec<Value> = rows().into_iter().filter(|u| u["state"] != "settled").collect();
+    s.ok("every span it held is settled, none left held, and nothing failed", open.is_empty() && lost().is_empty(), format!("{open:?} {:?}", lost()));
+
     // dropped from fragment.json: kept, asleep; removed: destroyed
     std::fs::write(site.join("fragment.json"), "{}")?;
     s.cli(api, &home, &["deploy", &name, "--dir", &dir_of(&site)]);
