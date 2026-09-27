@@ -1088,7 +1088,15 @@ and whose result comes later, as a note (so: do its own part first, and
 never describe a result it has not received); only its owner's turns
 hand off. It replaced a guide to building
 apps in the cell (2026-09-27). An agent made with a default instruction
-of any age (they all open alike) is told today's.
+of any age (they all open alike) is told today's. A person's agent's
+turns for its owner are also told the owner's memory (Hand-offs, below):
+`Your owner's memory, which their computer keeps in memory.<username>
+(you only read it: to add to it or change it, hand it off):`, then each
+`memory/*.md` at its main under its path, at most 2,000 characters in
+all, or `nothing yet.`. It is read as the turn starts (`GET
+/api/f/memory.<username>/files` for the owner, and each file again only
+when main moved since the agent last read them). A guest's turn is told
+none of it, and a fragment's own agent has none.
 
 A model call (`agent/src/model.rs`) asks for at most 4096 tokens and has
 100 s, under the node's 120 s fetch timeout (`CELLD_FETCH_TIMEOUT_S`,
@@ -1155,7 +1163,14 @@ name), signed by the agent (for its owner or no one), is the second
 owner-only action an agent takes. The platform takes it only for a
 fragment its owner owns and a computer its owner has of that name, and
 makes it an editor whatever the body says (a throwaway's computer, not
-paired yet, is made one by the agent's alarm once it is). Each step is a
+paired yet, is made one by the agent's alarm once it is). The same grant
+makes it an editor of the owner's memory, `memory.<username>`: a private
+fragment of theirs (`members`) that the agent makes at the first
+hand-off (`POST /api/fragments {name, visibility: "members"}`, the agent
+an editor, as for anything it makes). It holds `memory/*.md`, facts
+and preferences, and `skills/<name>/SKILL.md`. The hands' task client syncs it
+before and after each task, and commits what goose wrote to its main
+(docs/agent-computer.md, slice 3 as built). Each step is a
 `turn.step` record on the chat's `work` channel (the chat template's,
 above), under the hand-off's turn `hand-off:<computer>:<run>`, and goose's
 answer, once it ended its turn, is the computer's post on the chat's own

@@ -1,10 +1,10 @@
 # The agent computer: the brain in the cell, the hands on a computer
 
 Status: **decided 2026-09-27** (Paul; ROADMAP decision 24, which amends
-decision 10). Slices 1 and 2 are built (below, "Slice 1 as built",
-"Slice 2 as built"); slice 1 is measured on Paul's pet, and slice 2's
-real Sprite acceptance is next. Sources were checked on 2026-09-27, and
-the dependency cooldown is 2 days.
+decision 10). Slices 1, 2, and 3 are built (below, "Slice 1 as built",
+"Slice 2 as built", "Slice 3 as built"); slice 1 is measured on Paul's
+pet, and slices 2 and 3 wait for their real Sprite acceptance. Sources
+were checked on 2026-09-27, and the dependency cooldown is 2 days.
 
 ## The decision
 
@@ -70,7 +70,7 @@ Desktop, where a person can take over and hand back
 | --- | --- | --- |
 | Sessions | SQLite; one agent per session "so a conversation reuses its cached prompt prefix" ([config](https://hermes-agent.nousresearch.com/docs/user-guide/configuration)) | one goose session per chat |
 | Compaction | summarizes the middle, keeps head and tail ([compression](https://hermes-agent.nousresearch.com/docs/developer-guide/context-compression-and-caching)) | goose's compaction |
-| Memory, skills | `MEMORY.md`, `USER.md`, agentskills.io `SKILL.md` ([memory](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory), [skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills)) | files in the fragment's git |
+| Memory, skills | `MEMORY.md`, `USER.md`, agentskills.io `SKILL.md` ([memory](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory), [skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills)) | files in a private fragment of the person's, `memory.<username>` (slice 3 as built) |
 | Browser, desktop | CDP snapshots; cua-driver over MCP ([browser](https://hermes-agent.nousresearch.com/docs/user-guide/features/browser), [computer-use](https://hermes-agent.nousresearch.com/docs/user-guide/features/computer-use)) | Stagehand on system Chrome; Cua Driver |
 | Screen | Xvnc, noVNC, a relay | step blobs, then the VNC relay |
 | Scheduling, messaging | gateway cron, 30+ chat apps ([cron](https://hermes-agent.nousresearch.com/docs/user-guide/features/cron), [messaging](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/)) | crons and jobs; chats and bridge fragments |
@@ -190,21 +190,24 @@ only.
 - step summaries, with screenshot blobs;
 - outputs (fragments, files, artifacts);
 - the task log and schedules;
-- memory and skills, as git files (`agent/memory/*.md`,
-  `agent/skills/<name>/SKILL.md`).
+- memory and skills, as git files: `memory/*.md` and
+  `skills/<name>/SKILL.md` in the person's own private fragment,
+  `memory.<username>` (slice 3 as built, below).
 
-`fragment sync --live` brings memory and skills to `~/fragment`. They
-are linked into goose's `~/.agents/skills`
-([skills](https://github.com/aaif-goose/goose/blob/v1.52.0/documentation/docs/guides/context-engineering/using-skills.md))
-and `~/.config/goose/memory`
-([memory](https://github.com/aaif-goose/goose/blob/v1.52.0/documentation/docs/mcp/memory-mcp.md)).
-The computer commits what goose writes back to `main`.
+The task client syncs that fragment to `~/memory` before and after each
+task, and commits what goose wrote to `main`. Its skills are linked into
+goose's `~/.agents/skills`
+([skills](https://github.com/aaif-goose/goose/blob/v1.52.0/documentation/docs/guides/context-engineering/using-skills.md));
+its facts reach each session as prompts. goose's own memory extension
+([memory](https://github.com/aaif-goose/goose/blob/v1.52.0/documentation/docs/mcp/memory-mcp.md))
+is not used.
 
 **Grants and secrets** live on the platform, never on the computer's
 disk.
 
 **A replacement computer** seeds each chat's new session from that
-chat's transcript, plus the memory and skills files.
+chat's transcript, plus the memory and skills files (the memory and
+skills are built; the transcript is not yet).
 
 ## Compaction and caching
 
@@ -719,6 +722,128 @@ someone removes it.
     earlier task;
   - a fragment without a computer gets none of it.
 - **Size:** CLI about 400, cell 100, templates −250, e2e 250.
+
+**Slice 3 as built: memory and skills** (docs/computers.md, the hands;
+docs/api.md, Hand-offs and Agents). Where it differs from the plan above:
+- **Where they live: one private fragment per person,
+  `memory.<username>`**, not files in each computer's fragment. A person
+  has several computers (Paul's answer 6) and throwaways, while memory is
+  theirs; a pet's files are served from live, and a commit to its main
+  would wait for a deploy. The agent makes it (members only, the owner's,
+  with the agent an editor, as for anything it makes) at its owner's
+  first hand-off, and makes each computer it hands work to an editor
+  there, as it does the chat: the same owner-only grant, `PUT
+  /api/f/memory.<username>/members/<computer>`. It holds `memory/*.md`
+  (facts and preferences, a few lines per topic) and
+  `skills/<name>/SKILL.md` (agentskills.io: `name` and `description`
+  frontmatter, then the steps). The owner reads and edits it like any
+  fragment (`fragment sync memory.<you> --dir …`). Every write goes to
+  `main` (Paul's answer 5), and git history is the review and the undo.
+  Nothing in it is deployed.
+- **The task client syncs it** to `~/memory` before and after each task
+  (`fragment sync memory.<username> --dir ~/memory --apply-mass-delete`,
+  both ways; a deletion is goose's own, and git keeps what it removed).
+  What goose changed is committed to `main` when the task ends, as the
+  computer (the CLI signs; the commit's author is `fragment/<8 hex of its
+  key>`), and what other chats and computers wrote is pulled. A computer
+  that is not a member (a pet driven only from its page) has no memory,
+  and says nothing about it (the sync answers `not_found` or
+  `forbidden`). Any other failure is a line of `hands.log`. No CLI change
+  was needed, so no CLI release.
+- **Skills are goose's own.** goose v1.52.0's Skills platform extension
+  is on by default ([platform_extensions](https://github.com/aaif-goose/goose/blob/v1.52.0/crates/goose/src/agents/platform_extensions/mod.rs)).
+  It finds each `SKILL.md` under `~/.agents/skills`, among other places
+  ([skills/mod.rs](https://github.com/aaif-goose/goose/blob/v1.52.0/crates/goose/src/skills/mod.rs)).
+  At every model call it lists them in the system prompt as `• name -
+  description`, and its `load_skill` tool loads one
+  ([skills/client.rs](https://github.com/aaif-goose/goose/blob/v1.52.0/crates/goose/src/skills/client.rs)).
+  The task client links `~/.agents/skills` to `~/memory/skills`, unless
+  something is there already, so a skill goose writes lands in the
+  memory. The cost: a new or changed skill changes the system prompt, so
+  each session's next call misses the cache once, as it does when the
+  hour turns (the system prompt names the hour).
+- **Facts reach a session as prompts, not in its system prompt.** goose
+  rebuilds its system prompt on every model call, reading its hints from
+  disk again
+  ([reply_parts.rs](https://github.com/aaif-goose/goose/blob/v1.52.0/crates/goose/src/agents/reply_parts.rs),
+  [prompt_manager.rs](https://github.com/aaif-goose/goose/blob/v1.52.0/crates/goose/src/agents/prompt_manager.rs)).
+  Its memory extension puts every global memory into its instructions
+  when it starts
+  ([memory/mod.rs](https://github.com/aaif-goose/goose/blob/v1.52.0/crates/goose-mcp/src/memory/mod.rs)).
+  Either way, each change would miss the cache for every session. So
+  instead:
+  - a session's first task starts with every `memory/*.md`: `Your
+    owner's memory (memory.<username>, at ~/memory):`, then each file
+    under its path;
+  - a later task starts with the files changed since and those removed:
+    `Your owner's memory changed since your earlier work here:`;
+  - either note carries at most 8,000 characters, and names the files it
+    leaves out, to be read.
+
+  What a session was told is kept beside its id
+  (`sessions/<chat>.memory`: each file's SHA-256), written once goose has
+  taken the prompt. What goose wrote itself comes back once in the next
+  task's note, since the task client cannot tell it from another chat's.
+  That costs a few tokens and is never wrong. goose's compaction
+  summarizes the history, notes included; the hints say where the files
+  are, so goose can read them again. Hermes does the same thing
+  differently: a frozen snapshot in the system prompt at session start,
+  rebuilt at compaction
+  ([memory](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory),
+  [prompt assembly](https://hermes-agent.nousresearch.com/docs/developer-guide/prompt-assembly)).
+- **How goose writes it**: with its own text editor and shell, as its
+  hints say. The hints are a paragraph after the CLI's guide in
+  `~/.config/goose/.goosehints`. They are static, so they break the cache
+  only at the deploy that brings them. There is no tool of ours: the task
+  client commits what goose wrote. Hermes has `memory` (add, replace,
+  remove) and `skill_manage` tools instead
+  ([memory_tool.py](https://github.com/NousResearch/hermes-agent/blob/v2026.9.24/tools/memory_tool.py),
+  [skill_manager_tool.py](https://github.com/NousResearch/hermes-agent/blob/v2026.9.24/tools/skill_manager_tool.py)).
+  goose's memory extension is not used, for three reasons: its files are
+  `<category>.txt`, its instructions tell the model to confirm with the
+  user before saving (the hands have no one to ask), and it adds four
+  tools to every request.
+- **The brain reads the facts.** Each of the owner's turns of their agent
+  is told the facts at `main`, after its instructions, up to 2,000
+  characters (Hermes' `MEMORY.md` holds 2,200). It reads `Your owner's
+  memory, which their computer keeps in memory.<username> (you only read
+  it: to add to it or change it, hand it off):`, then each file, or
+  `nothing yet.`.
+  - It is read as a turn starts: one listing (`GET
+    /api/f/memory.<username>/files`, for the owner), and the files again
+    only when `main` has moved (the agent keeps the view in its kv).
+  - So "what do I drink?" is answered in the cell, with no computer.
+  - A guest's turn is told nothing of it, and a fragment's own agent has
+    none.
+  - The brain's system prompt changes when the memory does. Its prefix
+    already changes every turn, since earlier turns' results are cut.
+- **Not built from the plan above**:
+  - seeding a replacement computer's session from the chat's transcript.
+    A replacement gets the memory and skills (its first session is told
+    the facts) but not the chat's history;
+  - moving the pet's browser and desktop runtime into every declared
+    computer.
+- **The e2e** (`builder`, after the home computer's sessions; the
+  stand-in goose lists `~/.agents/skills` in its system prompt as goose
+  does):
+  - the hand-offs made `memory.<username>`, the owner's and members
+    only, with the home computer an editor;
+  - in one chat, goose remembers a fact and writes a skill (through
+    `~/.agents/skills`), and both land on the memory's `main`;
+  - a second chat's new session on the computer is told the fact in its
+    first task and offered the skill, and its goose remembers another;
+  - the first chat's next task starts with what changed, the other
+    chat's fact among it, and its first request carries that chat's last
+    request as its prefix, message for message;
+  - the owner's agent answers "what do I drink?" from the facts in its
+    prompt, with no computer;
+  - a guest's turn is told nothing of it;
+  - the hints hold the memory's paragraph;
+  - the pet (`templates`), its computer no member until a hand-off
+    reaches it, says nothing of a memory in its prompts or `hands.log`.
+- **Size**: task client +62/−2, the hands' hints +12/−4, agent +130/−23
+  (`memory.rs` 102), e2e +136/−4, docs. No CLI or cell change, where the
+  plan guessed CLI 400 and cell 100.
 
 **4. Screenshots as blobs on pages.**
 - **What changes:** `__blob/<sha>`, `fragment blob put`, `shot` in each

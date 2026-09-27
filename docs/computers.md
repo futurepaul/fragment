@@ -234,8 +234,9 @@ task to it and waits; the pet's `do` and the builder's `build` do.
   `GOOSE_DISABLE_SESSION_NAMING=1`, `GOOSE_MAX_TOKENS=4096` (a model
   call finishes within the platform's 120 s), and
   `OPENROUTER_PARAMETERS={"reasoning":{"effort":"low"}}`. Its hints are
-  the CLI's guide (`fragment guide > ~/.config/goose/.goosehints`, each
-  start), and its extensions its default (the developer tools) and what
+  the CLI's guide and a paragraph on keeping its owner's memory (below)
+  (`~/.config/goose/.goosehints`, written at each start), and its
+  extensions its default (the developer tools, and goose's Skills) and what
   `~/.config/goose/config.yaml` enables (the pet's browser and Cua
   Driver): a new session takes the config's, and goose loads a session
   with those it keeps, so the task client brings them to the config's
@@ -258,6 +259,18 @@ task to it and waits; the pet's `do` and the builder's `build` do.
   docs/api.md, the chat template), trying a failed post again for a
   minute. It prints goose's last words; it exits 0 when goose ended its
   turn, and 124 past `TIME_S` (540), when it cancels the prompt.
+- **The owner's memory** (docs/agent-computer.md, slice 3 as built): the
+  task client syncs the owner's private fragment `memory.<username>` to
+  `~/memory` before and after each task (`fragment sync …
+  --apply-mass-delete`, both ways), so what goose wrote there is committed
+  to its `main` as the computer when the task ends; a computer that is no
+  member there has no memory, and says nothing of it. `~/.agents/skills` is linked to
+  `~/memory/skills`, where goose's Skills extension finds each
+  `<name>/SKILL.md` and lists it for the model. The facts,
+  `memory/*.md`, start a session's first task (at most 8,000
+  characters), and a later task starts with those changed since
+  (`sessions/<chat>.memory` keeps what the session was told), so nothing
+  the session holds is rewritten.
 - **Requests go as goose made them**: nothing between goose and the
   platform edits one, and goose sends its session's id as `session_id`,
   so a chat's calls stay on the provider that caches its prefix (the
@@ -633,8 +646,12 @@ again, so it cannot make up a result it has not received.
 
 The computer is made an editor of the chat, and posts each step there as
 your computer, then goose's answer, under the steps, with no one asking
-again. The agent's alarm watches the run, and its result reaches the
-agent's conversation as a note (the task, what the computer said, a
+again. It is made an editor of your memory too (`memory.<you>`, which your
+agent makes, members only, at your first hand-off): it keeps what you ask
+it to remember and the skills it writes there, for every chat and each of
+your computers, and your agent reads the facts into your own turns
+(docs/agent-computer.md, slice 3 as built). The agent's alarm watches
+the run, and its result reaches the agent's conversation as a note (the task, what the computer said, a
 build's URL), so later questions can build on it; the agent says in the
 chat only what the computer could not (a run that failed). A throwaway
 costs what any computer does: its boot, and its awake time while the

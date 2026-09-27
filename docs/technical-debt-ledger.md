@@ -653,3 +653,26 @@ without a delete condition is unfinished design, not debt.
   the task client, or the agent holding a chat's second hand-off until
   the first ends), proven by an e2e that hands off twice from one chat
   at once and gets both answers, in order.
+
+## A person's memory is the fragment named `memory`, granted only by a hand-off
+
+- **Observed:** 2026-09-27, slice 3 of docs/agent-computer.md. The
+  agent treats `memory.<username>` as its owner's memory by its name
+  (agent/src/memory.rs): it makes it when there is none, and it makes
+  each computer it hands work to an editor there. A computer gets
+  memory only through a hand-off. A throwaway's grant waits until its
+  computer has paired (the agent's alarm, every 10 s), so its first
+  task may start without the memory (its writes still land when the task
+  ends). A pet driven only from its own page has none.
+- **Risk:** a person who already had a fragment named `memory` finds it
+  used as their memory, and their computers syncing it; a task on a
+  throwaway, or on a pet no hand-off reached, goes without the owner's
+  facts and skills.
+- **First proof:** a person with a `memory` fragment of their own
+  before slice 3; a throwaway's first task answering without a fact
+  its owner's memory holds.
+- **Delete when:** the platform records each person's memory fragment
+  (made with the person, or claimed once) and makes every computer they
+  pair an editor there (`POST /api/computers/pair`), proven by an e2e
+  where a newly paired computer's first task, handed off or not, is
+  told the memory.

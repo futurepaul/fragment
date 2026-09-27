@@ -146,7 +146,8 @@ printf 'FRAGMENT-EXEC-BEGIN\n%s\nFRAGMENT-EXEC-END\n' "$(printf '%s' "$a/hands.s
 /// The hands' service (docs/agent-computer.md): `goose serve` on
 /// `fragment model --serve`, kept up together with backoff, its sessions
 /// in goose's own store. goose is fetched and checked on its first start;
-/// its hints are the CLI's guide; it speaks ACP on the first free port from
+/// its hints are the CLI's guide and how to keep its owner's memory
+/// (`~/memory`, which the task client syncs); it speaks ACP on the first free port from
 /// 3284 (in `port`), to clients holding `secret` (made here, 0600); its
 /// model calls go through the platform, signed as this computer (no key
 /// here), each logged by `--serve` to `model.log`. It runs itself again
@@ -170,7 +171,15 @@ log "fetching goose $v"; mkdir -p "$HOME/.local/share"; d=$(mktemp -d "$HOME/.lo
 curl -fsSL -o "$d/a.tar.gz" "$url" && echo "$sum  $d/a.tar.gz" | sha256sum -c - > /dev/null && mkdir "$d/x" && tar -xzf "$d/a.tar.gz" -C "$d/x" && mv "$d/x" "${goose%/goose}" || log "goose $v did not install"
 rm -rf "$d"
 fi
-mkdir -p "$HOME/.config/goose" && fragment guide > "$HOME/.config/goose/.goosehints" 2>> hands.log
+mkdir -p "$HOME/.config/goose" && { fragment guide; cat << 'MEMORY'
+
+# Your owner's memory
+~/memory is your owner's memory: a private fragment of theirs (memory.<their username>), the same in every chat and on each of their computers. It is synced before and after each task; what you change there is saved when the task ends, and its history is kept.
+- memory/*.md: lasting facts about your owner and what they prefer, a few short lines per topic (memory/preferences.md, memory/people.md). When they tell you something worth keeping, or ask you to remember it, write it there; fix or remove what turns out wrong. Never keep passwords, keys, or tokens there.
+- skills/<name>/SKILL.md: how to do a task that will come up again: frontmatter with `name` (the directory's name: lowercase letters, digits, dashes) and `description` (what it is for), then the steps. Write one when you work such a task out, and improve it as you learn. Your skills are listed for you; load_skill loads one.
+A chat's first task tells you the facts; a later one starts with what changed since.
+MEMORY
+} > "$HOME/.config/goose/.goosehints" 2>> hands.log
 fragment model --serve --port 0 > model.out 2>> model.log & m=$!
 mp=; for i in $(seq 100); do mp=$(sed -n 's#^serving http://127\.0\.0\.1:\([0-9]*\)/.*#\1#p' model.out); [ -n "$mp" ] && break; sleep 0.1; done
 gp=3284; while (exec 3<> "/dev/tcp/127.0.0.1/$gp") 2> /dev/null; do gp=$((gp + 1)); done
@@ -550,8 +559,7 @@ mod tests {
         let written = std::fs::read_to_string(&sh).unwrap();
         let header = format!("export FRAGMENT_HOST='https://fragment.test'\nv={GOOSE_VERSION} sum={GOOSE_SHA256}\n");
         assert_eq!(written, format!("{header}{HANDS_SH}"));
-        assert!(HANDS_SH.contains("goose-x86_64-unknown-linux-musl.tar.gz") && HANDS_SH.contains("sha256sum -c"), "fetched only as pinned");
-        assert!(Command::new("bash").args(["-n", sh.to_str().unwrap()]).status().unwrap().success(), "it parses");
+        assert!(HANDS_SH.contains("goose-x86_64-unknown-linux-musl.tar.gz") && HANDS_SH.contains("sha256sum -c"), "fetched only as pinned");        assert!(Command::new("bash").args(["-n", sh.to_str().unwrap()]).status().unwrap().success(), "it parses");
         // written again, unchanged: the same file, so a running service keeps going
         let before = std::fs::metadata(&sh).unwrap().modified().unwrap();
         std::thread::sleep(Duration::from_millis(20));

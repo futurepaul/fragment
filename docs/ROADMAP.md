@@ -615,6 +615,17 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   behind it), Cua Driver only desktop apps, so a web step sends the model
   no screenshot. Playwright's Chromium is gone. Open: its measure on the
   real pet (per-call ms, cached share, Jev's schema pass rate).
+- *Since `computer-memory` (2026-09-27; slice 3):* a person's memory and
+  skills are a private fragment of theirs, `memory.<username>`
+  (`memory/*.md`, `skills/<name>/SKILL.md`), made by their agent at the
+  first hand-off, with each computer it hands work to an editor there.
+  The task client syncs it before and after each task and commits what
+  goose wrote to main. goose's Skills extension lists the skills. The
+  facts start a session's first task, and what changed starts a later
+  one, so no history is rewritten. The agent reads the facts into its
+  owner's turns (capped, read-only). Open: its acceptance on a real
+  Sprite, and seeding a replacement computer's sessions from the chats'
+  transcripts.
 - Decision 20: `agent` in `fragment.json`; turns from signed-in
   visitors' messages and `job.agent` steps, acting as decision 17 says,
   on the owner's budget. The chat template declares one; C's seam goes.
