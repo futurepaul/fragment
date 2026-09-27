@@ -199,6 +199,13 @@ pub fn hands_files(host: &str) -> String {
     format!("export FRAGMENT_HOST={}\nv={GOOSE_VERSION} sum={GOOSE_SHA256}\n{HANDS_SH}FRAGMENT-TASK\n{TASK_MJS}", quote(host))
 }
 
+/// Which service and task client these are, for a computer's sync: a new
+/// one reaches a computer synced before it, as a new goose does.
+pub fn hands_digest() -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(&Sha256::digest(format!("{HANDS_SH}{TASK_MJS}"))[..8])
+}
+
 /// What `POLL` says.
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]

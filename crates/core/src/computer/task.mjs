@@ -57,6 +57,15 @@ function fail(why, code = 1) {
   console.error(why);
   process.exit(code);
 }
+// a line of hands.log (the service's), about this chat's session, where a
+// computer's owner sees it; a failure also on stderr
+function note(what, failed = false) {
+  const line = `${CHAT} session ${session}: ${what}`;
+  if (failed) console.error(line);
+  try {
+    fs.appendFileSync(path.join(DIR, "hands.log"), `[task] ${new Date().toISOString().slice(0, 19)}Z ${line}\n`);
+  } catch {}
+}
 
 if (!PROMPT || !NAME) fail("a job runs this, with PROMPT (and CHAT, RUN, ASKER)");
 if (!/^[a-z0-9-]+\.[a-z0-9-]+\/[a-z][a-z0-9_-]*$/.test(CHAT)) fail(`CHAT is <fragment>/<channel>, not ${CHAT}`);
@@ -171,24 +180,45 @@ if (!session) {
   session = (await ask("session/new", { cwd, mcpServers: [] })).sessionId;
   fs.mkdirSync(path.dirname(saved), { recursive: true });
   fs.writeFileSync(saved, session);
-} else await retool().catch((e) => console.error(`the session's tools were left as they were: ${e.message}`));
+} else await retool().catch((e) => note(`its tools were left as they were: ${e.message}`, true));
 
 // goose keeps the extensions a session was made with (or those that loaded
 // last time) and loads it with them, not with its config's: a session made
 // before the hands' tools changed (~/.config/goose/config.yaml) would keep
 // the old ones. So a loaded session's MCP extensions become the config's
-// enabled ones, through goose's own ACP methods (its built-in ones stay),
-// and only where they differ: a change breaks the cached prefix once. An
-// extension's `envs` do not carry over (goose takes none that way), so a
-// config puts them in its command.
+// enabled ones, through goose's own ACP methods (its built-in ones stay). One
+// is added (goose restarts a same-named one on the new definition) when the
+// session's copy is not the config's whole definition as goose says it
+// (command, args, tool allowlist, timeout, description), or when goose's
+// tool list, what the model is sent, has none of its tools or one its
+// allowlist leaves out; one no longer configured is removed. A change breaks
+// the cached prefix once, none otherwise, and is a line of hands.log, with
+// whether goose then offers the tools as configured. goose says no
+// extension's `envs` and adds none that way, so a config puts them in its
+// command.
 async function retool() {
+  const on = (method, params) => ask(`_goose/unstable/${method}`, { sessionId: session, ...params });
   const key = (v) => JSON.stringify(v, (_, x) => (x && typeof x === "object" && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort()) : x));
   const mcp = (e) => e.extension?.type === "mcp";
-  const want = (await ask("_goose/unstable/config/extensions/list", {})).extensions.filter((e) => e.enabled && mcp(e)).map((e) => key(e.extension));
-  const have = (await ask("_goose/unstable/session/extensions/list", { sessionId: session })).extensions.filter(mcp);
-  const change = (method, params) => ask(`_goose/unstable/session/extensions/${method}`, { sessionId: session, ...params }).catch((e) => console.error(`${method}: ${e.message}`));
-  for (const gone of have.filter((h) => !want.includes(key(h.extension)))) await change("remove", { extensionKey: gone.extensionKey });
-  for (const add of want.filter((w) => !have.some((h) => key(h.extension) === w))) await change("add", { extension: JSON.parse(add) });
+  const want = (await ask("_goose/unstable/config/extensions/list", {})).extensions.filter((e) => e.enabled && mcp(e));
+  const have = (await on("session/extensions/list")).extensions.filter(mcp);
+  const offered = async () => (await on("tools/list")).tools.map((t) => t.name);
+  // goose offers an extension's tools as <its key>__<tool>: some, and only those its allowlist names
+  const fits = (tools, { configKey: k, extension: { available_tools: only } }) => {
+    const own = tools.filter((t) => t.startsWith(`${k}__`)).map((t) => t.slice(k.length + 2));
+    return own.length > 0 && own.every((t) => !only || only.includes(t));
+  };
+  const [tools, changed] = [await offered(), []];
+  const change = (method, params, name, done) => on(`session/extensions/${method}`, params).then(() => changed.push(`${name} ${done}`), (e) => note(`${method} ${name} failed: ${e.message}`, true));
+  for (const gone of have.filter((h) => !want.some((w) => w.configKey === h.extensionKey))) await change("remove", { extensionKey: gone.extensionKey }, gone.extensionKey, "removed");
+  for (const w of want) {
+    const h = have.find((h) => h.extensionKey === w.configKey);
+    if (!h || key(h.extension) !== key(w.extension) || !fits(tools, w)) await change("add", { extension: w.extension }, w.configKey, h ? "replaced" : "added");
+  }
+  if (!changed.length) return;
+  const now = await offered();
+  const off = want.filter((w) => !fits(now, w)).map((w) => w.configKey);
+  note(`${changed.join(", ")}; goose offers ${off.length ? `not the configured tools of ${off.join(", ")}` : "the configured tools"}`);
 }
 
 let late = false;

@@ -22,7 +22,8 @@
 //!   runs detached on it, journaled on its disk (fragment_core::computer).
 //! - Its fragment's live files are kept at `~/fragment` on it, and its
 //!   `start` runs from them as a Sprites service: synced after its boot,
-//!   and while it is awake after each deploy (`sync_files`).
+//!   and while it is awake after each deploy, and after a platform deploy
+//!   that changes its goose, CLI, or hands (`sync_files`).
 //!
 //! Every step is the alarm's, from the row below: a failed one is retried
 //! with backoff, and its fragment's `events` says why.
@@ -85,11 +86,12 @@ struct Files {
 }
 
 impl Files {
-    /// What it is to be synced to: live, its `start`, the hands' goose, and
-    /// the CLI (a computer synced before them, or with another goose or an
-    /// older CLI, syncs again).
+    /// What it is to be synced to: live, its `start`, the hands' goose, the
+    /// CLI, and the hands' service and task client (a computer synced before
+    /// them, or with another goose, an older CLI, or other hands, syncs
+    /// again: a platform deploy brings a new task client).
     fn wanted(&self) -> Option<String> {
-        self.live.as_ref().map(|live| json!([live, self.start, exec::GOOSE_VERSION, exec::CLI_VERSION]).to_string())
+        self.live.as_ref().map(|live| json!([live, self.start, exec::GOOSE_VERSION, exec::CLI_VERSION, exec::hands_digest()]).to_string())
     }
 
     fn stale(&self) -> bool {
