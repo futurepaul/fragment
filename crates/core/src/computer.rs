@@ -78,7 +78,7 @@ pub const READ: &str = r#"printf 'FRAGMENT-EXEC-BEGIN\n'; tail -c +$(( $3 + 1 ))
 
 /// The CLI version this platform's computers run at least (the CLI's own
 /// version: a test holds them together). A sync updates an older one.
-pub const CLI_VERSION: &str = "0.12.0";
+pub const CLI_VERSION: &str = "0.12.1";
 
 /// `bash -c SYNC fragment-sync <fragment> <host> <release URL> <CLI version>`,
 /// its `start` script (`job_script`) on stdin, or nothing: first a CLI older
