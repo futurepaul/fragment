@@ -76,16 +76,28 @@ printf 'FRAGMENT-EXEC-BEGIN\n%s\nFRAGMENT-EXEC-END\n' "$(printf '%s' "$s" | base
 /// `bash -c READ fragment-exec <id> <stdout|stderr> <offset> <length>`.
 pub const READ: &str = r#"printf 'FRAGMENT-EXEC-BEGIN\n'; tail -c +$(( $3 + 1 )) "$HOME/.fragment/exec/$1/$2" | head -c $4 | base64; printf 'FRAGMENT-EXEC-END\n'"#;
 
-/// `bash -c SYNC fragment-sync <fragment> <host> <release URL>`, its
-/// `start` script (`job_script`) on stdin, or nothing: pulls what is live
-/// into `~/fragment` (a CLI from before `sync --live` updates itself from
-/// the release first), then writes `start` and the service that keeps it
-/// up (`serve.sh`: restarted with backoff when it exits, its output in
-/// `~/fragment.log`, trimmed to its last 512 KiB past 1 MiB). Answers the
-/// computer's home.
+/// The CLI version this platform's computers run at least (the CLI's own
+/// version: a test holds them together). A sync updates an older one.
+pub const CLI_VERSION: &str = "0.12.0";
+
+/// `bash -c SYNC fragment-sync <fragment> <host> <release URL> <CLI version>`,
+/// its `start` script (`job_script`) on stdin, or nothing: first a CLI older
+/// than that version is replaced from the release (never by an older one:
+/// the release publishes no checksum, so what is installed is its tarball's
+/// binary once it runs and says a newer version; the hands restart on it),
+/// then it pulls what is live into `~/fragment`, and writes `start` and the
+/// service that keeps it up (`serve.sh`: restarted with backoff when it
+/// exits, its output in `~/fragment.log`, trimmed to its last 512 KiB past
+/// 1 MiB). Answers the computer's home, then a line with its CLI's version
+/// when that is still older (the release has none newer yet), else none.
 pub const SYNC: &str = r#"set -e
-export PATH="$HOME/.local/bin:$PATH" FRAGMENT_HOST="$2"; mkdir -p "$HOME/fragment" "$HOME/.fragment"
-fragment sync --help 2> /dev/null | grep -q -e --live || curl -fsSL "$3/fragment-$(uname -s)-$(uname -m).tar.gz" | tar -xzf - -C "$HOME/.local/bin"
+bin="$HOME/.local/bin"; export PATH="$bin:$PATH" FRAGMENT_HOST="$2"; mkdir -p "$bin" "$HOME/fragment" "$HOME/.fragment"
+v() { "$1" --version 2> /dev/null | sed -n 's/^fragment //p'; }
+older() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n 1)" = "$1" ]; }
+have=$(v "$bin/fragment"); behind=
+if older "$have" "$4"; then d=$(mktemp -d "$bin/.get-XXXXXX")
+if curl -fsSL "$3/fragment-$(uname -s)-$(uname -m).tar.gz" | tar -xzf - -C "$d" && got=$(v "$d/fragment") && older "$have" "$got"; then mv "$d/fragment" "$bin/fragment"; echo "the fragment CLI: ${have:-none}, now $got" >&2; have=$got; fi
+rm -rf "$d"; if older "$have" "$4"; then behind=${have:-none}; fi; fi
 fragment sync "$1" --dir "$HOME/fragment" --live --apply-mass-delete >&2 || [ $? = 3 ]
 start=$(cat)
 if [ -n "$start" ]; then printf '%s
@@ -109,7 +121,7 @@ else rm -f "$HOME/.fragment/start.sh" "$HOME/.fragment/serve.sh"; fi
 printf 'FRAGMENT-EXEC-BEGIN
 %s
 FRAGMENT-EXEC-END
-' "$(printf '%s' "$HOME" | base64)""#;
+' "$(printf '%s\n%s' "$HOME" "$behind" | base64)""#;
 
 /// The goose every computer runs (docs/agent-computer.md): its static
 /// x86_64 Linux release, checked against the SHA-256 GitHub lists for it,
@@ -137,15 +149,19 @@ printf 'FRAGMENT-EXEC-BEGIN\n%s\nFRAGMENT-EXEC-END\n' "$(printf '%s' "$a/hands.s
 /// its hints are the CLI's guide; it speaks ACP on the first free port from
 /// 3284 (in `port`), to clients holding `secret` (made here, 0600); its
 /// model calls go through the platform, signed as this computer (no key
-/// here), each logged by `--serve` to `model.log`. After the header
-/// `hands_files` adds (the platform's host, the pinned goose).
+/// here), each logged by `--serve` to `model.log`. It runs itself again
+/// when its script changes, or the CLI under it (a sync's update, or one
+/// by hand): a task in progress then ends, saying so (`task.mjs`). After
+/// the header `hands_files` adds (the platform's host, the pinned goose).
 const HANDS_SH: &str = r#"set -u
 a="$HOME/.fragment/agent"; cd "$a" || exit 1; touch hands.log model.log goose.log
 export PATH="$HOME/.local/bin:$PATH"
 goose="$HOME/.local/share/goose-$v/goose"; url="https://github.com/aaif-goose/goose/releases/download/v$v/goose-x86_64-unknown-linux-musl.tar.gz"
-me=$(cksum < "$0"); m=; g=; backoff=1
+cli() { ls -liL "$HOME/.local/bin/fragment" 2> /dev/null; }
+me=$(cksum < "$0"); was=$(cli); m=; g=; backoff=1
 trap 'kill $m $g 2> /dev/null; exit 0' TERM INT HUP
 log() { echo "[hands] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >> hands.log; }
+again() { log "$1"; kill $m $g; wait; exec bash "$0"; }
 [ -s secret ] || (umask 077; head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > secret)
 while :; do
 t0=$(date +%s); rm -f port
@@ -166,7 +182,8 @@ for i in $(seq 300); do curl -fs "http://127.0.0.1:$gp/health" > /dev/null 2>&1 
 kill -0 $g 2> /dev/null && echo "$gp" > port && log "up: goose $v on $gp, its model on $mp"
 fi
 while [ -s port ] && kill -0 $m 2> /dev/null && kill -0 $g 2> /dev/null; do
-[ "$(cksum < "$0")" = "$me" ] || { log "its script changed"; kill $m $g; wait; exec bash "$0"; }
+[ "$(cksum < "$0")" = "$me" ] || again "its script changed"
+[ "$(cli)" = "$was" ] || again "its CLI changed: $(fragment --version 2>&1)"
 for f in hands.log model.log goose.log; do if [ $(( $(wc -c < $f) )) -gt 1048576 ]; then tail -c 524288 $f > $f.t; cat $f.t > $f; rm -f $f.t; fi; done
 sleep 1 & wait $!
 done
@@ -457,17 +474,49 @@ mod tests {
         assert_eq!(home.finish("b3"), json!({ "code": 124, "stdout": "before\n", "stderr": "", "truncated": false }));
     }
 
+    /// A stand-in CLI at `path` that says `version`, and syncs nothing.
+    fn stand_in_cli(path: &Path, version: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("#!/bin/sh\n[ \"$1\" = --version ] && echo 'fragment {version}'\nexit 0\n")).unwrap();
+        Command::new("chmod").args(["755", path.to_str().unwrap()]).status().unwrap();
+    }
+
+    #[test]
+    fn a_sync_brings_an_older_cli_up_to_the_release() {
+        let home = Home::new("cli");
+        let release = home.path("release");
+        // the release's tarball for this machine, holding a CLI that says `v`
+        let publish = |v: &str| {
+            stand_in_cli(&release.join("fragment"), v);
+            let tar = r#"tar -czf "$0/fragment-$(uname -s)-$(uname -m).tar.gz" -C "$0" fragment"#;
+            assert!(Command::new("bash").args(["-c", tar, release.to_str().unwrap()]).status().unwrap().success());
+        };
+        let url = format!("file://{}", release.display());
+        let sync = |want: &str| String::from_utf8(answer(&home.run(SYNC, &["pet.paul", "https://fragment.test", &url, want], "")).unwrap()).unwrap();
+        let bin = home.path(".local/bin/fragment");
+        let installed = || String::from_utf8(Command::new(&bin).arg("--version").output().unwrap().stdout).unwrap();
+        let said = |behind: &str| format!("{}\n{behind}", home.0.display());
+        stand_in_cli(&bin, "0.11.1");
+        publish("0.12.0");
+        assert_eq!((sync("0.12.0"), installed()), (said(""), "fragment 0.12.0\n".into()), "older: updated");
+        publish("0.13.0");
+        assert_eq!((sync("0.12.0"), installed()), (said(""), "fragment 0.12.0\n".into()), "current: left alone");
+        stand_in_cli(&bin, "0.14.0");
+        assert_eq!((sync("0.12.0"), installed()), (said(""), "fragment 0.14.0\n".into()), "newer: never down");
+        stand_in_cli(&bin, "0.9.1");
+        assert_eq!((sync("0.14.0"), installed()), (said("0.13.0"), "fragment 0.13.0\n".into()), "the release is newer, not new enough: said");
+        std::fs::remove_dir_all(&release).unwrap();
+        assert_eq!((sync("0.14.0"), installed()), (said("0.13.0"), "fragment 0.13.0\n".into()), "no release: kept, and said");
+    }
+
     #[test]
     fn start_is_synced_then_kept_up_by_its_service() {
         let home = Home::new("serve");
-        // a stand-in CLI that knows `sync --live`, and syncs nothing
-        std::fs::create_dir_all(home.path(".local/bin")).unwrap();
-        std::fs::write(home.path(".local/bin/fragment"), "#!/bin/sh\n[ \"$2\" = --help ] && echo --live\nexit 0\n").unwrap();
-        Command::new("chmod").args(["755", home.path(".local/bin/fragment").to_str().unwrap()]).status().unwrap();
-        let args = ["pet.paul", "https://fragment.test", "https://release.test"];
+        stand_in_cli(&home.path(".local/bin/fragment"), CLI_VERSION);
+        let args = ["pet.paul", "https://fragment.test", "https://release.test", CLI_VERSION];
         let start = start_script("echo run >> runs; echo \"said $FRAGMENT_NAME\"; exit 1", args[1], args[0]);
         let out = home.run(SYNC, &args, &start);
-        assert_eq!(answer(&out), Some(home.0.display().to_string().into_bytes()), "{out}");
+        assert_eq!(answer(&out), Some(format!("{}\n", home.0.display()).into_bytes()), "{out}");
         let mut serve = Command::new("bash").arg(home.path(".fragment/serve.sh")).env("HOME", &home.0).spawn().unwrap();
         // it exits at once: restarted a second later, then two
         let runs = || std::fs::read_to_string(home.path("fragment/runs")).unwrap_or_default().lines().count();

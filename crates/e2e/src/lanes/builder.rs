@@ -325,10 +325,11 @@ fn home_sessions(s: &mut Suite, api: &Api, (owner, owner_cli): (&Keys, &Path), c
     let agents = s.agents()?;
     let username = api.username(owner)?;
     let agent = format!("agent.{username}");
-    let set = s.cli_json(api, owner_cli, &["agent", "home", &agent, builder.split('.').next().unwrap_or(""), "--json"]);
+    // bare labels, as a person types them (`fragment agent home agent pet` once named no fragment)
+    let set = s.cli_json(api, owner_cli, &["agent", "home", "agent", builder.split('.').next().unwrap_or(""), "--json"]);
     let v = view(&agents, owner, &agent);
     s.ok(
-        "its owner sets a home computer once (`fragment agent home`, a label theirs): a fragment of theirs that does work",
+        "its owner sets a home computer once (`fragment agent home`, with bare labels: theirs): a fragment of theirs that does work",
         set.as_ref().is_ok_and(|a| a["home"] == builder) && v["home"] == builder,
         format!("{set:?} / {}", v["home"]),
     );

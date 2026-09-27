@@ -1539,11 +1539,11 @@ fn run(cli: Cli) -> Result<()> {
                     }
                 }
                 AgentCmd::Home { name, computer, clear: _ } => {
-                    // a bare label is one of yours, as the agent's name says
-                    let computer = computer.map(|c| match (c.contains('.'), name.split_once('.')) {
-                        (false, Some((_, user))) => format!("{c}.{user}"),
-                        _ => c,
-                    });
+                    // a bare label is one of yours: the signed API resolves it
+                    let computer = match computer {
+                        Some(label) if !label.contains('.') => Some(c.call_as::<FragmentStatus>(c.get(&format!("/api/f/{label}/status"))?)?.name),
+                        named => named,
+                    };
                     let v = a.call(a.put_json(&format!("/api/a/{name}/home"), &json!({ "computer": computer }))?)?;
                     json_exit(j, &v);
                     match v["home"].as_str() {
@@ -2027,6 +2027,13 @@ fn uid() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sync brings a computer's CLI up to the version the platform
+    /// expects: this one, so a platform deploy updates computers to it.
+    #[test]
+    fn computers_run_this_cli() {
+        assert_eq!(fragment_core::computer::CLI_VERSION, env!("CARGO_PKG_VERSION"));
+    }
 
     /// Goal: a deploy of a folder mints one storage token, reads main's
     /// head once (its sync's), lists once, and nudges the pins once.

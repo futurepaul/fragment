@@ -103,7 +103,8 @@ ws.onmessage = ({ data }) => {
   if (m.error) w?.reject(Object.assign(new Error(m.error.message), { code: m.error.code }));
   else w?.resolve(m.result);
 };
-ws.onclose = () => waiting.forEach((w) => w.reject(new Error("goose serve closed the connection")));
+// its service restarted (a CLI updated, its script changed) or goose died: said, not retried
+ws.onclose = () => waiting.forEach((w) => w.reject(new Error("goose serve closed the connection (its service restarted, or goose stopped): the task did not finish")));
 
 // goose's updates while the task runs: its words, and each tool call, a step once it ended
 let [loading, said, last, steps] = [false, "", "", 0];
@@ -170,6 +171,6 @@ clearTimeout(timer);
 ws.close();
 await posted;
 const words = said.trim() || last;
-console.log(words || ended.error || (late ? "It ran out of time." : "(goose said nothing)"));
+console.log([words, ended.error].filter(Boolean).join("\n\n") || (late ? "It ran out of time." : "(goose said nothing)"));
 if (ended.error) console.error(ended.error);
 process.exit(late ? 124 : ended.stopReason === "end_turn" ? 0 : 1);

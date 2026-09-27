@@ -161,6 +161,10 @@ pub fn computer_runtime(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("start that exits is run again (with backoff)", s.eventually(Duration::from_secs(10), || said(1) >= 2), said(1));
     let log = std::fs::read_to_string(pet_home.join("fragment.log")).unwrap_or_default();
     s.ok("from ~/fragment, its output in ~/fragment.log", pet_home.join("fragment/said.sh").exists() && log.contains("[fragment] exited 0"), &log);
+    // its hands (every computer's), up once
+    let hands = || std::fs::read_to_string(pet_home.join(".fragment/agent/hands.log")).unwrap_or_default();
+    let ups = || hands().matches("up: goose").count();
+    s.eventually(Duration::from_secs(20), || ups() == 1);
     // awake (a page open), a redeploy that changes the script restarts it
     let page = Socket::open(api, &pet, "__live", Some(&owner), None)?;
     let site = s.scratch.join("runtime-said");
@@ -174,6 +178,40 @@ pub fn computer_runtime(s: &mut Suite, api: &Api) -> Result<()> {
         o.status.success() && restarted && said(1) == ones && said(2) == 1,
         format!("v1 {ones} then {}, v2 {}", said(1), said(2)),
     );
+    s.ok("that sync, its CLI current, leaves its hands running", ups() == 1 && !hands().contains("its CLI changed"), hands());
+    cli_kept_current(s, api, (&home, &owner), (&pet, &pet_home, &site), &said)?;
     page.close();
+    Ok(())
+}
+
+/// A computer's CLI, kept current (fragment.club, 2026-09-27: a pet's
+/// hands ran CLI 0.11.1's `model --serve`, which missed goose's model path,
+/// until they were restarted by hand, after the CLI was updated by hand):
+/// a CLI changed under the hands restarts them, and a sync updates an old
+/// one from the release, restarting them on it. The computer is awake.
+fn cli_kept_current(s: &mut Suite, api: &Api, (home, owner): (&Path, &Keys), (pet, pet_home, site): (&str, &Path, &Path), said: &dyn Fn(u32) -> usize) -> Result<()> {
+    let hands = || std::fs::read_to_string(pet_home.join(".fragment/agent/hands.log")).unwrap_or_default();
+    let ups = || hands().matches("up: goose").count();
+    let bin = pet_home.join(".local/bin/fragment");
+    // an old CLI stand-in (the real one, saying it is 0.0.1), put in by hand
+    let old = pet_home.join(".local/bin/.old");
+    std::fs::write(&old, format!("#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'fragment 0.0.1'; exit 0; }}\nexec '{}' \"$@\"\n", s.cli.display()))?;
+    std::fs::set_permissions(&old, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
+    std::fs::rename(&old, &bin)?;
+    let by_hand = s.eventually(Duration::from_secs(20), || hands().contains("its CLI changed: fragment 0.0.1") && ups() == 2);
+    s.ok("a CLI changed under its hands restarts them on it", by_hand, hands());
+    std::fs::write(site.join("said.sh"), "fragment post \"$FRAGMENT_NAME\" said --body '{\"v\": 3}'\nexec sleep 600\n")?;
+    let o = s.cli(api, home, &["deploy", pet, "--dir", &dir_of(site)]);
+    let synced = s.eventually(Duration::from_secs(20), || said(3) == 1);
+    let now = fragment_core::computer::CLI_VERSION;
+    let updated = s.eventually(Duration::from_secs(20), || hands().contains(&format!("its CLI changed: fragment {now}")) && ups() == 3);
+    let version = std::process::Command::new(&bin).arg("--version").output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    let events = api.signed(owner, "GET", &format!("/api/f/{pet}/events?tail=20"), None)?;
+    let failed = events.body["events"].as_array().into_iter().flatten().any(|e| e["kind"] == "computer.failed");
+    s.ok(
+        "a sync updates an old CLI from the release, and its hands restart on the new one",
+        o.status.success() && synced && updated && version == format!("fragment {now}\n") && !failed,
+        format!("{version:?} {}", hands()),
+    );
     Ok(())
 }

@@ -506,7 +506,9 @@ keeps the last good code and says why in `status.code.error`.
   does. The computer keeps the fragment's live files at `~/fragment`
   (`fragment sync <name> --dir ~/fragment --live`): synced after its
   first boot, and after each deploy that moves live, at once while it is
-  awake, or else when it next wakes. `start` (a string of at most 4096
+  awake, or else when it next wakes; each sync first brings its CLI up
+  to the version the platform expects, from the release (docs/computers.md).
+  `start` (a string of at most 4096
   bytes) runs from there, as a job's command does but with no timeout
   and `FRAGMENT_NAME` set, as a Sprites service (`fragment`) while the
   computer is awake: run again when it exits (after 1 s, doubling to 60
