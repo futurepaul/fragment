@@ -187,9 +187,11 @@ pub enum FileChange<'a> {
 pub const CHUNK_MAX: usize = 4 * 1024 * 1024;
 
 /// An NDJSON commit pack for `POST /api/repos/<repo>/commit-pack`:
-/// metadata first, then each file's content as base64 chunks, each stream
-/// ending with an `eof` chunk. `expected` is the branch head the commit
-/// must land on (the service answers 409 when it moved).
+/// metadata first, then each upsert's content as base64 chunks, each
+/// stream ending with an `eof` chunk. A delete names an id but streams
+/// nothing, as code.storage's SDKs send it: the service refuses a chunk
+/// no upsert names ("unexpected content_id"). `expected` is the branch
+/// head the commit must land on (the service answers 409 when it moved).
 pub fn commit_pack(branch: &str, expected: Option<&str>, message: &str, author: (&str, &str), changes: &[FileChange]) -> String {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD;
@@ -212,10 +214,7 @@ pub fn commit_pack(branch: &str, expected: Option<&str>, message: &str, author: 
                     chunk(&id, piece, j + 1 == pieces.len());
                 }
             }
-            FileChange::Delete { path } => {
-                files.push(serde_json::json!({ "path": path, "operation": "delete", "content_id": id, "mode": "100644" }));
-                chunk(&id, b"", true);
-            }
+            FileChange::Delete { path } => files.push(serde_json::json!({ "path": path, "operation": "delete", "content_id": id })),
         }
     }
     let mut meta = serde_json::json!({

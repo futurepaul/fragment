@@ -214,6 +214,11 @@ fn problem(status: u16, detail: &str) -> Response {
     Response::json(status, &json!({ "type": "about:blank", "status": status, "detail": detail, "error": detail }))
 }
 
+/// A commit pack code.storage refuses as malformed, in its shape.
+fn invalid(message: &str) -> Response {
+    Response::json(400, &json!({ "commit": null, "result": { "success": false, "status": "invalid", "message": message } }))
+}
+
 fn cas_failed(branch: &str, current: &str) -> Response {
     Response::json(
         409,
@@ -568,10 +573,21 @@ impl Inner {
             return Response::json(400, &json!({ "error": "first payload must be metadata", "result": { "status": "invalid", "message": "first payload must be metadata" } }));
         }
         let Some(branch) = meta["target_branch"].as_str() else { return problem(400, "metadata needs target_branch") };
+        // as code.storage checks: every upsert names a content_id, and a
+        // chunk streams only for one (a delete's id streams nothing)
+        let files = meta["files"].as_array().cloned().unwrap_or_default();
+        let mut streams = BTreeSet::new();
+        for f in files.iter().filter(|f| f["operation"] != "delete") {
+            let Some(id) = f["content_id"].as_str().filter(|id| !id.is_empty()) else { return invalid(&format!("missing content_id for {}", f["path"])) };
+            streams.insert(id);
+        }
         let mut chunks: BTreeMap<String, (Vec<u8>, bool)> = BTreeMap::new();
         for line in lines {
             let Ok(v) = serde_json::from_str::<Value>(line) else { return problem(400, "a line is not JSON") };
             let Some(id) = v["blob_chunk"]["content_id"].as_str() else { return problem(400, "a line is not a blob_chunk") };
+            if !streams.contains(id) {
+                return invalid(&format!("unexpected content_id {id:?}"));
+            }
             let data = base64::engine::general_purpose::STANDARD.decode(v["blob_chunk"]["data"].as_str().unwrap_or("")).unwrap_or_default();
             if data.len() > CHUNK_MAX {
                 return Response::json(
@@ -584,7 +600,7 @@ impl Inner {
             entry.1 = v["blob_chunk"]["eof"].as_bool().unwrap_or(false);
         }
         let mut changes = Vec::new();
-        for f in meta["files"].as_array().cloned().unwrap_or_default() {
+        for f in &files {
             let (Some(path), Some(op)) = (f["path"].as_str(), f["operation"].as_str()) else { return problem(400, "a file needs path and operation") };
             if op == "delete" {
                 changes.push((path.to_string(), None));
