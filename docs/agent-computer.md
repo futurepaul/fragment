@@ -254,7 +254,7 @@ Prices are per 1M tokens, from
 | --- | --- | --- |
 | `z-ai/glm-5.3-flashx` (2026-09-18) | $0.37 / $1.25 / $0.09 | reads images; one provider (Z.AI); `response_format`, no `structured_outputs` |
 | `z-ai/glm-5.3-flash` (the brain's) | $0.045 / $0.14 / $0.01 | lists `structured_outputs` |
-| `typesafe/jev-router` (2026-09-25) | variable (−1) | a router; no parameters listed |
+| `typesafe/jev-router` (2026-09-25) | variable (−1) | a router: picks the model (stealth ones too, which Paul accepted) and its reasoning effort; no parameters listed |
 
 **Images.** goose sends a tool's image only to a model its catalog says
 reads images, looked up by (provider, model)
@@ -270,10 +270,10 @@ allowlist, which another PR is adding along with latency routing and
 reasoning passthrough. Reasoning is set once, in
 `OPENROUTER_PARAMETERS`.
 
-**Browser reasoning** is Jev: Stagehand's callback sends
-`typesafe/jev-router` with a `json_schema` response format. Jev's
-structured output is unverified. The Stagehand slice checks it, and
-falls back to flash if it fails.
+**Browser reasoning** is flashx, in JSON mode, or with one setting Jev
+first: Stagehand's callback sends `typesafe/jev-router` with a
+`json_schema` response format and no reasoning effort, which Jev picks,
+and flashx answers when Jev's answer does not fit (Browser fixes, below).
 
 No key is on the computer.
 
@@ -501,7 +501,8 @@ structure. Where it differs from the plan above:
 - **Its model**: Stagehand's `generate` callback posts to goose's
   `OPENROUTER_HOST` (the extension inherits goose's environment: `fragment
   model --serve`), unstreamed, with Stagehand's JSON schema as
-  `response_format` and `reasoning.effort: low`. Jev first; when its
+  `response_format` and `reasoning.effort: low` (both changed since:
+  Browser fixes, below). Jev first; when its
   answer is not JSON that fits the schema (checked in the callback, as
   far as Stagehand's schemas go), flashx answers the same request, not
   flash (Paul: flashx by default everywhere). Each call is a line of
@@ -539,6 +540,85 @@ structure. Where it differs from the plan above:
 - **Size:** template +251/−44 (the server 180; the lockfile, 490 lines
   of generated JSON, not counted), e2e +123/−25, the OpenRouter fake
   +10/−5 (an unstreamed answer takes the script's text), docs.
+
+**Browser fixes** (after the first real run, 2026-09-27). Asked in a new
+chat for Hacker News' top 3 stories, the pet's goose used `open`,
+`extract` twice, `observe`, then `screenshot`, and answered right from
+the screenshot: every Stagehand model call had failed (`browser.log`).
+- **Jev refused our reasoning effort**: `OpenRouter (400): No configured
+  model/effort candidate satisfies the requested reasoning effort…`
+  (Extraction, Observation). The effort was the browser server's own
+  (`reasoning.effort: low`); nothing on the way adds one. Jev picks a
+  model and its effort itself, so its requests name none. flashx keeps
+  `low`, as goose's do.
+- **Jev picked a stealth model** (`stealth/space-bunny-alpha`, provider
+  "Stealth", free), whose markdown list did not parse. **Jev may route to
+  stealth models: Paul accepted this on 2026-09-27** ("it's fun"), so
+  its requests name no provider preferences, and a stealth pick's
+  malformed answer falls back to flashx like any misfit. Should that
+  change: OpenRouter's `provider: {ignore: ["stealth"]}` (the cloaked
+  models' provider slug) and `data_collection: "deny"` (only providers
+  that neither store nor train on prompts; space-bunny-alpha's endpoint
+  keeps them) exclude them, though whether Jev's router applies
+  preferences to its pick is not documented (the Auto Router applies
+  them to "the endpoints of whichever models the router resolves"). Jev's
+  own listing lists no parameters.
+- **flashx ignored the JSON schema**: its one provider lists
+  `response_format` (JSON mode) but not `structured_outputs` (a schema),
+  and OpenRouter drops a parameter no provider takes, so it answered
+  Stagehand's prompt (which never states the shape) in markdown: "1. …"
+  ("Unterminated fractional number in JSON at position 2") and a bare
+  array of elements for Observation ("does not fit"). Now flashx is asked
+  for JSON mode (`{type: "json_object"}`) from a provider that takes it
+  (`require_parameters`), Jev for the schema, and the schema is said in
+  the system prompt. `answer.mjs` reads the reply: the JSON in it (fences,
+  words or a number before it, reasoning after it), a schema's only field
+  given bare (the bare array), or plain words where that field is text
+  (an extraction); JSON cut short, or JSON of another shape, is refused,
+  so the next model answers. A unit test runs it on the replies that
+  failed (crates/templates). `browser.log` also names the model that
+  answered (`by`: Jev's pick).
+- **Jev is not forced** (Paul: "obviously we don't force jev if it's not
+  actually helping"). One setting in `browser-mcp.mjs`, `JEV_FIRST`,
+  picks flashx alone (the default) or Jev and then flashx. flashx alone
+  is the default on the evidence there is: on the real run flashx's three
+  answers held the right content in the wrong wrapper, which
+  `answer.mjs` now reads (3 of 3, replayed in the unit test), while Jev
+  fitted none of three (two refusals this fixes, one stealth list that
+  `answer.mjs` would now read as an extraction). Jev first also costs a
+  routing decision on each call and, when its answer misfits, a whole
+  wasted call before flashx, and holds $0.50 of the month per call
+  until it settles. Nothing here measured either model's latency (no
+  real OpenRouter calls). **What flips it**: run 20 or more Stagehand
+  calls each way on the pet and compare `browser.log`. Jev first wins
+  when its first-try `ok` rate is at least flashx's and the median `ms`
+  from a call's start to its answer (Jev's, or flashx's after a Jev
+  miss) is below flashx alone's.
+- **A session kept its old tools.** goose stores a session's extensions
+  when it is made and loads it with those, not with its config's
+  (`session/load` adds only the `mcpServers` a client passes; a failed
+  extension is dropped from the session too). So Paul's chat from before
+  slice 2 had Cua Driver's tools and never the browser. The task client
+  now compares a loaded session's MCP extensions with the config's
+  enabled ones (goose's ACP methods
+  `_goose/unstable/config/extensions/list` and
+  `_goose/unstable/session/extensions/list`) and removes and adds where
+  they differ (`…/session/extensions/remove`, `…/add`), which goose
+  persists: one cache break per change, none otherwise. goose adds no
+  extension with inline `envs` that way, so Cua Driver's environment is
+  in its command (`/usr/bin/env DISPLAY=:99 … cua-driver mcp`).
+- **The e2e**: goose's stand-in keeps each session's extensions as goose
+  does, with those ACP methods; a session made on a Cua-only config gets
+  the new tools on its next task, in the same session, and the task after
+  changes nothing (the same tools, in order). By default every Stagehand
+  call is flashx's, in JSON mode, and its markdown list and bare array
+  are read as Stagehand's shapes. Then `JEV_FIRST` is turned on in the
+  pet's own files: the OpenRouter fake refuses a Jev effort as Jev did,
+  Jev's asks name none and no provider, and Jev's JSON cut short falls
+  back to flashx.
+- **Size**: template +137/−48 (`answer.mjs` 93, 30 of them the schema
+  check moved out of the server), task client +20/−1, e2e +233/−63, the
+  unit test +50, the fake +6/−1, docs.
 
 **What slice 2 leaves to the real pet**: Chrome's install and
 Stagehand's runtime loading there; per-call ms and cached share in

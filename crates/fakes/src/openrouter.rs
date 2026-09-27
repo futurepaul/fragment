@@ -7,9 +7,10 @@
 //! reasoning alone; unstreamed, text) in order before falling back to an
 //! echo; an in-cell agent's requests (no `session_id`: goose's name their
 //! session) take their own script first, so a test scripts the agent and
-//! the computer's goose apart. A streamed answer keeps to the request's
-//! `max_tokens` (`CHARS_PER_TOKEN` characters each): one longer is cut
-//! there and ends `length`, as the service's do.
+//! the computer's goose apart. Jev's router (`typesafe/jev-router`) refuses
+//! a named reasoning effort (400), as it did. A streamed answer keeps to
+//! the request's `max_tokens` (`CHARS_PER_TOKEN` characters each): one
+//! longer is cut there and ends `length`, as the service's do.
 //! An answer can be held back first (`delay_next`), as a slow model's is,
 //! its script consumed as the request arrives. Every answer reports its cost
 //! (`usage.cost`, dollars) unless told to leave it out. A video's prompt
@@ -252,6 +253,10 @@ fn answer(s: &mut State, req: &Request, expected: &str, manager: &str, base_in: 
     let costless = s.costless;
     match (req.method.as_str(), path) {
         ("POST", "/api/v1/chat/completions") => {
+            // the router picks each call's reasoning effort itself, and refused one named (2026-09-27)
+            if body["model"] == "typesafe/jev-router" && !body["reasoning"]["effort"].is_null() {
+                return problem(400, "No configured model/effort candidate satisfies the requested reasoning effort");
+            }
             if let Err(r) = s.charge(&auth, costs.text) {
                 return r;
             }

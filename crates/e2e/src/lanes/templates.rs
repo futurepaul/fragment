@@ -491,14 +491,46 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
     api.approve(&op_session, &s.operator)?;
     let top = api.signed(&s.operator, "POST", &format!("/api/budget/{owner_id}/top-up"), Some(&json!({ "usd": 1.0 })))?;
     anyhow::ensure!(top.status == 200, "topping up the owner's month: {top}");
+
+    // a session made before the hands' tools changed: the pet's own, when
+    // its goose config named Cua Driver alone (as before the browser), its
+    // display in `envs`; the task client run by hand, as `do` runs it
+    let cua = home.join(format!(".local/share/cua-driver-{CUA_VERSION}/cua-driver"));
+    let old = json!({ "extensions": { "cua": { "enabled": true, "type": "stdio", "name": "cua", "cmd": cua, "args": ["mcp"], "timeout": 120, "available_tools": ["get_desktop_state", "click"], "envs": { "DISPLAY": ":99" } } } });
+    std::fs::create_dir_all(home.join(".config/goose"))?;
+    std::fs::write(home.join(".config/goose/config.yaml"), old.to_string())?;
+    let hello = |openrouter: &fragment_fakes::openrouter::OpenRouter, id: &str| -> Result<(Value, Value)> {
+        openrouter.clear_script();
+        openrouter.script(&[Say::Text("Hello.".into())]);
+        let before = openrouter.chats().len();
+        let r = api.op(owner, &name, "run", id, json!({ "command": "PROMPT='say hello' node \"$HOME/.fragment/agent/task.mjs\"" }))?;
+        let ran = settle(api, owner, &name, started(&r), &["succeeded", "held"], Duration::from_secs(60));
+        Ok((ran, openrouter.chats().into_iter().nth(before).unwrap_or_default()))
+    };
+    let tools_of = |c: &Value| -> Vec<String> { c["tools"].as_array().into_iter().flatten().filter_map(|t| t["function"]["name"].as_str()).map(str::to_string).collect() };
+    let (ran, then) = hello(&s.openrouter, "r3")?;
+    let session = then["session_id"].as_str().unwrap_or_default().to_string();
+    let changes = || {
+        let store = std::fs::read_to_string(home.join(".local/share/goose/sessions/stand-in.json")).unwrap_or_default();
+        serde_json::from_str::<Value>(&store).unwrap_or_default()["sessions"][&session]["changes"].clone()
+    };
+    s.ok(
+        "a session made before a tool change has the tools of then: its shell and those Cua Driver's config named",
+        ran["output"]["code"] == 0 && tools_of(&then) == ["shell", "cua__click", "cua__get_desktop_state"] && !session.is_empty() && changes() == 0,
+        json!({ "run": ran, "tools": tools_of(&then) }),
+    );
+
     let said = "Milk is $3.49; I put it in the todo box and clicked the app.";
     s.openrouter.clear_script();
     s.openrouter.script(&[
         Say::Tools(vec![("browser__open".into(), json!({ "url": "https://shop.test/milk" }))]),
         Say::Tools(vec![("browser__extract".into(), json!({ "what": "the price of milk" }))]),
-        // Stagehand's calls: Jev's answer does not fit its schema, so flashx answers
-        Say::Text("Milk is about three dollars.".into()),
-        Say::Text(json!({ "extraction": "$3.49" }).to_string()),
+        // Stagehand's calls, on flashx: a markdown list, as flashx answered on
+        // Paul's pet, read as the extraction
+        Say::Text("1. Milk: $3.49".into()),
+        Say::Tools(vec![("browser__observe".into(), json!({ "about": "the todo box" }))]),
+        // its elements as a bare array, as there, read as the observation
+        Say::Text(json!([{ "elementId": "0-16", "description": "the New todo box" }]).to_string()),
         Say::Tools(vec![("browser__act".into(), json!({ "action": "type milk into the todo box" }))]),
         Say::Text(json!({ "action": { "elementId": "0-16", "method": "fill" }, "twoStep": false }).to_string()),
         Say::Tools(vec![("cua__get_window_state".into(), json!({ "pid": 1 }))]),
@@ -516,49 +548,71 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
     );
     let chats: Vec<Value> = s.openrouter.chats().into_iter().skip(before).collect();
     let (goose, stagehand): (Vec<&Value>, Vec<&Value>) = chats.iter().partition(|c| c["stream"] == true);
-    let mut offered: Vec<&str> = goose.first().and_then(|c| c["tools"].as_array()).into_iter().flatten().filter_map(|t| t["function"]["name"].as_str()).collect();
+    let mut offered = goose.first().map(|c| tools_of(c)).unwrap_or_default();
     offered.sort();
     let tools = ["browser__act", "browser__extract", "browser__observe", "browser__open", "browser__screenshot", "cua__click", "cua__get_window_state", "shell"];
     s.ok(
         "goose's model calls went through the platform, on the hands' model (flashx), offered its shell, the browser's tools, and the Cua Driver tools for desktop apps its config names",
-        goose.len() == 6 && goose.iter().all(|c| c["model"] == "z-ai/glm-5.3-flashx") && offered == tools,
+        goose.len() == 7 && goose.iter().all(|c| c["model"] == "z-ai/glm-5.3-flashx") && offered == tools,
         json!(offered),
     );
-    let text = |c: &Value| c.to_string();
-    let models: Vec<&str> = stagehand.iter().filter_map(|c| c["model"].as_str()).collect();
-    let schemas: Vec<&str> = stagehand.iter().filter_map(|c| c["response_format"]["json_schema"]["name"].as_str()).collect();
-    let tree = stagehand.iter().all(|c| c["response_format"]["type"] == "json_schema" && text(c).contains("[0-16] textbox: New todo"));
-    let log = std::fs::read_to_string(home.join(".fragment/agent/browser.log")).unwrap_or_default();
-    let logged: Vec<(String, bool)> = log.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).map(|l| (l["model"].as_str().unwrap_or("").to_string(), l["ok"] == true)).collect();
     s.ok(
-        "a browser step goes through Stagehand's MCP server to the model, through the hands' endpoint: Jev asked for Stagehand's JSON schema, flashx when Jev's answer does not fit, each call in browser.log",
-        models == [fragment_proto::ROUTER_MODEL, "z-ai/glm-5.3-flashx", fragment_proto::ROUTER_MODEL]
-            && schemas == ["Extraction", "Extraction", "Act"]
-            && tree
-            && logged == [(fragment_proto::ROUTER_MODEL.to_string(), false), ("z-ai/glm-5.3-flashx".into(), true), (fragment_proto::ROUTER_MODEL.to_string(), true)],
-        json!({ "models": models, "schemas": schemas, "log": log }),
+        "in the session made before the tool change, now with the config's tools: Cua Driver's replaced (its display in its command now), the browser's added, the shell kept",
+        goose.iter().all(|c| c["session_id"] == session.as_str()) && changes() == 3,
+        json!({ "session": session, "changes": changes() }),
     );
-    let usage = api.signed(owner, "GET", "/api/budget/usage", None)?;
-    let routed = usage.body["usage"].as_array().into_iter().flatten().filter(|u| u["kind"] == "computer.text" && u["fragment"] == computer_id.as_str() && u["model"] == fragment_proto::ROUTER_MODEL).count();
-    s.ok("billed to its owner, naming the computer and the router", routed == 2, &usage);
+    let (ran, again) = hello(&s.openrouter, "r4")?;
+    s.ok(
+        "and its next task changes nothing: the same tools in the same order, so the prefix holds",
+        ran["output"]["code"] == 0 && again["session_id"] == session.as_str() && goose.first().is_some_and(|c| c["tools"] == again["tools"]) && changes() == 3,
+        json!({ "run": ran, "changes": changes() }),
+    );
+    let text = |c: &Value| c.to_string();
+    let (jev, flashx) = (fragment_proto::ROUTER_MODEL, "z-ai/glm-5.3-flashx");
+    let models = |calls: &[&Value]| calls.iter().filter_map(|c| c["model"].as_str().map(str::to_string)).collect::<Vec<_>>();
+    let schemas = |calls: &[&Value]| {
+        let named = |p: &str| ["Extraction", "Observation", "Act"].into_iter().find(|n| p.starts_with(&format!("the stand-in's {n}")));
+        calls.iter().filter_map(|c| c["messages"][0]["content"].as_str().and_then(named)).collect::<Vec<_>>()
+    };
+    // Jev picks its own reasoning effort (and provider: stealth ones too);
+    // flashx is asked for JSON mode, from a provider that takes it
+    let asked = |calls: &[&Value]| {
+        calls.iter().all(|c| {
+            let format = match c["model"].as_str() {
+                Some(fragment_proto::ROUTER_MODEL) => c["response_format"]["type"] == "json_schema" && c.get("reasoning").is_none() && c["provider"] == json!({ "sort": "latency" }),
+                _ => c["response_format"] == json!({ "type": "json_object" }) && c["reasoning"] == json!({ "effort": "low" }) && c["provider"] == json!({ "sort": "latency", "require_parameters": true }),
+            };
+            format && text(c).contains("in this JSON schema") && text(c).contains("[0-16] textbox: New todo")
+        })
+    };
+    let log = || std::fs::read_to_string(home.join(".fragment/agent/browser.log")).unwrap_or_default();
+    let logged = |from: usize| -> Vec<(String, bool)> {
+        log().lines().skip(from).filter_map(|l| serde_json::from_str::<Value>(l).ok()).map(|l| (l["model"].as_str().unwrap_or("").to_string(), l["ok"] == true)).collect()
+    };
+    s.ok(
+        "a browser step goes through Stagehand's MCP server to the model, through the hands' endpoint: flashx by default, in JSON mode, told the schema, its markdown and bare array read as Stagehand's shapes, each call in browser.log",
+        models(&stagehand) == [flashx; 3] && schemas(&stagehand) == ["Extraction", "Observation", "Act"] && asked(&stagehand) && logged(0) == vec![(flashx.to_string(), true); 3],
+        json!({ "asked": stagehand, "log": log() }),
+    );
     let images = |c: &Value| c["messages"].as_array().into_iter().flatten().filter_map(|m| m["content"].as_array()).flatten().filter(|p| p["type"] == "image_url").count();
     let seen: Vec<usize> = goose.iter().map(|c| images(c)).collect();
     let answered = |i: usize, what: &str| goose.get(i).is_some_and(|c| text(c).contains(what));
     s.ok(
-        "no browser step sends the model a screenshot (goose's calls, and Stagehand's, whose messages are text); the answers came back as text",
-        seen.get(..4) == Some(&[0, 0, 0, 0][..])
+        "no browser step sends the model a screenshot (goose's calls, and Stagehand's, whose messages are text); the answers came back as text, a bare array of elements as the observation",
+        seen.get(..5) == Some(&[0, 0, 0, 0, 0][..])
             && stagehand.iter().all(|c| images(c) == 0 && c["messages"].as_array().into_iter().flatten().all(|m| m["content"].is_string()))
             && answered(1, "on the Chrome at http://127.0.0.1:9222")
-            && answered(2, "$3.49")
-            && answered(3, "Done: fill on 0-16"),
+            && answered(2, "1. Milk: $3.49")
+            && answered(3, "- the New todo box")
+            && answered(4, "Done: fill on 0-16"),
         json!(seen),
     );
     let capped = std::fs::read_to_string(home.join(".cua-driver/config.json")).unwrap_or_default();
     s.ok(
         "a desktop app's look (Cua Driver's) reaches the model and stays, its screenshots capped, and Cua Driver drives the pet's display",
-        seen.get(4..) == Some(&[1, 1][..])
-            && answered(4, &format!("data:image/png;base64,{PNG}"))
-            && answered(5, "clicked at 10, 20 on :99")
+        seen.get(5..) == Some(&[1, 1][..])
+            && answered(5, &format!("data:image/png;base64,{PNG}"))
+            && answered(6, "clicked at 10, 20 on :99")
             && capped.contains("\"max_image_dimension\": 768"),
         json!({ "seen": seen, "cua config": capped }),
     );
@@ -568,7 +622,7 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
     let by_computer = records.iter().filter(|x| x["body"]["kind"] == "turn.step").all(|x| x["principal"] == computer_id.as_str());
     s.ok(
         "asked on its page, work has the run's start, each step as its computer posted it, and its end",
-        steps == ["start ", "turn.step open", "turn.step extract", "turn.step act", "turn.step get_window_state", "turn.step click", "end "]
+        steps == ["start ", "turn.step open", "turn.step extract", "turn.step observe", "turn.step act", "turn.step get_window_state", "turn.step click", "end "]
             && by_computer
             && records.first().is_some_and(|x| x["body"]["asker"] == owner_id.as_str())
             && records.last().is_some_and(|x| x["body"]["message"] == said),
@@ -579,6 +633,48 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
     let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/control"), Some(&json!({ "id": "p4", "body": { "kind": "key", "key": "Escape" } })))?;
     let back = r.status == 200 && s.eventually(Duration::from_secs(20), || screen()["driver"] == owner_id.as_str());
     s.ok("its agent is the driver the screen names, for who asked, until a person drives it again", drove && back, screen());
+
+    // Jev first, its one setting (JEV_FIRST) turned on in the pet's own
+    // files, as its owner would: Jev asked for the schema, naming no
+    // reasoning effort (the fake refuses one, as Jev did) and no provider
+    // (its stealth picks too), and its JSON cut short falls back to flashx
+    let file = home.join("fragment/computer/browser/browser-mcp.mjs");
+    let server = std::fs::read_to_string(&file).context("the pet's browser server, synced")?;
+    anyhow::ensure!(server.contains("const JEV_FIRST = false;"), "the browser server's one setting");
+    let on = json!({ "files": [{ "path": "computer/browser/browser-mcp.mjs", "text": server.replace("const JEV_FIRST = false;", "const JEV_FIRST = true;") }] });
+    let wrote = api.signed(owner, "POST", &format!("/api/f/{name}/files"), Some(&on))?;
+    let deployed = api.signed(owner, "POST", &format!("/api/f/{name}/deploy"), None)?;
+    let synced = s.eventually(Duration::from_secs(60), || std::fs::read_to_string(&file).is_ok_and(|t| t.contains("const JEV_FIRST = true;")));
+    anyhow::ensure!(wrote.status == 200 && synced, "turning Jev on in the pet's files: {wrote} / {deployed}");
+    let from = log().lines().count();
+    s.openrouter.clear_script();
+    s.openrouter.script(&[
+        Say::Tools(vec![("browser__extract".into(), json!({ "what": "the price of milk" }))]),
+        Say::Text(r#"{"extraction": "$3.4"#.into()),
+        Say::Text(json!({ "extraction": "$3.49" }).to_string()),
+        Say::Tools(vec![("browser__act".into(), json!({ "action": "click Add" }))]),
+        Say::Text(json!({ "action": { "elementId": "0-21", "method": "click" }, "twoStep": false }).to_string()),
+        Say::Text("Milk is still $3.49; I clicked Add.".into()),
+    ]);
+    let before = s.openrouter.chats().len();
+    let r = api.op(owner, &name, "do", "d3", json!({ "task": "the price of milk again, then click Add" }))?;
+    let done = settle(api, owner, &name, started(&r), &["succeeded", "held"], Duration::from_secs(90));
+    let chats: Vec<Value> = s.openrouter.chats().into_iter().skip(before).collect();
+    let (turns, stagehand): (Vec<&Value>, Vec<&Value>) = chats.iter().partition(|c| c["stream"] == true);
+    s.ok(
+        "with Jev first: Jev asked for Stagehand's schema, naming no reasoning effort and no provider, its answer cut short falling back to flashx, the next on Jev; the session's tools unchanged",
+        done["output"]["code"] == 0
+            && models(&stagehand) == [jev, flashx, jev]
+            && schemas(&stagehand) == ["Extraction", "Extraction", "Act"]
+            && asked(&stagehand)
+            && logged(from) == [(jev.to_string(), false), (flashx.to_string(), true), (jev.to_string(), true)]
+            && turns.get(1).is_some_and(|c| text(c).contains("$3.49"))
+            && changes() == 3,
+        json!({ "run": done, "asked": stagehand, "log": log() }),
+    );
+    let usage = api.signed(owner, "GET", "/api/budget/usage", None)?;
+    let routed = usage.body["usage"].as_array().into_iter().flatten().filter(|u| u["kind"] == "computer.text" && u["fragment"] == computer_id.as_str() && u["model"] == jev).count();
+    s.ok("billed to its owner, naming the computer and the router", routed == 2, &usage);
 
     // its owner's agent hands work to the pet by name: its `do` runs there,
     // and the pet's computer answers in the chat that asked (the agent's

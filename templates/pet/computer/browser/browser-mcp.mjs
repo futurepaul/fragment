@@ -8,19 +8,39 @@
 //
 // act, observe, and extract reason with a model through the hands' own
 // endpoint (goose's OPENROUTER_HOST: `fragment model --serve`, signed as this
-// computer, billed to its owner): Jev, asked for Stagehand's JSON schema, and
-// flashx when Jev's answer is not JSON that fits it. Each of those calls is a
-// line of ~/.fragment/agent/browser.log. None sends the model a picture; the
-// `screenshot` tool is the one that shows one. JSON-RPC by hand, as the task
-// client speaks ACP.
+// computer, billed to its owner): flashx, or Jev first with flashx when
+// Jev's answer does not fit Stagehand's JSON schema (answer.mjs reads it).
+// Each of those calls is a line of ~/.fragment/agent/browser.log. None sends
+// the model a picture; the `screenshot` tool is the one that shows one.
+// JSON-RPC by hand, as the task client speaks ACP.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { localBrowser, Stagehand } from "@browserbasehq/stagehand";
+import { answer } from "./answer.mjs";
 
 const CDP = "http://127.0.0.1:9222";
-const MODELS = ["typesafe/jev-router", "z-ai/glm-5.3-flashx"];
+// The models Stagehand's calls go to, in order: flashx alone, or, with
+// JEV_FIRST, Jev and then flashx. flashx alone until the pet's browser.log
+// shows Jev first fits as often and answers sooner (docs/agent-computer.md,
+// Browser fixes).
+const JEV_FIRST = false;
+const [JEV, FLASHX] = ["typesafe/jev-router", "z-ai/glm-5.3-flashx"];
+const MODELS = JEV_FIRST ? [JEV, FLASHX] : [FLASHX];
+// What each is asked beside Stagehand's messages, with the schema said in
+// the system prompt so a model that ignores the response format still knows
+// the shape. Jev is a router: it picks a model (stealth ones too, which Paul
+// accepted) and that model's reasoning effort (it refused the one we named),
+// and is asked for the schema. flashx's one provider (Z.AI) takes JSON mode
+// but no schema (it lists `response_format`, not `structured_outputs`, and
+// asked for a schema it answered in markdown): only a provider that takes
+// JSON mode, the soonest (the platform's default sort, which naming a
+// provider replaces).
+const ASKS = {
+  [JEV]: (name, schema) => ({ response_format: { type: "json_schema", json_schema: { name, schema } } }),
+  [FLASHX]: () => ({ response_format: { type: "json_object" }, reasoning: { effort: "low" }, provider: { sort: "latency", require_parameters: true } }),
+};
 const LOG = path.join(os.homedir(), ".fragment/agent/browser.log");
 // the most a tool answers, in characters
 const ANSWER_MAX = 8000;
@@ -85,56 +105,30 @@ async function active() {
 // asked to, and nothing here asks), answered in its JSON schema
 async function generate({ messages, systemPrompt, temperature, responseFormat: { name, schema } }) {
   const text = (c) => [c].flat().map((b) => (b.type === "text" ? b.text : "")).join("\n");
+  const system = [systemPrompt, `Answer with one JSON object, and nothing else, in this JSON schema:\n${JSON.stringify(schema)}`].filter(Boolean).join("\n\n");
   const body = {
-    messages: [...(systemPrompt ? [{ role: "system", content: systemPrompt }] : []), ...messages.map((m) => ({ role: m.role, content: text(m.content) }))],
-    response_format: { type: "json_schema", json_schema: { name, schema } },
-    reasoning: { effort: "low" },
+    messages: [{ role: "system", content: system }, ...messages.map((m) => ({ role: m.role, content: text(m.content) }))],
     ...(temperature === undefined ? {} : { temperature }),
   };
   let why = "";
   for (const model of MODELS) {
     const t0 = Date.now();
+    let by;
     try {
-      const r = await fetch(`${process.env.OPENROUTER_HOST}/v1/chat/completions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...body, model }) });
+      const r = await fetch(`${process.env.OPENROUTER_HOST}/v1/chat/completions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...body, ...ASKS[model](name, schema), model }) });
       if (!r.ok) throw new Error(`${r.status}: ${(await r.text()).slice(0, 200)}`);
-      const answer = String((await r.json()).choices?.[0]?.message?.content ?? "").replace(/^\s*```(json)?|```\s*$/g, "");
-      const structuredContent = JSON.parse(answer);
-      if (!fits(structuredContent, schema)) throw new Error(`does not fit: ${answer.slice(0, 200)}`);
-      note({ model, schema: name, ms: Date.now() - t0, ok: true });
-      return { role: "assistant", content: { type: "text", text: answer }, outputFormat: "json_schema", structuredContent };
+      const said = await r.json();
+      // the model that answered: a router's pick
+      by = said.model;
+      const structuredContent = answer(said.choices?.[0]?.message?.content, schema);
+      note({ model, by, schema: name, ms: Date.now() - t0, ok: true });
+      return { role: "assistant", content: { type: "text", text: JSON.stringify(structuredContent) }, outputFormat: "json_schema", structuredContent };
     } catch (e) {
       why = e.message;
-      note({ model, schema: name, ms: Date.now() - t0, ok: false, why: why.slice(0, 300) });
+      note({ model, by, schema: name, ms: Date.now() - t0, ok: false, why: why.slice(0, 300) });
     }
   }
   throw new Error(`no model answered in Stagehand's schema: ${why}`);
-}
-
-// whether a value fits a JSON schema, as far as Stagehand's go
-function fits(v, s) {
-  if (s.anyOf) return s.anyOf.some((x) => fits(v, x));
-  if (Array.isArray(s.type)) return s.type.some((type) => fits(v, { ...s, type }));
-  if (s.enum && !s.enum.includes(v)) return false;
-  switch (s.type) {
-    case "object": {
-      const known = ([k, x]) => (s.properties?.[k] ? fits(x, s.properties[k]) : s.additionalProperties !== false);
-      return v !== null && typeof v === "object" && !Array.isArray(v) && (s.required ?? []).every((k) => k in v) && Object.entries(v).every(known);
-    }
-    case "array":
-      return Array.isArray(v) && v.every((x) => !s.items || fits(x, s.items));
-    case "string":
-      return typeof v === "string" && (!s.pattern || new RegExp(s.pattern).test(v));
-    case "integer":
-      return Number.isInteger(v);
-    case "number":
-      return typeof v === "number";
-    case "boolean":
-      return typeof v === "boolean";
-    case "null":
-      return v === null;
-    default:
-      return true;
-  }
 }
 
 function note(call) {
@@ -148,7 +142,7 @@ try {
 } catch {}
 
 // MCP over stdio: a JSON-RPC message a line
-async function answer({ method, params }) {
+async function respond({ method, params }) {
   if (method === "initialize") return { protocolVersion: params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "browser", version: "1" } };
   if (method === "ping") return {};
   if (method === "tools/list") {
@@ -172,7 +166,7 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
     return;
   }
   if (m.id === undefined || m.method === undefined) return;
-  await answer(m).then(
+  await respond(m).then(
     (result) => send({ id: m.id, result }),
     (e) => send({ id: m.id, error: { code: e.code ?? -32603, message: e.message } }),
   );
