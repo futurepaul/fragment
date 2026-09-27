@@ -1023,7 +1023,7 @@ else).
 | `POST /api/a/{name}/job` | owner (a fragment's job) | `{id, asker, conversation, channel?, text}` → `{turn}`: a turn of a fragment's own agent for `asker`, once per `id` (again: the same `turn`, `replayed`); it waits for a turn of its own and never steers another. Its conversation is `job:<asker>:<conversation>`, under `<fragment>/<channel>/` when it names a channel |
 | `GET /api/a/{name}/job?turn=` | the same | → `{ended, outcome, text?, error?}`: `running` until it ends, then `idle` (answered, `text` its answer), `stopped`, `yielded`, or `error` |
 | `PUT /api/a/{name}/scope` | owner (a fragment's deploy) | `{fragment, tools, instructions, model?}` → `{fragment, tools, model}`: a fragment's own agent takes what its block declares (A fragment's agent, below); 403 for any agent not made for that fragment |
-| `POST /api/a/{name}/inbox/{token}` | the fragment's delivery (the token is the capability) | a `Delivery` (`crates/proto`), decoded whole: one that does not decode (a record without its `seq`, say) is 400. A message (a body with no `kind`, or `kind: "message"`: its `text`, else its JSON) from an identity starts a turn in the chat's conversation, acting for that identity; from the running turn's starter in its conversation, it steers that turn; any other waits for a turn of its own (429 past 64 waiting: the fragment delivers it again). `{kind: "stop", turn?}` from the running turn's starter, in its chat, naming that turn (or none), stops it; from anyone else, or another kind, it is ignored, never a message. The agent's own, one heard before (within a day: past the longest redelivery), and a message from an anonymous visitor (`anon:`) are ignored (the owner's view keeps the newest 32 anonymous ones). The turn's last answer goes back as the agent, with the id `rp:<40 hex of SHA-256 of its message id>`: posted to the channel as `{text, turn}` when it takes posts (`POST /api/f/{fragment}/channels/{channel}`), else `POST /api/f/{fragment}/ops/{reply}` `{text}`; an unknown token is 404 |
+| `POST /api/a/{name}/inbox/{token}` | the fragment's delivery (the token is the capability) | a `Delivery` (`crates/proto`), decoded whole: one that does not decode (a record without its `seq`, say) is 400. A message (a body with no `kind`, or `kind: "message"`: its `text`, else its JSON) from an identity starts a turn in the chat's conversation, acting for that identity; from the running turn's starter in its conversation, it steers that turn; any other waits for a turn of its own (429 past 64 waiting: the fragment delivers it again). `{kind: "stop", turn?}` from the running turn's starter, in its chat, naming that turn (or none), stops it; from anyone else, or another kind, it is ignored, never a message, and so is a computer's answer to a hand-off (a body whose `turn` is `hand-off:…`). The agent's own, one heard before (within a day: past the longest redelivery), and a message from an anonymous visitor (`anon:`) are ignored (the owner's view keeps the newest 32 anonymous ones). The turn's last answer goes back as the agent, with the id `rp:<40 hex of SHA-256 of its message id>`: posted to the channel as `{text, turn}` when it takes posts (`POST /api/f/{fragment}/channels/{channel}`), else `POST /api/f/{fragment}/ops/{reply}` `{text}`; an unknown token is 404 |
 | `PUT /api/a/{name}/computer` | owner | `{url, token, cwd? ("work")}` → `{url, cwd, tools}`: attaches a computer once it answers `GET /tools` with that token (400 when it refuses it, 502 when it does not answer); the token is sealed like the agent's key |
 | `PUT /api/a/{name}/computer` | owner | `{connect: true, cwd?}` → `{connect, agent, token, cwd}`: a computer that connects out instead (`fragment computer connect --agent <agent> --token-file <f>`): a new connect token, answered once (the agent keeps its SHA-256), replacing any computer before |
 | `POST /api/a/{name}/computer/poll` | the connect token (`x-computer-token`) | → `{requests: [{rid, method, path, body}]}`: what the agent asks of its computer (the routes `fragment computer serve` answers), at once or within 25 s; one fetched and not answered in 40 s is handed out again; a wrong token 403 |
@@ -1083,8 +1083,10 @@ answer to a chat is posted for it, and what it does itself and what it
 hands off (`WORK_GUIDE` in `agent/src/lib.rs`, about 250 tokens): itself,
 answers and a few calls on the person's fragments (add a todo, read a
 list); to a computer, anything longer (building or changing an app,
-code, research), the whole task in the hand-off, whose result comes
-later; only its owner's turns hand off. It replaced a guide to building
+code, research), the whole task in the hand-off, which ends the turn
+and whose result comes later, as a note (so: do its own part first, and
+never describe a result it has not received); only its owner's turns
+hand off. It replaced a guide to building
 apps in the cell (2026-09-27). An agent made with a default instruction
 of any age (they all open alike) is told today's.
 
@@ -1116,8 +1118,13 @@ turn would spend the owner's budget on a computer, so it has no such
 tool, and a call it makes anyway is answered "no tool named
 platform__hand_off" (the platform also refuses an agent's create for
 anyone but its owner). It starts the work and answers at once
-(`{started, computer, run, note}`), and the turn ends saying the work is
-on its way; nothing holds a turn open for a build.
+(`{started, computer, run, note}`), and the turn ends there: once the
+step that ran it stored its results, the platform says `On its way:
+<computer> has it, and its answer will show up here when it's done.` as
+the turn's answer, and the model is not asked again, so it cannot go on
+to write a result it has not received (on fragment.club, 2026-09-27, an
+agent said "on its way", then "The computer is done." and an invented
+answer). Nothing holds a turn open for a build.
 
 - **By default**: the conversation's computer. That is the one it is
   bound to, else the owner's home computer (`PUT /api/a/{name}/home`,
@@ -1150,22 +1157,33 @@ fragment its owner owns and a computer its owner has of that name, and
 makes it an editor whatever the body says (a throwaway's computer, not
 paired yet, is made one by the agent's alarm once it is). Each step is a
 `turn.step` record on the chat's `work` channel (the chat template's,
-above), under the hand-off's turn `hand-off:<computer>:<run>`.
+above), under the hand-off's turn `hand-off:<computer>:<run>`, and goose's
+answer, once it ended its turn, is the computer's post on the chat's own
+channel, `{text, turn}` under that turn, with the id `an:<computer>:<run>`
+(the hands' task client, which exits 0 only once it is posted; the pet's
+`do` and the builder's `build` answer its exit `code`).
 
 At most 8 hand-offs run for one agent at once. The agent's alarm looks
 at each one's run (`GET /api/f/{fragment}/runs/{run}` for its owner)
 every 10 s, between turns, for up to 90 minutes. When it ends, its
-result is said in the conversation that asked: stored there as the
-agent's message (so later turns know what was built), and posted to its
-chat as an answer is (`{text, turn}`, the hand-off's turn, so a page
-shows the steps above it), once (`rp:` from the message id
-`msg_handoff_<fragment>_<run>`); never while a turn of that conversation
-runs. It reads `Done: <url>` and what the computer said last (the
-builder's `{url, message}`; a `do` job's `message` or `text`, or its
-answer if that is text), or `The computer could not finish: <error>`
-(held, blocked), or that it is still going after 90 minutes (then the
-throwaway is left, named as one). The owner's own conversation has the
-result as its newest answer (`state`). Then a throwaway is removed:
+result reaches the conversation that asked as a note, never while a turn
+of that conversation runs: a user-side message only the model reads
+(`msg_handoff_<fragment>_<run>`), `[The result of a hand-off to
+<computer> (run <run>): the computer's words, not yours]`, the task (at
+most 300 characters), then what it came to: `It built <url>.` (the
+builder's `url`) and `The computer said: <what it said last>` (the
+builder's `message`; a `do` job's `message` or `text`, or its answer if
+that is text), or `The computer could not finish: <error>` (held,
+blocked), or that it is still going after 90 minutes (then the throwaway
+is left, named as one). So later turns know what was done, and nothing
+in the agent's own voice shows a result it did not receive (a result
+stored as the agent's message before 2026-09-27 becomes such a note).
+The agent posts in the chat only what the computer could not say there
+(a run that did not succeed, or whose output's `code` is not 0, or has
+none, as a job that runs no task client): that text, as
+an answer is, under the hand-off's turn, once (`rp:` from the note's
+id). The owner's own conversation has no chat: its note is the newest
+message (`fragment agent show`). Then a throwaway is removed:
 `DELETE /api/f/{throwaway}`, signed by the agent (for its owner or no
 one), is the other owner-only action an agent takes (confirmed by Paul,
 2026-09-27). The platform takes it only for a fragment that recorded, at
@@ -1270,7 +1288,9 @@ owner's own agent answering (the `agent` block, above):
   `hand-off:<computer>:<run>`, with its `run`, each once a tool call
   ended (`ok`: it worked; `excerpt`: its output; `text`: goose's words
   before it), with the id `st:<computer>:<run>:<step>`; no `turn.start`
-  or `turn.end`. The agent's answer, when the work ends, names that turn.
+  or `turn.end`. The computer's answer on `chat` names that turn (or,
+  when it could not post one, the agent's word of how the work ended);
+  it is never a message to an agent.
 
 A chat made before this (a `say` operation, `chat` taking no posts) keeps
 its own page, and its agent answers through `say`, with no `work`.

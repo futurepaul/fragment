@@ -20,21 +20,27 @@
 //! step there as its owner's computer (`grant`; a throwaway's once it is
 //! paired). Both are calls for the asker, capped as every call is
 //! (decision 17), and the computer spends its owner's budget, as everything
-//! a fragment does. No turn waits for the work: the turn ends saying it is
-//! on its way, and the agent's alarm watches the run between turns
-//! (`watch`). When it ends, its result is said in the conversation that
-//! asked (stored there, and posted to its chat as an answer is, under the
-//! hand-off's turn, so the chat shows the steps above it), then a
-//! throwaway is removed, its computer first (the Sprite destroyed), keeping
-//! what it built.
+//! a fragment does. No turn waits for the work: a turn that starts one ends
+//! there, the platform saying it is on its way (`acknowledgement`), so the
+//! model is never asked to go on and cannot write a result it has not
+//! received (Paul's chat, 2026-09-27: "on its way… The computer is done."
+//! and an invented answer). The computer posts its steps and its answer in
+//! the chat, as itself (computer/task.mjs), and the agent's alarm watches
+//! the run between turns (`watch`). When it ends, its result reaches the
+//! conversation that asked as a note (`note`): input the agent reads, never
+//! a message in its own voice to imitate. The agent says in the chat only
+//! what the computer could not (a run that failed, an answer it could not
+//! post). Then a throwaway is removed, its computer first (the Sprite
+//! destroyed), keeping what it built.
 
 use std::time::Duration;
 
 use anyhow::anyhow;
 use fragment_core::tools::{is_throwaway, op_id, reply_id, throwaway_label};
-use fragment_core::work::handoff_turn;
+use fragment_core::work::{cut, handoff_turn};
 use fragment_proto::{split_fragment_name, valid_fragment_name, FragmentStatus, OpKind, Run, RunStatus};
-use goose_provider_types::conversation::message::Message;
+use goose_provider_types::conversation::message::{Message, MessageContent};
+use rmcp::model::Role;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::{Method, SqlStorage, Storage};
@@ -52,8 +58,9 @@ const RUNNING_MAX: i64 = 8;
 /// goose is capped at 10 minutes, a job's command at 60.
 const WATCH_EVERY_MS: i64 = 10_000;
 const WATCH_MAX_MS: i64 = 90 * 60 * 1000;
-/// The most of a result said in the conversation.
+/// The most of a result said in the conversation, and of its task.
 const SAID_MAX_CHARS: usize = 1500;
+const TASK_SAID_CHARS: usize = 300;
 
 /// One hand-off being watched.
 #[derive(Deserialize)]
@@ -117,8 +124,8 @@ pub async fn start(fleet: &Fleet, sql: &SqlStorage, conv: &str, request_id: &str
         vec![fragment.as_str().into(), run.into(), conv.into(), (throwaway as i64).into(), now.into(), (now + WATCH_EVERY_MS).into(), (granted as i64).into()],
     )
     .map_err(|e| e.to_string())?;
-    let note = "It runs on its own now, for minutes: its result is said in this conversation when it ends. Tell the person \
-                it is on its way, and end your turn.";
+    let note = "It runs on its own now, for minutes, and this turn ends here. The computer answers in the chat itself; \
+                its answer reaches you as a note when the work ends.";
     Ok(json!({ "started": true, "computer": fragment, "run": run, "note": note }).to_string())
 }
 
@@ -253,16 +260,18 @@ async fn look(fleet: &Fleet, sql: &SqlStorage, owner: &str, h: &Watched, now: i6
     }
     if h.said == 0 {
         // never inside a turn of the conversation it lands in: no await
-        // between this look and the message stored
+        // between this look and the note stored
         let running = kv_u64(sql, "active")? == 1 && kv_get(sql, "turn_conv")?.as_deref() == Some(h.conv.as_str());
         if running {
             return later(sql, h, now, false);
         }
-        let (id, text) = (format!("msg_handoff_{}_{}", h.fragment, h.run), result_text(&h.fragment, run.as_ref()));
+        let (id, (answered, text)) = (format!("msg_handoff_{}_{}", h.fragment, h.run), came_to(&h.fragment, run.as_ref()));
         if store::message_seq(sql, &id).is_err() {
-            store::append_message(sql, &h.conv, &Message::assistant().with_text(&text).with_id(&id))?;
+            store::append_message(sql, &h.conv, &note(&h.fragment, h.run, run.as_ref(), &text).with_id(&id))?;
         }
-        crate::post_answer(sql, fleet, &h.conv, &reply_id(&id), &text, None, Some(&handoff_turn(&h.fragment, h.run))).await?;
+        if !answered {
+            crate::post_answer(sql, fleet, &h.conv, &reply_id(&id), &text, None, Some(&handoff_turn(&h.fragment, h.run))).await?;
+        }
         sql.exec("UPDATE handoffs SET said = 1 WHERE fragment = ? AND run = ?", vec![h.fragment.as_str().into(), h.run.into()]).map_err(|e| anyhow!("{e}"))?;
     }
     if ended && h.throwaway == 1 {
@@ -281,25 +290,59 @@ fn later(sql: &SqlStorage, h: &Watched, now: i64, done: bool) -> anyhow::Result<
     done.map(|_| ()).map_err(|e| anyhow!("{e}"))
 }
 
-/// What a hand-off's run came to, as it is said: its URL and what the
-/// computer said last (the builder answers `{url, message}`), why it could
-/// not finish, or that it is still going.
-fn result_text(fragment: &str, run: Option<&Run>) -> String {
-    let Some(run) = run else { return format!("The work on {fragment} did not come back: it is gone.") };
-    let text = match run.status {
+/// What a hand-off's run came to: what the computer said last (the
+/// builder answers `{url, message}` too), why it could not finish, or that
+/// it is still going; and whether the computer answered in the chat itself,
+/// as its task client does before it exits 0 (computer/task.mjs; the pet's
+/// and the builder's runs answer its `code`).
+fn came_to(fragment: &str, run: Option<&Run>) -> (bool, String) {
+    let Some(run) = run else { return (false, format!("The work on {fragment} did not come back: it is gone.")) };
+    let (answered, text) = match run.status {
         RunStatus::Succeeded => {
             let out = run.output.clone().unwrap_or_default();
             let said = match &out {
                 Value::String(s) => s.as_str(),
                 o => o["message"].as_str().or(o["text"].as_str()).unwrap_or(""),
             };
-            let head = out["url"].as_str().map_or("The computer is done.".to_string(), |url| format!("Done: {url}"));
-            format!("{head}\n\n{}", said.trim())
+            let built = out["url"].as_str().map_or(String::new(), |url| format!("It built {url}.\n"));
+            (out["code"] == 0, format!("{built}The computer said: {}", said.trim()))
         }
-        RunStatus::Held | RunStatus::Blocked => format!("The computer could not finish: {}", run.error.as_deref().unwrap_or("its run stopped")),
-        _ => format!("It is still going on {fragment} after {} minutes; I stopped watching it.", WATCH_MAX_MS / 60_000),
+        RunStatus::Held | RunStatus::Blocked => (false, format!("The computer could not finish: {}", run.error.as_deref().unwrap_or("its run stopped"))),
+        _ => (false, format!("It is still going on {fragment} after {} minutes, and is no longer watched.", WATCH_MAX_MS / 60_000)),
     };
-    fragment_core::work::cut(&text, SAID_MAX_CHARS)
+    (answered, cut(&text, SAID_MAX_CHARS))
+}
+
+/// A finished hand-off in the conversation that asked: a note to the agent,
+/// input labeled as the computer's and naming the task, so later turns know
+/// what was done, with nothing in the agent's own voice to imitate.
+fn note(fragment: &str, run_id: i64, run: Option<&Run>, came_to: &str) -> Message {
+    let task = run.and_then(|r| r.input.as_ref()?["task"].as_str()).map_or(String::new(), |t| cut(t, TASK_SAID_CHARS));
+    let text = format!("[The result of a hand-off to {fragment} (run {run_id}): the computer's words, not yours]\nTask: {task}\n{came_to}");
+    Message::user().with_text(cut(&text, SAID_MAX_CHARS)).agent_only()
+}
+
+/// What a turn that started a hand-off says, as it ends there (turn.rs
+/// `HandedOff`): the computers its model's last message handed work to,
+/// from their results stored after it. `None` when that message started
+/// none (or is this acknowledgement already).
+pub fn acknowledgement(turn: &[Message]) -> Option<String> {
+    let asked = turn.iter().rposition(|m| m.role == Role::Assistant)?;
+    let calls: Vec<&str> = turn[asked]
+        .content
+        .iter()
+        .filter_map(MessageContent::as_tool_request)
+        .filter(|r| r.tool_call.as_ref().is_ok_and(|c| c.name == TOOL))
+        .map(|r| r.id.as_str())
+        .collect();
+    let started = |c: &&MessageContent| c.as_tool_response().is_some_and(|r| calls.contains(&r.id.as_str()) && r.tool_result.as_ref().is_ok_and(|r| r.is_error != Some(true)));
+    let computers: Vec<String> = turn[asked + 1..]
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter(started)
+        .filter_map(|c| serde_json::from_str::<Value>(&c.as_tool_response_text()?).ok()?["computer"].as_str().map(str::to_string))
+        .collect();
+    (!computers.is_empty()).then(|| format!("On its way: {} has it, and its answer will show up here when it's done.", computers.join(" and ")))
 }
 
 /// The agent's alarm at rest: when the next hand-off is due, or none.

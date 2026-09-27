@@ -144,7 +144,34 @@ protocol.
 - The final text becomes the answer on its `chat`.
 - The computer posts there as its owner's computer; the hand-off grants
   it that.
-- The job answers `{message, code}` to the brain's alarm, as today.
+- The job answers `{message, code}` to the brain's alarm, which gives the
+  brain the result as a note (below).
+
+**The brain never speaks for the hands** (Paul, 2026-09-27). In Paul's
+chat on fragment.club the brain, asked a follow-up, handed it off and
+wrote in the same reply "The computer is done." and an invented answer
+(1908; the real run said 1886), twice. Hand-off results were stored in
+its conversation as its own messages, opening "The computer is done.",
+and the model learned to complete "on its way …" with one. Now:
+- **The computer answers as itself.** The task client posts goose's
+  answer on the chat's `chat`, `{text, turn}` under the hand-off's turn,
+  so the page shows it as the computer's, its steps above it. The brain
+  posts in the chat only what the computer could not say (a run that
+  failed).
+- **The brain reads results as input.** A finished hand-off lands in its
+  conversation as a note only the model reads, labeled as the computer's
+  words and naming the task, so later questions build on it, with
+  nothing in the brain's voice to imitate. Results stored the old way
+  become notes too.
+- **A turn that hands off ends there.** Once the hand-off's result is
+  stored, the platform says `On its way: <computer> has it, …` and the
+  turn ends; the model is not asked again. A fixed acknowledgement is the
+  simplest robust shape: nothing it writes after the call can be kept or
+  cut wrong, it is read from the stored turn (so a replaced driver ends
+  it alike), and it saves a model call. What the model says before the
+  call is its step's text on `work`. The work guide says the turn ends
+  there, so do its own part first, and not to describe results it has
+  not received.
 
 **Other callers.** A cron that calls `do` takes the same path, and
 triggers wake the computer, so goose's own scheduler is not used. A
@@ -411,7 +438,7 @@ Hand-offs). Where it differs from the plan above:
   hand (about 60 lines), instead of `@agentclientprotocol/sdk`: nothing
   is installed at run time for it.
 - **Steps are `turn.step` records**, the ones the chat page renders
-  already, under the hand-off's turn, which the agent's answer names.
+  already, under the hand-off's turn, which the computer's answer names.
 - **The grant**: the hand-off makes the computer an editor of the chat
   (the second owner-only action an agent takes; the platform takes it
   only for its owner's own computer and chat).

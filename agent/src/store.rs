@@ -100,6 +100,23 @@ pub fn migrate(sql: &SqlStorage) -> anyhow::Result<()> {
     if !cols.iter().any(|c| c["name"] == "granted") {
         ah(sql.exec("ALTER TABLE handoffs ADD COLUMN granted INTEGER NOT NULL DEFAULT 0", None))?;
     }
+    // a hand-off's result stored as the agent's own message (before
+    // 2026-09-27) becomes a note to it (handoff.rs `note`), which its model
+    // cannot learn to write itself
+    #[derive(Deserialize)]
+    struct Said {
+        id: String,
+        json: String,
+    }
+    let q = "SELECT id, json FROM messages WHERE id >= 'msg_handoff_' AND id < 'msg_handoff`' AND json LIKE '%\"role\":\"assistant\"%'";
+    for said in ah(ah(sql.exec(q, None))?.to_array::<Said>())? {
+        let old: Message = serde_json::from_str(&said.json).map_err(|e| anyhow!("corrupt message: {e}"))?;
+        if old.role == rmcp::model::Role::Assistant {
+            let note = Message::user().with_text(format!("[The result of a hand-off: the computer's words, not yours]\n{}", old.as_concat_text()));
+            let json = serde_json::to_string(&note.agent_only().with_id(&said.id))?;
+            ah(sql.exec("UPDATE messages SET json = ? WHERE id = ?", vec![json.into(), said.id.into()]))?;
+        }
+    }
     Ok(())
 }
 

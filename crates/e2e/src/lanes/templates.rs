@@ -485,8 +485,8 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
     s.ok("its agent is the driver the screen names, for who asked, until a person drives it again", drove && back, screen());
 
     // its owner's agent hands work to the pet by name: its `do` runs there,
-    // and the result lands in the chat that asked (the fake echoes: the
-    // agent's answer and goose's, in whatever order they come)
+    // and the pet's computer answers in the chat that asked (the agent's
+    // turn ends on the hand-off, so goose's answer is the fake's echo)
     let dos = || api.signed(owner, "GET", &format!("/api/f/{name}/runs?op=do"), None).map_or(0, |r| r.body["runs"].as_array().map_or(0, Vec::len));
     let (before, sprites) = (dos(), s.sprites.sprites().len());
     s.openrouter.clear_script();
@@ -494,12 +494,13 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
     api.signed(owner, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": "t-hand-off", "body": { "text": "have my pet click its button" } })))?;
     let result = || {
         let records = api.signed(owner, "GET", &format!("/api/f/{chat}/channels/chat"), None).ok().and_then(|r| r.body["records"].as_array().cloned()).unwrap_or_default();
-        records.into_iter().find(|x| x["body"]["text"].as_str().is_some_and(|t| t.starts_with("The computer is done.")))
+        let turn = format!("hand-off:{name}:");
+        records.into_iter().find(|x| x["principal"] == computer_id.as_str() && x["body"]["turn"].as_str().is_some_and(|t| t.starts_with(&turn)))
     };
     let landed = s.eventually(Duration::from_secs(90), || result().is_some());
     let said = result().map(|x| x["body"]["text"].to_string()).unwrap_or_default();
     s.ok(
-        "handed work by name, the owner's agent picks the pet's do: it runs there, the pet stays, and its result lands in the chat",
+        "handed work by name, the owner's agent picks the pet's do: it runs there, the pet stays, and its computer answers in the chat",
         landed && dos() == before + 1 && said.contains("click the pet") && s.sprites.sprites().len() == sprites,
         json!({ "said": said, "do runs": dos() }),
     );
