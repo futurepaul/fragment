@@ -10,8 +10,15 @@ use crate::steps::Step;
 
 /// One US dollar in micro-dollars.
 pub const USD: i64 = 1_000_000;
-/// A text completion's reservation.
-pub const TEXT_RESERVE: i64 = 50_000;
+/// A text completion's reservation, and each model call's of an agent or a
+/// computer: on the platform's model (`fragment_proto::AGENT_MODEL`, about
+/// $1.20 in and $4.00 out per million tokens), a call of 150,000 tokens in
+/// and 4,096 out.
+pub const TEXT_RESERVE: i64 = 200_000;
+/// A computer's call on the router with variable pricing
+/// (`fragment_proto::ROUTER_MODEL`): its price is known only once it
+/// answers, so it holds this cap, then settles to the cost reported.
+pub const ROUTER_RESERVE: i64 = 500_000;
 /// An image's.
 pub const IMAGE_RESERVE: i64 = 100_000;
 /// A video's, per second of it (the models this plan names cost about

@@ -99,7 +99,7 @@ router, so its signature binds its URL, which names the bytes' hash (the
 cell checks the bytes as they arrive): a `payload` tag may name that same
 hash, or be absent, and one naming any other hash is 401. Every other
 body the router reads
-is at most 2 MiB, measured as it arrives: a longer declared
+is at most 2 MiB (a computer's model request 8 MiB), measured as it arrives: a longer declared
 `content-length`, or a chunked body that runs past it, is 413 before
 anything is authenticated.
 
@@ -224,7 +224,7 @@ random bytes, the registry keeps their SHA-256).
 | `POST /auth/fragment?name=&return=` | that page's form (`form`, its token): the yes, remembered, then → the fragment's `__signin?token=` (303); another origin, or a missing or stale token, 403 |
 | `GET /cli?key=<npub>&proof=` | the link `fragment login` prints: `proof` is the key's own NIP-98 event for `POST <platform>/cli/approve`, good for ten minutes (the proof of possession; without it, stale, or by another key: 400). Signed in: a page showing the key's last eight characters, to compare with the terminal, and an Add button; signed out: → sign in first, keeping the link |
 | `GET /cli?key=&proof=&computer=<name>` | the link `fragment login --computer <name>` prints: the proof is for `POST <platform>/cli/approve?computer=<name>`, so it pairs that computer and nothing else (the same key without the name, or under another, is 400). The page says it is a computer named `<name>`, owned by the person, acting only in the fragments they add it to and those it makes (theirs, on their budget), never as them; and a Pair button |
-| `POST /api/model/chat/completions` | a computer | an OpenAI-style chat request (`messages`, and what else OpenRouter takes) → OpenRouter's answer, on the agents' model (`fragment_proto::AGENT_MODEL`, whatever the request names), with the computer's owner's OpenRouter key, reserved on their month and settled to its reported cost (a `computer.text` usage row naming the computer, as an agent's call is an `agent.text` one); anyone else 403; past the budget 402 `budget_used_up`. With `"stream": true` the answer is server-sent events relayed as they arrive (the platform adds `stream_options.include_usage`), settled once as the stream ends: to the `usage.cost` its last chunk carried, or to its reservation when none came (cut off, or the computer left, which ends the call); the node ends an answer at 120 s. `fragment model`, and `fragment model --serve` (below) |
+| `POST /api/model/chat/completions` | a computer | an OpenAI-style chat request (`messages`, and what else OpenRouter takes) → OpenRouter's answer, on the `model` it names from `fragment_proto::COMPUTER_MODELS`: `z-ai/glm-5.3-flashx` (the platform's, and the default when it names none), `z-ai/glm-5.3-flash` (its slower variant, an eighth of its price), or `typesafe/jev-router` (a router with variable pricing); any other, or OpenRouter's `models` fallbacks, is 400. It goes with `provider: {"sort": "latency"}` unless the request names its own `provider` (a sort pins no provider, so OpenRouter's sticky routing keeps a cached prompt's calls where the cache is); its `reasoning` and `session_id` go as they came (no reasoning is added), and any `transforms` is dropped. With the computer's owner's OpenRouter key, reserved on their month ($0.20; the router $0.50, since its price is known only once it answers) and settled to its reported cost (a `computer.text` usage row naming the computer and the model, as an agent's call is an `agent.text` one); anyone else 403; past the budget 402 `budget_used_up`. With `"stream": true` the answer is server-sent events relayed as they arrive (the platform adds `stream_options.include_usage`), settled once as the stream ends: to the `usage.cost` its last chunk carried, or to its reservation when none came (cut off, or the computer left, which ends the call); the node ends an answer at 120 s. `fragment model`, and `fragment model --serve` (below) |
 | `POST /api/computers/pair` | signed by a new key | `{token}` → the computer the token names (a fragment's own, which its Sprite was handed at its boot), holding that key, now an editor of its fragment; again by the same key, the same one; a spent, expired, or unknown token 401 |
 | `POST /cli/approve` | the page's form (`key`, `proof`, `computer`): the key joins the signed-in person at once, or, with `computer`, becomes their new computer of that name (again, the same one; a name they already use is 409); a key someone else holds, or a revoked one, is 409; another origin 403; the CLI waits for `GET /api/identities/me` to answer. People themselves come only from sign-in (`POST /api/identities {kind: "person"}` is 400), and computers from this page (`{kind: "computer"}` is 400) |
 
@@ -671,7 +671,7 @@ reported (`delivery.failed`).
 A job calls OpenRouter as its steps. Who pays: a fragment with its own
 `OPENROUTER_API_KEY` secret pays with it, unmetered. Otherwise its owner
 does, from their monthly budget (Budgets, below): each paid step reserves
-its worst case in the owner's ledger before it runs (text $0.05, an
+its worst case in the owner's ledger before it runs (text $0.20, an
 image $0.10, a video $0.10 a second), runs on the owner's own OpenRouter
 key, and settles to the cost OpenRouter reports (`usage.cost`). An
 answer that reports no cost is charged the step's reservation
@@ -721,7 +721,7 @@ there. Running out stops only paid steps, never sites or mutations.
 | `GET /api/budget` | a person (an agent: its owner's) | → `{billingOrg, period, budgetMicros, toppedUpMicros, allowanceMicros, spentMicros, reservedMicros, remainingMicros, warn, usage}`: `warn` at 80% of the allowance; the newest 20 usage rows |
 | `GET /api/budget/usage?period=YYYY-MM` | the same | → the same with every usage row of the month |
 | `POST /api/budget/{id}/top-up` | the fleet's operators | `{usd}` → the month: the allowance rises, and the org's key limit with it |
-| `POST /api/budget/reserve` | an agent (its owner's month) | `{ref, model, fragment, asker}` → `{key}`: one model call's worst case ($0.05) held, and the org's key to make it with; `{key, settled: true}` when that call settled before (made again after a crash, it is not charged again); 402 `budget_used_up` when the month cannot cover it |
+| `POST /api/budget/reserve` | an agent (its owner's month) | `{ref, model, fragment, asker}` → `{key}`: one model call's worst case ($0.20) held, and the org's key to make it with; `{key, settled: true}` when that call settled before (made again after a crash, it is not charged again); 402 `budget_used_up` when the month cannot cover it |
 | `POST /api/budget/settle` | the same | `{ref, cost}` (dollars, as OpenRouter reported; none: charged the reservation) → `{cost}` in micro-dollars; `{ref, release: true}` gives the reservation back when nothing was billed |
 
 A usage row is FIN-10's report shape: `{sourceRef, agent?, billingOrg,
@@ -1008,7 +1008,7 @@ else).
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/agents` | a person with a username | `{name, model? ("z-ai/glm-5.3-flash"), instructions?}` → `{name, npub, model, id}`: made and registered as the caller's; again by its owner, the same answer (`replayed`); a name under someone else's username is 403 |
+| `POST /api/agents` | a person with a username | `{name, model? ("z-ai/glm-5.3-flashx"), instructions?}` → `{name, npub, model, id}`: made and registered as the caller's; again by its owner, the same answer (`replayed`); a name under someone else's username is 403 |
 | `GET /api/a/{name}` | owner | → `{name, id, owner, npub, model, active, driving, outcome (running, idle, stopped, yielded, error), error, tokens, watchdogRestarts, conversation, asker, waiting: [{conversation, asker, at}], conversations: [{conversation, outcome, error, asker, at}], listens: {count, newest: [{fragment, channel, at}]}, ignored: [{fragment, channel, principal, at}], handoffs: [{fragment, run, conversation, throwaway, said, at}], messages: [{id, role, text, tool_requests, tool_responses, steer, conversation}], steer, toolRuns, steps}` (each list its newest 256, oldest first but `conversations` and `listens`, newest first). `active`, `outcome`, and `error` are the running (or last) turn's, of any conversation; `conversation` and `asker` name it (`direct` is the owner's own conversation, a chat's is `<fragment>/<channel>`); `steer` holds the running turn's messages from its starter sent while it worked (a new turn drops those the model read); `ignored` notes anonymous messages, which start nothing |
 | `GET /api/a/{name}/state?wait_ms=` | owner | → `AgentState` `{active, driving, outcome, error, answer}` (`crates/proto`) of the owner's own conversation: `active` while a turn of it runs or waits behind a chat's, `answer` its newest message when that is the model's text; answered once it is not active or `wait_ms` (0-25000, default 0) has passed: the read waits in the agent's cell, so a client waiting out a turn asks about every 25 s (`fragment agent say` does) |
 | `POST /api/a/{name}/turns` | owner | `{text}` (at most 16 KiB) → `{started}`; during the owner's own turn, `{steered: true}` (read between steps); during another (a chat's), `{queued: true}`: it runs next, in the owner's conversation. At most 64 messages wait (429) |
@@ -1153,7 +1153,7 @@ A fragment may declare an agent people talk to through one of its
 channels, in `fragment.json` (checked at deploy like the rest of it):
 
 ```json
-"agent": { "instructions": "agent.md", "tools": ["log_food", "today"], "channel": "ask", "model": "z-ai/glm-5.3-flash" }
+"agent": { "instructions": "agent.md", "tools": ["log_food", "today"], "channel": "ask", "model": "z-ai/glm-5.3-flashx" }
 ```
 
 `channel` is a channel it declares with a `post` role; `instructions` a

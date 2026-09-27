@@ -421,7 +421,7 @@ without a delete condition is unfinished design, not debt.
 ## A paid step's reservation is an estimate per kind of step
 
 - **Observed:** phase 4 slice C. A step reserves a fixed worst case (text
-  $0.05, an image $0.10, a video $0.10 a second), not the model's price
+  $0.20, an image $0.10, a video $0.10 a second), not the model's price
   times its tokens. A long answer from an expensive model can cost more
   than it reserved; the ledger records what it did cost, so a month can
   pass its allowance by that difference.

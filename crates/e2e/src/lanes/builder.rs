@@ -115,7 +115,7 @@ pub fn builder(s: &mut Suite, api: &Api) -> Result<()> {
     // goose's model: the platform's, through the run's own model --serve
     let chats: Vec<Value> = s.openrouter.chats().into_iter().skip(chats_before).collect();
     s.ok(
-        "each of goose's model calls went through the platform, streamed, on the agents' model",
+        "each of goose's model calls went through the platform, streamed, on the platform's model, which the template names",
         chats.len() == 2 && chats.iter().all(|c| c["stream"] == true && c["model"] == fragment_proto::AGENT_MODEL && c["tools"][0]["function"]["name"] == "shell"),
         json!(chats),
     );

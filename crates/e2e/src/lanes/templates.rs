@@ -454,8 +454,8 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
     let chats: Vec<Value> = s.openrouter.chats().into_iter().skip(before).collect();
     let offered: Vec<&str> = chats.first().and_then(|c| c["tools"].as_array()).into_iter().flatten().filter_map(|t| t["function"]["name"].as_str()).collect();
     s.ok(
-        "each model call went through the platform, on the agents' model, offered the Cua Driver tools its goose config names",
-        chats.len() == 6 && chats.iter().all(|c| c["model"] == fragment_proto::AGENT_MODEL && c["stream"] == true) && offered == ["cua__get_desktop_state", "cua__click"],
+        "each model call went through the platform, on the model do.mjs names (flash, which reads images), offered the Cua Driver tools its goose config names",
+        chats.len() == 6 && chats.iter().all(|c| c["model"] == "z-ai/glm-5.3-flash" && c["stream"] == true) && offered == ["cua__get_desktop_state", "cua__click"],
         json!(offered),
     );
     let images = |c: &Value| c["messages"].as_array().into_iter().flatten().filter_map(|m| m["content"].as_array()).flatten().filter(|p| p["type"] == "image_url").count();

@@ -25,7 +25,8 @@ Status, 2026-09-26 (ROADMAP phase E). Built:
    provisions one on deploy, and the owner pays, as for everything a
    fragment spends.
 5. **Model calls:** through the platform, signed with the computer's own
-   key, on the model the agents in cells use: `fragment model` (below).
+   key, on a model from a short list (the platform's by default):
+   `fragment model` (below).
 
 ## How it works
 
@@ -67,25 +68,45 @@ The only credential a computer holds is its own key, in its CLI config
 (0600) on the Sprite's disk (decision 21). It reaches the model through
 the platform: `fragment model "<prompt>"`, or `fragment model --request`
 with an OpenAI-style chat request on stdin (`POST
-/api/model/chat/completions`, signed by its key). The platform forces the
-agents' model (`fragment_proto::AGENT_MODEL`), calls OpenRouter with the
-owner's own key, which never reaches the computer, and reserves and
-settles on the owner's month as `job.ai` does. Any computer may call it:
+/api/model/chat/completions`, signed by its key). The request names its
+model from a short list (`fragment_proto::COMPUTER_MODELS`), or none:
+`z-ai/glm-5.3-flashx`, the platform's (the agents' too) and the default,
+the high-speed variant of `z-ai/glm-5.3-flash`, which stays on the list
+at an eighth of its price; and `typesafe/jev-router`, a router with
+variable pricing. Any other model is
+refused, and so are OpenRouter's `models` fallbacks. The platform asks
+OpenRouter for the provider that answers soonest (`provider: {"sort":
+"latency"}`) unless the request names its own; a sort pins no provider, so
+OpenRouter's sticky routing keeps a repeated prompt on the provider that
+cached it (measured from a Sprite, 2026-09-27: 0.4–0.7 s for a tiny call on
+the fastest provider, against 0.5–3 s spread across four; an 11.8k-token
+prompt repeated came back 11,712 tokens cached, in 1.3–1.5 s against 4 s,
+at a fifth of the cost). The request's `reasoning` and `session_id` go as
+they came, and the platform adds no reasoning of its own (this model's
+cannot be turned off; `{"effort": "low"}` often spends none); a
+`transforms` is dropped. It calls OpenRouter with the owner's own key,
+which never reaches the computer, and reserves and settles on the owner's
+month as `job.ai` does: $0.20 a call (150,000 tokens in and 4,096 out on
+flashx), or $0.50 on the router, whose price is known only once it
+answers, each settled to the cost reported. A request is at most 8 MiB
+(screenshots), where every other request the platform reads is 2 MiB. Any
+computer may call it:
 a fragment's own, or a machine a person paired. A streamed request's
 chunks are relayed as they arrive, and it settles once, as the stream
 ends, to the cost its last chunk reports (docs/api.md).
 
 `fragment model --serve [--port N]` (8765 by default; 0 picks one) serves
 the same as an OpenAI-compatible endpoint on this machine alone:
-`http://127.0.0.1:N/v1`, `POST /v1/chat/completions`, streamed or not,
-and `GET /health`. It binds the loopback address only (there is no flag
+`http://127.0.0.1:N/v1`, `POST /v1/chat/completions` (and OpenRouter's
+path, `/api/v1/chat/completions`, for goose's `openrouter` provider),
+streamed or not, and `GET /health`. It binds the loopback address only (there is no flag
 to bind another), forwards each request's bytes to the platform signed
 with the computer's key, sends each once (a call that may have reached
 the platform is never made again blind), and relays the answer's status
 and bytes as they arrive. Whatever speaks to an OpenAI-compatible
 provider (goose's `openai` provider with `OPENAI_HOST` pointed at it)
-then needs no key: any key it sends is ignored, and the platform picks
-the model. Any process on the machine may call it, on the owner's
+then needs no key: any key it sends is ignored, and the platform refuses
+a model past its list. Any process on the machine may call it, on the owner's
 budget: a computer is one person's machine (a Sprite has one user).
 
 ## A job's commands (`job.computer.exec`)
@@ -149,8 +170,9 @@ deploys a new fragment, its owner's. Each step is a durable
    (`ff8c5142…c84af`, the digest GitHub lists for the asset) before it
    is unpacked to `~/.local/bin/goose-1.50.0`. Why this one: a release
    is a single file with nothing to build or host; the musl build is
-   static, so it runs on any x86_64 Linux whatever its libc; v1.50.0 is
-   18 days old (the two-week cooldown), and it is the release the
+   static, so it runs on any x86_64 Linux whatever its libc; v1.50.0 was
+   18 days old when chosen (past the dependency cooldown, two days since
+   2026-09-27), and it is the release the
    repo's goose fork (`futurepaul/goose` at `12922e7`, decision 10) is
    based on, so the cell's loop and the computer's are the same goose.
    Building goose's CLI from the fork instead would mean a Linux build
@@ -162,7 +184,8 @@ deploys a new fragment, its owner's. Each step is a durable
    knows of the CLI is the installed CLI's own manual.
 3. **goose, headless**, in `~/builds/run-<run>`: `goose run --quiet
    --no-session --with-builtin developer --max-turns 60 --text
-   <prompt>`, with `GOOSE_PROVIDER=openai`, `GOOSE_MODE=auto` (no
+   <prompt>`, with `GOOSE_PROVIDER=openai`, `GOOSE_MODEL=z-ai/glm-5.3-flashx`
+   (the platform's model), `GOOSE_MODE=auto` (no
    approvals), `GOOSE_DISABLE_KEYRING=1` (a Sprite has none), and
    `GOOSE_MAX_TOKENS=4096` (the platform's model call must finish within
    its 120 s). Its model is the platform's: the step
@@ -342,7 +365,8 @@ agent's next look shows it). Its steps, each durable:
 1. **Installed once** (`job.computer.exec`, 3 minutes): goose v1.50.0,
    pinned as the builder's is (above), and **Cua Driver v0.28.1**
    (github.com/trycua/cua, MIT; released 2026-09-12, the newest past the
-   two-week cooldown), its release asset
+   dependency cooldown when chosen; the cooldown is two days since
+   2026-09-27), its release asset
    `cua-driver-rs-0.28.1-linux-x86_64-binary.tar.gz` checked against the
    SHA-256 GitHub lists (`71aa9253…bcf`). Not the one-line `install.sh`:
    it fetches a second script from cua.ai unpinned, takes the newest
@@ -369,14 +393,17 @@ agent's next look shows it). Its steps, each durable:
 to an OpenAI-compatible provider as a user message after the tool's
 (`image_url`, a data URL), but only when its model catalog lists the
 model as reading images, by the name `GOOSE_MODEL` gives: a name it does
-not know (the builder's `fragment`) loses every screenshot ("omitted as
-the model does not support vision"). So the job names `gpt-4o`, which the
-catalog lists as reading images; the platform calls the agents' model
-(`z-ai/glm-5.3-flash`, which reads images) whatever the request names.
+not know (the builder's) loses every screenshot ("omitted as the model
+does not support vision"). So the job names `gpt-4o` to goose, which the
+catalog lists as reading images, and `do.mjs`'s proxy names the platform's
+`z-ai/glm-5.3-flash` (which reads images) on each request: the platform
+refuses a model past its list. Whether `z-ai/glm-5.3-flashx`, the
+platform's default, reads images is not checked yet, so the pet stays on
+flash; that one constant (`MODEL`) moves it.
 The platform's endpoint passes image content through unchanged. What
 needed care is size: goose sends every screenshot it was given, each
-turn, and a request is at most 2 MiB (the CLI's `--serve` and the cell
-both refuse more). `do.mjs` puts a loopback proxy between goose and
+turn, and a request is at most 8 MiB (the CLI's `--serve` and the cell
+both refuse more; 2 MiB until 2026-09-27). `do.mjs` puts a loopback proxy between goose and
 `fragment model --serve` that keeps the newest 3 screenshots (each
 earlier one becomes a line of text) and cuts each tool result before the
 newest 3 to 2000 characters.
@@ -398,7 +425,7 @@ both (the e2e binary, where the pinned releases go): goose's reads the
 config `do.mjs` writes, starts the Cua Driver stand-in's MCP server,
 offers the tools the config names, and sends screenshots on as goose
 does. It checks the refusal for a viewer, the answer, the model calls
-(through the platform, on the agents' model, a screenshot in them, only
+(through the platform, on the model `do.mjs` names, a screenshot in them, only
 the newest three), the click on `:99`, the steps on `work`, and the
 driver. It proves the plumbing, not goose or Cua Driver.
 
@@ -410,7 +437,7 @@ openbox, `get_desktop_state` captures `:99`, and its pixel clicks land in
 Chromium (and whether its agent cursor overlay shows in the frames);
 whether Chromium's tree reaches AT-SPI over the pet's session bus, or
 `get_window_state` comes back `degraded` (pixels still work); how large a
-screenshot is, and so how far the 2 MiB goes; and how well
+screenshot is, and so how far the 8 MiB goes; and how well
 `glm-5.3-flash` drives a screen in 40 turns.
 
 ## Your agent hands its work to a computer

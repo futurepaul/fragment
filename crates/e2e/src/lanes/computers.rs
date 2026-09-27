@@ -218,7 +218,9 @@ fn served(s: &Suite, api: &Api, home: &Path, log: &Path) -> Result<(Child, Strin
 /// `fragment model --serve`: an OpenAI-compatible endpoint on loopback
 /// that signs each call as the computer, streamed or not, each billed once
 /// to its owner at the cost the answer reported; a person's CLI serving it
-/// is refused as the platform refuses the person.
+/// is refused as the platform refuses the person. A call names a model from
+/// the platform's short list, or none (the agents'); goes to the provider
+/// that answers soonest unless it names its own; and keeps its reasoning.
 fn serve_model(s: &mut Suite, api: &Api, home: &Path, owner_home: &Path, owner: &Keys, computer_id: &str) -> Result<()> {
     let rows = || -> Vec<Value> {
         let usage = api.signed(owner, "GET", "/api/budget/usage", None).map(|r| r.body).unwrap_or_default();
@@ -229,10 +231,25 @@ fn serve_model(s: &mut Suite, api: &Api, home: &Path, owner_home: &Path, owner: 
     let (mut child, base) = served(s, api, home, &s.scratch.join("model-serve.log"))?;
     let http = reqwest::blocking::Client::new();
     let ask = |body: Value| http.post(format!("{base}/chat/completions")).bearer_auth("no key here").json(&body).send();
-    let plain = ask(json!({ "model": "anything", "messages": [{ "role": "user", "content": "served plain" }] }))?;
+    // at OpenRouter's path too (goose's openrouter provider), as OpenRouter's own request
+    let plain = json!({
+        "model": "z-ai/glm-5.3-flash", "reasoning": { "effort": "low" }, "session_id": "goose-session-1", "transforms": ["middle-out"],
+        "messages": [{ "role": "user", "content": "served plain" }],
+    });
+    let plain = http.post(format!("{}/api/v1/chat/completions", base.trim_end_matches("/v1"))).json(&plain).send()?;
     let (status, v) = (plain.status().as_u16(), plain.json::<Value>().unwrap_or_default());
-    s.ok("model --serve answers a chat request, with no key of its own", status == 200 && v["choices"][0]["message"]["content"] == "echo: served plain", &v);
-    let streamed = ask(json!({ "messages": [{ "role": "user", "content": "served streamed" }], "stream": true }))?;
+    s.ok("model --serve answers a chat request, with no key of its own, at OpenRouter's path too", status == 200 && v["choices"][0]["message"]["content"] == "echo: served plain", &v);
+    let asked = s.openrouter.chats().last().cloned().unwrap_or_default();
+    s.ok(
+        "on the model it names from the list, to the provider that answers soonest, with its reasoning and session, and no transforms",
+        asked["model"] == "z-ai/glm-5.3-flash"
+            && asked["provider"] == json!({ "sort": "latency" })
+            && asked["reasoning"] == json!({ "effort": "low" })
+            && asked["session_id"] == "goose-session-1"
+            && asked.get("transforms").is_none(),
+        &asked,
+    );
+    let streamed = ask(json!({ "messages": [{ "role": "user", "content": "served streamed" }], "stream": true, "provider": { "order": ["z-ai"] } }))?;
     let kind = streamed.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     let (status, text) = (streamed.status().as_u16(), streamed.text().unwrap_or_default());
     s.ok(
@@ -241,12 +258,52 @@ fn serve_model(s: &mut Suite, api: &Api, home: &Path, owner_home: &Path, owner: 
         format!("{status} {kind} {text}"),
     );
     let asked = s.openrouter.chats().into_iter().rev().find(|c| c["stream"] == true).unwrap_or_default();
-    s.ok("on the agents' model, asking for its usage", asked["model"] == fragment_proto::AGENT_MODEL && asked["stream_options"]["include_usage"] == true, &asked);
+    s.ok(
+        "naming none, on the platform's model, with the provider it names and no reasoning added, asking for its usage",
+        asked["model"] == fragment_proto::AGENT_MODEL && asked["provider"] == json!({ "order": ["z-ai"] }) && asked.get("reasoning").is_none() && asked["stream_options"]["include_usage"] == true,
+        &asked,
+    );
     // the stream settles as it ends, just after the computer has read it
     let reported = fragment_core::budget::micros(fragment_fakes::openrouter::Costs::default().text);
     let billed = s.eventually(Duration::from_secs(10), || fresh().len() == 2 && fresh().iter().all(|u| u["state"] == "settled"));
     let costs: Vec<Value> = fresh().iter().map(|u| u["quantity"].clone()).collect();
     s.ok("each is billed once, to its owner, at the cost its answer reported", billed && costs.iter().all(|c| *c == json!(reported)), format!("{costs:?}"));
+    // a model past the list, or fallbacks past it, is refused before OpenRouter
+    let chats = s.openrouter.chats().len();
+    let said = |body: Value| ask(body).map(|r| (r.status().as_u16(), r.text().unwrap_or_default()));
+    let past = said(json!({ "model": "anthropic/claude-opus-4.1", "messages": [{ "role": "user", "content": "hi" }] }))?;
+    let fallbacks = said(json!({ "models": ["anthropic/claude-opus-4.1"], "messages": [{ "role": "user", "content": "hi" }] }))?;
+    s.ok(
+        "a model past the list is refused, naming the list, and so are fallbacks: neither reaches OpenRouter, nor is billed",
+        past.0 == 400 && past.1.contains("z-ai/glm-5.3-flash") && fallbacks.0 == 400 && s.openrouter.chats().len() == chats && fresh().len() == 2,
+        format!("{past:?} {fallbacks:?}"),
+    );
+    // the router's price is unknown up front: it holds its cap, more than
+    // this month has left, until a top-up; then settles to the cost reported
+    let routed = || said(json!({ "model": fragment_proto::ROUTER_MODEL, "messages": [{ "role": "user", "content": "routed" }] }));
+    let short = routed()?;
+    let op_session = api.sign_in("operator@e2e.test")?;
+    api.approve(&op_session, &s.operator)?;
+    let top = api.signed(&s.operator, "POST", &format!("/api/budget/{}/top-up", api.identity(owner)?), Some(&json!({ "usd": 1.0 })))?;
+    let r = routed()?;
+    let row = fresh().into_iter().find(|u| u["model"] == fragment_proto::ROUTER_MODEL).unwrap_or_default();
+    s.ok(
+        "the router's call holds its cap first (a $0.40 month cannot), then settles to the cost its answer reported",
+        short.0 == 402 && top.status == 200 && r.0 == 200 && row["state"] == "settled" && row["quantity"] == json!(reported),
+        format!("{short:?} {top} {r:?} {row}"),
+    );
+    // screenshots: a request past the 2 MiB every other one keeps to, up to 8 MiB
+    let shots = "x".repeat(3 * 1024 * 1024);
+    let r = said(json!({ "messages": [{ "role": "user", "content": shots }] }))?;
+    let over = "x".repeat(fragment_proto::limits::MODEL_BODY_MAX_BYTES);
+    let body = serde_json::to_vec(&json!({ "messages": [{ "role": "user", "content": over }] }))?;
+    let keys = s.cli_keys(home).context("the computer's CLI holds its key")?;
+    let sent = api.call(crate::api::Call { method: "POST", url: format!("{}/api/model/chat/completions", api.base), body: Some(body), content_type: Some("application/json"), keys: Some(&keys), ..Default::default() });
+    let refused = match sent {
+        Ok(r) => r.status == 413,
+        Err(e) => format!("{e:#}").contains("reset") || format!("{e:#}").contains("Broken pipe"),
+    };
+    s.ok("a model request carries up to 8 MiB (screenshots), and past it is refused unread (413)", r.0 == 200 && refused, r.0);
     let _ = child.kill();
     let _ = child.wait();
     let (mut child, base) = served(s, api, owner_home, &s.scratch.join("model-serve-person.log"))?;

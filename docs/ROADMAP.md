@@ -86,8 +86,10 @@ rollback), members and invites, call (operations), and read and follow
    per-fragment subdomains for origin isolation. The new fleet takes
    `fragment.club` itself in phase 3, with no staging name: only Paul
    publishes there (Paul, 2026-09-23).
-7. **Inference is OpenRouter for everything**: text `z-ai/glm-5.3-flash`
-   (reads images and video, so screenshots work), images
+7. **Inference is OpenRouter for everything**: text `z-ai/glm-5.3-flashx`
+   (since 2026-09-27, Paul: `z-ai/glm-5.3-flash`'s high-speed variant, at
+   about 8 times its price; flash reads images and video, so screenshots
+   work), images
    `google/gemini-3.1-flash-lite-image`, video `minimax/hailuo-3-max`
    (H3 Max). fal is removed. Each person uses their own model credential
    ("Connect OpenRouter"), not one shared key (decision 11).
