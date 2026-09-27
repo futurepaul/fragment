@@ -5,12 +5,14 @@
 // it when it exits and after a deploy; what it prints is in ~/fragment.log.
 // The `fragment` CLI here is signed in as the computer, an editor, and
 // FRAGMENT_NAME names the fragment. Its agent (the `do` job: the computer's
-// hands, with Cua Driver) drives the same display, and marks each step it
-// takes in ~/.pet/agent, which makes it the driver the frames name.
+// hands, with Stagehand on this browser and Cua Driver for other apps)
+// drives the same display, and marks each step it takes in ~/.pet/agent,
+// which makes it the driver the frames name.
 //
 // PET_FAKE_SCREEN=<a JPEG> shows that fixed image instead: nothing is
 // installed or started, and control records are logged, not applied.
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -29,9 +31,19 @@ const FRAME_MAX_CHARS = 180_000;
 // a control record older than this is skipped: its poster saw another screen
 const STALE_MS = 30_000;
 const KEYS = { Enter: "Return", Backspace: "BackSpace", Escape: "Escape", Tab: "Tab", ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right" };
-// with what Cua Driver needs: libXi, and AT-SPI 2 on a session bus for the browser's accessibility tree
+// with what Cua Driver needs: libXi, and AT-SPI 2 on a session bus for apps' accessibility trees
 const APT = ["xvfb", "openbox", "xdotool", "imagemagick", "fonts-liberation", "fonts-noto-color-emoji", "libxi6", "at-spi2-core", "dbus"];
-const PLAYWRIGHT = "playwright@1.63.0";
+// Google's Chrome (a system browser, as Stagehand and Cua Driver want; Ubuntu's
+// own is a snap), a release past the dependency cooldown (two days), checked
+// against the SHA-256 Google's apt index lists for it
+const CHROME = "154.0.8037.57-1";
+const CHROME_SHA256 = "66c0645f6a19871bab2844b8537c11a0db2e7d3bea8ef85a1c7cb52a54e65a3e";
+const CHROME_DEB = `https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_${CHROME}_amd64.deb`;
+// Stagehand's runtime, an unpacked extension its hands load over CDP (the
+// pet's `do` installs it there): its id is its path's hash, and the socket
+// it opens to the browser's CDP comes from its origin
+const RUNTIME = path.join(fs.realpathSync(os.homedir()), ".local/share/pet-browser/node_modules/@browserbasehq/stagehand/dist/extension");
+const RUNTIME_ID = [...createHash("sha256").update(RUNTIME).digest("hex").slice(0, 32)].map((c) => String.fromCharCode(97 + parseInt(c, 16))).join("");
 
 const FAKE = process.env.PET_FAKE_SCREEN;
 const CLI = process.env.FRAGMENT_BIN ?? "fragment";
@@ -50,7 +62,6 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const run = promisify(execFile);
 const has = (cmd) => spawnSync("sh", ["-c", 'command -v "$0"', cmd]).status === 0;
 const kids = {};
-let chrome;
 let shot;
 let sandbox = true;
 let applied = Number(fs.existsSync(CURSOR) && fs.readFileSync(CURSOR, "utf8")) || 0;
@@ -59,29 +70,20 @@ let driver = null;
 let droveAt = Date.now();
 
 function install() {
-  if (spawnSync("dpkg", ["-s", ...APT], { stdio: "ignore" }).status === 0) return;
-  log(`installing ${APT.join(" ")}`);
+  const chrome = spawnSync("dpkg-query", ["-W", "-f=${Version}", "google-chrome-stable"], { encoding: "utf8" }).stdout === CHROME;
+  if (chrome && spawnSync("dpkg", ["-s", ...APT], { stdio: "ignore" }).status === 0) return;
+  log(`installing ${APT.join(" ")}, and Chrome ${CHROME}`);
   const apt = (...args) => execFileSync("sudo", ["-n", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "-q", "-y", ...args], { stdio: ["ignore", "inherit", "inherit"] });
   apt("update");
   apt("install", "--no-install-recommends", ...APT);
-}
-
-// A browser that runs here: Playwright's Chromium, with the libraries it
-// needs (apt), since Ubuntu packages its own as a snap.
-function browserPath() {
-  const runs = (bin) => spawnSync(bin, ["--version"], { timeout: 10_000 }).status === 0;
-  const find = () => [process.env.PET_BROWSER, ...playwrights()].find((b) => b && runs(b));
-  if (!find()) {
-    log(`installing Chromium (${PLAYWRIGHT})`);
-    execFileSync("npx", ["-y", PLAYWRIGHT, "install", "--with-deps", "chromium"], { stdio: ["ignore", "inherit", "inherit"] });
-  }
-  return find() ?? fail("no browser runs here");
-}
-
-function playwrights() {
-  const root = path.join(os.homedir(), ".cache/ms-playwright");
-  if (!fs.existsSync(root)) return [];
-  return fs.readdirSync(root, { recursive: true }).filter((p) => p.startsWith("chromium-") && path.basename(p) === "chrome").map((p) => path.join(root, p));
+  if (chrome) return;
+  // its package, checked; without Google's apt source, which it would add: it stays the pinned one
+  const deb = path.join(STATE, "chrome.deb");
+  execFileSync("curl", ["-fsSL", "-o", deb, CHROME_DEB], { stdio: ["ignore", "inherit", "inherit"] });
+  execFileSync("sha256sum", ["-c", "-"], { input: `${CHROME_SHA256}  ${deb}\n`, stdio: ["pipe", "ignore", "inherit"] });
+  execFileSync("sudo", ["-n", "sh", "-c", `echo 'repo_add_once="false"' > /etc/default/google-chrome`]);
+  apt("install", "--no-install-recommends", deb);
+  fs.rmSync(deb);
 }
 
 function fail(why) {
@@ -102,10 +104,12 @@ function daemon(label, cmd, args, stdio) {
   return (kids[label] = child);
 }
 
+// Chrome, with its CDP on loopback for Stagehand (browser/browser-mcp.mjs)
 function browser() {
   const started = Date.now();
-  const flags = ["--no-first-run", "--no-default-browser-check", "--disable-dev-shm-usage", "--password-store=basic", "--hide-crash-restore-bubble", "--start-maximized", "--force-renderer-accessibility"];
-  const child = daemon("browser", chrome, [...flags, `--user-data-dir=${path.join(STATE, "browser")}`, ...(sandbox ? [] : ["--no-sandbox"]), START]);
+  const flags = ["--no-first-run", "--no-default-browser-check", "--disable-dev-shm-usage", "--password-store=basic", "--hide-crash-restore-bubble", "--start-maximized"];
+  const cdp = ["--remote-debugging-port=9222", "--enable-unsafe-extension-debugging", `--remote-allow-origins=chrome-extension://${RUNTIME_ID}`];
+  const child = daemon("browser", "google-chrome-stable", [...flags, ...cdp, `--user-data-dir=${path.join(STATE, "browser")}`, ...(sandbox ? [] : ["--no-sandbox"]), START]);
   child.on("exit", () => {
     // a kernel that does not allow its sandbox ends it at once
     if (sandbox && Date.now() - started < 10_000) {
@@ -136,7 +140,7 @@ async function desktop() {
   for (const f of ["/tmp/.X99-lock", "/tmp/.X11-unix/X99"]) fs.rmSync(f, { force: true });
   daemon("xvfb", "Xvfb", [DISPLAY, "-screen", "0", `${SCREEN.width}x${SCREEN.height}x24`, "-nolisten", "tcp"]);
   for (let i = 0; i < 50 && spawnSync("xdotool", ["getmouselocation"]).status !== 0; i++) await sleep(200);
-  // a session bus, where the browser's accessibility tree reaches AT-SPI (Cua Driver reads it)
+  // a session bus, where apps' accessibility trees reach AT-SPI (Cua Driver reads them)
   if (has("dbus-daemon")) {
     fs.rmSync(BUS, { force: true });
     daemon("bus", "dbus-daemon", ["--session", "--nofork", "--nopidfile", `--address=unix:path=${BUS}`]);
@@ -256,7 +260,6 @@ if (!FAKE) {
   if (!has("sprite-env")) fail("not on a Sprite: PET_FAKE_SCREEN=<a JPEG> shows that image instead");
   process.env.DISPLAY = DISPLAY;
   install();
-  chrome = browserPath();
   shot = has("magick") ? ["magick", "import"] : ["import"];
   await desktop();
 }

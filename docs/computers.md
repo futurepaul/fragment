@@ -232,9 +232,9 @@ task to it and waits; the pet's `do` and the builder's `build` do.
   `OPENROUTER_PARAMETERS={"reasoning":{"effort":"low"}}`. Its hints are
   the CLI's guide (`fragment guide > ~/.config/goose/.goosehints`, each
   start), and its extensions its default (the developer tools) and what
-  `~/.config/goose/config.yaml` enables (the pet's Cua Driver). A
-  script the platform changed restarts itself at its next second, and so
-  does one whose CLI changed (above).
+  `~/.config/goose/config.yaml` enables (the pet's browser and Cua
+  Driver). A script the platform changed restarts itself at its next
+  second, and so does one whose CLI changed (above).
 - **The task client** (`~/.fragment/agent/task.mjs`, Node; written with
   the service): one task, `PROMPT`, in the session of `CHAT`
   (`<fragment>/<channel>`; none: the job's own fragment's `work`). The
@@ -390,11 +390,19 @@ together, built only from what any fragment may declare:
   (a Sprite has Node 24). On its first start the script installs what is
   missing (apt with `sudo -n`: `xvfb openbox xdotool imagemagick
   fonts-liberation fonts-noto-color-emoji`, and for its agent's Cua
-  Driver `libxi6 at-spi2-core dbus`; Chromium from Playwright 1.63.0,
-  since Ubuntu's own is a snap), then runs a 1024×640 display, a session
-  bus (`~/.pet/bus`), and Chromium on the fragment's
-  `computer/start.html` with its accessibility tree on
-  (`--force-renderer-accessibility`, for AT-SPI).
+  Driver `libxi6 at-spi2-core dbus`), and **Google's Chrome**
+  (`google-chrome-stable` 154.0.8037.57-1, stable since 2026-09-22: its
+  .deb from Google's pool, checked against the SHA-256 Google's apt index
+  lists, `66c0645f…5a3e`, installed with apt, which brings its
+  libraries, and without the apt source it would add, so it stays the
+  pinned one). Ubuntu's own browser is a snap, and Stagehand and Cua
+  Driver both want a system one. Then it runs a 1024×640 display, a
+  session bus (`~/.pet/bus`), and Chrome on the fragment's
+  `computer/start.html`, with CDP on loopback (port 9222) for its
+  agent's Stagehand: `--enable-unsafe-extension-debugging`, and
+  `--remote-allow-origins` naming only Stagehand's runtime (an unpacked
+  extension whose id is its path's hash; its service worker opens its own
+  socket to CDP, which Chrome otherwise refuses).
 - **Private by default**: a template that declares a computer starts
   `members` when made on the platform (its owner pays while anyone has
   it open), until they share it (`first_visibility`).
@@ -459,9 +467,9 @@ caps it at editor there), and a job's call answers once its run ends
 The pet's computer is one machine that people and its agent both drive.
 `do({task, chat?})` is an editor-only job (the agent spends its owner's
 budget; signed-in viewers still drive by hand): the computer's hands do
-the task with Cua Driver on the display the pet frames, so everyone
-watching sees each click and anyone may click in between (the agent's
-next look shows it). Its steps, each durable:
+the task on the display the pet frames, the web through Stagehand in its
+Chrome and other apps through Cua Driver, so everyone watching sees each
+click and anyone may click in between. Its steps, each durable:
 
 1. **Installed once** (`job.computer.exec`, 3 minutes): **Cua Driver
    v0.28.3** (github.com/trycua/cua, MIT; released 2026-09-24, past the
@@ -472,22 +480,53 @@ next look shows it). Its steps, each durable:
    helper beside its binary; it links libXi, which `pet.mjs` installs
    with the display). Not the one-line `install.sh`: it fetches a second
    script from cua.ai unpinned, takes the newest release, and edits
-   shell rc files. Then goose's config names it as an extension: stdio
-   `cua-driver mcp` (on Linux it owns its runtime and ends with its
-   session), offering 8 of its 62 tools (`get_desktop_state`,
-   `get_window_state`, `list_windows`, `click`, `type_text`, `press_key`,
-   `hotkey`, `scroll`: each is described at length, and every model
-   request carries the tools offered), with `DISPLAY=:99`, the pet's
-   session bus, telemetry off, and no update checks.
+   shell rc files. Its screenshots' long edge is capped at 768
+   (`~/.cua-driver/config.json`; its default, 1568, was over the pet's
+   whole screen). **The browser's server**
+   (`computer/browser/browser-mcp.mjs`, below) and Stagehand 4.1.0: `npm
+   ci --ignore-scripts` from `computer/browser/package-lock.json` (41
+   packages under Stagehand, each pinned and checked by its `integrity`,
+   all past the cooldown, none with install scripts) into
+   `~/.local/share/pet-browser`, only when the lockfile changed. Then
+   goose's config names both as extensions: stdio `cua-driver mcp` (on
+   Linux it owns its runtime and ends with its session), offering 8 of its
+   62 tools, those for desktop apps (`launch_app`, `list_windows`,
+   `get_window_state`, `click`, `type_text`, `press_key`, `hotkey`,
+   `scroll`: each is described at length, and every model request
+   carries the tools offered), with `DISPLAY=:99`, the pet's session bus,
+   telemetry off, and no update checks; and `browser`, the server on the
+   Node a job finds.
 2. **The task** (capped at 10 minutes): the hands' task client, in the
    session of the chat that asked (none: the pet's own page's), the task
-   after a paragraph on how to use the screen.
+   after a paragraph on the screen and which tools are for what: the
+   browser's for anything on the web, Cua Driver's only for other apps
+   (goose's system prompt stays its own).
 3. **Its answer**: `{message, code}`, goose's last words and the task's
    exit code.
 
+**The browser** (docs/agent-computer.md, slice 2) is a stdio MCP server,
+JSON-RPC by hand like the task client, whose tools are `open` (an
+address, answered with the page's title), `act` (one thing, said
+plainly), `observe`, `extract` (text off the page), and `screenshot`
+(for when the look matters). Stagehand, in local mode, attaches to the
+pet's Chrome over CDP at the first call and loads its runtime extension
+there; each step reads the page's accessibility tree, and none sends the
+model a picture. act, observe, and extract reason through the hands' own
+endpoint (the server inherits goose's `OPENROUTER_HOST`, `fragment model
+--serve`: signed as the computer, billed to its owner), unstreamed, with
+Stagehand's JSON schema as `response_format`: Jev
+(`typesafe/jev-router`) first, and flashx for the same request when
+Jev's answer is not JSON that fits the schema (checked in the server),
+or when Jev is refused (a Jev call holds $0.50 of the month until it
+settles). Each such call is a line of `~/.fragment/agent/browser.log`
+(`{model, schema, ms, ok, why}`), beside `model.log`'s. Stagehand's own
+traces, which go to example.com unless told otherwise, go to a closed
+loopback port.
+
 **Screenshots reach the model, and stay.** goose sends an MCP tool's
-image as a user message after the tool's (`image_url`, a data URL) to a
-model its catalog lists as reading images, which flashx is
+image (Cua Driver's `get_window_state`, the browser's `screenshot`) as a
+user message after the tool's (`image_url`, a data URL) to a model its
+catalog lists as reading images, which flashx is
 (`openrouter/z-ai/glm-5.3-flashx`); the platform passes image content
 through unchanged. Nothing trims a request: a request is at most 8 MiB
 (the CLI's `--serve` and the cell), goose compacts its session near 51k
@@ -506,24 +545,34 @@ own when its page asked. The page shows the latest run's.
 @someone" until a person drives it again.
 
 The e2e (`templates`) runs it on the Sprites fake with stand-ins for
-goose and Cua Driver (the e2e binary, where the pinned releases go):
-goose's reads the config the job writes, starts the Cua Driver
-stand-in's MCP server with its environment, offers its shell and the
+goose and Cua Driver (the e2e binary, where the pinned releases go) and
+for Stagehand (a module where the job installs it, beside the pet's own
+lockfile, so nothing is installed; its act, observe, and extract ask the
+model once each through the `generate` callback, with a fixed tree as
+the page). goose's stand-in reads the config the job writes, starts both
+MCP servers (the browser's is the real one), offers its shell and the
 tools the config names, and sends screenshots on as goose does. It
-checks the refusal for a viewer, the answer, the model calls (through
-the platform, on flashx, every screenshot in them), the click on `:99`,
-the steps on `work`, and the driver. It proves the plumbing, not goose
-or Cua Driver.
+checks the refusal for a viewer, the answer, goose's model calls
+(through the platform, on flashx, offered the browser's tools and Cua
+Driver's desktop ones), a browser task's steps (`open`, `extract`,
+`act`) reaching the model through the hands' endpoint as Jev with
+Stagehand's schema, flashx taking over when Jev's answer does not fit,
+billed to the owner, and in `browser.log`; that no browser step sends a
+screenshot, while Cua Driver's reaches the model, capped; the click on
+`:99`, the steps on `work`, and the driver. It proves the plumbing, not
+goose, Stagehand, or Cua Driver.
 
 **What only a real Sprite shows**: that goose v1.52.0 loads the
-extension from the JSON `config.yaml` and offers the 8 tools; that its
+extensions from the JSON `config.yaml` and offers their tools; that its
 ACP updates are the shapes the task client reads (`tool_call` with
 `_meta.goose.toolCall.toolName` and `rawInput`, `tool_call_update`,
-`agent_message_chunk`); that `cua-driver mcp` starts under Xvfb and
-openbox, `get_desktop_state` captures `:99`, and its pixel clicks land
-in Chromium; whether Chromium's tree reaches AT-SPI over the pet's
-session bus; how many screenshots fit before compaction at 64k; and how
-well flashx drives a screen.
+`agent_message_chunk`); that Chrome installs and Stagehand's runtime
+loads in it there (on a local Chrome 153, Stagehand 4.1.0 through this
+server opened a page, filled and clicked, observed, and extracted); how
+often Jev's answers fit Stagehand's schema (`browser.log`); a browser
+step's time; that `cua-driver mcp` starts under Xvfb and openbox, and
+its clicks land in a desktop app; how many screenshots fit before
+compaction at 64k; and how well flashx drives a screen.
 
 ## Your agent hands its work to a computer
 
@@ -576,7 +625,12 @@ build runs, on your budget.
 - **The builder on a real Sprite**: `fragment new b --template builder`,
   create, deploy, and a task from its page.
 - **The pet's agent on a real Sprite** (`do`, above): a task from the
-  pet's page, and the list of what only a real Sprite shows.
+  pet's page, and the list of what only a real Sprite shows. Slice 2's
+  measure: a web task (a price found, added to a todo) whose model calls
+  in `model.log` carry no screenshot, each call's ms and cached share,
+  and in `browser.log` how many of 20 Jev calls fit Stagehand's schema.
+  A pet made before slice 2 keeps Playwright's Chromium in
+  `~/.cache/ms-playwright` until someone removes it (`run`).
 - **Alerts** about computers awake longer than expected, and what a
   deleted fragment's computer becomes (today it stays, asleep, until
   `fragment computers rm`).
