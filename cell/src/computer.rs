@@ -85,10 +85,11 @@ struct Files {
 }
 
 impl Files {
-    /// What it is to be synced to: live, its `start`, and the hands' goose
-    /// (a computer synced before them, or with another goose, syncs again).
+    /// What it is to be synced to: live, its `start`, the hands' goose, and
+    /// the CLI (a computer synced before them, or with another goose or an
+    /// older CLI, syncs again).
     fn wanted(&self) -> Option<String> {
-        self.live.as_ref().map(|live| json!([live, self.start, exec::GOOSE_VERSION]).to_string())
+        self.live.as_ref().map(|live| json!([live, self.start, exec::GOOSE_VERSION, exec::CLI_VERSION]).to_string())
     }
 
     fn stale(&self) -> bool {
@@ -683,7 +684,7 @@ impl ComputerCell {
         match synced {
             Ok(()) => now.synced = Some(want),
             Err(e) if now.failed.as_ref() != Some(&want) => {
-                self.tell(c, "computer.failed", &format!("its files did not sync: {}", e.message)).await;
+                self.tell(c, "computer.failed", &format!("its sync did not finish: {}", e.message)).await;
                 now.failed = Some(want);
             }
             Err(_) => return,
@@ -693,16 +694,19 @@ impl ComputerCell {
         }
     }
 
-    /// Pulls live into `~/fragment` (`exec::SYNC`), then its `start`
-    /// service goes and, when declared, comes again from the new files;
-    /// then its hands.
+    /// Brings its CLI up to `CLI_VERSION` and pulls live into `~/fragment`
+    /// (`exec::SYNC`), then its `start` service goes and, when declared,
+    /// comes again from the new files (on the new CLI); then its hands,
+    /// which restart themselves on a new CLI.
     async fn sync(&self, c: &Row, f: &Files) -> CellResult<()> {
         let host = self.cfg.computer_platform()?;
         let start = f.start.as_deref().map_or(String::new(), |s| exec::start_script(s, &host, &c.fragment));
-        let argv = ["bash", "-c", exec::SYNC, "fragment-sync", &c.fragment, &host, &self.cfg.cli_release_url];
+        let argv = ["bash", "-c", exec::SYNC, "fragment-sync", &c.fragment, &host, &self.cfg.cli_release_url, exec::CLI_VERSION];
         let (status, out) = keys::sprites(&self.env, "exec", &argv, &start).await?;
-        let home = exec::answer(&out).filter(|_| status == 200).and_then(|h| String::from_utf8(h).ok());
-        let home = home.ok_or_else(|| upstream(format!("{} did not sync ({status}): {}", self.sprite(), tail(&out))))?;
+        let said = exec::answer(&out).filter(|_| status == 200).and_then(|h| String::from_utf8(h).ok());
+        let Some((home, behind)) = said.as_deref().and_then(|s| s.split_once('\n')) else {
+            return Err(upstream(format!("{} did not sync ({status}): {}", self.sprite(), tail(&out))));
+        };
         keys::sprites(&self.env, "exec", &["sprite-env", "services", "delete", SERVICE], "").await?;
         if f.start.is_some() {
             let serve = format!("{home}/.fragment/serve.sh");
@@ -720,6 +724,11 @@ impl ComputerCell {
         let (status, out) = keys::sprites(&self.env, "exec", &["sprite-env", "services", "create", exec::HANDS_SERVICE, "--cmd", "bash", "--args", &hands, "--no-stream"], "").await?;
         if !matches!(status, 200 | 409) {
             return Err(upstream(format!("{} would not run its hands as a service ({status}): {}", self.sprite(), tail(&out))));
+        }
+        // the release had none as new as this platform expects (a cell
+        // deployed before its CLI's release): tried again when it next wakes
+        if !behind.is_empty() {
+            return Err(upstream(format!("its CLI is {behind}, and the release has none as new as {} yet", exec::CLI_VERSION)));
         }
         Ok(())
     }

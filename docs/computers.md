@@ -142,8 +142,10 @@ run can be replayed.
 The `Computer` cell keeps what live declares (its commit, and `start`)
 and what the computer last synced, in its own `files` table. After the
 first boot, and on any tick awake while they differ (a deploy while it is
-awake arms the alarm at once), one exec runs `exec::SYNC`: a CLI from
-before `sync --live` updates itself from the release, `fragment sync
+awake arms the alarm at once), one exec runs `exec::SYNC`: a CLI older
+than the platform expects (`fragment_core::computer::CLI_VERSION`, the
+CLI's own version at the cell's commit: a test holds them together) is
+replaced from the release, `fragment sync
 <name> --dir ~/fragment --live` pulls live, and `~/.fragment/start.sh`
 (a job script for `start`) and `serve.sh` are written. Then `sprite-env
 services delete fragment`, and `create fragment --cmd bash --args
@@ -155,8 +157,38 @@ while it is asleep is synced when it next wakes: `start` cannot run while
 it sleeps anyway. Only awake time is billed (the seconds of a boot's sync
 are the boot's). Then the hands (below) are written, and their service
 made if it is not there (`exec::HANDS`). What a computer last synced
-names the hands' goose too, so one synced before them, or with another
-goose, syncs again when it next wakes.
+names the hands' goose and the CLI too, so one synced before them, or with
+another goose or an older CLI, syncs again when it next wakes.
+
+**Its CLI stays current** (fragment.club, 2026-09-27: a pet's hands ran
+CLI 0.11.1's `model --serve`, which missed goose's model path, until they
+were restarted by hand, after the CLI was updated by hand). Each sync
+compares `fragment --version` with `CLI_VERSION`, which the cell sends;
+an older CLI is replaced by the release's tarball (the one-line install's
+URL, `latest`) once the binary in it runs and says a newer version, moved
+into place whole; a CLI is never replaced by an older one. The release
+publishes no checksum file, so that is what is verified: HTTPS from
+GitHub, and the version the new binary says. The hands notice a CLI
+changed under them (its inode, size, and time, looked at each second, as
+their script's checksum is), whoever changed it, and run again on it;
+`start`'s service is made again after every sync anyway. A release older
+than `CLI_VERSION` (a cell deployed before its CLI's release) leaves the
+newest it has, and the sync fails, saying so (`computer.failed`), to be
+tried again when it next wakes.
+
+**A task across a restart of the hands.** A job's command runs detached
+from both services (`job.computer.exec`), so its polls are unaffected. The
+task client waits for goose (its `port`, up to 3 minutes), so a task that
+starts while the hands restart waits for them. One in progress loses its
+connection: the task client prints goose's words so far and that goose
+serve closed the connection and the task did not finish, and exits 1, so
+the job's answer says so (`code` 1; the builder records the build failed,
+and a hand-off's chat gets that message). It is not retried: goose may
+have acted partway. goose keeps the session, so the chat's next task
+carries on from it. A sync that restarts the hands holds a waking job's
+command until it ends (the alarm holds the computer after its sync), so
+only a deploy while a task runs, with a new CLI or a new `hands.sh`, cuts
+one short.
 
 **Holding it awake from the service** (not built). The cell holds the
 Sprite with the Tasks API, a tick at a time, and whether that keeps a
@@ -201,7 +233,8 @@ task to it and waits; the pet's `do` and the builder's `build` do.
   the CLI's guide (`fragment guide > ~/.config/goose/.goosehints`, each
   start), and its extensions its default (the developer tools) and what
   `~/.config/goose/config.yaml` enables (the pet's Cua Driver). A
-  script the platform changed restarts itself at its next second.
+  script the platform changed restarts itself at its next second, and so
+  does one whose CLI changed (above).
 - **The task client** (`~/.fragment/agent/task.mjs`, Node; written with
   the service): one task, `PROMPT`, in the session of `CHAT`
   (`<fragment>/<channel>`; none: the job's own fragment's `work`). The
@@ -534,8 +567,8 @@ does: its boot, and its awake time while the build runs, on your budget.
   over 10 s; another chat gets its own session; after a restart, a
   chat's next task recalls its earlier one. `model.log` has each call's
   time, provider, and cached tokens, and the chat's `work` each step's
-  time. It needs a CLI release whose `model --serve` answers OpenRouter's
-  path (a computer's CLI older than that fails each call: `goose.log`).
+  time. Its CLI is brought to 0.12.0 at its next sync (`model --serve`
+  answering OpenRouter's path; an older one failed each call: `goose.log`).
 - **The builder on a real Sprite**: `fragment new b --template builder`,
   create, deploy, and a task from its page.
 - **The pet's agent on a real Sprite** (`do`, above): a task from the
