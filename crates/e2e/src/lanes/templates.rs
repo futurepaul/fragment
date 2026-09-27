@@ -12,7 +12,7 @@ use fragment_nip98::Keys;
 use fragment_proto::ErrorCode;
 use serde_json::{json, Value};
 
-use super::builder::{stand_in, CUA_VERSION, GOOSE_VERSION, PNG};
+use super::builder::{stand_in, CUA_VERSION, PNG};
 use super::jobs::{settle, started};
 use super::signin::{site_cookie, with_session};
 use crate::api::{url_enc, Api, Call, Reply, Socket};
@@ -435,7 +435,6 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
     // do: its agent drives its screen, for editors only
     let home = s.scratch.join("sprites/sprites").join(&sprite);
     let computer_id = api.identity(&computer)?;
-    stand_in(&home, &format!(".local/share/goose-{GOOSE_VERSION}/goose"), "goose")?;
     stand_in(&home, &format!(".local/share/cua-driver-{CUA_VERSION}/cua-driver"), "cua-driver")?;
     let r = api.op(&viewer, &name, "do", "d1", json!({ "task": "click it" }))?;
     s.ok("a viewer cannot ask its agent", r.status == 403, &r);
@@ -447,35 +446,33 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
     let run = started(&r);
     let done = settle(api, owner, &name, run, &["succeeded", "held"], Duration::from_secs(90));
     s.ok(
-        "its owner asks its agent: goose and Cua Driver are installed, goose runs, and the run answers its last words",
+        "its owner asks its agent: Cua Driver is installed, the hands do the task, and the run answers goose's last words",
         done["status"] == "succeeded" && done["output"]["code"] == 0 && done["output"]["message"] == said,
         &done,
     );
     let chats: Vec<Value> = s.openrouter.chats().into_iter().skip(before).collect();
     let offered: Vec<&str> = chats.first().and_then(|c| c["tools"].as_array()).into_iter().flatten().filter_map(|t| t["function"]["name"].as_str()).collect();
     s.ok(
-        "each model call went through the platform, on the model do.mjs names (flash, which reads images), offered the Cua Driver tools its goose config names",
-        chats.len() == 6 && chats.iter().all(|c| c["model"] == "z-ai/glm-5.3-flash" && c["stream"] == true) && offered == ["cua__get_desktop_state", "cua__click"],
+        "each model call went through the platform, on the hands' model (flashx, which reads images), offered goose's shell and the Cua Driver tools its config names",
+        chats.len() == 6 && chats.iter().all(|c| c["model"] == "z-ai/glm-5.3-flashx" && c["stream"] == true) && offered == ["shell", "cua__get_desktop_state", "cua__click"],
         json!(offered),
     );
     let images = |c: &Value| c["messages"].as_array().into_iter().flatten().filter_map(|m| m["content"].as_array()).flatten().filter(|p| p["type"] == "image_url").count();
     let seen: Vec<usize> = chats.iter().map(images).collect();
     let text = |i: usize| chats.get(i).map(Value::to_string).unwrap_or_default();
     s.ok(
-        "a screenshot reaches the model, only the newest three go along, and Cua Driver drives the pet's display",
-        seen == [0, 1, 1, 2, 3, 3]
-            && text(1).contains(&format!("data:image/png;base64,{PNG}"))
-            && text(5).contains("an earlier screenshot, left out")
-            && text(2).contains("clicked at 10, 20 on :99"),
+        "each screenshot reaches the model and stays, the requests as goose made them (no proxy trims them), and Cua Driver drives the pet's display",
+        seen == [0, 1, 1, 2, 3, 4] && text(1).contains(&format!("data:image/png;base64,{PNG}")) && !text(5).contains("left out") && text(2).contains("clicked at 10, 20 on :99"),
         json!(seen),
     );
     let work = api.signed(owner, "GET", &format!("/api/f/{name}/channels/work"), None)?;
     let records: Vec<Value> = work.body["records"].as_array().into_iter().flatten().filter(|x| x["body"]["run"] == run).cloned().collect();
     let steps: Vec<String> = records.iter().map(|x| format!("{} {}", x["body"]["kind"].as_str().unwrap_or(""), x["body"]["tool"].as_str().unwrap_or(""))).collect();
-    let by_computer = records.iter().filter(|x| x["body"]["kind"] == "step").all(|x| x["principal"] == computer_id.as_str());
+    let by_computer = records.iter().filter(|x| x["body"]["kind"] == "turn.step").all(|x| x["principal"] == computer_id.as_str());
+    let step = "turn.step get_desktop_state";
     s.ok(
-        "work has the run's start, each step as its computer posted it, and its end",
-        steps == ["start ", "step get_desktop_state", "step click", "step get_desktop_state", "step get_desktop_state", "step get_desktop_state", "end "]
+        "asked on its page, work has the run's start, each step as its computer posted it, and its end",
+        steps == ["start ", step, "turn.step click", step, step, step, "end "]
             && by_computer
             && records.first().is_some_and(|x| x["body"]["asker"] == owner_id.as_str())
             && records.get(6).is_some_and(|x| x["body"]["message"] == said),

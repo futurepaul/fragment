@@ -4,9 +4,9 @@
 // computer is awake, as fragment.json's `computer.start` says, and restarts
 // it when it exits and after a deploy; what it prints is in ~/fragment.log.
 // The `fragment` CLI here is signed in as the computer, an editor, and
-// FRAGMENT_NAME names the fragment. Its agent (the `do` job, computer/do.mjs)
-// drives the same display through Cua Driver, and marks each step it takes
-// in ~/.pet/agent, which makes it the driver the frames name.
+// FRAGMENT_NAME names the fragment. Its agent (the `do` job: the computer's
+// hands, with Cua Driver) drives the same display, and marks each step it
+// takes in ~/.pet/agent, which makes it the driver the frames name.
 //
 // PET_FAKE_SCREEN=<a JPEG> shows that fixed image instead: nothing is
 // installed or started, and control records are logged, not applied.

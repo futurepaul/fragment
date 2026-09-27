@@ -98,11 +98,13 @@ fn platform_tools(owner_turn: bool) -> Vec<(&'static str, &'static str, Value)> 
         handoff::TOOL,
         "Hands work to a computer: building or changing an app, writing code, research, anything more than a few calls. \
          It answers at once and the work runs for minutes on its own; its result is said in this conversation when it \
-         ends. Without `computer`, a throwaway computer does it (what it builds is a new fragment of your owner's) and \
-         is removed after, keeping what it built.",
+         ends. It goes to your owner's own computer, in this conversation's session there, which remembers the work \
+         handed off from here before. With `throwaway`, or when they have no computer, a throwaway computer does it \
+         (what it builds is a new fragment of your owner's) and is removed after, keeping what it built.",
         json!({ "type": "object", "required": ["task"], "additionalProperties": false, "properties": {
-            "task": { "type": "string", "description": "the whole task, as the computer should read it: it sees nothing of this conversation" },
+            "task": { "type": "string", "description": "the task, as the computer should read it: it sees only what was handed off from this conversation before" },
             "computer": { "type": "string", "description": "only when the person names one: a fragment of theirs with a computer and a `do` or `build` job (<label>.<username>)" },
+            "throwaway": { "type": "boolean", "description": "extra hands: a new computer just for this, for work alongside other work or risky work" },
         } }),
     );
     let mut tools = if owner_turn { vec![create, hand_off] } else { Vec::new() };

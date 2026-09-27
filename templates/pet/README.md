@@ -40,19 +40,21 @@ by its agent (ask it to do something).
   (`job.computer.exec`), answered with `{code, stdout, stderr,
   truncated}`. The owner's agent calls it from any chat (the desktop's
   Computers: docs/computers.md). A viewer is refused.
-- `do({task})` is its agent, a job for editors (it spends the owner's
-  budget): goose v1.50.0 and Cua Driver v0.28.1, each installed once
-  from its release and checked against its SHA-256, then
-  `computer/do.mjs` runs goose headless (at most 40 turns and 9 minutes)
-  with Cua Driver's MCP server (`cua-driver mcp`, 8 of its tools) on the
-  pet's display. goose's model is the platform's (`fragment model
-  --serve`, through a proxy that keeps the newest 3 screenshots, so a
-  request stays under the platform's 8 MiB); `GOOSE_MODEL=gpt-4o` only tells goose the
-  model reads images, as the one the platform calls does. Each tool
-  call is a step on `work` (`{run, kind: "step", n, tool, args, said}`,
-  between the job's `start` and `end`), which the page shows live, and
-  the run answers `{message, code}`. Anyone may click while it works:
-  its next look shows it.
+- `do({task, chat?})` is its agent, a job for editors (it spends the
+  owner's budget): the hands every computer has (goose v1.52.0 in `goose
+  serve`, one session per chat: docs/agent-computer.md) do `task` in the
+  session of the chat that asked (none: this page's own), with Cua Driver
+  v0.28.3 as their way to the screen: installed once from its release
+  and checked against its SHA-256, then named in goose's config as an
+  extension (`cua-driver mcp`, 8 of its tools, on the pet's display). The
+  task runs for at most 9 minutes. goose's model is the platform's
+  (`fragment model --serve`, `z-ai/glm-5.3-flashx`, which reads images),
+  and every request goes as goose made it. Each tool call is a step on
+  the chat's `work` (`{kind: "turn.step", turn, run, step, tool, args,
+  ok, excerpt, text}`), this page's own when no chat asked, where the
+  job also posts the run's `start` and `end`, which the page shows live;
+  the run answers `{message, code}`. Anyone may click while it works: its
+  next look shows it.
 
 `frame` says `"ephemeral": true`: its calls leave no ledger row in the
 app's database (a mutation's id is otherwise kept a week there, which a
@@ -62,5 +64,6 @@ harmless for the latest frame) and effects (it publishes nothing).
 
 Its state is in `~/.pet` on the computer: the last record applied, the
 browser's profile, the display's and browser's logs, the session bus,
-and the agent's goose config and log (`goose/`, `goose.log`). `PET_FAKE_SCREEN=
+and who the agent last worked for (`agent`). The hands keep theirs in
+`~/.fragment/agent` (goose's sessions in its own store). `PET_FAKE_SCREEN=
 <a JPEG>` shows that image instead (nothing installed, nothing driven).

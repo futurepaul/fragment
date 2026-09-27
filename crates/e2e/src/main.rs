@@ -492,7 +492,7 @@ fn approve_login(api: &Api, pending: &Value) -> Result<()> {
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // the builder's and the pet's goose, and the pet's Cua Driver, where the Sprites fake runs an exec
+    // the hands' goose (every computer's), and the pet's Cua Driver, where the Sprites fake runs them
     match args.first().map(String::as_str) {
         Some("goose") => return lanes::builder::stand_in_goose(&args[1..]),
         Some("cua-driver") => return lanes::builder::stand_in_cua(&args[1..]),
@@ -557,6 +557,9 @@ fn main() -> Result<()> {
         node_env_extra: vec![],
         shape: Shape::Plain,
     };
+    // every computer's hands find the stand-in goose where they install the pinned one
+    let goose = format!("#!/bin/sh\nexec '{}' goose \"$@\"\n", std::env::current_exe()?.display());
+    s.sprites.seed(&format!(".local/share/goose-{}/goose", fragment_core::computer::GOOSE_VERSION), goose.as_bytes());
     s.start(true, true)?;
     lanes::run(&mut s);
     for (flag, name) in s.only.clone().unwrap_or_default().into_iter().map(|n| ("--only", n)).chain(s.except.clone().into_iter().map(|n| ("--except", n))) {

@@ -30,6 +30,13 @@ pub fn turn_id(kickoff_message_id: &str) -> String {
     hex::encode(Sha256::digest(kickoff_message_id.as_bytes()))[..24].to_string()
 }
 
+/// A hand-off's turn in a chat's records: the computer posts its steps
+/// under it (computer/task.mjs builds the same), and the agent's answer
+/// names it, so a page shows the steps above the answer.
+pub fn handoff_turn(computer: &str, run: i64) -> String {
+    format!("hand-off:{computer}:{run}")
+}
+
 /// A progress record's post id (`[A-Za-z0-9._:-]`): its turn and its part
 /// (`start`, a call's number, `end`), so a replayed step posts the same id
 /// with the same body, and the platform appends nothing new.
@@ -166,6 +173,7 @@ mod tests {
             assert!(fragment_proto::valid_op_id(&id), "{id} is a post id");
         }
         assert_ne!(record_id(&t, "1"), record_id(&t, "2"));
+        assert_eq!(handoff_turn("pet.paul", 7), "hand-off:pet.paul:7", "computer/task.mjs posts steps under it");
     }
 
     #[test]

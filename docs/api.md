@@ -138,7 +138,9 @@ A person's request naming `for` is 403, as is more than one `for` (400)
 or one that is not an identity (400). A call without `for` acts as the
 agent's own membership. Owner-only actions (members, other than leaving
 with `DELETE members/me`; invites; visibility; rotation; grants;
-deletion) are 403 for an agent whatever it names. A site request's query is its app's:
+deletion) are 403 for an agent whatever it names, but two a hand-off
+takes for its owner (Agents, Hand-offs): deleting a throwaway it made,
+and making its owner's computer an editor of its owner's chat. A site request's query is its app's:
 `for` there means nothing to the platform.
 
 A computer (Identities, below) acts as itself only: it holds the role
@@ -419,6 +421,7 @@ platform (`Content-Security-Policy`), and keep their URL to the platform
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
 | `PUT /api/f/{name}/members/{id\|npub}` | owner | `{role: viewer\|editor}` → the member; a key names the identity holding it (404 when no one registered it) |
+| `PUT /api/f/{name}/members/{computer}` | an agent, for its owner (Agents, Hand-offs) | → the member: its owner's computer named `computer` (a fragment's name) becomes an editor of its owner's fragment; another fragment 403, a computer its owner does not have 404 |
 | `DELETE /api/f/{name}/members/{id\|npub\|me}` | owner, or the member | → `{ok, removed}`; closes that member's change feeds (and its owner's, when an agent's membership was their only view) |
 | `POST /api/f/{name}/invites` | owner | `{role, uses? (1), ttlS? (7 days, at most 30), invitee? (id:…)}` → `{id, role, usesLeft, expiresAt, createdBy, invitee?, token}`; the token is shown once. With `invitee`, only that identity may accept it (the share sheet's invite by username); without, whoever holds the token |
 | `GET /api/f/{name}/invites` | owner | → `{invites: [...]}` without tokens |
@@ -1024,6 +1027,7 @@ else).
 | `POST /api/a/{name}/computer/poll` | the connect token (`x-computer-token`) | → `{requests: [{rid, method, path, body}]}`: what the agent asks of its computer (the routes `fragment computer serve` answers), at once or within 25 s; one fetched and not answered in 40 s is handed out again; a wrong token 403 |
 | `POST /api/a/{name}/computer/answer` | the connect token | `{rid, status, body}` (at most 6 MiB) → `{ok}`. A turn leaves out a computer that has not polled in 60 s |
 | `DELETE /api/a/{name}/computer` | owner | → `{detached}` |
+| `PUT /api/a/{name}/home` | owner | `{computer}` → `{home}`: the owner's home computer, where hand-offs go by default (a fragment of theirs whose job `do` or `build` takes a task; any other is 400); `{computer: null}` clears it (Hand-offs, below) |
 | `POST /api/a/{name}/test` | owner, test fleets | `{hold_in_tool_ms?, hold_after_tool_ms?, watchdog_ms?, window_messages? (2-256), view_rows? (2-256), model_timeout_ms? (200-100000)}` |
 
 One conversation per chat: a turn belongs to the owner's own
@@ -1100,52 +1104,76 @@ conversation and posted to its chat as an answer is, and the chat's
 
 ### Hand-offs (`platform__hand_off`)
 
-A person's agent does light work itself and hands the rest to a computer
-(Paul, 2026-09-27; `agent/src/handoff.rs`). `platform__hand_off({task,
-computer?})` (a task of at most 4000 bytes, the whole of it: the
-computer sees nothing of the conversation) is offered in its owner's
-turns only: a guest's turn would spend the owner's budget on a computer,
-so it has no such tool, and a call it makes anyway is answered "no tool
-named platform__hand_off" (the platform also refuses an agent's create
-for anyone but its owner). It starts the work and answers at once
+A person's agent does light work itself and hands the rest to a
+computer's hands: goose, in a long-lived session per chat
+(docs/agent-computer.md, slice 1; `agent/src/handoff.rs`).
+`platform__hand_off({task, computer?, throwaway?})` (a task of at most
+4000 bytes: the computer sees only what was handed off from the same
+conversation before) is offered in its owner's turns only: a guest's
+turn would spend the owner's budget on a computer, so it has no such
+tool, and a call it makes anyway is answered "no tool named
+platform__hand_off" (the platform also refuses an agent's create for
+anyone but its owner). It starts the work and answers at once
 (`{started, computer, run, note}`), and the turn ends saying the work is
 on its way; nothing holds a turn open for a build.
 
+- **By default**: the conversation's computer. That is the one it is
+  bound to, else the owner's home computer (`PUT /api/a/{name}/home`,
+  `fragment agent home <agent> <computer>`), to which the conversation
+  is bound from then on, so its session there carries over. A bound
+  computer that is gone, or offers no job now, frees the conversation
+  for the home computer.
 - **With `computer`**: one of the owner's fragments whose job `do`, or
-  else `build`, takes `{task}` (a pet, a builder). The job is called
-  there for the asker, capped as every call is.
-- **Without**: a throwaway. The agent makes a private fragment of its
-  owner's from the `builder` template with `throwaway: true` (the
-  fragment records the agent), named `handoff-<12 hex of SHA-256 of the
-  tool-call id>.<username>` (a replayed call finds the one it made, and a
-  crash's leftovers are recognized by that name; the name grants
-  nothing), and calls its
-  `build({task})`: goose on the fragment's own new computer makes and
-  deploys what was asked, a fragment of the owner's (docs/computers.md).
-  A build that does not start removes it again.
+  else `build`, takes `{task, chat?}` (a pet, a builder). The job is
+  called there for the asker, capped as every call is. It binds nothing.
+- **With `throwaway: true`, or with no home computer**: a throwaway,
+  extra hands. The agent makes a private fragment of its owner's from
+  the `builder` template with `throwaway: true` (the fragment records the
+  agent), named `handoff-<12 hex of SHA-256 of the tool-call id>.<username>`
+  (a replayed call finds the one it made, and a crash's leftovers are
+  recognized by that name; the name grants nothing), and calls its
+  `build`: goose on the fragment's own new computer makes and deploys
+  what was asked, a fragment of the owner's (docs/computers.md). A build
+  that does not start removes it again. A throwaway is only a hand-off's
+  lifecycle: the platform tells no computer apart as one.
+
+The job's input names the asking chat (`chat`, `<fragment>/<channel>`;
+none from the owner's own conversation): its session on the computer,
+and where each step goes. The hand-off makes the computer an editor of
+the chat, so it posts its steps there as its owner's computer: `PUT
+/api/f/{chat}/members/{computer}` (the computer named by its fragment's
+name), signed by the agent (for its owner or no one), is the second
+owner-only action an agent takes. The platform takes it only for a
+fragment its owner owns and a computer its owner has of that name, and
+makes it an editor whatever the body says (a throwaway's computer, not
+paired yet, is made one by the agent's alarm once it is). Each step is a
+`turn.step` record on the chat's `work` channel (the chat template's,
+above), under the hand-off's turn `hand-off:<computer>:<run>`.
 
 At most 8 hand-offs run for one agent at once. The agent's alarm looks
 at each one's run (`GET /api/f/{fragment}/runs/{run}` for its owner)
 every 10 s, between turns, for up to 90 minutes. When it ends, its
 result is said in the conversation that asked: stored there as the
 agent's message (so later turns know what was built), and posted to its
-chat as an answer is (`{text}`, naming no turn), once (`rp:` from the
-message id `msg_handoff_<fragment>_<run>`); never while a turn of that
-conversation runs. It reads `Done: <url>` and what the computer said
-last (the builder's `{url, message}`; a `do` job's `message` or `text`,
-or its answer if that is text), or `The computer could not finish:
-<error>` (held, blocked), or that it is still going after 90 minutes (then
-the throwaway is left, named as one). The owner's own conversation has
-the result as its newest answer (`state`). Then a throwaway is removed:
+chat as an answer is (`{text, turn}`, the hand-off's turn, so a page
+shows the steps above it), once (`rp:` from the message id
+`msg_handoff_<fragment>_<run>`); never while a turn of that conversation
+runs. It reads `Done: <url>` and what the computer said last (the
+builder's `{url, message}`; a `do` job's `message` or `text`, or its
+answer if that is text), or `The computer could not finish: <error>`
+(held, blocked), or that it is still going after 90 minutes (then the
+throwaway is left, named as one). The owner's own conversation has the
+result as its newest answer (`state`). Then a throwaway is removed:
 `DELETE /api/f/{throwaway}`, signed by the agent (for its owner or no
-one), is the one owner-only action an agent takes (confirmed by Paul,
+one), is the other owner-only action an agent takes (confirmed by Paul,
 2026-09-27). The platform takes it only for a fragment that recorded, at
 its create, that this agent made it as a throwaway; any other, whatever
 its name, is 403 (a gone one 404): it removes the fragment's computer as `fragment computers rm`
 does (keys revoked, every fragment left, the Sprite destroyed; one never
 paired has its Sprite destroyed alone), then deletes the fragment as its
 owner. What the computer built stays its owner's. The owner's view lists
-the hand-offs being watched (`handoffs`).
+the hand-offs being watched (`handoffs`), the home computer (`home`), and
+the conversations bound to a computer (`bound`).
 
 ### A fragment's agent (the `agent` block)
 
@@ -1234,6 +1262,13 @@ owner's own agent answering (the `agent` block, above):
   `turn` is 24 hex of the SHA-256 of the turn's first message's id; the
   answer on `chat` names it, so a page places the steps above their
   answer. Nothing streams: a record is a whole step.
+
+  A hand-off's steps come the same way from the computer doing it (an
+  editor here: Agents, Hand-offs), `turn.step` records under the turn
+  `hand-off:<computer>:<run>`, with its `run`, each once a tool call
+  ended (`ok`: it worked; `excerpt`: its output; `text`: goose's words
+  before it), with the id `st:<computer>:<run>:<step>`; no `turn.start`
+  or `turn.end`. The agent's answer, when the work ends, names that turn.
 
 A chat made before this (a `say` operation, `chat` taking no posts) keeps
 its own page, and its agent answers through `say`, with no `work`.

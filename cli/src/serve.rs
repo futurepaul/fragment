@@ -5,13 +5,15 @@
 //! the answer as it arrives. Anything that speaks to an OpenAI-compatible
 //! provider or to OpenRouter (goose on a computer) then needs no key: the
 //! platform checks the model and bills the computer's owner. It binds the
-//! loopback address only, so it answers this machine alone.
+//! loopback address only, so it answers this machine alone. Each call is a
+//! line on stderr (`call_log`): how long it took, which provider answered,
+//! and how much of its prompt was cached.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use fragment_proto::limits::MODEL_BODY_MAX_BYTES;
@@ -28,6 +30,8 @@ const HEAD_MAX_BYTES: u64 = 16 * 1024;
 /// and room for the hop.
 const CALL_TIMEOUT: Duration = Duration::from_secs(150);
 const PLATFORM_PATH: &str = "/api/model/chat/completions";
+/// The end of an answer kept to read its usage from (a stream's last chunk).
+const TAIL_BYTES: usize = 64 * 1024;
 
 pub fn serve(client: Client, port: u16) -> Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).with_context(|| format!("binding 127.0.0.1:{port}"))?;
@@ -92,6 +96,7 @@ fn one(client: &Client, stream: TcpStream) -> Result<()> {
     };
     let mut body = vec![0; length];
     reader.read_exact(&mut body)?;
+    let t0 = Instant::now();
     let mut forwarded = match client.post_streaming(PLATFORM_PATH, body, CALL_TIMEOUT) {
         Ok(r) => r,
         Err(e) => return answer(&mut out, 502, "application/json", serde_json::json!({ "error": { "message": format!("{e:#}") } }).to_string().as_bytes()),
@@ -101,15 +106,45 @@ fn one(client: &Client, stream: TcpStream) -> Result<()> {
     let status = forwarded.status().as_u16();
     let kind = forwarded.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/json").to_string();
     write!(out, "HTTP/1.1 {status} {}\r\ncontent-type: {kind}\r\ncache-control: no-store\r\nconnection: close\r\n\r\n", reason(status))?;
+    let (first, mut tail) = (t0.elapsed(), Vec::new());
     let mut piece = [0u8; 16 * 1024];
     loop {
         let n = forwarded.read(&mut piece)?;
         if n == 0 {
+            eprintln!("{}", call_log(status, first, t0.elapsed(), &tail));
             return Ok(());
         }
         out.write_all(&piece[..n])?;
         out.flush()?;
+        tail.extend_from_slice(&piece[..n]);
+        if tail.len() > 2 * TAIL_BYTES {
+            tail.drain(..tail.len() - TAIL_BYTES);
+        }
     }
+}
+
+/// One call, as a line of JSON (on stderr): when it ended, its status, how
+/// long to the answer's head and to its end, and what its usage says (the
+/// provider that answered, the prompt's tokens and how many were cached),
+/// read from the end of the answer (a stream's last chunks).
+fn call_log(status: u16, first: Duration, total: Duration, tail: &[u8]) -> serde_json::Value {
+    let text = String::from_utf8_lossy(tail);
+    let (mut provider, mut model, mut usage) = (serde_json::Value::Null, serde_json::Value::Null, serde_json::Value::Null);
+    let lines = text.lines().map(|l| l.strip_prefix("data: ").unwrap_or(l));
+    for v in lines.chain([text.as_ref()]).filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()) {
+        for (field, kept) in [("provider", &mut provider), ("model", &mut model), ("usage", &mut usage)] {
+            if !v[field].is_null() {
+                *kept = v[field].clone();
+            }
+        }
+    }
+    let at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    let call = serde_json::json!({
+        "at": at, "status": status, "ms": total.as_millis(), "first_ms": first.as_millis(), "model": model, "provider": provider,
+        "prompt_tokens": usage["prompt_tokens"], "cached_tokens": usage["prompt_tokens_details"]["cached_tokens"],
+        "completion_tokens": usage["completion_tokens"], "cost": usage["cost"],
+    });
+    serde_json::json!({ "call": call })
 }
 
 fn answer(out: &mut TcpStream, status: u16, kind: &str, body: &[u8]) -> Result<()> {
@@ -123,5 +158,28 @@ fn reason(status: u16) -> &'static str {
         200 => "OK",
         400..=499 => "Client Error",
         _ => "Server Error",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_call_is_logged_with_its_provider_and_cache() {
+        let stream = concat!(
+            "data: {\"id\":\"a\",\"provider\":\"Z.AI\",\"model\":\"z-ai/glm-5.3-flashx\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            "data: {\"id\":\"a\",\"provider\":\"Z.AI\",\"choices\":[],\"usage\":{\"prompt_tokens\":11800,\"prompt_tokens_details\":{\"cached_tokens\":11700},\"completion_tokens\":30,\"cost\":0.001}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let line = call_log(200, Duration::from_millis(400), Duration::from_millis(1400), stream.as_bytes());
+        let c = &line["call"];
+        assert_eq!((c["ms"].as_u64(), c["first_ms"].as_u64(), c["status"].as_u64()), (Some(1400), Some(400), Some(200)));
+        assert_eq!((c["provider"].as_str(), c["model"].as_str()), (Some("Z.AI"), Some("z-ai/glm-5.3-flashx")));
+        assert_eq!((c["prompt_tokens"].as_u64(), c["cached_tokens"].as_u64(), c["completion_tokens"].as_u64()), (Some(11800), Some(11700), Some(30)));
+        // a whole answer (not streamed), and one with nothing to read
+        let whole = br#"{"provider":"Z.AI","usage":{"prompt_tokens":5,"completion_tokens":1}}"#;
+        assert_eq!(call_log(200, Duration::ZERO, Duration::ZERO, whole)["call"]["prompt_tokens"].as_u64(), Some(5));
+        assert!(call_log(502, Duration::ZERO, Duration::ZERO, b"oops")["call"]["provider"].is_null());
     }
 }

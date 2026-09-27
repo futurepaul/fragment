@@ -218,6 +218,40 @@ pub(crate) async fn remove_throwaway(env: &Env, url: &Url, agent: &Signed, name:
     crate::forward(env, &delete, None, crate::Forward { routed, inner: "/delete".into(), extra: vec![] }).await
 }
 
+/// `PUT /api/f/{name}/members/{computer}` by an agent, naming a computer by
+/// its fragment's name: its owner's computer of that name becomes an editor
+/// of `name`, a fragment its owner owns (a hand-off's chat, where the
+/// computer posts its steps as its owner's computer: agent/src/handoff.rs,
+/// docs/agent-computer.md). The second owner-only action an agent takes,
+/// for its owner or itself; its body is not read (always `editor`), and any
+/// other member change stays its owner's (decision 17).
+pub(crate) async fn add_computer(env: &Env, url: &Url, agent: &Signed, name: &str, computer: &str) -> CellResult<Response> {
+    let owner = agent.owner.clone().ok_or_else(|| CellError::host("an agent without an owner"))?;
+    let refused = || CellError::new(ErrorCode::Forbidden, "an agent adds only its owner's computer, as an editor, to its owner's fragment: any other member is its owner's to add");
+    if agent.acting_for.as_ref().is_some_and(|asker| *asker != owner) {
+        return Err(refused());
+    }
+    // whose the fragment is, read as the request reads it
+    let routed = crate::routed::Routed { name: name.to_string(), url: url.clone(), mode: None, signed: Some(agent.clone()), credential: None };
+    let read = Request::new(url.as_str(), Method::Get)?;
+    let mut status = crate::forward(env, &read, None, crate::Forward { routed, inner: "/api/status".into(), extra: vec![] }).await?;
+    let status: Option<fragment_proto::FragmentStatus> = match status.status_code() {
+        200 => Some(status.json().await?),
+        404 => return Err(CellError::new(ErrorCode::NotFound, format!("no fragment {name}"))),
+        _ => None,
+    };
+    if status.map(|s| s.owner).as_deref() != Some(owner.as_str()) {
+        return Err(refused());
+    }
+    let computers = ask_registry(env, &calls::View { identity: None, by: calls::By::Identity(owner.clone()) }).await?.computers;
+    let c = computers.into_iter().find(|c| c.name == computer).ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("its owner has no computer named {computer}")))?;
+    let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: agent.username.clone() };
+    let routed = crate::routed::Routed { name: name.to_string(), url: url.clone(), mode: None, signed: Some(Signed::new(identity, None)), credential: None };
+    let put = Request::new(url.as_str(), Method::Put)?;
+    let body = crate::bytes_body(json!({ "role": Role::Editor }).to_string().into_bytes());
+    crate::forward(env, &put, body, crate::Forward { routed, inner: format!("/api/members/{}", c.id), extra: vec![] }).await
+}
+
 /// What live's `agent` block declares, as the fragment keeps it
 /// (`MetaKey::AgentLive`): the block, and its instructions' text at live.
 #[derive(Serialize, Deserialize, PartialEq)]

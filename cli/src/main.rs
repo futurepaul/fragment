@@ -391,6 +391,16 @@ enum AgentCmd {
         #[arg(long, conflicts_with_all = ["url", "token_file", "connect"])]
         detach: bool,
     },
+    /// Your home computer: where the agent hands work off by default, each chat in a session of its own
+    Home {
+        name: String,
+        /// A fragment of yours with a computer and a `do` or `build` job (a label: yours)
+        #[arg(required_unless_present = "clear")]
+        computer: Option<String>,
+        /// No home computer: hand-offs go to throwaways
+        #[arg(long, conflicts_with = "computer")]
+        clear: bool,
+    },
     /// Follow a fragment's channel: others' messages start turns, answers go back through the reply operation
     Listen {
         name: String,
@@ -1526,6 +1536,19 @@ fn run(cli: Cli) -> Result<()> {
                     json_exit(j, &v);
                     for t in v["tools"].as_array().cloned().unwrap_or_default() {
                         println!("{}", t.as_str().unwrap_or(""));
+                    }
+                }
+                AgentCmd::Home { name, computer, clear: _ } => {
+                    // a bare label is one of yours, as the agent's name says
+                    let computer = computer.map(|c| match (c.contains('.'), name.split_once('.')) {
+                        (false, Some((_, user))) => format!("{c}.{user}"),
+                        _ => c,
+                    });
+                    let v = a.call(a.put_json(&format!("/api/a/{name}/home"), &json!({ "computer": computer }))?)?;
+                    json_exit(j, &v);
+                    match v["home"].as_str() {
+                        Some(home) => println!("{name} hands work to {home} by default: each chat has a session there"),
+                        None => println!("{name} has no home computer: hand-offs go to throwaways"),
                     }
                 }
                 AgentCmd::Listen { name, fragment, channel, reply } => {

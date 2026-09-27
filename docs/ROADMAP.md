@@ -601,6 +601,14 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   throwaway builder removed after), in its owner's turns only; the result
   lands in the chat from the agent's alarm. Its write and deploy tools and
   the build guide are gone (docs/api.md, Hand-offs).
+- *Since `computer-sessions` (2026-09-27; decision 24, slice 1 of
+  docs/agent-computer.md):* every computer runs the hands, `goose serve`
+  (v1.52.0) on `fragment model --serve`, with one long-lived session per
+  chat; a hand-off goes by default to the owner's home computer (`fragment
+  agent home`), bound to the chat, whose steps the computer posts into
+  the chat; throwaways are extra hands when asked for, or with no home.
+  The pet's trimming proxy, `gpt-4o`, and one-shot `goose run` are gone.
+  Open: its acceptance on a real Sprite (the cache, the step times).
 - Decision 20: `agent` in `fragment.json`; turns from signed-in
   visitors' messages and `job.agent` steps, acting as decision 17 says,
   on the owner's budget. The chat template declares one; C's seam goes.

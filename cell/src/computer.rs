@@ -85,9 +85,10 @@ struct Files {
 }
 
 impl Files {
-    /// What it is to be synced to: live, and its `start`.
+    /// What it is to be synced to: live, its `start`, and the hands' goose
+    /// (a computer synced before them, or with another goose, syncs again).
     fn wanted(&self) -> Option<String> {
-        self.live.as_ref().map(|live| json!([live, self.start]).to_string())
+        self.live.as_ref().map(|live| json!([live, self.start, exec::GOOSE_VERSION]).to_string())
     }
 
     fn stale(&self) -> bool {
@@ -693,7 +694,8 @@ impl ComputerCell {
     }
 
     /// Pulls live into `~/fragment` (`exec::SYNC`), then its `start`
-    /// service goes and, when declared, comes again from the new files.
+    /// service goes and, when declared, comes again from the new files;
+    /// then its hands.
     async fn sync(&self, c: &Row, f: &Files) -> CellResult<()> {
         let host = self.cfg.computer_platform()?;
         let start = f.start.as_deref().map_or(String::new(), |s| exec::start_script(s, &host, &c.fragment));
@@ -708,6 +710,16 @@ impl ComputerCell {
             if status != 200 {
                 return Err(upstream(format!("{} would not run start as a service ({status}): {}", self.sprite(), tail(&out))));
             }
+        }
+        // the hands (docs/agent-computer.md), on every computer: written
+        // each sync, and a service made once (409: it runs already, and
+        // restarts itself when its script changed)
+        let (status, out) = keys::sprites(&self.env, "exec", &["bash", "-c", exec::HANDS, "fragment-hands"], &exec::hands_files(&host)).await?;
+        let hands = exec::answer(&out).filter(|_| status == 200).and_then(|h| String::from_utf8(h).ok());
+        let hands = hands.ok_or_else(|| upstream(format!("{} did not take its hands ({status}): {}", self.sprite(), tail(&out))))?;
+        let (status, out) = keys::sprites(&self.env, "exec", &["sprite-env", "services", "create", exec::HANDS_SERVICE, "--cmd", "bash", "--args", &hands, "--no-stream"], "").await?;
+        if !matches!(status, 200 | 409) {
+            return Err(upstream(format!("{} would not run its hands as a service ({status}): {}", self.sprite(), tail(&out))));
         }
         Ok(())
     }

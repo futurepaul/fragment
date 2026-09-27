@@ -1,8 +1,9 @@
 # The agent computer: the brain in the cell, the hands on a computer
 
 Status: **decided 2026-09-27** (Paul; ROADMAP decision 24, which amends
-decision 10). Nothing is built yet; the slices below build it. Sources
-were checked on 2026-09-27, and the dependency cooldown is 2 days.
+decision 10). Slice 1 is built (below, "Slice 1 as built"); its real
+Sprite acceptance is next. Sources were checked on 2026-09-27, and the
+dependency cooldown is 2 days.
 
 ## The decision
 
@@ -395,6 +396,34 @@ work, or about 90 on flash.
   task becomes a prompt, steps and the answer reach the asking chat, and
   requests pass through unedited.
 - **Size:** template +150/−120, CLI +10, cell +10, e2e +200.
+
+**Slice 1 as built** (docs/computers.md, the hands; docs/api.md,
+Hand-offs). Where it differs from the plan above:
+- **One service, `hands`**, runs `fragment model --serve` and `goose
+  serve` together (a script the platform writes at each sync, on every
+  computer), so goose always points at the model endpoint that is up.
+  Each binds a free port (the model's `--port 0`; goose the first free
+  from 3284, in `~/.fragment/agent/port`), since the e2e runs every
+  Sprite on one machine.
+- **The task client is the platform's** (`~/.fragment/agent/task.mjs`,
+  written with the service), so the pet's `do` and the builder's `build`
+  share one. It speaks ACP over goose serve's WebSocket, JSON-RPC by
+  hand (about 60 lines), instead of `@agentclientprotocol/sdk`: nothing
+  is installed at run time for it.
+- **Steps are `turn.step` records**, the ones the chat page renders
+  already, under the hand-off's turn, which the agent's answer names.
+- **The grant**: the hand-off makes the computer an editor of the chat
+  (the second owner-only action an agent takes; the platform takes it
+  only for its owner's own computer and chat).
+- **A reconnect does not reuse the loaded agent** (goose's source: each
+  connection gets its own `AcpServer::create_agent`, and a session load
+  builds a new one). A task's first call is cached as the last task's
+  within the hour its system prompt names; after the hour turns, it
+  misses once. The resident client over `goose acp` stays the fallback,
+  if the measured miss matters.
+- **Reasoning** is `OPENROUTER_PARAMETERS={"reasoning":{"effort":"low"}}`,
+  which every model takes; `{"enabled": false}` is the knob to try if
+  flashx allows it.
 
 **2. Stagehand on system Chrome.**
 - **What changes:** the checked Chrome .deb replaces Playwright's

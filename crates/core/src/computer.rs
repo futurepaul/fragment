@@ -111,6 +111,77 @@ printf 'FRAGMENT-EXEC-BEGIN
 FRAGMENT-EXEC-END
 ' "$(printf '%s' "$HOME" | base64)""#;
 
+/// The goose every computer runs (docs/agent-computer.md): its static
+/// x86_64 Linux release, checked against the SHA-256 GitHub lists for it,
+/// past the dependency cooldown (two days).
+pub const GOOSE_VERSION: &str = "1.52.0";
+pub const GOOSE_SHA256: &str = "fdc86653285a89f7dcad6e76736af1688ab2cde44661b089328b2fc40bb79f9f";
+/// The hands' service, beside `start`'s.
+pub const HANDS_SERVICE: &str = "hands";
+/// The task client a job runs for the hands (`node ~/.fragment/agent/task.mjs`).
+pub const TASK_MJS: &str = include_str!("computer/task.mjs");
+
+/// `bash -c HANDS fragment-hands`, `hands_files` on stdin: writes the
+/// hands' service (`hands.sh`, only when it changed: a running one notices
+/// and restarts itself) and the task client into `~/.fragment/agent`.
+/// Answers `hands.sh`'s path, which the service runs.
+pub const HANDS: &str = r#"set -e
+a="$HOME/.fragment/agent"; mkdir -p "$a"; cd "$a"; cat > files.t
+sed '/^FRAGMENT-TASK$/,$d' files.t > hands.sh.t; sed '1,/^FRAGMENT-TASK$/d' files.t > task.mjs; rm files.t
+if cmp -s hands.sh.t hands.sh; then rm hands.sh.t; else mv hands.sh.t hands.sh; fi
+printf 'FRAGMENT-EXEC-BEGIN\n%s\nFRAGMENT-EXEC-END\n' "$(printf '%s' "$a/hands.sh" | base64)""#;
+
+/// The hands' service (docs/agent-computer.md): `goose serve` on
+/// `fragment model --serve`, kept up together with backoff, its sessions
+/// in goose's own store. goose is fetched and checked on its first start;
+/// its hints are the CLI's guide; it speaks ACP on the first free port from
+/// 3284 (in `port`), to clients holding `secret` (made here, 0600); its
+/// model calls go through the platform, signed as this computer (no key
+/// here), each logged by `--serve` to `model.log`. After the header
+/// `hands_files` adds (the platform's host, the pinned goose).
+const HANDS_SH: &str = r#"set -u
+a="$HOME/.fragment/agent"; cd "$a" || exit 1; touch hands.log model.log goose.log
+export PATH="$HOME/.local/bin:$PATH"
+goose="$HOME/.local/share/goose-$v/goose"; url="https://github.com/aaif-goose/goose/releases/download/v$v/goose-x86_64-unknown-linux-musl.tar.gz"
+me=$(cksum < "$0"); m=; g=; backoff=1
+trap 'kill $m $g 2> /dev/null; exit 0' TERM INT HUP
+log() { echo "[hands] $(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >> hands.log; }
+[ -s secret ] || (umask 077; head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > secret)
+while :; do
+t0=$(date +%s); rm -f port
+if [ ! -x "$goose" ]; then
+log "fetching goose $v"; mkdir -p "$HOME/.local/share"; d=$(mktemp -d "$HOME/.local/share/.get-XXXXXX")
+curl -fsSL -o "$d/a.tar.gz" "$url" && echo "$sum  $d/a.tar.gz" | sha256sum -c - > /dev/null && mkdir "$d/x" && tar -xzf "$d/a.tar.gz" -C "$d/x" && mv "$d/x" "${goose%/goose}" || log "goose $v did not install"
+rm -rf "$d"
+fi
+mkdir -p "$HOME/.config/goose" && fragment guide > "$HOME/.config/goose/.goosehints" 2>> hands.log
+fragment model --serve --port 0 > model.out 2>> model.log & m=$!
+mp=; for i in $(seq 100); do mp=$(sed -n 's#^serving http://127\.0\.0\.1:\([0-9]*\)/.*#\1#p' model.out); [ -n "$mp" ] && break; sleep 0.1; done
+gp=3284; while (exec 3<> "/dev/tcp/127.0.0.1/$gp") 2> /dev/null; do gp=$((gp + 1)); done
+if [ -n "$mp" ] && [ -x "$goose" ]; then
+GOOSE_SERVER__SECRET_KEY=$(cat secret) GOOSE_PROVIDER=openrouter OPENROUTER_HOST="http://127.0.0.1:$mp" OPENROUTER_API_KEY=unused \
+GOOSE_MODEL=z-ai/glm-5.3-flashx GOOSE_CONTEXT_LIMIT=64000 GOOSE_MODE=auto GOOSE_DISABLE_KEYRING=1 GOOSE_DISABLE_SESSION_NAMING=1 \
+GOOSE_MAX_TOKENS=4096 OPENROUTER_PARAMETERS='{"reasoning":{"effort":"low"}}' "$goose" serve --port "$gp" >> goose.log 2>&1 & g=$!
+for i in $(seq 300); do curl -fs "http://127.0.0.1:$gp/health" > /dev/null 2>&1 && break; kill -0 $g 2> /dev/null || break; sleep 0.2; done
+kill -0 $g 2> /dev/null && echo "$gp" > port && log "up: goose $v on $gp, its model on $mp"
+fi
+while [ -s port ] && kill -0 $m 2> /dev/null && kill -0 $g 2> /dev/null; do
+[ "$(cksum < "$0")" = "$me" ] || { log "its script changed"; kill $m $g; wait; exec bash "$0"; }
+for f in hands.log model.log goose.log; do if [ $(( $(wc -c < $f) )) -gt 1048576 ]; then tail -c 524288 $f > $f.t; cat $f.t > $f; rm -f $f.t; fi; done
+sleep 1 & wait $!
+done
+kill $m $g 2> /dev/null; wait $m $g 2> /dev/null; rm -f port
+log "stopped (the model's port: ${mp:-none}; goose $v: $([ -x "$goose" ] && echo there || echo missing))"
+if [ $(( $(date +%s) - t0 )) -ge 60 ]; then backoff=1; fi
+sleep $backoff & wait $!; backoff=$(( backoff * 2 > 60 ? 60 : backoff * 2 ))
+done
+"#;
+
+/// `HANDS`' stdin: the service, after its header, then the task client.
+pub fn hands_files(host: &str) -> String {
+    format!("export FRAGMENT_HOST={}\nv={GOOSE_VERSION} sum={GOOSE_SHA256}\n{HANDS_SH}FRAGMENT-TASK\n{TASK_MJS}", quote(host))
+}
+
 /// What `POLL` says.
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -411,6 +482,25 @@ mod tests {
         // no start: its service's files go
         home.run(SYNC, &args, "");
         assert!(!home.path(".fragment/serve.sh").exists() && !home.path(".fragment/start.sh").exists());
+    }
+
+    #[test]
+    fn the_hands_are_written_pinned_and_kept() {
+        let home = Home::new("hands");
+        let out = home.run(HANDS, &[], &hands_files("https://fragment.test"));
+        let sh = home.path(".fragment/agent/hands.sh");
+        assert_eq!(answer(&out), Some(sh.display().to_string().into_bytes()), "{out}");
+        assert_eq!(std::fs::read_to_string(home.path(".fragment/agent/task.mjs")).unwrap(), TASK_MJS);
+        let written = std::fs::read_to_string(&sh).unwrap();
+        let header = format!("export FRAGMENT_HOST='https://fragment.test'\nv={GOOSE_VERSION} sum={GOOSE_SHA256}\n");
+        assert_eq!(written, format!("{header}{HANDS_SH}"));
+        assert!(HANDS_SH.contains("goose-x86_64-unknown-linux-musl.tar.gz") && HANDS_SH.contains("sha256sum -c"), "fetched only as pinned");
+        assert!(Command::new("bash").args(["-n", sh.to_str().unwrap()]).status().unwrap().success(), "it parses");
+        // written again, unchanged: the same file, so a running service keeps going
+        let before = std::fs::metadata(&sh).unwrap().modified().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        home.run(HANDS, &[], &hands_files("https://fragment.test"));
+        assert_eq!(std::fs::metadata(&sh).unwrap().modified().unwrap(), before);
     }
 
     #[test]

@@ -1,27 +1,38 @@
-//! Hand-offs (docs/api.md, Agents; Paul, 2026-09-27): a person's agent does
-//! light work itself and hands the rest to a computer. In its owner's turns
-//! only (a guest's would spend the owner's budget on a computer),
-//! `platform__hand_off({task, computer?})` starts a job on a computer and
-//! answers at once:
+//! Hand-offs (docs/api.md, Agents; Paul, 2026-09-27; docs/agent-computer.md):
+//! a person's agent does light work itself and hands the rest to a
+//! computer's hands, goose in a long-lived session per chat. In its owner's
+//! turns only (a guest's would spend the owner's budget on a computer),
+//! `platform__hand_off({task, computer?, throwaway?})` starts a job on a
+//! computer and answers at once:
 //!
+//! - by default on the chat's computer: the one it is bound to, else its
+//!   owner's home computer (`PUT /api/a/{name}/home`), which the chat is
+//!   bound to from then on, so its session there carries over;
 //! - with `computer`, one of the owner's fragments whose job `do` (or
-//!   `build`) takes `{task}` (a pet, a builder), it runs there;
-//! - without, on a throwaway: a private fragment of the owner's from the
-//!   builder template (`fragment_core::tools::throwaway_label`), whose
-//!   `build` runs goose on the fragment's own new computer.
+//!   `build`) takes `{task, chat?}` (a pet, a builder);
+//! - with `throwaway`, or with no home, on a throwaway: a private fragment
+//!   of the owner's from the builder template
+//!   (`fragment_core::tools::throwaway_label`), whose `build` runs goose on
+//!   the fragment's own new computer: extra hands.
 //!
-//! Both are calls for the asker, capped as every call is (decision 17), and
-//! the computer spends its owner's budget, as everything a fragment does.
-//! No turn waits for a build: the turn ends saying the work is on its way,
-//! and the agent's alarm watches the run between turns (`watch`). When it
-//! ends, its result is said in the conversation that asked (stored there,
-//! and posted to its chat as an answer is), then a throwaway is removed,
-//! its computer first (the Sprite destroyed), keeping what it built.
+//! The job is told the asking chat (`chat`: its session, and where its steps
+//! go), and the computer is made an editor of the chat, so it posts each
+//! step there as its owner's computer (`grant`; a throwaway's once it is
+//! paired). Both are calls for the asker, capped as every call is
+//! (decision 17), and the computer spends its owner's budget, as everything
+//! a fragment does. No turn waits for the work: the turn ends saying it is
+//! on its way, and the agent's alarm watches the run between turns
+//! (`watch`). When it ends, its result is said in the conversation that
+//! asked (stored there, and posted to its chat as an answer is, under the
+//! hand-off's turn, so the chat shows the steps above it), then a
+//! throwaway is removed, its computer first (the Sprite destroyed), keeping
+//! what it built.
 
 use std::time::Duration;
 
 use anyhow::anyhow;
 use fragment_core::tools::{is_throwaway, op_id, reply_id, throwaway_label};
+use fragment_core::work::handoff_turn;
 use fragment_proto::{split_fragment_name, valid_fragment_name, FragmentStatus, OpKind, Run, RunStatus};
 use goose_provider_types::conversation::message::Message;
 use serde::Deserialize;
@@ -30,7 +41,7 @@ use worker::{Method, SqlStorage, Storage};
 
 use crate::fleet::{self, Fleet};
 use crate::js;
-use crate::store::{self, kv_get, kv_u64};
+use crate::store::{self, kv_get, kv_set, kv_u64};
 
 pub const TOOL: &str = "platform__hand_off";
 /// A task's length (the builder's `build` takes at most this).
@@ -53,6 +64,7 @@ struct Watched {
     throwaway: i64,
     started_at: i64,
     said: i64,
+    granted: i64,
 }
 
 /// `platform__hand_off`: the work started on a computer, or why not.
@@ -64,11 +76,34 @@ pub async fn start(fleet: &Fleet, sql: &SqlStorage, conv: &str, request_id: &str
         return Err(format!("{RUNNING_MAX} hand-offs are running already: wait for one to end"));
     }
     let asker = fleet.acting_for.as_deref().expect("a turn's tools act for its asker");
-    let (fragment, op, throwaway) = match args["computer"].as_str() {
-        Some(named) => (named.to_string(), offered(fleet, asker, named).await?, false),
-        None => (made(fleet, sql, request_id).await?, "build", true),
+    let named = args["computer"].as_str();
+    let (fragment, op, throwaway) = loop {
+        let chosen = match (named, args["throwaway"] == true) {
+            (Some(named), _) => Some(named.to_string()),
+            (None, true) => None,
+            (None, false) => computer_for(sql, conv).map_err(|e| e.to_string())?,
+        };
+        let Some(computer) = chosen else { break (made(fleet, sql, request_id).await?, "build", true) };
+        match offered(fleet, asker, &computer).await {
+            Ok(op) => break (computer, op, false),
+            // the chat's computer is gone, or does no work now: the chat
+            // goes to the home computer (or a throwaway) instead
+            Err(_) if named.is_none() && unbind(sql, conv, &computer).map_err(|e| e.to_string())? => continue,
+            Err(e) => return Err(e),
+        }
     };
-    let body = json!({ "id": op_id(request_id), "input": { "task": task } });
+    // by default, a chat is bound to the first computer that works for it
+    if named.is_none() && !throwaway {
+        let bind = "INSERT OR IGNORE INTO bound (conv, computer, at) VALUES (?, ?, ?)";
+        sql.exec(bind, vec![conv.into(), fragment.as_str().into(), (js::now_ms() as i64).into()]).map_err(|e| e.to_string())?;
+    }
+    let chat = store::chat_of(conv).map(|(f, c)| format!("{f}/{c}"));
+    let mut input = json!({ "task": task });
+    if let Some(chat) = &chat {
+        input["chat"] = json!(chat);
+    }
+    let granted = !throwaway && grant(fleet, conv, &fragment).await;
+    let body = json!({ "id": op_id(request_id), "input": input });
     let (status, answer) = fleet.call(Method::Post, &format!("/api/f/{fragment}/ops/{op}"), Some(&body)).await.map_err(|e| e.to_string())?;
     let Some(run) = answer["result"]["run"].as_i64().filter(|_| status == 200) else {
         if throwaway {
@@ -78,13 +113,66 @@ pub async fn start(fleet: &Fleet, sql: &SqlStorage, conv: &str, request_id: &str
     };
     let now = js::now_ms() as i64;
     sql.exec(
-        "INSERT OR IGNORE INTO handoffs (fragment, run, conv, throwaway, started_at, next_at) VALUES (?, ?, ?, ?, ?, ?)",
-        vec![fragment.as_str().into(), run.into(), conv.into(), (throwaway as i64).into(), now.into(), (now + WATCH_EVERY_MS).into()],
+        "INSERT OR IGNORE INTO handoffs (fragment, run, conv, throwaway, started_at, next_at, granted) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        vec![fragment.as_str().into(), run.into(), conv.into(), (throwaway as i64).into(), now.into(), (now + WATCH_EVERY_MS).into(), (granted as i64).into()],
     )
     .map_err(|e| e.to_string())?;
     let note = "It runs on its own now, for minutes: its result is said in this conversation when it ends. Tell the person \
                 it is on its way, and end your turn.";
     Ok(json!({ "started": true, "computer": fragment, "run": run, "note": note }).to_string())
+}
+
+/// The computer a conversation's work goes to by default: the one it is
+/// bound to, else its owner's home computer; none: a throwaway.
+fn computer_for(sql: &SqlStorage, conv: &str) -> anyhow::Result<Option<String>> {
+    #[derive(Deserialize)]
+    struct Bound {
+        computer: String,
+    }
+    let rows: Vec<Bound> = sql.exec("SELECT computer FROM bound WHERE conv = ?", vec![conv.into()]).and_then(|c| c.to_array()).map_err(|e| anyhow!("{e}"))?;
+    match rows.into_iter().next() {
+        Some(b) => Ok(Some(b.computer)),
+        None => Ok(kv_get(sql, HOME)?.filter(|h| !h.is_empty())),
+    }
+}
+
+/// Frees a conversation from `computer`; whether it was bound to it.
+fn unbind(sql: &SqlStorage, conv: &str, computer: &str) -> anyhow::Result<bool> {
+    let dropped = sql.exec("DELETE FROM bound WHERE conv = ? AND computer = ?", vec![conv.into(), computer.into()]).map_err(|e| anyhow!("{e}"))?;
+    Ok(dropped.rows_written() > 0)
+}
+
+/// The owner's home computer (`PUT /api/a/{name}/home`): a fragment of
+/// theirs that offers `do` or `build`, or none.
+pub const HOME: &str = "home";
+
+/// Sets (or, with `None`, clears) the home computer; `fleet` acts for the owner.
+pub async fn set_home(fleet: &Fleet, sql: &SqlStorage, owner: &str, computer: Option<&str>) -> Result<Value, String> {
+    if let Some(computer) = computer {
+        offered(fleet, owner, computer).await?;
+    }
+    kv_set(sql, HOME, computer.unwrap_or_default()).map_err(|e| e.to_string())?;
+    Ok(json!({ "home": computer }))
+}
+
+/// Makes the hand-off's computer an editor of the asking chat, so it posts
+/// its steps there as its owner's computer (the platform takes this from an
+/// agent for its owner's own computer and chat only: cell/src/agents.rs
+/// `add_computer`). Whether that is settled: it is, or never will be (a
+/// chat not its owner's); a throwaway's computer is not one until it paired.
+async fn grant(fleet: &Fleet, conv: &str, computer: &str) -> bool {
+    let Some((chat, _)) = store::chat_of(conv) else { return true };
+    match fleet.call(Method::Put, &format!("/api/f/{chat}/members/{computer}"), Some(&json!({ "role": "editor" }))).await {
+        Ok((200, _)) => true,
+        Ok((status, answer)) => {
+            worker::console_warn!("{computer} is not let post in {chat} ({status}): {}", fleet::message(&answer));
+            status == 403
+        }
+        Err(e) => {
+            worker::console_warn!("{computer} is not let post in {chat}: {e:#}");
+            false
+        }
+    }
 }
 
 /// The job a named computer offers for work: `do`, else `build`, on a
@@ -132,7 +220,7 @@ async fn remove(fleet: &Fleet, fragment: &str) -> anyhow::Result<()> {
 pub async fn watch(fleet: &Fleet, sql: &SqlStorage, owner: &str) -> anyhow::Result<()> {
     let now = js::now_ms() as i64;
     let due: Vec<Watched> = sql
-        .exec("SELECT fragment, run, conv, throwaway, started_at, said FROM handoffs WHERE next_at <= ? ORDER BY next_at LIMIT ?", vec![now.into(), RUNNING_MAX.into()])
+        .exec("SELECT fragment, run, conv, throwaway, started_at, said, granted FROM handoffs WHERE next_at <= ? ORDER BY next_at LIMIT ?", vec![now.into(), RUNNING_MAX.into()])
         .and_then(|c| c.to_array())
         .map_err(|e| anyhow!("{e}"))?;
     for h in due {
@@ -157,6 +245,10 @@ async fn look(fleet: &Fleet, sql: &SqlStorage, owner: &str, h: &Watched, now: i6
     };
     let ended = run.as_ref().is_none_or(|r| matches!(r.status, RunStatus::Succeeded | RunStatus::Held | RunStatus::Blocked));
     if !ended && now - h.started_at < WATCH_MAX_MS {
+        // a throwaway's computer, once it paired, is let post its steps too
+        if h.granted == 0 && grant(&fleet.acting_for(owner), &h.conv, &h.fragment).await {
+            sql.exec("UPDATE handoffs SET granted = 1 WHERE fragment = ? AND run = ?", vec![h.fragment.as_str().into(), h.run.into()]).map_err(|e| anyhow!("{e}"))?;
+        }
         return later(sql, h, now, false);
     }
     if h.said == 0 {
@@ -170,7 +262,7 @@ async fn look(fleet: &Fleet, sql: &SqlStorage, owner: &str, h: &Watched, now: i6
         if store::message_seq(sql, &id).is_err() {
             store::append_message(sql, &h.conv, &Message::assistant().with_text(&text).with_id(&id))?;
         }
-        crate::post_answer(sql, fleet, &h.conv, &reply_id(&id), &text, None, None).await?;
+        crate::post_answer(sql, fleet, &h.conv, &reply_id(&id), &text, None, Some(&handoff_turn(&h.fragment, h.run))).await?;
         sql.exec("UPDATE handoffs SET said = 1 WHERE fragment = ? AND run = ?", vec![h.fragment.as_str().into(), h.run.into()]).map_err(|e| anyhow!("{e}"))?;
     }
     if ended && h.throwaway == 1 {

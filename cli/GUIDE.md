@@ -500,6 +500,18 @@ my-bot my-chat`, gets an answer to every message from someone else. The
 agents answer on the platform's own host (their script is co-hosted in
 its fleet); `FRAGMENT_AGENTS` names another.
 
+Your own agent (`agent.<you>`) hands longer work (building an app, code,
+research) to a computer: by default your home computer, where each chat
+has a goose session of its own that remembers what the chat handed it
+before. Name it once, a fragment of yours with a computer and a `do` or
+`build` job (a pet, a builder); without one, each hand-off gets a
+throwaway computer:
+
+```
+fragment agent home agent.<you> my-pet            # hand-offs go to my-pet
+fragment agent home agent.<you> --clear
+```
+
 An agent with a computer also gets goose's developer tools (shell,
 write, edit, tree) there, and `screenshot {url}` (headless Chrome; a
 turn in a chat shows the image there). On the computer (a CLI built with
