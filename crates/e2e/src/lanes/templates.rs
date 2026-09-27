@@ -274,15 +274,60 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     pet(s, api, &owner, &chat)
 }
 
+/// A stand-in for Stagehand 4.1.0, where the pet's `do` installs the real
+/// one: no browser, and act, observe, and extract each ask the model once
+/// through the `generate` callback, as Stagehand's runtime does, with the
+/// page as its accessibility tree.
+const STAGEHAND: &str = r#"const TREE = "[0-2] RootWebArea: Milk\n  [0-9] StaticText: Milk costs $3.49\n  [0-16] textbox: New todo\n  [0-21] button: Add";
+const ID = { type: "string", pattern: "^\\d+-\\d+$" };
+let [at, cdp] = ["about:blank", ""];
+const page = { goto: async (url) => void (at = url), url: async () => at, title: async () => `Milk, on the Chrome at ${cdp}`, screenshot: async () => new Uint8Array([255, 216, 255]) };
+export const localBrowser = { connect: async ({ cdpUrl }) => ((cdp = cdpUrl), {}) };
+export class Stagehand {
+  static async create({ model }) {
+    return Object.assign(new Stagehand(), { model, browser: { context: { activePage: async () => page } } });
+  }
+  async ask(name, instruction, properties) {
+    const schema = { type: "object", properties, required: Object.keys(properties), additionalProperties: false };
+    const messages = [{ role: "user", content: { type: "text", text: `Instruction: ${instruction}\nDOM: ${TREE}` } }];
+    return (await this.model.generate({ systemPrompt: `the stand-in's ${name}`, messages, responseFormat: { type: "json_schema", name, schema } })).structuredContent;
+  }
+  async act(action) {
+    const element = { type: "object", properties: { elementId: ID, method: { type: "string" } }, required: ["elementId", "method"] };
+    const a = (await this.ask("Act", action, { action: { anyOf: [element, { type: "null" }] }, twoStep: { type: "boolean" } })).action;
+    return { data: { success: !!a, message: a ? `${a.method} on ${a.elementId}` : "no such element", actionDescription: action, actions: [] } };
+  }
+  async observe(about) {
+    return { data: (await this.ask("Observation", about ?? "anything", { elements: { type: "array", items: { type: "object", properties: { elementId: ID, description: { type: "string" } } } } })).elements };
+  }
+  async extract(what) {
+    return { data: await this.ask("Extraction", what, { extraction: { type: "string" } }) };
+  }
+}
+"#;
+
+/// The stand-in Stagehand where the pet's `do` installs Stagehand, with the
+/// pet's own lockfile beside it, so that nothing is installed.
+fn stand_in_stagehand(home: &std::path::Path) -> Result<()> {
+    let dir = home.join(".local/share/pet-browser");
+    let module = dir.join("node_modules/@browserbasehq/stagehand");
+    std::fs::create_dir_all(&module)?;
+    std::fs::copy(home.join("fragment/computer/browser/package-lock.json"), dir.join("package-lock.json")).context("the pet's lockfile, synced")?;
+    std::fs::write(module.join("package.json"), r#"{"name": "@browserbasehq/stagehand", "type": "module", "exports": "./index.mjs"}"#)?;
+    std::fs::write(module.join("index.mjs"), STAGEHAND)?;
+    Ok(())
+}
+
 /// An 8×5 JPEG, as the pet's computer sends its screen.
 const JPEG: &str = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAAFAAgDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFAEBAAAAAAAAAAAAAAAAAAAABf/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AIcA2Kf/2Q==";
 
 /// The pet (templates/pet): a computer, a `control` channel people drive it
 /// through, and its screen, one row its computer stores through `frame` and
-/// `screen` answers; and its agent, `do`, goose with Cua Driver as its hands
-/// (both stand-ins here, as in the builder section: this proves the
-/// plumbing). Its display loop and the real agent need a real Sprite
-/// (docs/computers.md).
+/// `screen` answers; and its agent, `do`, goose with the pet's browser
+/// (its Stagehand MCP server, computer/browser) and Cua Driver as its hands
+/// (goose, Stagehand, and Cua Driver are stand-ins here, as in the builder
+/// section: this proves the plumbing). Its display loop, Chrome, and the
+/// real agent need a real Sprite (docs/computers.md).
 fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
     let viewer = api.person()?;
     let viewer_id = api.identity(&viewer)?;
@@ -432,50 +477,101 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
         &read,
     );
 
-    // do: its agent drives its screen, for editors only
+    // do: its agent drives its screen, for editors only: the web through
+    // the browser's MCP server (Stagehand's model calls through the hands'
+    // endpoint, Jev first), a desktop app through Cua Driver
     let home = s.scratch.join("sprites/sprites").join(&sprite);
     let computer_id = api.identity(&computer)?;
     stand_in(&home, &format!(".local/share/cua-driver-{CUA_VERSION}/cua-driver"), "cua-driver")?;
+    stand_in_stagehand(&home)?;
     let r = api.op(&viewer, &name, "do", "d1", json!({ "task": "click it" }))?;
     s.ok("a viewer cannot ask its agent", r.status == 403, &r);
-    let (look, said) = (Say::Tools(vec![("cua__get_desktop_state".into(), json!({}))]), "I looked and clicked.");
+    // each of Jev's calls holds $0.50 until it settles: more than this month has
+    let op_session = api.sign_in("operator@e2e.test")?;
+    api.approve(&op_session, &s.operator)?;
+    let top = api.signed(&s.operator, "POST", &format!("/api/budget/{owner_id}/top-up"), Some(&json!({ "usd": 1.0 })))?;
+    anyhow::ensure!(top.status == 200, "topping up the owner's month: {top}");
+    let said = "Milk is $3.49; I put it in the todo box and clicked the app.";
     s.openrouter.clear_script();
-    s.openrouter.script(&[look.clone(), Say::Tools(vec![("cua__click".into(), json!({ "x": 10, "y": 20 }))]), look.clone(), look.clone(), look, Say::Text(said.into())]);
+    s.openrouter.script(&[
+        Say::Tools(vec![("browser__open".into(), json!({ "url": "https://shop.test/milk" }))]),
+        Say::Tools(vec![("browser__extract".into(), json!({ "what": "the price of milk" }))]),
+        // Stagehand's calls: Jev's answer does not fit its schema, so flashx answers
+        Say::Text("Milk is about three dollars.".into()),
+        Say::Text(json!({ "extraction": "$3.49" }).to_string()),
+        Say::Tools(vec![("browser__act".into(), json!({ "action": "type milk into the todo box" }))]),
+        Say::Text(json!({ "action": { "elementId": "0-16", "method": "fill" }, "twoStep": false }).to_string()),
+        Say::Tools(vec![("cua__get_window_state".into(), json!({ "pid": 1 }))]),
+        Say::Tools(vec![("cua__click".into(), json!({ "x": 10, "y": 20 }))]),
+        Say::Text(said.into()),
+    ]);
     let before = s.openrouter.chats().len();
-    let r = api.op(owner, &name, "do", "d2", json!({ "task": "click it" }))?;
+    let r = api.op(owner, &name, "do", "d2", json!({ "task": "find the price of milk, add it to my todo, then click the app" }))?;
     let run = started(&r);
     let done = settle(api, owner, &name, run, &["succeeded", "held"], Duration::from_secs(90));
     s.ok(
-        "its owner asks its agent: Cua Driver is installed, the hands do the task, and the run answers goose's last words",
+        "its owner asks its agent: Cua Driver and the browser's server are installed, the hands do the task, and the run answers goose's last words",
         done["status"] == "succeeded" && done["output"]["code"] == 0 && done["output"]["message"] == said,
         &done,
     );
     let chats: Vec<Value> = s.openrouter.chats().into_iter().skip(before).collect();
-    let offered: Vec<&str> = chats.first().and_then(|c| c["tools"].as_array()).into_iter().flatten().filter_map(|t| t["function"]["name"].as_str()).collect();
+    let (goose, stagehand): (Vec<&Value>, Vec<&Value>) = chats.iter().partition(|c| c["stream"] == true);
+    let mut offered: Vec<&str> = goose.first().and_then(|c| c["tools"].as_array()).into_iter().flatten().filter_map(|t| t["function"]["name"].as_str()).collect();
+    offered.sort();
+    let tools = ["browser__act", "browser__extract", "browser__observe", "browser__open", "browser__screenshot", "cua__click", "cua__get_window_state", "shell"];
     s.ok(
-        "each model call went through the platform, on the hands' model (flashx, which reads images), offered goose's shell and the Cua Driver tools its config names",
-        chats.len() == 6 && chats.iter().all(|c| c["model"] == "z-ai/glm-5.3-flashx" && c["stream"] == true) && offered == ["shell", "cua__get_desktop_state", "cua__click"],
+        "goose's model calls went through the platform, on the hands' model (flashx), offered its shell, the browser's tools, and the Cua Driver tools for desktop apps its config names",
+        goose.len() == 6 && goose.iter().all(|c| c["model"] == "z-ai/glm-5.3-flashx") && offered == tools,
         json!(offered),
     );
-    let images = |c: &Value| c["messages"].as_array().into_iter().flatten().filter_map(|m| m["content"].as_array()).flatten().filter(|p| p["type"] == "image_url").count();
-    let seen: Vec<usize> = chats.iter().map(images).collect();
-    let text = |i: usize| chats.get(i).map(Value::to_string).unwrap_or_default();
+    let text = |c: &Value| c.to_string();
+    let models: Vec<&str> = stagehand.iter().filter_map(|c| c["model"].as_str()).collect();
+    let schemas: Vec<&str> = stagehand.iter().filter_map(|c| c["response_format"]["json_schema"]["name"].as_str()).collect();
+    let tree = stagehand.iter().all(|c| c["response_format"]["type"] == "json_schema" && text(c).contains("[0-16] textbox: New todo"));
+    let log = std::fs::read_to_string(home.join(".fragment/agent/browser.log")).unwrap_or_default();
+    let logged: Vec<(String, bool)> = log.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).map(|l| (l["model"].as_str().unwrap_or("").to_string(), l["ok"] == true)).collect();
     s.ok(
-        "each screenshot reaches the model and stays, the requests as goose made them (no proxy trims them), and Cua Driver drives the pet's display",
-        seen == [0, 1, 1, 2, 3, 4] && text(1).contains(&format!("data:image/png;base64,{PNG}")) && !text(5).contains("left out") && text(2).contains("clicked at 10, 20 on :99"),
+        "a browser step goes through Stagehand's MCP server to the model, through the hands' endpoint: Jev asked for Stagehand's JSON schema, flashx when Jev's answer does not fit, each call in browser.log",
+        models == [fragment_proto::ROUTER_MODEL, "z-ai/glm-5.3-flashx", fragment_proto::ROUTER_MODEL]
+            && schemas == ["Extraction", "Extraction", "Act"]
+            && tree
+            && logged == [(fragment_proto::ROUTER_MODEL.to_string(), false), ("z-ai/glm-5.3-flashx".into(), true), (fragment_proto::ROUTER_MODEL.to_string(), true)],
+        json!({ "models": models, "schemas": schemas, "log": log }),
+    );
+    let usage = api.signed(owner, "GET", "/api/budget/usage", None)?;
+    let routed = usage.body["usage"].as_array().into_iter().flatten().filter(|u| u["kind"] == "computer.text" && u["fragment"] == computer_id.as_str() && u["model"] == fragment_proto::ROUTER_MODEL).count();
+    s.ok("billed to its owner, naming the computer and the router", routed == 2, &usage);
+    let images = |c: &Value| c["messages"].as_array().into_iter().flatten().filter_map(|m| m["content"].as_array()).flatten().filter(|p| p["type"] == "image_url").count();
+    let seen: Vec<usize> = goose.iter().map(|c| images(c)).collect();
+    let answered = |i: usize, what: &str| goose.get(i).is_some_and(|c| text(c).contains(what));
+    s.ok(
+        "no browser step sends the model a screenshot (goose's calls, and Stagehand's, whose messages are text); the answers came back as text",
+        seen.get(..4) == Some(&[0, 0, 0, 0][..])
+            && stagehand.iter().all(|c| images(c) == 0 && c["messages"].as_array().into_iter().flatten().all(|m| m["content"].is_string()))
+            && answered(1, "on the Chrome at http://127.0.0.1:9222")
+            && answered(2, "$3.49")
+            && answered(3, "Done: fill on 0-16"),
         json!(seen),
+    );
+    let capped = std::fs::read_to_string(home.join(".cua-driver/config.json")).unwrap_or_default();
+    s.ok(
+        "a desktop app's look (Cua Driver's) reaches the model and stays, its screenshots capped, and Cua Driver drives the pet's display",
+        seen.get(4..) == Some(&[1, 1][..])
+            && answered(4, &format!("data:image/png;base64,{PNG}"))
+            && answered(5, "clicked at 10, 20 on :99")
+            && capped.contains("\"max_image_dimension\": 768"),
+        json!({ "seen": seen, "cua config": capped }),
     );
     let work = api.signed(owner, "GET", &format!("/api/f/{name}/channels/work"), None)?;
     let records: Vec<Value> = work.body["records"].as_array().into_iter().flatten().filter(|x| x["body"]["run"] == run).cloned().collect();
     let steps: Vec<String> = records.iter().map(|x| format!("{} {}", x["body"]["kind"].as_str().unwrap_or(""), x["body"]["tool"].as_str().unwrap_or(""))).collect();
     let by_computer = records.iter().filter(|x| x["body"]["kind"] == "turn.step").all(|x| x["principal"] == computer_id.as_str());
-    let step = "turn.step get_desktop_state";
     s.ok(
         "asked on its page, work has the run's start, each step as its computer posted it, and its end",
-        steps == ["start ", step, "turn.step click", step, step, step, "end "]
+        steps == ["start ", "turn.step open", "turn.step extract", "turn.step act", "turn.step get_window_state", "turn.step click", "end "]
             && by_computer
             && records.first().is_some_and(|x| x["body"]["asker"] == owner_id.as_str())
-            && records.get(6).is_some_and(|x| x["body"]["message"] == said),
+            && records.last().is_some_and(|x| x["body"]["message"] == said),
         &work,
     );
     let agent = format!("agent:{owner_id}");

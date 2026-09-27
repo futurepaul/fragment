@@ -1,9 +1,10 @@
 # The agent computer: the brain in the cell, the hands on a computer
 
 Status: **decided 2026-09-27** (Paul; ROADMAP decision 24, which amends
-decision 10). Slice 1 is built (below, "Slice 1 as built"); its real
-Sprite acceptance is next. Sources were checked on 2026-09-27, and the
-dependency cooldown is 2 days.
+decision 10). Slices 1 and 2 are built (below, "Slice 1 as built",
+"Slice 2 as built"); slice 1 is measured on Paul's pet, and slice 2's
+real Sprite acceptance is next. Sources were checked on 2026-09-27, and
+the dependency cooldown is 2 days.
 
 ## The decision
 
@@ -304,10 +305,10 @@ browsers
 ([sessionManager.ts](https://github.com/browserbase/mcp-server-browserbase/blob/main/src/sessionManager.ts)),
 and Stagehand's own ships only as source
 ([integrations](https://docs.stagehand.dev/v4/integrations/overview)).
-So `computer/browser-mcp.mjs` is ours: about 150 lines on
-`@modelcontextprotocol/sdk` 1.30.1, offering `open`, `act`, `observe`,
-`extract`, and `screenshot`. goose is the agent and Stagehand its hands,
-v4's own split.
+So `computer/browser/browser-mcp.mjs` is ours: JSON-RPC by hand (slice
+2 as built), offering `open`, `act`, `observe`, `extract`, and
+`screenshot`. goose is the agent and Stagehand its hands, v4's own
+split.
 
 **Chrome, on the Sprite's Ubuntu** (26.04, per phase 8's smoke).
 - **Why not Ubuntu's.** Its `chromium-browser` is a transitional
@@ -463,6 +464,89 @@ Hand-offs). Where it differs from the plan above:
     takes over;
   - Blender (from apt) opens through Cua, and a menu click lands.
 - **Size:** +250/−60.
+
+**Slice 2 as built** (docs/computers.md, the pet's agent). Measured on
+Paul's pet after slice 1: a model call took 4–5 s for 10–70 tokens out,
+where the same model answers a 22k-token cached text-only prompt in
+about 1.5 s; the difference was the screenshots in context from Cua
+Driver's `get_desktop_state`. So web tasks go through each page's
+structure. Where it differs from the plan above:
+- **Chrome** is `google-chrome-stable` 154.0.8037.57-1 (stable since
+  2026-09-22), its .deb from Google's pool checked against the SHA-256
+  in Google's apt index, installed by `pet.mjs` with apt and without
+  Google's apt source (`repo_add_once="false"`), so nothing upgrades it.
+  It replaces Playwright's Chromium on the pet's screen. Its CDP is on
+  loopback port 9222, with `--enable-unsafe-extension-debugging`, and
+  `--remote-allow-origins` naming Stagehand's runtime alone: that
+  unpacked extension's service worker opens its own socket to CDP, which
+  Chrome refuses from an origin it was not told of ("CDP websocket failed
+  to open"); the extension's id is its path's hash, which `pet.mjs`
+  computes.
+- **The server is JSON-RPC by hand**, as the task client is, not on
+  `@modelcontextprotocol/sdk`: nothing but Stagehand is installed for it.
+  No maintained server runs Stagehand locally: Browserbase's
+  `mcp-server-browserbase` 2.4.3 and `@browserbasehq/mcp` 3.0.0 are on
+  Stagehand v3 and cloud browsers, Stagehand's own integrations ship as
+  source, and `stagehand-mcp` 1.0.10 is on Stagehand v2. It is
+  `templates/pet/computer/browser/browser-mcp.mjs` (about 180 lines),
+  and it attaches to Chrome at its first call, so a task that never
+  browses never touches Chrome.
+- **Installed per lockfile**: the pet's `do` runs `npm ci
+  --ignore-scripts` from `computer/browser/package-lock.json` (Stagehand
+  4.1.0 and the 41 packages under it, each pinned and checked by its
+  `integrity`, all past the cooldown, none with install scripts) into
+  `~/.local/share/pet-browser`, and again only when the lockfile
+  changes. Still in the pet (slice 3 moves the runtime into every
+  declared computer).
+- **Its model**: Stagehand's `generate` callback posts to goose's
+  `OPENROUTER_HOST` (the extension inherits goose's environment: `fragment
+  model --serve`), unstreamed, with Stagehand's JSON schema as
+  `response_format` and `reasoning.effort: low`. Jev first; when its
+  answer is not JSON that fits the schema (checked in the callback, as
+  far as Stagehand's schemas go), flashx answers the same request, not
+  flash (Paul: flashx by default everywhere). Each call is a line of
+  `~/.fragment/agent/browser.log`: `{model, schema, ms, ok, why}`. A
+  Jev call holds $0.50 of its owner's month until it settles
+  (`ROUTER_RESERVE`), so with less than that left Jev is refused (402)
+  and flashx answers.
+- **Whether Jev works with Stagehand is not known yet.** Nothing here
+  called the real router. On Stagehand 4.1.0 with a real Chrome (153,
+  locally) and a stand-in model, this server opened a page, filled a box
+  and clicked a button, observed, and extracted; the fallback took over
+  when the first answer was not JSON. The real pet's `browser.log` says
+  which model answers; if Jev rarely fits, `MODELS` loses it.
+- **Stagehand's traces**: its runtime exports OpenTelemetry traces to
+  `https://example.com/v1/traces` unless told otherwise; the server
+  points them at a closed loopback port.
+- **Cua Driver** is narrowed to desktop apps: `get_desktop_state` goes,
+  `launch_app` comes (the plan's eight). `~/.cua-driver/config.json`
+  caps its screenshots' long edge at 768 (the default, 1568, was over
+  the pet's whole 1024×640 screen; now 768×480). The task's first
+  paragraph says which tools are for what; goose's system prompt stays
+  its own.
+- **What a step costs**: `act` and `observe` are one model call each,
+  `extract` two (Stagehand's extraction, then its "is it complete"
+  check). On a local Chrome, `act` also waited about 0.5 s for the page
+  to settle (Stagehand's `domSettleTimeoutMs`; at 100 ms it took 0.13
+  s): a knob for the real pet's numbers, left at its default.
+- **The e2e** (`templates`; stand-ins for goose, Stagehand, and Cua
+  Driver): the hands' goose is offered the browser's five tools and Cua
+  Driver's desktop ones; a browser task (`open`, `extract`, `act`) goes
+  through the real server to the model through `--serve`, as Jev with
+  Stagehand's schema, flashx when Jev's answer does not fit, billed to
+  the owner, in `browser.log`; no browser step's request carries a
+  screenshot, and Cua Driver's still reaches the model.
+- **Size:** template +251/−44 (the server 180; the lockfile, 490 lines
+  of generated JSON, not counted), e2e +123/−25, the OpenRouter fake
+  +10/−5 (an unstreamed answer takes the script's text), docs.
+
+**What slice 2 leaves to the real pet**: Chrome's install and
+Stagehand's runtime loading there; per-call ms and cached share in
+`model.log` for a web task (a price found, added to a todo), with no
+screenshot in its requests; whether a browser step approaches 1.5–2 s;
+and how many of 20 Jev calls fit (`browser.log`). A pet made before
+slice 2 keeps Playwright's Chromium in `~/.cache/ms-playwright` until
+someone removes it.
 
 **3. Memory and skills in git.**
 - **What changes:**

@@ -459,8 +459,9 @@ fn files_containing(dir: &Path, needles: &[String]) -> Vec<String> {
 /// provider does (streaming, the session's id as `session_id`, `transforms`,
 /// `OPENROUTER_PARAMETERS` merged in), sending the session's whole history
 /// after a fixed system prompt, with a `shell` tool and the tools of the
-/// stdio MCP servers goose's config enables (the pet's Cua Driver), named
-/// and filtered as goose does. Each tool call is a `tool_call` update, then
+/// stdio MCP servers goose's config enables (the pet's Cua Driver and
+/// browser), named and filtered as goose does, each inheriting goose's
+/// environment. Each tool call is a `tool_call` update, then
 /// a `tool_call_update` once it ran (an image as goose's OpenAI format adds
 /// it, a user message after the result); the model's text is an
 /// `agent_message_chunk`.
@@ -697,9 +698,10 @@ impl Mcp {
 }
 
 /// A stand-in for Cua Driver's CLI: `--version`, and `mcp`, a stdio MCP
-/// server with three tools: `get_desktop_state` answers a PNG, `click` says
+/// server with four tools: `get_window_state` answers a PNG, `click` says
 /// where it clicked and on which display (`$DISPLAY`), and
-/// `start_recording`, which the pet's goose config leaves out.
+/// `get_desktop_state` and `start_recording`, which the pet's goose config
+/// leaves out.
 pub fn stand_in_cua(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("--version") => {
@@ -711,7 +713,7 @@ pub fn stand_in_cua(args: &[String]) -> Result<()> {
     }
     let display = std::env::var("DISPLAY").unwrap_or_default();
     let tool = |name: &str| json!({ "name": name, "description": format!("the stand-in's {name}"), "inputSchema": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" } } } });
-    let tools: Vec<Value> = ["get_desktop_state", "click", "start_recording"].into_iter().map(tool).collect();
+    let tools: Vec<Value> = ["get_window_state", "click", "get_desktop_state", "start_recording"].into_iter().map(tool).collect();
     let mut out = std::io::stdout();
     for line in std::io::stdin().lines() {
         let ask: Value = serde_json::from_str(&line?)?;
@@ -720,7 +722,7 @@ pub fn stand_in_cua(args: &[String]) -> Result<()> {
             _ if ask["id"].is_null() => continue,
             ("initialize", _) => json!({ "protocolVersion": params["protocolVersion"], "capabilities": { "tools": {} }, "serverInfo": { "name": "cua-driver", "version": CUA_VERSION } }),
             ("tools/list", _) => json!({ "tools": tools }),
-            ("tools/call", Some("get_desktop_state")) => json!({ "content": [{ "type": "text", "text": "the screen" }, { "type": "image", "data": PNG, "mimeType": "image/png" }] }),
+            ("tools/call", Some("get_window_state")) => json!({ "content": [{ "type": "text", "text": "the window" }, { "type": "image", "data": PNG, "mimeType": "image/png" }] }),
             ("tools/call", Some("click")) => json!({ "content": [{ "type": "text", "text": format!("clicked at {}, {} on {display}", params["arguments"]["x"], params["arguments"]["y"]) }] }),
             _ => json!({ "content": [{ "type": "text", "text": "not a tool here" }], "isError": true }),
         };

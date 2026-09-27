@@ -13,10 +13,11 @@ by its agent (ask it to do something).
 - `computer/pet.mjs` (Node, which a Sprite has) installs what it needs
   on its first start (apt: `xvfb openbox xdotool imagemagick
   fonts-liberation fonts-noto-color-emoji`, and `libxi6 at-spi2-core
-  dbus` for Cua Driver; Chromium from Playwright 1.63.0, since Ubuntu's
-  own is a snap), starts a 1024×640 display, a session bus, and a
-  browser on `computer/start.html` with its accessibility tree on, and
-  then:
+  dbus` for Cua Driver; Google's Chrome 154.0.8037.57-1, its .deb
+  checked against its SHA-256, since Ubuntu's own browser is a snap),
+  starts a 1024×640 display, a session bus, and Chrome on
+  `computer/start.html` with its CDP on loopback for its agent's
+  Stagehand, and then:
   - follows `control` (`fragment channel <name> control --follow`) and
     applies each record once, by seq, as xdotool input: `{kind: "click",
     x, y}` (screen pixels), `{kind: "type", text}`, `{kind: "key", key}`
@@ -43,11 +44,15 @@ by its agent (ask it to do something).
 - `do({task, chat?})` is its agent, a job for editors (it spends the
   owner's budget): the hands every computer has (goose v1.52.0 in `goose
   serve`, one session per chat: docs/agent-computer.md) do `task` in the
-  session of the chat that asked (none: this page's own), with Cua Driver
-  v0.28.3 as their way to the screen: installed once from its release
-  and checked against its SHA-256, then named in goose's config as an
-  extension (`cua-driver mcp`, 8 of its tools, on the pet's display). The
-  task runs for at most 9 minutes. goose's model is the platform's
+  session of the chat that asked (none: this page's own), with two ways
+  to the screen, each named in goose's config as an extension: the
+  browser (`computer/browser/browser-mcp.mjs`, a small MCP server on
+  Stagehand 4.1.0, installed with `npm ci` from its lockfile), for
+  anything on the web, through each page's structure, its own model
+  calls on Jev with flashx behind it; and Cua Driver v0.28.3, for other
+  desktop apps (installed once from its release and checked against its
+  SHA-256; `cua-driver mcp`, 8 of its tools, its screenshots capped at
+  768 pixels). The task runs for at most 9 minutes. goose's model is the platform's
   (`fragment model --serve`, `z-ai/glm-5.3-flashx`, which reads images),
   and every request goes as goose made it. Each tool call is a step on
   the chat's `work` (`{kind: "turn.step", turn, run, step, tool, args,
@@ -65,5 +70,7 @@ harmless for the latest frame) and effects (it publishes nothing).
 Its state is in `~/.pet` on the computer: the last record applied, the
 browser's profile, the display's and browser's logs, the session bus,
 and who the agent last worked for (`agent`). The hands keep theirs in
-`~/.fragment/agent` (goose's sessions in its own store). `PET_FAKE_SCREEN=
+`~/.fragment/agent` (goose's sessions in its own store; `browser.log`,
+each of the browser's model calls), and the browser's server and
+Stagehand are in `~/.local/share/pet-browser`. `PET_FAKE_SCREEN=
 <a JPEG>` shows that image instead (nothing installed, nothing driven).

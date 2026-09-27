@@ -609,6 +609,12 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   the chat; throwaways are extra hands when asked for, or with no home.
   The pet's trimming proxy, `gpt-4o`, and one-shot `goose run` are gone.
   Open: its acceptance on a real Sprite (the cache, the step times).
+- *Since `computer-browser` (2026-09-27; slice 2):* the pet's screen shows
+  Google's Chrome (pinned, checked), and its hands drive the web through
+  Stagehand 4.1.0 (a small MCP server, its model calls on Jev with flashx
+  behind it), Cua Driver only desktop apps, so a web step sends the model
+  no screenshot. Playwright's Chromium is gone. Open: its measure on the
+  real pet (per-call ms, cached share, Jev's schema pass rate).
 - Decision 20: `agent` in `fragment.json`; turns from signed-in
   visitors' messages and `job.agent` steps, acting as decision 17 says,
   on the owner's budget. The chat template declares one; C's seam goes.

@@ -4,12 +4,12 @@
 //! Answers are deterministic from the request, so tests can assert on them.
 //! Chat completions stream (server-sent events, OpenAI's chunk format) when
 //! asked to, and answer scripted replies (text, tool calls, nothing, or
-//! reasoning alone) in order before falling back to an echo; an in-cell
-//! agent's requests (no `session_id`: goose's name their session) take
-//! their own script first, so a test scripts the agent and the computer's
-//! goose apart. A streamed
-//! answer keeps to the request's `max_tokens` (`CHARS_PER_TOKEN` characters
-//! each): one longer is cut there and ends `length`, as the service's do.
+//! reasoning alone; unstreamed, text) in order before falling back to an
+//! echo; an in-cell agent's requests (no `session_id`: goose's name their
+//! session) take their own script first, so a test scripts the agent and
+//! the computer's goose apart. A streamed answer keeps to the request's
+//! `max_tokens` (`CHARS_PER_TOKEN` characters each): one longer is cut
+//! there and ends `length`, as the service's do.
 //! An answer can be held back first (`delay_next`), as a slow model's is,
 //! its script consumed as the request arrives. Every answer reports its cost
 //! (`usage.cost`, dollars) unless told to leave it out. A video's prompt
@@ -268,11 +268,15 @@ fn answer(s: &mut State, req: &Request, expected: &str, manager: &str, base_in: 
                 return Response::bytes(200, "text/event-stream", events.into_bytes());
             }
             let usage = with_cost(json!({ "prompt_tokens": 3, "completion_tokens": 3, "total_tokens": 6 }), costs.text, costless);
+            let content = match scripted {
+                Some(Reply::Text(text)) => text,
+                _ => format!("echo: {}", last.as_str().unwrap_or("")),
+            };
             Response::json(
                 200,
                 &json!({
                     "id": "chatcmpl-fake", "object": "chat.completion", "created": 0, "model": body["model"],
-                    "choices": [{ "index": 0, "finish_reason": "stop", "message": { "role": "assistant", "content": format!("echo: {}", last.as_str().unwrap_or("")) } }],
+                    "choices": [{ "index": 0, "finish_reason": "stop", "message": { "role": "assistant", "content": content } }],
                     "usage": usage,
                 }),
             )
@@ -394,7 +398,7 @@ impl OpenRouter {
         Ok(OpenRouter { url: server.url.clone(), state, _server: server })
     }
 
-    /// Replies the next streamed chat completions answer, in order.
+    /// Replies the next chat completions answers, in order (an unstreamed one takes text).
     pub fn script(&self, replies: &[Reply]) {
         self.state.lock().expect("openrouter state").script.extend(replies.iter().cloned());
     }
