@@ -169,21 +169,36 @@ pub(crate) async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellRes
     Ok(FragmentList { fragments })
 }
 
-/// `DELETE /api/f/{name}` by an agent, for a hand-off's throwaway
-/// (`tools::is_throwaway`; agent/src/handoff.rs): the one owner-only action
-/// an agent takes (decision 17 keeps every other from agents), for its
-/// owner or itself, on its owner's fragment it is in. The fragment's
-/// computer goes first (its keys revoked, it leaves every fragment, its
-/// Sprite destroyed), then the fragment, as its owner deletes one. What the
+/// Marks a create as a hand-off's throwaway, naming the agent that makes
+/// it: set by the router's create alone (no request's own header passes).
+pub(crate) const THROWAWAY_HEADER: &str = "x-fragment-throwaway-of";
+
+/// `DELETE /api/f/{name}` by an agent: allowed only for a throwaway it made
+/// (`POST /api/fragments {throwaway: true}`, which the fragment recorded;
+/// agent/src/handoff.rs), for its owner or itself; any other delete stays
+/// its owner's (decision 17). The one owner-only action an agent takes,
+/// confirmed by Paul on 2026-09-27. The fragment's computer goes
+/// first (its keys revoked, it leaves every fragment, its Sprite
+/// destroyed), then the fragment, as its owner deletes one. What the
 /// computer built stays its owner's.
 pub(crate) async fn remove_throwaway(env: &Env, url: &Url, agent: &Signed, name: &str) -> CellResult<Response> {
     let owner = agent.owner.clone().ok_or_else(|| CellError::host("an agent without an owner"))?;
+    let refused = || CellError::new(ErrorCode::Forbidden, "an agent deletes only a throwaway it made, for its owner: any other fragment is its owner's to delete");
     if agent.acting_for.as_ref().is_some_and(|asker| *asker != owner) {
-        return Err(CellError::new(ErrorCode::Forbidden, "an agent removes a throwaway in its owner's turns only"));
+        return Err(refused());
     }
-    let owners = split_fragment_name(name).map(|(_, username)| username) == agent.username.as_deref();
-    if !owners || !listed(env, &agent.id).await?.fragments.iter().any(|f| f.name == name) {
-        return Err(CellError::new(ErrorCode::NotFound, format!("no throwaway {name} of this agent's")));
+    // what the fragment recorded, read as the agent itself (gone: 404)
+    let as_agent = Signed { acting_for: None, ..agent.clone() };
+    let routed = crate::routed::Routed { name: name.to_string(), url: url.clone(), mode: None, signed: Some(as_agent), credential: None };
+    let read = Request::new(url.as_str(), Method::Get)?;
+    let mut status = crate::forward(env, &read, None, crate::Forward { routed, inner: "/api/status".into(), extra: vec![] }).await?;
+    let status: Option<fragment_proto::FragmentStatus> = match status.status_code() {
+        200 => Some(status.json().await?),
+        404 => return Err(CellError::new(ErrorCode::NotFound, format!("no fragment {name}"))),
+        _ => None,
+    };
+    if status.and_then(|s| s.throwaway_of).as_deref() != Some(agent.id.as_str()) {
+        return Err(refused());
     }
     let by = || calls::By::Identity(owner.clone());
     let computers = ask_registry(env, &calls::View { identity: None, by: by() }).await?.computers;

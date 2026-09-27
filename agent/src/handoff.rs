@@ -102,22 +102,23 @@ async fn offered(fleet: &Fleet, asker: &str, named: &str) -> Result<&'static str
 }
 
 /// The throwaway this call makes: a private fragment of the owner's (under
-/// their username, as this agent is) from the builder template, named from
-/// the call, so a replayed call finds it made (409).
+/// their username, as this agent is) from the builder template, which the
+/// platform records as this agent's throwaway (only so may it delete it),
+/// named from the call, so a replayed call finds it made (409).
 async fn made(fleet: &Fleet, sql: &SqlStorage, request_id: &str) -> Result<String, String> {
     let me = kv_get(sql, "name").map_err(|e| e.to_string())?.unwrap_or_default();
     let username = split_fragment_name(&me).map(|(_, u)| u).ok_or("this agent has no name")?;
     let name = format!("{}.{username}", throwaway_label(request_id));
-    let create = json!({ "name": name, "template": "builder", "visibility": "members" });
+    let create = json!({ "name": name, "template": "builder", "visibility": "members", "throwaway": true });
     match fleet.call(Method::Post, "/api/fragments", Some(&create)).await.map_err(|e| e.to_string())? {
         (200 | 409, _) => Ok(name),
         (status, answer) => Err(format!("making a computer for it ({status}): {}", fleet::message(&answer))),
     }
 }
 
-/// Removes a throwaway: the platform removes its computer (the Sprite
-/// destroyed, its keys revoked), then the fragment. What it built stays its
-/// owner's. One gone already is removed.
+/// Removes a throwaway this agent made (the platform checks its record):
+/// its computer (the Sprite destroyed, its keys revoked), then the
+/// fragment. What it built stays its owner's. One gone already is removed.
 async fn remove(fleet: &Fleet, fragment: &str) -> anyhow::Result<()> {
     assert!(is_throwaway(fragment), "an agent removes only a throwaway");
     match fleet.call(Method::Delete, &format!("/api/f/{fragment}"), None).await? {

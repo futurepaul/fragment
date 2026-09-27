@@ -539,6 +539,7 @@ fn relay(ctx: &Context, env: &Env, org: String, reference: String, mut answer: R
 /// owner: the owner's (on their budget, in their list), under their
 /// username, with its maker an editor of it.
 pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut create: CreateFragment, principal: Signed) -> CellResult<Response> {
+    let by_agent = principal.kind == IdentityKind::Agent;
     let (maker, agent) = match principal.kind {
         IdentityKind::Person => (principal, None),
         IdentityKind::Agent | IdentityKind::Computer => {
@@ -549,11 +550,17 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
     };
     let username = maker.username.clone().ok_or_else(|| CellError::invalid(format!("choose a username first (sign in at {}/)", cfg.platform(url))))?;
     create.name = qualify(&create.name, &username)?;
+    // a hand-off's throwaway: the fragment records the agent that makes it
+    let extra = match (create.throwaway, by_agent, &agent) {
+        (false, _, _) => vec![],
+        (true, true, Some(agent)) => vec![(agents::THROWAWAY_HEADER, agent.clone())],
+        (true, _, _) => return Err(CellError::new(ErrorCode::Forbidden, "only an agent makes a throwaway, for its owner")),
+    };
     let body = serde_json::to_vec(&create).map_err(|e| CellError::host(e.to_string()))?;
     // a fresh request: nothing of the caller's but what the router decided
     let bare = Request::new(url.as_str(), Method::Post)?;
     let routed = Routed { name: create.name.clone(), url: url.clone(), mode: None, signed: Some(maker.clone()), credential: None };
-    let made = forward(env, &bare, bytes_body(body), Forward { routed, inner: "/create".into(), extra: vec![] }).await?;
+    let made = forward(env, &bare, bytes_body(body), Forward { routed, inner: "/create".into(), extra }).await?;
     if let (Some(agent), 200) = (agent, made.status_code()) {
         let put = Request::new(url.as_str(), Method::Put)?;
         let role = serde_json::to_vec(&json!({ "role": "editor" })).map_err(|e| CellError::host(e.to_string()))?;
@@ -1120,12 +1127,9 @@ async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellResult<Respons
                 }
                 _ => Some(signer_for(env, &req, &url, &body).await?),
             };
-            // but one: an agent removes a hand-off's throwaway it is in
+            // but one: an agent deletes a throwaway it made (the fragment decides)
             if let Some(agent) = principal.as_ref().filter(|p| deleting && p.kind == IdentityKind::Agent) {
-                let name = named_fragment(name, Some(agent))?;
-                if fragment_core::tools::is_throwaway(&name) {
-                    return agents::remove_throwaway(env, &url, agent, &name).await;
-                }
+                return agents::remove_throwaway(env, &url, agent, &named_fragment(name, Some(agent))?).await;
             }
             // owner-only actions never go through an agent, whatever it acts
             // for, nor a computer: only a person owns a fragment

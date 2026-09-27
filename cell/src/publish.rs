@@ -297,7 +297,7 @@ impl FragmentCell {
         let name = self.name()?;
         let (_, username) = fragment_proto::split_fragment_name(&name).ok_or_else(|| CellError::host(format!("{name} is not <label>.<username>")))?;
         let text = |k: &str| body[k].as_str().map(str::to_string).ok_or_else(|| CellError::invalid(format!("{k} is a string")));
-        let create = CreateFragment { name: text("label")?, visibility: None, template: Some(text("template")?) };
+        let create = CreateFragment { name: text("label")?, visibility: None, template: Some(text("template")?), throwaway: false };
         let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: Some(username.to_string()) };
         let signer = Signed::new(identity, None);
         let mut made = crate::create_fragment(&self.env, self.cfg, &caller.url, create, signer).await?;

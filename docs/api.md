@@ -412,10 +412,10 @@ platform (`Content-Security-Policy`), and keep their URL to the platform
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/fragments` | a person with a username; an agent or a computer for its owner (the fragment is the owner's, under their username, on their budget, with its maker an editor) | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). `visibility` defaults to `link`, and to `members` for a template whose `fragment.json` declares a computer (the pet) or any capability (`fragments`, `frame`: the desktop): its owner's alone until they share it (`publish.rs`, `first_visibility`). The fragment's own key is made by the node's `KEYS` and stays sealed there. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`desktop`, `chat`, `todo`, `inbox`, `calories`, `pet`, `builder`, `blank`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
+| `POST /api/fragments` | a person with a username; an agent or a computer for its owner (the fragment is the owner's, under their username, on their budget, with its maker an editor) | `{name, visibility?, template?, throwaway?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). `visibility` defaults to `link`, and to `members` for a template whose `fragment.json` declares a computer (the pet) or any capability (`fragments`, `frame`: the desktop): its owner's alone until they share it (`publish.rs`, `first_visibility`). The fragment's own key is made by the node's `KEYS` and stays sealed there. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`desktop`, `chat`, `todo`, `inbox`, `calories`, `pet`, `builder`, `blank`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). `throwaway: true` (an agent's only, for its owner; anyone else's is 403) makes a hand-off's throwaway: the fragment records that agent (`throwawayOf` in its status), which may then delete it (Agents, Hand-offs). |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, sharing?}]}`; `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility (a fragment from before sends it once, on its next change or alarm; until then it has none); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
-| `DELETE /api/f/{name}` | owner; an agent, for a hand-off's throwaway it is in (Agents, Hand-offs) | → `{ok, deleted}`; the app's database goes too; the repo stays |
-| `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes, frame?}` (`frame`: when live's `fragment.json` asks for it, whether its owner allows it) |
+| `DELETE /api/f/{name}` | owner; an agent, for a throwaway it made (Agents, Hand-offs) | → `{ok, deleted}`; the app's database goes too; the repo stays |
+| `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes, frame?, throwawayOf?}` (`frame`: when live's `fragment.json` asks for it, whether its owner allows it; `throwawayOf`: the agent that made it as a throwaway) |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
 | `PUT /api/f/{name}/members/{id\|npub}` | owner | `{role: viewer\|editor}` → the member; a key names the identity holding it (404 when no one registered it) |
@@ -1115,9 +1115,11 @@ on its way; nothing holds a turn open for a build.
   else `build`, takes `{task}` (a pet, a builder). The job is called
   there for the asker, capped as every call is.
 - **Without**: a throwaway. The agent makes a private fragment of its
-  owner's from the `builder` template, named `handoff-<12 hex of SHA-256
-  of the tool-call id>.<username>` (a replayed call finds the one it made,
-  and a crash's leftovers are found by that name), and calls its
+  owner's from the `builder` template with `throwaway: true` (the
+  fragment records the agent), named `handoff-<12 hex of SHA-256 of the
+  tool-call id>.<username>` (a replayed call finds the one it made, and a
+  crash's leftovers are recognized by that name; the name grants
+  nothing), and calls its
   `build({task})`: goose on the fragment's own new computer makes and
   deploys what was asked, a fragment of the owner's (docs/computers.md).
   A build that does not start removes it again.
@@ -1136,9 +1138,10 @@ or its answer if that is text), or `The computer could not finish:
 the throwaway is left, named as one). The owner's own conversation has
 the result as its newest answer (`state`). Then a throwaway is removed:
 `DELETE /api/f/{throwaway}`, signed by the agent (for its owner or no
-one), is the one owner-only action an agent takes. The platform takes it
-only for a `handoff-` name of its owner's that the agent is in (404
-otherwise): it removes the fragment's computer as `fragment computers rm`
+one), is the one owner-only action an agent takes (confirmed by Paul,
+2026-09-27). The platform takes it only for a fragment that recorded, at
+its create, that this agent made it as a throwaway; any other, whatever
+its name, is 403 (a gone one 404): it removes the fragment's computer as `fragment computers rm`
 does (keys revoked, every fragment left, the Sprite destroyed; one never
 paired has its Sprite destroyed alone), then deletes the fragment as its
 owner. What the computer built stays its owner's. The owner's view lists
