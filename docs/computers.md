@@ -409,13 +409,16 @@ a computer with `platform__hand_off({task, computer?})`, in your own turns
 only, and its turn ends saying the work is on its way.
 
 - **A computer you name**: one of your fragments whose job `do` (or
-  `build`) takes `{task}`: a pet, or a builder. It stays.
+  else `build`) takes `{task}`: a pet (its `do`, above, at most 2000
+  bytes of task), or a builder. It stays.
 - **Otherwise a throwaway**: a private builder of yours,
   `handoff-<12 hex>.<you>`, made for the task. Its computer boots, goose
   runs `build({task})` and deploys what it made as a fragment of yours,
   and when the run ends the agent removes the throwaway: its computer
   (keys revoked, the Sprite destroyed), then the fragment. What it built
-  stays. A crash's leftovers are found by that name.
+  stays. A crash's leftovers are recognized by that name, but the name
+  grants nothing: the platform recorded the throwaway as the agent's when
+  it was made, and only that lets the agent delete it.
 
 The agent's alarm watches the run, and its result (`Done: <url>`, and what
 goose said) lands in the chat that asked, with no one asking again. A
