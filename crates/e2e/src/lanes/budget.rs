@@ -1,7 +1,7 @@
 //! Budgets (phase 4 slice C; ROADMAP decision 14), against the OpenRouter
 //! fake: a fragment's owner pays for its paid steps from a monthly
-//! allowance ($0.10 here), each step reserving its worst case ($0.05 for
-//! text) and settling to the reported cost ($0.04 here). A step that does
+//! allowance ($0.40 here), each step reserving its worst case ($0.20 for
+//! text) and settling to the reported cost ($0.16 here). A step that does
 //! not fit is held, and replays after a top-up; a settled step is never
 //! paid again; the owner's own OpenRouter key carries the allowance as its
 //! limit; the month resets.
@@ -35,7 +35,7 @@ pub fn budget(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     let wait = Duration::from_secs(40);
-    s.openrouter.set_costs(Costs { text: 0.04, image: 0.002, video_per_s: 0.01 });
+    s.openrouter.set_costs(Costs { text: 0.16, image: 0.002, video_per_s: 0.01 });
     let email = "budget-owner@e2e.test";
     let session = api.sign_in(email)?;
     let owner = Keys::generate();
@@ -52,7 +52,7 @@ pub fn budget(s: &mut Suite, api: &Api) -> Result<()> {
     let v = month(api, &owner);
     s.ok(
         "a person starts the month with their budget, in their own billing org",
-        m(&v, "allowanceMicros") == 100_000 && m(&v, "spentMicros") == 0 && v["billingOrg"] == org.as_str(),
+        m(&v, "allowanceMicros") == 400_000 && m(&v, "spentMicros") == 0 && v["billingOrg"] == org.as_str(),
         &v,
     );
     let r = run(&owner, "summarize", "t1", json!({ "text": "one" }))?;
@@ -61,7 +61,7 @@ pub fn budget(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("without its own key, a fragment's AI is paid by its owner", r["status"] == "succeeded" && r["output"]["text"] == "echo: one", &r);
     s.ok(
         "on the owner's own OpenRouter key, minted with their allowance as its monthly limit",
-        minted.as_ref().is_some_and(|k| k.limit == Some(0.1) && k.limit_reset.as_deref() == Some("monthly")),
+        minted.as_ref().is_some_and(|k| k.limit == Some(0.4) && k.limit_reset.as_deref() == Some("monthly")),
         format!("{minted:?}"),
     );
     let hash = minted.as_ref().map(|k| k.hash.clone()).unwrap_or_default();
@@ -70,9 +70,9 @@ pub fn budget(s: &mut Suite, api: &Api) -> Result<()> {
     let used_key = chats(s).last().map(|c| c.3.clone()).unwrap_or_default();
     s.ok("the call carried that key", minted.as_ref().is_some_and(|k| used_key == format!("Bearer {}", k.key)), &used_key);
     let v = month(api, &owner);
-    s.ok("it settles to the reported cost", m(&v, "spentMicros") == 40_000 && m(&v, "reservedMicros") == 0 && m(&v, "remainingMicros") == 60_000, &v);
+    s.ok("it settles to the reported cost", m(&v, "spentMicros") == 160_000 && m(&v, "reservedMicros") == 0 && m(&v, "remainingMicros") == 240_000, &v);
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/runs/{}", r["id"]), None)?;
-    s.ok("and the run shows what it cost", r.body["costMicros"] == 40_000, &r);
+    s.ok("and the run shows what it cost", r.body["costMicros"] == 160_000, &r);
 
     // a visitor's call: the owner pays
     api.signed(&owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "public" })))?;
@@ -80,7 +80,7 @@ pub fn budget(s: &mut Suite, api: &Api) -> Result<()> {
     let visitor = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
     let v = month(api, &owner);
     let row = v["usage"].as_array().and_then(|u| u.iter().find(|u| u["principal"].as_str().is_some_and(|p| p.starts_with("anon:")))).cloned().unwrap_or_default();
-    s.ok("a public visitor's call bills the owner", visitor["status"] == "succeeded" && m(&v, "spentMicros") == 80_000 && row["billingOrg"] == org.as_str(), &v);
+    s.ok("a public visitor's call bills the owner", visitor["status"] == "succeeded" && m(&v, "spentMicros") == 320_000 && row["billingOrg"] == org.as_str(), &v);
     s.ok("at 80% the month warns", v["warn"] == true, &v);
 
     // the month cannot cover the next step
@@ -92,14 +92,14 @@ pub fn budget(s: &mut Suite, api: &Api) -> Result<()> {
 
     // a top-up, by the fleet's operators
     let top = format!("/api/budget/{owner_id}/top-up");
-    let r = api.signed(&owner, "POST", &top, Some(&json!({ "usd": 0.1 })))?;
+    let r = api.signed(&owner, "POST", &top, Some(&json!({ "usd": 0.4 })))?;
     s.ok("only the fleet's operators top up a budget", r.status == 403, &r);
     let op_session = api.sign_in("operator@e2e.test")?;
     api.approve(&op_session, &s.operator)?;
-    let r = api.signed(&s.operator, "POST", &top, Some(&json!({ "usd": 0.1 })))?;
-    s.ok("an operator's top-up raises the month's allowance", r.status == 200 && r.body["allowanceMicros"] == 200_000, &r);
+    let r = api.signed(&s.operator, "POST", &top, Some(&json!({ "usd": 0.4 })))?;
+    s.ok("an operator's top-up raises the month's allowance", r.status == 200 && r.body["allowanceMicros"] == 800_000, &r);
     let patched = patches_of(s);
-    s.ok("and the owner's key limit with it", patched.last().is_some_and(|b| b["limit"] == 0.2), format!("{patched:?}"));
+    s.ok("and the owner's key limit with it", patched.last().is_some_and(|b| b["limit"] == 0.8), format!("{patched:?}"));
     api.signed(&owner, "POST", &format!("/api/f/{name}/replay"), Some(&json!({ "run": held })))?;
     let r = settle(api, &owner, &name, held, &["succeeded", "held"], wait);
     s.ok("the held run succeeds on replay after the top-up", r["status"] == "succeeded" && r["output"]["text"] == "echo: three", &r);
@@ -109,13 +109,13 @@ pub fn budget(s: &mut Suite, api: &Api) -> Result<()> {
     let r = run(&owner, "twice", "w1", json!({ "a": "first", "b": "second" }))?;
     s.ok("a second step the month cannot cover holds the run after the first was paid", r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("budget used up")), &r);
     let twice = r["id"].as_i64().unwrap_or(0);
-    api.signed(&s.operator, "POST", &top, Some(&json!({ "usd": 0.05 })))?;
+    api.signed(&s.operator, "POST", &top, Some(&json!({ "usd": 0.2 })))?;
     api.signed(&owner, "POST", &format!("/api/f/{name}/replay"), Some(&json!({ "run": twice })))?;
     let r = settle(api, &owner, &name, twice, &["succeeded", "held"], wait);
     let after = chats(s).len();
     s.ok(
         "on replay the paid step answers what it answered, unpaid, and only the other runs",
-        r["status"] == "succeeded" && r["output"] == json!({ "one": "echo: first", "two": "echo: second" }) && after - before == 2 && r["costMicros"] == 80_000,
+        r["status"] == "succeeded" && r["output"] == json!({ "one": "echo: first", "two": "echo: second" }) && after - before == 2 && r["costMicros"] == 320_000,
         format!("{r} ({} calls)", after - before),
     );
 
@@ -158,7 +158,7 @@ pub fn budget(s: &mut Suite, api: &Api) -> Result<()> {
                     && u["unit"] == "usd_micro"
                     && u["period"] == v["period"]
                     && u["state"] == "settled"
-                    && u["quantity"] == 40_000
+                    && u["quantity"] == 160_000
             }),
         &r,
     );
@@ -190,7 +190,7 @@ pub fn budget(s: &mut Suite, api: &Api) -> Result<()> {
     let home = s.dir("budget-home");
     s.login(api, &home);
     let out = s.cli(api, &home, &["budget"]);
-    s.ok("fragment budget says what is left", out.status.success() && String::from_utf8_lossy(&out.stdout).contains("$0.10 left"), String::from_utf8_lossy(&out.stdout));
+    s.ok("fragment budget says what is left", out.status.success() && String::from_utf8_lossy(&out.stdout).contains("$0.40 left"), String::from_utf8_lossy(&out.stdout));
 
     // a new month
     let this_month = month(api, &owner)["period"].clone();
@@ -199,12 +199,12 @@ pub fn budget(s: &mut Suite, api: &Api) -> Result<()> {
     let v = month(api, &owner);
     s.ok(
         "the month resets on the 1st: nothing spent, the plain budget (top-ups were that month's)",
-        r.status == 200 && v["period"] == r.body["period"] && v["period"] != this_month && m(&v, "spentMicros") == 0 && m(&v, "allowanceMicros") == 100_000,
+        r.status == 200 && v["period"] == r.body["period"] && v["period"] != this_month && m(&v, "spentMicros") == 0 && m(&v, "allowanceMicros") == 400_000,
         &v,
     );
     let r = run(&owner, "summarize", "next-month", json!({ "text": "again" }))?;
     let patched = patches_of(s);
-    s.ok("and the key's limit goes back with it", r["status"] == "succeeded" && patched.last().is_some_and(|b| b["limit"] == 0.1), format!("{r} {patched:?}"));
+    s.ok("and the key's limit goes back with it", r["status"] == "succeeded" && patched.last().is_some_and(|b| b["limit"] == 0.4), format!("{r} {patched:?}"));
 
     // an answer that names no cost is charged the step's reservation: the
     // money path fails closed, never at zero

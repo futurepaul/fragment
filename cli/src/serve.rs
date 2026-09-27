@@ -1,9 +1,10 @@
 //! `fragment model --serve`: a local OpenAI-compatible endpoint on
-//! 127.0.0.1 (`POST /v1/chat/completions`, streaming or not) that forwards
-//! each request to the platform's model endpoint signed with this CLI's
-//! key, and relays the answer as it arrives. Anything that speaks to an
-//! OpenAI-compatible provider (goose on a computer) then needs no key: the
-//! platform picks the model and bills the computer's owner. It binds the
+//! 127.0.0.1 (`POST /v1/chat/completions`, and OpenRouter's path
+//! `/api/v1/chat/completions`, streaming or not) that forwards each request
+//! to the platform's model endpoint signed with this CLI's key, and relays
+//! the answer as it arrives. Anything that speaks to an OpenAI-compatible
+//! provider or to OpenRouter (goose on a computer) then needs no key: the
+//! platform checks the model and bills the computer's owner. It binds the
 //! loopback address only, so it answers this machine alone.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -13,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use fragment_proto::limits::BODY_MAX_BYTES;
+use fragment_proto::limits::MODEL_BODY_MAX_BYTES;
 
 use crate::api::Client;
 
@@ -32,7 +33,7 @@ pub fn serve(client: Client, port: u16) -> Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).with_context(|| format!("binding 127.0.0.1:{port}"))?;
     let at = listener.local_addr()?;
     assert!(at.ip().is_loopback(), "the model endpoint answers this machine alone");
-    println!("serving http://{at}/v1 (POST /v1/chat/completions), signed as {}", client.id.npub());
+    println!("serving http://{at}/v1 (POST /v1/chat/completions, or OpenRouter's /api/v1/chat/completions), signed as {}", client.id.npub());
     std::io::stdout().flush()?;
     let (client, open) = (Arc::new(client), Arc::new(AtomicUsize::new(0)));
     for stream in listener.incoming() {
@@ -83,11 +84,11 @@ fn one(client: &Client, stream: TcpStream) -> Result<()> {
     let mut words = line.split_whitespace();
     match (words.next(), words.next()) {
         (Some("GET"), Some("/health")) => return answer(&mut out, 200, "text/plain", b"ok"),
-        (Some("POST"), Some("/v1/chat/completions")) => {}
-        _ => return answer(&mut out, 404, "application/json", br#"{"error":{"message":"POST /v1/chat/completions is all this serves"}}"#),
+        (Some("POST"), Some("/v1/chat/completions" | "/api/v1/chat/completions")) => {}
+        _ => return answer(&mut out, 404, "application/json", br#"{"error":{"message":"POST /v1/chat/completions (or /api/v1/chat/completions) is all this serves"}}"#),
     }
-    let Some(length) = length.filter(|n| *n <= BODY_MAX_BYTES) else {
-        return answer(&mut out, 413, "application/json", br#"{"error":{"message":"a request carries its content-length, at most 2 MiB"}}"#);
+    let Some(length) = length.filter(|n| *n <= MODEL_BODY_MAX_BYTES) else {
+        return answer(&mut out, 413, "application/json", br#"{"error":{"message":"a request carries its content-length, at most 8 MiB"}}"#);
     };
     let mut body = vec![0; length];
     reader.read_exact(&mut body)?;

@@ -8,8 +8,8 @@
 // no model key is on the computer. The run answers with what it built.
 import { DurableObject } from "cloudflare:workers";
 
-// goose's CLI release, at least two weeks old (the dependency cooldown),
-// checked against the SHA-256 GitHub lists for the asset
+// goose's CLI release, past the dependency cooldown (two days), checked
+// against the SHA-256 GitHub lists for the asset
 const GOOSE_VERSION = "1.50.0";
 const GOOSE_URL = `https://github.com/aaif-goose/goose/releases/download/v${GOOSE_VERSION}/goose-x86_64-unknown-linux-musl.tar.gz`;
 const GOOSE_SHA256 = "ff8c51428180142e5c92e2a0b67b3d1762698499d028f6f5fe370fdbec8c84af";
@@ -47,7 +47,8 @@ code=$?
 tail -c 3000 goose.log
 exit $code`;
 
-const GOOSE_ENV = { GOOSE_PROVIDER: "openai", GOOSE_MODEL: "fragment", GOOSE_MODE: "auto", GOOSE_MAX_TOKENS: "4096", GOOSE_DISABLE_KEYRING: "1" };
+// its model: the platform's (fragment_proto::AGENT_MODEL), one a computer may name
+const GOOSE_ENV = { GOOSE_PROVIDER: "openai", GOOSE_MODEL: "z-ai/glm-5.3-flashx", GOOSE_MODE: "auto", GOOSE_MAX_TOKENS: "4096", GOOSE_DISABLE_KEYRING: "1" };
 
 const prompt = (task) => `You are on a Linux computer with the \`fragment\` CLI installed and signed in; its manual is in your hints (\`fragment guide\` prints it). Build this as a new fragment and deploy it live:
 

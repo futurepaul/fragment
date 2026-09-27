@@ -65,7 +65,7 @@ pub const SIGNINS_PENDING_MAX: u64 = 200;
 /// The OpenRouter fake's management key, and each person's monthly budget
 /// here (small, so a few steps use it up).
 pub const OPENROUTER_MANAGEMENT: &str = "sk-or-v1-management-e2e";
-pub const BUDGET_USD: &str = "0.1";
+pub const BUDGET_USD: &str = "0.4";
 /// The WorkOS fake's environment.
 const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";

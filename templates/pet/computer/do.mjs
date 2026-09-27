@@ -3,7 +3,7 @@
 // and frames (:99), so everyone watching sees what it does, and anyone may
 // click in between (its next look shows it). Its model is the platform's
 // (`fragment model --serve`, on the owner's budget), through a proxy here
-// that keeps each request under the platform's 2 MiB: goose sends every
+// that keeps each request under the platform's 8 MiB: goose sends every
 // screenshot it was given, each turn, so only the newest go along. Each tool
 // call is a step on `work` (`fragment post`) and marks the agent as the
 // pet's driver (~/.pet/agent, which pet.mjs reads). It prints goose's last
@@ -29,6 +29,9 @@ const TIME_MS = 9 * 60_000;
 const SHOTS = 3;
 const RESULTS = 3;
 const RESULT_CUT = 2000;
+// the model the platform calls (one a computer may name): the agents',
+// which reads images
+const MODEL = "z-ai/glm-5.3-flash";
 const INSTRUCTIONS = `You use a Linux computer through the cua tools: a 1024×640 screen with a Chromium browser on it, which people watch live and may click too. Look before you act (get_desktop_state shows the whole screen; get_window_state also lists a window's elements), act with click, type_text, press_key, hotkey, and scroll, then look again to check what happened. To open an address, focus the browser's address bar (ctrl+l), type it, and press Return. When the task is done, say in a sentence or two what you did.`;
 
 const run = promisify(execFile);
@@ -75,7 +78,7 @@ async function model() {
     req.on("end", () => {
       let body = Buffer.concat(chunks);
       try {
-        body = Buffer.from(JSON.stringify(trim(JSON.parse(body))));
+        body = Buffer.from(JSON.stringify({ ...trim(JSON.parse(body)), model: MODEL }));
       } catch {}
       const headers = { "content-type": "application/json", "content-length": body.length };
       const up = http.request({ host: "127.0.0.1", port, path: req.url, method: req.method, headers }, (answer) => {
@@ -120,7 +123,7 @@ const env = {
   ...process.env,
   GOOSE_PATH_ROOT: root,
   GOOSE_PROVIDER: "openai",
-  // The platform calls the agents' model whatever this names. goose reads a
+  // The proxy names MODEL to the platform whatever this names. goose reads a
   // model's abilities from its catalog by this name and sends a tool's
   // screenshot on only to one that reads images, as gpt-4o does (a name it
   // does not know, such as the builder's, loses every screenshot).

@@ -137,7 +137,9 @@ time; read it before touching the matching phase.
   4 GB ≈ $23/month. Tigris: $0.02/GB-month, $0.005 per 1,000 writes,
   $0.0005 per 1,000 reads, no egress.
 - OpenRouter: `z-ai/glm-5.3-flash` $0.15 in / $0.50 out per million
-  tokens (text, image, and video input); images
+  tokens (text, image, and video input); `z-ai/glm-5.3-flashx`, its
+  high-speed variant and the platform's model since 2026-09-27, about 8
+  times that; images
   `google/gemini-3.1-flash-lite-image`; video `minimax/hailuo-3-max`.
   Media models are missing from the default `/models` list; add
   `?output_modalities=image` or `video`.

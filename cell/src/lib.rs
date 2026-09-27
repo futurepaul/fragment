@@ -437,13 +437,17 @@ const MODEL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 
 /// `POST /api/model/chat/completions`: a computer calls the model through
 /// the platform (docs/computers.md), signed by its own key: an OpenAI-style
-/// chat request, on the model the agents use, paid from its owner's month
-/// as an agent's call is (`agent_spend`: the same ledger reserve, settle,
-/// and release), except that the platform makes the call: the owner's
-/// OpenRouter key never reaches the computer. A request that streams is
-/// answered as its chunks arrive (`relay`).
+/// chat request, on a model it names from `fragment_proto::COMPUTER_MODELS`
+/// (none: the platform's), paid from its owner's month as an agent's call is
+/// (`agent_spend`: the same ledger reserve, settle, and release), except
+/// that the platform makes the call: the owner's OpenRouter key never
+/// reaches the computer. A request that streams is answered as its chunks
+/// arrive (`relay`). The rest of the request goes as it came (its
+/// `reasoning`, with no default added, and its `session_id`, which keeps a
+/// session's calls on one provider's cache), but for `transforms`.
 async fn model_call(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, url: &Url) -> CellResult<Response> {
-    let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+    // screenshots: more than any other request carries
+    let body = read_body(&mut req, limits::MODEL_BODY_MAX_BYTES).await?;
     let who = signer(env, &req, url, &body).await?;
     let owner = match (who.kind, who.owner.as_deref()) {
         (IdentityKind::Computer, Some(owner)) => owner.to_string(),
@@ -453,7 +457,29 @@ async fn model_call(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, ur
     if !ask["messages"].is_array() {
         return Err(CellError::invalid("a chat request's messages are an array"));
     }
-    ask["model"] = json!(fragment_proto::AGENT_MODEL);
+    let models = fragment_proto::COMPUTER_MODELS;
+    let model = match &ask["model"] {
+        Value::Null => fragment_proto::AGENT_MODEL,
+        named => models.into_iter().find(|m| named.as_str() == Some(*m)).ok_or_else(|| {
+            CellError::invalid(format!("a computer calls {} (the default), or {}; not {named}", models[0], models[1..].join(" or ")))
+        })?,
+    };
+    // OpenRouter's fallbacks would name models past the list
+    if !ask["models"].is_null() {
+        return Err(CellError::invalid("a computer names one model (`model`), not `models`"));
+    }
+    ask["model"] = json!(model);
+    // OpenRouter's prompt transforms (`middle-out`) rewrite the prompt a
+    // cache holds; the models here need none (an empty list is the same)
+    if let Some(ask) = ask.as_object_mut() {
+        ask.remove("transforms");
+    }
+    // the provider that answers soonest, unless the request says: a sort
+    // pins none, so OpenRouter's sticky routing keeps a cached prompt's
+    // calls on the provider that holds it
+    if ask["provider"].is_null() {
+        ask["provider"] = json!({ "sort": "latency" });
+    }
     let streams = ask["stream"] == json!(true);
     if streams {
         // its last chunk then carries the answer's usage, and its cost
@@ -465,8 +491,11 @@ async fn model_call(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, ur
     let reserve = ledger::Reserve {
         reference: reference.clone(),
         kind: "computer.text".into(),
-        model: Some(fragment_proto::AGENT_MODEL.into()),
-        amount: fragment_core::budget::TEXT_RESERVE,
+        model: Some(model.into()),
+        amount: match model {
+            fragment_proto::ROUTER_MODEL => fragment_core::budget::ROUTER_RESERVE,
+            _ => fragment_core::budget::TEXT_RESERVE,
+        },
         fragment: who.id.clone(),
         run: 0,
         principal: who.id.clone(),

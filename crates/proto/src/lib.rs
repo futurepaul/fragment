@@ -40,6 +40,9 @@ pub mod limits {
     pub const AUTH_WINDOW_S: i64 = 60;
     /// Request bodies the router reads (to hash for NIP-98).
     pub const BODY_MAX_BYTES: usize = 2 * 1024 * 1024;
+    /// A computer's model request (`POST /api/model/chat/completions`),
+    /// which carries screenshots.
+    pub const MODEL_BODY_MAX_BYTES: usize = 8 * 1024 * 1024;
     /// A secret's value.
     pub const SECRET_MAX_BYTES: usize = 64 * 1024;
     /// The app facet's database (docs/MODEL.md): a mutation that leaves it
@@ -575,9 +578,15 @@ pub struct MemberList {
     pub members: Vec<Member>,
 }
 
-/// The model agents in cells use unless they name another, and the only one
-/// a computer calls through the platform (`POST /api/model/chat/completions`).
-pub const AGENT_MODEL: &str = "z-ai/glm-5.3-flash";
+/// The platform's model: agents in cells use it unless they name another,
+/// and a computer's call through the platform when it names none. The
+/// high-speed variant of `z-ai/glm-5.3-flash`, at about 8 times its price.
+pub const AGENT_MODEL: &str = "z-ai/glm-5.3-flashx";
+/// A router with variable pricing: its cost is known only once it answers.
+pub const ROUTER_MODEL: &str = "typesafe/jev-router";
+/// The models a computer may name (`POST /api/model/chat/completions`);
+/// any other is refused. The first is the default.
+pub const COMPUTER_MODELS: [&str; 3] = [AGENT_MODEL, "z-ai/glm-5.3-flash", ROUTER_MODEL];
 
 /// What an identity is (docs/finite-integration.md). A fragment's own key
 /// stays the fragment's and is not registered. An agent and a computer each

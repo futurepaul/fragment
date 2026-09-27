@@ -70,7 +70,7 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     let full = format!("{name}.{username}");
     s.ok(
         "the owner makes an agent under their username: its own key, registered as theirs at once",
-        r.status == 200 && agent_npub.starts_with("npub1") && r.body["name"] == full.as_str() && r.body["model"] == "z-ai/glm-5.3-flash" && agent_id.starts_with("id:"),
+        r.status == 200 && agent_npub.starts_with("npub1") && r.body["name"] == full.as_str() && r.body["model"] == fragment_proto::AGENT_MODEL && agent_id.starts_with("id:"),
         &r,
     );
     let reg = api.signed(&owner, "GET", &format!("/api/identities/{agent_id}"), None)?;

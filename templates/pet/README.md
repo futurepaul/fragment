@@ -47,7 +47,7 @@ by its agent (ask it to do something).
   with Cua Driver's MCP server (`cua-driver mcp`, 8 of its tools) on the
   pet's display. goose's model is the platform's (`fragment model
   --serve`, through a proxy that keeps the newest 3 screenshots, so a
-  request stays under 2 MiB); `GOOSE_MODEL=gpt-4o` only tells goose the
+  request stays under the platform's 8 MiB); `GOOSE_MODEL=gpt-4o` only tells goose the
   model reads images, as the one the platform calls does. Each tool
   call is a step on `work` (`{run, kind: "step", n, tool, args, said}`,
   between the job's `start` and `end`), which the page shows live, and

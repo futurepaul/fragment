@@ -81,9 +81,9 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["prompt", "serve"])]
         request: bool,
         /// Serve an OpenAI-compatible endpoint on 127.0.0.1 (POST
-        /// /v1/chat/completions, streamed or not) that signs each call as
-        /// this computer: goose, or anything that speaks to such a
-        /// provider, needs no key
+        /// /v1/chat/completions, or OpenRouter's /api/v1/chat/completions,
+        /// streamed or not) that signs each call as this computer: goose,
+        /// or anything that speaks to such a provider, needs no key
         #[arg(long, conflicts_with = "prompt")]
         serve: bool,
         /// The port --serve listens on (0: any free one)
@@ -350,7 +350,7 @@ enum AgentCmd {
     /// Make an agent you own; prints its npub (add it to fragments as a member)
     Create {
         name: String,
-        /// An OpenRouter model id (default z-ai/glm-5.3-flash)
+        /// An OpenRouter model id (default z-ai/glm-5.3-flashx)
         #[arg(long)]
         model: Option<String>,
         #[arg(long)]
