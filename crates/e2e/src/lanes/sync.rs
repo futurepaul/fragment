@@ -44,6 +44,26 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
     let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir)]);
     s.ok("a both-sides change exits 3", code(&out) == 3, String::from_utf8_lossy(&out.stdout));
 
+    // a folder pulled, then several files changed and one deleted (as an
+    // rsync from a newer template does), pushes as one commit: the pack
+    // streamed a chunk for the delete, which code.storage refuses
+    let (name, c) = create(s, "sync-delete")?;
+    let repo = c["repo"].as_str().unwrap_or("").to_string();
+    let files = ["a.md", "b.md", "c.md"];
+    s.commit(&c, &[("a.md", Some(b"a")), ("b.md", Some(b"b")), ("c.md", Some(b"c")), ("gone.md", Some(b"gone"))]);
+    let dir = s.dir("sync-delete");
+    s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir), "--mode", "pull"]);
+    for f in files {
+        std::fs::write(dir.join(f), format!("new {f}"))?;
+    }
+    std::fs::remove_file(dir.join("gone.md"))?;
+    let packs = s.fake.requests(&repo, "POST commit-pack");
+    let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir), "--mode", "push"]);
+    let at = |f: &str| s.fake.file_at(&repo, "main", f);
+    let landed = files.iter().all(|f| at(f) == Some(format!("new {f}").into_bytes())) && at("gone.md").is_none();
+    let one = s.fake.requests(&repo, "POST commit-pack") - packs == 1;
+    s.ok("a push of three changed files and one deletion lands as one commit", code(&out) == 0 && landed && one, String::from_utf8_lossy(&out.stderr));
+
     // continuous: the change feed pulls a remote write; a local edit pushes
     let (name, c) = create(s, "sync-watch")?;
     let dir = s.dir("sync-watch");
