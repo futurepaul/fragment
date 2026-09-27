@@ -54,8 +54,9 @@
 //! channel (progress.rs).
 //!
 //! A person's agent does light work itself and hands the rest to a
-//! computer (handoff.rs): a hand-off's turn ends at once, and its result is
-//! said in the conversation that asked when the computer is done.
+//! computer (handoff.rs): a turn that hands off ends there, the platform
+//! saying the work is on its way; the computer answers in the chat itself,
+//! and its result reaches the conversation that asked as a note.
 //!
 //! A fragment's own agent (its `fragment.json` `agent` block; its deploy
 //! makes it, with a `scope`) is this same agent with three differences:
@@ -387,8 +388,9 @@ a fragment from a template (platform__create_fragment), as a person can.
 Your owner's computer does it, and remembers what was handed off from this conversation before; it sees nothing else \
 of it, so put what it needs in the task. Name a computer only when the person names one of theirs; ask for a \
 throwaway only for extra hands, alongside other work or for risky work.
-- A hand-off takes minutes. Once it starts, say in a sentence that it is on its way and end your turn: its result is \
-said here when it is done. Do not check on it.
+- A hand-off takes minutes, and your turn ends as it starts (the person is told it is on its way), so do your own \
+part first. The computer answers here itself, and you get its answer as a note. Don't describe results you haven't \
+received.
 - Only your owner's turns can hand off (you have no platform__hand_off otherwise): tell anyone else it is theirs to \
 ask the owner.";
 

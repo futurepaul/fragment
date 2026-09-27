@@ -11,9 +11,11 @@
 // goose's history, and the model's cached prefix, carry over. Each tool call
 // goose makes is a step on the chat's `work` channel, posted as this
 // computer once the call ended, under the hand-off's turn
-// (fragment_core::work::handoff_turn); the answer is the job's to say. It
-// prints goose's last words, and exits 0 when goose ended its turn (124 past
-// its time).
+// (fragment_core::work::handoff_turn), and goose's answer, once it ended its
+// turn, is this computer's post on the chat's own channel, `{text, turn}`
+// (the asking agent reads it from the run, never from the chat). It prints
+// goose's last words, and exits 0 when goose ended its turn and a chat that
+// asked has its answer (124 past its time).
 //
 // Its env: PROMPT, the task as goose reads it; CHAT, the asking chat
 // (<fragment>/<channel>; none: this fragment's own `work`); RUN, the job's
@@ -35,6 +37,8 @@ const UP_MS = 180_000;
 // a step's arguments and excerpts, as the chat's records keep them (fragment_core::work)
 const ARGS_MAX = 140;
 const EXCERPT_MAX = 300;
+// the answer, at most a chat message's most (cell/chat.mjs)
+const ANSWER_MAX = 16000;
 // a post that fails is tried again after these (the hand-off's grant may come late)
 const RETRY_S = [2, 4, 8, 16, 30];
 
@@ -55,7 +59,7 @@ function fail(why, code = 1) {
 
 if (!PROMPT || !NAME) fail("a job runs this, with PROMPT (and CHAT, RUN, ASKER)");
 if (!/^[a-z0-9-]+\.[a-z0-9-]+\/[a-z][a-z0-9_-]*$/.test(CHAT)) fail(`CHAT is <fragment>/<channel>, not ${CHAT}`);
-const [where] = CHAT.split("/");
+const [where, channel] = CHAT.split("/");
 const turn = `hand-off:${NAME}:${RUN}`;
 const saved = path.join(DIR, "sessions", CHAT);
 const cwd = path.join(os.homedir(), "chats", CHAT);
@@ -125,20 +129,24 @@ function updated(u) {
     const out = (u.content ?? []).map((c) => (c.content?.type === "text" ? c.content.text : c.content?.type ? `(${c.content.type})` : "")).join(" ");
     const body = { kind: "turn.step", turn, run: Number(RUN), step: call.n, tool: call.tool, args: call.args, ok: u.status === "completed", excerpt: cut(out.trim(), EXCERPT_MAX) };
     if (call.text) body.text = cut(call.text, EXCERPT_MAX);
-    post(body, call.n);
+    post("work", body, `st:${NAME}:${RUN}:${call.n}`);
   }
 }
 
-// each step on `work`, in order, once (its id), as this computer
-let posted = Promise.resolve();
-function post(body, n) {
-  const once = () => run(CLI, ["post", where, "work", "--body", JSON.stringify(body), "--id", `st:${NAME}:${RUN}:${n}`]);
+// each post in order, once (its id), as this computer: whether it is in
+let posted = Promise.resolve(true);
+function post(on, body, id) {
+  const once = () => run(CLI, ["post", where, on, "--body", JSON.stringify(body), "--id", id]);
   posted = posted.then(async () => {
     for (const wait of [...RETRY_S, null]) {
       try {
-        return await once();
+        await once();
+        return true;
       } catch (e) {
-        if (wait === null) return console.error(`step ${n} not posted: ${String(e.stderr || e.message).trim().slice(0, 300)}`);
+        if (wait === null) {
+          console.error(`${id} not posted: ${String(e.stderr || e.message).trim().slice(0, 300)}`);
+          return false;
+        }
         await sleep(wait * 1000);
       }
     }
@@ -169,8 +177,11 @@ const timer = setTimeout(() => ((late = true), send({ method: "session/cancel", 
 const ended = await ask("session/prompt", { sessionId: session, prompt: [{ type: "text", text: PROMPT }] }).catch((e) => ({ error: e.message }));
 clearTimeout(timer);
 ws.close();
-await posted;
 const words = said.trim() || last;
+const done = !late && ended.stopReason === "end_turn";
+// once goose ended its turn, its answer, in the chat that asked (none: this fragment's own work)
+if (done && process.env.CHAT) post(channel, { text: cut(words || "(goose said nothing)", ANSWER_MAX), turn }, `an:${NAME}:${RUN}`);
+const told = (await posted) || !process.env.CHAT;
 console.log([words, ended.error].filter(Boolean).join("\n\n") || (late ? "It ran out of time." : "(goose said nothing)"));
 if (ended.error) console.error(ended.error);
-process.exit(late ? 124 : ended.stopReason === "end_turn" ? 0 : 1);
+process.exit(late ? 124 : done && told ? 0 : 1);

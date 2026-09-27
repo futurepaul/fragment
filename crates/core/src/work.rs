@@ -30,12 +30,13 @@ pub fn turn_id(kickoff_message_id: &str) -> String {
     hex::encode(Sha256::digest(kickoff_message_id.as_bytes()))[..24].to_string()
 }
 
-/// A hand-off's turn in a chat's records: the computer posts its steps
-/// under it (computer/task.mjs builds the same), and the agent's answer
-/// names it, so a page shows the steps above the answer.
+/// A hand-off's turn in a chat's records: the computer posts its steps and
+/// its answer under it (computer/task.mjs builds the same), so a page shows
+/// the steps above the answer.
 pub fn handoff_turn(computer: &str, run: i64) -> String {
-    format!("hand-off:{computer}:{run}")
+    format!("{HANDOFF_TURN}{computer}:{run}")
 }
+const HANDOFF_TURN: &str = "hand-off:";
 
 /// A progress record's post id (`[A-Za-z0-9._:-]`): its turn and its part
 /// (`start`, a call's number, `end`), so a replayed step posts the same id
@@ -132,7 +133,9 @@ pub fn answer(text: &str, turn: Option<&str>) -> Value {
 /// What a record on a chat's channel says to its agent. A body without a
 /// `kind` (or `kind: "message"`) is a message: its `text`, or else its
 /// JSON; `kind: "stop"` asks to stop a turn (the page's Stop button); any
-/// other kind is for the page alone, never a message.
+/// other kind is for the page alone, never a message, and so is a
+/// computer's answer to a hand-off (its turn `hand-off:…`), which the agent
+/// reads from the run.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Said {
     Message(String),
@@ -151,6 +154,9 @@ pub fn said(body: &str) -> Said {
             return Said::Stop { turn: o.get("turn").and_then(Value::as_str).map(str::to_string) };
         }
         Some(_) => return Said::Other,
+    }
+    if o.get("turn").and_then(Value::as_str).is_some_and(|t| t.starts_with(HANDOFF_TURN)) {
+        return Said::Other;
     }
     match o.get("text") {
         Some(Value::String(t)) => Said::Message(t.clone()),
@@ -235,5 +241,8 @@ mod tests {
         assert_eq!(said(r#"{"kind":"stop"}"#), Said::Stop { turn: None });
         assert_eq!(said(r#"{"kind":"typing","text":"not a message"}"#), Said::Other, "another kind is never a message");
         assert_eq!(said(r#"{"kind":7,"text":"x"}"#), Said::Other);
+        let posted = answer("1886", Some(&handoff_turn("pet.paul", 4))).to_string();
+        assert_eq!(said(&posted), Said::Other, "a computer's answer to a hand-off is never a message");
+        assert_eq!(said(r#"{"text":"hi","turn":"0a1b"}"#), Said::Message("hi".into()));
     }
 }

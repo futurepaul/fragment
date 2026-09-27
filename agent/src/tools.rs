@@ -97,10 +97,11 @@ fn platform_tools(owner_turn: bool) -> Vec<(&'static str, &'static str, Value)> 
     let hand_off = (
         handoff::TOOL,
         "Hands work to a computer: building or changing an app, writing code, research, anything more than a few calls. \
-         It answers at once and the work runs for minutes on its own; its result is said in this conversation when it \
-         ends. It goes to your owner's own computer, in this conversation's session there, which remembers the work \
-         handed off from here before. With `throwaway`, or when they have no computer, a throwaway computer does it \
-         (what it builds is a new fragment of your owner's) and is removed after, keeping what it built.",
+         It starts the work and ends your turn (the person is told it is on its way); the work runs for minutes on its \
+         own, the computer answers here itself, and its answer reaches you as a note. It goes to your owner's own \
+         computer, in this conversation's session there, which remembers the work handed off from here before. With \
+         `throwaway`, or when they have no computer, a throwaway computer does it (what it builds is a new fragment of \
+         your owner's) and is removed after, keeping what it built.",
         json!({ "type": "object", "required": ["task"], "additionalProperties": false, "properties": {
             "task": { "type": "string", "description": "the task, as the computer should read it: it sees only what was handed off from this conversation before" },
             "computer": { "type": "string", "description": "only when the person names one: a fragment of theirs with a computer and a `do` or `build` job (<label>.<username>)" },

@@ -32,7 +32,7 @@ use worker::{Delay, SqlStorage, Storage};
 
 use crate::computer::{self, Computer, ComputerTools};
 use crate::fleet::Fleet;
-use crate::js;
+use crate::{handoff, js};
 use crate::model::{self, OpenRouter, Spend};
 use crate::progress::Progress;
 use crate::store::{self, kv_get, kv_set, kv_u64, Effect, Session, Store};
@@ -128,6 +128,27 @@ impl Operation<Session, Effect> for Unoffered {
             return not_applicable();
         }
         let message = emit.message(message).await;
+        applied([Effect::Message(message)])
+    }
+}
+
+/// A turn that started a hand-off ends there: once the step that ran it
+/// stored its results, the platform says the work is on its way
+/// (handoff::acknowledgement), and the model is not asked again, so it
+/// cannot go on to write a result it has not received. It reads the stored
+/// turn, so a driver that replaces a dead one ends it alike. It runs before
+/// a steer: a message the turn ended before reading gets a turn of its own.
+struct HandedOff;
+
+#[async_trait]
+impl Operation<Session, Effect> for HandedOff {
+    fn name(&self) -> &'static str {
+        "handed_off"
+    }
+
+    async fn run(&self, _: &Session, conversation: &Conversation, emit: &Emitter) -> anyhow::Result<OperationResult<Effect>> {
+        let Some(said) = handoff::acknowledgement(messages_since_kickoff(conversation)?) else { return not_applicable() };
+        let message = emit.message(Message::assistant().with_text(said)).await;
         applied([Effect::Message(message)])
     }
 }
@@ -284,6 +305,7 @@ pub async fn drive(driver: Driver) -> anyhow::Result<TurnOutcome> {
         vec![
             Step::Operation(Arc::new(operation)),
             Step::Operation(Arc::new(Unoffered)),
+            Step::Operation(Arc::new(HandedOff)),
             Step::Operation(Arc::new(Steer { sql: driver.storage.sql() })),
             Step::Operation(Arc::new(Instructions(instructions))),
             Step::Inference(Arc::new(InferenceRunner::new(provider, model::config(&driver.model.name)))),

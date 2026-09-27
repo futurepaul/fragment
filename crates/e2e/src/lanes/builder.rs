@@ -149,6 +149,15 @@ fn offered(chat: &Value) -> Vec<String> {
     chat["tools"].as_array().into_iter().flatten().filter_map(|t| t["function"]["name"].as_str().map(str::to_string)).collect()
 }
 
+/// What the agent's model was scripted to say after a hand-off, had it been asked again.
+const INVENTED: &str = "The computer is done.\n\nThe stadium opened in 1908.";
+
+/// The notes in an agent's view that say how a hand-off to `computer` ended.
+fn notes(v: &Value, computer: &str) -> Vec<String> {
+    let head = format!("[The result of a hand-off to {computer} ");
+    v["messages"].as_array().into_iter().flatten().filter(|m| m["role"] == "user").filter_map(|m| m["text"].as_str()).filter(|t| t.starts_with(&head)).map(str::to_string).collect()
+}
+
 /// The owner's fragments whose names start with `prefix`.
 fn owned(api: &Api, owner: &Keys, prefix: &str) -> Vec<String> {
     let mine = api.signed(owner, "GET", "/api/fragments", None).map(|r| r.body).unwrap_or_default();
@@ -163,13 +172,15 @@ fn builds(label: &str, text: &str) -> String {
 /// Hand-offs (agent/src/handoff.rs; Paul, 2026-09-27;
 /// docs/agent-computer.md): the owner's own agent, in a chat, does light
 /// work itself and hands building to a computer. The OpenRouter fake is
-/// scripted for the agent and then for goose (the stand-in, seeded into
+/// scripted for the agent and for goose apart (the stand-in, seeded into
 /// every Sprite). Checked: asked to add a todo, it calls the list's
 /// operation, no computer; its tools hand work off and none writes files or
 /// deploys; asked to build, with no home computer, it hands off and its
-/// turn ends at once, a throwaway builder runs goose, the chat gets the
-/// built URL without being asked again, and the throwaway's computer (its
-/// Sprite) and fragment are gone, what it built kept; handed to a named
+/// turn ends at once, the platform saying so, a throwaway builder runs
+/// goose, whose answer its computer posts in the chat without being asked
+/// again, the built URL reaches the agent's conversation as a note, and
+/// the throwaway's computer (its Sprite) and fragment are gone, what it
+/// built kept; handed to a named
 /// computer (the builder above), the work runs there and that computer
 /// stays; with the builder as the home computer, two hand-offs naming none
 /// reach the chat's one session there (`home_sessions`); a guest's turn
@@ -190,6 +201,11 @@ fn hand_offs(s: &mut Suite, api: &Api, (owner, owner_cli): (&Keys, &Path), (buil
     anyhow::ensure!(s.eventually(wait, || agent_of().is_some() && listening() == 1), "the owner's agent joins the chat and listens");
     let agent = agent_of().unwrap_or_default();
     let from_agent = |start: &str| chat_records(api, owner, &chat).into_iter().find(|r| r["principal"] == agent.as_str() && r["body"]["text"].as_str().is_some_and(|t| t.starts_with(start)));
+    // a computer's answer: its post under a hand-off's turn on `computer` (a fragment)
+    let from_computer = |on: &str, text: &str| {
+        let turn = format!("hand-off:{on}:");
+        chat_records(api, owner, &chat).into_iter().find(|r| r["principal"] != agent.as_str() && r["body"]["turn"].as_str().is_some_and(|t| t.starts_with(&turn)) && r["body"]["text"] == text)
+    };
     let canonical = |name: &str| api.status(owner, name).ok().and_then(|r| r.body["urls"]["canonical"].as_str().map(str::to_string)).unwrap_or_default();
 
     // light work, itself: a todo added through the list's operation
@@ -219,37 +235,35 @@ fn hand_offs(s: &mut Suite, api: &Api, (owner, owner_cli): (&Keys, &Path), (buil
         json!(tools),
     );
 
-    // building, handed off: a throwaway builder runs goose; the chat gets
-    // the URL; the throwaway goes, what it built stays
+    // building, handed off: a throwaway builder runs goose, whose computer
+    // answers in the chat; the throwaway goes, what it built stays
     let label = s.name("ho-built");
     let built = format!("{label}.{username}");
     s.openrouter.clear_script();
+    s.openrouter.script_agent(&[Reply::Tools(vec![(HAND_OFF.into(), json!({ "task": format!("Make a page that says built on a throwaway, as the fragment {label}.") }))])]);
     s.openrouter.script(&[
-        Reply::Tools(vec![(HAND_OFF.into(), json!({ "task": format!("Make a page that says built on a throwaway, as the fragment {label}.") }))]),
-        Reply::Text("On it: a computer is building it.".into()),
         Reply::Tools(vec![("shell".into(), json!({ "command": builds(&label, "built on a throwaway") }))]),
         Reply::Text("Built it and deployed it live.".into()),
     ]);
     let deleted = s.sprites.deleted().len();
     say(api, owner, &chat, "h2", "build me a page that says built on a throwaway")?;
-    let on_it = s.eventually(wait, || from_agent("On it").is_some());
+    let on_it = s.eventually(wait, || from_agent("On its way: handoff-").is_some());
     let mut throwaway = String::new();
     s.eventually(wait, || {
         throwaway = owned(api, owner, "handoff-").pop().unwrap_or_default();
         !throwaway.is_empty()
     });
     s.ok(
-        "asked to build, the agent hands off to a throwaway (a private builder of the owner's) and its turn ends at once, saying so",
+        "asked to build, the agent hands off to a throwaway (a private builder of the owner's) and its turn ends at once, the platform saying so",
         on_it && fragment_core::tools::is_throwaway(&throwaway) && api.status(owner, &throwaway).is_ok_and(|r| r.body["visibility"] == "members"),
         json!({ "throwaway": throwaway, "chat": chat_records(api, owner, &chat) }),
     );
-    let result = s.eventually(long, || from_agent("Done: ").is_some());
-    let said = from_agent("Done: ").map(|r| r["body"]["text"].as_str().unwrap_or("").to_string()).unwrap_or_default();
+    let result = s.eventually(long, || from_computer(&throwaway, "Built it and deployed it live.").is_some());
     let url = canonical(&built);
     s.ok(
-        "a throwaway builder runs goose, and the chat gets the built URL and what goose said, without being asked again",
-        result && !url.is_empty() && said.starts_with(&format!("Done: {url}")) && said.contains("Built it and deployed it live."),
-        json!({ "said": said, "url": url }),
+        "a throwaway builder runs goose, and its computer posts goose's answer in the chat under the hand-off's turn, without being asked again",
+        result && !url.is_empty(),
+        json!({ "chat": chat_records(api, owner, &chat), "url": url }),
     );
     let page = api.status(owner, &built).ok().and_then(|r| r.body["viewToken"].as_str().map(str::to_string)).unwrap_or_default();
     let page = api.page(&built, &format!("?view={page}"), None)?;
@@ -263,25 +277,24 @@ fn hand_offs(s: &mut Suite, api: &Api, (owner, owner_cli): (&Keys, &Path), (buil
         json!({ "throwaway": api.status(owner, &throwaway)?.status, "deleted": s.sprites.deleted(), "computers": computers(), "page": page.status }),
     );
     let v = view(&agents, owner, &format!("agent.{username}"));
-    let kept = v["messages"].as_array().into_iter().flatten().any(|m| m["role"] == "assistant" && m["text"].as_str().is_some_and(|t| t.starts_with("Done: ")));
-    s.ok("the result is in the chat's conversation, for the turns after, and nothing is left to watch", kept && v["handoffs"] == json!([]), json!(v["handoffs"]));
+    let kept = notes(&v, &throwaway).iter().any(|t| t.contains(&format!("It built {url}.")) && t.contains("The computer said: Built it and deployed it live."));
+    s.ok("the result is in the chat's conversation as a note, with the URL, for the turns after, and nothing is left to watch", kept && v["handoffs"] == json!([]), json!(notes(&v, &throwaway)));
 
     // handed to a named computer: the builder above does it, and stays
     let label = s.name("ho-named");
     s.openrouter.clear_script();
+    s.openrouter.script_agent(&[Reply::Tools(vec![(
+        HAND_OFF.into(),
+        json!({ "task": format!("Make a page that says built on my builder, as the fragment {label}."), "computer": builder }),
+    )])]);
     s.openrouter.script(&[
-        Reply::Tools(vec![(HAND_OFF.into(), json!({ "task": format!("Make a page that says built on my builder, as the fragment {label}."), "computer": builder }))]),
-        Reply::Text("On it, on your builder.".into()),
         Reply::Tools(vec![("shell".into(), json!({ "command": builds(&label, "built on my builder") }))]),
         Reply::Text("Built it on the builder.".into()),
     ]);
     let (sprites, deleted) = (s.sprites.sprites().len(), s.sprites.deleted().len());
     say(api, owner, &chat, "h3", &format!("build it on {builder}"))?;
     let named = format!("{label}.{username}");
-    let result = s.eventually(long, || {
-        let url = canonical(&named);
-        !url.is_empty() && from_agent(&format!("Done: {url}")).is_some()
-    });
+    let result = s.eventually(long, || !canonical(&named).is_empty() && from_computer(builder, "Built it on the builder.").is_some_and(|r| r["principal"] == computer));
     s.ok(
         "handed to a named computer (the builder above), the work runs there, and that computer stays",
         result && s.sprites.sprites().len() == sprites && s.sprites.deleted().len() == deleted && api.status(owner, builder).is_ok_and(|r| r.status == 200),
@@ -319,8 +332,14 @@ fn hand_offs(s: &mut Suite, api: &Api, (owner, owner_cli): (&Keys, &Path), (buil
 /// the first's last request is its prefix, message for message, under the same
 /// `session_id` (nothing between goose and the model edits a request).
 /// Each step is posted in the chat's `work` by the computer, which the
-/// hand-off made an editor there, under the hand-off's turn, which the
-/// answer names too.
+/// hand-off made an editor there, under the hand-off's turn, and so is its
+/// answer, on `chat`. No invented result (Paul's chat, 2026-09-27: the
+/// agent said "on its way", then "The computer is done." and a made-up
+/// answer): the agent's model is scripted to write one after each
+/// hand-off, and the second is a follow-up with the first's result in its
+/// history; each turn ends on the platform's acknowledgement, the model
+/// never asked again, and the agent's conversation holds each result as a
+/// note, input its model reads, never as its own text.
 fn home_sessions(s: &mut Suite, api: &Api, (owner, owner_cli): (&Keys, &Path), chat: &str, (builder, computer, builder_home): (&str, &str, &Path)) -> Result<()> {
     let agents = s.agents()?;
     let username = api.username(owner)?;
@@ -334,22 +353,30 @@ fn home_sessions(s: &mut Suite, api: &Api, (owner, owner_cli): (&Keys, &Path), c
         format!("{set:?} / {}", v["home"]),
     );
     let canonical = |name: &str| api.status(owner, name).ok().and_then(|r| r.body["urls"]["canonical"].as_str().map(str::to_string)).unwrap_or_default();
-    let answered = |url: &str| chat_records(api, owner, chat).into_iter().find(|r| r["body"]["text"].as_str().is_some_and(|t| url.len() > 8 && t.starts_with(&format!("Done: {url}"))));
+    // the computer's answer: its post under one of its hand-offs' turns
+    let answered = |text: &str| {
+        let turn = format!("hand-off:{builder}:");
+        chat_records(api, owner, chat).into_iter().find(|r| r["principal"] == computer && r["body"]["turn"].as_str().is_some_and(|t| t.starts_with(&turn)) && r["body"]["text"] == text)
+    };
+    let me = v["id"].as_str().unwrap_or("").to_string();
+    let agent_said = || -> Vec<String> { chat_records(api, owner, chat).into_iter().filter(|r| r["principal"] == me.as_str()).filter_map(|r| r["body"]["text"].as_str().map(str::to_string)).collect() };
     let build_runs = || api.signed(owner, "GET", &format!("/api/f/{builder}/runs?op=build"), None).map_or(0, |r| r.body["runs"].as_array().map_or(0, Vec::len));
     let (sprites, runs, asked) = (s.sprites.sprites().len(), build_runs(), s.openrouter.chats().len());
-    let mut done = vec![];
+    let (mut done, mut acks, mut asks) = (vec![], vec![], vec![]);
     for (n, (text, task)) in [("first at home", "Make a page that says first at home, as the fragment {label}."), ("second at home", "Make {label} too: a page that says second at home.")].into_iter().enumerate() {
         let label = s.name(&format!("ho-home{n}"));
         s.openrouter.clear_script();
-        s.openrouter.script(&[
-            Reply::Tools(vec![(HAND_OFF.into(), json!({ "task": task.replace("{label}", &label) }))]),
-            Reply::Text("On it, at home.".into()),
-            Reply::Tools(vec![("shell".into(), json!({ "command": builds(&label, text) }))]),
-            Reply::Text(format!("Built {text}.")),
-        ]);
+        // the agent's model hands off, then, if asked again, invents the result
+        s.openrouter.script_agent(&[Reply::Tools(vec![(HAND_OFF.into(), json!({ "task": task.replace("{label}", &label) }))]), Reply::Text(INVENTED.into())]);
+        s.openrouter.script(&[Reply::Tools(vec![("shell".into(), json!({ "command": builds(&label, text) }))]), Reply::Text(format!("Built {text}."))]);
+        let (before, from) = (agent_said().len(), s.openrouter.chats().len());
         say(api, owner, chat, &format!("hh{n}"), &format!("build {text}"))?;
-        let name = format!("{label}.{username}");
-        done.push(s.eventually(Duration::from_secs(150), || answered(&canonical(&name)).is_some()) && answered(&canonical(&name)).is_some());
+        let (name, built) = (format!("{label}.{username}"), format!("Built {text}."));
+        done.push(s.eventually(Duration::from_secs(150), || answered(&built).is_some() && !canonical(&name).is_empty()));
+        // its result reaches the agent's conversation (the alarm's next look) before the follow-up is asked
+        done.push(s.eventually(Duration::from_secs(30), || notes(&view(&agents, owner, &agent), builder).iter().any(|t| t.contains(&built))));
+        acks.extend(agent_said().into_iter().skip(before));
+        asks.push(s.openrouter.chats().into_iter().skip(from).filter(|c| c["session_id"].is_null()).count());
     }
     // goose's requests (its own carry a session_id): the first's last, and the second's first
     let chats: Vec<Value> = s.openrouter.chats().into_iter().skip(asked).filter(|c| c["session_id"].is_string()).collect();
@@ -359,7 +386,7 @@ fn home_sessions(s: &mut Suite, api: &Api, (owner, owner_cli): (&Keys, &Path), c
     let session = std::fs::read_to_string(builder_home.join(format!(".fragment/agent/sessions/{chat}/chat"))).unwrap_or_default();
     s.ok(
         "two hand-offs from one chat, naming no computer, go to the home computer (no new one) and its chat's one session there",
-        done == [true, true] && build_runs() == runs + 2 && s.sprites.sprites().len() == sprites && !session.is_empty(),
+        done == [true; 4] && build_runs() == runs + 2 && s.sprites.sprites().len() == sprites && !session.is_empty(),
         json!({ "done": done, "runs": build_runs() - runs, "session": session }),
     );
     let (first, second) = (first.cloned().unwrap_or_default(), second.cloned().unwrap_or_default());
@@ -370,7 +397,26 @@ fn home_sessions(s: &mut Suite, api: &Api, (owner, owner_cli): (&Keys, &Path), c
         prefix && first["session_id"] == session.as_str() && second["session_id"] == session.as_str(),
         json!({ "first": a.len(), "second": b.len(), "sessions": [first["session_id"], second["session_id"], session] }),
     );
-    // its steps, in the chat, as the computer, under the hand-off's turn the answer names
+    // the agent's side: its replies, what its model was told, what it keeps
+    let ack = format!("On its way: {builder} has it, and its answer will show up here when it's done.");
+    let told: Vec<Value> = s.openrouter.chats().into_iter().skip(asked).filter(|c| c["session_id"].is_null()).collect();
+    let holds = |c: &Value, role: &str, what: &str| c["messages"].as_array().into_iter().flatten().any(|m| m["role"] == role && m["content"].to_string().contains(what));
+    let knew = told.get(1).is_some_and(|c| holds(c, "user", "Built first at home.") && !holds(c, "assistant", "Built first at home."));
+    let invented = chat_records(api, owner, chat).iter().any(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("1908")));
+    s.ok(
+        "a follow-up, with a finished hand-off in the agent's history, hands off again: each reply is the platform's acknowledgement, the model (scripted to invent a result after the call) never asked again, nothing invented said",
+        acks == [ack.clone(), ack] && asks == [1, 1] && knew && !invented,
+        json!({ "acks": acks, "asks": asks, "knew": knew, "invented": invented }),
+    );
+    let v = view(&agents, owner, &agent);
+    let own = |m: &&Value| m["role"] == "assistant" && m["text"].as_str().is_some_and(|t| t.contains("at home.") || t.contains("The computer is done"));
+    let kept = ["first at home", "second at home"].map(|t| notes(&v, builder).iter().any(|n| n.contains("\nTask: Make") && n.contains(&format!("The computer said: Built {t}."))));
+    s.ok(
+        "the computer's answers are its own posts, none the agent's; the agent's conversation holds each result as a note naming the task, input its model reads, never as its own text",
+        kept == [true, true] && !v["messages"].as_array().into_iter().flatten().any(|m| own(&m)) && !agent_said().iter().any(|t| t.contains("at home.")),
+        json!({ "notes": notes(&v, builder), "agent said": agent_said() }),
+    );
+    // its steps, in the chat, as the computer, under the hand-off's turn its answer names
     let records = chat_records(api, owner, chat);
     let turn = records.iter().rev().find_map(|r| r["body"]["turn"].as_str().filter(|t| t.starts_with(&format!("hand-off:{builder}:"))).map(str::to_string)).unwrap_or_default();
     let work = api.signed(owner, "GET", &format!("/api/f/{chat}/channels/work"), None)?;

@@ -531,8 +531,9 @@ A person's agent builds nothing in its cell (Paul, 2026-09-27; docs/api.md,
 Agents, Hand-offs). It answers questions and makes a few calls on your
 fragments itself (a todo added, a list read); anything longer it hands to
 a computer's hands with `platform__hand_off({task, computer?,
-throwaway?})`, in your own turns only, and its turn ends saying the work
-is on its way.
+throwaway?})`, in your own turns only, and its turn ends there: the
+platform says the work is on its way, and the agent's model is not asked
+again, so it cannot make up a result it has not received.
 
 - **Your home computer, by default**: `fragment agent home agent.<you>
   <computer>`, once, names one of your fragments whose job `do` (or
@@ -551,10 +552,13 @@ is on its way.
   agent delete it.
 
 The computer is made an editor of the chat, and posts each step there as
-your computer; the agent's alarm watches the run, and its result
-(`Done: <url>`, and what goose said) lands in the chat that asked, under
-the steps, with no one asking again. A throwaway costs what any computer
-does: its boot, and its awake time while the build runs, on your budget.
+your computer, then goose's answer, under the steps, with no one asking
+again. The agent's alarm watches the run, and its result reaches the
+agent's conversation as a note (the task, what the computer said, a
+build's URL), so later questions can build on it; the agent says in the
+chat only what the computer could not (a run that failed). A throwaway
+costs what any computer does: its boot, and its awake time while the
+build runs, on your budget.
 
 ## Next
 
