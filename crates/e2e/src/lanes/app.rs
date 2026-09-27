@@ -115,6 +115,15 @@ pub fn ops(s: &mut Suite, api: &Api) -> Result<()> {
     s.deploy(&c);
     let r = api.op(&owner, &name, "list", "q3", json!({}))?;
     s.ok("a live commit without app.mjs has no operations", r.status == 404 && r.error() == "no_code", &r);
+    // a name deleted with app data and made again starts from an empty app:
+    // under celld v0.6.0 the app's database is a stream of its own under the
+    // fragment's cell, and one left behind refuses the new one ("used epoch")
+    let r = api.signed(&owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    s.ok("a fragment with app data is deleted", r.status == 200, &r);
+    let again = s.create(api, &owner, &name)?;
+    ship(s, &again, TODO_APP, TODO_JSON);
+    let r = api.op(&owner, &name, "add_todo", "again", json!({ "text": "again" }))?;
+    s.ok("made again under the same name, its app writes, starting from nothing", r.status == 200 && count(api, &owner, &name) == 1, &r);
     Ok(())
 }
 

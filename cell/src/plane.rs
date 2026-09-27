@@ -328,7 +328,7 @@ impl FragmentCell {
             self.want_computer(None, None)?;
             self.del_meta(MetaKey::CodeError)?;
             self.set_agent_live(None)?;
-            js::abort_app_facet(&self.raw, "live is gone")?;
+            js::abort_app_facet(&self.raw, &self.app_facet()?, "live is gone")?;
             return Ok(());
         };
         let cs = self.cs()?;
@@ -363,7 +363,7 @@ impl FragmentCell {
             store_installed(&self.sql(), &Installed { operations: &BTreeMap::new(), channels: &manifest.channels, triggers: &[] })?;
             self.sync_schedules(&[])?;
             self.del_meta(MetaKey::CodeError)?;
-            js::abort_app_facet(&self.raw, "live has no app.mjs")?;
+            js::abort_app_facet(&self.raw, &self.app_facet()?, "live has no app.mjs")?;
             let summary = format!("live {} has no app.mjs ({} channels)", short(Some(sha)), manifest.channels.len());
             self.event("code.none", &summary, json!({ "sha": sha, "channels": manifest.channels.keys().collect::<Vec<_>>() }));
             return Ok(());
@@ -436,7 +436,7 @@ impl FragmentCell {
         self.sync_schedules(&manifest.triggers)?;
         self.forget_undeclared_pauses()?;
         self.del_meta(MetaKey::CodeError)?;
-        js::abort_app_facet(&self.raw, "new code from live")?;
+        js::abort_app_facet(&self.raw, &self.app_facet()?, "new code from live")?;
         self.event(
             "code.installed",
             &format!(

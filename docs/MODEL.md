@@ -42,7 +42,7 @@ mechanism names the celld primitive it uses; read with the celld docs
 | Part | celld primitive | Holds |
 |---|---|---|
 | Supervisor | a Durable Object (`Fragment`), platform code in Rust | members, invites, the audit copy of the operation ledger, channels, schedules, wrapped secrets, the file-plane pins and tree index, the live code pin |
-| App | a **Durable Object Facet** named `app`, started through the **Worker Loader** at `live@SHA` from `platform.js` (platform code) wrapping the author's `App` class | the author's SQLite database (`this.ctx.storage.sql`), which the supervisor's tables never share, and the mutation ledger `_fragment_ops` beside it |
+| App | a **Durable Object Facet** named `app@<incarnation>` (each life of a fragment's name has its own; `app` for fragments made before 2026-09-27), started through the **Worker Loader** at `live@SHA` from `platform.js` (platform code) wrapping the author's `App` class | the author's SQLite database (`this.ctx.storage.sql`), which the supervisor's tables never share, and the mutation ledger `_fragment_ops` beside it |
 | Files | code.storage git (wire contract unchanged) | every file; one of 1 MiB or more as a pointer to its blob |
 | Blobs | celld's **R2** binding, which stores objects in the fleet bucket (Tigris) under `r2/<bucket>/`; no Cloudflare R2 | the bytes of large files, content-addressed by SHA-256; only blobs a pointer at a branch tip references are kept |
 | Jobs | **Workflows** (each instance is a cell) | multi-step or long operations, and agent turns |
@@ -335,7 +335,7 @@ the spike and its handoff are on branch `spike/goose-agent`,
 ## Answered (2026-09-23)
 
 - **Authoring shape:** one `app.mjs` whose exported `App` class (a
-  Durable Object class the supervisor starts as the `app` facet) has one
+  Durable Object class the supervisor starts as the app facet) has one
   method per operation, plus an optional `fetch` for custom routes.
 - **Anonymous callers:** public fragments are websites; anonymous
   visitors may read and write through `public`-role operations, with an
