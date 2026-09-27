@@ -391,13 +391,18 @@ impl Suite {
 
     /// Runs the CLI with its own HOME against the node.
     pub fn cli(&self, api: &Api, home: &Path, args: &[&str]) -> Output {
-        Command::new(&self.cli)
-            .args(args)
-            .env("HOME", home)
-            .env("FRAGMENT_HOST", &api.base)
-            .env_remove("FRAGMENT_OUTPUT")
-            .output()
-            .expect("run the fragment CLI")
+        self.cli_command(api, home, args).output().expect("run the fragment CLI")
+    }
+
+    /// `cli`, run in `cwd` (where `fragment init` makes its folder).
+    pub fn cli_in(&self, api: &Api, home: &Path, cwd: &Path, args: &[&str]) -> Output {
+        self.cli_command(api, home, args).current_dir(cwd).output().expect("run the fragment CLI")
+    }
+
+    fn cli_command(&self, api: &Api, home: &Path, args: &[&str]) -> Command {
+        let mut c = Command::new(&self.cli);
+        c.args(args).env("HOME", home).env("FRAGMENT_HOST", &api.base).env_remove("FRAGMENT_OUTPUT");
+        c
     }
 
     /// `fragment login` in `home`, with a person approving its key in a

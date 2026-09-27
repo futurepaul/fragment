@@ -39,7 +39,7 @@ fn listening(api: &Api, owner: &Keys, name: &str) -> Vec<(String, String)> {
     subs.as_array().into_iter().flatten().map(|s| (s["principal"].as_str().unwrap_or("").to_string(), s["channel"].as_str().unwrap_or("").to_string())).collect()
 }
 
-fn events(api: &Api, owner: &Keys, name: &str, kind: &str) -> usize {
+pub(super) fn events(api: &Api, owner: &Keys, name: &str, kind: &str) -> usize {
     let r = api.signed(owner, "GET", &format!("/api/f/{name}/events?tail=200"), None);
     r.map_or(0, |r| r.body["events"].as_array().into_iter().flatten().filter(|e| e["kind"] == kind).count())
 }

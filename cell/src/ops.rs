@@ -420,11 +420,12 @@ impl FragmentCell {
                 }
                 json!({ "aged": ms })
             }
-            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects")) => {
+            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "fail-join" | "drop-effects")) => {
                 let key = match lever {
                     "fail-deliveries" => MetaKey::TestFailDeliveries,
                     "fail-outbox" => MetaKey::TestFailOutbox,
                     "fail-triggers" => MetaKey::TestFailTriggers,
+                    "fail-join" => MetaKey::TestFailJoin,
                     _ => MetaKey::TestDropEffects,
                 };
                 let times = body["times"].as_u64().ok_or_else(|| CellError::invalid(format!("{lever} names how many times")))?;
