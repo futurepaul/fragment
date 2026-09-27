@@ -37,6 +37,8 @@ use crate::Suite;
 pub(super) use fragment_core::computer::GOOSE_VERSION;
 /// The Cua Driver the pet pins (templates/pet/app.mjs).
 pub(super) const CUA_VERSION: &str = "0.28.3";
+/// The Cua Driver tools the pet's goose config names (its `TOOLS`).
+pub(super) const CUA_TOOLS: [&str; 8] = ["launch_app", "list_windows", "get_window_state", "click", "type_text", "press_key", "hotkey", "scroll"];
 /// A 1×1 PNG, the stand-in Cua Driver's screenshot.
 pub(super) const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 
@@ -464,8 +466,9 @@ fn files_containing(dir: &Path, needles: &[String]) -> Vec<String> {
 /// goose's environment. As goose does, a session keeps the extensions its
 /// config enabled when it was made, and a load keeps them; goose's ACP
 /// methods list the config's and a session's (a stdio one's `envs` left
-/// out), and add or remove a session's (one with an inline env refused),
-/// each counted in the session's `changes`. Each tool call is a
+/// out), and add (replacing a same-named one; one with an inline env
+/// refused) or remove a session's, each counted in the session's
+/// `changes`, and list the tools the model is offered. Each tool call is a
 /// `tool_call` update, then a `tool_call_update` once it ran (an image as
 /// goose's OpenAI format adds it, a user message after the result); the
 /// model's text is an `agent_message_chunk`.
@@ -548,6 +551,12 @@ fn acp(stream: std::net::TcpStream, secret: &str, sessions: &std::sync::Mutex<()
             "_goose/unstable/session/extensions/list" => {
                 let entries = store.0["sessions"][&id]["extensions"].as_array().into_iter().flatten().map(|x| json!({ "extension": said(x), "extensionKey": x["name"] }));
                 Ok(json!({ "extensions": entries.collect::<Vec<_>>() }))
+            }
+            "_goose/unstable/tools/list" => {
+                let (_, tools) = session_tools(&store.0["sessions"][&id]["extensions"])?;
+                let mut tools: Vec<Value> = tools.iter().map(|t| json!({ "name": t["function"]["name"], "description": t["function"]["description"], "inputSchema": t["function"]["parameters"] })).collect();
+                tools.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+                Ok(json!({ "tools": tools }))
             }
             "_goose/unstable/session/extensions/add" | "_goose/unstable/session/extensions/remove" => {
                 let session = &mut store.0["sessions"][&id];
@@ -648,12 +657,9 @@ fn added(e: &Value) -> std::result::Result<Value, String> {
     }
 }
 
-/// One prompt in a session: the model asked with its whole history, each
-/// tool call run and said, until it answers without one (at most 10
-/// rounds). The history after, and why it stopped.
-fn prompt<S: std::io::Read + Write>(ws: &mut tungstenite::WebSocket<S>, session: &str, extensions: &Value, mut history: Vec<Value>, text: &str) -> Result<(Vec<Value>, &'static str)> {
-    let mut update = |u: Value| ws.send(tungstenite::Message::text(json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": session, "update": u } }).to_string()));
-    let env = |k: &str| std::env::var(k).with_context(|| k.to_string());
+/// A session's tools as goose offers them, with its stdio MCP servers,
+/// running: a `shell` (its built-in `developer`) and those servers' own.
+fn session_tools(extensions: &Value) -> Result<(Vec<Mcp>, Vec<Value>)> {
     let extensions = extensions.as_array().map(Vec::as_slice).unwrap_or_default();
     let mut servers = Mcp::start(extensions)?;
     let shell = json!({ "type": "function", "function": {
@@ -663,6 +669,16 @@ fn prompt<S: std::io::Read + Write>(ws: &mut tungstenite::WebSocket<S>, session:
     for server in &mut servers {
         tools.extend(server.tools()?);
     }
+    Ok((servers, tools))
+}
+
+/// One prompt in a session: the model asked with its whole history, each
+/// tool call run and said, until it answers without one (at most 10
+/// rounds). The history after, and why it stopped.
+fn prompt<S: std::io::Read + Write>(ws: &mut tungstenite::WebSocket<S>, session: &str, extensions: &Value, mut history: Vec<Value>, text: &str) -> Result<(Vec<Value>, &'static str)> {
+    let mut update = |u: Value| ws.send(tungstenite::Message::text(json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": session, "update": u } }).to_string()));
+    let env = |k: &str| std::env::var(k).with_context(|| k.to_string());
+    let (mut servers, tools) = session_tools(extensions)?;
     let http = reqwest::blocking::Client::builder().timeout(Duration::from_secs(150)).build()?;
     history.push(json!({ "role": "user", "content": text }));
     for _ in 0..10 {
@@ -772,10 +788,10 @@ impl Mcp {
 }
 
 /// A stand-in for Cua Driver's CLI: `--version`, and `mcp`, a stdio MCP
-/// server with four tools: `get_window_state` answers a PNG, `click` says
-/// where it clicked and on which display (`$DISPLAY`), and
-/// `get_desktop_state` and `start_recording`, which the pet's goose config
-/// leaves out.
+/// server with the eight tools the pet's goose config names
+/// (`get_window_state` answers a PNG, `click` says where it clicked and on
+/// which display, `$DISPLAY`; the others only listed), and
+/// `get_desktop_state` and `start_recording`, which it leaves out.
 pub fn stand_in_cua(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("--version") => {
@@ -787,7 +803,7 @@ pub fn stand_in_cua(args: &[String]) -> Result<()> {
     }
     let display = std::env::var("DISPLAY").unwrap_or_default();
     let tool = |name: &str| json!({ "name": name, "description": format!("the stand-in's {name}"), "inputSchema": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" } } } });
-    let tools: Vec<Value> = ["get_window_state", "click", "get_desktop_state", "start_recording"].into_iter().map(tool).collect();
+    let tools: Vec<Value> = CUA_TOOLS.into_iter().chain(["get_desktop_state", "start_recording"]).map(tool).collect();
     let mut out = std::io::stdout();
     for line in std::io::stdin().lines() {
         let ask: Value = serde_json::from_str(&line?)?;

@@ -12,7 +12,7 @@ use fragment_nip98::Keys;
 use fragment_proto::ErrorCode;
 use serde_json::{json, Value};
 
-use super::builder::{stand_in, CUA_VERSION, PNG};
+use super::builder::{stand_in, CUA_TOOLS, CUA_VERSION, PNG};
 use super::jobs::{settle, started};
 use super::signin::{site_cookie, with_session};
 use crate::api::{url_enc, Api, Call, Reply, Socket};
@@ -493,12 +493,22 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
     anyhow::ensure!(top.status == 200, "topping up the owner's month: {top}");
 
     // a session made before the hands' tools changed: the pet's own, when
-    // its goose config named Cua Driver alone (as before the browser), its
-    // display in `envs`; the task client run by hand, as `do` runs it
+    // its goose config named Cua Driver alone, as it does now but for its
+    // tools (get_desktop_state, not launch_app: before the browser), and no
+    // browser; the task client run by hand, as `do` runs it
     let cua = home.join(format!(".local/share/cua-driver-{CUA_VERSION}/cua-driver"));
-    let old = json!({ "extensions": { "cua": { "enabled": true, "type": "stdio", "name": "cua", "cmd": cua, "args": ["mcp"], "timeout": 120, "available_tools": ["get_desktop_state", "click"], "envs": { "DISPLAY": ":99" } } } });
+    let bus = format!("DBUS_SESSION_BUS_ADDRESS=unix:path={}", home.join(".pet/bus").display());
+    let args = json!(["DISPLAY=:99", bus, "CUA_DRIVER_RS_TELEMETRY_ENABLED=false", "CUA_DRIVER_RS_UPDATE_CHECK=false", cua, "mcp"]);
+    let then_tools = ["get_desktop_state", "get_window_state", "list_windows", "click", "type_text", "press_key", "hotkey", "scroll"];
+    let old = json!({ "enabled": true, "type": "stdio", "name": "cua", "description": "desktop apps on the pet's screen", "cmd": "/usr/bin/env", "args": args, "timeout": 120, "available_tools": then_tools });
     std::fs::create_dir_all(home.join(".config/goose"))?;
-    std::fs::write(home.join(".config/goose/config.yaml"), old.to_string())?;
+    std::fs::write(home.join(".config/goose/config.yaml"), json!({ "extensions": { "cua": old } }).to_string())?;
+    // what the task client said of a session's tools, in hands.log
+    let refreshed = || -> Vec<String> {
+        let log = std::fs::read_to_string(home.join(".fragment/agent/hands.log")).unwrap_or_default();
+        log.lines().filter_map(|l| l.strip_prefix("[task] ")?.split_once(' ').map(|(_, said)| said.to_string())).collect()
+    };
+    let named = |prefix: &str, tools: &[&str]| tools.iter().map(|t| format!("{prefix}__{t}")).collect::<Vec<_>>();
     let hello = |openrouter: &fragment_fakes::openrouter::OpenRouter, id: &str| -> Result<(Value, Value)> {
         openrouter.clear_script();
         openrouter.script(&[Say::Text("Hello.".into())]);
@@ -507,17 +517,24 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
         let ran = settle(api, owner, &name, started(&r), &["succeeded", "held"], Duration::from_secs(60));
         Ok((ran, openrouter.chats().into_iter().nth(before).unwrap_or_default()))
     };
-    let tools_of = |c: &Value| -> Vec<String> { c["tools"].as_array().into_iter().flatten().filter_map(|t| t["function"]["name"].as_str()).map(str::to_string).collect() };
+    let tools_of = |c: &Value| -> Vec<String> {
+        let mut tools: Vec<String> = c["tools"].as_array().into_iter().flatten().filter_map(|t| t["function"]["name"].as_str()).map(str::to_string).collect();
+        tools.sort();
+        tools
+    };
     let (ran, then) = hello(&s.openrouter, "r3")?;
     let session = then["session_id"].as_str().unwrap_or_default().to_string();
     let changes = || {
         let store = std::fs::read_to_string(home.join(".local/share/goose/sessions/stand-in.json")).unwrap_or_default();
         serde_json::from_str::<Value>(&store).unwrap_or_default()["sessions"][&session]["changes"].clone()
     };
+    let mut had = named("cua", &then_tools);
+    had.push("shell".into());
+    had.sort();
     s.ok(
         "a session made before a tool change has the tools of then: its shell and those Cua Driver's config named",
-        ran["output"]["code"] == 0 && tools_of(&then) == ["shell", "cua__click", "cua__get_desktop_state"] && !session.is_empty() && changes() == 0,
-        json!({ "run": ran, "tools": tools_of(&then) }),
+        ran["output"]["code"] == 0 && tools_of(&then) == had && !session.is_empty() && changes() == 0 && refreshed().is_empty(),
+        json!({ "run": ran, "tools": tools_of(&then), "hands.log": refreshed() }),
     );
 
     let said = "Milk is $3.49; I put it in the todo box and clicked the app.";
@@ -548,24 +565,31 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
     );
     let chats: Vec<Value> = s.openrouter.chats().into_iter().skip(before).collect();
     let (goose, stagehand): (Vec<&Value>, Vec<&Value>) = chats.iter().partition(|c| c["stream"] == true);
-    let mut offered = goose.first().map(|c| tools_of(c)).unwrap_or_default();
-    offered.sort();
-    let tools = ["browser__act", "browser__extract", "browser__observe", "browser__open", "browser__screenshot", "cua__click", "cua__get_window_state", "shell"];
+    let offered = goose.first().map(|c| tools_of(c)).unwrap_or_default();
+    let mut tools = [named("browser", &["act", "extract", "observe", "open", "screenshot"]), named("cua", &CUA_TOOLS), vec!["shell".into()]].concat();
+    tools.sort();
     s.ok(
-        "goose's model calls went through the platform, on the hands' model (flashx), offered its shell, the browser's tools, and the Cua Driver tools for desktop apps its config names",
+        "goose's model calls went through the platform, on the hands' model (flashx), offered its shell, the browser's five tools, and the eight Cua Driver tools for desktop apps its config names",
         goose.len() == 7 && goose.iter().all(|c| c["model"] == "z-ai/glm-5.3-flashx") && offered == tools,
         json!(offered),
     );
+    let config: Value = serde_json::from_str(&std::fs::read_to_string(home.join(".config/goose/config.yaml")).unwrap_or_default()).unwrap_or_default();
+    let but_tools = |x: &Value| -> Value { x.as_object().into_iter().flatten().filter(|(k, _)| *k != "available_tools").map(|(k, v)| (k.clone(), v.clone())).collect() };
+    let said_so = format!("{name}/work session {session}: browser added, cua replaced; goose offers the configured tools");
     s.ok(
-        "in the session made before the tool change, now with the config's tools: Cua Driver's replaced (its display in its command now), the browser's added, the shell kept",
-        goose.iter().all(|c| c["session_id"] == session.as_str()) && changes() == 3,
-        json!({ "session": session, "changes": changes() }),
+        "in the session made before the tool change, now with the config's tools: Cua Driver's replaced (the same definition but for its tools), the browser's added, the shell kept, and hands.log names what changed",
+        goose.iter().all(|c| c["session_id"] == session.as_str())
+            && changes() == 2
+            && but_tools(&config["extensions"]["cua"]) == but_tools(&old)
+            && config["extensions"]["cua"]["available_tools"] == json!(CUA_TOOLS)
+            && refreshed() == [said_so.clone()],
+        json!({ "session": session, "changes": changes(), "config": config, "hands.log": refreshed() }),
     );
     let (ran, again) = hello(&s.openrouter, "r4")?;
     s.ok(
-        "and its next task changes nothing: the same tools in the same order, so the prefix holds",
-        ran["output"]["code"] == 0 && again["session_id"] == session.as_str() && goose.first().is_some_and(|c| c["tools"] == again["tools"]) && changes() == 3,
-        json!({ "run": ran, "changes": changes() }),
+        "and its next task changes nothing: the same tools in the same order, so the prefix holds, and hands.log says nothing new",
+        ran["output"]["code"] == 0 && again["session_id"] == session.as_str() && goose.first().is_some_and(|c| c["tools"] == again["tools"]) && changes() == 2 && refreshed() == [said_so],
+        json!({ "run": ran, "changes": changes(), "hands.log": refreshed() }),
     );
     let text = |c: &Value| c.to_string();
     let (jev, flashx) = (fragment_proto::ROUTER_MODEL, "z-ai/glm-5.3-flashx");
@@ -669,7 +693,7 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
             && asked(&stagehand)
             && logged(from) == [(jev.to_string(), false), (flashx.to_string(), true), (jev.to_string(), true)]
             && turns.get(1).is_some_and(|c| text(c).contains("$3.49"))
-            && changes() == 3,
+            && changes() == 2,
         json!({ "run": done, "asked": stagehand, "log": log() }),
     );
     let usage = api.signed(owner, "GET", "/api/budget/usage", None)?;

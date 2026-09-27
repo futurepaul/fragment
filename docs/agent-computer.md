@@ -620,6 +620,62 @@ the screenshot: every Stagehand model call had failed (`browser.log`).
   check moved out of the server), task client +20/−1, e2e +233/−63, the
   unit test +50, the fake +6/−1, docs.
 
+**Session tools refresh** (after the browser fixes deployed,
+2026-09-27). On Paul's pet a new chat's session used Stagehand (`open`,
+`extract`: 2 of 2 calls ok, 1.5 s each), but his older chat, its session
+from before slice 2, given a web task, still used Cua Driver's
+`get_desktop_state` and `hotkey` and never the browser.
+- **Not a name-only comparison.** The refresh already compared each
+  extension's whole definition as goose says it (command, args, tool
+  allowlist, timeout, description). goose v1.52.0's source agrees with
+  the e2e's stand-in: `…/session/extensions/add` restarts a same-named
+  extension whose definition differs and stores the session's new set.
+- **Most likely, the pet never ran the new task client** (not confirmed
+  there; its `hands.log` now says). The platform writes `task.mjs` at a
+  computer's sync, and a synced computer synced again only for a new
+  commit of its own fragment, `start`, goose, or CLI, not for a new task
+  client. A pet that synced its new template files before the platform
+  deploy that carried the refresh kept the old client, which has none:
+  the old tools, and no browser. Now what a computer synced names a
+  digest of the hands' service and task client, so a platform deploy
+  that changes either syncs each computer once (awake, at its next tick;
+  asleep, when it wakes), as a CLI bump does, `start` restarting too.
+- **And nothing could be seen.** A failed refresh was said on the task's
+  stderr, which a run shows only when goose said nothing. And the
+  refresh read only goose's stored list, which goose answers from the
+  config when it cannot read the session's own, so a session that runs
+  other tools looked current.
+- **Now**, before the prompt: each of the config's enabled MCP extensions
+  is added (goose restarts a same-named one on the new definition) when
+  the session's copy is not its whole definition, or when goose's tool
+  list for the session (`_goose/unstable/tools/list`, what the model is
+  sent) has none of its tools or one its allowlist leaves out; one no
+  longer configured is removed; built-ins stay. A replaced one is added
+  over, not removed first, so an add that fails leaves the old one. One
+  cache break per change; with nothing to change, the three lists are all
+  it asks. Each change is a line of `~/.fragment/agent/hands.log`, names
+  only, with whether goose then offers the configured tools:
+  `[task] <time> <chat> session <id>: browser added, cua replaced; goose
+  offers the configured tools`. A failure is a line there too (and on
+  stderr). goose says no extension's `envs`, so a change of those alone
+  is not seen: configs keep their environment in the command.
+- **The e2e** (`templates`): the stand-in Cua Driver lists the pet's
+  eight tools and two it leaves out, and the stand-in goose answers
+  `tools/list`. The session is made on the pet's Cua Driver definition
+  with the tools from before the browser (`get_desktop_state`, no
+  `launch_app`) and no browser; its next `do`, in the same session, is
+  offered exactly the shell, Cua Driver's eight, and the browser's five,
+  the config (checked) differing from the old only in the tool list, and
+  `hands.log` names the change; the task after changes nothing and logs
+  nothing.
+- **Size**: task client +40/−10, the sync's key +14/−5, e2e +72/−32,
+  docs.
+- **On the pet after this deploys**: it syncs once, and the older chat's
+  next task either logs `browser added, cua replaced` (the pet had run
+  the old client) or logs nothing: goose already offered the config's
+  tools, and the model called `get_desktop_state` from its history (that
+  step's `ok` says it failed).
+
 **What slice 2 leaves to the real pet**: Chrome's install and
 Stagehand's runtime loading there; per-call ms and cached share in
 `model.log` for a web task (a price found, added to a todo), with no

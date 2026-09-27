@@ -157,8 +157,12 @@ while it is asleep is synced when it next wakes: `start` cannot run while
 it sleeps anyway. Only awake time is billed (the seconds of a boot's sync
 are the boot's). Then the hands (below) are written, and their service
 made if it is not there (`exec::HANDS`). What a computer last synced
-names the hands' goose and the CLI too, so one synced before them, or with
-another goose or an older CLI, syncs again when it next wakes.
+names the hands' goose, the CLI, and which hands' service and task client
+(`exec::hands_digest`) too, so one synced before them, or with another
+goose, an older CLI, or other hands, syncs again at its next tick awake or
+when it next wakes: a platform deploy that changes the task client brings
+it to every computer (before 2026-09-27 only a deploy of the computer's
+own fragment did).
 
 **Its CLI stays current** (fragment.club, 2026-09-27: a pet's hands ran
 CLI 0.11.1's `model --serve`, which missed goose's model path, until they
@@ -243,10 +247,12 @@ task to it and waits; the pet's `do` and the builder's `build` do.
   chat's session id is kept in `sessions/<chat>`: the first task makes
   it (`session/new`, in `~/chats/<chat>`), each later one loads it
   (`session/load`), and one goose lost is made again. A loaded session's
-  MCP extensions are made the config's enabled ones where they differ
-  (goose's `_goose/unstable/…/extensions/list`, `add`, `remove`: one
-  cache break per tool change; an extension's `envs` do not carry over,
-  so a config puts them in its command). It sends
+  MCP extensions are made the config's enabled ones where they differ,
+  in their whole definition or in the tools goose offers the model
+  (goose's `_goose/unstable/…/extensions/list`, `add`, `remove`, and
+  `tools/list`: one cache break per tool change; each change a line of
+  `hands.log`; an extension's `envs` do not carry over, so a config puts
+  them in its command: docs/agent-computer.md). It sends
   `session/prompt`, and posts each tool call, once it ended, as a
   `turn.step` on the chat's `work` (`fragment post`, as the computer:
   docs/api.md, the chat template), trying a failed post again for a
