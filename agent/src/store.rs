@@ -77,7 +77,9 @@ CREATE TABLE IF NOT EXISTS shots (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, mime TEXT NOT NULL, data TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS handoffs (
   fragment TEXT NOT NULL, run INTEGER NOT NULL, conv TEXT NOT NULL, throwaway INTEGER NOT NULL,
-  started_at INTEGER NOT NULL, next_at INTEGER NOT NULL, said INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (fragment, run));
+  started_at INTEGER NOT NULL, next_at INTEGER NOT NULL, said INTEGER NOT NULL DEFAULT 0, granted INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (fragment, run));
+CREATE TABLE IF NOT EXISTS bound (conv TEXT PRIMARY KEY, computer TEXT NOT NULL, at INTEGER NOT NULL);
 ";
 
 /// Brings an agent made before conversations were kept apart up to the
@@ -92,6 +94,11 @@ pub fn migrate(sql: &SqlStorage) -> anyhow::Result<()> {
     let cols: Vec<Value> = ah(ah(sql.exec("PRAGMA table_info(pending)", None))?.to_array())?;
     if !cols.iter().any(|c| c["name"] == "kick") {
         ah(sql.exec("ALTER TABLE pending ADD COLUMN kick TEXT", None))?;
+    }
+    // a hand-off's computer is let post in its chat (handoff.rs `grant`)
+    let cols: Vec<Value> = ah(ah(sql.exec("PRAGMA table_info(handoffs)", None))?.to_array())?;
+    if !cols.iter().any(|c| c["name"] == "granted") {
+        ah(sql.exec("ALTER TABLE handoffs ADD COLUMN granted INTEGER NOT NULL DEFAULT 0", None))?;
     }
     Ok(())
 }

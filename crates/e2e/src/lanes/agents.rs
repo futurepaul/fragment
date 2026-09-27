@@ -181,6 +181,20 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
         by_person.status == 403 && made.status == 200 && recorded == hand_id.as_str() && for_stranger == 403 && for_owner == 200 && api.status(&owner, &throwaway)?.status == 404,
         json!({ "by a person": by_person.status, "made": made.body, "recorded": recorded, "for a stranger": for_stranger, "for its owner": for_owner }),
     );
+    // and one member change (a hand-off's): its owner's computer, named by
+    // its fragment, an editor of a fragment its owner owns; nothing else
+    let strange = s.named(api, &stranger, "agent-strange")?;
+    s.create(api, &stranger, &strange)?;
+    let add_member = |fragment: &str, who: &str| {
+        let path = format!("/api/f/{fragment}/members/nope.{username}?{}", acting(who));
+        api.signed(&hand, "PUT", &path, Some(&json!({ "role": "editor" }))).map_or(0, |r| r.status)
+    };
+    let tried = [add_member(&other, &owner_id), add_member(&other, &stranger_id), add_member(&strange, &owner_id)];
+    s.ok(
+        "an agent may make its owner's computer a member of its owner's fragment, for its owner only: of a name no computer of theirs has, 404; for anyone else, or on another's fragment, 403",
+        tried == [404, 403, 403],
+        json!(tried),
+    );
     // a post to a postable channel is decided as a call is: for its
     // asker, capped (`notes` takes an editor's posts)
     let room = s.named(api, &owner, "agent-room")?;

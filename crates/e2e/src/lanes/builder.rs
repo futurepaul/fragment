@@ -1,18 +1,21 @@
 //! The builder template, in the `builder` section: a fragment that
-//! declares a computer, whose `build({task})` job runs goose on it, and
-//! goose makes and deploys a new fragment with the `fragment` CLI. The
-//! Sprites fake runs each exec on this machine, so the goose here is a
-//! stand-in (`stand_in_goose`, this binary run as `goose`), put where the
-//! pinned release would be installed: real goose is a Linux binary from
+//! declares a computer, whose `build({task})` job hands the task to the
+//! computer's hands (`goose serve`, a session per chat), and goose makes
+//! and deploys a new fragment with the `fragment` CLI. The Sprites fake
+//! runs each exec and service on this machine, so the goose here is a
+//! stand-in (`stand_in_goose`, this binary run as `goose`, seeded where the
+//! hands install the pinned release): real goose is a Linux binary from
 //! GitHub, and the model here is the OpenRouter fake's script, so this
 //! proves the plumbing, not goose. The coordinator runs the real one on a
-//! Sprite. Checked: the job installs goose's hints and runs `fragment model
-//! --serve` for it; each model call goes through it, signed as the
-//! computer, streamed, and billed to the owner; goose's tool call makes and
-//! deploys a fragment that is the owner's; the run answers its URL and
-//! goose's last message, and the page's query lists it; no model key is on
-//! the computer's disk. Then hand-offs (`hand_offs`): the owner's own agent
-//! hands building to a computer, a throwaway builder or this one.
+//! Sprite. Checked: the hands write goose's hints and run it on `fragment
+//! model --serve`; each model call goes through that, signed as the
+//! computer, streamed, billed to the owner, and logged; goose's tool call
+//! makes and deploys a fragment that is the owner's; the run answers its
+//! URL and goose's last message, and the page's query lists it; no model
+//! key is on the computer's disk. Then hand-offs (`hand_offs`): the owner's
+//! own agent hands building to a computer, a throwaway builder, this one
+//! by name, and this one as its home computer, where one chat's hand-offs
+//! share a session.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -30,10 +33,10 @@ use super::jobs::{settle, started};
 use crate::api::Api;
 use crate::Suite;
 
-/// The goose the templates pin (templates/builder/app.mjs, templates/pet/app.mjs).
-pub(super) const GOOSE_VERSION: &str = "1.50.0";
+/// The goose every computer's hands run.
+pub(super) use fragment_core::computer::GOOSE_VERSION;
 /// The Cua Driver the pet pins (templates/pet/app.mjs).
-pub(super) const CUA_VERSION: &str = "0.28.1";
+pub(super) const CUA_VERSION: &str = "0.28.3";
 /// A 1×1 PNG, the stand-in Cua Driver's screenshot.
 pub(super) const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 
@@ -75,7 +78,9 @@ pub fn builder(s: &mut Suite, api: &Api) -> Result<()> {
     let computer = s.cli_keys(&sprite_home).context("the Sprite's CLI holds its key")?;
     let computer_id = api.identity(&computer)?;
     s.ok("it declares a computer, which is made and paired", ready && !computer_id.is_empty(), &sprite);
-    stand_in(&sprite_home, &format!(".local/bin/goose-{GOOSE_VERSION}"), "goose")?;
+    let up = s.eventually(Duration::from_secs(30), || sprite_home.join(".fragment/agent/port").exists());
+    let hands = std::fs::read_to_string(sprite_home.join(".fragment/agent/hands.log")).unwrap_or_default();
+    s.ok("its hands run: goose serve (the pinned one, here the stand-in) on its own model --serve", up && hands.contains(&format!("up: goose {GOOSE_VERSION}")), &hands);
 
     // the model's script: goose's shell makes and deploys a fragment, then it answers
     let label = s.name("built");
@@ -124,12 +129,17 @@ pub fn builder(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("billed to its owner, naming the computer", billed == 2, &usage);
     let hints = std::fs::read_to_string(sprite_home.join(".config/goose/.goosehints")).unwrap_or_default();
     s.ok("goose's hints are the CLI's guide", hints.contains("fragment deploy"), hints.chars().take(200).collect::<String>());
+    let log = std::fs::read_to_string(sprite_home.join(".fragment/agent/model.log")).unwrap_or_default();
+    let logged: Vec<Value> = log.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(|l| l["call"]["status"] == 200).collect();
+    s.ok(
+        "each call is a line of model.log: how long it took, and its usage (for the provider and the cached tokens)",
+        logged.len() >= 2 && logged.iter().all(|l| l["call"]["ms"].is_u64() && l["call"]["prompt_tokens"].is_u64()),
+        &log,
+    );
     let keys: Vec<String> = s.openrouter.minted().into_iter().map(|m| m.key).collect();
     let leaked = files_containing(&sprite_home, &keys);
     s.ok("no model key is on the computer's disk", !keys.is_empty() && leaked.is_empty(), format!("{leaked:?}"));
-    // every Sprite made from here on has the stand-in where the install looks
-    s.sprites.seed(&format!(".local/bin/goose-{GOOSE_VERSION}"), format!("#!/bin/sh\nexec '{}' goose \"$@\"\n", std::env::current_exe()?.display()).as_bytes());
-    hand_offs(s, api, &owner, &name)
+    hand_offs(s, api, (&owner, &home), (&name, &computer_id, &sprite_home))
 }
 
 const HAND_OFF: &str = "platform__hand_off";
@@ -150,19 +160,21 @@ fn builds(label: &str, text: &str) -> String {
     format!("mkdir -p {label}/site && printf '<h1>{text}</h1>' > {label}/site/index.html && fragment create {label} && fragment deploy {label} --dir {label}")
 }
 
-/// Hand-offs (agent/src/handoff.rs; Paul, 2026-09-27): the owner's own
-/// agent, in a chat, does light work itself and hands building to a
-/// computer. The OpenRouter fake is scripted for the agent and then for
-/// goose (the stand-in, seeded into every new Sprite). Checked: asked to add
-/// a todo, it calls the list's operation, no computer; its tools hand work
-/// off and none writes files or deploys; asked to build, it hands off and
-/// its turn ends at once, a throwaway builder runs goose, the chat gets the
+/// Hand-offs (agent/src/handoff.rs; Paul, 2026-09-27;
+/// docs/agent-computer.md): the owner's own agent, in a chat, does light
+/// work itself and hands building to a computer. The OpenRouter fake is
+/// scripted for the agent and then for goose (the stand-in, seeded into
+/// every Sprite). Checked: asked to add a todo, it calls the list's
+/// operation, no computer; its tools hand work off and none writes files or
+/// deploys; asked to build, with no home computer, it hands off and its
+/// turn ends at once, a throwaway builder runs goose, the chat gets the
 /// built URL without being asked again, and the throwaway's computer (its
 /// Sprite) and fragment are gone, what it built kept; handed to a named
 /// computer (the builder above), the work runs there and that computer
-/// stays; a guest's turn has no hand-off, and one it calls anyway makes
-/// nothing.
-fn hand_offs(s: &mut Suite, api: &Api, owner: &Keys, builder: &str) -> Result<()> {
+/// stays; with the builder as the home computer, two hand-offs naming none
+/// reach the chat's one session there (`home_sessions`); a guest's turn
+/// has no hand-off, and one it calls anyway makes nothing.
+fn hand_offs(s: &mut Suite, api: &Api, (owner, owner_cli): (&Keys, &Path), (builder, computer, builder_home): (&str, &str, &Path)) -> Result<()> {
     let agents = s.agents()?;
     let (wait, long) = (Duration::from_secs(30), Duration::from_secs(150));
     let username = api.username(owner)?;
@@ -276,6 +288,8 @@ fn hand_offs(s: &mut Suite, api: &Api, owner: &Keys, builder: &str) -> Result<()
         json!({ "chat": chat_records(api, owner, &chat), "sprites": s.sprites.sprites().len() }),
     );
 
+    home_sessions(s, api, (owner, owner_cli), &chat, (builder, computer, builder_home))?;
+
     // a guest's turn: no hand-off offered, and one it calls anyway makes nothing
     let guest = api.person()?;
     let guest_id = api.identity(&guest)?;
@@ -299,6 +313,77 @@ fn hand_offs(s: &mut Suite, api: &Api, owner: &Keys, builder: &str) -> Result<()
     Ok(())
 }
 
+/// The owner's home computer (the builder), set once with the CLI: two
+/// hand-offs from one chat, naming no computer, reach the same session
+/// there. The second's first model request carries the first's context:
+/// the first's last request is its prefix, message for message, under the same
+/// `session_id` (nothing between goose and the model edits a request).
+/// Each step is posted in the chat's `work` by the computer, which the
+/// hand-off made an editor there, under the hand-off's turn, which the
+/// answer names too.
+fn home_sessions(s: &mut Suite, api: &Api, (owner, owner_cli): (&Keys, &Path), chat: &str, (builder, computer, builder_home): (&str, &str, &Path)) -> Result<()> {
+    let agents = s.agents()?;
+    let username = api.username(owner)?;
+    let agent = format!("agent.{username}");
+    let set = s.cli_json(api, owner_cli, &["agent", "home", &agent, builder.split('.').next().unwrap_or(""), "--json"]);
+    let v = view(&agents, owner, &agent);
+    s.ok(
+        "its owner sets a home computer once (`fragment agent home`, a label theirs): a fragment of theirs that does work",
+        set.as_ref().is_ok_and(|a| a["home"] == builder) && v["home"] == builder,
+        format!("{set:?} / {}", v["home"]),
+    );
+    let canonical = |name: &str| api.status(owner, name).ok().and_then(|r| r.body["urls"]["canonical"].as_str().map(str::to_string)).unwrap_or_default();
+    let answered = |url: &str| chat_records(api, owner, chat).into_iter().find(|r| r["body"]["text"].as_str().is_some_and(|t| url.len() > 8 && t.starts_with(&format!("Done: {url}"))));
+    let build_runs = || api.signed(owner, "GET", &format!("/api/f/{builder}/runs?op=build"), None).map_or(0, |r| r.body["runs"].as_array().map_or(0, Vec::len));
+    let (sprites, runs, asked) = (s.sprites.sprites().len(), build_runs(), s.openrouter.chats().len());
+    let mut done = vec![];
+    for (n, (text, task)) in [("first at home", "Make a page that says first at home, as the fragment {label}."), ("second at home", "Make {label} too: a page that says second at home.")].into_iter().enumerate() {
+        let label = s.name(&format!("ho-home{n}"));
+        s.openrouter.clear_script();
+        s.openrouter.script(&[
+            Reply::Tools(vec![(HAND_OFF.into(), json!({ "task": task.replace("{label}", &label) }))]),
+            Reply::Text("On it, at home.".into()),
+            Reply::Tools(vec![("shell".into(), json!({ "command": builds(&label, text) }))]),
+            Reply::Text(format!("Built {text}.")),
+        ]);
+        say(api, owner, chat, &format!("hh{n}"), &format!("build {text}"))?;
+        let name = format!("{label}.{username}");
+        done.push(s.eventually(Duration::from_secs(150), || answered(&canonical(&name)).is_some()) && answered(&canonical(&name)).is_some());
+    }
+    // goose's requests (its own carry a session_id): the first's last, and the second's first
+    let chats: Vec<Value> = s.openrouter.chats().into_iter().skip(asked).filter(|c| c["session_id"].is_string()).collect();
+    let said = |c: &Value, what: &str| c["messages"].to_string().contains(what);
+    let first = chats.iter().rev().find(|c| said(c, "first at home") && !said(c, "second at home"));
+    let second = chats.iter().find(|c| said(c, "second at home"));
+    let session = std::fs::read_to_string(builder_home.join(format!(".fragment/agent/sessions/{chat}/chat"))).unwrap_or_default();
+    s.ok(
+        "two hand-offs from one chat, naming no computer, go to the home computer (no new one) and its chat's one session there",
+        done == [true, true] && build_runs() == runs + 2 && s.sprites.sprites().len() == sprites && !session.is_empty(),
+        json!({ "done": done, "runs": build_runs() - runs, "session": session }),
+    );
+    let (first, second) = (first.cloned().unwrap_or_default(), second.cloned().unwrap_or_default());
+    let (a, b) = (first["messages"].as_array().cloned().unwrap_or_default(), second["messages"].as_array().cloned().unwrap_or_default());
+    let prefix = !a.is_empty() && b.len() > a.len() && a[..] == b[..a.len()];
+    s.ok(
+        "the second's first request carries the first's context: the first's last request is its prefix, message for message, on the same session_id",
+        prefix && first["session_id"] == session.as_str() && second["session_id"] == session.as_str(),
+        json!({ "first": a.len(), "second": b.len(), "sessions": [first["session_id"], second["session_id"], session] }),
+    );
+    // its steps, in the chat, as the computer, under the hand-off's turn the answer names
+    let records = chat_records(api, owner, chat);
+    let turn = records.iter().rev().find_map(|r| r["body"]["turn"].as_str().filter(|t| t.starts_with(&format!("hand-off:{builder}:"))).map(str::to_string)).unwrap_or_default();
+    let work = api.signed(owner, "GET", &format!("/api/f/{chat}/channels/work"), None)?;
+    let steps: Vec<Value> = work.body["records"].as_array().into_iter().flatten().filter(|r| r["body"]["turn"] == turn.as_str()).cloned().collect();
+    let members = api.signed(owner, "GET", &format!("/api/f/{chat}/members"), None)?;
+    let editor = members.body["members"].as_array().into_iter().flatten().any(|m| m["principal"] == computer && m["role"] == "editor");
+    s.ok(
+        "each step is the computer's post in the chat's work (the hand-off made it an editor there), under the turn its answer names",
+        !turn.is_empty() && editor && steps.len() == 1 && steps.iter().all(|r| r["principal"] == computer && r["body"]["kind"] == "turn.step" && r["body"]["tool"] == "shell" && r["body"]["ok"] == true),
+        json!({ "turn": turn, "steps": steps, "editor": editor }),
+    );
+    Ok(())
+}
+
 /// The files under `dir` that hold any of `needles`.
 fn files_containing(dir: &Path, needles: &[String]) -> Vec<String> {
     let mut found = vec![];
@@ -317,82 +402,198 @@ fn files_containing(dir: &Path, needles: &[String]) -> Vec<String> {
     found
 }
 
-/// A stand-in for goose's CLI, run where the Sprites fake runs an exec:
-/// `goose --version`, and `goose run … --text <prompt>` as goose's loop cut
-/// to the plumbing. It asks `$OPENAI_BASE_URL` (the run's `fragment model
-/// --serve`), streaming as goose does, with one `shell` tool (the builder),
-/// or with the tools of the stdio MCP servers `$GOOSE_PATH_ROOT`'s config
-/// enables (the pet's agent: Cua Driver), named and filtered as goose does;
-/// answers each tool call, a result's image as the user message goose's
-/// OpenAI format adds after it; and prints the model's text once it calls no
-/// tool, or with `--output-format stream-json`, each tool call and that text
-/// as goose's events.
+/// A stand-in for goose's CLI, where the hands run it (hands.sh, as a
+/// Sprites service of the fake): `goose --version`, and `goose serve --port
+/// P`, goose's ACP server cut to the plumbing. A WebSocket at `/acp` for a
+/// client holding `$GOOSE_SERVER__SECRET_KEY` (`?token=`), and `/health`.
+/// Its sessions are kept in `~/.local/share/goose/sessions/stand-in.json`,
+/// so a new connection, or a restart, loads one. `session/prompt` asks
+/// `$OPENROUTER_HOST/api/v1/chat/completions` as goose's OpenRouter
+/// provider does (streaming, the session's id as `session_id`, `transforms`,
+/// `OPENROUTER_PARAMETERS` merged in), sending the session's whole history
+/// after a fixed system prompt, with a `shell` tool and the tools of the
+/// stdio MCP servers goose's config enables (the pet's Cua Driver), named
+/// and filtered as goose does. Each tool call is a `tool_call` update, then
+/// a `tool_call_update` once it ran (an image as goose's OpenAI format adds
+/// it, a user message after the result); the model's text is an
+/// `agent_message_chunk`.
 pub fn stand_in_goose(args: &[String]) -> Result<()> {
-    if args.first().map(String::as_str) == Some("--version") {
-        println!("goose {GOOSE_VERSION} (the e2e's stand-in)");
-        return Ok(());
+    match args.first().map(String::as_str) {
+        Some("--version") => {
+            println!("goose {GOOSE_VERSION} (the e2e's stand-in)");
+            return Ok(());
+        }
+        Some("serve") => {}
+        _ => bail!("goose --version | serve --port <port>"),
     }
-    let flag = |f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1));
-    let prompt = flag("--text").context("goose run --text <prompt>")?;
-    let events = flag("--output-format").is_some_and(|f| f == "stream-json");
-    let say = |content: Value| println!("{}", json!({ "type": "message", "message": { "role": "assistant", "content": [content] } }));
-    let base = std::env::var("OPENAI_BASE_URL").context("OPENAI_BASE_URL")?;
+    let port: u16 = args.iter().position(|a| a == "--port").and_then(|i| args.get(i + 1)).context("serve --port <port>")?.parse()?;
+    let secret = std::env::var("GOOSE_SERVER__SECRET_KEY").context("GOOSE_SERVER__SECRET_KEY")?;
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port))?;
+    let sessions = std::sync::Arc::new(std::sync::Mutex::new(()));
+    for stream in listener.incoming() {
+        let (stream, secret, sessions) = (stream?, secret.clone(), std::sync::Arc::clone(&sessions));
+        std::thread::spawn(move || {
+            if let Err(e) = acp(stream, &secret, &sessions) {
+                eprintln!("goose (stand-in): {e:#}");
+            }
+        });
+    }
+    Ok(())
+}
+
+/// One ACP connection: `initialize`, `session/new`, `session/load`, and
+/// `session/prompt`; a notification (a cancel) is let be.
+fn acp(stream: std::net::TcpStream, secret: &str, sessions: &std::sync::Mutex<()>) -> Result<()> {
+    use tungstenite::handshake::server::{ErrorResponse, Request, Response};
+    let mut head = [0u8; 64];
+    let n = stream.peek(&mut head)?;
+    if head[..n].starts_with(b"GET /health") {
+        return Ok((&stream).write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok")?);
+    }
+    let token = format!("token={secret}");
+    // tungstenite's own type for a refusal
+    #[allow(clippy::result_large_err)]
+    let check = |req: &Request, resp: Response| -> std::result::Result<Response, ErrorResponse> {
+        match req.uri().path() == "/acp" && req.uri().query().is_some_and(|q| q.split('&').any(|kv| kv == token)) {
+            true => Ok(resp),
+            false => Err(tungstenite::http::Response::builder().status(401).body(None).expect("a response")),
+        }
+    };
+    let mut ws = tungstenite::accept_hdr(stream, check).map_err(|e| anyhow::anyhow!("the handshake: {e}"))?;
+    loop {
+        let text = match ws.read() {
+            Ok(tungstenite::Message::Text(t)) => t,
+            Ok(tungstenite::Message::Close(_)) | Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => return Ok(()),
+            Ok(_) => continue,
+            Err(e) => return Err(e.into()),
+        };
+        let ask: Value = serde_json::from_str(&text)?;
+        if ask["id"].is_null() {
+            continue;
+        }
+        let params = &ask["params"];
+        let _one = sessions.lock().expect("the sessions");
+        let mut store = Sessions::read()?;
+        let answer = match ask["method"].as_str().unwrap_or("") {
+            "initialize" => Ok(json!({ "protocolVersion": 1, "agentCapabilities": { "loadSession": true } })),
+            "session/new" => {
+                let id = format!("s{}", store.0["sessions"].as_object().map_or(0, |s| s.len()) + 1);
+                store.0["sessions"][&id] = json!({ "cwd": params["cwd"], "messages": [] });
+                store.write()?;
+                Ok(json!({ "sessionId": id }))
+            }
+            "session/load" => match store.0["sessions"][params["sessionId"].as_str().unwrap_or("")].is_object() {
+                true => Ok(json!({})),
+                false => Err((-32002, "Resource not found".to_string())),
+            },
+            "session/prompt" => {
+                let id = params["sessionId"].as_str().unwrap_or("").to_string();
+                let text = params["prompt"][0]["text"].as_str().unwrap_or("").to_string();
+                match store.0["sessions"][&id]["messages"].as_array().cloned() {
+                    Some(history) => {
+                        let (history, stop) = prompt(&mut ws, &id, history, &text)?;
+                        store.0["sessions"][&id]["messages"] = json!(history);
+                        store.write()?;
+                        Ok(json!({ "stopReason": stop }))
+                    }
+                    None => Err((-32002, "Resource not found".to_string())),
+                }
+            }
+            method => Err((-32601, format!("{method} is not the stand-in's"))),
+        };
+        let reply = match answer {
+            Ok(result) => json!({ "jsonrpc": "2.0", "id": ask["id"], "result": result }),
+            Err((code, message)) => json!({ "jsonrpc": "2.0", "id": ask["id"], "error": { "code": code, "message": message } }),
+        };
+        ws.send(tungstenite::Message::text(reply.to_string()))?;
+    }
+}
+
+/// The stand-in's sessions, in its home as goose keeps its own.
+struct Sessions(Value);
+
+impl Sessions {
+    fn path() -> Result<std::path::PathBuf> {
+        Ok(Path::new(&std::env::var("HOME")?).join(".local/share/goose/sessions/stand-in.json"))
+    }
+    fn read() -> Result<Sessions> {
+        let text = std::fs::read_to_string(Self::path()?).unwrap_or_default();
+        Ok(Sessions(serde_json::from_str(&text).unwrap_or_else(|_| json!({ "sessions": {} }))))
+    }
+    fn write(&self) -> Result<()> {
+        let path = Self::path()?;
+        std::fs::create_dir_all(path.parent().context("a parent")?)?;
+        Ok(std::fs::write(path, self.0.to_string())?)
+    }
+}
+
+/// One prompt in a session: the model asked with its whole history, each
+/// tool call run and said, until it answers without one (at most 10
+/// rounds). The history after, and why it stopped.
+fn prompt<S: std::io::Read + Write>(ws: &mut tungstenite::WebSocket<S>, session: &str, mut history: Vec<Value>, text: &str) -> Result<(Vec<Value>, &'static str)> {
+    let mut update = |u: Value| ws.send(tungstenite::Message::text(json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": session, "update": u } }).to_string()));
+    let env = |k: &str| std::env::var(k).with_context(|| k.to_string());
     let mut servers = Mcp::configured()?;
-    let mut tools = vec![];
+    let mut tools = vec![json!({ "type": "function", "function": {
+        "name": "shell", "description": "Run a command with bash",
+        "parameters": { "type": "object", "required": ["command"], "properties": { "command": { "type": "string" } } } } })];
     for server in &mut servers {
         tools.extend(server.tools()?);
     }
-    if servers.is_empty() {
-        tools.push(json!({ "type": "function", "function": {
-            "name": "shell", "description": "Run a command with bash",
-            "parameters": { "type": "object", "required": ["command"], "properties": { "command": { "type": "string" } } } } }));
-    }
     let http = reqwest::blocking::Client::builder().timeout(Duration::from_secs(150)).build()?;
-    let mut messages = vec![json!({ "role": "user", "content": prompt })];
+    history.push(json!({ "role": "user", "content": text }));
     for _ in 0..10 {
-        let body = json!({ "model": std::env::var("GOOSE_MODEL")?, "messages": messages, "tools": tools, "stream": true });
-        let answer = http.post(format!("{base}/chat/completions")).json(&body).send()?.error_for_status()?.text()?;
-        let (text, calls) = assemble(&answer);
-        if calls.is_empty() {
-            if events {
-                say(json!({ "type": "text", "text": text }));
-                println!("{}", json!({ "type": "complete" }));
-            } else {
-                println!("{text}");
-            }
-            return Ok(());
+        let messages: Vec<Value> = [json!({ "role": "system", "content": "You are goose (the e2e's stand-in)." })].into_iter().chain(history.iter().cloned()).collect();
+        let mut body = json!({
+            "model": env("GOOSE_MODEL")?, "messages": messages, "tools": tools, "stream": true,
+            "session_id": session, "user": session, "transforms": ["middle-out"], "usage": { "include": true },
+        });
+        if let Ok(Value::Object(extra)) = env("OPENROUTER_PARAMETERS").map(|p| serde_json::from_str(&p).unwrap_or_default()) {
+            body.as_object_mut().expect("an object").extend(extra);
         }
-        messages.push(json!({ "role": "assistant", "content": text, "tool_calls": calls }));
+        let url = format!("{}/api/v1/chat/completions", env("OPENROUTER_HOST")?);
+        let answer = http.post(url).bearer_auth(env("OPENROUTER_API_KEY")?).json(&body).send()?.error_for_status()?.text()?;
+        let (said, calls) = assemble(&answer);
+        if !said.is_empty() {
+            update(json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": said } }))?;
+        }
+        if calls.is_empty() {
+            history.push(json!({ "role": "assistant", "content": said }));
+            return Ok((history, "end_turn"));
+        }
+        history.push(json!({ "role": "assistant", "content": said, "tool_calls": calls }));
         for call in calls {
             let (name, args) = (call["function"]["name"].as_str().unwrap_or(""), call["function"]["arguments"].as_str().unwrap_or(""));
             let args: Value = serde_json::from_str(args).unwrap_or_default();
-            if events {
-                say(json!({ "type": "toolRequest", "id": call["id"], "toolCall": { "status": "success", "value": { "name": name, "arguments": args } } }));
-            }
-            let server = servers.iter_mut().find(|s| name.strip_prefix(&s.name).is_some_and(|t| t.starts_with("__")));
-            let Some(server) = server else {
-                let o = Command::new("bash").args(["-c", args["command"].as_str().unwrap_or("")]).output()?;
-                let answer = format!("exit {}\n{}{}", o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
-                messages.push(json!({ "role": "tool", "tool_call_id": call["id"], "content": answer }));
-                continue;
-            };
-            let tool = &name[server.name.len() + 2..];
-            let result = server.ask("tools/call", json!({ "name": tool, "arguments": args }))?;
-            let (mut text, mut shots) = (vec![], vec![]);
-            for part in result["content"].as_array().into_iter().flatten() {
-                if part["type"] == "image" {
-                    text.push("This tool result included an image that is uploaded in the next message.".to_string());
-                    let url = format!("data:{};base64,{}", part["mimeType"].as_str().unwrap_or(""), part["data"].as_str().unwrap_or(""));
-                    shots.push(json!({ "role": "user", "content": [{ "type": "image_url", "image_url": { "url": url } }] }));
-                } else {
-                    text.push(part["text"].as_str().unwrap_or("").to_string());
+            let tool_call = json!({ "goose": { "toolCall": { "toolName": name } } });
+            update(json!({ "sessionUpdate": "tool_call", "toolCallId": call["id"], "title": name, "status": "pending", "rawInput": args, "_meta": tool_call }))?;
+            let (mut text, mut shots, mut content) = (vec![], vec![], vec![]);
+            match servers.iter_mut().find(|s| name.strip_prefix(&s.name).is_some_and(|t| t.starts_with("__"))) {
+                None => {
+                    let o = Command::new("bash").args(["-c", args["command"].as_str().unwrap_or("")]).output()?;
+                    text.push(format!("exit {}\n{}{}", o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)));
+                }
+                Some(server) => {
+                    let result = server.ask("tools/call", json!({ "name": &name[server.name.len() + 2..], "arguments": args }))?;
+                    for part in result["content"].as_array().into_iter().flatten() {
+                        if part["type"] == "image" {
+                            text.push("This tool result included an image that is uploaded in the next message.".to_string());
+                            let url = format!("data:{};base64,{}", part["mimeType"].as_str().unwrap_or(""), part["data"].as_str().unwrap_or(""));
+                            shots.push(json!({ "role": "user", "content": [{ "type": "image_url", "image_url": { "url": url } }] }));
+                            content.push(json!({ "type": "content", "content": part }));
+                        } else {
+                            text.push(part["text"].as_str().unwrap_or("").to_string());
+                        }
+                    }
                 }
             }
-            messages.push(json!({ "role": "tool", "tool_call_id": call["id"], "content": text.join(" ") }));
-            messages.extend(shots);
+            content.insert(0, json!({ "type": "content", "content": { "type": "text", "text": text.join(" ") } }));
+            update(json!({ "sessionUpdate": "tool_call_update", "toolCallId": call["id"], "status": "completed", "content": content }))?;
+            history.push(json!({ "role": "tool", "tool_call_id": call["id"], "content": text.join(" ") }));
+            history.extend(shots);
         }
     }
-    bail!("the model called tools 10 turns running")
+    Ok((history, "max_turn_requests"))
 }
 
 /// A stdio MCP server, started as goose starts one from its config.
@@ -406,15 +607,16 @@ struct Mcp {
 }
 
 impl Mcp {
-    /// The servers `$GOOSE_PATH_ROOT/config/config.yaml` enables (the pet's
-    /// agent writes it as JSON), each initialized.
+    /// The servers goose's config (`~/.config/goose/config.yaml`) enables
+    /// (the pet writes it as JSON), each initialized with its `envs`.
     fn configured() -> Result<Vec<Mcp>> {
-        let Ok(root) = std::env::var("GOOSE_PATH_ROOT") else { return Ok(vec![]) };
-        let config: Value = serde_json::from_str(&std::fs::read_to_string(Path::new(&root).join("config/config.yaml"))?)?;
+        let Ok(text) = std::fs::read_to_string(Path::new(&std::env::var("HOME")?).join(".config/goose/config.yaml")) else { return Ok(vec![]) };
+        let config: Value = serde_json::from_str(&text)?;
         let strings = |v: &Value| v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>();
         let mut servers = vec![];
         for (name, x) in config["extensions"].as_object().into_iter().flatten().filter(|(_, x)| x["enabled"] == true && x["type"] == "stdio") {
-            let mut child = Command::new(x["cmd"].as_str().context("its cmd")?).args(strings(&x["args"])).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
+            let envs = x["envs"].as_object().into_iter().flatten().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()));
+            let mut child = Command::new(x["cmd"].as_str().context("its cmd")?).args(strings(&x["args"])).envs(envs).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
             let (to, from) = (child.stdin.take().context("stdin")?, BufReader::new(child.stdout.take().context("stdout")?));
             let mut server = Mcp { name: name.clone(), only: strings(&x["available_tools"]), _child: child, to, from, id: 0 };
             server.ask("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "goose", "version": GOOSE_VERSION } }))?;

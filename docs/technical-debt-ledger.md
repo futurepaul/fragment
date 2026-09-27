@@ -632,3 +632,22 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** the charge comes from what the Sprite reports it used
   (Sprites' own usage, or its cgroup's `cpu.stat` and memory read on each
   tick), and an owner hears of a computer awake past a bound.
+
+## A chat's session takes one task at a time, unqueued
+
+- **Observed:** 2026-09-27, slice 1 of docs/agent-computer.md. Each chat
+  has one goose session on its computer, and the task client
+  (crates/core/src/computer/task.mjs) sends its task to that session
+  whatever else runs there: nothing queues a second hand-off from the
+  same chat behind the first, and what goose serve does with a prompt
+  for a session that is mid-turn is its own (it keeps a registry of a
+  session's active runs).
+- **Risk:** two hand-offs from one chat at once: the second fails, or
+  both run in one history, interleaved.
+- **First proof:** a chat whose agent hands off twice before the first
+  ends, on a real Sprite (the chat hears "could not finish", or one
+  task's steps land in the other's).
+- **Delete when:** a chat's tasks wait their turn (a lock per session in
+  the task client, or the agent holding a chat's second hand-off until
+  the first ends), proven by an e2e that hands off twice from one chat
+  at once and gets both answers, in order.

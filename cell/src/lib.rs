@@ -1135,6 +1135,7 @@ async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellResult<Respons
             }
             let owner_only = fragment_core::access::owner_only(method.as_ref(), rest);
             let deleting = method == Method::Delete && matches!(rest, [] | [""]);
+            let putting = method == Method::Put;
             let inner = match (method, rest) {
                 (Method::Delete, [] | [""]) => "/delete".to_string(),
                 (_, [] | [""]) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
@@ -1156,9 +1157,16 @@ async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellResult<Respons
                 }
                 _ => Some(signer_for(env, &req, &url, &body).await?),
             };
-            // but one: an agent deletes a throwaway it made (the fragment decides)
+            // but two: an agent deletes a throwaway it made (the fragment
+            // decides), and makes its owner's computer, named by its
+            // fragment, an editor of its owner's fragment (a hand-off's chat)
             if let Some(agent) = principal.as_ref().filter(|p| deleting && p.kind == IdentityKind::Agent) {
                 return agents::remove_throwaway(env, &url, agent, &named_fragment(name, Some(agent))?).await;
+            }
+            if let (Some(agent), ["members", computer]) = (principal.as_ref().filter(|p| putting && p.kind == IdentityKind::Agent), rest) {
+                if valid_fragment_name(computer) {
+                    return agents::add_computer(env, &url, agent, &named_fragment(name, Some(agent))?, computer).await;
+                }
             }
             // owner-only actions never go through an agent, whatever it acts
             // for, nor a computer: only a person owns a fragment

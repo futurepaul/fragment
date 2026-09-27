@@ -40,6 +40,7 @@
 //!   GET  /api/a/{name}/job?turn=      that turn's state: {ended, outcome, text, error}
 //!   PUT  /api/a/{name}/computer       {url, token, cwd? ("work")}: attach a computer (`fragment computer serve`)
 //!   DELETE /api/a/{name}/computer     detach it
+//!   PUT  /api/a/{name}/home           {computer | null}: the owner's home computer, where hand-offs go by default
 //!   POST /api/a/{name}/test           test controls (dev fleets: AGENT_TEST_HOOKS=allow)
 //!
 //! A listened-to channel's records arrive at `POST /api/a/{name}/inbox/{token}`
@@ -383,9 +384,9 @@ const WORK_GUIDE: &str = "What you do, and what you hand off:
 (add a todo, read a list, look up a date), with your tools or platform__operations then platform__call. You may make \
 a fragment from a template (platform__create_fragment), as a person can.
 - Hand off the rest with platform__hand_off: building or changing an app, writing code, research, anything longer. \
-A computer does it. Put the whole task in it: the computer sees nothing of this conversation. Name a computer only \
-when the person names one of theirs; otherwise a throwaway one does the work and is removed after, keeping what it \
-made.
+Your owner's computer does it, and remembers what was handed off from this conversation before; it sees nothing else \
+of it, so put what it needs in the task. Name a computer only when the person names one of theirs; ask for a \
+throwaway only for extra hands, alongside other work or for risky work.
 - A hand-off takes minutes. Once it starts, say in a sentence that it is on its way and end your turn: its result is \
 said here when it is done. Do not check on it.
 - Only your owner's turns can hand off (you have no platform__hand_off otherwise): tell anyone else it is theirs to \
@@ -1164,6 +1165,8 @@ impl Agent {
             },
             "ignored": table("fragment, channel, principal, at", "ignored")?,
             "handoffs": newest("SELECT fragment, run, conv AS conversation, throwaway = 1 AS throwaway, said = 1 AS said, started_at AS at FROM handoffs ORDER BY started_at DESC LIMIT ?")?,
+            "home": kv_get(&sql, handoff::HOME)?.filter(|h| !h.is_empty()),
+            "bound": newest("SELECT conv AS conversation, computer, at FROM bound ORDER BY at DESC LIMIT ?")?,
             "messages": messages,
             "steer": table("seq, text, consumed", "steer")?,
             "toolRuns": table("tool_call_id, tool, at, driver", "tool_runs")?,
@@ -1223,6 +1226,14 @@ impl Agent {
                             names.extend(computer::tools_of(&manifest)?.iter().map(|t| t.name.to_string()));
                         }
                         from(json!({ "tools": names }))
+                    }
+                    (Method::Put, "home") => {
+                        let computer = match &body["computer"] {
+                            Value::Null => None,
+                            Value::String(c) => Some(c.as_str()),
+                            _ => return Err(Fail::invalid("computer is a fragment's name, or null")),
+                        };
+                        handoff::set_home(&self.fleet()?.acting_for(&principal), &self.sql(), &principal, computer).await.map_err(Fail::invalid)
                     }
                     (Method::Put, "computer") => self.attach(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?).await,
                     (Method::Delete, "computer") => self.detach(),

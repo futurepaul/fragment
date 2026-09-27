@@ -125,7 +125,7 @@
     for (const b of document.querySelectorAll("[data-key]")) b.onclick = () => send({ kind: "key", key: b.dataset.key });
 
     // its agent's latest run, from `work`: the task, each step as the
-    // computer posts it, and how it ended
+    // computer posts it (`turn.step`, as a chat's), and how it ended
     const runs = new Map();
     const li = (className, ...kids) => {
       const n = Object.assign(document.createElement("li"), { className });
@@ -136,7 +136,7 @@
     async function showWork() {
       const r = runs.get(Math.max(...runs.keys()));
       const asker = r.asker ? `, asked by ${await who(r.asker)}` : "";
-      const steps = [...r.steps.values()].sort((a, b) => a.n - b.n).map((s) => li("", ...(s.said ? [`${s.said} `] : []), code(`${s.tool} ${s.args}`)));
+      const steps = [...r.steps.values()].sort((a, b) => a.step - b.step).map((s) => li("", ...(s.text ? [`${s.text} `] : []), code(`${s.tool} ${s.args}`)));
       const end = !r.end ? li("", "working…") : r.end.error || r.end.code ? li("end failed", r.end.error || r.end.message || `stopped (${r.end.code})`) : li("end", r.end.message);
       $("work").replaceChildren(li("task", `${r.task ?? "…"}${asker}`), ...steps, end);
       $("work").hidden = false;
@@ -146,7 +146,7 @@
       if (!runs.has(b.run)) runs.set(b.run, { steps: new Map() });
       const r = runs.get(b.run);
       if (b.kind === "start") Object.assign(r, { task: b.task, asker: b.asker });
-      if (b.kind === "step" && Number.isInteger(b.n)) r.steps.set(b.n, b);
+      if (b.kind === "turn.step" && Number.isInteger(b.step)) r.steps.set(b.step, b);
       if (b.kind === "end") r.end = b;
       showWork();
     }, { last: 200 });

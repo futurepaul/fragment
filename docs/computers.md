@@ -107,7 +107,13 @@ and bytes as they arrive. Whatever speaks to an OpenAI-compatible
 provider (goose's `openai` provider with `OPENAI_HOST` pointed at it)
 then needs no key: any key it sends is ignored, and the platform refuses
 a model past its list. Any process on the machine may call it, on the owner's
-budget: a computer is one person's machine (a Sprite has one user).
+budget: a computer is one person's machine (a Sprite has one user). Each
+call is one line of JSON on its stderr, `{call: {at, status, ms,
+first_ms, model, provider, prompt_tokens, cached_tokens,
+completion_tokens, cost}}`: how long to the answer's head and to its end,
+and what the answer's usage says (read from its last chunks), so a
+computer's `~/.fragment/agent/model.log` shows each call's latency,
+provider, and cache.
 
 ## A job's commands (`job.computer.exec`)
 
@@ -144,7 +150,10 @@ runs `start` again when it exits, with backoff, logs to
 `~/fragment.log`, and on TERM stops `start` and its children. A deploy
 while it is asleep is synced when it next wakes: `start` cannot run while
 it sleeps anyway. Only awake time is billed (the seconds of a boot's sync
-are the boot's).
+are the boot's). Then the hands (below) are written, and their service
+made if it is not there (`exec::HANDS`). What a computer last synced
+names the hands' goose too, so one synced before them, or with another
+goose, syncs again when it next wakes.
 
 **Holding it awake from the service** (not built). The cell holds the
 Sprite with the Tasks API, a tick at a time, and whether that keeps a
@@ -156,54 +165,88 @@ it awake while the page shows it, and it pauses when the page goes. The
 cell would still charge a tick at a time while its fragment has viewers,
 and would hold it with the Tasks API only for a job's commands.
 
-## goose on a computer: the builder template
+## The hands: goose on every computer (`goose serve`)
+
+Every declared computer runs goose, one long-lived session per chat
+(docs/agent-computer.md, slice 1; ROADMAP decision 24). A job hands a
+task to it and waits; the pet's `do` and the builder's `build` do.
+
+- **goose v1.52.0**, the upstream release
+  (`goose-x86_64-unknown-linux-musl.tar.gz`, from
+  github.com/aaif-goose/goose: static, one file, nothing to build or
+  host), checked against its SHA-256 (`fdc86653…9f9f`, the digest GitHub
+  lists for the asset) and unpacked whole to
+  `~/.local/share/goose-1.52.0` on the service's first start
+  (`fragment_core::computer::GOOSE_VERSION`, `GOOSE_SHA256`). v1.52.0
+  turns off the tool-pair summaries that rewrote v1.50.0's history, so a
+  session's prefix holds between compactions.
+- **The service** (`~/.fragment/agent/hands.sh`, the Sprites service
+  `hands`, beside `start`'s): `fragment model --serve --port 0`, and
+  `goose serve` on it, kept up together with backoff (`hands.log`), each
+  logging to `model.log` and `goose.log` (each cut to its last 512 KiB
+  past 1 MiB). goose speaks ACP (a WebSocket at `/acp`) on the first free
+  port from 3284, which it writes to `port` once `/health` answers, to
+  clients holding `secret` (made on the machine, 0600). Its environment:
+  `GOOSE_PROVIDER=openrouter` with `OPENROUTER_HOST` at the model
+  endpoint (its OpenRouter path, `/api/v1/chat/completions`) and a key
+  that is never used, `GOOSE_MODEL=z-ai/glm-5.3-flashx` (which reads
+  images, as goose's catalog knows), `GOOSE_CONTEXT_LIMIT=64000`
+  (compaction near 51k), `GOOSE_MODE=auto`, `GOOSE_DISABLE_KEYRING=1`,
+  `GOOSE_DISABLE_SESSION_NAMING=1`, `GOOSE_MAX_TOKENS=4096` (a model
+  call finishes within the platform's 120 s), and
+  `OPENROUTER_PARAMETERS={"reasoning":{"effort":"low"}}`. Its hints are
+  the CLI's guide (`fragment guide > ~/.config/goose/.goosehints`, each
+  start), and its extensions its default (the developer tools) and what
+  `~/.config/goose/config.yaml` enables (the pet's Cua Driver). A
+  script the platform changed restarts itself at its next second.
+- **The task client** (`~/.fragment/agent/task.mjs`, Node; written with
+  the service): one task, `PROMPT`, in the session of `CHAT`
+  (`<fragment>/<channel>`; none: the job's own fragment's `work`). The
+  chat's session id is kept in `sessions/<chat>`: the first task makes
+  it (`session/new`, in `~/chats/<chat>`), each later one loads it
+  (`session/load`), and one goose lost is made again. It sends
+  `session/prompt`, and posts each tool call, once it ended, as a
+  `turn.step` on the chat's `work` (`fragment post`, as the computer:
+  docs/api.md, the chat template), trying a failed post again for a
+  minute. It prints goose's last words; it exits 0 when goose ended its
+  turn, and 124 past `TIME_S` (540), when it cancels the prompt.
+- **Requests go as goose made them**: nothing between goose and the
+  platform edits one, and goose sends its session's id as `session_id`,
+  so a chat's calls stay on the provider that caches its prefix (the
+  platform passes it on and drops `transforms`; docs/api.md).
+
+goose serve makes an agent for each connection (its source:
+`AcpServer::create_agent`), and each task is a connection, so a session
+is loaded afresh for each task. Its system prompt names the hour
+("so that prompt cache can be used"): within the hour a task's first
+call is cached as the last task's; the first call after the hour turns
+misses once.
+
+## The builder template
 
 `templates/builder` is a fragment that builds fragments: it declares a
-computer, and its job `build({task})` runs goose there, whose shell has
-the `fragment` CLI (signed in as the computer), so goose makes and
-deploys a new fragment, its owner's. Each step is a durable
-`job.computer.exec`:
+computer, and its job `build({task, chat?})` hands the task to the
+computer's hands, whose shell has the `fragment` CLI (signed in as the
+computer), so goose makes and deploys a new fragment, its owner's. Each
+step is a durable `job.computer.exec`:
 
-1. **goose, installed once**: the upstream CLI release **v1.50.0**
-   (`goose-x86_64-unknown-linux-musl.tar.gz`, from
-   github.com/aaif-goose/goose), checked against its SHA-256
-   (`ff8c5142…c84af`, the digest GitHub lists for the asset) before it
-   is unpacked to `~/.local/bin/goose-1.50.0`. Why this one: a release
-   is a single file with nothing to build or host; the musl build is
-   static, so it runs on any x86_64 Linux whatever its libc; v1.50.0 was
-   18 days old when chosen (past the dependency cooldown, two days since
-   2026-09-27), and it is the release the
-   repo's goose fork (`futurepaul/goose` at `12922e7`, decision 10) is
-   based on, so the cell's loop and the computer's are the same goose.
-   Building goose's CLI from the fork instead would mean a Linux build
-   and a place to host it, for no difference in behaviour. The
-   template's constants pin the version and the digest; changing them
-   installs the new one beside the old.
-2. **The CLI's guide as goose's hints**: `fragment guide >
-   ~/.config/goose/.goosehints`, rewritten each build, so what goose
-   knows of the CLI is the installed CLI's own manual.
-3. **goose, headless**, in `~/builds/run-<run>`: `goose run --quiet
-   --no-session --with-builtin developer --max-turns 60 --text
-   <prompt>`, with `GOOSE_PROVIDER=openai`, `GOOSE_MODEL=z-ai/glm-5.3-flashx`
-   (the platform's model), `GOOSE_MODE=auto` (no
-   approvals), `GOOSE_DISABLE_KEYRING=1` (a Sprite has none), and
-   `GOOSE_MAX_TOKENS=4096` (the platform's model call must finish within
-   its 120 s). Its model is the platform's: the step
-   starts `fragment model --serve --port 0` beside it, points
-   `OPENAI_BASE_URL` at it, and stops it with goose, so each run has its
-   own and a crash leaves none behind. goose's step is capped at 10
-   minutes; each other step at 3.
-4. **What it built**: the fragments listed after goose ran that were not
+1. **What there is**: `fragment list`.
+2. **The task**, capped at 10 minutes: the task client, in the session
+   of the chat that asked (`chat`; none: the builder's own), with a
+   prompt that says to build it as a new fragment and deploy it.
+3. **What it built**: the fragments listed after the task that were not
    listed before, each with its URL and whether it is live (`fragment
    status`). The run answers `{url, built, message, code}`, `message`
    being the end of what goose said.
 
-The e2e (`builder`) runs every step on the Sprites fake with a stand-in
-for goose (the e2e binary run as `goose`, put where the pinned release
-would be installed): it speaks to the run's `fragment model --serve` as
-goose does, streaming, with one `shell` tool, and the OpenRouter fake's
-script calls it to `fragment create` and `deploy`. It proves the
-plumbing, not goose; the first real run on a Sprite proves goose.
+The e2e (`builder`) runs every step, and the hands' service, on the
+Sprites fake with a stand-in for goose (the e2e binary run as `goose`,
+seeded where the hands install the pinned release): `goose serve`, an
+ACP WebSocket whose sessions persist in its home, asking the model
+through `fragment model --serve` as goose's OpenRouter provider does,
+streaming, with a `shell` tool, and the OpenRouter fake's script calls it
+to `fragment create` and `deploy`. It proves the plumbing, not goose;
+the first real run on a Sprite proves goose.
 
 ## Running the first real one
 
@@ -356,124 +399,120 @@ caps it at editor there), and a job's call answers once its run ends
 ## The pet's agent: `do`
 
 The pet's computer is one machine that people and its agent both drive.
-`do({task})` is an editor-only job (the agent spends its owner's budget;
-signed-in viewers still drive by hand): goose runs headless on the
-computer with Cua Driver as its hands, on the display the pet frames, so
-everyone watching sees each click and anyone may click in between (the
-agent's next look shows it). Its steps, each durable:
+`do({task, chat?})` is an editor-only job (the agent spends its owner's
+budget; signed-in viewers still drive by hand): the computer's hands do
+the task with Cua Driver on the display the pet frames, so everyone
+watching sees each click and anyone may click in between (the agent's
+next look shows it). Its steps, each durable:
 
-1. **Installed once** (`job.computer.exec`, 3 minutes): goose v1.50.0,
-   pinned as the builder's is (above), and **Cua Driver v0.28.1**
-   (github.com/trycua/cua, MIT; released 2026-09-12, the newest past the
-   dependency cooldown when chosen; the cooldown is two days since
-   2026-09-27), its release asset
-   `cua-driver-rs-0.28.1-linux-x86_64-binary.tar.gz` checked against the
-   SHA-256 GitHub lists (`71aa9253…bcf`). Not the one-line `install.sh`:
-   it fetches a second script from cua.ai unpinned, takes the newest
-   release, and edits shell rc files. Each archive is unpacked whole, as
-   it ships, to `~/.local/share/<name>-<version>` (Cua Driver's keeps its
-   cursor-theme helper beside its binary); both then answer `--version`
-   (Cua Driver links libXi, which `pet.mjs` installs with the display).
-2. **goose** (`node computer/do.mjs`, capped at 10 minutes; goose itself
-   at 9, and 40 turns): `goose run --no-session --output-format
-   stream-json --system <how to use the screen> --text <task>`, with a
-   config root of its own (`GOOSE_PATH_ROOT=~/.pet/goose`) whose one
-   extension is Cua Driver's MCP server, stdio `cua-driver mcp` (on
-   Linux it owns its runtime and ends with goose, so no daemon runs),
-   offering 8 of its 62 tools: `get_desktop_state`, `get_window_state`,
-   `list_windows`, `click`, `type_text`, `press_key`, `hotkey`, `scroll`
-   (each is described at length, and every model request carries the
-   tools offered). No `developer` tools: the agent works through the
-   screen, and `run` is for commands. Cua Driver gets `DISPLAY=:99`, the pet's
-   session bus, telemetry off (`CUA_DRIVER_RS_TELEMETRY_ENABLED=false`),
-   and no update checks.
-3. **Its answer**: `{message, code}`, goose's last words and exit code.
+1. **Installed once** (`job.computer.exec`, 3 minutes): **Cua Driver
+   v0.28.3** (github.com/trycua/cua, MIT; released 2026-09-24, past the
+   two-day cooldown), its release asset
+   `cua-driver-rs-0.28.3-linux-x86_64-binary.tar.gz` checked against the
+   SHA-256 GitHub lists (`51de56e3…6fcf`), unpacked whole, as it ships,
+   to `~/.local/share/cua-driver-0.28.3` (it keeps its cursor-theme
+   helper beside its binary; it links libXi, which `pet.mjs` installs
+   with the display). Not the one-line `install.sh`: it fetches a second
+   script from cua.ai unpinned, takes the newest release, and edits
+   shell rc files. Then goose's config names it as an extension: stdio
+   `cua-driver mcp` (on Linux it owns its runtime and ends with its
+   session), offering 8 of its 62 tools (`get_desktop_state`,
+   `get_window_state`, `list_windows`, `click`, `type_text`, `press_key`,
+   `hotkey`, `scroll`: each is described at length, and every model
+   request carries the tools offered), with `DISPLAY=:99`, the pet's
+   session bus, telemetry off, and no update checks.
+2. **The task** (capped at 10 minutes): the hands' task client, in the
+   session of the chat that asked (none: the pet's own page's), the task
+   after a paragraph on how to use the screen.
+3. **Its answer**: `{message, code}`, goose's last words and the task's
+   exit code.
 
-**Screenshots reach the model.** goose v1.50.0 sends an MCP tool's image
-to an OpenAI-compatible provider as a user message after the tool's
-(`image_url`, a data URL), but only when its model catalog lists the
-model as reading images, by the name `GOOSE_MODEL` gives: a name it does
-not know (the builder's) loses every screenshot ("omitted as the model
-does not support vision"). So the job names `gpt-4o` to goose, which the
-catalog lists as reading images, and `do.mjs`'s proxy names the platform's
-`z-ai/glm-5.3-flash` (which reads images) on each request: the platform
-refuses a model past its list. Whether `z-ai/glm-5.3-flashx`, the
-platform's default, reads images is not checked yet, so the pet stays on
-flash; that one constant (`MODEL`) moves it.
-The platform's endpoint passes image content through unchanged. What
-needed care is size: goose sends every screenshot it was given, each
-turn, and a request is at most 8 MiB (the CLI's `--serve` and the cell
-both refuse more; 2 MiB until 2026-09-27). `do.mjs` puts a loopback proxy between goose and
-`fragment model --serve` that keeps the newest 3 screenshots (each
-earlier one becomes a line of text) and cuts each tool result before the
-newest 3 to 2000 characters.
+**Screenshots reach the model, and stay.** goose sends an MCP tool's
+image as a user message after the tool's (`image_url`, a data URL) to a
+model its catalog lists as reading images, which flashx is
+(`openrouter/z-ai/glm-5.3-flashx`); the platform passes image content
+through unchanged. Nothing trims a request: a request is at most 8 MiB
+(the CLI's `--serve` and the cell), goose compacts its session near 51k
+tokens, and it compacts on an image-limit error too.
 
-**Its steps are live** on the `work` channel (viewers read, editors
-post): the job publishes `{run, kind: "start", task, asker}` and `{run,
-kind: "end", code, message}` (or `error`); `do.mjs` posts each tool call
-as the computer, `{run, kind: "step", n, tool, args, said}` (`fragment
-post`, with the id `do-<run>-<n>`, so a retry appends nothing). The page
-shows the latest run's.
+**Its steps are live**: on the pet's own `work` channel (viewers read,
+editors post) the job publishes `{run, kind: "start", task, asker}` and
+`{run, kind: "end", code, message}` (or `error`); each tool call is a
+`turn.step` the computer posts on the asking chat's `work`, or the pet's
+own when its page asked. The page shows the latest run's.
 
 **Who drives it**: each step also writes the asker's id to
-`~/.pet/agent`; `pet.mjs` names `agent:<asker>` as the driver once that
-file is newer than anyone's last `control` record, so the page says
-"last driven by its agent, for @someone" until a person drives it again.
+`~/.pet/agent` (the task client's `MARK`); `pet.mjs` names
+`agent:<asker>` as the driver once that file is newer than anyone's last
+`control` record, so the page says "last driven by its agent, for
+@someone" until a person drives it again.
 
 The e2e (`templates`) runs it on the Sprites fake with stand-ins for
-both (the e2e binary, where the pinned releases go): goose's reads the
-config `do.mjs` writes, starts the Cua Driver stand-in's MCP server,
-offers the tools the config names, and sends screenshots on as goose
-does. It checks the refusal for a viewer, the answer, the model calls
-(through the platform, on the model `do.mjs` names, a screenshot in them, only
-the newest three), the click on `:99`, the steps on `work`, and the
-driver. It proves the plumbing, not goose or Cua Driver.
+goose and Cua Driver (the e2e binary, where the pinned releases go):
+goose's reads the config the job writes, starts the Cua Driver
+stand-in's MCP server with its environment, offers its shell and the
+tools the config names, and sends screenshots on as goose does. It
+checks the refusal for a viewer, the answer, the model calls (through
+the platform, on flashx, every screenshot in them), the click on `:99`,
+the steps on `work`, and the driver. It proves the plumbing, not goose
+or Cua Driver.
 
-**What only a real Sprite shows**: that goose v1.50.0 loads the
+**What only a real Sprite shows**: that goose v1.52.0 loads the
 extension from the JSON `config.yaml` and offers the 8 tools; that its
-`stream-json` events are the shapes `do.mjs` reads (a `toolRequest` per
-call, the text before it); that `cua-driver mcp` starts under Xvfb and
-openbox, `get_desktop_state` captures `:99`, and its pixel clicks land in
-Chromium (and whether its agent cursor overlay shows in the frames);
-whether Chromium's tree reaches AT-SPI over the pet's session bus, or
-`get_window_state` comes back `degraded` (pixels still work); how large a
-screenshot is, and so how far the 8 MiB goes; and how well
-`glm-5.3-flash` drives a screen in 40 turns.
+ACP updates are the shapes the task client reads (`tool_call` with
+`_meta.goose.toolCall.toolName` and `rawInput`, `tool_call_update`,
+`agent_message_chunk`); that `cua-driver mcp` starts under Xvfb and
+openbox, `get_desktop_state` captures `:99`, and its pixel clicks land
+in Chromium; whether Chromium's tree reaches AT-SPI over the pet's
+session bus; how many screenshots fit before compaction at 64k; and how
+well flashx drives a screen.
 
 ## Your agent hands its work to a computer
 
 A person's agent builds nothing in its cell (Paul, 2026-09-27; docs/api.md,
 Agents, Hand-offs). It answers questions and makes a few calls on your
 fragments itself (a todo added, a list read); anything longer it hands to
-a computer with `platform__hand_off({task, computer?})`, in your own turns
-only, and its turn ends saying the work is on its way.
+a computer's hands with `platform__hand_off({task, computer?,
+throwaway?})`, in your own turns only, and its turn ends saying the work
+is on its way.
 
-- **A computer you name**: one of your fragments whose job `do` (or
-  else `build`) takes `{task}`: a pet (its `do`, above, at most 2000
-  bytes of task), or a builder. It stays.
-- **Otherwise a throwaway**: a private builder of yours,
-  `handoff-<12 hex>.<you>`, made for the task. Its computer boots, goose
-  runs `build({task})` and deploys what it made as a fragment of yours,
-  and when the run ends the agent removes the throwaway: its computer
-  (keys revoked, the Sprite destroyed), then the fragment. What it built
-  stays. A crash's leftovers are recognized by that name, but the name
-  grants nothing: the platform recorded the throwaway as the agent's when
-  it was made, and only that lets the agent delete it.
+- **Your home computer, by default**: `fragment agent home agent.<you>
+  <computer>`, once, names one of your fragments whose job `do` (or
+  else `build`) takes a task: a pet, or a builder. A chat's first
+  hand-off binds it there, and each later one goes to the same session,
+  so the computer remembers what the chat handed it before.
+- **A computer you name**: the same, for that hand-off.
+- **A throwaway**, when asked for (extra hands), or when you have no home
+  computer: a private builder of yours, `handoff-<12 hex>.<you>`, made
+  for the task. Its computer boots, goose runs `build` and deploys what
+  it made as a fragment of yours, and when the run ends the agent removes
+  the throwaway: its computer (keys revoked, the Sprite destroyed), then
+  the fragment. What it built stays. A crash's leftovers are recognized
+  by that name, but the name grants nothing: the platform recorded the
+  throwaway as the agent's when it was made, and only that lets the
+  agent delete it.
 
-The agent's alarm watches the run, and its result (`Done: <url>`, and what
-goose said) lands in the chat that asked, with no one asking again. A
-throwaway costs what any computer does: its boot, and its awake time
-while the build runs, on your budget.
+The computer is made an editor of the chat, and posts each step there as
+your computer; the agent's alarm watches the run, and its result
+(`Done: <url>`, and what goose said) lands in the chat that asked, under
+the steps, with no one asking again. A throwaway costs what any computer
+does: its boot, and its awake time while the build runs, on your budget.
 
 ## Next
 
 - **A hand-off on a real Sprite**: a throwaway's boot, goose, and its
   Sprite destroyed after (`sprite list`). The e2e proves the plumbing
   with the stand-in goose.
+- **The hands on a real Sprite** (docs/agent-computer.md, slice 1's
+  acceptance): two hand-offs from one chat share a session, the second's
+  first call at least 80% cached; a median step of 3 s or less, no gap
+  over 10 s; another chat gets its own session; after a restart, a
+  chat's next task recalls its earlier one. `model.log` has each call's
+  time, provider, and cached tokens, and the chat's `work` each step's
+  time. It needs a CLI release whose `model --serve` answers OpenRouter's
+  path (a computer's CLI older than that fails each call: `goose.log`).
 - **The builder on a real Sprite**: `fragment new b --template builder`,
-  create, deploy, and a task from its page. It needs a CLI release with
-  `model --serve` first (a computer made before then has an older CLI:
-  the install step says so).
+  create, deploy, and a task from its page.
 - **The pet's agent on a real Sprite** (`do`, above): a task from the
   pet's page, and the list of what only a real Sprite shows.
 - **Alerts** about computers awake longer than expected, and what a
