@@ -591,6 +591,20 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
         ran["output"]["code"] == 0 && again["session_id"] == session.as_str() && goose.first().is_some_and(|c| c["tools"] == again["tools"]) && changes() == 2 && refreshed() == [said_so],
         json!({ "run": ran, "changes": changes(), "hands.log": refreshed() }),
     );
+    // what goose was asked: its session's last user message
+    let prompt_of = |c: &Value| c["messages"].as_array().into_iter().flatten().rev().find(|m| m["role"] == "user").and_then(|m| m["content"].as_str()).unwrap_or_default().to_string();
+    let told = goose.first().map(|c| prompt_of(c)).unwrap_or_default();
+    let mut cua_now = CUA_TOOLS.to_vec();
+    cua_now.sort();
+    let note = format!(
+        "Your tools changed since your earlier work here. New browser tools: act, extract, observe, open, screenshot. They drive Chrome through the page itself: use them for anything on a web page. The cua tools are now: {}. They are the desktop tools (Cua): use them only for native apps.\n\n",
+        cua_now.join(", ")
+    );
+    s.ok(
+        "the task after the change starts with a note of what changed, from what goose now offers, before the pet's own prompt; a new session's task and the task after are told nothing",
+        told.strip_prefix(&note).is_some_and(|t| t.starts_with("You are on a Linux computer") && t.ends_with("then click the app")) && prompt_of(&then) == "say hello" && prompt_of(&again) == "say hello",
+        json!({ "told": told, "new": prompt_of(&then), "after": prompt_of(&again) }),
+    );
     let text = |c: &Value| c.to_string();
     let (jev, flashx) = (fragment_proto::ROUTER_MODEL, "z-ai/glm-5.3-flashx");
     let models = |calls: &[&Value]| calls.iter().filter_map(|c| c["model"].as_str().map(str::to_string)).collect::<Vec<_>>();

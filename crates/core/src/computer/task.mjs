@@ -9,7 +9,8 @@
 // Each chat has one goose session, its id kept in sessions/<chat>: the first
 // task makes it (session/new), each later one loads it (session/load), so
 // goose's history, and the model's cached prefix, carry over, with the tools
-// goose's config names now (`retool`). Each tool call
+// goose's config names now (`retool`; a task after they changed is told so
+// first). Each tool call
 // goose makes is a step on the chat's `work` channel, posted as this
 // computer once the call ended, under the hand-off's turn
 // (fragment_core::work::handoff_turn), and goose's answer, once it ended its
@@ -42,6 +43,11 @@ const EXCERPT_MAX = 300;
 const ANSWER_MAX = 16000;
 // a post that fails is tried again after these (the hand-off's grant may come late)
 const RETRY_S = [2, 4, 8, 16, 30];
+// what a known extension's tools are for, said to the model when they change
+const HINTS = {
+  browser: "They drive Chrome through the page itself: use them for anything on a web page.",
+  cua: "They are the desktop tools (Cua): use them only for native apps.",
+};
 
 const run = promisify(execFile);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -166,7 +172,7 @@ function post(on, body, id) {
 // the chat's session: loaded, or made the first time (or when goose lost it)
 await ask("initialize", { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: "fragment", version: "1" } });
 fs.mkdirSync(cwd, { recursive: true });
-let session = read(saved);
+let [session, news] = [read(saved), ""];
 if (session) {
   loading = true;
   await ask("session/load", { sessionId: session, cwd, mcpServers: [], _meta: { replayTail: 1 } }).catch((e) => {
@@ -180,7 +186,7 @@ if (!session) {
   session = (await ask("session/new", { cwd, mcpServers: [] })).sessionId;
   fs.mkdirSync(path.dirname(saved), { recursive: true });
   fs.writeFileSync(saved, session);
-} else await retool().catch((e) => note(`its tools were left as they were: ${e.message}`, true));
+} else news = await retool().catch((e) => note(`its tools were left as they were: ${e.message}`, true));
 
 // goose keeps the extensions a session was made with (or those that loaded
 // last time) and loads it with them, not with its config's: a session made
@@ -195,7 +201,10 @@ if (!session) {
 // the cached prefix once, none otherwise, and is a line of hands.log, with
 // whether goose then offers the tools as configured. goose says no
 // extension's `envs` and adds none that way, so a config puts them in its
-// command.
+// command. What it answers is a note for this task's prompt, none without a
+// change: the session's history shows the tools of before, which a model
+// otherwise goes on using, so it says what changed, from what goose now
+// offers, with a known extension's hint.
 async function retool() {
   const on = (method, params) => ask(`_goose/unstable/${method}`, { sessionId: session, ...params });
   const key = (v) => JSON.stringify(v, (_, x) => (x && typeof x === "object" && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort()) : x));
@@ -204,26 +213,30 @@ async function retool() {
   const have = (await on("session/extensions/list")).extensions.filter(mcp);
   const offered = async () => (await on("tools/list")).tools.map((t) => t.name);
   // goose offers an extension's tools as <its key>__<tool>: some, and only those its allowlist names
-  const fits = (tools, { configKey: k, extension: { available_tools: only } }) => {
-    const own = tools.filter((t) => t.startsWith(`${k}__`)).map((t) => t.slice(k.length + 2));
-    return own.length > 0 && own.every((t) => !only || only.includes(t));
-  };
+  const own = (tools, k) => tools.filter((t) => t.startsWith(`${k}__`)).map((t) => t.slice(k.length + 2));
+  const fits = (tools, { configKey: k, extension: { available_tools: only } }) => own(tools, k).length > 0 && own(tools, k).every((t) => !only || only.includes(t));
   const [tools, changed] = [await offered(), []];
-  const change = (method, params, name, done) => on(`session/extensions/${method}`, params).then(() => changed.push(`${name} ${done}`), (e) => note(`${method} ${name} failed: ${e.message}`, true));
+  const change = (method, params, name, done) => on(`session/extensions/${method}`, params).then(() => changed.push([name, done]), (e) => note(`${method} ${name} failed: ${e.message}`, true));
   for (const gone of have.filter((h) => !want.some((w) => w.configKey === h.extensionKey))) await change("remove", { extensionKey: gone.extensionKey }, gone.extensionKey, "removed");
   for (const w of want) {
     const h = have.find((h) => h.extensionKey === w.configKey);
     if (!h || key(h.extension) !== key(w.extension) || !fits(tools, w)) await change("add", { extension: w.extension }, w.configKey, h ? "replaced" : "added");
   }
-  if (!changed.length) return;
+  if (!changed.length) return "";
   const now = await offered();
   const off = want.filter((w) => !fits(now, w)).map((w) => w.configKey);
-  note(`${changed.join(", ")}; goose offers ${off.length ? `not the configured tools of ${off.join(", ")}` : "the configured tools"}`);
+  note(`${changed.map((c) => c.join(" ")).join(", ")}; goose offers ${off.length ? `not the configured tools of ${off.join(", ")}` : "the configured tools"}`);
+  const lines = changed.map(([k, done]) => {
+    const list = own(now, k).join(", ");
+    if (!list) return `The ${k} tools are gone.`;
+    return [done === "added" ? `New ${k} tools: ${list}.` : `The ${k} tools are now: ${list}.`, HINTS[k]].filter(Boolean).join(" ");
+  });
+  return ["Your tools changed since your earlier work here.", ...lines].join(" ");
 }
 
 let late = false;
 const timer = setTimeout(() => ((late = true), send({ method: "session/cancel", params: { sessionId: session } })), TIME_MS);
-const ended = await ask("session/prompt", { sessionId: session, prompt: [{ type: "text", text: PROMPT }] }).catch((e) => ({ error: e.message }));
+const ended = await ask("session/prompt", { sessionId: session, prompt: [{ type: "text", text: news ? `${news}\n\n${PROMPT}` : PROMPT }] }).catch((e) => ({ error: e.message }));
 clearTimeout(timer);
 ws.close();
 const words = said.trim() || last;

@@ -676,6 +676,28 @@ from before slice 2, given a web task, still used Cua Driver's
   tools, and the model called `get_desktop_state` from its history (that
   step's `ok` says it failed).
 
+**Told of the change** (after the refresh deployed, 2026-09-27). On
+Paul's pet the older chat's session was refreshed (`hands.log`: `cua
+replaced, browser added; goose offers the configured tools`), but goose
+still drove the browser through Cua (`list_windows`, `hotkey`,
+`type_text`, `get_window_state`), copying its own earlier steps from the
+session's history; a fresh session uses `open` and `extract` and is
+about twice as fast.
+- **Now** a task whose refresh changed the session's tools starts with a
+  note built from the change and what goose then offers: `Your tools
+  changed since your earlier work here.`, then per extension `New
+  <key> tools: …`, `The <key> tools are now: …`, or `The <key> tools
+  are gone.`, with a one-line hint for the known ones (`browser`: for
+  anything on a web page; `cua`: only for native apps). Only that task:
+  no change, no note, so no cache break; the note stays in the history
+  like any prompt.
+- **The e2e** (`templates`): the refreshed task's prompt is exactly the
+  note, then the pet's own; the new session's task before and the task
+  after are told nothing.
+- **Size**: task client +25/−12, e2e +14, docs.
+- **On the pet**: its older chat was refreshed already, so it gets no
+  note until its tools change again; a new chat needs none.
+
 **What slice 2 leaves to the real pet**: Chrome's install and
 Stagehand's runtime loading there; per-call ms and cached share in
 `model.log` for a web task (a price found, added to a todo), with no
