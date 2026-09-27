@@ -167,6 +167,12 @@ Machines one at a time. Then revoke the old value at its issuer.
   fleet durability): `--nodes --stop-first`, then the cell, then the hosted
   e2e. v0.6.0 moves each app's database into a file of its own on first
   open, so going back to a v0.5.1 node after that is not supported.
+- Before any celld upgrade, read data written on the old rev with the new
+  one, with replication on (`celld dev` replicates, as the fleet does): a
+  fragment with app rows on the old binary, then the same storage under
+  the new one. The e2e makes fresh fragments and cannot catch a migration
+  bug. v0.6.0 had one (docs/technical-debt-ledger.md, "App data from
+  before celld v0.6.0 reads as empty"), and it reached fragment.club.
 - Never publish the internal port (8081) as a Fly service: it is for
   peers, and without `CELLD_INTERNAL_PEER_ONLY` its operator API has no
   authentication.

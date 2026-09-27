@@ -503,6 +503,33 @@ without a delete condition is unfinished design, not debt.
   priority in celld's gate, or a registry kept warm), or the node wakes
   its alarms in a bounded trickle.
 
+## App data from before celld v0.6.0 reads as empty
+
+- **Observed:** 2026-09-27, after fragment.club's nodes moved from the
+  v0.5.1 fork to v0.6.0 (#57, `--nodes --stop-first`, ~12:50Z). Every
+  app's own database written before then read as empty (a guestbook's
+  rows, the desktop's chats, the pet's frame); the supervisors' data
+  (channels, events, members) was intact, and the hosted e2e passed,
+  since it makes fresh fragments. An upstream bug, reproduced with
+  denoland's own 0.5.1 and 0.6.0 binaries: v0.6.0 imports a facet's
+  v0.5.1 image (a row of its root's `_cf_FACETS`) only into a new file
+  that is empty (`PRAGMA page_count` 0) and not restored, but under
+  replication the facet's stream creates the file first, with ltx's
+  control tables, so the import never runs.
+- **Risk:** none now: Paul, the only user, chose to start over rather than
+  restore, and the fork stays at `4f50c81` (no patch). The old images
+  still sit in each fragment's root database; deleting the fragment
+  removes its image (`facets.delete`). A later celld upgrade can lose data
+  the same way unless it is tested (docs/operate.md, celld upgrades).
+- **First proof:** already present.
+- **Fix in hand, not used:** a fork commit that imports the image table by
+  table, once, keeping ltx's control tables (a whole-file backup would
+  wedge replication), on the unpushed local branch
+  `facet-legacy-import-unpushed` of `celld-worktrees/v060` (`6b296a2`).
+- **Delete when:** the fragments from before 2026-09-27 are deleted or
+  re-created (their images go with them), or upstream fixes the import
+  and nothing needs it.
+
 ## An agent runs one turn at a time, across all its chats
 
 - **Observed:** phase 7 slice A keeps one conversation per chat, but one
