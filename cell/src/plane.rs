@@ -458,9 +458,13 @@ impl FragmentCell {
     }
 
     /// Refreshes pins; a move of main notifies the change feed and starts
-    /// the runs its file triggers name.
+    /// the runs its file triggers name, and the agent a new live declares
+    /// joins with its deploy (the alarm retries one that fails).
     pub(crate) async fn interpret(&self, refs: &[&str]) -> CellResult<Vec<(String, PinMove)>> {
         let out = self.interpret_locked(refs).await?;
+        if let Err(e) = self.sync_agent().await {
+            self.event("agent.join-failed", &e.message, json!({ "code": e.code }));
+        }
         // the file triggers' runs, the notifyUrls, and the alarm for newly installed schedules
         self.launch_queued().await;
         for (which, moved) in &out {

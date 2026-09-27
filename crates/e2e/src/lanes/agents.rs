@@ -596,6 +596,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
 
     let bot = Bot { name: &bot, id: &bot_id, npub: &bot_npub };
     chats_apart(s, api, &agents, &home, &owner, &bot, &todo)?;
+    joins_at_once(s, api, &home, &owner)?;
 
     // the page: the conversation so far, and a message sent from it (by a
     // link holder, who is a viewer)
@@ -614,6 +615,84 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     std::env::remove_var("FRAGMENT_AGENTS");
     super::work::work(s, api)?;
     super::build::build(s, api)
+}
+
+/// The template's chat and its owner's own agent (fragment.club,
+/// 2026-09-27: the agent joined at the alarm's retry, five minutes on, and
+/// the message sent before never got an answer). `fragment init` answers
+/// with the agent listening; a message sent right away is answered once,
+/// and a redeploy answers nothing again. A join that fails leaves the
+/// agent out until the alarm retries it: what was posted meanwhile is
+/// answered as it joins, once, and nothing from before the block was.
+fn joins_at_once(s: &mut Suite, api: &Api, home: &std::path::Path, owner: &Keys) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let listening = |chat: &str| api.signed(owner, "GET", &format!("/api/f/{chat}/subscriptions"), None).map_or(0, |r| r.body["subscriptions"].as_array().map_or(0, Vec::len));
+    let texts = |chat: &str| chat_records(api, owner, chat).iter().filter_map(|r| r["body"]["text"].as_str().map(str::to_string)).collect::<Vec<_>>();
+    let answered = |chat: &str, agent: &str, text: &str| said_by(&chat_records(api, owner, chat), &[agent], text);
+    let deploy = |s: &Suite, chat: &str, dir: &std::path::Path| s.cli(api, home, &["deploy", chat, "--dir", dir.to_str().expect("utf-8 path")]).status.success();
+    s.openrouter.clear_script();
+
+    let chat = s.named(api, owner, "joins")?;
+    let folder = s.dir("chat-joins");
+    let init = s.cli_in(api, home, &folder, &["init", &chat, "--template", "chat"]);
+    let members = api.signed(owner, "GET", &format!("/api/f/{chat}/members"), None)?;
+    let agent = members.body["members"].as_array().into_iter().flatten().find(|m| m["kind"] == "agent").and_then(|m| m["principal"].as_str()).unwrap_or("").to_string();
+    s.ok(
+        "fragment init --template chat answers with its owner's agent in the chat, listening",
+        init.status.success() && !agent.is_empty() && listening(&chat) == 1,
+        json!({ "stderr": String::from_utf8_lossy(&init.stderr), "members": members.body }),
+    );
+    let asked = s.openrouter.chats().len();
+    s.openrouter.script(&[Reply::Text("Hello there.".into())]);
+    say(api, owner, &chat, "j1", "hello right away")?;
+    let hello = s.eventually(wait, || answered(&chat, &agent, "Hello there."));
+    s.ok("a message sent as init answers is answered", hello, json!(chat_records(api, owner, &chat)));
+    let joins = super::addon::events(api, owner, &chat, "agent.joined");
+    std::fs::write(folder.join(&chat).join("README.md"), "A chat, deployed again.\n")?;
+    let redeployed = deploy(s, &chat, &folder.join(&chat));
+    s.openrouter.script(&[Reply::Text("Still here.".into())]);
+    say(api, owner, &chat, "j2", "after the redeploy")?;
+    let sentinel = s.eventually(wait, || answered(&chat, &agent, "Still here."));
+    let (said, turns) = (texts(&chat), s.openrouter.chats().len() - asked);
+    let rejoined = super::addon::events(api, owner, &chat, "agent.joined") == joins + 1;
+    s.ok(
+        "a redeploy joins the agent again and answers nothing again: each message is answered once",
+        redeployed && rejoined && sentinel && said == ["hello right away", "Hello there.", "after the redeploy", "Still here."] && turns == 2,
+        json!({ "rejoined": rejoined, "said": said, "model requests": turns }),
+    );
+
+    // a chat whose block comes with a later deploy, whose join fails (a test lever)
+    let late = s.named(api, owner, "joins-late")?;
+    let dir = s.dir("chat-joins-late").join("room");
+    let scaffolded = s.cli(api, home, &["new", dir.to_str().expect("utf-8 path"), "--template", "chat"]);
+    let manifest = std::fs::read(dir.join("fragment.json"))?;
+    without_owners_agent(&dir)?;
+    let made = s.cli_json(api, home, &["create", &late, "--json"])?;
+    let bare = scaffolded.status.success() && made["name"] == late.as_str() && deploy(s, &late, &dir);
+    say(api, owner, &late, "l1", "before the block")?;
+    let lever = |times: u32| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": late, "op": "fail-join", "times": times })));
+    lever(1000)?;
+    std::fs::write(dir.join("fragment.json"), &manifest)?;
+    let declared = deploy(s, &late, &dir);
+    let failures = super::addon::events(api, owner, &late, "agent.join-failed");
+    s.ok("a deploy whose join fails leaves the agent out, saying so", bare && declared && listening(&late) == 0 && failures > 0, json!({ "failures": failures }));
+    let asked = s.openrouter.chats().len();
+    say(api, owner, &late, "l2", "while it joins")?;
+    s.openrouter.script(&[Reply::Text("Caught up.".into())]);
+    lever(0)?;
+    let caught = s.eventually(wait, || answered(&late, &agent, "Caught up."));
+    s.openrouter.script(&[Reply::Text("And now.".into())]);
+    say(api, owner, &late, "l3", "and now?")?;
+    let sentinel = s.eventually(wait, || answered(&late, &agent, "And now."));
+    let (said, turns) = (texts(&late), s.openrouter.chats().len() - asked);
+    let before = s.openrouter.chats()[asked..].iter().any(|c| c["messages"].to_string().contains("before the block"));
+    s.ok(
+        "the alarm's join answers what was sent before the agent listened, once, and nothing sent before its block",
+        caught && sentinel && !before && said == ["before the block", "while it joins", "Caught up.", "and now?", "And now."] && turns == 2,
+        json!({ "said": said, "model requests": turns, "heard before the block": before }),
+    );
+    s.openrouter.clear_script();
+    Ok(())
 }
 
 /// A chat scaffolded for the lane's own agent: the template's block that

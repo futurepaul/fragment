@@ -153,6 +153,8 @@ pub struct FragmentCell {
     pub(crate) cfg: &'static Config,
     /// Serializes pin refreshes: two refreshes racing could leave the older head pinned.
     pub(crate) plane: futures_util::lock::Mutex<()>,
+    /// Serializes `sync_agent`: a deploy's and the alarm's would join the same agent twice.
+    pub(crate) joining: futures_util::lock::Mutex<()>,
     pub(crate) rate: RefCell<fragment_core::ratelimit::Rate>,
     /// Whether this activation has swept its pending mutations.
     pub(crate) swept: Cell<bool>,
@@ -181,6 +183,7 @@ impl DurableObject for FragmentCell {
             env,
             cfg,
             plane: futures_util::lock::Mutex::new(()),
+            joining: futures_util::lock::Mutex::new(()),
             rate: RefCell::new(rate),
             swept: Cell::new(false),
             settling: RefCell::default(),
@@ -334,12 +337,15 @@ pub(crate) enum MetaKey {
     /// A template still to commit (publish.rs).
     TemplatePending,
     /// What live's `agent` block declares, still to make so (agents.rs
-    /// `sync_agent`).
+    /// `sync_agent`): a new value each time live declares one.
     AgentPending,
     /// Live's `agent` block and its instructions' text (agents.rs `AgentLive`).
     AgentLive,
     /// The agent the platform last made answer here, and on which channel.
     AgentJoined,
+    /// Where a newly declared channel's agent starts hearing it, until it
+    /// joins (agents.rs `Floor`).
+    AgentFloor,
     /// What its computer is still to be told: `1` live declares one, `0`
     /// it no longer does (computer.rs).
     ComputerPending,
@@ -381,6 +387,8 @@ pub(crate) enum MetaKey {
     TestFailOutbox,
     /// Test fleets only: how many more trigger steps fail (`fail-triggers`).
     TestFailTriggers,
+    /// Test fleets only: how many more agent joins fail (`fail-join`).
+    TestFailJoin,
     /// Test fleets only: how many more step answers are lost on their way
     /// back to the Workflow, after the step was performed (`drop-effects`).
     TestDropEffects,
@@ -412,6 +420,7 @@ impl MetaKey {
             MetaKey::AgentPending => "agent_pending",
             MetaKey::AgentLive => "agent_live",
             MetaKey::AgentJoined => "agent_joined",
+            MetaKey::AgentFloor => "agent_floor",
             MetaKey::ComputerPending => "computer_pending",
             MetaKey::ComputerDeclared => "computer_declared",
             MetaKey::ThrowawayOf => "throwaway_of",
@@ -431,6 +440,7 @@ impl MetaKey {
             MetaKey::TestFailDeliveries => "test_fail_deliveries",
             MetaKey::TestFailOutbox => "test_fail_outbox",
             MetaKey::TestFailTriggers => "test_fail_triggers",
+            MetaKey::TestFailJoin => "test_fail_join",
             MetaKey::TestDropEffects => "test_drop_effects",
             MetaKey::TestHoldAdvances => "test_hold_advances",
             MetaKey::TestAdvanceHeld => "test_advance_held",
@@ -1042,11 +1052,10 @@ impl FragmentCell {
         self.event("create", &format!("fragment {} created by {owner} (repo {repo})", body.name), json!({ "repo": repo, "key": caller.key().map(npub::display) }));
         self.flush_index().await;
         // a template that did not land, or an agent it declares that did
-        // not join, is retried by the alarm
+        // not join (its deploy joins it: plane.rs `interpret`), is retried
+        // by the alarm
         if let Err(e) = self.seed().await {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
-        } else if let Err(e) = self.sync_agent().await {
-            self.event("agent.join-failed", &e.message, json!({ "code": e.code }));
         }
         self.schedule().await?;
         json_response(&Created {

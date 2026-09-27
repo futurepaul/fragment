@@ -269,6 +269,19 @@ struct Joined {
     channel: String,
 }
 
+/// Where the agent of a newly declared channel starts hearing it
+/// (`MetaKey::AgentFloor`): the channel's last record as the deploy that
+/// declared it went live. What is posted after, before the agent listens,
+/// reaches it as it joins (`catch_up`); nothing from before ever does.
+#[derive(Serialize, Deserialize)]
+struct Floor {
+    channel: String,
+    seq: i64,
+}
+
+/// One join catches up on the newest this many records, at most.
+const CATCH_UP_MAX: i64 = 32;
+
 fn stored<T: DeserializeOwned>(text: Option<String>, what: &str) -> CellResult<Option<T>> {
     text.map(|t| serde_json::from_str(&t)).transpose().map_err(|e| CellError::host(format!("the stored {what}: {e}")))
 }
@@ -301,26 +314,41 @@ impl FragmentCell {
     }
 
     /// Keeps what a new live declares, and has `sync_agent` make it so. A
-    /// fragment that never declared an agent carries nothing of one.
+    /// fragment that never declared an agent carries nothing of one. A
+    /// channel newly declared gets its floor (`Floor`).
     pub(crate) fn set_agent_live(&self, live: Option<&AgentLive>) -> CellResult<()> {
         match live {
-            Some(a) => self.set_meta(MetaKey::AgentLive, &serde_json::to_string(a).expect("an agent block serializes"))?,
+            Some(a) => {
+                let before: Option<AgentLive> = stored(self.meta(MetaKey::AgentLive)?, "agent block")?;
+                if before.is_none_or(|b| b.decl.channel != a.decl.channel) {
+                    let last = self.rows("SELECT MAX(seq) AS seq FROM records WHERE channel = ?", vec![a.decl.channel.as_str().into()])?;
+                    let floor = Floor { channel: a.decl.channel.clone(), seq: last.first().and_then(|r| r["seq"].as_i64()).unwrap_or(0) };
+                    self.set_meta(MetaKey::AgentFloor, &serde_json::to_string(&floor).expect("a floor serializes"))?;
+                }
+                self.set_meta(MetaKey::AgentLive, &serde_json::to_string(a).expect("an agent block serializes"))?
+            }
             None if self.meta(MetaKey::AgentLive)?.is_none() => return Ok(()),
-            None => self.del_meta(MetaKey::AgentLive)?,
+            None => {
+                self.del_meta(MetaKey::AgentFloor)?;
+                self.del_meta(MetaKey::AgentLive)?
+            }
         }
-        self.set_meta(MetaKey::AgentPending, "1")
+        self.set_meta(MetaKey::AgentPending, &js::random_hex::<8>())
     }
 
     /// Makes the agent live declares answer here: its owner's own, or the
     /// fragment's (made on first need, and given what the block declares),
-    /// an editor that listens to the declared channel. The one that
-    /// answered before leaves when it is not that one, and stops listening
-    /// where it no longer answers. Each part is idempotent, so the alarm
-    /// retries one that did not finish.
+    /// an editor that listens to the declared channel, caught up on what
+    /// was posted there since its channel was declared (`catch_up`). The
+    /// one that answered before leaves when it is not that one, and stops
+    /// listening where it no longer answers. Each part is idempotent, so
+    /// the alarm retries one that did not finish. One runs at a time, and
+    /// a live that declares again meanwhile leaves its own pending.
     pub(crate) async fn sync_agent(&self) -> CellResult<()> {
-        if self.meta(MetaKey::AgentPending)?.is_none() {
-            return Ok(());
-        }
+        let _held = self.joining.lock().await;
+        let Some(pending) = self.meta(MetaKey::AgentPending)? else { return Ok(()) };
+        let settled = || self.exec("DELETE FROM meta WHERE key = ? AND value = ?", vec![MetaKey::AgentPending.key().into(), pending.as_str().into()]);
+        self.test_countdown(MetaKey::TestFailJoin, "the agent's join failed")?;
         let [live, joined] = self.metas([MetaKey::AgentLive, MetaKey::AgentJoined])?;
         let (live, joined): (Option<AgentLive>, Option<Joined>) = (stored(live, "agent block")?, stored(joined, "agent joined")?);
         let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
@@ -348,16 +376,47 @@ impl FragmentCell {
         }
         let Some(wanted) = wanted else {
             self.del_meta(MetaKey::AgentJoined)?;
-            return self.del_meta(MetaKey::AgentPending);
+            return settled();
         };
         if self.member_role(&wanted.agent)?.is_none() {
             self.set_member(&as_owner, &wanted.agent, fragment_proto::SetRole { role: Role::Editor }).await?;
         }
         let listen = json!({ "fragment": name, "channel": wanted.channel });
-        ask_json(&self.env, Method::Post, &format!("/api/a/{}/listen", wanted.name), &owner, &listen).await?;
+        let listening = ask_json(&self.env, Method::Post, &format!("/api/a/{}/listen", wanted.name), &owner, &listen).await?;
         self.set_meta(MetaKey::AgentJoined, &serde_json::to_string(&wanted).expect("a join serializes"))?;
         self.event("agent.joined", &format!("{} answers on {}", wanted.name, wanted.channel), json!({ "agent": wanted.agent }));
-        self.del_meta(MetaKey::AgentPending)
+        let sub = listening["subscription"].as_i64().ok_or_else(|| CellError::host("the agent's listen named no subscription"))?;
+        if self.catch_up(&wanted.channel, sub)? {
+            self.drain_deliveries().await;
+        }
+        settled()
+    }
+
+    /// The records of `channel` past its floor that its subscription `sub`
+    /// never carried (posted before it began), the newest CATCH_UP_MAX,
+    /// queued for it once: the floor goes with them, so a later join (a
+    /// redeploy) catches up on nothing. The agent never answers a record
+    /// twice (it keeps what it heard). Answers whether any were queued.
+    fn catch_up(&self, channel: &str, sub: i64) -> CellResult<bool> {
+        let floor: Option<Floor> = stored(self.meta(MetaKey::AgentFloor)?, "agent floor")?;
+        // another channel's is a newer live's, for its own join
+        let Some(floor) = floor.filter(|f| f.channel == channel) else { return Ok(false) };
+        let queued = self.rows(
+            "INSERT INTO delivery_outbox (kind, sub, channel, seq, next_at) SELECT 'record', ?, channel, seq, ? FROM (
+               SELECT r.channel, r.seq FROM records r JOIN subs s ON s.id = ? AND s.channel = r.channel
+               WHERE r.channel = ? AND r.seq > ? AND r.at <= s.created_at ORDER BY r.seq DESC LIMIT ?)
+             ORDER BY seq RETURNING id",
+            vec![
+                SqlStorageValue::Integer(sub),
+                SqlStorageValue::Integer(js::now_ms()),
+                SqlStorageValue::Integer(sub),
+                channel.into(),
+                SqlStorageValue::Integer(floor.seq),
+                SqlStorageValue::Integer(CATCH_UP_MAX),
+            ],
+        )?;
+        self.del_meta(MetaKey::AgentFloor)?;
+        Ok(!queued.is_empty())
     }
 
     /// The fragment's own agent, named as the fragment is: made its owner's
