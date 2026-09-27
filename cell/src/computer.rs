@@ -264,6 +264,23 @@ impl ComputerCell {
         Ok(())
     }
 
+    /// Saves a step's row over what asks wrote while it ran (a step waits on
+    /// Sprites, and on `stepping`): a later wake stands (a page's, a job's
+    /// command's), and so do a deploy's `declared` and a removal. A step
+    /// that let it sleep for the month (`awake_until` 0) keeps that.
+    fn save_step(&self, c: &mut Row) -> CellResult<()> {
+        if let Some(asked) = self.row()? {
+            if c.awake_until != 0 {
+                c.awake_until = c.awake_until.max(asked.awake_until);
+            }
+            c.declared = asked.declared;
+            if asked.phase == Phase::Destroy {
+                c.phase = Phase::Destroy;
+            }
+        }
+        self.save(c)
+    }
+
     fn files(&self) -> CellResult<Files> {
         Ok(self.sql().exec("SELECT start, live, synced, failed FROM files", None)?.to_array::<Files>()?.pop().unwrap_or_default())
     }
@@ -484,7 +501,7 @@ impl ComputerCell {
                     self.settle(c, &reference, cost).await?;
                 }
                 (c.asleep_since, c.billed_to) = (None, now);
-                self.save(c)?;
+                self.save_step(c)?;
             }
             // a tick is held when the last one paid for runs out
             match if now >= c.billed_to { self.hold(c).await } else { Ok(()) } {
@@ -503,7 +520,7 @@ impl ComputerCell {
             }
             self.sync_files(c, woke).await;
             (c.held, c.tries) = (true, 0);
-            self.save(c)?;
+            self.save_step(c)?;
             // next: the paid tick's end, or the idle wait's, whichever first
             return self.arm((c.billed_to - now).min(c.awake_until - now)).await;
         }
@@ -526,7 +543,12 @@ impl ComputerCell {
             keys::sprites(&self.env, "exec", &tasks("DELETE", ""), "").await?;
             (c.held, c.asleep_since) = (false, Some(now));
         }
-        self.save(c)
+        self.save_step(c)?;
+        // asked awake while it let go: held again at once
+        if c.declared && js::now_ms() < c.awake_until {
+            self.arm(0).await?;
+        }
+        Ok(())
     }
 
     /// How many pages of its fragment are open (its live sockets).
@@ -536,11 +558,11 @@ impl ComputerCell {
         v["viewers"].as_i64().ok_or_else(|| CellError::host("the fragment answered no viewers"))
     }
 
-    /// Awake for a job's command until `until`, as for a page, and held:
-    /// it waits a while for the alarm to hold it (its first tick paid).
-    /// Refused for good when it is not declared, or its owner's month cannot
-    /// pay a tick; one still waking or booting is tried again.
-    async fn awake(&self, until: i64) -> CellResult<Row> {
+    /// Awake for a job's command until `until`, as for a page. `held`: it
+    /// waits a while for the alarm to hold it (its first tick paid), and
+    /// one still waking or booting is tried again. Refused for good when it
+    /// is not declared, or its owner's month cannot pay a tick.
+    async fn awake(&self, until: i64, held: bool) -> CellResult<Row> {
         let refused = |m: &str| CellError::invalid(format!("job.computer.exec: {m}"));
         let (t0, mut asked) = (js::now_ms(), false);
         loop {
@@ -566,7 +588,7 @@ impl ComputerCell {
                 }
             }
             asked = true;
-            if c.phase == Phase::Ready && c.held {
+            if !held || (c.phase == Phase::Ready && c.held) {
                 return Ok(c);
             }
             if js::now_ms() - t0 > WAKE_WAIT_MS {
@@ -584,11 +606,20 @@ impl ComputerCell {
         Ok(month.remaining_micros >= budget::computer(self.cfg.computer_tick_ms, c.disk_bytes, true))
     }
 
+    /// How long a job's command keeps its computer awake from its start and
+    /// from each poll: through a poll's wait, at least (each poll's end
+    /// asks for the idle wait after it, as a page's close does). More than
+    /// a slow wake takes, so the hold that wake pays for is not let go at
+    /// once.
+    fn command_awake_ms(&self) -> i64 {
+        (1000 * (exec::POLL_WAIT_S as i64 + 10)).max(self.cfg.computer_idle_ms)
+    }
+
     /// `job.computer.exec`'s start: the computer awake, then the command
     /// started on it, once (`exec::START`).
     async fn exec(&self, id: &str, e: &ComputerExec) -> CellResult<Value> {
         exec::check(e).map_err(CellError::invalid)?;
-        let c = self.awake(js::now_ms() + self.cfg.computer_idle_ms).await?;
+        let c = self.awake(js::now_ms() + self.command_awake_ms(), true).await?;
         let script = exec::job_script(e, &self.cfg.computer_platform()?, &c.fragment);
         let timeout = exec::timeout_s(e).to_string();
         let (status, out) = keys::sprites(&self.env, "exec", &["bash", "-c", exec::START, "fragment-exec", id, &timeout], &script).await?;
@@ -598,11 +629,12 @@ impl ComputerCell {
         }
     }
 
-    /// `job.computer.exec`'s poll: awake, waiting on the computer for the
-    /// command to end, then its result, read in chunks.
+    /// `job.computer.exec`'s poll: kept awake, waiting on the computer for
+    /// the command to end, then its result, read in chunks. It waits on no
+    /// alarm step: the command's start held the computer, each poll keeps
+    /// it held for the next, and an exec reaches a Sprite that paused.
     async fn exec_poll(&self, id: &str) -> CellResult<Value> {
-        // awake through the wait, then the idle wait from its end, as after a page
-        self.awake(js::now_ms() + 1000 * (exec::POLL_WAIT_S as i64 + 10)).await?;
+        self.awake(js::now_ms() + self.command_awake_ms(), false).await?;
         let wait = exec::POLL_WAIT_S.to_string();
         let (status, out) = keys::sprites(&self.env, "exec", &["bash", "-c", exec::POLL, "fragment-exec", id, &wait], "").await?;
         self.asked(Ask::Wake { until: js::now_ms() + self.cfg.computer_idle_ms }).await?;
