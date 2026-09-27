@@ -443,18 +443,22 @@ the pet).
 - whether Stagehand's extension loads in the Sprite's Chrome;
 - whether Jev honours `json_schema`.
 
-## Open questions for Paul
+## Paul's answers (2026-09-27)
 
-1. **The hands' model.** flashx (about $1.30 an hour of hands' work) or
-   flash (about $0.15)? Compact at 64k tokens?
-2. **Jev.** Allow `typesafe/jev-router` on the platform endpoint? Its
-   price varies, so the reservation must cover the worst case.
-3. **The model route's cap.** Raise it from 2 MiB to 8 MiB?
-4. **Stagehand.** v4.1.0, with no local action cache, or v3.7.3, with
-   `cacheDir`?
-5. **Memory and skills.** Commit them to `main` directly, or review them
-   first (Hermes's `write_approval`)?
-6. **"The owner's computer".** When there are several, which one?
-   Proposed: the one marked default, else the newest.
-7. **Pins.** Move goose to v1.52.0 and Cua Driver to 0.28.3, the
-   builder's goose included?
+1. **Model: flashx by default everywhere**, not only on computers: the
+   in-cell agents, fragment agents, and the computer endpoint. Compaction
+   starts at 64k tokens and gets measured.
+2. **Jev: yes.** `typesafe/jev-router` is on the allowlist, with a capped
+   reservation settled to its reported cost ("Jev will bring down costs
+   considerably").
+3. **The model route's cap: 8 MiB.** Every other route keeps 2 MiB.
+4. **Stagehand: the latest** (v4.1.0 at the time of writing).
+5. **Memory and skills: straight to `main`.** Git history is the review
+   and the undo.
+6. **The owner's computer:** a chat binds to one computer; the owner
+   sets a default ("home") computer once. A person may have several
+   long-lived computers ("pets" may be plural) beside throwaways, and
+   the platform need not distinguish the two: a throwaway is only a
+   hand-off's lifecycle.
+7. **Pins: yes.** goose v1.52.0 and Cua Driver 0.28.3, the builder's
+   goose included. The dependency cooldown is 2 days (Paul, 2026-09-27).

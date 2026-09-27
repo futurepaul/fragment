@@ -107,6 +107,9 @@ rollback), members and invites, call (operations), and read and follow
     computer, else its cell); the conversation lives in the agent's cell.
     finite-next's fx path (`acp-job.mjs`, `run-job.sh`, the inference
     shim, ACP event mapping, the cancel file) is not ported.
+    *Amended 2026-09-27 by decision 24:* a session lives where its hands
+    are (the computer); a conversation lives in its fragment's channels;
+    memory and skills live in fragment files.
 11. **Secrets have one home, and code holds capabilities, not keys**
     (`docs/secrets.md`): encrypted in the owning cell; computers reach
     credentials through Sprites connectors. *Amended 2026-09-23 by
