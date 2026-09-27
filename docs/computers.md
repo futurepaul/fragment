@@ -233,14 +233,20 @@ task to it and waits; the pet's `do` and the builder's `build` do.
   the CLI's guide (`fragment guide > ~/.config/goose/.goosehints`, each
   start), and its extensions its default (the developer tools) and what
   `~/.config/goose/config.yaml` enables (the pet's browser and Cua
-  Driver). A script the platform changed restarts itself at its next
+  Driver): a new session takes the config's, and goose loads a session
+  with those it keeps, so the task client brings them to the config's
+  (below). A script the platform changed restarts itself at its next
   second, and so does one whose CLI changed (above).
 - **The task client** (`~/.fragment/agent/task.mjs`, Node; written with
   the service): one task, `PROMPT`, in the session of `CHAT`
   (`<fragment>/<channel>`; none: the job's own fragment's `work`). The
   chat's session id is kept in `sessions/<chat>`: the first task makes
   it (`session/new`, in `~/chats/<chat>`), each later one loads it
-  (`session/load`), and one goose lost is made again. It sends
+  (`session/load`), and one goose lost is made again. A loaded session's
+  MCP extensions are made the config's enabled ones where they differ
+  (goose's `_goose/unstable/…/extensions/list`, `add`, `remove`: one
+  cache break per tool change; an extension's `envs` do not carry over,
+  so a config puts them in its command). It sends
   `session/prompt`, and posts each tool call, once it ended, as a
   `turn.step` on the chat's `work` (`fragment post`, as the computer:
   docs/api.md, the chat template), trying a failed post again for a
@@ -494,8 +500,9 @@ click and anyone may click in between. Its steps, each durable:
    `get_window_state`, `click`, `type_text`, `press_key`, `hotkey`,
    `scroll`: each is described at length, and every model request
    carries the tools offered), with `DISPLAY=:99`, the pet's session bus,
-   telemetry off, and no update checks; and `browser`, the server on the
-   Node a job finds.
+   telemetry off, and no update checks (in its command, `/usr/bin/env
+   … cua-driver mcp`, which a loaded session takes too); and `browser`,
+   the server on the Node a job finds.
 2. **The task** (capped at 10 minutes): the hands' task client, in the
    session of the chat that asked (none: the pet's own page's), the task
    after a paragraph on the screen and which tools are for what: the
@@ -513,15 +520,23 @@ pet's Chrome over CDP at the first call and loads its runtime extension
 there; each step reads the page's accessibility tree, and none sends the
 model a picture. act, observe, and extract reason through the hands' own
 endpoint (the server inherits goose's `OPENROUTER_HOST`, `fragment model
---serve`: signed as the computer, billed to its owner), unstreamed, with
-Stagehand's JSON schema as `response_format`: Jev
-(`typesafe/jev-router`) first, and flashx for the same request when
-Jev's answer is not JSON that fits the schema (checked in the server),
-or when Jev is refused (a Jev call holds $0.50 of the month until it
-settles). Each such call is a line of `~/.fragment/agent/browser.log`
-(`{model, schema, ms, ok, why}`), beside `model.log`'s. Stagehand's own
-traces, which go to example.com unless told otherwise, go to a closed
-loopback port.
+--serve`: signed as the computer, billed to its owner), unstreamed, the
+schema said in the system prompt. One setting in the server,
+`JEV_FIRST`, picks the models: flashx alone (the default), in JSON mode
+(its one provider takes no schema; `provider: {sort: "latency",
+require_parameters: true}`) with `reasoning.effort: low`; or Jev
+(`typesafe/jev-router`) first, asked for Stagehand's JSON schema as
+`response_format`, with no reasoning effort (it picks its own, and
+refused one named) and no provider preferences (it may pick a stealth
+model, which Paul accepted), then flashx for the same request when Jev's
+answer does not fit or Jev is refused (a Jev call holds $0.50 of the
+month until it settles). `computer/browser/answer.mjs` reads an answer:
+the JSON in it, a schema's only field given bare, or words where that
+field is text. Each call is a line of `~/.fragment/agent/browser.log`
+(`{model, by, schema, ms, ok, why}`, `by` the model that answered),
+beside `model.log`'s, which is what settles the setting
+(docs/agent-computer.md, Browser fixes). Stagehand's own traces, which
+go to example.com unless told otherwise, go to a closed loopback port.
 
 **Screenshots reach the model, and stay.** goose sends an MCP tool's
 image (Cua Driver's `get_window_state`, the browser's `screenshot`) as a
@@ -549,15 +564,23 @@ goose and Cua Driver (the e2e binary, where the pinned releases go) and
 for Stagehand (a module where the job installs it, beside the pet's own
 lockfile, so nothing is installed; its act, observe, and extract ask the
 model once each through the `generate` callback, with a fixed tree as
-the page). goose's stand-in reads the config the job writes, starts both
-MCP servers (the browser's is the real one), offers its shell and the
-tools the config names, and sends screenshots on as goose does. It
+the page). goose's stand-in keeps each session's extensions as goose
+does (a new session takes the config the job writes, with goose's ACP
+methods to list, add, and remove them), starts its MCP servers (the
+browser's is the real one), offers its shell and their tools, and sends
+screenshots on as goose does. A session made on an older, Cua-only
+config gets the new tools on its next task, in the same session, and
+the task after changes nothing. It
 checks the refusal for a viewer, the answer, goose's model calls
 (through the platform, on flashx, offered the browser's tools and Cua
 Driver's desktop ones), a browser task's steps (`open`, `extract`,
-`act`) reaching the model through the hands' endpoint as Jev with
-Stagehand's schema, flashx taking over when Jev's answer does not fit,
-billed to the owner, and in `browser.log`; that no browser step sends a
+`observe`, `act`) reaching the model through the hands' endpoint, on
+flashx in JSON mode, its markdown list and bare array of elements read
+as Stagehand's shapes, and in `browser.log`; then, `JEV_FIRST` turned on
+in the pet's files, Jev with Stagehand's schema and no reasoning effort
+(the OpenRouter fake refuses one, as Jev did) or provider, flashx
+taking over when Jev's JSON is cut short, billed to the owner; that no
+browser step sends a
 screenshot, while Cua Driver's reaches the model, capped; the click on
 `:99`, the steps on `work`, and the driver. It proves the plumbing, not
 goose, Stagehand, or Cua Driver.
@@ -566,13 +589,15 @@ goose, Stagehand, or Cua Driver.
 extensions from the JSON `config.yaml` and offers their tools; that its
 ACP updates are the shapes the task client reads (`tool_call` with
 `_meta.goose.toolCall.toolName` and `rawInput`, `tool_call_update`,
-`agent_message_chunk`); that Chrome installs and Stagehand's runtime
-loads in it there (on a local Chrome 153, Stagehand 4.1.0 through this
-server opened a page, filled and clicked, observed, and extracted); how
-often Jev's answers fit Stagehand's schema (`browser.log`); a browser
-step's time; that `cua-driver mcp` starts under Xvfb and openbox, and
-its clicks land in a desktop app; how many screenshots fit before
-compaction at 64k; and how well flashx drives a screen.
+`agent_message_chunk`), and its extension methods' the shapes it
+compares (read from goose v1.52.0's source); that Chrome installs and
+Stagehand's runtime loads in it there (on a local Chrome 153, Stagehand
+4.1.0 through this server opened a page, filled and clicked, observed,
+and extracted); how often flashx's answers, and Jev's, fit Stagehand's
+schema, and how soon (`browser.log`), which settles `JEV_FIRST`; a
+browser step's time; that `cua-driver mcp` starts under Xvfb and
+openbox, and its clicks land in a desktop app; how many screenshots fit
+before compaction at 64k; and how well flashx drives a screen.
 
 ## Your agent hands its work to a computer
 

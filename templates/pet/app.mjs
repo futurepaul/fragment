@@ -33,7 +33,9 @@ const SCREEN = `You are on a Linux computer whose 1024×640 screen people watch 
 // changed; then goose's extensions for them: Cua Driver's MCP server on the
 // pet's display and session bus, no telemetry, no update checks, and the
 // browser's, with Node as a job finds it (goose's config, which the hands
-// read for each new session; JSON is YAML)
+// read for each new session, and the task client brings a loaded one's
+// extensions to; JSON is YAML). Their environments are in their commands
+// (`env VAR=… cmd`): goose moves no extension's `envs` into a session.
 const INSTALL = `set -eu
 export CUA_DRIVER_RS_TELEMETRY_ENABLED=false
 if [ ! -d "$HOME/${CUA_DIR}" ]; then
@@ -51,9 +53,9 @@ if ! cmp -s computer/browser/package-lock.json "$b/package-lock.json"; then
   (cd "$t" && npm ci --ignore-scripts --no-audit --no-fund --loglevel=error)
   rm -rf "$b" && mv "$t" "$b"
 fi
-cp computer/browser/browser-mcp.mjs "$b"
+cp computer/browser/browser-mcp.mjs computer/browser/answer.mjs "$b"
 mkdir -p "$HOME/.config/goose" && cat > "$HOME/.config/goose/config.yaml" << EOF
-{"extensions": {"cua": {"enabled": true, "type": "stdio", "name": "cua", "description": "desktop apps on the pet's screen", "cmd": "$HOME/${CUA_DIR}/cua-driver", "args": ["mcp"], "timeout": 120, "available_tools": ${JSON.stringify(TOOLS)}, "envs": {"DISPLAY": ":99", "DBUS_SESSION_BUS_ADDRESS": "unix:path=$HOME/.pet/bus", "CUA_DRIVER_RS_TELEMETRY_ENABLED": "false", "CUA_DRIVER_RS_UPDATE_CHECK": "false"}},
+{"extensions": {"cua": {"enabled": true, "type": "stdio", "name": "cua", "description": "desktop apps on the pet's screen", "cmd": "/usr/bin/env", "args": ["DISPLAY=:99", "DBUS_SESSION_BUS_ADDRESS=unix:path=$HOME/.pet/bus", "CUA_DRIVER_RS_TELEMETRY_ENABLED=false", "CUA_DRIVER_RS_UPDATE_CHECK=false", "$HOME/${CUA_DIR}/cua-driver", "mcp"], "timeout": 120, "available_tools": ${JSON.stringify(TOOLS)}},
 "browser": {"enabled": true, "type": "stdio", "name": "browser", "description": "the web, in the Chrome on the pet's screen", "cmd": "$(command -v node)", "args": ["$b/browser-mcp.mjs"], "timeout": 120}}}
 EOF`;
 

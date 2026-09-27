@@ -458,13 +458,17 @@ fn files_containing(dir: &Path, needles: &[String]) -> Vec<String> {
 /// `$OPENROUTER_HOST/api/v1/chat/completions` as goose's OpenRouter
 /// provider does (streaming, the session's id as `session_id`, `transforms`,
 /// `OPENROUTER_PARAMETERS` merged in), sending the session's whole history
-/// after a fixed system prompt, with a `shell` tool and the tools of the
-/// stdio MCP servers goose's config enables (the pet's Cua Driver and
-/// browser), named and filtered as goose does, each inheriting goose's
-/// environment. Each tool call is a `tool_call` update, then
-/// a `tool_call_update` once it ran (an image as goose's OpenAI format adds
-/// it, a user message after the result); the model's text is an
-/// `agent_message_chunk`.
+/// after a fixed system prompt, with the session's tools: a `shell` (its
+/// built-in `developer`) and those of its stdio MCP servers (the pet's Cua
+/// Driver and browser), named and filtered as goose does, each inheriting
+/// goose's environment. As goose does, a session keeps the extensions its
+/// config enabled when it was made, and a load keeps them; goose's ACP
+/// methods list the config's and a session's (a stdio one's `envs` left
+/// out), and add or remove a session's (one with an inline env refused),
+/// each counted in the session's `changes`. Each tool call is a
+/// `tool_call` update, then a `tool_call_update` once it ran (an image as
+/// goose's OpenAI format adds it, a user message after the result); the
+/// model's text is an `agent_message_chunk`.
 pub fn stand_in_goose(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("--version") => {
@@ -489,8 +493,9 @@ pub fn stand_in_goose(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// One ACP connection: `initialize`, `session/new`, `session/load`, and
-/// `session/prompt`; a notification (a cancel) is let be.
+/// One ACP connection: `initialize`, `session/new`, `session/load`,
+/// `session/prompt`, and goose's methods for extensions; a notification (a
+/// cancel) is let be.
 fn acp(stream: std::net::TcpStream, secret: &str, sessions: &std::sync::Mutex<()>) -> Result<()> {
     use tungstenite::handshake::server::{ErrorResponse, Request, Response};
     let mut head = [0u8; 64];
@@ -522,30 +527,56 @@ fn acp(stream: std::net::TcpStream, secret: &str, sessions: &std::sync::Mutex<()
         let params = &ask["params"];
         let _one = sessions.lock().expect("the sessions");
         let mut store = Sessions::read()?;
-        let answer = match ask["method"].as_str().unwrap_or("") {
+        let (method, id) = (ask["method"].as_str().unwrap_or(""), params["sessionId"].as_str().unwrap_or("").to_string());
+        let known = store.0["sessions"][&id].is_object();
+        let answer = match method {
             "initialize" => Ok(json!({ "protocolVersion": 1, "agentCapabilities": { "loadSession": true } })),
             "session/new" => {
                 let id = format!("s{}", store.0["sessions"].as_object().map_or(0, |s| s.len()) + 1);
-                store.0["sessions"][&id] = json!({ "cwd": params["cwd"], "messages": [] });
+                let mut extensions = vec![json!({ "type": "builtin", "name": "developer" })];
+                extensions.extend(configured()?.into_iter().filter(|x| x["enabled"] == true));
+                store.0["sessions"][&id] = json!({ "cwd": params["cwd"], "messages": [], "extensions": extensions, "changes": 0 });
                 store.write()?;
                 Ok(json!({ "sessionId": id }))
             }
-            "session/load" => match store.0["sessions"][params["sessionId"].as_str().unwrap_or("")].is_object() {
-                true => Ok(json!({})),
-                false => Err((-32002, "Resource not found".to_string())),
-            },
-            "session/prompt" => {
-                let id = params["sessionId"].as_str().unwrap_or("").to_string();
-                let text = params["prompt"][0]["text"].as_str().unwrap_or("").to_string();
-                match store.0["sessions"][&id]["messages"].as_array().cloned() {
-                    Some(history) => {
-                        let (history, stop) = prompt(&mut ws, &id, history, &text)?;
-                        store.0["sessions"][&id]["messages"] = json!(history);
-                        store.write()?;
-                        Ok(json!({ "stopReason": stop }))
+            "_goose/unstable/config/extensions/list" => {
+                let entries: Vec<Value> = configured()?.iter().map(|x| json!({ "extension": said(x), "enabled": x["enabled"] == true, "configKey": x["name"] })).collect();
+                Ok(json!({ "extensions": entries }))
+            }
+            _ if !known => Err((-32002, "Resource not found".to_string())),
+            "session/load" => Ok(json!({})),
+            "_goose/unstable/session/extensions/list" => {
+                let entries = store.0["sessions"][&id]["extensions"].as_array().into_iter().flatten().map(|x| json!({ "extension": said(x), "extensionKey": x["name"] }));
+                Ok(json!({ "extensions": entries.collect::<Vec<_>>() }))
+            }
+            "_goose/unstable/session/extensions/add" | "_goose/unstable/session/extensions/remove" => {
+                let session = &mut store.0["sessions"][&id];
+                let extensions = session["extensions"].as_array_mut().context("a session's extensions")?;
+                let changed = match method.ends_with("/add") {
+                    true => added(&params["extension"]).map(|x| {
+                        extensions.retain(|y| y["name"] != x["name"]);
+                        extensions.push(x);
+                    }),
+                    false => {
+                        let before = extensions.len();
+                        extensions.retain(|x| x["name"] != params["extensionKey"]);
+                        (extensions.len() < before).then_some(()).ok_or_else(|| format!("Extension {} not found", params["extensionKey"]))
                     }
-                    None => Err((-32002, "Resource not found".to_string())),
+                };
+                if changed.is_ok() {
+                    session["changes"] = json!(session["changes"].as_u64().unwrap_or(0) + 1);
+                    store.write()?;
                 }
+                changed.map(|()| json!({})).map_err(|e| (-32602, e))
+            }
+            "session/prompt" => {
+                let text = params["prompt"][0]["text"].as_str().unwrap_or("").to_string();
+                let session = &store.0["sessions"][&id];
+                let history = session["messages"].as_array().cloned().unwrap_or_default();
+                let (history, stop) = prompt(&mut ws, &id, &session["extensions"].clone(), history, &text)?;
+                store.0["sessions"][&id]["messages"] = json!(history);
+                store.write()?;
+                Ok(json!({ "stopReason": stop }))
             }
             method => Err((-32601, format!("{method} is not the stand-in's"))),
         };
@@ -575,16 +606,60 @@ impl Sessions {
     }
 }
 
+/// The extensions goose's config (`~/.config/goose/config.yaml`, which the
+/// pet writes as JSON) names, each with its name.
+fn configured() -> Result<Vec<Value>> {
+    let Ok(text) = std::fs::read_to_string(Path::new(&std::env::var("HOME")?).join(".config/goose/config.yaml")) else { return Ok(vec![]) };
+    let config: Value = serde_json::from_str(&text)?;
+    let named = |(name, x): (&String, &Value)| {
+        let mut x = x.clone();
+        x["name"] = x.get("name").cloned().unwrap_or_else(|| json!(name));
+        x
+    };
+    Ok(config["extensions"].as_object().into_iter().flatten().map(named).collect())
+}
+
+/// An extension as goose's ACP says it (`GooseExtension`): a stdio one's
+/// `envs` left out, as goose leaves them out.
+fn said(x: &Value) -> Value {
+    if x["type"] != "stdio" {
+        return json!({ "type": x["type"], "name": x["name"] });
+    }
+    let mut said = json!({ "type": "mcp", "server": { "name": x["name"], "command": x["cmd"], "args": x["args"], "env": [] } });
+    for k in ["description", "timeout", "available_tools"] {
+        if ![Value::Null, json!(""), json!([])].contains(&x[k]) {
+            said[k] = x[k].clone();
+        }
+    }
+    said
+}
+
+/// An extension goose's ACP adds to a session, as a config holds one: with
+/// no inline env, which goose refuses.
+fn added(e: &Value) -> std::result::Result<Value, String> {
+    let server = &e["server"];
+    match (e["type"].as_str(), server["command"].is_string(), server["env"].as_array().map_or(0, Vec::len)) {
+        (Some("mcp"), true, 0) => Ok(json!({
+            "enabled": true, "type": "stdio", "name": server["name"], "cmd": server["command"], "args": server["args"],
+            "description": e["description"], "timeout": e["timeout"], "available_tools": e["available_tools"],
+        })),
+        (Some("mcp"), true, _) => Err("extension env values must be passed via envKeys referencing stored secrets, not inline env".into()),
+        _ => Err(format!("the stand-in adds stdio MCP extensions, not {e}")),
+    }
+}
+
 /// One prompt in a session: the model asked with its whole history, each
 /// tool call run and said, until it answers without one (at most 10
 /// rounds). The history after, and why it stopped.
-fn prompt<S: std::io::Read + Write>(ws: &mut tungstenite::WebSocket<S>, session: &str, mut history: Vec<Value>, text: &str) -> Result<(Vec<Value>, &'static str)> {
+fn prompt<S: std::io::Read + Write>(ws: &mut tungstenite::WebSocket<S>, session: &str, extensions: &Value, mut history: Vec<Value>, text: &str) -> Result<(Vec<Value>, &'static str)> {
     let mut update = |u: Value| ws.send(tungstenite::Message::text(json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": session, "update": u } }).to_string()));
     let env = |k: &str| std::env::var(k).with_context(|| k.to_string());
-    let mut servers = Mcp::configured()?;
-    let mut tools = vec![json!({ "type": "function", "function": {
+    let extensions = extensions.as_array().map(Vec::as_slice).unwrap_or_default();
+    let mut servers = Mcp::start(extensions)?;
+    let shell = json!({ "type": "function", "function": {
         "name": "shell", "description": "Run a command with bash",
-        "parameters": { "type": "object", "required": ["command"], "properties": { "command": { "type": "string" } } } } })];
+        "parameters": { "type": "object", "required": ["command"], "properties": { "command": { "type": "string" } } } } });
+    let mut tools: Vec<Value> = extensions.iter().filter(|x| x["type"] == "builtin" && x["name"] == "developer").map(|_| shell.clone()).collect();
     for server in &mut servers {
         tools.extend(server.tools()?);
     }
@@ -655,18 +730,17 @@ struct Mcp {
 }
 
 impl Mcp {
-    /// The servers goose's config (`~/.config/goose/config.yaml`) enables
-    /// (the pet writes it as JSON), each initialized with its `envs`.
-    fn configured() -> Result<Vec<Mcp>> {
-        let Ok(text) = std::fs::read_to_string(Path::new(&std::env::var("HOME")?).join(".config/goose/config.yaml")) else { return Ok(vec![]) };
-        let config: Value = serde_json::from_str(&text)?;
+    /// A session's stdio servers, each started with its `envs`, as goose
+    /// starts them.
+    fn start(extensions: &[Value]) -> Result<Vec<Mcp>> {
         let strings = |v: &Value| v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>();
         let mut servers = vec![];
-        for (name, x) in config["extensions"].as_object().into_iter().flatten().filter(|(_, x)| x["enabled"] == true && x["type"] == "stdio") {
+        for x in extensions.iter().filter(|x| x["type"] == "stdio") {
             let envs = x["envs"].as_object().into_iter().flatten().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()));
             let mut child = Command::new(x["cmd"].as_str().context("its cmd")?).args(strings(&x["args"])).envs(envs).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
             let (to, from) = (child.stdin.take().context("stdin")?, BufReader::new(child.stdout.take().context("stdout")?));
-            let mut server = Mcp { name: name.clone(), only: strings(&x["available_tools"]), _child: child, to, from, id: 0 };
+            let name = x["name"].as_str().context("its name")?.to_string();
+            let mut server = Mcp { name, only: strings(&x["available_tools"]), _child: child, to, from, id: 0 };
             server.ask("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "goose", "version": GOOSE_VERSION } }))?;
             writeln!(server.to, "{}", json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))?;
             servers.push(server);

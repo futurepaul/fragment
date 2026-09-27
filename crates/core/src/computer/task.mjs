@@ -8,7 +8,8 @@
 //
 // Each chat has one goose session, its id kept in sessions/<chat>: the first
 // task makes it (session/new), each later one loads it (session/load), so
-// goose's history, and the model's cached prefix, carry over. Each tool call
+// goose's history, and the model's cached prefix, carry over, with the tools
+// goose's config names now (`retool`). Each tool call
 // goose makes is a step on the chat's `work` channel, posted as this
 // computer once the call ended, under the hand-off's turn
 // (fragment_core::work::handoff_turn), and goose's answer, once it ended its
@@ -170,6 +171,24 @@ if (!session) {
   session = (await ask("session/new", { cwd, mcpServers: [] })).sessionId;
   fs.mkdirSync(path.dirname(saved), { recursive: true });
   fs.writeFileSync(saved, session);
+} else await retool().catch((e) => console.error(`the session's tools were left as they were: ${e.message}`));
+
+// goose keeps the extensions a session was made with (or those that loaded
+// last time) and loads it with them, not with its config's: a session made
+// before the hands' tools changed (~/.config/goose/config.yaml) would keep
+// the old ones. So a loaded session's MCP extensions become the config's
+// enabled ones, through goose's own ACP methods (its built-in ones stay),
+// and only where they differ: a change breaks the cached prefix once. An
+// extension's `envs` do not carry over (goose takes none that way), so a
+// config puts them in its command.
+async function retool() {
+  const key = (v) => JSON.stringify(v, (_, x) => (x && typeof x === "object" && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort()) : x));
+  const mcp = (e) => e.extension?.type === "mcp";
+  const want = (await ask("_goose/unstable/config/extensions/list", {})).extensions.filter((e) => e.enabled && mcp(e)).map((e) => key(e.extension));
+  const have = (await ask("_goose/unstable/session/extensions/list", { sessionId: session })).extensions.filter(mcp);
+  const change = (method, params) => ask(`_goose/unstable/session/extensions/${method}`, { sessionId: session, ...params }).catch((e) => console.error(`${method}: ${e.message}`));
+  for (const gone of have.filter((h) => !want.includes(key(h.extension)))) await change("remove", { extensionKey: gone.extensionKey });
+  for (const add of want.filter((w) => !have.some((h) => key(h.extension) === w))) await change("add", { extension: JSON.parse(add) });
 }
 
 let late = false;
