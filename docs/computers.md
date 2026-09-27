@@ -252,9 +252,12 @@ together, built only from what any fragment may declare:
 - **Its computer** is declared with `"start": "node computer/pet.mjs"`
   (a Sprite has Node 24). On its first start the script installs what is
   missing (apt with `sudo -n`: `xvfb openbox xdotool imagemagick
-  fonts-liberation fonts-noto-color-emoji`; Chromium from Playwright
-  1.63.0, since Ubuntu's own is a snap), then runs a 1024×640 display
-  with Chromium on the fragment's `computer/start.html`.
+  fonts-liberation fonts-noto-color-emoji`, and for its agent's Cua
+  Driver `libxi6 at-spi2-core dbus`; Chromium from Playwright 1.63.0,
+  since Ubuntu's own is a snap), then runs a 1024×640 display, a session
+  bus (`~/.pet/bus`), and Chromium on the fragment's
+  `computer/start.html` with its accessibility tree on
+  (`--force-renderer-accessibility`, for AT-SPI).
 - **Private by default**: a template that declares a computer starts
   `members` when made on the platform (its owner pays while anyone has
   it open), until they share it (`first_visibility`).
@@ -311,7 +314,91 @@ truncated}`. A viewer is refused. Your own agent reaches it from any chat
 through the platform's verbs, `platform__operations` and `platform__call`
 (it is no member of the pet, so no tool of its own names it; decision 17
 caps it at editor there), and a job's call answers once its run ends
-(docs/api.md, Agents), so it reads what the command printed.
+(docs/api.md, Agents), so it reads what the command printed. It calls
+`do({task})` (below) the same way, to hand work to the pet's own agent.
+
+## The pet's agent: `do`
+
+The pet's computer is one machine that people and its agent both drive.
+`do({task})` is an editor-only job (the agent spends its owner's budget;
+signed-in viewers still drive by hand): goose runs headless on the
+computer with Cua Driver as its hands, on the display the pet frames, so
+everyone watching sees each click and anyone may click in between (the
+agent's next look shows it). Its steps, each durable:
+
+1. **Installed once** (`job.computer.exec`, 3 minutes): goose v1.50.0,
+   pinned as the builder's is (above), and **Cua Driver v0.28.1**
+   (github.com/trycua/cua, MIT; released 2026-09-12, the newest past the
+   two-week cooldown), its release asset
+   `cua-driver-rs-0.28.1-linux-x86_64-binary.tar.gz` checked against the
+   SHA-256 GitHub lists (`71aa9253…bcf`). Not the one-line `install.sh`:
+   it fetches a second script from cua.ai unpinned, takes the newest
+   release, and edits shell rc files. Each archive is unpacked whole, as
+   it ships, to `~/.local/share/<name>-<version>` (Cua Driver's keeps its
+   cursor-theme helper beside its binary); both then answer `--version`
+   (Cua Driver links libXi, which `pet.mjs` installs with the display).
+2. **goose** (`node computer/do.mjs`, capped at 10 minutes; goose itself
+   at 9, and 40 turns): `goose run --no-session --output-format
+   stream-json --system <how to use the screen> --text <task>`, with a
+   config root of its own (`GOOSE_PATH_ROOT=~/.pet/goose`) whose one
+   extension is Cua Driver's MCP server, stdio `cua-driver mcp` (on
+   Linux it owns its runtime and ends with goose, so no daemon runs),
+   offering 8 of its 62 tools: `get_desktop_state`, `get_window_state`,
+   `list_windows`, `click`, `type_text`, `press_key`, `hotkey`, `scroll`
+   (each is described at length, and every model request carries the
+   tools offered). No `developer` tools: the agent works through the
+   screen, and `run` is for commands. Cua Driver gets `DISPLAY=:99`, the pet's
+   session bus, telemetry off (`CUA_DRIVER_RS_TELEMETRY_ENABLED=false`),
+   and no update checks.
+3. **Its answer**: `{message, code}`, goose's last words and exit code.
+
+**Screenshots reach the model.** goose v1.50.0 sends an MCP tool's image
+to an OpenAI-compatible provider as a user message after the tool's
+(`image_url`, a data URL), but only when its model catalog lists the
+model as reading images, by the name `GOOSE_MODEL` gives: a name it does
+not know (the builder's `fragment`) loses every screenshot ("omitted as
+the model does not support vision"). So the job names `gpt-4o`, which the
+catalog lists as reading images; the platform calls the agents' model
+(`z-ai/glm-5.3-flash`, which reads images) whatever the request names.
+The platform's endpoint passes image content through unchanged. What
+needed care is size: goose sends every screenshot it was given, each
+turn, and a request is at most 2 MiB (the CLI's `--serve` and the cell
+both refuse more). `do.mjs` puts a loopback proxy between goose and
+`fragment model --serve` that keeps the newest 3 screenshots (each
+earlier one becomes a line of text) and cuts each tool result before the
+newest 3 to 2000 characters.
+
+**Its steps are live** on the `work` channel (viewers read, editors
+post): the job publishes `{run, kind: "start", task, asker}` and `{run,
+kind: "end", code, message}` (or `error`); `do.mjs` posts each tool call
+as the computer, `{run, kind: "step", n, tool, args, said}` (`fragment
+post`, with the id `do-<run>-<n>`, so a retry appends nothing). The page
+shows the latest run's.
+
+**Who drives it**: each step also writes the asker's id to
+`~/.pet/agent`; `pet.mjs` names `agent:<asker>` as the driver once that
+file is newer than anyone's last `control` record, so the page says
+"last driven by its agent, for @someone" until a person drives it again.
+
+The e2e (`templates`) runs it on the Sprites fake with stand-ins for
+both (the e2e binary, where the pinned releases go): goose's reads the
+config `do.mjs` writes, starts the Cua Driver stand-in's MCP server,
+offers the tools the config names, and sends screenshots on as goose
+does. It checks the refusal for a viewer, the answer, the model calls
+(through the platform, on the agents' model, a screenshot in them, only
+the newest three), the click on `:99`, the steps on `work`, and the
+driver. It proves the plumbing, not goose or Cua Driver.
+
+**What only a real Sprite shows**: that goose v1.50.0 loads the
+extension from the JSON `config.yaml` and offers the 8 tools; that its
+`stream-json` events are the shapes `do.mjs` reads (a `toolRequest` per
+call, the text before it); that `cua-driver mcp` starts under Xvfb and
+openbox, `get_desktop_state` captures `:99`, and its pixel clicks land in
+Chromium (and whether its agent cursor overlay shows in the frames);
+whether Chromium's tree reaches AT-SPI over the pet's session bus, or
+`get_window_state` comes back `degraded` (pixels still work); how large a
+screenshot is, and so how far the 2 MiB goes; and how well
+`glm-5.3-flash` drives a screen in 40 turns.
 
 ## Next
 
@@ -319,10 +406,8 @@ caps it at editor there), and a job's call answers once its run ends
   create, deploy, and a task from its page. It needs a CLI release with
   `model --serve` first (a computer made before then has an older CLI:
   the install step says so).
-- **The pet's agent**: `click`, `type`, and `open` operations an `agent`
-  block offers, which publish to `control`. It waits for tool results
-  that carry an image: an agent that cannot see the screen can only open
-  addresses.
+- **The pet's agent on a real Sprite** (`do`, above): a task from the
+  pet's page, and the list of what only a real Sprite shows.
 - **Alerts** about computers awake longer than expected, and what a
   deleted fragment's computer becomes (today it stays, asleep, until
   `fragment computers rm`).

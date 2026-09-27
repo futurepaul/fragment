@@ -1,7 +1,8 @@
 # pet
 
 A computer everyone with the fragment shares: its screen, live on the
-page, and driven together (click it, type into it, open an address).
+page, and driven together (click it, type into it, open an address), and
+by its agent (ask it to do something).
 
 - `fragment.json` declares the computer (`"computer": {"start": "node
   computer/pet.mjs"}`): a Sprite of its own, paired as an editor here. It
@@ -11,9 +12,11 @@ page, and driven together (click it, type into it, open an address).
   So a new pet is its owner's alone (`members`) until they share it.
 - `computer/pet.mjs` (Node, which a Sprite has) installs what it needs
   on its first start (apt: `xvfb openbox xdotool imagemagick
-  fonts-liberation fonts-noto-color-emoji`; Chromium from Playwright
-  1.63.0, since Ubuntu's own is a snap), starts a 1024×640 display with a
-  browser on `computer/start.html`, and then:
+  fonts-liberation fonts-noto-color-emoji`, and `libxi6 at-spi2-core
+  dbus` for Cua Driver; Chromium from Playwright 1.63.0, since Ubuntu's
+  own is a snap), starts a 1024×640 display, a session bus, and a
+  browser on `computer/start.html` with its accessibility tree on, and
+  then:
   - follows `control` (`fragment channel <name> control --follow`) and
     applies each record once, by seq, as xdotool input: `{kind: "click",
     x, y}` (screen pixels), `{kind: "type", text}`, `{kind: "key", key}`
@@ -24,7 +27,9 @@ page, and driven together (click it, type into it, open an address).
   - sends the screen through `frame` (`fragment call --input @file`, as a
     frame is more than one argument holds) when it changed: a JPEG of at
     most 85 KB, at most one a second for a minute after someone drives it
-    and one each 5 seconds otherwise.
+    and one each 5 seconds otherwise. Its agent is the driver it names
+    (`agent:<who asked>`) while `~/.pet/agent` is newer than anyone's
+    last `control` record.
 - `app.mjs` keeps only the latest frame (one row: the JPEG, what is on
   screen, who drove it last); `screen` is the live query the page shows.
 - `site/index.html` shows the frame big; a click on it posts a click at
@@ -35,6 +40,19 @@ page, and driven together (click it, type into it, open an address).
   (`job.computer.exec`), answered with `{code, stdout, stderr,
   truncated}`. The owner's agent calls it from any chat (the desktop's
   Computers: docs/computers.md). A viewer is refused.
+- `do({task})` is its agent, a job for editors (it spends the owner's
+  budget): goose v1.50.0 and Cua Driver v0.28.1, each installed once
+  from its release and checked against its SHA-256, then
+  `computer/do.mjs` runs goose headless (at most 40 turns and 9 minutes)
+  with Cua Driver's MCP server (`cua-driver mcp`, 8 of its tools) on the
+  pet's display. goose's model is the platform's (`fragment model
+  --serve`, through a proxy that keeps the newest 3 screenshots, so a
+  request stays under 2 MiB); `GOOSE_MODEL=gpt-4o` only tells goose the
+  model reads images, as the one the platform calls does. Each tool
+  call is a step on `work` (`{run, kind: "step", n, tool, args, said}`,
+  between the job's `start` and `end`), which the page shows live, and
+  the run answers `{message, code}`. Anyone may click while it works:
+  its next look shows it.
 
 `frame` says `"ephemeral": true`: its calls leave no ledger row in the
 app's database (a mutation's id is otherwise kept a week there, which a
@@ -43,5 +61,6 @@ one row. It gives up the replay (a call sent again runs again, which is
 harmless for the latest frame) and effects (it publishes nothing).
 
 Its state is in `~/.pet` on the computer: the last record applied, the
-browser's profile, and the display's and browser's logs. `PET_FAKE_SCREEN=
+browser's profile, the display's and browser's logs, the session bus,
+and the agent's goose config and log (`goose/`, `goose.log`). `PET_FAKE_SCREEN=
 <a JPEG>` shows that image instead (nothing installed, nothing driven).

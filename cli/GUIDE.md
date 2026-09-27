@@ -78,7 +78,8 @@ fragment init my-inbox --template inbox   # or: todo | notes | calories | pet | 
 - `inbox`: webhook deliveries start a job that fetches and records.
 - `notes`: a folder of markdown as a live site; the files are the state.
 - `calories`: a food log you tell what you ate; its own agent logs it.
-- `pet`: a computer everyone here shares: its screen live, driven together.
+- `pet`: a computer everyone here shares: its screen live, driven together
+  and by its agent (`do`, for editors).
 - `chat`: a live chat room; an agent member can answer in it.
 - `desktop`: a demo: your fragments side by side (chats, apps, files).
 - `builder`: a fragment that builds fragments: say what you want, and goose,
