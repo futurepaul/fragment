@@ -543,7 +543,9 @@ without a delete condition is unfinished design, not debt.
   one before it.
 - **Risk:** a long step gathers a waiting handler every ~15 s, each of
   which then steps in turn (cheaply, from the row the long one left); a
-  step that hangs holds every later one until `KEYS`' timeout.
+  step that hangs holds every later one until `KEYS`' timeout. A job's
+  command's start still waits on it (20 s at most, then retried); its
+  polls do not (2026-09-27).
 - **First proof:** a boot on a real Sprite that takes minutes, or a node
   log with many of one `Computer`'s alarm handlers waiting.
 - **Delete when:** the long Sprites calls leave the alarm (run from

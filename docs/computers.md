@@ -114,15 +114,18 @@ budget: a computer is one person's machine (a Sprite has one user).
 A job runs `bash -lc <command>` on its fragment's computer (docs/api.md,
 Jobs and triggers), in shell over `KEYS`' exec only
 (`fragment_core::computer`), so it needs nothing of the CLI's release
-beyond pairing. The start wakes the computer as a page does and waits up
-to 20 s for the alarm to hold it (its first tick paid, or refused: a
-`StepError`). It then makes `~/.fragment/exec/<id>` (the run's and
+beyond pairing. The start wakes the computer as a page does, asking it
+awake through a poll's wait (110 s, or the idle wait if longer), and
+waits up to 20 s for the alarm to hold it (its first tick paid, or
+refused: a `StepError`). It then makes `~/.fragment/exec/<id>` (the run's and
 step's id, never the attempt's) as its lock and starts a detached runner
 (`setsid nohup`) that records its pid, runs the command with its output
 in files, stops it at its timeout, keeps 256 KiB of each stream, and
 writes its code last; a start that finds the directory starts nothing.
-Each poll waits there up to 100 s for the code (a blank line every 10 s),
-then reads the output in chunks that fit `KEYS`' 64 KiB answer. No code
+Each poll asks the computer awake the same way and for the idle wait
+after it, waits on no alarm step (an exec reaches a Sprite that paused),
+waits there up to 100 s for the code (a blank line every 10 s), then
+reads the output in chunks that fit `KEYS`' 64 KiB answer. No code
 and no runner, or 60 s past the deadline, is interrupted: it never runs
 again. Every answer is base64 between marker lines (whatever else a
 Sprite's exec adds is dropped). The journal is kept 30 days, as long as a
@@ -279,6 +282,28 @@ Sprite and settled a hold that was gone. Now a `Computer` cell runs one
 alarm step at a time (`stepping`): one fired again waits, then steps from
 the row the one before it left. The e2e (`sprites`) wakes one whose Sprite
 answers its hold past the deadline.
+
+### What a long command showed (2026-09-27)
+
+Paul's pet ran `do({task})`: its goose command finished on the Sprite
+after about 7 minutes (the journal's `code` 0, 403 bytes of stdout), and
+8 minutes later the run was still `running`, with no events after
+`run.started`. On the Sprites fake, a command is never collected when its
+Sprite answers each hold past the node's operation deadline (e2e
+`computer-runtime`), three ways. The start asked the computer awake for
+the idle wait alone, shorter than the wake it waited on, so the alarm
+fired again let it go as soon as its hold was paid, and every start
+waited its 20 s in vain. Each poll waited the same way on an alarm queued
+behind slow holds (`stepping`). And an alarm step saved the row it read
+before its Sprites calls, undoing the wake a poll asked for meanwhile, so
+the computer was let go mid-command (a real Sprite then pauses). Now a
+command asks its computer awake through a poll's wait, a poll waits on
+no alarm step, and a step saves over what was asked while it ran (a later
+wake, `declared`, a removal). What the fake does not show is why the
+pet's run stayed `running` rather than held: a poll that fails is retried
+four times, then fails the step, which the run's events would say. The
+node's logs for that hour, or the next long command on a real Sprite,
+show whether a poll's 100 s exec comes back.
 
 ## How a page shows it: the pet (`templates/pet`)
 

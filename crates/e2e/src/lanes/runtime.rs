@@ -1,11 +1,12 @@
 //! The computer runtime, on the Sprites fake (where a command runs as a
 //! local process in its Sprite's home): a fragment's jobs run commands on
 //! its declared computer (`job.computer.exec`), awake and billed to its
-//! owner for them. A nonzero exit is a result; a replayed run reattaches
-//! to its command and never runs it twice; a fragment without a computer
-//! is told to declare one. A computer keeps its fragment's live files and
-//! runs its `start` from them as a service, restarted when it exits and
-//! after a deploy.
+//! owner for them, and held awake until a long command's result is read,
+//! however slow its Sprite is to hold. A nonzero exit is a result; a
+//! replayed run reattaches to its command and never runs it twice; a
+//! fragment without a computer is told to declare one. A computer keeps
+//! its fragment's live files and runs its `start` from them as a service,
+//! restarted when it exits and after a deploy.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -72,7 +73,36 @@ pub fn computer_runtime(s: &mut Suite, api: &Api) -> Result<()> {
     let name = deployed(s, api, &home, "runner", &[("app.mjs", APP), ("fragment.json", MANIFEST)])?;
     let sprite = ready(s, api, &owner, &name);
     s.ok("its computer is made and paired", sprite.is_some(), &name);
-    let its_home: PathBuf = s.scratch.join("sprites/sprites").join(sprite.unwrap_or_default());
+    let sprite = sprite.unwrap_or_default();
+    let its_home: PathBuf = s.scratch.join("sprites/sprites").join(&sprite);
+
+    // A command longer than a poll's wait, started while the computer sleeps
+    // (as it does once made), on a Sprite that answers each hold past the
+    // node's operation deadline (15 s: the alarm is fired again, and waits
+    // on `stepping`).
+    // fragment.club, 2026-09-27: a pet's 7-minute command finished on its
+    // Sprite and was never collected. Its start waited on a wake asked for
+    // the idle wait alone, shorter than the wake; each poll waited on an
+    // alarm queued behind slow holds; and an alarm step's save undid the
+    // wake a poll asked for meanwhile, letting the computer go mid-command.
+    let fake = |s: &Suite| s.sprites.sprites().get(&sprite).cloned().unwrap_or_default();
+    let asleep = s.eventually(Duration::from_secs(20), || !fake(s).held);
+    let released = fake(s).releases;
+    s.sprites.slow_holds(Some(Duration::from_secs(18)));
+    let long = r#"n=$(cat "$HOME/long" 2> /dev/null || echo 0); echo $((n + 1)) > "$HOME/long"; sleep 110; echo long"#;
+    let r = api.op(&owner, &name, "shell", "long", json!({ "command": long }))?;
+    let done = settle(api, &owner, &name, started(&r), &["succeeded", "held"], Duration::from_secs(300));
+    let after = fake(s);
+    s.sprites.slow_holds(None);
+    // the hold still answering late ends, and the next is quick again
+    let holds = fake(s).holds;
+    s.eventually(Duration::from_secs(30), || fake(s).holds > holds + 1);
+    let ran = std::fs::read_to_string(its_home.join("long")).unwrap_or_default();
+    s.ok(
+        "a long command on a computer slow to hold is collected: it ran once, held throughout, and its result read",
+        asleep && done["status"] == "succeeded" && done["output"]["stdout"] == "long\n" && ran == "1\n" && after.releases == released,
+        format!("{done}; ran {ran:?}; released {released} then {}", after.releases),
+    );
 
     // a command, as the computer, in ~/fragment, billed to the owner
     let billed = awake_rows(api, &owner, &name);
