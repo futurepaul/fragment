@@ -190,7 +190,7 @@ impl FragmentCell {
         if rows.is_empty() {
             return Err(CellError::new(ErrorCode::NoCode, "the live commit has no app.mjs (deploy one)"));
         }
-        self.app.facet(&self.raw)
+        self.app.facet(&self.raw, &self.app_facet()?)
     }
 
     /// `POST /api/f/<name>/ops/<op>`: a signed caller.

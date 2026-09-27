@@ -76,6 +76,8 @@ pub struct Facet {
     stub: JsValue,
 }
 
+/// The app facet's name for a fragment made before each life had its own
+/// (`Fragment::app_facet`): `app@<incarnation>` since.
 pub const APP_FACET: &str = "app";
 
 /// The capabilities an app's env holds: `FILES`, bound to `fragment`
@@ -178,20 +180,20 @@ impl AppLoader {
         self.builds.get()
     }
 
-    /// The running `app` facet, or a new one started from the installed
-    /// code (the caller has checked there is some).
-    pub fn facet(&self, ctx: &JsValue) -> CellResult<Facet> {
+    /// The running app facet `name`, or a new one started from the
+    /// installed code (the caller has checked there is some).
+    pub fn facet(&self, ctx: &JsValue, name: &str) -> CellResult<Facet> {
         let facets = get(ctx, "facets")?;
-        let stub = call(&facets, "get", &[APP_FACET.into(), self.start.as_ref().clone()]).map_err(|e| CellError::host(format!("facets.get: {}", js_message(&e))))?;
+        let stub = call(&facets, "get", &[name.into(), self.start.as_ref().clone()]).map_err(|e| CellError::host(format!("facets.get: {}", js_message(&e))))?;
         Ok(Facet { stub })
     }
 }
 
-/// Stops the running `app` facet (its database stays), so the next call
-/// starts the newly installed class.
-pub fn abort_app_facet(ctx: &JsValue, reason: &str) -> CellResult<()> {
+/// Stops the running app facet `name` (its database stays), so the next
+/// call starts the newly installed class.
+pub fn abort_app_facet(ctx: &JsValue, name: &str, reason: &str) -> CellResult<()> {
     let facets = get(ctx, "facets")?;
-    call(&facets, "abort", &[APP_FACET.into(), js_sys::Error::new(reason).into()])
+    call(&facets, "abort", &[name.into(), js_sys::Error::new(reason).into()])
         .map_err(|e| CellError::host(format!("facets.abort: {}", js_message(&e))))?;
     Ok(())
 }
@@ -286,10 +288,13 @@ fn app_answer(method: &str, why: String) -> CellError {
     CellError::new(ErrorCode::AppFailed, format!("the app facet's {method} answered what its platform code never does: {why}"))
 }
 
-/// Stops the `app` facet and deletes its database (a deleted fragment).
-pub fn delete_app_facet(ctx: &JsValue) -> CellResult<()> {
+/// Stops the app facet `name` and deletes its database (a deleted
+/// fragment), waiting until celld has: since v0.6.0 the delete is a promise
+/// that removes the facet's own stream from the bucket.
+pub async fn delete_app_facet(ctx: &JsValue, name: &str) -> CellResult<()> {
     let facets = get(ctx, "facets")?;
-    call(&facets, "delete", &[APP_FACET.into()]).map_err(|e| CellError::host(format!("facets.delete: {}", js_message(&e))))?;
+    let done = call(&facets, "delete", &[name.into()]).map_err(|e| CellError::host(format!("facets.delete: {}", js_message(&e))))?;
+    JsFuture::from(Promise::resolve(&done)).await.map_err(|e| CellError::host(format!("facets.delete: {}", js_message(&e))))?;
     Ok(())
 }
 

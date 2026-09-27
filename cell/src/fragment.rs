@@ -323,6 +323,9 @@ pub(crate) enum MetaKey {
     WebhookSecret,
     /// Its code.storage repo.
     Repo,
+    /// Its app facet's name, `app@<incarnation>`: each life of a name has
+    /// its own app database (`app_facet`). None: `app`, made before.
+    AppFacet,
     /// The latest members index change (members.rs).
     IndexVersion,
     /// The owner's row in their list has been sent this fragment's sharing
@@ -404,6 +407,7 @@ impl MetaKey {
             MetaKey::Name => "name",
             MetaKey::ClaimedAt => "claimed_at",
             MetaKey::CreatedAt => "created_at",
+            MetaKey::AppFacet => "app_facet",
             MetaKey::Owner => "owner",
             MetaKey::Npub => "npub",
             MetaKey::FragmentSecret => "fragment_secret",
@@ -607,6 +611,12 @@ impl FragmentCell {
     /// A meta value every created fragment has.
     pub(crate) fn must(&self, key: MetaKey) -> CellResult<String> {
         self.meta(key)?.ok_or_else(|| missing(key))
+    }
+
+    /// The app facet's name: this life's (`MetaKey::AppFacet`), or `app` for
+    /// a fragment made before each life had its own.
+    pub(crate) fn app_facet(&self) -> CellResult<String> {
+        Ok(self.meta(MetaKey::AppFacet)?.unwrap_or_else(|| js::APP_FACET.to_string()))
     }
 
     pub(crate) fn count(&self, q: &str) -> CellResult<u64> {
@@ -1030,6 +1040,7 @@ impl FragmentCell {
             (MetaKey::IndexVersion, "0"),
             (MetaKey::PollAt, poll_at.as_str()),
             (MetaKey::ThrowawayOf, throwaway_of.as_deref().unwrap_or_default()),
+            (MetaKey::AppFacet, format!("{}@{created_at}", js::APP_FACET).as_str()),
             // written last: a fragment exists once it has created_at
             (MetaKey::CreatedAt, created_at.as_str()),
         ] {
@@ -1083,7 +1094,13 @@ impl FragmentCell {
         for ws in self.state.get_websockets() {
             let _ = ws.close(Some(4004), Some("the fragment was deleted"));
         }
-        js::delete_app_facet(&self.raw)?;
+        // a name made again must not meet this life's app database: its own
+        // facet name (`app_facet`) already keeps them apart, and the delete
+        // finishes before the fragment's storage goes
+        let facet = self.app_facet()?;
+        if let Err(e) = js::delete_app_facet(&self.raw, &facet).await {
+            worker::console_warn!("{name}: deleting the app facet {facet}: {}", e.message);
+        }
         self.delete_blobs().await?;
         self.state.storage().delete_all().await?;
         self.sql().exec(SCHEMA, None)?;

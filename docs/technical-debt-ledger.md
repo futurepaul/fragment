@@ -552,6 +552,29 @@ without a delete condition is unfinished design, not debt.
   `waitUntil`, with a watchdog alarm armed first, as the lessons say), so
   no step outlives the deadline.
 
+## A deleted fragment's app stream can outlive it
+
+- **Observed:** 2026-09-27, the hosted e2e on celld v0.6.0 (fork
+  `4f50c81`): a fragment deleted and made again under the same name failed
+  its app calls with "refusing to restore Fragment:…/facets/… from used
+  epoch 10 into writer epoch …". Since v0.6.0 an app's database is a
+  stream of its own under the fragment's cell, and the old life's objects
+  were in the bucket at an epoch the new life could not start from. Not
+  reproduced on one local node (bucket durability); the fleet runs fleet
+  durability, whose uploads trail, and `rm` did not wait for
+  `facets.delete`.
+- **Fix:** each life of a name has its own app facet, `app@<incarnation>`
+  (`MetaKey::AppFacet`; fragments made before keep `app`), so a new life
+  never opens an old stream; `rm` waits for `facets.delete`. The `ops`
+  e2e deletes a fragment with app data and makes it again.
+- **Risk:** an old life's stream that `facets.delete` did not remove stays
+  in the bucket as garbage (bytes, never read).
+- **First proof:** objects under `cells/Fragment:<id>/facets/` for a
+  facet no live fragment names.
+- **Delete when:** celld's facet delete is proven complete under fleet
+  durability (or reported and fixed upstream), and a sweep has removed
+  what earlier deletes left.
+
 ## An agent runs one turn at a time, across all its chats
 
 - **Observed:** phase 7 slice A keeps one conversation per chat, but one
