@@ -215,6 +215,29 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a picture in an answer opens in the viewer when clicked", viewed, format!("{:?}", panes(&mut chrome, &page)));
     chrome.eval(&page, "document.querySelector('.pane[data-key^=\"file:\"] .pane-action[title=Close]')?.click(); true")?;
 
+    // New computer: a pet fragment, listed under Computers and open as a
+    // pane, its own page, which is what keeps a computer awake (the sprites
+    // lane checks that on a computer that paired; the templates lane, your
+    // agent running a command on one). A computer here does not pair: its
+    // CLI would reach the platform at fragment.localhost, which a runner's
+    // resolver need not know (the harness and Chrome never ask it).
+    chrome.eval(&page, "document.getElementById('new-computer').click(); true")?;
+    let opened = chrome.until(&page, "!!document.querySelector('.pane[data-key^=\"app:computer-\"]')", wait);
+    let mine = api.signed(&owner, "GET", "/api/fragments", None)?;
+    let computer = mine.body["fragments"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str()).find(|n| n.starts_with("computer-")).unwrap_or("").to_string();
+    let listed = format!("!!document.querySelector('#computers .row[data-key=\"app:{computer}\"]') && !document.querySelector('#apps .row[data-key=\"app:{computer}\"]')");
+    s.ok(
+        "New computer makes a pet fragment, lists it under Computers (not Apps), and opens it as a pane",
+        opened && !computer.is_empty() && chrome.until(&page, &listed, wait),
+        format!("{mine} {}", chrome.eval(&page, "document.getElementById('computers').innerText").unwrap_or_default()),
+    );
+    let pet = s.eventually(wait, || chrome.eval_in_frame(&page, &format!("{}--", label(&computer)), "document.title").ok() == Some(json!("Pet")));
+    let st = api.status(&owner, &computer)?;
+    s.ok("the pane is the computer's own page, signed in on its origin; the computer is its owner's alone", pet && st.body["visibility"] == "members", &st);
+    chrome.eval(&page, &format!("document.querySelector('.pane[data-key={:?}] .pane-action[title=Close]').click(); true", format!("app:{computer}")))?;
+    let gone = chrome.until(&page, &format!("![...document.querySelectorAll('iframe')].some(f => f.src.includes({:?}))", format!("name={}", url_enc(&computer))), wait);
+    s.ok("its pane closed, its page is gone: nothing here keeps it awake", gone, "");
+
     // apps and files open into the viewer, newest on top
     chrome.eval(&page, &format!("[...document.querySelectorAll('#apps .row')].find(r => r.dataset.key === {:?}).click(); true", format!("app:{todo}")))?;
     s.ok("an app opens as a pane", chrome.until(&page, &format!("!!document.querySelector('.pane[data-key={:?}]')", format!("app:{todo}")), wait), "");

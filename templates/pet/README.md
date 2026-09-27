@@ -30,6 +30,11 @@ page, and driven together (click it, type into it, open an address).
 - `site/index.html` shows the frame big; a click on it posts a click at
   the same point of the screen. Anyone who can open the fragment
   watches; signing in lets you drive.
+- `run({command})` is a job for editors (the owner, their agent capped at
+  editor, the computer): `bash -lc` on the computer in `~/fragment`
+  (`job.computer.exec`), answered with `{code, stdout, stderr,
+  truncated}`. The owner's agent calls it from any chat (the desktop's
+  Computers: docs/computers.md). A viewer is refused.
 
 `frame` says `"ephemeral": true`: its calls leave no ledger row in the
 app's database (a mutation's id is otherwise kept a week there, which a

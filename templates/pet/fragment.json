@@ -19,7 +19,17 @@
         }
       }
     },
-    "screen": { "kind": "query", "role": "viewer", "input": { "type": "object", "additionalProperties": false } }
+    "screen": { "kind": "query", "role": "viewer", "input": { "type": "object", "additionalProperties": false } },
+    "run": {
+      "kind": "job",
+      "role": "editor",
+      "input": {
+        "type": "object",
+        "required": ["command"],
+        "additionalProperties": false,
+        "properties": { "command": { "type": "string", "minLength": 1, "maxLength": 8000, "description": "a bash command, run on the computer in ~/fragment" } }
+      }
+    }
   },
   "channels": { "control": { "read": "viewer", "post": "viewer", "signedIn": true } },
   "meta": { "title": "Pet", "description": "A computer everyone here shares: its screen live, driven together. It is awake while someone has it open, on your budget." }
