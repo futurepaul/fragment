@@ -412,9 +412,9 @@ platform (`Content-Security-Policy`), and keep their URL to the platform
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/fragments` | a person with a username; an agent or a computer for its owner (the fragment is the owner's, under their username, on their budget, with its maker an editor) | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). `visibility` defaults to `link`, and to `members` for a template whose `fragment.json` declares a computer (the pet) or any capability (`fragments`, `frame`: the desktop): its owner's alone until they share it (`publish.rs`, `first_visibility`). The fragment's own key is made by the node's `KEYS` and stays sealed there. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`desktop`, `chat`, `todo`, `inbox`, `calories`, `pet`, `blank`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
+| `POST /api/fragments` | a person with a username; an agent or a computer for its owner (the fragment is the owner's, under their username, on their budget, with its maker an editor) | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). `visibility` defaults to `link`, and to `members` for a template whose `fragment.json` declares a computer (the pet) or any capability (`fragments`, `frame`: the desktop): its owner's alone until they share it (`publish.rs`, `first_visibility`). The fragment's own key is made by the node's `KEYS` and stays sealed there. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`desktop`, `chat`, `todo`, `inbox`, `calories`, `pet`, `builder`, `blank`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, sharing?}]}`; `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility (a fragment from before sends it once, on its next change or alarm; until then it has none); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
-| `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
+| `DELETE /api/f/{name}` | owner; an agent, for a hand-off's throwaway it is in (Agents, Hand-offs) | → `{ok, deleted}`; the app's database goes too; the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes, frame?}` (`frame`: when live's `fragment.json` asks for it, whether its owner allows it) |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
@@ -1009,11 +1009,11 @@ else).
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/agents` | a person with a username | `{name, model? ("z-ai/glm-5.3-flash"), instructions?}` → `{name, npub, model, id}`: made and registered as the caller's; again by its owner, the same answer (`replayed`); a name under someone else's username is 403 |
-| `GET /api/a/{name}` | owner | → `{name, id, owner, npub, model, active, driving, outcome (running, idle, stopped, yielded, error), error, tokens, watchdogRestarts, conversation, asker, waiting: [{conversation, asker, at}], conversations: [{conversation, outcome, error, asker, at}], listens: {count, newest: [{fragment, channel, at}]}, ignored: [{fragment, channel, principal, at}], messages: [{id, role, text, tool_requests, tool_responses, steer, conversation}], steer, toolRuns, steps}` (each list its newest 256, oldest first but `conversations` and `listens`, newest first). `active`, `outcome`, and `error` are the running (or last) turn's, of any conversation; `conversation` and `asker` name it (`direct` is the owner's own conversation, a chat's is `<fragment>/<channel>`); `steer` holds the running turn's messages from its starter sent while it worked (a new turn drops those the model read); `ignored` notes anonymous messages, which start nothing |
+| `GET /api/a/{name}` | owner | → `{name, id, owner, npub, model, active, driving, outcome (running, idle, stopped, yielded, error), error, tokens, watchdogRestarts, conversation, asker, waiting: [{conversation, asker, at}], conversations: [{conversation, outcome, error, asker, at}], listens: {count, newest: [{fragment, channel, at}]}, ignored: [{fragment, channel, principal, at}], handoffs: [{fragment, run, conversation, throwaway, said, at}], messages: [{id, role, text, tool_requests, tool_responses, steer, conversation}], steer, toolRuns, steps}` (each list its newest 256, oldest first but `conversations` and `listens`, newest first). `active`, `outcome`, and `error` are the running (or last) turn's, of any conversation; `conversation` and `asker` name it (`direct` is the owner's own conversation, a chat's is `<fragment>/<channel>`); `steer` holds the running turn's messages from its starter sent while it worked (a new turn drops those the model read); `ignored` notes anonymous messages, which start nothing |
 | `GET /api/a/{name}/state?wait_ms=` | owner | → `AgentState` `{active, driving, outcome, error, answer}` (`crates/proto`) of the owner's own conversation: `active` while a turn of it runs or waits behind a chat's, `answer` its newest message when that is the model's text; answered once it is not active or `wait_ms` (0-25000, default 0) has passed: the read waits in the agent's cell, so a client waiting out a turn asks about every 25 s (`fragment agent say` does) |
 | `POST /api/a/{name}/turns` | owner | `{text}` (at most 16 KiB) → `{started}`; during the owner's own turn, `{steered: true}` (read between steps); during another (a chat's), `{queued: true}`: it runs next, in the owner's conversation. At most 64 messages wait (429) |
 | `POST /api/a/{name}/stop` | owner | → `{active, driving}`; a tool in flight is interrupted; the messages waiting run next |
-| `GET /api/a/{name}/tools` | owner | → `{tools: ["platform__create_fragment", "platform__list_fragments", "platform__operations", "platform__call", "platform__list_files", "platform__read_file", "platform__write_file", "platform__append_file", "platform__write_files", "platform__deploy", "<fragment>__<op>", ...]}`: what the owner's own turn has (below) |
+| `GET /api/a/{name}/tools` | owner | → `{tools: ["platform__create_fragment", "platform__hand_off", "platform__list_fragments", "platform__operations", "platform__call", "platform__list_files", "platform__read_file", "<fragment>__<op>", ...]}`: what the owner's own turn has (below) |
 | `POST /api/a/{name}/listen` | owner | `{fragment, channel? ("chat"), reply? ("say")}` → `{fragment, channel, reply, subscription}`: the agent subscribes itself to the channel (it must be a member) with an inbox URL of its own (`AGENT_URL`); at most 500. `reply` answers a chat whose channel takes no posts (one made before phase 7); a postable channel is answered by a post. A new listen first drops those of fragments the agent is no longer in: of the fragments its memberships leave out, up to 16 are asked, and one that answers 404 or 403 loses its listens (so does one whose subscribe answers either, and a chat whose answer's post does). Listening again to the same fragment's channel is the same listen: its inbox URL, so the one subscription (made again if the fragment dropped it) |
 | `POST /api/a/{name}/job` | owner (a fragment's job) | `{id, asker, conversation, channel?, text}` → `{turn}`: a turn of a fragment's own agent for `asker`, once per `id` (again: the same `turn`, `replayed`); it waits for a turn of its own and never steers another. Its conversation is `job:<asker>:<conversation>`, under `<fragment>/<channel>/` when it names a channel |
 | `GET /api/a/{name}/job?turn=` | the same | → `{ended, outcome, text?, error?}`: `running` until it ends, then `idle` (answered, `text` its answer), `stopped`, `yielded`, or `error` |
@@ -1050,16 +1050,14 @@ goes on to its answer). And the platform's verbs, for every fragment the
 asker reaches: `platform__list_fragments` (`GET /api/fragments?for=`),
 `platform__operations` (`{fragment}` → its operations and the role the
 turn acts with there), `platform__call` (`{fragment, operation, input}`),
-`platform__list_files`, `platform__read_file`, `platform__write_file`
-(`{fragment, path, text}`: one file), `platform__append_file` (the same:
-adds to the file as it is at main, none yet being empty, in one commit),
-`platform__write_files` (several), `platform__deploy`, and, in its
-owner's turns only,
-`platform__create_fragment` (a fragment the agent makes is its owner's,
-the agent an editor). A call is `POST /api/f/<fragment>/ops/<op>?for=<asker>`
-signed by the agent with the id `tc:<40 hex of SHA-256 of the tool-call
-id>`: a replayed call replays the operation; a file write's key is the
-tool call's. A job's call (either kind of tool) answers when its run
+`platform__list_files`, `platform__read_file`, and, in its owner's turns
+only, `platform__create_fragment` (from a template, as a person makes
+one: the fragment is its owner's, the agent an editor) and
+`platform__hand_off` (below). The agent writes no fragment's files and
+deploys none: building is a computer's (Hand-offs). A call is `POST
+/api/f/<fragment>/ops/<op>?for=<asker>` signed by the agent with the id
+`tc:<40 hex of SHA-256 of the tool-call id>`: a replayed call replays
+the operation. A job's call (either kind of tool) answers when its run
 ends, reading it `for` the asker every second for up to 90 s: `{run,
 status, output}` (succeeded) or `{run, status, error}` (held, blocked),
 else `{run, status, note}` (still going), so an agent that runs a command
@@ -1075,13 +1073,14 @@ window ends in an error; the next message starts a turn that fits. A chat turn's
 last message, when that is the model's text.
 
 Every turn tells the model, after the agent's instructions, that its
-answer to a chat is posted for it, and a short guide to building an app
-(`BUILD_GUIDE` in `agent/src/lib.rs`, about 400 tokens: a page is
-`site/index.html`; `fragment.json` and `app.mjs` only for data or live
-updates; the templates; write, deploy, answer; never read other
-fragments to learn the format; one file per call under 150 lines). An
-agent made with the default instructions from before the guide (which
-said to read the todo template) is told today's default instead.
+answer to a chat is posted for it, and what it does itself and what it
+hands off (`WORK_GUIDE` in `agent/src/lib.rs`, about 250 tokens): itself,
+answers and a few calls on the person's fragments (add a todo, read a
+list); to a computer, anything longer (building or changing an app,
+code, research), the whole task in the hand-off, whose result comes
+later; only its owner's turns hand off. It replaced a guide to building
+apps in the cell (2026-09-27). An agent made with a default instruction
+of any age (they all open alike) is told today's.
 
 A model call (`agent/src/model.rs`) asks for at most 4096 tokens and has
 100 s, under the node's 120 s fetch timeout (`CELLD_FETCH_TIMEOUT_S`,
@@ -1091,15 +1090,59 @@ deadline, one that fails, or one that answers nothing (no text and no
 tool call: reasoning alone is nothing) is made once more, told why when
 that helps; a refused key or budget (401, 402, 403) is not. Nothing twice,
 after tool calls that worked in the turn, is answered with what those
-calls did ("Done. Here is what I did: …"). A reply cut off at its limit
-(`finish_reason: length`) keeps what it wrote: a cut
-`platform__write_file` or `platform__append_file` runs with the text so
-far, and its result says where the file stops so the model appends the
-rest; any other cut call is refused, saying why. A turn that fails (a
+calls did ("Done. Here is what I did: …"). A call in a reply cut off at
+its limit (`finish_reason: length`) is refused, saying so (goose's
+parse), and the model tries again. A turn that fails (a
 second failed call, or any other error) is never silent: "I couldn't
 finish: <why>. Ask me to try again." is its answer, stored in its
 conversation and posted to its chat as an answer is, and the chat's
 `turn.end` carries the error.
+
+### Hand-offs (`platform__hand_off`)
+
+A person's agent does light work itself and hands the rest to a computer
+(Paul, 2026-09-27; `agent/src/handoff.rs`). `platform__hand_off({task,
+computer?})` (a task of at most 4000 bytes, the whole of it: the
+computer sees nothing of the conversation) is offered in its owner's
+turns only: a guest's turn would spend the owner's budget on a computer,
+so it has no such tool, and a call it makes anyway is answered "no tool
+named platform__hand_off" (the platform also refuses an agent's create
+for anyone but its owner). It starts the work and answers at once
+(`{started, computer, run, note}`), and the turn ends saying the work is
+on its way; nothing holds a turn open for a build.
+
+- **With `computer`**: one of the owner's fragments whose job `do`, or
+  else `build`, takes `{task}` (a pet, a builder). The job is called
+  there for the asker, capped as every call is.
+- **Without**: a throwaway. The agent makes a private fragment of its
+  owner's from the `builder` template, named `handoff-<12 hex of SHA-256
+  of the tool-call id>.<username>` (a replayed call finds the one it made,
+  and a crash's leftovers are found by that name), and calls its
+  `build({task})`: goose on the fragment's own new computer makes and
+  deploys what was asked, a fragment of the owner's (docs/computers.md).
+  A build that does not start removes it again.
+
+At most 8 hand-offs run for one agent at once. The agent's alarm looks
+at each one's run (`GET /api/f/{fragment}/runs/{run}` for its owner)
+every 10 s, between turns, for up to 90 minutes. When it ends, its
+result is said in the conversation that asked: stored there as the
+agent's message (so later turns know what was built), and posted to its
+chat as an answer is (`{text}`, naming no turn), once (`rp:` from the
+message id `msg_handoff_<fragment>_<run>`); never while a turn of that
+conversation runs. It reads `Done: <url>` and what the computer said
+last (the builder's `{url, message}`; a `do` job's `message` or `text`,
+or its answer if that is text), or `The computer could not finish:
+<error>` (held, blocked), or that it is still going after 90 minutes (then
+the throwaway is left, named as one). The owner's own conversation has
+the result as its newest answer (`state`). Then a throwaway is removed:
+`DELETE /api/f/{throwaway}`, signed by the agent (for its owner or no
+one), is the one owner-only action an agent takes. The platform takes it
+only for a `handoff-` name of its owner's that the agent is in (404
+otherwise): it removes the fragment's computer as `fragment computers rm`
+does (keys revoked, every fragment left, the Sprite destroyed; one never
+paired has its Sprite destroyed alone), then deletes the fragment as its
+owner. What the computer built stays its owner's. The owner's view lists
+the hand-offs being watched (`handoffs`).
 
 ### A fragment's agent (the `agent` block)
 
@@ -1136,7 +1179,7 @@ and offered as their role may call them: no other fragment, no platform
 verb, no computer. It keeps one conversation per person who posts
 (`<fragment>/<channel>/<identity>`), so strangers never share one. And
 it is told, after its instructions, that its answer is posted for it and
-each call acts as the asker (no build guide). A signed-in person's post
+each call acts as the asker (no work guide, and no hand-off). A signed-in person's post
 to the channel starts a turn for them (an anonymous one starts nothing);
 each call acts for them (`for`: the lower of their role and the agent's,
 and the app's `call.principal` is them). On its own fragment, the

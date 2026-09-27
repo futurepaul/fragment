@@ -68,20 +68,8 @@ impl Fleet {
     }
 
     /// A signed request; answers the status and the JSON body (`Null` when
-    /// empty, a string when it is not JSON).
+    /// empty, a string when it is not JSON: a file's text).
     pub async fn call(&self, method: Method, path: &str, body: Option<&Value>) -> anyhow::Result<(u16, Value)> {
-        let (status, bytes) = self.call_raw(method, path, body).await?;
-        let value = if bytes.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes).unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()))
-        };
-        Ok((status, value))
-    }
-
-    /// A signed request; answers the status and the body's bytes as they
-    /// came (a file's, which may be JSON, read to be added to).
-    pub async fn call_raw(&self, method: Method, path: &str, body: Option<&Value>) -> anyhow::Result<(u16, Vec<u8>)> {
         let url = self.url(path)?;
         let bytes = match body {
             Some(b) => serde_json::to_vec(b)?,
@@ -105,7 +93,11 @@ impl Fleet {
         if bytes.len() > ANSWER_MAX_BYTES {
             return Err(anyhow!("{path}: the answer is {} bytes; at most {ANSWER_MAX_BYTES}", bytes.len()));
         }
-        Ok((status, bytes))
+        let value = match bytes.is_empty() {
+            true => Value::Null,
+            false => serde_json::from_slice(&bytes).unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned())),
+        };
+        Ok((status, value))
     }
 
     pub async fn get(&self, path: &str) -> anyhow::Result<Value> {

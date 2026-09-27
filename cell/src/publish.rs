@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::site;
 use fragment_proto::{CreateFragment, ErrorBody, ErrorCode, IdentityKind, Role, Visibility};
-use fragment_templates::{Template, BLANK, CALORIES, CHAT, DESKTOP, INBOX, PET, TODO};
+use fragment_templates::{Template, BLANK, BUILDER, CALORIES, CHAT, DESKTOP, INBOX, PET, TODO};
 use serde_json::{json, Value};
 use worker::*;
 
@@ -24,9 +24,9 @@ use crate::routed::{Credential, Signed};
 /// The templates a fragment can start from, in the order the home page
 /// offers them: the simplest first, the desktop (a demo) last. `notes`
 /// stays with the CLI (`fragment new --template notes`): at 3 MiB it would
-/// double the cell.
-pub(crate) const TEMPLATES: [(&str, Template); 7] =
-    [("blank", BLANK), ("todo", TODO), ("inbox", INBOX), ("calories", CALORIES), ("pet", PET), ("chat", CHAT), ("desktop", DESKTOP)];
+/// double the cell. `builder` is also what an agent's hand-off makes.
+pub(crate) const TEMPLATES: [(&str, Template); 8] =
+    [("blank", BLANK), ("todo", TODO), ("inbox", INBOX), ("calories", CALORIES), ("pet", PET), ("builder", BUILDER), ("chat", CHAT), ("desktop", DESKTOP)];
 
 /// `live` moving under a deploy this many times is an error.
 const DEPLOY_ATTEMPTS: usize = 5;

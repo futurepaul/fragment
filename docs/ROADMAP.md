@@ -534,6 +534,12 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
 - *Built 2026-09-26 (#47, #48; decision 20 says what):* the `agent`
   block, `"personal": true` for the chat template, `job.agent`, the
   history trim, and agent spend on the ledger.
+- *Since `agent-handoff` (2026-09-27, Paul's direction):* a person's
+  agent does light work itself and hands the rest to a computer
+  (`platform__hand_off`: a named computer's `do` or `build`, or a
+  throwaway builder removed after), in its owner's turns only; the result
+  lands in the chat from the agent's alarm. Its write and deploy tools and
+  the build guide are gone (docs/api.md, Hand-offs).
 - Decision 20: `agent` in `fragment.json`; turns from signed-in
   visitors' messages and `job.agent` steps, acting as decision 17 says,
   on the owner's budget. The chat template declares one; C's seam goes.
@@ -582,7 +588,9 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   chat, through the platform's verbs; a job's call now answers what the
   job answered (docs/computers.md). Since #60 keyed `first_visibility` on
   what a template declares, docs/platform.md names the desktop only as the
-  first user of `fragments` and `frame`: no special case is left.
+  first user of `fragments` and `frame`: no special case is left. *Since
+  `agent-handoff`:* your agent hands work to a computer from any chat (a
+  pet you name, or a throwaway builder).
 
 ### 9. Cutover
 - `fragment.club` moves to Fly in phase 3. What remains: the VPS

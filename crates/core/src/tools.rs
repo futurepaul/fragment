@@ -34,9 +34,34 @@ pub fn reply_id(message_id: &str) -> String {
     format!("rp:{}", &hex::encode(Sha256::digest(message_id.as_bytes()))[..40])
 }
 
+/// A hand-off's throwaway computer is a fragment labeled `handoff-` and 12
+/// hex of the tool call's id: a replayed call makes the same one, and a
+/// crash's leftovers are found by their name. Its agent may remove it
+/// (docs/platform.md), the one delete an agent makes.
+pub const THROWAWAY_PREFIX: &str = "handoff-";
+
+/// The throwaway label a hand-off's tool call makes.
+pub fn throwaway_label(tool_call_id: &str) -> String {
+    format!("{THROWAWAY_PREFIX}{}", &hex::encode(Sha256::digest(tool_call_id.as_bytes()))[..12])
+}
+
+/// Whether a fragment's name is a throwaway's (`throwaway_label`, under a username).
+pub fn is_throwaway(fragment: &str) -> bool {
+    let label = fragment_proto::split_fragment_name(fragment).map(|(label, _)| label).unwrap_or_default();
+    label.strip_prefix(THROWAWAY_PREFIX).is_some_and(|h| h.len() == 12 && h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn throwaways() {
+        let label = throwaway_label("call_abc123");
+        assert_eq!(label, throwaway_label("call_abc123"));
+        assert!(fragment_proto::valid_label(&label) && is_throwaway(&format!("{label}.paul")));
+        assert!(!is_throwaway(&label) && !is_throwaway("handoff-notes.paul") && !is_throwaway("handoff-0123456789AB.paul"));
+    }
 
     #[test]
     fn names_and_ids() {

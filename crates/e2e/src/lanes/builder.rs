@@ -11,7 +11,8 @@
 //! computer, streamed, and billed to the owner; goose's tool call makes and
 //! deploys a fragment that is the owner's; the run answers its URL and
 //! goose's last message, and the page's query lists it; no model key is on
-//! the computer's disk.
+//! the computer's disk. Then hand-offs (`hand_offs`): the owner's own agent
+//! hands building to a computer, a throwaway builder or this one.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -21,8 +22,10 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use fragment_fakes::openrouter::Reply;
+use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
+use super::agents::{chat_records, say, view};
 use super::jobs::{settle, started};
 use crate::api::Api;
 use crate::Suite;
@@ -124,6 +127,175 @@ pub fn builder(s: &mut Suite, api: &Api) -> Result<()> {
     let keys: Vec<String> = s.openrouter.minted().into_iter().map(|m| m.key).collect();
     let leaked = files_containing(&sprite_home, &keys);
     s.ok("no model key is on the computer's disk", !keys.is_empty() && leaked.is_empty(), format!("{leaked:?}"));
+    // every Sprite made from here on has the stand-in where the install looks
+    s.sprites.seed(&format!(".local/bin/goose-{GOOSE_VERSION}"), format!("#!/bin/sh\nexec '{}' goose \"$@\"\n", std::env::current_exe()?.display()).as_bytes());
+    hand_offs(s, api, &owner, &name)
+}
+
+const HAND_OFF: &str = "platform__hand_off";
+
+/// The tools a model request offered.
+fn offered(chat: &Value) -> Vec<String> {
+    chat["tools"].as_array().into_iter().flatten().filter_map(|t| t["function"]["name"].as_str().map(str::to_string)).collect()
+}
+
+/// The owner's fragments whose names start with `prefix`.
+fn owned(api: &Api, owner: &Keys, prefix: &str) -> Vec<String> {
+    let mine = api.signed(owner, "GET", "/api/fragments", None).map(|r| r.body).unwrap_or_default();
+    mine["fragments"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str()).filter(|n| n.starts_with(prefix)).map(str::to_string).collect()
+}
+
+/// goose's shell command that makes and deploys `label`, saying `text`.
+fn builds(label: &str, text: &str) -> String {
+    format!("mkdir -p {label}/site && printf '<h1>{text}</h1>' > {label}/site/index.html && fragment create {label} && fragment deploy {label} --dir {label}")
+}
+
+/// Hand-offs (agent/src/handoff.rs; Paul, 2026-09-27): the owner's own
+/// agent, in a chat, does light work itself and hands building to a
+/// computer. The OpenRouter fake is scripted for the agent and then for
+/// goose (the stand-in, seeded into every new Sprite). Checked: asked to add
+/// a todo, it calls the list's operation, no computer; its tools hand work
+/// off and none writes files or deploys; asked to build, it hands off and
+/// its turn ends at once, a throwaway builder runs goose, the chat gets the
+/// built URL without being asked again, and the throwaway's computer (its
+/// Sprite) and fragment are gone, what it built kept; handed to a named
+/// computer (the builder above), the work runs there and that computer
+/// stays; a guest's turn has no hand-off, and one it calls anyway makes
+/// nothing.
+fn hand_offs(s: &mut Suite, api: &Api, owner: &Keys, builder: &str) -> Result<()> {
+    let agents = s.agents()?;
+    let (wait, long) = (Duration::from_secs(30), Duration::from_secs(150));
+    let username = api.username(owner)?;
+    let chat = s.named(api, owner, "ho-chat")?;
+    let made = api.create_with(owner, json!({ "name": chat, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "a chat from the template: {made}");
+    s.hook(api, &made.body);
+    let agent_of = || -> Option<String> {
+        let members = api.signed(owner, "GET", &format!("/api/f/{chat}/members"), None).ok()?;
+        members.body["members"].as_array()?.iter().find(|m| m["kind"] == "agent").and_then(|m| m["principal"].as_str().map(str::to_string))
+    };
+    let listening = || api.signed(owner, "GET", &format!("/api/f/{chat}/subscriptions"), None).map_or(0, |r| r.body["subscriptions"].as_array().map_or(0, Vec::len));
+    anyhow::ensure!(s.eventually(wait, || agent_of().is_some() && listening() == 1), "the owner's agent joins the chat and listens");
+    let agent = agent_of().unwrap_or_default();
+    let from_agent = |start: &str| chat_records(api, owner, &chat).into_iter().find(|r| r["principal"] == agent.as_str() && r["body"]["text"].as_str().is_some_and(|t| t.starts_with(start)));
+    let canonical = |name: &str| api.status(owner, name).ok().and_then(|r| r.body["urls"]["canonical"].as_str().map(str::to_string)).unwrap_or_default();
+
+    // light work, itself: a todo added through the list's operation
+    let todo = s.named(api, owner, "ho-todo")?;
+    let r = api.create_with(owner, json!({ "name": todo, "template": "todo" }))?;
+    anyhow::ensure!(r.status == 200, "a todo list from the template: {r}");
+    let sprites = s.sprites.sprites().len();
+    s.openrouter.clear_script();
+    s.openrouter.script(&[
+        Reply::Tools(vec![("platform__call".into(), json!({ "fragment": todo, "operation": "add", "input": { "text": "milk" } }))]),
+        Reply::Text("Added milk to your list.".into()),
+    ]);
+    let asked = s.openrouter.chats().len();
+    say(api, owner, &chat, "h1", &format!("add milk to my list {todo}"))?;
+    let added = s.eventually(wait, || from_agent("Added milk to your list.").is_some());
+    let list = api.op(owner, &todo, "list", "q1", json!({}))?;
+    let tools = s.openrouter.chats().get(asked).map(offered).unwrap_or_default();
+    s.ok(
+        "asked to add a todo, the agent calls the list's operation itself: no computer",
+        added && list.body["result"]["todos"][0]["text"] == "milk" && s.sprites.sprites().len() == sprites && !tools.is_empty(),
+        json!({ "list": list.body, "sprites": s.sprites.sprites().len() }),
+    );
+    let writes = ["platform__write_file", "platform__append_file", "platform__write_files", "platform__deploy"];
+    s.ok(
+        "its tools hand work off, and none writes a fragment's files or deploys it",
+        tools.iter().any(|t| t == HAND_OFF) && !tools.iter().any(|t| writes.contains(&t.as_str())),
+        json!(tools),
+    );
+
+    // building, handed off: a throwaway builder runs goose; the chat gets
+    // the URL; the throwaway goes, what it built stays
+    let label = s.name("ho-built");
+    let built = format!("{label}.{username}");
+    s.openrouter.clear_script();
+    s.openrouter.script(&[
+        Reply::Tools(vec![(HAND_OFF.into(), json!({ "task": format!("Make a page that says built on a throwaway, as the fragment {label}.") }))]),
+        Reply::Text("On it: a computer is building it.".into()),
+        Reply::Tools(vec![("shell".into(), json!({ "command": builds(&label, "built on a throwaway") }))]),
+        Reply::Text("Built it and deployed it live.".into()),
+    ]);
+    let deleted = s.sprites.deleted().len();
+    say(api, owner, &chat, "h2", "build me a page that says built on a throwaway")?;
+    let on_it = s.eventually(wait, || from_agent("On it").is_some());
+    let mut throwaway = String::new();
+    s.eventually(wait, || {
+        throwaway = owned(api, owner, "handoff-").pop().unwrap_or_default();
+        !throwaway.is_empty()
+    });
+    s.ok(
+        "asked to build, the agent hands off to a throwaway (a private builder of the owner's) and its turn ends at once, saying so",
+        on_it && fragment_core::tools::is_throwaway(&throwaway) && api.status(owner, &throwaway).is_ok_and(|r| r.body["visibility"] == "members"),
+        json!({ "throwaway": throwaway, "chat": chat_records(api, owner, &chat) }),
+    );
+    let result = s.eventually(long, || from_agent("Done: ").is_some());
+    let said = from_agent("Done: ").map(|r| r["body"]["text"].as_str().unwrap_or("").to_string()).unwrap_or_default();
+    let url = canonical(&built);
+    s.ok(
+        "a throwaway builder runs goose, and the chat gets the built URL and what goose said, without being asked again",
+        result && !url.is_empty() && said.starts_with(&format!("Done: {url}")) && said.contains("Built it and deployed it live."),
+        json!({ "said": said, "url": url }),
+    );
+    let page = api.status(owner, &built).ok().and_then(|r| r.body["viewToken"].as_str().map(str::to_string)).unwrap_or_default();
+    let page = api.page(&built, &format!("?view={page}"), None)?;
+    let computers = || api.signed(owner, "GET", "/api/identities/me", None).map(|r| r.body["computers"].to_string()).unwrap_or_default();
+    let gone = s.eventually(wait, || {
+        api.status(owner, &throwaway).is_ok_and(|r| r.status == 404) && s.sprites.deleted().len() == deleted + 1 && s.sprites.sprites().len() == sprites && !computers().contains(&throwaway)
+    });
+    s.ok(
+        "then the throwaway's computer (its Sprite destroyed) and fragment are gone, and what it built stays, the owner's and live",
+        gone && page.text.contains("built on a throwaway") && api.status(owner, &built).is_ok_and(|r| r.body["role"] == "owner"),
+        json!({ "throwaway": api.status(owner, &throwaway)?.status, "deleted": s.sprites.deleted(), "computers": computers(), "page": page.status }),
+    );
+    let v = view(&agents, owner, &format!("agent.{username}"));
+    let kept = v["messages"].as_array().into_iter().flatten().any(|m| m["role"] == "assistant" && m["text"].as_str().is_some_and(|t| t.starts_with("Done: ")));
+    s.ok("the result is in the chat's conversation, for the turns after, and nothing is left to watch", kept && v["handoffs"] == json!([]), json!(v["handoffs"]));
+
+    // handed to a named computer: the builder above does it, and stays
+    let label = s.name("ho-named");
+    s.openrouter.clear_script();
+    s.openrouter.script(&[
+        Reply::Tools(vec![(HAND_OFF.into(), json!({ "task": format!("Make a page that says built on my builder, as the fragment {label}."), "computer": builder }))]),
+        Reply::Text("On it, on your builder.".into()),
+        Reply::Tools(vec![("shell".into(), json!({ "command": builds(&label, "built on my builder") }))]),
+        Reply::Text("Built it on the builder.".into()),
+    ]);
+    let (sprites, deleted) = (s.sprites.sprites().len(), s.sprites.deleted().len());
+    say(api, owner, &chat, "h3", &format!("build it on {builder}"))?;
+    let named = format!("{label}.{username}");
+    let result = s.eventually(long, || {
+        let url = canonical(&named);
+        !url.is_empty() && from_agent(&format!("Done: {url}")).is_some()
+    });
+    s.ok(
+        "handed to a named computer (the builder above), the work runs there, and that computer stays",
+        result && s.sprites.sprites().len() == sprites && s.sprites.deleted().len() == deleted && api.status(owner, builder).is_ok_and(|r| r.status == 200),
+        json!({ "chat": chat_records(api, owner, &chat), "sprites": s.sprites.sprites().len() }),
+    );
+
+    // a guest's turn: no hand-off offered, and one it calls anyway makes nothing
+    let guest = api.person()?;
+    let guest_id = api.identity(&guest)?;
+    api.signed(owner, "PUT", &format!("/api/f/{chat}/members/{guest_id}"), Some(&json!({ "role": "viewer" })))?;
+    s.openrouter.clear_script();
+    s.openrouter.script(&[
+        Reply::Tools(vec![(HAND_OFF.into(), json!({ "task": "Make a page for the guest." }))]),
+        Reply::Text("Only the owner can hand work to a computer.".into()),
+    ]);
+    let (asked, sprites) = (s.openrouter.chats().len(), s.sprites.sprites().len());
+    say(api, &guest, &chat, "g1", "build me a page too")?;
+    let answered = s.eventually(wait, || from_agent("Only the owner").is_some());
+    let chats = s.openrouter.chats();
+    let refused = chats.get(asked + 1).is_some_and(|c| c["messages"].to_string().contains("no tool named platform__hand_off"));
+    s.ok(
+        "a guest's turn is offered no hand-off; one it calls anyway is refused, and no computer is made",
+        answered && !chats.get(asked).map(offered).unwrap_or_default().iter().any(|t| t == HAND_OFF) && refused && owned(api, owner, "handoff-").is_empty() && s.sprites.sprites().len() == sprites,
+        json!({ "requests": chats.len() - asked }),
+    );
+    s.openrouter.clear_script();
     Ok(())
 }
 

@@ -17,17 +17,14 @@
 //!   not tried again.
 //! - nothing twice, after tool calls that worked in the turn, is answered
 //!   with what those calls did instead.
-//! - a call cut off at `MAX_TOKENS` (`finish_reason: length`) keeps what it
-//!   wrote: a cut `platform__write_file` or `platform__append_file` runs with
-//!   the text written so far, marked `cut_off`, and its answer says where
-//!   the file stops (tools.rs), so a long file lands in pieces. Any other cut
-//!   call is refused, saying why.
+//! - a call cut off at `MAX_TOKENS` (`finish_reason: length`) is refused,
+//!   saying why (goose's parse does).
 //!
 //! Every call is paid on its owner's month (ROADMAP decision 14), as a
 //! job's `ai.text` step is (`Spend`): it reserves its worst case first,
 //! with the key that answers, and settles to the cost its answer reports.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
@@ -42,16 +39,15 @@ use goose_provider_types::errors::ProviderError;
 use goose_provider_types::formats::openai::{create_request, response_to_streaming_message};
 use goose_provider_types::images::ImageFormat;
 use goose_provider_types::model::ModelConfig;
-use rmcp::model::{CallToolRequestParams, ErrorData, Tool};
-use serde_json::{json, Map, Value};
+use rmcp::model::Tool;
+use serde_json::{json, Value};
 use worker::send::SendFuture;
 use worker::{AbortController, AbortSignal, Delay, Fetch, Headers, Method, Request, RequestInit, SqlStorage};
 
 use crate::fleet::{self, Fleet};
 
 /// The most one completion writes (reasoning included): at the rates the
-/// platform's models write, it ends well inside `DEADLINE_MS`. A file of
-/// about 12 KB fits in one call; the guide asks for 6 KB (lib.rs).
+/// platform's models write, it ends well inside `DEADLINE_MS`.
 pub const MAX_TOKENS: i32 = 4096;
 /// One completion's deadline: under the node's fetch timeout (120 s), so a
 /// slow call ends here and is named as one.
@@ -63,18 +59,8 @@ const ATTEMPTS: usize = 2;
 const SSE_LINE_MAX: usize = 1024 * 1024;
 /// The most of one answer read (4096 tokens stream as far less).
 const ANSWER_BYTES_MAX: usize = 8 * 1024 * 1024;
-/// A cut call's arguments are closed by dropping at most this many of their
-/// last characters (an escape, a key, a comma cut in half).
-const REPAIR_DROPS_MAX: usize = 64;
-/// The tools a cut call still runs for: what they wrote is text, and what
-/// was written so far is worth keeping.
-pub const WRITE_FILE: &str = "platform__write_file";
-pub const APPEND_FILE: &str = "platform__append_file";
-/// The mark a cut call runs with (tools.rs reads it).
-pub const CUT_OFF: &str = "cut_off";
-
-const TIMEOUT_NUDGE: &str = "(Your last reply took longer than the time limit and was lost. Reply again with less in \
-     it: one file per call, under 150 lines, the rest of a long file in more calls to platform__append_file.)";
+const TIMEOUT_NUDGE: &str = "(Your last reply took longer than the time limit and was lost. Reply again, shorter: \
+     hand long work to a computer with platform__hand_off.)";
 const EMPTY_NUDGE: &str = "(Your last reply was empty. Reply again: call a tool, or answer the person in a sentence or two, \
      saying what you did and where it is.)";
 
@@ -398,10 +384,9 @@ async fn read_answer(url: &str, key: &str, body: String, signal: &AbortSignal) -
     Ok(lines)
 }
 
-/// goose's parse of the answer, then what this module adds: nothing is
-/// `Empty`, and a cut call is repaired or refused.
+/// goose's parse of the answer (which refuses a call cut off at the output
+/// limit, saying so), then what this module adds: nothing is `Empty`.
 async fn parse(lines: Vec<String>) -> Attempt {
-    let raw = raw_calls(&lines);
     let parsed: Vec<anyhow::Result<Item>> = response_to_streaming_message(futures::stream::iter(lines.into_iter().map(Ok))).collect().await;
     let mut items = Vec::with_capacity(parsed.len());
     for item in parsed {
@@ -416,129 +401,7 @@ async fn parse(lines: Vec<String>) -> Attempt {
         let usage = items.into_iter().filter_map(|(_, u)| u).next_back();
         return Attempt::Empty(usage);
     }
-    for message in items.iter_mut().filter_map(|(m, _)| m.as_mut()) {
-        if !message.metadata.output_token_limit_reached {
-            continue;
-        }
-        for content in message.content.iter_mut() {
-            let MessageContent::ToolRequest(request) = content else { continue };
-            if request.tool_call.is_ok() {
-                continue;
-            }
-            let Some((name, args)) = raw.get(&request.id) else { continue };
-            request.tool_call = cut_call(name, args);
-        }
-    }
     Attempt::Answered(items)
-}
-
-/// Each tool call's name and arguments as they streamed, by its id.
-fn raw_calls(lines: &[String]) -> HashMap<String, (String, String)> {
-    let mut by_index: BTreeMap<i64, (String, String, String)> = BTreeMap::new();
-    for line in lines {
-        let Some(data) = line.strip_prefix("data:").map(str::trim) else { continue };
-        if data == "[DONE]" {
-            break;
-        }
-        let Ok(chunk) = serde_json::from_str::<Value>(data) else { continue };
-        for (position, call) in chunk["choices"][0]["delta"]["tool_calls"].as_array().into_iter().flatten().enumerate() {
-            let index = call["index"].as_i64().unwrap_or(position as i64);
-            let (id, name, args) = by_index.entry(index).or_default();
-            if let (true, Some(new)) = (id.is_empty(), call["id"].as_str()) {
-                *id = new.to_string();
-            }
-            if let Some(new) = call["function"]["name"].as_str().filter(|n| !n.is_empty()) {
-                *name = new.to_string();
-            }
-            if let Some(more) = call["function"]["arguments"].as_str() {
-                args.push_str(more);
-            }
-        }
-    }
-    by_index.into_values().filter(|(id, _, _)| !id.is_empty()).map(|(id, name, args)| (id, (name, args))).collect()
-}
-
-/// A call in an answer cut off at its output limit (goose refuses them
-/// all): whole, it runs; a cut write of a file runs with what it wrote so
-/// far, marked; any other is refused, saying why.
-fn cut_call(name: &str, args: &str) -> Result<CallToolRequestParams, ErrorData> {
-    if let Ok(Value::Object(whole)) = serde_json::from_str::<Value>(args) {
-        return Ok(CallToolRequestParams::new(name.to_string()).with_arguments(whole));
-    }
-    if name == WRITE_FILE || name == APPEND_FILE {
-        if let Some(mut kept) = close_json(args).filter(|a| ["fragment", "path", "text"].iter().all(|k| a[*k].as_str().is_some_and(|s| !s.is_empty()))) {
-            kept.insert(CUT_OFF.into(), json!(true));
-            return Ok(CallToolRequestParams::new(name.to_string()).with_arguments(kept));
-        }
-    }
-    Err(ErrorData::invalid_params(
-        format!(
-            "{name} was cut off: your reply reached its output limit ({MAX_TOKENS} tokens) before this call was whole, so it \
-             did not run. Send less per call: one file per call, under 150 lines; write a long file with {WRITE_FILE} and \
-             add the rest with {APPEND_FILE}."
-        ),
-        None,
-    ))
-}
-
-/// The JSON object `partial` begins, closed where it was cut: its open
-/// string and containers closed, after dropping what cannot end there (half
-/// an escape, a key without its value, a comma). `None` when no prefix
-/// closes into an object.
-pub fn close_json(partial: &str) -> Option<Map<String, Value>> {
-    let mut end = partial.len();
-    for _ in 0..=REPAIR_DROPS_MAX {
-        if let Some(object) = close_at(&partial[..end]) {
-            return Some(object);
-        }
-        // one character fewer
-        end = partial[..end].char_indices().next_back()?.0;
-    }
-    None
-}
-
-fn close_at(prefix: &str) -> Option<Map<String, Value>> {
-    let mut stack = Vec::new();
-    let (mut in_string, mut escaped, mut unicode) = (false, false, 0u8);
-    for c in prefix.chars() {
-        if in_string {
-            if unicode > 0 {
-                unicode -= 1;
-            } else if escaped {
-                escaped = false;
-                if c == 'u' {
-                    unicode = 4;
-                }
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match c {
-            '"' => in_string = true,
-            '{' => stack.push('}'),
-            '[' => stack.push(']'),
-            '}' | ']' => {
-                stack.pop()?;
-            }
-            _ => {}
-        }
-    }
-    // half an escape cannot end a string
-    if escaped || unicode > 0 {
-        return None;
-    }
-    let mut closed = prefix.to_string();
-    if in_string {
-        closed.push('"');
-    }
-    closed.extend(stack.iter().rev());
-    match serde_json::from_str::<Value>(&closed) {
-        Ok(Value::Object(object)) => Some(object),
-        _ => None,
-    }
 }
 
 /// What the turn's tool calls did, said for them when the model, after
@@ -546,33 +409,24 @@ fn close_at(prefix: &str) -> Option<Map<String, Value>> {
 fn summary(messages: &[Message]) -> Option<String> {
     let start = messages.iter().rposition(|m| m.role == rmcp::model::Role::User && !m.is_tool_response() && !m.as_concat_text().trim().is_empty())?;
     let turn = &messages[start..];
-    let mut calls: HashMap<&str, (&str, Value)> = HashMap::new();
+    let mut calls: HashMap<&str, &str> = HashMap::new();
     for request in turn.iter().flat_map(|m| m.content.iter()).filter_map(MessageContent::as_tool_request) {
         if let Ok(call) = &request.tool_call {
-            calls.insert(request.id.as_str(), (call.name.as_ref(), Value::Object(call.arguments.clone().unwrap_or_default())));
+            calls.insert(request.id.as_str(), call.name.as_ref());
         }
     }
     let mut did: Vec<String> = Vec::new();
     for content in turn.iter().flat_map(|m| m.content.iter()) {
         let Some(response) = content.as_tool_response() else { continue };
         let worked = response.tool_result.as_ref().is_ok_and(|r| r.is_error != Some(true));
-        let Some((name, args)) = calls.get(response.id.as_str()) else { continue };
+        let Some(name) = calls.get(response.id.as_str()) else { continue };
         if !worked {
             continue;
         }
         let answer: Value = MessageContent::as_tool_response_text(content).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-        let fragment = args["fragment"].as_str().unwrap_or("");
         let line = match *name {
-            WRITE_FILE | APPEND_FILE => format!("wrote {} in {fragment}", args["path"].as_str().unwrap_or("a file")),
-            "platform__write_files" => {
-                let paths: Vec<&str> = args["files"].as_array().into_iter().flatten().filter_map(|f| f["path"].as_str()).collect();
-                format!("wrote {} in {fragment}", paths.join(", "))
-            }
-            "platform__deploy" => match answer["url"].as_str() {
-                Some(url) => format!("deployed {fragment}: {url}"),
-                None => format!("deployed {fragment}"),
-            },
             "platform__create_fragment" => format!("made {}", answer["name"].as_str().unwrap_or("a fragment")),
+            crate::handoff::TOOL => format!("handed the work to {}", answer["computer"].as_str().unwrap_or("a computer")),
             other => format!("ran {other}"),
         };
         if !did.contains(&line) {

@@ -400,8 +400,33 @@ whether Chromium's tree reaches AT-SPI over the pet's session bus, or
 screenshot is, and so how far the 2 MiB goes; and how well
 `glm-5.3-flash` drives a screen in 40 turns.
 
+## Your agent hands its work to a computer
+
+A person's agent builds nothing in its cell (Paul, 2026-09-27; docs/api.md,
+Agents, Hand-offs). It answers questions and makes a few calls on your
+fragments itself (a todo added, a list read); anything longer it hands to
+a computer with `platform__hand_off({task, computer?})`, in your own turns
+only, and its turn ends saying the work is on its way.
+
+- **A computer you name**: one of your fragments whose job `do` (or
+  `build`) takes `{task}`: a pet, or a builder. It stays.
+- **Otherwise a throwaway**: a private builder of yours,
+  `handoff-<12 hex>.<you>`, made for the task. Its computer boots, goose
+  runs `build({task})` and deploys what it made as a fragment of yours,
+  and when the run ends the agent removes the throwaway: its computer
+  (keys revoked, the Sprite destroyed), then the fragment. What it built
+  stays. A crash's leftovers are found by that name.
+
+The agent's alarm watches the run, and its result (`Done: <url>`, and what
+goose said) lands in the chat that asked, with no one asking again. A
+throwaway costs what any computer does: its boot, and its awake time
+while the build runs, on your budget.
+
 ## Next
 
+- **A hand-off on a real Sprite**: a throwaway's boot, goose, and its
+  Sprite destroyed after (`sprite list`). The e2e proves the plumbing
+  with the stand-in goose.
 - **The builder on a real Sprite**: `fragment new b --template builder`,
   create, deploy, and a task from its page. It needs a CLI release with
   `model --serve` first (a computer made before then has an older CLI:

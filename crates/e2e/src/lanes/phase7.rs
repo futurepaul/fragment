@@ -13,7 +13,7 @@
 //! 4. The guest asks the owner's agent about the chat, which is within the
 //!    guest's reach: it answers there, its tool group shown above it.
 //! 5. The guest asks it to read one of the owner's private apps: it cannot.
-//! 6. The owner asks it to edit that same app: it does.
+//! 6. The owner asks it to add to that same app (a list): it does.
 //! 7. The owner removes the guest in the share sheet: the guest's socket
 //!    closes, and their next request is a 403.
 //! 8. A rewritten desktop cannot share without the sheet's click. The share
@@ -53,7 +53,7 @@ const ASK_CHAT: &str = "What is this chat made of?";
 const ABOUT: &str = "Two channels: chat for what we say, work for what I do.";
 const CANNOT: &str = "I can't open that app for you: it isn't shared with you.";
 const EDITED: &str = "The plan is on.";
-const DONE: &str = "Done: your notes say the plan is on.";
+const DONE: &str = "Done: your list says the plan is on.";
 
 /// Runs on a node restarted with the platform and the fragments on two domains
 /// (as fragment.club is), then restarts it as it was for the lanes after.
@@ -242,7 +242,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // one of the owner's apps, private: only the people in it may open it
     // (the owner alone: their agent is not in it either)
     let app = api.qualified(&owner.keys, &s.name("private"))?;
-    let r = api.create_with(&owner.keys, json!({ "name": app, "template": "blank", "visibility": "members" }))?;
+    let r = api.create_with(&owner.keys, json!({ "name": app, "template": "todo", "visibility": "members" }))?;
     anyhow::ensure!(r.status == 200, "making {app}: {r}");
     let secret = format!("the secret plan, {}", s.name("notes"));
     let r = api.signed(&owner.keys, "POST", &format!("/api/f/{app}/files"), Some(&json!({ "files": [{ "path": "notes.txt", "text": secret }] })))?;
@@ -394,25 +394,26 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the guest's page shows that step failed, above the answer", failed, chrome.eval(&theirs, MESSAGES).unwrap_or_default());
     chrome.screenshot(&theirs, &s.scratch.join("phase7-guest.png"))?;
 
-    // ---- 6. the owner asks it to edit that same app
+    // ---- 6. the owner asks it to add to that same app, a list
     s.openrouter.script(&[
-        Reply::Tools(vec![("platform__write_files".into(), json!({ "fragment": app, "files": [{ "path": "notes.txt", "text": EDITED }] }))]),
+        Reply::Tools(vec![("platform__call".into(), json!({ "fragment": app, "operation": "add", "input": { "text": EDITED } }))]),
         Reply::Text(DONE.into()),
     ]);
-    chrome.eval_in_frame(&desk, &chat_host, &send(&format!("Change the notes in {app} to say: {EDITED}")))?;
+    chrome.eval_in_frame(&desk, &chat_host, &send(&format!("Add to my list in {app}: {EDITED}")))?;
     let turn = chat.answered(s, DONE).unwrap_or_default();
     let work = chat.work(s, &turn);
     let (asker, step) = starter_and_step(&work);
-    let edited = s.eventually(WAIT, || notes() == EDITED);
+    let list = || api.op(&owner.keys, &app, "list", "q", json!({})).map(|r| r.body["result"]["todos"].to_string()).unwrap_or_default();
+    let added = s.eventually(WAIT, || list().contains(EDITED));
     let members = api.signed(&owner.keys, "GET", &format!("/api/f/{app}/members"), None)?;
     let owner_alone = members.body["members"].as_array().is_some_and(|m| m.len() == 1 && m[0]["principal"] == owner.id.as_str());
     s.ok(
-        "the owner asks it to edit that same app: it does, for the owner (it is still not in the app)",
-        !turn.is_empty() && asker == owner.id && step["tool"] == "platform__write_files" && step["ok"] == true && edited && owner_alone,
-        json!({ "notes": notes(), "members": members.body, "work": work }),
+        "the owner asks it to add to that same app: it does, for the owner (it is still not in the app)",
+        !turn.is_empty() && asker == owner.id && step["tool"] == "platform__call" && step["ok"] == true && added && owner_alone,
+        json!({ "list": list(), "members": members.body, "work": work }),
     );
     chrome.front(&desk)?;
-    let grouped = s.eventually(WAIT, || in_desk(&mut chrome, &group_above(&turn, DONE, "platform__write_files", false)));
+    let grouped = s.eventually(WAIT, || in_desk(&mut chrome, &group_above(&turn, DONE, "platform__call", false)));
     s.ok("the owner's page shows its tool group above the answer", grouped, chrome.eval_in_frame(&desk, &chat_host, MESSAGES).unwrap_or_default());
     chrome.screenshot(&desk, &s.scratch.join("phase7-owner.png"))?;
 

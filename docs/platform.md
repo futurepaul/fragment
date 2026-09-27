@@ -101,6 +101,13 @@ so no platform code names a template (`cell/src/agents.rs`,
   Opening a fragment by its URL). An app's own answers pass as they are.
 - **An agent's authority** in a turn is the lower of its asker's role
   and a cap (phase 7, decision 1).
+- **An agent removes a hand-off's throwaway** (docs/api.md, Agents,
+  Hand-offs): `DELETE /api/f/<name>` signed by an agent, for its owner or
+  no one, of a `handoff-<12 hex>` fragment of its owner's that it is in,
+  removes the fragment's computer (its Sprite destroyed) and then the
+  fragment, as its owner. The one owner-only action an agent takes:
+  deleting stays its owner's everywhere else (decision 17), and the
+  throwaway is the agent's own scratch, made for one task.
 - **An agent in a chat posts its work** (phase 7, C): a turn a chat
   started posts its start, each tool call, and its end to the chat's
   `work` channel, and its answer to `chat` naming the turn, when the chat
