@@ -31,7 +31,8 @@ pub struct Sprite {
     pub held: bool,
     pub holds: u32,
     pub releases: u32,
-    /// Commands run (the Tasks API's aside), and the last input one was given.
+    /// Commands run (the Tasks API's aside), and the first input one was
+    /// given (its boot's pairing token: the hands' files come after).
     pub runs: u32,
     pub stdin: String,
     /// Every call that named it.
@@ -93,7 +94,7 @@ fn exec(state: &Mutex<State>, home: &Path, name: &str, req: &Request) -> Respons
     let mut s = state.lock().expect("sprites state");
     let sprite = s.sprites.get_mut(name).expect("exec checked the Sprite exists");
     sprite.runs += 1;
-    if !stdin.is_empty() {
+    if sprite.stdin.is_empty() {
         sprite.stdin = String::from_utf8_lossy(&stdin).into_owned();
     }
     drop(s);
