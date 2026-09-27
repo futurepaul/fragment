@@ -33,6 +33,13 @@
     .drive { display: flex; flex-wrap: wrap; gap: .5rem; }
     .keys { display: flex; gap: .5rem; }
     .keys button { background: transparent; color: var(--fg); border: 1px solid var(--line); }
+    #ask { margin-top: .75rem; }
+    #work { list-style: none; margin: .75rem 0 0; padding: .6rem .8rem; border: 1px solid var(--line); border-radius: .5rem; font-size: .85rem; color: var(--muted); }
+    #work li + li { margin-top: .2rem; }
+    #work .task, #work .end { color: var(--fg); }
+    #work .end { margin-top: .4rem; }
+    #work .failed { color: #b3261e; }
+    #work code { font: .8rem ui-monospace, SFMono-Regular, monospace; color: var(--fg); overflow-wrap: anywhere; }
     #error { color: #b3261e; min-height: 1.5rem; margin-top: .5rem; font-size: .9rem; }
     @media (max-width: 40rem) { main { margin-top: 1.25rem; } .keys { width: 100%; } .keys button { flex: 1; } }
   </style>
@@ -50,6 +57,8 @@
       <form id="type"><input id="text" placeholder="Type into it" maxlength="500" autocomplete="off" disabled><button disabled>Type</button></form>
       <div class="keys"><button data-key="Enter" disabled>Enter</button><button data-key="Backspace" title="Backspace" aria-label="Backspace" disabled>⌫</button><button data-key="Escape" disabled>Esc</button></div>
     </div>
+    <form id="ask" hidden><input id="task" placeholder="Ask it to do something" maxlength="2000" autocomplete="off"><button>Do it</button></form>
+    <ol id="work" hidden></ol>
     <div id="error"></div>
   </main>
   <script type="module">
@@ -83,7 +92,9 @@
       $("empty").hidden = true;
       $("screen").style.aspectRatio = `${s.width} / ${s.height}`;
       $("title").textContent = s.title ? `on screen: ${s.title}` : "";
-      $("driver").textContent = s.driver ? `last driven by ${await who(s.driver)}` : "";
+      // its agent drives as `agent:<who asked it>`
+      const driven = (d) => (d.startsWith("agent:") ? who(d.slice(6)).then((asker) => `its agent, for ${asker}`) : who(d));
+      $("driver").textContent = s.driver ? `last driven by ${await driven(s.driver)}` : "";
     }, show);
 
     $("frame").onclick = (e) => {
@@ -112,6 +123,46 @@
       send({ kind: "type", text }).then((sent) => sent && ($("text").value = ""));
     };
     for (const b of document.querySelectorAll("[data-key]")) b.onclick = () => send({ kind: "key", key: b.dataset.key });
+
+    // its agent's latest run, from `work`: the task, each step as the
+    // computer posts it, and how it ended
+    const runs = new Map();
+    const li = (className, ...kids) => {
+      const n = Object.assign(document.createElement("li"), { className });
+      n.append(...kids);
+      return n;
+    };
+    const code = (text) => Object.assign(document.createElement("code"), { textContent: text });
+    async function showWork() {
+      const r = runs.get(Math.max(...runs.keys()));
+      const asker = r.asker ? `, asked by ${await who(r.asker)}` : "";
+      const steps = [...r.steps.values()].sort((a, b) => a.n - b.n).map((s) => li("", ...(s.said ? [`${s.said} `] : []), code(`${s.tool} ${s.args}`)));
+      const end = !r.end ? li("", "working…") : r.end.error || r.end.code ? li("end failed", r.end.error || r.end.message || `stopped (${r.end.code})`) : li("end", r.end.message);
+      $("work").replaceChildren(li("task", `${r.task ?? "…"}${asker}`), ...steps, end);
+      $("work").hidden = false;
+    }
+    fragment.subscribe("work", ({ body: b }) => {
+      if (!Number.isInteger(b?.run)) return;
+      if (!runs.has(b.run)) runs.set(b.run, { steps: new Map() });
+      const r = runs.get(b.run);
+      if (b.kind === "start") Object.assign(r, { task: b.task, asker: b.asker });
+      if (b.kind === "step" && Number.isInteger(b.n)) r.steps.set(b.n, b);
+      if (b.kind === "end") r.end = b;
+      showWork();
+    }, { last: 200 });
+
+    // editors ask it (the agent spends its owner's budget)
+    if (["editor", "owner"].includes(me.role)) {
+      $("ask").hidden = false;
+      $("ask").onsubmit = (e) => {
+        e.preventDefault();
+        const task = $("task").value.trim();
+        const button = $("ask").querySelector("button");
+        if (!task) return;
+        button.disabled = true;
+        fragment.call("do", { task }).then(() => (($("task").value = ""), show()), show).finally(() => (button.disabled = false));
+      };
+    }
 
     fragment.closed(({ code }) => {
       $("note").textContent = code === 4004 ? "this pet was deleted" : "this page's access changed: reload it";

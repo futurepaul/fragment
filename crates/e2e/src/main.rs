@@ -492,9 +492,11 @@ fn approve_login(api: &Api, pending: &Value) -> Result<()> {
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // the builder section's goose, where the Sprites fake runs an exec
-    if args.first().map(String::as_str) == Some("goose") {
-        return lanes::builder::stand_in_goose(&args[1..]);
+    // the builder's and the pet's goose, and the pet's Cua Driver, where the Sprites fake runs an exec
+    match args.first().map(String::as_str) {
+        Some("goose") => return lanes::builder::stand_in_goose(&args[1..]),
+        Some("cua-driver") => return lanes::builder::stand_in_cua(&args[1..]),
+        _ => {}
     }
     let (hosted, rest) = match args.split_first() {
         Some((flag, rest)) if flag == "--hosted" => (true, rest),

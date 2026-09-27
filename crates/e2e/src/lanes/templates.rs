@@ -12,6 +12,7 @@ use fragment_nip98::Keys;
 use fragment_proto::ErrorCode;
 use serde_json::{json, Value};
 
+use super::builder::{stand_in, CUA_VERSION, GOOSE_VERSION, PNG};
 use super::jobs::{settle, started};
 use super::signin::{site_cookie, with_session};
 use crate::api::{url_enc, Api, Call, Reply, Socket};
@@ -278,7 +279,10 @@ const JPEG: &str = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJ
 
 /// The pet (templates/pet): a computer, a `control` channel people drive it
 /// through, and its screen, one row its computer stores through `frame` and
-/// `screen` answers. Its display loop needs a real Sprite (docs/computers.md).
+/// `screen` answers; and its agent, `do`, goose with Cua Driver as its hands
+/// (both stand-ins here, as in the builder section: this proves the
+/// plumbing). Its display loop and the real agent need a real Sprite
+/// (docs/computers.md).
 fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
     let viewer = api.person()?;
     let viewer_id = api.identity(&viewer)?;
@@ -298,12 +302,19 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
             && ops["frame"]["ephemeral"] == true
             && ops["screen"]["kind"] == "query"
             && ops["run"]["kind"] == "job"
-            && ops["run"]["role"] == "editor",
+            && ops["run"]["role"] == "editor"
+            && ops["do"]["kind"] == "job"
+            && ops["do"]["role"] == "editor",
         format!("{made} / {st}"),
     );
     let channels = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None)?;
-    let control = channels.body["channels"].as_array().into_iter().flatten().find(|c| c["name"] == "control").cloned().unwrap_or_default();
-    s.ok("and a control channel viewers signed in post to", control["read"] == "viewer" && control["post"] == "viewer" && control["signedIn"] == true, &channels);
+    let channel = |n: &str| channels.body["channels"].as_array().into_iter().flatten().find(|c| c["name"] == n).cloned().unwrap_or_default();
+    let (control, work) = (channel("control"), channel("work"));
+    s.ok(
+        "and a control channel viewers signed in post to, and a work channel its editors post to",
+        control["read"] == "viewer" && control["post"] == "viewer" && control["signedIn"] == true && work["read"] == "viewer" && work["post"] == "editor",
+        &channels,
+    );
     // shared by its link: who holds it is a viewer, signed in or not
     let r = api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "link" })))?;
     anyhow::ensure!(r.status == 200, "sharing the pet by its link: {r}");
@@ -420,6 +431,61 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
         answered && read.contains(r#"\"role\":\"editor\""#) && read.contains(r#"\"run\":{"#) && read.contains(r#"\"stdout\":\"ran 42\\n\""#),
         &read,
     );
+
+    // do: its agent drives its screen, for editors only
+    let home = s.scratch.join("sprites/sprites").join(&sprite);
+    let computer_id = api.identity(&computer)?;
+    stand_in(&home, &format!(".local/share/goose-{GOOSE_VERSION}/goose"), "goose")?;
+    stand_in(&home, &format!(".local/share/cua-driver-{CUA_VERSION}/cua-driver"), "cua-driver")?;
+    let r = api.op(&viewer, &name, "do", "d1", json!({ "task": "click it" }))?;
+    s.ok("a viewer cannot ask its agent", r.status == 403, &r);
+    let (look, said) = (Say::Tools(vec![("cua__get_desktop_state".into(), json!({}))]), "I looked and clicked.");
+    s.openrouter.clear_script();
+    s.openrouter.script(&[look.clone(), Say::Tools(vec![("cua__click".into(), json!({ "x": 10, "y": 20 }))]), look.clone(), look.clone(), look, Say::Text(said.into())]);
+    let before = s.openrouter.chats().len();
+    let r = api.op(owner, &name, "do", "d2", json!({ "task": "click it" }))?;
+    let run = started(&r);
+    let done = settle(api, owner, &name, run, &["succeeded", "held"], Duration::from_secs(90));
+    s.ok(
+        "its owner asks its agent: goose and Cua Driver are installed, goose runs, and the run answers its last words",
+        done["status"] == "succeeded" && done["output"]["code"] == 0 && done["output"]["message"] == said,
+        &done,
+    );
+    let chats: Vec<Value> = s.openrouter.chats().into_iter().skip(before).collect();
+    let offered: Vec<&str> = chats.first().and_then(|c| c["tools"].as_array()).into_iter().flatten().filter_map(|t| t["function"]["name"].as_str()).collect();
+    s.ok(
+        "each model call went through the platform, on the agents' model, offered the Cua Driver tools its goose config names",
+        chats.len() == 6 && chats.iter().all(|c| c["model"] == fragment_proto::AGENT_MODEL && c["stream"] == true) && offered == ["cua__get_desktop_state", "cua__click"],
+        json!(offered),
+    );
+    let images = |c: &Value| c["messages"].as_array().into_iter().flatten().filter_map(|m| m["content"].as_array()).flatten().filter(|p| p["type"] == "image_url").count();
+    let seen: Vec<usize> = chats.iter().map(images).collect();
+    let text = |i: usize| chats.get(i).map(Value::to_string).unwrap_or_default();
+    s.ok(
+        "a screenshot reaches the model, only the newest three go along, and Cua Driver drives the pet's display",
+        seen == [0, 1, 1, 2, 3, 3]
+            && text(1).contains(&format!("data:image/png;base64,{PNG}"))
+            && text(5).contains("an earlier screenshot, left out")
+            && text(2).contains("clicked at 10, 20 on :99"),
+        json!(seen),
+    );
+    let work = api.signed(owner, "GET", &format!("/api/f/{name}/channels/work"), None)?;
+    let records: Vec<Value> = work.body["records"].as_array().into_iter().flatten().filter(|x| x["body"]["run"] == run).cloned().collect();
+    let steps: Vec<String> = records.iter().map(|x| format!("{} {}", x["body"]["kind"].as_str().unwrap_or(""), x["body"]["tool"].as_str().unwrap_or(""))).collect();
+    let by_computer = records.iter().filter(|x| x["body"]["kind"] == "step").all(|x| x["principal"] == computer_id.as_str());
+    s.ok(
+        "work has the run's start, each step as its computer posted it, and its end",
+        steps == ["start ", "step get_desktop_state", "step click", "step get_desktop_state", "step get_desktop_state", "step get_desktop_state", "end "]
+            && by_computer
+            && records.first().is_some_and(|x| x["body"]["asker"] == owner_id.as_str())
+            && records.get(6).is_some_and(|x| x["body"]["message"] == said),
+        &work,
+    );
+    let agent = format!("agent:{owner_id}");
+    let drove = s.eventually(Duration::from_secs(20), || screen()["driver"] == agent.as_str());
+    let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/control"), Some(&json!({ "id": "p4", "body": { "kind": "key", "key": "Escape" } })))?;
+    let back = r.status == 200 && s.eventually(Duration::from_secs(20), || screen()["driver"] == owner_id.as_str());
+    s.ok("its agent is the driver the screen names, for who asked, until a person drives it again", drove && back, screen());
     page.close();
     Ok(())
 }

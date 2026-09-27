@@ -4,7 +4,9 @@
 // computer is awake, as fragment.json's `computer.start` says, and restarts
 // it when it exits and after a deploy; what it prints is in ~/fragment.log.
 // The `fragment` CLI here is signed in as the computer, an editor, and
-// FRAGMENT_NAME names the fragment.
+// FRAGMENT_NAME names the fragment. Its agent (the `do` job, computer/do.mjs)
+// drives the same display through Cua Driver, and marks each step it takes
+// in ~/.pet/agent, which makes it the driver the frames name.
 //
 // PET_FAKE_SCREEN=<a JPEG> shows that fixed image instead: nothing is
 // installed or started, and control records are logged, not applied.
@@ -27,7 +29,8 @@ const FRAME_MAX_CHARS = 180_000;
 // a control record older than this is skipped: its poster saw another screen
 const STALE_MS = 30_000;
 const KEYS = { Enter: "Return", Backspace: "BackSpace", Escape: "Escape", Tab: "Tab", ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right" };
-const APT = ["xvfb", "openbox", "xdotool", "imagemagick", "fonts-liberation", "fonts-noto-color-emoji"];
+// with what Cua Driver needs: libXi, and AT-SPI 2 on a session bus for the browser's accessibility tree
+const APT = ["xvfb", "openbox", "xdotool", "imagemagick", "fonts-liberation", "fonts-noto-color-emoji", "libxi6", "at-spi2-core", "dbus"];
 const PLAYWRIGHT = "playwright@1.63.0";
 
 const FAKE = process.env.PET_FAKE_SCREEN;
@@ -38,6 +41,8 @@ const NAME = process.env.FRAGMENT_NAME ?? fail("FRAGMENT_NAME names the fragment
 const STATE = path.join(os.homedir(), ".pet");
 const CURSOR = path.join(STATE, "applied");
 const FRAME = path.join(STATE, "frame.json");
+const BUS = path.join(STATE, "bus");
+const AGENT = path.join(STATE, "agent");
 const START = `file://${path.resolve("computer/start.html")}`;
 
 const log = (...parts) => console.log(new Date().toISOString(), ...parts);
@@ -54,7 +59,7 @@ let driver = null;
 let droveAt = Date.now();
 
 function install() {
-  if (["Xvfb", "openbox", "xdotool"].every(has) && (has("magick") || has("import"))) return;
+  if (spawnSync("dpkg", ["-s", ...APT], { stdio: "ignore" }).status === 0) return;
   log(`installing ${APT.join(" ")}`);
   const apt = (...args) => execFileSync("sudo", ["-n", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "-q", "-y", ...args], { stdio: ["ignore", "inherit", "inherit"] });
   apt("update");
@@ -99,7 +104,7 @@ function daemon(label, cmd, args, stdio) {
 
 function browser() {
   const started = Date.now();
-  const flags = ["--no-first-run", "--no-default-browser-check", "--disable-dev-shm-usage", "--password-store=basic", "--hide-crash-restore-bubble", "--start-maximized"];
+  const flags = ["--no-first-run", "--no-default-browser-check", "--disable-dev-shm-usage", "--password-store=basic", "--hide-crash-restore-bubble", "--start-maximized", "--force-renderer-accessibility"];
   const child = daemon("browser", chrome, [...flags, `--user-data-dir=${path.join(STATE, "browser")}`, ...(sandbox ? [] : ["--no-sandbox"]), START]);
   child.on("exit", () => {
     // a kernel that does not allow its sandbox ends it at once
@@ -113,7 +118,7 @@ function browser() {
 // What the run before this one left (the platform restarts it on exit and
 // after a deploy).
 function reap() {
-  for (const label of ["follow", "browser", "openbox", "xvfb"]) {
+  for (const label of ["follow", "browser", "openbox", "xvfb", "bus"]) {
     try {
       process.kill(Number(fs.readFileSync(path.join(STATE, `${label}.pid`), "utf8")), "SIGTERM");
     } catch {}
@@ -131,6 +136,13 @@ async function desktop() {
   for (const f of ["/tmp/.X99-lock", "/tmp/.X11-unix/X99"]) fs.rmSync(f, { force: true });
   daemon("xvfb", "Xvfb", [DISPLAY, "-screen", "0", `${SCREEN.width}x${SCREEN.height}x24`, "-nolisten", "tcp"]);
   for (let i = 0; i < 50 && spawnSync("xdotool", ["getmouselocation"]).status !== 0; i++) await sleep(200);
+  // a session bus, where the browser's accessibility tree reaches AT-SPI (Cua Driver reads it)
+  if (has("dbus-daemon")) {
+    fs.rmSync(BUS, { force: true });
+    daemon("bus", "dbus-daemon", ["--session", "--nofork", "--nopidfile", `--address=unix:path=${BUS}`]);
+    for (let i = 0; i < 25 && !fs.existsSync(BUS); i++) await sleep(200);
+    process.env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${BUS}`;
+  }
   daemon("openbox", "openbox", []);
   // no blinking caret: each blink would be a frame
   const gtk = path.join(os.homedir(), ".config/gtk-3.0/settings.ini");
@@ -165,6 +177,12 @@ async function frames() {
     try {
       // closed from the page: open it again
       if (!FAKE && kids.browser.gone) browser();
+      // the agent took a step since anyone else drove it
+      const agent = fs.statSync(AGENT, { throwIfNoEntry: false });
+      if (agent && agent.mtimeMs > droveAt) {
+        droveAt = agent.mtimeMs;
+        driver = `agent:${fs.readFileSync(AGENT, "utf8").trim()}`;
+      }
       const jpeg = (await capture()).toString("base64");
       const frame = { jpeg, width: SCREEN.width, height: SCREEN.height, title: await title(), ...(driver && { driver }) };
       if (frame.jpeg === sent.jpeg && frame.title === sent.title && frame.driver === sent.driver) continue;

@@ -29,8 +29,21 @@
         "additionalProperties": false,
         "properties": { "command": { "type": "string", "minLength": 1, "maxLength": 8000, "description": "a bash command, run on the computer in ~/fragment" } }
       }
+    },
+    "do": {
+      "kind": "job",
+      "role": "editor",
+      "input": {
+        "type": "object",
+        "required": ["task"],
+        "additionalProperties": false,
+        "properties": { "task": { "type": "string", "minLength": 1, "maxLength": 2000, "description": "what the pet's agent does on its screen" } }
+      }
     }
   },
-  "channels": { "control": { "read": "viewer", "post": "viewer", "signedIn": true } },
-  "meta": { "title": "Pet", "description": "A computer everyone here shares: its screen live, driven together. It is awake while someone has it open, on your budget." }
+  "channels": {
+    "control": { "read": "viewer", "post": "viewer", "signedIn": true },
+    "work": { "read": "viewer", "post": "editor" }
+  },
+  "meta": { "title": "Pet", "description": "A computer everyone here shares: its screen live, driven together and by its agent. It is awake while someone has it open, on your budget." }
 }
