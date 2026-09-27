@@ -262,6 +262,62 @@ site with each other until the Public Suffix List lists
 `fragment.boats`, which waits for thousands of people
 (docs/fragment-boats.md; the fleet: docs/operate.md).
 
+### 24. Chat → agent: the brain in the cell, the hands on a computer (Paul, 2026-09-27)
+
+The blessed path is chat → agent. The brain runs in the cell, and the
+hands are on a computer: the same split as Grok's bot and Meta's Muse.
+The design, the research behind it, and its slices are in
+docs/agent-computer.md.
+
+- **One interface: the chat.** A chat is a fragment's chat channel. The
+  desktop, custom pages, and bridges such as Telegram (bridge fragments)
+  are ways to read it and post to it.
+- **The brain** is the in-cell agent: thin and friendly, with a minimal
+  system prompt. It answers questions and calls operations on the
+  owner's fragments through APIs, which is cheap, instant, and needs no
+  computer. It hands off anything that creates or edits code, uses a
+  browser or desktop, or takes more than a few calls.
+- **The hands** are a computer agent: goose on the computer. It is
+  technical, with a generic, well-evaluated system prompt. It has files,
+  bash, Linux, Stagehand with system Chrome for the browser, and Cua
+  Driver for desktop apps.
+  - It keeps one long-lived session per chat. goose's own compaction
+    keeps the prefix stable for caching.
+  - Its steps and answers go into the same chat.
+  - A hand-off goes by default to the owner's computer, in the session
+    for that chat. Throwaway computers are extra hands, for parallel or
+    risky work.
+  - It is the backstop: a full Linux computer. A computer-use case that
+    becomes common enough can move into the brain's toolset later.
+- **Fragment agents** (the `agent` block) are the same pattern, scoped to
+  one fragment: a brain whose tools are that fragment's operations. They
+  hand off only if the fragment declares a computer.
+- **No multiple agents per person.** A person has multiple fragments,
+  organized by project.
+- **State.**
+  - The computer owns working state: goose sessions, browser profiles,
+    installs, caches, scratch. Losing it costs working memory and logins
+    only.
+  - The fragment owns what is useful or shared: the conversation
+    (channels), step summaries with screenshot blobs, outputs
+    (fragments, files, artifacts), the task log, schedules, and memory
+    and skills as git-tracked files the computer syncs. Paul: "a huge
+    win".
+  - Grants and secrets live on the platform, never on the computer's
+    disk.
+  - A replacement computer seeds a fresh session from the chat
+    transcript plus the memory and skills files.
+- **Decision 10 is amended:** a session lives where its hands are; a
+  conversation lives in its fragment's channels; memory and skills live
+  in fragment files. The in-cell brain keeps its own turn state in its
+  cell.
+- **Not now:**
+  - Sprites checkpoints. The disk survives sleep; on-demand checkpoints
+    come later.
+  - A second main agent, or a Hermes as a child of the brain. These are
+    examples of what the blessed path allows; they are not designed
+    now.
+
 ## Truth map (every change is checked against this)
 
 | Thing | Source of truth | Derived/copies must be |
