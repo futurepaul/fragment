@@ -530,6 +530,26 @@ without a delete condition is unfinished design, not debt.
   re-created (their images go with them), or upstream fixes the import
   and nothing needs it.
 
+## A computer's long steps run inside its alarm
+
+- **Observed:** 2026-09-27, fragment.club. A `Computer` cell's alarm
+  makes Sprites calls that can take minutes (a boot's install and
+  pairing, a sync, a hold on a Sprite slow to wake; `KEYS` waits up to
+  180 s), and celld fires an alarm again whenever its handler outlives
+  the operation deadline (15 s; docs/finite-next-lessons.md). Two steps
+  at once gave back each other's holds on the month, and a wake failed on
+  `no such reservation`. The cell now runs one step at a time
+  (`stepping`, cell/src/computer.rs): a handler fired again waits for the
+  one before it.
+- **Risk:** a long step gathers a waiting handler every ~15 s, each of
+  which then steps in turn (cheaply, from the row the long one left); a
+  step that hangs holds every later one until `KEYS`' timeout.
+- **First proof:** a boot on a real Sprite that takes minutes, or a node
+  log with many of one `Computer`'s alarm handlers waiting.
+- **Delete when:** the long Sprites calls leave the alarm (run from
+  `waitUntil`, with a watchdog alarm armed first, as the lessons say), so
+  no step outlives the deadline.
+
 ## An agent runs one turn at a time, across all its chats
 
 - **Observed:** phase 7 slice A keeps one conversation per chat, but one

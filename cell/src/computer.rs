@@ -197,6 +197,13 @@ pub struct ComputerCell {
     state: State,
     env: Env,
     cfg: &'static Config,
+    /// One alarm step at a time. celld fires an alarm again when its
+    /// handler outlives the node's operation deadline (15 s), beside the one
+    /// still running; a wake would take that one's hold on the month for a
+    /// dead step's and give it back, and its settle then finds none (`no
+    /// such reservation`). The one fired again waits here, then steps from
+    /// the row the one before it left.
+    stepping: futures_util::lock::Mutex<()>,
 }
 
 impl DurableObject for ComputerCell {
@@ -204,7 +211,7 @@ impl DurableObject for ComputerCell {
         state.storage().sql().exec(SCHEMA, None).expect("the Computer schema applies");
         state.storage().sql().exec(FILES_SCHEMA, None).expect("the Computer schema applies");
         let cfg = Config::from_env(&env);
-        ComputerCell { state, env, cfg }
+        ComputerCell { state, env, cfg, stepping: futures_util::lock::Mutex::new(()) }
     }
 
     async fn fetch(&self, mut req: Request) -> Result<Response> {
@@ -221,6 +228,7 @@ impl DurableObject for ComputerCell {
     }
 
     async fn alarm(&self) -> Result<Response> {
+        let _one = self.stepping.lock().await;
         if let Err(e) = self.step().await {
             let Some(mut c) = self.row().ok().flatten() else { return Response::ok("") };
             c.tries += 1;

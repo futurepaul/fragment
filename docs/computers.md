@@ -244,6 +244,19 @@ and was destroyed. Fixed since:
   own desktop service, holding a connection while a page shows it, is
   the natural holder. That is the pet-desktop PR's choice.
 
+### What a restart showed (2026-09-27)
+
+After both nodes restarted (celld v0.6.0), Paul's pet did not wake: its
+events said `computer.failed: no such reservation`, again and again.
+celld fires an alarm again when its handler outlives the node's operation
+deadline (15 s; cold cells after a restart, a Sprite slow to wake), while
+the first still runs. The second wake took the first's hold on the month
+for one a dead wake had left, and gave it back; the first then held the
+Sprite and settled a hold that was gone. Now a `Computer` cell runs one
+alarm step at a time (`stepping`): one fired again waits, then steps from
+the row the one before it left. The e2e (`sprites`) wakes one whose Sprite
+answers its hold past the deadline.
+
 ## How a page shows it: the pet (`templates/pet`)
 
 A computer everyone who has the fragment watches live and drives
