@@ -442,6 +442,10 @@ pub struct CreateFragment {
     /// `todo`, `blank`, …): its files are the first commit, and live.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
+    /// A hand-off's throwaway, made by an agent for its owner: the fragment
+    /// records the agent, which alone may delete it (docs/api.md, Hand-offs).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub throwaway: bool,
 }
 
 /// The answer to a create: the only time the webhook secret is shown
@@ -516,6 +520,9 @@ pub struct FragmentStatus {
     /// its owner lets it show their fragments inside it (`__frame`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame: Option<bool>,
+    /// The agent that made it as a hand-off's throwaway, which may delete it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throwaway_of: Option<String>,
 }
 
 /// A fragment the signer holds a role on.

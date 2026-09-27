@@ -135,7 +135,7 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
 
     let none = s.name("tnone");
     let r = api.create_with(&owner, json!({ "name": none, "template": "nope" }))?;
-    s.ok("an unknown template is refused, naming the templates", r.status == 400 && r.message().contains("blank, todo, inbox, calories, pet, chat, desktop"), &r);
+    s.ok("an unknown template is refused, naming the templates", r.status == 400 && r.message().contains("blank, todo, inbox, calories, pet, builder, chat, desktop"), &r);
     let r = api.status(&owner, &api.qualified(&owner, &none)?)?;
     s.ok("and nothing is made", r.status == 404, &r);
 
@@ -240,11 +240,11 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let theirs = with_session(api, "GET", "/", &editor_session)?;
     s.ok("and says which are shared with them, and as what", row(&theirs, &blank).contains("shared with you · editor"), &theirs);
-    let offered: Vec<usize> = ["blank", "todo", "inbox", "calories", "pet", "chat", "desktop"].iter().filter_map(|t| home.text.find(&format!("value=\"{t}\""))).collect();
+    let offered: Vec<usize> = ["blank", "todo", "inbox", "calories", "pet", "builder", "chat", "desktop"].iter().filter_map(|t| home.text.find(&format!("value=\"{t}\""))).collect();
     s.ok(
         "and offers the templates, the simplest first and the desktop last, as the demo it is, saying it will show their fragments inside it",
         home.text.contains("New fragment")
-            && offered.len() == 7
+            && offered.len() == 8
             && offered.is_sorted()
             && home.text.contains("A demo of what fragments can do")
             && home.text.contains("It will show your fragments inside it, signed in as you"),
@@ -486,6 +486,26 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
     let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/control"), Some(&json!({ "id": "p4", "body": { "kind": "key", "key": "Escape" } })))?;
     let back = r.status == 200 && s.eventually(Duration::from_secs(20), || screen()["driver"] == owner_id.as_str());
     s.ok("its agent is the driver the screen names, for who asked, until a person drives it again", drove && back, screen());
+
+    // its owner's agent hands work to the pet by name: its `do` runs there,
+    // and the result lands in the chat that asked (the fake echoes: the
+    // agent's answer and goose's, in whatever order they come)
+    let dos = || api.signed(owner, "GET", &format!("/api/f/{name}/runs?op=do"), None).map_or(0, |r| r.body["runs"].as_array().map_or(0, Vec::len));
+    let (before, sprites) = (dos(), s.sprites.sprites().len());
+    s.openrouter.clear_script();
+    s.openrouter.script(&[Say::Tools(vec![("platform__hand_off".into(), json!({ "task": "click the pet's button", "computer": name }))])]);
+    api.signed(owner, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": "t-hand-off", "body": { "text": "have my pet click its button" } })))?;
+    let result = || {
+        let records = api.signed(owner, "GET", &format!("/api/f/{chat}/channels/chat"), None).ok().and_then(|r| r.body["records"].as_array().cloned()).unwrap_or_default();
+        records.into_iter().find(|x| x["body"]["text"].as_str().is_some_and(|t| t.starts_with("The computer is done.")))
+    };
+    let landed = s.eventually(Duration::from_secs(90), || result().is_some());
+    let said = result().map(|x| x["body"]["text"].to_string()).unwrap_or_default();
+    s.ok(
+        "handed work by name, the owner's agent picks the pet's do: it runs there, the pet stays, and its result lands in the chat",
+        landed && dos() == before + 1 && said.contains("click the pet") && s.sprites.sprites().len() == sprites,
+        json!({ "said": said, "do runs": dos() }),
+    );
     page.close();
     Ok(())
 }

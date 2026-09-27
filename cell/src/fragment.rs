@@ -345,6 +345,9 @@ pub(crate) enum MetaKey {
     ComputerPending,
     /// Its computer was last told live declares one.
     ComputerDeclared,
+    /// The agent that made it as a hand-off's throwaway (its only deleter
+    /// besides its owner), as the router named it at create.
+    ThrowawayOf,
     /// The commits the cell pins (plane.rs).
     PinMain,
     PinLive,
@@ -411,6 +414,7 @@ impl MetaKey {
             MetaKey::AgentJoined => "agent_joined",
             MetaKey::ComputerPending => "computer_pending",
             MetaKey::ComputerDeclared => "computer_declared",
+            MetaKey::ThrowawayOf => "throwaway_of",
             MetaKey::PinMain => "pin_main",
             MetaKey::PinLive => "pin_live",
             MetaKey::PinsCheckedAt => "pins_checked_at",
@@ -834,7 +838,12 @@ impl FragmentCell {
                 if body.name != routed_name {
                     return Err(CellError::host("the router addressed a different fragment than the body names"));
                 }
-                self.create(&caller, body).await
+                // only the router's create names a throwaway's agent (no request passes the header on)
+                let throwaway_of = req.headers().get(crate::agents::THROWAWAY_HEADER)?.filter(|a| npub::is_identity(a));
+                if body.throwaway != throwaway_of.is_some() {
+                    return Err(CellError::host("a throwaway's create names the agent that makes it"));
+                }
+                self.create(&caller, body, throwaway_of).await
             }
             (Method::Delete, ["delete"]) => self.delete(&caller).await,
             (Method::Get, ["api", "status"]) => self.status(&caller),
@@ -958,7 +967,7 @@ impl FragmentCell {
         }
     }
 
-    async fn create(&self, caller: &Caller, body: CreateFragment) -> CellResult<Response> {
+    async fn create(&self, caller: &Caller, body: CreateFragment, throwaway_of: Option<String>) -> CellResult<Response> {
         let owner = self.caller_id(caller)?.to_string();
         if !valid_fragment_name(&body.name) {
             return Err(CellError::invalid("a fragment name must match ^[a-z0-9][a-z0-9-]{0,62}$"));
@@ -1010,6 +1019,7 @@ impl FragmentCell {
             (MetaKey::Repo, repo.as_str()),
             (MetaKey::IndexVersion, "0"),
             (MetaKey::PollAt, poll_at.as_str()),
+            (MetaKey::ThrowawayOf, throwaway_of.as_deref().unwrap_or_default()),
             // written last: a fragment exists once it has created_at
             (MetaKey::CreatedAt, created_at.as_str()),
         ] {
@@ -1099,6 +1109,7 @@ impl FragmentCell {
             urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name) },
             blob_min_bytes: Some(fragment_core::blob::BLOB_MIN_BYTES as u64),
             frame: self.framing()?,
+            throwaway_of: self.meta(MetaKey::ThrowawayOf)?.filter(|a| !a.is_empty()),
             name: facts.name,
         })
     }

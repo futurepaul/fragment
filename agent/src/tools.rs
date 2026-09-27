@@ -18,12 +18,13 @@
 //! again.
 //!
 //! The platform's own verbs (`platform__*`), for everything else: list the
-//! fragments the asker reaches, read one's operations, call one, list,
-//! read, and write its files, and deploy it, each the signed API the CLI
-//! uses; and, in its owner's turns only, make a fragment for the owner (an
-//! app). A fragment's own agent (`Scope`) has neither kind but one: the
-//! operations of its fragment that its block names. A file write's key comes from the tool-call id, so a replayed step
-//! commits nothing twice.
+//! fragments the asker reaches, read one's operations, call one, and list
+//! and read its files, each the signed API the CLI uses; and, in its
+//! owner's turns only, make a fragment from a template for the owner, and
+//! hand work to a computer (handoff.rs). The agent builds nothing itself
+//! (Paul, 2026-09-27): what it cannot do in a few calls goes to a computer.
+//! A fragment's own agent (`Scope`) has neither kind but one: the
+//! operations of its fragment that its block names.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -43,9 +44,8 @@ use worker::send::SendFuture;
 use worker::{Delay, Method, SqlStorage};
 
 use crate::fleet::{self, Fleet};
-use crate::js;
-use crate::model::{APPEND_FILE, CUT_OFF, WRITE_FILE};
 use crate::store::{chat_of, kv_u64, Session};
+use crate::{handoff, js};
 
 /// The fragments, and the tools, one agent's turn considers at most.
 pub const FRAGMENTS_MAX: usize = 16;
@@ -80,21 +80,32 @@ enum Route {
     Platform(&'static str),
 }
 
-/// The platform's verbs: (name, description, input schema). The first is
-/// offered in its owner's turns only.
+/// The platform's verbs: (name, description, input schema). The first two
+/// are offered in its owner's turns only.
 fn platform_tools(owner_turn: bool) -> Vec<(&'static str, &'static str, Value)> {
     let fragment = json!({ "type": "string", "description": "the fragment's full name, <label>.<username>" });
     let create = (
         "platform__create_fragment",
-        "Makes a new fragment (an app, a page, a list) for your owner, named <label>.<their username>, from a \
-         template: blank (one page), todo (a live list: a working example of an app), inbox, or chat. You become \
-         its editor. Answers its name and URL. How to build what goes in it is in your instructions.",
+        "Makes a new fragment for your owner from a template, as they could, named <label>.<their username>: blank (one \
+         page), todo (a live list), inbox, or chat. You become its editor. Answers its name and URL. To build something \
+         new in it, hand the work off.",
         json!({ "type": "object", "required": ["label"], "additionalProperties": false, "properties": {
             "label": { "type": "string", "description": "lowercase letters, digits, and single dashes" },
             "template": { "type": "string", "enum": ["blank", "todo", "inbox", "chat"] },
         } }),
     );
-    let mut tools = if owner_turn { vec![create] } else { Vec::new() };
+    let hand_off = (
+        handoff::TOOL,
+        "Hands work to a computer: building or changing an app, writing code, research, anything more than a few calls. \
+         It answers at once and the work runs for minutes on its own; its result is said in this conversation when it \
+         ends. Without `computer`, a throwaway computer does it (what it builds is a new fragment of your owner's) and \
+         is removed after, keeping what it built.",
+        json!({ "type": "object", "required": ["task"], "additionalProperties": false, "properties": {
+            "task": { "type": "string", "description": "the whole task, as the computer should read it: it sees nothing of this conversation" },
+            "computer": { "type": "string", "description": "only when the person names one: a fragment of theirs with a computer and a `do` or `build` job (<label>.<username>)" },
+        } }),
+    );
+    let mut tools = if owner_turn { vec![create, hand_off] } else { Vec::new() };
     tools.extend([
         (
             "platform__list_fragments",
@@ -131,41 +142,6 @@ fn platform_tools(owner_turn: bool) -> Vec<(&'static str, &'static str, Value)> 
                 "fragment": fragment, "path": { "type": "string" },
             } }),
         ),
-        (
-            WRITE_FILE,
-            "Writes one file of a fragment (site/index.html, say), replacing what it held. Keep it under 150 lines: \
-             add the rest of a longer file with platform__append_file. Nothing changes for its visitors until you deploy.",
-            json!({ "type": "object", "required": ["fragment", "path", "text"], "additionalProperties": false, "properties": {
-                "fragment": fragment, "path": { "type": "string" }, "text": { "type": "string" },
-            } }),
-        ),
-        (
-            APPEND_FILE,
-            "Adds text to the end of one file of a fragment (making it if it is not there): a long file is written in \
-             parts, each under 150 lines. Nothing changes for its visitors until you deploy.",
-            json!({ "type": "object", "required": ["fragment", "path", "text"], "additionalProperties": false, "properties": {
-                "fragment": fragment, "path": { "type": "string" }, "text": { "type": "string" },
-            } }),
-        ),
-        (
-            "platform__write_files",
-            "Writes several files to a fragment in one commit (at most 16 files and 256 KiB). A file whose text is null is \
-             removed. For one file, platform__write_file. Nothing changes for its visitors until you deploy.",
-            json!({ "type": "object", "required": ["fragment", "files"], "additionalProperties": false, "properties": {
-                "fragment": fragment,
-                "files": { "type": "array", "items": { "type": "object", "required": ["path", "text"], "properties": {
-                    "path": { "type": "string" }, "text": { "type": ["string", "null"] },
-                } } },
-                "message": { "type": "string" },
-            } }),
-        ),
-        (
-            "platform__deploy",
-            "Deploys a fragment: what its files are now goes live for everyone who opens it. Answers its URL.",
-            json!({ "type": "object", "required": ["fragment"], "additionalProperties": false, "properties": {
-                "fragment": fragment, "note": { "type": "string" },
-            } }),
-        ),
     ]);
     tools
 }
@@ -196,50 +172,8 @@ fn platform_request(tool: &str, args: &Value, request_id: &str) -> Result<(Metho
         }
         "platform__list_files" => (Method::Get, format!("/api/f/{}/files", fragment()?), None),
         "platform__read_file" => (Method::Get, format!("/api/f/{}/file?{}", fragment()?, q(&text("path")?)), None),
-        "platform__write_files" => {
-            let files: Vec<Value> = args["files"]
-                .as_array()
-                .ok_or("files is a list")?
-                .iter()
-                .map(|f| match f["text"].as_str() {
-                    Some(t) => json!({ "path": f["path"], "text": t }),
-                    None => json!({ "path": f["path"], "delete": true }),
-                })
-                .collect();
-            let body = json!({ "files": files, "message": args["message"].as_str().unwrap_or("written by an agent"), "key": op_id(request_id) });
-            (Method::Post, format!("/api/f/{}/files", fragment()?), Some(body))
-        }
-        WRITE_FILE => {
-            let files = [json!({ "path": text("path")?, "text": text("text")? })];
-            let body = json!({ "files": files, "message": "written by an agent", "key": op_id(request_id) });
-            (Method::Post, format!("/api/f/{}/files", fragment()?), Some(body))
-        }
-        "platform__deploy" => (Method::Post, format!("/api/f/{}/deploy", fragment()?), Some(json!({ "note": args["note"] }))),
         other => return Err(format!("no tool named {other}")),
     })
-}
-
-/// The last characters of a cut-off file the model is shown, to continue from.
-const CUT_TAIL_CHARS: usize = 160;
-
-/// A file write's answer: its size now, and, for a write cut off at the
-/// model's output limit (model.rs), where the file stops and what to do.
-fn file_written(args: &Value, written: &str, commit: &str) -> String {
-    let path = args["path"].as_str().unwrap_or("");
-    if args[CUT_OFF] != true {
-        return json!({ "path": path, "bytes": written.len(), "commit": serde_json::from_str::<Value>(commit).unwrap_or_default()["commit"] }).to_string();
-    }
-    let tail: String = {
-        let chars: Vec<char> = written.chars().collect();
-        chars[chars.len().saturating_sub(CUT_TAIL_CHARS)..].iter().collect()
-    };
-    format!(
-        "Cut off: your reply reached its output limit inside {path}, so it holds what you wrote so far ({} bytes), ending \
-         with:\n{tail}\nContinue it now: call {APPEND_FILE} with fragment {}, path {path}, and the rest of the file, starting \
-         right after that. Nothing is deployed yet.",
-        written.len(),
-        args["fragment"].as_str().unwrap_or(""),
-    )
 }
 
 /// A platform verb's answer, as the model reads it.
@@ -389,30 +323,6 @@ impl FragmentTools {
         Ok(Catalog { tools, routes })
     }
 
-    /// An append's write: the file as it is now (none yet is empty), with
-    /// the text added, in one commit keyed by the call (a replayed call
-    /// reads the appended file, and the key answers the first commit).
-    async fn appended(&self, args: &Value, request_id: &str) -> Result<(Method, String, Option<Value>), String> {
-        let text = |k: &str| args[k].as_str().map(str::to_string).ok_or_else(|| format!("{k} is required"));
-        let (fragment, path, more) = (text("fragment")?, text("path")?, text("text")?);
-        if !valid_fragment_name(&fragment) {
-            return Err(format!("{fragment:?} is not a fragment's name (<label>.<username>)"));
-        }
-        let mut u = worker::Url::parse("https://q/").expect("a URL");
-        u.query_pairs_mut().append_pair("path", &path);
-        let at = format!("/api/f/{fragment}/file?{}", u.query().unwrap_or_default());
-        let fleet = self.fleet.clone();
-        let (status, bytes) = SendFuture::new(async move { fleet.call_raw(Method::Get, &at, None).await }).await.map_err(|e| e.to_string())?;
-        let now = match status {
-            200 => String::from_utf8(bytes).map_err(|_| format!("{path} is not text: write it whole with {WRITE_FILE}"))?,
-            404 => String::new(),
-            _ => return Err(format!("reading {path}: {status}: {}", fleet::message(&serde_json::from_slice(&bytes).unwrap_or_default()))),
-        };
-        let files = [json!({ "path": path, "text": now + &more })];
-        let body = json!({ "files": files, "message": "written by an agent", "key": op_id(request_id) });
-        Ok((Method::Post, format!("/api/f/{fragment}/files"), Some(body)))
-    }
-
     /// An operation's answer, as the model reads it. A job's call answers
     /// only the run it started (`{run, status}`), so the tool waits for the
     /// run to end (at most `JOB_WAIT_MS`, read `for` the asker) and answers
@@ -498,19 +408,20 @@ impl ToolProvider<Session> for FragmentTools {
             return Ok(CallToolResult::error(vec![ContentBlock::text(format!("no tool named {}", call.name))]));
         };
         let args = Value::Object(call.arguments.unwrap_or_default());
+        if let Route::Platform(handoff::TOOL) = route {
+            let (fleet, sql, conv, id) = (self.fleet.clone(), self.sql.clone(), self.conv.clone(), request_id.to_string());
+            return Ok(match SendFuture::new(async move { handoff::start(&fleet, &sql, &conv, &id, &args).await }).await {
+                Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
+                Err(why) => CallToolResult::error(vec![ContentBlock::text(why)]),
+            });
+        }
         let request = match &route {
             Route::Op { fragment, op } => Ok((Method::Post, format!("/api/f/{fragment}/ops/{op}"), Some(json!({ "id": op_id(request_id), "input": args })))),
-            Route::Platform(APPEND_FILE) => self.appended(&args, request_id).await,
             Route::Platform(tool) => platform_request(tool, &args, request_id),
         };
         let (method, path, body) = match request {
             Ok(r) => r,
             Err(why) => return Ok(CallToolResult::error(vec![ContentBlock::text(why)])),
-        };
-        // a file write's whole new text (an append's too), for its answer
-        let written = match &route {
-            Route::Platform(WRITE_FILE | APPEND_FILE) => body.as_ref().and_then(|b| b["files"][0]["text"].as_str()).map(str::to_string),
-            _ => None,
         };
         let fleet = self.fleet.clone();
         let (status, answer) = SendFuture::new(async move { fleet.call(method, &path, body.as_ref()).await }).await.map_err(internal)?;
@@ -532,9 +443,6 @@ impl ToolProvider<Session> for FragmentTools {
             Ok(t) => t,
             Err(why) => return Ok(CallToolResult::error(vec![ContentBlock::text(why)])),
         };
-        if let Some(written) = written {
-            text = file_written(&args, &written, &text);
-        }
         if text.len() > RESULT_TEXT_MAX {
             text.truncate(text.floor_char_boundary(RESULT_TEXT_MAX));
             text.push_str(" …(truncated)");

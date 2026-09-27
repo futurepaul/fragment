@@ -87,17 +87,18 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     let r = agents.signed(&owner, "GET", &format!("/api/a/{name}/tools"), None)?;
     let platform = [
         "platform__create_fragment",
+        "platform__hand_off",
         "platform__list_fragments",
         "platform__operations",
         "platform__call",
         "platform__list_files",
         "platform__read_file",
-        "platform__write_file",
-        "platform__append_file",
-        "platform__write_files",
-        "platform__deploy",
     ];
-    s.ok("an agent in no fragment has only the platform's verbs", r.status == 200 && r.body["tools"] == json!(platform), &r);
+    s.ok(
+        "an agent in no fragment has only the platform's verbs, none of which writes a fragment's files or deploys it",
+        r.status == 200 && r.body["tools"] == json!(platform),
+        &r,
+    );
 
     // a todo fragment the owner makes, with the agent as an editor
     let todo = s.named(api, &owner, "agent-todo")?;
@@ -156,6 +157,29 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
         "an agent never changes members, visibility, links, or invites, nor deletes, even for its owner",
         refused.iter().all(|(_, status)| *status == 403) && st.status == 200 && st.body["visibility"] == "link" && members.body["members"].as_array().map(Vec::len) == Some(1),
         json!({ "refused": refused, "visibility": st.body["visibility"], "members": members.body }),
+    );
+    // but a throwaway it made (a hand-off's): the platform recorded it at
+    // create, and the name is no authority. One the owner made, named as a
+    // throwaway and with the agent in it, stays the owner's to delete.
+    let remove = |name: &str, who: &str| api.signed(&hand, "DELETE", &format!("/api/f/{name}?{}", acting(who)), None).map_or(0, |r| r.status);
+    let by_hand = format!("handoff-0123456789ab.{username}");
+    s.create(api, &owner, &by_hand)?;
+    api.signed(&owner, "PUT", &format!("/api/f/{by_hand}/members/{hand_id}"), Some(&json!({ "role": "editor" })))?;
+    let refused = remove(&by_hand, &owner_id);
+    s.ok(
+        "a fragment the owner made, named handoff-… with the agent in it, is refused to the agent",
+        refused == 403 && api.status(&owner, &by_hand)?.status == 200,
+        json!({ "refused": refused }),
+    );
+    let by_person = api.create_with(&owner, json!({ "name": s.name("tw-person"), "throwaway": true }))?;
+    let made = api.signed(&hand, "POST", &format!("/api/fragments?{}", acting(&owner_id)), Some(&json!({ "name": "handoff-0123456789cd", "throwaway": true })))?;
+    let throwaway = made.body["name"].as_str().unwrap_or("").to_string();
+    let recorded = api.status(&owner, &throwaway)?.body["throwawayOf"].clone();
+    let (for_stranger, for_owner) = (remove(&throwaway, &stranger_id), remove(&throwaway, &owner_id));
+    s.ok(
+        "a throwaway is made only by an agent, which the fragment records; that agent deletes it, for its owner only: then it is gone",
+        by_person.status == 403 && made.status == 200 && recorded == hand_id.as_str() && for_stranger == 403 && for_owner == 200 && api.status(&owner, &throwaway)?.status == 404,
+        json!({ "by a person": by_person.status, "made": made.body, "recorded": recorded, "for a stranger": for_stranger, "for its owner": for_owner }),
     );
     // a post to a postable channel is decided as a call is: for its
     // asker, capped (`notes` takes an editor's posts)
@@ -242,19 +266,17 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     let by_agent = ops.body["records"].as_array().into_iter().flatten().any(|r| r["body"]["op"] == "add_todo" && r["principal"] == agent_id.as_str());
     s.ok("and calls its operation, as the agent", todos(api, &owner, &other).iter().any(|t| t == "by my agent") && by_agent, &ops);
 
-    // it makes an app for its owner: a fragment, its page, a deploy
+    // it makes a fragment from a template for its owner, as they could
     let label = s.name("counter");
     let app = format!("{label}.{username}");
     s.openrouter.clear_script();
     s.openrouter.script(&[
         Reply::Tools(vec![("platform__create_fragment".into(), json!({ "label": label, "template": "blank" }))]),
-        Reply::Tools(vec![("platform__write_files".into(), json!({ "fragment": app, "files": [{ "path": "site/index.html", "text": "<h1>Counter, by an agent</h1>" }] }))]),
-        Reply::Tools(vec![("platform__deploy".into(), json!({ "fragment": app, "note": "first" }))]),
-        Reply::Text("Your counter is up.".into()),
+        Reply::Text("Your page is up.".into()),
     ]);
-    agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "make me a counter app" })))?;
+    agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "make me a blank page" })))?;
     let v = settle(s, &agents, &owner, &name, wait);
-    s.ok("asked for an app, it makes one and says so", v["outcome"] == "idle" && v["messages"].as_array().and_then(|m| m.last()).is_some_and(|m| m["text"] == "Your counter is up."), &v);
+    s.ok("asked for a page, it makes one from a template and says so", v["outcome"] == "idle" && v["messages"].as_array().and_then(|m| m.last()).is_some_and(|m| m["text"] == "Your page is up."), &v);
     let mine = api.signed(&owner, "GET", "/api/fragments", None)?;
     s.ok(
         "the app is its owner's, under their username",
@@ -265,7 +287,7 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and the agent is its editor", members.body["members"].as_array().is_some_and(|a| a.iter().any(|m| m["principal"] == agent_id.as_str() && m["role"] == "editor")), &members);
     let st = api.status(&owner, &app)?;
     let page = api.page(&app, "", Some(&format!("fragview={}", st.body["viewToken"].as_str().unwrap_or(""))))?;
-    s.ok("its page, written and deployed by the agent, is live", page.status == 200 && page.text.contains("Counter, by an agent"), &page);
+    s.ok("its page, the template's, is live", page.status == 200 && page.text.contains("A blank fragment"), &page);
 
     // steer mid-tool: the message waits for the tool, then joins the turn
     agents.signed(&owner, "POST", &format!("/api/a/{name}/test"), Some(&json!({ "hold_in_tool_ms": 3000 })))?;

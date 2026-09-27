@@ -1,16 +1,14 @@
-//! Building an app from a chat, and a turn that never fails silently, in
-//! the `chat` section. On fragment.club (2026-09-25) an agent asked to
-//! build a countdown page read other fragments for a dozen calls to learn
-//! the format, wrote the whole page in one reply that outlasted the node's
-//! 120 s fetch, and ended its turn with nothing said. With the OpenRouter
-//! fake scripted as the model:
+//! The agent's work guide, and a turn that never fails silently, in the
+//! `chat` section. On fragment.club (2026-09-25) an agent asked to build a
+//! countdown page read other fragments for a dozen calls, wrote the whole
+//! page in one reply that outlasted the node's 120 s fetch, and ended its
+//! turn with nothing said; since 2026-09-27 it builds nothing itself and
+//! hands such work to a computer (the `builder` section's hand-offs). With
+//! the OpenRouter fake scripted as the model:
 //!
-//! - the build flow: every turn's instructions carry the build guide (an
-//!   agent made with the old default gets today's); the agent writes
-//!   `site/index.html` to a fragment the person already made, deploys it,
-//!   and answers; the page is live. Each request bounds its output.
-//! - a reply cut off at `max_tokens` inside a file keeps what it wrote and
-//!   says where it stops; the rest, appended, completes the file.
+//! - every turn's instructions carry the work guide, not the build guide it
+//!   replaced (an agent made with an old default gets today's); each
+//!   request bounds its output.
 //! - a slow model: a call past its deadline is made once more; a second
 //!   timeout ends the turn in an error, said in the chat and on `work`.
 //! - an empty answer is asked for again; empty twice with nothing done is
@@ -20,7 +18,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use fragment_fakes::openrouter::{Reply, CHARS_PER_TOKEN};
+use fragment_fakes::openrouter::Reply;
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
@@ -28,18 +26,10 @@ use super::agents::{chat_records, say, settle};
 use crate::api::Api;
 use crate::Suite;
 
-const STARSHIP: &str = include_str!("../../fixtures/starship.html");
-/// What Paul asked on 2026-09-25 (the fragment's label is this run's).
-const ASKED: &str = "Build my starship-countdown app: a single page counting down to the next SpaceX Starship launch, \
-                     big numbers, dark space theme. Put it in the starship-countdown fragment I already made and deploy it.";
-/// Lines of the guide the model must be told (agent/src/lib.rs `BUILD_GUIDE`).
-const GUIDE_LINES: [&str; 3] = [
-    "How to build an app (a fragment):",
-    "Do not read other fragments or templates to learn this format",
-    "One file per call, each under 150 lines",
-];
-/// The old default's advice, which the guide replaces.
-const OLD_ADVICE: &str = "read the todo template's files for the shape";
+/// Lines of the guide the model must be told (agent/src/lib.rs `WORK_GUIDE`).
+const GUIDE_LINES: [&str; 3] = ["What you do, and what you hand off:", "Hand off the rest with platform__hand_off", "Only your owner's turns can hand off"];
+/// The oldest default's advice, and the build guide's opening: gone.
+const OLD_ADVICE: [&str; 2] = ["read the todo template's files for the shape", "How to build an app (a fragment):"];
 
 fn work_records(api: &Api, keys: &Keys, chat: &str) -> Vec<Value> {
     api.signed(keys, "GET", &format!("/api/f/{chat}/channels/work?after=0"), None).ok().and_then(|r| r.body["records"].as_array().cloned()).unwrap_or_default()
@@ -91,27 +81,17 @@ pub(super) fn build(s: &mut Suite, api: &Api) -> Result<()> {
     let test = |controls: Value| agents.signed(&owner, "POST", "/api/a/agent/test", Some(&controls));
     let turn_of = |answer: &Value| answer["body"]["turn"].as_str().unwrap_or("").to_string();
 
-    // the build flow: a fragment the person already made (the blank template)
-    let app = s.named(api, &owner, "starship-countdown")?;
-    let r = api.create_with(&owner, json!({ "name": app, "template": "blank" }))?;
-    anyhow::ensure!(r.status == 200, "the starship-countdown fragment: {r}");
-    s.hook(api, &r.body);
-    let view_token = r.body["viewToken"].as_str().unwrap_or("").to_string();
+    // every turn's instructions carry the work guide
     s.openrouter.clear_script();
-    s.openrouter.script(&[
-        Reply::Tools(vec![("platform__write_file".into(), json!({ "fragment": app, "path": "site/index.html", "text": STARSHIP }))]),
-        Reply::Tools(vec![("platform__deploy".into(), json!({ "fragment": app, "note": "the countdown" }))]),
-        Reply::Text("Your Starship countdown is live.".into()),
-    ]);
+    s.openrouter.script(&[Reply::Text("Hi there.".into())]);
     let asked = s.openrouter.chats().len();
-    say(api, &owner, &chat, "b1", &ASKED.replace("starship-countdown fragment", &format!("{app} fragment")))?;
-    let done = s.eventually(wait, || answered(api, &owner, &chat, &agent, "Your Starship countdown is live.").is_some());
-    let answer = answered(api, &owner, &chat, &agent, "Your Starship countdown is live.").unwrap_or_default();
+    say(api, &owner, &chat, "b1", "hello")?;
+    let done = s.eventually(wait, || answered(api, &owner, &chat, &agent, "Hi there.").is_some());
     let requests: Vec<Value> = s.openrouter.chats()[asked..].to_vec();
     let prompt = requests.first().map(system).unwrap_or_default();
     s.ok(
-        "the instructions the model is sent include the build guide, not the old advice to read a template",
-        GUIDE_LINES.iter().all(|l| prompt.contains(l)) && !prompt.contains(OLD_ADVICE),
+        "the instructions the model is sent include the work guide, not the build guide it replaced",
+        done && GUIDE_LINES.iter().all(|l| prompt.contains(l)) && !OLD_ADVICE.iter().any(|l| prompt.contains(l)),
         &prompt,
     );
     s.ok(
@@ -119,23 +99,15 @@ pub(super) fn build(s: &mut Suite, api: &Api) -> Result<()> {
         !requests.is_empty() && requests.iter().all(|c| c["max_tokens"] == 4096),
         json!(requests.iter().map(|c| c["max_tokens"].clone()).collect::<Vec<_>>()),
     );
-    let page = api.page(&app, "", Some(&format!("fragview={view_token}")))?;
-    let records = ended(s, api, &owner, &chat, &turn_of(&answer));
-    let steps: Vec<(String, bool)> = records.iter().filter(|r| r["body"]["kind"] == "turn.step").map(|r| (r["body"]["tool"].as_str().unwrap_or("").to_string(), r["body"]["ok"] == true)).collect();
-    s.ok(
-        "asked to build a page in a fragment the person made, the agent writes site/index.html, deploys, and answers in the chat",
-        done && steps == [("platform__write_file".to_string(), true), ("platform__deploy".to_string(), true)] && kinds(&records).last().is_some_and(|k| k == "turn.end"),
-        json!({ "answer": answer, "work": records }),
-    );
-    s.ok("the page is live, as written", page.status == 200 && page.text.contains("Next Starship launch") && page.text.contains("setInterval(tick, 1000)"), &page);
 
     // an agent made with the old default instructions gets today's
     let old = s.name("old-default");
     let old_default = format!(
         "You are {old}, an agent. Most of your tools are operations of the fragments you belong to: shared places such as an \
          app, a list, or a chat. The platform__ tools make new fragments for your owner and change their files: when asked \
-         for an app, make one, {OLD_ADVICE}, write yours, deploy it, and say where it is. Do what you are asked, one call at \
-         a time, and when the work is done answer in one short sentence."
+         for an app, make one, {}, write yours, deploy it, and say where it is. Do what you are asked, one call at a time, \
+         and when the work is done answer in one short sentence.",
+        OLD_ADVICE[0]
     );
     let r = agents.signed(&owner, "POST", "/api/agents", Some(&json!({ "name": old, "instructions": old_default })))?;
     anyhow::ensure!(r.status == 200, "an agent with the old default: {r}");
@@ -147,40 +119,8 @@ pub(super) fn build(s: &mut Suite, api: &Api) -> Result<()> {
     let prompt = s.openrouter.chats().get(asked).map(system).unwrap_or_default();
     s.ok(
         "an agent made with the old default instructions is told today's, and the guide",
-        v["outcome"] == "idle" && !prompt.contains(OLD_ADVICE) && GUIDE_LINES.iter().all(|l| prompt.contains(l)),
+        v["outcome"] == "idle" && !OLD_ADVICE.iter().any(|l| prompt.contains(l)) && GUIDE_LINES.iter().all(|l| prompt.contains(l)),
         &prompt,
-    );
-
-    // a reply cut off at max_tokens inside a file: what it wrote is kept,
-    // the model is told where it stops, and the rest, appended, completes it
-    let long: String = (0..400).map(|i| format!("<p class=l{i}>line {i} of a page longer than one reply</p>")).collect();
-    let args = json!({ "fragment": app, "path": "site/long.html", "text": long });
-    let budget = 4096 * CHARS_PER_TOKEN;
-    let head = args.to_string().find(&long[..32]).unwrap_or(0);
-    anyhow::ensure!(args.to_string().len() > budget && head > 0, "the long page outgrows one reply");
-    let kept = budget - head;
-    s.openrouter.clear_script();
-    s.openrouter.script(&[
-        Reply::Tools(vec![("platform__write_file".into(), args.clone())]),
-        Reply::Tools(vec![("platform__append_file".into(), json!({ "fragment": app, "path": "site/long.html", "text": &long[kept..] }))]),
-        Reply::Tools(vec![("platform__deploy".into(), json!({ "fragment": app }))]),
-        Reply::Text("Your long page is up.".into()),
-    ]);
-    let asked = s.openrouter.chats().len();
-    say(api, &owner, &chat, "b2", "write me a long page in the same fragment")?;
-    let done = s.eventually(wait, || answered(api, &owner, &chat, &agent, "Your long page is up.").is_some());
-    let requests: Vec<Value> = s.openrouter.chats()[asked..].to_vec();
-    let told = requests.get(1).map(last_message).unwrap_or_default();
-    let file = api.signed(&owner, "GET", &format!("/api/f/{app}/file?path=site%2Flong.html"), None)?;
-    s.ok(
-        "a write cut off at the reply's limit keeps what it wrote, and the model is told where the file stops",
-        told.contains("Cut off") && told.contains(&long[kept - 40..kept]) && told.contains("platform__append_file"),
-        &told,
-    );
-    s.ok(
-        "the rest, appended, completes the file, and the turn answers",
-        done && file.status == 200 && file.text == long,
-        json!({ "done": done, "status": file.status, "bytes": file.text.len(), "want": long.len() }),
     );
 
     // a slow model: past its deadline (1.5 s here) a call is made once
@@ -248,13 +188,14 @@ pub(super) fn build(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "answer": answer, "end": end }),
     );
     // empty twice after work that worked: what that work did, instead
+    let label = s.name("noted");
     s.openrouter.script(&[
-        Reply::Tools(vec![("platform__write_file".into(), json!({ "fragment": app, "path": "site/note.txt", "text": "a note" }))]),
+        Reply::Tools(vec![("platform__create_fragment".into(), json!({ "label": label, "template": "blank" }))]),
         Reply::Empty,
         Reply::Thinking("Done, I think.".into()),
     ]);
-    say(api, &owner, &chat, "b7", "leave a note in it")?;
-    let summary = format!("Done. Here is what I did: wrote site/note.txt in {app}.");
+    say(api, &owner, &chat, "b7", "make me a blank page")?;
+    let summary = format!("Done. Here is what I did: made {}.", api.qualified(&owner, &label)?);
     let said = s.eventually(wait, || answered(api, &owner, &chat, &agent, &summary).is_some());
     let answer = answered(api, &owner, &chat, &agent, &summary).unwrap_or_default();
     let records = ended(s, api, &owner, &chat, &turn_of(&answer));

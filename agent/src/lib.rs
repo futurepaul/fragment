@@ -52,14 +52,19 @@
 //! before). Such a turn also posts its progress to the chat's `work`
 //! channel (progress.rs).
 //!
+//! A person's agent does light work itself and hands the rest to a
+//! computer (handoff.rs): a hand-off's turn ends at once, and its result is
+//! said in the conversation that asked when the computer is done.
+//!
 //! A fragment's own agent (its `fragment.json` `agent` block; its deploy
 //! makes it, with a `scope`) is this same agent with three differences:
 //! its tools are the operations its block names, of that fragment alone
 //! (tools.rs `Scope`); it keeps one conversation per person who posts
-//! there; and it gets no build guide and no computer.
+//! there; and it gets no work guide, no hand-off, and no computer.
 
 mod computer;
 mod fleet;
+mod handoff;
 mod js;
 mod keys;
 mod model;
@@ -368,50 +373,39 @@ const TURN_NOTES: &str = "Your answer to a chat message is posted to that chat f
      asked: you reach only what they may (platform__list_fragments lists it), and platform__operations and \
      platform__call reach a fragment you have no tools for.";
 
-/// How to build an app, told on every turn with the notes above (about 400
-/// tokens): without it, an agent asked for an app read other fragments'
-/// files for a dozen calls to learn the format, then wrote the whole page
-/// in one reply that outlasted the node's fetch (2026-09-25). Every turn,
-/// not only those that look like building: "make the numbers bigger" is
-/// building too, and a guess that missed costs far more than the guide.
-const BUILD_GUIDE: &str = "How to build an app (a fragment):
-- A fragment is a place with its own address. Visitors see site/index.html (and the other files under site/), served \
-as written: a page of HTML, CSS, and JavaScript needs nothing else. Most apps (a countdown, a calculator, a landing \
-page) are that one file.
-- Only a page that must keep shared data or update live needs operations: fragment.json declares them (keep its name \
-and meta; add \"operations\": {\"add\": {\"kind\": \"mutation\", \"role\": \"public\", \"input\": <a JSON Schema>}}, kind \
-query or mutation), app.mjs runs them (export class App extends DurableObject, from \"cloudflare:workers\", with one method \
-per operation taking (input, call), its data in this.ctx.storage.sql), and the page calls them: import * as fragment from \
-\"./__fragment.js\", then fragment.call(\"add\", {...}) or fragment.live(\"list\", {}, onResult).
-- Templates: blank (one page: the usual start), todo (a live list, the example of operations), inbox, chat. Make a \
-fragment with platform__create_fragment, or use the one the person names (<label>.<their username>).
-- Then platform__write_file for each file, platform__deploy (nothing is live until you deploy), and answer with its URL.
-- Do not read other fragments or templates to learn this format: it is all here. Read a fragment's files only to change \
-what is in them.
-- Be quick: write a whole first version at once, deploy it, then improve it.
-- A reply is cut off after about 4,000 tokens. One file per call, each under 150 lines (6 KB); put the rest of a longer \
-file in more calls to platform__append_file. What a cut-off call wrote is kept, and you are told where it stops.";
+/// What the agent does itself and what it hands to a computer, told on
+/// every turn with the notes above (about 250 tokens). Paul, 2026-09-27:
+/// "the in-cell agent should only do easy and obvious stuff, it should hand
+/// off work to a computer as its primary tool." An agent that built apps
+/// itself, file by file, outlasted its model calls and its turns.
+const WORK_GUIDE: &str = "What you do, and what you hand off:
+- Do yourself what takes a few calls: answer questions, and use the person's fragments through their operations \
+(add a todo, read a list, look up a date), with your tools or platform__operations then platform__call. You may make \
+a fragment from a template (platform__create_fragment), as a person can.
+- Hand off the rest with platform__hand_off: building or changing an app, writing code, research, anything longer. \
+A computer does it. Put the whole task in it: the computer sees nothing of this conversation. Name a computer only \
+when the person names one of theirs; otherwise a throwaway one does the work and is removed after, keeping what it \
+made.
+- A hand-off takes minutes. Once it starts, say in a sentence that it is on its way and end your turn: its result is \
+said here when it is done. Do not check on it.
+- Only your owner's turns can hand off (you have no platform__hand_off otherwise): tell anyone else it is theirs to \
+ask the owner.";
 
 fn default_instructions(name: &str) -> String {
     let name = name.split('.').next().unwrap_or(name);
     format!(
-        "You are {name}, an agent. Most of your tools are operations of the fragments you belong to: shared places such \
-         as an app, a list, or a chat. The platform__ tools make new fragments for your owner and change their files. \
-         Do what you are asked, one call at a time, and when the work is done answer in one short sentence."
+        "{} shared places such as an app, a list, or a chat. Do what you are asked, one call at a time, and when the work \
+         is done answer in one short sentence.",
+        default_opening(name)
     )
 }
 
-/// The default before the build guide: it told the model to read the todo
-/// template's files for the shape, which the guide says not to do. An agent
-/// made with it (stored at creation) gets today's default instead.
-fn default_instructions_before_the_guide(name: &str) -> String {
-    let name = name.split('.').next().unwrap_or(name);
-    format!(
-        "You are {name}, an agent. Most of your tools are operations of the fragments you belong to: shared places such \
-         as an app, a list, or a chat. The platform__ tools make new fragments for your owner and change their files: \
-         when asked for an app, make one, read the todo template's files for the shape, write yours, deploy it, and say \
-         where it is. Do what you are asked, one call at a time, and when the work is done answer in one short sentence."
-    )
+/// How every default has opened, from the first (which told the model to
+/// read the todo template and write an app itself) on: instructions are
+/// stored as an agent is made, so one made with a default of any age is
+/// told today's.
+fn default_opening(label: &str) -> String {
+    format!("You are {label}, an agent. Most of your tools are operations of the fragments you belong to:")
 }
 
 /// Told to a fragment's own agent on every turn, after the instructions
@@ -420,15 +414,15 @@ const SCOPED_NOTES: &str = "Your answer to a message is posted where it was aske
      asked: your tools are this fragment's operations, and each acts as them.";
 
 /// What a turn tells the model: the agent's instructions, then the notes
-/// and the build guide every turn gets (a fragment's own agent, its notes).
+/// and the work guide every turn gets (a fragment's own agent, its notes).
 fn turn_instructions(stored: Option<String>, name: &str, scoped: bool) -> String {
     let own = match stored {
-        Some(s) if s != default_instructions_before_the_guide(name) => s,
+        Some(s) if !s.starts_with(&default_opening(name.split('.').next().unwrap_or(name))) => s,
         _ => default_instructions(name),
     };
     match scoped {
         true => format!("{own}\n\n{SCOPED_NOTES}"),
-        false => format!("{own}\n\n{TURN_NOTES}\n\n{BUILD_GUIDE}"),
+        false => format!("{own}\n\n{TURN_NOTES}\n\n{WORK_GUIDE}"),
     }
 }
 
@@ -774,11 +768,15 @@ impl Agent {
             cancel_slot.borrow_mut().take();
             driving.set(false);
             // Issued before anything else runs: a driver started after it
-            // arms its own watchdog after this lands.
-            let _ = match resting {
-                true => setup.storage.delete_alarm().await,
-                false => setup.storage.set_alarm(std::time::Duration::from_millis(50)).await,
+            // arms its own watchdog after this lands. At rest, the alarm is
+            // the next hand-off's (handoff.rs), if any.
+            let armed = match resting {
+                true => handoff::arm(&setup.storage, &sql).await,
+                false => setup.storage.set_alarm(std::time::Duration::from_millis(50)).await.map_err(|e| anyhow::anyhow!("{e}")),
             };
+            if let Err(e) = armed {
+                worker::console_error!("arming the alarm at rest: {e:#}");
+            }
         });
         Ok(true)
     }
@@ -1165,6 +1163,7 @@ impl Agent {
                 "newest": newest("SELECT fragment, channel, created_at AS at FROM listens ORDER BY created_at DESC LIMIT ?")?,
             },
             "ignored": table("fragment, channel, principal, at", "ignored")?,
+            "handoffs": newest("SELECT fragment, run, conv AS conversation, throwaway = 1 AS throwaway, said = 1 AS said, started_at AS at FROM handoffs ORDER BY started_at DESC LIMIT ?")?,
             "messages": messages,
             "steer": table("seq, text, consumed", "steer")?,
             "toolRuns": table("tool_call_id, tool, at, driver", "tool_runs")?,
@@ -1510,35 +1509,13 @@ fn waiting(sql: &worker::SqlStorage) -> anyhow::Result<usize> {
     Ok(rows.first().map_or(0, |c| c.n.max(0) as usize))
 }
 
-/// Posts a chat turn's last answer to its fragment, once (the id comes
-/// from the message): to the chat's channel, naming its turn, when the
-/// channel takes posts; else through the listen's reply operation, as
-/// chats made before postable channels answer. The owner's own
-/// conversation has nowhere to post. A chat that is gone (404), or that no
-/// longer has the agent (403), drops its listen.
+/// Posts a chat turn's last answer, with the images the turn kept (a
+/// screenshot, in the chat's files, shown with the answer). The owner's
+/// own conversation has nowhere to post.
 async fn reply(sql: &worker::SqlStorage, fleet: &Fleet, conv: &str, shape: Option<Shape>, turn: Option<&str>) -> anyhow::Result<()> {
-    let Some((fragment, channel)) = store::chat_of(conv) else { return Ok(()) };
-    #[derive(Deserialize)]
-    struct Listen {
-        reply: String,
-    }
-    let rows: Vec<Listen> = sql.exec("SELECT reply FROM listens WHERE fragment = ? AND channel = ?", vec![fragment.into(), channel.into()])?.to_array()?;
-    // a turn that ended without text has nothing to say
-    let Some(answer) = last_answer(sql, conv)? else { return Ok(()) };
-    let shape = match shape {
-        Some(shape) => shape,
-        None => progress::shape(fleet, fragment, channel).await?,
-    };
-    // a channel that takes posts gets it (a job's names one it need not
-    // follow); one that takes none, its listen's reply operation, if any
-    let reply_op = match (shape.posts, rows.into_iter().next()) {
-        (true, _) => None,
-        (false, Some(listen)) => Some(listen.reply),
-        (false, None) => return Ok(()),
-    };
+    let (Some((fragment, _)), Some(answer)) = (store::chat_of(conv), last_answer(sql, conv)?) else { return Ok(()) };
     let id = fragment_core::tools::reply_id(answer.id.as_deref().unwrap_or(""));
     let mut text = answer.as_concat_text();
-    // the turn's images (a screenshot) land in the chat's files, shown with the answer
     let shots: Vec<Value> = sql.exec("SELECT seq, mime, data FROM shots ORDER BY seq", None)?.to_array()?;
     if !shots.is_empty() {
         let paths: Vec<String> = shots
@@ -1555,18 +1532,47 @@ async fn reply(sql: &worker::SqlStorage, fleet: &Fleet, conv: &str, shape: Optio
             text.push_str(&format!("\n\n(the screenshot could not be shown here: {})", fleet::message(&body)));
         }
     }
+    post_answer(sql, fleet, conv, &id, &text, shape, turn).await?;
+    sql.exec("DELETE FROM shots", None)?;
+    Ok(())
+}
+
+/// Posts an answer in a chat conversation's fragment, once (`id`, from its
+/// message's: `reply_id`): to the chat's channel, naming its turn, when the
+/// channel takes posts; else through the listen's reply operation, as
+/// chats made before postable channels answer. The owner's own
+/// conversation has nowhere to post. A chat that is gone (404), or that no
+/// longer has the agent (403), drops its listen.
+async fn post_answer(sql: &worker::SqlStorage, fleet: &Fleet, conv: &str, id: &str, text: &str, shape: Option<Shape>, turn: Option<&str>) -> anyhow::Result<()> {
+    let Some((fragment, channel)) = store::chat_of(conv) else { return Ok(()) };
+    #[derive(Deserialize)]
+    struct Listen {
+        reply: String,
+    }
+    let rows: Vec<Listen> = sql.exec("SELECT reply FROM listens WHERE fragment = ? AND channel = ?", vec![fragment.into(), channel.into()])?.to_array()?;
+    let shape = match shape {
+        Some(shape) => shape,
+        None => progress::shape(fleet, fragment, channel).await?,
+    };
+    // a channel that takes posts gets it (a job's names one it need not
+    // follow); one that takes none, its listen's reply operation, if any
+    let reply_op = match (shape.posts, rows.into_iter().next()) {
+        (true, _) => None,
+        (false, Some(listen)) => Some(listen.reply),
+        (false, None) => return Ok(()),
+    };
     let (path, body) = match reply_op {
-        None => (format!("/api/f/{fragment}/channels/{channel}"), json!({ "id": id, "body": fragment_core::work::answer(&text, turn) })),
+        None => (format!("/api/f/{fragment}/channels/{channel}"), json!({ "id": id, "body": fragment_core::work::answer(text, turn) })),
         Some(op) => (format!("/api/f/{fragment}/ops/{op}"), json!({ "id": id, "input": { "text": text } })),
     };
     let (status, body) = fleet.call(Method::Post, &path, Some(&body)).await?;
     if matches!(status, 403 | 404) {
         sql.exec("DELETE FROM listens WHERE fragment = ?", vec![fragment.into()])?;
     }
-    if status != 200 {
+    // 409: its id posted already, with another body (said again after a crash)
+    if !matches!(status, 200 | 409) {
         anyhow::bail!("posting the answer to {path}: {status} {}", fleet::message(&body));
     }
-    sql.exec("DELETE FROM shots", None)?;
     Ok(())
 }
 
@@ -1615,6 +1621,16 @@ impl DurableObject for Agent {
             if let Err(f) = self.start_driver("waiting") {
                 worker::console_error!("starting a waiting turn: {}", f.message);
             }
+        }
+        // the hand-offs whose time came (a hand-off's turn learned the owner);
+        // a driver arms its own alarm, and at rest this one comes back for the next
+        if let (Ok(fleet), Some(owner)) = (self.fleet(), kv_get(&sql, "owner").map_err(failed)?) {
+            if let Err(e) = handoff::watch(&fleet, &sql, &owner).await {
+                worker::console_error!("watching hand-offs: {e:#}");
+            }
+        }
+        if !self.driving.get() {
+            handoff::arm(&self.state.storage(), &sql).await.map_err(failed)?;
         }
         Response::ok("ok")
     }

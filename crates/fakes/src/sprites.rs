@@ -10,7 +10,8 @@
 //! Sprite and name, started in its home, and stopped as the runtime stops
 //! one (TERM, then KILL 5 s later), as every one is when the fake goes. The
 //! release the install fetches (`/download/fragment-<os>-<arch>.tar.gz`)
-//! is the binary the fake was started with.
+//! is the binary the fake was started with. A test may seed files every new
+//! Sprite's home starts with (`seed`), as an image would hold them.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -48,6 +49,8 @@ struct State {
     slow_holds: Option<Duration>,
     /// Running services, by Sprite and name.
     services: BTreeMap<(String, String), Child>,
+    /// Executable files each new Sprite's home starts with: (path, bytes).
+    seeds: Vec<(String, Vec<u8>)>,
 }
 
 pub struct Sprites {
@@ -136,6 +139,19 @@ fn services(state: &Mutex<State>, home: &Path, sprite: &str, verb: &str, service
     }
 }
 
+/// A new Sprite's home, with the seeded files in it.
+fn seeded(home: &Path, seeds: &[(String, Vec<u8>)]) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(home)?;
+    for (path, bytes) in seeds {
+        let file = home.join(path);
+        std::fs::create_dir_all(file.parent().unwrap_or(home))?;
+        std::fs::write(&file, bytes)?;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
 /// Stops a service as the runtime does: TERM, then KILL 5 s later.
 fn stop(mut child: Child) {
     let _ = Command::new("kill").args(["-TERM", &child.id().to_string()]).status();
@@ -198,9 +214,10 @@ impl Sprites {
                 None => false,
             };
             let sprite = json!({ "id": format!("sprite-{name}"), "name": name, "organization": "fake", "status": "cold", "url": format!("https://{name}.sprites.app") });
+            let seeds = st.lock().expect("sprites state").seeds.clone();
             match (req.method.as_str(), &parts[2..], exists) {
                 ("POST", [], true) => Response::json(409, &json!({ "error": "a Sprite has that name" })),
-                ("POST", [], false) => match std::fs::create_dir_all(&home) {
+                ("POST", [], false) => match seeded(&home, &seeds) {
                     Ok(()) => {
                         st.lock().expect("sprites state").sprites.insert(name.to_string(), Sprite::default());
                         Response::json(201, &sprite)
@@ -242,5 +259,11 @@ impl Sprites {
     /// The Sprites deleted, in order.
     pub fn deleted(&self) -> Vec<String> {
         self.state.lock().expect("sprites state").deleted.clone()
+    }
+
+    /// An executable file every Sprite made from now on starts with, at
+    /// `path` in its home.
+    pub fn seed(&self, path: &str, bytes: &[u8]) {
+        self.state.lock().expect("sprites state").seeds.push((path.to_string(), bytes.to_vec()));
     }
 }
