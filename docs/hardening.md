@@ -2,10 +2,13 @@
 
 Status: **H1–H3 deployed to fragment.club on 2026-09-24** (Paul: "proceed
 with h1-h4", then each deploy step). The secret rotations wait on Paul
-(below). The celld fork is branch `hardening` on futurepaul/celld
-(`celld-worktrees/hardening`): H1–H3 at `2779418`; after it, phase 6's
-co-hosting (`0d80ead`) and two lockfile updates (the last, `f734f8f`,
-is what `master` pins and fragment.club's nodes run since 2026-09-25). Sources: the native services spike
+(below). The celld fork is branch `hardening-v0.6.0` on futurepaul/celld
+(`celld-worktrees/v060`): upstream v0.6.0 plus seven commits (the
+egress, the seam's two, the facet cap, loaded workers, the internal
+listener, phase 6's co-hosting) and a lockfile update (`4f50c81`, what
+`master` pins). Rebased 2026-09-26 from branch `hardening` (v0.5.1,
+`f734f8f`, which fragment.club's nodes ran from 2026-09-25); the alarm fix
+is upstream's now (#228), and the commit ids below are the rebased ones. Sources: the native services spike
 (`spike/native-services`, cd1d6d8), and the two isolation spikes
 (`spike/cell-isolation` 35c51f1; `spike/isolation` dadbadb).
 
@@ -14,21 +17,21 @@ is what `master` pins and fragment.club's nodes run since 2026-09-25). Sources: 
 | Finding | State (in code) | Where |
 |---|---|---|
 | Tenants with identical app source shared one V8 realm | fixed (phase 4: one loaded worker per fragment) | `cell/src/ops.rs` |
-| A supervisor fetch could reach celld's internal listener or 6PN (SSRF) | mitigated since phase 3 (`CELLD_EGRESS_PUBLIC_ONLY`); **now also closed at the listener** | fork `cd3a68b`, `2779418` |
-| celld's internal listener has no auth (`/state`, `/do`, `/evict`, `/shutdown`) | **fixed**: `CELLD_INTERNAL_PEER_ONLY=1` serves only the fleet-signed routes (`/peer/*`, `/runtime/`) | fork `2779418` |
+| A supervisor fetch could reach celld's internal listener or 6PN (SSRF) | mitigated since phase 3 (`CELLD_EGRESS_PUBLIC_ONLY`); **now also closed at the listener** | fork `1413fcd`, `ccdeb54` |
+| celld's internal listener has no auth (`/state`, `/do`, `/evict`, `/shutdown`) | **fixed**: `CELLD_INTERNAL_PEER_ONLY=1` serves only the fleet-signed routes (`/peer/*`, `/runtime/`) | fork `ccdeb54` |
 | Fleet secrets are Worker `vars` (in every isolate, and in the manifest in the bucket) | **fixed**: they are the node's environment (Fly secrets), read only by `KEYS`; a cell deploy refuses a var that holds one. The old deployments' manifests still hold them (debt ledger) | `crates/native`, `xtask/src/deploy.rs` |
 | Key material in wasm/JS heaps (sealing, the code.storage key, agents' nostr keys) | **fixed** for the fleet's keys and the agents' and fragments' own keys; tenant secrets (a fragment's `{{NAME}}`, an org's OpenRouter key, a VAPID key, a computer's token) still open in the cell at the egress point, now only for the cell that sealed them | `cell/src/keys.rs`, `agent/src/keys.rs` |
-| A facet's SQLite has no size cap | **fixed**: 16 MiB per app (a mutation past it rolls back, 507), and the node's hard stop 4 MiB above | `cell/platform.mjs`, fork `cbea45e` |
-| 255 loaded workers per node, never released; one tenant can fill a node | **visible**: the next app answers 503 `node_full` and the rest serve on. Release is not built (debt ledger) | `cell/src/js.rs`, fork `c4d64a9` |
-| Code generation from strings, `Atomics.wait` in facets | **fixed**: `CELLD_DYNAMIC_LOCKDOWN=1` | fork `c4d64a9` |
-| No hard heap cap per isolate | **fixed** for the V8 heap: past twice its limit (128 MiB) an isolate's execution ends; ArrayBuffer memory is still uncounted (debt ledger) | fork `c4d64a9` |
+| A facet's SQLite has no size cap | **fixed**: 16 MiB per app (a mutation past it rolls back, 507), and the node's hard stop 4 MiB above | `cell/platform.mjs`, fork `553e923` |
+| 255 loaded workers per node, never released; one tenant can fill a node | **visible**: the next app answers 503 `node_full` and the rest serve on. Release is not built (debt ledger) | `cell/src/js.rs`, fork `8393f75` |
+| Code generation from strings, `Atomics.wait` in facets | **fixed**: `CELLD_DYNAMIC_LOCKDOWN=1` | fork `8393f75` |
+| No hard heap cap per isolate | **fixed** for the V8 heap: past twice its limit (128 MiB) an isolate's execution ends; ArrayBuffer memory is still uncounted (debt ledger) | fork `8393f75` |
 | Facet egress, CPU limits, SQL authorizer, frozen clocks | fine | — |
 
 ## What was built
 
 ### H1. `KEYS`, a native service in our celld fork
 
-- **The seam** (fork `ddd220d`, `6a194d5`): a service binding whose
+- **The seam** (fork `5b76ced`, `aecfbb6`): a service binding whose
   target is `native:<name>` is answered by `crates/native` instead of a
   script, with the calling cell's scope as the host attests it (JS cannot
   claim another cell's). celld builds our crate from fragment-next checked
@@ -95,13 +98,13 @@ is what `master` pins and fragment.club's nodes run since 2026-09-25). Sources: 
 
 ### H3. The fork
 
-- **The internal listener** (`2779418`): `CELLD_INTERNAL_PEER_ONLY=1`.
+- **The internal listener** (`ccdeb54`): `CELLD_INTERNAL_PEER_ONLY=1`.
   Checked by hand on a local node: with it, `GET /state` and `GET
   /do/<scope>` answer 403; without it, 200 and reachable; unsigned
   `/peer/probe` is 401 either way. (celld dev hides its internal port, so
   the e2e cannot reach it.) A node then stops on its signal: Fly sends
   SIGTERM, and `celld dev` falls back to it.
-- **Loaded workers** (`c4d64a9`): `CELLD_DYNAMIC_LOCKDOWN=1` turns off
+- **Loaded workers** (`8393f75`): `CELLD_DYNAMIC_LOCKDOWN=1` turns off
   code generation from strings (before the module's first line runs) and
   `Atomics.wait`. A heap past twice its limit ends the isolate's
   execution ("Worker exceeded its memory limit of 128 MiB"); the app
@@ -112,7 +115,7 @@ is what `master` pins and fragment.club's nodes run since 2026-09-25). Sources: 
   together. It is the one H3 item left, in the debt ledger, and the H2
   503 covers it until a node nears 255 apps.
 - **Upstreamable:** each setting defaults to upstream's behavior and
-  lives in its own commit (`cbea45e`, `c4d64a9`, `2779418`).
+  lives in its own commit (`553e923`, `8393f75`, `ccdeb54`).
 
 ## Evidence
 

@@ -17,15 +17,15 @@ pub const READY_TIMEOUT: Duration = Duration::from_secs(120);
 /// A graceful stop must finish within this.
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The fork of celld (branch `hardening`): v0.5.1 with the alarm fix
-/// (spikes/celld-0.5.1/README.md), public-only Worker egress
+/// The fork of celld (branch `hardening-v0.6.0`): v0.6.0 with public-only
+/// Worker egress
 /// (`CELLD_EGRESS_PUBLIC_ONLY`, docs/phase-3.md slice E), the native-services
 /// seam that serves `KEYS` from crates/native, and the settings
 /// docs/hardening.md turns on: `CELLD_FACET_MAX_BYTES`,
 /// `CELLD_LOADED_WORKERS_MAX`, `CELLD_DYNAMIC_LOCKDOWN`,
 /// `CELLD_INTERNAL_PEER_ONLY`, and a hard heap ceiling.
 pub const CELLD_FORK_URL: &str = "https://github.com/futurepaul/celld.git";
-pub const CELLD_FORK_REV: &str = "f734f8f44054669a42f489edcb054c6fe06b07f1";
+pub const CELLD_FORK_REV: &str = "4f50c819214d85d604e09f12a10a90ca0b37119e";
 
 pub fn repo_root() -> PathBuf {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
