@@ -341,6 +341,9 @@ pub(crate) enum MetaKey {
     OutsideAt,
     /// A template still to commit (publish.rs).
     TemplatePending,
+    /// The template it was made from, once it landed (publish.rs `seed`);
+    /// one made before this was kept is read from its `template` event.
+    Template,
     /// What live's `agent` block declares, still to make so (agents.rs
     /// `sync_agent`): a new value each time live declares one.
     AgentPending,
@@ -425,6 +428,7 @@ impl MetaKey {
             MetaKey::PollAt => "poll_at",
             MetaKey::OutsideAt => "outside_at",
             MetaKey::TemplatePending => "template_pending",
+            MetaKey::Template => "template",
             MetaKey::AgentPending => "agent_pending",
             MetaKey::AgentLive => "agent_live",
             MetaKey::AgentJoined => "agent_joined",
@@ -934,6 +938,8 @@ impl FragmentCell {
                     if bytes.is_empty() { json!({}) } else { serde_json::from_slice(&bytes).map_err(|e| CellError::invalid(format!("body: {e}")))? };
                 self.deploy_api(&caller, body).await
             }
+            (Method::Get, ["api", "template"]) => json_response(&self.template_status(&caller).await?),
+            (Method::Post, ["api", "template"]) => json_response(&self.template_update(&caller).await?),
             (Method::Get, ["api", "file"]) => self.file(&caller, &query("path").unwrap_or_default()).await,
             (Method::Get, ["api", "file", "stat"]) => self.stat(&caller, &query("path").unwrap_or_default()).await,
             (Method::Get, ["api", "events"]) => self.events(&caller, query("since").and_then(|s| s.parse().ok()).unwrap_or(0), query("tail")),

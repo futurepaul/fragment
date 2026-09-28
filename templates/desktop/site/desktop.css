@@ -96,6 +96,18 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; }
 .empty-row { font-size: 13px; color: var(--text-tertiary); padding: 6px 8px; }
 .spacer { flex: 1; }
 
+/* the template's newer files: a pill at the sidebar's foot, and its confirmation above it (desktop.js, template updates) */
+.update { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 8px 2px 0; }
+.update-pill { display: inline-flex; align-items: center; gap: 7px; height: 26px; padding: 0 11px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-secondary); font-size: 12px; font-weight: 600; transition: background .12s, color .12s; }
+.update-pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent-blue); }
+.update-pill:hover, .update-pill[aria-expanded="true"] { background: var(--bg-hover); color: var(--text-primary); }
+.update-confirm { align-self: stretch; padding: 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); color: var(--text-secondary); font-size: 13px; line-height: 1.45; }
+.update-confirm p { margin: 0 0 10px; }
+.update-actions { display: flex; gap: 6px; }
+.update-actions button { height: 28px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; font-size: 13px; font-weight: 600; }
+.update-actions #update-go { border-color: transparent; background: var(--primary); color: var(--primary-foreground); }
+.update-actions button:disabled { opacity: .6; cursor: default; }
+
 /* ---- chat column ---- */
 .chat { position: relative; flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .topbar { display: flex; align-items: center; gap: 6px; min-height: 54px; padding: 10px 14px; font-size: 14px; }

@@ -26,6 +26,14 @@
       <div class="section-label">Computers<button class="icon-button small" id="new-computer" type="button" title="New computer: awake while open, on your budget" aria-label="New computer"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button></div>
       <nav class="rows" id="computers"></nav>
       <div class="spacer"></div>
+      <!-- when the desktop template has newer files than this desktop's own (desktop.js, template updates) -->
+      <div class="update" id="update" hidden>
+        <div class="update-confirm" id="update-confirm" hidden>
+          <p id="update-text">Update this desktop to the latest version? Its own files are replaced; your chats and apps are not touched. The old version stays in its history.</p>
+          <div class="update-actions"><button type="button" id="update-go">Update</button><button type="button" id="update-cancel">Cancel</button></div>
+        </div>
+        <button class="update-pill" id="update-pill" type="button">Update available</button>
+      </div>
     </aside>
     <div class="gutter gutter-col" id="gutter-left" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" title="Drag to resize · double-click to reset"></div>
 

@@ -4,7 +4,8 @@
 //! `POST /api/deploy` (`live` to `main`'s tip, as `fragment deploy` does).
 //! An agent's tools use the same two routes. Also the capabilities a page
 //! can ask for: its owner's fragments, listed and made (`__fragments`),
-//! and shown inside it, signed in (`__frame`).
+//! and shown inside it, signed in (`__frame`). And, for a fragment's
+//! owner, its template's latest files (`__template`).
 
 use std::collections::BTreeMap;
 
@@ -12,6 +13,7 @@ use fragment_core::site;
 use fragment_proto::{CreateFragment, ErrorBody, ErrorCode, IdentityKind, Role, Visibility};
 use fragment_templates::{Template, BLANK, BUILDER, CALORIES, CHAT, DESKTOP, INBOX, PET, TODO};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
@@ -85,6 +87,31 @@ fn stamp(bytes: &[u8], name: &str) -> Vec<u8> {
     }
 }
 
+/// A template's files as the fragment `name` holds them: its fragment.json
+/// stamped with that name.
+fn stamped(t: Template, name: &str) -> Vec<FileWrite> {
+    t.iter()
+        .map(|(path, bytes)| FileWrite { path: path.to_string(), bytes: Some(if *path == "fragment.json" { stamp(bytes, name) } else { bytes.to_vec() }) })
+        .collect()
+}
+
+/// A template's bytes, hashed: what an update to them is keyed by.
+fn template_hash(t: Template) -> String {
+    let mut h = Sha256::new();
+    for (path, bytes) in t {
+        h.update(path.as_bytes());
+        h.update([0]);
+        h.update((bytes.len() as u64).to_le_bytes());
+        h.update(bytes);
+    }
+    hex::encode(&h.finalize()[..8])
+}
+
+/// `__template`'s answer: the template, and the paths where live is not it.
+fn template_answer(which: &str, changed: Vec<String>) -> Value {
+    json!({ "template": which, "upToDate": changed.is_empty(), "changed": changed })
+}
+
 impl FragmentCell {
     /// Commits the template a fragment was made from (`template_pending`)
     /// and deploys it. Keyed by the fragment's incarnation, so the alarm
@@ -93,17 +120,100 @@ impl FragmentCell {
         let Some(which) = self.meta(MetaKey::TemplatePending)? else { return Ok(()) };
         let t = template(&which).ok_or_else(|| CellError::host(format!("no template {which}")))?;
         let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
-        let writes: Vec<FileWrite> = t
-            .iter()
-            .map(|(path, bytes)| FileWrite { path: path.to_string(), bytes: Some(if *path == "fragment.json" { stamp(bytes, &name) } else { bytes.to_vec() }) })
-            .collect();
         let key = format!("template:{}", self.must(MetaKey::CreatedAt)?);
-        if let Wrote::Conflict(why) = self.commit(&key, &writes, &BTreeMap::new(), &format!("start from the {which} template"), &owner, 0).await? {
+        if let Wrote::Conflict(why) = self.commit(&key, &stamped(t, &name), &BTreeMap::new(), &format!("start from the {which} template"), &owner, 0).await? {
             return Err(CellError::host(why));
         }
         self.go_live(&owner, &format!("deploy {name}")).await?;
         self.event("template", &format!("{name} starts from the {which} template"), json!({ "template": which }));
+        self.set_meta(MetaKey::Template, &which)?;
         self.del_meta(MetaKey::TemplatePending)
+    }
+
+    /// The template this fragment was made from, while the platform still
+    /// offers it: as `seed` kept it, or, for one made before it kept it, as
+    /// its `template` event says (kept from then on).
+    fn made_from(&self) -> CellResult<Option<(String, Template)>> {
+        let which = match self.meta(MetaKey::Template)? {
+            Some(which) => Some(which),
+            None => {
+                let rows = self.rows("SELECT body FROM records WHERE channel = 'events' AND kind = 'template' ORDER BY seq DESC LIMIT 1", vec![])?;
+                let body = rows.first().and_then(|r| serde_json::from_str::<Value>(r["body"].as_str()?).ok()).unwrap_or_default();
+                let logged = body["data"]["template"].as_str().map(str::to_string);
+                if let Some(which) = &logged {
+                    self.set_meta(MetaKey::Template, which)?;
+                }
+                logged
+            }
+        };
+        Ok(which.and_then(|w| template(&w).map(|t| (w, t))))
+    }
+
+    /// The owner, when they are the caller (signed in on this origin, or
+    /// with their key): a fragment's template is theirs to update, with no
+    /// capability asked for.
+    fn template_owner(&self, caller: &Caller) -> CellResult<String> {
+        let owner = self.must(MetaKey::Owner)?;
+        match caller.principal() {
+            Some(p) if p == owner => Ok(owner),
+            Some(_) => Err(CellError::new(ErrorCode::Forbidden, "only this fragment's owner updates it to its template")),
+            None => Err(CellError::new(ErrorCode::Unauthenticated, "sign in as this fragment's owner to update it to its template")),
+        }
+    }
+
+    /// The template's files that live does not hold as they are, by path:
+    /// one absent, or of another size, without a read; the rest read from
+    /// live and compared.
+    async fn unlike_template(&self, t: Template, name: &str) -> CellResult<Vec<String>> {
+        let mut facts = self.facts()?;
+        self.ensure_pins(&mut facts).await?;
+        let cs = self.cs()?;
+        let (repo, live, cs) = (&facts.repo, facts.pin_live.as_deref(), &cs);
+        let compared = stamped(t, name).into_iter().map(|w| async move {
+            let want = w.bytes.expect("a template writes each of its files");
+            let same = match (live, self.tree_row("live", &w.path)?) {
+                (Some(live), Some(row)) if row.size == want.len() as u64 => cs.read(repo, live, &w.path, want.len()).await? == Some(want),
+                _ => false,
+            };
+            Ok::<_, CellError>((!same).then_some(w.path))
+        });
+        Ok(futures_util::future::try_join_all(compared).await?.into_iter().flatten().collect())
+    }
+
+    /// `GET __template`: the template this fragment was made from, and
+    /// whether live holds its latest files, to its owner alone (`{template:
+    /// null}`: it was not made from one the platform offers).
+    pub(crate) async fn template_status(&self, caller: &Caller) -> CellResult<Value> {
+        self.template_owner(caller)?;
+        let name = self.name()?;
+        match self.made_from()? {
+            Some((which, t)) => Ok(template_answer(&which, self.unlike_template(t, &name).await?)),
+            None => Ok(json!({ "template": null })),
+        }
+    }
+
+    /// `POST __template`: the template's latest files committed to main in
+    /// one commit (fragment.json stamped; files it does not have stay), and
+    /// deployed, for its owner; answers the new status. Keyed by the
+    /// template and the live commit it replaces, so a retry commits once;
+    /// a fragment up to date commits nothing.
+    pub(crate) async fn template_update(&self, caller: &Caller) -> CellResult<Value> {
+        let owner = self.template_owner(caller)?;
+        let name = self.name()?;
+        let (which, t) = self.made_from()?.ok_or_else(|| CellError::invalid(format!("{name} was not made from a template")))?;
+        let changed = self.unlike_template(t, &name).await?;
+        if changed.is_empty() {
+            return Ok(template_answer(&which, changed));
+        }
+        let key = format!("template-update:{}:{}", template_hash(t), self.pin("live")?.unwrap_or_default());
+        let message = format!("update to the latest {which} template");
+        if let Wrote::Conflict(why) = self.commit(&key, &stamped(t, &name), &BTreeMap::new(), &message, &owner, 0).await? {
+            return Err(CellError::host(why));
+        }
+        let live = self.go_live(&owner, &format!("deploy {name}: {message}")).await?;
+        let summary = format!("{name} updates to the latest {which} template ({} of its files)", changed.len());
+        self.event("template.update", &summary, json!({ "template": which, "changed": changed, "live": live }));
+        Ok(template_answer(&which, self.unlike_template(t, &name).await?))
     }
 
     /// Moves `live` to `main`'s tip: the first deploy makes the branch,

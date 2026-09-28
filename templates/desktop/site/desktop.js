@@ -583,6 +583,45 @@ function look() {
 setInterval(look, PRESENCE_MS);
 document.addEventListener("visibilitychange", look);
 
+// ---- template updates: when the desktop template has newer files than
+// this desktop's own (`__template`, its owner's alone), a pill at the foot
+// of the sidebar, asked on load and every 10 minutes while in view. Its
+// Update commits the template's files over this desktop's (the platform
+// deploys them; its chats and apps are other fragments), then reloads ----
+const TEMPLATE_MS = 10 * 60 * 1000;
+async function templateStatus(init) {
+  const r = await fetch("__template", { credentials: "same-origin", ...init });
+  const out = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(out.message || r.statusText);
+  return out;
+}
+async function checkTemplate() {
+  const { template, upToDate } = await templateStatus().catch(() => ({}));
+  $("update").hidden = !template || upToDate !== false;
+}
+function confirmUpdate(open) {
+  $("update-confirm").hidden = !open;
+  $("update-pill").setAttribute("aria-expanded", String(open));
+  if (open) $("update-go").focus();
+}
+$("update-pill").onclick = () => confirmUpdate($("update-confirm").hidden);
+$("update-cancel").onclick = () => confirmUpdate(false);
+$("update-go").onclick = async () => {
+  const [go, cancel] = [$("update-go"), $("update-cancel")];
+  go.disabled = cancel.disabled = true;
+  go.textContent = "Updating…";
+  try {
+    await templateStatus({ method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    location.reload();
+  } catch (e) {
+    $("update-text").textContent = `The update did not finish: ${e.message}`;
+    go.textContent = "Try again";
+    go.disabled = cancel.disabled = false;
+  }
+};
+checkTemplate();
+setInterval(() => { if (!document.hidden) checkTemplate(); }, TEMPLATE_MS);
+
 // ---- loading ----
 let seen = "";
 async function load() {
