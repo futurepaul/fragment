@@ -136,5 +136,73 @@ pub fn blobs(s: &mut Suite, api: &Api) -> Result<()> {
     // while the collector still awaits the bucket), so wait for it too
     let logged = s.eventually(Duration::from_secs(10), || api.signed(&keys, "GET", &format!("/api/f/{name}/events"), None).is_ok_and(|r| r.text.contains("blobs.collected")));
     s.ok("the event log says so", logged, "no blobs.collected event in 10 s");
+    pages(s, api, (&keys, &home), &name, &viewer)
+}
+
+/// Pages read a blob by its hash on the fragment's own origin (`__blob`):
+/// viewers and up, typed as its upload declared, the same bytes forever. A
+/// computer's screen is uploaded as frames, collected soon after the next.
+fn pages(s: &mut Suite, api: &Api, (keys, home): (&Keys, &Path), name: &str, viewer: &Keys) -> Result<()> {
+    let dir = s.dir("blobs-pages");
+    let put = |s: &Suite, fragment: &str, file: &str, bytes: &[u8], frame: bool| -> Result<String> {
+        let path = dir.join(file);
+        std::fs::write(&path, bytes)?;
+        let path = path.to_str().expect("utf-8 path").to_string();
+        let args = [&["blob", "put", fragment, &path][..], if frame { &["--frame"][..] } else { &[] }].concat();
+        let out = s.cli(api, home, &args);
+        anyhow::ensure!(out.status.success(), "fragment blob put {file}: {}", String::from_utf8_lossy(&out.stderr));
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let read = |fragment: &str, keys: Option<&Keys>, sha: &str, extra: Vec<(&'static str, String)>| {
+        api.call(Call { method: "GET", url: api.site_url(fragment, &format!("__blob/{sha}")), keys, extra, ..Call::default() })
+    };
+    let r = api.signed(keys, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    anyhow::ensure!(r.status == 200, "making it members-only: {r}");
+    let png = bytes_of(2000, 5);
+    let shot = put(s, name, "shot.png", &png, false)?;
+    s.ok("`fragment blob put` uploads a file and prints its sha256", shot == sha256_hex(&png), &shot);
+    let r = read(name, Some(viewer), &shot, vec![])?;
+    s.ok(
+        "a viewer reads it on the fragment's origin (`__blob`): its bytes, as the PNG its name says, cached as immutable, never sniffed",
+        r.status == 200 && r.bytes == png && r.header("content-type") == "image/png" && r.header("cache-control").contains("immutable") && r.header("x-content-type-options") == "nosniff",
+        &r,
+    );
+    let r = read(name, Some(viewer), &shot, vec![("if-none-match", format!("\"{shot}\""))])?;
+    s.ok("and revalidates it without reading it (304)", r.status == 304, &r);
+    let (stranger, anonymous) = (read(name, Some(&api.person()?), &shot, vec![])?, read(name, None, &shot, vec![])?);
+    s.ok(
+        "on a members-only fragment, a signed-in outsider is refused (403), and an anonymous visitor (401)",
+        stranger.status == 403 && anonymous.status == 401,
+        format!("{stranger} / {anonymous}"),
+    );
+    let page = put(s, name, "page.html", b"<script>parent.alert(1)</script>", false)?;
+    let r = read(name, Some(viewer), &page, vec![])?;
+    s.ok("a blob that would be active content (HTML) is served as bytes, never as a page", r.status == 200 && r.header("content-type") == "application/octet-stream", &r);
+
+    // frames, on a fragment the daily pass leaves alone (nothing outside the
+    // platform writes it), so only a frame's upload collects anything here
+    let frames = s.named(api, keys, "frames")?;
+    s.create(api, keys, &frames)?;
+    let hook = |op: &str| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": frames, "op": op }))).map(|r| r.body).unwrap_or_default();
+    let day_ms: i64 = 24 * 3600 * 1000;
+    let quiet = s.eventually(Duration::from_secs(u64::from(crate::POLL_S) * 5), || {
+        let alarm = hook("alarm");
+        alarm["pollAt"].as_i64().zip(alarm["now"].as_i64()).is_some_and(|(at, now)| at - now > day_ms - 60_000)
+    });
+    anyhow::ensure!(quiet, "the frames fragment's next pass is a day away: {}", hook("alarm"));
+    let r = read(&frames, Some(keys), &shot, vec![])?;
+    s.ok("another fragment's hash is not found here (404): each fragment's blobs are its own", r.status == 404, &r);
+    let first = put(s, &frames, "first.jpg", &bytes_of(3000, 1), true)?;
+    let step = put(s, &frames, "step.png", &png, false)?;
+    let r = read(&frames, Some(keys), &first, vec![])?;
+    let shown = r.status == 200 && r.header("content-type") == "image/jpeg";
+    std::thread::sleep(Duration::from_secs(u64::from(crate::BLOB_GRACE_S) + 1));
+    let next = put(s, &frames, "next.jpg", &bytes_of(3000, 2), true)?;
+    let head = |sha: &str| api.signed(keys, "HEAD", &format!("/api/f/{frames}/blobs/{sha}"), None).map_or(0, |r| r.status);
+    s.ok(
+        "a frame (`--frame`) is collected at the next frame's upload once its grace passed; the new frame and a blob that is no frame stay",
+        shown && head(&first) == 404 && head(&next) == 200 && head(&step) == 200,
+        json!({ "shown": shown, "first": head(&first), "next": head(&next), "step": head(&step) }),
+    );
     Ok(())
 }

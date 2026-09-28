@@ -15,10 +15,11 @@
 // turn}`) is never a message. `work` holds an agent's progress while a turn
 // runs: `turn.start` (who asked), one `turn.step` per tool call (the tool,
 // its short arguments, whether it worked, a short excerpt of its result,
-// and the model's text before it), `turn.end`. The page groups a turn's
-// steps above its answer, shows who is working while one runs, and gives
-// the person who started it a Stop button. Nothing streams: each record is
-// a whole step.
+// the model's text before it, and a screenshot it showed: `shot`, a blob of
+// this fragment's, shown small at `__blob/<shot>`), `turn.end`. The page
+// groups a turn's steps above its answer, shows who is working while one
+// runs, and gives the person who started it a Stop button. Nothing streams:
+// each record is a whole step.
 //
 // Ported from finite-mono's hosted chat (the desktop's look): Funnel Sans and
 // JetBrains Mono, a 720 px column, dark unless the system asks for light.
@@ -296,6 +297,8 @@ export function mount(root, options = {}) {
         const pre = el("pre");
         pre.append(el("span", "step-name", `${s.tool}${s.args ? ` ${s.args}` : ""}\n`), s.excerpt || (s.ok === false ? "failed" : "done"));
         step.append(pre);
+        // its screenshot, small; a click opens it whole
+        if (/^[0-9a-f]{64}$/.test(s.shot ?? "")) step.append(image(`__blob/${s.shot}`, `${s.tool} screenshot`));
         d.append(step);
       }
       out.push(d);

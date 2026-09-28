@@ -25,17 +25,20 @@ by its agent (ask it to do something).
     url}`, skipping one older than 30 seconds. `control` says
     `"signedIn": true`, so only people signed in post there: the
     platform refuses an anonymous link holder's post (401);
-  - sends the screen through `frame` (`fragment call --input @file`, as a
-    frame is more than one argument holds) when it changed: a JPEG of at
-    most 85 KB, at most one a second for a minute after someone drives it
-    and one each 5 seconds otherwise. Its agent is the driver it names
-    (`agent:<who asked>`) while `~/.pet/agent` is newer than anyone's
-    last `control` record.
-- `app.mjs` keeps only the latest frame (one row: the JPEG, what is on
-  screen, who drove it last); `screen` is the live query the page shows.
-- `site/index.html` shows the frame big; a click on it posts a click at
-  the same point of the screen. Anyone who can open the fragment
-  watches; signing in lets you drive.
+  - sends the screen when it changed: a JPEG of at most 85 KB, at most
+    one a second for a minute after someone drives it and one each 5
+    seconds otherwise, uploaded as a blob of the fragment (`fragment blob
+    put --frame`: the platform deletes a frame a minute after a later one
+    arrives), then named through `frame` (`fragment call`). Its agent is
+    the driver it names (`agent:<who asked>`) while `~/.pet/agent` is
+    newer than anyone's last `control` record.
+- `app.mjs` keeps only the latest frame (one row: its blob's hash and
+  size, what is on screen, who drove it last; never the image);
+  `screen` is the live query the page shows.
+- `site/index.html` shows the frame big, from `./__blob/<shot>`; a click
+  on it posts a click at the same point of the screen. Anyone who can
+  open the fragment watches (viewers and up: the link counts); signing in
+  lets you drive.
 - `run({command})` is a job for editors (the owner, their agent capped at
   editor, the computer): `bash -lc` on the computer in `~/fragment`
   (`job.computer.exec`), answered with `{code, stdout, stderr,
@@ -56,7 +59,8 @@ by its agent (ask it to do something).
   (`fragment model --serve`, `z-ai/glm-5.3-flashx`, which reads images),
   and every request goes as goose made it. Each tool call is a step on
   the chat's `work` (`{kind: "turn.step", turn, run, step, tool, args,
-  ok, excerpt, text}`), this page's own when no chat asked, where the
+  ok, excerpt, text, shot}`, `shot` a screenshot the tool showed, as a
+  blob of that chat's), this page's own when no chat asked, where the
   job also posts the run's `start` and `end`, which the page shows live;
   the run answers `{message, code}`. Anyone may click while it works: its
   next look shows it.

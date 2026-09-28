@@ -1,6 +1,7 @@
 //! Serving a fragment: its site from the `live` pin, the machine-read
-//! plane (`__tree`, `__file`), browser calls (`__op`), and the change feed
-//! (`__watch`). Who may see what follows the fragment's visibility:
+//! plane (`__tree`, `__file`), a blob by its hash (`__blob`), browser
+//! calls (`__op`), and the change feed (`__watch`). Who may see what
+//! follows the fragment's visibility:
 //! members always; on a `link` or `public` fragment, whoever holds the
 //! share link counts as a viewer (a `?view=` token sets a cookie on the
 //! fragment's origin); on a `public` fragment, everyone else holds the
@@ -76,7 +77,7 @@ fn anon_principal(cookie_value: &str) -> String {
 
 /// 304 for a request whose `If-None-Match` names `etag`, with the headers
 /// the full answer would carry; `None` otherwise.
-fn not_modified(req: &Request, etag: &str, cache: &str) -> CellResult<Option<Response>> {
+pub(crate) fn not_modified(req: &Request, etag: &str, cache: &str) -> CellResult<Option<Response>> {
     match req.headers().get("if-none-match")? {
         Some(tags) if site::not_modified(&tags, etag) => {
             let h = Headers::new();
@@ -219,7 +220,7 @@ impl FragmentCell {
             self.frame_redirect(caller, name).await?
         } else if path == "__people" {
             // names for a page: a person's username and picture, or whose agent
-            self.reader(&mut facts, caller, link).await?;
+            self.reader(&mut facts, caller, link, Role::Public).await?;
             let ids: Vec<String> = url.query_pairs().filter(|(k, _)| k == "id").map(|(_, v)| v.into_owned()).collect();
             let mut answer = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids }).await?;
             let platform = self.cfg.platform(&caller.url);
@@ -227,6 +228,13 @@ impl FragmentCell {
                 p.picture = p.picture.take().map(|path| format!("{platform}{path}"));
             }
             json_response(&answer)?
+        } else if let Some(sha) = path.strip_prefix("__blob/") {
+            // one of this fragment's blobs by its hash (blobs.rs): viewers and up
+            if !matches!(req.method(), Method::Get | Method::Head) {
+                return Err(CellError::invalid("read a blob with GET or HEAD"));
+            }
+            self.reader(&mut facts, caller, link, Role::Viewer).await?;
+            self.serve_blob(&req, sha).await?
         } else if path == "__sw.js" {
             script(&req, crate::push::SW_JS, SW_JS_HASH)?
         } else if path == "__watch" {
@@ -330,7 +338,7 @@ impl FragmentCell {
     #[allow(clippy::too_many_arguments)]
     async fn site(&self, req: &mut Request, caller: &Caller, facts: &mut Facts, path: &str, url: &url::Url, link: bool, anon: Option<String>) -> CellResult<Response> {
         // a page or a file reads alike for everyone who may see the fragment
-        let reader = self.reader(facts, caller, link).await?;
+        let reader = self.reader(facts, caller, link, Role::Public).await?;
         let caller: &Caller = &reader;
         let head = req.method() == Method::Head;
         if path == "__fragment.js" {

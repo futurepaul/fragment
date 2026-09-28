@@ -21,7 +21,7 @@ the node's environment, where only `KEYS` reads them (below).
 | `FRAGMENT_POLL_INTERVAL_S` | the webhook backstop (default 300), and how often running runs are checked against their Workflows, for a busy fragment: one something outside the platform may have written in the last day (a storage token was minted for it, or a webhook arrived), or with a run in flight, a held run's video to settle, or a template or an owner's agent still to land. Any other fragment is polled once a day |
 | `FRAGMENT_JOB_RETRY_DELAY_S` | a failed job step's first retry delay, doubling over 4 retries (default 10) |
 | `FRAGMENT_EGRESS_LOCAL` | `allow` lets jobs fetch loopback and private addresses (dev and e2e fakes); never on a shared fleet |
-| `FRAGMENT_BLOB_GRACE_S` | how long a blob no branch names is kept before it is deleted (default 7 days) |
+| `FRAGMENT_BLOB_GRACE_S` | how long a blob no branch names is kept before it is deleted (default 7 days; a frame, a minute at most: Blobs, below) |
 | `FRAGMENT_PUSH_SUBJECT` | who push services may contact about this fleet's pushes (a `mailto:` or https URL; RFC 8292) |
 | `FRAGMENT_DELIVERY_RETRY_S` | the shortest wait before a delivery is retried (default 10; the wait grows with the delivery's age, up to an hour) |
 | `FRAGMENT_DELIVERY_RETRY_MAX_S` | the longest (default an hour, never under the shortest; test fleets set both, for a fixed pace) |
@@ -444,7 +444,7 @@ platform (`Content-Security-Policy`), and keep their URL to the platform
 | `POST /api/f/{name}/webhook` | code.storage | signed with the fragment's webhook secret (`X-Pierre-Signature`, 5 minutes); validate, remember (redeliveries are acknowledged), then move the pin to the branch's head as read now |
 | `GET /api/f/{name}/files` | viewer | → `{ref, files: [{path, size, mode, lastCommitSha, machinery, blob?}]}` at main; a pointer's `size` is its bytes' |
 | `GET /api/f/{name}/file?path=` | viewer | → the bytes at main (`x-fragment-ref`); a pointer's come from the blob store |
-| `PUT /api/f/{name}/blobs/{sha256}` | editor | the bytes as the body (`content-length` required, at most 256 MiB), streamed through and hashed on the way in: → `{ok, sha, size, stored}`; bytes that hash to anything else are deleted and refused (400) |
+| `PUT /api/f/{name}/blobs/{sha256}[?frame]` | editor | the bytes as the body (`content-length` required, at most 256 MiB), streamed through and hashed on the way in: → `{ok, sha, size, stored}`; bytes that hash to anything else are deleted and refused (400). Its `content-type` is what `__blob` serves it as, when that is passive media; `?frame` makes it a frame (Blobs, below) |
 | `GET`, `HEAD /api/f/{name}/blobs/{sha256}` | viewer | → the bytes (ranges answer 206) |
 | `GET /api/f/{name}/file/stat?path=` | viewer | → `{stat: {path, size, blobSha, lastCommitSha, present}, ref}` |
 | `GET /api/f/{name}/events?since=` or `?tail=` | viewer | → `{events: [{id, at, kind, summary, data}]}`, oldest first: the page after `since`, or the newest `tail` (1-500; 400 otherwise, or with `since`) (500 a page; 10 000 kept, as for `ops`: `limits::AUDIT_KEPT`) |
@@ -642,6 +642,25 @@ pointer at `main` or `live` has named for `FRAGMENT_BLOB_GRACE_S` (7
 days) is deleted, so only the latest versions' bytes are kept: a
 rollback older than that has pointers without bytes. A deleted
 fragment's blobs go with it.
+
+A page reads one of its fragment's blobs by hash at `__blob/<sha256>`
+(Serving, below): a step's screenshot, a computer's screen, shown with
+no row in the app's database and no record holding the bytes. One
+nothing names is deleted after the grace period like any other (uploads
+never committed included). It is served as the type its upload's
+`content-type` declared when that is passive media (JPEG, PNG, WebP,
+GIF, MP4, WebM, MP3, WAV, PDF: `blob::served_type`), else as
+`application/octet-stream`, so a blob never runs as a page or a script
+there. A **frame** (`?frame` on its upload: a computer's screen, sent as
+it changes) is deleted at a later frame's upload once a minute has passed
+since it was last uploaded (or the grace period, when shorter), never
+while a pointer names it. That collection runs at most once a minute, so
+a frame a second keeps about two minutes of frames; the newest is the
+upload that ran it, and the frames left when uploads stop go at the next
+frame, or after the grace period.
+
+CLI: `fragment blob put <name> <file> [--frame]` uploads a file as a
+blob, typed by its extension, and prints its sha256.
 
 ### Deliveries: web push and notifyUrls
 
@@ -851,6 +870,7 @@ API answers on the platform's host):
 | `__tree` | `{type, ref: "live", sha, count, files}`, content only |
 | `__file?path=` | a content file from live, else main |
 | `__preview.svg` | the placeholder preview image |
+| `__blob/{sha256}` | one of this fragment's blobs (Blobs, above), `GET` or `HEAD`, viewers and up (on a `public` fragment too: whoever holds only `public` is refused): its bytes as the type its upload declared (ranges answer 206), `Cache-Control: private, max-age=31536000, immutable`, `X-Content-Type-Options: nosniff`, and an `ETag` of the hash; another fragment's hash is 404 |
 | `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; a signed-in browser (`fragment_site`) calls as its person; an unsigned caller gets an anonymous principal cookie; callers holding only `public` get 60 calls a minute each, 600 per fragment (a page's live views re-run over `__live`, outside this) |
 | `POST __op/channels/{channel}` | a browser's post (`fragment.post`), through the call's door and its checks: `{id, input}` with the record's body as `input` → `{result: record, replayed}`, as `POST /api/f/{name}/channels/{channel}` answers it; a post spends the public budget as a call does (no operation name holds a `/`) |
 | `__signin`, `__signout` | this origin's session (Sign-in, above) |
@@ -1320,10 +1340,12 @@ owner's own agent answering (the `agent` block, above):
   editor here: Agents, Hand-offs), `turn.step` records under the turn
   `hand-off:<computer>:<run>`, with its `run`, each once a tool call
   ended (`ok`: it worked; `excerpt`: its output; `text`: goose's words
-  before it), with the id `st:<computer>:<run>:<step>`; no `turn.start`
-  or `turn.end`. The computer's answer on `chat` names that turn (or,
-  when it could not post one, the agent's word of how the work ended);
-  it is never a message to an agent.
+  before it; `shot`: the sha256 of a screenshot the tool showed, a blob of
+  this fragment's the computer uploaded first, which the page shows small
+  at `__blob/<shot>`), with the id `st:<computer>:<run>:<step>`; no
+  `turn.start` or `turn.end`. The computer's answer on `chat` names that
+  turn (or, when it could not post one, the agent's word of how the work
+  ended); it is never a message to an agent.
 
 A chat made before this (a `say` operation, `chat` taking no posts) keeps
 its own page, and its agent answers through `say`, with no `work`.

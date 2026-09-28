@@ -119,7 +119,9 @@ CREATE TABLE IF NOT EXISTS paused_ops (op TEXT PRIMARY KEY, by TEXT NOT NULL, at
 CREATE TABLE IF NOT EXISTS op_breakers (op TEXT PRIMARY KEY, reset_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS file_commits (key TEXT PRIMARY KEY, sha TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS own_commits (sha TEXT PRIMARY KEY, depth INTEGER NOT NULL, at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS blobs (sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS blobs (
+  sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, mime TEXT,
+  frame INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS pointers (
   ref TEXT NOT NULL, path TEXT NOT NULL, sha TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY (ref, path));
 CREATE TABLE IF NOT EXISTS subs (
@@ -380,6 +382,8 @@ pub(crate) enum MetaKey {
     CodeError,
     /// When the blob collection runs next.
     BlobsGcAt,
+    /// When a frame's upload next collects the frames before it (blobs.rs).
+    FramesGcAt,
     /// The fragment's VAPID key, sealed (push.rs).
     Vapid,
     /// Test fleets only: a shorter ledger window (`/test/fragment ledger`).
@@ -439,6 +443,7 @@ impl MetaKey {
             MetaKey::FrameGranted => "frame_granted",
             MetaKey::CodeError => "code_error",
             MetaKey::BlobsGcAt => "blobs_gc_at",
+            MetaKey::FramesGcAt => "frames_gc_at",
             MetaKey::Vapid => "vapid",
             MetaKey::TestLedgerMs => "test_ledger_ms",
             MetaKey::TestFailDeliveries => "test_fail_deliveries",
@@ -762,23 +767,24 @@ impl FragmentCell {
     }
 
     /// The caller of a read that answers alike for everyone who may see
-    /// the fragment (a page, a file): who they are is resolved only when
-    /// the anonymous standing may not read, since no one sees less than
-    /// that (`access::effective_role` only adds to it). A refusal is the
+    /// the fragment with `needs` (a page, a file: `public`; a blob:
+    /// `viewer`): who they are is resolved only when the anonymous standing
+    /// may not read, since no one sees less than that
+    /// (`access::effective_role` only adds to it). A refusal is the
     /// resolved caller's (401 or 403).
     ///
     /// Asking the registry lets other requests run meanwhile (a deploy's
     /// pin move among them), so `facts` are read again after it: the
     /// answer's tree rows and the pin it streams from are one snapshot.
-    pub(crate) async fn reader<'a>(&self, facts: &mut Facts, caller: &'a Caller, link: bool) -> CellResult<Cow<'a, Caller>> {
-        if caller.unresolved.is_some() && self.admit(facts, caller, link, Role::Public).is_ok() {
+    pub(crate) async fn reader<'a>(&self, facts: &mut Facts, caller: &'a Caller, link: bool, needs: Role) -> CellResult<Cow<'a, Caller>> {
+        if caller.unresolved.is_some() && self.admit(facts, caller, link, needs).is_ok() {
             return Ok(Cow::Borrowed(caller));
         }
         let caller = self.identified(caller, &facts.name).await?;
         if matches!(caller, Cow::Owned(_)) {
             *facts = self.facts()?;
         }
-        self.admit(facts, &caller, link, Role::Public)?;
+        self.admit(facts, &caller, link, needs)?;
         Ok(caller)
     }
 

@@ -257,8 +257,10 @@ task to it and waits; the pet's `do` and the builder's `build` do.
   `session/prompt`, and posts each tool call, once it ended, as a
   `turn.step` on the chat's `work` (`fragment post`, as the computer:
   docs/api.md, the chat template), trying a failed post again for a
-  minute. It prints goose's last words; it exits 0 when goose ended its
-  turn, and 124 past `TIME_S` (540), when it cancels the prompt.
+  minute; a screenshot the tool showed goes up first (`fragment blob
+  put` to the chat's fragment), and the step names it (`shot`). It
+  prints goose's last words; it exits 0 when goose ended its turn, and
+  124 past `TIME_S` (540), when it cancels the prompt.
 - **The owner's memory** (docs/agent-computer.md, slice 3; docs/api.md,
   `/api/memory`): the owner's private fragment the platform records,
   where the computer is an editor (made one as it paired, and again at
@@ -444,16 +446,19 @@ together, built only from what any fragment may declare:
   30 seconds. `control` says `"signedIn": true`: on a `link` fragment an
   anonymous link holder is a viewer, and the platform refuses their post
   (401), so every record names an identity.
-- **Frames** go through `frame`, an ephemeral mutation editors call (the
-  computer is one), with `fragment call`: a JPEG of at most 85 KB as
-  base64, when the screen changed, at most one a second for a minute
-  after someone drives it and one each 5 seconds otherwise. The app keeps one row (the
-  latest frame, what is on screen, who drove it last), which `screen`
-  answers, and every page follows it live. Not a blob: a page cannot read
-  one (the site serves files at live), and a frame a second would keep a
-  blob a second for the week's grace. Not a channel: a channel is
-  history, and a record is at most 64 KiB. A frame goes from a file
-  (`--input @file`): as an argument, Linux caps it at 128 KiB.
+- **Frames are blobs** (docs/api.md, Blobs): when the screen changed, at
+  most one a second for a minute after someone drives it and one each 5
+  seconds otherwise, the computer uploads the JPEG (at most 85 KB) with
+  `fragment blob put --frame`, then names it through `frame`, an
+  ephemeral mutation editors call (the computer is one): its hash and
+  size, what is on screen, who drove it last. The app keeps that one row,
+  which `screen` answers; every page follows it live and shows
+  `__blob/<shot>`. No image is in the app's database or in any record. A
+  frame is deleted at a later frame's upload a minute after its own, so a
+  pet driven nonstop keeps about two minutes of frames; the last stays
+  while it sleeps (a week, the grace period), and a page whose frame is
+  gone shows the waking note until the next arrives. Not a channel: a
+  channel is history, and a record is at most 64 KiB.
 - **Awake** is the platform's to decide; the pet holds nothing itself.
   Its follower is a live socket, but a computer's socket is no page: its
   opening and its close neither wake the computer nor hold it. If the
@@ -463,10 +468,11 @@ together, built only from what any fragment may declare:
   leave no ledger row: the app's database holds the one row however long
   it is driven (before, each frame's id was kept a week, and a pet driven
   nonstop filled the 16 MiB within a day). What is left is the path: each
-  frame is a whole JPEG of up to 85 KB through a mutation, and every open
-  page re-runs `screen` after it, so a frame a second costs about 85 KB a
-  second per viewer. Streaming the screen to pages directly is the end
-  state (being scoped); this is the quick fix.
+  frame is an upload of up to 85 KB (Tigris charges $0.005 per 1,000
+  PUTs: about $0.43 a day at a frame a second, beside $1.74 of awake
+  time), and every open page re-runs `screen` after it and fetches the
+  frame, about 85 KB a second per viewer. Streaming the screen to pages
+  directly is the end state (docs/screen-streaming.md).
 
 ## Your computer on the desktop, and your agent on it
 

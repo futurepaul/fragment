@@ -53,7 +53,7 @@ impl<'a> Blobs<'a> {
         let size = bytes.len() as u64;
         let head = self.client.head(&self.path(&sha))?;
         if head.status == 404 {
-            self.client.call(self.client.put_blob(&self.path(&sha), bytes)?)?;
+            self.client.call(self.client.put_blob(&self.path(&sha), bytes, None)?)?;
         } else if !head.ok() {
             bail!("checking blob {sha}: http {}", head.status);
         }

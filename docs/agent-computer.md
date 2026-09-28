@@ -1,11 +1,11 @@
 # The agent computer: the brain in the cell, the hands on a computer
 
 Status: **decided 2026-09-27** (Paul; ROADMAP decision 24, which amends
-decision 10). Slices 1, 2, and 3 are built (below, "Slice 1 as built",
-"Slice 2 as built", "Slice 3 as built", and its "Memory follow-ups");
-slice 1 is measured on Paul's pet, and slices 2 and 3 wait for their real
-Sprite acceptance. Sources
-were checked on 2026-09-27, and the dependency cooldown is 2 days.
+decision 10). Slices 1 to 4 are built (below, "Slice 1 as built",
+"Slice 2 as built", "Slice 3 as built" and its "Memory follow-ups",
+"Slice 4 as built"); slice 1 is measured on Paul's pet, and slices 2
+and 3 wait for their real Sprite acceptance. Sources were checked on
+2026-09-27, and the dependency cooldown is 2 days.
 
 ## The decision
 
@@ -357,10 +357,10 @@ display as a JPEG of at most 80 KB. It uploads it with a new
 - A blob no pointer names is deleted after 7 days
   (`FRAGMENT_BLOB_GRACE_S`), by a sweep that runs at most daily. This
   includes uploads never committed (cell/src/blobs.rs).
-- Pages cannot yet read a blob by hash: that route answers on the
-  platform's host, to signed callers. The blob slice adds
-  `__blob/<sha>` on the fragment's origin, for viewers and up, serving
-  only this fragment's blobs, cached as immutable.
+- Pages read a blob by hash at `__blob/<sha>` on the fragment's origin,
+  for viewers and up, serving only this fragment's blobs, cached as
+  immutable (slice 4; before it, only the platform's host answered, to
+  signed callers).
 - The store is Tigris: $0.02 a GB-month, $0.005 per 1,000 PUTs, and
   free egress ([pricing](https://www.tigrisdata.com/pricing/)), with
   per-prefix expiry
@@ -380,6 +380,8 @@ pet's `frame` row stays: it is one replaced row, not history.
   - `goose run --no-session`;
   - the throwaway builder as the default hand-off.
 - **Slice 2:** Playwright's Chromium.
+- **Slice 4:** the frame's base64 JPEG (in `frame`'s input, the pet's
+  row, and its page's data URL).
 - **The relay:**
   - `frame`, and `screen` and its row;
   - the capture loop;
@@ -944,6 +946,79 @@ the facts" (read-only):
   - an unreferenced blob is collected after the grace period;
   - no row or record holds image bytes.
 - **Size:** cell 60, CLI 50, template 40, e2e 100.
+
+**Slice 4 as built** (docs/api.md, Blobs and Serving; docs/computers.md).
+Paul: "Screenshots should be going in blob storage or served as urls
+from the machine, not db rows." Where it differs from the plan above:
+- **`__blob/<sha256>`** answers on the fragment's origin, `GET` or `HEAD`,
+  to viewers and up, through the same check as its pages (so a `members`
+  fragment's blobs are its members', and on a `public` one whoever holds
+  only `public` is refused, as its `work` is). It serves only this
+  fragment's blobs (their keys are under its npub: another's hash is
+  404), `private, max-age=31536000, immutable`, `nosniff`, with ranges and
+  304s. Its type is the one the upload declared, recorded beside the
+  blob, when that is passive media (images but SVG, MP4, WebM, MP3, WAV,
+  PDF); anything else, and every blob from before, is
+  `application/octet-stream`, so an editor's upload never runs as a page
+  there.
+- **`fragment blob put <name> <file> [--frame]`** uploads a file typed by
+  its extension and prints its sha256. Computers get it with a CLI
+  release and `CLI_VERSION` raised to it; until then a pet made from this
+  template shows no screen (its uploads fail), and steps carry no shot.
+- **The pet's screen:** `pet.mjs` uploads each changed frame as a blob,
+  then calls `frame` with `{shot, size, width, height, title, driver}`;
+  the app's one row (`shown`) holds that, and `screen` answers it. The
+  page shows `./__blob/<shot>`, and the waking note when a frame is gone.
+  The base64 path is deleted: `jpeg` in `frame`'s schema and the row,
+  the JPEG check, and `--input @file`. A pet made before keeps its own
+  copy of the old code (a template is copied at creation), which the
+  platform still serves; given the new files, it drops its old `screen`
+  table, the JPEG with it.
+- **Frames have a class of their own.** At about a frame a second, the
+  week's grace would hold ~600,000 frames (86,400 a day; 60 KB each is
+  ~5 GB a day, ~36 GB held per pet), and worse, the daily sweep deletes
+  at most 1,000 blobs a run, so ~85,000 a day would pile up for good. So
+  an upload with `?frame` marks the blob a frame, and a frame's upload,
+  at most once a minute, deletes the frames last uploaded more than a
+  minute before (the grace period, when shorter; never one a pointer
+  names). A pet driven nonstop keeps about two minutes of frames (~120,
+  ~10 MB) and makes one bulk delete a minute; its last frame stays while
+  it sleeps, until the grace period. It is platform-side and needs no
+  bucket rule. PUTs still cost what they cost: $0.005 per 1,000 is about
+  $0.43 a day at a frame a second (a quarter of the $1.74 of awake time),
+  $0.09 at one each 5 seconds.
+- **Step screenshots are the tools' own**, not a capture after each step
+  as Screens (above) planned: a web step through Stagehand shows no
+  picture and needs none, and a capture per step is an upload per step.
+  When a tool call's result carries an image
+  (Cua Driver's `get_window_state`, the browser's `screenshot`: goose
+  v1.52.0 passes MCP images through in `tool_call_update`), the task
+  client writes it to a temporary file, uploads it to the fragment its
+  steps go to (`fragment blob put`; the computer is an editor there),
+  and the step carries `shot`. An upload that fails leaves the step
+  without one; the step still posts. The chat's page shows it 180 px
+  wide under the step's output, a link to it whole (the desktop opens it
+  in its viewer). What the model is sent is unchanged. Step screenshots
+  are unreferenced blobs, kept a week; at more than 1,000 a day in one
+  fragment, the daily sweep's cap would fall behind them too.
+- **The e2e** (`blobs`, `templates`): `blob put` prints the hash; a
+  member viewer reads it as its PNG (immutable, nosniff), revalidates it
+  (304); an outsider is 403 and an anonymous visitor 401 on a `members`
+  fragment; an HTML upload is served as bytes; another fragment's hash
+  is 404; on a fragment the daily pass leaves alone, a frame is gone at
+  the next frame's upload after its grace, and the new frame and a
+  non-frame blob stay. The pet: the old JPEG input is refused (400);
+  `screen` answers the hash and metadata and nothing more; its computer
+  (on a fake screen) uploads its frame and names it, a link holder reads
+  it, and the page, in Chrome, shows it from `__blob`; Cua Driver's step
+  names its PNG, readable on the pet; a hand-off's step in the chat names
+  its blob, readable on the chat's origin, and the chat's page shows the
+  thumbnail; no `work` record holds the image.
+- **Size:** cell +135/−41 (the route, the frame class, the collection
+  shared by both sweeps), the chat page +8/−4, core +19 (the served
+  types and their test), task client +25/−4, CLI +46/−12, the pet
+  +43/−34, e2e +159/−13, docs. Over the plan: the frame class, which
+  the plan did not foresee.
 
 **Later: the live view.** This is screen-streaming.md's first slice,
 plus `__screen/now.jpg`. It removes the `frame` row (about −200 lines in

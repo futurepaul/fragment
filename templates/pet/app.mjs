@@ -1,8 +1,9 @@
 // The pet: the latest frame of its computer's screen, and who drove it
-// last. The computer (computer/pet.mjs, an editor here) stores each frame
-// through `frame`, and every page follows `screen` live. People drive it
-// by posting to `control`, which the computer follows. Nothing here keeps
-// history: one row, replaced. Its agent (`do`) drives it too: the hands
+// last. The computer (computer/pet.mjs, an editor here) uploads each frame
+// as a blob and names it through `frame`, and every page follows `screen`
+// live and shows the blob (`__blob/<shot>`). People drive it by posting to
+// `control`, which the computer follows. Nothing here keeps history, nor
+// any image: one row, replaced. Its agent (`do`) drives it too: the hands
 // every computer has (goose, a session per chat: docs/agent-computer.md),
 // with Stagehand on this screen's Chrome, and Cua Driver for other apps.
 import { DurableObject } from "cloudflare:workers";
@@ -75,28 +76,29 @@ function ok(out, what) {
 export class App extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
-    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS screen (
-      id INTEGER PRIMARY KEY CHECK (id = 1), jpeg TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
-      title TEXT NOT NULL, driver TEXT, at INTEGER NOT NULL)`);
+    // `screen` held the JPEG itself before frames were blobs: its one row goes
+    ctx.storage.sql.exec("DROP TABLE IF EXISTS screen");
+    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS shown (
+      id INTEGER PRIMARY KEY CHECK (id = 1), shot TEXT NOT NULL, size INTEGER NOT NULL, width INTEGER NOT NULL,
+      height INTEGER NOT NULL, title TEXT NOT NULL, driver TEXT, at INTEGER NOT NULL)`);
   }
 
-  frame({ jpeg, width, height, title = "", driver = null }) {
-    // a JPEG's first bytes (FF D8 FF), in base64
-    if (!jpeg.startsWith("/9j/")) throw new Error("a frame is a base64 JPEG");
+  frame({ shot, size, width, height, title = "", driver = null }) {
+    if (!/^[0-9a-f]{64}$/.test(shot)) throw new Error("a frame names its blob by its sha256");
     const at = Date.now();
     // a frame that names no driver (its computer just started) keeps the last one
     this.ctx.storage.sql.exec(
-      `INSERT INTO screen (id, jpeg, width, height, title, driver, at) VALUES (1, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (id) DO UPDATE SET jpeg = excluded.jpeg, width = excluded.width, height = excluded.height,
-         title = excluded.title, driver = coalesce(excluded.driver, screen.driver), at = excluded.at`,
-      jpeg, width, height, title, driver, at,
+      `INSERT INTO shown (id, shot, size, width, height, title, driver, at) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (id) DO UPDATE SET shot = excluded.shot, size = excluded.size, width = excluded.width,
+         height = excluded.height, title = excluded.title, driver = coalesce(excluded.driver, shown.driver), at = excluded.at`,
+      shot, size, width, height, title, driver, at,
     );
     return { at };
   }
 
   // the screen as the computer last sent it, or null before its first frame
   screen() {
-    return this.ctx.storage.sql.exec("SELECT jpeg, width, height, title, driver, at FROM screen").toArray()[0] ?? null;
+    return this.ctx.storage.sql.exec("SELECT shot, size, width, height, title, driver, at FROM shown").toArray()[0] ?? null;
   }
 
   // A job, for editors (the owner, and their agent, capped at editor): one
