@@ -55,7 +55,7 @@ use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
-use crate::fragment::{Caller, FragmentCell, MetaKey};
+use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 use crate::js;
 use crate::ops::Invocation;
 use crate::routed::Credential;
@@ -314,6 +314,26 @@ impl FragmentCell {
     /// computer's sockets are none.
     pub(crate) fn viewers(&self) -> usize {
         self.state.get_websockets_with_tag(LIVE_TAG).len().saturating_sub(self.state.get_websockets_with_tag(COMPUTER_TAG).len())
+    }
+
+    /// `GET /api/presence`: who has this fragment open now, to its owner
+    /// alone (their desktop's panes ask, `__presence`): each principal with
+    /// a live socket once, whether or not its page shares presence, and
+    /// anonymous visitors as a count.
+    pub(crate) fn presence_api(&self, caller: &Caller) -> CellResult<Response> {
+        self.name()?;
+        if caller.principal() != Some(self.must(MetaKey::Owner)?.as_str()) {
+            return Err(CellError::new(ErrorCode::Forbidden, "only its owner sees who has a fragment open"));
+        }
+        let (mut people, mut anonymous) = (BTreeSet::new(), BTreeSet::new());
+        for st in self.state.get_websockets_with_tag(LIVE_TAG).iter().filter_map(state_of) {
+            if st.signed() {
+                people.insert(st.principal);
+            } else {
+                anonymous.insert(st.principal);
+            }
+        }
+        json_response(&json!({ "people": people, "anonymous": anonymous.len() }))
     }
 
     /// Test fleets: forgets what this activation knows of its sockets, as

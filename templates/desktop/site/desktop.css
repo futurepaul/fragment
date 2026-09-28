@@ -82,8 +82,8 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; }
 .item .more { opacity: 0; color: var(--text-tertiary); transition: opacity .12s; }
 .item:hover .more, .item:focus-within .more, .item .more[aria-expanded="true"] { opacity: 1; }
 @media (hover: none) { .item .more { opacity: 1; } }
-.row .shared { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; color: var(--text-tertiary); flex: none; }
-.row .shared svg { width: 13px; height: 13px; }
+.row .shared, .pane-head .shared { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; color: var(--text-tertiary); flex: none; }
+.row .shared svg, .pane-head .shared svg { width: 13px; height: 13px; }
 .menu { position: fixed; z-index: 20; min-width: 150px; padding: 4px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); box-shadow: 0 10px 28px rgba(0,0,0,.35); }
 .menu button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 10px; border: 0; border-radius: 6px; background: none; text-align: left; font-size: 14px; }
 .menu button:hover, .menu button:focus-visible { background: var(--bg-hover); outline: none; }
@@ -139,6 +139,22 @@ body.reordering iframe { pointer-events: none; }
 .pane-icon svg { width: 15px; height: 15px; }
 .pane-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .pane-sub { color: var(--text-tertiary); font-family: var(--font-mono); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex-shrink: 9; }
+/* an app pane's sharing, after its title, and who else has it open, before its actions (desktop.js);
+   a narrow pane keeps its title: the words go, then presence is a count, then the sharing goes */
+.pane { container: pane / inline-size; }
+.pane-sharing { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex-shrink: 4; font-size: 12px; color: var(--text-tertiary); white-space: nowrap; }
+.pane-sharing .words { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.presence { display: inline-flex; align-items: center; flex: none; margin-right: 4px; }
+.presence .av { display: grid; place-items: center; width: 22px; height: 22px; margin-left: -6px; border: 2px solid var(--bg-sidebar); border-radius: 50%; background: var(--surface-muted); color: var(--text-secondary); font-size: 10px; font-weight: 700; object-fit: cover; }
+.presence .av:first-child { margin-left: 0; }
+.presence .av.more { width: auto; min-width: 22px; padding: 0 5px; border-radius: 999px; }
+.presence .count { display: none; align-items: center; gap: 3px; font-size: 12px; color: var(--text-tertiary); }
+.presence .count svg { width: 13px; height: 13px; }
+@container pane (max-width: 460px) {
+  .pane-sharing .words, .presence .av { display: none; }
+  .presence .count { display: inline-flex; }
+}
+@container pane (max-width: 340px) { .pane-sharing { display: none; } }
 .pane-action { width: 26px; height: 26px; border-radius: 7px; color: var(--text-tertiary); }
 .pane-action svg { width: 14px; height: 14px; }
 .pane-action:hover { color: var(--text-primary); }
