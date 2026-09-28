@@ -172,9 +172,10 @@ function post(on, body, id) {
 }
 
 // The owner's memory (docs/agent-computer.md, slice 3): their private
-// fragment memory.<username>, kept at ~/memory, synced both ways before and
-// after each task (a hand-off made this computer an editor there; one that
-// is none has no memory, quietly). goose writes it with its own tools, as
+// fragment the platform records (its name in ./memory, written at each sync;
+// none: no memory), kept at ~/memories/<name>, which ~/memory links to (its
+// owner may name another: `fragment memory use`), synced both ways before and
+// after each task (this computer is an editor there). goose writes it with its own tools, as
 // its hints say (fragment_core::computer HANDS_SH), and what it changed is
 // committed to main as this computer when the task ends: git history is the
 // review and the undo. Its skills (skills/<name>/SKILL.md) are goose's own,
@@ -183,11 +184,34 @@ function post(on, body, id) {
 // rewritten: every one in the session's first task, then, at the start of a
 // task, those changed since (what the session was told is kept beside its
 // id), at most MEMORY_MAX characters, the rest named.
-const MEMORY = `memory.${NAME.split(".")[1]}`;
+const MEMORY = read(path.join(DIR, "memory"));
 const MEMORY_DIR = path.join(os.homedir(), "memory");
 const MEMORY_MAX = 8000;
+// ~/memory, the recorded memory's folder: a link, moved when it changes (a
+// folder of before, slice 3's, is kept under the name it synced)
+function placed() {
+  const [home, dir] = [path.join(os.homedir(), "memories"), path.join(os.homedir(), "memories", MEMORY)];
+  const at = fs.lstatSync(MEMORY_DIR, { throwIfNoEntry: false });
+  if (at && !at.isSymbolicLink()) {
+    const was = JSON.parse(read(path.join(MEMORY_DIR, ".fragment/state.json")) || "{}").name || `before-${Date.now()}`;
+    fs.mkdirSync(home, { recursive: true });
+    fs.renameSync(MEMORY_DIR, path.join(home, was));
+  }
+  fs.mkdirSync(dir, { recursive: true });
+  if (at?.isSymbolicLink() && fs.readlinkSync(MEMORY_DIR) === dir) return dir;
+  if (at?.isSymbolicLink()) fs.unlinkSync(MEMORY_DIR);
+  fs.symlinkSync(dir, MEMORY_DIR);
+  return dir;
+}
 async function synced() {
-  const out = await run(CLI, ["sync", MEMORY, "--dir", MEMORY_DIR, "--apply-mass-delete", "--json"]).then((r) => r.stdout, (e) => String(e.stdout || e.message));
+  if (!MEMORY) return;
+  let dir;
+  try {
+    dir = placed();
+  } catch (e) {
+    return note(`${MEMORY} has no folder: ${e.message}`, true);
+  }
+  const out = await run(CLI, ["sync", MEMORY, "--dir", dir, "--apply-mass-delete", "--json"]).then((r) => r.stdout, (e) => String(e.stdout || e.message));
   let said = {};
   try {
     said = JSON.parse(out.trim().split("\n").pop());
@@ -195,6 +219,7 @@ async function synced() {
   if (!said.ok && !["not_found", "forbidden"].includes(said.error?.code)) note(`${MEMORY} was not synced: ${cut(String(said.error?.message ?? out).trim(), 300)}`, true);
 }
 function recall() {
+  if (!MEMORY) return { files: {}, note: "" };
   const dir = path.join(MEMORY_DIR, "memory");
   const facts = (fs.existsSync(dir) ? fs.readdirSync(dir) : []).filter((f) => f.endsWith(".md")).sort().map((f) => [`memory/${f}`, read(path.join(dir, f))]);
   const files = Object.fromEntries(facts.map(([f, text]) => [f, createHash("sha256").update(text).digest("hex")]));
@@ -237,8 +262,8 @@ if (!session) {
 await synced();
 const skills = path.join(os.homedir(), ".agents/skills");
 try {
-  fs.mkdirSync(path.join(MEMORY_DIR, "skills"), { recursive: true });
-  if (!fs.lstatSync(skills, { throwIfNoEntry: false })) fs.mkdirSync(path.dirname(skills), { recursive: true }), fs.symlinkSync(path.join(MEMORY_DIR, "skills"), skills);
+  if (MEMORY) fs.mkdirSync(path.join(MEMORY_DIR, "skills"), { recursive: true });
+  if (MEMORY && !fs.lstatSync(skills, { throwIfNoEntry: false })) fs.mkdirSync(path.dirname(skills), { recursive: true }), fs.symlinkSync(path.join(MEMORY_DIR, "skills"), skills);
 } catch (e) {
   note(`its skills are not linked: ${e.message}`, true);
 }

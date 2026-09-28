@@ -677,25 +677,18 @@ without a delete condition is unfinished design, not debt.
   the first ends), proven by an e2e that hands off twice from one chat
   at once and gets both answers, in order.
 
-## A person's memory is the fragment named `memory`, granted only by a hand-off
+## The agent's remembered fact can lose a computer's write to the same file
 
-- **Observed:** 2026-09-27, slice 3 of docs/agent-computer.md. The
-  agent treats `memory.<username>` as its owner's memory by its name
-  (agent/src/memory.rs): it makes it when there is none, and it makes
-  each computer it hands work to an editor there. A computer gets
-  memory only through a hand-off. A throwaway's grant waits until its
-  computer has paired (the agent's alarm, every 10 s), so its first
-  task may start without the memory (its writes still land when the task
-  ends). A pet driven only from its own page has none.
-- **Risk:** a person who already had a fragment named `memory` finds it
-  used as their memory, and their computers syncing it; a task on a
-  throwaway, or on a pet no hand-off reached, goes without the owner's
-  facts and skills.
-- **First proof:** a person with a `memory` fragment of their own
-  before slice 3; a throwaway's first task answering without a fact
-  its owner's memory holds.
-- **Delete when:** the platform records each person's memory fragment
-  (made with the person, or claimed once) and makes every computer they
-  pair an editor there (`POST /api/computers/pair`), proven by an e2e
-  where a newly paired computer's first task, handed off or not, is
-  told the memory.
+- **Observed:** 2026-09-27, `memory-followups`. `platform__remember`
+  (agent/src/memory.rs) reads `memory/<topic>.md` at main, then commits
+  the whole file (`POST /api/f/<memory>/files`), which expects nothing of
+  main. A computer's sync that commits the same file between the read
+  and the write is overwritten; git keeps it in history.
+- **Risk:** a fact goose wrote in a task that ends while the owner tells
+  the agent another, to the same topic, drops out of the memory.
+- **First proof:** a memory file whose history shows a computer's line
+  gone at the agent's next commit.
+- **Delete when:** the files API takes an expected blob per path (the
+  cell's commit already takes `expect`), the agent passes the one it
+  read and reads again on a conflict, proven by an e2e that commits
+  between the read and the write and keeps both lines.

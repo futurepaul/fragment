@@ -626,6 +626,12 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   owner's turns (capped, read-only). Open: its acceptance on a real
   Sprite, and seeding a replacement computer's sessions from the chats'
   transcripts.
+- *Since `memory-followups` (2026-09-27, Paul):* the platform records
+  each person's memory (`/api/memory`; a fragment of theirs named
+  `memory` is never taken over), and makes every computer of theirs an
+  editor there as it pairs, and again at each sync. The per-hand-off
+  grant is gone. The agent keeps a fact itself (`platform__remember`,
+  one commit), so "remember X" wakes no computer.
 - Decision 20: `agent` in `fragment.json`; turns from signed-in
   visitors' messages and `job.agent` steps, acting as decision 17 says,
   on the owner's budget. The chat template declares one; C's seam goes.

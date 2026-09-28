@@ -261,6 +261,12 @@ enum Cmd {
         #[command(subcommand)]
         sub: AgentCmd,
     },
+    /// Your memory: the fragment of yours your computers keep facts and
+    /// skills in, and your agent reads (`use` names one of yours)
+    Memory {
+        #[command(subcommand)]
+        sub: Option<MemoryCmd>,
+    },
     /// A computer an agent works on: `fragment computer serve` runs goose's
     /// developer tools for the agent that attaches it (`fragment agent computer`)
     Computer {
@@ -342,6 +348,18 @@ enum Cmd {
         /// List available templates
         #[arg(long)]
         list: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryCmd {
+    /// Name a fragment of yours as your memory; your computers become its editors
+    Use {
+        /// The fragment (a label: yours)
+        fragment: String,
+        /// Replace the memory you have (it is left as it is)
+        #[arg(long)]
+        replace: bool,
     },
 }
 
@@ -1462,6 +1480,21 @@ fn run(cli: Cli) -> Result<()> {
             println!("canonical:   {link}");
             println!("share link:  {link}");
             println!("webhook URL: {webhook}");
+        }
+        Cmd::Memory { sub } => {
+            let v = match sub {
+                None => c.call(c.get("/api/memory")?)?,
+                Some(MemoryCmd::Use { fragment, replace }) => {
+                    // a bare label is one of yours: the signed API resolves it
+                    let fragment = if fragment.contains('.') { fragment } else { c.call_as::<FragmentStatus>(c.get(&format!("/api/f/{fragment}/status"))?)?.name };
+                    c.call(c.put_json("/api/memory", &json!({ "fragment": fragment, "replace": replace }))?)?
+                }
+            };
+            json_exit(j, &v);
+            match v["name"].as_str() {
+                Some(name) => println!("your memory is {name}"),
+                None => println!("you have no memory yet: the platform makes one when a computer of yours pairs, or name one of yours (`fragment memory use <fragment>`)"),
+            }
         }
         Cmd::Agent { sub } => {
             let a = agents_client(cli.verbose)?;

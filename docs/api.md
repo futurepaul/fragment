@@ -227,8 +227,8 @@ random bytes, the registry keeps their SHA-256).
 | `GET /cli?key=<npub>&proof=` | the link `fragment login` prints: `proof` is the key's own NIP-98 event for `POST <platform>/cli/approve`, good for ten minutes (the proof of possession; without it, stale, or by another key: 400). Signed in: a page showing the key's last eight characters, to compare with the terminal, and an Add button; signed out: → sign in first, keeping the link |
 | `GET /cli?key=&proof=&computer=<name>` | the link `fragment login --computer <name>` prints: the proof is for `POST <platform>/cli/approve?computer=<name>`, so it pairs that computer and nothing else (the same key without the name, or under another, is 400). The page says it is a computer named `<name>`, owned by the person, acting only in the fragments they add it to and those it makes (theirs, on their budget), never as them; and a Pair button |
 | `POST /api/model/chat/completions` | a computer | an OpenAI-style chat request (`messages`, and what else OpenRouter takes) → OpenRouter's answer, on the `model` it names from `fragment_proto::COMPUTER_MODELS`: `z-ai/glm-5.3-flashx` (the platform's, and the default when it names none), `z-ai/glm-5.3-flash` (its slower variant, an eighth of its price), or `typesafe/jev-router` (a router with variable pricing); any other, or OpenRouter's `models` fallbacks, is 400. It goes with `provider: {"sort": "latency"}` unless the request names its own `provider` (a sort pins no provider, so OpenRouter's sticky routing keeps a cached prompt's calls where the cache is); its `reasoning` and `session_id` go as they came (no reasoning is added), and any `transforms` is dropped. With the computer's owner's OpenRouter key, reserved on their month ($0.20; the router $0.50, since its price is known only once it answers) and settled to its reported cost (a `computer.text` usage row naming the computer and the model, as an agent's call is an `agent.text` one); anyone else 403; past the budget 402 `budget_used_up`. With `"stream": true` the answer is server-sent events relayed as they arrive (the platform adds `stream_options.include_usage`), settled once as the stream ends: to the `usage.cost` its last chunk carried, or to its reservation when none came (cut off, or the computer left, which ends the call); the node ends an answer at 120 s. `fragment model`, and `fragment model --serve` (below) |
-| `POST /api/computers/pair` | signed by a new key | `{token}` → the computer the token names (a fragment's own, which its Sprite was handed at its boot), holding that key, now an editor of its fragment; again by the same key, the same one; a spent, expired, or unknown token 401 |
-| `POST /cli/approve` | the page's form (`key`, `proof`, `computer`): the key joins the signed-in person at once, or, with `computer`, becomes their new computer of that name (again, the same one; a name they already use is 409); a key someone else holds, or a revoked one, is 409; another origin 403; the CLI waits for `GET /api/identities/me` to answer. People themselves come only from sign-in (`POST /api/identities {kind: "person"}` is 400), and computers from this page (`{kind: "computer"}` is 400) |
+| `POST /api/computers/pair` | signed by a new key | `{token}` → the computer the token names (a fragment's own, which its Sprite was handed at its boot), holding that key, now an editor of its fragment and of its owner's memory (below); again by the same key, the same one; a spent, expired, or unknown token 401 |
+| `POST /cli/approve` | the page's form (`key`, `proof`, `computer`): the key joins the signed-in person at once, or, with `computer`, becomes their new computer of that name, an editor of their memory (below) (again, the same one; a name they already use is 409); a key someone else holds, or a revoked one, is 409; another origin 403; the CLI waits for `GET /api/identities/me` to answer. People themselves come only from sign-in (`POST /api/identities {kind: "person"}` is 400), and computers from this page (`{kind: "computer"}` is 400) |
 
 On fragment.club the platform is cross-site from every fragment
 (`fragment.club` and `<label>--<username>.fragment.boats`), so its
@@ -415,6 +415,9 @@ platform (`Content-Security-Policy`), and keep their URL to the platform
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/fragments` | a person with a username; an agent or a computer for its owner (the fragment is the owner's, under their username, on their budget, with its maker an editor) | `{name, visibility?, template?, throwaway?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). `visibility` defaults to `link`, and to `members` for a template whose `fragment.json` declares a computer (the pet) or any capability (`fragments`, `frame`: the desktop): its owner's alone until they share it (`publish.rs`, `first_visibility`). The fragment's own key is made by the node's `KEYS` and stays sealed there. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`desktop`, `chat`, `todo`, `inbox`, `calories`, `pet`, `builder`, `blank`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). `throwaway: true` (an agent's only, for its owner; anyone else's is 403) makes a hand-off's throwaway: the fragment records that agent (`throwawayOf` in its status), which may then delete it (Agents, Hand-offs). |
+| `GET /api/memory` | any signer | → `{name}`: the signer's memory (an agent's or a computer's: its owner's; an agent names only its owner in `for`), as the platform recorded it, or `null` before it made one. A person's memory is one private fragment of theirs, holding `memory/*.md` (facts and preferences) and `skills/<name>/SKILL.md`, that the platform makes on first need (`members`, the person's, named `memory.<username>`, or `memory-2` … `memory-9` when that name is taken: a fragment of theirs is never taken over) and records; every computer of theirs is made an editor there, as it pairs (`POST /api/computers/pair`, `POST /cli/approve`), all at once when it is made, and a fragment's own computer again at each sync. Their computers' hands keep it (docs/computers.md), and their agent reads its facts and keeps one (Agents) |
+| `POST /api/memory` | a person; an agent, for its owner | → `{name}`: the same, made first when there is none (a computer's is 403: it is given its owner's as it pairs) |
+| `PUT /api/memory` | a person (an agent's or a computer's is 403) | `{fragment, replace?}` → `{name}`: a fragment the person owns becomes their memory (`fragment memory use <fragment>`; `fragment memory` shows it), and every computer of theirs an editor there, each fragment's own told to sync; another memory recorded already is 409 unless `replace` is true, and it is left as it is |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, sharing?}]}`; `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility (a fragment from before sends it once, on its next change or alarm; until then it has none); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
 | `DELETE /api/f/{name}` | owner; an agent, for a throwaway it made (Agents, Hand-offs) | → `{ok, deleted}`; the app's database goes too; the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes, frame?, throwawayOf?}` (`frame`: when live's `fragment.json` asks for it, whether its owner allows it; `throwawayOf`: the agent that made it as a throwaway) |
@@ -1018,7 +1021,7 @@ else).
 | `GET /api/a/{name}/state?wait_ms=` | owner | → `AgentState` `{active, driving, outcome, error, answer}` (`crates/proto`) of the owner's own conversation: `active` while a turn of it runs or waits behind a chat's, `answer` its newest message when that is the model's text; answered once it is not active or `wait_ms` (0-25000, default 0) has passed: the read waits in the agent's cell, so a client waiting out a turn asks about every 25 s (`fragment agent say` does) |
 | `POST /api/a/{name}/turns` | owner | `{text}` (at most 16 KiB) → `{started}`; during the owner's own turn, `{steered: true}` (read between steps); during another (a chat's), `{queued: true}`: it runs next, in the owner's conversation. At most 64 messages wait (429) |
 | `POST /api/a/{name}/stop` | owner | → `{active, driving}`; a tool in flight is interrupted; the messages waiting run next |
-| `GET /api/a/{name}/tools` | owner | → `{tools: ["platform__create_fragment", "platform__hand_off", "platform__list_fragments", "platform__operations", "platform__call", "platform__list_files", "platform__read_file", "<fragment>__<op>", ...]}`: what the owner's own turn has (below) |
+| `GET /api/a/{name}/tools` | owner | → `{tools: ["platform__create_fragment", "platform__hand_off", "platform__remember", "platform__list_fragments", "platform__operations", "platform__call", "platform__list_files", "platform__read_file", "<fragment>__<op>", ...]}`: what the owner's own turn has (below) |
 | `POST /api/a/{name}/listen` | owner | `{fragment, channel? ("chat"), reply? ("say")}` → `{fragment, channel, reply, subscription}`: the agent subscribes itself to the channel (it must be a member) with an inbox URL of its own (`AGENT_URL`); at most 500. `reply` answers a chat whose channel takes no posts (one made before phase 7); a postable channel is answered by a post. A new listen first drops those of fragments the agent is no longer in: of the fragments its memberships leave out, up to 16 are asked, and one that answers 404 or 403 loses its listens (so does one whose subscribe answers either, and a chat whose answer's post does). Listening again to the same fragment's channel is the same listen: its inbox URL, so the one subscription (made again if the fragment dropped it) |
 | `POST /api/a/{name}/job` | owner (a fragment's job) | `{id, asker, conversation, channel?, text}` → `{turn}`: a turn of a fragment's own agent for `asker`, once per `id` (again: the same `turn`, `replayed`); it waits for a turn of its own and never steers another. Its conversation is `job:<asker>:<conversation>`, under `<fragment>/<channel>/` when it names a channel |
 | `GET /api/a/{name}/job?turn=` | the same | → `{ended, outcome, text?, error?}`: `running` until it ends, then `idle` (answered, `text` its answer), `stopped`, `yielded`, or `error` |
@@ -1058,8 +1061,8 @@ asker reaches: `platform__list_fragments` (`GET /api/fragments?for=`),
 turn acts with there), `platform__call` (`{fragment, operation, input}`),
 `platform__list_files`, `platform__read_file`, and, in its owner's turns
 only, `platform__create_fragment` (from a template, as a person makes
-one: the fragment is its owner's, the agent an editor) and
-`platform__hand_off` (below). The agent writes no fragment's files and
+one: the fragment is its owner's, the agent an editor),
+`platform__hand_off` (below), and `platform__remember` (below). The agent writes no fragment's files and
 deploys none: building is a computer's (Hand-offs). A call is `POST
 /api/f/<fragment>/ops/<op>?for=<asker>` signed by the agent with the id
 `tc:<40 hex of SHA-256 of the tool-call id>`: a replayed call replays
@@ -1088,15 +1091,27 @@ and whose result comes later, as a note (so: do its own part first, and
 never describe a result it has not received); only its owner's turns
 hand off. It replaced a guide to building
 apps in the cell (2026-09-27). An agent made with a default instruction
-of any age (they all open alike) is told today's. A person's agent's
-turns for its owner are also told the owner's memory (Hand-offs, below):
-`Your owner's memory, which their computer keeps in memory.<username>
-(you only read it: to add to it or change it, hand it off):`, then each
-`memory/*.md` at its main under its path, at most 2,000 characters in
-all, or `nothing yet.`. It is read as the turn starts (`GET
-/api/f/memory.<username>/files` for the owner, and each file again only
-when main moved since the agent last read them). A guest's turn is told
-none of it, and a fragment's own agent has none.
+of any age (they all open alike) is told today's.
+
+A person's agent's turns for its owner are also told the owner's memory
+(`/api/memory`, above): `Your owner's memory, their private fragment
+<name>, which their computers keep too (keep or correct a fact with
+platform__remember):`, then each `memory/*.md` at its main under its
+path, at most 2,000 characters in all; or `Your owner's memory holds
+nothing yet (keep a fact with platform__remember).`. It is read as the
+turn starts (the memory's name once, then `GET /api/f/<memory>/files` for
+the owner, and each file again only when main moved since). And they
+may keep a fact themselves, so "remember X" wakes no computer:
+`platform__remember({topic, fact, replaces?})` adds `- <fact>` as a line
+of `memory/<topic>.md` (`topic` 1-40 of `[a-z0-9-]`; `fact` one line of
+at most 500 characters), or, with `replaces` (text in that file, at most
+500 characters), puts the fact in its place. It is one commit to the
+memory's main (`POST /api/f/<memory>/files`, for the owner, keyed by the
+call, so a replayed call commits nothing again; the memory is made first
+if there is none), refused past 4 KiB for the file. Facts only: skills,
+code, and anything else are the computers'. A guest's turn is offered no
+such tool and told none of the memory; a fragment's own agent has
+neither.
 
 A model call (`agent/src/model.rs`) asks for at most 4096 tokens and has
 100 s, under the node's 120 s fetch timeout (`CELLD_FETCH_TIMEOUT_S`,
@@ -1163,14 +1178,10 @@ name), signed by the agent (for its owner or no one), is the second
 owner-only action an agent takes. The platform takes it only for a
 fragment its owner owns and a computer its owner has of that name, and
 makes it an editor whatever the body says (a throwaway's computer, not
-paired yet, is made one by the agent's alarm once it is). The same grant
-makes it an editor of the owner's memory, `memory.<username>`: a private
-fragment of theirs (`members`) that the agent makes at the first
-hand-off (`POST /api/fragments {name, visibility: "members"}`, the agent
-an editor, as for anything it makes). It holds `memory/*.md`, facts
-and preferences, and `skills/<name>/SKILL.md`. The hands' task client syncs it
-before and after each task, and commits what goose wrote to its main
-(docs/agent-computer.md, slice 3 as built). Each step is a
+paired yet, is made one by the agent's alarm once it is). The computer
+is an editor of its owner's memory already (`/api/memory`, above): the
+hands' task client syncs it before and after each task, and commits what
+goose wrote to its main (docs/agent-computer.md, slice 3). Each step is a
 `turn.step` record on the chat's `work` channel (the chat template's,
 above), under the hand-off's turn `hand-off:<computer>:<run>`, and goose's
 answer, once it ended its turn, is the computer's post on the chat's own

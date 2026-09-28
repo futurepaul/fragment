@@ -154,6 +154,29 @@ impl Call for MintPairing {
     type Answer = PairingToken;
 }
 
+/// `POST /memory`: the fragment the platform records as `owner`'s memory
+/// (docs/agent-computer.md, slice 3), recording `name` when there is none
+/// yet (the first recorded stays), or in place of the one there with
+/// `replace` (its owner's choice): the one recorded, if any.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Memory {
+    pub owner: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub replace: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct MemoryName {
+    pub name: Option<String>,
+}
+
+impl Call for Memory {
+    const PATH: &'static str = "/memory";
+    type Answer = MemoryName;
+}
+
 /// `POST /computers/redeem`: a key pairs as the computer a token names
 /// (the router checked the key signed the request). Again, by the same
 /// key, the same computer.

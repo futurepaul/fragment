@@ -120,6 +120,9 @@ pub(crate) enum Ask {
     Paired,
     /// Its owner removed it: the Sprite goes.
     Destroy,
+    /// Its owner named another memory: its files sync again (awake, now;
+    /// asleep, as it wakes), which gives the hands its name.
+    Resync,
     /// A job's command, `id` its run's and step's: started once.
     Exec { id: String, exec: ComputerExec },
     /// That command's state, waiting on the computer up to `POLL_WAIT_S`.
@@ -336,6 +339,13 @@ impl ComputerCell {
                 c
             }
             (Some(c), Ask::Paired) => c,
+            (Some(c), Ask::Resync) => {
+                // unlike any sync's: a sync that ran meanwhile does not count
+                let mut f = self.files()?;
+                f.synced = Some(format!("resync@{now}"));
+                self.save_files(&f)?;
+                c
+            }
             (Some(mut c), Ask::Destroy) => {
                 if c.phase != Phase::Gone {
                     c.phase = Phase::Destroy;
@@ -684,6 +694,8 @@ impl ComputerCell {
         let synced = self.sync(c, &f).await;
         let Ok(mut now) = self.files() else { return };
         match synced {
+            // asked to sync again meanwhile (`Resync`): it stays due
+            Ok(()) if now.synced != f.synced => return,
             Ok(()) => now.synced = Some(want),
             Err(e) if now.failed.as_ref() != Some(&want) => {
                 self.tell(c, "computer.failed", &format!("its sync did not finish: {}", e.message)).await;
@@ -698,8 +710,9 @@ impl ComputerCell {
 
     /// Brings its CLI up to `CLI_VERSION` and pulls live into `~/fragment`
     /// (`exec::SYNC`), then its `start` service goes and, when declared,
-    /// comes again from the new files (on the new CLI); then its hands,
-    /// which restart themselves on a new CLI.
+    /// comes again from the new files (on the new CLI); then it is made an
+    /// editor of its owner's memory, and its hands are written, which
+    /// restart themselves on a new CLI.
     async fn sync(&self, c: &Row, f: &Files) -> CellResult<()> {
         let host = self.cfg.computer_platform()?;
         let start = f.start.as_deref().map_or(String::new(), |s| exec::start_script(s, &host, &c.fragment));
@@ -717,10 +730,14 @@ impl ComputerCell {
                 return Err(upstream(format!("{} would not run start as a service ({status}): {}", self.sprite(), tail(&out))));
             }
         }
+        // its owner's memory (memory.rs): it is an editor there, which a
+        // computer paired before memories were becomes at this sync
+        let memory = crate::memory::grant_named(&self.env, self.cfg, &c.owner, &c.fragment).await;
         // the hands (docs/agent-computer.md), on every computer: written
-        // each sync, and a service made once (409: it runs already, and
-        // restarts itself when its script changed)
-        let (status, out) = keys::sprites(&self.env, "exec", &["bash", "-c", exec::HANDS, "fragment-hands"], &exec::hands_files(&host)).await?;
+        // each sync, with the memory's name, and a service made once (409:
+        // it runs already, and restarts itself when its script changed)
+        let named = memory.as_deref().unwrap_or_default();
+        let (status, out) = keys::sprites(&self.env, "exec", &["bash", "-c", exec::HANDS, "fragment-hands", named], &exec::hands_files(&host)).await?;
         let hands = exec::answer(&out).filter(|_| status == 200).and_then(|h| String::from_utf8(h).ok());
         let hands = hands.ok_or_else(|| upstream(format!("{} did not take its hands ({status}): {}", self.sprite(), tail(&out))))?;
         let (status, out) = keys::sprites(&self.env, "exec", &["sprite-env", "services", "create", exec::HANDS_SERVICE, "--cmd", "bash", "--args", &hands, "--no-stream"], "").await?;
@@ -732,7 +749,8 @@ impl ComputerCell {
         if !behind.is_empty() {
             return Err(upstream(format!("its CLI is {behind}, and the release has none as new as {} yet", exec::CLI_VERSION)));
         }
-        Ok(())
+        // a memory that did not take: tried again when it next wakes
+        memory.map(|_| ()).map_err(|e| upstream(format!("its owner's memory: {}", e.message)))
     }
 
     /// An entry in its fragment's `events`; one that does not land is logged.

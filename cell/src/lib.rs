@@ -47,6 +47,7 @@ mod keys;
 mod ledger;
 mod live;
 mod members;
+mod memory;
 mod ops;
 mod plane;
 mod principal;
@@ -407,8 +408,9 @@ async fn remove_computer(env: &Env, url: &Url, removed: calls::RemovedComputer) 
 
 /// `POST /api/computers/pair`: a fragment's own computer pairs, signed by
 /// the key it just made, with the token its fragment's computer cell
-/// handed it: the computer becomes its fragment's editor, for its owner.
-async fn pair_computer(mut req: Request, env: &Env, url: &Url) -> CellResult<Response> {
+/// handed it: the computer becomes its fragment's editor, for its owner,
+/// and an editor of its owner's memory (memory.rs; its sync tries again).
+async fn pair_computer(mut req: Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
     #[derive(Deserialize)]
     struct Pair {
         token: String,
@@ -420,7 +422,7 @@ async fn pair_computer(mut req: Request, env: &Env, url: &Url) -> CellResult<Res
     let (Some(fragment), Some(owner)) = (view.name.clone(), view.owner.clone()) else {
         return Err(CellError::host("a paired computer has a name and an owner"));
     };
-    let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: None };
+    let identity = fragment_proto::Identity { id: owner.clone(), kind: IdentityKind::Person, owner: None, username: None };
     let routed = Routed { name: fragment.clone(), url: url.clone(), mode: None, signed: Some(Signed::new(identity, None)), credential: None };
     let role = serde_json::to_vec(&json!({ "role": "editor" })).map_err(|e| CellError::host(e.to_string()))?;
     let put = Request::new(url.as_str(), Method::Put)?;
@@ -429,6 +431,9 @@ async fn pair_computer(mut req: Request, env: &Env, url: &Url) -> CellResult<Res
         return Err(CellError::host(format!("{} paired, but did not join {fragment}: {}", view.id, added.text().await.unwrap_or_default())));
     }
     computer::ask(env, &fragment, &computer::Ask::Paired).await?;
+    if let Err(e) = memory::grant(env, cfg, url, &owner, &view.id).await {
+        console_error!("{fragment} paired, and was not made an editor of its owner's memory: {}", e.message);
+    }
     json_answer(&view)
 }
 
@@ -1087,7 +1092,12 @@ async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellResult<Respons
             }
             release_username(env, username).await
         }
-        (Method::Post, ["api", "computers", "pair"]) => pair_computer(req, env, &url).await,
+        (Method::Post, ["api", "computers", "pair"]) => pair_computer(req, env, cfg, &url).await,
+        (method @ (Method::Get | Method::Post | Method::Put), ["api", "memory"]) => {
+            let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+            let who = signer_for(env, &req, &url, &body).await?;
+            memory::route(env, cfg, &url, method, who, &body).await
+        }
         (Method::Post, ["api", "model", "chat", "completions"]) => model_call(req, env, ctx, cfg, &url).await,
         (_, ["api", "identities", rest @ ..]) => {
             let rest = rest.to_vec();

@@ -2,8 +2,9 @@
 
 Status: **decided 2026-09-27** (Paul; ROADMAP decision 24, which amends
 decision 10). Slices 1, 2, and 3 are built (below, "Slice 1 as built",
-"Slice 2 as built", "Slice 3 as built"); slice 1 is measured on Paul's
-pet, and slices 2 and 3 wait for their real Sprite acceptance. Sources
+"Slice 2 as built", "Slice 3 as built", and its "Memory follow-ups");
+slice 1 is measured on Paul's pet, and slices 2 and 3 wait for their real
+Sprite acceptance. Sources
 were checked on 2026-09-27, and the dependency cooldown is 2 days.
 
 ## The decision
@@ -844,6 +845,94 @@ docs/api.md, Hand-offs and Agents). Where it differs from the plan above:
 - **Size**: task client +62/−2, the hands' hints +12/−4, agent +130/−23
   (`memory.rs` 102), e2e +136/−4, docs. No CLI or cell change, where the
   plan guessed CLI 400 and cell 100.
+
+**Memory follow-ups** (Paul, 2026-09-27, approving all four
+recommendations after slice 3; `memory-followups`). These supersede
+slice 3's first bullet, how a computer is granted, and "the brain reads
+the facts" (read-only):
+- **The platform records each person's memory**
+  (`cell/src/memory.rs`; a `memories` table in the registry, one row per
+  person; docs/api.md, `/api/memory`).
+  - It is made on first need: members only, the person's, named
+    `memory.<username>`, or the next free of `memory-2` … `memory-9`.
+  - It is found by that record, never by its name, so a fragment the
+    person made called `memory` is never taken over.
+  - Two first needs at once record one; the other's fragment is deleted
+    again.
+  - A memory its owner deleted is made again, under its recorded name,
+    at the next grant.
+  - Its owner may name a fragment of their own as it: `fragment memory
+    use <fragment>` (`PUT /api/memory`; never an agent's or a computer's).
+    This is for the `memory.<username>` slice 3's agent made (#79 was
+    deployed alone, so Paul has `memory.futurepaul`), which would
+    otherwise be an ordinary fragment beside a new `memory-2`. Every
+    computer of theirs is made an editor there, and each fragment's own
+    syncs again (`Ask::Resync`), so its task client syncs the named one.
+    Each memory has its own folder, `~/memories/<name>`, which `~/memory`
+    links to (a sync folder is bound to one fragment); slice 3's
+    `~/memory` folder is moved under the name it synced.
+    Replacing a recorded memory needs `--replace`; the old one is left as
+    it is. `fragment memory` shows it. This is a new CLI command
+    (computers need none of it: `CLI_VERSION` stays).
+- **Computers are granted as they pair, and at each sync.** Each of
+  these makes the computer an editor of its owner's memory (the memory
+  made first if there is none):
+  - a fragment's own computer's pairing (`POST /api/computers/pair`);
+  - a machine its owner approves as a computer (`POST /cli/approve`,
+    whose page now says so);
+  - making the memory, which makes every computer the person has now an
+    editor at once;
+  - each sync of a fragment's own computer
+    (`cell/src/computer.rs`), which also writes the memory's name to
+    `~/.fragment/agent/memory` for the task client. So a computer paired
+    before this shipped gets both at its first sync, which the new task
+    client's digest brings anyway.
+
+  A failed grant does not fail a pairing (the sync tries again), and it
+  fails a sync, which is tried again when the computer next wakes.
+  Because every sync grants it again, an owner cannot take a computer out
+  of their memory except by removing the computer. The hand-off's
+  per-hand-off memory grant is gone; the chat grant stays.
+- **The brain keeps a fact itself**: `platform__remember({topic, fact,
+  replaces?})`, in its owner's turns only (`agent/src/memory.rs`).
+  - It adds `- <fact>` as a line of `memory/<topic>.md`, or puts the fact
+    in place of `replaces`.
+  - It makes one commit to the memory's main through the files API, keyed
+    by the tool call, and makes the memory first if there is none.
+  - Its limits: the fact is one line of at most 500 characters, the topic
+    is `[a-z0-9-]{1,40}`, and the file stays under 4 KiB (past that, it
+    says to tidy the file first).
+  - It writes facts only; skills and code stay the hands'.
+  - The work guide gains a line (about 40 tokens): keep a lasting fact
+    the owner tells you, or asks you to remember, with
+    `platform__remember` yourself, with no computer.
+  - The facts view now says so, and names the recorded memory.
+  - One shortcut is in the debt ledger: it reads the file, then writes
+    it whole, so a computer's commit to the same file in between is lost
+    from main (git keeps it).
+- **The e2e** (`builder`):
+  - the owner's own `memory.<username>` (with a file) exists before the
+    builder deploys;
+  - the builder's pairing makes and records `memory-2.<username>`,
+    members only, with the computer an editor, before any hand-off, and
+    the owner's own `memory` is untouched;
+  - asked again, the same one is answered, and a stranger has none;
+  - `fragment memory use memory` is refused without `--replace` and
+    never taken from a computer; with it, the owner's own becomes their
+    memory, the computer an editor there, `memory-2` left as it was, and
+    the rest of the section runs on it;
+  - the agent keeps "tea with milk" itself: one commit, no build run, no
+    goose request; a 600-character fact is refused; then it corrects the
+    tea line in place;
+  - the computer is taken out of the memory and its name file removed
+    (as one paired before), and the builder deploys: its next sync makes
+    it an editor again and writes the name, its next task starts with
+    the facts the agent kept, and no memory sync failed;
+  - a guest's turn is offered no `platform__remember` (the `agents`
+    section's tool list gains it).
+- **Size**: cell +206/−19 (`memory.rs` 139, the registry's record 41),
+  agent +139/−84, task client and the hands' script +19/−12, e2e
+  +119/−27, docs.
 
 **4. Screenshots as blobs on pages.**
 - **What changes:** `__blob/<sha>`, `fragment blob put`, `shot` in each

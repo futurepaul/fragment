@@ -17,14 +17,15 @@
 //!
 //! The job is told the asking chat (`chat`: its session, and where its steps
 //! go), and the computer is made an editor of the chat, so it posts each
-//! step there as its owner's computer, and of its owner's memory (`grant`,
-//! memory.rs; a throwaway's once it is paired). Both are calls for the
-//! asker, capped as every call is (decision 17), and the computer spends
-//! its owner's budget, as everything a fragment does. No turn waits for the work: a turn that starts one ends
-//! there, the platform saying it is on its way (`acknowledgement`), so the
-//! model is never asked to go on and cannot write a result it has not
-//! received (Paul's chat, 2026-09-27: "on its way… The computer is done."
-//! and an invented answer). The computer posts its steps and its answer in
+//! step there as its owner's computer (`grant`; a throwaway's once it is
+//! paired). Both are calls for the asker, capped as every call is
+//! (decision 17), and the computer spends its owner's budget, as everything
+//! a fragment does. (It is an editor of its owner's memory already: the
+//! platform makes it one as it pairs, cell/src/memory.rs.) No turn waits
+//! for the work: a turn that starts one ends there, the platform saying it
+//! is on its way (`acknowledgement`), so the model is never asked to go on
+//! and cannot write a result it has not received (Paul's chat, 2026-09-27:
+//! "on its way… The computer is done." and an invented answer). The computer posts its steps and its answer in
 //! the chat, as itself (computer/task.mjs), and the agent's alarm watches
 //! the run between turns (`watch`). When it ends, its result reaches the
 //! conversation that asked as a note (`note`): input the agent reads, never
@@ -47,7 +48,6 @@ use worker::{Method, SqlStorage, Storage};
 
 use crate::fleet::{self, Fleet};
 use crate::js;
-use crate::memory;
 use crate::store::{self, kv_get, kv_set, kv_u64};
 
 pub const TOOL: &str = "platform__hand_off";
@@ -110,7 +110,7 @@ pub async fn start(fleet: &Fleet, sql: &SqlStorage, conv: &str, request_id: &str
     if let Some(chat) = &chat {
         input["chat"] = json!(chat);
     }
-    let granted = !throwaway && grant(fleet, sql, conv, &fragment).await;
+    let granted = !throwaway && grant(fleet, conv, &fragment).await;
     let body = json!({ "id": op_id(request_id), "input": input });
     let (status, answer) = fleet.call(Method::Post, &format!("/api/f/{fragment}/ops/{op}"), Some(&body)).await.map_err(|e| e.to_string())?;
     let Some(run) = answer["result"]["run"].as_i64().filter(|_| status == 200) else {
@@ -166,15 +166,21 @@ pub async fn set_home(fleet: &Fleet, sql: &SqlStorage, owner: &str, computer: Op
 /// Makes the hand-off's computer an editor of the asking chat, so it posts
 /// its steps there as its owner's computer (the platform takes this from an
 /// agent for its owner's own computer and chat only: cell/src/agents.rs
-/// `add_computer`), and of its owner's memory (memory.rs). Whether that is
-/// settled: it is, or never will be (a chat not its owner's); a throwaway's
-/// computer is not one until it paired.
-async fn grant(fleet: &Fleet, sql: &SqlStorage, conv: &str, computer: &str) -> bool {
-    let chat = match store::chat_of(conv) {
-        Some((chat, _)) => matches!(memory::add(fleet, chat, computer).await, 200 | 403),
-        None => true,
-    };
-    memory::grant(fleet, sql, computer).await && chat
+/// `add_computer`). Whether that is settled: it is, or never will be (a
+/// chat not its owner's); a throwaway's computer is not one until it paired.
+async fn grant(fleet: &Fleet, conv: &str, computer: &str) -> bool {
+    let Some((chat, _)) = store::chat_of(conv) else { return true };
+    match fleet.call(Method::Put, &format!("/api/f/{chat}/members/{computer}"), Some(&json!({ "role": "editor" }))).await {
+        Ok((200, _)) => true,
+        Ok((status, answer)) => {
+            worker::console_warn!("{computer} is not let post in {chat} ({status}): {}", fleet::message(&answer));
+            status == 403
+        }
+        Err(e) => {
+            worker::console_warn!("{computer} is not let post in {chat}: {e:#}");
+            false
+        }
+    }
 }
 
 /// The job a named computer offers for work: `do`, else `build`, on a
@@ -248,7 +254,7 @@ async fn look(fleet: &Fleet, sql: &SqlStorage, owner: &str, h: &Watched, now: i6
     let ended = run.as_ref().is_none_or(|r| matches!(r.status, RunStatus::Succeeded | RunStatus::Held | RunStatus::Blocked));
     if !ended && now - h.started_at < WATCH_MAX_MS {
         // a throwaway's computer, once it paired, is let post its steps too
-        if h.granted == 0 && grant(&fleet.acting_for(owner), sql, &h.conv, &h.fragment).await {
+        if h.granted == 0 && grant(&fleet.acting_for(owner), &h.conv, &h.fragment).await {
             sql.exec("UPDATE handoffs SET granted = 1 WHERE fragment = ? AND run = ?", vec![h.fragment.as_str().into(), h.run.into()]).map_err(|e| anyhow!("{e}"))?;
         }
         return later(sql, h, now, false);

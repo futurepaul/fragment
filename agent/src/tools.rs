@@ -20,8 +20,9 @@
 //! The platform's own verbs (`platform__*`), for everything else: list the
 //! fragments the asker reaches, read one's operations, call one, and list
 //! and read its files, each the signed API the CLI uses; and, in its
-//! owner's turns only, make a fragment from a template for the owner, and
-//! hand work to a computer (handoff.rs). The agent builds nothing itself
+//! owner's turns only, make a fragment from a template for the owner, hand
+//! work to a computer (handoff.rs), and keep a fact in the owner's memory
+//! (memory.rs). The agent builds nothing itself
 //! (Paul, 2026-09-27): what it cannot do in a few calls goes to a computer.
 //! A fragment's own agent (`Scope`) has neither kind but one: the
 //! operations of its fragment that its block names.
@@ -45,7 +46,7 @@ use worker::{Delay, Method, SqlStorage};
 
 use crate::fleet::{self, Fleet};
 use crate::store::{chat_of, kv_u64, Session};
-use crate::{handoff, js};
+use crate::{handoff, js, memory};
 
 /// The fragments, and the tools, one agent's turn considers at most.
 pub const FRAGMENTS_MAX: usize = 16;
@@ -80,8 +81,8 @@ enum Route {
     Platform(&'static str),
 }
 
-/// The platform's verbs: (name, description, input schema). The first two
-/// are offered in its owner's turns only.
+/// The platform's verbs: (name, description, input schema). The first
+/// three are offered in its owner's turns only.
 fn platform_tools(owner_turn: bool) -> Vec<(&'static str, &'static str, Value)> {
     let fragment = json!({ "type": "string", "description": "the fragment's full name, <label>.<username>" });
     let create = (
@@ -108,7 +109,7 @@ fn platform_tools(owner_turn: bool) -> Vec<(&'static str, &'static str, Value)> 
             "throwaway": { "type": "boolean", "description": "extra hands: a new computer just for this, for work alongside other work or risky work" },
         } }),
     );
-    let mut tools = if owner_turn { vec![create, hand_off] } else { Vec::new() };
+    let mut tools = if owner_turn { vec![create, hand_off, memory::tool()] } else { Vec::new() };
     tools.extend([
         (
             "platform__list_fragments",
@@ -411,9 +412,15 @@ impl ToolProvider<Session> for FragmentTools {
             return Ok(CallToolResult::error(vec![ContentBlock::text(format!("no tool named {}", call.name))]));
         };
         let args = Value::Object(call.arguments.unwrap_or_default());
-        if let Route::Platform(handoff::TOOL) = route {
+        if let Route::Platform(tool @ (handoff::TOOL | memory::TOOL)) = route {
             let (fleet, sql, conv, id) = (self.fleet.clone(), self.sql.clone(), self.conv.clone(), request_id.to_string());
-            return Ok(match SendFuture::new(async move { handoff::start(&fleet, &sql, &conv, &id, &args).await }).await {
+            let done = SendFuture::new(async move {
+                match tool {
+                    handoff::TOOL => handoff::start(&fleet, &sql, &conv, &id, &args).await,
+                    _ => memory::remember(&fleet, &id, &args).await,
+                }
+            });
+            return Ok(match done.await {
                 Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
                 Err(why) => CallToolResult::error(vec![ContentBlock::text(why)]),
             });
