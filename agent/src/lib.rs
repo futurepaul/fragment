@@ -378,7 +378,7 @@ const TURN_NOTES: &str = "Your answer to a chat message is posted to that chat f
      platform__call reach a fragment you have no tools for.";
 
 /// What the agent does itself and what it hands to a computer, told on
-/// every turn with the notes above (about 250 tokens). Paul, 2026-09-27:
+/// every turn with the notes above (about 290 tokens). Paul, 2026-09-27:
 /// "the in-cell agent should only do easy and obvious stuff, it should hand
 /// off work to a computer as its primary tool." An agent that built apps
 /// itself, file by file, outlasted its model calls and its turns.
@@ -393,6 +393,8 @@ throwaway only for extra hands, alongside other work or for risky work.
 - A hand-off takes minutes, and your turn ends as it starts (the person is told it is on its way), so do your own \
 part first. The computer answers here itself, and you get its answer as a note. Don't describe results you haven't \
 received.
+- When your owner tells you a lasting fact about themselves or asks you to remember something, keep it with \
+platform__remember yourself (no computer); skills and code are the computer's.
 - Only your owner's turns can hand off (you have no platform__hand_off otherwise): tell anyone else it is theirs to \
 ask the owner.";
 
@@ -1378,7 +1380,8 @@ async fn drive_turn(setup: &Setup, cancel: CancellationToken, conv: &str, asker:
     let owner_turn = kv_get(&sql, "owner")?.is_some_and(|owner| owner == asker);
     // the computer is its owner's: it joins its owner's own agent's turns only
     let computer = if owner_turn && setup.scope.is_none() { open_computer(&setup.env, &sql).await? } else { None };
-    // and so is its memory: its facts, read into its owner's turns alone (memory.rs)
+    // and so is its memory: its facts, read into its owner's turns alone,
+    // which may keep one (memory.rs)
     let mut instructions = setup.instructions.clone();
     if owner_turn && setup.scope.is_none() {
         match memory::view(&setup.fleet.acting_for(&asker), &sql).await {

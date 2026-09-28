@@ -609,7 +609,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 let (title, lead, button, named) = match &computer {
                     Some(c) => (
                         "Pair a computer",
-                        format!("<p>A machine wants to be your computer <b>{c}</b>: an identity of its own, owned by <b>{you}</b>, that never acts as you. It works only in the fragments you add it to (<code>fragment members add &lt;fragment&gt; {c} --role editor</code>) and in those it makes, which are yours, on your budget. It cannot add keys, share anything, or make agents; <code>fragment computers rm {c}</code> removes it.</p>"),
+                        format!("<p>A machine wants to be your computer <b>{c}</b>: an identity of its own, owned by <b>{you}</b>, that never acts as you. It works only in the fragments you add it to (<code>fragment members add &lt;fragment&gt; {c} --role editor</code>), in those it makes, which are yours, on your budget, and in your memory (the facts and skills your computers keep for you). It cannot add keys, share anything, or make agents; <code>fragment computers rm {c}</code> removes it.</p>"),
                         format!("Pair {c} as your computer"),
                         format!("<input type=\"hidden\" name=\"computer\" value=\"{c}\">"),
                     ),
@@ -643,8 +643,13 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                     ask_registry(env, &calls::ApproveKey { token, key: hex }).await?;
                     return page(200, "Key added", "<p>This key is yours now. A <code>fragment login</code> waiting in a terminal finishes on its own.</p>");
                 };
-                ask_registry(env, &calls::PairComputer { token, key: hex, name: name.clone() }).await?;
-                let done = format!("<p><b>{name}</b> is your computer now, acting only where you let it. A <code>fragment login --computer</code> waiting on it finishes on its own.</p>");
+                let paired = ask_registry(env, &calls::PairComputer { token, key: hex, name: name.clone() }).await?;
+                // and an editor of its owner's memory (memory.rs)
+                let owner = paired.owner.as_deref().ok_or_else(|| CellError::host("a paired computer has an owner"))?;
+                if let Err(e) = crate::memory::grant(env, cfg, url, owner, &paired.id).await {
+                    console_error!("{name} paired, and was not made an editor of its owner's memory: {}", e.message);
+                }
+                let done = format!("<p><b>{name}</b> is your computer now, acting only where you let it, and keeping your memory. A <code>fragment login --computer</code> waiting on it finishes on its own.</p>");
                 page(200, "Computer paired", &done)
             }
             (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),

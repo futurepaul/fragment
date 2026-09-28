@@ -67,6 +67,13 @@ pub fn builder(s: &mut Suite, api: &Api) -> Result<()> {
     let made = s.cli_json(api, &home, &["create", &s.name("builder"), "--json"])?;
     let name = made["name"].as_str().unwrap_or("").to_string();
     s.hook(api, &made);
+    // a fragment of the owner's own named memory, from before any memory of theirs
+    let username = api.username(&owner)?;
+    let own = format!("memory.{username}");
+    let r = api.create_with(&owner, json!({ "name": own }))?;
+    anyhow::ensure!(r.status == 200, "the owner's own memory fragment: {r}");
+    let r = api.signed(&owner, "POST", &format!("/api/f/{own}/files"), Some(&json!({ "files": [{ "path": "notes.md", "text": "mine" }] })))?;
+    anyhow::ensure!(r.status == 200, "a file in it: {r}");
     let sprites_before: Vec<String> = s.sprites.sprites().into_keys().collect();
     let deployed = s.cli(api, &home, &["deploy", &name, "--dir", &dir_s]);
     s.ok("the builder template scaffolds and deploys", out.status.success() && deployed.status.success(), String::from_utf8_lossy(&deployed.stderr));
@@ -81,6 +88,7 @@ pub fn builder(s: &mut Suite, api: &Api) -> Result<()> {
     let computer = s.cli_keys(&sprite_home).context("the Sprite's CLI holds its key")?;
     let computer_id = api.identity(&computer)?;
     s.ok("it declares a computer, which is made and paired", ready && !computer_id.is_empty(), &sprite);
+    recorded(s, api, (&owner, &home), &own, (&computer, &computer_id))?;
     let up = s.eventually(Duration::from_secs(30), || sprite_home.join(".fragment/agent/port").exists());
     let hands = std::fs::read_to_string(sprite_home.join(".fragment/agent/hands.log")).unwrap_or_default();
     s.ok("its hands run: goose serve (the pinned one, here the stand-in) on its own model --serve", up && hands.contains(&format!("up: goose {GOOSE_VERSION}")), &hands);
@@ -305,7 +313,7 @@ fn hand_offs(s: &mut Suite, api: &Api, (owner, owner_cli): (&Keys, &Path), (buil
     );
 
     home_sessions(s, api, (owner, owner_cli), &chat, (builder, computer, builder_home))?;
-    remembers(s, api, owner, &chat, computer)?;
+    remembers(s, api, owner, &chat, (builder, computer, builder_home))?;
 
     // a guest's turn: no hand-off offered, and one it calls anyway makes nothing
     let guest = api.person()?;
@@ -322,12 +330,12 @@ fn hand_offs(s: &mut Suite, api: &Api, (owner, owner_cli): (&Keys, &Path), (buil
     let chats = s.openrouter.chats();
     let refused = chats.get(asked + 1).is_some_and(|c| c["messages"].to_string().contains("no tool named platform__hand_off"));
     s.ok(
-        "a guest's turn is offered no hand-off; one it calls anyway is refused, and no computer is made",
-        answered && !chats.get(asked).map(offered).unwrap_or_default().iter().any(|t| t == HAND_OFF) && refused && owned(api, owner, "handoff-").is_empty() && s.sprites.sprites().len() == sprites,
+        "a guest's turn is offered no hand-off and no remember; a hand-off it calls anyway is refused, and no computer is made",
+        answered && !chats.get(asked).map(offered).unwrap_or_default().iter().any(|t| t == HAND_OFF || t == REMEMBER) && refused && owned(api, owner, "handoff-").is_empty() && s.sprites.sprites().len() == sprites,
         json!({ "requests": chats.len() - asked }),
     );
     let told = chats.get(asked).map(|c| c["messages"][0]["content"].to_string()).unwrap_or_default();
-    s.ok("and it is told nothing of the owner's memory", !told.is_empty() && !told.contains("memory.") && !told.contains(TEA), &told);
+    s.ok("and it is told nothing of the owner's memory", !told.is_empty() && !told.contains("Your owner's memory") && !told.contains("tea"), &told);
     s.openrouter.clear_script();
     Ok(())
 }
@@ -437,8 +445,67 @@ fn home_sessions(s: &mut Suite, api: &Api, (owner, owner_cli): (&Keys, &Path), c
     Ok(())
 }
 
+/// The members of `fragment`: (principal, role).
+fn members(api: &Api, owner: &Keys, fragment: &str) -> Vec<(String, String)> {
+    let r = api.signed(owner, "GET", &format!("/api/f/{fragment}/members"), None).map(|r| r.body).unwrap_or_default();
+    r["members"].as_array().into_iter().flatten().map(|m| (m["principal"].as_str().unwrap_or("").to_string(), m["role"].as_str().unwrap_or("").to_string())).collect()
+}
+
+/// The owner's memory, as the platform records it (`GET /api/memory`).
+fn memory_of(api: &Api, keys: &Keys) -> Value {
+    api.signed(keys, "GET", "/api/memory", None).map(|r| r.body["name"].clone()).unwrap_or_default()
+}
+
+/// The platform's record of a person's memory (cell/src/memory.rs): their
+/// computer's pairing made it, before any hand-off, under the next free name
+/// (`own`, the owner's own fragment named memory, is never taken over),
+/// the owner's, members only, with the computer an editor there. Asked
+/// again, the same one; a stranger is told of none of theirs. Then the
+/// owner names their own as their memory (`fragment memory use`, as one an
+/// agent of theirs made before memories were recorded): refused until they
+/// say `--replace`, never the computer's to do; then it is theirs, with the
+/// computer an editor, and the one before is left as it was.
+fn recorded(s: &mut Suite, api: &Api, (owner, owner_cli): (&Keys, &Path), own: &str, (computer_keys, computer): (&Keys, &str)) -> Result<()> {
+    let memory = memory_of(api, owner).as_str().unwrap_or("").to_string();
+    let username = api.username(owner)?;
+    let status = api.status(owner, &memory)?;
+    s.ok(
+        "a computer's pairing makes its owner's memory, recorded by the platform: theirs, members only, with the computer an editor, and a fragment of theirs named memory is left as it was",
+        memory == format!("memory-2.{username}")
+            && status.body["owner"] == api.identity(owner)?.as_str()
+            && status.body["visibility"] == "members"
+            && members(api, owner, &memory).contains(&(computer.to_string(), "editor".to_string()))
+            && members(api, owner, own).len() == 1
+            && api.signed(owner, "GET", &format!("/api/f/{own}/file?path=notes.md"), None).is_ok_and(|r| r.text == "mine"),
+        json!({ "memory": memory, "status": status.body, "own": members(api, owner, own) }),
+    );
+    let (again, stranger) = (memory_of(api, owner), memory_of(api, &api.person()?));
+    s.ok("asked again, the same memory; someone else has none yet", again == memory.as_str() && stranger.is_null(), json!([again, stranger]));
+    let label = own.split('.').next().unwrap_or("");
+    let shown = s.cli_json(api, owner_cli, &["memory", "--json"]);
+    let unasked = s.cli_json(api, owner_cli, &["memory", "use", label, "--json"]);
+    let by_computer = api.signed(computer_keys, "PUT", "/api/memory", Some(&json!({ "fragment": own, "replace": true })))?;
+    let named = s.cli_json(api, owner_cli, &["memory", "use", label, "--replace", "--json"]);
+    s.ok(
+        "its owner names their own fragment as their memory (`fragment memory use`): refused without --replace, never by a computer, then recorded, the computer an editor there, the one before left as it was",
+        shown.as_ref().is_ok_and(|v| v["name"] == memory.as_str())
+            && unasked.is_err()
+            && by_computer.status == 403
+            && named.as_ref().is_ok_and(|v| v["name"] == own)
+            && memory_of(api, owner) == own
+            && members(api, owner, own).contains(&(computer.to_string(), "editor".to_string()))
+            && members(api, owner, &memory).contains(&(computer.to_string(), "editor".to_string())),
+        json!({ "shown": format!("{shown:?}"), "unasked": format!("{unasked:?}"), "by computer": by_computer.status, "named": format!("{named:?}") }),
+    );
+    Ok(())
+}
+
 /// The fact goose remembers, the other, and the skill it writes (`remembers`).
 const TEA: &str = "- Paul drinks tea, never coffee.";
+/// What the owner's agent keeps itself, and corrects TEA to (`platform__remember`).
+const REMEMBER: &str = "platform__remember";
+const MILK: &str = "Paul takes his tea with milk.";
+const GREEN: &str = "- Paul drinks green tea, never coffee.";
 const WORK: &str = "- Paul builds fragments.";
 const SKILL: &str = "• tea - How Paul likes his tea made.";
 
@@ -456,30 +523,27 @@ fn handed(s: &Suite, api: &Api, owner: &Keys, chat: &str, (id, task): (&str, &st
     Ok((done, s.openrouter.chats().into_iter().skip(from).filter(|c| c["session_id"].is_string()).collect()))
 }
 
-/// The owner's memory (docs/agent-computer.md, slice 3; agent/src/memory.rs,
-/// the task client): `memory.<username>`, which the hand-offs above made,
-/// the owner's, members only, with the home computer an editor. In `chat`,
-/// goose remembers a fact and writes a skill (through `~/.agents/skills`):
-/// both land in the memory as a commit on main. A second chat's new session
-/// on the same computer is told the fact in its first task and offered the
-/// skill (goose lists skills in its system prompt; the stand-in does as it
-/// does), and its goose remembers another. The first chat's next task is
-/// told that one at its start, and its first request carries that chat's
-/// last one as its prefix: nothing loaded is rewritten. The owner's agent
-/// reads the facts itself (asked what they drink, it answers, no computer);
-/// a guest's turn is told none (`hand_offs`).
-fn remembers(s: &mut Suite, api: &Api, owner: &Keys, chat: &str, computer: &str) -> Result<()> {
-    let memory = format!("memory.{}", api.username(owner)?);
+/// The owner's memory (docs/agent-computer.md, slice 3; cell/src/memory.rs,
+/// agent/src/memory.rs, the task client): the one the platform recorded as
+/// the builder paired (`recorded`), the home computer an editor there. In
+/// `chat`, goose remembers a fact and writes a skill (through
+/// `~/.agents/skills`): both land in the memory as a commit on main. A
+/// second chat's new session on the same computer is told the fact in its
+/// first task and offered the skill (goose lists skills in its system
+/// prompt; the stand-in does as it does), and its goose remembers another.
+/// The first chat's next task is told that one at its start, and its first
+/// request carries that chat's last one as its prefix: nothing loaded is
+/// rewritten. The owner's agent reads the facts itself (asked what they
+/// drink, it answers, no computer), keeps one itself (`platform__remember`,
+/// no computer), refuses one past the cap, and corrects one. Then the
+/// computer, taken out of the memory and without its name on its disk (as
+/// one paired before memories were), is given both at its next sync, and
+/// its next task hears the agent's facts. A guest's turn is offered no
+/// remember and told nothing (`hand_offs`).
+fn remembers(s: &mut Suite, api: &Api, owner: &Keys, chat: &str, (builder, computer, builder_home): (&str, &str, &Path)) -> Result<()> {
+    let memory = memory_of(api, owner).as_str().unwrap_or("").to_string();
     let file = |path: &str| api.signed(owner, "GET", &format!("/api/f/{memory}/file?path={path}"), None).ok().filter(|r| r.status == 200).map(|r| r.text);
     let main = || api.status(owner, &memory).map(|r| r.body["pins"]["main"].clone()).unwrap_or_default();
-    let status = api.status(owner, &memory)?;
-    let members = api.signed(owner, "GET", &format!("/api/f/{memory}/members"), None)?;
-    let editor = members.body["members"].as_array().into_iter().flatten().any(|m| m["principal"] == computer && m["role"] == "editor");
-    s.ok(
-        "the hand-offs made the owner's memory, a private fragment of theirs, with the home computer an editor there",
-        status.body["owner"] == api.identity(owner)?.as_str() && status.body["visibility"] == "members" && editor,
-        json!({ "status": status.body, "members": members.body }),
-    );
 
     // goose remembers a fact, and writes a skill: a commit on the memory's main
     let (before, remember) = (main(), format!(
@@ -535,9 +599,56 @@ fn remembers(s: &mut Suite, api: &Api, owner: &Keys, chat: &str, computer: &str)
     let told = asked.first().map(system).unwrap_or_default();
     s.ok(
         "the owner's agent is told their memory's facts, so it answers a personal question itself, with no computer",
-        answered && asked.len() == 1 && asked[0]["session_id"].is_null() && told.contains(&format!("which their computer keeps in {memory}")) && told.contains(TEA) && told.contains(WORK),
+        answered && asked.len() == 1 && asked[0]["session_id"].is_null() && told.contains(&format!("their private fragment {memory}")) && told.contains(TEA) && told.contains(WORK),
         &told,
     );
+
+    // the owner's agent keeps a fact itself (platform__remember): one
+    // commit, no computer; a fact past the cap is refused, then it corrects one
+    let build_runs = || api.signed(owner, "GET", &format!("/api/f/{builder}/runs?op=build"), None).map_or(0, |r| r.body["runs"].as_array().map_or(0, Vec::len));
+    let (runs, before, from) = (build_runs(), main(), s.openrouter.chats().len());
+    let long = "x".repeat(600);
+    let keep = |fact: &str| (REMEMBER.into(), json!({ "topic": "preferences", "fact": fact }));
+    s.openrouter.clear_script();
+    s.openrouter.script_agent(&[Reply::Tools(vec![keep(MILK), keep(&long)]), Reply::Text("I'll remember that.".into())]);
+    say(api, owner, &other, "m5", "remember that I take my tea with milk")?;
+    let answered = s.eventually(Duration::from_secs(30), || chat_records(api, owner, &other).iter().any(|r| r["body"]["text"] == "I'll remember that."));
+    let asked: Vec<Value> = s.openrouter.chats().into_iter().skip(from).collect();
+    let refused = asked.get(1).is_some_and(|c| c["messages"].to_string().contains("fact is one line of 1-500 characters"));
+    let kept = file("memory/preferences.md").unwrap_or_default();
+    s.ok(
+        "told to remember a fact, the owner's agent keeps it itself: one commit to the memory's main, the fact past the cap refused, no computer woken",
+        answered && refused && kept == format!("{TEA}\n- {MILK}\n") && main() != before && build_runs() == runs && asked.iter().all(|c| c["session_id"].is_null()),
+        json!({ "preferences": kept, "requests": asked.len(), "runs": build_runs() - runs }),
+    );
+    s.openrouter.clear_script();
+    let fix = json!({ "topic": "preferences", "fact": GREEN, "replaces": TEA });
+    s.openrouter.script_agent(&[Reply::Tools(vec![(REMEMBER.into(), fix)]), Reply::Text("Updated.".into())]);
+    say(api, owner, &other, "m6", "actually, I drink green tea")?;
+    let fixed = s.eventually(Duration::from_secs(30), || file("memory/preferences.md").is_some_and(|t| t == format!("{GREEN}\n- {MILK}\n")));
+    s.ok("and corrects one in place (`replaces`)", fixed, file("memory/preferences.md").unwrap_or_default());
+
+    // a computer that is not an editor there, nor knows its name (as one
+    // paired before memories were): its next sync makes it both, and its
+    // next task hears what the agent kept
+    let r = api.signed(owner, "DELETE", &format!("/api/f/{memory}/members/{computer}"), None)?;
+    anyhow::ensure!(r.status == 200, "the computer taken out of the memory: {r}");
+    std::fs::remove_file(builder_home.join(".fragment/agent/memory"))?;
+    let r = api.signed(owner, "POST", &format!("/api/f/{builder}/files"), Some(&json!({ "files": [{ "path": "note.txt", "text": "a deploy" }] })))?;
+    let d = api.signed(owner, "POST", &format!("/api/f/{builder}/deploy"), Some(&json!({})))?;
+    anyhow::ensure!(r.status == 200 && d.status == 200, "the builder deployed again: {r} {d}");
+    // awake, it syncs now (a task that came meanwhile would race it); asleep, as it wakes for the task
+    s.eventually(Duration::from_secs(5), || builder_home.join(".fragment/agent/memory").exists());
+    let (done, asks) = handed(s, api, owner, chat, ("m7", "Anything new?"), &[Reply::Text("Green tea, with milk.".into())], "Green tea, with milk.")?;
+    let named = std::fs::read_to_string(builder_home.join(".fragment/agent/memory")).unwrap_or_default();
+    let told = asks.first().map(prompt).unwrap_or_default();
+    s.ok(
+        "a computer no longer an editor of its owner's memory, without its name, is made both at its next sync, and its next task starts with the facts the agent kept",
+        done && named == memory && members(api, owner, &memory).contains(&(computer.to_string(), "editor".to_string())) && told.contains(GREEN) && told.contains(MILK),
+        json!({ "named": named, "prompt": told }),
+    );
+    let log = std::fs::read_to_string(builder_home.join(".fragment/agent/hands.log")).unwrap_or_default();
+    s.ok("and no sync of the memory failed", !log.contains("was not synced"), log.lines().filter(|l| l.contains("[task]")).collect::<Vec<_>>().join("\n"));
     s.openrouter.clear_script();
     Ok(())
 }

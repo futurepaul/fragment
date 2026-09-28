@@ -259,12 +259,15 @@ task to it and waits; the pet's `do` and the builder's `build` do.
   docs/api.md, the chat template), trying a failed post again for a
   minute. It prints goose's last words; it exits 0 when goose ended its
   turn, and 124 past `TIME_S` (540), when it cancels the prompt.
-- **The owner's memory** (docs/agent-computer.md, slice 3 as built): the
-  task client syncs the owner's private fragment `memory.<username>` to
-  `~/memory` before and after each task (`fragment sync …
-  --apply-mass-delete`, both ways), so what goose wrote there is committed
-  to its `main` as the computer when the task ends; a computer that is no
-  member there has no memory, and says nothing of it. `~/.agents/skills` is linked to
+- **The owner's memory** (docs/agent-computer.md, slice 3; docs/api.md,
+  `/api/memory`): the owner's private fragment the platform records,
+  where the computer is an editor (made one as it paired, and again at
+  each sync, which writes the memory's name to `~/.fragment/agent/memory`).
+  The task client syncs it to `~/memory` before and after each task
+  (`fragment sync … --apply-mass-delete`, both ways), so what goose wrote
+  there is committed to its `main` as the computer when the task ends;
+  without a name there (a computer not synced since), it has no memory,
+  and says nothing of it. `~/.agents/skills` is linked to
   `~/memory/skills`, where goose's Skills extension finds each
   `<name>/SKILL.md` and lists it for the model. The facts,
   `memory/*.md`, start a session's first task (at most 8,000
@@ -646,11 +649,12 @@ again, so it cannot make up a result it has not received.
 
 The computer is made an editor of the chat, and posts each step there as
 your computer, then goose's answer, under the steps, with no one asking
-again. It is made an editor of your memory too (`memory.<you>`, which your
-agent makes, members only, at your first hand-off): it keeps what you ask
-it to remember and the skills it writes there, for every chat and each of
-your computers, and your agent reads the facts into your own turns
-(docs/agent-computer.md, slice 3 as built). The agent's alarm watches
+again. It is an editor of your memory too (a private fragment of yours
+the platform made, `memory.<you>` unless you had one by that name): it
+keeps what you ask it to remember and the skills it writes there, for
+every chat and each of your computers. Your agent reads the facts into
+your own turns and keeps a fact you tell it itself, with no computer
+(docs/agent-computer.md, slice 3). The agent's alarm watches
 the run, and its result reaches the agent's conversation as a note (the task, what the computer said, a
 build's URL), so later questions can build on it; the agent says in the
 chat only what the computer could not (a run that failed). A throwaway

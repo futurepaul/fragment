@@ -133,12 +133,14 @@ pub const HANDS_SERVICE: &str = "hands";
 /// The task client a job runs for the hands (`node ~/.fragment/agent/task.mjs`).
 pub const TASK_MJS: &str = include_str!("computer/task.mjs");
 
-/// `bash -c HANDS fragment-hands`, `hands_files` on stdin: writes the
-/// hands' service (`hands.sh`, only when it changed: a running one notices
-/// and restarts itself) and the task client into `~/.fragment/agent`.
-/// Answers `hands.sh`'s path, which the service runs.
+/// `bash -c HANDS fragment-hands <memory>`, `hands_files` on stdin: writes
+/// the hands' service (`hands.sh`, only when it changed: a running one
+/// notices and restarts itself) and the task client into
+/// `~/.fragment/agent`, and the name of its owner's memory (`memory`, which
+/// the task client syncs; none given: kept). Answers `hands.sh`'s path,
+/// which the service runs.
 pub const HANDS: &str = r#"set -e
-a="$HOME/.fragment/agent"; mkdir -p "$a"; cd "$a"; cat > files.t
+a="$HOME/.fragment/agent"; mkdir -p "$a"; cd "$a"; cat > files.t; [ -z "${1:-}" ] || printf '%s' "$1" > memory
 sed '/^FRAGMENT-TASK$/,$d' files.t > hands.sh.t; sed '1,/^FRAGMENT-TASK$/d' files.t > task.mjs; rm files.t
 if cmp -s hands.sh.t hands.sh; then rm hands.sh.t; else mv hands.sh.t hands.sh; fi
 printf 'FRAGMENT-EXEC-BEGIN\n%s\nFRAGMENT-EXEC-END\n' "$(printf '%s' "$a/hands.sh" | base64)""#;
@@ -552,9 +554,10 @@ mod tests {
     #[test]
     fn the_hands_are_written_pinned_and_kept() {
         let home = Home::new("hands");
-        let out = home.run(HANDS, &[], &hands_files("https://fragment.test"));
+        let out = home.run(HANDS, &["memory-2.paul"], &hands_files("https://fragment.test"));
         let sh = home.path(".fragment/agent/hands.sh");
         assert_eq!(answer(&out), Some(sh.display().to_string().into_bytes()), "{out}");
+        assert_eq!(std::fs::read_to_string(home.path(".fragment/agent/memory")).unwrap(), "memory-2.paul");
         assert_eq!(std::fs::read_to_string(home.path(".fragment/agent/task.mjs")).unwrap(), TASK_MJS);
         let written = std::fs::read_to_string(&sh).unwrap();
         let header = format!("export FRAGMENT_HOST='https://fragment.test'\nv={GOOSE_VERSION} sum={GOOSE_SHA256}\n");
@@ -565,6 +568,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         home.run(HANDS, &[], &hands_files("https://fragment.test"));
         assert_eq!(std::fs::metadata(&sh).unwrap().modified().unwrap(), before);
+        assert_eq!(std::fs::read_to_string(home.path(".fragment/agent/memory")).unwrap(), "memory-2.paul", "none given: the memory's name is kept");
     }
 
     #[test]

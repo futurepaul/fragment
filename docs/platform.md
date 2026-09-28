@@ -111,6 +111,16 @@ so no platform code names a template (`cell/src/agents.rs`,
   crash cleanup, never the check: a fragment the owner made, whatever its
   name, is never an agent's to delete. The one owner-only action an agent
   takes: deleting stays its owner's everywhere else (decision 17).
+- **A person's memory** (docs/agent-computer.md, slice 3; docs/api.md,
+  `/api/memory`): the platform makes one private fragment per person on
+  first need (members only, theirs: `memory.<username>`, or the next
+  free `memory-<n>`), records it in the registry, and finds it by that
+  record, never by name, so a fragment of theirs called `memory` is never
+  taken over. It makes every computer of theirs an editor there: as each
+  pairs, all of them when it makes the memory, and a fragment's own
+  computer again at each sync (so the owner cannot take a computer out
+  of their memory but by removing it). Their agent, in their turns,
+  reads its facts and keeps one (`platform__remember`, one commit).
 - **An agent in a chat posts its work** (phase 7, C): a turn a chat
   started posts its start, each tool call, and its end to the chat's
   `work` channel, and its answer to `chat` naming the turn, when the chat

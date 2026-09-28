@@ -88,6 +88,7 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     let platform = [
         "platform__create_fragment",
         "platform__hand_off",
+        "platform__remember",
         "platform__list_fragments",
         "platform__operations",
         "platform__call",
