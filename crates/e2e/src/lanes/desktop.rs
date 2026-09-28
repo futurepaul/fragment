@@ -6,10 +6,12 @@
 //! a desktop made with the platform's new-fragment form may, with no visit
 //! to the share sheet (the form's submit is the grant; a P0 when it was
 //! not), and is its owner's alone. A chat is what New chat names one.
+//! Then the files viewer (`__files`) as a page of its own.
 
 use std::time::Duration;
 
 use anyhow::Result;
+use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
 use fragment_fakes::openrouter::Reply;
@@ -21,6 +23,21 @@ use crate::Suite;
 
 /// A picture (1×1 PNG) an answer shows.
 pub(super) const DOT_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+/// In a frame of the files viewer (`__files`): opens notes/hello.txt from
+/// its tree, in its reader.
+pub(super) const OPEN_HELLO: &str = "(() => { const a = document.querySelector('.row.file[data-path=\"notes/hello.txt\"]'); if (!a) return false; a.click(); return true; })()";
+/// Then its bar's button: the page around it opens the file as a pane.
+pub(super) const POP_OUT: &str = "(() => { const b = document.getElementById('pop'); if (!b || b.hidden || !document.querySelector('#reader pre.code')) return false; b.click(); return true; })()";
+
+/// A markdown file whose HTML must stay text in the files viewer.
+const HOSTILE_MD: &str = r#"# Not a page
+<script>window.pwned = "script"</script>
+<img src=x onerror="window.pwned = 'img'">
+<iframe src="javascript:parent.pwned = 'frame'"></iframe>
+<svg onload="window.pwned = 'svg'"></svg>
+[a link](javascript:window.pwned='link') and ![a picture](javascript:window.pwned='picture')
+"#;
 
 /// The viewer's panes, top to bottom.
 const PANES: &str = "[...document.querySelectorAll('.pane')].filter(p => !p.hidden).sort((a, b) => a.style.gridRow - b.style.gridRow).map(p => p.dataset.key)";
@@ -73,8 +90,16 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let desk = api.qualified(&owner, &desk_label)?;
     let todo = make(&s.name("dtodo"), "todo")?;
     let notes = make(&s.name("dnotes"), "blank")?;
-    let r = api.signed(&owner, "POST", &format!("/api/f/{notes}/files"), Some(&json!({ "files": [{ "path": "notes/hello.txt", "text": "hello from a file" }] })))?;
-    anyhow::ensure!(r.status == 200, "writing a file: {r}");
+    let files = json!([
+        { "path": "notes/hello.txt", "text": "hello from a file" },
+        { "path": "notes/start.md", "text": "---\ntitle: front matter\n---\n# Start\n\nSee [[linked]], or [the same](linked.md).\n" },
+        { "path": "notes/linked.md", "text": "# Linked\n\n- one\n  - nested\n" },
+        { "path": "notes/hostile.md", "text": HOSTILE_MD },
+        { "path": "code/app.js", "text": "const answer = 42;\n\nconsole.log(answer);\n" },
+        { "path": "pics/dot.png", "base64": DOT_PNG },
+    ]);
+    let r = api.signed(&owner, "POST", &format!("/api/f/{notes}/files"), Some(&json!({ "files": files })))?;
+    anyhow::ensure!(r.status == 200, "writing files: {r}");
     let label = |name: &str| name.split('.').next().unwrap_or("").to_string();
     let wait = Duration::from_secs(20);
     let st = api.status(&owner, &desk)?;
@@ -246,11 +271,12 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.eval(&page, &format!("document.querySelector('.pane[data-key={:?}] .pane-action[title=Files]').click(); true", format!("app:{notes}")))?;
     let tree_key = format!("tree:{notes}");
     s.ok("an app's files open as a pane", chrome.until(&page, &format!("!!document.querySelector('.pane[data-key={tree_key:?}]')"), wait), "");
-    let clicked = s.eventually(wait, || {
-        chrome.eval_in_frame(&page, "/__files", "(() => { const a = [...document.querySelectorAll('a')].find(a => a.textContent === 'notes/hello.txt'); if (!a) return false; a.click(); return true; })()").ok() == Some(json!(true))
-    });
-    let file_open = clicked && chrome.until(&page, "[...document.querySelectorAll('.pane')].some(p => p.dataset.key.startsWith('file:'))", wait);
-    s.ok("a file in that list opens as its own pane", file_open, format!("{:?}", panes(&mut chrome, &page)));
+    let clicked = s.eventually(wait, || chrome.eval_in_frame(&page, "/__files", OPEN_HELLO).ok() == Some(json!(true)));
+    let read = clicked && s.eventually(wait, || chrome.eval_in_frame(&page, "/__files", "document.querySelector('#reader pre.code')?.textContent === 'hello from a file'").ok() == Some(json!(true)));
+    s.ok("the pane is the files viewer: a file in its tree opens in its reader", read, "");
+    let popped = s.eventually(wait, || chrome.eval_in_frame(&page, "/__files", POP_OUT).ok() == Some(json!(true)));
+    let file_open = popped && chrome.until(&page, "[...document.querySelectorAll('.pane')].some(p => p.dataset.key.startsWith('file:'))", wait);
+    s.ok("and its bar opens the file as a pane of its own", file_open, format!("{:?}", panes(&mut chrome, &page)));
     let text = s.eventually(wait, || chrome.eval_in_frame(&page, "__file?path=", "document.body.innerText").ok().and_then(|v| v.as_str().map(|t| t.contains("hello from a file"))) == Some(true));
     let seen = chrome.eval_in_frame(&page, "__file?path=", "location.href + ' ' + document.body?.innerText").map_err(|e| e.to_string());
     s.ok("read through its own fragment's __file", text, format!("{seen:?}"));
@@ -299,5 +325,59 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let fits = chrome.eval(&page, "document.documentElement.scrollWidth <= innerWidth")? == json!(true);
     chrome.screenshot(&page, &s.scratch.join("desktop-phone.png"))?;
     s.ok("at phone width the sidebar is an overlay, and nothing scrolls sideways", narrow && overlay && back && fits, layout(&mut chrome));
+    chrome.close(page)?;
+    files_viewer(s, api, &mut chrome, &owner, &notes)
+}
+
+/// The files viewer as a page of its own (`__files`): the tree and a reader
+/// for markdown, text, and pictures; a file's HTML is only ever text; it
+/// follows writes to main; and it works at phone width.
+fn files_viewer(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, notes: &str) -> Result<()> {
+    let wait = Duration::from_secs(20);
+    let page = chrome.open(&api.site_url(notes, "__signin?return=/__files"))?;
+    chrome.viewport(&page, 1280, 800, false)?;
+    let row = |path: &str| format!("!!document.querySelector('.row.file[data-path={path:?}]')");
+    let landed = chrome.until(&page, "document.querySelector('#reader h1')?.textContent === 'blank'", wait);
+    let listed = chrome.eval(&page, &format!("{} && {} && !document.querySelector('.row.file[data-path=\"fragment.json\"]')", row("notes/hello.txt"), row("code/app.js")))? == json!(true);
+    s.ok("__files lists the fragment's files (not its machinery) and opens its README", landed && listed, chrome.eval(&page, "document.body.innerText.slice(0, 400)").unwrap_or_default());
+
+    let open = |chrome: &mut Browser, path: &str| chrome.eval(&page, &format!("location.hash = '#/{path}'; true"));
+    open(chrome, "notes/start.md")?;
+    let rendered = chrome.until(&page, "!!document.querySelector('#reader a.wikilink[data-path=\"notes/linked.md\"]') && !document.getElementById('reader').textContent.includes('front matter')", wait);
+    chrome.eval(&page, "document.querySelector('#reader a.wikilink').click(); true")?;
+    let followed = chrome.until(&page, "location.hash === '#/notes/linked.md' && document.querySelector('#reader h1')?.textContent === 'Linked' && !!document.querySelector('#reader li ul li')", wait);
+    s.ok("markdown renders without its front matter, and a [[wikilink]] opens the file it names", rendered && followed, chrome.eval(&page, "location.hash + ' ' + document.getElementById('reader').innerHTML.slice(0, 400)").unwrap_or_default());
+
+    let write = json!({ "files": [{ "path": "notes/linked.md", "text": "# Linked, again\n" }, { "path": "notes/later.md", "text": "# Later\n" }] });
+    let r = api.signed(owner, "POST", &format!("/api/f/{notes}/files"), Some(&write))?;
+    let live = r.status == 200 && chrome.until(&page, &format!("document.querySelector('#reader h1')?.textContent === 'Linked, again' && {}", row("notes/later.md")), wait);
+    s.ok("while it is open, a write to main shows: the open file re-read, a new file in the tree (__watch)", live, &r);
+
+    open(chrome, "code/app.js")?;
+    let lines = chrome.until(&page, "[...document.querySelectorAll('#reader pre.code .line')].map(l => l.textContent).join('|') === 'const answer = 42;||console.log(answer);'", wait);
+    let numbered = chrome.eval(&page, "getComputedStyle(document.querySelector('#reader pre.code .line'), '::before').content")?;
+    s.ok("a .js file shows as text, a numbered row to each line", lines && numbered.as_str().is_some_and(|c| c.contains("counter")), &numbered);
+
+    open(chrome, "pics/dot.png")?;
+    s.ok("a picture shows inline", chrome.until(&page, "document.querySelector('#reader .media img')?.naturalWidth === 1", wait), "");
+
+    open(chrome, "notes/hostile.md")?;
+    let shown = chrome.until(&page, "(document.querySelector('#reader .doc')?.textContent ?? '').includes('<script>window.pwned')", wait);
+    std::thread::sleep(Duration::from_millis(500));
+    let inert = "window.pwned === undefined && !document.querySelector('#reader .doc :is(script, iframe, svg, [onerror], [onload], a[href^=\"javascript\"], img[src^=\"javascript\"])')";
+    let safe = chrome.eval(&page, inert)? == json!(true);
+    s.ok("a file's HTML shows as text and never runs: no script, handler, frame, or javascript: link", shown && safe, chrome.eval(&page, "document.querySelector('#reader .doc')?.innerHTML").unwrap_or_default());
+    chrome.screenshot(&page, &s.scratch.join("files.png"))?;
+
+    chrome.viewport(&page, 390, 844, true)?;
+    let tucked = chrome.until(&page, "document.querySelector('.side').getBoundingClientRect().right <= 0", wait);
+    chrome.eval(&page, "document.getElementById('menu').click(); true")?;
+    let shown = chrome.until(&page, "document.querySelector('.side').getBoundingClientRect().left >= 0", wait);
+    chrome.eval(&page, "document.querySelector('.row.file[data-path=\"notes/hello.txt\"]').click(); true")?;
+    let read = chrome.until(&page, "document.querySelector('#reader pre.code')?.textContent === 'hello from a file' && !document.getElementById('files').classList.contains('nav')", wait);
+    let fits = chrome.eval(&page, "document.documentElement.scrollWidth <= innerWidth")? == json!(true);
+    chrome.screenshot(&page, &s.scratch.join("files-phone.png"))?;
+    s.ok("at phone width the tree waits behind a button, a file opens from it, and nothing scrolls sideways", tucked && shown && read && fits, "");
+    chrome.close(page)?;
     Ok(())
 }
