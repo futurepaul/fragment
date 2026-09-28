@@ -332,6 +332,27 @@ A page shows its owner's fragments in frames, signed in, only through
   kept, on to `return`; without it, the page offering the fragment in a
   tab of its own.
 
+### The share sheet in a frame of the owner's page (`__share`)
+
+The platform's session never reaches a frame of a page on another site,
+so a page that frames its owner's fragments (the desktop) shows the
+share sheet of one of them signed in the same way:
+
+- `GET <page>/__share?name=<fragment>` is served as `__frame` is (a frame
+  of that origin's own page only; `frame` declared and allowed; its owner
+  signed in there), for a fragment its owner owns (in their list as
+  `owner`; one shared with them, or not theirs, is 403);
+- the registry mints a redemption for that fragment's sheet alone (not
+  for the fragment's origin: its `__signin` refuses it), from that
+  origin's own session, bound to the page's origin, single-use, 60 s,
+  and it answers `302` to `<platform>/share/<fragment>/embed?token=`
+  (`Referrer-Policy: no-referrer`; a frame's answer, never reused from a cache);
+- there, only in a frame (anywhere else it is 401, and spent), it becomes
+  `fragment_share` (`HttpOnly; Secure; SameSite=None; Partitioned;
+  Path=/share/<fragment>`), an embed session that ends with the platform
+  session it came from, as a frame session does (Sharing, below); then
+  `302` to `/share/<fragment>`, the token gone from the URL.
+
 ### Asking first
 
 Signing in on a fragment is silent on the person's own fragments and on
@@ -357,7 +378,7 @@ to on a fragment's origin (a frame's navigation too) is a small page in
 the platform's look with the refusal's own status and reason: "You need
 to sign in" (a link to its `__signin`), "You don't have access to X"
 (ask its owner; a link to sign out of it), "This link has changed" (a
-`?view=` that opened nothing), and `__frame`'s reason. From a frame its
+`?view=` that opened nothing), and `__frame`'s or `__share`'s reason. From a frame its
 links open a tab. An API call, a fetch, an operation, a socket, and any
 request whose `Accept` names no HTML keep the JSON error. Only the
 platform's refusals become pages: the fragment marks its own for the
@@ -389,8 +410,9 @@ platform, so the fragment decides who may do what.
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /share/<name>` | the share sheet, a card laid out as a document's share dialog: who is in (usernames and pictures, from the registry's profiles) and their roles, to any member (anyone else, a 403 page); for the owner, adding people by username (an invite), the pending invites (revoke), each member's role menu (viewer, editor, or removing them), who can open it ("General access": Restricted `members`, Anyone with the link `link`, Public `public`), each menu sent as it changes; Copy link (the share link while it opens it, else its address) and Done (in the home's dialog, closes it; in a window of its own, closes that, or goes home); then, quieter, a new share link and the frame grant. Signed out: → sign in first, and back. It reads nothing from its URL |
-| `POST /share/<name>` | the sheet's form: `form` (the page's token), `action`, and its fields: `invite` (`username`, `role`: an invite for them alone, one use, seven days; answers the sheet with the `/join` link to send them), `role` (`member`, `role`: `viewer`, `editor`, or `remove`, which removes them), `remove` (`member`), `uninvite` (`invite`: its id), `visibility` (`visibility`), `rotate` (the share link only; the inbox's token and the webhook's secret are the CLI's). Done: → 303 back to the sheet; refused by the fragment (a member who is not the owner: 403): the sheet, saying why, with the refusal's status |
+| `GET /share/<name>` | the share sheet, a card laid out as a document's share dialog: who is in (usernames and pictures, from the registry's profiles) and their roles, to any member (anyone else, a 403 page); for the owner, adding people by username (an invite), the pending invites (revoke), each member's role menu (viewer, editor, or removing them), who can open it ("General access": Restricted `members`, Anyone with the link `link`, Public `public`), each menu sent as it changes; Copy link (the share link while it opens it, else its address) and Done (in a dialog, closes it, as Escape does; in a window of its own, closes that, or goes home); then, quieter, a new share link and the frame grant. Signed out: → sign in first, and back. It reads nothing from its URL. Under its embed session (below): its owner's, without the frame grant |
+| `POST /share/<name>` | the sheet's form: `form` (the page's token), `action`, and its fields: `invite` (`username`, `role`: an invite for them alone, one use, seven days; answers the sheet with the `/join` link to send them), `role` (`member`, `role`: `viewer`, `editor`, or `remove`, which removes them), `remove` (`member`), `uninvite` (`invite`: its id), `visibility` (`visibility`), `rotate` (the share link only; the inbox's token and the webhook's secret are the CLI's), `frame` (`granted`: `yes`, or anything else to stop it; under an embed session, 403). Done: → 303 back to the sheet; refused by the fragment (a member who is not the owner: 403): the sheet, saying why, with the refusal's status |
+| `GET /share/<name>/embed?token=` | a frame of its owner's page, from that page's `__share` (Sign-in, The share sheet in a frame): the sheet's embed session (`fragment_share`, on `/share/<name>`), then → the sheet |
 | `GET /join/<name>?token=` | what the invite grants (the fragment, the role, who invites), and a Join button; signed out: → sign in first, and back. An invite for someone else: a 403 page naming them; used, revoked, or expired: 404; the person is in already (at that role or above): a link to open it |
 | `POST /join/<name>` | the page's form (`form`, `token`): joins as the signed-in person, then → `/auth/fragment?name=<name>&return=/` (signed in on its origin, and there) |
 
@@ -412,6 +434,20 @@ every fragment is another origin), sever their opener, allow scripts
 and styles only inline and images only from the platform
 (`Content-Security-Policy`), and keep their URL to the platform
 (`Referrer-Policy: same-origin`: the join page's holds its invite).
+
+The sheet's embed session (`fragment_share`, from a page's `__share`)
+counts only on a request that carries no platform session, only on that
+one sheet (`GET` and `POST /share/<name>`: its cookie's path), and only
+in a frame's navigation or from the sheet's own page (`Sec-Fetch-Dest:
+iframe`, or `Sec-Fetch-Site: same-origin`). It is the sheet's owner, and
+the sheet under it answers `frame-ancestors` naming the page that asked
+for it alone (the origin its session is bound to; no `X-Frame-Options`,
+which cannot name another origin), tells its height and Done
+(`postMessage`) to that origin alone, and leaves out the frame grant,
+whose `POST` it refuses: a page never allows itself, nor stops. Another
+fragment's sheet, the home, `/join`, `/auth/*`, and the API take no such
+cookie. A request that carries the platform's session is answered as
+before, whatever else it carries.
 
 ## Control API
 
@@ -879,6 +915,7 @@ API answers on the platform's host):
 | `POST __op/channels/{channel}` | a browser's post (`fragment.post`), through the call's door and its checks: `{id, input}` with the record's body as `input` → `{result: record, replayed}`, as `POST /api/f/{name}/channels/{channel}` answers it; a post spends the public budget as a call does (no operation name holds a `/`) |
 | `__signin`, `__signout` | this origin's session (Sign-in, above) |
 | `__frame?name=&return=` | a frame of this page signed in on one of its owner's fragments (Sign-in, Frames) |
+| `__share?name=` | a frame of this page showing the share sheet of one of its owner's own fragments, signed in there (Sign-in, The share sheet in a frame) |
 | `__fragment.js` | the browser library (below) |
 | `__chat.js`, `__chat.css` | the chat's page, the platform's (docs/platform.md): `import { mount } from "./__chat.js"; mount(document.body, {suggestions?, placeholder?})` renders a chat's `chat` and `work` channels (the chat template, below) |
 | `__fragments` | `{fragments: [{name, role, url, share, sharing?}], frame}`: the fragments this fragment's owner belongs to, only to the owner signed in here, and only when `fragment.json` at live declares `"capabilities": ["fragments"]` (anyone else, or a page that does not ask, 403). `share` is its share sheet (`<platform>/share/<name>`); `sharing` is the owner's list's (`GET /api/fragments`): a read asks the owner's Principal cell alone and wakes none of the fragments listed. `frame` is whether this page may show them inside it (`__frame`; `null` when its `fragment.json` does not ask): the desktop shows a notice in place of its panes without it. A dashboard's page, such as the desktop's. `POST` `application/json` `{label, template}` → `{name, url}` makes `<label>.<username>` for the owner, as `POST /api/fragments` would, under the same conditions |

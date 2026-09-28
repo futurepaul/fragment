@@ -16,6 +16,7 @@ belongs in a template instead.
 | `__chat.js`, `__chat.css` | The chat's page (phase 7, C): messages, each turn's steps grouped above its answer, the working line, a composer, Stop for a turn's starter; the chat template's `index.html` is a shell that mounts it | It renders the records agents write (`work`, docs/api.md), so it ships with the platform rather than frozen into each chat |
 | `__signin`, `__signout` | A fragment origin's own session, through a single-use redemption from the platform; `__signin` only as a navigation of a page, `__signout` a POST from the fragment's own page | Sessions are the platform's; a fragment's code must not mint them, and another page must not set them off |
 | `__frame` | A frame of this page, signed in on one of its owner's fragments: the platform mints a frame redemption from this origin's session and sends the frame on to that fragment's `__signin`, which sets a partitioned cookie for this page only (docs/api.md, Frames) | Only for a page whose `fragment.json` asks for `frame` and whose owner allows it (below); the page's code never holds the redemption |
+| `__share` | A frame of this page showing the share sheet of one of its owner's own fragments, signed in: the platform mints a redemption for that one sheet and sends the frame on to the sheet's `embed`, which sets a partitioned cookie on that sheet's path, for this page only (docs/api.md, The share sheet in a frame) | As `__frame`; the sheet is the platform's page, and this page can neither read nor script it |
 | `__live`, `__watch` | The live socket and the CLI's watch stream, taken only from the fragment's own page (`Origin`; a socket has no CORS) | Platform protocol |
 | `__people` | Profiles (usernames, pictures) by identity | Reads the registry |
 | `__files`, `__file`, `__tree` | The fragment's files, read through the platform; `__files` is a viewer (`__files.js`, `__files.css`): a tree beside a reader for markdown, text, and pictures | Reads git with the platform's token; the viewer renders any file on the fragment's origin, so a file's text becomes DOM as text only |
@@ -27,7 +28,7 @@ belongs in a template instead.
 | Path | What |
 |---|---|
 | `/`, `/auth/*`, `/cli` | Sign-in, choosing a username, the home (your fragments, a new one, pairing your CLI), approving the CLI's key or pairing a computer |
-| `/share/<name>` | The share sheet, in a dialog on the home and in a window the desktop opens: who is in; the owner invites by username, sets roles, removes, revokes invites, sets who can open it, copies and renews the link, and allows `frame` (below). Sharing grants, so no fragment's code (which its author or an agent rewrites) may do it |
+| `/share/<name>` | The share sheet, in a dialog on the home, in a dialog in its owner's desktop (`__share`), and in a window the desktop opens when it may not frame: who is in; the owner invites by username, sets roles, removes, revokes invites, sets who can open it, copies and renews the link, and allows `frame` (below; never inside a desktop). Sharing grants, so no fragment's code (which its author or an agent rewrites) may do it |
 | `/auth/fragment` | Signing in on a fragment's origin; on one that is not the person's nor shared with them, it asks "Continue to X?" first, once (docs/api.md, Asking first) |
 | `/join/<name>?token=` | Accepting an invite: what it grants, then a click; an invite by username is its invitee's alone. Replaced a fragment-origin `__join` (a page there is its author's) |
 | `/api/*` | The signed API: fragments, members, identities, budgets, agents (`/api/agents`, `/api/a/*`, co-hosted) |
@@ -50,6 +51,22 @@ fragment's page cannot script the window it opened on one. The sharing
 pages' forms also carry a token bound to the session and arm after a
 moment (docs/api.md, Sharing).
 
+The share sheet has one more framer: its owner's own page that frames
+their fragments (the desktop), through `__share`, for one of their own
+fragments' sheets at a time. The platform's session never reaches that
+frame, so `__share` hands it an embed session instead: minted from the
+page's own session, for its owner, while its `frame` grant holds, for
+that one sheet, bound to the page's origin. Under it, and only on a
+request that carries no platform session, the sheet is the owner's on
+that sheet alone, answers `frame-ancestors` naming that page's origin
+alone, tells its height and Done to that origin alone, and leaves out
+the frame grant (so a page never allows itself). The embed cookie is
+partitioned, on the sheet's path, and counts only in a frame's
+navigation or from the sheet's own page; no other platform page, no
+other sheet, and no API takes it. This is the trust the `frame` grant
+already asks for (below): whoever changes the page's code could lay its
+own buttons over the sheet, as over the fragments it frames.
+
 ## Capabilities a fragment declares, and who grants them
 
 `fragment.json`'s `capabilities` asks for platform powers; each is
@@ -57,7 +74,8 @@ honored only for the fragment's owner viewing its page.
 
 - `fragments` (`__fragments`): the owner's list, and making fragments.
   Declaring it is enough.
-- `frame` (`__frame`): showing the owner's fragments inside the page,
+- `frame` (`__frame`, and `__share` for their own fragments' share
+  sheets): showing the owner's fragments inside the page,
   signed in as them. The desktop is the first user; a chat showing an app
   inline is the next. Declaring it is not enough: the owner allows it in
   the fragment's share sheet ("Your fragments inside it"; `PUT

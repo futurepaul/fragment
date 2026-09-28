@@ -207,23 +207,30 @@ fn sign_in(chrome: &mut Browser, api: &Api, email: &str, username: &str) -> Resu
 }
 
 /// The desktop opens the chat's share sheet as a person does, a click each
-/// on its row's … menu and on Share…: a window of its own, on the platform's
-/// origin at `sheet`.
-fn open_sheet(s: &Suite, chrome: &mut Browser, desk: &Page, chat: &str, sheet: &str) -> Result<Page> {
+/// on its row's … menu and on Share…: a dialog on the desktop, framing the
+/// platform's sheet at `sheet`, signed in through `__share`.
+fn open_sheet(s: &Suite, chrome: &mut Browser, desk: &Page, chat: &str, sheet: &str) -> Result<()> {
     chrome.front(desk)?;
-    let before: Vec<String> = chrome.pages()?.into_iter().map(|(target, _)| target).collect();
     chrome.click(desk, &format!(".more[data-fragment={chat:?}]"))?;
     anyhow::ensure!(chrome.until(desk, "!document.getElementById('menu').hidden", WAIT), "the chat's … menu did not open");
     chrome.click(desk, "#menu-share")?;
-    let mut found = None;
-    s.eventually(WAIT, || {
-        found = chrome.pages().ok().and_then(|p| p.into_iter().find(|(target, url)| url == sheet && !before.contains(target)));
-        found.is_some()
-    });
-    let (target, _) = found.with_context(|| format!("Share… opened no window on {sheet}: {:?}", chrome.pages()))?;
-    let popup = chrome.attach(&target)?;
-    chrome.front(&popup)?;
-    Ok(popup)
+    let opened = chrome.until(desk, "document.getElementById('sheet').open", WAIT)
+        && s.eventually(WAIT, || chrome.eval_in_frame(desk, sheet, "document.body.innerText.includes('General access')").ok() == Some(json!(true)));
+    anyhow::ensure!(opened, "Share… showed no sheet at {sheet} in the desktop: {}", in_sheet_text(chrome, desk, sheet));
+    Ok(())
+}
+
+/// The sheet in the desktop's dialog: where it is and what it says, for a FAIL's detail.
+fn in_sheet_text(chrome: &mut Browser, desk: &Page, sheet: &str) -> String {
+    let v = chrome.eval_in_frame(desk, sheet, "location.href + ' | ' + (document.body?.innerText ?? '').slice(-600)");
+    v.map(|v| v.as_str().unwrap_or("").to_string()).unwrap_or_else(|e| format!("{e:#}"))
+}
+
+/// Done in the sheet: the desktop's dialog closes.
+fn close_sheet(chrome: &mut Browser, desk: &Page, sheet: &str) -> Result<()> {
+    chrome.eval_in_frame(desk, sheet, "(document.querySelector('button[data-done]').click(), true)")?;
+    anyhow::ensure!(chrome.until(desk, "!document.getElementById('sheet').open", WAIT), "Done did not close the sheet's dialog");
+    Ok(())
 }
 
 fn run(s: &mut Suite, api: &Api) -> Result<()> {
@@ -295,21 +302,21 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let agent_label = format!("{}'s agent", owner.username);
 
     let sheet = format!("{platform}/share/{}", chat.name);
-    let popup = open_sheet(s, &mut chrome, &desk, &chat.name, &sheet)?;
+    open_sheet(s, &mut chrome, &desk, &chat.name, &sheet)?;
+    let in_sheet = |chrome: &mut Browser, js: &str| chrome.eval_in_frame(&desk, &sheet, js).ok() == Some(json!(true));
     let invite = "form:has(input[name=action][value=invite]) button[data-arm]";
-    let can_invite = chrome.until(&popup, &armed(invite), WAIT);
-    chrome.eval(&popup, &format!("document.querySelector('input[name=username]').value = {:?}; true", guest.username))?;
-    chrome.click(&popup, invite)?;
-    let got_link = chrome.until(&popup, "!!document.getElementById('invite-link')?.value", WAIT);
-    let link = chrome.eval(&popup, "document.getElementById('invite-link')?.value ?? ''")?.as_str().unwrap_or("").to_string();
+    let can_invite = s.eventually(WAIT, || in_sheet(&mut chrome, &armed(invite)));
+    chrome.eval_in_frame(&desk, &sheet, &format!("document.querySelector('input[name=username]').value = {:?}; document.querySelector({invite:?}).click(); true", guest.username))?;
+    let got_link = s.eventually(WAIT, || in_sheet(&mut chrome, "!!document.getElementById('invite-link')?.value"));
+    let link = chrome.eval_in_frame(&desk, &sheet, "document.getElementById('invite-link')?.value ?? ''")?.as_str().unwrap_or("").to_string();
     let invites = api.signed(&owner.keys, "GET", &format!("/api/f/{}/invites", chat.name), None)?;
     let pending: Vec<&Value> = invites.body["invites"].as_array().into_iter().flatten().filter(|i| i["invitee"] == guest.id.as_str()).collect();
     s.ok(
-        "they share it with the guest by username, in the sheet the desktop opens (a window on the platform's origin): it answers the link to send",
+        "they share it with the guest by username, in the sheet the desktop opens (a dialog on it, the platform's sheet signed in through __share): it answers the link to send",
         can_invite && got_link && link.starts_with(&format!("{platform}/join/{}?token=", chat.name)) && pending.len() == 1 && pending[0]["role"] == "viewer",
-        format!("{link:?} {invites} | {}", shown(&mut chrome, &popup)),
+        format!("{link:?} {invites} | {}", in_sheet_text(&mut chrome, &desk, &sheet)),
     );
-    chrome.close(popup)?;
+    close_sheet(&mut chrome, &desk, &sheet)?;
 
     // ---- 2. the guest accepts at /join, and lands in the chat
     let theirs = chrome.open_in(&guest.browser, &link)?;
@@ -425,18 +432,21 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.front(&desk)?;
     let badged = chrome.until(&desk, &badge, WAIT);
     s.ok("the owner's desktop shows the chat shared with one person", badged, chrome.eval(&desk, "document.getElementById('chats')?.innerHTML ?? ''").unwrap_or_default());
-    let popup = open_sheet(s, &mut chrome, &desk, &chat.name, &sheet)?;
+    open_sheet(s, &mut chrome, &desk, &chat.name, &sheet)?;
     let member = format!("input[name=member][value={:?}]", guest.id);
     // their role's menu ends in Remove access, sent as it is chosen
     let menu = format!("form:has({member}) select[name=role]");
-    let can_remove = chrome.until(&popup, &armed(&menu), WAIT);
-    chrome.eval(&popup, &format!("(s => {{ s.value = 'remove'; s.dispatchEvent(new Event('change')); return true; }})(document.querySelector({menu:?}))"))?;
-    let gone = chrome.until(&popup, &format!("document.readyState === 'complete' && !!document.querySelector('ul.people') && !document.querySelector({member:?})"), WAIT);
+    let can_remove = s.eventually(WAIT, || in_sheet(&mut chrome, &armed(&menu)));
+    chrome.eval_in_frame(&desk, &sheet, &format!("(s => {{ s.value = 'remove'; s.dispatchEvent(new Event('change')); return true; }})(document.querySelector({menu:?}))"))?;
+    let gone = s.eventually(WAIT, || {
+        in_sheet(&mut chrome, &format!("document.readyState === 'complete' && !!document.querySelector('ul.people') && !document.querySelector({member:?})"))
+    });
     s.ok(
         "the owner removes the guest in the sheet",
         can_remove && gone && chat.role_of(&guest.id).is_none(),
-        shown(&mut chrome, &popup),
+        in_sheet_text(&mut chrome, &desk, &sheet),
     );
+    close_sheet(&mut chrome, &desk, &sheet)?;
     let said = "document.getElementById('banner-text')?.textContent ?? ''";
     chrome.front(&theirs)?;
     let closed = chrome.until(&theirs, &format!("!document.getElementById('banner').hidden && ({said}).includes('access to this chat changed')"), WAIT);

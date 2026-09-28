@@ -13,6 +13,8 @@
 //!   POST /share/<name>         one of the owner's changes (`action`), then back to the sheet
 //!                              (a role of `remove` removes the member);
 //!                              an invite answers the sheet with the link to send
+//!   GET  /share/<name>/embed?token=   the owner's desktop signs its frame in on the sheet
+//!                              (`__share`): the sheet's embed session, then the sheet
 //!   GET  /join/<name>?token=   what the invite grants, and a Join button
 //!   POST /join/<name>          joins, then → the fragment, signed in on its origin
 //!
@@ -24,7 +26,8 @@
 //!
 //! - it cannot read them: they send no CORS headers, and they refuse
 //!   every frame (`auth::unframed`) but the sheet's in the platform's own
-//!   home (`frame-ancestors 'self'`: no fragment is on its origin);
+//!   home (`frame-ancestors 'self'`: no fragment is on its origin), and in
+//!   its owner's desktop through `__share` (below);
 //! - it cannot post to them: every POST's Origin must be the platform's
 //!   (`auth::same_origin`) and carry a form token bound to the session
 //!   (`fragment_core::form`), which only the page itself holds;
@@ -38,6 +41,20 @@
 //! - the click that opened one cannot confirm it: their buttons (and the
 //!   sheet's selects, each sent as it changes) arm `form::DELAY_MS` after
 //!   the page shows, and a form sent sooner is refused.
+//!
+//! The owner's desktop shows the sheet of one of their own fragments in a
+//! dialog of its own (docs/platform.md). The platform's session never
+//! reaches a frame of a page on another site, so the frame signs in as
+//! `__frame` does (publish.rs): the desktop's `__share?name=`, for its
+//! owner signed in there once they allow it to frame their fragments,
+//! mints a redemption for that one sheet and sends the frame to its
+//! `embed`, which sets the sheet's embed cookie (partitioned, on the
+//! sheet's path alone). A request that carries no platform session is its
+//! owner by that cookie, on that sheet alone and in a frame only: the sheet
+//! answers `frame-ancestors` naming that desktop's origin alone, tells its
+//! height and Done to that origin alone, and never shows the frame grant,
+//! so no desktop changes its own. Every other page here, the API, and
+//! another fragment's sheet take no such cookie.
 
 use std::collections::BTreeMap;
 
@@ -87,8 +104,12 @@ footer{display:flex;justify-content:space-between;gap:8px;margin-top:1.4em}
 
 /// Arms the page's controls `DELAY_MS` after it shows (again each time it
 /// is shown), copies a link, sends a form as its select changes, and
-/// closes the sheet (Done).
-fn script() -> String {
+/// closes the sheet (Done; framed, Escape too). Framed, it tells the page
+/// around it its height and when it is done, addressed to `parent` (an
+/// origin), else to the platform's own.
+fn script(parent: Option<&str>) -> String {
+    // a JavaScript string: JSON's
+    let to = parent.map_or_else(|| "location.origin".to_string(), |origin| json!(origin).to_string());
     format!(
         r#"<script>(() => {{
   const acting = () => document.querySelectorAll("[data-arm]");
@@ -110,14 +131,15 @@ fn script() -> String {
   }};
   // a role, a removal, or who can open it: one choice, sent as it is made
   for (const s of document.querySelectorAll("select[data-send]")) s.onchange = () => s.form.submit();
-  // in the home's dialog (only the platform's own pages may frame this
-  // one), Done closes the dialog; in a window of its own, the window, or
-  // it goes home
+  // in the home's dialog, or its owner's desktop's (only those may frame
+  // this one), Done or Escape closes the dialog; in a window of its own,
+  // Done closes the window, or it goes home
   const framed = parent !== window;
-  const tell = (share) => parent.postMessage({{ share, height: document.body.offsetHeight }}, location.origin);
+  const tell = (share) => parent.postMessage({{ share, height: document.body.offsetHeight }}, {to});
   if (framed) {{
     document.documentElement.classList.add("framed");
     tell("shown");
+    addEventListener("keydown", (e) => {{ if (e.key === "Escape") tell("done"); }});
   }}
   for (const b of document.querySelectorAll("button[data-done]")) b.onclick = () => {{
     if (framed) return tell("done");
@@ -141,6 +163,12 @@ fn policy(forms_here: bool, ancestors: &str) -> String {
 /// join page's redirects on to the fragment's, which `form-action` would
 /// refuse).
 pub(crate) fn sheet_page(status: u16, title: &str, body: &str, forms_here: bool) -> CellResult<Response> {
+    framed_by(status, title, body, forms_here, None)
+}
+
+/// `sheet_page`, whose script tells the page framing it (`parent`, an
+/// origin; `None`, the platform's own) its height and when it is done.
+fn framed_by(status: u16, title: &str, body: &str, forms_here: bool, parent: Option<&str>) -> CellResult<Response> {
     let html = format!(
         r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{t}</title>
 <style>{style}
@@ -149,7 +177,7 @@ pub(crate) fn sheet_page(status: u16, title: &str, body: &str, forms_here: bool)
         t = esc(title),
         style = auth::STYLE,
         sheet = SHEET_STYLE,
-        script = script(),
+        script = script(parent),
     );
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
@@ -165,10 +193,22 @@ pub(crate) fn sheet_page(status: u16, title: &str, body: &str, forms_here: bool)
 /// The share sheet itself: a sharing page only the platform's own pages
 /// may frame (the home shows it in a dialog: `DIALOG`). `'self'` is the
 /// platform's origin alone; every fragment is on another (docs/platform.md).
-fn sheet_framable(status: u16, title: &str, body: &str) -> CellResult<Response> {
-    let mut resp = sheet_page(status, title, body, true)?;
-    resp.headers_mut().set("content-security-policy", &policy(true, "'self'"))?;
-    resp.headers_mut().set("x-frame-options", "SAMEORIGIN")?;
+/// Under its embed session, only the owner's desktop that asked for it
+/// (`embedder`, an origin: `__share`) may, and its messages go there alone;
+/// `X-Frame-Options` cannot name another origin, so it goes.
+fn sheet_framable(status: u16, title: &str, body: &str, embedder: Option<&str>) -> CellResult<Response> {
+    let mut resp = framed_by(status, title, body, true, embedder)?;
+    let h = resp.headers_mut();
+    match embedder {
+        Some(origin) => {
+            h.set("content-security-policy", &policy(true, origin))?;
+            h.delete("x-frame-options")?;
+        }
+        None => {
+            h.set("content-security-policy", &policy(true, "'self'"))?;
+            h.set("x-frame-options", "SAMEORIGIN")?;
+        }
+    }
     Ok(resp)
 }
 
@@ -227,12 +267,14 @@ pub async fn route(req: Request, env: &Env, cfg: &Config, url: &Url, segments: &
     let method = req.method();
     let (what, name) = match segments {
         [what @ ("share" | "join"), name] => (*what, *name),
+        ["share", name, "embed"] => ("embed", *name),
         _ => return Err(CellError::new(ErrorCode::NotFound, format!("no route {}", url.path()))),
     };
     let Some(name) = fragment_named(name) else { return notice(404, "No such fragment", "This link names no fragment.") };
     match (method, what) {
         (Method::Get, "share") => sheet(&req, env, cfg, url, &name).await,
         (Method::Post, "share") => share_post(req, env, cfg, url, &name).await,
+        (Method::Get, "embed") => embed(&req, env, url, &name).await,
         (Method::Get, "join") => join_page(&req, env, cfg, url, &name).await,
         (Method::Post, "join") => join_post(req, env, cfg, url, &name).await,
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
@@ -520,26 +562,77 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     out
 }
 
+/// The session a request to one of sharing's pages carries, as the registry
+/// is asked for it: the platform's; or, on `sheet`'s share sheet and only
+/// when it carries none, the sheet's embed session (`__share`), which
+/// counts in a frame's navigation or from the sheet's own page only, as a
+/// fragment's frame cookie does (`Fetched::frame`), and names that one
+/// sheet (`calls::sheet`).
+fn carried(req: &Request, url: &Url, sheet: Option<&str>) -> CellResult<Option<calls::Session>> {
+    let secure = auth::secure(url);
+    if let Some(token) = auth::cookie_of(req, auth::SESSION_COOKIE, secure, "/")? {
+        return Ok(Some(calls::Session { token, fragment: None, frame: false }));
+    }
+    let Some(scope) = sheet.map(calls::sheet) else { return Ok(None) };
+    if !crate::fetched(req)?.frame {
+        return Ok(None);
+    }
+    Ok(auth::cookie_of(req, auth::SHARE_COOKIE, secure, &scope)?.map(|token| calls::Session { token, fragment: Some(scope), frame: true }))
+}
+
 async fn sheet(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &str) -> CellResult<Response> {
     let platform = cfg.platform(url);
-    let Some((session, live)) = auth::platform_session(req, env, url).await? else { return auth::to_login(&platform, &format!("/share/{name}")) };
+    let signed_out = || auth::to_login(&platform, &format!("/share/{name}"));
+    let Some(session) = carried(req, url, Some(name))? else { return signed_out() };
+    let token = session.token.clone();
+    let live = match ask_registry(env, &session).await {
+        Err(e) if e.code == ErrorCode::Unauthenticated => return signed_out(),
+        live => live?,
+    };
     let who = Signed::new(live.identity, None);
-    shown(env, cfg, url, name, &who, &session, None, 200).await
+    shown(env, cfg, url, name, &who, &token, live.embedder.as_deref(), None, 200).await
 }
 
 /// The sheet as it is now, with `flash` above it; a person it is not
-/// shown to gets a refusal page.
+/// shown to gets a refusal page. Under an embed session (`embedder`: the
+/// owner's desktop), the owner's alone, without the frame grant.
 #[allow(clippy::too_many_arguments)]
-async fn shown(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, session: &str, flash: Option<Flash>, status: u16) -> CellResult<Response> {
+async fn shown(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, session: &str, embedder: Option<&str>, flash: Option<Flash>, status: u16) -> CellResult<Response> {
     let title = format!("Share “{}”", label(name));
+    let not_yours = || notice(403, "Not yours to share", &format!("You are not in {}, so it is not yours to share.", esc(label(name))));
+    // it goes into a header and a script: an origin, as the desktop's cell named it
+    let origin = |e: &str| Url::parse(e).is_ok_and(|u| u.origin().ascii_serialization() == e);
+    if embedder.is_some_and(|e| !origin(e)) {
+        return Err(CellError::host(format!("an embed session's embedder {embedder:?} is not an origin")));
+    }
     match load(env, cfg, url, name, who, session).await {
-        Ok(sheet) => sheet_framable(status, &title, &render(&sheet, flash)),
-        Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::Unauthenticated) => {
-            notice(403, "Not yours to share", &format!("You are not in {}, so it is not yours to share.", esc(label(name))))
+        Ok(sheet) if embedder.is_some() && !sheet.owner() => not_yours(),
+        Ok(mut sheet) => {
+            // a desktop never shows the grant that lets it frame, nor stops it
+            if embedder.is_some() {
+                sheet.frame = None;
+            }
+            sheet_framable(status, &title, &render(&sheet, flash), embedder)
         }
+        Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::Unauthenticated) => not_yours(),
         Err(e) if e.code == ErrorCode::NotFound => notice(404, "No such fragment", &format!("There is no {}.", esc(name))),
         Err(e) => Err(e),
     }
+}
+
+/// `GET /share/<name>/embed?token=`: the owner's desktop signs its frame in
+/// on this sheet (`__share`, publish.rs). The redemption is spent for this
+/// sheet alone, and only in a frame (anywhere else it is refused, and
+/// spent), into the sheet's embed cookie: `SameSite=None; Partitioned`, so
+/// it reaches a frame in that desktop's partition only, on the sheet's path
+/// alone, and its session ends with the platform session it came from (as
+/// a frame session does). Then the sheet, with no token in its URL.
+async fn embed(req: &Request, env: &Env, url: &Url, name: &str) -> CellResult<Response> {
+    let path = calls::sheet(name);
+    let redeem = auth::query(url, "token").unwrap_or_default();
+    let redeemed = ask_registry(env, &calls::Redeem { redeem, fragment: path.clone(), framed: crate::fetched(req)?.framed }).await?;
+    let ttl_s = crate::registry::SESSION_TTL_MS / 1000;
+    auth::redirect(&path, &[auth::frame_cookie(auth::SHARE_COOKIE, &redeemed.token, &path, ttl_s, auth::secure(url))])
 }
 
 fn form_fields(bytes: &[u8]) -> BTreeMap<String, String> {
@@ -548,19 +641,20 @@ fn form_fields(bytes: &[u8]) -> BTreeMap<String, String> {
 
 /// A POST's person, once its Origin and form token hold: the token is
 /// checked against the session cookie before the registry is asked who it
-/// names.
-pub(crate) async fn poster(req: &mut Request, env: &Env, url: &Url, platform: &str, purpose: &str) -> CellResult<Result<(String, Signed, BTreeMap<String, String>), Response>> {
+/// names. On a share sheet (`sheet`), its embed session counts too
+/// (`carried`).
+pub(crate) async fn poster(req: &mut Request, env: &Env, url: &Url, platform: &str, purpose: &str, sheet: Option<&str>) -> CellResult<Result<(String, calls::LiveSession, BTreeMap<String, String>), Response>> {
     auth::same_origin(req, platform)?;
     let bytes = crate::read_body(req, FORM_MAX_BYTES).await?;
     let fields = form_fields(&bytes);
-    let Some(session) = auth::cookie_of(req, auth::SESSION_COOKIE, auth::secure(url), "/")? else {
+    let Some(session) = carried(req, url, sheet)? else {
         return Ok(Err(notice(401, "Sign in first", "This page's session ended. Sign in, then open it again.")?));
     };
-    if let Err(refused) = form::check(&session, purpose, fields.get("form").map_or("", String::as_str), js::now_ms()) {
+    if let Err(refused) = form::check(&session.token, purpose, fields.get("form").map_or("", String::as_str), js::now_ms()) {
         return Ok(Err(notice(403, "Not sent", refused.message())?));
     }
-    match ask_registry(env, &calls::Session { token: session.clone(), fragment: None, frame: false }).await {
-        Ok(live) => Ok(Ok((session, Signed::new(live.identity, None), fields))),
+    match ask_registry(env, &session).await {
+        Ok(live) => Ok(Ok((session.token, live, fields))),
         Err(e) if e.code == ErrorCode::Unauthenticated => Ok(Err(notice(401, "Sign in first", "This page's session ended. Sign in, then open it again.")?)),
         Err(e) => Err(e),
     }
@@ -568,10 +662,13 @@ pub(crate) async fn poster(req: &mut Request, env: &Env, url: &Url, platform: &s
 
 async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str) -> CellResult<Response> {
     let platform = cfg.platform(url);
-    let (session, who, fields) = match poster(&mut req, env, url, &platform, &purpose("share", name)).await? {
+    let (session, live, fields) = match poster(&mut req, env, url, &platform, &purpose("share", name), Some(name)).await? {
         Ok(posted) => posted,
         Err(page) => return Ok(page),
     };
+    let who = Signed::new(live.identity, None);
+    // the owner's desktop's frame (`__share`), when its embed session posts
+    let embedder = live.embedder.as_deref();
     let field = |k: &str| fields.get(k).map_or("", |v| v.trim());
     let member = || match field("member") {
         m if npub::is_identity(m) => Ok(m.to_string()),
@@ -590,7 +687,7 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
         "invite" => match invite(env, url, name, &who, field("username"), role()).await {
             Ok((username, role, token)) => {
                 let link = format!("{platform}/join/{name}?token={token}");
-                return shown(env, cfg, url, name, &who, &session, Some(Flash::Invited { who: username, role, link }), 200).await;
+                return shown(env, cfg, url, name, &who, &session, embedder, Some(Flash::Invited { who: username, role, link }), 200).await;
             }
             Err(e) => Err(e),
         },
@@ -615,6 +712,8 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
         // the share link only: the inbox's token and the webhook's secret are
         // integrations', rotated with the CLI
         "rotate" => ask(env, url, name, &who, Method::Post, "/api/rotate", Some(json!({ "scopes": ["view"] }))).await,
+        // never from inside a desktop, which could otherwise allow itself
+        "frame" if embedder.is_some() => Err(CellError::new(ErrorCode::Forbidden, "the frame grant changes only in the sheet's own window or the platform's home")),
         "frame" => ask(env, url, name, &who, Method::Put, "/api/grants/frame", Some(json!({ "granted": field("granted") == "yes" }))).await,
         _ => Err(CellError::invalid("no such change")),
     };
@@ -622,7 +721,7 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
         Ok(_) => Ok(auth::redirect(&format!("/share/{name}"), &[])?.with_status(303)),
         Err(e) if matches!(e.code, ErrorCode::InvalidRequest | ErrorCode::NotFound | ErrorCode::AlreadyExists | ErrorCode::Forbidden) => {
             let status = e.code.status();
-            shown(env, cfg, url, name, &who, &session, Some(Flash::Refused(e.message)), status).await
+            shown(env, cfg, url, name, &who, &session, embedder, Some(Flash::Refused(e.message)), status).await
         }
         Err(e) => Err(e),
     }
@@ -711,10 +810,11 @@ async fn join_page(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &str
 
 async fn join_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str) -> CellResult<Response> {
     let platform = cfg.platform(url);
-    let (_, who, fields) = match poster(&mut req, env, url, &platform, &purpose("join", name)).await? {
+    let (_, live, fields) = match poster(&mut req, env, url, &platform, &purpose("join", name), None).await? {
         Ok(posted) => posted,
         Err(page) => return Ok(page),
     };
+    let who = Signed::new(live.identity, None);
     let token = fields.get("token").filter(|t| t.len() == INVITE_TOKEN_LEN && t.bytes().all(|b| b.is_ascii_hexdigit()));
     let Some(token) = token else { return notice(400, "Not an invite", "This form holds no invite.") };
     match ask(env, url, name, &who, Method::Post, "/api/join", Some(json!({ "token": token }))).await {

@@ -233,7 +233,13 @@ impl FragmentCell {
     /// in a frame of this origin only, and the frame goes on to that
     /// fragment's `__signin`: this page's code never holds it (the router
     /// takes `__frame` only as a frame of this origin's own page).
-    pub(crate) async fn frame_redirect(&self, caller: &Caller, name: &str) -> CellResult<Response> {
+    ///
+    /// `__share?name=` (`sheet`) is the same for the share sheet of one of
+    /// the owner's own fragments, on the platform's origin: the redemption
+    /// is for that sheet alone (`calls::sheet`), and the frame goes on to
+    /// its `embed`, whose session opens that sheet, as the owner, in a
+    /// frame of this origin only, and nothing else of the platform's.
+    pub(crate) async fn frame_redirect(&self, caller: &Caller, name: &str, sheet: bool) -> CellResult<Response> {
         let why = match self.framing()? {
             Some(true) => None,
             Some(false) => Some(format!("its owner has not let it show their fragments inside it: they allow it in its share sheet ({}/share/{name})", self.cfg.platform(&caller.url))),
@@ -251,21 +257,28 @@ impl FragmentCell {
         let target = asked("name").filter(|n| fragment_proto::valid_fragment_name(n)).ok_or_else(|| CellError::invalid("name a fragment"))?;
         let owner = self.must(MetaKey::Owner)?;
         let listed = self.listed(&owner).await?;
-        if !listed["fragments"].as_array().into_iter().flatten().any(|f| f["name"] == target.as_str()) {
-            return Err(CellError::new(ErrorCode::Forbidden, format!("{target} is not one of its owner's fragments")));
+        // a sheet's is only for a fragment the owner owns
+        let theirs = |f: &Value| f["name"] == target.as_str() && (!sheet || f["role"] == "owner");
+        if !listed["fragments"].as_array().into_iter().flatten().any(theirs) {
+            let what = if sheet { "its owner's own" } else { "one of its owner's fragments" };
+            return Err(CellError::new(ErrorCode::Forbidden, format!("{target} is not {what}")));
         }
         let mint = calls::MintFrame {
             token,
             frame,
             from: name.to_string(),
             owner,
-            fragment: target.clone(),
+            fragment: if sheet { calls::sheet(&target) } else { target.clone() },
             embedder: self.cfg.origin(&caller.url, name),
             return_to: site::return_path(asked("return").as_deref()),
         };
         let redeem = crate::ask_registry(&self.env, &mint).await?.redeem.ok_or_else(|| CellError::host("a frame's mint answered no redemption"))?;
+        let to = match sheet {
+            true => format!("{}{}/embed?token={redeem}", self.cfg.platform(&caller.url), calls::sheet(&target)),
+            false => format!("{}__signin?token={redeem}", self.cfg.canonical(&caller.url, &target)),
+        };
         let h = Headers::new();
-        h.set("location", &format!("{}__signin?token={redeem}", self.cfg.canonical(&caller.url, &target)))?;
+        h.set("location", &to)?;
         h.set("cache-control", "no-store")?;
         h.set("referrer-policy", "no-referrer")?;
         Ok(Response::empty()?.with_status(302).with_headers(h))
