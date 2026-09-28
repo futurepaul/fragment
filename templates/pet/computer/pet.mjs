@@ -1,5 +1,6 @@
 // The pet's computer: a virtual display with a browser on it, driven by the
-// fragment's `control` channel and shown through its `frame` operation. The
+// fragment's `control` channel and shown through its `frame` operation, each
+// frame a blob of the fragment's (`fragment blob put --frame`). The
 // platform runs this from ~/fragment (the fragment's live files) while the
 // computer is awake, as fragment.json's `computer.start` says, and restarts
 // it when it exits and after a deploy; what it prints is in ~/fragment.log.
@@ -26,8 +27,6 @@ const DISPLAY = ":99";
 const FAST_MS = 1000;
 const SLOW_MS = 5000;
 const DRIVEN_MS = 60_000;
-// the longest JPEG `frame` takes (its input schema), as base64
-const FRAME_MAX_CHARS = 180_000;
 // a control record older than this is skipped: its poster saw another screen
 const STALE_MS = 30_000;
 const KEYS = { Enter: "Return", Backspace: "BackSpace", Escape: "Escape", Tab: "Tab", ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right" };
@@ -52,7 +51,7 @@ const NAME = process.env.FRAGMENT_NAME ?? fail("FRAGMENT_NAME names the fragment
 // browser's logs, the browser's profile
 const STATE = path.join(os.homedir(), ".pet");
 const CURSOR = path.join(STATE, "applied");
-const FRAME = path.join(STATE, "frame.json");
+const FRAME = path.join(STATE, "frame.jpg");
 const BUS = path.join(STATE, "bus");
 const AGENT = path.join(STATE, "agent");
 const START = `file://${path.resolve("computer/start.html")}`;
@@ -169,7 +168,9 @@ async function title() {
   return run("xdotool", ["getactivewindow", "getwindowname"]).then((o) => o.stdout.trim().slice(0, 300), () => "");
 }
 
-// Each change of the screen (or of who drives it) as the fragment's frame.
+// Each change of the screen (or of who drives it) as the fragment's frame:
+// the JPEG as a blob (a frame: the platform deletes it soon after the next),
+// then its hash through `frame`, which pages follow.
 async function frames() {
   let sent = {};
   for (;;) {
@@ -187,16 +188,15 @@ async function frames() {
         droveAt = agent.mtimeMs;
         driver = `agent:${fs.readFileSync(AGENT, "utf8").trim()}`;
       }
-      const jpeg = (await capture()).toString("base64");
-      const frame = { jpeg, width: SCREEN.width, height: SCREEN.height, title: await title(), ...(driver && { driver }) };
-      if (frame.jpeg === sent.jpeg && frame.title === sent.title && frame.driver === sent.driver) continue;
-      if (jpeg.length > FRAME_MAX_CHARS) {
-        log(`a frame of ${jpeg.length} characters is over ${FRAME_MAX_CHARS}: skipped`);
-        continue;
+      const jpeg = await capture();
+      const shot = createHash("sha256").update(jpeg).digest("hex");
+      const frame = { shot, size: jpeg.length, width: SCREEN.width, height: SCREEN.height, title: await title(), ...(driver && { driver }) };
+      if (frame.shot === sent.shot && frame.title === sent.title && frame.driver === sent.driver) continue;
+      if (frame.shot !== sent.shot) {
+        fs.writeFileSync(FRAME, jpeg);
+        await run(CLI, ["blob", "put", NAME, FRAME, "--frame"]);
       }
-      // from a file: a frame is more than one argument holds (128 KiB)
-      fs.writeFileSync(FRAME, JSON.stringify(frame));
-      await run(CLI, ["call", NAME, "frame", "--input", `@${FRAME}`]);
+      await run(CLI, ["call", NAME, "frame", "--input", JSON.stringify(frame)]);
       sent = frame;
     } catch (e) {
       log(`frame: ${String(e.stderr || e.message).trim().slice(0, 300)}`);

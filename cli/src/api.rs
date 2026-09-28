@@ -271,18 +271,23 @@ impl Client {
     fn request(&self, method: &str, path: &str, body: Option<Vec<u8>>) -> Result<Resp> {
         let body = body.unwrap_or_default();
         let timeout = timeout_for(body.len() as u64);
-        self.send(method, path, body, Replay::of(method), Signed::Body, timeout)
+        self.send(method, path, body, Replay::of(method), Signed::Body, timeout, None)
     }
 
     /// One signed request, retried within [`REQUEST_ATTEMPTS`] as `replay`
-    /// allows (`send_retrying`).
-    fn send(&self, method: &str, path: &str, body: Vec<u8>, replay: Replay, signed: Signed, timeout: Duration) -> Result<Resp> {
+    /// allows (`send_retrying`); `content_type` names the body's type, when
+    /// it has one.
+    #[allow(clippy::too_many_arguments)]
+    fn send(&self, method: &str, path: &str, body: Vec<u8>, replay: Replay, signed: Signed, timeout: Duration, content_type: Option<&str>) -> Result<Resp> {
         let url = format!("{}{}", self.host, path);
         let verb: reqwest::Method = method.parse()?;
         let what = format!("{method} {path}");
         let build = || {
             let auth = self.id.nip98_header(method, &url, if signed == Signed::Body { &body } else { &[] });
-            let req = self.http.request(verb.clone(), &url).header("authorization", auth).timeout(timeout);
+            let mut req = self.http.request(verb.clone(), &url).header("authorization", auth).timeout(timeout);
+            if let Some(t) = content_type {
+                req = req.header("content-type", t);
+            }
             if body.is_empty() { req } else { req.body(body.clone()) }
         };
         let (host, coded) = (&self.host, |code, msg| Err(anyhow::Error::new(CodedError { code, msg })));
@@ -309,7 +314,7 @@ impl Client {
     }
     /// A POST whose answer takes as long as `timeout` may (a model call).
     pub fn post_json_waiting(&self, path: &str, v: &impl serde::Serialize, timeout: Duration) -> Result<Resp> {
-        self.send("POST", path, serde_json::to_vec(v)?, Replay::of("POST"), Signed::Body, timeout)
+        self.send("POST", path, serde_json::to_vec(v)?, Replay::of("POST"), Signed::Body, timeout, None)
     }
     /// A signed POST answered as it arrives (`model --serve` relays it),
     /// sent once: a model call that may have reached the host is not made
@@ -324,7 +329,7 @@ impl Client {
     pub fn post_json_by_id(&self, path: &str, v: &impl serde::Serialize) -> Result<Resp> {
         let body = serde_json::to_vec(v)?;
         let timeout = timeout_for(body.len() as u64);
-        self.send("POST", path, body, Replay::ById, Signed::Body, timeout)
+        self.send("POST", path, body, Replay::ById, Signed::Body, timeout, None)
     }
     pub fn put_json(&self, path: &str, v: &impl serde::Serialize) -> Result<Resp> {
         self.request("PUT", path, Some(serde_json::to_vec(v)?))
@@ -333,15 +338,16 @@ impl Client {
         self.request("PUT", path, Some(bytes))
     }
     /// A PUT to a content address (a blob named by its bytes' hash): safe
-    /// to send again whatever became of the first, and signed over its URL.
-    pub fn put_blob(&self, path: &str, bytes: Vec<u8>) -> Result<Resp> {
+    /// to send again whatever became of the first, and signed over its URL;
+    /// `content_type` is what a page reading it gets (`__blob`).
+    pub fn put_blob(&self, path: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<Resp> {
         let timeout = timeout_for(bytes.len() as u64);
-        self.send("PUT", path, bytes, Replay::Safe, Signed::Url, timeout)
+        self.send("PUT", path, bytes, Replay::Safe, Signed::Url, timeout, content_type)
     }
     /// A GET whose answer is known to be about `bytes` long (a blob), given
     /// the time that takes.
     pub fn get_sized(&self, path: &str, bytes: u64) -> Result<Resp> {
-        self.send("GET", path, Vec::new(), Replay::Safe, Signed::Body, timeout_for(bytes))
+        self.send("GET", path, Vec::new(), Replay::Safe, Signed::Body, timeout_for(bytes), None)
     }
     pub fn head(&self, path: &str) -> Result<Resp> {
         self.request("HEAD", path, None)
@@ -487,7 +493,7 @@ mod tests {
         let (_server, seen, c) = silent_host();
         assert_eq!(code_of(c.get("/api/f/x/status")), "unavailable");
         assert_eq!(seen.load(Ordering::SeqCst), REQUEST_ATTEMPTS);
-        assert_eq!(code_of(c.put_blob("/api/f/x/blobs/abc", vec![1, 2, 3])), "unavailable");
+        assert_eq!(code_of(c.put_blob("/api/f/x/blobs/abc", vec![1, 2, 3], None)), "unavailable");
         assert_eq!(seen.load(Ordering::SeqCst), 2 * REQUEST_ATTEMPTS);
     }
 

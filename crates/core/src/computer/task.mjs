@@ -13,7 +13,8 @@
 // first). Each tool call
 // goose makes is a step on the chat's `work` channel, posted as this
 // computer once the call ended, under the hand-off's turn
-// (fragment_core::work::handoff_turn), and goose's answer, once it ended its
+// (fragment_core::work::handoff_turn), a screenshot it showed a blob of the
+// chat's that the step names (`shot`), and goose's answer, once it ended its
 // turn, is this computer's post on the chat's own channel, `{text, turn}`
 // (the asking agent reads it from the run, never from the chat). It prints
 // goose's last words, and exits 0 when goose ended its turn and a chat that
@@ -41,6 +42,8 @@ const UP_MS = 180_000;
 // a step's arguments and excerpts, as the chat's records keep them (fragment_core::work)
 const ARGS_MAX = 140;
 const EXCERPT_MAX = 300;
+// a step's screenshot, by its type: the file the CLI uploads, which names its type
+const SHOT_TYPES = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" };
 // the answer, at most a chat message's most (cell/chat.mjs)
 const ANSWER_MAX = 16000;
 // a post that fails is tried again after these (the hand-off's grant may come late)
@@ -147,17 +150,35 @@ function updated(u) {
     const out = (u.content ?? []).map((c) => (c.content?.type === "text" ? c.content.text : c.content?.type ? `(${c.content.type})` : "")).join(" ");
     const body = { kind: "turn.step", turn, run: Number(RUN), step: call.n, tool: call.tool, args: call.args, ok: u.status === "completed", excerpt: cut(out.trim(), EXCERPT_MAX) };
     if (call.text) body.text = cut(call.text, EXCERPT_MAX);
-    post("work", body, `st:${NAME}:${RUN}:${call.n}`);
+    const image = (u.content ?? []).map((c) => c.content).find((c) => c?.type === "image" && SHOT_TYPES[c.mimeType] && c.data);
+    post("work", body, `st:${NAME}:${RUN}:${call.n}`, image);
   }
 }
 
-// each post in order, once (its id), as this computer: whether it is in
+// A step's screenshot, for the people watching (the model has its own):
+// a blob of the chat's fragment, where this computer is an editor, which the
+// chat's page shows by its hash (`__blob/<sha>`). Its sha256, or none.
+async function shot({ data, mimeType }) {
+  const file = path.join(os.tmpdir(), `fragment-shot-${process.pid}.${SHOT_TYPES[mimeType]}`);
+  try {
+    fs.writeFileSync(file, Buffer.from(data, "base64"));
+    return (await run(CLI, ["blob", "put", where, file])).stdout.trim();
+  } catch (e) {
+    console.error(`a screenshot was not kept: ${String(e.stderr || e.message).trim().slice(0, 300)}`);
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
+}
+
+// each post in order, once (its id), as this computer: whether it is in; a
+// step's screenshot goes up first, and a step without one still posts
 let posted = Promise.resolve(true);
-function post(on, body, id) {
+function post(on, body, id, image) {
   const once = () => run(CLI, ["post", where, on, "--body", JSON.stringify(body), "--id", id]);
   posted = posted.then(async () => {
     for (const wait of [...RETRY_S, null]) {
       try {
+        if (image && !body.shot) body.shot = await shot(image);
         await once();
         return true;
       } catch (e) {

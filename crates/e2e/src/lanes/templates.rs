@@ -6,6 +6,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use fragment_core::blob::sha256_hex;
 use fragment_core::npub;
 use fragment_fakes::openrouter::Reply as Say;
 use fragment_nip98::Keys;
@@ -321,9 +322,16 @@ fn stand_in_stagehand(home: &std::path::Path) -> Result<()> {
 /// An 8×5 JPEG, as the pet's computer sends its screen.
 const JPEG: &str = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAAFAAgDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFAEBAAAAAAAAAAAAAAAAAAAABf/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AIcA2Kf/2Q==";
 
+/// The bytes of a base64 fixture.
+fn decoded(b64: &str) -> Vec<u8> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(b64).expect("a fixture decodes")
+}
+
 /// The pet (templates/pet): a computer, a `control` channel people drive it
 /// through, and its screen, one row its computer stores through `frame` and
-/// `screen` answers; and its agent, `do`, goose with the pet's browser
+/// `screen` answers (the JPEG a blob its page shows, never in the app's
+/// database); and its agent, `do`, goose with the pet's browser
 /// (its Stagehand MCP server, computer/browser) and Cua Driver as its hands
 /// (goose, Stagehand, and Cua Driver are stand-ins here, as in the builder
 /// section: this proves the plumbing). Its display loop, Chrome, and the
@@ -397,23 +405,38 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
         !sprite.is_empty()
     });
     let computer = s.cli_keys(&s.scratch.join("sprites/sprites").join(&sprite)).context("the pet's computer, paired on its Sprite")?;
-    let frame = |keys: &Keys, id: &str, jpeg: &str, title: &str, driver: Option<&str>| {
-        let mut input = json!({ "jpeg": jpeg, "width": 8, "height": 5, "title": title });
+    let (jpeg, png) = (decoded(JPEG), decoded(PNG));
+    let shot = sha256_hex(&jpeg);
+    let frame = |keys: &Keys, id: &str, input: Value| api.signed(keys, "POST", &format!("/api/f/{name}/ops/frame"), Some(&json!({ "id": id, "input": input })));
+    let named = |title: &str, driver: Option<&str>| {
+        let mut input = json!({ "shot": shot, "size": jpeg.len(), "width": 8, "height": 5, "title": title });
         if let Some(driver) = driver {
             input["driver"] = json!(driver);
         }
-        api.signed(keys, "POST", &format!("/api/f/{name}/ops/frame"), Some(&json!({ "id": id, "input": input })))
+        input
     };
-    let r = frame(&viewer, "f1", JPEG, "a viewer's", None)?;
+    let r = frame(&viewer, "f1", named("a viewer's", None))?;
     s.ok("a viewer cannot store a frame", r.status == 403, &r);
-    let r = frame(&computer, "f2", "iVBORw0KGgo", "a PNG", None)?;
-    s.ok("nor can anyone store what is not a JPEG", r.status == 422, &r);
-    let stored = [frame(&computer, "f3", JPEG, "first", Some(&viewer_id))?, frame(&computer, "f4", JPEG, "Hello from your pet", None)?];
+    let r = frame(&computer, "f2", json!({ "jpeg": JPEG, "width": 8, "height": 5 }))?;
+    s.ok(
+        "nor can anyone send the JPEG itself, as frames were once sent (400: a frame names its blob): the app's database holds no image",
+        r.status == 400 && r.message().contains("/shot"),
+        &r,
+    );
+    let stored = [frame(&computer, "f3", named("first", Some(&viewer_id)))?, frame(&computer, "f4", named("Hello from your pet", None))?];
     let screen = api.signed(&viewer, "POST", &format!("/api/f/{name}/ops/screen"), Some(&json!({ "id": "s1", "input": {} })))?;
     let got = &screen.body["result"];
+    let mut fields: Vec<&str> = got.as_object().into_iter().flatten().map(|(k, _)| k.as_str()).collect();
+    fields.sort();
     s.ok(
-        "its computer stores frames, and the live query answers the latest: the JPEG, what is on screen, and who drove it (kept by a frame that names no one)",
-        stored.iter().all(|r| r.status == 200) && got["jpeg"] == JPEG && got["title"] == "Hello from your pet" && got["driver"] == viewer_id.as_str() && got["width"] == 8,
+        "its computer names frames by their blob, and the live query answers the latest: its hash and size, what is on screen, and who drove it (kept by a frame that names no one), and nothing more",
+        stored.iter().all(|r| r.status == 200)
+            && got["shot"] == shot.as_str()
+            && got["size"] == jpeg.len()
+            && got["title"] == "Hello from your pet"
+            && got["driver"] == viewer_id.as_str()
+            && got["width"] == 8
+            && fields == ["at", "driver", "height", "shot", "size", "title", "width"],
         format!("{} / {screen}", stored[1]),
     );
 
@@ -426,8 +449,25 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
     let wrote = api.signed(owner, "POST", &format!("/api/f/{name}/files"), Some(&files))?;
     let deployed = api.signed(owner, "POST", &format!("/api/f/{name}/deploy"), None)?;
     let screen = || api.op(&viewer, &name, "screen", "s2", json!({})).map(|r| r.body["result"].clone()).unwrap_or_default();
-    let shown = s.eventually(Duration::from_secs(60), || screen()["width"] == 1024 && screen()["jpeg"] == JPEG);
+    let shown = s.eventually(Duration::from_secs(60), || screen()["width"] == 1024 && screen()["shot"] == shot.as_str());
     s.ok("its computer runs start from the live files: shown a fixed screen, it stores that frame", wrote.status == 200 && shown, format!("{deployed} / {}", screen()));
+    let blob = |fragment: &str, sha: &str, cookie: &str| api.call(Call { method: "GET", url: api.site_url(fragment, &format!("__blob/{sha}")), cookie: Some(cookie.to_string()), ..Call::default() });
+    let r = blob(&name, &shot, &link)?;
+    s.ok(
+        "the frame is a blob of the pet's (the computer uploaded it, a frame), which whoever holds its link reads on its origin as a JPEG",
+        r.status == 200 && r.bytes == jpeg && r.header("content-type") == "image/jpeg",
+        &r,
+    );
+    if let Some(mut chrome) = s.browser()? {
+        let tab = chrome.open(&api.site_url(&name, &format!("?view={}", made.body["viewToken"].as_str().unwrap_or(""))))?;
+        let expr = format!("(() => {{ const i = document.getElementById('frame'); return !i.hidden && i.complete && i.naturalWidth === 8 && i.getAttribute('src') === './__blob/{shot}'; }})()");
+        let drawn = chrome.until(&tab, &expr, Duration::from_secs(30));
+        chrome.screenshot(&tab, &s.scratch.join("pet-page.png"))?;
+        chrome.close(tab)?;
+        s.ok("and its page shows it, from `__blob`", drawn, "");
+    } else {
+        s.ok("Chrome is installed for the pet's page (set CHROME_BIN)", false, "no Chrome found");
+    }
     let owner_id = api.identity(owner)?;
     let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/control"), Some(&json!({ "id": "p3", "body": { "kind": "key", "key": "Enter" } })))?;
     let drove = s.eventually(Duration::from_secs(20), || screen()["driver"] == owner_id.as_str());
@@ -666,6 +706,16 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
             && records.last().is_some_and(|x| x["body"]["message"] == said),
         &work,
     );
+    // a step that showed a screenshot (Cua Driver's look) names it as a blob
+    // of the fragment its steps go to; no record holds the image
+    let shots: Vec<(String, String)> =
+        records.iter().filter_map(|x| x["body"]["shot"].as_str().map(|sha| (x["body"]["tool"].as_str().unwrap_or("").to_string(), sha.to_string()))).collect();
+    let r = blob(&name, &sha256_hex(&png), &link)?;
+    s.ok(
+        "a step that showed a screenshot names it (`shot`), a blob of the pet's that its page reads as the PNG, and no record holds the image",
+        shots == [("get_window_state".to_string(), sha256_hex(&png))] && r.status == 200 && r.bytes == png && r.header("content-type") == "image/png" && !work.text.contains(PNG),
+        json!({ "shots": shots, "blob": r.to_string() }),
+    );
     let agent = format!("agent:{owner_id}");
     let drove = s.eventually(Duration::from_secs(20), || screen()["driver"] == agent.as_str());
     let r = api.signed(owner, "POST", &format!("/api/f/{name}/channels/control"), Some(&json!({ "id": "p4", "body": { "kind": "key", "key": "Escape" } })))?;
@@ -716,11 +766,15 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
 
     // its owner's agent hands work to the pet by name: its `do` runs there,
     // and the pet's computer answers in the chat that asked (the agent's
-    // turn ends on the hand-off, so goose's answer is the fake's echo)
+    // turn ends on the hand-off; goose looks at the pet, then answers)
     let dos = || api.signed(owner, "GET", &format!("/api/f/{name}/runs?op=do"), None).map_or(0, |r| r.body["runs"].as_array().map_or(0, Vec::len));
     let (before, sprites) = (dos(), s.sprites.sprites().len());
     s.openrouter.clear_script();
-    s.openrouter.script(&[Say::Tools(vec![("platform__hand_off".into(), json!({ "task": "click the pet's button", "computer": name }))])]);
+    s.openrouter.script(&[
+        Say::Tools(vec![("platform__hand_off".into(), json!({ "task": "click the pet's button", "computer": name }))]),
+        Say::Tools(vec![("cua__get_window_state".into(), json!({ "pid": 1 }))]),
+        Say::Text("I looked, then I'd click the pet's button.".into()),
+    ]);
     api.signed(owner, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": "t-hand-off", "body": { "text": "have my pet click its button" } })))?;
     let result = || {
         let records = api.signed(owner, "GET", &format!("/api/f/{chat}/channels/chat"), None).ok().and_then(|r| r.body["records"].as_array().cloned()).unwrap_or_default();
@@ -734,6 +788,30 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
         landed && dos() == before + 1 && said.contains("click the pet") && s.sprites.sprites().len() == sprites,
         json!({ "said": said, "do runs": dos() }),
     );
+    // its look is a step in the chat, its screenshot a blob of the chat's
+    // (the computer is an editor there), which the chat's page shows small
+    let work = api.signed(owner, "GET", &format!("/api/f/{chat}/channels/work"), None)?;
+    let step = work.body["records"].as_array().into_iter().flatten().find(|x| x["principal"] == computer_id.as_str() && x["body"]["tool"] == "get_window_state").cloned().unwrap_or_default();
+    let token = api.status(owner, chat)?.body["viewToken"].as_str().unwrap_or("").to_string();
+    let r = blob(chat, &sha256_hex(&png), &format!("fragview={token}"))?;
+    s.ok(
+        "a step with a screenshot in the chat names its blob, which whoever reads the chat reads on its origin, and no record holds the image",
+        step["body"]["shot"] == sha256_hex(&png).as_str() && r.status == 200 && r.bytes == png && !work.text.contains(PNG),
+        json!({ "step": step, "blob": r.to_string() }),
+    );
+    if let Some(mut chrome) = s.browser()? {
+        let tab = chrome.open(&api.site_url(chat, &format!("?view={token}")))?;
+        // the turn is over, so its steps are folded: open them
+        let expr = format!(
+            "(() => {{ const i = document.querySelector('details.tools .step img.shot'); if (!i) return false; i.closest('details').open = true; \
+             return i.complete && i.naturalWidth > 0 && i.getAttribute('src') === '__blob/{}' && i.closest('a').target === '_blank'; }})()",
+            sha256_hex(&png)
+        );
+        let drawn = chrome.until(&tab, &expr, Duration::from_secs(30));
+        chrome.screenshot(&tab, &s.scratch.join("chat-step-shot.png"))?;
+        chrome.close(tab)?;
+        s.ok("and the chat's page shows it small in the step, a link to it whole", drawn, "");
+    }
     page.close();
     Ok(())
 }

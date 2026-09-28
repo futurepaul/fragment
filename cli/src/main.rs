@@ -297,6 +297,12 @@ enum Cmd {
         #[arg(long)]
         id: Option<String>,
     },
+    /// A fragment's blobs: bytes by their hash, which its pages read at
+    /// `__blob/<sha256>` (viewers and up)
+    Blob {
+        #[command(subcommand)]
+        sub: BlobCmd,
+    },
     /// Post a record to a channel fragment.json declares with a post role;
     /// prints the record (a retry with the same --id appends nothing)
     Post {
@@ -490,6 +496,19 @@ enum KeysCmd {
     Rotate,
     /// Revoke one of your keys (never the last)
     Revoke { npub: String },
+}
+
+#[derive(Subcommand)]
+enum BlobCmd {
+    /// Upload a file as a blob (editors; typed by its extension); prints
+    /// its sha256. A blob nothing names is deleted after a week
+    Put {
+        name: String,
+        file: PathBuf,
+        /// A computer's screen: deleted a minute after the next frame
+        #[arg(long)]
+        frame: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1717,6 +1736,15 @@ fn run(cli: Cli) -> Result<()> {
             if v.replayed {
                 eprintln!("(replayed: operation {id} had already run)");
             }
+        }
+        Cmd::Blob { sub: BlobCmd::Put { name, file, frame } } => {
+            let bytes = std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
+            let sha = sync::sha256_hex(&bytes);
+            let kind = fragment_core::site::mime_for_path(&file.to_string_lossy());
+            let path = format!("/api/f/{name}/blobs/{sha}{}", if frame { "?frame" } else { "" });
+            let v = c.call(c.put_blob(&path, bytes, Some(kind))?)?;
+            json_exit(j, &v);
+            println!("{sha}");
         }
         Cmd::Post { name, channel, body, id } => {
             let body: Value = serde_json::from_str(&body).map_err(|e| usage(format!("--body must be JSON: {e}")))?;

@@ -92,6 +92,7 @@ details.tools .spin { animation: spin 1s linear infinite; }
 .step { border-top: 1px solid var(--border); padding: 10px 14px; background: var(--chat-code); }
 .step pre { margin: 0; font: 500 12px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-secondary); max-height: 240px; overflow-y: auto; }
 .step .step-name { color: var(--text-primary); }
+.step .shot { max-width: 180px; margin-top: 8px; border-radius: 8px; }
 .step.error pre, .step.error .step-name { color: var(--danger-text); }
 .step-text { border-top: 1px solid var(--border); padding: 10px 14px 0; font-size: 13px; color: var(--text-secondary); font-style: italic; white-space: pre-wrap; overflow-wrap: anywhere; }
 .step-text + .step { border-top: 0; }

@@ -84,12 +84,18 @@
       return names.get(id);
     };
 
+    // the frame is a blob of this fragment's; one collected while the pet
+    // slept shows the waking note until the pet sends the next
+    const showing = (frame) => {
+      $("frame").hidden = !frame;
+      $("empty").hidden = frame;
+    };
+    $("frame").onload = () => showing(true);
+    $("frame").onerror = () => showing(false);
     fragment.live("screen", {}, async (s) => {
       if (!s) return;
-      if (s.jpeg !== shown?.jpeg) $("frame").src = `data:image/jpeg;base64,${s.jpeg}`;
+      if (s.shot !== shown?.shot) $("frame").src = `./__blob/${s.shot}`;
       shown = s;
-      $("frame").hidden = false;
-      $("empty").hidden = true;
       $("screen").style.aspectRatio = `${s.width} / ${s.height}`;
       $("title").textContent = s.title ? `on screen: ${s.title}` : "";
       // its agent drives as `agent:<who asked it>`

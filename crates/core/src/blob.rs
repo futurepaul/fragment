@@ -46,6 +46,16 @@ pub const IS_POINTER_JS: &str = r#"export function isBlobPointer(data) {
   return m !== null && BigInt(m[1]) <= 18446744073709551615n;
 }"#;
 
+/// The type a fragment's origin serves a blob as (`__blob/<sha>`), from
+/// the one its upload declared: passive media only, so a blob never runs as
+/// a page or a script there (anything else is `application/octet-stream`).
+pub fn served_type(declared: &str) -> Option<&'static str> {
+    let essence = declared.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    ["image/jpeg", "image/png", "image/webp", "image/gif", "video/mp4", "video/webm", "audio/mpeg", "audio/wav", "application/pdf"]
+        .into_iter()
+        .find(|t| *t == essence)
+}
+
 /// The pointer a file's bytes are, if they are one.
 pub fn parse(bytes: &[u8]) -> Option<Pointer> {
     if bytes.len() > POINTER_MAX_BYTES {
@@ -86,6 +96,15 @@ mod tests {
             pointer(SHA, 1).replace("size 1", "size x"),
         ] {
             assert_eq!(parse(bad.as_bytes()), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn served_types_are_passive_media() {
+        assert_eq!(served_type("image/jpeg"), Some("image/jpeg"));
+        assert_eq!(served_type(" Image/PNG ; q=1"), Some("image/png"));
+        for active in ["text/html", "image/svg+xml", "text/javascript", "application/xml", "text/css", ""] {
+            assert_eq!(served_type(active), None, "{active}");
         }
     }
 }
