@@ -56,7 +56,8 @@
 //! A person's agent does light work itself and hands the rest to a
 //! computer (handoff.rs): a turn that hands off ends there, the platform
 //! saying the work is on its way; the computer answers in the chat itself,
-//! and its result reaches the conversation that asked as a note.
+//! and its result reaches the conversation that asked as a note. Its
+//! owner's turns are told what their computers remember of them (memory.rs).
 //!
 //! A fragment's own agent (its `fragment.json` `agent` block; its deploy
 //! makes it, with a `scope`) is this same agent with three differences:
@@ -69,6 +70,7 @@ mod fleet;
 mod handoff;
 mod js;
 mod keys;
+mod memory;
 mod model;
 mod progress;
 mod store;
@@ -1376,6 +1378,14 @@ async fn drive_turn(setup: &Setup, cancel: CancellationToken, conv: &str, asker:
     let owner_turn = kv_get(&sql, "owner")?.is_some_and(|owner| owner == asker);
     // the computer is its owner's: it joins its owner's own agent's turns only
     let computer = if owner_turn && setup.scope.is_none() { open_computer(&setup.env, &sql).await? } else { None };
+    // and so is its memory: its facts, read into its owner's turns alone (memory.rs)
+    let mut instructions = setup.instructions.clone();
+    if owner_turn && setup.scope.is_none() {
+        match memory::view(&setup.fleet.acting_for(&asker), &sql).await {
+            Ok(view) => instructions.push_str(&view),
+            Err(e) => worker::console_warn!("reading the owner's memory: {e:#}"),
+        }
+    }
     let spend = Spend {
         fleet: setup.fleet.clone(),
         sql: sql.clone(),
@@ -1392,7 +1402,7 @@ async fn drive_turn(setup: &Setup, cancel: CancellationToken, conv: &str, asker:
         model: Model { base: setup.base.clone(), name: setup.model.clone(), deadline_ms: setup.deadline_ms, spend },
         scope: setup.scope.clone(),
         fleet: setup.fleet.clone(),
-        instructions: setup.instructions.clone(),
+        instructions,
         computer,
         cancel,
         id: setup.id.clone(),

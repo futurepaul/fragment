@@ -17,13 +17,15 @@
 // turn, is this computer's post on the chat's own channel, `{text, turn}`
 // (the asking agent reads it from the run, never from the chat). It prints
 // goose's last words, and exits 0 when goose ended its turn and a chat that
-// asked has its answer (124 past its time).
+// asked has its answer (124 past its time). Before and after the task it
+// syncs the owner's memory (`synced`, below).
 //
 // Its env: PROMPT, the task as goose reads it; CHAT, the asking chat
 // (<fragment>/<channel>; none: this fragment's own `work`); RUN, the job's
 // run; ASKER, who asked; MARK, a file ASKER is written to at each step (the
 // pet's driver); TIME_S, its time (540 s).
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -169,6 +171,50 @@ function post(on, body, id) {
   });
 }
 
+// The owner's memory (docs/agent-computer.md, slice 3): their private
+// fragment memory.<username>, kept at ~/memory, synced both ways before and
+// after each task (a hand-off made this computer an editor there; one that
+// is none has no memory, quietly). goose writes it with its own tools, as
+// its hints say (fragment_core::computer HANDS_SH), and what it changed is
+// committed to main as this computer when the task ends: git history is the
+// review and the undo. Its skills (skills/<name>/SKILL.md) are goose's own,
+// at ~/.agents/skills, which goose lists for the model. Its facts
+// (memory/*.md) reach the session as prompts, so nothing the session holds is
+// rewritten: every one in the session's first task, then, at the start of a
+// task, those changed since (what the session was told is kept beside its
+// id), at most MEMORY_MAX characters, the rest named.
+const MEMORY = `memory.${NAME.split(".")[1]}`;
+const MEMORY_DIR = path.join(os.homedir(), "memory");
+const MEMORY_MAX = 8000;
+async function synced() {
+  const out = await run(CLI, ["sync", MEMORY, "--dir", MEMORY_DIR, "--apply-mass-delete", "--json"]).then((r) => r.stdout, (e) => String(e.stdout || e.message));
+  let said = {};
+  try {
+    said = JSON.parse(out.trim().split("\n").pop());
+  } catch {}
+  if (!said.ok && !["not_found", "forbidden"].includes(said.error?.code)) note(`${MEMORY} was not synced: ${cut(String(said.error?.message ?? out).trim(), 300)}`, true);
+}
+function recall() {
+  const dir = path.join(MEMORY_DIR, "memory");
+  const facts = (fs.existsSync(dir) ? fs.readdirSync(dir) : []).filter((f) => f.endsWith(".md")).sort().map((f) => [`memory/${f}`, read(path.join(dir, f))]);
+  const files = Object.fromEntries(facts.map(([f, text]) => [f, createHash("sha256").update(text).digest("hex")]));
+  let was = null;
+  try {
+    const told = JSON.parse(fs.readFileSync(`${saved}.memory`, "utf8"));
+    if (told.session === session) was = told.files;
+  } catch {}
+  const [shown, unshown] = [[], []];
+  let left = MEMORY_MAX;
+  for (const [f, text] of facts.filter(([f]) => files[f] !== was?.[f])) {
+    if (left < 200) unshown.push(f);
+    else left -= shown[shown.push(`### ${f}\n${cut(text, left)}`) - 1].length;
+  }
+  const said = [...shown, ...Object.keys(was ?? {}).filter((f) => !(f in files)).map((f) => `${f} was removed.`)];
+  if (unshown.length) said.push(`Not shown here (read them when they matter): ${unshown.join(", ")}.`);
+  const head = was ? "Your owner's memory changed since your earlier work here:" : `Your owner's memory (${MEMORY}, at ~/memory):`;
+  return { files, note: said.length ? [head, ...said].join("\n\n") : "" };
+}
+
 // the chat's session: loaded, or made the first time (or when goose lost it)
 await ask("initialize", { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: "fragment", version: "1" } });
 fs.mkdirSync(cwd, { recursive: true });
@@ -187,6 +233,16 @@ if (!session) {
   fs.mkdirSync(path.dirname(saved), { recursive: true });
   fs.writeFileSync(saved, session);
 } else news = await retool().catch((e) => note(`its tools were left as they were: ${e.message}`, true));
+// the memory, synced, its skills goose's, and what the session is yet to be told of it
+await synced();
+const skills = path.join(os.homedir(), ".agents/skills");
+try {
+  fs.mkdirSync(path.join(MEMORY_DIR, "skills"), { recursive: true });
+  if (!fs.lstatSync(skills, { throwIfNoEntry: false })) fs.mkdirSync(path.dirname(skills), { recursive: true }), fs.symlinkSync(path.join(MEMORY_DIR, "skills"), skills);
+} catch (e) {
+  note(`its skills are not linked: ${e.message}`, true);
+}
+const memory = recall();
 
 // goose keeps the extensions a session was made with (or those that loaded
 // last time) and loads it with them, not with its config's: a session made
@@ -236,14 +292,18 @@ async function retool() {
 
 let late = false;
 const timer = setTimeout(() => ((late = true), send({ method: "session/cancel", params: { sessionId: session } })), TIME_MS);
-const ended = await ask("session/prompt", { sessionId: session, prompt: [{ type: "text", text: news ? `${news}\n\n${PROMPT}` : PROMPT }] }).catch((e) => ({ error: e.message }));
+const ended = await ask("session/prompt", { sessionId: session, prompt: [{ type: "text", text: [news, memory.note, PROMPT].filter(Boolean).join("\n\n") }] }).catch((e) => ({ error: e.message }));
 clearTimeout(timer);
 ws.close();
+// goose took the prompt: what it was told of the memory is kept for the next task
+if (ended.stopReason) fs.writeFileSync(`${saved}.memory`, JSON.stringify({ session, files: memory.files }));
 const words = said.trim() || last;
 const done = !late && ended.stopReason === "end_turn";
 // once goose ended its turn, its answer, in the chat that asked (none: this fragment's own work)
 if (done && process.env.CHAT) post(channel, { text: cut(words || "(goose said nothing)", ANSWER_MAX), turn }, `an:${NAME}:${RUN}`);
 const told = (await posted) || !process.env.CHAT;
+// what goose remembered, committed (and what other chats and computers did, pulled)
+await synced();
 console.log([words, ended.error].filter(Boolean).join("\n\n") || (late ? "It ran out of time." : "(goose said nothing)"));
 if (ended.error) console.error(ended.error);
 process.exit(late ? 124 : done && told ? 0 : 1);

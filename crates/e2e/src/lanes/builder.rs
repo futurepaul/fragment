@@ -15,7 +15,8 @@
 //! key is on the computer's disk. Then hand-offs (`hand_offs`): the owner's
 //! own agent hands building to a computer, a throwaway builder, this one
 //! by name, and this one as its home computer, where one chat's hand-offs
-//! share a session.
+//! share a session, and the owner's memory and skills reach every chat
+//! (`remembers`).
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -130,7 +131,7 @@ pub fn builder(s: &mut Suite, api: &Api) -> Result<()> {
     let billed = usage.body["usage"].as_array().into_iter().flatten().filter(|u| u["kind"] == "computer.text" && u["fragment"] == computer_id.as_str() && u["state"] == "settled").count();
     s.ok("billed to its owner, naming the computer", billed == 2, &usage);
     let hints = std::fs::read_to_string(sprite_home.join(".config/goose/.goosehints")).unwrap_or_default();
-    s.ok("goose's hints are the CLI's guide", hints.contains("fragment deploy"), hints.chars().take(200).collect::<String>());
+    s.ok("goose's hints are the CLI's guide, and how to keep its owner's memory", hints.contains("fragment deploy") && hints.contains("# Your owner's memory\n~/memory is"), hints.chars().take(200).collect::<String>());
     let log = std::fs::read_to_string(sprite_home.join(".fragment/agent/model.log")).unwrap_or_default();
     let logged: Vec<Value> = log.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(|l| l["call"]["status"] == 200).collect();
     s.ok(
@@ -304,6 +305,7 @@ fn hand_offs(s: &mut Suite, api: &Api, (owner, owner_cli): (&Keys, &Path), (buil
     );
 
     home_sessions(s, api, (owner, owner_cli), &chat, (builder, computer, builder_home))?;
+    remembers(s, api, owner, &chat, computer)?;
 
     // a guest's turn: no hand-off offered, and one it calls anyway makes nothing
     let guest = api.person()?;
@@ -324,6 +326,8 @@ fn hand_offs(s: &mut Suite, api: &Api, (owner, owner_cli): (&Keys, &Path), (buil
         answered && !chats.get(asked).map(offered).unwrap_or_default().iter().any(|t| t == HAND_OFF) && refused && owned(api, owner, "handoff-").is_empty() && s.sprites.sprites().len() == sprites,
         json!({ "requests": chats.len() - asked }),
     );
+    let told = chats.get(asked).map(|c| c["messages"][0]["content"].to_string()).unwrap_or_default();
+    s.ok("and it is told nothing of the owner's memory", !told.is_empty() && !told.contains("memory.") && !told.contains(TEA), &told);
     s.openrouter.clear_script();
     Ok(())
 }
@@ -433,6 +437,111 @@ fn home_sessions(s: &mut Suite, api: &Api, (owner, owner_cli): (&Keys, &Path), c
     Ok(())
 }
 
+/// The fact goose remembers, the other, and the skill it writes (`remembers`).
+const TEA: &str = "- Paul drinks tea, never coffee.";
+const WORK: &str = "- Paul builds fragments.";
+const SKILL: &str = "• tea - How Paul likes his tea made.";
+
+/// A hand-off from `chat` to its home computer: the agent's model hands off
+/// `task`, goose's answers `goose`. Whether the computer then answered
+/// `said` in the chat, and goose's requests.
+fn handed(s: &Suite, api: &Api, owner: &Keys, chat: &str, (id, task): (&str, &str), goose: &[Reply], said: &str) -> Result<(bool, Vec<Value>)> {
+    s.openrouter.clear_script();
+    s.openrouter.script_agent(&[Reply::Tools(vec![(HAND_OFF.into(), json!({ "task": task }))])]);
+    s.openrouter.script(goose);
+    let from = s.openrouter.chats().len();
+    say(api, owner, chat, id, task)?;
+    let answered = || chat_records(api, owner, chat).iter().any(|r| r["body"]["turn"].as_str().is_some_and(|t| t.starts_with("hand-off:")) && r["body"]["text"] == said);
+    let done = s.eventually(Duration::from_secs(150), answered);
+    Ok((done, s.openrouter.chats().into_iter().skip(from).filter(|c| c["session_id"].is_string()).collect()))
+}
+
+/// The owner's memory (docs/agent-computer.md, slice 3; agent/src/memory.rs,
+/// the task client): `memory.<username>`, which the hand-offs above made,
+/// the owner's, members only, with the home computer an editor. In `chat`,
+/// goose remembers a fact and writes a skill (through `~/.agents/skills`):
+/// both land in the memory as a commit on main. A second chat's new session
+/// on the same computer is told the fact in its first task and offered the
+/// skill (goose lists skills in its system prompt; the stand-in does as it
+/// does), and its goose remembers another. The first chat's next task is
+/// told that one at its start, and its first request carries that chat's
+/// last one as its prefix: nothing loaded is rewritten. The owner's agent
+/// reads the facts itself (asked what they drink, it answers, no computer);
+/// a guest's turn is told none (`hand_offs`).
+fn remembers(s: &mut Suite, api: &Api, owner: &Keys, chat: &str, computer: &str) -> Result<()> {
+    let memory = format!("memory.{}", api.username(owner)?);
+    let file = |path: &str| api.signed(owner, "GET", &format!("/api/f/{memory}/file?path={path}"), None).ok().filter(|r| r.status == 200).map(|r| r.text);
+    let main = || api.status(owner, &memory).map(|r| r.body["pins"]["main"].clone()).unwrap_or_default();
+    let status = api.status(owner, &memory)?;
+    let members = api.signed(owner, "GET", &format!("/api/f/{memory}/members"), None)?;
+    let editor = members.body["members"].as_array().into_iter().flatten().any(|m| m["principal"] == computer && m["role"] == "editor");
+    s.ok(
+        "the hand-offs made the owner's memory, a private fragment of theirs, with the home computer an editor there",
+        status.body["owner"] == api.identity(owner)?.as_str() && status.body["visibility"] == "members" && editor,
+        json!({ "status": status.body, "members": members.body }),
+    );
+
+    // goose remembers a fact, and writes a skill: a commit on the memory's main
+    let (before, remember) = (main(), format!(
+        "mkdir -p ~/memory/memory ~/.agents/skills/tea && printf -- '{TEA}\\n' > ~/memory/memory/preferences.md && \
+         printf -- '---\\nname: tea\\ndescription: How Paul likes his tea made.\\n---\\nSteep it for three minutes.\\n' > ~/.agents/skills/tea/SKILL.md"
+    ));
+    let goose = [Reply::Tools(vec![("shell".into(), json!({ "command": remember }))]), Reply::Text("Remembered.".into())];
+    let (done, first) = handed(s, api, owner, chat, ("m1", "Remember that I drink tea, never coffee, and how I make it."), &goose, "Remembered.")?;
+    let landed = s.eventually(Duration::from_secs(30), || file("memory/preferences.md").is_some_and(|t| t.contains(TEA)) && file("skills/tea/SKILL.md").is_some());
+    s.ok(
+        "a hand-off whose goose remembers a fact and writes a skill commits both to the memory's main",
+        done && landed && main() != before,
+        json!({ "main": [before, main()], "preferences": file("memory/preferences.md") }),
+    );
+
+    // a second chat: its new session is told the fact, and offered the skill
+    let other = s.named(api, owner, "mem-chat")?;
+    let made = api.create_with(owner, json!({ "name": other, "template": "chat" }))?;
+    anyhow::ensure!(made.status == 200, "a second chat from the template: {made}");
+    s.hook(api, &made.body);
+    let listening = || api.signed(owner, "GET", &format!("/api/f/{other}/subscriptions"), None).map_or(0, |r| r.body["subscriptions"].as_array().map_or(0, Vec::len));
+    anyhow::ensure!(s.eventually(Duration::from_secs(30), || listening() == 1), "the owner's agent listens in the second chat");
+    let goose = [Reply::Tools(vec![("shell".into(), json!({ "command": format!("printf -- '{WORK}\\n' > ~/memory/memory/work.md") }))]), Reply::Text("Noted.".into())];
+    let (done, asks) = handed(s, api, owner, &other, ("m2", "Note that I build fragments."), &goose, "Noted.")?;
+    let landed = s.eventually(Duration::from_secs(30), || file("memory/work.md").is_some_and(|t| t.contains(WORK)));
+    let (fresh, then) = (asks.first().cloned().unwrap_or_default(), first.last().cloned().unwrap_or_default());
+    let prompt = |c: &Value| c["messages"].as_array().into_iter().flatten().rev().find(|m| m["role"] == "user").map(|m| m["content"].to_string()).unwrap_or_default();
+    let system = |c: &Value| c["messages"][0]["content"].to_string();
+    s.ok(
+        "another chat's new session on the computer is told the fact in its first task, and offered the skill written in the first chat",
+        done && landed && fresh["session_id"] != then["session_id"] && prompt(&fresh).contains(&format!("Your owner's memory ({memory}, at ~/memory):")) && prompt(&fresh).contains(TEA) && system(&fresh).contains(SKILL),
+        json!({ "prompt": prompt(&fresh), "system": system(&fresh) }),
+    );
+
+    // the first chat's next task: told what changed at its start, its loaded history kept whole
+    let (done, asks) = handed(s, api, owner, chat, ("m3", "Anything else to note?"), &[Reply::Text("Nothing else.".into())], "Nothing else.")?;
+    let next = asks.first().cloned().unwrap_or_default();
+    let (a, b) = (then["messages"].as_array().cloned().unwrap_or_default(), next["messages"].as_array().cloned().unwrap_or_default());
+    s.ok(
+        "the first chat's next task starts with what changed in the memory, and its first request carries that chat's last as its prefix: nothing loaded is rewritten",
+        done && !a.is_empty() && b.len() > a.len() && a[..] == b[..a.len()] && next["session_id"] == then["session_id"]
+            && prompt(&next).contains("Your owner's memory changed since your earlier work here:") && prompt(&next).contains(WORK),
+        json!({ "then": a.len(), "next": b.len(), "prompt": prompt(&next) }),
+    );
+
+    // the owner's agent reads the facts itself: no computer
+    s.openrouter.clear_script();
+    s.openrouter.script_agent(&[Reply::Text("Tea, never coffee.".into())]);
+    let from = s.openrouter.chats().len();
+    say(api, owner, &other, "m4", "what do I drink?")?;
+    let answered = s.eventually(Duration::from_secs(30), || chat_records(api, owner, &other).iter().any(|r| r["body"]["text"] == "Tea, never coffee."));
+    let asked: Vec<Value> = s.openrouter.chats().into_iter().skip(from).collect();
+    let told = asked.first().map(system).unwrap_or_default();
+    s.ok(
+        "the owner's agent is told their memory's facts, so it answers a personal question itself, with no computer",
+        answered && asked.len() == 1 && asked[0]["session_id"].is_null() && told.contains(&format!("which their computer keeps in {memory}")) && told.contains(TEA) && told.contains(WORK),
+        &told,
+    );
+    s.openrouter.clear_script();
+    Ok(())
+}
+
 /// The files under `dir` that hold any of `needles`.
 fn files_containing(dir: &Path, needles: &[String]) -> Vec<String> {
     let mut found = vec![];
@@ -460,7 +569,8 @@ fn files_containing(dir: &Path, needles: &[String]) -> Vec<String> {
 /// `$OPENROUTER_HOST/api/v1/chat/completions` as goose's OpenRouter
 /// provider does (streaming, the session's id as `session_id`, `transforms`,
 /// `OPENROUTER_PARAMETERS` merged in), sending the session's whole history
-/// after a fixed system prompt, with the session's tools: a `shell` (its
+/// after a fixed system prompt (and the skills goose would list:
+/// `skills_listed`), with the session's tools: a `shell` (its
 /// built-in `developer`) and those of its stdio MCP servers (the pet's Cua
 /// Driver and browser), named and filtered as goose does, each inheriting
 /// goose's environment. As goose does, a session keeps the extensions its
@@ -682,7 +792,8 @@ fn prompt<S: std::io::Read + Write>(ws: &mut tungstenite::WebSocket<S>, session:
     let http = reqwest::blocking::Client::builder().timeout(Duration::from_secs(150)).build()?;
     history.push(json!({ "role": "user", "content": text }));
     for _ in 0..10 {
-        let messages: Vec<Value> = [json!({ "role": "system", "content": "You are goose (the e2e's stand-in)." })].into_iter().chain(history.iter().cloned()).collect();
+        let system = format!("You are goose (the e2e's stand-in).{}", skills_listed());
+        let messages: Vec<Value> = [json!({ "role": "system", "content": system })].into_iter().chain(history.iter().cloned()).collect();
         let mut body = json!({
             "model": env("GOOSE_MODEL")?, "messages": messages, "tools": tools, "stream": true,
             "session_id": session, "user": session, "transforms": ["middle-out"], "usage": { "include": true },
@@ -733,6 +844,27 @@ fn prompt<S: std::io::Read + Write>(ws: &mut tungstenite::WebSocket<S>, session:
         }
     }
     Ok((history, "max_turn_requests"))
+}
+
+/// What goose's Skills extension adds to its system prompt at each model
+/// call (goose v1.52.0, crates/goose/src/skills/client.rs
+/// `get_instructions`): each `~/.agents/skills/<dir>/SKILL.md` whose
+/// frontmatter names it, sorted, as `• name - description`.
+fn skills_listed() -> String {
+    let dir = Path::new(&std::env::var("HOME").unwrap_or_default()).join(".agents/skills");
+    let skill = |e: std::fs::DirEntry| -> Option<(String, String)> {
+        let text = std::fs::read_to_string(e.path().join("SKILL.md")).ok()?;
+        let head = text.strip_prefix("---\n")?.split_once("\n---")?.0;
+        let field = |k: &str| head.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix(':')).map(|v| v.trim().trim_matches('\'').to_string());
+        Some((field("name")?, field("description").unwrap_or_default()))
+    };
+    let mut skills: Vec<(String, String)> = std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(skill).collect();
+    skills.sort();
+    let listed: String = skills.iter().map(|(name, what)| format!("\n• {name} - {what}")).collect();
+    match listed.is_empty() {
+        true => listed,
+        false => format!("\n\nYou have these skills at your disposal, when it is clear they can help you solve a problem or you are asked to use them:{listed}"),
+    }
 }
 
 /// A stdio MCP server, started as goose starts one from its config.
