@@ -34,6 +34,8 @@ const DEPLOY_ATTEMPTS: usize = 5;
 /// screenshot), larger than an app's (`limits::FILE_WRITE_MAX_BYTES`);
 /// bigger files go through the CLI as blobs.
 const API_WRITE_MAX_BYTES: usize = 1024 * 1024;
+/// Fragments one `__presence` read may name: a desktop's open panes.
+const PRESENCE_NAMES_MAX: usize = 8;
 
 /// Who may open a fragment made from a template, when its create does not
 /// say, from what the template declares (fragment.json holds no access): a
@@ -286,6 +288,36 @@ impl FragmentCell {
             .collect();
         // without it, the desktop says so in place of its panes
         Ok(json!({ "fragments": fragments, "frame": self.framing()? }))
+    }
+
+    /// `GET __presence?name=…`: who has each named fragment open now, for
+    /// the desktop's panes. Each is asked as the owner and answers its own
+    /// owner alone (`/api/presence`), so one that is not theirs, or cannot
+    /// answer, is left out; a read wakes only the fragments it names.
+    pub(crate) async fn owner_presence(&self, caller: &Caller) -> CellResult<Value> {
+        self.owner_granted(caller)?;
+        let who = caller.signed.as_ref().expect("the owner, granted, signed in");
+        let mut names: Vec<String> = caller.url.query_pairs().filter(|(k, _)| k == "name").map(|(_, v)| v.into_owned()).collect();
+        names.sort();
+        names.dedup();
+        if names.len() > PRESENCE_NAMES_MAX {
+            return Err(CellError::invalid(format!("at most {PRESENCE_NAMES_MAX} fragments at once")));
+        }
+        if let Some(bad) = names.iter().find(|n| !fragment_proto::valid_fragment_name(n)) {
+            return Err(CellError::invalid(format!("{bad:?} is not a fragment's name")));
+        }
+        let asked = names.iter().map(|name| crate::share::ask(&self.env, &caller.url, name, who, Method::Get, "/api/presence", None));
+        let mut presence = serde_json::Map::new();
+        for (name, answer) in names.iter().zip(futures_util::future::join_all(asked).await) {
+            match answer {
+                Ok(here) => {
+                    presence.insert(name.clone(), here);
+                }
+                Err(e) if crate::auth::is_refusal(e.code) || e.code == ErrorCode::NotFound => {}
+                Err(e) => console_error!("__presence: {name}: {:?} {}", e.code, e.message),
+            }
+        }
+        Ok(json!({ "presence": presence }))
     }
 
     /// `POST __fragments {label, template}`: makes `<label>.<username>` from

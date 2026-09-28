@@ -116,9 +116,9 @@ fn compiled_in(req: &Request, body: &'static str, hash: u64, content_type: &str)
 /// Whether a site path's answer is someone's, beyond whether they may see
 /// the fragment: an operation's call, a socket (`__live`'s presence; a
 /// member's `__watch` closes when they leave), a push subscription, or the
-/// owner's fragments. Its caller is resolved first.
+/// owner's fragments and who has them open. Its caller is resolved first.
 fn answers_someone(path: &str) -> bool {
-    path.starts_with("__op/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__fragments" | "__watch" | "__live")
+    path.starts_with("__op/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__fragments" | "__presence" | "__watch" | "__live")
 }
 
 fn with_cookies(mut resp: Response, cookies: &[String]) -> CellResult<Response> {
@@ -221,6 +221,9 @@ impl FragmentCell {
                 self.with_share_sheets(caller, listed)?
             };
             json_response(&answer)?
+        } else if path == "__presence" {
+            // who has each of the owner's named fragments open (publish.rs)
+            json_response(&self.owner_presence(caller).await?)?
         } else if path == "__frame" {
             // a frame of this page, on to one of its owner's fragments (publish.rs)
             self.frame_redirect(caller, name).await?

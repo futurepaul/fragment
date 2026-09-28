@@ -216,7 +216,7 @@ random bytes, the registry keeps their SHA-256).
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /` | the home. Signed out: a link to sign in. Signed in without a username: choosing one. Then: who is signed in, what is left of this month's AI budget, their fragments (each one's link; theirs or shared with them, as what; on their own, who may open it; its share sheet, `/share/<name>`), the "new fragment" form (blank, todo, inbox, chat, then the desktop, a demo), pairing a CLI (the one-line install, `fragment login`, and `fragment skill` for a coding agent), their picture, signing out, and linking another sign-in |
+| `GET /` | the home. Signed out: a link to sign in. Signed in without a username: choosing one. Then: who is signed in, what is left of this month's AI budget, their fragments (each one's link; theirs or shared with them, as what; on their own, who may open it; its share sheet, `/share/<name>`, in a dialog: a frame of the sheet, whose Done closes it, and the home reloads), the "new fragment" form (blank, todo, inbox, chat, then the desktop, a demo), pairing a CLI (the one-line install, `fragment login`, and `fragment skill` for a coding agent), their picture, signing out, and linking another sign-in |
 | `POST /auth/new` | the form (`label`, `template`): makes `<label>.<username>` from the template, then → `/auth/fragment?name=…&return=/` (signed in on its origin, and there); a refusal is a 400 page saying why; another origin 403. For a template whose `fragment.json` asks for `frame` (the desktop), the form says it will show the person's fragments inside it, signed in as them, and making it there is their frame grant (`PUT /api/f/{name}/grants/frame`, the same event) |
 | `GET /auth/login?return=&login_hint=` | → WorkOS's authorize URL (`provider=authkit`, `redirect_uri` `<platform>/auth/callback`, a state); the state is bound to the browser by `fragment_login` (HttpOnly, SameSite=Lax, `Path=/`, ten minutes) |
 | `GET /auth/link?return=` | the same from a signed-in browser: the sign-in that comes back joins this person (409 when it is someone else's) |
@@ -389,8 +389,8 @@ platform, so the fragment decides who may do what.
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /share/<name>` | the share sheet: who is in (usernames and pictures, from the registry's profiles) and their roles, to any member (anyone else, a 403 page); for the owner, inviting by username, the pending invites (revoke), each member's role and removing them, who can open it (`members`, `link`, `public`), and the share link (copy; a new one). Signed out: → sign in first, and back. It reads nothing from its URL |
-| `POST /share/<name>` | the sheet's form: `form` (the page's token), `action`, and its fields: `invite` (`username`, `role`: an invite for them alone, one use, seven days; answers the sheet with the `/join` link to send them), `role` (`member`, `role`), `remove` (`member`), `uninvite` (`invite`: its id), `visibility` (`visibility`), `rotate` (the share link only; the inbox's token and the webhook's secret are the CLI's). Done: → 303 back to the sheet; refused by the fragment (a member who is not the owner: 403): the sheet, saying why, with the refusal's status |
+| `GET /share/<name>` | the share sheet, a card laid out as a document's share dialog: who is in (usernames and pictures, from the registry's profiles) and their roles, to any member (anyone else, a 403 page); for the owner, adding people by username (an invite), the pending invites (revoke), each member's role menu (viewer, editor, or removing them), who can open it ("General access": Restricted `members`, Anyone with the link `link`, Public `public`), each menu sent as it changes; Copy link (the share link while it opens it, else its address) and Done (in the home's dialog, closes it; in a window of its own, closes that, or goes home); then, quieter, a new share link and the frame grant. Signed out: → sign in first, and back. It reads nothing from its URL |
+| `POST /share/<name>` | the sheet's form: `form` (the page's token), `action`, and its fields: `invite` (`username`, `role`: an invite for them alone, one use, seven days; answers the sheet with the `/join` link to send them), `role` (`member`, `role`: `viewer`, `editor`, or `remove`, which removes them), `remove` (`member`), `uninvite` (`invite`: its id), `visibility` (`visibility`), `rotate` (the share link only; the inbox's token and the webhook's secret are the CLI's). Done: → 303 back to the sheet; refused by the fragment (a member who is not the owner: 403): the sheet, saying why, with the refusal's status |
 | `GET /join/<name>?token=` | what the invite grants (the fragment, the role, who invites), and a Join button; signed out: → sign in first, and back. An invite for someone else: a 403 page naming them; used, revoked, or expired: 404; the person is in already (at that role or above): a link to open it |
 | `POST /join/<name>` | the page's form (`form`, `token`): joins as the signed-in person, then → `/auth/fragment?name=<name>&return=/` (signed in on its origin, and there) |
 
@@ -404,10 +404,13 @@ another fragment or page, one sent sooner than 800 ms after its page was
 made, or one older than 12 hours is 403. Their buttons come disabled and
 arm 800 ms after the page shows (again each time it is shown), so the
 click that opened a page (a double-click's second half) cannot confirm
-in it. Both pages send no CORS headers (a fragment's page cannot read
-them, so it never holds a form's token), refuse every frame, sever their
-opener, allow scripts and styles only inline and images only from the
-platform (`Content-Security-Policy`), and keep their URL to the platform
+in it (the sheet's selects too). Both pages send no CORS headers (a
+fragment's page cannot read them, so it never holds a form's token),
+refuse every frame but the sheet's on the platform's own origin (the
+home's dialog: `frame-ancestors 'self'`, `X-Frame-Options: SAMEORIGIN`;
+every fragment is another origin), sever their opener, allow scripts
+and styles only inline and images only from the platform
+(`Content-Security-Policy`), and keep their URL to the platform
 (`Referrer-Policy: same-origin`: the join page's holds its invite).
 
 ## Control API
@@ -423,6 +426,7 @@ platform (`Content-Security-Policy`), and keep their URL to the platform
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes, frame?, throwawayOf?}` (`frame`: when live's `fragment.json` asks for it, whether its owner allows it; `throwawayOf`: the agent that made it as a throwaway) |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
+| `GET /api/f/{name}/presence` | owner | → `{people, anonymous}`: who has the fragment open now: each principal with a live socket (`__live`) once, a page's or a computer's, whether or not it shares presence, and how many anonymous visitors (`__presence` asks it) |
 | `PUT /api/f/{name}/members/{id\|npub}` | owner | `{role: viewer\|editor}` → the member; a key names the identity holding it (404 when no one registered it) |
 | `PUT /api/f/{name}/members/{computer}` | an agent, for its owner (Agents, Hand-offs) | → the member: its owner's computer named `computer` (a fragment's name) becomes an editor of its owner's fragment; another fragment 403, a computer its owner does not have 404 |
 | `DELETE /api/f/{name}/members/{id\|npub\|me}` | owner, or the member | → `{ok, removed}`; closes that member's change feeds (and its owner's, when an agent's membership was their only view) |
@@ -878,6 +882,7 @@ API answers on the platform's host):
 | `__fragment.js` | the browser library (below) |
 | `__chat.js`, `__chat.css` | the chat's page, the platform's (docs/platform.md): `import { mount } from "./__chat.js"; mount(document.body, {suggestions?, placeholder?})` renders a chat's `chat` and `work` channels (the chat template, below) |
 | `__fragments` | `{fragments: [{name, role, url, share, sharing?}], frame}`: the fragments this fragment's owner belongs to, only to the owner signed in here, and only when `fragment.json` at live declares `"capabilities": ["fragments"]` (anyone else, or a page that does not ask, 403). `share` is its share sheet (`<platform>/share/<name>`); `sharing` is the owner's list's (`GET /api/fragments`): a read asks the owner's Principal cell alone and wakes none of the fragments listed. `frame` is whether this page may show them inside it (`__frame`; `null` when its `fragment.json` does not ask): the desktop shows a notice in place of its panes without it. A dashboard's page, such as the desktop's. `POST` `application/json` `{label, template}` → `{name, url}` makes `<label>.<username>` for the owner, as `POST /api/fragments` would, under the same conditions |
+| `__presence?name=…&name=…` | who has each named fragment open now, for a desktop's panes: `{presence: {<name>: {people, anonymous}}}` for up to 8 names (more is 400), under `__fragments`' conditions (its owner signed in here, `fragments` declared; anyone else 403). Each named fragment is asked at once, as the owner (`GET /api/f/{name}/presence`), so one that is not theirs, or cannot answer, is left out, and a read wakes only the fragments it names. The desktop asks for its open app panes every 12 seconds while it is in view |
 | `__people?id=…&id=…` | anyone who can see the fragment: `{profiles: {<id>: {kind, username, picture}}}` for up to 64 identities (an agent's `username` is its owner's; a picture is an absolute platform URL); an id the registry does not hold is left out |
 | `__files` | the files viewer, the platform's page (`__files.js`, `__files.css`): the content files (live and main) as a tree beside a reader (markdown with `[[wikilinks]]`, other text with line numbers, pictures, downloads), reading each through `__file`, following `__watch` where it may; asked for `application/json`, the list it reads, `{type: "files", count, files: [{path, size}]}` (a path on both is live's). Framed, the reader's bar asks the page around it to open a file as a pane (`postMessage({fragment: "open", url, title})`) |
 | `__live` | WebSocket, anyone who can see the fragment: channel subscriptions from a cursor, presence, change signals, queries (below) |

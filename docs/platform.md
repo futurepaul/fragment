@@ -27,13 +27,20 @@ belongs in a template instead.
 | Path | What |
 |---|---|
 | `/`, `/auth/*`, `/cli` | Sign-in, choosing a username, the home (your fragments, a new one, pairing your CLI), approving the CLI's key or pairing a computer |
-| `/share/<name>` | The share sheet, in a window the desktop opens: who is in; the owner invites by username, sets roles, removes, revokes invites, sets who can open it, copies and renews the link, and allows `frame` (below). Sharing grants, so no fragment's code (which its author or an agent rewrites) may do it |
+| `/share/<name>` | The share sheet, in a dialog on the home and in a window the desktop opens: who is in; the owner invites by username, sets roles, removes, revokes invites, sets who can open it, copies and renews the link, and allows `frame` (below). Sharing grants, so no fragment's code (which its author or an agent rewrites) may do it |
 | `/auth/fragment` | Signing in on a fragment's origin; on one that is not the person's nor shared with them, it asks "Continue to X?" first, once (docs/api.md, Asking first) |
 | `/join/<name>?token=` | Accepting an invite: what it grants, then a click; an invite by username is its invitee's alone. Replaced a fragment-origin `__join` (a page there is its author's) |
 | `/api/*` | The signed API: fragments, members, identities, budgets, agents (`/api/agents`, `/api/a/*`, co-hosted) |
 
-Every platform page must refuse to be framed (`frame-ancestors 'none'`;
-PR `platform-no-framing`). Since the move to fragment.boats
+No page on another origin may frame a platform page: every one answers
+`frame-ancestors 'none'` (PR `platform-no-framing`) but the share sheet,
+which answers `frame-ancestors 'self'` (and `X-Frame-Options:
+SAMEORIGIN`) so the home can show it in a dialog. `'self'` is the
+platform's origin alone, and nothing but the platform's own pages is
+served there: every fragment is on an origin of its own (a fleet without
+a hostname suffix, where fragments share the platform's origin, is the
+debt ledger's, and there a fragment's page could read the sheet with a
+fetch anyway). Since the move to fragment.boats
 (docs/fragment-boats.md, ROADMAP decision 23) the platform is cross-site
 from every fragment, so its session cookie never reaches a fragment's
 frame; the header stays for any fleet whose platform shares the
