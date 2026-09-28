@@ -1,9 +1,10 @@
 // The viewer: apps and files stacked vertically in the right column, newest on
-// top. Each pane has a header (icon, title, actions, maximize, close; drag it
-// to reorder) and resizes against its neighbours through split-grid row
-// gutters. Order is only grid-row placement: a pane's element never moves in
-// the DOM once added, so app iframes keep their state through reordering,
-// resizing, collapsing the viewer, maximizing, and other panes closing.
+// top. Each pane has a header (icon, title, status, presence, actions,
+// maximize, close; drag it to reorder) and resizes against its neighbours
+// through split-grid row gutters. Order is only grid-row placement: a pane's
+// element never moves in the DOM once added, so app iframes keep their state
+// through reordering, resizing, collapsing the viewer, maximizing, and other
+// panes closing.
 import Split from "./vendor/split-grid.js";
 import { store } from "./layout.js";
 
@@ -80,7 +81,8 @@ export function createViewer({ stack, onChange = () => {} }) {
     p.el.classList.add("flash");
   }
 
-  // open({ key, title, subtitle?, icon?: Element, body: Element, actions?: [{ icon, title, onClick }], size?, persist? })
+  // open({ key, title, subtitle?, icon?: Element, status?: Element, presence?: Element, body: Element, actions?: [{ icon, title, onClick }], size?, persist? })
+  // `status` follows the title; `presence` stands before the actions.
   function open(spec) {
     const existing = panes.find((p) => p.key === spec.key);
     if (existing) { focus(spec.key); return existing; }
@@ -101,9 +103,11 @@ export function createViewer({ stack, onChange = () => {} }) {
       sub.textContent = spec.subtitle;
       head.append(sub);
     }
+    if (spec.status) head.append(spec.status);
     const grow = document.createElement("span");
     grow.className = "grow";
     head.append(grow);
+    if (spec.presence) head.append(spec.presence);
     for (const a of spec.actions || []) head.append(button(a.icon, a.title, a.onClick));
     const max = button("max", "Maximize", () => maximize(spec.key));
     head.append(max, button("x", "Close", () => close(spec.key)));

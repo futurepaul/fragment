@@ -32,6 +32,10 @@ authority over any of them.
   many people besides you (and your agents) are in them, and a globe when
   anyone may open them, from `sharing` in your list (reading it wakes none
   of the fragments).
+- An app pane's header says the same, and who may open it, with a Share
+  button; and who else has the app open now, as faces (`__presence`: one
+  read for the open app panes every 12 seconds while this page is in
+  view, which wakes only those fragments).
 - `site/layout.js` is the frame (sidebar | chat | viewer, one CSS grid
   resized with split-grid), `site/viewer.js` the stacked panes, and
   `site/desktop.js` the rest. Layout and open panes are remembered in the

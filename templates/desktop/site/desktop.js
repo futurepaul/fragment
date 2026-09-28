@@ -10,7 +10,9 @@
 // place of its panes). Sharing is the platform's too: a row's Share item
 // opens the platform's share sheet in a window of its own, which this page
 // cannot script (the sheet severs its opener); the list says who else is
-// in each, for the badges.
+// in each, for the badges. An app pane's header says the same, with a Share
+// button, and who has the app open now (`__presence`, asked while this page
+// is in view).
 import * as fragment from "./__fragment.js";
 import { createLayout, store } from "./layout.js";
 import { createViewer } from "./viewer.js";
@@ -38,8 +40,9 @@ const CATALOG = [
 ];
 
 // `frame`: whether this page may show the owner's fragments inside it
-// (`null`: its fragment.json does not ask), as the platform last said
-const state = { fragments: [], chats: [], current: store.get(CURRENT, null), frames: new Map(), frame: undefined };
+// (`null`: its fragment.json does not ask), as the platform last said;
+// `me`: the owner's principal, once this page's socket said hello
+const state = { fragments: [], chats: [], current: store.get(CURRENT, null), frames: new Map(), frame: undefined, me: null };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -151,6 +154,7 @@ const viewer = createViewer({
     $("viewer-count").textContent = keys.length;
     for (const row of document.querySelectorAll("#apps .row[data-key], #computers .row[data-key]")) row.classList.toggle("open", keys.includes(row.dataset.key));
     if (!keys.length) renderQuickOpen();
+    look();
   },
 });
 
@@ -195,6 +199,16 @@ function badges(f) {
     out.push(b);
   }
   return out;
+}
+
+// Who may open a fragment, in words: an app pane's header says it after
+// the row's badges, and who else is in it in its tooltip.
+const OPENS = { members: "Only people added", link: "Anyone with the link", public: "Public" };
+function renderSharing(box, f) {
+  const { guests = 0, visibility } = f?.sharing ?? {};
+  box.replaceChildren(...badges(f ?? {}));
+  if (OPENS[visibility]) box.append(el("span", "words", OPENS[visibility]));
+  box.title = [OPENS[visibility], guests > 0 && `Shared with ${guests}`].filter(Boolean).join(" · ");
 }
 
 // The platform's share sheet, in a small window of its own. `noopener`:
@@ -372,9 +386,19 @@ function openApp(name) {
   const f = byName(name);
   if (!f) return;
   const frame = frameOf(framed(name), label(name), name);
+  const status = el("span", "pane-sharing");
+  status.dataset.fragment = name;
+  renderSharing(status, f);
+  // who has it open: the platform says so for the owner's own alone
+  const here = f.role === "owner" ? el("span", "presence") : undefined;
+  if (here) {
+    here.hidden = true;
+    here.dataset.fragment = name;
+  }
   show({
-    key: `app:${name}`, title: label(name), subtitle: f.role === "owner" ? undefined : f.role, icon: iconOf(name), body: frame,
+    key: `app:${name}`, title: label(name), subtitle: f.role === "owner" ? undefined : f.role, icon: iconOf(name), body: frame, status, presence: here,
     actions: [
+      { icon: ICON.share, title: "Share…", onClick: () => share(name) },
       { icon: ICON.folder, title: "Files", onClick: () => openTree(name) },
       { icon: ICON.reload, title: "Reload", onClick: () => { if (frame.isConnected && frame.tagName === "IFRAME") frame.src = framed(name); } },
     ],
@@ -467,6 +491,68 @@ function renderQuickOpen() {
   $("quick-open").replaceChildren(...rows, add);
 }
 
+// ---- presence: who has each open app open now, one `__presence` read for
+// every app pane (the platform's most: 8), while this page is in view ----
+const PRESENCE_MS = 12000;
+const PRESENCE_MAX = 8;
+const FACES = 3;
+const profiles = new Map(); // id -> { kind, username, picture } ({}: the platform knows none)
+
+// Usernames and pictures for the ids not seen yet, asked once each (64 at
+// most a read, the platform's most).
+async function lookUp(ids) {
+  const fresh = [...new Set(ids)].filter((id) => !profiles.has(id)).slice(0, 64);
+  if (!fresh.length) return;
+  const r = await fetch(`__people?${fresh.map((id) => `id=${encodeURIComponent(id)}`).join("&")}`, { credentials: "same-origin" });
+  if (!r.ok) return;
+  const { profiles: found = {} } = await r.json();
+  for (const id of fresh) profiles.set(id, found[id] ?? {});
+}
+
+const bot = (p) => p.kind === "agent" || p.kind === "computer";
+const nameOf = (p) => (bot(p) ? `${p.username ?? "someone"}'s ${p.kind}` : (p.username ?? "someone"));
+function face(p) {
+  if (!p.picture) return el("span", "av", bot(p) ? "✦" : (p.username?.[0]?.toUpperCase() ?? "?"));
+  const img = el("img", "av");
+  img.src = p.picture;
+  img.alt = "";
+  return img;
+}
+
+// Who else has an app open (its owner has it open here): up to three
+// faces, then +N; a narrow pane shows only how many (desktop.css).
+function renderPresence(box, here) {
+  const others = (here?.people ?? []).filter((id) => id !== state.me).map((id) => profiles.get(id) ?? {});
+  const guests = here?.anonymous ?? 0;
+  const n = others.length + guests;
+  const shown = others.slice(0, FACES);
+  const count = el("span", "count");
+  count.innerHTML = svg("people");
+  count.append(String(n));
+  box.replaceChildren(...shown.map(face), ...(n > shown.length ? [el("span", "av more", `+${n - shown.length}`)] : []), count);
+  box.title = `Here now: ${[others.map(nameOf).join(", "), guests && `${guests} ${guests === 1 ? "guest" : "guests"}`].filter(Boolean).join(" and ")}`;
+  box.hidden = n === 0;
+}
+
+async function lookAround() {
+  const boxes = [...document.querySelectorAll(".presence[data-fragment]")].slice(0, PRESENCE_MAX);
+  if (document.hidden || !state.me || !boxes.length) return;
+  const r = await fetch(`__presence?${boxes.map((b) => `name=${encodeURIComponent(b.dataset.fragment)}`).join("&")}`, { credentials: "same-origin" });
+  if (!r.ok) return;
+  const { presence = {} } = await r.json();
+  // a face whose name did not come shows as someone's
+  await lookUp(Object.values(presence).flatMap((p) => p.people)).catch(() => {});
+  for (const b of boxes) renderPresence(b, presence[b.dataset.fragment]);
+}
+// panes that open or close together are one read
+let looking = 0;
+function look() {
+  clearTimeout(looking);
+  looking = setTimeout(() => lookAround().catch(() => {}), 200);
+}
+setInterval(look, PRESENCE_MS);
+document.addEventListener("visibilitychange", look);
+
 // ---- loading ----
 let seen = "";
 async function load() {
@@ -486,6 +572,7 @@ async function load() {
   renderChats();
   renderApps();
   renderQuickOpen();
+  for (const box of document.querySelectorAll(".pane-sharing[data-fragment]")) renderSharing(box, byName(box.dataset.fragment));
 }
 
 // Reopen what was open last time (bottom first: new panes open on top).
@@ -517,6 +604,7 @@ async function start() {
   }
   const username = state.self?.split(".")[1];
   if (username) $("brand").textContent = `${username}'s desktop`;
+  fragment.me().then((hello) => { state.me = hello.principal; look(); });
   const chats = chatNames();
   if (chats.length) openChat(chats.includes(state.current) ? state.current : chats[0]);
   else if (state.frame !== true) cannotFrame();

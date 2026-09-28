@@ -5,7 +5,9 @@
 //! owner's, signed in on its own origin through the desktop's `__frame`:
 //! a desktop made with the platform's new-fragment form may, with no visit
 //! to the share sheet (the form's submit is the grant; a P0 when it was
-//! not), and is its owner's alone. A chat is what New chat names one.
+//! not), and is its owner's alone. A chat is what New chat names one. An
+//! app pane's header shows its sharing and who else has it open, which the
+//! desktop reads from `__presence`.
 
 use std::time::Duration;
 
@@ -14,8 +16,9 @@ use serde_json::{json, Value};
 
 use fragment_fakes::openrouter::Reply;
 
+use super::signin::site_cookie;
 use super::templates::{person, post_form};
-use crate::api::{url_enc, Api};
+use crate::api::{url_enc, Api, Call, Socket};
 use crate::browser::{Browser, Page};
 use crate::Suite;
 
@@ -43,11 +46,75 @@ pub fn desktop(s: &mut Suite, _: &Api) -> Result<()> {
     }
     s.stop()?;
     let api = s.start_as_browsers_see_it()?;
+    let asked = presence(s, &api);
     let result = run(s, &api);
     drop(api);
     s.stop()?;
     s.start(false, true)?;
-    result
+    asked.and(result)
+}
+
+/// `__presence`: who has the owner's apps open, for the desktop's panes,
+/// to its owner alone: every signed-in principal with a live socket there
+/// once (none of them shares presence), an anonymous visitor as a count,
+/// and only the owner's own fragments.
+fn presence(s: &mut Suite, api: &Api) -> Result<()> {
+    let (owner, session) = person(api)?;
+    let (guest, guest_session) = person(api)?;
+    let make = |keys: &fragment_nip98::Keys, label: &str, template: &str| -> Result<String> {
+        let name = api.qualified(keys, label)?;
+        let r = api.create_with(keys, json!({ "name": name, "template": template }))?;
+        anyhow::ensure!(r.status == 200, "making {name}: {r}");
+        Ok(name)
+    };
+    let desk = make(&owner, &s.name("pdesk"), "desktop")?;
+    let app = make(&owner, &s.name("papp"), "blank")?;
+    let theirs = make(&guest, &s.name("ptheirs"), "blank")?;
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{app}/visibility"), Some(&json!({ "visibility": "public" })))?;
+    anyhow::ensure!(r.status == 200, "making the app public: {r}");
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{desk}/members/{}", api.identity(&guest)?), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "adding an editor to the desktop: {r}");
+    let ask = |cookie: Option<&str>, on: &str, names: &[&str]| -> Result<crate::api::Reply> {
+        let query: Vec<String> = names.iter().map(|n| format!("name={}", url_enc(n))).collect();
+        let cookie = cookie.map(|c| format!("fragment_site={c}"));
+        api.call(Call { method: "GET", url: api.site_url(on, &format!("__presence?{}", query.join("&"))), cookie, ..Call::default() })
+    };
+    let owner_site = site_cookie(api, &session, &desk)?;
+    let r = ask(Some(&owner_site), &desk, &[&app])?;
+    s.ok("__presence: an app no one has open has no one in it", r.status == 200 && r.body["presence"][&app] == json!({ "people": [], "anonymous": 0 }), &r);
+
+    // the owner and a guest, the guest on two pages, and a visitor signed out
+    let mut open = vec![];
+    for keys in [Some(&owner), Some(&guest), Some(&guest), None] {
+        let mut socket = Socket::open(api, &app, "__live", keys, None)?;
+        socket.until("hello", 5)?;
+        open.push(socket);
+    }
+    let r = ask(Some(&owner_site), &desk, &[&app, &theirs])?;
+    let here = &r.body["presence"][&app];
+    let mut people = vec![api.identity(&owner)?, api.identity(&guest)?];
+    people.sort();
+    s.ok("two people with sockets open to the owner's app are in it, each once, though neither shares presence", r.status == 200 && here["people"] == json!(people), &r);
+    s.ok("a visitor signed out is counted, not named", here["anonymous"] == 1 && !here["people"].to_string().contains("anon:"), &r);
+    s.ok("another person's fragment is left out", r.body["presence"].get(&theirs).is_none(), &r);
+    let many: Vec<String> = (0..9).map(|i| format!("{app}{i}")).collect();
+    let r = ask(Some(&owner_site), &desk, &many.iter().map(String::as_str).collect::<Vec<_>>())?;
+    s.ok("more than 8 names are refused", r.status == 400, &r);
+    let r = ask(Some(&site_cookie(api, &guest_session, &desk)?), &desk, &[&app])?;
+    s.ok("an editor of the desktop, not its owner, is refused", r.status == 403, &r);
+    let r = ask(None, &desk, &[&app])?;
+    s.ok("so is someone signed out", r.status == 403 || r.status == 401, &r);
+    let r = ask(Some(&site_cookie(api, &session, &app)?), &app, &[&app])?;
+    s.ok("and a page that does not ask for the fragments capability, even to its owner", r.status == 403, &r);
+    let r = api.signed(&guest, "GET", &format!("/api/f/{app}/presence"), None)?;
+    s.ok("an app answers who has it open to its owner alone", r.status == 403, &r);
+
+    for socket in open {
+        socket.close();
+    }
+    let gone = s.eventually(Duration::from_secs(10), || ask(Some(&owner_site), &desk, &[&app]).is_ok_and(|r| r.body["presence"][&app] == json!({ "people": [], "anonymous": 0 })));
+    s.ok("their pages closed, no one is in it", gone, ask(Some(&owner_site), &desk, &[&app])?);
+    Ok(())
 }
 
 fn run(s: &mut Suite, api: &Api) -> Result<()> {
@@ -236,11 +303,29 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let gone = chrome.until(&page, &format!("![...document.querySelectorAll('iframe')].some(f => f.src.includes({:?}))", format!("name={}", url_enc(&computer))), wait);
     s.ok("its pane closed, its page is gone: nothing here keeps it awake", gone, "");
 
-    // apps and files open into the viewer, newest on top
+    // apps and files open into the viewer, newest on top; a guest of the
+    // todo has it open meanwhile
+    let (guest, _) = person(api)?;
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{todo}/members/{}", api.identity(&guest)?), Some(&json!({ "role": "viewer" })))?;
+    anyhow::ensure!(r.status == 200, "adding a guest to the todo: {r}");
+    let mut guest_page = Socket::open(api, &todo, "__live", Some(&guest), None)?;
+    guest_page.until("hello", 5)?;
     chrome.eval(&page, &format!("[...document.querySelectorAll('#apps .row')].find(r => r.dataset.key === {:?}).click(); true", format!("app:{todo}")))?;
     s.ok("an app opens as a pane", chrome.until(&page, &format!("!!document.querySelector('.pane[data-key={:?}]')", format!("app:{todo}")), wait), "");
     let todo_title = s.eventually(wait, || chrome.eval_in_frame(&page, &format!("{}--", label(&todo)), "document.title").ok() == Some(json!("Todo")));
     s.ok("the app's own page is in it", todo_title, "");
+    let head = format!(".pane[data-key=\"app:{todo}\"] .pane-head");
+    let headed = format!(
+        "(() => {{ const h = document.querySelector({head:?}); const p = h?.querySelector('.presence'); \
+         return !!h?.querySelector('.pane-action[title=\"Share…\"]') && h.querySelector('.pane-sharing').textContent.includes('Anyone with the link') \
+         && !!p && !p.hidden && p.querySelectorAll('.av').length === 1 && p.title.includes({:?}); }})()",
+        api.username(&guest)?
+    );
+    s.ok(
+        "its header says who may open it, has Share, and shows who else has it open: the guest, not the owner, whose page it is",
+        chrome.until(&page, &headed, wait),
+        chrome.eval(&page, &format!("document.querySelector({head:?})?.outerHTML")).unwrap_or_default(),
+    );
     chrome.eval(&page, &format!("[...document.querySelectorAll('#apps .row')].find(r => r.dataset.key === {:?}).click(); true", format!("app:{notes}")))?;
     chrome.until(&page, &format!("!!document.querySelector('.pane[data-key={:?}]')", format!("app:{notes}")), wait);
     chrome.eval(&page, &format!("document.querySelector('.pane[data-key={:?}] .pane-action[title=Files]').click(); true", format!("app:{notes}")))?;

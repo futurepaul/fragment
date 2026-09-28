@@ -875,6 +875,7 @@ impl FragmentCell {
             (Method::Get, ["api", "status"]) => self.status(&caller),
             (Method::Get, ["api", "manifest"]) => self.manifest(&caller),
             (Method::Get, ["api", "members"]) => self.members(&caller),
+            (Method::Get, ["api", "presence"]) => self.presence_api(&caller),
             (Method::Put, ["api", "members", who]) => {
                 let body = body_json(&mut req).await?;
                 self.set_member(&caller, who, body).await
