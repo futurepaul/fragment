@@ -8,11 +8,12 @@
 // owner allows (making it with the platform's form, or its share sheet;
 // the list says which, as `frame`, and without it the desktop says so in
 // place of its panes). Sharing is the platform's too: a row's Share item
-// opens the platform's share sheet in a window of its own, which this page
-// cannot script (the sheet severs its opener); the list says who else is
-// in each, for the badges. An app pane's header says the same, with a Share
-// button, and who has the app open now (`__presence`, asked while this page
-// is in view).
+// opens the platform's share sheet, in a dialog here (`__share` signs its
+// frame in on that one sheet, as `__frame` does on a fragment), or, while
+// this page may not frame, in a window of its own; this page can script
+// neither. The list says who else is in each, for the badges. An app pane's
+// header says the same, with a Share button, and who has the app open now
+// (`__presence`, asked while this page is in view).
 import * as fragment from "./__fragment.js";
 import { createLayout, store } from "./layout.js";
 import { createViewer } from "./viewer.js";
@@ -211,15 +212,44 @@ function renderSharing(box, f) {
   box.title = [OPENS[visibility], guests > 0 && `Shared with ${guests}`].filter(Boolean).join(" · ");
 }
 
-// The platform's share sheet, in a small window of its own. `noopener`:
-// this page keeps no handle on it (and the sheet severs any opener anyway).
+// The platform's share sheet. One of the owner's own, while this page may
+// frame their fragments, opens in a dialog here: its frame is `__share`,
+// which signs it in on that sheet alone, for this page alone (and the sheet
+// never shows its frame grant). It says its height, and when it is done
+// (Done, Escape), to this origin only; a message counts only from its
+// frame, on the platform's origin. Closed, the list is read again, for the
+// badges and the panes' headers. Otherwise the sheet opens in a small
+// window of its own. `noopener`: this page keeps no handle on it (and the
+// sheet severs any opener anyway).
+const sheet = $("sheet");
+let sheetFrame = null, sheetOrigin = null;
 function share(name) {
   const f = byName(name);
   if (!f?.share) return notice("Sharing is not available", "This platform does not offer a share sheet.");
+  if (state.frame === true && f.role === "owner") {
+    sheetOrigin = new URL(f.share).origin;
+    sheetFrame = el("iframe");
+    sheetFrame.title = `Share ${label(name)}`;
+    sheetFrame.allow = "clipboard-write";
+    sheetFrame.src = `__share?name=${encodeURIComponent(name)}`;
+    sheet.replaceChildren(sheetFrame);
+    return sheet.showModal();
+  }
   const w = 480, h = 720;
   const left = Math.max(0, screenX + (outerWidth - w) / 2), top = Math.max(0, screenY + (outerHeight - h) / 3);
   window.open(f.share, "_blank", `popup,noopener,width=${w},height=${h},left=${left},top=${top}`);
 }
+addEventListener("message", (e) => {
+  if (!sheet.open || e.source !== sheetFrame?.contentWindow || e.origin !== sheetOrigin) return;
+  if (Number.isFinite(e.data?.height)) sheetFrame.style.height = `${e.data.height}px`;
+  if (e.data?.share === "done") sheet.close();
+});
+sheet.onclick = (e) => { if (e.target === sheet) sheet.close(); };
+sheet.onclose = () => {
+  sheet.replaceChildren();
+  sheetFrame = null;
+  load().catch(() => {});
+};
 
 // One `…` menu, for whichever row asked.
 const menu = $("menu");

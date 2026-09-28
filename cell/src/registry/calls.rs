@@ -447,9 +447,10 @@ impl Call for Exchange {
 }
 
 /// `POST /session`: the identity a live session names (401 when it is
-/// not live): the platform's (`fragment` none) or one fragment's, a
-/// frame's (`frame`: made in a frame, for the page that framed it) or a
-/// top-level one. A token of the other kind is not live.
+/// not live): the platform's (`fragment` none) or one fragment's (or one
+/// share sheet's: `sheet`), a frame's (`frame`: made in a frame, for the
+/// page that framed it) or a top-level one. A token of the other kind is
+/// not live.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Session {
     pub token: String,
@@ -551,9 +552,20 @@ impl Call for Mint {
     }
 }
 
+/// Where a share sheet's embed session signs in (`__share`), in place of a
+/// fragment's name in `MintFrame`, `Redeem`, and `Session`: the sheet's
+/// path on the platform's origin. No fragment's name holds a `/`, so no
+/// fragment's origin takes the sheet's redemption or session, nor the
+/// sheet a fragment's.
+pub(crate) fn sheet(name: &str) -> String {
+    assert!(fragment_proto::valid_fragment_name(name), "a share sheet is a fragment's");
+    format!("/share/{name}")
+}
+
 /// `POST /redeem/frame`: a frame redemption (`__frame`): from the session
 /// `token` names on `from` (a site or frame session, `frame` says which),
-/// which must be `owner`'s, for `fragment` in a frame of `embedder` only.
+/// which must be `owner`'s, for `fragment` in a frame of `embedder` only
+/// (`fragment` is a share sheet's `sheet` for `__share`).
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MintFrame {

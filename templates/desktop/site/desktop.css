@@ -88,6 +88,11 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; }
 .menu button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 10px; border: 0; border-radius: 6px; background: none; text-align: left; font-size: 14px; }
 .menu button:hover, .menu button:focus-visible { background: var(--bg-hover); outline: none; }
 .menu svg { width: 15px; height: 15px; color: var(--text-secondary); }
+/* the share sheet's dialog: the sheet's own card colors, as tall as it says (desktop.js, share) */
+.sheet { padding: 0; border: 0; border-radius: 14px; width: min(30rem, calc(100vw - 32px)); background: #fff; box-shadow: 0 12px 48px rgba(0,0,0,.45); overflow: hidden; }
+.sheet::backdrop { background: rgba(0,0,0,.55); }
+.sheet iframe { display: block; width: 100%; height: 26rem; max-height: calc(100vh - 48px); border: 0; }
+@media (prefers-color-scheme: dark) { .sheet { background: #1f2327; } }
 .empty-row { font-size: 13px; color: var(--text-tertiary); padding: 6px 8px; }
 .spacer { flex: 1; }
 

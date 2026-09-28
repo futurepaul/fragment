@@ -359,7 +359,9 @@ impl Browser {
 
     /// Evaluates `expr` inside the page's first frame whose URL contains
     /// `url_part` (a same-site frame shares the page's process), in a world
-    /// of its own that shares the frame's DOM.
+    /// of its own that shares the frame's DOM. A frame of another site has
+    /// a process of its own (site isolation), so it is a target of its own:
+    /// it is evaluated there (`eval_in_isolated_frame`).
     pub fn eval_in_frame(&mut self, page: &Page, url_part: &str, expr: &str) -> Result<Value> {
         fn find(tree: &Value, part: &str) -> Option<String> {
             if tree["frame"]["url"].as_str().is_some_and(|u| u.contains(part)) {
@@ -368,7 +370,7 @@ impl Browser {
             tree["childFrames"].as_array()?.iter().find_map(|c| find(c, part))
         }
         let tree = self.send("Page.getFrameTree", json!({}), Some(&page.session))?;
-        let frame = find(&tree["frameTree"], url_part).with_context(|| format!("no frame at {url_part}"))?;
+        let Some(frame) = find(&tree["frameTree"], url_part) else { return self.eval_in_isolated_frame(url_part, expr) };
         let world = self.send("Page.createIsolatedWorld", json!({ "frameId": frame }), Some(&page.session))?;
         let r = self.send(
             "Runtime.evaluate",
@@ -379,6 +381,26 @@ impl Browser {
             bail!("the frame threw: {}", e["exception"]["description"].as_str().unwrap_or(&e.to_string()));
         }
         Ok(r["result"]["value"].clone())
+    }
+
+    /// `eval_in_frame` in a frame of another site than the page's: the
+    /// first frame target of this lease's contexts whose URL contains
+    /// `url_part`, attached for the evaluation.
+    fn eval_in_isolated_frame(&mut self, url_part: &str, expr: &str) -> Result<Value> {
+        let v = self.send("Target.getTargets", json!({}), None)?;
+        let context = self.context.clone();
+        let ours = |id: &Value| context.as_deref().is_none_or(|c| id == c || self.others.iter().any(|o| id == o.as_str()));
+        let target = v["targetInfos"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|t| t["type"] == "iframe" && ours(&t["browserContextId"]) && t["url"].as_str().is_some_and(|u| u.contains(url_part)))
+            .and_then(|t| t["targetId"].as_str().map(str::to_string))
+            .with_context(|| format!("no frame at {url_part}"))?;
+        let frame = self.attach(&target)?;
+        let r = self.eval(&frame, expr).map_err(|e| anyhow::anyhow!("the frame threw: {e:#}"));
+        self.send("Target.detachFromTarget", json!({ "sessionId": frame.session }), None)?;
+        r
     }
 
     /// A click at a point, as a hand makes it: a user gesture, so a popup

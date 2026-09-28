@@ -224,9 +224,11 @@ impl FragmentCell {
         } else if path == "__presence" {
             // who has each of the owner's named fragments open (publish.rs)
             json_response(&self.owner_presence(caller).await?)?
-        } else if path == "__frame" {
-            // a frame of this page, on to one of its owner's fragments (publish.rs)
-            self.frame_redirect(caller, name).await?
+        } else if crate::auth::is_frame_route(rest) {
+            // a frame of this page, on to one of its owner's fragments, or to
+            // the share sheet of one (publish.rs); named as the router took
+            // it, never percent-encoded past its check
+            self.frame_redirect(caller, name, rest == "__share").await?
         } else if path == "__people" {
             // names for a page: a person's username and picture, or whose agent
             self.reader(&mut facts, caller, link, Role::Public).await?;

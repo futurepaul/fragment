@@ -351,6 +351,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.until(&page, &headed, wait),
         chrome.eval(&page, &format!("document.querySelector({head:?})?.outerHTML")).unwrap_or_default(),
     );
+    share_in_a_dialog(s, api, &mut chrome, &page, &owner, &desk, &todo)?;
     chrome.eval(&page, &format!("[...document.querySelectorAll('#apps .row')].find(r => r.dataset.key === {:?}).click(); true", format!("app:{notes}")))?;
     chrome.until(&page, &format!("!!document.querySelector('.pane[data-key={:?}]')", format!("app:{notes}")), wait);
     chrome.eval(&page, &format!("document.querySelector('.pane[data-key={:?}] .pane-action[title=Files]').click(); true", format!("app:{notes}")))?;
@@ -412,6 +413,48 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("at phone width the sidebar is an overlay, and nothing scrolls sideways", narrow && overlay && back && fits, layout(&mut chrome));
     chrome.close(page)?;
     files_viewer(s, api, &mut chrome, &owner, &notes)
+}
+
+/// Share on an app pane: the platform's sheet in a dialog on the desktop,
+/// signed in as its owner through `__share` (the platform's session never
+/// reaches a frame of the desktop's site), its cookie partitioned under
+/// the desktop; a change made in it takes effect, and Done closes it, the
+/// pane's header following.
+fn share_in_a_dialog(s: &mut Suite, api: &Api, chrome: &mut Browser, page: &Page, owner: &Keys, desk: &str, app: &str) -> Result<()> {
+    let wait = Duration::from_secs(20);
+    let sheet = format!("/share/{app}");
+    let in_sheet = |chrome: &mut Browser, js: &str| chrome.eval_in_frame(page, &sheet, js).ok() == Some(json!(true));
+    chrome.eval(page, &format!("document.querySelector('.pane[data-key={:?}] .pane-action[title=\"Share…\"]').click(); true", format!("app:{app}")))?;
+    let opened = chrome.until(page, "document.getElementById('sheet').open", wait);
+    let signed_in = opened && s.eventually(wait, || in_sheet(chrome, "document.body.innerText.includes('General access') && !!document.querySelector('input[name=username]')"));
+    // its height came as a message to this origin, from the sheet's frame alone
+    let sized = signed_in && chrome.until(page, "parseFloat(document.querySelector('#sheet iframe').style.height) > 0", wait);
+    let desk_host = api.site_url(desk, "").split("//").nth(1).and_then(|h| h.split(':').next()).unwrap_or("").to_string();
+    let cookie = chrome.cookies()?.into_iter().find(|c| c["name"] == "fragment_share");
+    let partitioned = cookie.as_ref().is_some_and(|c| {
+        c["path"] == sheet.as_str() && c["partitionKey"]["topLevelSite"].as_str().is_some_and(|t| desk_host.ends_with(t.trim_start_matches("http://")))
+    });
+    chrome.screenshot(page, &s.scratch.join("desktop-share.png"))?;
+    s.ok(
+        "Share on an app pane opens the platform's sheet in a dialog on the desktop, signed in as its owner (their controls; the sheet told this origin its height), its cookie on the sheet's path, partitioned under the desktop",
+        signed_in && sized && partitioned,
+        json!({ "cookie": cookie, "sheet": chrome.eval_in_frame(page, &sheet, "document.body.innerText.slice(0, 300)").unwrap_or_default() }),
+    );
+    let select = "document.querySelector('select[name=visibility]')";
+    let armed = s.eventually(wait, || in_sheet(chrome, &format!("(s => !!s && !s.disabled)({select})")));
+    let chose = armed && in_sheet(chrome, &format!("(s => {{ s.value = 'public'; s.dispatchEvent(new Event('change')); return true; }})({select})"));
+    let public = chose && s.eventually(wait, || api.status(owner, app).is_ok_and(|r| r.body["visibility"] == "public"));
+    let again = public && s.eventually(wait, || in_sheet(chrome, &format!("{select}?.value === 'public'")));
+    s.ok("changing its General access to Public takes effect, and the sheet shows it again, still signed in", public && again, api.status(owner, app)?);
+    let done = in_sheet(chrome, "(document.querySelector('button[data-done]').click(), true)");
+    let closed = done && chrome.until(page, "!document.getElementById('sheet').open", wait);
+    let header = format!("document.querySelector('.pane[data-key={:?}] .pane-sharing')?.textContent.includes('Public')", format!("app:{app}"));
+    s.ok(
+        "its Done closes the dialog, and the pane's header follows (the list read again): Public",
+        closed && chrome.until(page, &header, wait),
+        chrome.eval(page, &format!("document.querySelector('.pane[data-key={:?}] .pane-head')?.outerHTML", format!("app:{app}"))).unwrap_or_default(),
+    );
+    Ok(())
 }
 
 /// The files viewer as a page of its own (`__files`): the tree and a reader

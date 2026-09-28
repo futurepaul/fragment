@@ -27,8 +27,9 @@
 //! are on fragment.boats), so its session cookie reaches a fragment's page
 //! only on a top-level visit; a fleet whose platform shares the fragments'
 //! domain puts them on one site, where the pages' forms, fetches, and
-//! frames carry it. Either way every page here refuses frames (`unframed`)
-//! and severs a window that opened it (`unopened`), and every form is
+//! frames carry it. Either way every page here refuses frames (`unframed`;
+//! the share sheet alone is framed, by the home and by its owner's desktop:
+//! share.rs) and severs a window that opened it (`unopened`), and every form is
 //! refused from another origin (`same_origin`). Sharing's pages (share.rs) add a form token and armed
 //! buttons.
 //!
@@ -67,6 +68,10 @@ pub const SITE_COOKIE: &str = "fragment_site";
 /// A frame's session cookie (`__frame`): partitioned, for the page that
 /// framed it.
 pub const FRAME_COOKIE: &str = "fragment_frame";
+/// A share sheet's embed session cookie (`__share`), on the platform's
+/// origin: partitioned, for the owner's desktop that framed the sheet, on
+/// that sheet's path alone (share.rs).
+pub const SHARE_COOKIE: &str = "fragment_share";
 const LOGIN_COOKIE: &str = "fragment_login";
 const LOGIN_HINT_MAX: usize = 320;
 const INVITATION_TOKEN_MAX: usize = 256;
@@ -137,12 +142,13 @@ pub fn set_cookie(base: &str, value: &str, path: &str, max_age_s: i64, secure: b
     format!("{name}={value}; Path={path}; Max-Age={max_age_s}; HttpOnly; SameSite=Lax{s}")
 }
 
-/// A frame's session cookie: `SameSite=None`, so it is sent in a frame of
+/// A frame's session cookie (`base`: a fragment's frame's, or a share
+/// sheet's embed session): `SameSite=None`, so it is sent in a frame of
 /// another site's page, and `Partitioned` (CHIPS), so a browser that
 /// blocks third-party cookies keeps it, in that page's partition only.
 /// Both need `Secure`, which browsers take from `localhost` over http too.
-fn frame_cookie(value: &str, path: &str, max_age_s: i64, secure: bool) -> String {
-    let name = cookie_name(FRAME_COOKIE, secure, path);
+pub(crate) fn frame_cookie(base: &str, value: &str, path: &str, max_age_s: i64, secure: bool) -> String {
+    let name = cookie_name(base, secure, path);
     format!("{name}={value}; Path={path}; Max-Age={max_age_s}; HttpOnly; Secure; SameSite=None; Partitioned")
 }
 
@@ -580,7 +586,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
             }
             (Method::Post, ["auth", "fragment"]) => {
                 let (name, back) = fragment_asked(url)?;
-                let (session, _, _) = match share::poster(&mut req, env, url, &platform, &format!("consent:{name}")).await? {
+                let (session, _, _) = match share::poster(&mut req, env, url, &platform, &format!("consent:{name}"), None).await? {
                     Ok(posted) => posted,
                     Err(page) => return Ok(page),
                 };
@@ -753,7 +759,7 @@ pub(crate) fn refused(cfg: &Config, url: &Url, name: &str, rest: &str, framed: b
     let home = a(&format!("{}/", cfg.platform(url)), "Your fragments");
     let why = format!("<p style=\"opacity:.7;font-size:.9em\">{}</p>", esc(&e.message));
     let l = esc(label);
-    let (title, body) = if rest == "__frame" {
+    let (title, body) = if is_frame_route(rest) {
         // a frame's own refusal, whose page's owner acts on it
         ("This can't be shown here".to_string(), format!("<p>{}</p><p>{home}</p>", esc(&e.message)))
     } else if link_changed {
@@ -784,6 +790,14 @@ pub fn is_fragment_route(rest: &str) -> bool {
     matches!(rest, "__signin" | "__signout")
 }
 
+/// Whether a path on a fragment's origin signs a frame of its own page in
+/// elsewhere: on one of its owner's fragments (`__frame`), or on the share
+/// sheet of one (`__share`). Each is taken only as a frame of this origin's
+/// own page, and with its credential unresolved (the registry mints from it).
+pub fn is_frame_route(rest: &str) -> bool {
+    matches!(rest, "__frame" | "__share")
+}
+
 /// `__signin` and `__signout` on a fragment's own origin, as the
 /// request's Fetch Metadata allows (`fetched`, the router's):
 ///
@@ -807,7 +821,7 @@ pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &
             if let Some(redeem) = query(url, "token") {
                 let redeemed = ask_registry(env, &calls::Redeem { redeem, fragment: name.to_string(), framed: fetched.framed }).await?;
                 return match fetched.framed {
-                    true => redirect(&format!("{base}__signin?check=frame&return={}", enc(&redeemed.return_to)), &[frame_cookie(&redeemed.token, &cookie_path, ttl_s, secure(url))]),
+                    true => redirect(&format!("{base}__signin?check=frame&return={}", enc(&redeemed.return_to)), &[frame_cookie(FRAME_COOKIE, &redeemed.token, &cookie_path, ttl_s, secure(url))]),
                     false => redirect(&back_to(&base, Some(&redeemed.return_to))?, &[set_cookie(SITE_COOKIE, &redeemed.token, &cookie_path, ttl_s, secure(url))]),
                 };
             }
@@ -842,7 +856,7 @@ pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &
                     console_error!("__signout on {name}: the registry did not end the sessions ({:?}): {}", e.code, e.message);
                 }
             }
-            Ok(redirect(&base, &[set_cookie(SITE_COOKIE, "", &cookie_path, 0, secure(url)), frame_cookie("", &cookie_path, 0, secure(url))])?.with_status(303))
+            Ok(redirect(&base, &[set_cookie(SITE_COOKIE, "", &cookie_path, 0, secure(url)), frame_cookie(FRAME_COOKIE, "", &cookie_path, 0, secure(url))])?.with_status(303))
         }
         (_, m) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {rest}", m.as_ref()))),
     }

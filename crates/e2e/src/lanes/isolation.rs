@@ -611,6 +611,20 @@ fn listed(s: &mut Suite, api: &Api) -> Result<()> {
         inside && framed.as_ref().is_some_and(|c| c["partitionKey"]["topLevelSite"].as_str().is_some_and(|t| t.ends_with(&desk_host))) && own.is_none(),
         json!({ "frame": framed, "site": own }),
     );
+    // its Share: the app's sheet in a dialog, signed in through `__share`
+    chrome.eval(&page, &format!("document.querySelector('.pane[data-key={:?}] .pane-action[title=\"Share…\"]').click(); true", format!("app:{app}")))?;
+    let sheet = format!("/share/{app}");
+    let signed = chrome.until(&page, "document.getElementById('sheet').open", wait) && frame_says(s, &mut chrome, &page, &sheet, "General access", wait);
+    let kept = chrome.cookies().ok().into_iter().flatten().find(|c| {
+        c["name"] == "fragment_share" && c["path"] == sheet.as_str() && c["partitionKey"]["topLevelSite"].as_str().is_some_and(|t| t.ends_with(&desk_host))
+    });
+    let closed = chrome.eval_in_frame(&page, &sheet, "(document.querySelector('button[data-done]').click(), true)").is_ok()
+        && chrome.until(&page, "!document.getElementById('sheet').open", wait);
+    s.ok(
+        "and its Share opens the app's sheet in a dialog there, signed in through __share, the sheet's cookie partitioned under the desktop; Done closes it",
+        signed && kept.is_some() && closed,
+        json!({ "sheet": kept }),
+    );
     let token = framed.as_ref().and_then(|c| c["value"].as_str()).unwrap_or_default();
     let r = as_browser(api, "GET", api.site_url(&app, ""), "iframe", "cross-site", &format!("fragment_frame={token}"))?;
     let top = as_browser(api, "GET", api.site_url(&app, ""), "document", "cross-site", &format!("fragment_frame={token}"))?;
