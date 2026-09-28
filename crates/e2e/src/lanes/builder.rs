@@ -180,6 +180,11 @@ fn builds(label: &str, text: &str) -> String {
     format!("mkdir -p {label}/site && printf '<h1>{text}</h1>' > {label}/site/index.html && fragment create {label} && fragment deploy {label} --dir {label}")
 }
 
+/// goose's shell command that gets `name`'s files, makes its page say `text`, and deploys it.
+fn changes(name: &str, text: &str) -> String {
+    format!("mkdir changing && fragment sync {name} --dir changing && printf '<h1>{text}</h1>' > changing/site/index.html && fragment deploy {name} --dir changing")
+}
+
 /// Hand-offs (agent/src/handoff.rs; Paul, 2026-09-27;
 /// docs/agent-computer.md): the owner's own agent, in a chat, does light
 /// work itself and hands building to a computer. The OpenRouter fake is
@@ -191,7 +196,9 @@ fn builds(label: &str, text: &str) -> String {
 /// goose, whose answer its computer posts in the chat without being asked
 /// again, the built URL reaches the agent's conversation as a note, and
 /// the throwaway's computer (its Sprite) and fragment are gone, what it
-/// built kept; handed to a named
+/// built kept; asked to change that app, naming it in `fragments`, a
+/// throwaway made an editor of it (once it paired) changes and deploys it,
+/// then goes, and the app's members are as they were; handed to a named
 /// computer (the builder above), the work runs there and that computer
 /// stays; with the builder as the home computer, two hand-offs naming none
 /// reach the chat's one session there (`home_sessions`); a guest's turn
@@ -290,6 +297,40 @@ fn hand_offs(s: &mut Suite, api: &Api, (owner, owner_cli): (&Keys, &Path), (buil
     let v = view(&agents, owner, &format!("agent.{username}"));
     let kept = notes(&v, &throwaway).iter().any(|t| t.contains(&format!("It built {url}.")) && t.contains("The computer said: Built it and deployed it live."));
     s.ok("the result is in the chat's conversation as a note, with the URL, for the turns after, and nothing is left to watch", kept && v["handoffs"] == json!([]), json!(notes(&v, &throwaway)));
+
+    // changing that app, handed off naming it (a bare label is the
+    // owner's): a throwaway, made its editor, changes and deploys it
+    let members = || api.signed(owner, "GET", &format!("/api/f/{built}/members"), None).map(|r| r.body["members"].as_array().map_or(0, Vec::len)).unwrap_or_default();
+    let (deleted, before) = (s.sprites.deleted().len(), members());
+    s.openrouter.clear_script();
+    s.openrouter.script_agent(&[Reply::Tools(vec![(HAND_OFF.into(), json!({ "task": "Make the page say changed on a throwaway.", "fragments": [label] }))])]);
+    s.openrouter.script(&[
+        Reply::Tools(vec![("shell".into(), json!({ "command": changes(&built, "changed on a throwaway") }))]),
+        Reply::Text("Changed it and deployed it live.".into()),
+    ]);
+    say(api, owner, &chat, "h2c", &format!("make {label} say changed on a throwaway"))?;
+    let mut changer = String::new();
+    s.eventually(wait, || {
+        changer = owned(api, owner, "handoff-").pop().unwrap_or_default();
+        !changer.is_empty()
+    });
+    let result = s.eventually(long, || from_computer(&changer, "Changed it and deployed it live.").is_some());
+    let token = api.status(owner, &built).ok().and_then(|r| r.body["viewToken"].as_str().map(str::to_string)).unwrap_or_default();
+    let page = || api.page(&built, &format!("?view={token}"), None).map(|p| p.text).unwrap_or_default();
+    let changed = s.eventually(wait, || page().contains("changed on a throwaway"));
+    let steps = api.signed(owner, "GET", &format!("/api/f/{chat}/channels/work"), None).map(|r| r.body["records"].clone()).unwrap_or_default();
+    let steps: Vec<&Value> = steps.as_array().into_iter().flatten().filter(|r| r["body"]["turn"].as_str().is_some_and(|t| t.contains(&changer))).collect();
+    s.ok(
+        "asked to change the owner's app, naming it in `fragments`, the agent hands off to a throwaway, which is made its editor and changes and deploys it",
+        result && changed && fragment_core::tools::is_throwaway(&changer),
+        json!({ "throwaway": changer, "page": page().chars().take(300).collect::<String>(), "steps": steps }),
+    );
+    let gone = s.eventually(wait, || api.status(owner, &changer).is_ok_and(|r| r.status == 404) && s.sprites.deleted().len() == deleted + 1 && members() == before);
+    s.ok(
+        "then the throwaway is gone, and with its computer, its place among the app's members",
+        gone,
+        json!({ "throwaway": api.status(owner, &changer)?.status, "members": api.signed(owner, "GET", &format!("/api/f/{built}/members"), None)?.body }),
+    );
 
     // handed to a named computer: the builder above does it, and stays
     let label = s.name("ho-named");

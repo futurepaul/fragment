@@ -11,7 +11,8 @@
         "additionalProperties": false,
         "properties": {
           "task": { "type": "string", "minLength": 1, "maxLength": 4000 },
-          "chat": { "type": "string", "maxLength": 200, "description": "the chat that asked (<fragment>/<channel>): its session here, and where the steps go" }
+          "chat": { "type": "string", "maxLength": 200, "description": "the chat that asked (<fragment>/<channel>): its session here, and where the steps go" },
+          "fragments": { "type": "array", "maxItems": 8, "items": { "type": "string", "maxLength": 127 }, "description": "the owner's fragments to change instead of making a new one (this computer is made an editor of each)" }
         }
       }
     },

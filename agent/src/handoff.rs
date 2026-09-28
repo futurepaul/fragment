@@ -10,10 +10,19 @@
 //!   bound to from then on, so its session there carries over;
 //! - with `computer`, one of the owner's fragments whose job `do` (or
 //!   `build`) takes `{task, chat?}` (a pet, a builder);
-//! - with `throwaway`, or with no home, on a throwaway: a private fragment
-//!   of the owner's from the builder template
+//! - with `throwaway`, with `fragments`, or with no home, on a throwaway: a
+//!   private fragment of the owner's from the builder template
 //!   (`fragment_core::tools::throwaway_label`), whose `build` runs goose on
-//!   the fragment's own new computer: extra hands.
+//!   the fragment's own new computer: extra hands, and fresh ones for
+//!   changing the owner's apps (Paul, 2026-09-28: "ideally it hands off to
+//!   an ephemeral computer not the pet").
+//!
+//! `fragments` names the owner's existing fragments the work changes, and
+//! the computer is made an editor of each (`let_edit`: the owner-only grant
+//! the chat's is, cell/src/agents.rs `add_computer`), before the work starts
+//! or, a throwaway's, once it paired (the builder waits for it). Without it
+//! a computer could change only what it made (Paul's chat, 2026-09-28: the
+//! pet, asked to update starship-countdown, had no role there).
 //!
 //! The job is told the asking chat (`chat`: its session, and where its steps
 //! go), and the computer is made an editor of the chat, so it posts each
@@ -59,6 +68,8 @@ const RUNNING_MAX: i64 = 8;
 /// goose is capped at 10 minutes, a job's command at 60.
 const WATCH_EVERY_MS: i64 = 10_000;
 const WATCH_MAX_MS: i64 = 90 * 60 * 1000;
+/// The fragments one hand-off may change.
+const FRAGMENTS_MAX: usize = 8;
 /// The most of a result said in the conversation, and of its task.
 const SAID_MAX_CHARS: usize = 1500;
 const TASK_SAID_CHARS: usize = 300;
@@ -73,6 +84,8 @@ struct Watched {
     started_at: i64,
     said: i64,
     granted: i64,
+    /// the fragments its work changes, a JSON list
+    fragments: String,
 }
 
 /// `platform__hand_off`: the work started on a computer, or why not.
@@ -84,9 +97,10 @@ pub async fn start(fleet: &Fleet, sql: &SqlStorage, conv: &str, request_id: &str
         return Err(format!("{RUNNING_MAX} hand-offs are running already: wait for one to end"));
     }
     let asker = fleet.acting_for.as_deref().expect("a turn's tools act for its asker");
+    let fragments = changed(fleet, sql, asker, &args["fragments"]).await?;
     let named = args["computer"].as_str();
     let (fragment, op, throwaway) = loop {
-        let chosen = match (named, args["throwaway"] == true) {
+        let chosen = match (named, args["throwaway"] == true || !fragments.is_empty()) {
             (Some(named), _) => Some(named.to_string()),
             (None, true) => None,
             (None, false) => computer_for(sql, conv).map_err(|e| e.to_string())?,
@@ -110,6 +124,22 @@ pub async fn start(fleet: &Fleet, sql: &SqlStorage, conv: &str, request_id: &str
     if let Some(chat) = &chat {
         input["chat"] = json!(chat);
     }
+    if !fragments.is_empty() {
+        // a builder's `build` takes them apart; any other job reads them in its task
+        match op {
+            "build" => input["fragments"] = json!(fragments),
+            _ => input["task"] = json!(format!("{}\n\n{task}", editing(&fragments))),
+        }
+        if input["task"].as_str().is_some_and(|t| t.len() > TASK_MAX) {
+            return Err(format!("task is 1-{TASK_MAX} bytes, with the fragments it changes"));
+        }
+        // a throwaway's computer is not one until it paired: `look` lets it then
+        if !throwaway {
+            for f in &fragments {
+                let_edit(fleet, f, &fragment).await?;
+            }
+        }
+    }
     let granted = !throwaway && grant(fleet, conv, &fragment).await;
     let body = json!({ "id": op_id(request_id), "input": input });
     let (status, answer) = fleet.call(Method::Post, &format!("/api/f/{fragment}/ops/{op}"), Some(&body)).await.map_err(|e| e.to_string())?;
@@ -121,8 +151,17 @@ pub async fn start(fleet: &Fleet, sql: &SqlStorage, conv: &str, request_id: &str
     };
     let now = js::now_ms() as i64;
     sql.exec(
-        "INSERT OR IGNORE INTO handoffs (fragment, run, conv, throwaway, started_at, next_at, granted) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        vec![fragment.as_str().into(), run.into(), conv.into(), (throwaway as i64).into(), now.into(), (now + WATCH_EVERY_MS).into(), (granted as i64).into()],
+        "INSERT OR IGNORE INTO handoffs (fragment, run, conv, throwaway, started_at, next_at, granted, fragments) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        vec![
+            fragment.as_str().into(),
+            run.into(),
+            conv.into(),
+            (throwaway as i64).into(),
+            now.into(),
+            (now + WATCH_EVERY_MS).into(),
+            (granted as i64).into(),
+            json!(fragments).to_string().into(),
+        ],
     )
     .map_err(|e| e.to_string())?;
     let note = "It runs on its own now, for minutes, and this turn ends here. The computer answers in the chat itself; \
@@ -183,6 +222,59 @@ async fn grant(fleet: &Fleet, conv: &str, computer: &str) -> bool {
     }
 }
 
+/// The fragments a hand-off's work changes (`fragments`): names of the
+/// asker's own (a bare label is under the asker's username), each checked.
+async fn changed(fleet: &Fleet, sql: &SqlStorage, asker: &str, named: &Value) -> Result<Vec<String>, String> {
+    let Some(named) = named.as_array() else {
+        return match named.is_null() {
+            true => Ok(Vec::new()),
+            false => Err("fragments is a list of fragments' names".into()),
+        };
+    };
+    let me = kv_get(sql, "name").map_err(|e| e.to_string())?.unwrap_or_default();
+    let username = split_fragment_name(&me).map(|(_, u)| u).ok_or("this agent has no name")?;
+    let mut names = Vec::new();
+    for name in named {
+        let name = name.as_str().map(str::trim).ok_or("fragments is a list of fragments' names")?;
+        let name = if name.contains('.') { name.to_string() } else { format!("{name}.{username}") };
+        if !valid_fragment_name(&name) {
+            return Err(format!("{name:?} is not a fragment's name (<label>.<username>)"));
+        }
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    if names.len() > FRAGMENTS_MAX {
+        return Err(format!("a hand-off changes at most {FRAGMENTS_MAX} fragments"));
+    }
+    for name in &names {
+        let status: FragmentStatus = fleet.get_as(&format!("/api/f/{name}/status")).await.map_err(|e| format!("{name}: {e}"))?;
+        if status.owner != asker {
+            return Err(format!("{name} is not the person's own: a computer is made an editor only of their own fragments"));
+        }
+    }
+    Ok(names)
+}
+
+/// Makes `computer` an editor of `fragment`, its owner's, which the work
+/// changes (cell/src/agents.rs `add_computer`, as the chat's `grant`).
+async fn let_edit(fleet: &Fleet, fragment: &str, computer: &str) -> Result<(), String> {
+    let path = format!("/api/f/{fragment}/members/{computer}");
+    match fleet.call(Method::Put, &path, Some(&json!({ "role": "editor" }))).await.map_err(|e| e.to_string())? {
+        (200, _) => Ok(()),
+        (status, answer) => Err(format!("{computer} was not made an editor of {fragment} ({status}): {}", fleet::message(&answer))),
+    }
+}
+
+/// What a computer's `do` reads of the fragments its work changes.
+fn editing(fragments: &[String]) -> String {
+    format!(
+        "You are an editor of the fragments this changes: {}. Get one's files into a new folder with `mkdir <folder> && fragment sync <name> --dir <folder>`, \
+         change them, put them live with `fragment deploy <name> --dir <folder>`, and check its page answers.",
+        fragments.join(", ")
+    )
+}
+
 /// The job a named computer offers for work: `do`, else `build`, on a
 /// fragment of the asker's own.
 async fn offered(fleet: &Fleet, asker: &str, named: &str) -> Result<&'static str, String> {
@@ -228,7 +320,10 @@ async fn remove(fleet: &Fleet, fragment: &str) -> anyhow::Result<()> {
 pub async fn watch(fleet: &Fleet, sql: &SqlStorage, owner: &str) -> anyhow::Result<()> {
     let now = js::now_ms() as i64;
     let due: Vec<Watched> = sql
-        .exec("SELECT fragment, run, conv, throwaway, started_at, said, granted FROM handoffs WHERE next_at <= ? ORDER BY next_at LIMIT ?", vec![now.into(), RUNNING_MAX.into()])
+        .exec(
+            "SELECT fragment, run, conv, throwaway, started_at, said, granted, fragments FROM handoffs WHERE next_at <= ? ORDER BY next_at LIMIT ?",
+            vec![now.into(), RUNNING_MAX.into()],
+        )
         .and_then(|c| c.to_array())
         .map_err(|e| anyhow!("{e}"))?;
     for h in due {
@@ -253,9 +348,20 @@ async fn look(fleet: &Fleet, sql: &SqlStorage, owner: &str, h: &Watched, now: i6
     };
     let ended = run.as_ref().is_none_or(|r| matches!(r.status, RunStatus::Succeeded | RunStatus::Held | RunStatus::Blocked));
     if !ended && now - h.started_at < WATCH_MAX_MS {
-        // a throwaway's computer, once it paired, is let post its steps too
-        if h.granted == 0 && grant(&fleet.acting_for(owner), &h.conv, &h.fragment).await {
-            sql.exec("UPDATE handoffs SET granted = 1 WHERE fragment = ? AND run = ?", vec![h.fragment.as_str().into(), h.run.into()]).map_err(|e| anyhow!("{e}"))?;
+        // a throwaway's computer, once it paired, is let post its steps
+        // too, and change the fragments its work changes
+        if h.granted == 0 {
+            let fleet = fleet.acting_for(owner);
+            let mut settled = grant(&fleet, &h.conv, &h.fragment).await;
+            for f in serde_json::from_str::<Vec<String>>(&h.fragments).unwrap_or_default() {
+                if let Err(e) = let_edit(&fleet, &f, &h.fragment).await {
+                    worker::console_warn!("{e}");
+                    settled = false;
+                }
+            }
+            if settled {
+                sql.exec("UPDATE handoffs SET granted = 1 WHERE fragment = ? AND run = ?", vec![h.fragment.as_str().into(), h.run.into()]).map_err(|e| anyhow!("{e}"))?;
+            }
         }
         return later(sql, h, now, false);
     }
