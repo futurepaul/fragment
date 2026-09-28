@@ -692,3 +692,19 @@ without a delete condition is unfinished design, not debt.
   cell's commit already takes `expect`), the agent passes the one it
   read and reads again on a conflict, proven by an e2e that commits
   between the read and the write and keeps both lines.
+
+## The platform carries two markdown renderers
+
+- **Observed:** 2026-09-28, `files-view`. The files viewer
+  (`cell/files.mjs`) renders markdown to DOM with textContent only, as
+  the chat's page (`cell/chat.mjs`, `renderMarkdown`) does; the viewer's
+  also takes nested lists, wikilinks, links to the fragment's own files,
+  and front matter. The chat's was left as it was to keep the change off
+  the chat.
+- **Risk:** a fix to one (a rendering bug, a safety rule for links) is
+  missed in the other.
+- **First proof:** a markdown case that renders in one and not the other
+  in a way someone reports.
+- **Delete when:** the chat renders with the viewer's renderer (one
+  module served to both, the chat's picture links kept), proven by the
+  chat, desktop, and files e2e sections.

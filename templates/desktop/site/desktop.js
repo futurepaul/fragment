@@ -405,8 +405,8 @@ function openApp(name) {
   });
 }
 
-// A fragment's files: its own __files page, whose links ask this page to
-// open them (the message listener below).
+// A fragment's files: its own __files viewer, whose bar asks this page to
+// open a file as a pane (the message listener below).
 function openTree(name) {
   const f = byName(name);
   if (!f) return;

@@ -22,7 +22,7 @@ use fragment_core::form;
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
-use super::desktop::DOT_PNG;
+use super::desktop::{DOT_PNG, OPEN_HELLO, POP_OUT};
 use super::signin::{consent, signout, unframed, with_session};
 use super::templates::person;
 use crate::api::{url_enc, Api, Call, Reply, Socket};
@@ -620,11 +620,9 @@ fn listed(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{r} {:?} / {top}", r.header("content-security-policy")),
     );
     chrome.eval(&page, &format!("document.querySelector('.pane[data-key={:?}] .pane-action[title=Files]').click(); true", format!("app:{app}")))?;
-    let clicked = s.eventually(wait, || {
-        let click = "(() => { const a = [...document.querySelectorAll('a')].find(a => a.textContent === 'notes/hello.txt'); if (!a) return false; a.click(); return true; })()";
-        chrome.eval_in_frame(&page, "/__files", click).ok() == Some(json!(true))
-    });
-    s.ok("a file pane opens through __frame too", clicked && frame_says(s, &mut chrome, &page, "__file?path=", "hello from a file", wait), "");
+    let clicked = s.eventually(wait, || chrome.eval_in_frame(&page, "/__files", OPEN_HELLO).ok() == Some(json!(true)));
+    let popped = clicked && s.eventually(wait, || chrome.eval_in_frame(&page, "/__files", POP_OUT).ok() == Some(json!(true)));
+    s.ok("a file pane opens through __frame too", popped && frame_says(s, &mut chrome, &page, "__file?path=", "hello from a file", wait), "");
     let told = open(&mut chrome, &shut) && frame_says(s, &mut chrome, &page, &format!("{}--", label(&shut)), "in a tab", wait);
     let heard = chrome.until(&page, "document.getElementById('notice').textContent.includes('signed out inside this page')", wait);
     chrome.screenshot(&page, &s.scratch.join("frames-blocked.png"))?;

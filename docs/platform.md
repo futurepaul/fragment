@@ -18,7 +18,7 @@ belongs in a template instead.
 | `__frame` | A frame of this page, signed in on one of its owner's fragments: the platform mints a frame redemption from this origin's session and sends the frame on to that fragment's `__signin`, which sets a partitioned cookie for this page only (docs/api.md, Frames) | Only for a page whose `fragment.json` asks for `frame` and whose owner allows it (below); the page's code never holds the redemption |
 | `__live`, `__watch` | The live socket and the CLI's watch stream, taken only from the fragment's own page (`Origin`; a socket has no CORS) | Platform protocol |
 | `__people` | Profiles (usernames, pictures) by identity | Reads the registry |
-| `__files`, `__file`, `__tree` | The fragment's files, read through the platform | Reads git with the platform's token |
+| `__files`, `__file`, `__tree` | The fragment's files, read through the platform; `__files` is a viewer (`__files.js`, `__files.css`): a tree beside a reader for markdown, text, and pictures | Reads git with the platform's token; the viewer renders any file on the fragment's origin, so a file's text becomes DOM as text only |
 | `__fragments` | The signed-in owner's fragments (with each one's share sheet, and the visibility and member and guest counts their list carries, for the desktop's Share item and badges), whether this page may show them inside it (`frame`), and making one | Owner-only, and only for a fragment that declares the `fragments` capability (the desktop) |
 | `__sw.js`, `__preview.svg` | The push service worker, the link preview image | Platform assets |
 

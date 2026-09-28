@@ -157,6 +157,29 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     s.commit(&c, &[("data/new.json", Some(b"{}"))]);
     let r = api.page(&name, "__file?path=data/new.json", Some(&cookie))?;
     s.ok("__file reads a file only main has yet", r.status == 200 && r.text == "{}", &r);
+    let r = api.page(&name, "__files", Some(&cookie))?;
+    s.ok(
+        "__files is the files viewer, the platform's page",
+        r.status == 200 && r.header("content-type").starts_with("text/html") && r.text.contains("./__files.js") && r.text.contains("./__files.css"),
+        &r,
+    );
+    let r = api.call(Call { method: "GET", url: api.site_url(&name, "__files"), cookie: Some(cookie.clone()), extra: vec![("accept", "application/json".into())], ..Call::default() })?;
+    let listed: Vec<&str> = r.body["files"].as_array().map(|a| a.iter().filter_map(|f| f["path"].as_str()).collect()).unwrap_or_default();
+    s.ok(
+        "asked for JSON, it lists the content files of live and main, with their sizes, and not the machinery",
+        r.status == 200
+            && listed.contains(&"notes/a.md")
+            && listed.contains(&"data/new.json")
+            && !listed.iter().any(|p| p.starts_with("workflows/") || *p == "fragment.json")
+            && r.body["files"].as_array().is_some_and(|a| a.iter().any(|f| f["path"] == "notes/a.md" && f["size"] == 5)),
+        &r,
+    );
+    for asset in ["__files.js", "__files.css"] {
+        let r = api.page(&name, asset, Some(&cookie))?;
+        s.ok(&format!("{asset} is served, tagged with its build-time hash"), r.status == 200 && r.header("etag").len() == 18 && !r.text.is_empty(), &r);
+    }
+    let r = api.page(&name, "__files", None)?;
+    s.ok("__files is gated like the site", r.status == 401, &r);
 
     // rotating the link
     let r = api.signed(&owner, "POST", &format!("/api/f/{name}/rotate"), Some(&json!({ "scopes": ["view"] })))?;

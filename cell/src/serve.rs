@@ -35,11 +35,17 @@ const CLIENT_JS: &str = include_str!("../client.mjs");
 /// agents write, so it ships with the platform (docs/platform.md).
 const CHAT_JS: &str = include_str!("../chat.mjs");
 const CHAT_CSS: &str = include_str!("../chat.css");
+/// The files viewer (`__files`'s page, with `./__files.js`, `./__files.css`):
+/// a fragment's files as a tree beside a reader.
+const FILES_JS: &str = include_str!("../files.mjs");
+const FILES_CSS: &str = include_str!("../files.css");
 /// The scripts' entity tags, hashed at build time: a page view revalidates
 /// them (`no-cache`) and gets 304 until a cell deploy changes their bytes.
 const CLIENT_JS_HASH: u64 = site::content_hash(CLIENT_JS.as_bytes());
 const CHAT_JS_HASH: u64 = site::content_hash(CHAT_JS.as_bytes());
 const CHAT_CSS_HASH: u64 = site::content_hash(CHAT_CSS.as_bytes());
+const FILES_JS_HASH: u64 = site::content_hash(FILES_JS.as_bytes());
+const FILES_CSS_HASH: u64 = site::content_hash(FILES_CSS.as_bytes());
 const SW_JS_HASH: u64 = site::content_hash(crate::push::SW_JS.as_bytes());
 /// Marks a site request's refusal (401, 403) as the platform's, never an
 /// app's answer: the router answers a browser's navigation to one as a
@@ -353,6 +359,12 @@ impl FragmentCell {
         if path == "__chat.css" {
             return compiled_in(req, CHAT_CSS, CHAT_CSS_HASH, "text/css; charset=utf-8");
         }
+        if path == "__files.js" {
+            return script(req, FILES_JS, FILES_JS_HASH);
+        }
+        if path == "__files.css" {
+            return compiled_in(req, FILES_CSS, FILES_CSS_HASH, "text/css; charset=utf-8");
+        }
         self.ensure_pins(facts).await?;
         let facts = &*facts;
         let name = facts.name.as_str();
@@ -384,18 +396,20 @@ impl FragmentCell {
                 return json_response(&json!({ "type": "tree", "ref": "live", "sha": live, "count": files.len(), "files": files }));
             }
             "__files" => {
-                let mut paths: Vec<String> = ["live", "main"]
-                    .into_iter()
-                    .map(|r| self.tree_rows(r))
-                    .collect::<CellResult<Vec<_>>>()?
-                    .into_iter()
-                    .flatten()
-                    .map(|r| r.path)
-                    .filter(|p| !site::is_machinery(p))
-                    .collect();
-                paths.sort();
-                paths.dedup();
-                return Ok(Response::ok(files_page(name, &paths))?.with_headers(headers("text/html; charset=utf-8", "no-store")?));
+                if !req.headers().get("accept")?.is_some_and(|a| a.contains("application/json")) {
+                    return Ok(Response::ok(files_page(name))?.with_headers(headers("text/html; charset=utf-8", "no-store")?));
+                }
+                // a path on both is live's, as `__file` reads it
+                let mut sizes = std::collections::BTreeMap::new();
+                for which in ["main", "live"] {
+                    let blobs = self.pointer_sizes(which)?;
+                    for r in self.tree_rows(which)?.into_iter().filter(|r| !site::is_machinery(&r.path)) {
+                        let size = blobs.get(&r.path).copied().unwrap_or(r.size);
+                        sizes.insert(r.path, size);
+                    }
+                }
+                let files: Vec<Value> = sizes.into_iter().map(|(path, size)| json!({ "path": path, "size": size })).collect();
+                return json_response(&json!({ "type": "files", "count": files.len(), "files": files }));
             }
             "__file" => {
                 let p = url.query_pairs().find(|(k, _)| k == "path").map(|(_, v)| v.into_owned()).unwrap_or_default();
@@ -484,24 +498,22 @@ impl FragmentCell {
     }
 }
 
-/// `__files`: a fragment's content files as links to `__file`. Framed (a
-/// desktop's pane), a click asks the page around it to open the file
-/// instead, as `{fragment: "open", url, title}`.
-fn files_page(name: &str, paths: &[String]) -> String {
-    let items: String = paths
-        .iter()
-        .map(|p| {
-            let href = format!("__file?path={}", url::form_urlencoded::byte_serialize(p.as_bytes()).collect::<String>());
-            format!("<li><a href=\"{}\">{}</a></li>", site::html_escape(&href), site::html_escape(p))
-        })
-        .collect();
-    let list = if items.is_empty() { "<p>No files yet.</p>".to_string() } else { format!("<ul>{items}</ul>") };
+/// `__files`: the files viewer's page (`files.mjs`), which lists the
+/// fragment's content files by asking `__files` for JSON.
+fn files_page(name: &str) -> String {
     format!(
-        r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{n}: files</title>
-<style>body{{font:14px/1.5 ui-sans-serif,system-ui,sans-serif;margin:0;padding:12px 16px;color:#1d2126;background:#fff}}ul{{list-style:none;padding:0;margin:0}}li{{padding:3px 0}}a{{color:#2a5bd7;text-decoration:none;font-family:ui-monospace,monospace}}a:hover{{text-decoration:underline}}p{{color:#6b7280}}
-@media (prefers-color-scheme:dark){{body{{background:#15181b;color:#e6e8ea}}a{{color:#7aa2f7}}}}</style>
-{list}
-<script>if (parent !== window) document.addEventListener("click", (e) => {{ const a = e.target.closest("a"); if (!a) return; e.preventDefault(); parent.postMessage({{ fragment: "open", url: a.href, title: a.textContent }}, "*"); }});</script>"#,
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{n}: files</title>
+<link rel="stylesheet" href="./__files.css">
+</head>
+<body data-fragment="{n}">
+<script type="module" src="./__files.js"></script>
+</body>
+</html>"#,
         n = site::html_escape(name)
     )
 }
