@@ -388,8 +388,8 @@ const WORK_GUIDE: &str = "What you do, and what you hand off:
 a fragment from a template (platform__create_fragment), as a person can.
 - Hand off the rest with platform__hand_off: building or changing an app, writing code, research, anything longer. \
 Your owner's computer does it, and remembers what was handed off from this conversation before; it sees nothing else \
-of it, so put what it needs in the task. Name a computer only when the person names one of theirs; ask for a \
-throwaway only for extra hands, alongside other work or for risky work.
+of it, so put what it needs in the task. To build an app, ask for a throwaway; to change one of theirs, name it in \
+`fragments` (a throwaway does it, as their editor). Name a computer only when the person names one of theirs.
 - A hand-off takes minutes, and your turn ends as it starts (the person is told it is on its way), so do your own \
 part first. The computer answers here itself, and you get its answer as a note. Don't describe results you haven't \
 received.

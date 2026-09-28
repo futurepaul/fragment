@@ -101,12 +101,13 @@ fn platform_tools(owner_turn: bool) -> Vec<(&'static str, &'static str, Value)> 
          It starts the work and ends your turn (the person is told it is on its way); the work runs for minutes on its \
          own, the computer answers here itself, and its answer reaches you as a note. It goes to your owner's own \
          computer, in this conversation's session there, which remembers the work handed off from here before. With \
-         `throwaway`, or when they have no computer, a throwaway computer does it (what it builds is a new fragment of \
-         your owner's) and is removed after, keeping what it built.",
+         `fragments` (their apps it changes) or `throwaway`, or when they have no computer, a throwaway computer does \
+         it, made an editor of each of `fragments`, and is removed after, keeping what it built or changed.",
         json!({ "type": "object", "required": ["task"], "additionalProperties": false, "properties": {
             "task": { "type": "string", "description": "the task, as the computer should read it: it sees only what was handed off from this conversation before" },
             "computer": { "type": "string", "description": "only when the person names one: a fragment of theirs with a computer and a `do` or `build` job (<label>.<username>)" },
-            "throwaway": { "type": "boolean", "description": "extra hands: a new computer just for this, for work alongside other work or risky work" },
+            "throwaway": { "type": "boolean", "description": "a new computer just for this: for building an app, extra hands alongside other work, or risky work" },
+            "fragments": { "type": "array", "maxItems": 8, "items": { "type": "string" }, "description": "the person's existing fragments the work changes (<label>.<username>): the computer is made an editor of each" },
         } }),
     );
     let mut tools = if owner_turn { vec![create, hand_off, memory::tool()] } else { Vec::new() };

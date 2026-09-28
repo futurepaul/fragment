@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS shots (
 CREATE TABLE IF NOT EXISTS handoffs (
   fragment TEXT NOT NULL, run INTEGER NOT NULL, conv TEXT NOT NULL, throwaway INTEGER NOT NULL,
   started_at INTEGER NOT NULL, next_at INTEGER NOT NULL, said INTEGER NOT NULL DEFAULT 0, granted INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (fragment, run));
+  fragments TEXT NOT NULL DEFAULT '[]', PRIMARY KEY (fragment, run));
 CREATE TABLE IF NOT EXISTS bound (conv TEXT PRIMARY KEY, computer TEXT NOT NULL, at INTEGER NOT NULL);
 ";
 
@@ -99,6 +99,10 @@ pub fn migrate(sql: &SqlStorage) -> anyhow::Result<()> {
     let cols: Vec<Value> = ah(ah(sql.exec("PRAGMA table_info(handoffs)", None))?.to_array())?;
     if !cols.iter().any(|c| c["name"] == "granted") {
         ah(sql.exec("ALTER TABLE handoffs ADD COLUMN granted INTEGER NOT NULL DEFAULT 0", None))?;
+    }
+    // and an editor of the fragments its work changes (handoff.rs `grant`)
+    if !cols.iter().any(|c| c["name"] == "fragments") {
+        ah(sql.exec("ALTER TABLE handoffs ADD COLUMN fragments TEXT NOT NULL DEFAULT '[]'", None))?;
     }
     // a hand-off's result stored as the agent's own message (before
     // 2026-09-27) becomes a note to it (handoff.rs `note`), which its model

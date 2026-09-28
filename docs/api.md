@@ -1154,7 +1154,7 @@ conversation and posted to its chat as an answer is, and the chat's
 A person's agent does light work itself and hands the rest to a
 computer's hands: goose, in a long-lived session per chat
 (docs/agent-computer.md, slice 1; `agent/src/handoff.rs`).
-`platform__hand_off({task, computer?, throwaway?})` (a task of at most
+`platform__hand_off({task, computer?, throwaway?, fragments?})` (a task of at most
 4000 bytes: the computer sees only what was handed off from the same
 conversation before) is offered in its owner's turns only: a guest's
 turn would spend the owner's budget on a computer, so it has no such
@@ -1178,16 +1178,27 @@ answer). Nothing holds a turn open for a build.
 - **With `computer`**: one of the owner's fragments whose job `do`, or
   else `build`, takes `{task, chat?}` (a pet, a builder). The job is
   called there for the asker, capped as every call is. It binds nothing.
-- **With `throwaway: true`, or with no home computer**: a throwaway,
-  extra hands. The agent makes a private fragment of its owner's from
+- **With `throwaway: true`, with `fragments`, or with no home
+  computer**: a throwaway, extra hands, and fresh ones for changing the
+  owner's apps. The agent makes a private fragment of its owner's from
   the `builder` template with `throwaway: true` (the fragment records the
   agent), named `handoff-<12 hex of SHA-256 of the tool-call id>.<username>`
   (a replayed call finds the one it made, and a crash's leftovers are
   recognized by that name; the name grants nothing), and calls its
   `build`: goose on the fragment's own new computer makes and deploys
-  what was asked, a fragment of the owner's (docs/computers.md). A build
+  what was asked, a fragment of the owner's (docs/computers.md), or with
+  `fragments` changes and deploys those. A build
   that does not start removes it again. A throwaway is only a hand-off's
   lifecycle: the platform tells no computer apart as one.
+
+`fragments` (at most 8) names the owner's existing fragments the work
+changes (a bare label is the owner's), each checked to be theirs: the
+computer is made an editor of each, as of the chat below, before the
+work starts, a throwaway's once it paired (its `build`, given
+`fragments`, waits until it is an editor of each, at most 2 minutes, and
+tells goose to change those, `fragment sync` then `fragment deploy`,
+not to make a new one). Any other job reads them in its task. A
+throwaway's computer leaves them as it is removed.
 
 The job's input names the asking chat (`chat`, `<fragment>/<channel>`;
 none from the owner's own conversation): its session on the computer,

@@ -1030,6 +1030,21 @@ the pet).
 - whether Stagehand's extension loads in the Sprite's Chrome;
 - whether Jev honours `json_schema`.
 
+**Changing an app (2026-09-28).** In Paul's chat, the pet was asked to
+update starship-countdown and could not: a hand-off made the computer an
+editor of the chat and of memory, never of the app. Before decision 24
+the agent wrote apps itself, so nothing needed that grant. Now
+`platform__hand_off` takes `fragments`, the owner's apps the work
+changes. The computer is made an editor of each through the same
+owner-only grant as the chat's. Naming them sends the work to a
+throwaway, not the pet (Paul: "ideally it hands off to an ephemeral
+computer not the pet"). The builder's `build` waits to be an editor of
+each and then changes them instead of making a new app. The agent's
+guide says to build an app on a throwaway too. The pet keeps browser and
+desktop work. The same chat also showed the agent calling
+`platform__write_file`: its window still held its own calls from before
+decision 24. A chat started after that has none.
+
 ## Paul's answers (2026-09-27)
 
 1. **Model: flashx by default everywhere**, not only on computers: the
