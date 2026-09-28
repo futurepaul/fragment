@@ -64,11 +64,12 @@ pub fn desktop(s: &mut Suite, _: &Api) -> Result<()> {
     s.stop()?;
     let api = s.start_as_browsers_see_it()?;
     let asked = presence(s, &api);
+    let updated = template(s, &api);
     let result = run(s, &api);
     drop(api);
     s.stop()?;
     s.start(false, true)?;
-    asked.and(result)
+    asked.and(updated).and(result)
 }
 
 /// `__presence`: who has the owner's apps open, for the desktop's panes,
@@ -131,6 +132,83 @@ fn presence(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let gone = s.eventually(Duration::from_secs(10), || ask(Some(&owner_site), &desk, &[&app]).is_ok_and(|r| r.body["presence"][&app] == json!({ "people": [], "anonymous": 0 })));
     s.ok("their pages closed, no one is in it", gone, ask(Some(&owner_site), &desk, &[&app])?);
+    Ok(())
+}
+
+/// `__template`: whether a desktop's own files are its template's latest,
+/// to its owner alone, and the update, which commits the template's files
+/// over its own (the owner's other files stay) and deploys them, once. The
+/// same at `/api/f/{name}/template`, for the CLI.
+fn template(s: &mut Suite, api: &Api) -> Result<()> {
+    let (owner, session) = person(api)?;
+    let (guest, guest_session) = person(api)?;
+    let desk = api.qualified(&owner, &s.name("udesk"))?;
+    let r = api.create_with(&owner, json!({ "name": desk, "template": "desktop" }))?;
+    anyhow::ensure!(r.status == 200, "making {desk}: {r}");
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{desk}/members/{}", api.identity(&guest)?), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "adding an editor to the desktop: {r}");
+    let owner_site = site_cookie(api, &session, &desk)?;
+    let ask = |method: &str, cookie: Option<&str>, content_type: Option<&'static str>| {
+        let (cookie, body) = (cookie.map(|c| format!("fragment_site={c}")), content_type.map(|_| b"{}".to_vec()));
+        api.call(Call { method, url: api.site_url(&desk, "__template"), cookie, content_type, body, ..Call::default() })
+    };
+    let r = ask("GET", Some(&owner_site), None)?;
+    s.ok("__template: a new desktop holds its template's latest files", r.status == 200 && r.body == json!({ "template": "desktop", "upToDate": true, "changed": [] }), &r);
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": desk, "op": "forget-template" })))?;
+    anyhow::ensure!(r.status == 200, "forgetting its template: {r}");
+    let r = ask("GET", Some(&owner_site), None)?;
+    s.ok("one made before the platform kept its template says the same, from its template event", r.status == 200 && r.body["template"] == "desktop" && r.body["upToDate"] == true, &r);
+
+    // one of its template's files changed, and one of the owner's own added, deployed
+    let (css, mine) = ("site/desktop.css", "notes/mine.md");
+    let file = |path: &str| api.signed(&owner, "GET", &format!("/api/f/{desk}/file?path={path}"), None);
+    let change = |text: &str| -> Result<()> {
+        let r = api.signed(&owner, "POST", &format!("/api/f/{desk}/files"), Some(&json!({ "files": [{ "path": css, "text": text }, { "path": mine, "text": "# mine" }] })))?;
+        anyhow::ensure!(r.status == 200, "writing to the desktop: {r}");
+        let r = api.signed(&owner, "POST", &format!("/api/f/{desk}/deploy"), None)?;
+        anyhow::ensure!(r.status == 200, "deploying the desktop: {r}");
+        Ok(())
+    };
+    let original = file(css)?;
+    change("/* the owner's */")?;
+    let r = ask("GET", Some(&owner_site), None)?;
+    s.ok("a template file changed on main and deployed: not up to date, naming that file (not the owner's own)", r.status == 200 && r.body["upToDate"] == false && r.body["changed"] == json!([css]), &r);
+
+    let r = ask("GET", Some(&site_cookie(api, &guest_session, &desk)?), None)?;
+    s.ok("an editor of the desktop, not its owner, is refused", r.status == 403, &r);
+    let r = ask("GET", None, None)?;
+    s.ok("so is someone signed out", r.status == 401 || r.status == 403, &r);
+    let r = ask("POST", Some(&owner_site), Some("text/plain"))?;
+    s.ok("an update not sent as JSON (a cross-site form's) is refused", r.status == 400, &r);
+    let r = api.signed(&guest, "POST", &format!("/api/f/{desk}/template"), None)?;
+    s.ok("and through the API, anyone but its owner", r.status == 403, &r);
+
+    let before = api.status(&owner, &desk)?;
+    let r = ask("POST", Some(&owner_site), Some("application/json"))?;
+    let after = api.status(&owner, &desk)?;
+    let pins = |st: &crate::api::Reply| st.body["pins"].clone();
+    s.ok(
+        "its owner's update brings it up to date: a commit to main, deployed",
+        r.status == 200 && r.body["upToDate"] == true && pins(&after)["main"] != pins(&before)["main"] && pins(&after)["live"] == pins(&after)["main"],
+        format!("{r} / {after}"),
+    );
+    let (restored, kept) = (file(css)?, file(mine)?);
+    s.ok("the file is the template's again, and the owner's own file stays", restored.status == 200 && restored.bytes == original.bytes && kept.text == "# mine", format!("{restored} / {kept}"));
+    let r = ask("POST", Some(&owner_site), Some("application/json"))?;
+    let again = api.status(&owner, &desk)?;
+    s.ok("the update again commits nothing", r.status == 200 && r.body["upToDate"] == true && pins(&again) == pins(&after), &again);
+    let events = api.signed(&owner, "GET", &format!("/api/f/{desk}/events?tail=100"), None)?;
+    let logged = events.body["events"].as_array().into_iter().flatten().filter(|e| e["kind"] == "template.update").count();
+    s.ok("and one template.update event says so", logged == 1, &events);
+    change("/* the owner's, again */")?;
+    let r = api.signed(&owner, "POST", &format!("/api/f/{desk}/template"), None)?;
+    s.ok("changed again, the update (here through the API, its owner's) updates it again", r.status == 200 && r.body["upToDate"] == true && file(css)?.bytes == original.bytes, &r);
+
+    let plain = api.qualified(&owner, &s.name("uplain"))?;
+    let r = api.create_with(&owner, json!({ "name": plain }))?;
+    anyhow::ensure!(r.status == 200, "making {plain}: {r}");
+    let r = api.signed(&owner, "GET", &format!("/api/f/{plain}/template"), None)?;
+    s.ok("a fragment made from no template has none", r.status == 200 && r.body == json!({ "template": null }), &r);
     Ok(())
 }
 
@@ -410,6 +488,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let fits = chrome.eval(&page, "document.documentElement.scrollWidth <= innerWidth")? == json!(true);
     chrome.screenshot(&page, &s.scratch.join("desktop-phone.png"))?;
     s.ok("at phone width the sidebar is an overlay, and nothing scrolls sideways", narrow && overlay && back && fits, layout(&mut chrome));
+    update_in_browser(s, api, &mut chrome, &page, &owner, &desk)?;
     chrome.close(page)?;
     files_viewer(s, api, &mut chrome, &owner, &notes)
 }
@@ -464,5 +543,36 @@ fn files_viewer(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, no
     chrome.screenshot(&page, &s.scratch.join("files-phone.png"))?;
     s.ok("at phone width the tree waits behind a button, a file opens from it, and nothing scrolls sideways", tucked && shown && read && fits, "");
     chrome.close(page)?;
+    Ok(())
+}
+
+/// "Update available" at the foot of the desktop's sidebar, while one of
+/// its template's files is not the template's; its Update, confirmed in
+/// place, brings the desktop up to date and reloads the page.
+fn update_in_browser(s: &mut Suite, api: &Api, chrome: &mut Browser, page: &Page, owner: &Keys, desk: &str) -> Result<()> {
+    let wait = Duration::from_secs(20);
+    let r = api.signed(owner, "POST", &format!("/api/f/{desk}/files"), Some(&json!({ "files": [{ "path": "README.md", "text": "# the owner's words\n" }] })))?;
+    anyhow::ensure!(r.status == 200, "writing to the desktop: {r}");
+    let r = api.signed(owner, "POST", &format!("/api/f/{desk}/deploy"), None)?;
+    anyhow::ensure!(r.status == 200, "deploying the desktop: {r}");
+    chrome.viewport(page, 1440, 900, false)?;
+    chrome.reload(page)?;
+    let asked = chrome.until(page, "!document.getElementById('update').hidden", wait);
+    chrome.eval(page, "document.getElementById('layout').classList.contains('left-open') || document.getElementById('toggle-left').click(); true")?;
+    let shown = asked && chrome.until(page, "document.getElementById('update-pill').offsetParent !== null", wait);
+    chrome.screenshot(page, &s.scratch.join("desktop-update.png"))?;
+    s.ok("with one of its template's files not the template's, the desktop's sidebar says an update is available", shown, chrome.eval(page, "document.getElementById('sidebar').innerText").unwrap_or_default());
+    chrome.click(page, "#update-pill")?;
+    let confirm = "!document.getElementById('update-confirm').hidden && document.getElementById('update-text').textContent.startsWith('Update this desktop to the latest version?')";
+    let confirming = chrome.until(page, confirm, wait);
+    chrome.screenshot(page, &s.scratch.join("desktop-update-confirm.png"))?;
+    chrome.eval(page, "window.beforeUpdate = true; true")?;
+    chrome.click(page, "#update-go")?;
+    let reloaded = chrome.until(page, "window.beforeUpdate === undefined && document.querySelectorAll('#apps .row').length > 0", wait);
+    let current = api.signed(owner, "GET", &format!("/api/f/{desk}/template"), None)?;
+    // what the reloaded page asked has had time to answer
+    std::thread::sleep(Duration::from_millis(1000));
+    let gone = chrome.eval(page, "document.getElementById('update').hidden")? == json!(true);
+    s.ok("clicked, it asks first, in place; its Update brings the desktop up to date and reloads it, the pill gone", confirming && reloaded && current.body["upToDate"] == true && gone, &current);
     Ok(())
 }

@@ -17,6 +17,11 @@ authority over any of them.
   the desktop shows a notice in place of its panes, with a button that
   opens that sheet, and opens nothing in a frame.
 - A new desktop is yours alone (`members`) until you share it.
+- When this template has newer files than your desktop's own, the foot
+  of the sidebar says "Update available" (`__template`, yours alone,
+  asked on load and every 10 minutes). Its Update commits the template's
+  files over your desktop's and deploys them; files the template does
+  not have stay, and the old version stays in its history.
 - A chat is a fragment New chat named (`chat-…`), and a computer one New
   computer named (`computer-…`, from the pet template: a Sprite of its
   own, on your budget), wherever you made it; every other fragment is an

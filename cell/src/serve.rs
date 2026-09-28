@@ -115,10 +115,11 @@ fn compiled_in(req: &Request, body: &'static str, hash: u64, content_type: &str)
 
 /// Whether a site path's answer is someone's, beyond whether they may see
 /// the fragment: an operation's call, a socket (`__live`'s presence; a
-/// member's `__watch` closes when they leave), a push subscription, or the
-/// owner's fragments and who has them open. Its caller is resolved first.
+/// member's `__watch` closes when they leave), a push subscription, the
+/// owner's fragments and who has them open, or its template's update. Its
+/// caller is resolved first.
 fn answers_someone(path: &str) -> bool {
-    path.starts_with("__op/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__fragments" | "__presence" | "__watch" | "__live")
+    path.starts_with("__op/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__fragments" | "__presence" | "__template" | "__watch" | "__live")
 }
 
 fn with_cookies(mut resp: Response, cookies: &[String]) -> CellResult<Response> {
@@ -219,6 +220,18 @@ impl FragmentCell {
             } else {
                 let listed = self.owner_fragments(caller).await?;
                 self.with_share_sheets(caller, listed)?
+            };
+            json_response(&answer)?
+        } else if path == "__template" {
+            // its owner's: whether live holds its template's latest files, and the update (publish.rs)
+            let answer = if req.method() == Method::Post {
+                // a cross-site form cannot send JSON without a preflight
+                if !req.headers().get("content-type")?.is_some_and(|c| c.starts_with("application/json")) {
+                    return Err(CellError::invalid("ask for the update as application/json"));
+                }
+                self.template_update(caller).await?
+            } else {
+                self.template_status(caller).await?
             };
             json_response(&answer)?
         } else if path == "__presence" {
