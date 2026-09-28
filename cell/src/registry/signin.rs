@@ -15,7 +15,9 @@
 //! A frame's session (`__frame`, docs/fragment-boats.md) is a site session
 //! bound to the origin of the page that framed it (`embedder`): minted
 //! from the framing page's own session, redeemed only in a frame, and
-//! looked up only as a frame's.
+//! looked up only as a frame's. A share sheet's embed session (`__share`)
+//! is one too, for the sheet's path (`calls::sheet`) where a fragment's
+//! name would be.
 //!
 //! A person's yes to a fragment that is not theirs or shared with them
 //! ("Continue to X as you?") is remembered (`consents`) until they sign

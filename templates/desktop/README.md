@@ -32,11 +32,17 @@ authority over any of them.
   agent runs commands on it from any chat (its `run` job;
   docs/computers.md).
 - Sharing is the platform's: each row's `…` menu has Share, which opens
-  the platform's share sheet (`/share/<name>`, from `__fragments`) in a
-  window of its own; this page cannot drive it. Rows are badged with how
-  many people besides you (and your agents) are in them, and a globe when
-  anyone may open them, from `sharing` in your list (reading it wakes none
-  of the fragments).
+  the platform's share sheet (`/share/<name>`, from `__fragments`). For a
+  fragment of your own, once you allow `frame`, it opens in a dialog here:
+  its frame is `__share?name=`, which signs it in on that one sheet as
+  `__frame` does on a fragment (the sheet then answers only to this page,
+  and leaves out its frame grant: change that in the sheet's own window).
+  Done, Escape, or a click beside it closes it, and the list is read
+  again. Otherwise (a fragment shared with you, or no `frame` yet) the
+  sheet opens in a window of its own. Either way this page cannot drive
+  it. Rows are badged with how many people besides you (and your agents)
+  are in them, and a globe when anyone may open them, from `sharing` in
+  your list (reading it wakes none of the fragments).
 - An app pane's header says the same, and who may open it, with a Share
   button; and who else has the app open now, as faces (`__presence`: one
   read for the open app panes every 12 seconds while this page is in

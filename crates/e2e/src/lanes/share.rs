@@ -35,10 +35,11 @@ pub fn share(s: &mut Suite, _: &Api) -> Result<()> {
     s.stop()?;
     let api = s.start_as_browsers_see_it()?;
     let result = run(s, &api);
+    let embedded = in_a_desktop(s, &api);
     drop(api);
     s.stop()?;
     s.start(false, true)?;
-    result
+    result.and(embedded)
 }
 
 fn now_ms() -> i64 {
@@ -91,6 +92,19 @@ fn post(api: &Api, path: &str, session: &str, origin: &str, fields: &[(&str, &st
         extra: vec![("origin", origin.to_string())],
         ..Call::default()
     })
+}
+
+/// A navigation as a browser sends it: a frame's (`iframe`) or a tab's
+/// (`document`), from a page on `site` (`same-origin`, `cross-site`), with
+/// `cookie`.
+fn navigate(api: &Api, url: String, dest: &str, site: &str, cookie: Option<String>) -> Result<Reply> {
+    let extra = vec![("sec-fetch-dest", dest.to_string()), ("sec-fetch-site", site.to_string()), ("sec-fetch-mode", "navigate".to_string())];
+    api.call(Call { method: "GET", url, cookie, extra, ..Call::default() })
+}
+
+/// The `frame-ancestors` directives of a page's policy.
+fn ancestors(r: &Reply) -> Vec<String> {
+    r.header("content-security-policy").split(';').map(str::trim).filter(|d| d.starts_with("frame-ancestors")).map(str::to_string).collect()
 }
 
 /// A page's form token once its buttons have armed.
@@ -579,5 +593,208 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.screenshot(&shown, &s.scratch.join(shot))?;
     }
     s.ok("the sheet fits a popup's width and a phone's, with no sideways scroll", fits.iter().all(|(_, fit)| *fit), format!("{fits:?}"));
+    Ok(())
+}
+
+/// The share sheet in its owner's desktop (`__share`; docs/api.md, The
+/// share sheet in a frame): the platform's session never reaches a frame
+/// of a page on another site, so the desktop's own frame signs in on one
+/// sheet of its owner's own fragments, for that desktop alone. Only its
+/// owner, signed in there, once they allow it to frame; the sheet's cookie
+/// opens that sheet, in a frame, and nothing else of the platform's; and a
+/// desktop never changes its own frame grant from inside itself.
+fn in_a_desktop(s: &mut Suite, api: &Api) -> Result<()> {
+    let platform = api.base.clone();
+    let (owner, owner_session) = person(api)?;
+    let (other, other_session) = person(api)?;
+    let make = |keys: &fragment_nip98::Keys, label: &str, template: &str| -> Result<String> {
+        let name = api.qualified(keys, label)?;
+        let r = api.create_with(keys, json!({ "name": name, "template": template }))?;
+        anyhow::ensure!(r.status == 200, "making {name}: {r}");
+        Ok(name)
+    };
+    // a desktop made without the platform's form: it asks for frame, not allowed yet
+    let desk = make(&owner, &s.name("edesk"), "desktop")?;
+    let app = make(&owner, &s.name("eapp"), "blank")?;
+    let second = make(&owner, &s.name("esecond"), "blank")?;
+    // in the owner's list, but not theirs; and not in it at all
+    let shared = make(&other, &s.name("eshared"), "blank")?;
+    let r = api.signed(&other, "PUT", &format!("/api/f/{shared}/members/{}", api.identity(&owner)?), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "sharing {shared} with the owner: {r}");
+    let foreign = make(&other, &s.name("eforeign"), "blank")?;
+    let in_list = s.eventually(Duration::from_secs(10), || {
+        api.signed(&owner, "GET", "/api/fragments", None).is_ok_and(|r| r.body["fragments"].as_array().is_some_and(|a| a.iter().any(|f| f["name"] == shared.as_str())))
+    });
+    anyhow::ensure!(in_list, "{shared} did not reach the owner's list");
+    let desk_origin = api.site_origin(&desk);
+    let owner_site = site_cookie(api, &owner_session, &desk)?;
+    // `__share` as the desktop's own page frames it
+    let share = |name: &str, cookie: Option<&str>| {
+        navigate(api, api.site_url(&desk, &format!("__share?name={}", url_enc(name))), "iframe", "same-origin", cookie.map(|c| format!("fragment_site={c}")))
+    };
+    let grant = |granted: bool| -> Result<()> {
+        let r = api.signed(&owner, "PUT", &format!("/api/f/{desk}/grants/frame"), Some(&json!({ "granted": granted })))?;
+        anyhow::ensure!(r.status == 200, "the desktop's frame grant: {r}");
+        Ok(())
+    };
+
+    // ---- refused: no grant, not its owner, not framed, not the owner's own
+    let r = share(&app, Some(&owner_site))?;
+    s.ok("__share: a desktop its owner has not let frame their fragments is refused (403), and mints nothing", r.status == 403 && r.header("location").is_empty(), &r);
+    grant(true)?;
+    let r = share(&app, None)?;
+    s.ok("allowed, it refuses someone signed out on the desktop's origin (401)", r.status == 401, &r);
+    let r = share(&app, Some(&site_cookie(api, &other_session, &desk)?))?;
+    s.ok("and someone signed in there who is not its owner (403)", r.status == 403 && r.header("location").is_empty(), &r);
+    let top = navigate(api, api.site_url(&desk, &format!("__share?name={}", url_enc(&app))), "document", "cross-site", Some(format!("fragment_site={owner_site}")))?;
+    let theirs = navigate(api, api.site_url(&desk, &format!("__share?name={}", url_enc(&app))), "iframe", "same-site", Some(format!("fragment_site={owner_site}")))?;
+    let encoded = navigate(api, api.site_url(&desk, &format!("%5F%5Fshare?name={}", url_enc(&app))), "document", "same-origin", Some(format!("fragment_site={owner_site}")))?;
+    s.ok(
+        "and anything but a frame of the desktop's own page: a tab, another page's frame, a percent-encoded __share (no redemption)",
+        top.status == 403 && theirs.status == 403 && !encoded.header("location").contains("token="),
+        format!("{top} / {theirs} / {encoded}"),
+    );
+    let r = share(&shared, Some(&owner_site))?;
+    let r2 = share(&foreign, Some(&owner_site))?;
+    s.ok(
+        "a fragment in the owner's list that is not theirs (shared with them), or one not in it, is refused (403)",
+        r.status == 403 && r2.status == 403 && r.message().contains("its owner's own"),
+        format!("{r} / {r2}"),
+    );
+
+    // ---- the owner's desktop: on to the sheet, its cookie, the sheet signed in
+    let r = share(&app, Some(&owner_site))?;
+    let embed_url = r.header("location");
+    s.ok(
+        "the owner's desktop's frame of __share goes on to the app's sheet on the platform (its embed, with a redemption), never reused from a cache",
+        r.status == 302 && embed_url.starts_with(&format!("{platform}/share/{app}/embed?token=")) && ["no-store", "no-cache"].iter().any(|d| r.header("cache-control").contains(d)),
+        format!("{r} location {embed_url:?} cache-control {:?}", r.header("cache-control")),
+    );
+    let r = navigate(api, embed_url.clone(), "iframe", "cross-site", None)?;
+    let set = r.headers.get_all("set-cookie").iter().filter_map(|v| v.to_str().ok()).find(|c| c.starts_with("fragment_share=")).unwrap_or("").to_string();
+    let token = set.split(';').next().and_then(|c| c.strip_prefix("fragment_share=")).unwrap_or("").to_string();
+    let attrs: Vec<&str> = set.split(';').map(str::trim).collect();
+    s.ok(
+        "its embed sets the sheet's cookie (HttpOnly, Secure, SameSite=None, Partitioned, on the sheet's path alone) and goes on to the sheet, no token in its URL",
+        r.status == 302
+            && r.header("location") == format!("/share/{app}")
+            && token.len() == 64
+            && ["HttpOnly", "Secure", "SameSite=None", "Partitioned"].iter().all(|a| attrs.contains(a))
+            && attrs.contains(&format!("Path=/share/{app}").as_str()),
+        &set,
+    );
+    let r = navigate(api, embed_url.clone(), "iframe", "cross-site", None)?;
+    s.ok("its redemption is spent: again, 401", r.status == 401, &r);
+    let embed = format!("fragment_share={token}");
+    let sheet = format!("{platform}/share/{app}");
+    let r = navigate(api, sheet.clone(), "iframe", "cross-site", Some(embed.clone()))?;
+    s.ok(
+        "in the desktop's frame, the sheet is the owner's (their controls), and only that desktop may frame it: frame-ancestors its origin, no X-Frame-Options",
+        r.status == 200
+            && r.text.contains("General access")
+            && r.text.contains("name=\"username\"")
+            && ancestors(&r) == [format!("frame-ancestors {desk_origin}")]
+            && r.header("x-frame-options").is_empty(),
+        headers(&r),
+    );
+    s.ok(
+        "it tells that origin alone its height and Done",
+        r.text.contains(&format!("offsetHeight }}, {})", json!(desk_origin))) && !r.text.contains("offsetHeight }, location.origin)"),
+        "",
+    );
+    let form = form_of(&r);
+
+    // ---- that cookie opens that sheet, in a frame, and nothing else
+    let top = navigate(api, sheet.clone(), "document", "cross-site", Some(embed.clone()))?;
+    let fetched = api.call(Call {
+        method: "GET",
+        url: sheet.clone(),
+        cookie: Some(embed.clone()),
+        extra: vec![("sec-fetch-dest", "empty".to_string()), ("sec-fetch-site", "cross-site".to_string()), ("sec-fetch-mode", "cors".to_string())],
+        ..Call::default()
+    })?;
+    let login = |r: &Reply| r.status == 302 && r.header("location").contains("/auth/login?");
+    s.ok("with only the sheet's cookie, a tab of the sheet, or a fetch of it, is signed out (→ sign in)", login(&top) && login(&fetched), format!("{top} / {fetched}"));
+    let other_sheet = navigate(api, format!("{platform}/share/{second}"), "iframe", "cross-site", Some(embed.clone()))?;
+    let home = navigate(api, format!("{platform}/"), "iframe", "cross-site", Some(embed.clone()))?;
+    let listed = api.call(Call { method: "GET", url: format!("{platform}/api/fragments"), cookie: Some(embed.clone()), ..Call::default() })?;
+    let join = navigate(api, format!("{platform}/join/{app}?token={}", "0".repeat(48)), "iframe", "cross-site", Some(embed.clone()))?;
+    s.ok(
+        "another fragment's sheet, the home, /join, and the API take it for no one (→ sign in, signed out, 401)",
+        login(&other_sheet) && home.status == 200 && home.text.contains("/auth/login") && !home.text.contains("Signed in as") && listed.status == 401 && login(&join),
+        format!("{other_sheet} / {home} / {listed} / {join}"),
+    );
+    let both = navigate(api, sheet.clone(), "iframe", "same-origin", Some(format!("fragment_session={owner_session}; {embed}")))?;
+    s.ok("a request with the platform's session is answered as before, whatever else it carries: only the platform frames it", framed_by_platform(&both), headers(&both));
+
+    // ---- its form works in the frame, as the owner
+    std::thread::sleep(Duration::from_millis(form::DELAY_MS as u64 + 100));
+    let post = |form: &str, fields: &[(&str, &str)]| {
+        let mut body = format!("form={}", url_enc(form));
+        for (k, v) in fields {
+            body += &format!("&{k}={}", url_enc(v));
+        }
+        let extra = vec![
+            ("origin", platform.clone()),
+            ("sec-fetch-dest", "iframe".to_string()),
+            ("sec-fetch-site", "same-origin".to_string()),
+            ("sec-fetch-mode", "navigate".to_string()),
+        ];
+        api.call(Call { method: "POST", url: sheet.clone(), body: Some(body.into_bytes()), content_type: Some("application/x-www-form-urlencoded"), cookie: Some(embed.clone()), extra, ..Call::default() })
+    };
+    let r = post(&form, &[("action", "visibility"), ("visibility", "public")])?;
+    let now = api.status(&owner, &app)?;
+    s.ok("the sheet's form in the frame changes who can open it, as its owner", r.status == 303 && r.header("location") == format!("/share/{app}") && now.body["visibility"] == "public", format!("{r} {now}"));
+    let r = post(&format!("{form}x"), &[("action", "visibility"), ("visibility", "members")])?;
+    s.ok("(a forged form token is refused there too: 403)", r.status == 403 && api.status(&owner, &app)?.body["visibility"] == "public", &r);
+
+    // ---- the desktop's own sheet, inside it: no frame grant, and none changed
+    let r = share(&desk, Some(&owner_site))?;
+    let r = navigate(api, r.header("location"), "iframe", "cross-site", None)?;
+    let own = r.cookies().into_iter().find_map(|c| c.strip_prefix("fragment_share=").map(str::to_string)).unwrap_or_default();
+    let own_sheet = format!("{platform}/share/{desk}");
+    let r = navigate(api, own_sheet.clone(), "iframe", "cross-site", Some(format!("fragment_share={own}")))?;
+    let shown = r.status == 200 && r.text.contains("General access") && !r.text.contains("Your fragments inside it") && !r.text.contains("name=\"granted\"");
+    let form = form_of(&r);
+    std::thread::sleep(Duration::from_millis(form::DELAY_MS as u64 + 100));
+    let stop = api.call(Call {
+        method: "POST",
+        url: own_sheet.clone(),
+        body: Some(format!("form={}&action=frame&granted=no", url_enc(&form)).into_bytes()),
+        content_type: Some("application/x-www-form-urlencoded"),
+        cookie: Some(format!("fragment_share={own}")),
+        extra: vec![("origin", platform.clone()), ("sec-fetch-dest", "iframe".to_string()), ("sec-fetch-site", "same-origin".to_string()), ("sec-fetch-mode", "navigate".to_string())],
+        ..Call::default()
+    })?;
+    let still = api.status(&owner, &desk)?;
+    s.ok(
+        "the desktop's own sheet inside it leaves out the frame grant, and refuses its change (403): a desktop never allows or stops itself",
+        shown && stop.status == 403 && still.body["frame"] == json!(true),
+        format!("{} / {stop} / {}", r.status, still.body["frame"]),
+    );
+
+    // ---- a redemption for the wrong place, or the wrong kind of page
+    let r = share(&app, Some(&owner_site))?;
+    let to = r.header("location");
+    let at_signin = navigate(api, api.site_url(&app, &format!("__signin?{}", to.split('?').nth(1).unwrap_or(""))), "iframe", "same-origin", None)?;
+    let then = navigate(api, to.clone(), "iframe", "cross-site", None)?;
+    s.ok(
+        "the sheet's redemption is refused by its fragment's own __signin (401, unspent: the sheet still takes it)",
+        at_signin.status == 401 && then.status == 302 && then.cookies().iter().any(|c| c.starts_with("fragment_share=")),
+        format!("{at_signin} / {then}"),
+    );
+    let r = share(&app, Some(&owner_site))?;
+    let tab = navigate(api, r.header("location"), "document", "cross-site", None)?;
+    let again = navigate(api, r.header("location"), "iframe", "cross-site", None)?;
+    s.ok("shown to a tab it is refused (401), and spent", tab.status == 401 && again.status == 401, format!("{tab} / {again}"));
+    let framed = navigate(api, api.site_url(&desk, &format!("__frame?name={}&return=/", url_enc(&app))), "iframe", "same-origin", Some(format!("fragment_site={owner_site}")))?;
+    let token = framed.header("location").split("token=").nth(1).unwrap_or("").to_string();
+    let r = navigate(api, format!("{platform}/share/{app}/embed?token={token}"), "iframe", "cross-site", None)?;
+    s.ok("and a fragment's frame redemption (__frame) opens no sheet (401)", framed.status == 302 && token.len() == 64 && r.status == 401, &r);
+
+    // ---- stopped, it mints no more
+    grant(false)?;
+    let r = share(&app, Some(&owner_site))?;
+    s.ok("once its owner stops the grant, __share is refused again (403)", r.status == 403 && r.header("location").is_empty(), &r);
     Ok(())
 }
