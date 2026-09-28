@@ -10,7 +10,8 @@
 //!                              removing, who may open it, its share link (copy, a new one),
 //!                              and, when its fragment.json asks for `frame`, letting it show
 //!                              the owner's other fragments inside it (`__frame`)
-//!   POST /share/<name>         one of the owner's changes (`action`), then back to the sheet;
+//!   POST /share/<name>         one of the owner's changes (`action`), then back to the sheet
+//!                              (a role of `remove` removes the member);
 //!                              an invite answers the sheet with the link to send
 //!   GET  /join/<name>?token=   what the invite grants, and a Join button
 //!   POST /join/<name>          joins, then → the fragment, signed in on its origin
@@ -22,7 +23,8 @@
 //! Either way neither page can be driven by one:
 //!
 //! - it cannot read them: they send no CORS headers, and they refuse
-//!   every frame (`auth::unframed`);
+//!   every frame (`auth::unframed`) but the sheet's in the platform's own
+//!   home (`frame-ancestors 'self'`: no fragment is on its origin);
 //! - it cannot post to them: every POST's Origin must be the platform's
 //!   (`auth::same_origin`) and carry a form token bound to the session
 //!   (`fragment_core::form`), which only the page itself holds;
@@ -33,9 +35,9 @@
 //! - it cannot hand them a grant: the sheet reads nothing from its URL, so
 //!   no link prefills what a click would approve (the join page's token is
 //!   the invite itself, and an invite by username is its invitee's alone);
-//! - the click that opened one cannot confirm it: their buttons arm
-//!   `form::DELAY_MS` after the page shows, and a form sent sooner is
-//!   refused.
+//! - the click that opened one cannot confirm it: their buttons (and the
+//!   sheet's selects, each sent as it changes) arm `form::DELAY_MS` after
+//!   the page shows, and a form sent sooner is refused.
 
 use std::collections::BTreeMap;
 
@@ -60,21 +62,36 @@ const INVITE_TOKEN_LEN: usize = 48;
 const INVITE_ID_LEN: usize = 16;
 const DAY_MS: i64 = 24 * 3600 * 1000;
 
-const SHEET_STYLE: &str = "body{margin:4vh auto}h2{font-size:1rem;margin:1.6em 0 .4em}.sub{color:#6b7280;margin-top:-.6em}
-ul.people{list-style:none;padding:0;margin:0}.people li{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #8882;flex-wrap:wrap}
-.av{width:28px;height:28px;border-radius:50%;object-fit:cover;background:#8884;display:inline-grid;place-items:center;font-size:13px;font-weight:600;flex:none}
-.who{flex:1;min-width:8rem}.role,.hint{color:#6b7280;font-size:.9em}form.inline{display:inline}
-input,select{font:inherit;padding:.35em .5em;border-radius:8px;border:1px solid #aab;background:inherit;color:inherit}
-input[readonly]{width:100%;box-sizing:border-box;font-size:.85em}label{display:block}
-button{padding:.35em .9em}button:disabled{opacity:.45;cursor:default}button.quiet{background:none;color:inherit;border-color:#aab}
-.flash{padding:2px 14px;border-radius:10px;background:#8882}.flash.error{background:#e5484d33}";
+/// A card, as a document's share dialog is: the page's, or, in the home's
+/// dialog (`framed`), the dialog's whole.
+const SHEET_STYLE: &str = ":root{color-scheme:light dark}body{margin:0 auto;padding:16px;max-width:30rem}
+main{background:#fff;border-radius:14px;padding:20px 24px;box-shadow:0 1px 2px #0000001a,0 8px 28px #0000001a}
+h1{font-size:1.35rem;font-weight:500;margin:0 0 .8em;overflow-wrap:anywhere}h2{font-size:1rem;font-weight:600;margin:1.3em 0 .3em}
+ul.people{list-style:none;padding:0;margin:0}.people li{display:flex;align-items:center;gap:10px;padding:4px 0;min-height:40px}
+.av{width:32px;height:32px;border-radius:50%;object-fit:cover;background:#8884;display:inline-grid;place-items:center;font-size:14px;font-weight:600;flex:none}
+.who{flex:1;min-width:0;overflow-wrap:anywhere}.role,.hint{color:#6b7280;font-size:.875em}.role{text-align:right}.hint{margin:.3em 0}form{margin:0}
+input,select{font:inherit;padding:.4em .6em;border-radius:8px;border:1px solid #c3c8cf;background:transparent;color:inherit;min-width:0}
+select.bare{border-color:transparent;cursor:pointer;field-sizing:content}select.bare:hover:not(:disabled){background:#8882}select:disabled{cursor:default}
+.add{display:flex;gap:8px;flex-wrap:wrap}.add input{flex:1 1 7rem}
+button{padding:.4em 1em}button:disabled{opacity:.45;cursor:default}button.quiet,.quiet button{background:none;color:inherit;border-color:#c3c8cf}
+.text button{background:none;border-color:transparent;color:#2a5bd7;padding:.3em .4em}
+.access{display:flex;gap:12px;align-items:center}.access select{margin-left:-.6em;font-weight:600}
+.icon{width:36px;height:36px;border-radius:50%;background:#8882;display:grid;place-items:center;flex:none}.icon.open{background:#e6f4ea;color:#137333}
+.icon svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.more{margin-top:1.3em;border-top:1px solid #8883;font-size:.9em}.more h2{font-size:.9rem;color:#6b7280}.more .row{display:flex;gap:12px;align-items:center;justify-content:space-between}
+footer{display:flex;justify-content:space-between;gap:8px;margin-top:1.4em}
+.flash{padding:4px 14px;border-radius:10px;background:#8882;margin-bottom:1em}.flash.error{background:#e5484d33}.flash .row{display:flex;gap:8px}.flash input{flex:1;font-size:.85em}
+.framed body{max-width:none;padding:0;background:#fff}.framed main{box-shadow:none;border-radius:0}
+@media (prefers-color-scheme:dark){main,.framed body{background:#1f2327}input,select,button.quiet,.quiet button{border-color:#4a5159}.icon.open{background:#1e3a2a;color:#81c995}.text button{color:#7aa2f7}}
+@media (max-width:420px){body{padding:8px}main{padding:16px}}";
 
-/// Arms the page's buttons `DELAY_MS` after it shows (again each time it
-/// is shown), and copies a link.
+/// Arms the page's controls `DELAY_MS` after it shows (again each time it
+/// is shown), copies a link, sends a form as its select changes, and
+/// closes the sheet (Done).
 fn script() -> String {
     format!(
         r#"<script>(() => {{
-  const acting = () => document.querySelectorAll("button[data-arm]");
+  const acting = () => document.querySelectorAll("[data-arm]");
   let timer = 0;
   const arm = () => {{
     clearTimeout(timer);
@@ -85,13 +102,38 @@ fn script() -> String {
   addEventListener("pageshow", arm);
   document.addEventListener("visibilitychange", () => {{ if (document.visibilityState === "visible") arm(); }});
   for (const b of document.querySelectorAll("button[data-copy]")) b.onclick = () => {{
-    const input = document.getElementById(b.dataset.copy);
-    input.select();
-    (navigator.clipboard ? navigator.clipboard.writeText(input.value) : Promise.reject()).then(() => {{ b.textContent = "Copied"; }}, () => document.execCommand("copy"));
+    const link = b.dataset.copy, was = b.textContent;
+    (navigator.clipboard ? navigator.clipboard.writeText(link) : Promise.reject()).then(() => {{
+      b.textContent = "Copied";
+      setTimeout(() => {{ b.textContent = was; }}, 1500);
+    }}, () => prompt("Copy this link:", link));
+  }};
+  // a role, a removal, or who can open it: one choice, sent as it is made
+  for (const s of document.querySelectorAll("select[data-send]")) s.onchange = () => s.form.submit();
+  // in the home's dialog (only the platform's own pages may frame this
+  // one), Done closes the dialog; in a window of its own, the window, or
+  // it goes home
+  const framed = parent !== window;
+  const tell = (share) => parent.postMessage({{ share, height: document.body.offsetHeight }}, location.origin);
+  if (framed) {{
+    document.documentElement.classList.add("framed");
+    tell("shown");
+  }}
+  for (const b of document.querySelectorAll("button[data-done]")) b.onclick = () => {{
+    if (framed) return tell("done");
+    close();
+    if (!window.closed) location.href = "/";
   }};
 }})();</script>"#,
         delay = form::DELAY_MS
     )
+}
+
+/// A sharing page's CSP: scripts and styles inline, images from the
+/// platform, and who may frame it (`ancestors`).
+fn policy(forms_here: bool, ancestors: &str) -> String {
+    let forms = if forms_here { " form-action 'self';" } else { "" };
+    format!("default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline';{forms} base-uri 'none'; frame-ancestors {ancestors}")
 }
 
 /// One of sharing's pages: the platform's look, its protections, and
@@ -103,7 +145,7 @@ pub(crate) fn sheet_page(status: u16, title: &str, body: &str, forms_here: bool)
         r#"<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{t}</title>
 <style>{style}
 {sheet}</style>
-<h1>{t}</h1>{body}{script}"#,
+<main><h1>{t}</h1>{body}</main>{script}"#,
         t = esc(title),
         style = auth::STYLE,
         sheet = SHEET_STYLE,
@@ -114,15 +156,44 @@ pub(crate) fn sheet_page(status: u16, title: &str, body: &str, forms_here: bool)
     h.set("cache-control", "no-store")?;
     auth::unframed(&h)?;
     auth::unopened(&h)?;
-    let forms = if forms_here { " form-action 'self';" } else { "" };
-    h.set(
-        "content-security-policy",
-        &format!("default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline';{forms} base-uri 'none'; frame-ancestors 'none'"),
-    )?;
+    h.set("content-security-policy", &policy(forms_here, "'none'"))?;
     // the join page's URL holds its token: no other origin hears it
     h.set("referrer-policy", "same-origin")?;
     Ok(Response::ok(html)?.with_status(status).with_headers(h))
 }
+
+/// The share sheet itself: a sharing page only the platform's own pages
+/// may frame (the home shows it in a dialog: `DIALOG`). `'self'` is the
+/// platform's origin alone; every fragment is on another (docs/platform.md).
+fn sheet_framable(status: u16, title: &str, body: &str) -> CellResult<Response> {
+    let mut resp = sheet_page(status, title, body, true)?;
+    resp.headers_mut().set("content-security-policy", &policy(true, "'self'"))?;
+    resp.headers_mut().set("x-frame-options", "SAMEORIGIN")?;
+    Ok(resp)
+}
+
+/// The home's share dialog: its Share links open the sheet in a frame
+/// (`sheet_framable`), whose Done closes it; the home reloads to show what
+/// changed. A message counts only from that frame, on the platform's origin.
+pub(crate) const DIALOG: &str = r#"<dialog id="share"><iframe title="Share"></iframe></dialog>
+<style>#share{padding:0;border:0;border-radius:14px;width:min(30rem,calc(100vw - 32px));background:#fff;box-shadow:0 12px 48px #0000004d;overflow:hidden}
+#share::backdrop{background:#0000008c}#share iframe{display:block;width:100%;height:26rem;max-height:calc(100vh - 48px);border:0}
+@media (prefers-color-scheme:dark){#share{background:#1f2327}}</style>
+<script>(() => {
+  const dialog = document.getElementById("share"), frame = dialog.querySelector("iframe");
+  for (const a of document.querySelectorAll("a[data-share]")) a.onclick = (e) => {
+    e.preventDefault();
+    frame.src = a.getAttribute("href");
+    dialog.showModal();
+  };
+  addEventListener("message", (e) => {
+    if (e.origin !== location.origin || e.source !== frame.contentWindow) return;
+    frame.style.height = e.data.height + "px";
+    if (e.data.share === "done") dialog.close();
+  });
+  dialog.onclick = (e) => { if (e.target === dialog) dialog.close(); };
+  dialog.onclose = () => location.reload();
+})();</script>"#;
 
 /// A page that only says something (a refusal, a stale link): `html`,
 /// escaped by the caller.
@@ -241,7 +312,6 @@ fn person(id: &str, p: Option<&Profile>, me: &str) -> String {
 
 /// What the sheet shows, read as the signed-in person.
 struct Sheet {
-    name: String,
     me: String,
     /// The person's own role (`None`: they read through an agent of theirs).
     role: Option<Role>,
@@ -251,6 +321,8 @@ struct Sheet {
     visibility: Visibility,
     /// The share link: the owner's only.
     link: Option<String>,
+    /// Its address, which opens it for the people in it.
+    canonical: String,
     /// Whether its owner lets it frame their fragments (`None`: its
     /// fragment.json does not ask for `frame`).
     frame: Option<bool>,
@@ -283,39 +355,73 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
         vec![]
     };
     let visibility: Visibility = decoded(status["visibility"].clone(), "the status's visibility")?;
+    let canonical = cfg.canonical(url, name);
     let link = match (role, status["viewToken"].as_str()) {
-        (Some(Role::Owner), Some(token)) => Some(format!("{}?view={token}", cfg.canonical(url, name))),
+        (Some(Role::Owner), Some(token)) => Some(format!("{canonical}?view={token}")),
         _ => None,
     };
     let ids = members.members.iter().map(|m| m.principal.clone()).chain(invites.iter().filter_map(|i| i.invitee.clone())).collect();
     Ok(Sheet {
-        name: name.to_string(),
         me: who.id.clone(),
         role,
         members: members.members,
         invites,
         visibility,
         link,
+        canonical,
         frame: status["frame"].as_bool(),
         profiles: profiles(env, ids).await,
         form: form::issue(session, &purpose("share", name), js::now_ms()),
     })
 }
 
-/// A form of the owner's: one action, with the page's token.
+/// A form of the owner's: one action, with the page's token, sent by its
+/// button, or, with none, as its select changes (`data-send`).
 fn action_form(sheet: &Sheet, action: &str, fields: &str, button: &str, class: &str) -> String {
+    let button = if button.is_empty() { String::new() } else { format!("<button data-arm disabled>{button}</button>") };
     format!(
-        "<form method=\"post\" class=\"{class}\"><input type=\"hidden\" name=\"form\" value=\"{f}\"><input type=\"hidden\" name=\"action\" value=\"{action}\">{fields}<button data-arm disabled>{button}</button></form>",
+        "<form method=\"post\" class=\"{class}\"><input type=\"hidden\" name=\"form\" value=\"{f}\"><input type=\"hidden\" name=\"action\" value=\"{action}\">{fields}{button}</form>",
         f = esc(&sheet.form),
     )
 }
 
+fn role_name(role: Role) -> &'static str {
+    match role {
+        Role::Owner => "Owner",
+        Role::Editor => "Editor",
+        Role::Viewer => "Viewer",
+        Role::Public => "Anyone",
+    }
+}
+
+/// Who can open it, as General access says it: an icon, its name, and
+/// what it means.
+fn access(v: Visibility) -> (&'static str, &'static str, &'static str) {
+    match v {
+        Visibility::Members => (
+            "<rect x=\"5\" y=\"11\" width=\"14\" height=\"10\" rx=\"2\"/><path d=\"M8 11V7a4 4 0 0 1 8 0v4\"/>",
+            "Restricted",
+            "Only the people with access can open it.",
+        ),
+        Visibility::Link => (
+            "<path d=\"M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1\"/><path d=\"M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1\"/>",
+            "Anyone with the link",
+            "Anyone who has the link can open it, as a viewer.",
+        ),
+        Visibility::Public => (
+            "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18\"/>",
+            "Public",
+            "Anyone can open it, no link needed.",
+        ),
+    }
+}
+
 fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
-    let mut out = format!("<p class=\"sub\"><code>{}</code></p>", esc(&sheet.name));
+    let mut out = String::new();
     match flash {
         Some(Flash::Invited { who, role, link }) => out += &format!(
             "<div class=\"flash\"><p>Invited <b>@{w}</b> as {r}. Send them this link: it works for them alone, once, for {d} days.</p>\
-             <p><input id=\"invite-link\" readonly value=\"{l}\"> <button type=\"button\" data-copy=\"invite-link\">Copy</button></p></div>",
+             <p class=\"row\"><input id=\"invite-link\" readonly value=\"{l}\"><button type=\"button\" class=\"quiet\" data-copy=\"{l}\">Copy</button></p></div>",
             w = esc(&who),
             r = role_phrase(role),
             d = fragment_proto::limits::INVITE_TTL_DEFAULT_S / 86400,
@@ -324,84 +430,93 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
         Some(Flash::Refused(why)) => out += &format!("<div class=\"flash error\"><p>{}</p></div>", esc(&why)),
         None => {}
     }
-    out += "<h2>People</h2><ul class=\"people\">";
+    if sheet.owner() {
+        out += &action_form(
+            sheet,
+            "invite",
+            "<input name=\"username\" required minlength=\"3\" maxlength=\"32\" pattern=\"@?[a-z0-9]([a-z0-9-]*[a-z0-9])?\" placeholder=\"Add people by username\" autocomplete=\"off\" aria-label=\"username\">\
+             <select name=\"role\" aria-label=\"role\"><option value=\"viewer\">Viewer</option><option value=\"editor\">Editor</option></select>",
+            "Invite",
+            "add",
+        );
+        out += "<p class=\"hint\">You get a link to send them; it works for them alone.</p>";
+    }
+    out += "<h2>People with access</h2><ul class=\"people\">";
     for m in &sheet.members {
         out += "<li>";
         out += &person(&m.principal, sheet.profiles.get(&m.principal), &sheet.me);
         if sheet.owner() && m.role != Role::Owner {
             let member = format!("<input type=\"hidden\" name=\"member\" value=\"{}\">", esc(&m.principal));
-            let choice = |r: Role| format!("<option value=\"{v}\"{s}>{v}</option>", v = r.as_str(), s = if m.role == r { " selected" } else { "" });
-            let select = format!("<select name=\"role\" aria-label=\"role\">{}{}</select> ", choice(Role::Viewer), choice(Role::Editor));
-            out += &action_form(sheet, "role", &format!("{member}{select}"), "Set", "inline");
-            out += " ";
-            out += &action_form(sheet, "remove", &member, "Remove", "inline quiet");
+            let choice = |r: Role| format!("<option value=\"{}\"{}>{}</option>", r.as_str(), if m.role == r { " selected" } else { "" }, role_name(r));
+            // the menu ends in removing them (`share_post`)
+            let select = format!(
+                "<select name=\"role\" aria-label=\"role\" class=\"bare\" autocomplete=\"off\" data-send data-arm disabled>{}{}<hr><option value=\"remove\">Remove access</option></select>",
+                choice(Role::Viewer),
+                choice(Role::Editor)
+            );
+            out += &action_form(sheet, "role", &format!("{member}{select}"), "", "");
         } else {
-            out += &format!("<span class=\"role\">{}</span>", m.role.as_str());
+            out += &format!("<span class=\"role\">{}</span>", role_name(m.role));
         }
         out += "</li>";
     }
-    out += "</ul>";
-    if !sheet.owner() {
-        let who = match sheet.visibility {
-            Visibility::Members => "only the people in it",
-            Visibility::Link => "the people in it, and anyone with its link",
-            Visibility::Public => "anyone",
+    let now = js::now_ms();
+    for i in &sheet.invites {
+        out += "<li>";
+        out += &match &i.invitee {
+            Some(id) => person(id, sheet.profiles.get(id), &sheet.me),
+            None => format!("<span class=\"av\" aria-hidden=\"true\">✉</span><span class=\"who\">anyone with its link <span class=\"role\">({} left)</span></span>", i.uses_left),
         };
-        out += &format!("<p class=\"hint\">{} can be opened by {who}. Only its owner changes who is in.</p>", esc(label(&sheet.name)));
-        return out;
+        let days = (i.expires_at - now) / DAY_MS;
+        let until = if days >= 1 { format!("{days} more day{}", if days == 1 { "" } else { "s" }) } else { "less than a day".into() };
+        out += &format!("<span class=\"role\">invited as {}<br>for {until}</span>", i.role.as_str());
+        out += &action_form(sheet, "uninvite", &format!("<input type=\"hidden\" name=\"invite\" value=\"{}\">", esc(&i.id)), "Revoke", "text");
+        out += "</li>";
     }
-    out += "<h2>Invite</h2>";
-    out += &action_form(
-        sheet,
-        "invite",
-        "<input name=\"username\" required minlength=\"3\" maxlength=\"32\" pattern=\"@?[a-z0-9]([a-z0-9-]*[a-z0-9])?\" placeholder=\"username\" autocomplete=\"off\" aria-label=\"username\"> \
-         <select name=\"role\" aria-label=\"role\"><option value=\"viewer\">viewer</option><option value=\"editor\">editor</option></select> ",
-        "Invite",
-        "",
-    );
-    out += "<p class=\"hint\">You get a link to send them; it works for them alone.</p>";
-    if !sheet.invites.is_empty() {
-        out += "<h2>Invited</h2><ul class=\"people\">";
-        let now = js::now_ms();
-        for i in &sheet.invites {
-            out += "<li>";
-            out += &match &i.invitee {
-                Some(id) => person(id, sheet.profiles.get(id), &sheet.me),
-                None => format!("<span class=\"who\">anyone with its link <span class=\"role\">({} left)</span></span>", i.uses_left),
-            };
-            let days = (i.expires_at - now) / DAY_MS;
-            let until = if days >= 1 { format!("{days} more day{}", if days == 1 { "" } else { "s" }) } else { "less than a day".into() };
-            out += &format!("<span class=\"role\">{}, for {until}</span> ", i.role.as_str());
-            out += &action_form(sheet, "uninvite", &format!("<input type=\"hidden\" name=\"invite\" value=\"{}\">", esc(&i.id)), "Revoke", "inline quiet");
-            out += "</li>";
+    out += "</ul><h2>General access</h2>";
+    let (icon, named, means) = access(sheet.visibility);
+    let control = match sheet.owner() {
+        true => {
+            let option = |v: Visibility| format!("<option value=\"{}\"{}>{}</option>", v.as_str(), if sheet.visibility == v { " selected" } else { "" }, access(v).1);
+            let options = [option(Visibility::Members), option(Visibility::Link), option(Visibility::Public)].concat();
+            let select = format!("<select name=\"visibility\" aria-label=\"general access\" class=\"bare\" autocomplete=\"off\" data-send data-arm disabled>{options}</select>");
+            action_form(sheet, "visibility", &select, "", "")
         }
-        out += "</ul>";
-    }
-    out += "<h2>Who can open it</h2>";
-    let option = |v: Visibility, text: &str| {
-        let checked = if sheet.visibility == v { " checked" } else { "" };
-        format!("<label><input type=\"radio\" name=\"visibility\" value=\"{}\"{checked}> {text}</label>", v.as_str())
+        false => format!("<b>{named}</b>"),
     };
-    let options = [option(Visibility::Members, "Only the people in it"), option(Visibility::Link, "Anyone with the link"), option(Visibility::Public, "Anyone")].concat();
-    out += &action_form(sheet, "visibility", &format!("{options}<p>"), "Save", "");
-    out += "</p>";
-    if let Some(link) = sheet.link.as_deref().filter(|_| sheet.visibility != Visibility::Members) {
-        out += &format!(
-            "<h2>Link</h2><p><input id=\"link\" readonly value=\"{}\"> <button type=\"button\" data-copy=\"link\">Copy</button></p>",
-            esc(link)
-        );
-        out += &action_form(sheet, "rotate", "", "New link", "quiet");
-        out += "<p class=\"hint\">A new link stops the old one working.</p>";
+    let open = if sheet.visibility == Visibility::Members { "" } else { " open" };
+    out += &format!(
+        "<div class=\"access\"><span class=\"icon{open}\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\">{icon}</svg></span><div>{control}<p class=\"hint\">{means}</p></div></div>"
+    );
+    if !sheet.owner() {
+        out += "<p class=\"hint\">Only its owner changes who has access.</p>";
     }
-    if let Some(granted) = sheet.frame {
-        out += "<h2>Your fragments inside it</h2>";
-        out += match granted {
-            true => "<p class=\"hint\">It shows your other fragments inside it, signed in as you. The platform can't vouch for its code: whoever changes it could put its own buttons on top of your fragments and catch your clicks. Stop it if you no longer trust that code.</p>",
-            false => "<p class=\"hint\">It asks to show your other fragments inside it, signed in as you. The platform can't vouch for its code: whoever changes that code (you, someone you share it with, or an agent) could put its own buttons on top of your fragments and catch your clicks. Allow it only if you trust that code.</p>",
-        };
-        let field = format!("<input type=\"hidden\" name=\"granted\" value=\"{}\">", if granted { "no" } else { "yes" });
-        out += &action_form(sheet, "frame", &field, if granted { "Stop" } else { "Allow" }, if granted { "quiet" } else { "" });
+    // the share link, while it opens it
+    let shared = sheet.link.as_deref().filter(|_| sheet.visibility != Visibility::Members);
+    // the rest, quieter: renewing the share link, and the frame grant
+    if sheet.owner() && (shared.is_some() || sheet.frame.is_some()) {
+        out += "<section class=\"more\">";
+        if shared.is_some() {
+            out += "<h2>Share link</h2><div class=\"row\"><p class=\"hint\">A new link stops the old one working.</p>";
+            out += &action_form(sheet, "rotate", "", "New link", "quiet");
+            out += "</div>";
+        }
+        if let Some(granted) = sheet.frame {
+            out += "<h2>Your fragments inside it</h2>";
+            out += match granted {
+                true => "<p class=\"hint\">It shows your other fragments inside it, signed in as you. The platform can't vouch for its code: whoever changes it could put its own buttons on top of your fragments and catch your clicks. Stop it if you no longer trust that code.</p>",
+                false => "<p class=\"hint\">It asks to show your other fragments inside it, signed in as you. The platform can't vouch for its code: whoever changes that code (you, someone you share it with, or an agent) could put its own buttons on top of your fragments and catch your clicks. Allow it only if you trust that code.</p>",
+            };
+            let field = format!("<input type=\"hidden\" name=\"granted\" value=\"{}\">", if granted { "no" } else { "yes" });
+            out += &action_form(sheet, "frame", &field, if granted { "Stop" } else { "Allow" }, if granted { "quiet" } else { "" });
+        }
+        out += "</section>";
     }
+    // Copy link: the share link, else its address (the people in it open that)
+    out += &format!(
+        "<footer><button type=\"button\" class=\"quiet\" data-copy=\"{}\">Copy link</button><button type=\"button\" data-done>Done</button></footer>",
+        esc(shared.unwrap_or(&sheet.canonical))
+    );
     out
 }
 
@@ -416,9 +531,9 @@ async fn sheet(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &str) ->
 /// shown to gets a refusal page.
 #[allow(clippy::too_many_arguments)]
 async fn shown(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, session: &str, flash: Option<Flash>, status: u16) -> CellResult<Response> {
-    let title = format!("Share {}", label(name));
+    let title = format!("Share “{}”", label(name));
     match load(env, cfg, url, name, who, session).await {
-        Ok(sheet) => sheet_page(status, &title, &render(&sheet, flash), true),
+        Ok(sheet) => sheet_framable(status, &title, &render(&sheet, flash)),
         Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::Unauthenticated) => {
             notice(403, "Not yours to share", &format!("You are not in {}, so it is not yours to share.", esc(label(name))))
         }
@@ -466,7 +581,12 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
         Some(r @ (Role::Viewer | Role::Editor)) => Ok(r),
         _ => Err(CellError::invalid("a role is viewer or editor")),
     };
-    let done = match field("action") {
+    // a member's role menu ends in "Remove access" (`render`)
+    let action = match (field("action"), field("role")) {
+        ("role", "remove") => "remove",
+        (action, _) => action,
+    };
+    let done = match action {
         "invite" => match invite(env, url, name, &who, field("username"), role()).await {
             Ok((username, role, token)) => {
                 let link = format!("{platform}/join/{name}?token={token}");

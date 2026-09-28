@@ -216,7 +216,7 @@ random bytes, the registry keeps their SHA-256).
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /` | the home. Signed out: a link to sign in. Signed in without a username: choosing one. Then: who is signed in, what is left of this month's AI budget, their fragments (each one's link; theirs or shared with them, as what; on their own, who may open it; its share sheet, `/share/<name>`), the "new fragment" form (blank, todo, inbox, chat, then the desktop, a demo), pairing a CLI (the one-line install, `fragment login`, and `fragment skill` for a coding agent), their picture, signing out, and linking another sign-in |
+| `GET /` | the home. Signed out: a link to sign in. Signed in without a username: choosing one. Then: who is signed in, what is left of this month's AI budget, their fragments (each one's link; theirs or shared with them, as what; on their own, who may open it; its share sheet, `/share/<name>`, in a dialog: a frame of the sheet, whose Done closes it, and the home reloads), the "new fragment" form (blank, todo, inbox, chat, then the desktop, a demo), pairing a CLI (the one-line install, `fragment login`, and `fragment skill` for a coding agent), their picture, signing out, and linking another sign-in |
 | `POST /auth/new` | the form (`label`, `template`): makes `<label>.<username>` from the template, then → `/auth/fragment?name=…&return=/` (signed in on its origin, and there); a refusal is a 400 page saying why; another origin 403. For a template whose `fragment.json` asks for `frame` (the desktop), the form says it will show the person's fragments inside it, signed in as them, and making it there is their frame grant (`PUT /api/f/{name}/grants/frame`, the same event) |
 | `GET /auth/login?return=&login_hint=` | → WorkOS's authorize URL (`provider=authkit`, `redirect_uri` `<platform>/auth/callback`, a state); the state is bound to the browser by `fragment_login` (HttpOnly, SameSite=Lax, `Path=/`, ten minutes) |
 | `GET /auth/link?return=` | the same from a signed-in browser: the sign-in that comes back joins this person (409 when it is someone else's) |
@@ -389,8 +389,8 @@ platform, so the fragment decides who may do what.
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /share/<name>` | the share sheet: who is in (usernames and pictures, from the registry's profiles) and their roles, to any member (anyone else, a 403 page); for the owner, inviting by username, the pending invites (revoke), each member's role and removing them, who can open it (`members`, `link`, `public`), and the share link (copy; a new one). Signed out: → sign in first, and back. It reads nothing from its URL |
-| `POST /share/<name>` | the sheet's form: `form` (the page's token), `action`, and its fields: `invite` (`username`, `role`: an invite for them alone, one use, seven days; answers the sheet with the `/join` link to send them), `role` (`member`, `role`), `remove` (`member`), `uninvite` (`invite`: its id), `visibility` (`visibility`), `rotate` (the share link only; the inbox's token and the webhook's secret are the CLI's). Done: → 303 back to the sheet; refused by the fragment (a member who is not the owner: 403): the sheet, saying why, with the refusal's status |
+| `GET /share/<name>` | the share sheet, a card laid out as a document's share dialog: who is in (usernames and pictures, from the registry's profiles) and their roles, to any member (anyone else, a 403 page); for the owner, adding people by username (an invite), the pending invites (revoke), each member's role menu (viewer, editor, or removing them), who can open it ("General access": Restricted `members`, Anyone with the link `link`, Public `public`), each menu sent as it changes; Copy link (the share link while it opens it, else its address) and Done (in the home's dialog, closes it; in a window of its own, closes that, or goes home); then, quieter, a new share link and the frame grant. Signed out: → sign in first, and back. It reads nothing from its URL |
+| `POST /share/<name>` | the sheet's form: `form` (the page's token), `action`, and its fields: `invite` (`username`, `role`: an invite for them alone, one use, seven days; answers the sheet with the `/join` link to send them), `role` (`member`, `role`: `viewer`, `editor`, or `remove`, which removes them), `remove` (`member`), `uninvite` (`invite`: its id), `visibility` (`visibility`), `rotate` (the share link only; the inbox's token and the webhook's secret are the CLI's). Done: → 303 back to the sheet; refused by the fragment (a member who is not the owner: 403): the sheet, saying why, with the refusal's status |
 | `GET /join/<name>?token=` | what the invite grants (the fragment, the role, who invites), and a Join button; signed out: → sign in first, and back. An invite for someone else: a 403 page naming them; used, revoked, or expired: 404; the person is in already (at that role or above): a link to open it |
 | `POST /join/<name>` | the page's form (`form`, `token`): joins as the signed-in person, then → `/auth/fragment?name=<name>&return=/` (signed in on its origin, and there) |
 
@@ -404,10 +404,13 @@ another fragment or page, one sent sooner than 800 ms after its page was
 made, or one older than 12 hours is 403. Their buttons come disabled and
 arm 800 ms after the page shows (again each time it is shown), so the
 click that opened a page (a double-click's second half) cannot confirm
-in it. Both pages send no CORS headers (a fragment's page cannot read
-them, so it never holds a form's token), refuse every frame, sever their
-opener, allow scripts and styles only inline and images only from the
-platform (`Content-Security-Policy`), and keep their URL to the platform
+in it (the sheet's selects too). Both pages send no CORS headers (a
+fragment's page cannot read them, so it never holds a form's token),
+refuse every frame but the sheet's on the platform's own origin (the
+home's dialog: `frame-ancestors 'self'`, `X-Frame-Options: SAMEORIGIN`;
+every fragment is another origin), sever their opener, allow scripts
+and styles only inline and images only from the platform
+(`Content-Security-Policy`), and keep their URL to the platform
 (`Referrer-Policy: same-origin`: the join page's holds its invite).
 
 ## Control API

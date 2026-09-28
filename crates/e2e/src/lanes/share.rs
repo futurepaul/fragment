@@ -10,7 +10,8 @@
 //! changes nothing. A rewritten desktop (its owner's agent rewrites it)
 //! cannot share: not by fetching the sheet or the API, not by framing the
 //! sheet, not with a signed call (it holds no key), and not by scripting
-//! the window it opens on the sheet. Every form needs the page's own
+//! the window it opens on the sheet (only the platform's home frames it, in
+//! a dialog). Every form needs the page's own
 //! token, bound to the session, and arms only after a moment.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -53,6 +54,14 @@ fn value_of(r: &Reply, attr: &str) -> String {
 /// The form token a sharing page holds.
 fn form_of(r: &Reply) -> String {
     value_of(r, "name=\"form\"")
+}
+
+/// Whether only the platform's own pages may frame a page: `'self'` and
+/// nothing else, so no fragment's origin (another origin, one site with the
+/// platform or not) may.
+fn framed_by_platform(r: &Reply) -> bool {
+    let csp = r.header("content-security-policy");
+    csp.split(';').map(str::trim).filter(|d| d.starts_with("frame-ancestors")).eq(["frame-ancestors 'self'"]) && r.header("x-frame-options") == "SAMEORIGIN"
 }
 
 /// Whether a page severs a window that opened it.
@@ -133,16 +142,20 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let r = with_session(api, "GET", &sheet, &owner_session)?;
     s.ok(
         "the owner's sheet shows who is in, by username (their agent too), and the owner's controls",
-        r.status == 200 && r.text.contains(&format!("@{owner_name}")) && r.text.contains(&format!("{owner_name}'s agent")) && r.text.contains("name=\"username\"") && r.text.contains("Who can open it"),
+        r.status == 200 && r.text.contains(&format!("@{owner_name}")) && r.text.contains(&format!("{owner_name}'s agent")) && r.text.contains("name=\"username\"") && r.text.contains("General access"),
         &r,
     );
-    s.ok("it refuses every frame, and severs a window that opened it", unframed(&r) && unopened(&r), headers(&r));
-    s.ok("its buttons come disabled: they arm a moment after the page shows", r.text.contains("data-arm disabled") && !r.text.contains("data-arm>"), "");
+    s.ok(
+        "only the platform's own pages may frame it (`frame-ancestors 'self'` alone: every fragment is another origin), and it severs a window that opened it",
+        framed_by_platform(&r) && unopened(&r),
+        headers(&r),
+    );
+    s.ok("its buttons and selects come disabled: they arm a moment after the page shows", r.text.contains("data-arm disabled") && !r.text.contains("data-arm>"), "");
     s.ok("and it offers the share link to copy", r.text.contains(&format!("{}?view=", api.site_url(&chat, ""))), "");
     let r = with_session(api, "GET", &format!("{sheet}?username={guest_name}&role=editor&action=invite&visibility=public&form=1"), &owner_session)?;
     s.ok(
         "it takes nothing from its URL: a link cannot prefill what a click would approve",
-        r.status == 200 && !r.text.contains(&guest_name) && r.text.contains("value=\"link\" checked") && !r.text.contains("value=\"public\" checked"),
+        r.status == 200 && !r.text.contains(&guest_name) && r.text.contains("value=\"link\" selected") && !r.text.contains("value=\"public\" selected"),
         &r,
     );
     let r = with_session(api, "GET", &sheet, &stranger_session)?;
@@ -160,8 +173,8 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         &r,
     );
     s.ok(
-        "and a desktop is its owner's alone from the start: only the people in it may open it",
-        r.text.contains("value=\"members\" checked") && !r.text.contains("id=\"link\""),
+        "and a desktop is its owner's alone from the start: only the people in it may open it (Copy link copies its address, not a share link)",
+        r.text.contains("value=\"members\" selected") && !r.text.contains("?view="),
         "",
     );
 
@@ -201,7 +214,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let r = with_session(api, "GET", &sheet, &owner_session)?;
     s.ok(
         "an invite for them alone, one use, pending on the sheet",
-        pending.len() == 1 && pending[0]["role"] == "editor" && pending[0]["usesLeft"] == 1 && r.text.contains("<h2>Invited</h2>") && r.text.contains(&format!("@{guest_name}")),
+        pending.len() == 1 && pending[0]["role"] == "editor" && pending[0]["usesLeft"] == 1 && r.text.contains("invited as editor") && r.text.contains(&format!("@{guest_name}")),
         json!(pending),
     );
 
@@ -329,8 +342,8 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- the owner removes the guest: their socket closes, and the chat is 403 to them
     let form = armed(api, &sheet, &owner_session)?;
-    let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "remove"), ("member", &guest_id)])?;
-    s.ok("the owner removes the guest from the sheet", r.status == 303 && r.header("location") == sheet && role_of(&guest_id)?.is_none(), &r);
+    let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "role"), ("member", &guest_id), ("role", "remove")])?;
+    s.ok("the owner removes the guest from the sheet (the last choice of their role's menu)", r.status == 303 && r.header("location") == sheet && role_of(&guest_id)?.is_none(), &r);
     let said = "document.getElementById('banner-text')?.textContent ?? ''";
     let closed = chrome.until(&page, &format!("!document.getElementById('banner').hidden && ({said}).includes('access to this chat changed')"), wait);
     s.ok("the guest's socket closes (their page says its access changed)", closed, chrome.eval(&page, said).unwrap_or_default());
@@ -505,7 +518,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // sheet refuses to show there, so there is nothing to lay a click under
     chrome.eval(&page, &format!("(() => {{ const f = document.createElement('iframe'); f.src = {:?}; document.body.append(f); return true; }})()", format!("{platform}{sheet}")))?;
     let framed = |chrome: &mut Browser| chrome.eval_in_frame(&page, "/share/", "document.body?.innerText ?? ''").ok().and_then(|v| v.as_str().map(str::to_string));
-    let shown = s.eventually(Duration::from_secs(5), || framed(&mut chrome).is_some_and(|t| t.contains("Who can open it")));
+    let shown = s.eventually(Duration::from_secs(5), || framed(&mut chrome).is_some_and(|t| t.contains("General access")));
     s.ok("a rewritten desktop that frames the sheet gets a frame without it", !shown, format!("{:?}", framed(&mut chrome)));
 
     // scripting the window it opens on the sheet (on a click of the
@@ -533,11 +546,38 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{:?} {:?}", chrome.eval(&page, "window.__sheet.closed"), chrome.pages()?),
     );
 
-    // the sheet as the owner sees it, at a popup's size (evidence for a person)
-    let shown = chrome.open(&format!("{platform}{sheet}"))?;
-    chrome.viewport(&shown, 480, 900, false)?;
-    if chrome.until(&shown, "document.readyState === 'complete'", wait) {
-        chrome.screenshot(&shown, &s.scratch.join("share-sheet.png"))?;
+    // ---- the platform's home, the one page that frames the sheet: its
+    // Share opens it in a dialog, and Done closes it
+    let home = chrome.open(&format!("{platform}/"))?;
+    let link = format!("a[data-share][href={sheet:?}]");
+    let listed = chrome.until(&home, &format!("!!document.querySelector({link:?})"), wait);
+    if listed {
+        chrome.click(&home, &link)?;
     }
+    let inside = |chrome: &mut Browser| chrome.eval_in_frame(&home, "/share/", "document.body?.innerText ?? ''").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+    let shown = listed && chrome.until(&home, "document.getElementById('share').open", wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
+    chrome.screenshot(&home, &s.scratch.join("share-dialog.png"))?;
+    chrome.eval(&home, "window.before = true")?;
+    let done = shown && chrome.eval_in_frame(&home, "/share/", "(document.querySelector('button[data-done]').click(), true)").is_ok();
+    let closed = done && chrome.until(&home, "!window.before && !document.getElementById('share').open", wait);
+    s.ok(
+        "the platform's home opens the sheet in a dialog (a frame on its own origin), and its Done closes it (the home reloads, showing what changed)",
+        shown && closed,
+        format!("listed {listed} shown {shown} done {done}: {}", inside(&mut chrome)),
+    );
+    chrome.close(home)?;
+
+    // the sheet as the owner sees it, at a popup's size and a phone's, light
+    // and dark (evidence for a person): no sideways scroll
+    let shown = chrome.open(&format!("{platform}{sheet}"))?;
+    let mut fits = vec![];
+    for (width, mobile, scheme, shot) in [(480, false, "light", "share-sheet.png"), (390, true, "dark", "share-sheet-phone.png")] {
+        chrome.viewport(&shown, width, 900, mobile)?;
+        chrome.color_scheme(&shown, scheme)?;
+        let ready = chrome.until(&shown, "document.readyState === 'complete' && !!document.querySelector('footer')", wait);
+        fits.push((width, ready && chrome.eval(&shown, "document.documentElement.scrollWidth <= innerWidth")? == json!(true)));
+        chrome.screenshot(&shown, &s.scratch.join(shot))?;
+    }
+    s.ok("the sheet fits a popup's width and a phone's, with no sideways scroll", fits.iter().all(|(_, fit)| *fit), format!("{fits:?}"));
     Ok(())
 }

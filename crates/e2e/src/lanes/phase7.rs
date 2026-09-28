@@ -427,9 +427,10 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the owner's desktop shows the chat shared with one person", badged, chrome.eval(&desk, "document.getElementById('chats')?.innerHTML ?? ''").unwrap_or_default());
     let popup = open_sheet(s, &mut chrome, &desk, &chat.name, &sheet)?;
     let member = format!("input[name=member][value={:?}]", guest.id);
-    let remove = format!("form:has(input[name=action][value=remove]):has({member}) button[data-arm]");
-    let can_remove = chrome.until(&popup, &armed(&remove), WAIT);
-    chrome.click(&popup, &remove)?;
+    // their role's menu ends in Remove access, sent as it is chosen
+    let menu = format!("form:has({member}) select[name=role]");
+    let can_remove = chrome.until(&popup, &armed(&menu), WAIT);
+    chrome.eval(&popup, &format!("(s => {{ s.value = 'remove'; s.dispatchEvent(new Event('change')); return true; }})(document.querySelector({menu:?}))"))?;
     let gone = chrome.until(&popup, &format!("document.readyState === 'complete' && !!document.querySelector('ul.people') && !document.querySelector({member:?})"), WAIT);
     s.ok(
         "the owner removes the guest in the sheet",

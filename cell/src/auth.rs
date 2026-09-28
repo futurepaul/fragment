@@ -308,12 +308,13 @@ async fn fragments_list(env: &Env, cfg: &Config, url: &Url, id: &str) -> String 
                 (role, _) => format!("shared with you · {}", role.as_str()),
             };
             let shown = link.split("://").nth(1).unwrap_or(&link).trim_end_matches('/');
-            format!("<li><a href=\"{}\">{}</a> <small>{whose} · <a href=\"/share/{}\">Share</a></small></li>", esc(&link), esc(shown), esc(&f.name))
+            format!("<li><a href=\"{}\">{}</a> <small>{whose} · <a href=\"/share/{}\" data-share>Share</a></small></li>", esc(&link), esc(shown), esc(&f.name))
         })
         .collect();
     match items.is_empty() {
         true => "<h2>Your fragments</h2><p>None yet: make one below, or with <code>fragment init</code> in your terminal.</p>".to_string(),
-        false => format!("<h2>Your fragments</h2><ul>{items}</ul>"),
+        // each one's share sheet, in a dialog
+        false => format!("<h2>Your fragments</h2><ul>{items}</ul>{}", share::DIALOG),
     }
 }
 
