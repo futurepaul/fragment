@@ -182,7 +182,7 @@ fn builds(label: &str, text: &str) -> String {
 
 /// goose's shell command that gets `name`'s files, makes its page say `text`, and deploys it.
 fn changes(name: &str, text: &str) -> String {
-    format!("fragment sync {name} --dir changing && printf '<h1>{text}</h1>' > changing/site/index.html && fragment deploy {name} --dir changing")
+    format!("mkdir changing && fragment sync {name} --dir changing && printf '<h1>{text}</h1>' > changing/site/index.html && fragment deploy {name} --dir changing")
 }
 
 /// Hand-offs (agent/src/handoff.rs; Paul, 2026-09-27;
@@ -316,11 +316,14 @@ fn hand_offs(s: &mut Suite, api: &Api, (owner, owner_cli): (&Keys, &Path), (buil
     });
     let result = s.eventually(long, || from_computer(&changer, "Changed it and deployed it live.").is_some());
     let token = api.status(owner, &built).ok().and_then(|r| r.body["viewToken"].as_str().map(str::to_string)).unwrap_or_default();
-    let page = api.page(&built, &format!("?view={token}"), None)?;
+    let page = || api.page(&built, &format!("?view={token}"), None).map(|p| p.text).unwrap_or_default();
+    let changed = s.eventually(wait, || page().contains("changed on a throwaway"));
+    let steps = api.signed(owner, "GET", &format!("/api/f/{chat}/channels/work"), None).map(|r| r.body["records"].clone()).unwrap_or_default();
+    let steps: Vec<&Value> = steps.as_array().into_iter().flatten().filter(|r| r["body"]["turn"].as_str().is_some_and(|t| t.contains(&changer))).collect();
     s.ok(
         "asked to change the owner's app, naming it in `fragments`, the agent hands off to a throwaway, which is made its editor and changes and deploys it",
-        result && fragment_core::tools::is_throwaway(&changer) && page.text.contains("changed on a throwaway"),
-        json!({ "throwaway": changer, "page": page.text.chars().take(300).collect::<String>(), "chat": chat_records(api, owner, &chat) }),
+        result && changed && fragment_core::tools::is_throwaway(&changer),
+        json!({ "throwaway": changer, "page": page().chars().take(300).collect::<String>(), "steps": steps }),
     );
     let gone = s.eventually(wait, || api.status(owner, &changer).is_ok_and(|r| r.status == 404) && s.sprites.deleted().len() == deleted + 1 && members() == before);
     s.ok(

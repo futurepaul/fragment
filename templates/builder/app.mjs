@@ -25,7 +25,7 @@ const change = (task, fragments) => `${ON} Change your owner's ${fragments.lengt
 
 ${task}
 
-Get each one's files with \`fragment sync <name> --dir <folder>\`, change them there, put them live with \`fragment deploy <name> --dir <folder>\`, and check its page answers. Change no other fragment. End with one short paragraph: what you changed, and its URL.`;
+Get each one's files into a new folder with \`mkdir <folder> && fragment sync <name> --dir <folder>\`, change them there, put them live with \`fragment deploy <name> --dir <folder>\`, and check its page answers. Change no other fragment. End with one short paragraph: what you changed, and its URL.`;
 
 // until the owner's agent made this computer an editor of each (it does,
 // once the computer paired: agent/src/handoff.rs), at most about 2 minutes

@@ -269,7 +269,7 @@ async fn let_edit(fleet: &Fleet, fragment: &str, computer: &str) -> Result<(), S
 /// What a computer's `do` reads of the fragments its work changes.
 fn editing(fragments: &[String]) -> String {
     format!(
-        "You are an editor of the fragments this changes: {}. Get one's files with `fragment sync <name> --dir <folder>`, \
+        "You are an editor of the fragments this changes: {}. Get one's files into a new folder with `mkdir <folder> && fragment sync <name> --dir <folder>`, \
          change them, put them live with `fragment deploy <name> --dir <folder>`, and check its page answers.",
         fragments.join(", ")
     )

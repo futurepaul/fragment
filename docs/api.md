@@ -1196,7 +1196,7 @@ changes (a bare label is the owner's), each checked to be theirs: the
 computer is made an editor of each, as of the chat below, before the
 work starts, a throwaway's once it paired (its `build`, given
 `fragments`, waits until it is an editor of each, at most 2 minutes, and
-tells goose to change those, `fragment sync` then `fragment deploy`,
+tells goose to change those, `mkdir` and `fragment sync`, then `fragment deploy`,
 not to make a new one). Any other job reads them in its task. A
 throwaway's computer leaves them as it is removed.
 
