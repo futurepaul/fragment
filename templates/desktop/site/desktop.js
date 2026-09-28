@@ -218,11 +218,15 @@ function renderSharing(box, f) {
 // never shows its frame grant). It says its height, and when it is done
 // (Done, Escape), to this origin only; a message counts only from its
 // frame, on the platform's origin. Closed, the list is read again, for the
-// badges and the panes' headers. Otherwise the sheet opens in a small
-// window of its own. `noopener`: this page keeps no handle on it (and the
-// sheet severs any opener anyway).
+// badges and the panes' headers. A browser that keeps no cookie in a frame
+// of another site (the sheet is on the platform's) shows the sheet signed
+// out, which never shows here: with no word from it after a while, the
+// dialog offers the sheet's own window instead. Otherwise the sheet opens
+// in a small window of its own. `noopener`: this page keeps no handle on it
+// (and the sheet severs any opener anyway).
 const sheet = $("sheet");
-let sheetFrame = null, sheetOrigin = null;
+const SHEET_SHOWN_MS = 5000;
+let sheetFrame = null, sheetOrigin = null, sheetWait = 0;
 function share(name) {
   const f = byName(name);
   if (!f?.share) return notice("Sharing is not available", "This platform does not offer a share sheet.");
@@ -233,19 +237,42 @@ function share(name) {
     sheetFrame.allow = "clipboard-write";
     sheetFrame.src = `__share?name=${encodeURIComponent(name)}`;
     sheet.replaceChildren(sheetFrame);
+    clearTimeout(sheetWait);
+    sheetWait = setTimeout(() => sheet.open && sheetFrame && sheetInWindow(f), SHEET_SHOWN_MS);
     return sheet.showModal();
   }
+  shareWindow(f);
+}
+function shareWindow(f) {
   const w = 480, h = 720;
   const left = Math.max(0, screenX + (outerWidth - w) / 2), top = Math.max(0, screenY + (outerHeight - h) / 3);
   window.open(f.share, "_blank", `popup,noopener,width=${w},height=${h},left=${left},top=${top}`);
 }
+// the dialog, when the sheet did not show in it: its own window, from a click
+function sheetInWindow(f) {
+  sheetFrame = null;
+  const note = el("div", "sheet-note");
+  note.append(el("strong", null, "The share sheet did not open here"), el("p", null, "This browser keeps no sign-in inside a frame from another site. It opens in a window of its own instead."));
+  const open = el("button", "go", "Open in a window");
+  open.type = "button";
+  open.onclick = () => { sheet.close(); shareWindow(f); };
+  const cancel = el("button", null, "Cancel");
+  cancel.type = "button";
+  cancel.onclick = () => sheet.close();
+  const actions = el("div", "update-actions");
+  actions.append(open, cancel);
+  note.append(actions);
+  sheet.replaceChildren(note);
+}
 addEventListener("message", (e) => {
   if (!sheet.open || e.source !== sheetFrame?.contentWindow || e.origin !== sheetOrigin) return;
+  clearTimeout(sheetWait);
   if (Number.isFinite(e.data?.height)) sheetFrame.style.height = `${e.data.height}px`;
   if (e.data?.share === "done") sheet.close();
 });
 sheet.onclick = (e) => { if (e.target === sheet) sheet.close(); };
 sheet.onclose = () => {
+  clearTimeout(sheetWait);
   sheet.replaceChildren();
   sheetFrame = null;
   load().catch(() => {});
