@@ -499,6 +499,29 @@ Found on the way: a view right after a PUT described what ran before.
 `observed: serving` at t+1 s was the old generation, and my own check
 believed it. Views now carry `pending` until the node has acted.
 
+## Phase 3, parts two and three: backups off the host, and restore (2026-09-29)
+
+Backups go to their own Tigris bucket, `sandcastle-backups`. Paul chose a
+new bucket and a scoped key over fragment.club's, whose keys control the
+fleet. The key reaches that bucket and is refused on `fragment-club-ord`
+(403). Every object is sealed by the node before it leaves
+(sandcastle/README.md, Backups). The node's backup key has a copy on
+Paul's Mac (`~/.config/finite-next/secrets/sandcastle-lat6-backup.key`).
+
+| Check on `finite-lat-6` | Result |
+|---|---|
+| A Hermes computer's first scheduled snapshot | shipped whole, 8.4 MB sealed, about 69 s after the first write |
+| The next one | shipped incremental from it, 238 KB |
+| What the bucket holds | the seal's header (`SCB1`), and not even the filesystem's label in the first MiB |
+| The node's state wiped (no grants, no backup rows); only the bucket and the key left | the node lists no backups; a restore without a grant is refused; another key's restore of the backup reads as "no such backup" (the sealed manifest names the owner) |
+| A signed restore into a new computer (`demo`) from the bucket alone | serving 9 s after the call: two objects fetched and opened, `zfs receive` of the chain, boot, Hermes; both marker files and Hermes' databases back |
+| Hermes on the restored home, through a fresh router session | its login and a WebSocket ticket, 200 |
+
+Found on the way: the restore decided whether a disk existed by the
+wording of an error. The fake engine's disks worded it differently, so
+the restore was skipped and the tests caught it. `Disks` now answers
+`exists` outright.
+
 ## Phases, each with its check
 
 1. **Hermes at a URL (R1, R4).** *Met on the real engine 2026-09-29, on
@@ -520,8 +543,9 @@ believed it. Views now carry `pending` until the node has acted.
      data intact.
    - Killing the daemon mid-rebase and restarting it converges to one
      running computer.
-3. **Backups and restore (R3, R6).** *Local snapshots met 2026-09-29;
-   shipping to Tigris and restoring from there are next.* Checks:
+3. **Backups and restore (R3, R6).** *Met 2026-09-29: snapshots every
+   five minutes when written, sealed off the host, restored from the
+   bucket alone after the node's state was wiped.* Checks:
    - Five-minute snapshots while a turn is writing.
    - A restore onto an empty disk on another host passes SQLite
      `integrity_check` and reopens the same conversation, then runs a

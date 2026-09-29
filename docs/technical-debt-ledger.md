@@ -775,9 +775,11 @@ without a delete condition is unfinished design, not debt.
 ## A sandcastle node converges one computer at a time
 
 - **Observed:** 2026-09-29. The supervisor walks every computer in one
-  task each tick. A slow step (an image pull, up to the engine's 600 s
-  create timeout) delays every other computer's convergence, wake, and
-  health.
+  task each tick. A slow step delays every other computer's convergence,
+  wake, and health:
+  - an image pull, up to the engine's 600 s create timeout;
+  - a restore, which downloads and replays a whole chain inside that
+    tick.
 - **Risk:** on a busy node, one new computer's first pull stalls everyone
   else's recovery.
 - **First proof:** a node with a handful of computers when one pulls a new
@@ -848,17 +850,6 @@ without a delete condition is unfinished design, not debt.
   dedicated system user with its own `MSB_HOME`, and a check on a fresh
   host proves it.
 
-## A sandcastle node's snapshots do not leave the host
-
-- **Observed:** 2026-09-29 (phase 3, part one). Snapshots are ZFS
-  snapshots on the node's own pool.
-- **Risk:** a lost host, pool, or node loses every computer's data and
-  every snapshot of it.
-- **First proof:** any disk or host failure.
-- **Delete when:** snapshots are sent off the host (phase 3, part two) and
-  restored from there onto an empty target (part three), with the restore
-  checked on the real engine.
-
 ## A sandcastle disk has no space reserved
 
 - **Observed:** 2026-09-29. Disks are sparse ZFS volumes (`zfs create
@@ -870,3 +861,35 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** the node refuses a create, or a grant, that would
   overcommit the pool past a configured ratio, and reports pool usage,
   with a test.
+
+## sandcastle backups are sealed with one key per node
+
+- **Observed:** 2026-09-29 (phase 3). Every backup a node ships is sealed
+  under keys derived from that node's one backup key. The operator holds
+  a copy (for `finite-lat-6`: Paul's Mac). Restoring on another node
+  needs that key too.
+- **Risk:**
+  - Whoever takes the node's key file opens every backup the node ever
+    made, for every owner.
+  - Losing both copies loses them all.
+  - A key cannot be rotated without re-sending everything.
+- **First proof:** a node compromise, or a second node restoring the
+  first one's backups.
+- **Delete when:** each computer's backups are sealed under a key only
+  its owner can unwrap (wrapped to the owner's public key with NIP-44, or
+  held by the platform's credential source), with rotation, and a
+  restore on a node that never held the key is tested.
+
+## sandcastle backups never expire
+
+- **Observed:** 2026-09-29. The shipper adds whole streams and
+  incrementals forever. Nothing deletes a chain from the bucket, not
+  even a deleted computer's.
+- **Risk:** the bucket's size and cost grow without bound, and a
+  person's data outlives their wish to delete it.
+- **First proof:** the bucket's first invoice, or someone asking that
+  their data be gone.
+- **Delete when:** a retention policy keeps chains back to a whole
+  stream and drops older ones (never breaking a chain), an owner can
+  delete a deleted computer's backups through the API, and both are
+  tested against the fake bucket and checked on Tigris.
