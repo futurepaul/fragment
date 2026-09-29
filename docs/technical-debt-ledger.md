@@ -809,17 +809,24 @@ without a delete condition is unfinished design, not debt.
   when the new one does not serve within the grace, reports that it did,
   and a test drives it with the fake and on the real engine.
 
-## sandcastle's test node has a private CA and no DNS
+## sandcastle's test node has per-name certificates renewed by hand
 
-- **Observed:** 2026-09-29. `finite-lat-6` serves `*.sandcastle.test` from
-  a certificate signed by a CA made on the host; clients pass the CA and
-  `--connect`/`--resolve`. No browser has opened a computer.
-- **Risk:** browser-only behaviour (cookies across a real public suffix,
-  mixed content, the Hermes UI's own requests) goes unchecked.
-- **First proof:** the first browser session.
-- **Delete when:** a real domain points at the node, a wildcard
-  certificate is issued by ACME (DNS-01) and renewed, and a browser check
-  opens Hermes through a ticket (docs/sandbox.md, open question 1).
+- **Observed:** 2026-09-29. `finite-lat-6` serves
+  `*.sandcastle.fragment.club` (Paul's A record) with one Let's Encrypt
+  certificate naming `api`, `hermes`, and `demo`. It was issued by certbot
+  over HTTP-01, with port 80 opened for the issue only, and copied to
+  `/etc/sandcastle/le-*.pem` for the daemon.
+- **Risk:**
+  - A computer with any other name fails TLS.
+  - certbot's renewal timer will fail with port 80 closed, and even when
+    it succeeds it does not copy the files or restart the daemon, so the
+    certificate lapses on 2026-12-28.
+- **First proof:** the first computer named otherwise, or 2026-12-28.
+- **Delete when:** the router issues and renews each computer's
+  certificate itself on first use (ACME TLS-ALPN-01 on 443, only for
+  names of existing computers: a self-hoster then needs only a wildcard A
+  record), or a wildcard certificate by DNS-01 renews itself. Either is
+  tested against a staging CA.
 
 ## A sandcastle node does not notice engine machines it has no row for
 
