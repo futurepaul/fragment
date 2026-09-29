@@ -21,7 +21,8 @@
     "FRAGMENT_LEGACY_HOST_SUFFIX": "fragment.club",
     "FRAGMENT_PLATFORM_URL": "https://fragment.club",
     "FRAGMENT_PUSH_SUBJECT": "https://fragment.club",
-    "FRAGMENT_OPERATORS": "npub1w352vpm92yvdlar2vunk8ctjrz609jwtdf8svfr3hnequ52agv9qeqf9h2"
+    "FRAGMENT_OPERATORS": "npub1w352vpm92yvdlar2vunk8ctjrz609jwtdf8svfr3hnequ52agv9qeqf9h2",
+    "FRAGMENT_SANDCASTLE_NODES": "aedf7b6cffe008ad078bd821d51dd298e62fd1564215ba8361fd1fc703334ad6"
   },
   "var_files": {
     "WORKOS_CLIENT_ID": "~/.config/finite-next/secrets/fragment-workos-client-id"
