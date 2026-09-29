@@ -205,6 +205,40 @@ reversible.
   `operator`, `core` or `self`. The service owns its grant rows; that
   is the pattern to copy.
 
+### Beside it: NVIDIA OpenShell (read 2026-09-29, from its docs, not its source)
+
+[OpenShell](https://github.com/NVIDIA/openshell) (Apache-2.0, Rust, v0.1.x,
+about 10k stars) calls itself "an open, secure runtime for AI agents" that
+"governs agent execution, access, and where inference goes". It is a
+policy and credential layer over sandboxes whose runtime is someone else's
+(Docker or Podman, Kubernetes, or a microVM over vsock). It is not a
+compute platform.
+
+| Our scope | sandcastle today | OpenShell |
+|---|---|---|
+| R1 a computer that runs Hermes | microVMs (microsandbox, KVM/HVF) | sandboxes on Docker, Podman, Kubernetes, or a microVM; confined with Landlock, seccomp, and an unprivileged user |
+| R2 a durable disk across image updates | a ZFS volume per computer; rebase and rollback | not documented |
+| R3/R6 backups, SQLite | snapshots every 5 min when written, sealed off the host, restore from the bucket | not documented |
+| R4 one URL, locked-down ingress | router with owner tickets plus the service's own login; only 443 | not documented (its gateway is the control plane, not an ingress) |
+| R5 credentials the agent cannot read | microsandbox's swap (placeholders, host-side TLS, headers); the credential URL is phase 4 | **its core feature**: "opaque credential placeholders" resolved by a trusted supervisor "only at profile-authorized endpoints", attached and rotated at runtime |
+| Egress policy | engine's public-only plus `--guest-deny` | **richer**: every connection through the supervisor; declarative YAML; per-endpoint rules over HTTP, GraphQL, and MCP (say, allow a read, block a write on one API); network rules hot-reload; a "policy prover" checks them with formal logic |
+| R7 sleep, wake, timers | phase 5 | not documented |
+| Inference routing | not ours (Finite Private, the platform) | yes: policy on "where inference goes" |
+| Auth, the contract | NIP-98, grants, owner keys | a gateway with workspaces and team permissions |
+| Hosts | Linux with KVM; macOS later | Linux, macOS on Apple Silicon, Windows with WSL 2 |
+
+**Worth borrowing, not adopting.** OpenShell overlaps the one layer we
+take from microsandbox (credentials and egress), and adds what that layer
+lacks: per-endpoint L7 rules (method and path, MCP-aware), network
+policy that reloads without a restart, and credentials rotated at
+runtime. It has nothing for persistence, backups, URLs, or sleep, which
+is most of our scope.
+
+If phase 4 finds microsandbox's swap too coarse (headers only, whole
+hosts, rotation needs a restart), an OpenShell supervisor in front of
+the machine is the thing to try, over vsock, which its docs list. Until
+then it is a design reference for the policy shape.
+
 ## The proposal
 
 ### The line
@@ -521,6 +555,126 @@ Found on the way: the restore decided whether a disk existed by the
 wording of an error. The fake engine's disks worded it differently, so
 the restore was skipped and the tests caught it. `Disks` now answers
 `exists` outright.
+
+## Where things stand (handoff, 2026-09-29)
+
+**Built and committed** on `claude/self-hosted-sandbox-5ecab9`:
+
+- phases 1 and 2 (Hermes at a locked-down URL, durable data, rebase,
+  rollback);
+- phase 3 (ZFS snapshots, sealed backups to Tigris, restore from the
+  bucket alone).
+
+52 tests; `sandcastle/README.md` is the reference.
+
+**The test node, `finite-lat-6`** (`ubuntu@206.223.228.129`, rented for
+this):
+
+- **Serving:** `api.sandcastle.fragment.club` and
+  `<name>.sandcastle.fragment.club`, with a Let's Encrypt certificate for
+  `api`, `hermes`, and `demo` only, lapsing 2026-12-28.
+- **Units:** `sandcastled.socket` and `sandcastled.service` (the flags are
+  in the unit).
+- **Running:** the computer `demo`, a restored Hermes v0.21.5 owned by
+  the test owner key.
+- **Firewall:** nftables admits 22 and 443.
+- **Engine:** msb 0.7.4 in `/home/ubuntu/.local/bin`.
+- **Storage:** the ZFS pool `tank` (mirror), with parent
+  `tank/sandcastle`.
+- **Test settings:** snapshots every 60 s (the default is 300).
+- **Backups:** to `sandcastle-backups` under `nodes/lat-6/`.
+
+**Keys and files** (paths only; never print them):
+
+- `~/.config/finite-next/secrets/sandcastle-test/`:
+  - `grantor.key`: the node's `--grantor`, standing in for Core or
+    fragment;
+  - `alice.key`: a test owner;
+  - `hermes-dash-pass`, `hermes-dash-secret`: Hermes' dashboard login,
+    user `sandcastle`;
+  - `hermes-v2026.9.2{1,4}.json`: specs holding those.
+- `~/.config/finite-next/secrets/sandcastle-backups.env`: the bucket's
+  scoped key, flyctl's output as is. The node's copy is
+  `/etc/sandcastle/backups.env`, as `KEY=value` lines.
+- `~/.config/finite-next/secrets/sandcastle-lat6-backup.key`: the copy
+  of the node's backup key. Without it, no backup opens.
+- On the node: `/etc/sandcastle/{le-cert,le-key}.pem`,
+  `backup.key`, `backups.env`; state in `/var/lib/sandcastle`.
+
+**Driving it** (from `sandcastle/`):
+
+```
+cargo build -p sandcastle
+export SANDCASTLE_API=https://api.sandcastle.fragment.club
+./target/debug/sandcastle --key-file ~/.config/finite-next/secrets/sandcastle-test/alice.key get demo
+```
+
+The same CLI also does `list`, `put … --spec`, `ticket`, `snapshots`, and
+`backups`; `grant` runs with `grantor.key`.
+
+**Deploying:**
+
+1. `rsync -a --delete --exclude target sandcastle/ ubuntu@206.223.228.129:sandcastle/`.
+2. `cargo build --release` there.
+3. `sudo systemctl restart sandcastled.service`. The socket keeps 443
+   meanwhile, and computers keep running.
+
+A store schema change is a hard cut:
+
+1. Delete the computers through the API and wait for 404.
+2. Stop the service.
+3. Remove `/var/lib/sandcastle/sandcastle.db*`.
+
+**Lessons that cost time:**
+
+- `msb exec` needs a stdin that ends.
+- Check what a release build contains (grep the binary for a new
+  string) when it finishes suspiciously fast.
+- A view right after a PUT is stale unless `pending` is false.
+- zsh does not split `$VAR` into words.
+
+## Phase 4 plan: the credential source
+
+**Paul's calls (2026-09-29):**
+
+- Build fragment's endpoint now, not a stand-in. It has a use already: a
+  person's computer needs their model key, which must never be on its
+  disk (docs/secrets.md).
+- Use the OpenRouter key fragment already uses: the person's key the
+  Ledger cell mints with the management key (`cell/src/ledger.rs`).
+
+**The shape:**
+
+- **The spec.** A computer names `credentials_url` in its spec (a
+  sandcastle field). The node fetches it with NIP-98 signed by **the
+  node's own key**, a new `--node-key-file` whose public key the platform
+  trusts.
+- **The answer.** It returns `[{name, value, hosts}]`, held in the
+  node's memory only. The node hands each value to the engine at create
+  through the msb subprocess's environment, as `--secret NAME@HOST`,
+  never argv. The guest sees a placeholder.
+- **Rotation.** A new version at the source is a new generation: the
+  node refetches on every create and start, and a rebase applies it.
+- **fragment's side.** A route answers only to its configured sandcastle
+  node keys. It maps the computer to the person or agent that owns it
+  (fragment's record of the computers it made on sandcastle) and returns
+  that owner's Ledger key, for `openrouter.ai`. fragment is the grantor
+  and the computer's owner key on the node.
+
+**To verify on the real engine:**
+
+- which placeholder the guest sees;
+- that Hermes' Python trusts microsandbox's CA (it honours
+  `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE`, and the node may need to
+  set them in the service env);
+- that a real Hermes model call succeeds;
+- that `env`, `/proc/*/environ`, `/data`, and a guest memory dump hold no
+  key;
+- that rotation takes effect with no key in any snapshot or backup.
+
+**Open:** where fragment's endpoint runs for the e2e. fragment.club
+needs Paul's approval to deploy, and the dev stack on a Mac is not
+reachable from lat-6.
 
 ## Phases, each with its check
 
