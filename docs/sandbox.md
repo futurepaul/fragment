@@ -441,6 +441,7 @@ Rust e2e lane (debt ledger).
 | `systemctl restart sandcastled` with requests in flight | 40 of 40 answered; same VM and Hermes processes, no relaunch |
 | Stop, then start, through the API | stopped in 1.7 s (URL 503); serving 5.3 s after start; marker and sessions intact |
 | An idle Hermes computer (2 vCPU, 4 GiB) | about 455 MB of host RAM |
+| On `sandcastle.fragment.club` with a Let's Encrypt certificate: the CLI and curl with no overrides; a real browser (the desktop app's) opening a ticket | the ticket redeemed, the router's cookie invisible to page scripts, Hermes' sign-in page served behind it |
 
 What the real engine taught (each now fixed and, where the fake can hold
 it, tested):
@@ -469,11 +470,17 @@ it, tested):
   two rebases), while storage and size are fixed.
 - **Views redact service env values** (`(set)`): a GET never echoes the
   dashboard password.
+- **The socket systemd passes must not reach the machines.** fd 3 arrives
+  without close-on-exec, so every VM process inherited the node's 443
+  listener. One kept it after the daemon stopped, and systemd could not
+  bind again. The daemon now duplicates it with close-on-exec and closes
+  the original. On the node, only systemd and the daemon hold 443.
 
 ## Phases, each with its check
 
-1. **Hermes at a URL (R1, R4).** *Met on the real engine 2026-09-29, with
-   a private CA and no DNS; a browser on a real domain is still to do.* The official v0.21.5 image in a
+1. **Hermes at a URL (R1, R4).** *Met on the real engine 2026-09-29, on
+   `sandcastle.fragment.club` with a Let's Encrypt certificate, through a
+   real browser.* The official v0.21.5 image in a
    microVM on x86 KVM with `/data` on its own disk. `hermes serve` is
    reached at `https://<computer>.<domain>/` behind an owner ticket.
    Checks:
@@ -520,11 +527,9 @@ it, tested):
 All six first ones were answered 2026-09-29 (see Decisions; question 2
 under What we found). New ones:
 
-1. **A real domain for the test node**, for a browser check with a real
-   certificate: say `*.sandcastle.fragment.club` pointing at `finite-lat-6`
-   (206.223.228.129), with a wildcard certificate by DNS-01. DNS changes are
-   Paul's.
-2. **Rollback on a failed rebase.** Should the node return to the previous
-   image by itself when a new one never serves (Kata's candidate and
-   rollback), or report the failure and wait for the platform's next PUT?
-   Proposed: return by itself, keeping the data, and report it.
+1. ~~A real domain for the test node.~~ *Done 2026-09-29:* Paul's
+   `*.sandcastle.fragment.club` A record; Let's Encrypt, accepted by Paul.
+2. ~~Rollback on a failed rebase.~~ *Paul, 2026-09-29:* yes, if cheap:
+   return by itself, keeping the data, and report it.
+3. **Order from here** (Paul, 2026-09-29): ZFS snapshots, the credential
+   source, sleep and wake, then the Hermes chat fragment. Commit as we go.
