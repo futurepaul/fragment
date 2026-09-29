@@ -111,6 +111,8 @@ pub struct Suite {
     /// The fleet's operator (`FRAGMENT_OPERATORS`): a key a person approves
     /// when a lane needs it.
     pub operator: Keys,
+    /// A sandcastle node the fleet lists (`FRAGMENT_SANDCASTLE_NODES`).
+    pub sandcastle_node: Keys,
     pub cli: PathBuf,
     pub scratch: PathBuf,
     /// The node's own copy of the cell project (never `cell/`, where `xtask dev` runs).
@@ -277,6 +279,7 @@ impl Suite {
             openrouter_management: Some(OPENROUTER_MANAGEMENT.into()),
             budget_usd: Some(BUDGET_USD.into()),
             operators: Some(fragment_core::npub::encode(self.operator.pubkey_hex())),
+            sandcastle_nodes: Some(fragment_core::npub::encode(self.sandcastle_node.pubkey_hex())),
             signins_pending_max: Some(SIGNINS_PENDING_MAX),
             test_hooks: true,
             computers: Some(devstack::ComputerVars {
@@ -555,6 +558,7 @@ fn main() -> Result<()> {
         host_secret: devstack::random_hex(32),
         workos: fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY)?,
         operator: Keys::generate(),
+        sandcastle_node: Keys::generate(),
         cli,
         scratch,
         project,

@@ -172,6 +172,7 @@ fn dev(args: &[String]) -> Result<()> {
         openrouter_management: read("OPENROUTER_MANAGEMENT_KEY_FILE")?,
         budget_usd: None,
         operators: None,
+        sandcastle_nodes: None,
         signins_pending_max: None,
         test_hooks: false,
     }
