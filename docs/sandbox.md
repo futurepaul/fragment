@@ -578,15 +578,15 @@ onto `fragment-rs/master` (`402a64d`) on 2026-09-29:
 - phase 4 (credentials from fragment.club through msb's swap), and
   fragment's route for it.
 
-62 sandcastle tests and the e2e section `sandcastle` (12);
+62 sandcastle tests and the e2e section `sandcastle` (21);
 `sandcastle/README.md` is the reference.
 
-**fragment.club runs this branch** (`db9b39d`, deployed 2026-09-29 with
-Paul's go-ahead): master `402a64d` plus the credential route and
-`FRAGMENT_SANDCASTLE_NODES` in `fleets/fragment-club.json`. The next
-deploy of master without this branch merged takes both away, and lat-6's
-`hermes` then gets a refusal at its next refetch (its value withdrawn;
-it keeps running).
+**fragment.club runs this branch** (`538d16f`, deployed 2026-09-29 with
+Paul's go-ahead): master `402a64d` plus the credential route, computer
+tokens on the model route, and `FRAGMENT_SANDCASTLE_NODES` in
+`fleets/fragment-club.json`. It is PR futurepaul/fragment#90, pushed
+with Paul's go-ahead. A deploy of master before it merges takes them
+away: lat-6's `hermes` then gets refused model calls (it keeps running).
 
 **The test node, `finite-lat-6`** (`ubuntu@206.223.228.129`, rented for
 this):
@@ -600,9 +600,9 @@ this):
 - **Running:**
   - `demo`, a restored Hermes v0.21.5 owned by the test owner key
     (`alice.key`);
-  - `hermes`, Hermes v0.21.5 with its OpenRouter key from fragment.club,
-    owned by the hosted e2e person's key (`fragment-club-e2e-key`,
-    granted 2 computers); its spec is
+  - `hermes`, Hermes v0.21.5 calling models with its own token through
+    fragment.club, owned by the hosted e2e person's key
+    (`fragment-club-e2e-key`, granted 2 computers); its spec is
     `sandcastle-test/hermes-credentials.json`.
 - **Firewall:** nftables admits 22 and 443.
 - **Engine:** msb 0.7.4 in `/home/ubuntu/.local/bin`.
@@ -673,26 +673,37 @@ A store schema change is a hard cut:
 **Paul's calls (2026-09-29):** build fragment's endpoint now, not a
 stand-in (a person's computer needs their model key, which must never be
 on its disk: docs/secrets.md); use the OpenRouter key fragment already
-uses, the person's own key the Ledger mints (`cell/src/ledger.rs`); and
-fragment.club is fine to deploy to.
+uses, the person's own key the Ledger mints (`cell/src/ledger.rs`);
+fragment.club is fine to deploy to; and, once the first version showed
+its spend skipped the Ledger, a per-computer token instead.
 
 **Built:**
 
 - **fragment:** `POST /api/sandcastle/credentials` (docs/api.md). It
   answers only the node keys the fleet lists (`FRAGMENT_SANDCASTLE_NODES`),
-  asks the registry, live, whose the owner key is, and returns that
-  person's Ledger key (an agent's or a computer's: its owner's) for
-  `openrouter.ai`, with the placeholder
-  `sk-or-v1-placeholder-swapped-for-the-real-key-on-the-way-out`. e2e
-  section `sandcastle`, 12 checks. Deployed to fragment.club from this
-  branch (see the handoff).
+  asks the registry, live, whose the owner key is, and returns the
+  computer's own token (`fsc1_<org>_<secret>`, kept sealed in the
+  owner's Ledger, the same on every ask) as `OPENAI_API_KEY` for the
+  platform's host. The computer's model calls go to
+  `/api/model/chat/completions` with it as a bearer, reserved and settled
+  on the owner's month, on the computer models only, and each call checks
+  live that the token is fresh (asked for in the last day), the node
+  listed, and the owner key someone's. e2e section `sandcastle`, 21
+  checks. Deployed to fragment.club from this branch (see the handoff).
+  The first version handed the owner's Ledger key itself, for
+  `openrouter.ai`; it is gone.
 - **sandcastle:** `credentials_url` in the spec, the node's own key,
   listed origins, the msb swap, live rotation, withdrawal on refusal
   (`sandcastle/README.md`, Credentials). 62 tests.
-- **The key's owner here** is the fragment.club person behind the
-  hosted e2e key (`fragment-club-e2e-key`, pubkey `438d49eb…`), granted
+- **The owner here** is the fragment.club person behind the hosted e2e
+  key (`fragment-club-e2e-key`, pubkey `438d49eb…`: futurepaul), granted
   on lat-6. The computer is `hermes` (`sc-2c763e7e14f6986f`), Hermes
-  v0.21.5 with the model `z-ai/glm-5.3-flash`.
+  v0.21.5 on `z-ai/glm-5.3-flash` through fragment's model route: its
+  service env sets `HERMES_INFERENCE_PROVIDER=custom`,
+  `HERMES_INFERENCE_MODEL`, and both `CUSTOM_BASE_URL` and
+  `OPENAI_BASE_URL` to `https://fragment.club/api/model` (Hermes' bare
+  custom provider takes its endpoint from the first, and sends
+  `OPENAI_API_KEY` only where the second points).
 
 **Checks on lat-6:**
 
@@ -700,8 +711,9 @@ fragment.club is fine to deploy to.
 |---|---|
 | The node fetches from fragment.club and creates through the swap | serving about 40 s after the PUT, first try after the fix below |
 | What the guest sees | `OPENROUTER_API_KEY=sk-or-v1-placeholder-swapped-for-the-real-key-on-the-way-out`, in the service's env and in a plain exec (msb sets it too); agentd installed msb's CA and set `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` |
-| A real model call from the service's own environment, as its user | `hermes -z` answered "sandcastle credentials work" in 7.1 s; again after a service death and daemon restart (the node handed the credentials over again before relaunching, and logged it) in 9.2 s; again after a stop and start (serving 5 s after start) in 3.9 s |
-| No key in the guest | any `sk-or-v1-` + 64 hex: 0 in every process's environ, 0 in 280 MiB of readable process memory, 0 in 16,783 files under `/opt/data`, `/tmp`, `/run`, `/root`, `/etc`, `/var`; a planted key-shaped string in the scanner's own memory was found (control) |
+| A real model call from the service's own environment, as its user | with the Ledger key to openrouter.ai: `hermes -z` answered "sandcastle credentials work" in 7.1 s; again after a service death and daemon restart (the node handed the credentials over again before relaunching, and logged it) in 9.2 s; again after a stop and start (serving 5 s after start) in 3.9 s |
+| The same with the computer's token, through fragment's model route | "sandcastle tokens work too" in 4.6 s; fragment.club's budget for the owner shows it as one settled `computer.text` row, `sandcastle:lat-6/hermes`, $0.0095; the guest's `OPENAI_API_KEY` is the placeholder, and it holds no `OPENROUTER_API_KEY` |
+| No key in the guest | any `sk-or-v1-` + 64 hex: 0 in every process's environ, 0 in 280 MiB of readable process memory, 0 in 16,783 files under `/opt/data`, `/tmp`, `/run`, `/root`, `/etc`, `/var`; a planted key-shaped string in the scanner's own memory was found (control). With the token: no token- or key-shaped string in environs, 290 MiB of memory, or 16,785 files (a planted token found), nor in the snapshot after the turn (the turn's answer 5 times) |
 | No key on the disk or in a snapshot | 0 in a plain `zfs send` of the snapshot taken after the turn (48 MB), where the turn's own answer appears 6 times (control); backups are sealed streams of these snapshots |
 | No key at rest on the host | 0 in `/var/lib/sandcastle`, in `~/.microsandbox` (files under 256 MB), and in the daemon's journal; 0 in any msb process's argv |
 | Live rotation (msb, by hand, dummy values to httpbin) | the guest's env kept the placeholder; httpbin saw value one, then value two after `msb modify`, no restart; `msb start` without the value fails closed ("host environment variable … is not set"), and with value three httpbin saw three; no file under `~/.microsandbox` held any of the three |
@@ -725,13 +737,16 @@ fragment.club is fine to deploy to.
 - **Rotation is live.** `msb modify --secret NAME@HOST` swaps a value in
   on a running machine (later connections carry it) and keeps a custom
   placeholder. New names or placeholders need a restart.
-- **fragment's own model route is the other shape.** Since decision 21
-  (2026-09-26) fragment's computers call `POST /api/model/chat/completions`
-  signed with their own key, and each call is reserved and settled on the
-  owner's month. The swap hands the Ledger key itself, so a sandcastle
-  computer's spend is capped by the key's limit (the allowance) but not
-  in the Ledger's usage rows (debt ledger). A per-computer token for the
-  model route, handed through the same swap, would close that.
+- **fragment's own model route was the better shape.** Since decision
+  21 (2026-09-26) fragment's computers call `POST
+  /api/model/chat/completions` signed with their own key, each call
+  reserved and settled on the owner's month. Handing a node the Ledger key
+  itself skipped all of that. So a sandcastle computer now gets its own
+  token for that route through the same swap: the swap can attach a
+  bearer, not a signature. A second OpenRouter key per computer (the
+  management key could mint one) would have been revocable alone, but its
+  spend would still miss the Ledger, and its limit would stack on the
+  owner's.
 - **This branch was cut from `main`, 207 commits behind
   `fragment-rs/master`,** which fragment.club runs. It was rebased onto
   `402a64d` before deploying, so the deploy took nothing back.
@@ -740,10 +755,10 @@ fragment.club is fine to deploy to.
   string, or with `cargo build -v` ("Fresh" or "Compiling").
 
 **Not proven on the real engine:** a new value at the source through
-the node's schedule (the Ledger has no rotate; by hand with msb and in
-the tests), and a refusal from fragment.club withdrawing the value
-(tested with the fake source; not run against fragment.club, which would
-mean revoking the hosted e2e key).
+the node's schedule (tokens do not rotate yet; by hand with msb and in
+the tests), and a refusal from fragment.club (tested in the e2e and with
+the fake source; not run against fragment.club, which would mean
+revoking the hosted e2e key).
 
 ## Phases, each with its check
 

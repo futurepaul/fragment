@@ -47,13 +47,15 @@ uses it reads it from there.
 - **Agents in cells** call models through the platform, which attaches
   the user's own model credential.
 - **Computers on sandcastle** (self-hosted, docs/sandbox.md): the node
-  fetches the owner's OpenRouter key from `POST
+  fetches the computer's own token from `POST
   /api/sandcastle/credentials`, signed with its own key, which the fleet
   lists (`FRAGMENT_SANDCASTLE_NODES`), and hands it to microsandbox's
-  credential swap. The computer's service holds a placeholder shaped like
-  a key; the value goes only to openrouter.ai, attached on the host as a
-  request leaves. It is not reserved and settled as the model route's
-  calls are (docs/technical-debt-ledger.md).
+  credential swap. The computer's service holds a placeholder; the token
+  goes only to the platform's host, attached on the node as a request
+  leaves, and buys model calls on `/api/model/chat/completions`, reserved
+  and settled on the owner's month like any computer's. The token is
+  kept sealed in the owner's Ledger; revoking the owner's key, or the
+  node's listing, stops it at once.
 - **Computers** hold only their own key (ROADMAP decision 21), and call
   the model through the platform, signed by it (`POST
   /api/model/chat/completions`, `fragment model`; Paul, 2026-09-26): the

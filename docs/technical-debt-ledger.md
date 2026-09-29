@@ -894,53 +894,32 @@ without a delete condition is unfinished design, not debt.
   delete a deleted computer's backups through the API, and both are
   tested against the fake bucket and checked on Tigris.
 
-## A sandcastle computer's model spend skips the Ledger's reservations
-
-- **Observed:** 2026-09-29 (sandbox phase 4). `POST
-  /api/sandcastle/credentials` hands a node the owner's Ledger key itself,
-  and msb's swap attaches it to every request to openrouter.ai. Every
-  other paid call (a job's step, an agent's turn, a Sprites computer's
-  `POST /api/model/chat/completions`) is reserved on the owner's month
-  and settled to its cost, and a computer may call only
-  `COMPUTER_MODELS`; these calls are neither.
-- **Risk:**
-  - The month's usage rows and the budget view miss this spend. The
-    key's own limit (the allowance) still stops it, so a computer can
-    use up the month under fragment's reservations, and a job's step
-    then fails at OpenRouter instead of being held.
-  - The computer may call any model, at any price, up to the allowance.
-- **First proof:** a person whose budget view says money is left while
-  OpenRouter refuses their key.
-- **Delete when:** the credential source hands a per-computer token
-  for the platform's model route (reserved, settled, limited to the
-  computer models, revocable alone) through the same swap, or the
-  Ledger reconciles against the key's usage, with a test either way.
-
-## A sandcastle computer's credential lives in its host VM process's environment
+## A sandcastle computer's token lives in its host VM process's environment
 
 - **Observed:** 2026-09-29 (sandbox phase 4, lat-6). The node hands
   msb a value in `msb create`'s environment, never its arguments; the
   `msb machine` process it spawns inherits that environment, so
   `/proc/<pid>/environ` of the computer's VM process on the host holds
-  the value for as long as the machine runs. The guest cannot see it.
+  the value (on fragment, the computer's token) for as long as the
+  machine runs. The guest cannot see it.
 - **Risk:** anything running as the node's user (an operator's shell, on
-  the test node the login user) reads every running computer's
-  credentials.
+  the test node the login user) can spend any running computer's model
+  budget until its owner's key or the node's listing is revoked.
 - **First proof:** already present, on finite-lat-6.
 - **Delete when:** the node runs as its own system user (see the test
   node entry), and msb resolves the value without leaving it in the
   child's environment (an upstream change, or the SDK behind the engine
   trait), checked by reading the VM process's environ.
 
-## A refused sandcastle credential waits for the next refetch
+## A deleted sandcastle computer's token lives a day
 
-- **Observed:** 2026-09-29 (sandbox phase 4). A node asks a computer's
-  credential source again every `--credentials-every-s` (15 minutes);
-  only then does a refusal (the owner's key revoked on fragment) withdraw
-  the value from the machine's swap.
-- **Risk:** a revoked owner's computers keep spending for up to 15
-  minutes.
-- **First proof:** a revocation someone needs to take effect at once.
-- **Delete when:** the platform can tell a node to ask again now (a
-  signed call on the node's API, from the key that owns the computer or a
-  grantor), and a test shows a revocation withdraw within seconds.
+- **Observed:** 2026-09-29. A node does not tell the platform when a
+  computer is deleted; its token lapses only when its node has not asked
+  for it in a day (`COMPUTER_TOKEN_IDLE_MS`), and a stopped computer's
+  token lapses the same way (its next start asks again).
+- **Risk:** for a day after a deletion, whoever holds the token (only
+  the node) could still spend its owner's month with it.
+- **First proof:** a token used after its computer was deleted.
+- **Delete when:** the node tells the platform (a signed call to the
+  credential source) when a computer is deleted, and the platform drops
+  its token, with a test.
