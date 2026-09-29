@@ -437,11 +437,39 @@ async fn pair_computer(mut req: Request, env: &Env, cfg: &Config, url: &Url) -> 
     json_answer(&view)
 }
 
+/// Who a sandcastle computer's token (`ledger::ComputerToken`) is for:
+/// (the person who pays, `sandcastle:<node>/<name>` for the usage row).
+/// Checked live on every call: the token is its ledger's and fresh, its
+/// node is still one the fleet lists, and its owner key is still someone's
+/// and belongs to that ledger's person (an agent's or a computer's owner),
+/// so a revocation takes effect at once, not at the node's next refetch.
+async fn sandcastle_computer(env: &Env, cfg: &Config, token: &str) -> CellResult<(String, String)> {
+    let refused = |why: &str| CellError::new(ErrorCode::Unauthenticated, format!("not a computer token this platform answers: {why}"));
+    let org = ledger::org_of_computer_token(token).ok_or_else(|| refused("its shape"))?;
+    let holder = ledger::ask(env, &org, &ledger::CheckToken { hash: ledger::computer_token_hash(token) }).await?;
+    if !cfg.is_sandcastle_node(&holder.node_key)? {
+        return Err(CellError::new(ErrorCode::Forbidden, format!("{} is no longer one of this fleet's sandcastle nodes", holder.node)));
+    }
+    let owner = ask_registry(env, &calls::Resolve { key: holder.owner_key.clone() }).await.map_err(|e| match e.code {
+        ErrorCode::Unauthenticated => CellError::new(ErrorCode::Forbidden, format!("{} on {}: its owner: {}", holder.name, holder.node, e.message)),
+        _ => e,
+    })?;
+    let person = match owner.kind {
+        IdentityKind::Person => owner.id.clone(),
+        IdentityKind::Agent | IdentityKind::Computer => owner.owner.clone().ok_or_else(|| CellError::host("an agent or computer without an owner"))?,
+    };
+    if ledger::org_of(&person).as_deref() != Some(org.as_str()) {
+        return Err(refused("its owner pays from another org"));
+    }
+    Ok((person, format!("sandcastle:{}/{}", holder.node, holder.name)))
+}
+
 /// How long a computer's model call may take (a reasoning step can take 96 s).
 const MODEL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// `POST /api/model/chat/completions`: a computer calls the model through
-/// the platform (docs/computers.md), signed by its own key: an OpenAI-style
+/// the platform (docs/computers.md), signed by its own key, or a sandcastle
+/// computer with its token as a bearer (`sandcastle_computer`): an OpenAI-style
 /// chat request, on a model it names from `fragment_proto::COMPUTER_MODELS`
 /// (none: the platform's), paid from its owner's month as an agent's call is
 /// (`agent_spend`: the same ledger reserve, settle, and release), except
@@ -453,10 +481,17 @@ const MODEL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 async fn model_call(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, url: &Url) -> CellResult<Response> {
     // screenshots: more than any other request carries
     let body = read_body(&mut req, limits::MODEL_BODY_MAX_BYTES).await?;
-    let who = signer(env, &req, url, &body).await?;
-    let owner = match (who.kind, who.owner.as_deref()) {
-        (IdentityKind::Computer, Some(owner)) => owner.to_string(),
-        _ => return Err(CellError::new(ErrorCode::Forbidden, "only a computer calls the model here, on its owner's budget")),
+    // who pays (the computer's owner), and who is calling, for the usage row
+    let bearer = req.headers().get("authorization")?.and_then(|a| a.strip_prefix("Bearer ").map(str::to_string));
+    let (owner, caller) = match bearer {
+        Some(token) => sandcastle_computer(env, cfg, &token).await?,
+        None => {
+            let who = signer(env, &req, url, &body).await?;
+            match (who.kind, who.owner.as_deref()) {
+                (IdentityKind::Computer, Some(owner)) => (owner.to_string(), who.id.clone()),
+                _ => return Err(CellError::new(ErrorCode::Forbidden, "only a computer calls the model here, on its owner's budget")),
+            }
+        }
     };
     let mut ask: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
     if !ask["messages"].is_array() {
@@ -492,7 +527,7 @@ async fn model_call(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, ur
     }
     let org = ledger::org_of(&owner).ok_or_else(|| CellError::host("a computer's owner is an identity"))?;
     // namespaced by the computer, as an agent's are by the agent
-    let reference = format!("computer:{}/{}", who.id, js::random_hex::<16>());
+    let reference = format!("computer:{caller}/{}", js::random_hex::<16>());
     let reserve = ledger::Reserve {
         reference: reference.clone(),
         kind: "computer.text".into(),
@@ -501,9 +536,9 @@ async fn model_call(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, ur
             fragment_proto::ROUTER_MODEL => fragment_core::budget::ROUTER_RESERVE,
             _ => fragment_core::budget::TEXT_RESERVE,
         },
-        fragment: who.id.clone(),
+        fragment: caller.clone(),
         run: 0,
-        principal: who.id.clone(),
+        principal: caller,
         agent: None,
     };
     let ledger::Reserved::Held { key } = ledger::ask(env, &org, &reserve).await? else {
@@ -765,10 +800,9 @@ async fn budget_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
     }
 }
 
-/// What the computer's service sees in place of the key: shaped like an
-/// OpenRouter key (Hermes takes one only if it starts `sk-or-`), and saying
-/// what it is to anyone who reads it.
-const SANDCASTLE_PLACEHOLDER: &str = "sk-or-v1-placeholder-swapped-for-the-real-key-on-the-way-out";
+/// What the computer's service sees in place of its token, saying what it
+/// is to anyone who reads it.
+const SANDCASTLE_PLACEHOLDER: &str = "fsc1-placeholder-swapped-for-the-computer-token-on-the-way-out";
 
 /// What a sandcastle node says about the computer it asks for
 /// (`sandcastle_proto::CredentialsAsk`).
@@ -788,13 +822,12 @@ struct SandcastleAsk {
 /// sandcastle node, signing with its own key, asks what a computer's
 /// service may spend. The node's word on who owns the computer is trusted,
 /// as the node is trusted to run it; the registry says, live, whose that
-/// key is, so a revoked key gets nothing. The answer is the owner's
-/// OpenRouter key (an agent's or a computer's owner's), from their Ledger,
-/// for openrouter.ai only: the node hands it to its engine's credential
-/// swap, and the computer's service sees a placeholder, never the key.
-/// Unlike `/api/model/chat/completions`, its spend is not reserved and
-/// settled here: the key's own limit is the month's allowance
-/// (docs/technical-debt-ledger.md).
+/// key is, so a revoked key gets nothing. The answer is the computer's own
+/// token (`ledger::ComputerToken`) as `OPENAI_API_KEY`, for the platform's
+/// host only: the node hands it to its engine's credential swap, the
+/// service sees a placeholder, and its model calls go to
+/// `/api/model/chat/completions`, reserved and settled on the owner's
+/// month (an agent's or a computer's owner's) like every other call.
 async fn sandcastle_credentials(mut req: Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     let node = authenticate(&req, url, Payload::Read(&body))?;
@@ -814,8 +847,11 @@ async fn sandcastle_credentials(mut req: Request, env: &Env, cfg: &Config, url: 
         IdentityKind::Agent | IdentityKind::Computer => owner.owner.clone().ok_or_else(|| CellError::host("an agent or computer without an owner"))?,
     };
     let org = ledger::org_of(&person).ok_or_else(|| CellError::host("no billing org"))?;
-    let key = ledger::ask(env, &org, &ledger::Key {}).await?.key;
-    json_answer(&json!({ "credentials": [{ "name": "OPENROUTER_API_KEY", "value": key, "hosts": ["openrouter.ai"], "placeholder": SANDCASTLE_PLACEHOLDER }] }))
+    let ask = ledger::ComputerToken { node_key: node, node: ask.node, computer: ask.id, name: ask.computer, owner_key: ask.owner };
+    let token = ledger::ask(env, &org, &ask).await?.token;
+    let platform = Url::parse(&cfg.platform(url)).map_err(|e| CellError::host(format!("the platform's URL: {e}")))?;
+    let host = platform.host_str().ok_or_else(|| CellError::host("the platform's URL has no host"))?;
+    json_answer(&json!({ "credentials": [{ "name": "OPENAI_API_KEY", "value": token, "hosts": [host], "placeholder": SANDCASTLE_PLACEHOLDER }] }))
 }
 
 /// `/api/identities…`: the registry's public face. The signer's key is
