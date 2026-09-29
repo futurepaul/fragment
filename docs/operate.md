@@ -88,10 +88,10 @@ person's OpenRouter key; `FRAGMENT_BUDGET_USD` (default 20) and
 <usd>`) in `vars`.
 `FRAGMENT_SANDCASTLE_NODES` in `vars` lists the sandcastle nodes (their
 own keys, npub or 64 hex, comma-separated) that may fetch a computer's
-model key (`POST /api/sandcastle/credentials`, docs/sandbox.md); a node
+model token (`POST /api/sandcastle/credentials`, docs/sandbox.md); a node
 shows its key at `GET https://api.<its domain>/v1/health` (`node_key`).
-Removing a node's key refuses its next refetch, which withdraws the key
-from its computers.
+Removing a node's key refuses its computers' model calls at once, and its
+next refetch, which withdraws the tokens from its machines.
 
 Hosts: `FRAGMENT_PLATFORM_URL` (`https://fragment.club`) is the
 platform, `FRAGMENT_HOST_SUFFIX` (`fragment.boats`) the fragments, and
