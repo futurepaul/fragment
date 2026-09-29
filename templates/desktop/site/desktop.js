@@ -236,7 +236,9 @@ function share(name) {
     sheetFrame.title = `Share ${label(name)}`;
     sheetFrame.allow = "clipboard-write";
     sheetFrame.src = `__share?name=${encodeURIComponent(name)}`;
-    sheet.replaceChildren(sheetFrame);
+    // until the sheet says it showed, the dialog says it is opening
+    sheet.classList.add("opening");
+    sheet.replaceChildren(el("p", "sheet-opening", "Opening the share sheet…"), sheetFrame);
     clearTimeout(sheetWait);
     sheetWait = setTimeout(() => sheet.open && sheetFrame && sheetInWindow(f), SHEET_SHOWN_MS);
     return sheet.showModal();
@@ -251,6 +253,7 @@ function shareWindow(f) {
 // the dialog, when the sheet did not show in it: its own window, from a click
 function sheetInWindow(f) {
   sheetFrame = null;
+  sheet.classList.remove("opening");
   const note = el("div", "sheet-note");
   note.append(el("strong", null, "The share sheet did not open here"), el("p", null, "This browser keeps no sign-in inside a frame from another site. It opens in a window of its own instead."));
   const open = el("button", "go", "Open in a window");
@@ -267,12 +270,14 @@ function sheetInWindow(f) {
 addEventListener("message", (e) => {
   if (!sheet.open || e.source !== sheetFrame?.contentWindow || e.origin !== sheetOrigin) return;
   clearTimeout(sheetWait);
+  sheet.classList.remove("opening");
   if (Number.isFinite(e.data?.height)) sheetFrame.style.height = `${e.data.height}px`;
   if (e.data?.share === "done") sheet.close();
 });
 sheet.onclick = (e) => { if (e.target === sheet) sheet.close(); };
 sheet.onclose = () => {
   clearTimeout(sheetWait);
+  sheet.classList.remove("opening");
   sheet.replaceChildren();
   sheetFrame = null;
   load().catch(() => {});
