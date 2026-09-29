@@ -253,3 +253,235 @@ NIP-98, grants, tickets) and what the phases proved.
 - **Unit and restart tests** per the acceptance criteria.
 - **Real-engine e2e** as above, with its evidence kept in the repo's
   results table (docs/sandbox.md).
+
+## The design (phase 1, 2026-09-29)
+
+Paul approved the plan and the semantics above on 2026-09-29 ("proceed
+with fearless rewrite"). This is the blueprint the code follows.
+
+### One idea
+
+The node is a set of per-computer state machines. Each is a row in
+SQLite (plus its generations and backups). Each step the executor asks
+the pure core what to do next, given the row and what it has observed
+this step, and gets one answer:
+
+- `Observe(what)`: look at the world (the disk's facts, the service's
+  health, the credential source);
+- `Do(effect)`: change the world (make, start, stop, or remove a machine,
+  launch or quiesce the service, snapshot, prune, destroy, ship, write a
+  manifest, receive a restore);
+- `Rest(until)`: nothing to do before then.
+
+The executor runs the effect through a gate, with a deadline, and hands
+the outcome back to the pure core (`apply`), which returns the row's next
+state. The store writes that in one transaction. Nothing the node decides
+lives only in memory: a crash between any two steps restarts from the
+row, and every step is either idempotent or checked by observing first.
+
+```
+          plan(row, knowledge, now) ─▶ Observe ─▶ gate ─▶ knowledge ┐
+store ─▶ row                          Do     ─▶ gate ─▶ outcome ──▶ apply(row, effect, outcome, now) ─▶ store (one txn)
+          ▲                            Rest   ─▶ next tick           │
+          └──────────────────────────────────────────────────────────┘
+```
+
+Knowledge (engine state, disk facts, a probe, fetched credentials) is
+ephemeral: it lives for one step batch and is observed again after a
+restart. Credential values are knowledge only; they never reach a row.
+
+### Crates
+
+- `proto`: kept. Tightened:
+  - an image may not start with `-`;
+  - `data_path` is `[A-Za-z0-9/_.-]` only;
+  - service env keys are checked where they are written.
+- `nip98`: kept.
+- `core` (new): the model, `plan`, `apply`, the invariants, and every limit
+  (with compile-time assertions between related ones). It depends on
+  `proto` alone: no tokio, no clock, no I/O.
+- `sandcastled`, rewritten on the core. It has four layers:
+  - the store;
+  - the gates;
+  - the executor;
+  - the commands (the API's mutations as functions: validate, one
+    transaction, a typed error), with the HTTP API, router, and proxy
+    thin above them.
+- `sim` (new, a test crate): the deterministic simulator.
+- `e2e` (new): the real-engine end-to-end binary.
+- `cli`: kept.
+
+### The row
+
+The rebase trigger is a generation *number*, not a hash of JSON.
+
+- **Fixed for a computer's life:**
+  - `id`, `name`, `owner`, `host_port`;
+  - `vcpus`, `memory_mib`, `storage`, `data_gib`, `data_path`.
+- **Changeable:**
+  - `url_auth`: a column, changed in place, no rebase;
+  - the generation fields: `image`, the service's argv, port, health path
+    and env, and `credentials_url`. These are one row of `generations`
+    each, with argv and env as child rows. A PUT that changes any of them
+    adds generation `n + 1`.
+- **Desire:** `desired` (`running`, `stopped`, `deleted`; nothing leaves
+  `deleted`), and `spec_seq`, the generation asked for.
+- **What the world holds:**
+  - `applied_seq`: the machine was made from this generation;
+  - `good_seq`: the last generation that served;
+  - `failed_seq` with `failure` (`kind`: spec, node, or source; the step;
+    a reason of at most 512 bytes). A spec failure of generation
+    `spec_seq` rolls back to `good_seq`.
+- **Retries:** `failures` and `retry_at_ms`.
+- **Service:** `launched_at_ms`, `served_at_ms` (the grace survives a
+  restart).
+- **Snapshots:**
+  - `snapshot_seq`: the next snapshot's number;
+  - `snapshot_due`: a kind the node owes;
+  - `snapshot_at_ms`: when the scheduled one is due.
+
+  A snapshot's name is `sc-<seq>-<kind>`: ordered by its number, never
+  by a clock or by comparing names.
+- **Credentials:** `credentials_digest`, `credentials_shape` (names, hosts,
+  and placeholders: never a value), and `credentials_at_ms`.
+- **Restore:** `restore_source`, `restore_snapshot`, and the chain as child
+  rows. Progress is observed: element `i` is received exactly when the
+  disk holds its snapshot.
+- **Shipping:**
+  - `ship_head` (the newest shipped snapshot and its number);
+  - `ship_since_whole`;
+  - `ship_upload`, an open multipart upload's id, aborted before anything
+    else after a crash;
+  - `manifest_due`.
+- **For views:** `status` (`absent`, `starting`, `serving`, `stopped`,
+  `failed`) and `status_reason`. They are persisted, so a view never
+  depends on a name-keyed map in memory.
+- **Concurrency:** `version`, bumped by every write.
+
+### Steps, and what makes each safe
+
+| Desire / state | Steps | Safe because |
+|---|---|---|
+| a machine is due (none, or a new generation) | fetch credentials (if any); if running: quiesce, stop, `snapshot_due = rebase`; snapshot; ensure or restore the disk; create; launch; probe until served or past the grace | credentials first, so a source that is down leaves the old machine serving. The rebase snapshot is owed in the row before it is taken, and a snapshot already on the disk counts as taken. Create replaces by name. |
+| stopped, wanted running | fetch credentials; start; launch; probe | start and launch are idempotent (the launch script keeps a live service) |
+| running, wanted stopped | quiesce; stop, `snapshot_due = stop`; snapshot | owed in the row before it is taken |
+| wanted deleted | quiesce; stop; remove; destroy the disk (only when the machine is observed gone); delete the row | each step is observed first, and nothing leaves `deleted` |
+| restore owed | observe the disk: if its snapshots are not a prefix of the chain, destroy it; receive the next element; done when it holds the target, then `snapshot_seq` resumes past the restored ones | never "the disk exists, so it is done" |
+| serving | probe; a scheduled snapshot when written; credentials refreshed when due (rotate live; new shape: stop, start); ship the oldest unshipped snapshot; write the manifest when due; prune | one machine per computer runs these in order, so pruning never races shipping. A shipped head and an open ship are never pruned. |
+| a failure | `failures + 1`, `retry_at` backs off (2 s doubling to 60 s), `failure` recorded; a spec failure of a new generation rolls back | backoff is in the row, so a restart does not reset it |
+
+Faults are typed at the gate and classed in the core:
+
+- **Spec:** creating a new generation's machine, or launching its
+  service, fails, or it stays silent past the grace.
+- **Node:** everything else the host does.
+- **Source:** the credential source. A 401, 403, or 404 withdraws the
+  credentials; anything else keeps what the machine holds.
+
+### Gates
+
+Each gate is a trait with typed errors, with a real implementation and a
+simulated one:
+
+- **Engine** (msb): list, create, start, stop, remove, rotate, launch,
+  quiesce, sync.
+- **Disks** (zfs): facts, ensure, snapshot, destroy a snapshot, destroy,
+  send, receive.
+- **Objects** (S3, with a deadline on every phase).
+- **Source** (credentials).
+- **Prober.**
+- **Clock.**
+- **Randomness.**
+
+No gate decides anything, and none matches error text: a caller that
+needs to know whether something exists observes first. Output past a cap
+is an error (`OutputTooLarge`), never silently cut. Streams are
+associated types, so no production enum carries a test variant.
+
+### The executor
+
+A step is three public calls:
+
+1. `plan`: read the row, ask the core.
+2. `perform`: run the effect through its gate.
+3. `record`: apply the outcome in one transaction, applied to the row as
+   it is now: the API may have changed desire meanwhile, and an
+   outcome is a fact about the world either way.
+
+The loop runs every computer every tick, at most a bounded number of
+steps each. Its tasks are joined, and `panic = "abort"`, so an assertion
+takes the node down (systemd restarts it; machines keep running).
+
+### The simulator
+
+It drives the real core, store (in-memory SQLite), and executor against
+simulated gates over one simulated world. The world holds the machines,
+the disks (each with a content version, bumped by the guest's writes;
+snapshots remember theirs), and the bucket. It persists across simulated
+crashes. The simulator also drives the commands.
+
+- **A seed chooses:**
+  - the workload: grants, creates, updates, restores, starts, stops,
+    deletes, tickets, and exact and conflicting replays;
+  - the guest's writes and service deaths;
+  - faults at every gate call: errors, timeouts, a full pool, a failing
+    bucket, a source down or refusing;
+  - crashes: between `perform` and `record` (the effect happened, the
+    row does not know it), and between steps;
+  - the clock's advance.
+- **Invariants after every step:**
+  - one machine per computer, and none without a row;
+  - a disk destroyed only when its row says deleted and its machine is
+    gone;
+  - a disk in at most one machine;
+  - every replace of a machine preceded by a clean stop, and by a
+    snapshot when the disk was written;
+  - a disk's content never rewinds except by a restore, which yields
+    exactly the requested snapshot's content;
+  - `failed_seq` only after a spec fault;
+  - the shipped chain restorable: every base shipped and in the bucket,
+    the head kept locally;
+  - no credential value in the store's bytes;
+  - ports unique;
+  - per-owner counts within grants when made;
+  - replays answer the same.
+- **At quiescence** (faults off): status matches desire, `applied_seq`
+  is the target, nothing is owed, and nothing leaks.
+
+A failing seed prints and replays exactly. CI runs a few thousand seeds,
+and each audited defect is a named regression seed or test.
+
+### The real-engine e2e
+
+A Rust binary (`sandcastle/crates/e2e`) run from a workstation against
+a node over its API, with SSH for host-side checks. It drives the
+product:
+
+- Hermes created and served at its URL behind a ticket and its own
+  login, with a WebSocket;
+- a rebase keeping a marker on the disk;
+- both rollbacks;
+- a stop and a start;
+- snapshots, a sealed backup, and a restore after the node's state is
+  wiped (the documented reset);
+- credentials through a platform;
+- the guest refused its host's addresses and private ranges;
+- only 22 and 443 open;
+- a SIGKILL of the daemon at each step of a rebase and a restore,
+  converging after;
+- no leaks: every `sc-*` machine and volume has a row.
+
+It writes its evidence as JSON.
+
+### The reset (the hard cut)
+
+`sandcastled reset --state-dir … --zfs-parent … --node-name …` removes
+whole explicit roots, and nothing else:
+
+- every `sc-*` machine;
+- every volume under the parent;
+- the bucket prefix `nodes/<node>/`;
+- the state file.
+
+It asks for the node name typed again. lat-6 is reset with it before the
+rewrite first runs there (Paul, 2026-09-29: wipe lat-6).
