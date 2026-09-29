@@ -45,6 +45,8 @@ pub fn sandcastle(s: &mut Suite, api: &Api) -> Result<()> {
             && r.body["credentials"].as_array().map(Vec::len) == Some(1)
             && cred["name"] == "OPENROUTER_API_KEY"
             && cred["hosts"] == json!(["openrouter.ai"])
+            // shaped like a key, as Hermes wants, and never the key
+            && cred["placeholder"].as_str().is_some_and(|p| p.starts_with("sk-or-") && p != cred["value"])
             && minted.len() == 1
             && cred["value"] == minted[0].key.as_str(),
         &r,
