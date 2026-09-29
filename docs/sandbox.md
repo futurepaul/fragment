@@ -478,6 +478,27 @@ it, tested):
   bind again. The daemon now duplicates it with close-on-exec and closes
   the original. On the node, only systemd and the daemon hold 443.
 
+## Phase 3, part one: disks the node owns, and snapshots (2026-09-29)
+
+The durable disk is now a ZFS volume the node makes and owns, not a
+microsandbox named volume, so the node can snapshot it and send it off
+the host. The daemon does all of it without privilege: `zfs allow` on
+`tank/sandcastle` (a mirror of the two NVMe drives), and a udev rule
+giving its user the volumes' device nodes (sandcastle/README.md).
+microsandbox mounts the volume's block device as the guest's disk.
+
+| Check on `finite-lat-6` | Result |
+|---|---|
+| The daemon's user makes a sparse 10 GiB zvol, formats it, and a Hermes computer boots on it | serving 5 s after the signed create |
+| A file the guest fsynced, then a host snapshot at once with no sync from the node, read from a clone after an ext4 journal replay | the file is there: libkrun passes flushes through, so snapshots of a running machine are crash-consistent |
+| A rebase and a stop | a `-rebase` snapshot of the cleanly stopped disk before the rebase; a `-stop` snapshot after the stop |
+| Serving past a 60 s slot | an `-auto` snapshot, only when something was written |
+| `pending` after `start` | "stopped, pending", then "starting, pending", then "serving, settled" at 7 s |
+
+Found on the way: a view right after a PUT described what ran before.
+`observed: serving` at t+1 s was the old generation, and my own check
+believed it. Views now carry `pending` until the node has acted.
+
 ## Phases, each with its check
 
 1. **Hermes at a URL (R1, R4).** *Met on the real engine 2026-09-29, on
@@ -499,7 +520,8 @@ it, tested):
      data intact.
    - Killing the daemon mid-rebase and restarting it converges to one
      running computer.
-3. **Backups and restore (R3, R6).** Checks:
+3. **Backups and restore (R3, R6).** *Local snapshots met 2026-09-29;
+   shipping to Tigris and restoring from there are next.* Checks:
    - Five-minute snapshots while a turn is writing.
    - A restore onto an empty disk on another host passes SQLite
      `integrity_check` and reopens the same conversation, then runs a
