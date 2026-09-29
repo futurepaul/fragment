@@ -25,7 +25,8 @@ github.com/futurepaul/fragment's `master`, which fragment.club runs) and on cell
    `docs/phase-5.md` — agents (choices for review);
    `docs/phase-8.md` — computers, first part;
    `docs/sandbox.md` — self-hosted computers: the research and the
-   sandbox service, sandcastle (proposed, not agreed);
+   sandbox service, sandcastle (phases 1–4 live on its test node);
+   `docs/sandcastle-rewrite.md` — its rewrite to engineering style;
    `docs/phase-3.md` — hosting on fragment.club;
    `docs/phase-2.md` — the record of the core cut (slices A–G);
    `docs/operate.md` — the operator runbook.
@@ -105,10 +106,13 @@ debt ledger).
   launcher), `crates/fakes` (code.storage, OpenRouter, WorkOS, a push
   service, Sprites), `crates/devstack`, `crates/e2e`.
 - `sandcastle/` is a separate Cargo workspace (self-hosted computers on
-  microVMs, docs/sandbox.md) that must not depend on fragment's crates;
-  `cargo xtask check` does not cover it. From `sandcastle/`: `cargo clippy
-  --workspace --all-targets --all-features -- -D warnings` and `cargo test
-  --workspace --all-features`. Its test node is `finite-lat-6`
+  microVMs, docs/sandbox.md; a pure core, a deterministic simulator,
+  docs/sandcastle-rewrite.md) that must not depend on fragment's crates;
+  `cargo xtask check` does not cover it, CI's `sandcastle` job does. From
+  `sandcastle/`: `cargo clippy --workspace --all-targets --all-features --
+  -D warnings` and `cargo test --workspace --all-features`
+  (`SANDCASTLE_SIM_SEEDS=n` for more simulator seeds). Its test node is
+  `finite-lat-6`, and `sandcastle-e2e` its real-engine e2e
   (`sandcastle/README.md`); changes to that host are fine, it was rented
   for this.
 - `.github/workflows/ci.yml` runs `check`, and the e2e in parallel: two

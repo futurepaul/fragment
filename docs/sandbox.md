@@ -568,25 +568,23 @@ the restore was skipped and the tests caught it. `Disks` now answers
 
 ## Where things stand (handoff, 2026-09-29)
 
-**Built and committed** on `claude/self-hosted-sandbox-5ecab9`, rebased
-onto `fragment-rs/master` (`402a64d`) on 2026-09-29:
+**Built:**
 
 - phases 1 and 2 (Hermes at a locked-down URL, durable data, rebase,
   rollback);
 - phase 3 (ZFS snapshots, sealed backups to Tigris, restore from the
   bucket alone);
 - phase 4 (credentials from fragment.club through msb's swap), and
-  fragment's route for it.
+  fragment's route for it: merged (futurepaul/fragment#90) and deployed
+  on fragment.club;
+- **the rewrite to engineering style** (`docs/sandcastle-rewrite.md`):
+  a pure core, the node's gates and executor, a deterministic simulator,
+  the daemon on top, and the real-engine e2e. It runs on lat-6 since the
+  hard cut (the documented reset) on 2026-09-29.
 
-62 sandcastle tests and the e2e section `sandcastle` (21);
-`sandcastle/README.md` is the reference.
-
-**fragment.club runs this branch** (`538d16f`, deployed 2026-09-29 with
-Paul's go-ahead): master `402a64d` plus the credential route, computer
-tokens on the model route, and `FRAGMENT_SANDCASTLE_NODES` in
-`fleets/fragment-club.json`. It is PR futurepaul/fragment#90, pushed
-with Paul's go-ahead. A deploy of master before it merges takes them
-away: lat-6's `hermes` then gets refused model calls (it keeps running).
+87 sandcastle tests (the simulator's 64 seeds among them) in CI, and the
+real-engine e2e (78 checks, by hand); `sandcastle/README.md` is the
+reference.
 
 **The test node, `finite-lat-6`** (`ubuntu@206.223.228.129`, rented for
 this):
@@ -594,16 +592,15 @@ this):
 - **Serving:** `api.sandcastle.fragment.club` and
   `<name>.sandcastle.fragment.club`, with a Let's Encrypt certificate for
   `api`, `hermes`, and `demo` only, lapsing 2026-12-28.
-- **Units:** `sandcastled.socket` and `sandcastled.service` (the flags are
-  in the unit; `--node-key-file /etc/sandcastle/node.key
-  --credentials-origin https://fragment.club` since phase 4).
-- **Running:**
-  - `demo`, a restored Hermes v0.21.5 owned by the test owner key
-    (`alice.key`);
-  - `hermes`, Hermes v0.21.5 calling models with its own token through
-    fragment.club, owned by the hosted e2e person's key
-    (`fragment-club-e2e-key`, granted 2 computers); its spec is
-    `sandcastle-test/hermes-credentials.json`.
+- **Units:** `sandcastled.socket` and `sandcastled.service` (`sandcastled
+  serve` and its flags are in the unit; `--node-key-file
+  /etc/sandcastle/node.key --credentials-origin https://fragment.club`
+  since phase 4).
+- **Running:** nothing. The rewrite's hard cut reset it (its computers,
+  disks, backups under `nodes/lat-6/`, and state), and each e2e run
+  deletes what it made; the bucket keeps the runs' backups. The e2e makes
+  its Hermes computer as `hermes`, owned by the hosted e2e person's key
+  (`fragment-club-e2e-key`), from `sandcastle-test/hermes-credentials.json`.
 - **Firewall:** nftables admits 22 and 443.
 - **Engine:** msb 0.7.4 in `/home/ubuntu/.local/bin`.
 - **Storage:** the ZFS pool `tank` (mirror), with parent
@@ -622,7 +619,7 @@ this):
   - `hermes-v2026.9.2{1,4}.json`: specs holding those;
     `hermes-credentials.json`: the same with `credentials_url`.
 - `~/.config/finite-next/secrets/fragment-club-e2e-key`: the hosted e2e
-  person's key on fragment.club, the owner of lat-6's `hermes`.
+  person's key on fragment.club, the owner of the e2e's `hermes`.
 - `~/.config/finite-next/secrets/sandcastle-backups.env`: the bucket's
   scoped key, flyctl's output as is. The node's copy is
   `/etc/sandcastle/backups.env`, as `KEY=value` lines.
@@ -647,15 +644,14 @@ The same CLI also does `list`, `put … --spec`, `ticket`, `snapshots`, and
 **Deploying:**
 
 1. `rsync -a --delete --exclude target sandcastle/ ubuntu@206.223.228.129:sandcastle/`.
-2. `cargo build --release` there.
+2. `cargo build --release -p sandcastled` there.
 3. `sudo systemctl restart sandcastled.service`. The socket keeps 443
    meanwhile, and computers keep running.
+4. The e2e (sandcastle/README.md, Checks).
 
-A store schema change is a hard cut:
-
-1. Delete the computers through the API and wait for 404.
-2. Stop the service.
-3. Remove `/var/lib/sandcastle/sandcastle.db*`.
+A store schema change is a hard cut: stop the service, then on the node
+`sandcastled reset` with the unit's `--state-dir`, `--msb`, `--msb-home`,
+`--zfs-parent`, `--node-name`, and bucket flags, and `--confirm lat-6`.
 
 **Lessons that cost time:**
 
@@ -759,6 +755,43 @@ the node's schedule (tokens do not rotate yet; by hand with msb and in
 the tests), and a refusal from fragment.club (tested in the e2e and with
 the fake source; not run against fragment.club, which would mean
 revoking the hosted e2e key).
+
+## The rewrite on the real engine (2026-09-29)
+
+The rewritten node (`docs/sandcastle-rewrite.md`) replaced the old one
+on lat-6 by the hard cut: `sandcastled reset` removed two Hermes
+machines, their disks, 613 objects under `nodes/lat-6/`, and the state
+(run twice, the second found nothing; a wrong `--confirm` removed
+nothing). Then `sandcastle-e2e`, from a Mac, with no overrides: 78
+checks in 2 min 15 s, its evidence as JSON (`sandcastle/target/e2e/`).
+
+| Check | Result |
+|---|---|
+| Unsigned, unknown-key, replayed, and non-grantor calls | 401, 403 `unknown_key` (refused before its id is remembered), 401 `replay`, 403 |
+| A data computer (python's `http.server` over its `/data`) | serving 4.2 s after the call; a marker written in the guest read through its URL |
+| A rebase | a new machine, serving 2.9 s after the call; the marker intact |
+| A rollback (an image that does not exist) | back on the old generation 5.6 s after the call, the registry's error in the view; the marker intact; the good spec again clears it |
+| A stop and a start | stopped in 1.5 s (its URL 503, its machine `Stopped`); serving 2.9 s after the start with its marker |
+| `systemctl restart sandcastled` | back in 0.2 s; the same machine (its creation time unchanged), serving throughout |
+| The daemon SIGKILLed mid-rebase (a watcher on the host fires when the old machine is draining) | systemd restarts it in 2.2 s; the node finishes the rebase 2.2 s later; one machine; the marker intact |
+| A scheduled snapshot after a write (every 60 s here) | shipped 25.6 s after the write |
+| A restore into a new computer | serving 4.2 s after the call with both markers; the same PUT again 200 |
+| The daemon SIGKILLed mid-restore (its disk received in part, no machine yet) | finished 2.2 s after the restart, with the data |
+| From outside: ports 22, 80, 443, 2375, 5432, 8000, 8642, 9119, 19119, 20000–20002 | only 22 and 443 answer |
+| From a guest: the node's IPv4 (22, 443) and IPv6 (22), 169.254.169.254, 10.0.0.1, 172.16.0.1, 192.168.0.1; then 1.1.1.1:443 | all refused; the public internet reached |
+| Hermes v0.21.5 with credentials from fragment.club, as `hermes` | serving 5.6 s after the call; the URL 401 without the router's session, a ticket redeemed once (303, then 401), Hermes' own gate behind it |
+| No token in the guest | 0 in its `service.env`, 0 in every process's environ |
+| A model call from the guest with the service's env (the placeholder), through the swap | 200 from fragment.club's route, `z-ai/glm-5.3-flash`, "sandcastle e2e", 1.4 s |
+| Everything deleted | gone within 2.2 s; no machine, disk, or secret config left; every machine and disk on the host has a row; backups outlive their computers |
+| The node's state set aside (`--wipe-state`), the daemon started with none | no grants; a restore from the bucket's sealed manifest alone serving 5.6 s after the call with both markers |
+
+Not covered by this run, and where they are: a SIGKILL at every step of
+every path (the simulator, with crashes after each effect and between
+steps); a WebSocket through the proxy (the daemon's tests, over TLS to a
+live service; Hermes' own through the old node, Phases 1 and 2); wedged
+guests and hung machines (the simulator: a real guest has not wedged
+yet); a refusal from fragment.club (the e2e lane and the tests; not run
+against fragment.club).
 
 ## Phases, each with its check
 
