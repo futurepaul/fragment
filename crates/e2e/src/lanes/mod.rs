@@ -26,6 +26,7 @@ mod plane;
 mod posts;
 mod restart;
 mod runtime;
+mod sandcastle;
 mod share;
 mod signin;
 mod site;
@@ -97,6 +98,7 @@ const LANES: &[Lane] = &[
     deliver::push,
     deliver::ai,
     budget::budget,
+    sandcastle::sandcastle,
     agents::agents,
     addon::addon,
     agents::chat,

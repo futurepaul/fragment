@@ -185,6 +185,9 @@ pub struct Fleet {
     pub openrouter_management: Option<String>,
     pub budget_usd: Option<String>,
     pub operators: Option<String>,
+    /// The sandcastle nodes that may ask for a computer's credentials
+    /// (npubs or 64 hex, comma-separated; `None`: none may).
+    pub sandcastle_nodes: Option<String>,
     /// Pending sign-ins the Registry keeps (`None`: the cell's default,
     /// `limits::SIGNINS_PENDING_MAX_DEFAULT`).
     pub signins_pending_max: Option<u64>,
@@ -298,6 +301,9 @@ impl Fleet {
         }
         if let Some(o) = &self.operators {
             vars.push(("FRAGMENT_OPERATORS", o.as_str()));
+        }
+        if let Some(n) = &self.sandcastle_nodes {
+            vars.push(("FRAGMENT_SANDCASTLE_NODES", n.as_str()));
         }
         let signins = self.signins_pending_max.map(|n| n.to_string());
         if let Some(n) = &signins {

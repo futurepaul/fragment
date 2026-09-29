@@ -765,6 +765,54 @@ async fn budget_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
     }
 }
 
+/// What a sandcastle node says about the computer it asks for
+/// (`sandcastle_proto::CredentialsAsk`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SandcastleAsk {
+    /// The computer's name and id on the node, and the node's name: for
+    /// the answer's errors; the owner decides.
+    computer: String,
+    id: String,
+    node: String,
+    /// The key that owns the computer on the node (64 hex).
+    owner: String,
+}
+
+/// `POST /api/sandcastle/credentials` (docs/sandbox.md, Credentials): a
+/// sandcastle node, signing with its own key, asks what a computer's
+/// service may spend. The node's word on who owns the computer is trusted,
+/// as the node is trusted to run it; the registry says, live, whose that
+/// key is, so a revoked key gets nothing. The answer is the owner's
+/// OpenRouter key (an agent's or a computer's owner's), from their Ledger,
+/// for openrouter.ai only: the node hands it to its engine's credential
+/// swap, and the computer's service sees a placeholder, never the key.
+/// Unlike `/api/model/chat/completions`, its spend is not reserved and
+/// settled here: the key's own limit is the month's allowance
+/// (docs/technical-debt-ledger.md).
+async fn sandcastle_credentials(mut req: Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
+    let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+    let node = authenticate(&req, url, Payload::Read(&body))?;
+    if !cfg.is_sandcastle_node(&node)? {
+        return Err(CellError::new(ErrorCode::Forbidden, format!("{} is not one of this fleet's sandcastle nodes", npub::encode(&node))));
+    }
+    let ask: SandcastleAsk = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+    if !npub::is_hex_key(&ask.owner) {
+        return Err(CellError::invalid("owner is the computer's owner key, 64 hex"));
+    }
+    let owner = ask_registry(env, &calls::Resolve { key: ask.owner.clone() }).await.map_err(|e| match e.code {
+        ErrorCode::Unauthenticated => CellError::new(ErrorCode::Forbidden, format!("{} ({}) on {}: its owner: {}", ask.computer, ask.id, ask.node, e.message)),
+        _ => e,
+    })?;
+    let person = match owner.kind {
+        IdentityKind::Person => owner.id.clone(),
+        IdentityKind::Agent | IdentityKind::Computer => owner.owner.clone().ok_or_else(|| CellError::host("an agent or computer without an owner"))?,
+    };
+    let org = ledger::org_of(&person).ok_or_else(|| CellError::host("no billing org"))?;
+    let key = ledger::ask(env, &org, &ledger::Key {}).await?.key;
+    json_answer(&json!({ "credentials": [{ "name": "OPENROUTER_API_KEY", "value": key, "hosts": ["openrouter.ai"] }] }))
+}
+
 /// `/api/identities…`: the registry's public face. The signer's key is
 /// checked here and resolved by the registry in the same turn as what it
 /// asks (`calls::By`): one round trip a call, and a key revoked a moment
@@ -1070,6 +1118,7 @@ async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellResult<Respons
             let list = Request::new("https://principal.internal/list", Method::Get)?;
             Ok(env.durable_object("PRINCIPAL")?.get_by_name(&principal.id)?.fetch_with_request(list).await?)
         }
+        (Method::Post, ["api", "sandcastle", "credentials"]) => sandcastle_credentials(req, env, cfg, &url).await,
         (_, ["api", "budget", rest @ ..]) => {
             let rest = rest.to_vec();
             budget_route(req, env, cfg, &url, &rest).await

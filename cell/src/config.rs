@@ -76,6 +76,10 @@ pub struct Config {
     /// `FRAGMENT_OPERATORS`: identities and keys (as `parse_list` reads
     /// them) that may top up a budget.
     operators: Option<Result<Vec<String>, String>>,
+    /// `FRAGMENT_SANDCASTLE_NODES`: the keys (npubs or 64 hex) of the
+    /// sandcastle nodes that may ask for a computer's credentials
+    /// (docs/sandbox.md, Credentials).
+    sandcastle_nodes: Option<Result<Vec<String>, String>>,
     /// `FRAGMENT_SIGNINS_PENDING_MAX`: sign-ins begun and not finished that
     /// the Registry keeps before it lets the oldest go (default
     /// `SIGNINS_PENDING_MAX_DEFAULT`).
@@ -157,6 +161,7 @@ impl Config {
                 .map(|v| (v * fragment_core::budget::USD as f64).round() as i64)
                 .unwrap_or(20 * fragment_core::budget::USD),
             operators: var(env, "FRAGMENT_OPERATORS").map(|l| fragment_core::npub::parse_list(&l)),
+            sandcastle_nodes: var(env, "FRAGMENT_SANDCASTLE_NODES").map(|l| fragment_core::npub::parse_list(&l)),
             signins_pending_max: var(env, "FRAGMENT_SIGNINS_PENDING_MAX")
                 .and_then(|s| s.parse::<u64>().ok())
                 .filter(|n| *n >= 1)
@@ -180,6 +185,16 @@ impl Config {
             None => Ok(false),
             Some(Err(e)) => Err(CellError::host(format!("FRAGMENT_OPERATORS: {e}"))),
             Some(Ok(listed)) => Ok(listed.iter().any(|l| l == identity || Some(l.as_str()) == key)),
+        }
+    }
+
+    /// Whether `key` (64 hex, a request's signer) is one of the fleet's
+    /// sandcastle nodes.
+    pub fn is_sandcastle_node(&self, key: &str) -> CellResult<bool> {
+        match &self.sandcastle_nodes {
+            None => Ok(false),
+            Some(Err(e)) => Err(CellError::host(format!("FRAGMENT_SANDCASTLE_NODES: {e}"))),
+            Some(Ok(listed)) => Ok(listed.iter().any(|l| l == key)),
         }
     }
 
