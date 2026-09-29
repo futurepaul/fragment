@@ -220,7 +220,7 @@ compute platform.
 | R2 a durable disk across image updates | a ZFS volume per computer; rebase and rollback | not documented |
 | R3/R6 backups, SQLite | snapshots every 5 min when written, sealed off the host, restore from the bucket | not documented |
 | R4 one URL, locked-down ingress | router with owner tickets plus the service's own login; only 443 | not documented (its gateway is the control plane, not an ingress) |
-| R5 credentials the agent cannot read | microsandbox's swap (placeholders, host-side TLS, headers); the credential URL is phase 4 | **its core feature**: "opaque credential placeholders" resolved by a trusted supervisor "only at profile-authorized endpoints", attached and rotated at runtime |
+| R5 credentials the agent cannot read | microsandbox's swap (placeholders, host-side TLS, headers), fed from the platform's credential URL, rotated live (phase 4, built) | **its core feature**: "opaque credential placeholders" resolved by a trusted supervisor "only at profile-authorized endpoints", attached and rotated at runtime |
 | Egress policy | engine's public-only plus `--guest-deny` | **richer**: every connection through the supervisor; declarative YAML; per-endpoint rules over HTTP, GraphQL, and MCP (say, allow a read, block a write on one API); network rules hot-reload; a "policy prover" checks them with formal logic |
 | R7 sleep, wake, timers | phase 5 | not documented |
 | Inference routing | not ours (Finite Private, the platform) | yes: policy on "where inference goes" |
@@ -234,10 +234,12 @@ policy that reloads without a restart, and credentials rotated at
 runtime. It has nothing for persistence, backups, URLs, or sleep, which
 is most of our scope.
 
-If phase 4 finds microsandbox's swap too coarse (headers only, whole
-hosts, rotation needs a restart), an OpenShell supervisor in front of
-the machine is the thing to try, over vsock, which its docs list. Until
-then it is a design reference for the policy shape.
+Phase 4 found microsandbox's swap enough for Hermes: rotation is live
+(`msb modify`), and a placeholder can be shaped like the real key. It is
+still headers only and whole hosts. If that proves too coarse (a
+read-only rule on one API, an MCP tool), an OpenShell supervisor in front
+of the machine is the thing to try, over vsock, which its docs list.
+Until then it is a design reference for the policy shape.
 
 ## The proposal
 
@@ -347,15 +349,23 @@ offers nothing destructive: no snapshots, restores, stops or exec.
 
 ### Credentials (R5)
 
-- A computer names a `credentials_url`. The host-side daemon fetches it
-  with a NIP-98 request signed by **the node's key**, naming the
-  computer. The response is a list of `{name, value, hosts}`. The daemon
-  keeps it in memory and gives it to the engine's swap. The guest sees
-  `SANDBOX_PLACEHOLDER_…` (plain ASCII, as Hermes' env loader requires)
-  and a CA it trusts only for those hosts.
-- Refetch happens on a TTL, on the platform's signal, and at every
-  start. A restore cannot bring back an old value, because none is on
-  the disk.
+*Built 2026-09-29 (phase 4); `sandcastle/README.md`, Credentials, is the
+reference.*
+
+- A computer names a `credentials_url`. The host-side daemon POSTs a
+  `CredentialsAsk` (`{computer, id, node, owner}`) there, NIP-98 signed
+  over the body by **the node's own key**, to origins its operator lists
+  only. The answer is `[{name, value, hosts, placeholder?}]`. The daemon
+  holds a value for one engine call and hands it to msb's swap in msb's
+  environment. The guest sees the placeholder (shaped like the real key
+  when the platform says so: Hermes takes an OpenRouter key only if it
+  starts `sk-or-`), and msb's CA, which agentd installs into the guest's
+  bundle and names in `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE`.
+- Refetch at every create and start, and every `--credentials-every-s`
+  (15 min): a new value is swapped in live; a refusal withdraws it live;
+  a platform that is down keeps what a machine holds. A restore cannot
+  bring back an old value, because none is on the disk. No platform
+  signal yet: a refusal waits for the next refetch.
 - **Limits:**
   - It works only for credentials that travel in HTTP headers to known
     hosts.
@@ -558,14 +568,25 @@ the restore was skipped and the tests caught it. `Disks` now answers
 
 ## Where things stand (handoff, 2026-09-29)
 
-**Built and committed** on `claude/self-hosted-sandbox-5ecab9`:
+**Built and committed** on `claude/self-hosted-sandbox-5ecab9`, rebased
+onto `fragment-rs/master` (`402a64d`) on 2026-09-29:
 
 - phases 1 and 2 (Hermes at a locked-down URL, durable data, rebase,
   rollback);
 - phase 3 (ZFS snapshots, sealed backups to Tigris, restore from the
-  bucket alone).
+  bucket alone);
+- phase 4 (credentials from fragment.club through msb's swap), and
+  fragment's route for it.
 
-52 tests; `sandcastle/README.md` is the reference.
+62 sandcastle tests and the e2e section `sandcastle` (12);
+`sandcastle/README.md` is the reference.
+
+**fragment.club runs this branch** (`db9b39d`, deployed 2026-09-29 with
+Paul's go-ahead): master `402a64d` plus the credential route and
+`FRAGMENT_SANDCASTLE_NODES` in `fleets/fragment-club.json`. The next
+deploy of master without this branch merged takes both away, and lat-6's
+`hermes` then gets a refusal at its next refetch (its value withdrawn;
+it keeps running).
 
 **The test node, `finite-lat-6`** (`ubuntu@206.223.228.129`, rented for
 this):
@@ -574,9 +595,15 @@ this):
   `<name>.sandcastle.fragment.club`, with a Let's Encrypt certificate for
   `api`, `hermes`, and `demo` only, lapsing 2026-12-28.
 - **Units:** `sandcastled.socket` and `sandcastled.service` (the flags are
-  in the unit).
-- **Running:** the computer `demo`, a restored Hermes v0.21.5 owned by
-  the test owner key.
+  in the unit; `--node-key-file /etc/sandcastle/node.key
+  --credentials-origin https://fragment.club` since phase 4).
+- **Running:**
+  - `demo`, a restored Hermes v0.21.5 owned by the test owner key
+    (`alice.key`);
+  - `hermes`, Hermes v0.21.5 with its OpenRouter key from fragment.club,
+    owned by the hosted e2e person's key (`fragment-club-e2e-key`,
+    granted 2 computers); its spec is
+    `sandcastle-test/hermes-credentials.json`.
 - **Firewall:** nftables admits 22 and 443.
 - **Engine:** msb 0.7.4 in `/home/ubuntu/.local/bin`.
 - **Storage:** the ZFS pool `tank` (mirror), with parent
@@ -592,14 +619,19 @@ this):
   - `alice.key`: a test owner;
   - `hermes-dash-pass`, `hermes-dash-secret`: Hermes' dashboard login,
     user `sandcastle`;
-  - `hermes-v2026.9.2{1,4}.json`: specs holding those.
+  - `hermes-v2026.9.2{1,4}.json`: specs holding those;
+    `hermes-credentials.json`: the same with `credentials_url`.
+- `~/.config/finite-next/secrets/fragment-club-e2e-key`: the hosted e2e
+  person's key on fragment.club, the owner of lat-6's `hermes`.
 - `~/.config/finite-next/secrets/sandcastle-backups.env`: the bucket's
   scoped key, flyctl's output as is. The node's copy is
   `/etc/sandcastle/backups.env`, as `KEY=value` lines.
 - `~/.config/finite-next/secrets/sandcastle-lat6-backup.key`: the copy
   of the node's backup key. Without it, no backup opens.
 - On the node: `/etc/sandcastle/{le-cert,le-key}.pem`,
-  `backup.key`, `backups.env`; state in `/var/lib/sandcastle`.
+  `backup.key`, `backups.env`, and `node.key` (the node's own key, made
+  there and never copied off; public key `aedf7b6c…4ad6`, which
+  `sandcastle health` shows); state in `/var/lib/sandcastle`.
 
 **Driving it** (from `sandcastle/`):
 
@@ -628,53 +660,90 @@ A store schema change is a hard cut:
 **Lessons that cost time:**
 
 - `msb exec` needs a stdin that ends.
-- Check what a release build contains (grep the binary for a new
-  string) when it finishes suspiciously fast.
+- Check what a release build contains when it finishes suspiciously
+  fast: `cargo build -v` says Fresh or Compiling. Grepping the binary
+  works only for long strings; LLVM stores short literals as immediates.
+- fragment.club runs `fragment-rs/master`, not this repo's `main`:
+  rebase onto it before any deploy.
 - A view right after a PUT is stale unless `pending` is false.
 - zsh does not split `$VAR` into words.
 
-## Phase 4 plan: the credential source
+## Phase 4 on the real engine: credentials from the platform (2026-09-29)
 
-**Paul's calls (2026-09-29):**
+**Paul's calls (2026-09-29):** build fragment's endpoint now, not a
+stand-in (a person's computer needs their model key, which must never be
+on its disk: docs/secrets.md); use the OpenRouter key fragment already
+uses, the person's own key the Ledger mints (`cell/src/ledger.rs`); and
+fragment.club is fine to deploy to.
 
-- Build fragment's endpoint now, not a stand-in. It has a use already: a
-  person's computer needs their model key, which must never be on its
-  disk (docs/secrets.md).
-- Use the OpenRouter key fragment already uses: the person's key the
-  Ledger cell mints with the management key (`cell/src/ledger.rs`).
+**Built:**
 
-**The shape:**
+- **fragment:** `POST /api/sandcastle/credentials` (docs/api.md). It
+  answers only the node keys the fleet lists (`FRAGMENT_SANDCASTLE_NODES`),
+  asks the registry, live, whose the owner key is, and returns that
+  person's Ledger key (an agent's or a computer's: its owner's) for
+  `openrouter.ai`, with the placeholder
+  `sk-or-v1-placeholder-swapped-for-the-real-key-on-the-way-out`. e2e
+  section `sandcastle`, 12 checks. Deployed to fragment.club from this
+  branch (see the handoff).
+- **sandcastle:** `credentials_url` in the spec, the node's own key,
+  listed origins, the msb swap, live rotation, withdrawal on refusal
+  (`sandcastle/README.md`, Credentials). 62 tests.
+- **The key's owner here** is the fragment.club person behind the
+  hosted e2e key (`fragment-club-e2e-key`, pubkey `438d49eb…`), granted
+  on lat-6. The computer is `hermes` (`sc-2c763e7e14f6986f`), Hermes
+  v0.21.5 with the model `z-ai/glm-5.3-flash`.
 
-- **The spec.** A computer names `credentials_url` in its spec (a
-  sandcastle field). The node fetches it with NIP-98 signed by **the
-  node's own key**, a new `--node-key-file` whose public key the platform
-  trusts.
-- **The answer.** It returns `[{name, value, hosts}]`, held in the
-  node's memory only. The node hands each value to the engine at create
-  through the msb subprocess's environment, as `--secret NAME@HOST`,
-  never argv. The guest sees a placeholder.
-- **Rotation.** A new version at the source is a new generation: the
-  node refetches on every create and start, and a rebase applies it.
-- **fragment's side.** A route answers only to its configured sandcastle
-  node keys. It maps the computer to the person or agent that owns it
-  (fragment's record of the computers it made on sandcastle) and returns
-  that owner's Ledger key, for `openrouter.ai`. fragment is the grantor
-  and the computer's owner key on the node.
+**Checks on lat-6:**
 
-**To verify on the real engine:**
+| Check | Result |
+|---|---|
+| The node fetches from fragment.club and creates through the swap | serving about 40 s after the PUT, first try after the fix below |
+| What the guest sees | `OPENROUTER_API_KEY=sk-or-v1-placeholder-swapped-for-the-real-key-on-the-way-out`, in the service's env and in a plain exec (msb sets it too); agentd installed msb's CA and set `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` |
+| A real model call from the service's own environment, as its user | `hermes -z` answered "sandcastle credentials work" in 7.1 s; again after a service death and daemon restart (the node handed the credentials over again before relaunching, and logged it) in 9.2 s; again after a stop and start (serving 5 s after start) in 3.9 s |
+| No key in the guest | any `sk-or-v1-` + 64 hex: 0 in every process's environ, 0 in 280 MiB of readable process memory, 0 in 16,783 files under `/opt/data`, `/tmp`, `/run`, `/root`, `/etc`, `/var`; a planted key-shaped string in the scanner's own memory was found (control) |
+| No key on the disk or in a snapshot | 0 in a plain `zfs send` of the snapshot taken after the turn (48 MB), where the turn's own answer appears 6 times (control); backups are sealed streams of these snapshots |
+| No key at rest on the host | 0 in `/var/lib/sandcastle`, in `~/.microsandbox` (files under 256 MB), and in the daemon's journal; 0 in any msb process's argv |
+| Live rotation (msb, by hand, dummy values to httpbin) | the guest's env kept the placeholder; httpbin saw value one, then value two after `msb modify`, no restart; `msb start` without the value fails closed ("host environment variable … is not set"), and with value three httpbin saw three; no file under `~/.microsandbox` held any of the three |
 
-- which placeholder the guest sees;
-- that Hermes' Python trusts microsandbox's CA (it honours
-  `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE`, and the node may need to
-  set them in the service env);
-- that a real Hermes model call succeeds;
-- that `env`, `/proc/*/environ`, `/data`, and a guest memory dump hold no
-  key;
-- that rotation takes effect with no key in any snapshot or backup.
+**What we found:**
 
-**Open:** where fragment's endpoint runs for the e2e. fragment.club
-needs Paul's approval to deploy, and the dev stack on a Mac is not
-reachable from lat-6.
+- **Hermes checks a key's shape.** v0.21.5 ignores an OpenRouter key
+  that does not start `sk-or-`, and any value that looks like a
+  placeholder (`hermes_cli/auth.py`: `KNOWN_PROVIDER_KEY_PREFIXES`,
+  `_is_placeholder_shape`). msb's own placeholder is `$MSB_<NAME>`. So
+  the source names the placeholder, and msb takes it only through a
+  secret config (`--secret-conf`), not the `--secret` flag.
+- **msb reads a config source more than once.** `--secret-conf
+  /dev/stdin` read as empty ("invalid type: null"); a 0600 file in the
+  engine's home, with no value in it and removed after the create, works.
+  msb interpolates `$` in every config string, so a placeholder has none.
+- **The value lives on in msb's host process.** `msb machine` inherits
+  `msb create`'s environment, so `/proc/<pid>/environ` of the computer's
+  VM process on the host holds the value for the machine's life. The
+  guest cannot see it; the node's user can (debt ledger).
+- **Rotation is live.** `msb modify --secret NAME@HOST` swaps a value in
+  on a running machine (later connections carry it) and keeps a custom
+  placeholder. New names or placeholders need a restart.
+- **fragment's own model route is the other shape.** Since decision 21
+  (2026-09-26) fragment's computers call `POST /api/model/chat/completions`
+  signed with their own key, and each call is reserved and settled on the
+  owner's month. The swap hands the Ledger key itself, so a sandcastle
+  computer's spend is capped by the key's limit (the allowance) but not
+  in the Ledger's usage rows (debt ledger). A per-computer token for the
+  model route, handed through the same swap, would close that.
+- **This branch was cut from `main`, 207 commits behind
+  `fragment-rs/master`,** which fragment.club runs. It was rebased onto
+  `402a64d` before deploying, so the deploy took nothing back.
+- **A release binary may not contain a short literal verbatim**: LLVM
+  stores `--secret-conf` as immediates. Check a new build with a longer
+  string, or with `cargo build -v` ("Fresh" or "Compiling").
+
+**Not proven on the real engine:** a new value at the source through
+the node's schedule (the Ledger has no rotate; by hand with msb and in
+the tests), and a refusal from fragment.club withdrawing the value
+(tested with the fake source; not run against fragment.club, which would
+mean revoking the hosted e2e key).
 
 ## Phases, each with its check
 
@@ -705,10 +774,12 @@ reachable from lat-6.
      `integrity_check` and reopens the same conversation, then runs a
      fresh model and tool turn.
    - Nothing in the guest can list or trigger a snapshot or restore.
-4. **Credentials (R5).** A real OpenRouter call through the swap. Then
-   `env`, `/proc/*/environ`, a grep of `/data` and a memory dump of the
-   guest find no key. Rotating the key at the source takes effect
-   without touching the guest. A restore brings back no old value.
+4. **Credentials (R5).** *Met 2026-09-29 on lat-6, the key from
+   fragment.club (Phase 4 on the real engine).* A real OpenRouter call
+   through the swap. Then `env`, `/proc/*/environ`, a grep of `/data` and
+   a memory dump of the guest find no key. Rotating the key at the source
+   takes effect without touching the guest (msb by hand, and the tests).
+   A restore brings back no old value.
 5. **Sleep and wake (R7).** Checks:
    - Idle sleep happens with a quiet WebSocket open.
    - A browser request wakes the computer, measured as ten warm and ten

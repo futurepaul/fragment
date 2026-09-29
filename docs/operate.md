@@ -86,6 +86,12 @@ rolls the Machines. Budgets (phase 4 slice C):
 person's OpenRouter key; `FRAGMENT_BUDGET_USD` (default 20) and
 `FRAGMENT_OPERATORS` (who may top up: `fragment budget top-up <id>
 <usd>`) in `vars`.
+`FRAGMENT_SANDCASTLE_NODES` in `vars` lists the sandcastle nodes (their
+own keys, npub or 64 hex, comma-separated) that may fetch a computer's
+model key (`POST /api/sandcastle/credentials`, docs/sandbox.md); a node
+shows its key at `GET https://api.<its domain>/v1/health` (`node_key`).
+Removing a node's key refuses its next refetch, which withdraws the key
+from its computers.
 
 Hosts: `FRAGMENT_PLATFORM_URL` (`https://fragment.club`) is the
 platform, `FRAGMENT_HOST_SUFFIX` (`fragment.boats`) the fragments, and
