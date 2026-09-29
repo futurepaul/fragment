@@ -923,3 +923,20 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** the node tells the platform (a signed call to the
   credential source) when a computer is deleted, and the platform drops
   its token, with a test.
+
+## sandcastle's node has known defects, pending its rewrite
+
+- **Observed:** 2026-09-29, two reviews against the engineering style
+  (docs/sandcastle-rewrite.md lists 14, two reproduced), after phase 4.
+  The worst:
+  - a daemon restart stops credentialed computers;
+  - backup shipping breaks after 10,000 backups;
+  - an assertion kills a task, not the node;
+  - infrastructure faults roll back good specs;
+  - a partial restore can boot as complete.
+- **Risk:** on the test node only (fragment.club runs no sandcastle
+  code). Anyone running a node before the rewrite hits them.
+- **First proof:** already present (the two reproduced).
+- **Delete when:** the rewrite in docs/sandcastle-rewrite.md lands, with
+  each defect a regression case in its simulator or tests.
+
