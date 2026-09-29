@@ -828,13 +828,45 @@ without a delete condition is unfinished design, not debt.
   no row and reports them to the operator (never deleting data on its
   own), with a test.
 
-## The test node's daemon runs as a login user
+## The test node is set up by hand and runs as a login user
 
 - **Observed:** 2026-09-29. On `finite-lat-6`, `sandcastled` runs as
   `ubuntu`, whose home holds microsandbox's state, because msb was
-  installed there first.
-- **Risk:** anything else running as that user (an operator's shell) can
-  reach every computer's engine state.
-- **First proof:** a second use of the test host.
-- **Delete when:** the node runs as a dedicated system user with its own
-  `MSB_HOME`, set up by the node's install step.
+  installed there first. Everything the node needs from the host was done
+  by hand (sandcastle/README.md, Running a node):
+  - the ZFS pool and its delegation;
+  - the zvol udev rule;
+  - the nftables rules;
+  - the systemd units;
+  - the certificate.
+- **Risk:**
+  - Anything else running as that user (an operator's shell) can reach
+    every computer's engine state and disks.
+  - A second node is set up differently from the first.
+- **First proof:** a second node, or a second use of the test host.
+- **Delete when:** a Rust install step sets up a node from nothing as a
+  dedicated system user with its own `MSB_HOME`, and a check on a fresh
+  host proves it.
+
+## A sandcastle node's snapshots do not leave the host
+
+- **Observed:** 2026-09-29 (phase 3, part one). Snapshots are ZFS
+  snapshots on the node's own pool.
+- **Risk:** a lost host, pool, or node loses every computer's data and
+  every snapshot of it.
+- **First proof:** any disk or host failure.
+- **Delete when:** snapshots are sent off the host (phase 3, part two) and
+  restored from there onto an empty target (part three), with the restore
+  checked on the real engine.
+
+## A sandcastle disk has no space reserved
+
+- **Observed:** 2026-09-29. Disks are sparse ZFS volumes (`zfs create
+  -s`): a computer's `data_gib` is a ceiling, not a reservation, and the
+  pool's free space is shared.
+- **Risk:** a full pool fails every computer's writes at once, the way a
+  full disk would, however little each one used.
+- **First proof:** a pool past about 80% full.
+- **Delete when:** the node refuses a create, or a grant, that would
+  overcommit the pool past a configured ratio, and reports pool usage,
+  with a test.
