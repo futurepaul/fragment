@@ -441,6 +441,8 @@ Rust e2e lane (debt ledger).
 | `systemctl restart sandcastled` with requests in flight | 40 of 40 answered; same VM and Hermes processes, no relaunch |
 | Stop, then start, through the API | stopped in 1.7 s (URL 503); serving 5.3 s after start; marker and sessions intact |
 | An idle Hermes computer (2 vCPU, 4 GiB) | about 455 MB of host RAM |
+| A rebase onto a tag that does not exist | rolled back: serving v0.21.4 again 8 s after the call, the marker intact, the view reporting the failed and running images and msb's registry error |
+| A rebase onto a service that exits at once (grace 45 s on the test node) | rolled back at 47 s, serving again at 52 s; a new PUT of the good spec clears the report |
 | On `sandcastle.fragment.club` with a Let's Encrypt certificate: the CLI and curl with no overrides; a real browser (the desktop app's) opening a ticket | the ticket redeemed, the router's cookie invisible to page scripts, Hermes' sign-in page served behind it |
 
 What the real engine taught (each now fixed and, where the fake can hold
@@ -489,9 +491,8 @@ it, tested):
      and another computer are refused.
    - No ticket, an expired ticket and a replayed ticket are refused at
      the router.
-2. **Durable data and updates (R2).** *Met by hand 2026-09-29 (rebase
-   and restart); the broken-image rollback is not built: a failed rebase
-   backs off rather than returning to the old image.* Checks:
+2. **Durable data and updates (R2).** *Met 2026-09-29, rollback
+   included, on the fake and on the real engine.* Checks:
    - A conversation survives stop/start and a rebase from an older
      Hermes image to v0.21.5.
    - A rebase onto a broken image returns to the old image with the
