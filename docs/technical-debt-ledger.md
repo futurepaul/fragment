@@ -796,19 +796,6 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** a per-signer token bucket answers 429 before signature
   verification's cost, with its limits documented and tested.
 
-## A failed sandcastle rebase backs off instead of rolling back
-
-- **Observed:** 2026-09-29. When a new image never serves, the supervisor
-  retries, then backs off, leaving the computer down; the old image is
-  not restored by itself (docs/sandbox.md, open question 2).
-- **Risk:** a bad release takes a person's agent down until the platform
-  notices and PUTs the old image back.
-- **First proof:** the first Hermes release that fails to start on an
-  existing home.
-- **Delete when:** a rebase keeps the previous generation, returns to it
-  when the new one does not serve within the grace, reports that it did,
-  and a test drives it with the fake and on the real engine.
-
 ## sandcastle's test node has per-name certificates renewed by hand
 
 - **Observed:** 2026-09-29. `finite-lat-6` serves
