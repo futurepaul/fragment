@@ -708,3 +708,27 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** the chat renders with the viewer's renderer (one
   module served to both, the chat's picture links kept), proven by the
   chat, desktop, and files e2e sections.
+
+## Files depend on code.storage, a hosted service with no self-hosted twin
+
+- **Observed:** 2026-09-29, while scoping self-hosting (the sandbox
+  investigation). Every fragment's files and history live in a
+  code.storage repo (`cell/src/cs.rs`, `cli/src/sync.rs`), reached only
+  through its REST API: repos, repo urls, branches, file metadata and
+  reads, commits, commit packs with expected-parent CAS, merges,
+  restore commits, and signed push webhooks, under ES256 JWTs minted with
+  the org key. No git smart-HTTP is used. The only other implementation
+  is the test fake (`crates/fakes/src/codestorage.rs`), which keeps its
+  state in memory or one JSON file.
+- **Risk:** fragment is not self-hostable while one of its planes is a
+  vendor's hosted service; an outage, a price change, or a deprecation
+  at code.storage stops every fragment's files at once, and a
+  self-hoster (bring your own compute, ROADMAP phase 10) must hold a
+  code.storage org.
+- **First proof:** the first deployment that cannot or will not use
+  code.storage (a self-hosted or air-gapped fleet), or a code.storage
+  outage on fragment.club.
+- **Delete when:** a self-hostable service answers the same REST subset
+  on durable storage (git on disk or in the bucket), with the fake's
+  rules as its conformance suite, and the e2e passes against it as well
+  as against the fake.
