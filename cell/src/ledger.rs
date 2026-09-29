@@ -39,12 +39,45 @@ CREATE TABLE IF NOT EXISTS usage (
   result TEXT, created_at INTEGER NOT NULL, settled_at INTEGER);
 CREATE INDEX IF NOT EXISTS usage_period ON usage (period, state);
 CREATE INDEX IF NOT EXISTS usage_video ON usage (video) WHERE video IS NOT NULL;
+CREATE TABLE IF NOT EXISTS computer_tokens (
+  node_key TEXT NOT NULL, computer TEXT NOT NULL, node TEXT NOT NULL, name TEXT NOT NULL, owner_key TEXT NOT NULL,
+  hash TEXT NOT NULL UNIQUE, sealed TEXT NOT NULL, created_at INTEGER NOT NULL, fetched_at INTEGER NOT NULL,
+  PRIMARY KEY (node_key, computer));
 ";
 /// A top-up at a time, and a month's usage rows listed at most (in
 /// `/usage`; `/status` lists the newest few).
 const TOPUP_MAX: i64 = 1_000 * budget::USD;
 const USAGE_PAGE: i64 = 1_000;
 const STATUS_USAGE: i64 = 20;
+
+/// A sandcastle computer's token lapses when its node has not asked for
+/// it in this long: the node asks every 15 minutes while the computer
+/// serves and at every start, so a deleted computer's token dies by itself.
+pub const COMPUTER_TOKEN_IDLE_MS: i64 = 24 * 3600 * 1000;
+const COMPUTER_TOKEN_PREFIX: &str = "fsc1_";
+
+/// A sandcastle computer's token: `fsc1_<the org's 32 hex>_<64 hex>`. It
+/// names its org, so the model route knows which ledger to ask; the
+/// secret is the rest.
+fn computer_token(org: &str, secret_hex: &str) -> String {
+    let org_hex = org.strip_prefix("org:").expect("a valid org");
+    format!("{COMPUTER_TOKEN_PREFIX}{org_hex}_{secret_hex}")
+}
+
+/// The org a computer token names, if it is shaped like one.
+pub fn org_of_computer_token(token: &str) -> Option<String> {
+    let rest = token.strip_prefix(COMPUTER_TOKEN_PREFIX)?;
+    let (org_hex, secret) = rest.split_once('_')?;
+    let secret_ok = secret.len() == 64 && secret.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase());
+    let org = format!("org:{org_hex}");
+    (secret_ok && valid_org(&org)).then_some(org)
+}
+
+/// How a computer token is looked up: never the token itself.
+pub fn computer_token_hash(token: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(token.as_bytes()))
+}
 
 /// A person's personal billing org.
 pub fn org_of(identity: &str) -> Option<String> {
@@ -268,6 +301,57 @@ pub struct TopUp {
 impl Route for TopUp {
     const PATH: &'static str = "/top-up";
     type Answer = BudgetView;
+}
+
+/// A sandcastle computer's token (docs/sandbox.md, Credentials): what
+/// its node's credential swap sends, as a bearer, to the platform's model
+/// route for it, which spends this org's month. One per computer on a
+/// node, the same each time the node asks (kept sealed; looked up by its
+/// hash), minted on the first ask. A new owner key for the same computer
+/// is a new token.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerToken {
+    /// The node's own key (64 hex), and what the node calls itself.
+    pub node_key: String,
+    pub node: String,
+    /// The computer's id and name on the node.
+    pub computer: String,
+    pub name: String,
+    /// The key that owns the computer on the node (64 hex).
+    pub owner_key: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TokenAnswer {
+    pub token: String,
+}
+
+impl Route for ComputerToken {
+    const PATH: &'static str = "/computer-token";
+    type Answer = TokenAnswer;
+}
+
+/// Whose a presented computer token is: 401 when it is no token here, or
+/// one its node has not asked for in `COMPUTER_TOKEN_IDLE_MS`.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckToken {
+    pub hash: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TokenHolder {
+    pub node_key: String,
+    pub node: String,
+    pub computer: String,
+    pub name: String,
+    pub owner_key: String,
+}
+
+impl Route for CheckToken {
+    const PATH: &'static str = "/computer-token/check";
+    type Answer = TokenHolder;
 }
 
 /// Dev fleets only: move this ledger's clock (to cross a month).
@@ -574,6 +658,65 @@ impl LedgerCell {
         })
     }
 
+    async fn computer_token(&self, ask: ComputerToken) -> CellResult<TokenAnswer> {
+        let fields_ok = [&ask.node_key, &ask.owner_key].iter().all(|k| npub::is_hex_key(k))
+            && [&ask.node, &ask.computer, &ask.name].iter().all(|f| !f.is_empty() && f.len() <= 64 && f.bytes().all(|c| c.is_ascii_graphic()));
+        if !fields_ok {
+            return Err(CellError::invalid("a computer token names a node key, owner key (64 hex each), node, computer, and name (1 to 64 printable)"));
+        }
+        let org = self.org()?;
+        let now = self.now()?;
+        let row = self.rows(
+            "SELECT owner_key, sealed FROM computer_tokens WHERE node_key = ? AND computer = ?",
+            vec![ask.node_key.as_str().into(), ask.computer.as_str().into()],
+        )?;
+        if let Some(row) = row.first().filter(|r| r["owner_key"] == ask.owner_key.as_str()) {
+            let sealed = row["sealed"].as_str().ok_or_else(|| CellError::host("a computer token row without its token"))?;
+            let opened = keys::open(&self.env, sealed, &org).await.map_err(|e| CellError::host(format!("a computer token: {}", e.message)))?;
+            let fresh = opened.resealed.unwrap_or_else(|| sealed.to_string());
+            self.exec(
+                "UPDATE computer_tokens SET fetched_at = ?, node = ?, name = ?, sealed = ? WHERE node_key = ? AND computer = ?",
+                vec![SqlStorageValue::Integer(now), ask.node.as_str().into(), ask.name.as_str().into(), fresh.into(), ask.node_key.as_str().into(), ask.computer.as_str().into()],
+            )?;
+            let token = String::from_utf8(opened.plaintext).map_err(|_| CellError::host("a computer token is not text"))?;
+            return Ok(TokenAnswer { token });
+        }
+        let token = computer_token(&org, &js::random_hex::<32>());
+        let sealed = keys::seal(&self.env, token.as_bytes()).await?;
+        // a new owner key for the same computer replaces the old token
+        self.exec(
+            "INSERT OR REPLACE INTO computer_tokens (node_key, computer, node, name, owner_key, hash, sealed, created_at, fetched_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            vec![
+                ask.node_key.as_str().into(),
+                ask.computer.as_str().into(),
+                ask.node.as_str().into(),
+                ask.name.as_str().into(),
+                ask.owner_key.as_str().into(),
+                computer_token_hash(&token).into(),
+                sealed.into(),
+                SqlStorageValue::Integer(now),
+                SqlStorageValue::Integer(now),
+            ],
+        )?;
+        Ok(TokenAnswer { token })
+    }
+
+    fn check_token(&self, check: CheckToken) -> CellResult<TokenHolder> {
+        let unknown = || CellError::new(ErrorCode::Unauthenticated, "no such computer token");
+        let rows = self.rows(
+            "SELECT node_key, node, computer, name, owner_key, fetched_at FROM computer_tokens WHERE hash = ?",
+            vec![check.hash.as_str().into()],
+        )?;
+        let row = rows.first().ok_or_else(unknown)?;
+        let fetched = row["fetched_at"].as_i64().expect("computer_tokens.fetched_at is INTEGER");
+        if self.now()? - fetched > COMPUTER_TOKEN_IDLE_MS {
+            return Err(CellError::new(ErrorCode::Unauthenticated, "this computer's node has not asked for its token in a day: it lapsed"));
+        }
+        let text = |k: &str| row[k].as_str().unwrap_or_default().to_string();
+        Ok(TokenHolder { node_key: text("node_key"), node: text("node"), computer: text("computer"), name: text("name"), owner_key: text("owner_key") })
+    }
+
     async fn route(&self, mut req: Request) -> CellResult<Value> {
         let org = req.headers().get(ORG_HEADER)?.filter(|o| valid_org(o)).ok_or_else(|| CellError::host("a ledger call names its org"))?;
         match self.meta("org")? {
@@ -609,6 +752,8 @@ impl LedgerCell {
                 reply::<Usage>(self.view(&period, USAGE_PAGE))
             }
             TopUp::PATH => reply::<TopUp>(self.top_up(decode(&body)?).await),
+            ComputerToken::PATH => reply::<ComputerToken>(self.computer_token(decode(&body)?).await),
+            CheckToken::PATH => reply::<CheckToken>(self.check_token(decode(&body)?)),
             SetClock::PATH if self.cfg.test_hooks => {
                 let clock: SetClock = decode(&body)?;
                 self.set_meta("clock_offset", &clock.offset_ms.to_string())?;
