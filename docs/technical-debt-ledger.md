@@ -732,3 +732,115 @@ without a delete condition is unfinished design, not debt.
   on durable storage (git on disk or in the bucket), with the fake's
   rules as its conformance suite, and the e2e passes against it as well
   as against the fake.
+
+## sandcastle copies fragment's NIP-98 crate
+
+- **Observed:** 2026-09-29. `sandcastle/crates/nip98` is fragment's
+  `crates/nip98` adapted (verify also returns the event id; signing adds a
+  `nonce` tag; key proofs left out), because sandcastle must not depend on
+  fragment's crates (docs/sandbox.md, decision 4).
+- **Risk:** a fix to one copy misses the other.
+- **First proof:** a verification bug fixed in one crate and found later
+  in the other.
+- **Delete when:** both use one crate: Finite's `finite-nostr` once
+  sandcastle moves to Finite, or a NIP-98 crate both workspaces depend on.
+
+## sandcastle's real-engine check is by hand
+
+- **Observed:** 2026-09-29. The node's tests run everything but the
+  microVM runtime (a fake engine). The real engine, Hermes, TLS, and the
+  host's firewall were proven by a hand-driven run against `finite-lat-6`
+  (docs/sandbox.md, Phases 1 and 2 on the real engine).
+- **Risk:** an msb upgrade or a node change breaks the real path with
+  every test green. Three of the day's bugs showed only on the real
+  engine.
+- **First proof:** the next msb release.
+- **Delete when:** a Rust e2e (a `sandcastle` crate or lane) drives a real
+  node on a KVM host through the CLI and HTTPS, covering the table in
+  docs/sandbox.md, and runs before every deploy.
+
+## A sandcastle node keeps service env in plaintext
+
+- **Observed:** 2026-09-29. A computer's `service.env` (Hermes' dashboard
+  password and session secret) is stored in the node's SQLite as part of
+  the spec, and in the guest's `/run/sandcastle/service.env`. Views
+  redact it.
+- **Risk:** a copy of the node's state file discloses every service's
+  settings.
+- **First proof:** a backup of `/var/lib/sandcastle` leaving the host.
+- **Delete when:** env values are sealed at rest with a key the node holds
+  apart from its state, or come from the credential source like every
+  other secret.
+
+## A sandcastle node converges one computer at a time
+
+- **Observed:** 2026-09-29. The supervisor walks every computer in one
+  task each tick. A slow step (an image pull, up to the engine's 600 s
+  create timeout) delays every other computer's convergence, wake, and
+  health.
+- **Risk:** on a busy node, one new computer's first pull stalls everyone
+  else's recovery.
+- **First proof:** a node with a handful of computers when one pulls a new
+  image.
+- **Delete when:** each computer converges in its own task, with a
+  per-computer lock and a bound on concurrent engine calls.
+
+## A sandcastle node has no per-signer rate limit
+
+- **Observed:** 2026-09-29. The API bounds bodies, headers, connections,
+  tickets, sessions, and the replay cache, but not how often one key
+  calls. Brain limits per signer.
+- **Risk:** one key, granted or not, spends the node's CPU on signature
+  checks and its disk on replay rows.
+- **First proof:** a misbehaving client in a loop.
+- **Delete when:** a per-signer token bucket answers 429 before signature
+  verification's cost, with its limits documented and tested.
+
+## A failed sandcastle rebase backs off instead of rolling back
+
+- **Observed:** 2026-09-29. When a new image never serves, the supervisor
+  retries, then backs off, leaving the computer down; the old image is
+  not restored by itself (docs/sandbox.md, open question 2).
+- **Risk:** a bad release takes a person's agent down until the platform
+  notices and PUTs the old image back.
+- **First proof:** the first Hermes release that fails to start on an
+  existing home.
+- **Delete when:** a rebase keeps the previous generation, returns to it
+  when the new one does not serve within the grace, reports that it did,
+  and a test drives it with the fake and on the real engine.
+
+## sandcastle's test node has a private CA and no DNS
+
+- **Observed:** 2026-09-29. `finite-lat-6` serves `*.sandcastle.test` from
+  a certificate signed by a CA made on the host; clients pass the CA and
+  `--connect`/`--resolve`. No browser has opened a computer.
+- **Risk:** browser-only behaviour (cookies across a real public suffix,
+  mixed content, the Hermes UI's own requests) goes unchecked.
+- **First proof:** the first browser session.
+- **Delete when:** a real domain points at the node, a wildcard
+  certificate is issued by ACME (DNS-01) and renewed, and a browser check
+  opens Hermes through a ticket (docs/sandbox.md, open question 1).
+
+## A sandcastle node does not notice engine machines it has no row for
+
+- **Observed:** 2026-09-29. When a node's state is lost or reset, its
+  `sc-…` machines and disks keep running and holding space with no row,
+  and nothing reports them (it happened once on `finite-lat-6`, cleaned up
+  by hand).
+- **Risk:** leaked machines and disks, and a person's data orphaned with
+  no owner on record.
+- **First proof:** any state restore or reset on a node with computers.
+- **Delete when:** the supervisor lists `sc-…` machines and volumes with
+  no row and reports them to the operator (never deleting data on its
+  own), with a test.
+
+## The test node's daemon runs as a login user
+
+- **Observed:** 2026-09-29. On `finite-lat-6`, `sandcastled` runs as
+  `ubuntu`, whose home holds microsandbox's state, because msb was
+  installed there first.
+- **Risk:** anything else running as that user (an operator's shell) can
+  reach every computer's engine state.
+- **First proof:** a second use of the test host.
+- **Delete when:** the node runs as a dedicated system user with its own
+  `MSB_HOME`, set up by the node's install step.
