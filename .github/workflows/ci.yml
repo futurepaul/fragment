@@ -35,6 +35,30 @@ jobs:
           restore-keys: check-${{ runner.os }}-
       - run: cargo xtask check
 
+  # sandcastle, a workspace of its own (docs/sandbox.md): clippy, its
+  # tests, and the simulator's default seeds. The real engine needs a KVM
+  # host; its e2e (sandcastle-e2e) runs by hand on finite-lat-6.
+  sandcastle:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sandcastle
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            sandcastle/target
+          key: sandcastle-${{ runner.os }}-${{ hashFiles('sandcastle/Cargo.lock') }}
+          restore-keys: sandcastle-${{ runner.os }}-
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+
   # The kit (`cargo xtask e2e-kit`) in two parts, built in parallel; each
   # shard unpacks both. The cell's wasm builds on Linux (wasm is wasm, and
   # Linux runners are plenty); on macOS, whose binaries the shards run, the

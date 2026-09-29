@@ -745,19 +745,20 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** both use one crate: Finite's `finite-nostr` once
   sandcastle moves to Finite, or a NIP-98 crate both workspaces depend on.
 
-## sandcastle's real-engine check is by hand
+## sandcastle's real-engine e2e runs by hand
 
-- **Observed:** 2026-09-29. The node's tests run everything but the
-  microVM runtime (a fake engine). The real engine, Hermes, TLS, and the
-  host's firewall were proven by a hand-driven run against `finite-lat-6`
-  (docs/sandbox.md, Phases 1 and 2 on the real engine).
+- **Observed:** 2026-09-29. `sandcastle-e2e` (`sandcastle/crates/e2e`)
+  drives a real node on a KVM host through its API and URLs and checks
+  the host over SSH (62 checks on `finite-lat-6`, JSON evidence), but it
+  runs only when someone runs it: CI has no KVM host, and nothing runs it
+  before a deploy.
 - **Risk:** an msb upgrade or a node change breaks the real path with
-  every test green. Three of the day's bugs showed only on the real
-  engine.
+  every CI check green. Three of the first day's bugs showed only on the
+  real engine.
 - **First proof:** the next msb release.
-- **Delete when:** a Rust e2e (a `sandcastle` crate or lane) drives a real
-  node on a KVM host through the CLI and HTTPS, covering the table in
-  docs/sandbox.md, and runs before every deploy.
+- **Delete when:** the e2e runs on a KVM host for every change that
+  reaches a node (a CI runner with `/dev/kvm`, or a deploy command that
+  runs it first and refuses on a failure).
 
 ## A sandcastle node keeps service env in plaintext
 
@@ -771,21 +772,6 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** env values are sealed at rest with a key the node holds
   apart from its state, or come from the credential source like every
   other secret.
-
-## A sandcastle node converges one computer at a time
-
-- **Observed:** 2026-09-29. The supervisor walks every computer in one
-  task each tick. A slow step delays every other computer's convergence,
-  wake, and health:
-  - an image pull, up to the engine's 600 s create timeout;
-  - a restore, which downloads and replays a whole chain inside that
-    tick.
-- **Risk:** on a busy node, one new computer's first pull stalls everyone
-  else's recovery.
-- **First proof:** a node with a handful of computers when one pulls a new
-  image.
-- **Delete when:** each computer converges in its own task, with a
-  per-computer lock and a bound on concurrent engine calls.
 
 ## A sandcastle node has no per-signer rate limit
 
@@ -806,7 +792,9 @@ without a delete condition is unfinished design, not debt.
   over HTTP-01, with port 80 opened for the issue only, and copied to
   `/etc/sandcastle/le-*.pem` for the daemon.
 - **Risk:**
-  - A computer with any other name fails TLS.
+  - A computer with any other name fails TLS in a browser (the e2e
+    reaches such computers with the API's TLS name and their own Host
+    header).
   - certbot's renewal timer will fail with port 80 closed, and even when
     it succeeds it does not copy the files or restart the daemon, so the
     certificate lapses on 2026-12-28.
@@ -819,16 +807,17 @@ without a delete condition is unfinished design, not debt.
 
 ## A sandcastle node does not notice engine machines it has no row for
 
-- **Observed:** 2026-09-29. When a node's state is lost or reset, its
-  `sc-…` machines and disks keep running and holding space with no row,
-  and nothing reports them (it happened once on `finite-lat-6`, cleaned up
-  by hand).
+- **Observed:** 2026-09-29. When a node's state is lost, its `sc-…`
+  machines and disks keep running and holding space with no row, and
+  nothing reports them (it happened once on `finite-lat-6`).
+  `sandcastled reset` removes them on a test node that starts over; a
+  node that serves people has nothing.
 - **Risk:** leaked machines and disks, and a person's data orphaned with
   no owner on record.
 - **First proof:** any state restore or reset on a node with computers.
-- **Delete when:** the supervisor lists `sc-…` machines and volumes with
-  no row and reports them to the operator (never deleting data on its
-  own), with a test.
+- **Delete when:** the node lists `sc-…` machines and volumes with no
+  row and reports them to the operator (never deleting data on its own),
+  with a test in the simulator.
 
 ## The test node is set up by hand and runs as a login user
 
@@ -882,9 +871,10 @@ without a delete condition is unfinished design, not debt.
 
 ## sandcastle backups never expire
 
-- **Observed:** 2026-09-29. The shipper adds whole streams and
-  incrementals forever. Nothing deletes a chain from the bucket, not
-  even a deleted computer's.
+- **Observed:** 2026-09-29. A node ships whole streams and
+  incrementals forever, and records every one. Nothing deletes a chain
+  from the bucket or the store, not even a deleted computer's; a
+  computer's manifest lists its newest 100,000.
 - **Risk:** the bucket's size and cost grow without bound, and a
   person's data outlives their wish to delete it.
 - **First proof:** the bucket's first invoice, or someone asking that
@@ -923,20 +913,3 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** the node tells the platform (a signed call to the
   credential source) when a computer is deleted, and the platform drops
   its token, with a test.
-
-## sandcastle's node has known defects, pending its rewrite
-
-- **Observed:** 2026-09-29, two reviews against the engineering style
-  (docs/sandcastle-rewrite.md lists 14, two reproduced), after phase 4.
-  The worst:
-  - a daemon restart stops credentialed computers;
-  - backup shipping breaks after 10,000 backups;
-  - an assertion kills a task, not the node;
-  - infrastructure faults roll back good specs;
-  - a partial restore can boot as complete.
-- **Risk:** on the test node only (fragment.club runs no sandcastle
-  code). Anyone running a node before the rewrite hits them.
-- **First proof:** already present (the two reproduced).
-- **Delete when:** the rewrite in docs/sandcastle-rewrite.md lands, with
-  each defect a regression case in its simulator or tests.
-
