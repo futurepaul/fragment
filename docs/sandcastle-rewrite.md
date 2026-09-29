@@ -1,7 +1,8 @@
-# sandcastle: the rewrite to engineering style (proposed)
+# sandcastle: the rewrite to engineering style
 
-Status: proposed 2026-09-29, after phase 4, before sleep and wake and
-before any computer that matters runs on it. Paul asked whether
+Status: **done 2026-09-29** (Results, at the end), and running on
+finite-lat-6. Proposed the same day, after phase 4, before sleep and wake
+and before any computer that matters runs on it. Paul asked whether
 sandcastle follows `engineering-style/engineering-style.md` (and
 TigerStyle), and to rewrite it fearlessly where it does not: it will be a
 foundational service.
@@ -485,3 +486,81 @@ whole explicit roots, and nothing else:
 
 It asks for the node name typed again. lat-6 is reset with it before the
 rewrite first runs there (Paul, 2026-09-29: wipe lat-6).
+
+## Results (2026-09-29)
+
+Built in the order of the decomposition, each part committed with its
+tests: the design (above); `crates/core` (the pure core, 24 path tests);
+`crates/node` (the store, the commands, the seal, the manifest, the
+gates, the executor, the scheduler; 34 tests); `crates/sim` (the
+simulator); `crates/sandcastled` rewritten on top (11 tests, the old
+supervisor, shipper, store, and gates deleted); `crates/e2e`. lat-6 was
+reset with `sandcastled reset` and runs the new node; the real-engine
+e2e passes 78 checks there (docs/sandbox.md, The rewrite on the real
+engine). 87 tests in CI (a `sandcastle` job), 1024 seeds pass.
+
+**What the simulator found** that the hand-written tests had not, each
+fixed in the core with a regression test:
+
+1. *Seed 80:* a crash after a rebase's stop, before its snapshot, and the
+   machine was replaced over writes no snapshot held. Now the snapshot
+   before a replacement is decided from what the disk shows, and a stop's
+   snapshot is owed in the row before the stop.
+2. A snapshot taken but not recorded (a crash between the two) was then
+   shipped as the head. Now a batch records any such snapshot before it
+   snapshots or ships.
+3. *Seed 38:* a guest that would not take a launch was asked again
+   forever, at the relaunch of a service that had served and died. Now
+   the machine restarts first, at both launch sites.
+4. *Seed 22:* a failed guest sync ended the batch, so every batch retried
+   it and none reached the snapshot or the duties (an open upload was
+   never aborted). A sync is advisory now, and the executor and the
+   simulator share one rule for whether a batch goes on (they had
+   drifted).
+5. *Seed 87:* a restart for a failed launch lost its intent when its
+   stop failed, and relaunched in a loop. The restart now goes on through
+   a failed quiesce and a failed stop.
+
+**What reading msb 0.7.4's source found:** a graceful `msb stop` waits
+for the guest to power off with no deadline (now: a stop that failed is
+followed by `msb stop -f`); `msb exec` boots a stopped machine for the
+command and stops it after (documented: the core execs only a machine its
+listing just showed running); `Starting` and `Draining` are visible only
+after a daemon died mid-operation (they read as `Other`); an image is a
+host path only when it starts `.`, `/`, `./`, or `../`, which the spec
+already refuses.
+
+**What writing the tests found:** a computer past 100,000 backups (about
+a year of 5-minute snapshots) could not record another, and the node
+would then crash on every restart. Recording never fails on the count
+now, and the manifest lists the newest 100,000.
+
+**A semantic refinement** within Paul's call ("only spec faults roll
+back"): a spec fault is the engine *refusing* to make or launch an
+unproven generation, or its service silent past the grace. An engine
+that timed out or could not run is the node's fault (an image pull on a
+slow link is not a bad image).
+
+**The audit's items, and where each went:**
+
+| # | Defect | Now | Proof |
+|---|---|---|---|
+| 1 | A restart stops credentialed computers | the row holds each machine's credential shape and digest | core: `credentials_refresh_by_what_the_source_says` |
+| 2 | Shipping breaks after 10,000 backups | the head shipped is in the row; the manifest lists the newest | node: `a_computer_past_its_manifest_cap_keeps_shipping` |
+| 3 | An assertion kills a task, not the node | `panic = "abort"` in both profiles; the scheduler crashes the node when the store fails | the profiles; systemd restarts it (the e2e's SIGKILLs) |
+| 4 | Infrastructure faults roll back good specs | faults typed at the gate and classed in the core | core: `a_node_fault_during_a_rebase_does_not_roll_back`, `an_engine_that_times_out_…`; the simulator checks every rollback's cause |
+| 5 | A partial restore boots as complete | done only when the target snapshot is on the disk; a prefix resumes, anything else starts over | core restore tests; the e2e's mid-restore SIGKILL |
+| 6 | Multi-step work has no persisted intent | owed snapshots, the open upload, the owed manifest, and backoff are columns | the simulator's crashes after every effect |
+| 7 | Unbounded waits | a deadline on every gate phase and stream; one batch per computer, 32 at once; API bodies, proxy answers, and tunnels bounded | the gates' tests; the scheduler |
+| 8 | Invariants by read-then-write | each command one transaction, caps inside it; nothing leaves `deleted` | node: the command tests |
+| 9 | Unbounded retries | backoff in the row, 2 s doubling to 60 s; a listener that keeps failing ends the node | core: `a_first_generation_that_fails_backs_off` |
+| 10 | Security | the image and mount checked by one predicate the gate asserts; the replay cache only for known signers; only 401, 403, 404 withdraw; the origin checked at fetch; `Forwarded` stripped; env names asserted | proto, node, and daemon tests; the e2e's `auth` |
+| 11 | Output truncated silently | past a cap is `BadOutput`; a read error is never end of file | node: `a_program_is_run_bounded_and_classified` |
+| 12 | State by name | by `ComputerId` everywhere; a batch's knowledge dies with it | the store; the simulator |
+| 13 | Brittle identity | generations numbered, snapshots `sc-<n>-<kind>`, a restore's source an id and a chain | the core's model |
+| 14 | Test gaps | valid, invalid, replay, and restart tests per command; the simulator; the daemon's tests on the simulated world with no sleeps; no test variant in a production type | the suites |
+
+**Left, in the debt ledger:** the real-engine e2e runs by hand (no KVM
+host in CI); the node does not report machines with no row; backups
+never expire; the test node's certificate names three hosts; the node
+runs as a login user.
