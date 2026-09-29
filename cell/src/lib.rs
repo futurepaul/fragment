@@ -765,6 +765,11 @@ async fn budget_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
     }
 }
 
+/// What the computer's service sees in place of the key: shaped like an
+/// OpenRouter key (Hermes takes one only if it starts `sk-or-`), and saying
+/// what it is to anyone who reads it.
+const SANDCASTLE_PLACEHOLDER: &str = "sk-or-v1-placeholder-swapped-for-the-real-key-on-the-way-out";
+
 /// What a sandcastle node says about the computer it asks for
 /// (`sandcastle_proto::CredentialsAsk`).
 #[derive(Deserialize)]
@@ -810,7 +815,7 @@ async fn sandcastle_credentials(mut req: Request, env: &Env, cfg: &Config, url: 
     };
     let org = ledger::org_of(&person).ok_or_else(|| CellError::host("no billing org"))?;
     let key = ledger::ask(env, &org, &ledger::Key {}).await?.key;
-    json_answer(&json!({ "credentials": [{ "name": "OPENROUTER_API_KEY", "value": key, "hosts": ["openrouter.ai"] }] }))
+    json_answer(&json!({ "credentials": [{ "name": "OPENROUTER_API_KEY", "value": key, "hosts": ["openrouter.ai"], "placeholder": SANDCASTLE_PLACEHOLDER }] }))
 }
 
 /// `/api/identities…`: the registry's public face. The signer's key is
