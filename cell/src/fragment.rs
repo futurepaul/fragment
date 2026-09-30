@@ -1118,6 +1118,11 @@ impl FragmentCell {
             self.index_change(m, None)?;
         }
         self.flush_index().await;
+        // its Hermes goes with it: its computer, and its key's computer
+        // (asked before the meta that says it has one is wiped)
+        if self.meta(MetaKey::HermesDeclared)?.is_some() || self.meta(MetaKey::HermesPending)?.is_some() {
+            crate::hermes::ask(&self.env, &name, &crate::hermes::Ask::Destroy).await?;
+        }
         for ws in self.state.get_websockets() {
             let _ = ws.close(Some(4004), Some("the fragment was deleted"));
         }

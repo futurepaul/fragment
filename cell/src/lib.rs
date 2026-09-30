@@ -381,6 +381,10 @@ async fn remove_computer(env: &Env, url: &Url, removed: calls::RemovedComputer) 
     if let Some(fragment) = removed.name.as_deref().filter(|n| valid_fragment_name(n)) {
         computer::ask(env, fragment, &computer::Ask::Destroy).await?;
     }
+    // a fragment's Hermes' key: its computer on the node goes too
+    if let Some(fragment) = removed.name.as_deref().and_then(fragment_core::hermes::fragment_of_identity) {
+        hermes::ask(env, &fragment, &hermes::Ask::Destroy).await?;
+    }
     let list = Request::new("https://principal.internal/list", Method::Get)?;
     let listed: fragment_proto::FragmentList = env.durable_object("PRINCIPAL")?.get_by_name(&id)?.fetch_with_request(list).await?.json().await?;
     let (mut left, mut failed) = (vec![], vec![]);

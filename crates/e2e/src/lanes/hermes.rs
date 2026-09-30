@@ -198,7 +198,37 @@ pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and one computer of its owner's for it", paired == 1, &r);
     let r = access(&api, &name, Some(&owner))?;
     s.ok("its owner gets a session for the new one", r.status == 200 && r.body["accessToken"] != token.as_str(), &r);
-    page(s, &api, &home, &owner, &name, &view)
+    page(s, &api, &home, &owner, &name, &view)?;
+    ends(s, &api, &home, &owner, &name)
+}
+
+/// The ways a Hermes ends: its owner removes its key's computer (a later
+/// deploy that declares it makes a new one), and its fragment is deleted.
+fn ends(s: &mut Suite, api: &Api, home: &std::path::Path, owner: &Keys, name: &str) -> Result<()> {
+    let hermes_of = |api: &Api| -> Vec<String> {
+        let r = api.signed(owner, "GET", "/api/identities/me", None).map(|r| r.body).unwrap_or_default();
+        r["computers"].as_array().into_iter().flatten().filter_map(|c| c["name"].as_str()).filter(|n| n.contains("hermes")).map(str::to_string).collect()
+    };
+    let serving = |s: &Suite| s.sandcastle.computers().into_iter().filter(|(_, c)| c.spec["service"]["env"]["HERMES_DASHBOARD"] == "1").count();
+    let [identity] = hermes_of(api).try_into().map_err(|v| anyhow::anyhow!("one Hermes computer of its owner's: {v:?}"))?;
+    let o = s.cli(api, home, &["computers", "rm", &identity]);
+    s.ok("its owner removes its key's computer", o.status.success(), out(&o));
+    let gone = soon(s, || serving(s) == 0);
+    s.ok("and its computer leaves the node", gone, format!("{:?}", s.sandcastle.computers().keys()));
+    let r = access(api, name, Some(owner))?;
+    s.ok("with no Hermes, no session", r.status == 404, &r);
+    let dir = s.dir("hermes-template");
+    let o = s.cli(api, home, &["new", dir.to_str().expect("a UTF-8 path"), "--template", "hermes"]);
+    std::fs::write(dir.join("site/notes.txt"), "declared again")?;
+    let deployed = s.cli(api, home, &["deploy", name, "--dir", dir.to_str().expect("a UTF-8 path")]);
+    s.ok("a deploy that declares it again goes live", o.status.success() && deployed.status.success(), out(&deployed));
+    let again = soon(s, || serving(s) == 1 && hermes_of(api).len() == 1 && access(api, name, Some(owner)).is_ok_and(|r| r.status == 200));
+    s.ok("and makes a new one", again, format!("{:?} {:?}", s.sandcastle.computers().keys(), hermes_of(api)));
+    let o = s.cli(api, home, &["rm", name]);
+    s.ok("its owner deletes the fragment", o.status.success(), out(&o));
+    let gone = soon(s, || serving(s) == 0 && hermes_of(api).is_empty());
+    s.ok("and its Hermes goes with it: its computer, and its key's computer", gone, format!("{:?} {:?}", s.sandcastle.computers().keys(), hermes_of(api)));
+    Ok(())
 }
 
 /// The `hermes` template's page, in a browser: a chat with the fragment's
