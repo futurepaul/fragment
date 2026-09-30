@@ -784,6 +784,25 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** a per-signer token bucket answers 429 before signature
   verification's cost, with its limits documented and tested.
 
+## A sandcastle VM's VMM runs as the node's own user
+
+- **Observed:** 2026-09-30, on `finite-lat-6`. A computer's VM process
+  (`msb machine`, the libkrun VMM) runs as the daemon's user (uid 1000)
+  with no capabilities and no new privileges, but no seccomp, and in the
+  host's user, mount, network, and pid namespaces. libkrun's security
+  model says the guest and the VMM "pertain to the same security
+  context" and leaves isolating the VMM to the host.
+- **Risk:** a guest that escapes into its VMM (a virtio or VMM bug) acts
+  as the node's user: the node's key, its state, the backup key, and
+  other computers' disks are in reach.
+- **First proof:** a guest running code its owner did not write, on a
+  node that holds more than one person's computers.
+- **Delete when:** each VM process runs in a jail of its own (its own
+  uid, a mount namespace with only its disks, its own network namespace,
+  seccomp, a cgroup), or at least as a user apart from the daemon's
+  secrets, with a test that a guest-side escape into the VMM cannot read
+  the node's key or another computer's disk (docs/sandcastle-on-libkrun.md).
+
 ## sandcastle's test node has per-name certificates renewed by hand
 
 - **Observed:** 2026-09-29. `finite-lat-6` serves

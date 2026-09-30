@@ -36,6 +36,8 @@ github.com/futurepaul/fragment's `master`, which fragment.club runs) and on cell
    `docs/containers-on-celld.md` — the audit: celld already has
    Cloudflare's `ctx.container` (on Docker), so one codepath, with a
    sandcastle engine and the stubs filled;
+   `docs/sandcastle-on-libkrun.md` — sandcastle on libkrun directly,
+   without msb: where we fight msb, what we would build, the spike;
    `docs/phase-3.md` — hosting on fragment.club;
    `docs/phase-2.md` — the record of the core cut (slices A–G);
    `docs/operate.md` — the operator runbook.
