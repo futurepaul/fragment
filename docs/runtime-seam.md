@@ -319,3 +319,51 @@ WASM client, the e2e's `web` section, `target/e2e/sandcastle-e2e-web.json`):
 - Where a page gets its admission: fragment's platform, or the person's
   own key.
 
+
+## The cut (2026-09-30)
+
+After the measurement, the cut to one computer resource, in steps:
+
+1. **`KEYS` signs admissions** (merged): `nostr/sign` with kind
+   `admission`, a cell's sealed key signing the event sandcastle checks,
+   at most ten minutes long.
+2. **The `Hermes` cell by its key:** Hermes in loopback mode behind the
+   bridge, its session token made and sealed by the cell; the computer's
+   key, relay, and node recorded; `__hermes/access {peer}` answers an
+   owner's or editor's page with an admission for the page's key, signed
+   by the computer's key (five minutes). The sandcastle fake serves its
+   computers by their keys through an in-process relay.
+3. **The shared client:** sandcastle-web, built by `cargo xtask build`
+   (xtask/src/client.rs) and served on every host at `/__computer/` as
+   celld's static assets, so its module never enters an isolate:
+   - an entry, `/__computer/client.js`, revalidated on each load, names a
+     build (`/__computer/<digest>/`) whose files are kept a year;
+   - the module is gzipped (1.43 MB) and declared so in `_headers`,
+     since celld serves an asset's bytes as they are; it is named
+     `.wasm.gz` because celld takes every `*.wasm` below a project into
+     its bundle;
+   - the build needs an LLVM clang for wasm32 (ring's C), which xtask
+     finds (the environment, Homebrew's, the PATH's, or Nix's); CI builds
+     it on the macOS kit.
+   - A page makes its key before it knows the relay (it names its key to
+     get the admission that names the relay), so `new Peer()` makes the
+     key and the endpoint binds at the first `connect`.
+4. **The preset and the page:** `"computer": {"preset": "hermes"}` in
+   place of `"hermes": {}` (decision 1; `start` with a preset is
+   refused), and the `hermes` template's page on the client: its key, an
+   admission, REST and the socket by the computer's key, the admission
+   renewed on the same connection a minute before it ends.
+
+The e2e lane `hermes` proves 2 to 4 on fakes (49 checks), the template's
+page in headless Chrome included.
+
+Still to do:
+
+- **A derived Hermes image** with the bridge as an s6 service, in place
+  of the init command.
+- **fragment.club (Paul approves):** the grantor secret, a node deploy
+  (`KEYS`' admission kind) and the cell (its static assets ship with
+  it); no wildcard certificate is needed any more. Then the hosted
+  proof: a person on fragment.club chats with their Hermes on lat-6 by
+  its key.
+- **The `goose` preset**, and presets on a rented site.

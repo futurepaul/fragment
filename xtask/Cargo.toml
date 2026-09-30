@@ -13,3 +13,9 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 fragment-devstack = { path = "../crates/devstack" }
 fragment-fakes = { path = "../crates/fakes" }
 fragment-proto = { path = "../crates/proto" }
+# The browser's computer client (src/client.rs): wasm-bindgen as a library,
+# the version both lockfiles pin, and the module gzipped (celld serves an
+# asset as it is), under its digest.
+wasm-bindgen-cli-support = "=0.2.127"
+flate2 = "=1.1.10"
+sha2 = "=0.10.9"
