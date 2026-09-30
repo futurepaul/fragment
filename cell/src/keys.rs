@@ -3,7 +3,8 @@
 //! with them. The service knows which cell is asking (the host attests it),
 //! so a value sealed here opens only for this cell, a code.storage token is
 //! signed only for a `Fragment`, WorkOS's exchange only for the `Registry`,
-//! OpenRouter's key API only for a `Ledger`, and a Sprite only for its `Computer`.
+//! OpenRouter's key API only for a `Ledger`, a Sprite only for its `Computer`,
+//! and the platform's sandcastle grant only for a `Hermes`.
 
 use base64::Engine;
 use fragment_proto::ErrorCode;
@@ -72,6 +73,27 @@ pub async fn open(env: &Env, sealed: &str, legacy_salt: &str) -> CellResult<Open
 pub async fn nostr_keypair(env: &Env) -> CellResult<(String, String)> {
     let answer = call(env, "nostr/keypair", &json!({})).await?;
     Ok((field(&answer, "pubkey", "nostr/keypair")?, field(&answer, "sealed", "nostr/keypair")?))
+}
+
+/// A NIP-98 `Authorization` header for `method url` with `body`, signed by
+/// the nostr key sealed for this cell, with a nonce (a sandcastle node's
+/// replay cache keys on the event id): (header, the key resealed when it
+/// was stale: store it).
+pub async fn nostr_sign(env: &Env, sealed: &str, method: &str, url: &str, body: &[u8]) -> CellResult<(String, Option<String>)> {
+    let payload = (!body.is_empty()).then(|| {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(body))
+    });
+    let ask = json!({ "sealed": sealed, "legacySalt": "", "kind": "header", "method": method, "url": url, "payload": payload, "createdAt": js::now_ms() / 1000, "nonce": true });
+    let answer = call(env, "nostr/sign", &ask).await?;
+    Ok((field(&answer, "header", "nostr/sign")?, answer["resealed"].as_str().map(str::to_string)))
+}
+
+/// The platform's grant of a computer on the fleet's sandcastle node to
+/// this cell's key (a `Hermes` only): (the node's status, its answer).
+pub async fn sandcastle_grant(env: &Env, pubkey: &str, grant: &Value) -> CellResult<(u16, Value)> {
+    let answer = call(env, "sandcastle/grant", &json!({ "pubkey": pubkey, "grant": grant })).await?;
+    Ok((answer["status"].as_u64().unwrap_or(0) as u16, answer["body"].clone()))
 }
 
 /// A code.storage JWT (a `Fragment` only): (token, expiry in ms).

@@ -14,6 +14,7 @@ mod computers;
 mod control;
 mod deliver;
 mod desktop;
+mod hermes;
 mod identities;
 mod isolation;
 pub(crate) mod jobs;
@@ -99,6 +100,7 @@ const LANES: &[Lane] = &[
     deliver::ai,
     budget::budget,
     sandcastle::sandcastle,
+    hermes::hermes,
     agents::agents,
     addon::addon,
     agents::chat,

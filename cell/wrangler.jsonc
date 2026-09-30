@@ -33,7 +33,9 @@
       // A billing org's budget and usage: one cell per org (ledger.rs).
       { "name": "LEDGER", "class_name": "Ledger" },
       // A fragment's own computer, its Sprite's life: one cell per fragment that declares one (computer.rs).
-      { "name": "COMPUTER", "class_name": "Computer" }
+      { "name": "COMPUTER", "class_name": "Computer" },
+      // A fragment's own Hermes on the fleet's sandcastle node: one cell per fragment that declares one (hermes.rs).
+      { "name": "HERMES", "class_name": "Hermes" }
     ]
   },
   "migrations": [
@@ -41,6 +43,7 @@
     { "tag": "v2", "new_sqlite_classes": ["Principal"] },
     { "tag": "v3", "new_sqlite_classes": ["Registry"] },
     { "tag": "v4", "new_sqlite_classes": ["Ledger"] },
-    { "tag": "v5", "new_sqlite_classes": ["Computer"] }
+    { "tag": "v5", "new_sqlite_classes": ["Computer"] },
+    { "tag": "v6", "new_sqlite_classes": ["Hermes"] }
   ]
 }

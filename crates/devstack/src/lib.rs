@@ -196,6 +196,18 @@ pub struct Fleet {
     pub test_hooks: bool,
     /// Computers on Sprites (`None`: a fragment that declares one waits for them).
     pub computers: Option<ComputerVars>,
+    /// A fragment's Hermes on a sandcastle node (docs/hermes-chat.md;
+    /// `None`: a fragment that declares one waits for it).
+    pub hermes: Option<HermesVars>,
+}
+
+/// Hermes on a sandcastle node: the node's API (for the cell and for
+/// `KEYS`), the platform's grantor key there (for `KEYS`: 64 hex), and how
+/// often a Hermes being made is looked at.
+pub struct HermesVars {
+    pub sandcastle_url: String,
+    pub grantor_key: String,
+    pub tick_s: u32,
 }
 
 /// Computers on Sprites: the Sprites API and its token (for `KEYS`), where
@@ -257,6 +269,10 @@ impl Fleet {
             env.push(("FRAGMENT_KEYS_SPRITES_TOKEN".into(), c.sprites_token.clone()));
             env.push(("FRAGMENT_KEYS_SPRITES_URL".into(), c.sprites_url.clone()));
         }
+        if let Some(h) = &self.hermes {
+            env.push(("FRAGMENT_KEYS_SANDCASTLE_GRANTOR_KEY".into(), h.grantor_key.clone()));
+            env.push(("FRAGMENT_KEYS_SANDCASTLE_URL".into(), h.sandcastle_url.clone()));
+        }
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
         let (tick, idle) = self.computers.as_ref().map_or((String::new(), String::new()), |c| (c.tick_s.to_string(), c.idle_s.to_string()));
@@ -314,6 +330,10 @@ impl Fleet {
         }
         if let Some(c) = &self.computers {
             vars.extend([("FRAGMENT_CLI_RELEASE_URL", c.release_url.as_str()), ("FRAGMENT_COMPUTER_TICK_S", &tick), ("FRAGMENT_COMPUTER_IDLE_S", &idle)]);
+        }
+        let hermes_tick = self.hermes.as_ref().map(|h| h.tick_s.to_string()).unwrap_or_default();
+        if let Some(h) = &self.hermes {
+            vars.extend([("FRAGMENT_SANDCASTLE_API", h.sandcastle_url.as_str()), ("FRAGMENT_HERMES_TICK_S", hermes_tick.as_str())]);
         }
         write_dev_vars(project, &vars)?;
         Ok(env)

@@ -565,6 +565,20 @@ keeps the last good code and says why in `status.code.error`.
   `fragment computers rm <fragment>` destroys it. Its steps are in the
   fragment's `events` (`computer.ready`, `computer.failed`,
   `computer.budget`, `computer.destroyed`).
+- `"hermes": {}` gives the fragment its owner's own Hermes on the
+  fleet's sandcastle node (docs/hermes-chat.md; the block takes no keys
+  yet, and any is refused at deploy). The deploy that declares it has the
+  fragment's `Hermes` cell make it: a key `KEYS` makes for that cell,
+  registered as a computer the fragment's owner owns (named
+  `<label>-hermes.<username>`), so its model calls bill them; a grant of
+  one computer from the platform's grantor key; and the computer, Hermes
+  public at the node's router with its own login (a password the cell
+  generates and keeps sealed) the gate, and the fragment's origin named
+  in its `cors_origins`. Its steps are in the fragment's `events`
+  (`hermes.ready`, `hermes.failed`, retried with backoff,
+  `hermes.removed`). A deploy without the block removes the computer and
+  the key's computer; a later one makes new ones. `__hermes/access`
+  (Serving) hands a page a session for it.
 - `input` is a JSON Schema in a bounded subset (`crates/core/src/schema.rs`:
   types, `enum`, `const`, lengths, ranges, `items`, `properties`,
   `required`, `additionalProperties`, counts; annotations allowed; any
@@ -923,6 +937,7 @@ API answers on the platform's host):
 | `__fragments` | `{fragments: [{name, role, url, share, sharing?}], frame}`: the fragments this fragment's owner belongs to, only to the owner signed in here, and only when `fragment.json` at live declares `"capabilities": ["fragments"]` (anyone else, or a page that does not ask, 403). `share` is its share sheet (`<platform>/share/<name>`); `sharing` is the owner's list's (`GET /api/fragments`): a read asks the owner's Principal cell alone and wakes none of the fragments listed. `frame` is whether this page may show them inside it (`__frame`; `null` when its `fragment.json` does not ask): the desktop shows a notice in place of its panes without it. A dashboard's page, such as the desktop's. `POST` `application/json` `{label, template}` → `{name, url}` makes `<label>.<username>` for the owner, as `POST /api/fragments` would, under the same conditions |
 | `__presence?name=…&name=…` | who has each named fragment open now, for a desktop's panes: `{presence: {<name>: {people, anonymous}}}` for up to 8 names (more is 400), under `__fragments`' conditions (its owner signed in here, `fragments` declared; anyone else 403). Each named fragment is asked at once, as the owner (`GET /api/f/{name}/presence`), so one that is not theirs, or cannot answer, is left out, and a read wakes only the fragments it names. The desktop asks for its open app panes every 12 seconds while it is in view |
 | `__template` | the template this fragment was made from and whether live holds its latest files, to its owner signed in here alone (no capability asked for; anyone else 403, signed out 401): `{template, upToDate, changed: [path]}`, each of the template's files (`fragment.json` stamped with the fragment's name) compared by content with live's; `{template: null}` for a fragment not made from one the platform offers (the template is kept when its files land, `seed`; for a fragment made before that, read from its `template` event). `POST` `application/json` updates it: the template's files committed to main in one commit ("update to the latest <template> template"; files the template does not have stay), keyed by the template's bytes and the live commit it replaces, so a retry commits once and one up to date commits nothing, then deployed, as `POST /api/f/{name}/deploy` does (a `template.update` event); → the new status. The desktop shows "Update available" at the foot of its sidebar while it is not up to date, asked on load and every 10 minutes while in view |
+| `__hermes/access` | `POST` `application/json` → `{baseUrl, accessToken, expiresAt}`: a native session for the fragment's Hermes (`"hermes": {}`, above), to a signed-in owner or editor alone (anyone else signed in 403, signed out 401): its Hermes' own login, which only the platform holds, exchanged for Hermes' session, as Finite's dashboard gets one (docs/hermes-chat.md). The page calls Hermes at `baseUrl` directly with `Authorization: Bearer <accessToken>` (`api/sessions`, `api/auth/ws-ticket`, then `api/ws`) until `expiresAt` (an hour at most); asked again, the same session while it has a minute left. The page's origin, as the router served it, is named on its computer first. While it is being made, 409 `not_ready`; with no Hermes declared, 404 |
 | `__people?id=…&id=…` | anyone who can see the fragment: `{profiles: {<id>: {kind, username, picture}}}` for up to 64 identities (an agent's `username` is its owner's; a picture is an absolute platform URL); an id the registry does not hold is left out |
 | `__files` | the files viewer, the platform's page (`__files.js`, `__files.css`): the content files (live and main) as a tree beside a reader (markdown with `[[wikilinks]]`, other text with line numbers, pictures, downloads), reading each through `__file`, following `__watch` where it may; asked for `application/json`, the list it reads, `{type: "files", count, files: [{path, size}]}` (a path on both is live's). Framed, the reader's bar asks the page around it to open a file as a pane (`postMessage({fragment: "open", url, title})`) |
 | `__live` | WebSocket, anyone who can see the fragment: channel subscriptions from a cursor, presence, change signals, queries (below) |

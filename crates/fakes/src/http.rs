@@ -30,13 +30,18 @@ pub struct Response {
     pub body: Vec<u8>,
     /// Close the connection without writing an answer.
     pub unanswered: bool,
+    /// A `101`: after its head, the connection is this one's (a WebSocket).
+    pub upgrade: Option<Upgrade>,
 }
+
+/// What runs a connection a `101` handed over.
+pub type Upgrade = Box<dyn FnOnce(TcpStream) + Send>;
 
 impl Response {
     /// No answer at all: the connection closes once the request is read (a
     /// request that was handled, and an answer lost on its way back).
     pub fn unanswered() -> Response {
-        Response { status: 0, headers: Vec::new(), body: Vec::new(), unanswered: true }
+        Response { status: 0, headers: Vec::new(), body: Vec::new(), unanswered: true, upgrade: None }
     }
 
     pub fn json(status: u16, v: &serde_json::Value) -> Response {
@@ -44,7 +49,20 @@ impl Response {
     }
 
     pub fn bytes(status: u16, content_type: &str, body: Vec<u8>) -> Response {
-        Response { status, headers: vec![("content-type".into(), content_type.into())], body, unanswered: false }
+        Response { status, headers: vec![("content-type".into(), content_type.into())], body, unanswered: false, upgrade: None }
+    }
+
+    /// Accepts a WebSocket (`key`, the client's `Sec-WebSocket-Key`),
+    /// choosing `protocol`; `run` then holds the connection.
+    pub fn websocket(key: &str, protocol: Option<&str>, run: impl FnOnce(TcpStream) + Send + 'static) -> Response {
+        use base64::Engine;
+        use sha1::Digest;
+        let accept = base64::engine::general_purpose::STANDARD.encode(sha1::Sha1::digest(format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes()));
+        let mut headers = vec![("upgrade".into(), "websocket".into()), ("connection".into(), "Upgrade".into()), ("sec-websocket-accept".into(), accept)];
+        if let Some(p) = protocol {
+            headers.push(("sec-websocket-protocol".into(), p.into()));
+        }
+        Response { status: 101, headers, body: Vec::new(), unanswered: false, upgrade: Some(Box::new(run)) }
     }
 
     pub fn with_header(mut self, k: &str, v: &str) -> Response {
@@ -103,6 +121,18 @@ fn serve_one(mut stream: TcpStream, handler: &Handler) {
     let resp = handler(&req);
     if resp.unanswered {
         let _ = stream.shutdown(std::net::Shutdown::Both);
+        return;
+    }
+    if let Some(run) = resp.upgrade {
+        let mut out = "HTTP/1.1 101 Switching Protocols\r\n".to_string();
+        for (k, v) in &resp.headers {
+            out.push_str(&format!("{k}: {v}\r\n"));
+        }
+        out.push_str("\r\n");
+        if stream.write_all(out.as_bytes()).is_ok() {
+            let _ = stream.set_read_timeout(None);
+            run(stream);
+        }
         return;
     }
     let mut out = format!("HTTP/1.1 {} {}\r\n", resp.status, reason(resp.status));

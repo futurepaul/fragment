@@ -58,6 +58,9 @@ const CODESTORAGE_CLASS: &str = "Fragment";
 const WORKOS_CLASS: &str = "Registry";
 const OPENROUTER_CLASS: &str = "Ledger";
 const SPRITES_CLASS: &str = "Computer";
+/// The platform's sandcastle grantor key grants only a `Hermes` cell's own
+/// key its computer (docs/hermes-chat.md).
+const SANDCASTLE_CLASS: &str = "Hermes";
 /// An exec runs until its command ends (a computer's first boot installs
 /// the CLI and pairs), and its answer is kept to this much text.
 const SPRITES_TIMEOUT: Duration = Duration::from_secs(180);
@@ -79,6 +82,9 @@ pub struct Config {
     pub workos: Option<Outbound>,
     pub openrouter: Option<Outbound>,
     pub sprites: Option<Outbound>,
+    /// The platform's grantor key (64 hex) on the fleet's sandcastle node,
+    /// and the node's API (`https://api.<domain>`).
+    pub sandcastle: Option<Outbound>,
 }
 
 pub struct Keys {
@@ -124,7 +130,8 @@ impl Keys {
     /// a rotation), `FRAGMENT_KEYS_CODESTORAGE_ORG` and `_PRIVATE_KEY`,
     /// `FRAGMENT_KEYS_WORKOS_API_KEY` (`_URL`), and
     /// `FRAGMENT_KEYS_OPENROUTER_MANAGEMENT_KEY` (`FRAGMENT_KEYS_OPENROUTER_URL`),
-    /// and `FRAGMENT_KEYS_SPRITES_TOKEN` (`FRAGMENT_KEYS_SPRITES_URL`).
+    /// `FRAGMENT_KEYS_SPRITES_TOKEN` (`FRAGMENT_KEYS_SPRITES_URL`), and
+    /// `FRAGMENT_KEYS_SANDCASTLE_GRANTOR_KEY` (`FRAGMENT_KEYS_SANDCASTLE_URL`).
     pub fn from_env() -> Keys {
         let host_secrets = ["FRAGMENT_KEYS_HOST_SECRET", "FRAGMENT_KEYS_HOST_SECRET_PREVIOUS"].iter().filter_map(|n| env(n)).collect();
         let codestorage = match (env("FRAGMENT_KEYS_CODESTORAGE_ORG"), env("FRAGMENT_KEYS_CODESTORAGE_PRIVATE_KEY")) {
@@ -138,6 +145,7 @@ impl Keys {
             workos: outbound_from_env("FRAGMENT_KEYS_WORKOS_API_KEY", "FRAGMENT_KEYS_WORKOS_URL", "https://api.workos.com"),
             openrouter: outbound_from_env("FRAGMENT_KEYS_OPENROUTER_MANAGEMENT_KEY", "FRAGMENT_KEYS_OPENROUTER_URL", "https://openrouter.ai"),
             sprites: outbound_from_env("FRAGMENT_KEYS_SPRITES_TOKEN", "FRAGMENT_KEYS_SPRITES_URL", "https://api.sprites.dev"),
+            sandcastle: outbound_from_env("FRAGMENT_KEYS_SANDCASTLE_GRANTOR_KEY", "FRAGMENT_KEYS_SANDCASTLE_URL", "https://api.sandcastle.fragment.club"),
         })
     }
 
@@ -182,6 +190,7 @@ impl Config {
             "workos/authenticate" => self.workos(caller, &body).await,
             "openrouter/keys" => self.openrouter_keys(caller, &body).await,
             "sprites" => self.sprites(caller, &body).await,
+            "sandcastle/grant" => self.sandcastle_grant(caller, &body).await,
             p => Err(Response::error(404, format!("no route POST /{p}"))),
         };
         answer.unwrap_or_else(|r| r)
@@ -251,7 +260,10 @@ impl Config {
                 if payload.is_some_and(|p| !is_sha(p)) {
                     return Err(Response::error(400, "payload is the body's SHA-256 as 64 hex"));
                 }
-                keys.header_for_payload(method, url, payload, created_at)
+                // A nonce for a verifier whose replay cache keys on the
+                // event id (a sandcastle node's).
+                let nonce = (body["nonce"] == json!(true)).then(|| hex::encode(random::<16>()));
+                keys.header_with_nonce(method, url, payload, nonce.as_deref(), created_at)
             }
             Some("proof") => {
                 let signer = str_field(body, "signer")?;
@@ -321,6 +333,48 @@ impl Config {
             _ => return Err(Response::error(400, "method is GET, POST, or PATCH")),
         };
         let (status, answer) = send(req.bearer_auth(&or.key), "OpenRouter").await?;
+        Ok(Response::json(200, &json!({ "status": status, "body": answer })))
+    }
+}
+
+/// A computer's grant on a sandcastle node: how many, how large. Each is
+/// a small count, checked before the platform's key signs it.
+fn grant_body(body: &Value) -> Result<Value, Response> {
+    let n = |k: &str, max: u64| body["grant"][k].as_u64().filter(|v| *v <= max).ok_or_else(|| Response::error(400, format!("grant.{k} is a number up to {max}")));
+    Ok(json!({
+        "computers_max": n("computers_max", 8)?,
+        "vcpus_max": n("vcpus_max", 16)?,
+        "memory_mib_max": n("memory_mib_max", 64 * 1024)?,
+        "data_gib_max": n("data_gib_max", 1024)?,
+    }))
+}
+
+/// The grantor's signed `PUT <base>/v1/grants/<pubkey>`: (url, header,
+/// body). The node checks the signature against its own API's URL.
+fn grant_request(base: &str, grantor: &NostrKeys, pubkey: &str, grant: &Value, now: i64, nonce: &[u8; 16]) -> (String, String, String) {
+    let url = format!("{base}/v1/grants/{pubkey}");
+    let body = grant.to_string();
+    let payload = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(body.as_bytes()));
+    let header = grantor.header_with_nonce("PUT", &url, Some(&payload), Some(&hex::encode(nonce)), now);
+    (url, header, body)
+}
+
+impl Config {
+    /// Grants a `Hermes` cell's own key (`pubkey`) its computer on the
+    /// fleet's sandcastle node, signed with the platform's grantor key:
+    /// (the node's status, its answer).
+    async fn sandcastle_grant(&self, caller: &str, body: &Value) -> Result<Response, Response> {
+        only(caller, SANDCASTLE_CLASS, "a sandcastle grant")?;
+        let sc = self.sandcastle.as_ref().ok_or_else(|| Response::error(503, "FRAGMENT_KEYS_SANDCASTLE_GRANTOR_KEY is not set on this node"))?;
+        let grantor = NostrKeys::from_secret_hex(&sc.key).ok_or_else(|| Response::error(503, "FRAGMENT_KEYS_SANDCASTLE_GRANTOR_KEY is not a nostr secret key (64 hex)"))?;
+        let pubkey = str_field(body, "pubkey")?;
+        if pubkey.len() != 64 || !pubkey.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+            return Err(Response::error(400, "pubkey is a key as 64 lowercase hex"));
+        }
+        let grant = grant_body(body)?;
+        let (url, header, body) = grant_request(&sc.base, &grantor, pubkey, &grant, now_s(), &random());
+        let req = client().put(url).header("authorization", header).header("content-type", "application/json").body(body);
+        let (status, answer) = send(req, "the sandcastle node").await?;
         Ok(Response::json(200, &json!({ "status": status, "body": answer })))
     }
 }
@@ -414,6 +468,7 @@ mod tests {
             workos: None,
             openrouter: None,
             sprites: None,
+            sandcastle: None,
         })
     }
 
@@ -526,8 +581,34 @@ mod tests {
         assert_eq!(call(&k, Some(LEDGER), "POST", "openrouter/keys", json!({ "method": "GET" })).0, 503);
         assert_eq!(call(&k, Some(ALICE), "POST", "sprites", json!({ "op": "get" })).0, 403);
         assert_eq!(call(&k, Some("Computer:eeee"), "POST", "sprites", json!({ "op": "get" })).0, 503);
+        let grant = json!({ "pubkey": "ab".repeat(32), "grant": { "computers_max": 1, "vcpus_max": 2, "memory_mib_max": 4096, "data_gib_max": 10 } });
+        assert_eq!(call(&k, Some(ALICE), "POST", "sandcastle/grant", grant.clone()).0, 403);
+        assert_eq!(call(&k, Some("Hermes:ffff"), "POST", "sandcastle/grant", grant).0, 503);
         // each computer cell reaches its own Sprite, named for its id
         let id = "0123456789abcdef".repeat(4);
         assert_eq!(sprite_of(&format!("Computer:{id}")), "fragment-0123456789abcdef01234567");
+    }
+
+    /// Goal: a grant is signed by the platform's key over exactly the URL
+    /// and body sent, with a nonce (the node refuses a replayed event id);
+    /// only small grants are signed.
+    #[test]
+    fn a_grant_is_signed_by_the_grantor_over_what_is_sent() {
+        let grantor = NostrKeys::from_secret_hex(&"11".repeat(32)).unwrap();
+        let grant = grant_body(&json!({ "grant": { "computers_max": 1, "vcpus_max": 2, "memory_mib_max": 4096, "data_gib_max": 10 } })).unwrap();
+        let now = now_s();
+        let (url, header, body) = grant_request("https://api.sc.test", &grantor, &"ab".repeat(32), &grant, now, &[1; 16]);
+        assert_eq!(url, format!("https://api.sc.test/v1/grants/{}", "ab".repeat(32)));
+        assert_eq!(fragment_nip98::verify(Some(&header), "PUT", &url, body.as_bytes(), now, 60).unwrap(), grantor.pubkey_hex());
+        let (_, again, _) = grant_request("https://api.sc.test", &grantor, &"ab".repeat(32), &grant, now, &[2; 16]);
+        assert_ne!(header, again, "a nonce makes each a new event");
+        for bad in [json!({ "grant": { "computers_max": 9, "vcpus_max": 2, "memory_mib_max": 4096, "data_gib_max": 10 } }), json!({ "grant": { "computers_max": 1 } })] {
+            assert_eq!(grant_body(&bad).unwrap_err().status, 400, "{bad}");
+        }
+        let k = keys(&[HOST]);
+        let pair = call(&k, Some(ALICE), "POST", "nostr/keypair", json!({})).1;
+        let signed = |nonce: bool| call(&k, Some(ALICE), "POST", "nostr/sign", json!({ "sealed": pair["sealed"], "kind": "header", "method": "GET", "url": "https://api.sc.test/v1/computers/x", "createdAt": now, "nonce": nonce })).1["header"].as_str().unwrap().to_string();
+        assert_ne!(signed(true), signed(true), "a nonce on asking");
+        assert_eq!(signed(false), signed(false), "none otherwise");
     }
 }

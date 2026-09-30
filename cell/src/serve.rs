@@ -119,7 +119,7 @@ fn compiled_in(req: &Request, body: &'static str, hash: u64, content_type: &str)
 /// owner's fragments and who has them open, or its template's update. Its
 /// caller is resolved first.
 fn answers_someone(path: &str) -> bool {
-    path.starts_with("__op/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__fragments" | "__presence" | "__template" | "__watch" | "__live")
+    path.starts_with("__op/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__fragments" | "__presence" | "__template" | "__watch" | "__live" | "__hermes/access")
 }
 
 fn with_cookies(mut resp: Response, cookies: &[String]) -> CellResult<Response> {
@@ -234,6 +234,14 @@ impl FragmentCell {
                 self.template_status(caller).await?
             };
             json_response(&answer)?
+        } else if path == "__hermes/access" {
+            // a native session for its Hermes (hermes.rs), for the page's own
+            // origin, as the router took it (never the client's `Origin`)
+            if req.method() != Method::Post || !req.headers().get("content-type")?.is_some_and(|c| c.starts_with("application/json")) {
+                return Err(CellError::invalid("POST for a session as application/json"));
+            }
+            let origin = self.cfg.origin(&caller.url, name);
+            self.hermes_access(caller, &origin).await?
         } else if path == "__presence" {
             // who has each of the owner's named fragments open (publish.rs)
             json_response(&self.owner_presence(caller).await?)?

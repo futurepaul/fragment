@@ -20,3 +20,4 @@ hkdf = "0.12"
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 p256 = { version = "0.13", features = ["ecdsa", "ecdh", "pem", "pkcs8"] }
 fragment-core = { path = "../core" }
+fragment-nip98 = { path = "../nip98" }
