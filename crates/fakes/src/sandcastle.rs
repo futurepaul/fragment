@@ -67,7 +67,8 @@ struct State {
     turn_ms: u64,
     /// `gateway.ping`s heard, on every socket.
     pings: u64,
-    /// Admissions refused, on every endpoint.
+    /// Admissions taken and refused, on every endpoint.
+    admitted: u64,
     refused: u64,
     next: u64,
 }
@@ -147,6 +148,11 @@ impl Sandcastle {
     /// The `gateway.ping`s its Hermes have heard.
     pub fn pings(&self) -> u64 {
         self.state.lock().unwrap().pings
+    }
+
+    /// The admissions its endpoints have taken.
+    pub fn admitted(&self) -> u64 {
+        self.state.lock().unwrap().admitted
     }
 
     /// The admissions its endpoints have refused.
@@ -328,10 +334,13 @@ async fn admit(state: &Arc<Mutex<State>>, n: &Node, name: &str, peer: &str, mut 
         Ok(a.expires_at)
     }
     .await;
+    // counted before it is answered: a test reads the count once it has the answer
     let (until, answer) = match decided {
-        Ok(until) => (Some(until), json!({ "admitted": true, "until": until })),
+        Ok(until) => {
+            state.lock().unwrap().admitted += 1;
+            (Some(until), json!({ "admitted": true, "until": until }))
+        }
         Err(why) => {
-            // counted before it is answered: a test reads the count once it has the answer
             state.lock().unwrap().refused += 1;
             (None, json!({ "admitted": false, "reason": why }))
         }

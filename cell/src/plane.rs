@@ -364,8 +364,8 @@ impl FragmentCell {
         }
         self.set_meta(MetaKey::CapabilitiesLive, &serde_json::to_string(&manifest.capabilities).expect("a list serializes"))?;
         self.set_agent_live(agent.as_ref())?;
-        self.want_computer(manifest.computer.as_ref(), Some(sha))?;
-        self.want_hermes(manifest.hermes.is_some())?;
+        self.want_computer(manifest.default_computer(), Some(sha))?;
+        self.want_hermes(manifest.preset() == Some(manifest::Preset::Hermes))?;
         if self.tree_row("live", "app.mjs")?.is_none() {
             self.exec("DELETE FROM code", vec![])?;
             // no operations to run, so nothing for a trigger to start

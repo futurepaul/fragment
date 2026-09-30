@@ -33,27 +33,56 @@ pub struct Manifest {
     pub capabilities: Vec<String>,
     /// The agent people talk to through one of its channels (`agent`).
     pub agent: Option<AgentDecl>,
-    /// `"computer": {}`: a deploy with it provisions the fragment's own
-    /// computer, a Sprite, on its owner's budget (docs/computers.md).
+    /// `"computer": {...}`: a deploy with it gives the fragment its own
+    /// computer: the default one, a Sprite on its owner's budget
+    /// (docs/computers.md), or a preset's (`{"preset": "hermes"}`: its
+    /// owner's own Hermes on the fleet's sandcastle node, which the page
+    /// reaches by its key; docs/hermes-chat.md, docs/runtime-seam.md).
     pub computer: Option<ComputerDecl>,
-    /// `"hermes": {}`: a deploy with it gives the fragment's owner their own
-    /// Hermes on the fleet's sandcastle node, whose chat the fragment's
-    /// page holds with it (docs/hermes-chat.md).
-    pub hermes: Option<HermesDecl>,
     /// Top-level keys that no longer do anything here.
     pub ignored: Vec<&'static str>,
 }
 
 /// `computer`: `{}`, or `{"start": "<command>"}`, run from the fragment's
-/// live files on it as a long-lived service while it is awake.
+/// live files on it as a long-lived service while it is awake; or
+/// `{"preset": "<preset>"}`, a computer running the preset's image and
+/// service (its size and model: the platform's).
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ComputerDecl {
     pub start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<Preset>,
 }
 
-/// `hermes`: `{}` (the preset's image, size, and model: the platform's).
-#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
-pub struct HermesDecl {}
+/// What a computer runs besides the default (docs/runtime-seam.md,
+/// decision 1; `goose` is to come).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Preset {
+    Hermes,
+}
+
+impl Preset {
+    pub const ALL: [Preset; 1] = [Preset::Hermes];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Preset::Hermes => "hermes",
+        }
+    }
+}
+
+impl Manifest {
+    /// The default computer it declares (a Sprite), not a preset's.
+    pub fn default_computer(&self) -> Option<&ComputerDecl> {
+        self.computer.as_ref().filter(|c| c.preset.is_none())
+    }
+
+    /// The preset its computer runs, if it declares one.
+    pub fn preset(&self) -> Option<Preset> {
+        self.computer.as_ref().and_then(|c| c.preset)
+    }
+}
 
 /// A `start` command's longest.
 pub const COMPUTER_START_MAX_BYTES: usize = 4096;
@@ -333,20 +362,24 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
     }
     match obj.get("computer") {
         None | Some(Value::Null) => {}
-        Some(Value::Object(c)) if c.keys().all(|k| k == "start") => {
+        Some(Value::Object(c)) if c.keys().all(|k| k == "start" || k == "preset") => {
             let start = match c.get("start") {
                 None => None,
                 Some(Value::String(s)) if !s.trim().is_empty() && s.len() <= COMPUTER_START_MAX_BYTES && !s.contains('\0') => Some(s.clone()),
                 Some(_) => return Err(format!("computer.start is a command: a string of 1 to {COMPUTER_START_MAX_BYTES} bytes")),
             };
-            m.computer = Some(ComputerDecl { start });
+            let presets = || Preset::ALL.map(Preset::name).join(", ");
+            let preset = match c.get("preset") {
+                None => None,
+                Some(Value::String(p)) => Some(Preset::ALL.into_iter().find(|x| x.name() == p).ok_or_else(|| format!("computer.preset {p:?} is not one of: {}", presets()))?),
+                Some(_) => return Err(format!("computer.preset is one of: {}", presets())),
+            };
+            if start.is_some() && preset.is_some() {
+                return Err("computer.start is for the default computer: a preset runs its own service".into());
+            }
+            m.computer = Some(ComputerDecl { start, preset });
         }
-        Some(_) => return Err("computer is {} or {\"start\": \"<command>\"}".into()),
-    }
-    match obj.get("hermes") {
-        None | Some(Value::Null) => {}
-        Some(Value::Object(h)) if h.is_empty() => m.hermes = Some(HermesDecl {}),
-        Some(_) => return Err("hermes is {}".into()),
+        Some(_) => return Err("computer is {}, {\"start\": \"<command>\"}, or {\"preset\": \"hermes\"}".into()),
     }
     match obj.get("triggers") {
         None | Some(Value::Null) => {}
@@ -392,15 +425,19 @@ mod tests {
         assert_eq!(parse(b"{}").unwrap(), Manifest::default());
         assert_eq!(parse(br#"{"capabilities":["fragments"]}"#).unwrap().capabilities, vec!["fragments"]);
         assert!(parse(br#"{"capabilities":["everything"]}"#).is_err());
-        assert_eq!(parse(br#"{"computer":{}}"#).unwrap().computer, Some(ComputerDecl { start: None }));
+        let m = parse(br#"{"computer":{}}"#).unwrap();
+        assert_eq!(m.computer, Some(ComputerDecl { start: None, preset: None }));
+        assert_eq!((m.default_computer().is_some(), m.preset()), (true, None));
         assert_eq!(parse(br#"{}"#).unwrap().computer, None);
         assert_eq!(parse(br#"{"computer":{"start":"node serve.js"}}"#).unwrap().computer.and_then(|c| c.start).as_deref(), Some("node serve.js"));
         assert!(parse(br#"{"computer":{"size":"xl"}}"#).is_err() && parse(br#"{"computer":true}"#).is_err());
-        assert_eq!(parse(br#"{"hermes":{}}"#).unwrap().hermes, Some(HermesDecl {}));
-        assert_eq!(parse(br#"{}"#).unwrap().hermes, None);
-        for bad in [r#"{"hermes":true}"#, r#"{"hermes":{"image":"x"}}"#, r#"{"hermes":[]}"#] {
+        let m = parse(br#"{"computer":{"preset":"hermes"}}"#).unwrap();
+        assert_eq!((m.default_computer(), m.preset()), (None, Some(Preset::Hermes)));
+        for bad in [r#"{"computer":{"preset":"goose"}}"#, r#"{"computer":{"preset":true}}"#, r#"{"computer":{"preset":"hermes","start":"x"}}"#] {
             assert!(parse(bad.as_bytes()).is_err(), "{bad}");
         }
+        // the cut: `hermes` is no key of a manifest's (docs/runtime-seam.md, decision 1)
+        assert_eq!(parse(br#"{"hermes":{}}"#).unwrap().computer, None);
         let long = format!(r#"{{"computer":{{"start":"{}"}}}}"#, "x".repeat(COMPUTER_START_MAX_BYTES + 1));
         for start in [r#"{"computer":{"start":""}}"#, r#"{"computer":{"start":7}}"#, r#"{"computer":{"start":"a","size":1}}"#, &long] {
             assert!(parse(start.as_bytes()).is_err(), "{}", &start[..40.min(start.len())]);

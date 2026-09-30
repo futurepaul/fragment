@@ -36,6 +36,12 @@ pub fn cell_dir() -> PathBuf {
     repo_root().join("cell")
 }
 
+/// The cell's static assets: the computer client (`cargo xtask build`,
+/// xtask/src/client.rs), served at `/__computer/` on every host.
+pub fn client_dir() -> PathBuf {
+    cell_dir().join("client")
+}
+
 /// The agents' celld project (goose's loop; phase 5).
 pub fn agent_dir() -> PathBuf {
     repo_root().join("agent")
@@ -52,9 +58,9 @@ pub fn stage_agent(dir: &Path) -> Result<PathBuf> {
     Ok(dir.to_path_buf())
 }
 
-/// A copy of the built cell project at `dir` (its config, shim, and build),
-/// so a node run from it keeps its state and variables apart from `cell/`,
-/// where `xtask dev` runs.
+/// A copy of the built cell project at `dir` (its config, shim, build, and
+/// static assets), so a node run from it keeps its state and variables
+/// apart from `cell/`, where `xtask dev` runs.
 pub fn stage_project(dir: &Path) -> Result<PathBuf> {
     fn copy_dir(from: &Path, to: &Path) -> Result<()> {
         fs::create_dir_all(to)?;
@@ -76,6 +82,8 @@ pub fn stage_project(dir: &Path) -> Result<PathBuf> {
     }
     let _ = fs::remove_dir_all(dir.join("build"));
     copy_dir(&cell.join("build"), &dir.join("build")).context("stage cell/build (run `cargo xtask build`)")?;
+    let _ = fs::remove_dir_all(dir.join("client"));
+    copy_dir(&client_dir(), &dir.join("client")).context("stage cell/client (run `cargo xtask build`)")?;
     Ok(dir.to_path_buf())
 }
 

@@ -1,9 +1,11 @@
 # A Hermes chat fragment on sandcastle
 
-*Held 2026-09-30:* phase 5 (the fragment.club deploy, the wildcard
-certificate, the hosted proof) waits for docs/runtime-seam.md, which
-makes Hermes a preset of one computer, reached over iroh by an
-admission, in place of the `Hermes` cell's public URL and login.
+*Changed 2026-09-30:* docs/runtime-seam.md's cut made Hermes a preset
+of one computer (`"computer": {"preset": "hermes"}`), reached over iroh
+by an admission, in place of the `Hermes` cell's public URL, CORS, and
+login ("The seam, built", below). Phases 1 to 4 are the record of what
+came before. Phase 5 no longer needs the wildcard certificate; the
+fragment.club deploy and the hosted proof are Paul's to approve.
 
 Status: design agreed 2026-09-30 (Finite's model); phase 1 in progress. Paul's calls, 2026-09-30:
 
@@ -127,7 +129,7 @@ a6d055d9) works like this:
   authentication through (`finite-saas-runner/src/hosted_hermes_caddy.rs`).
 
 Here, the fragment's cell stands in for Core and sandcastle's router is
-the edge:
+the edge (items 2 to 4 are replaced by the seam: see "The seam, built"):
 
 1. **Ownership (Paul: a cell key and the platform's grantor).**
    - A fragment declares `"hermes": {}` in `fragment.json`. Its own
@@ -331,6 +333,40 @@ open, a reload reopens it from Hermes' history, a 17 s turn in the same
 chat on a new socket is answered with the page's pings heard meanwhile,
 one chat holds both turns, and a signed-out visitor with the link gets
 sign-in and no chat.
+
+### The seam, built (2026-09-30)
+
+docs/runtime-seam.md's cut, steps 1 to 3 (phase 4's page and the lane
+carried over):
+
+- **Hermes in loopback mode.** Its dashboard binds to 127.0.0.1 (no
+  login, no password: `HERMES_DASHBOARD_HOST`), with a session token the
+  cell makes and seals, and a bridge in the guest (9119 to 127.0.0.1:9120,
+  started by the init command) so the node's port forward reaches it. Its
+  computer has no public URL: the node gives it an iroh key, held on the
+  host.
+- **The admission.** `POST /__hermes/access {peer}` answers an owner's or
+  editor's page with an admission for the page's own iroh key, signed by
+  the computer's key in `KEYS` (five minutes), the computer's key and
+  relay, Hermes' session token, and a loopback Host (docs/api.md,
+  Serving). The node checks it before any byte reaches Hermes.
+- **The computer client on every host.** sandcastle-web, built with the
+  cell and served as celld's static assets at `/__computer/` (never in an
+  isolate; 1.43 MB gzipped, kept a year under its digest).
+- **The manifest.** `"computer": {"preset": "hermes"}` in place of
+  `"hermes": {}`, a hard cut.
+- **The page.** `site/hermes.js` makes the page's key, asks for an
+  admission, connects by the computer's key, sends REST and the socket
+  each on a stream of their own, and renews the admission on the same
+  connection a minute before it ends.
+
+The lane `hermes` (49 checks, on fakes; the fake node serves its
+computers by their keys through an in-process relay): the admission's
+signer, peer, computer, node, and length; the refused (a bad key, a
+stranger, signed out, another key with the page's admission); Hermes
+refusing a read without its token; the client's entry, module, and glue
+as a fragment's host serves them; and the template's page in headless
+Chrome by its key, as in phase 4.
 
 ## Evaluation
 

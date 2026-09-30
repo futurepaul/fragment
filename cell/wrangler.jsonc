@@ -6,6 +6,11 @@
   "main": "entry.mjs",
   "compatibility_date": "2026-01-01",
   "worker_loaders": [{ "binding": "LOADER" }],
+  // The computer client (docs/runtime-seam.md; `cargo xtask build` writes
+  // client/, xtask/src/client.rs): served at /__computer/ on every host
+  // before the cell runs, so its module never enters an isolate. Every
+  // other path goes to the cell with no asset lookup.
+  "assets": { "directory": "./client", "run_worker_first": ["/*", "!/__computer/*"] },
   // One Workflow instance per run of a job or triggered operation (jobs.rs).
   "workflows": [{ "name": "fragment-jobs", "binding": "JOBS", "class_name": "Job" }],
   // Blobs: the bytes of files of 1 MiB or more (blobs.rs), in the fleet bucket.

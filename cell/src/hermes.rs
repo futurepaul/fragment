@@ -1,7 +1,7 @@
 //! The `Hermes` cell: one per fragment whose live `fragment.json` declares
-//! `"hermes": {}` (docs/hermes-chat.md), named by the fragment, holding its
-//! owner's own Hermes on the fleet's sandcastle node. It is Finite Core's
-//! hosted-Hermes binding in the platform's shape:
+//! `"computer": {"preset": "hermes"}` (docs/hermes-chat.md), named by the
+//! fragment, holding its owner's own Hermes on the fleet's sandcastle node.
+//! It is Finite Core's hosted-Hermes binding in the platform's shape:
 //!
 //! - A key `KEYS` made for this cell owns the computer on the node. It is
 //!   registered as a computer its fragment's owner owns, so the model
