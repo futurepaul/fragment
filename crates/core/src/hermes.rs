@@ -1,24 +1,62 @@
 //! A fragment's own Hermes on the fleet's sandcastle node
-//! (docs/hermes-chat.md): what its `Hermes` cell decides, apart from the
-//! calls it makes. Its names on the node and in the registry, the spec of
-//! its computer, the grant its key is given, how a step's save keeps what
-//! a deploy asked meanwhile, the page origins it names, and the session
-//! read from Hermes' login.
+//! (docs/hermes-chat.md, docs/runtime-seam.md): what its `Hermes` cell
+//! decides, apart from the calls it makes. Its names on the node and in the
+//! registry, the spec of its computer, the grant its key is given, how a
+//! step's save keeps what a deploy asked meanwhile, and the admissions it
+//! hands a page.
+//!
+//! Hermes runs in its loopback mode: its dashboard on the guest's
+//! loopback, where its own login is off, behind a bridge from the port the
+//! node publishes. A page reaches it by its computer's key, admitted by the
+//! platform, which signs as the computer's owner; Hermes' session token is
+//! its second check. No password exists.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Digest;
 
-/// Hermes' login's user (the password is what is secret).
-pub const USERNAME: &str = "owner";
-/// A native session handed out lives at most this long (Hermes' own TTL,
-/// which the spec sets); one within `SESSION_MARGIN_S` of it is renewed first.
-pub const SESSION_TTL_S: i64 = 3600;
-pub const SESSION_MARGIN_S: i64 = 60;
-/// Page origins a Hermes names at once: the latest few a fragment was
-/// served from (a host move leaves the old one a while). Within
-/// sandcastle's own bound (`CORS_ORIGINS_MAX`, 8).
-pub const ORIGINS_MAX: usize = 4;
+/// How long an admission the platform signs lasts: a page asks for another
+/// before it ends (a node takes at most ten minutes).
+pub const ADMISSION_S: i64 = 300;
+/// The Host a page's requests carry: Hermes in loopback mode takes only a
+/// loopback name (its DNS-rebinding guard).
+pub const HOST: &str = "127.0.0.1";
+/// Where Hermes' dashboard listens in the guest, and the port the node
+/// publishes (the bridge's).
+const DASHBOARD_PORT: u16 = 9120;
+const PUBLISHED_PORT: u16 = 9119;
+
+/// In the guest, a bridge from the published port to Hermes' dashboard on
+/// the guest's loopback: msb reaches only the guest's external interface,
+/// from its gateway's address, and Hermes in loopback mode takes only
+/// loopback peers. Started before the image's own command, as root; a
+/// derived image with an s6 service for it replaces this
+/// (docs/runtime-seam.md).
+const BRIDGE: &str = r#"/opt/hermes/.venv/bin/python3 -c '
+import asyncio
+async def pipe(r, w):
+    try:
+        while True:
+            d = await r.read(65536)
+            if not d:
+                break
+            w.write(d)
+            await w.drain()
+    finally:
+        w.close()
+async def conn(cr, cw):
+    try:
+        ur, uw = await asyncio.open_connection("127.0.0.1", 9120)
+    except OSError:
+        cw.close()
+        return
+    await asyncio.gather(pipe(cr, uw), pipe(ur, cw), return_exceptions=True)
+async def main():
+    s = await asyncio.start_server(conn, "0.0.0.0", 9119)
+    async with s:
+        await s.serve_forever()
+asyncio.run(main())
+'"#;
 
 /// Where a fragment's Hermes is.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -83,21 +121,21 @@ pub fn fragment_of_identity(name: &str) -> Option<String> {
     (fragment_proto::valid_fragment_name(&fragment) && identity_name(&fragment) == name).then_some(fragment)
 }
 
-/// What its computer is made of, apart from its secrets.
+/// What its computer is made of, apart from its session token.
 pub struct Spec<'a> {
     pub image: &'a str,
     pub model: &'a str,
     /// The platform's URL: its model route and credential source.
     pub platform: &'a str,
-    pub origins: &'a [String],
 }
 
 impl Spec<'_> {
     /// The computer's spec: Hermes under its own init (s6: its dashboard
-    /// and gateway), its login and model settings in `env`, its model's
-    /// key from the platform's credential source, public, with the page's
-    /// origins named, and awake while its gateway works.
-    pub fn json(&self, password: &str, secret: &str) -> Value {
+    /// and gateway), its dashboard in loopback mode behind the bridge, its
+    /// session token pinned, its model's key from the platform's credential
+    /// source, its URL its owner's alone, and awake while its gateway
+    /// works.
+    pub fn json(&self, token: &str) -> Value {
         let platform = self.platform;
         json!({
             "image": self.image,
@@ -108,16 +146,17 @@ impl Spec<'_> {
             "data_path": "/opt/data",
             "service": {
                 "argv": [],
-                "init": { "argv": ["/init", "/opt/hermes/docker/main-wrapper.sh", "gateway", "run"], "stop": ["/run/s6/basedir/bin/halt"] },
-                "port": 9119,
-                "health_path": "/api/auth/providers",
+                "init": {
+                    "argv": ["/init", "/bin/sh", "-c", format!("{BRIDGE} & exec /opt/hermes/docker/main-wrapper.sh gateway run")],
+                    "stop": ["/run/s6/basedir/bin/halt"],
+                },
+                "port": PUBLISHED_PORT,
+                "health_path": "/api/status",
                 "env": {
                     "HERMES_DASHBOARD": "1",
-                    "HERMES_DASHBOARD_PORT": "9119",
-                    "HERMES_DASHBOARD_BASIC_AUTH_USERNAME": USERNAME,
-                    "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD": password,
-                    "HERMES_DASHBOARD_BASIC_AUTH_SECRET": secret,
-                    "HERMES_DASHBOARD_BASIC_AUTH_TTL_SECONDS": SESSION_TTL_S.to_string(),
+                    "HERMES_DASHBOARD_HOST": "127.0.0.1",
+                    "HERMES_DASHBOARD_PORT": DASHBOARD_PORT.to_string(),
+                    "HERMES_DASHBOARD_SESSION_TOKEN": token,
                     "HERMES_INFERENCE_PROVIDER": "custom",
                     "HERMES_INFERENCE_MODEL": self.model,
                     "OPENAI_BASE_URL": format!("{platform}/api/model"),
@@ -125,8 +164,7 @@ impl Spec<'_> {
                 },
                 "busy": { "path": "/api/status", "field": "active_agents" },
             },
-            "url_auth": "public",
-            "cors_origins": self.origins,
+            "url_auth": "owner",
             "credentials_url": format!("{platform}/api/sandcastle/credentials"),
         })
     }
@@ -138,37 +176,9 @@ pub fn grant() -> Value {
     json!({ "computers_max": 1, "vcpus_max": 2, "memory_mib_max": 4096, "data_gib_max": 10 })
 }
 
-/// `origins` with `origin` named, the oldest dropped past `ORIGINS_MAX`;
-/// None when it is named already.
-pub fn with_origin(origins: &[String], origin: &str) -> Option<Vec<String>> {
-    if origins.iter().any(|o| o == origin) {
-        return None;
-    }
-    let mut named = origins.to_vec();
-    named.push(origin.to_string());
-    let past = named.len().saturating_sub(ORIGINS_MAX);
-    named.drain(..past);
-    Some(named)
-}
-
-/// A session's end: what Hermes says (`api/auth/me`), never past the TTL
-/// from `now_s`.
-pub fn session_end(said: Option<i64>, now_s: i64) -> i64 {
-    said.unwrap_or(now_s + SESSION_TTL_S).min(now_s + SESSION_TTL_S)
-}
-
-/// Whether a session ending at `expires_at` is handed out again at `now_s`.
-pub fn session_fresh(expires_at: i64, now_s: i64) -> bool {
-    expires_at > now_s + SESSION_MARGIN_S
-}
-
-/// The native session in Hermes' login answer: the value of its
-/// `hermes_session_at` cookie, whatever prefix its scheme gave it.
-pub fn session_cookie(set_cookie: &str) -> Option<String> {
-    // Set-Cookie headers come joined (", "); the token has neither ';' nor ','.
-    let at = set_cookie.find("hermes_session_at=")? + "hermes_session_at=".len();
-    let token: String = set_cookie[at..].chars().take_while(|c| *c != ';' && *c != ',' && !c.is_whitespace()).collect();
-    (!token.is_empty()).then_some(token)
+/// Whether `peer` is an iroh key a page may be admitted as: 64 lowercase hex.
+pub fn valid_peer(peer: &str) -> bool {
+    peer.len() == 64 && peer.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 #[cfg(test)]
@@ -231,44 +241,36 @@ mod tests {
         assert_eq!(declared(false, Gone), Gone, "a deploy without it, again, changes nothing");
     }
 
+    /// Goal: the spec puts Hermes in loopback mode behind the bridge, its
+    /// token its only secret, its model on the platform's route, its URL
+    /// its owner's. Method: one spec, each part checked.
     #[test]
-    fn origins_are_the_latest_few() {
-        let o = |n: usize| (0..n).map(|i| format!("https://f{i}.example")).collect::<Vec<_>>();
-        assert_eq!(with_origin(&o(2), "https://f1.example"), None, "named already");
-        assert_eq!(with_origin(&[], "https://a.example"), Some(vec!["https://a.example".to_string()]));
-        let full = with_origin(&o(ORIGINS_MAX), "https://new.example").unwrap();
-        assert_eq!(full.len(), ORIGINS_MAX);
-        assert_eq!(full.first().map(String::as_str), Some("https://f1.example"), "the oldest goes");
-        assert_eq!(full.last().map(String::as_str), Some("https://new.example"));
-    }
-
-    #[test]
-    fn a_session_lasts_what_hermes_says_within_the_ttl() {
-        assert_eq!(session_end(Some(1_000 + 600), 1_000), 1_600);
-        assert_eq!(session_end(Some(1_000 + 99_999), 1_000), 1_000 + SESSION_TTL_S, "never past the TTL");
-        assert_eq!(session_end(None, 1_000), 1_000 + SESSION_TTL_S);
-        assert!(session_fresh(1_000 + SESSION_MARGIN_S + 1, 1_000));
-        assert!(!session_fresh(1_000 + SESSION_MARGIN_S, 1_000), "renewed within the margin");
-    }
-
-    #[test]
-    fn the_spec_names_its_secrets_and_the_platform() {
-        let origins = vec!["https://chat--alice.fragment.boats".to_string()];
-        let spec = Spec { image: "img", model: "m", platform: "https://fragment.club", origins: &origins }.json("pw", "sec");
-        assert_eq!(spec["service"]["env"]["HERMES_DASHBOARD_BASIC_AUTH_PASSWORD"], "pw");
-        assert_eq!(spec["service"]["env"]["HERMES_DASHBOARD_BASIC_AUTH_SECRET"], "sec");
-        assert_eq!(spec["service"]["env"]["OPENAI_BASE_URL"], "https://fragment.club/api/model");
+    fn the_spec_is_loopback_hermes_behind_its_bridge() {
+        let spec = Spec { image: "img", model: "m", platform: "https://fragment.club" }.json("tok");
+        let env = &spec["service"]["env"];
+        assert_eq!(env["HERMES_DASHBOARD_HOST"], "127.0.0.1", "loopback mode: Hermes' login is off");
+        assert_eq!(env["HERMES_DASHBOARD_PORT"], "9120");
+        assert_eq!(env["HERMES_DASHBOARD_SESSION_TOKEN"], "tok");
+        assert!(env.as_object().unwrap().keys().all(|k| !k.contains("BASIC_AUTH")), "no password anywhere");
+        assert_eq!(spec["service"]["port"], 9119, "the node publishes the bridge's port");
+        let init = spec["service"]["init"]["argv"].as_array().unwrap();
+        assert_eq!((init[0].as_str(), init[1].as_str(), init[2].as_str()), (Some("/init"), Some("/bin/sh"), Some("-c")));
+        let script = init[3].as_str().unwrap();
+        assert!(script.contains("start_server(conn, \"0.0.0.0\", 9119)") && script.contains("open_connection(\"127.0.0.1\", 9120)"));
+        assert!(script.ends_with("& exec /opt/hermes/docker/main-wrapper.sh gateway run"));
+        assert!(script.len() < 8 * 1024, "within a node's argv bound");
+        assert_eq!(env["OPENAI_BASE_URL"], "https://fragment.club/api/model");
         assert_eq!(spec["credentials_url"], "https://fragment.club/api/sandcastle/credentials");
-        assert_eq!(spec["url_auth"], "public");
-        assert_eq!(spec["cors_origins"], json!(origins));
+        assert_eq!(spec["url_auth"], "owner");
+        assert!(spec.get("cors_origins").is_none());
         assert_eq!(grant()["computers_max"], 1);
     }
 
     #[test]
-    fn the_session_is_read_from_the_login_cookie() {
-        assert_eq!(session_cookie("hermes_session_at=abc_DEF-1; Path=/; HttpOnly; SameSite=Lax").as_deref(), Some("abc_DEF-1"));
-        assert_eq!(session_cookie("__Host-hermes_session_rt=r; Path=/, __Host-hermes_session_at=tok; Path=/; Secure").as_deref(), Some("tok"));
-        assert_eq!(session_cookie("other=1"), None);
-        assert_eq!(session_cookie("hermes_session_at=; Path=/"), None);
+    fn a_peer_is_an_iroh_key() {
+        assert!(valid_peer(&"a1".repeat(32)));
+        for bad in ["", "abc", &"A1".repeat(32), &"g1".repeat(32), &"a".repeat(65)] {
+            assert!(!valid_peer(bad), "{bad}");
+        }
     }
 }

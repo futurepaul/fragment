@@ -12,6 +12,9 @@ serde_json = "1"
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 tungstenite = "=0.29.0"
+# A page's iroh peer against the sandcastle fake (docs/runtime-seam.md).
+iroh = { version = "=1.3.0", default-features = false, features = ["tls-ring"] }
+tokio = { version = "1.48", features = ["rt-multi-thread", "net", "io-util", "time"] }
 fragment-proto = { path = "../proto" }
 fragment-core = { path = "../core" }
 fragment-nip98 = { path = "../nip98", features = ["sign"] }

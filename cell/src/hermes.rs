@@ -7,19 +7,18 @@
 //!   registered as a computer its fragment's owner owns, so the model
 //!   route bills them and revoking it cuts the Hermes off. The platform's
 //!   grantor key (in `KEYS`) grants it one computer.
-//! - The computer is public at the node's router; Hermes' own login is the
-//!   gate. Its password is generated here, sealed, and never leaves the
-//!   platform: a viewer who owns or edits the fragment gets a native
-//!   session for it (`grant`), as Finite's dashboard does, and talks to
-//!   Hermes directly (`/api/ws`, `/api/sessions`).
-//! - The node wakes and sleeps it; the cell only makes it, names the page
-//!   that may read it (`cors_origins`), and removes it.
+//! - The computer is reached by its key over iroh (docs/runtime-seam.md):
+//!   Hermes runs in its loopback mode, behind a bridge in the guest, with no
+//!   login and no password. A viewer who owns or edits the fragment gets an
+//!   admission for their page's iroh key, signed by the computer's owner
+//!   key in `KEYS` (`access`), and Hermes' session token, its second check;
+//!   the page then talks to Hermes directly.
+//! - The node wakes and sleeps it; the cell only makes it and removes it.
 //!
 //! Every step is the alarm's, from the row below, and lands once however
 //! often it is retried: a failed one is tried again with backoff, and its
 //! fragment's `events` says why.
 
-use std::cell::RefCell;
 use std::time::Duration;
 
 use fragment_proto::ErrorCode;
@@ -32,7 +31,7 @@ use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, FragmentCell, MetaKey};
 use crate::registry::calls;
 use crate::{js, keys};
-use fragment_core::hermes::{self as pure, Phase, USERNAME};
+use fragment_core::hermes::{self as pure, Phase};
 
 /// The marker of a Hermes cell's calls into its fragment (`hermes/…`).
 pub(crate) const HEADER: &str = "x-fragment-hermes";
@@ -44,7 +43,7 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS hermes (
   one INTEGER PRIMARY KEY CHECK (one = 1), fragment TEXT NOT NULL, owner TEXT NOT NULL, declared INTEGER NOT NULL,
   phase TEXT NOT NULL, computer TEXT NOT NULL, pubkey TEXT, key_sealed TEXT, identity TEXT, granted INTEGER NOT NULL,
-  password_sealed TEXT, secret_sealed TEXT, made INTEGER NOT NULL, url TEXT, origins TEXT NOT NULL, tries INTEGER NOT NULL);";
+  token_sealed TEXT, made INTEGER NOT NULL, endpoint TEXT, relay TEXT, node_key TEXT, tries INTEGER NOT NULL);";
 
 /// What is asked of a Hermes.
 #[derive(Serialize, Deserialize)]
@@ -53,9 +52,8 @@ pub(crate) enum Ask {
     /// A deploy of `fragment` (its owner's) declares a Hermes, or no longer
     /// does.
     Declare { fragment: String, owner: String, declared: bool },
-    /// A native session for a viewer the fragment let in, on a page served
-    /// from `origin`.
-    Grant { origin: String },
+    /// An admission for a page's iroh key, for a viewer the fragment let in.
+    Access { peer: String },
     /// Its fragment was deleted, or its owner removed its key's computer
     /// (`fragment computers rm`): its computer goes, and the key's computer.
     /// A later deploy that declares it makes a new one.
@@ -77,15 +75,17 @@ struct Row {
     identity: Option<String>,
     #[serde(deserialize_with = "flag")]
     granted: bool,
-    password_sealed: Option<String>,
-    secret_sealed: Option<String>,
+    /// Hermes' session token, pinned in its spec: its second check behind
+    /// the admission.
+    token_sealed: Option<String>,
     /// The node took the computer as last specified.
     #[serde(deserialize_with = "flag")]
     made: bool,
-    /// Its URL, as the node answers it (`https://<name>.<domain>/`).
-    url: Option<String>,
-    /// JSON: the page origins it names (`cors_origins`).
-    origins: String,
+    /// Its iroh key (64 hex) and its node's relay, as the node's view says.
+    endpoint: Option<String>,
+    relay: Option<String>,
+    /// The node's own key (64 hex), which an admission names.
+    node_key: Option<String>,
     tries: i64,
 }
 
@@ -93,18 +93,20 @@ fn flag<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<bool, D::
     Ok(i64::deserialize(d)? != 0)
 }
 
-impl Row {
-    fn origins(&self) -> Vec<String> {
-        serde_json::from_str(&self.origins).expect("origins is the JSON the cell wrote")
-    }
-}
-
-/// A granted native session: what a page talks to Hermes with.
+/// What a page talks to its Hermes with: where it is (its key, its
+/// relay), an admission for the page's key, the Host its requests carry,
+/// and Hermes' session token.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct Grant {
-    pub base_url: String,
-    pub access_token: String,
+pub(crate) struct Access {
+    pub endpoint: String,
+    pub relay: Option<String>,
+    pub node: String,
+    /// The admission, as the event's JSON.
+    pub admission: String,
+    pub host: String,
+    pub token: String,
+    /// The admission's end, seconds since the epoch: ask again before.
     pub expires_at: i64,
 }
 
@@ -135,20 +137,18 @@ pub struct HermesCell {
     /// One alarm step at a time (celld fires an alarm again when a handler
     /// outlives the node's operation deadline).
     stepping: futures_util::lock::Mutex<()>,
-    /// The native session last taken: renewed a minute before it ends.
-    session: RefCell<Option<Grant>>,
 }
 
 impl DurableObject for HermesCell {
     fn new(state: State, env: Env) -> Self {
         state.storage().sql().exec(SCHEMA, None).expect("the Hermes schema applies");
         let cfg = Config::from_env(&env);
-        HermesCell { state, env, cfg, stepping: futures_util::lock::Mutex::new(()), session: RefCell::new(None) }
+        HermesCell { state, env, cfg, stepping: futures_util::lock::Mutex::new(()) }
     }
 
     async fn fetch(&self, mut req: Request) -> Result<Response> {
         let asked = match serde_json::from_slice::<Ask>(&req.bytes().await?) {
-            Ok(Ask::Grant { origin }) => self.grant(&origin).await.and_then(|g| serde_json::to_value(g).map_err(|e| CellError::host(e.to_string()))),
+            Ok(Ask::Access { peer }) => self.access(&peer).await.and_then(|g| serde_json::to_value(g).map_err(|e| CellError::host(e.to_string()))),
             Ok(a) => self.asked(a).await.map(|()| Value::Null),
             Err(e) => Err(CellError::invalid(format!("body: {e}"))),
         };
@@ -190,7 +190,7 @@ impl HermesCell {
     fn save(&self, h: &Row) -> CellResult<()> {
         let v = serde_json::to_value(h).map_err(|e| CellError::host(e.to_string()))?;
         let cols = [
-            "fragment", "owner", "declared", "phase", "computer", "pubkey", "key_sealed", "identity", "granted", "password_sealed", "secret_sealed", "made", "url", "origins", "tries",
+            "fragment", "owner", "declared", "phase", "computer", "pubkey", "key_sealed", "identity", "granted", "token_sealed", "made", "endpoint", "relay", "node_key", "tries",
         ];
         let binds = cols.iter().map(|k| match &v[*k] {
             Value::Bool(b) => SqlStorageValue::Integer(i64::from(*b)),
@@ -234,11 +234,11 @@ impl HermesCell {
                     key_sealed: None,
                     identity: None,
                     granted: false,
-                    password_sealed: None,
-                    secret_sealed: None,
+                    token_sealed: None,
                     made: false,
-                    url: None,
-                    origins: "[]".into(),
+                    endpoint: None,
+                    relay: None,
+                    node_key: None,
                     tries: 0,
                 }
             }
@@ -255,7 +255,7 @@ impl HermesCell {
                 }
                 h
             }
-            (_, Ask::Grant { .. }) => unreachable!("a grant is asked of `grant`"),
+            (_, Ask::Access { .. }) => unreachable!("an access is asked of `access`"),
         };
         let due = matches!(h.phase, Phase::Make | Phase::Remove);
         h.tries = if due { 0 } else { h.tries };
@@ -310,9 +310,12 @@ impl HermesCell {
             h.granted = true;
             self.save_step(h)?;
         }
-        if h.password_sealed.is_none() {
-            h.password_sealed = Some(keys::seal(&self.env, js::random_hex::<32>().as_bytes()).await?);
-            h.secret_sealed = Some(keys::seal(&self.env, js::random_hex::<32>().as_bytes()).await?);
+        if h.token_sealed.is_none() {
+            h.token_sealed = Some(keys::seal(&self.env, js::random_hex::<32>().as_bytes()).await?);
+            self.save_step(h)?;
+        }
+        if h.node_key.is_none() {
+            h.node_key = Some(self.node_key(api).await?);
             self.save_step(h)?;
         }
         if !h.made {
@@ -334,7 +337,11 @@ impl HermesCell {
         if !settled {
             return Ok(Some(self.cfg.hermes_tick_ms));
         }
-        h.url = view["url"].as_str().map(str::to_string);
+        let Some(endpoint) = view["iroh"]["endpoint"].as_str().filter(|e| pure::valid_peer(e)) else {
+            return Err(upstream("the node does not serve computers by their keys (its --iroh-relay)"));
+        };
+        h.endpoint = Some(endpoint.to_string());
+        h.relay = view["iroh"]["relay"].as_str().map(str::to_string);
         h.phase = Phase::Ready;
         self.tell(h, "hermes.ready", "its Hermes serves").await;
         Ok(None)
@@ -343,10 +350,8 @@ impl HermesCell {
     /// Makes (or converges) its computer on the node, as specified now.
     async fn put_computer(&self, h: &mut Row, api: &str, platform: &str) -> CellResult<()> {
         let _ = api;
-        let password = self.opened(h, "password").await?;
-        let secret = self.opened(h, "secret").await?;
-        let origins = h.origins();
-        let body = pure::Spec { image: &self.cfg.hermes_image, model: &self.cfg.hermes_model, platform, origins: &origins }.json(&password, &secret);
+        let token = self.token(h).await?;
+        let body = pure::Spec { image: &self.cfg.hermes_image, model: &self.cfg.hermes_model, platform }.json(&token);
         let (status, answer) = self.node(h, "PUT", &format!("/v1/computers/{}", h.computer), Some(&body)).await?;
         match status {
             200 | 201 => Ok(()),
@@ -372,29 +377,32 @@ impl HermesCell {
             }
         }
         // A new declaration makes a new one: a new key, a new computer.
-        (h.pubkey, h.key_sealed, h.identity, h.granted, h.made, h.url) = (None, None, None, false, false, None);
+        (h.pubkey, h.key_sealed, h.identity, h.granted, h.token_sealed, h.made, h.endpoint, h.relay) = (None, None, None, false, None, false, None, None);
         h.phase = Phase::Gone;
-        *self.session.borrow_mut() = None;
         self.tell(h, "hermes.removed", "its Hermes was removed").await;
         Ok(())
     }
 
-    /// A sealed value of the row, opened; stored again when `KEYS` resealed it.
-    async fn opened(&self, h: &mut Row, which: &str) -> CellResult<String> {
-        let sealed = match which {
-            "password" => h.password_sealed.clone(),
-            _ => h.secret_sealed.clone(),
-        }
-        .ok_or_else(|| CellError::host(format!("its Hermes has no {which} yet")))?;
+    /// Hermes' session token, opened; stored again when `KEYS` resealed it.
+    async fn token(&self, h: &mut Row) -> CellResult<String> {
+        let sealed = h.token_sealed.clone().ok_or_else(|| CellError::host("its Hermes has no session token yet"))?;
         let opened = keys::open(&self.env, &sealed, "").await?;
         if let Some(fresh) = opened.resealed {
-            match which {
-                "password" => h.password_sealed = Some(fresh),
-                _ => h.secret_sealed = Some(fresh),
-            }
+            h.token_sealed = Some(fresh);
             self.save_step(h)?;
         }
-        String::from_utf8(opened.plaintext).map_err(|_| CellError::host(format!("its {which} is not text")))
+        String::from_utf8(opened.plaintext).map_err(|_| CellError::host("its session token is not text"))
+    }
+
+    /// The node's own key, from its health (unsigned): what an admission names.
+    async fn node_key(&self, api: &str) -> CellResult<String> {
+        let req = Request::new(&format!("{api}/v1/health"), Method::Get)?;
+        let mut resp = crate::cs::fetch(req, CALL_DEADLINE).await.map_err(|e| match e {
+            crate::cs::FetchError::Failed(m) => upstream(format!("the sandcastle node: {m}")),
+            refused => CellError::from(refused),
+        })?;
+        let health: Value = resp.json().await.map_err(|_| upstream("the node's health is not JSON"))?;
+        health["node_key"].as_str().filter(|k| pure::valid_peer(k)).map(str::to_string).ok_or_else(|| upstream("the node names no key of its own (its --node-key-file)"))
     }
 
     /// One call to the node's API, signed by its computer's key: (status,
@@ -429,69 +437,30 @@ impl HermesCell {
         Ok((status, answer))
     }
 
-    /// A native session for a page served from `origin` (the fragment
-    /// checked who asks): Hermes' own, from its login, which this cell
-    /// alone holds. A page origin it does not name yet is named first.
-    async fn grant(&self, origin: &str) -> CellResult<Grant> {
+    /// An admission for the page whose iroh key is `peer` (the fragment
+    /// checked who asks), signed by its computer's owner key in `KEYS`, and
+    /// Hermes' session token: everything the page needs to talk to Hermes
+    /// directly, by its key.
+    async fn access(&self, peer: &str) -> CellResult<Access> {
+        if !pure::valid_peer(peer) {
+            return Err(CellError::invalid("peer is the page's iroh key, 64 lowercase hex"));
+        }
         let Some(mut h) = self.row()? else { return Err(CellError::new(ErrorCode::NotFound, "this fragment declares no Hermes")) };
-        let url = match (h.phase, h.url.clone()) {
-            (Phase::Ready, Some(url)) => url,
-            (Phase::Make, _) => return Err(CellError::new(ErrorCode::NotReady, "its Hermes is starting; ask again shortly")),
+        let (endpoint, node) = match (h.phase, h.endpoint.clone(), h.node_key.clone()) {
+            (Phase::Ready, Some(endpoint), Some(node)) => (endpoint, node),
+            (Phase::Make, _, _) => return Err(CellError::new(ErrorCode::NotReady, "its Hermes is starting; ask again shortly")),
             _ => return Err(CellError::new(ErrorCode::NotFound, "this fragment has no Hermes")),
         };
-        if !h.origins().iter().any(|o| o == origin) {
-            // Named as a step is taken, never beside one: a removal's
-            // delete must not race this put.
-            let _one = self.stepping.lock().await;
-            h = self.row()?.ok_or_else(|| CellError::new(ErrorCode::NotFound, "this fragment has no Hermes"))?;
-            if h.phase != Phase::Ready {
-                return Err(CellError::new(ErrorCode::NotFound, "this fragment has no Hermes"));
-            }
-            if let Some(origins) = pure::with_origin(&h.origins(), origin) {
-                h.origins = serde_json::to_string(&origins).expect("a list serializes");
-                let (api, platform) = self.cfg.sandcastle()?;
-                let (api, platform) = (api.to_string(), platform.to_string());
-                self.put_computer(&mut h, &api, &platform).await?;
-                self.save_step(&mut h)?;
-            }
-        }
         let now_s = js::now_ms() / 1000;
-        if let Some(g) = self.session.borrow().as_ref().filter(|g| pure::session_fresh(g.expires_at, now_s) && g.base_url == url) {
-            return Ok(g.clone());
+        let expires_at = now_s + pure::ADMISSION_S;
+        let sealed = h.key_sealed.clone().expect("a ready Hermes has its key");
+        let (admission, resealed) = keys::nostr_admission(&self.env, &sealed, peer, &h.computer, &node, now_s, expires_at).await?;
+        if let Some(fresh) = resealed {
+            h.key_sealed = Some(fresh);
+            self.save_step(&mut h)?;
         }
-        let password = self.opened(&mut h, "password").await?;
-        let login = json!({ "provider": "basic", "username": USERNAME, "password": password }).to_string();
-        let headers = Headers::new();
-        headers.set("content-type", "application/json")?;
-        let mut init = RequestInit::new();
-        init.with_method(Method::Post).with_headers(headers).with_body(Some(login.into()));
-        let req = Request::new_with_init(&format!("{url}auth/password-login"), &init)?;
-        let resp = crate::cs::fetch(req, CALL_DEADLINE).await.map_err(|e| match e {
-            crate::cs::FetchError::Failed(m) => upstream(format!("its Hermes: {m}")),
-            refused => CellError::from(refused),
-        })?;
-        if resp.status_code() != 200 {
-            return Err(upstream(format!("its Hermes refused the platform's login ({})", resp.status_code())));
-        }
-        let token = resp.headers().get("set-cookie")?.as_deref().and_then(pure::session_cookie).ok_or_else(|| upstream("its Hermes' login gave no session"))?;
-        // Its session's end, as Hermes says (never the token's own words).
-        let headers = Headers::new();
-        headers.set("authorization", &format!("Bearer {token}"))?;
-        let mut init = RequestInit::new();
-        init.with_method(Method::Get).with_headers(headers);
-        let req = Request::new_with_init(&format!("{url}api/auth/me"), &init)?;
-        let mut me = crate::cs::fetch(req, CALL_DEADLINE).await.map_err(|e| match e {
-            crate::cs::FetchError::Failed(m) => upstream(format!("its Hermes: {m}")),
-            refused => CellError::from(refused),
-        })?;
-        if me.status_code() != 200 {
-            return Err(upstream(format!("its Hermes did not know the session it gave ({})", me.status_code())));
-        }
-        let me: Value = me.json().await.map_err(|_| upstream("its Hermes' answer about its session is not JSON"))?;
-        let expires_at = pure::session_end(me["expires_at"].as_i64(), now_s);
-        let g = Grant { base_url: url, access_token: token, expires_at };
-        *self.session.borrow_mut() = Some(g.clone());
-        Ok(g)
+        let token = self.token(&mut h).await?;
+        Ok(Access { endpoint, relay: h.relay.clone(), node, admission, host: pure::HOST.to_string(), token, expires_at })
     }
 
     /// An event in its fragment's `events`.
@@ -549,16 +518,16 @@ impl FragmentCell {
         }
     }
 
-    /// `POST /__hermes/access`: a native session for its Hermes, for a
-    /// signed-in viewer who owns or edits the fragment (docs/hermes-chat.md),
-    /// on the page's own origin.
-    pub(crate) async fn hermes_access(&self, caller: &crate::fragment::Caller, origin: &str) -> CellResult<Response> {
+    /// `POST /__hermes/access` `{peer}`: an admission to its Hermes for the
+    /// page's iroh key, for a signed-in viewer who owns or edits the
+    /// fragment (docs/runtime-seam.md).
+    pub(crate) async fn hermes_access(&self, caller: &crate::fragment::Caller, peer: &str) -> CellResult<Response> {
         self.require(caller, false, fragment_proto::Role::Editor)?;
         if self.meta(MetaKey::HermesDeclared)?.is_none() {
             return Err(CellError::new(ErrorCode::NotFound, "this fragment declares no Hermes"));
         }
-        let grant = ask(&self.env, &self.name()?, &Ask::Grant { origin: origin.to_string() }).await?;
-        json_response(&grant)
+        let access = ask(&self.env, &self.name()?, &Ask::Access { peer: peer.to_string() }).await?;
+        json_response(&access)
     }
 
     /// An event its Hermes tells (`hermes/event`).
