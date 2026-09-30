@@ -27,6 +27,9 @@ github.com/futurepaul/fragment's `master`, which fragment.club runs) and on cell
    `docs/sandbox.md` — self-hosted computers: the research and the
    sandbox service, sandcastle (phases 1–4 live on its test node);
    `docs/sandcastle-rewrite.md` — its rewrite to engineering style;
+   `docs/runtime-seam.md` — one computer wherever it runs: presets,
+   sites, the trust floor, iroh and admissions (decided 2026-09-30),
+   and the measurement before the cut;
    `docs/phase-3.md` — hosting on fragment.club;
    `docs/phase-2.md` — the record of the core cut (slices A–G);
    `docs/operate.md` — the operator runbook.

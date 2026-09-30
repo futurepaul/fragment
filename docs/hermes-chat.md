@@ -1,5 +1,10 @@
 # A Hermes chat fragment on sandcastle
 
+*Held 2026-09-30:* phase 5 (the fragment.club deploy, the wildcard
+certificate, the hosted proof) waits for docs/runtime-seam.md, which
+makes Hermes a preset of one computer, reached over iroh by an
+admission, in place of the `Hermes` cell's public URL and login.
+
 Status: design agreed 2026-09-30 (Finite's model); phase 1 in progress. Paul's calls, 2026-09-30:
 
 - Get a chat over `hermes serve` working, with the chat in a fragment.
