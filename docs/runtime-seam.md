@@ -285,12 +285,37 @@ WASM client, the e2e's `web` section, `target/e2e/sandcastle-e2e-web.json`):
 - the admission gate holds before any byte reaches the guest;
 - the client's weight is about 1 MB.
 
+**Hermes behind the admission alone** (the e2e run
+`target/e2e/sandcastle-e2e-loopback.json`, 64 checks):
+
+- **Loopback mode on a node.** Hermes' dashboard runs on the guest's
+  loopback (`HERMES_DASHBOARD_HOST=127.0.0.1`, port 9120). There its
+  login gate is off, and no password exists anywhere.
+- **A bridge in the guest.** msb publishes only to the guest's external
+  interface, and connects from its gateway's address (`172.16.0.5`),
+  where loopback mode refuses a peer. So a small bridge in the guest (a
+  Python relay, started by the preset's init command before the image's
+  own) carries the published port 9119 to Hermes on `127.0.0.1:9120`.
+- **The checks, over the same iroh connection:**
+  - a read without Hermes' session token is refused (401);
+  - with it, it is answered;
+  - a Host that is not loopback is refused (400, Hermes' own
+    DNS-rebinding guard);
+  - its socket opens with `?token=`, and a chat turn runs with no login
+    (first words in 5.8 s).
+- **The token** is pinned in the spec for now
+  (`HERMES_DASHBOARD_SESSION_TOKEN`). So the admission is the gate, and
+  the token is Hermes' own second check.
+- **For the product,** the bridge belongs in the preset's image, a
+  derived Hermes image with an s6 service for it, as Finite builds its
+  own runtime images, and not in an init command.
+
 **What it leaves open:**
 - The relay's cost off the node's own host, and direct paths for native
   apps (lat-6 drops inbound UDP).
 - Why a guest took 59 s, not 31, to sleep after a turn.
-- Hermes in loopback mode behind the admission, which needs a forwarder
-  in the guest.
+- Hermes' session token read from its own `/` by the page, as Finite's
+  spike does, rather than pinned in the spec.
 - Where a page gets its admission: fragment's platform, or the person's
   own key.
 
