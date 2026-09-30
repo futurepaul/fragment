@@ -187,6 +187,19 @@ launching `service.argv` on every boot:
   the node's store does (the debt ledger's plaintext-env entry grows to
   cover it).
 
+### Built (2026-09-30)
+
+`service.init` is in the spec, the core, the store (the row keeps how to
+stop the machine it made), the msb gate, and the simulator (a third of
+its computers; 512 seeds). On lat-6 the e2e's Hermes runs under s6: its
+gateway runs, a script-only cron job fires on the gateway's own ticker,
+and the model call through the swap answers (the placeholder reaches the
+guest through msb's own secret handling). Found on the way: an init's
+environment must name no credential (msb would take the value from its
+own environment under that name: the gate's assertion refused, and the
+core's check now holds it); a new credential shape makes the machine
+again (msb learns a secret's shape only when it makes one).
+
 ## Order
 
 1. **Budgets**: the metrics gate, the accounting, admission and
