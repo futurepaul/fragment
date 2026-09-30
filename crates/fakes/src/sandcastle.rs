@@ -16,7 +16,8 @@
 //!   pages are http).
 //!
 //! A computer serves after `serving_after` looks at it (a platform waits
-//! for it), and never sleeps.
+//! for it), and never sleeps. A turn's second delta waits `slow_turns` (a
+//! page's heartbeat is heard meanwhile: `pings`).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
@@ -49,6 +50,10 @@ struct State {
     /// Stored chats per computer: id → (title, messages).
     chats: HashMap<String, BTreeMap<String, (String, Vec<Value>)>>,
     serving_after: u32,
+    /// How long a turn's reply takes between its two deltas.
+    turn_ms: u64,
+    /// `gateway.ping`s heard, on every socket.
+    pings: u64,
     next: u64,
 }
 
@@ -90,6 +95,16 @@ impl Sandcastle {
     /// Looks a computer's view takes before it serves (default 1).
     pub fn serving_after(&self, looks: u32) {
         self.state.lock().unwrap().serving_after = looks;
+    }
+
+    /// How long each turn takes between its two deltas (default none).
+    pub fn slow_turns(&self, ms: u64) {
+        self.state.lock().unwrap().turn_ms = ms;
+    }
+
+    /// The `gateway.ping`s its Hermes have heard.
+    pub fn pings(&self) -> u64 {
+        self.state.lock().unwrap().pings
     }
 }
 
@@ -151,7 +166,9 @@ fn handle(state: &Arc<Mutex<State>>, base: &str, grantor: &str, req: &Request) -
         }
         ("DELETE", ["v1", "computers", name]) => match s.computers.get(*name) {
             Some(c) if c.owner == signer => {
+                // its disk goes with it, and Hermes' chats on it
                 s.computers.remove(*name);
+                s.chats.remove(*name);
                 Response::json(202, &json!({ "deleting": name }))
             }
             _ => problem(404, "not_found", "no such computer"),
@@ -261,10 +278,14 @@ fn event(kind: &str, session: &str, payload: Value) -> Value {
 }
 
 /// Hermes' JSON-RPC gateway, as a chat client uses it: a turn echoes its
-/// prompt (`echo: <text>`) in two deltas, and both are stored.
+/// prompt (`echo: <text>`) in two deltas, and both are stored. A turn's
+/// events go out from a thread of their own, as Hermes streams a turn while
+/// it answers other requests (a page's pings).
 fn gateway(mut stream: TcpStream, state: &Arc<Mutex<State>>, name: &str) {
-    let send = |stream: &mut TcpStream, v: &Value| write_frame(stream, 0x1, v.to_string().as_bytes());
-    if send(&mut stream, &event("gateway.ready", "", json!({}))).is_err() {
+    let Ok(writer) = stream.try_clone() else { return };
+    let writer = Arc::new(Mutex::new(writer));
+    let send = |v: &Value| write_frame(&mut writer.lock().unwrap(), 0x1, v.to_string().as_bytes());
+    if send(&event("gateway.ready", "", json!({}))).is_err() {
         return;
     }
     // live handles (this connection's) → stored ids
@@ -274,7 +295,7 @@ fn gateway(mut stream: TcpStream, state: &Arc<Mutex<State>>, name: &str) {
         match op {
             0x8 => return,
             0x9 => {
-                let _ = write_frame(&mut stream, 0xA, &payload);
+                let _ = write_frame(&mut writer.lock().unwrap(), 0xA, &payload);
                 continue;
             }
             0x1 => {}
@@ -286,7 +307,10 @@ fn gateway(mut stream: TcpStream, state: &Arc<Mutex<State>>, name: &str) {
         let answer = {
             let mut s = state.lock().unwrap();
             match msg["method"].as_str() {
-                Some("gateway.ping") => Ok(json!({ "ok": true })),
+                Some("gateway.ping") => {
+                    s.pings += 1;
+                    Ok(json!({ "ok": true }))
+                }
                 Some("session.create") => {
                     s.next += 1;
                     let (stored, handle) = (format!("s{}", s.next), format!("live{}", s.next));
@@ -336,14 +360,23 @@ fn gateway(mut stream: TcpStream, state: &Arc<Mutex<State>>, name: &str) {
             Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
             Err(message) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": message } }),
         };
-        if send(&mut stream, &reply).is_err() {
+        if send(&reply).is_err() {
             return;
         }
-        for e in &after {
-            if send(&mut stream, e).is_err() {
-                return;
-            }
+        if after.is_empty() {
+            continue;
         }
+        let (writer, wait) = (Arc::clone(&writer), std::time::Duration::from_millis(state.lock().unwrap().turn_ms));
+        std::thread::spawn(move || {
+            for (i, e) in after.iter().enumerate() {
+                if i == 2 {
+                    std::thread::sleep(wait);
+                }
+                if write_frame(&mut writer.lock().unwrap(), 0x1, e.to_string().as_bytes()).is_err() {
+                    return;
+                }
+            }
+        });
     }
 }
 

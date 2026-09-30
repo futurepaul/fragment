@@ -97,8 +97,8 @@ debt ledger).
   library), `inbox` (a trigger, a job, the inbox), and `notes` (files as
   the state, read through `App.fetch`, refreshed by a file trigger).
   `fragment new|init --template` scaffolds any of `templates/` (also
-  `blank`, `chat`, `desktop`); the platform's "new" page offers all but
-  `notes`.
+  `blank`, `chat`, `desktop`, `hermes`); the platform's "new" page offers all but
+  `notes` and `hermes`.
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
   logic, host-tested), `crates/nip98`, `crates/native` (`KEYS`, built
   into the celld fork), `crates/templates` (`templates/`, embedded),

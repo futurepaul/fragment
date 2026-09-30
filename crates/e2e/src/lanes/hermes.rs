@@ -100,6 +100,7 @@ pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
     let owner = s.cli_keys(&home).context("the owner's CLI logged in")?;
     let made = s.cli_json(api, &home, &["create", "chat", "--json"])?;
     let name = made["name"].as_str().unwrap_or("").to_string();
+    let view = made["viewToken"].as_str().unwrap_or("").to_string();
     s.hook(api, &made);
     let site = s.dir("hermes-site");
     std::fs::write(site.join("index.html"), "<h1>chat</h1>")?;
@@ -197,6 +198,56 @@ pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and one computer of its owner's for it", paired == 1, &r);
     let r = access(&api, &name, Some(&owner))?;
     s.ok("its owner gets a session for the new one", r.status == 200 && r.body["accessToken"] != token.as_str(), &r);
+    page(s, &api, &home, &owner, &name, &view)
+}
+
+/// The `hermes` template's page, in a browser: a chat with the fragment's
+/// Hermes as its owner has one, straight to Hermes over the grant.
+fn page(s: &mut Suite, api: &Api, home: &std::path::Path, owner: &Keys, name: &str, view: &str) -> Result<()> {
+    let dir = s.dir("hermes-template");
+    let dir_s = dir.to_str().expect("a UTF-8 path").to_string();
+    let o = s.cli(api, home, &["new", &dir_s, "--template", "hermes"]);
+    let manifest: Value = serde_json::from_slice(&std::fs::read(dir.join("fragment.json")).unwrap_or_default()).unwrap_or_default();
+    s.ok("the hermes template scaffolds, declaring its Hermes", o.status.success() && manifest["hermes"] == json!({}), out(&o));
+    let o = s.cli(api, home, &["deploy", name, "--dir", &dir_s]);
+    s.ok("and deploys onto the fragment that has one", o.status.success(), out(&o));
+    let Some(mut chrome) = s.browser()? else {
+        s.ok("Chrome is installed for the hermes page (set CHROME_BIN)", false, "no Chrome found");
+        return Ok(());
+    };
+    let wait = Duration::from_secs(20);
+    let session = api.sign_in(&crate::cli_email(&fragment_core::npub::encode(owner.pubkey_hex()))?)?;
+    chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
+    let tab = chrome.open(&api.site_url(name, "__signin?return=/"))?;
+    let said = |chrome: &mut crate::browser::Browser, tab: &crate::browser::Page| chrome.eval(tab, "document.body.dataset.state + ': ' + document.body.innerText.slice(0, 400)").unwrap_or_default();
+    let ready = chrome.until(&tab, "document.body.dataset.state === 'ready'", wait);
+    s.ok("signed in, the page gets its session from the platform", ready, said(&mut chrome, &tab));
+    let submit = |text: &str| format!("document.getElementById('text').value = {text:?}; document.getElementById('composer').requestSubmit(); true");
+    let replied = |text: &str| format!("[...document.querySelectorAll('.row.assistant')].some(r => r.textContent === {:?} && !r.classList.contains('streaming'))", format!("echo: {text}"));
+    chrome.eval(&tab, &submit("hello from the page"))?;
+    s.ok("a message from the page gets Hermes' reply, streamed over its socket", chrome.until(&tab, &replied("hello from the page"), wait), said(&mut chrome, &tab));
+    let listed = "document.querySelector('#chats li.open')?.textContent === 'hello from the page'";
+    s.ok("the new chat is listed and open", chrome.until(&tab, listed, wait), said(&mut chrome, &tab));
+    chrome.reload(&tab)?;
+    let history = "document.body.dataset.state === 'ready' && document.querySelectorAll('.row.user').length === 1 && [...document.querySelectorAll('.row.assistant')].some(r => r.textContent === 'echo: hello from the page')";
+    s.ok("a reload opens it again, from Hermes' history", chrome.until(&tab, history, wait) && chrome.until(&tab, listed, wait), said(&mut chrome, &tab));
+
+    // a long turn: the page pings while it runs (the node's sign of a turn)
+    s.sandcastle.slow_turns(17_000);
+    let pinged = s.sandcastle.pings();
+    chrome.eval(&tab, &submit("take your time"))?;
+    let long = chrome.until(&tab, &replied("take your time"), Duration::from_secs(40));
+    s.sandcastle.slow_turns(0);
+    s.ok("a long turn in the same chat, resumed on a new socket, is answered", long, said(&mut chrome, &tab));
+    s.ok("and the page pinged its Hermes while it ran", s.sandcastle.pings() > pinged, format!("{} pings before, {} after", pinged, s.sandcastle.pings()));
+    let one = chrome.eval(&tab, "document.querySelectorAll('#chats li').length === 1 && document.querySelectorAll('.row.user').length === 2")?;
+    s.ok("one chat holds both turns", one == json!(true), said(&mut chrome, &tab));
+
+    // signed out, with its link: no chat, and a way to sign in
+    let context = chrome.another_context()?;
+    let stranger = chrome.open_in(&context, &api.site_url(name, &format!("?view={view}")))?;
+    let signin = chrome.until(&stranger, "document.body.dataset.state === 'signin' && !!document.querySelector('#status a[href*=\"__signin\"]')", wait);
+    s.ok("signed out, the page offers sign-in and no chat", signin, said(&mut chrome, &stranger));
     Ok(())
 }
 
