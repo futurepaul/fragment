@@ -81,6 +81,14 @@ The two are not the same promise:
 
 ## Computers: one seam, two hosts
 
+*Superseded in part, 2026-09-30:* upstream celld already implements
+Cloudflare's `ctx.container` (on Docker or Podman), so the seam is that
+API itself. fragment writes one host over `ctx.container`, and
+`SandcastleHost` becomes a sandcastle engine inside celld.
+docs/containers-on-celld.md is the audit: what celld and sandcastle add,
+method by method, and the order. What follows is the design as first
+written.
+
 A computer's cell (the `Computer` cell, reshaped by runtime-seam.md's
 decisions) talks to its host through one Rust trait in the cell, a
 **computer host**:
@@ -244,7 +252,7 @@ The services fragment calls that it does not run, and what each becomes
 
 | Service | What for | On Cloudflare | Self-hosted |
 |---|---|---|---|
-| code.storage | every fragment's files, history, and `live` pointer (git) | code.storage now; Cloudflare Artifacts later (Git-compatible repos for agents, reached from Workers, a REST API, and git clients; closed beta) | a replacement service the operator runs: the contract `crates/fakes/src/codestorage.rs` already implements (the subset the cell and CLI call), made real on the bucket |
+| code.storage | every fragment's files, history, and `live` pointer (git) | code.storage, until Cloudflare Artifacts (Git-compatible repos for agents, reached from Workers, a REST API, and git clients) leaves its private beta; Paul is on the waitlist | a replacement service the operator runs: the contract `crates/fakes/src/codestorage.rs` already implements (the subset the cell and CLI call), made real on the bucket |
 | WorkOS | sign-in (`KEYS` `workos/authenticate`) | fragment's WorkOS | the operator's own WorkOS account (only configuration), or, for an internal company network, its own identity provider over OpenID Connect (the Registry's sign-in made one seam with two implementations) |
 | OpenRouter | model calls, and per-person keys that carry each budget | OpenRouter | OpenRouter |
 | Sprites | fragments' computers today | Containers | sandcastle |
@@ -271,7 +279,8 @@ with sandcastle nodes on Linux boxes with KVM and ZFS.
      cloudflare`: todo, inbox, blobs, egress, ai); a fragment's app
      cannot reach another's facet or `KEYS`; the two checks above
      answered.
-3. **Computers behind the seam.**
+3. **Computers behind the seam** (now over `ctx.container`: the order in
+   docs/containers-on-celld.md replaces this phase's `SandcastleHost`).
    - The computer host trait. The `Hermes` cell's sandcastle code
      becomes `SandcastleHost`. Presets `hermes` and `goose`.
    - `__computer/*` on the fragment's origin replaces `__hermes/access`,
