@@ -289,7 +289,8 @@ The escalations for phase 5 (Paul approves each):
 - the fleet secret `FRAGMENT_KEYS_SANDCASTLE_GRANTOR_KEY` (a nostr secret
   key in hex), and `FRAGMENT_SANDCASTLE_API`
   (`https://api.sandcastle.fragment.club`) in the fleet's vars;
-- lat-6's unit adding `--grantor <its public key>`;
+- lat-6's unit adding `--grantor <its public key>` (done 2026-09-30: the
+  node answers the key's grantors-only `node` read);
 - a fragment.club deploy (nodes first: `KEYS` gains `sandcastle/grant`);
 - `*.sandcastle.fragment.club`'s wildcard certificate (DNS-01 on Paul's
   DNS), since each Hermes is its own host there.
