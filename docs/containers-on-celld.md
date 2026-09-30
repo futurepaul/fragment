@@ -25,6 +25,21 @@ docs/two-substrates.md's computer-host trait collapses to one
 implementation over `ctx.container`, and `SandcastleHost` becomes
 celld's sandcastle engine.
 
+**Decided (Paul, 2026-09-30):**
+
+- **Upstream celld is assumed to converge on Cloudflare's advertised
+  feature set.** Filling the stubs (snapshots, intercepts, `inspect`, the
+  start sizes) is upstream's direction; ours is what that direction does
+  not cover, and whatever the sandcastle engine needs before upstream
+  gets there.
+- **A fleet runs its containers on Docker or on sandcastle
+  (microsandbox)**, chosen by the operator: the engine is a choice, not a
+  fork of the code.
+- **The bar is Cloudflare's capabilities.** Where a question is "how far
+  should the self-hosted side go", the answer is as far as Cloudflare
+  does, with sandcastle's extras (the warm tier, local ZFS) kept beneath
+  the API where they change nothing a caller sees.
+
 ## The API, method by method
 
 What Cloudflare's reference defines (`ctx.container`, the Durable Object
@@ -33,17 +48,17 @@ is the sandcastle side.
 
 | Cloudflare | celld v0.6.0 | celld must | sandcastle must |
 |---|---|---|---|
-| `running`, `monitor()` (resolves at exit 0, rejects with `exitCode`) | has: Docker's `/wait` | take exits from the engine | report exits with their codes (`msb wait` has none yet) |
+| `running`, `monitor()` (resolves at exit 0, rejects with `exitCode`) | has: Docker's `/wait` | take exits from the engine | run the entrypoint as a supervised exec, whose exit and code are the container's |
 | `start({image, entrypoint, env, enableInternet, labels})` | has | send them to the engine | run a computer shaped like a container: a fresh root each start (`msb --root-disk`), the image's entrypoint or an override (`--entrypoint`), env, labels, the network default (`--no-net`, `--net`) |
 | `start({instance})`, `{vcpu, memoryMib, diskMb}` | no: sizes come from the config's `instance_type` | accept them, and refuse what Cloudflare refuses (at least 3 GiB per vCPU; at most 4 vCPU, 12 GiB, 20 GB), so code that runs here runs there | take a size per start |
 | `images` (named, digest-pinned) | no | the map, from the `containers` config | load images from celld's bucket (`msb load`) or a registry |
 | `destroy(error?)`, `signal(n)` | has | send them to the engine | a signal endpoint |
 | `setInactivityTimeout(ms)`, at most 6 h | has (10 min kept by default) | the same | stop at the object's timeout; its own warm pause stays beneath, invisible while "running" |
 | `exec(cmd, {stdin, stdout, stderr, cwd, env, user, pty, signal})`, `kill`, `resize` | has (Docker exec, streamed) | stream it from the engine | a streamed exec (`msb exec`: a PTY, or byte-faithful stdin and stdout; env, workdir, user, timeout) |
-| `getTcpPort(p).fetch()`, `.connect()`, WebSockets included | has, by rewriting the host to the container's address and calling the global `fetch` (which the fork's public-only egress refuses for a bridge address) | ops that return a stream (`js/tcp.rs` takes any stream) from the engine, in place of the address | a tunnel to any guest port, HTTP and raw TCP, for celld alone (see Open questions) |
+| `getTcpPort(p).fetch()`, `.connect()`, WebSockets included | has, by rewriting the host to the container's address and calling the global `fetch` (which the fork's public-only egress refuses for a bridge address) | ops that return a stream (`js/tcp.rs` takes any stream) from the engine, in place of the address | any guest port, for celld alone: declared ports through msb's forward, any other through a streamed exec of a connector it mounts in the guest |
 | `inspect()` | a stub | `{image, labels}` from the engine | its view has them |
 | `snapshotContainer({name})`, `start({containerSnapshot})` | stubs | the handle `{id, size, name}`, kept by the object; a 30-day TTL, refreshed on restore | `msb snapshot create` (a disk snapshot, or `--full` with memory and execution state), exported to the bucket (`msb snapshot export`), restored into a new computer |
-| `interceptOutboundHttp/Https(addr, fetcher)`, `interceptAllOutbound*` | stubs | validate the Fetcher as the Worker Loader's `globalOutbound` is (`__outboundMeta`); keep the rules; deliver each intercepted request to it (`runtime.fetch_service`) | per computer: a proxy that intercepts TLS, its CA at Cloudflare's path (`/etc/cloudflare/certs/cloudflare-containers-ca.crt`); the rules (host, glob, `ip:port`, CIDR; 128 entries); with `enableInternet: false`, DNS only for intercepted names; each match sent to celld's callback |
+| `interceptOutboundHttp/Https(addr, fetcher)`, `interceptAllOutbound*` | stubs | validate the Fetcher as the Worker Loader's `globalOutbound` is (`__outboundMeta`); keep the rules; deliver each intercepted request to it (`runtime.fetch_service`) | per computer: a proxy that intercepts TLS, its CA at Cloudflare's path (`/etc/cloudflare/certs/cloudflare-containers-ca.crt`); the rules (host, glob, `ip:port`, CIDR; 128 entries); with `enableInternet: false`, DNS only for intercepted names; each match sent to celld's callback (a hook msb's swap needs: below) |
 
 ## celld: what the fork (or upstream) changes
 
@@ -99,17 +114,21 @@ makes, so grants, NIP-98, and the reserve stay as they are. What is new:
    health path required (celld checks readiness itself, as Cloudflare's
    callers do).
 2. **Adopt by name, fenced by epoch.**
-3. **Exit events with their codes**, which celld long-polls or is sent.
+3. **Exit events with their codes**, which celld long-polls or is sent:
+   the entrypoint runs as a supervised exec, since `msb create` outlives
+   its entrypoint and `msb wait` has no code.
 4. **Streamed exec**, over one WebSocket per process: stdin, stdout,
    stderr, a PTY and its resize, kill.
 5. **A port tunnel** to any guest port, HTTP and raw TCP, for celld's key
-   only.
+   only: msb's forward for declared ports, a streamed exec of a mounted
+   connector for the rest.
 6. **Signals.**
 7. **Snapshots of the whole computer**, in the bucket, restored into a
    new one, kept 30 days from their making or last restore.
 8. **Outbound interception with callbacks** (the table's last row): the
-   largest new piece, since msb's own swap substitutes values and does
-   not hand a request to code.
+   largest new piece. msb intercepts TLS transparently for its swap but
+   substitutes a value rather than handing the request to code; the hook
+   is a contribution to microsandbox.
 9. **Images from celld's bucket.**
 
 Beneath the API, sandcastle keeps what makes it good: the warm tier
@@ -159,8 +178,9 @@ against workerd (`docs/testing.md`); this extends that to containers.
 3. **sandcastle's engine API** (items 1 to 6) and celld's Sandcastle
    engine: the suite on lat-6.
 4. **Snapshots**, on both.
-5. **Intercepts**, on both. Then fragment's model key goes through an
-   intercept on all three.
+5. **Intercepts**, on both: on sandcastle once msb has its hook (until
+   then fragment's model key rides msb's swap); then fragment's model key
+   goes through an intercept on all three.
 6. **The Sandbox SDK 1.0** (`@cloudflare/sandbox@next`) on celld: it needs
    the `images` map, snapshots, and the start sizes.
 
@@ -184,19 +204,42 @@ against workerd (`docs/testing.md`); this extends that to containers.
   development and for people who trust each other. Strangers' computers
   run on Cloudflare or on sandcastle.
 
-## Open questions
+## The open questions, answered by Cloudflare's bar
 
-- **Reaching any guest port.** sandcastle forwards one declared port per
-  computer (`msb create -p`). Can the host reach a guest's address on
-  msb's network for any port, or add a forward while the guest runs, or
-  does the tunnel run through msb's agent in the guest?
-- **Transparent interception:** msb's network rules and gateway DNS can
-  hold a guest to the proxy, but transparent redirection of 80 and 443 is
-  msb's to offer. Without it the guest is pointed at the proxy
-  (`HTTPS_PROXY`), which a program may ignore; `--no-net` with only the
-  proxy allowed makes ignoring it fail closed.
-- **Exit codes** from `msb wait` ("currently unavailable").
-- **Where the engine runs relative to celld:** in the same fleet but on
-  other machines (celld on Fly, sandcastle on lat-6 today), or one box
-  running both.
-- **Upstream:** whether celld takes the engine trait and the filled stubs.
+Measured on finite-lat-6 (msb 0.7.4, 2026-09-30), with probe sandboxes
+removed after:
+
+- **Any guest port** (`getTcpPort` takes any). msb's network is
+  per-sandbox and in userspace (a guest at `172.16.0.10/30`, its gateway
+  msb's): the host has no route to a guest's address, and a port is
+  reachable only if forwarded at create (`-p`), which `msb modify` cannot
+  add later. But a streamed exec is a tunnel:
+  `msb exec --stream <sandbox> -- nc 127.0.0.1 <port>` round-trips in
+  20 ms, the exec's start included. So each `getTcpPort` connection is one
+  streamed exec of a small static connector sandcastle mounts read-only
+  into every guest (an image need not carry `nc`). Declared ports keep
+  msb's forward, the fast path.
+- **Exit codes** (`monitor()` rejects with `exitCode`). A sandbox made
+  with `msb create` stays up whatever its entrypoint does (PID 1 is
+  msb's own init; `--entrypoint false` still reads "running"), and
+  `msb wait` reports no code. But `msb exec` passes its command's code
+  through (7 and 9 came back as sent, streamed or not). So sandcastle runs
+  a container's entrypoint as a supervised exec: its exit is the
+  container's, its code is `monitor()`'s, and the machine stops then (a
+  fresh root at the next start, as on Cloudflare).
+- **Transparent interception** (Cloudflare intercepts at the network,
+  and an app needs no proxy setting). Pointing a guest at a proxy is not
+  enough. msb already intercepts TLS transparently for its secret swap,
+  per host, in its userspace network; what it lacks is handing a request
+  to code instead of substituting a value. That hook in msb (a
+  contribution to microsandbox, whose swap is the place for it) is the
+  one engine dependency this audit finds. Until it lands, fragment's own
+  use (the model's key) is covered by msb's swap, which does exactly
+  that substitution. On Docker, transparent interception is celld's to
+  build upstream, in the container's network namespace.
+- **Where the engine runs.** Cloudflare may start a container away from
+  its object, so both are right: sandcastle on other machines than celld
+  (Fly and lat-6 today) or on the same one, over the same signed API.
+- **Upstream.** Assumed to track Cloudflare (above). The engine trait is
+  proposed upstream; the sandcastle engine lives with sandcastle (or in
+  the fork) if upstream prefers not to carry a second engine.
