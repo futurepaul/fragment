@@ -115,8 +115,11 @@ function subscribeFrame(channel, s) {
   return s.last != null ? { type: "subscribe", channel, last: s.last } : { type: "subscribe", channel, after: s.after };
 }
 
+// A page awaiting `me()` wants the socket too: its hello is the answer,
+// and a socket closed before it (a deploy restarting the runtime) must be
+// dialled again, or the page waits forever.
 function wanted() {
-  return subs.size > 0 || lives.size > 0 || presenceHandlers.size > 0 || presenceData !== null;
+  return subs.size > 0 || lives.size > 0 || presenceHandlers.size > 0 || presenceData !== null || helloWaiters.length > 0;
 }
 
 function connect() {
