@@ -620,6 +620,12 @@ this):
     `hermes-credentials.json`: the same with `credentials_url`.
 - `~/.config/finite-next/secrets/fragment-club-e2e-key`: the hosted e2e
   person's key on fragment.club, the owner of the e2e's `hermes`.
+- `~/.config/finite-next/secrets/fragment-club-sandcastle-grantor-key`
+  (`.pub` beside it: `09a01a85…6f13`): fragment.club's grantor, the
+  fleet's `FRAGMENT_KEYS_SANDCASTLE_GRANTOR_KEY`, which grants each
+  fragment's Hermes key its one computer (docs/hermes-chat.md). Made
+  2026-09-30; lat-6 is to list it as a second `--grantor` beside
+  `grantor.key` (its unit, phase 5 of docs/hermes-chat.md).
 - `~/.config/finite-next/secrets/sandcastle-backups.env`: the bucket's
   scoped key, flyctl's output as is. The node's copy is
   `/etc/sandcastle/backups.env`, as `KEY=value` lines.
