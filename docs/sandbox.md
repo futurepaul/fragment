@@ -624,8 +624,8 @@ this):
   (`.pub` beside it: `09a01a85…6f13`): fragment.club's grantor, the
   fleet's `FRAGMENT_KEYS_SANDCASTLE_GRANTOR_KEY`, which grants each
   fragment's Hermes key its one computer (docs/hermes-chat.md). Made
-  2026-09-30; lat-6 is to list it as a second `--grantor` beside
-  `grantor.key` (its unit, phase 5 of docs/hermes-chat.md).
+  2026-09-30; lat-6 lists it as a second `--grantor` beside
+  `grantor.key` (its unit, since 2026-09-30 17:52 UTC).
 - `~/.config/finite-next/secrets/sandcastle-backups.env`: the bucket's
   scoped key, flyctl's output as is. The node's copy is
   `/etc/sandcastle/backups.env`, as `KEY=value` lines.
