@@ -564,7 +564,12 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // Share opens it in a dialog, and Done closes it
     let home = chrome.open(&format!("{platform}/"))?;
     let link = format!("a[data-share][href={sheet:?}]");
-    let listed = chrome.until(&home, &format!("!!document.querySelector({link:?})"), wait);
+    // A hand's click lands where the link is drawn: only once the page has
+    // loaded, its fonts are in, and the link's handler is set, or a layout
+    // still moving puts the click on the row's other link (on CI it opened
+    // the owner's desktop).
+    let settled = format!("document.readyState === 'complete' && document.fonts.status === 'loaded' && !!document.querySelector({link:?})?.onclick");
+    let listed = chrome.until(&home, &settled, wait);
     if listed {
         chrome.click(&home, &link)?;
     }
