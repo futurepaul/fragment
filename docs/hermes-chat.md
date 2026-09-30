@@ -294,6 +294,36 @@ The escalations for phase 5 (Paul approves each):
 - `*.sandcastle.fragment.club`'s wildcard certificate (DNS-01 on Paul's
   DNS), since each Hermes is its own host there.
 
+### Phase 4, built (2026-09-30)
+
+The `hermes` template (`fragment new --template hermes`; not on the
+platform's "new" page until phase 5): `"hermes": {}` and a page of plain
+modules with no build.
+
+- `site/hermes.js` is the client, with nothing of fragment's but the
+  grant's default address, shaped after Finite's
+  (`hosted-hermes-status.ts`): a grant held until a minute before its end
+  and asked for again once on a 401; `sessions()` and `messages(id)` over
+  REST with the bearer; `gateway()`, a socket opened with a fresh ticket in
+  its subprotocols and resolved on `gateway.ready`, whose `request` answers
+  a method's result and whose `onEvent` hears its events.
+- `site/chat.js` is the chat: Hermes' chats in the sidebar, the open one
+  in `#chat=<id>`, `session.create` for a new chat and `session.resume`
+  for a stored one on each new socket, deltas streamed into the reply,
+  `tool.*` steps as rows, Stop as `session.interrupt`, and a
+  `gateway.ping` every 15 s while a turn runs. A socket that drops
+  mid-turn says the reply will be in the chat's history.
+- Signed out, the page offers sign-in; someone who is neither owner nor
+  editor is told so; while the Hermes is being made it says so and asks
+  again.
+
+The lane drives it in headless Chrome against the fake (36 checks in
+all): signed in, a message streams its reply, the new chat is listed and
+open, a reload reopens it from Hermes' history, a 17 s turn in the same
+chat on a new socket is answered with the page's pings heard meanwhile,
+one chat holds both turns, and a signed-out visitor with the link gets
+sign-in and no chat.
+
 ## Evaluation
 
 - **Unit tests:**
