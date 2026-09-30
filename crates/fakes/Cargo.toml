@@ -20,4 +20,9 @@ hkdf = "0.12"
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 p256 = { version = "0.13", features = ["ecdsa", "ecdh", "pem", "pkcs8"] }
 fragment-core = { path = "../core" }
-fragment-nip98 = { path = "../nip98" }
+fragment-nip98 = { path = "../nip98", features = ["sign"] }
+# The sandcastle fake's computers are reached by their keys, through a relay
+# of its own (docs/runtime-seam.md): iroh and its relay server, as the node's.
+iroh = { version = "=1.3.0", default-features = false, features = ["tls-ring"] }
+iroh-relay = { version = "=1.3.0", features = ["server"] }
+tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }

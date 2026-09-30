@@ -89,6 +89,15 @@ pub async fn nostr_sign(env: &Env, sealed: &str, method: &str, url: &str, body: 
     Ok((field(&answer, "header", "nostr/sign")?, answer["resealed"].as_str().map(str::to_string)))
 }
 
+/// An admission (docs/runtime-seam.md) signed with a sealed key: `peer` may
+/// reach `computer` on `node` until `expires_at`. (The event's JSON, the key
+/// resealed if `KEYS` did.)
+pub async fn nostr_admission(env: &Env, sealed: &str, peer: &str, computer: &str, node: &str, created_at: i64, expires_at: i64) -> CellResult<(String, Option<String>)> {
+    let ask = json!({ "sealed": sealed, "legacySalt": "", "kind": "admission", "peer": peer, "computer": computer, "node": node, "createdAt": created_at, "expiresAt": expires_at });
+    let answer = call(env, "nostr/sign", &ask).await?;
+    Ok((field(&answer, "admission", "nostr/sign")?, answer["resealed"].as_str().map(str::to_string)))
+}
+
 /// The platform's grant of a computer on the fleet's sandcastle node to
 /// this cell's key (a `Hermes` only): (the node's status, its answer).
 pub async fn sandcastle_grant(env: &Env, pubkey: &str, grant: &Value) -> CellResult<(u16, Value)> {

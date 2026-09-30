@@ -1,19 +1,24 @@
 //! A sandcastle node (sandcastle/README.md), as much of it as the platform
-//! touches, with a Hermes behind each computer's URL (docs/hermes-chat.md):
+//! touches, with a Hermes behind each computer's key (docs/hermes-chat.md,
+//! docs/runtime-seam.md):
 //!
 //! - The API: `PUT /v1/grants/{pubkey}` (the grantor's only), `PUT|GET|
 //!   DELETE /v1/computers/{name}` (a key with a grant; its own computers
-//!   only). Every call is NIP-98 checked as the node checks it, the URL its
-//!   own, and a replayed header is refused (the node's cache keys on the
-//!   event id).
-//! - A computer answers at `<url>/c/<name>/` like Hermes' web server: a
-//!   native login (`auth/password-login`, against the spec's basic-auth
-//!   env) giving a session cookie, `api/auth/me`, `api/sessions` and a
-//!   session's `messages`, a single-use `api/auth/ws-ticket`, and `api/ws`,
+//!   only), and `GET /v1/health` (unsigned: the node's key). Every signed
+//!   call is NIP-98 checked as the node checks it, the URL its own, and a
+//!   replayed header is refused (the node's cache keys on the event id).
+//! - A computer is reached by its key, as `sandcastled --iroh-relay` serves
+//!   it: an iroh endpoint of its own (ALPN `sandcastle/1`, through an
+//!   in-process relay over plain HTTP, which a browser on a dev fleet's
+//!   http page reaches too). A connection opens with an admission, signed
+//!   by the computer's owner for this peer, computer, and node; each
+//!   further stream is piped to the computer's Hermes.
+//! - Its Hermes is Hermes in loopback mode on a port of its own: a loopback
+//!   Host only (else 400), its session token (the spec's
+//!   `HERMES_DASHBOARD_SESSION_TOKEN`) on `api/sessions` and a session's
+//!   `messages` (else 401), `api/status` open, and `api/ws?token=`,
 //!   JSON-RPC (`session.create`, `session.resume`, `prompt.submit`, whose
-//!   turn echoes the prompt in two deltas, `gateway.ping`). The router's
-//!   CORS policy for the spec's `cors_origins` (any scheme: a dev fleet's
-//!   pages are http).
+//!   turn echoes the prompt in two deltas, `gateway.ping`).
 //!
 //! A computer serves after `serving_after` looks at it (a platform waits
 //! for it), and never sleeps. A turn's second delta waits `slow_turns` (a
@@ -24,12 +29,17 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 
+use fragment_nip98::Keys;
+use iroh::endpoint::{presets, Connection, RecvStream, SendStream};
+use iroh::{Endpoint, RelayMode, RelayUrl};
 use serde_json::{json, Value};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::http::{Request, Response, Server};
 
-/// Seconds a native session lives, as a fleet sets Hermes' TTL.
-const SESSION_TTL_S: i64 = 3600;
+const ALPN: &[u8] = b"sandcastle/1";
+const STREAM_ADMISSION: u8 = b'A';
+const STREAM_HTTP: u8 = b'H';
 
 #[derive(Clone, Debug)]
 pub struct Computer {
@@ -37,6 +47,10 @@ pub struct Computer {
     pub spec: Value,
     /// GETs of its view so far: it serves once they reach `serving_after`.
     pub looks: u32,
+    /// Its iroh key (64 hex).
+    pub endpoint: String,
+    /// Where its Hermes listens.
+    pub port: u16,
 }
 
 #[derive(Default)]
@@ -44,9 +58,8 @@ struct State {
     grants: BTreeMap<String, Value>,
     computers: BTreeMap<String, Computer>,
     seen: HashSet<String>,
-    /// Native sessions (token → (computer, expires_at)) and tickets.
-    sessions: HashMap<String, (String, i64)>,
-    tickets: HashMap<String, String>,
+    /// Each computer's endpoint and its Hermes' server, while it lives.
+    running: HashMap<String, (Endpoint, Server)>,
     /// Stored chats per computer: id → (title, messages).
     chats: HashMap<String, BTreeMap<String, (String, Vec<Value>)>>,
     serving_after: u32,
@@ -54,14 +67,22 @@ struct State {
     turn_ms: u64,
     /// `gateway.ping`s heard, on every socket.
     pings: u64,
+    /// Admissions refused, on every endpoint.
+    refused: u64,
     next: u64,
 }
 
 pub struct Sandcastle {
     pub url: String,
     pub grantor: String,
+    /// The node's own key (64 hex): what an admission names.
+    pub node: String,
+    /// The in-process relay's URL (plain HTTP).
+    pub relay: String,
     state: Arc<Mutex<State>>,
     _server: Server,
+    _relay: iroh_relay::server::Server,
+    runtime: tokio::runtime::Runtime,
 }
 
 fn now_s() -> i64 {
@@ -72,15 +93,36 @@ fn problem(status: u16, code: &str, message: &str) -> Response {
     Response::json(status, &json!({ "code": code, "message": message }))
 }
 
+/// What the API's handler holds besides the state.
+struct Node {
+    base: String,
+    grantor: String,
+    node: String,
+    relay: RelayUrl,
+    runtime: tokio::runtime::Handle,
+}
+
 impl Sandcastle {
     /// A node whose grants only `grantor` (64 hex) may write.
     pub fn start(grantor: &str) -> std::io::Result<Sandcastle> {
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+        let relay = runtime
+            .block_on(async {
+                let mut config = iroh_relay::server::ServerConfig::default();
+                config.relay = Some(iroh_relay::server::RelayConfig::new(std::net::SocketAddr::from(([127, 0, 0, 1], 0))));
+                iroh_relay::server::Server::spawn(config).await
+            })
+            .map_err(|e| std::io::Error::other(format!("the relay: {e}")))?;
+        let addr = relay.http_addr().ok_or_else(|| std::io::Error::other("the relay serves no HTTP"))?;
+        let relay_url: RelayUrl = format!("http://{addr}").parse().map_err(|e| std::io::Error::other(format!("the relay's URL: {e}")))?;
+        let node = Keys::generate().pubkey_hex().to_string();
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
         let url = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
         let state = Arc::new(Mutex::new(State { serving_after: 1, ..State::default() }));
-        let (s, base, g) = (Arc::clone(&state), url.clone(), grantor.to_string());
-        let server = Server::serve(listener, Arc::new(move |req: &Request| handle(&s, &base, &g, req)))?;
-        Ok(Sandcastle { url, grantor: grantor.to_string(), state, _server: server })
+        let n = Arc::new(Node { base: url.clone(), grantor: grantor.to_string(), node: node.clone(), relay: relay_url.clone(), runtime: runtime.handle().clone() });
+        let s = Arc::clone(&state);
+        let server = Server::serve(listener, Arc::new(move |req: &Request| handle(&s, &n, req)))?;
+        Ok(Sandcastle { url, grantor: grantor.to_string(), node, relay: relay_url.to_string(), state, _server: server, _relay: relay, runtime })
     }
 
     /// Its computers now (a test lever).
@@ -106,14 +148,23 @@ impl Sandcastle {
     pub fn pings(&self) -> u64 {
         self.state.lock().unwrap().pings
     }
+
+    /// The admissions its endpoints have refused.
+    pub fn refused(&self) -> u64 {
+        self.state.lock().unwrap().refused
+    }
+
+    /// The runtime its endpoints run on, for a test's own iroh peer.
+    pub fn runtime(&self) -> tokio::runtime::Handle {
+        self.runtime.handle().clone()
+    }
 }
 
-fn handle(state: &Arc<Mutex<State>>, base: &str, grantor: &str, req: &Request) -> Response {
-    if let Some(rest) = req.path.strip_prefix("/c/") {
-        let (name, path) = rest.split_once('/').unwrap_or((rest, ""));
-        return hermes(state, name, path, req);
+fn handle(state: &Arc<Mutex<State>>, n: &Arc<Node>, req: &Request) -> Response {
+    if (req.method.as_str(), req.path.as_str()) == ("GET", "/v1/health") {
+        return Response::json(200, &json!({ "ok": true, "node_key": n.node }));
     }
-    let url = format!("{base}{}", req.path);
+    let url = format!("{}{}", n.base, req.path);
     let signer = match fragment_nip98::verify(req.header("authorization"), &req.method, &url, &req.body, now_s(), 60) {
         Ok(k) => k,
         Err(e) => return problem(401, "unauthorized", &e.to_string()),
@@ -125,7 +176,7 @@ fn handle(state: &Arc<Mutex<State>>, base: &str, grantor: &str, req: &Request) -
     let segments: Vec<&str> = req.path.trim_start_matches('/').split('/').collect();
     match (req.method.as_str(), segments.as_slice()) {
         ("PUT", ["v1", "grants", key]) => {
-            if signer != grantor {
+            if signer != n.grantor {
                 return problem(403, "not_grantor", "only the node's grantors write grants");
             }
             let Ok(spec) = serde_json::from_slice::<Value>(&req.body) else { return problem(400, "invalid", "the body") };
@@ -140,16 +191,23 @@ fn handle(state: &Arc<Mutex<State>>, base: &str, grantor: &str, req: &Request) -
                 Some(c) if c.owner != signer => problem(409, "name_taken", "that name is taken"),
                 Some(c) => {
                     c.spec = spec;
-                    Response::json(200, &view(base, name, c, serving_after))
+                    Response::json(200, &view(n, name, c, serving_after))
                 }
                 None => {
                     let mine = s.computers.values().filter(|c| c.owner == signer).count() as u64;
                     if mine >= grant["computers_max"].as_u64().unwrap_or(0) {
                         return problem(403, "over_grant", "this key's grant allows no more computers");
                     }
-                    let c = Computer { owner: signer.clone(), spec, looks: 0 };
-                    let v = view(base, name, &c, serving_after);
+                    drop(s);
+                    let (ep, hermes) = match run_computer(state, n, name) {
+                        Ok(pair) => pair,
+                        Err(e) => return problem(500, "engine", &e),
+                    };
+                    let c = Computer { owner: signer.clone(), spec, looks: 0, endpoint: ep.id().to_string(), port: hermes.port };
+                    let v = view(n, name, &c, serving_after);
+                    let mut s = state.lock().unwrap();
                     s.computers.insert(name.to_string(), c);
+                    s.running.insert(name.to_string(), (ep, hermes));
                     Response::json(201, &v)
                 }
             }
@@ -159,16 +217,19 @@ fn handle(state: &Arc<Mutex<State>>, base: &str, grantor: &str, req: &Request) -
             match s.computers.get_mut(*name) {
                 Some(c) if c.owner == signer => {
                     c.looks += 1;
-                    Response::json(200, &view(base, name, c, serving_after))
+                    Response::json(200, &view(n, name, c, serving_after))
                 }
                 _ => problem(404, "not_found", "no such computer"),
             }
         }
         ("DELETE", ["v1", "computers", name]) => match s.computers.get(*name) {
             Some(c) if c.owner == signer => {
-                // its disk goes with it, and Hermes' chats on it
+                // its disk goes with it, and Hermes' chats on it; its key answers no one
                 s.computers.remove(*name);
                 s.chats.remove(*name);
+                if let Some((ep, _hermes)) = s.running.remove(*name) {
+                    n.runtime.spawn(async move { ep.close().await });
+                }
                 Response::json(202, &json!({ "deleting": name }))
             }
             _ => problem(404, "not_found", "no such computer"),
@@ -177,74 +238,144 @@ fn handle(state: &Arc<Mutex<State>>, base: &str, grantor: &str, req: &Request) -
     }
 }
 
-fn view(base: &str, name: &str, c: &Computer, serving_after: u32) -> Value {
+fn view(n: &Node, name: &str, c: &Computer, serving_after: u32) -> Value {
     let serving = c.looks >= serving_after;
     json!({
         "name": name,
         "owner": c.owner,
         "observed": { "state": if serving { "serving" } else { "starting" } },
         "pending": !serving,
-        "url": format!("{base}/c/{name}/"),
+        "url": format!("{}/c/{name}/", n.base),
+        "iroh": { "endpoint": c.endpoint, "relay": n.relay.to_string() },
     })
 }
 
-/// The computer's router CORS, then Hermes.
-fn hermes(state: &Arc<Mutex<State>>, name: &str, path: &str, req: &Request) -> Response {
-    let origins: Vec<String> = {
-        let s = state.lock().unwrap();
-        let Some(c) = s.computers.get(name) else { return problem(404, "not_found", "No such computer.") };
-        c.spec["cors_origins"].as_array().into_iter().flatten().filter_map(|o| o.as_str().map(str::to_string)).collect()
-    };
-    let origin = req.header("origin").filter(|o| origins.iter().any(|a| a == o)).map(str::to_string);
-    if req.method == "OPTIONS" && req.header("access-control-request-method").is_some() {
-        return match origin {
-            Some(o) => Response::bytes(204, "text/plain", vec![])
-                .with_header("access-control-allow-origin", &o)
-                .with_header("access-control-allow-methods", "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS")
-                .with_header("access-control-allow-headers", "Authorization, Content-Type")
-                .with_header("vary", "Origin"),
-            None => Response::bytes(403, "text/plain", b"This origin may not read this computer.\n".to_vec()),
-        };
-    }
-    let resp = native(state, name, path, req);
-    match (resp.upgrade.is_some(), origin) {
-        (false, Some(o)) => resp.with_header("access-control-allow-origin", &o).with_header("vary", "Origin"),
-        _ => resp,
+/// A new computer's Hermes (on a port of its own) and its endpoint.
+fn run_computer(state: &Arc<Mutex<State>>, n: &Arc<Node>, name: &str) -> Result<(Endpoint, Server), String> {
+    let (s, who) = (Arc::clone(state), name.to_string());
+    let hermes = Server::start(0, Arc::new(move |req: &Request| native(&s, &who, req))).map_err(|e| e.to_string())?;
+    let relay = n.relay.clone();
+    let ep = n
+        .runtime
+        .block_on(Endpoint::builder(presets::Minimal).alpns(vec![ALPN.to_vec()]).relay_mode(RelayMode::Custom(relay.into())).bind())
+        .map_err(|e| format!("binding an endpoint: {e}"))?;
+    let (s, n2, who, port, accepting) = (Arc::clone(state), Arc::clone(n), name.to_string(), hermes.port, ep.clone());
+    n.runtime.spawn(async move {
+        // Bounded by the endpoint: None once it closes.
+        while let Some(incoming) = accepting.accept().await {
+            let (s, n2, who) = (Arc::clone(&s), Arc::clone(&n2), who.clone());
+            tokio::spawn(async move {
+                if let Ok(conn) = incoming.await {
+                    connection(&s, &n2, &who, port, conn).await;
+                }
+            });
+        }
+    });
+    Ok((ep, hermes))
+}
+
+/// A peer's connection: an admission first, then its streams piped to Hermes.
+async fn connection(state: &Arc<Mutex<State>>, n: &Node, name: &str, port: u16, conn: Connection) {
+    let peer = conn.remote_id().to_string();
+    let mut until: i64 = 0;
+    // Bounded by the connection.
+    loop {
+        let Ok((send, mut recv)) = conn.accept_bi().await else { return };
+        let mut kind = [0u8; 1];
+        if recv.read_exact(&mut kind).await.is_err() {
+            continue;
+        }
+        match kind[0] {
+            STREAM_ADMISSION => match admit(state, n, name, &peer, send, recv).await {
+                Some(exp) => until = until.max(exp),
+                None if until == 0 => {
+                    conn.close(403u32.into(), b"not admitted");
+                    return;
+                }
+                None => {}
+            },
+            STREAM_HTTP if now_s() < until => {
+                tokio::spawn(async move {
+                    let Ok(mut tcp) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await else { return };
+                    let mut stream = tokio::io::join(recv, send);
+                    let _ = tokio::io::copy_bidirectional(&mut stream, &mut tcp).await;
+                });
+            }
+            _ => {
+                conn.close(403u32.into(), b"not admitted");
+                return;
+            }
+        }
     }
 }
 
-fn native(state: &Arc<Mutex<State>>, name: &str, path: &str, req: &Request) -> Response {
-    let mut s = state.lock().unwrap();
-    let env = s.computers[name].spec["service"]["env"].clone();
-    if (req.method.as_str(), path) == ("POST", "auth/password-login") {
-        let Ok(body) = serde_json::from_slice::<Value>(&req.body) else { return problem(400, "invalid", "the body") };
-        let ok = body["provider"] == "basic" && body["username"] == env["HERMES_DASHBOARD_BASIC_AUTH_USERNAME"] && body["password"] == env["HERMES_DASHBOARD_BASIC_AUTH_PASSWORD"];
-        if !ok || body["password"].as_str().is_none_or(str::is_empty) {
-            return problem(401, "unauthorized", "Invalid credentials");
+/// An admission stream, as `sandcastled`'s iroh endpoint reads one: its end
+/// when it admits.
+async fn admit(state: &Arc<Mutex<State>>, n: &Node, name: &str, peer: &str, mut send: SendStream, mut recv: RecvStream) -> Option<i64> {
+    let decided: Result<i64, String> = async {
+        let len = recv.read_u16().await.map_err(|_| "a length".to_string())?;
+        let mut raw = vec![0u8; usize::from(len)];
+        recv.read_exact(&mut raw).await.map_err(|_| "the admission".to_string())?;
+        let raw = String::from_utf8(raw).map_err(|_| "not text".to_string())?;
+        let a = fragment_nip98::verify_admission(&raw, now_s(), 60).map_err(|e| e.to_string())?;
+        let owner = state.lock().unwrap().computers.get(name).map(|c| c.owner.clone()).ok_or("no such computer")?;
+        if a.signer != owner {
+            return Err("the admission's signer admits no one here".into());
         }
-        s.next += 1;
-        let token = format!("hs{:016x}{}", s.next, "0".repeat(16));
-        s.sessions.insert(token.clone(), (name.to_string(), now_s() + SESSION_TTL_S));
-        return Response::json(200, &json!({ "ok": true })).with_header("set-cookie", &format!("hermes_session_at={token}; Path=/; HttpOnly; SameSite=Lax"));
+        if a.peer != peer || a.computer != name || a.node != n.node {
+            return Err("the admission is for another peer, computer, or node".into());
+        }
+        Ok(a.expires_at)
+    }
+    .await;
+    let (until, answer) = match decided {
+        Ok(until) => (Some(until), json!({ "admitted": true, "until": until })),
+        Err(why) => {
+            // counted before it is answered: a test reads the count once it has the answer
+            state.lock().unwrap().refused += 1;
+            (None, json!({ "admitted": false, "reason": why }))
+        }
+    };
+    let body = answer.to_string();
+    let _ = send.write_u16(u16::try_from(body.len()).expect("a short answer")).await;
+    let _ = send.write_all(body.as_bytes()).await;
+    let _ = send.finish();
+    if until.is_none() {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), send.stopped()).await;
+    }
+    until
+}
+
+/// Hermes in loopback mode (its DNS-rebinding guard, its session token).
+fn native(state: &Arc<Mutex<State>>, name: &str, req: &Request) -> Response {
+    let host = req.header("host").unwrap_or("");
+    let hostname = host.rsplit_once(':').map_or(host, |(h, p)| if p.bytes().all(|b| b.is_ascii_digit()) { h } else { host });
+    if !matches!(hostname, "127.0.0.1" | "localhost" | "[::1]" | "::1") {
+        return problem(400, "invalid_host", "Invalid Host header. Dashboard requests must use the bound hostname.");
+    }
+    let path = req.path.trim_start_matches('/');
+    let token = {
+        let s = state.lock().unwrap();
+        let Some(c) = s.computers.get(name) else { return problem(404, "not_found", "No such computer.") };
+        c.spec["service"]["env"]["HERMES_DASHBOARD_SESSION_TOKEN"].as_str().unwrap_or("").to_string()
+    };
+    if (req.method.as_str(), path) == ("GET", "api/status") {
+        return Response::json(200, &json!({ "gateway_running": true, "active_agents": 0 }));
     }
     if path == "api/ws" {
-        drop(s);
-        return websocket(state, name, req);
+        let given = req.query.get("token").map(String::as_str).unwrap_or("");
+        let key = req.header("sec-websocket-key").filter(|_| !token.is_empty() && given == token);
+        let Some(key) = key else { return problem(403, "forbidden", "a socket needs the session token") };
+        let offered = req.header("sec-websocket-protocol").unwrap_or("").split(',').any(|p| p.trim() == "hermes-gateway-v1");
+        let (state, name) = (Arc::clone(state), name.to_string());
+        return Response::websocket(key, offered.then_some("hermes-gateway-v1"), move |stream| gateway(stream, &state, &name));
     }
-    let bearer = req.header("authorization").and_then(|h| h.strip_prefix("Bearer ")).unwrap_or("");
-    let authed = s.sessions.get(bearer).is_some_and(|(c, exp)| c == name && *exp > now_s());
-    if !authed {
+    let given = req.header("x-hermes-session-token").or_else(|| req.header("authorization").and_then(|h| h.strip_prefix("Bearer "))).unwrap_or("");
+    if token.is_empty() || given != token {
         return problem(401, "unauthorized", "Unauthorized");
     }
-    let expires_at = s.sessions[bearer].1;
+    let s = state.lock().unwrap();
     match (req.method.as_str(), path) {
-        ("GET", "api/auth/me") => Response::json(200, &json!({ "provider": "basic", "user": { "id": "owner" }, "expires_at": expires_at })),
-        ("POST", "api/auth/ws-ticket") => {
-            s.next += 1;
-            let ticket = format!("t{:016x}{}", s.next, "1".repeat(16));
-            s.tickets.insert(ticket.clone(), name.to_string());
-            Response::json(200, &json!({ "ticket": ticket, "ttl_seconds": 30 }))
-        }
         ("GET", "api/sessions") => {
             let chats = s.chats.get(name).cloned().unwrap_or_default();
             let rows: Vec<Value> = chats.iter().rev().map(|(id, (title, m))| json!({ "id": id, "title": title, "source": "web", "message_count": m.len(), "preview": m.last().and_then(|x| x["content"].as_str()).unwrap_or("") })).collect();
@@ -259,18 +390,6 @@ fn native(state: &Arc<Mutex<State>>, name: &str, path: &str, req: &Request) -> R
         }
         _ => problem(404, "not_found", &format!("no route {} /{path}", req.method)),
     }
-}
-
-/// `api/ws`: the ticket in the subprotocols (single use), then JSON-RPC.
-fn websocket(state: &Arc<Mutex<State>>, name: &str, req: &Request) -> Response {
-    let protocols: Vec<&str> = req.header("sec-websocket-protocol").unwrap_or("").split(',').map(str::trim).collect();
-    let ticket = protocols.iter().find_map(|p| p.strip_prefix("hermes-gateway-ticket.")).unwrap_or("");
-    let valid = state.lock().unwrap().tickets.remove(ticket).is_some_and(|c| c == name);
-    let Some(key) = req.header("sec-websocket-key").filter(|_| valid && protocols.contains(&"hermes-gateway-v1")) else {
-        return problem(403, "forbidden", "a socket needs a valid ticket");
-    };
-    let (state, name) = (Arc::clone(state), name.to_string());
-    Response::websocket(key, Some("hermes-gateway-v1"), move |stream| gateway(stream, &state, &name))
 }
 
 fn event(kind: &str, session: &str, payload: Value) -> Value {
