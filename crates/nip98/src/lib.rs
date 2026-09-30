@@ -10,6 +10,11 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 pub const KIND: u64 = 27235;
+/// An admission's kind (sandcastle's, `sandcastle_nip98::ADMISSION_KIND`):
+/// one iroh peer may reach one computer on one node until a time.
+pub const ADMISSION_KIND: u64 = 27237;
+/// The longest an admission lasts; a sandcastle node refuses one longer.
+pub const ADMISSION_LIFETIME_MAX_S: i64 = 600;
 
 /// Why a request's auth was refused. Each maps to 401 at the edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -289,6 +294,25 @@ impl Keys {
         self.event(tags, created_at)
     }
 
+    /// An admission (docs/runtime-seam.md; sandcastle's `verify_admission`
+    /// reads it): `peer` (an iroh key, 64 hex) may reach `computer` on the
+    /// node `node` (64 hex) until `expires_at`. The event, as JSON.
+    pub fn admission(&self, peer: &str, computer: &str, node: &str, created_at: i64, expires_at: i64) -> String {
+        let tags = vec![tag("peer", peer), tag("computer", computer), tag("node", node), tag("expiration", &expires_at.to_string())];
+        let id = event_id(&self.pubkey_hex, created_at, ADMISSION_KIND, &tags, "");
+        let sig = self.key.sign_raw(&id, &[0u8; 32]).expect("BIP-340 signing a 32-byte digest");
+        let event = Event {
+            id: hex::encode(id),
+            pubkey: self.pubkey_hex.clone(),
+            created_at,
+            kind: ADMISSION_KIND,
+            tags,
+            content: String::new(),
+            sig: hex::encode(sig.to_bytes()),
+        };
+        serde_json::to_string(&event).expect("an event serializes")
+    }
+
     fn event(&self, tags: Vec<Vec<String>>, created_at: i64) -> String {
         let id = event_id(&self.pubkey_hex, created_at, KIND, &tags, "");
         let sig = self.key.sign_raw(&id, &[0u8; 32]).expect("BIP-340 signing a 32-byte digest");
@@ -327,6 +351,26 @@ mod tests {
 
     fn url(s: &str) -> Url {
         Url::parse(s).expect("a test URL")
+    }
+
+    /// Goal: an admission is the event sandcastle verifies: its kind, its
+    /// four tags, an id over them, and the key's signature. Method: sign
+    /// one and check each part, the signature by BIP-340.
+    #[test]
+    fn an_admission_is_sandcastles_event() {
+        let k = keys(7);
+        let (peer, node) = ("1".repeat(64), "2".repeat(64));
+        let raw = k.admission(&peer, "hermes", &node, NOW, NOW + 300);
+        let ev: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(ev["kind"], ADMISSION_KIND);
+        assert_eq!(ev["pubkey"], k.pubkey_hex());
+        assert_eq!(ev["tags"], serde_json::json!([["peer", peer], ["computer", "hermes"], ["node", node], ["expiration", (NOW + 300).to_string()]]));
+        let tags: Vec<Vec<String>> = serde_json::from_value(ev["tags"].clone()).unwrap();
+        let id = event_id(k.pubkey_hex(), NOW, ADMISSION_KIND, &tags, "");
+        assert_eq!(ev["id"], hex::encode(id));
+        let key = k256::schnorr::VerifyingKey::from_bytes(&hex::decode(k.pubkey_hex()).unwrap()).unwrap();
+        let sig = k256::schnorr::Signature::try_from(hex::decode(ev["sig"].as_str().unwrap()).unwrap().as_slice()).unwrap();
+        key.verify_raw(&id, &sig).expect("the key's signature over the id");
     }
 
     fn verify_at(header: &str, method: &str, at: &str, body: &[u8]) -> Result<String, AuthError> {

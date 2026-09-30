@@ -250,6 +250,9 @@ impl Config {
     fn nostr_sign(&self, caller: &str, body: &Value) -> Result<Response, Response> {
         let (secret, resealed) = self.open_for(caller, body)?;
         let keys = std::str::from_utf8(&secret).ok().and_then(NostrKeys::from_secret_hex).ok_or_else(|| Response::error(400, "that sealed value is not a nostr key"))?;
+        if body["kind"] == json!("admission") {
+            return Self::nostr_admission(body, &keys, resealed);
+        }
         let method = str_field(body, "method")?;
         let url = str_field(body, "url")?;
         let created_at = body["createdAt"].as_i64().ok_or_else(|| Response::error(400, "createdAt is required (seconds)"))?;
@@ -272,9 +275,33 @@ impl Config {
                 }
                 keys.proof(method, url, signer, created_at)
             }
-            _ => return Err(Response::error(400, "kind is \"header\" or \"proof\"")),
+            _ => return Err(Response::error(400, "kind is \"header\", \"proof\", or \"admission\"")),
         };
         Ok(Response::json(200, &json!({ "header": header, "pubkey": keys.pubkey_hex(), "resealed": resealed })))
+    }
+
+    /// An admission (docs/runtime-seam.md) signed with a sealed key: `peer`
+    /// may reach `computer` on `node` until `expiresAt`, for at most
+    /// `ADMISSION_LIFETIME_MAX_S`.
+    fn nostr_admission(body: &Value, keys: &NostrKeys, resealed: Option<String>) -> Result<Response, Response> {
+        let is_key = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        let peer = str_field(body, "peer")?;
+        let node = str_field(body, "node")?;
+        let computer = str_field(body, "computer")?;
+        if !is_key(peer) || !is_key(node) {
+            return Err(Response::error(400, "peer and node are keys as 64 lowercase hex"));
+        }
+        if computer.is_empty() || computer.len() > 63 {
+            return Err(Response::error(400, "computer is a computer's name"));
+        }
+        let created_at = body["createdAt"].as_i64().ok_or_else(|| Response::error(400, "createdAt is required (seconds)"))?;
+        let expires_at = body["expiresAt"].as_i64().ok_or_else(|| Response::error(400, "expiresAt is required (seconds)"))?;
+        let lifetime = expires_at.saturating_sub(created_at);
+        if !(1..=fragment_nip98::ADMISSION_LIFETIME_MAX_S).contains(&lifetime) {
+            return Err(Response::error(400, format!("an admission lasts 1 to {} s", fragment_nip98::ADMISSION_LIFETIME_MAX_S)));
+        }
+        let admission = keys.admission(peer, computer, node, created_at, expires_at);
+        Ok(Response::json(200, &json!({ "admission": admission, "pubkey": keys.pubkey_hex(), "resealed": resealed })))
     }
 
     fn codestorage_token(&self, caller: &str, body: &Value) -> Result<Response, Response> {
@@ -525,6 +552,27 @@ mod tests {
         assert_eq!(call(&current, Some(ALICE), "POST", "open", json!({ "sealed": fresh })).1["plaintext"], b64().encode("v"));
         assert_eq!(call(&current, Some(ALICE), "POST", "open", json!({ "sealed": sealed })).0, 403, "the old secret is gone");
         assert_eq!(call(&keys(&[]), Some(ALICE), "POST", "seal", json!({ "plaintext": "" })).0, 503, "no host secret on the node");
+    }
+
+    /// Goal: a cell's sealed key signs an admission (docs/runtime-seam.md),
+    /// only its own key, and only a short one. Method: one good admission
+    /// read back; another cell's, a long one, and bad fields refused.
+    #[test]
+    fn a_sealed_key_signs_an_admission() {
+        let k = keys(&[HOST]);
+        let pair = call(&k, Some(ALICE), "POST", "nostr/keypair", json!({})).1;
+        let (peer, node, now) = ("a".repeat(64), "b".repeat(64), 1_790_000_000i64);
+        let ask = |who: &str, peer: &str, node: &str, computer: &str, until: i64| call(&k, Some(who), "POST", "nostr/sign", json!({ "sealed": pair["sealed"], "kind": "admission", "peer": peer, "node": node, "computer": computer, "createdAt": now, "expiresAt": until }));
+        let (s, v) = ask(ALICE, &peer, &node, "hermes", now + 300);
+        assert_eq!(s, 200, "{v}");
+        let ev: Value = serde_json::from_str(v["admission"].as_str().unwrap()).unwrap();
+        assert_eq!((ev["kind"].as_u64(), ev["pubkey"].as_str()), (Some(fragment_nip98::ADMISSION_KIND), pair["pubkey"].as_str()));
+        assert_eq!(ask(BOB, &peer, &node, "hermes", now + 300).0, 403, "another cell's key");
+        assert_eq!(ask(ALICE, &peer, &node, "hermes", now + fragment_nip98::ADMISSION_LIFETIME_MAX_S + 1).0, 400, "longer than an admission lasts");
+        assert_eq!(ask(ALICE, &peer, &node, "hermes", now).0, 400, "over before it starts");
+        assert_eq!(ask(ALICE, "short", &node, "hermes", now + 60).0, 400);
+        assert_eq!(ask(ALICE, &peer, &"B".repeat(64), "hermes", now + 60).0, 400, "uppercase hex");
+        assert_eq!(ask(ALICE, &peer, &node, "", now + 60).0, 400);
     }
 
     #[test]
