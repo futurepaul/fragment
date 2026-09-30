@@ -200,6 +200,42 @@ own environment under that name: the gate's assertion refused, and the
 core's check now holds it); a new credential shape makes the machine
 again (msb learns a secret's shape only when it makes one).
 
+## Tiers (step 3, the design)
+
+A computer's owner wants it running; whether its machine is awake is the
+node's business. The row keeps a **tier**, the node's intent, and the
+machine converges to it like everything else:
+
+| Tier | The machine | Enters when | Leaves when |
+|---|---|---|---|
+| awake | running | made, started, or woken | idle for `--idle-after-s` (30) and not busy: warm |
+| warm | paused (`msb pause --guest-flush required`), its memory frozen | idle | activity or a wake: awake (resume, ms); warm for `--cold-after-s` (86400), or its room needed: cold |
+| cold | stopped, disk and layer on the host | warm too long, or demoted | activity or a wake: awake (a boot, seconds) |
+
+- **Activity** is what the node sees, never the guest's say-so: bytes
+  through the router (an open, quiet WebSocket is not activity), and the
+  guest's network bytes and CPU over a floor between samples (`msb
+  metrics`, every 10 s; floors are settings, tuned from the report). The
+  node keeps it in memory; the row keeps the last activity it acted on.
+- **Busy**: before a computer sleeps, the node may ask its service
+  (`service.busy = {path, field}`: a GET through its port, busy when that
+  JSON field is true or above zero; Hermes: `/api/status`,
+  `active_agents`). Busy is activity.
+- **Wake**: the router holds a request for a sleeping computer, nudges
+  its batch at once (not the next tick), and forwards when it serves.
+  `POST /v1/computers/{name}/wake` (its owner, or a grantor, for a
+  scheduler acting for it) wakes it too.
+- **Room**: waking asks the ledger for the machine's whole allocation; a
+  warm machine holds only what it measured resident when it paused (it
+  cannot grow while frozen), so warm computers are cheap. A wake with no
+  room demotes the least recently active warm computer to cold, and waits.
+- **While asleep**: no credential rotation (a paused machine refuses it;
+  it waits for the wake), no scheduled snapshot (nothing is written),
+  its shipping goes on. A stop or a deletion of a warm machine resumes it
+  first, so its service stops gracefully.
+- **The view** says `warm` or `cold` (a new observed state) and is not
+  pending: sleep is the node's to choose.
+
 ## Order
 
 1. **Budgets**: the metrics gate, the accounting, admission and
