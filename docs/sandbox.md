@@ -601,7 +601,14 @@ this):
   deletes what it made; the bucket keeps the runs' backups. The e2e makes
   its Hermes computer as `hermes`, owned by the hosted e2e person's key
   (`fragment-club-e2e-key`), from `sandcastle-test/hermes-credentials.json`.
-- **Firewall:** nftables admits 22 and 443.
+- **Firewall:** nftables admits 22, 443, and 8443 (the iroh relay).
+- **The iroh relay** (docs/runtime-seam.md, since 2026-09-30):
+  `iroh-relay` 1.3.0 in `/home/ubuntu/iroh/bin`, unit `iroh-relay`,
+  config `/etc/iroh-relay/config.toml`. It serves
+  `https://demo.sandcastle.fragment.club:8443/` with the node's own
+  certificate, with plain HTTP and metrics on loopback and no UDP address
+  discovery. `sandcastled` runs with `--iroh-relay` naming it, so each
+  computer is also reached by its key.
 - **Engine:** msb 0.7.4 in `/home/ubuntu/.local/bin`.
 - **Storage:** the ZFS pool `tank` (mirror), with parent
   `tank/sandcastle`.
