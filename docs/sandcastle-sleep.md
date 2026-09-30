@@ -34,6 +34,24 @@ fire while asleep), after the rewrite (`docs/sandcastle-rewrite.md`).
 | Where the VMs live | in `sandcastled.service`'s cgroup (`KillMode=process`), so the unit's `MemoryMax=` caps the daemon and every machine together |
 | The host | 125 GiB RAM, 122 GiB available; the pool 1.68 TiB free; the root filesystem (msb's images and each machine's writable layer, up to about 4 GiB each) 408 GiB free |
 
+**Hermes under its own init** (a probe on lat-6, the official image,
+`msb create --init /init --init-arg /opt/hermes/docker/main-wrapper.sh
+--init-arg gateway --init-arg run -e HERMES_DASHBOARD=1 …`):
+
+| Measure | Result |
+|---|---|
+| What runs | PID 1 `s6-svscan`; s6 supervises the dashboard (a superset of `serve`) on 9119 and `gateway-default` (`hermes gateway run`, which runs cron); the cron ticker's heartbeat written; `/api/status` says `gateway_running: true` |
+| Create to answering | 6.3 s |
+| Pause / resume | 7 ms / answering 23 ms after the resume began; the gateway still running |
+| A graceful `msb stop` | hangs (`Draining`, timed out at 20 s): s6 ignores the signal msb sends a foreign init |
+| s6's own `halt` (exec'd), three cycles | stopped in 3.2 s, gracefully (s6 stops its services; the gateway drains cron) |
+| Start after a stop, three cycles | s6 is PID 1 again (msb keeps the init across restarts); answering 6.5 s after the start call |
+
+So Hermes runs as its image intends with no upstream change and no
+custom image: msb hands PID 1 to the image's init. A custom image stays
+possible (built from Hermes' source at a tag: its Dockerfile builds from
+the checkout), but is not needed for this.
+
 And from reading the sources (msb 0.7.4, Hermes v0.21.5):
 
 - **msb's full memory snapshots do not fit this design**: they refuse a
@@ -57,9 +75,9 @@ And from reading the sources (msb 0.7.4, Hermes v0.21.5):
   image starts the gateway only under its own init (s6) as PID 1; the
   node launches `serve` on agentd's non-PID-1 path, so its computers run
   no cron today. microsandbox's own Hermes recipe runs the image with
-  `--init auto` (made to work detached in msb 0.5.7); for v0.21 images,
-  whose entrypoint is a dispatcher, spike 1 found `--init auto` found
-  nothing. How to run it is open (below).
+  `--init auto`; v0.21 images' entrypoint is a dispatcher, which `auto`
+  does not recognise (spike 1's failure), but naming `/init` explicitly
+  works (above).
 - **Hermes says when it is busy**: `GET /api/status` (running agents,
   gateway busy), a token-gated `/api/health/idle`, and a prepare/commit
   retirement handshake that freezes new work only if it is idle. Its
@@ -136,12 +154,37 @@ unit's settings, including `MemoryMax=`.
   paused machine's disk is clean if the pause flushed the guest
   (`--guest-flush required`).
 
+## A service under its image's init (for Hermes)
+
+The spec gains a second way to run its service, generic, beside the node
+launching `service.argv` on every boot:
+
+- **`service.init`**: the engine hands PID 1 to the image's own init with
+  these arguments (`msb --init`); the init starts and supervises the
+  service, so the node launches nothing and still probes health.
+- **`service.stop`**: a command the node runs in the guest to shut it
+  down gracefully (for s6, `/run/s6/basedir/bin/halt`); the machine then
+  powers off by itself. The node waits for that within a deadline, then
+  kills it (`msb stop -f`).
+- **The service's env** reaches the init at boot through msb's `-e KEY`,
+  its value in msb's own environment (never its command line), as
+  credentials' values already do. msb keeps it in its config at rest, as
+  the node's store does (the debt ledger's plaintext-env entry grows to
+  cover it).
+
+## Order
+
+1. **Budgets**: the metrics gate, the accounting, admission and
+   demotion, the ZFS reservations and quota, the unit's `MemoryMax=`, the
+   capacity report, and encroachment warnings.
+2. **A service under its image's init**, proven with Hermes' gateway
+   running cron.
+3. **Tiers**: warm and cold as core states, idle detection, and wake on
+   request and on a timer.
+4. **The cron provider**.
+
 ## Open
 
-- **How Hermes runs** (serve, gateway, cron) in an msb 0.7.4 machine:
-  `--init` handoff to the image's s6 as microsandbox documents, a custom
-  image built from Hermes' source, or a two-process launcher. Being
-  researched.
 - **The cron provider**: a Hermes plugin (like Nous' Chronos) that hands
   each job's next fire time to a scheduler, which fires it through
   `POST /api/cron/fire`; on fragment, a cell.
