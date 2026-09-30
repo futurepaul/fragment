@@ -195,3 +195,68 @@ Mac:
   messages letting the guest sleep.
 - The real-engine run on lat-6: ten samples each where cheap, with their
   spread.
+
+## The measurement, as built (2026-09-30)
+
+What runs on finite-lat-6:
+
+- **The relay.** Our own `iroh-relay` 1.3.0, at
+  `https://demo.sandcastle.fragment.club:8443/` (the existing
+  certificate's `demo` name). It has its own unit, and the firewall now
+  admits 8443/tcp. Its plain HTTP and metrics are on loopback, and its
+  UDP address discovery is off.
+- **`sandcastled --iroh-relay`** (`sandcastle/crates/sandcastled/src/iroh.rs`):
+  - An endpoint per computer, whose key is HKDF of the node's key and
+    the computer's id. So the key holds across restarts, a computer made
+    again gets a new one, and the guest never sees it.
+  - A connection (ALPN `sandcastle/1`) opens with an admission: a nostr
+    event of kind 27237 with `peer`, `computer`, `node`, and
+    `expiration` tags, lasting at most 10 minutes, verified by the same
+    BIP-340 code as NIP-98. It is signed by one of the node's
+    `--admitter`s, or by the computer's owner when the node names none.
+  - Then each stream is one HTTP/1.1 connection, served by the router's
+    own path from its gate on (`proxy::pass`). So activity, wake, hold,
+    forward, and upgrades are the router's.
+  - A connection closes when its admission ends.
+  - The view (`GET /v1/computers/{name}`) names the computer's key and
+    relay.
+- **`sandcastle-web`** (`sandcastle/crates/web`): the WASM client, which
+  gives a page a peer, an admitted connection, `fetch`, and a WebSocket
+  with its pings answered.
+- **Tests:**
+  - The daemon's tests: who may admit whom, key derivation, and a
+    computer reached by its key over real endpoints. They cover each
+    wrong admission, expiry, two streams and an upgrade on one
+    connection, the key across a restart, admitters replacing the owner,
+    and a warm wake over iroh with a connection held open.
+  - The real-engine e2e's new `iroh` and `web` sections.
+
+**Measured from the Mac, through the relay on lat-6** (the e2e run
+`target/e2e/sandcastle-e2e-iroh.json`, 57 checks, with Hermes v0.21.5):
+
+| | By its key (iroh) | By its URL (HTTPS) |
+|---|---|---|
+| First contact | endpoint bound in 3 ms; connected 179 ms; admitted 249 ms; first answer 303 ms | |
+| An awake request | median 49 ms (47–64, 10) | median 222 ms (209–250, 10) |
+| A warm wake | median 68 ms (68–69, 5) | 223 ms |
+| A cold wake | median 6.96 s (6.4–8.2, 3) | 6.8 s |
+| Hermes' login; its socket opening | 71 ms; 62 ms | |
+| A Hermes turn, first words | 2.9 s | 4.4 s |
+
+- **Relayed throughout.** Hole punching did not happen, since lat-6's
+  firewall drops inbound UDP. The relay and the node share a host, so
+  the relay costs little here; elsewhere it is one more hop.
+- **The URL column pays a fresh TLS connection per request**, and the
+  key column reuses one QUIC connection. So the awake gap is mostly the
+  handshake, not the relay. A warm wake adds about 20 ms either way.
+- **The refusals held over the real relay:** a stream with no admission
+  closed the connection, and an admission by someone other than the
+  owner was refused.
+- **Sleep under an open connection.** The guest went warm with the
+  connection open, and the next request on it woke it in 68 ms. Going
+  warm took 58.9 s after the turn, not the 31 s expected; something
+  held it busy for about half a minute after a turn, not yet
+  explained.
+- **The WASM client** is 3.97 MB raw, 1.43 MB gzipped, and 1.01 MB
+  with brotli. `wasm-opt -Oz` saves raw bytes, not compressed ones.
+
