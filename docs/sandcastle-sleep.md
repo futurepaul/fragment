@@ -132,6 +132,21 @@ report, and the journal) when something else has taken it.
 reserve, prints what that holds for a computer size, and writes the
 unit's settings, including `MemoryMax=`.
 
+### Budgets, built (2026-09-30)
+
+On finite-lat-6 with a reserve of 112 GiB of memory (`MemoryMax=113G`),
+1,500 GiB of disk (a ZFS quota to match), and 300 GiB of the engine's
+disk, the capacity report read: 4,160 MiB committed to the one running
+Hermes (its 4 GiB and the overhead) against 425 MiB it measured
+resident; no warnings; 26 more such machines may run, and 74 more such
+computers fit, bound by the engine's disk at msb's 4 GiB layers (whose
+measured use was a few MiB: the report is where that is seen and tuned).
+The real-engine e2e passed 61 checks on the budgeted node, machines made
+with `--root-disk`. The simulator's every fourth seed has a reserve of
+three machines: 512 seeds pass (99 computers waited for room; room
+never passed the reserve nor was held by a computer that neither ran
+nor meant to).
+
 ## Sleep and wake (after budgets)
 
 - **Tiers as states in the core**: hot (running), warm (paused), cold
