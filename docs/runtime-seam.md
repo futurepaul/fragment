@@ -260,3 +260,37 @@ What runs on finite-lat-6:
 - **The WASM client** is 3.97 MB raw, 1.43 MB gzipped, and 1.01 MB
   with brotli. `wasm-opt -Oz` saves raw bytes, not compressed ones.
 
+**From a browser** (headless Chrome on the Mac, the test page on the
+WASM client, the e2e's `web` section, `target/e2e/sandcastle-e2e-web.json`):
+
+| | By its key, from the browser |
+|---|---|
+| The client compiled and started; a peer on the relay | 10 ms; 7 ms |
+| Connected and admitted; the first answer | 349 ms; 61 ms more |
+| An awake request | median 53 ms (49–56, 10) |
+| A warm wake | median 71 ms (68–350, 5) |
+| A cold wake | 6.3–7.7 s (2) |
+| Hermes' login; its socket opening | 76 ms; 64 ms |
+| A Hermes turn, first words | 3.8 s (the model's time, mostly) |
+
+- **The browser pays nothing over native** past the first contact: its
+  requests and wakes are within a few milliseconds of the native
+  client's.
+- **Its first contact is about a third of a second:** a new peer, the
+  relay, the admission, and the first answer.
+
+**What the measurement settles.** Acceptance 1 to 6 are met on lat-6:
+- a page reaches a computer by its key alone;
+- sandcastle's wake survives the move;
+- the admission gate holds before any byte reaches the guest;
+- the client's weight is about 1 MB.
+
+**What it leaves open:**
+- The relay's cost off the node's own host, and direct paths for native
+  apps (lat-6 drops inbound UDP).
+- Why a guest took 59 s, not 31, to sleep after a turn.
+- Hermes in loopback mode behind the admission, which needs a forwarder
+  in the guest.
+- Where a page gets its admission: fragment's platform, or the person's
+  own key.
+
