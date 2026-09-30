@@ -41,6 +41,7 @@ mod cs;
 mod error;
 mod files;
 mod fragment;
+mod hermes;
 mod jobs;
 mod js;
 mod keys;
@@ -75,6 +76,7 @@ use routed::{Credential, Mode, Routed, Signed};
 
 pub use computer::ComputerCell;
 pub use fragment::FragmentCell;
+pub use hermes::HermesCell;
 pub use principal::PrincipalCell;
 pub use ledger::LedgerCell;
 pub use registry::RegistryCell;

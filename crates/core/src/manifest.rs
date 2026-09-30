@@ -36,6 +36,10 @@ pub struct Manifest {
     /// `"computer": {}`: a deploy with it provisions the fragment's own
     /// computer, a Sprite, on its owner's budget (docs/computers.md).
     pub computer: Option<ComputerDecl>,
+    /// `"hermes": {}`: a deploy with it gives the fragment's owner their own
+    /// Hermes on the fleet's sandcastle node, whose chat the fragment's
+    /// page holds with it (docs/hermes-chat.md).
+    pub hermes: Option<HermesDecl>,
     /// Top-level keys that no longer do anything here.
     pub ignored: Vec<&'static str>,
 }
@@ -46,6 +50,10 @@ pub struct Manifest {
 pub struct ComputerDecl {
     pub start: Option<String>,
 }
+
+/// `hermes`: `{}` (the preset's image, size, and model: the platform's).
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct HermesDecl {}
 
 /// A `start` command's longest.
 pub const COMPUTER_START_MAX_BYTES: usize = 4096;
@@ -335,6 +343,11 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
         }
         Some(_) => return Err("computer is {} or {\"start\": \"<command>\"}".into()),
     }
+    match obj.get("hermes") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(h)) if h.is_empty() => m.hermes = Some(HermesDecl {}),
+        Some(_) => return Err("hermes is {}".into()),
+    }
     match obj.get("triggers") {
         None | Some(Value::Null) => {}
         Some(Value::Array(list)) => {
@@ -383,6 +396,11 @@ mod tests {
         assert_eq!(parse(br#"{}"#).unwrap().computer, None);
         assert_eq!(parse(br#"{"computer":{"start":"node serve.js"}}"#).unwrap().computer.and_then(|c| c.start).as_deref(), Some("node serve.js"));
         assert!(parse(br#"{"computer":{"size":"xl"}}"#).is_err() && parse(br#"{"computer":true}"#).is_err());
+        assert_eq!(parse(br#"{"hermes":{}}"#).unwrap().hermes, Some(HermesDecl {}));
+        assert_eq!(parse(br#"{}"#).unwrap().hermes, None);
+        for bad in [r#"{"hermes":true}"#, r#"{"hermes":{"image":"x"}}"#, r#"{"hermes":[]}"#] {
+            assert!(parse(bad.as_bytes()).is_err(), "{bad}");
+        }
         let long = format!(r#"{{"computer":{{"start":"{}"}}}}"#, "x".repeat(COMPUTER_START_MAX_BYTES + 1));
         for start in [r#"{"computer":{"start":""}}"#, r#"{"computer":{"start":7}}"#, r#"{"computer":{"start":"a","size":1}}"#, &long] {
             assert!(parse(start.as_bytes()).is_err(), "{}", &start[..40.min(start.len())]);

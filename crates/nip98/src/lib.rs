@@ -264,7 +264,18 @@ impl Keys {
     /// `header` for a body the signer holds only the SHA-256 (hex) of, or
     /// for none (`None`: no payload tag).
     pub fn header_for_payload(&self, method: &str, url: &str, payload_sha_hex: Option<&str>, created_at: i64) -> String {
+        self.header_with_nonce(method, url, payload_sha_hex, None, created_at)
+    }
+
+    /// `header_for_payload` with a `nonce` tag (hex): every header a new
+    /// event, for a verifier whose replay cache keys on the event id (a
+    /// sandcastle node's), where the same request signed twice in one
+    /// second would otherwise be refused the second time.
+    pub fn header_with_nonce(&self, method: &str, url: &str, payload_sha_hex: Option<&str>, nonce_hex: Option<&str>, created_at: i64) -> String {
         let mut tags = vec![tag("u", url), tag("method", &method.to_ascii_uppercase())];
+        if let Some(n) = nonce_hex {
+            tags.push(tag("nonce", n));
+        }
         if let Some(p) = payload_sha_hex {
             tags.push(tag("payload", p));
         }
@@ -365,6 +376,22 @@ mod tests {
         assert!(verify_at(&k.header("GET", "https://x:443/a", b"", NOW), "GET", "https://x/a", b"").is_ok());
         // the edge of the window is inside it
         assert!(verify_request(Some(&k.header("GET", URL, b"", NOW - 60)), "GET", &url(URL), Payload::Read(b""), NOW, 60).is_ok());
+    }
+
+    /// Goal: a nonce makes the same request two events, and both verify
+    /// (a sandcastle node's replay cache keys on the event id).
+    #[test]
+    fn a_nonce_makes_the_same_request_two_events() {
+        let k = keys(1);
+        let body = br#"{"a":1}"#;
+        let payload = hex::encode(Sha256::digest(body));
+        let one = k.header_with_nonce("PUT", URL, Some(&payload), Some("01"), NOW);
+        let two = k.header_with_nonce("PUT", URL, Some(&payload), Some("02"), NOW);
+        assert_ne!(decoded(&one).id, decoded(&two).id);
+        for h in [&one, &two] {
+            assert_eq!(verify_at(h, "PUT", URL, body).as_deref(), Ok(k.pubkey_hex()));
+        }
+        assert_eq!(k.header_for_payload("PUT", URL, Some(&payload), NOW), k.header_with_nonce("PUT", URL, Some(&payload), None, NOW), "no nonce: as before");
     }
 
     #[test]

@@ -343,6 +343,9 @@ pub enum ErrorCode {
     /// 410: the fragment moved to another host; the message names its URL
     /// there (a write or a socket to its old host: docs/api.md, Moved hosts).
     Moved,
+    /// 409: what was asked for is still being made (a fragment's Hermes
+    /// starting); ask again shortly.
+    NotReady,
 }
 
 impl ErrorCode {
@@ -363,6 +366,7 @@ impl ErrorCode {
             ErrorCode::StorageFull => 507,
             ErrorCode::NodeFull => 503,
             ErrorCode::Moved => 410,
+            ErrorCode::NotReady => 409,
         }
     }
 }

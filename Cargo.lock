@@ -751,6 +751,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "fragment-core",
+ "fragment-nip98",
  "hex",
  "hkdf",
  "hmac",

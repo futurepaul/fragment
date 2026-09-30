@@ -113,6 +113,10 @@ pub struct Suite {
     pub operator: Keys,
     /// A sandcastle node the fleet lists (`FRAGMENT_SANDCASTLE_NODES`).
     pub sandcastle_node: Keys,
+    /// The fleet's sandcastle node for fragments' Hermes (docs/hermes-chat.md),
+    /// and the platform's grantor key there (a fleet secret: `KEYS` signs).
+    pub sandcastle: fragment_fakes::sandcastle::Sandcastle,
+    sandcastle_grantor: Keys,
     pub cli: PathBuf,
     pub scratch: PathBuf,
     /// The node's own copy of the cell project (never `cell/`, where `xtask dev` runs).
@@ -135,6 +139,7 @@ impl Suite {
             ("WorkOS API key", WORKOS_KEY.into()),
             ("OpenRouter management key", OPENROUTER_MANAGEMENT.into()),
             ("Sprites token", SPRITES_TOKEN.into()),
+            ("sandcastle grantor key", self.sandcastle_grantor.secret_hex()),
         ]
     }
 
@@ -289,6 +294,7 @@ impl Suite {
                 tick_s: COMPUTER_TICK_S,
                 idle_s: COMPUTER_IDLE_S,
             }),
+            hermes: Some(devstack::HermesVars { sandcastle_url: self.sandcastle.url.clone(), grantor_key: self.sandcastle_grantor.secret_hex(), tick_s: 1 }),
         }
         .configure(&self.project)?;
         // the agents' script is co-hosted, as the fleet runs it: the
@@ -535,6 +541,7 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&scratch)?;
     let project = devstack::stage_project(&scratch.join("cell"))?;
     let agents_project = devstack::stage_agent(&scratch.join("agent"))?;
+    let sandcastle_grantor = Keys::generate();
     let mut s = Suite {
         only,
         except,
@@ -559,6 +566,8 @@ fn main() -> Result<()> {
         workos: fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY)?,
         operator: Keys::generate(),
         sandcastle_node: Keys::generate(),
+        sandcastle: fragment_fakes::sandcastle::Sandcastle::start(sandcastle_grantor.pubkey_hex())?,
+        sandcastle_grantor,
         cli,
         scratch,
         project,

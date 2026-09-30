@@ -125,9 +125,9 @@ Here, the fragment's cell stands in for Core and sandcastle's router is
 the edge:
 
 1. **Ownership (Paul: a cell key and the platform's grantor).**
-   - The fragment's `Computer` cell gets a sandcastle runtime beside
-     Sprites: `"computer": {"runtime": "sandcastle", "preset": "hermes"}`.
-     This is finite-integration's "one runtime seam".
+   - A fragment declares `"hermes": {}` in `fragment.json`. Its own
+     `Hermes` cell (not the Sprites-shaped `Computer` cell: phase 1's
+     notes) holds it, the way Core holds a runtime.
    - Its owner key is one `KEYS` makes for that cell, registered as a
      computer identity that its fragment's owner owns (as a Sprite
      pairs). So the model route bills the person, and revoking the
@@ -195,8 +195,8 @@ The costs of Finite's model, taken knowingly:
      and history over REST; a turn with the page's heartbeat outlasts
      the idle time.
 2. **The runtime seam:**
-   - the `Computer` cell's sandcastle runtime: grant, create, observe,
-     delete, idempotent across restarts;
+   - the `Hermes` cell: grant, create, observe, delete, idempotent
+     across restarts;
    - its owner key registered as a computer identity;
    - a fake sandcastle in `crates/fakes`, and an e2e lane.
 3. **The grant:**
@@ -240,6 +240,59 @@ On finite-lat-6 (36 checks):
 The per-fragment cell is a new `Hermes` cell, not the Sprites-shaped
 `Computer` cell. That cell's file sync, hands, and per-tick billing are
 Sprites', and a small cell with Core's shape is what Finite could lift.
+
+### Phases 2 and 3, built (2026-09-30)
+
+Built:
+
+- **`"hermes": {}`** in `fragment.json` (no keys yet; any is refused at
+  deploy), and a `Hermes` cell per fragment that declares it. Its steps
+  are Core's: a key `KEYS` makes; that key paired as a computer its
+  fragment's owner owns (`<label>-hermes.<username>`); a grant of one
+  computer signed by the platform's grantor key (`KEYS`'
+  `sandcastle/grant`, which grants nothing but that size); a generated
+  password and session secret, sealed; the computer; then its view read
+  until the node settles it. Each step's result is saved before the
+  next, so a retried or restarted one lands once. A failed step is tried
+  again with backoff and said in the fragment's `events`.
+- **Removal.** A deploy without the block deletes the computer and
+  removes the key's computer identity (every key revoked), so the node's
+  next credential ask gets nothing. A later declaration makes a new key
+  and computer.
+- **The grant, `POST /__hermes/access`** on the fragment's own origin: an
+  owner or editor signed in there gets `{baseUrl, accessToken,
+  expiresAt}`; anyone else is 403, anyone signed out 401, and 409
+  `not_ready` while it is made. The origin is the one the router served
+  the page from, never the client's `Origin`; it is named on the
+  computer's `cors_origins` first (the latest four). The session is
+  Hermes' own from its login and is cached until a minute before its end.
+- **Asks during a step.** A deploy's ask that lands while a step awaits
+  stands over that step's save (`fragment_core::hermes::merged`), and the
+  grant names an origin only between steps, so a removal's delete never
+  races its put.
+- **The sandcastle fake** (`crates/fakes/src/sandcastle.rs`): the node's
+  API with NIP-98 and replay refusal, grants only from the grantor,
+  owner-only computers, and a fake Hermes behind the router's CORS: its
+  login, `api/auth/me`, sessions, the single-use ticket, and the
+  `/api/ws` JSON-RPC subset a chat uses.
+
+The e2e lane `hermes` (26 checks, on fakes): made from a deploy, its
+events, one computer and one grant to a key of its own, the spec, the
+key as its owner's computer, the credentials ask billing its owner; the
+owner's session, its origin named, a cross-origin read and a turn over
+`/api/ws`, the same session asked again, a stranger and the signed-out
+refused, an editor admitted; removal, the key revoked; declared again
+and the node crashed mid-making, made once when back.
+
+The escalations for phase 5 (Paul approves each):
+
+- the fleet secret `FRAGMENT_KEYS_SANDCASTLE_GRANTOR_KEY` (a nostr secret
+  key in hex), and `FRAGMENT_SANDCASTLE_API`
+  (`https://api.sandcastle.fragment.club`) in the fleet's vars;
+- lat-6's unit adding `--grantor <its public key>`;
+- a fragment.club deploy (nodes first: `KEYS` gains `sandcastle/grant`);
+- `*.sandcastle.fragment.club`'s wildcard certificate (DNS-01 on Paul's
+  DNS), since each Hermes is its own host there.
 
 ## Evaluation
 

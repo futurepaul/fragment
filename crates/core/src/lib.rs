@@ -15,6 +15,7 @@ pub mod egress;
 pub mod facet;
 pub mod form;
 pub mod glob;
+pub mod hermes;
 pub mod history;
 pub mod live;
 pub mod manifest;
