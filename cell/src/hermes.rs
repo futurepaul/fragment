@@ -56,8 +56,9 @@ pub(crate) enum Ask {
     /// A native session for a viewer the fragment let in, on a page served
     /// from `origin`.
     Grant { origin: String },
-    /// Its computer's owner removed it (the registry revoked its key): the
-    /// computer goes.
+    /// Its fragment was deleted, or its owner removed its key's computer
+    /// (`fragment computers rm`): its computer goes, and the key's computer.
+    /// A later deploy that declares it makes a new one.
     Destroy,
 }
 

@@ -459,7 +459,7 @@ before, whatever else it carries.
 | `POST /api/memory` | a person; an agent, for its owner | → `{name}`: the same, made first when there is none (a computer's is 403: it is given its owner's as it pairs) |
 | `PUT /api/memory` | a person (an agent's or a computer's is 403) | `{fragment, replace?}` → `{name}`: a fragment the person owns becomes their memory (`fragment memory use <fragment>`; `fragment memory` shows it), and every computer of theirs an editor there, each fragment's own told to sync; another memory recorded already is 409 unless `replace` is true, and it is left as it is |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, sharing?}]}`; `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility (a fragment from before sends it once, on its next change or alarm; until then it has none); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
-| `DELETE /api/f/{name}` | owner; an agent, for a throwaway it made (Agents, Hand-offs) | → `{ok, deleted}`; the app's database goes too; the repo stays |
+| `DELETE /api/f/{name}` | owner; an agent, for a throwaway it made (Agents, Hand-offs) | → `{ok, deleted}`; the app's database goes too, and its Hermes (`"hermes": {}`: its computer and its key's computer); the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes, frame?, throwawayOf?}` (`frame`: when live's `fragment.json` asks for it, whether its owner allows it; `throwawayOf`: the agent that made it as a throwaway) |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
@@ -577,7 +577,10 @@ keeps the last good code and says why in `status.code.error`.
   in its `cors_origins`. Its steps are in the fragment's `events`
   (`hermes.ready`, `hermes.failed`, retried with backoff,
   `hermes.removed`). A deploy without the block removes the computer and
-  the key's computer; a later one makes new ones. `__hermes/access`
+  the key's computer, as deleting the fragment does, and as its owner
+  removing that computer does (`fragment computers rm
+  <label>-hermes.<username>`); a later deploy that declares it makes new
+  ones. `__hermes/access`
   (Serving) hands a page a session for it.
 - `input` is a JSON Schema in a bounded subset (`crates/core/src/schema.rs`:
   types, `enum`, `const`, lengths, ranges, `items`, `properties`,

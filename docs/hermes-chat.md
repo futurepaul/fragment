@@ -257,8 +257,10 @@ Built:
   again with backoff and said in the fragment's `events`.
 - **Removal.** A deploy without the block deletes the computer and
   removes the key's computer identity (every key revoked), so the node's
-  next credential ask gets nothing. A later declaration makes a new key
-  and computer.
+  next credential ask gets nothing. Deleting the fragment does the same,
+  and so does its owner removing the key's computer (`fragment computers
+  rm`, whose name maps back to the fragment). A later declaration makes
+  a new key and computer.
 - **The grant, `POST /__hermes/access`** on the fragment's own origin: an
   owner or editor signed in there gets `{baseUrl, accessToken,
   expiresAt}`; anyone else is 403, anyone signed out 401, and 409

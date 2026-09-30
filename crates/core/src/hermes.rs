@@ -73,6 +73,16 @@ pub fn identity_name(fragment: &str) -> String {
     format!("hermes-{}.{username}", &digest[..16])
 }
 
+/// The fragment whose Hermes a computer identity named `name` is, when
+/// `identity_name` gave it (`<label>-hermes.<username>`); a digest's name
+/// (a label past the limit) names none, and its Hermes goes with its
+/// fragment instead.
+pub fn fragment_of_identity(name: &str) -> Option<String> {
+    let (label, username) = fragment_proto::split_fragment_name(name)?;
+    let fragment = fragment_proto::fragment_name(label.strip_suffix("-hermes")?, username);
+    (fragment_proto::valid_fragment_name(&fragment) && identity_name(&fragment) == name).then_some(fragment)
+}
+
 /// What its computer is made of, apart from its secrets.
 pub struct Spec<'a> {
     pub image: &'a str,
@@ -176,6 +186,17 @@ mod tests {
         let long = format!("{}.alice", "a".repeat(fragment_proto::limits::NAME_MAX_BYTES));
         let named = identity_name(&long);
         assert!(fragment_proto::valid_fragment_name(&named) && named.starts_with("hermes-"), "{named}");
+    }
+
+    #[test]
+    fn an_identity_names_its_hermes_fragment() {
+        assert_eq!(fragment_of_identity("chat-hermes.alice").as_deref(), Some("chat.alice"));
+        assert_eq!(fragment_of_identity("my-chat-hermes.alice").as_deref(), Some("my-chat.alice"));
+        for name in ["builder.alice", "hermes.alice", "-hermes.alice", "chat-hermes", "chat-hermes.", ""] {
+            assert_eq!(fragment_of_identity(name), None, "{name}");
+        }
+        let long = format!("{}.alice", "a".repeat(fragment_proto::limits::NAME_MAX_BYTES));
+        assert_eq!(fragment_of_identity(&identity_name(&long)), None, "a digest's name names none");
     }
 
     /// Goal: a deploy's ask that lands while a step awaits is never lost
