@@ -210,6 +210,37 @@ The costs of Finite's model, taken knowingly:
    - the grantor secret, the cell deploy, and lat-6's `--grantor`;
    - the hosted e2e as the acceptance above, with evidence.
 
+### Phase 1, built (2026-09-30)
+
+Built:
+
+- `cors_origins` in sandcastle's router, with a daemon test through the
+  real router: a preflight admitted and refused, a read admitted and a
+  stranger's, the service's own headers dropped, and none named.
+- Hermes' chat checks in the sandcastle e2e, with a WebSocket client
+  that reads its socket as a browser does, answering pings at once.
+  Hermes closes a socket whose pong is 20 s late, which a client reading
+  only when it expects an answer will be.
+
+On finite-lat-6 (36 checks):
+
+- **The edge.** The URL made public with no new machine. Hermes' own
+  gate refuses without a login. A native login gives a session. The
+  page's preflight and its bearer reads carry the page's origin.
+- **The socket.** The ticket opens the socket once, and a new chat's turn
+  streams from the model through the swap: first words in 4.0–4.5 s, and
+  history holds the turn.
+- **Sleep.** A page's heartbeat (a `gateway.ping` every 15 s) keeps
+  Hermes awake past the idle time. Quiet, it goes warm under its open
+  socket (33 s).
+- **The wake.** The next message on that socket wakes it and is answered:
+  first words in 1.2 s, most of it the model. An open connection
+  survives a pause and resume through msb's port forward.
+
+The per-fragment cell is a new `Hermes` cell, not the Sprites-shaped
+`Computer` cell. That cell's file sync, hands, and per-tick billing are
+Sprites', and a small cell with Core's shape is what Finite could lift.
+
 ## Evaluation
 
 - **Unit tests:**
