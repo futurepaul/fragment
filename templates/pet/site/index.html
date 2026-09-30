@@ -84,17 +84,29 @@
       return names.get(id);
     };
 
-    // the frame is a blob of this fragment's; one collected while the pet
-    // slept shows the waking note until the pet sends the next
+    // the frame is a blob of this fragment's; one that does not load is
+    // tried again a few times, and one collected while the pet slept shows
+    // the waking note until the pet sends the next
     const showing = (frame) => {
       $("frame").hidden = !frame;
       $("empty").hidden = frame;
     };
-    $("frame").onload = () => showing(true);
-    $("frame").onerror = () => showing(false);
+    let retries = 0;
+    $("frame").onload = () => { retries = 0; showing(true); };
+    $("frame").onerror = () => {
+      showing(false);
+      const src = $("frame").getAttribute("src");
+      if (src && retries < 5) {
+        retries += 1;
+        setTimeout(() => { if ($("frame").getAttribute("src") === src) $("frame").src = `${src.split("?")[0]}?try=${retries}`; }, 1000 * retries);
+      }
+    };
     fragment.live("screen", {}, async (s) => {
       if (!s) return;
-      if (s.shot !== shown?.shot) $("frame").src = `./__blob/${s.shot}`;
+      if (s.shot !== shown?.shot) {
+        retries = 0;
+        $("frame").src = `./__blob/${s.shot}`;
+      }
       shown = s;
       $("screen").style.aspectRatio = `${s.width} / ${s.height}`;
       $("title").textContent = s.title ? `on screen: ${s.title}` : "";

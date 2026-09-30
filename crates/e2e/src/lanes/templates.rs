@@ -460,11 +460,21 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
     );
     if let Some(mut chrome) = s.browser()? {
         let tab = chrome.open(&api.site_url(&name, &format!("?view={}", made.body["viewToken"].as_str().unwrap_or(""))))?;
-        let expr = format!("(() => {{ const i = document.getElementById('frame'); return !i.hidden && i.complete && i.naturalWidth === 8 && i.getAttribute('src') === './__blob/{shot}'; }})()");
+        let expr = format!("(() => {{ const i = document.getElementById('frame'); return !i.hidden && i.complete && i.naturalWidth === 8 && i.getAttribute('src').split('?')[0] === './__blob/{shot}'; }})()");
         let drawn = chrome.until(&tab, &expr, Duration::from_secs(30));
+        // what the page holds when it has not drawn it: its image, and what
+        // fetching that image answers now
+        let seen = if drawn {
+            Value::Null
+        } else {
+            let probe = "(async () => { const i = document.getElementById('frame'); const src = i.getAttribute('src'); \
+                 const r = src ? await fetch(src).then((r) => `${r.status} ${r.headers.get('content-type')}`, (e) => String(e)) : null; \
+                 return { src, complete: i.complete, width: i.naturalWidth, hidden: i.hidden, fetched: r, error: document.getElementById('error').textContent }; })()";
+            chrome.eval(&tab, probe).unwrap_or_else(|e| json!(e.to_string()))
+        };
         chrome.screenshot(&tab, &s.scratch.join("pet-page.png"))?;
         chrome.close(tab)?;
-        s.ok("and its page shows it, from `__blob`", drawn, "");
+        s.ok("and its page shows it, from `__blob`", drawn, seen.to_string());
     } else {
         s.ok("Chrome is installed for the pet's page (set CHROME_BIN)", false, "no Chrome found");
     }
