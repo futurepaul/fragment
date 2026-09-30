@@ -222,7 +222,7 @@ compute platform.
 | R4 one URL, locked-down ingress | router with owner tickets plus the service's own login; only 443 | not documented (its gateway is the control plane, not an ingress) |
 | R5 credentials the agent cannot read | microsandbox's swap (placeholders, host-side TLS, headers), fed from the platform's credential URL, rotated live (phase 4, built) | **its core feature**: "opaque credential placeholders" resolved by a trusted supervisor "only at profile-authorized endpoints", attached and rotated at runtime |
 | Egress policy | engine's public-only plus `--guest-deny` | **richer**: every connection through the supervisor; declarative YAML; per-endpoint rules over HTTP, GraphQL, and MCP (say, allow a read, block a write on one API); network rules hot-reload; a "policy prover" checks them with formal logic |
-| R7 sleep, wake, timers | phase 5 | not documented |
+| R7 sleep, wake, timers | warm (paused) and cold (stopped) tiers, a request wakes it (phase 5); timers next | not documented |
 | Inference routing | not ours (Finite Private, the platform) | yes: policy on "where inference goes" |
 | Auth, the contract | NIP-98, grants, owner keys | a gateway with workspaces and team permissions |
 | Hosts | Linux with KVM; macOS later | Linux, macOS on Apple Silicon, Windows with WSL 2 |
@@ -828,12 +828,20 @@ against fragment.club).
    a memory dump of the guest find no key. Rotating the key at the source
    takes effect without touching the guest (msb by hand, and the tests).
    A restore brings back no old value.
-5. **Sleep and wake (R7).** Checks:
-   - Idle sleep happens with a quiet WebSocket open.
+5. **Sleep and wake (R7).** *Tiers met 2026-09-30 on lat-6
+   (`docs/sandcastle-sleep.md`, Tiers, built); the cron provider is next.*
+   Checks:
+   - Idle sleep happens with a quiet WebSocket open. *Met: its pings and
+     pongs keep nothing awake, a message wakes it (the daemon's tests).*
    - A browser request wakes the computer, measured as ten warm and ten
-     cold wakes each with a spread.
+     cold wakes each with a spread. *Met: warm median 229 ms against 214
+     ms awake, cold 3.1 s (a python service); Hermes warm 236 ms, cold
+     6.2 s.*
    - A Hermes cron job fires on time while the computer is asleep.
-   - A held long tool is never suspended.
+     *Not yet: the cron provider.*
+   - A held long tool is never suspended. *A request in flight, however
+     long, is activity; a service says busy (`service.busy`: Hermes'
+     `active_agents`).*
 6. **The contract.** NIP-98 on every call, grants, and owner keys:
    valid, invalid and replay tests for each mutation, and a restart test
    for each stored invariant. fragment's `Computer` cell drives it.

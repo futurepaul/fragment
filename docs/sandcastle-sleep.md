@@ -1,6 +1,8 @@
 # sandcastle phase 5: budgets, sleep, and wake
 
-Status: proposed 2026-09-29 (Paul's calls below). Phase 5 of
+Status: steps 1–3 (budgets, a service under its image's init, tiers)
+built and proven on finite-lat-6, 2026-09-30; step 4, the cron provider,
+is next. Paul's calls below. Phase 5 of
 `docs/sandbox.md` (R7: sleep when idle, wake fast on contact, crons that
 fire while asleep), after the rewrite (`docs/sandcastle-rewrite.md`).
 
@@ -236,6 +238,93 @@ machine converges to it like everything else:
 - **The view** says `warm` or `cold` (a new observed state) and is not
   pending: sleep is the node's to choose.
 
+### Tiers, built (2026-09-30)
+
+As designed above, with these decisions made while building it:
+
+- **A request in flight is activity for as long as it lasts** (a long
+  stream is never idle), and always wakes a sleeping computer, whatever
+  the clock says. A WebSocket's client data frames count; its pings,
+  pongs, and close do not (`sandcastled/src/frames.rs` reads frame
+  headers only).
+- **Wake is written to the row** (`POST .../wake`, owner or grantor), so a
+  restart keeps it; on an awake computer it counts as activity, so a
+  scheduler can keep one awake. `POST .../sleep {tier}` puts a serving
+  computer to sleep now (only colder), which the e2e uses to measure.
+- **What a computer wrote before it slept is snapshotted**
+  (`sc-<n>-pause`), owed before the pause (so a crash between the two
+  still takes it; simulation seed 231), and shipped while it sleeps. A
+  day warm is never a day without a backup.
+- **A machine whose image's init is PID 1 cannot be paused flushed.**
+  msb 0.7.4 refuses `pause --guest-flush required` for it ("PID 1
+  handoff workloads are not wholly owned by agentd's cgroup": agentd
+  cannot freeze a workload it does not own), which the first Hermes run
+  found. The node syncs such a guest by exec (9 ms) just before its pause
+  and pauses with `--guest-flush auto`. Writes between the sync and the
+  pause stay in the guest's memory, flushed on its next wake or stop, so
+  its pause snapshot is as of the sync.
+- **A machine that will not pause** (a guest that cannot flush, so likely
+  wedged) goes cold instead: its halt goes through the wedge, and its
+  next wake is a fresh boot. Retrying the pause would hold a batch for
+  its 60 s deadline every idle time (the simulation's first run: 621
+  failed pauses).
+- **A nudged batch** runs between ticks, from a fresh listing of its own
+  (`msb ls` takes 5 ms), so a warm wake is not a tick away.
+- **A restarted node measures before it adopts** what it finds up: an
+  awake computer's running machine at its whole allocation, any other at
+  what it measured, as it held before the restart. Adopting paused
+  machines whole passed the reserve (simulation seed 44).
+- **Demotion** is the node's, across computers, between batches: while
+  computers wait for room, the least recently active warm computers go
+  cold until what they will free covers the wait.
+
+Older bugs the simulation found on the way: after a create whose reply
+was lost, the node took the new machine for the one it replaced (seed
+251), or guessed how it stops from a generation asked for since (seed
+483), and sent an init's stop to a machine the node launches. The row
+now forgets the old machine and notes how the new one stops before the
+create (`Note::Replace`), so it never guesses. And a relaunch counted a
+service seen before it as seen since (a relaunch loop within one
+simulated millisecond).
+
+**Measured on finite-lat-6** (msb 0.7.4; a 512 MiB python web computer
+and a 4 GiB Hermes; each request from a Mac over a new TLS connection
+through the router, so an awake request is the baseline):
+
+| | Result |
+|---|---|
+| `msb pause --guest-flush required`, `msb resume` | 8 ms each; a paused machine is listed `Paused` and still measured |
+| Idle to warm | 31.4 s after the last request (idle after 30 s) |
+| An awake request | median 210 ms (204–222, 10) |
+| A warm wake, through the URL | median 230 ms (216–242, 10): the wake adds about 20 ms |
+| A cold wake, through the URL | median 3.1 s (2.3–3.1 s, 10): a boot, the service's launch, its first answer |
+| A cold halt (asked to seen stopped) | median 0.9 s (10) |
+| A busy service (`service.busy`) | awake past the idle time while it says busy; warm 31 s after it says not |
+| An idle guest's rates (python web) | 1–6 thousandths of a vCPU, 0.7–0.9 KiB/s (the node's probe): the floors (50, 4 KiB/s) sit well above |
+| An idle Hermes' rates (under s6, gateway and dashboard up) | 6 thousandths of a vCPU at the median, 19–20 at p95; 0.7 KiB/s at the median, up to 3.2 KiB/s at p95 (the samples include the e2e's cron and model call): under the floors, the network's close to its 4 KiB/s |
+| Hermes paused | 0.9 s from asked to seen paused (a sync, then `--guest-flush auto`); **892–925 MiB resident** |
+| A warm Hermes wake, through its URL | 235–236 ms (two runs) |
+| A cold Hermes wake, through its URL | 6.0–6.2 s (s6's boot, the gateway and dashboard, the first answer) |
+| A guest's caches dropped before a pause | its guest memory 580 → 525 MiB, its host resident 796 → 759 MiB: msb gives freed guest memory back to no one |
+
+The whole real-engine e2e passed 124 checks on lat-6 with the final
+build (Hermes included: its cron fired while each look kept it awake,
+and its model call went through the swap). 1,000 simulation seeds pass:
+14,385 crashes, 2,622 pauses, 1,806 wakes, 999 cold halts, 53 demotions;
+a sleeping computer never holds writes that no snapshot has, and the
+ledger never passes the reserve, restarts included.
+
+**What the warm cost means for a node.** A warm Hermes holds about
+900 MiB, twice the 425 MiB an idle `hermes serve` measured, since its
+gateway and dashboard run and msb returns nothing a guest frees. On
+lat-6's 112 GiB reserve that is about 118 warm Hermes with none awake,
+or 10 awake (41 GiB) and about 75 warm, the rest cold, bounded then by
+disk: 120 computers of 10 GiB at 1 GiB layers, about 240 of 5 GiB. Paul's
+256 on a 128 GiB machine holds if most of them are cold, which a day
+warm makes them. The lever that would double the warm tier is the guest
+giving memory back (free page reporting or a balloon in msb's VMM),
+listed below.
+
 ## Order
 
 1. **Budgets**: the metrics gate, the accounting, admission and
@@ -244,11 +333,19 @@ machine converges to it like everything else:
 2. **A service under its image's init**, proven with Hermes' gateway
    running cron.
 3. **Tiers**: warm and cold as core states, idle detection, and wake on
-   request and on a timer.
+   request (built 2026-09-30; waking on a timer is the cron provider's).
 4. **The cron provider**.
 
 ## Open
 
+- **Returning a guest's freed memory to the host.** A warm Hermes holds
+  what its guest ever touched (892 MiB); dropping its caches frees guest
+  memory the host never sees again. Free page reporting or a balloon in
+  msb's VMM (libkrun), with a cache drop before the pause, would roughly
+  halve the warm cost. Ask upstream, or measure what libkrun offers.
+- **Waking for outbound gateways** (the debt ledger: a sleeping computer
+  hears only what comes through its URL): Telegram by webhook, Finite
+  Chat by a wake from its server.
 - **The cron provider**: a Hermes plugin (like Nous' Chronos) that hands
   each job's next fire time to a scheduler, which fires it through
   `POST /api/cron/fire`; on fragment, a cell.

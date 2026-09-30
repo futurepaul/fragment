@@ -839,18 +839,6 @@ without a delete condition is unfinished design, not debt.
   dedicated system user with its own `MSB_HOME`, and a check on a fresh
   host proves it.
 
-## A sandcastle disk has no space reserved
-
-- **Observed:** 2026-09-29. Disks are sparse ZFS volumes (`zfs create
-  -s`): a computer's `data_gib` is a ceiling, not a reservation, and the
-  pool's free space is shared.
-- **Risk:** a full pool fails every computer's writes at once, the way a
-  full disk would, however little each one used.
-- **First proof:** a pool past about 80% full.
-- **Delete when:** the node refuses a create, or a grant, that would
-  overcommit the pool past a configured ratio, and reports pool usage,
-  with a test.
-
 ## sandcastle backups are sealed with one key per node
 
 - **Observed:** 2026-09-29 (phase 3). Every backup a node ships is sealed
@@ -913,3 +901,48 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** the node tells the platform (a signed call to the
   credential source) when a computer is deleted, and the platform drops
   its token, with a test.
+
+## A sleeping sandcastle computer hears only what comes through its URL
+
+- **Observed:** 2026-09-30 (phase 5, tiers). A computer sleeps after 30 s
+  with no activity the node sees: requests through its URL, a client's
+  WebSocket data, its guest's CPU and network over the floors. A
+  gateway its guest keeps outbound (Hermes' Telegram long-poll, Finite
+  Chat's relay connection) is frozen with it: a message waits at its
+  platform until something else wakes the computer.
+- **Risk:** an agent reached only through an outbound gateway stops
+  answering 30 s after its last conversation.
+- **First proof:** a Hermes with a polling Telegram gateway, or Finite
+  Chat, on a node that sleeps computers.
+- **Delete when:** every gateway Finite ships delivers through the
+  computer's URL (a webhook) or its platform calls `POST .../wake` for a
+  message, proven by an e2e that sends a message to a warm Hermes and
+  gets its answer.
+
+## A sleeping sandcastle computer's cron does not run
+
+- **Observed:** 2026-09-30 (phase 5, tiers). Hermes' cron ticks in its
+  gateway, inside the guest; a paused or stopped guest does not tick. A
+  job due while it sleeps fires once when it next wakes (a one-shot more
+  than 120 s late is dropped by Hermes).
+- **Risk:** scheduled jobs of an idle agent are late by as long as it
+  sleeps, or lost.
+- **First proof:** any Hermes cron job on a node that sleeps computers.
+- **Delete when:** the cron provider (docs/sandcastle-sleep.md, step 4)
+  wakes a computer for each job it fires, proven by the e2e firing a job
+  on a warm and on a cold Hermes.
+
+## A sandcastle demotion resumes a machine with only its warm hold
+
+- **Observed:** 2026-09-30. A warm computer demoted to cold (its room
+  wanted, or a day warm) is resumed so its service stops gracefully (msb
+  refuses a graceful stop of a paused machine), holding in the ledger
+  only what it measured when it paused; while its service stops, it may
+  use more.
+- **Risk:** machines briefly hold more than the ledger says; the unit's
+  `MemoryMax=` (a GiB over the reserve on lat-6) is the line then.
+- **First proof:** many demotions at once on a node near its reserve.
+- **Delete when:** a demotion takes room for the whole allocation before
+  it resumes (or kills the paused machine once its guest flushed, if
+  that is judged safe for services), with a sim invariant that committed
+  memory covers every running machine's allocation.
