@@ -150,12 +150,31 @@ could place computers on Cloudflare or on sandcastle nodes behind one API.
 |---|---|---|
 | A warm wake | none: memory is not kept | 236 ms (Hermes, paused) |
 | A cold wake | container start (648 ms median, 910 ms p95) + restoring `/data` + Hermes' own start (about 5 s) | 6.1 s |
-| Awake, per hour | memory and disk as provisioned, CPU as used: about $0.038 plus CPU for a `standard-1` (½ vCPU, 4 GiB, 8 GB) | the box's rent, shared |
+| Awake, per hour | memory and disk as provisioned, CPU only as used: about $0.058 for a Hermes of 2 vCPU, 6 GiB, and 16 GB (below), plus its CPU | the box's rent, shared |
 | Asleep | nothing | the box's rent |
 
-With no warm tier, "warm" on Cloudflare means staying awake: an idle
-Hermes costs about 0.06¢ a minute, so the computer's object can keep it
-up 20 to 30 minutes after the last message and still cost cents a day.
+**A Hermes' size on Cloudflare.** Paul wants 2 vCPU and 4 GiB. A
+container's custom size (`ctx.container.start({vcpu, memoryMib,
+diskMb})`) takes 1 to 4 vCPU, up to 12 GiB and 20 GB, but **at least
+3 GiB of memory per vCPU**, so 2 vCPU needs 6 GiB. CPU is billed only
+as it is used, so the second vCPU costs nothing idle; what it costs is
+the 2 GiB more memory the ratio asks for, about $0.018 an hour awake.
+The default is therefore 2 vCPU, 6 GiB, and 16 GB:
+
+| | vCPU | Memory | Awake and idle, per hour | Per minute | Awake all month |
+|---|---|---|---|---|---|
+| Custom (the default) | 2 | 6 GiB | $0.058 | 0.1¢ | about $42 |
+| `standard-1` | ½ | 4 GiB | $0.038 | 0.06¢ | about $27 |
+| `standard-3` | 2 | 8 GiB | $0.076 | 0.13¢ | about $55 |
+
+At list prices: memory $0.009 per GiB-hour, disk $0.00025 per GB-hour,
+CPU $0.072 per vCPU-hour of use (an idle Hermes uses about 6
+thousandths of a vCPU: about a cent a day, even awake all day). A person whose
+Hermes is awake two hours a day costs about 12¢ a day.
+
+With no warm tier, "warm" on Cloudflare means staying awake: at about
+0.1¢ a minute, the computer's object can keep Hermes up 20 to 30 minutes
+after the last message and still cost cents a day.
 The object decides idle itself (the raw `ctx.container` API, not the
 `Container` class, which renews its timeout on every WebSocket message,
 pings included: FIN-66's lesson), counting data frames as sandcastle's
@@ -220,22 +239,21 @@ needs no compatibility flag.
 
 ## Self-hosted, entirely
 
-A self-hosted fragment still calls four services it does not run:
+The services fragment calls that it does not run, and what each becomes
+(Paul, 2026-09-30):
 
-| Service | What for | Its self-hosted replacement |
-|---|---|---|
-| code.storage | every fragment's files, history, and `live` pointer (git) | the contract `crates/fakes/src/codestorage.rs` already implements (the subset the cell and CLI call), made a real service on the bucket, or an adapter over a git server the operator runs |
-| WorkOS | sign-in (`KEYS` `workos/authenticate`) | any OpenID Connect provider (the Registry's call made generic), or passkeys |
-| OpenRouter | model calls, and per-person keys that carry each budget | any OpenAI-compatible endpoint, a local model included; budgets kept by the platform's own ledger (it already meters every call) |
-| Sprites | fragments' computers today | sandcastle (this doc's computer seam) |
+| Service | What for | On Cloudflare | Self-hosted |
+|---|---|---|---|
+| code.storage | every fragment's files, history, and `live` pointer (git) | code.storage now; Cloudflare Artifacts later (Git-compatible repos for agents, reached from Workers, a REST API, and git clients; closed beta) | a replacement service the operator runs: the contract `crates/fakes/src/codestorage.rs` already implements (the subset the cell and CLI call), made real on the bucket |
+| WorkOS | sign-in (`KEYS` `workos/authenticate`) | fragment's WorkOS | the operator's own WorkOS account (only configuration), or, for an internal company network, its own identity provider over OpenID Connect (the Registry's sign-in made one seam with two implementations) |
+| OpenRouter | model calls, and per-person keys that carry each budget | OpenRouter | OpenRouter |
+| Sprites | fragments' computers today | Containers | sandcastle |
 
-Web push goes through the browsers' push services, which no operator
-runs; it stays optional. The hosting is any machine that runs celld and
-any S3-compatible bucket, with sandcastle nodes on Linux boxes with KVM
-and ZFS.
-
-The Cloudflare substrate keeps code.storage, WorkOS, and OpenRouter as
-they are: they are not substrate questions.
+So a code store and a sign-in seam are what self-hosting has to build;
+the models stay OpenRouter's everywhere. Web push goes through the
+browsers' push services, which no operator runs; it stays optional. The
+hosting is any machine that runs celld and any S3-compatible bucket,
+with sandcastle nodes on Linux boxes with KVM and ZFS.
 
 ## Phases
 
@@ -273,10 +291,12 @@ they are: they are not substrate questions.
    - *Evaluation:* the same on both substrates; a node behind NAT with
      no inbound port.
 6. **Entirely self-hosted.**
-   - The four replacements above.
+   - The code store as a service of its own, and sign-in through the
+     operator's WorkOS or their own OpenID Connect provider.
    - One box's install (celld, sandcastle, a bucket) and its runbook.
-   - *Evaluation:* the hosted e2e against a self-hosted fleet that
-     calls none of the four.
+   - *Evaluation:* the hosted e2e against a self-hosted fleet that calls
+     neither code.storage nor fragment's WorkOS, and one signed in
+     through an OpenID Connect provider on a private network.
 
 Every phase keeps both substrates green: CI runs the e2e on celld, and a
 Cloudflare fleet run joins it from phase 2.
@@ -289,11 +309,12 @@ Cloudflare fleet run joins it from phase 2.
 - **Dynamic Workers leave beta** at what price and limits? At $0.002
   per unique worker per day, 10 000 fragments active in a day cost $20.
 - **Containers:**
+  - at least 3 GiB per vCPU (so 2 vCPU is 6 GiB), at most 4 vCPU,
+    12 GiB, and 20 GB;
   - snapshots are in beta, image-tied, and kept 30 days;
   - there is no warm tier;
   - a container may start somewhere other than its object, or move on a
     restart;
-  - disks are 8 to 20 GB.
 - **Parity.** celld's fork must keep matching Cloudflare's semantics
   where fragment leans on them (facets, the loader, alarms): the e2e on
   both substrates is the guard.
