@@ -30,6 +30,9 @@ github.com/futurepaul/fragment's `master`, which fragment.club runs) and on cell
    `docs/runtime-seam.md` — one computer wherever it runs: presets,
    sites, the trust floor, iroh and admissions (decided 2026-09-30),
    and the measurement before the cut;
+   `docs/two-substrates.md` — fragment on Cloudflare, or entirely
+   self-hosted, from one code (proposed 2026-09-30): the layers, the
+   computer seam (Containers or sandcastle), what changes, the phases;
    `docs/phase-3.md` — hosting on fragment.club;
    `docs/phase-2.md` — the record of the core cut (slices A–G);
    `docs/operate.md` — the operator runbook.

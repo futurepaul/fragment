@@ -53,6 +53,18 @@ decisions behind it, and the measurement that comes before any cut.
    of the `Hermes` cell, the wildcard certificate for
    `*.sandcastle.fragment.club`, and the hosted proof in docs/hermes-chat.md.
 
+**Refined later the same day (Paul):** keeping a person's data from the
+platform is not a design driver. On a hosted platform fragment holds
+what it hosts, as it holds published fragments and its agents; a person
+who connects their own computer knows the platform could see what passes
+through; privacy is what self-hosting gives. So a computer is reached
+**through the platform**, on the fragment's own origin, and a person's
+own computer dials out to it. That supersedes 4 and 5: iroh and signed
+admissions become a later optimization (a native app on the same
+network), not the transport, and the measurement below waits behind
+docs/two-substrates.md (fragment on Cloudflare, or entirely self-hosted),
+which also names Cloudflare Containers as a rented placement.
+
 ## The model
 
 Three layers, each owned by one party:
