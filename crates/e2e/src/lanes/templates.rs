@@ -461,7 +461,28 @@ fn pet(s: &mut Suite, api: &Api, owner: &Keys, chat: &str) -> Result<()> {
     if let Some(mut chrome) = s.browser()? {
         let tab = chrome.open(&api.site_url(&name, &format!("?view={}", made.body["viewToken"].as_str().unwrap_or(""))))?;
         let expr = format!("(() => {{ const i = document.getElementById('frame'); return !i.hidden && i.complete && i.naturalWidth === 8 && i.getAttribute('src').split('?')[0] === './__blob/{shot}'; }})()");
-        let drawn = chrome.until(&tab, &expr, Duration::from_secs(30));
+        // A live pet's frames keep coming; this fake one's screen never
+        // changes, so it sends its frame once, and the e2e's node collects
+        // any blob unseen for BLOB_GRACE_S (4 s): on a slow runner, before
+        // the page loads it. So the test keeps the frame fresh, as a pet
+        // sending frames would, while the page draws it.
+        let fresh = || {
+            api.call(Call {
+                method: "PUT",
+                url: format!("{}/api/f/{name}/blobs/{shot}?frame", api.base),
+                body: Some(jpeg.clone()),
+                content_type: Some("image/jpeg"),
+                keys: Some(&computer),
+                ..Call::default()
+            })
+        };
+        let started = std::time::Instant::now();
+        let mut drawn = false;
+        while !drawn && started.elapsed() < Duration::from_secs(30) {
+            let r = fresh()?;
+            anyhow::ensure!(r.status == 200, "the pet's frame stored again: {r}");
+            drawn = chrome.until(&tab, &expr, Duration::from_secs(2));
+        }
         // what the page holds when it has not drawn it: its image, and what
         // fetching that image answers now
         let seen = if drawn {
