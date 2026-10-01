@@ -35,7 +35,7 @@ The goal is an engine that:
 | Warm tier (pause) | None: an idle VM stops, and a wake is a cold start | Paul; Cloudflare has none |
 | seccomp | An allowlist from what libkrun calls | Paul |
 | Launching VMs | A root engine service jails each VM itself (no `sudo` or `systemd-run`); celld and sandcastled stay unprivileged and call it over a unix socket | About 20 ms off every start; how Docker's daemon works |
-| Guest ports | Measure the VM's NIC (kernel TCP) against vsock and keep the faster; vsock stays for servers listening on loopback only | Speed: vsock carries about 200 MiB/s |
+| Guest ports | Measured (E4): the NIC wins. The engine connects a TCP socket from inside the VM's network namespace and hands it over on `ports.sock`; vsock stays for servers listening on loopback only | 5.8 GiB/s and 0.34 ms to first byte, against vsock's 2.5 GiB/s and 4 ms |
 | Images | Unpack as Docker does: xattrs (file capabilities), device nodes, every zstd form; accept `docker save` tars, which is how celld ships images | Parity |
 | Roots and snapshots | Keep overlays (a fresh root in 5 ms, no ZFS). `snapshotContainer` copies the writable layer; storage with reflinks only if that measures slow | Speed; Cloudflare's snapshot is the writable root only |
 | Proxy and NIC | Keep: the proxy on the node outside the jail, a real NIC rather than TSI | No speed cost; safer, more reliable |
@@ -186,4 +186,106 @@ commit.
 
 ## Results
 
-*(Filled as each phase lands.)*
+*2026-10-01, on finite-lat-6.* E1 to E5 are done; E6 (celld) and E7
+(CI) are next. Every number below is from one engine build
+(`engine_sha256_16` 364f2f6fac921a28), with seccomp enforced, in
+`docs/krun-engine-evidence/`. Medians, with the range in brackets.
+
+### Acceptance
+
+| | Item | State |
+|---|---|---|
+| 1 | Cloudflare's container API | Every call but `interceptOutboundHttp`'s callback to the Durable Object, which waits for celld (E6); 28 parity checks pass (`parity.json`) |
+| 2 | Speed | Met but one: a jailed start is 108.1 ms against the 107 ms bar (below) |
+| 3 | celld on the engine | Not started (E6) |
+| 4 | Images | Met: the corpus, file capabilities granted to a non-root user, `docker save` loads, Cloudflare's `sandbox-shim` |
+| 5 | Hardening | Met: the allowlist holds every scenario; adoption; limits refused with typed errors |
+| 6 | Clean | Clippy and tests pass on the Mac and on Linux; CI is E7 |
+
+### Speed
+
+| Measure | Now | Spike | Notes |
+|---|---|---|---|
+| busybox, start to ready (jailed, `lite`) | 108.1 ms [106.6–111.0] | 107 unjailed, 124–129 jailed | `boot.json` |
+| exec round trip | 4.0 ms [1.3–80.0] | 4.0 | `exec.json` |
+| guest port, NIC (`ports.sock`) | 5.8 GiB/s, 0.34 ms to first byte | — | `port-nic.json`; 2 vCPU |
+| guest port, vsock | 2.5 GiB/s, 4.0 ms to first byte | 0.18 GiB/s | the spike's figure was busybox `nc`'s ceiling, not vsock's |
+| snapshot; start from it | 46.6 ms; 215 ms | — | a 4 MB writable root |
+| Hermes, start to serving | 4.47 s [4.46–4.47] | 4.37 | `hermes.json`; ready in 250 ms |
+| an intercepted request's round trip | 2.8 ms on `standard-1` | 2.6 | on `lite` most wait out the 1/16 vCPU's period (93 ms) |
+| engine restart to serving, its VMs adopted | 39 ms | — | `crash.json` |
+
+Where the start goes now (`boot.json`, from the request): prepared
+1.8 ms, jailed 6.2 (nft 1.9), the VMM built and running 12.8, the
+guest's init says hello at 104.8 (its kernel's clock reads 47 ms), ready
+at 107.9. Two cuts made it:
+
+- **The VM is born in its cgroup.** The jailer moved itself into the
+  VM's cgroup with a write to `cgroup.procs`, which waits out an RCU
+  grace period: 13.7 of a 14.4 ms jail. It now forks the VM with
+  `clone3(CLONE_INTO_CGROUP)` and stays in the engine's cgroup itself.
+- **`pci=off`.** libkrun's devices are all virtio-mmio; the kernel's
+  PCI probe cost 7 ms.
+
+Measured and not taken: `cryptomgr.notests`, `tsc=reliable`,
+`no_timer_check` (no change); dropping virtio-rng (1 ms, not worth
+weaker entropy where RDRAND is missing); skipping btrfs's initcall
+(0.7 ms). What is left, from the guest's `dmesg` with `initcall_debug`
+(`boot-dmesg.json`), for later:
+
+- about 45 ms from the first `KVM_RUN` to the kernel's clock, unexplained
+  without `perf` on the node;
+- in the kernel: jitterentropy's self-test 6.4 ms,
+  `sched_clock_init_late` 5.8 ms, `param_sysfs` 2.5 ms, virtio probes
+  8.5 ms; a trimmed libkrunfw config is the lever;
+- libkrun's `KVM_REINJECT_CONTROL`, 4.4 ms (an SRCU sync), a patch
+  upstream;
+- the nft ruleset by netlink instead of spawning `nft`, about 2 ms.
+
+### What E4 and E5 found and fixed
+
+- **Guest ports go over the NIC.** With a server that writes 1 MiB at a
+  time, the NIC carries 5.8 GiB/s against vsock's 2.5. A client sends
+  `{name, port}` to `ports.sock`; one engine thread enters the VM's
+  network namespace, makes a socket, and returns, and the engine
+  connects it to the guest and passes the fd (SCM_RIGHTS). Nothing
+  relays the bytes. `refused` means nothing listens on the NIC, and the
+  client falls back to vsock, which reaches a server on the guest's
+  loopback (checked). The jailer adds the guest's MAC as a permanent
+  neighbor, so no first connection waits on ARP (libkrun attaches the
+  tap lazily, and a first ARP sent before that was lost: a 1 s stall).
+- **An exit could be lost.** The guest sent `Exited` and powered off at
+  once, and libkrun ends the process on the guest's reboot, racing the
+  runner's read: five of six fast exits lost their code once the start
+  got faster. The runner now answers `Recorded`, and the guest waits for
+  it (2 s at most) before powering off; wire version 2.
+- **A VM that ends while the engine is down** has its exit read from its
+  events file at restart, so `monitor()` answers with its code (5, in
+  the crash scenario), not "not found".
+- **The seccomp allowlist holds.** Every scenario passes with it
+  enforced, and the kernel logged no kill but the probe's: in the jail,
+  a child under the runner's filter dies by SIGSYS at `execve` and lives
+  through `getpid`.
+- **CPU.** `lite`'s 1/16 vCPU is enforced over a 100 ms period with a
+  burst of one quota. A 20 ms period was tried and was worse: it spread
+  every request out to sixteen times its CPU time (60 ms for a 2.6 ms
+  call).
+- **Images.** A file capability is granted to a non-root user (CapEff
+  `0x2000` for `cap_net_raw`, as `ping` needs). Cloudflare's
+  `sandbox-shim`, copied into `node:24-trixie-slim` as their example
+  Dockerfile does, answers every `Files` call the SDK makes (write, read,
+  stat, list, rename, recursive remove, errno for a missing path and for
+  a write `user` may not make).
+
+### Debt
+
+Into `docs/technical-debt-ledger.md` when this merges:
+
+- A `docker save` tar's `diff_ids` are not checked against its layers
+  (celld is the only loader, and trusted).
+- The build VM ends the same way the run VM did before `Recorded`: its
+  `Finished` reply races its power-off. No build has lost it yet.
+- `ended` keeps the last 4096 exits and drops by name order, not age.
+- Memory is now reported as the VM's cgroup (730 MiB for an idle Hermes
+  after a reclaim), which counts the page cache of its disks; the
+  spike's 604 MiB was the VMM's resident memory alone.
