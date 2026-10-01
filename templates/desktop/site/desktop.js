@@ -13,7 +13,10 @@
 // this page may not frame, in a window of its own; this page can script
 // neither. The list says who else is in each, for the badges. An app pane's
 // header says the same, with a Share button, and who has the app open now
-// (`__presence`, asked while this page is in view).
+// (`__presence`, asked while this page is in view). It is its owner's home
+// (docs/one-home.md): New chat asks who answers (their agent, a Hermes of
+// theirs, or the people alone), the open chat's Invite opens its share
+// sheet, and Settings is the platform's page.
 import * as fragment from "./__fragment.js";
 import { createLayout, store } from "./layout.js";
 import { createViewer } from "./viewer.js";
@@ -164,7 +167,7 @@ $("collapse-left").onclick = () => layout.hide("left");
 $("toggle-right").onclick = () => layout.toggle("right");
 $("collapse-right").onclick = () => layout.hide("right");
 $("scrim").onclick = () => { layout.hide("left"); layout.hide("right"); };
-$("new-chat-top").onclick = () => $("new-chat").click();
+$("new-chat-top").onclick = () => openMenu($("new-chat-top"), answerers());
 addEventListener("keydown", (e) => {
   if (!(e.metaKey || e.ctrlKey) || e.code !== "KeyB") return;
   e.preventDefault();
@@ -283,7 +286,9 @@ sheet.onclose = () => {
   load().catch(() => {});
 };
 
-// One `…` menu, for whichever row asked.
+// One menu, for whichever button asked: a row's `…` (Share…), and New
+// chat's (who answers it). Each item: `{heading}`, or `{id?, icon, text,
+// data?, onClick}`.
 const menu = $("menu");
 let menuFor = null;
 function closeMenu() {
@@ -292,21 +297,30 @@ function closeMenu() {
   menuFor = null;
   menu.hidden = true;
 }
-function openMenu(button, name) {
+function openMenu(button, items) {
   const again = menuFor?.button === button;
   closeMenu();
   if (again) return;
-  menuFor = { button, name };
+  menuFor = { button };
+  menu.replaceChildren(...items.map((it) => {
+    if (it.heading) return el("div", "menu-heading", it.heading);
+    const b = el("button");
+    b.type = "button";
+    b.setAttribute("role", "menuitem");
+    if (it.id) b.id = it.id;
+    Object.assign(b.dataset, it.data ?? {});
+    b.innerHTML = svg(it.icon);
+    b.append(it.text);
+    b.onclick = () => { closeMenu(); it.onClick(); };
+    return b;
+  }));
   button.setAttribute("aria-expanded", "true");
   menu.hidden = false;
   const r = button.getBoundingClientRect();
   menu.style.top = `${Math.min(r.bottom + 4, innerHeight - menu.offsetHeight - 8)}px`;
   menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8))}px`;
-  $("menu-share").focus();
+  menu.querySelector("button")?.focus();
 }
-$("menu-share").innerHTML = svg("share");
-$("menu-share").append("Share…");
-$("menu-share").onclick = () => { const name = menuFor?.name; closeMenu(); if (name) share(name); };
 addEventListener("pointerdown", (e) => { if (menuFor && !menu.contains(e.target) && e.target !== menuFor.button && !menuFor.button.contains(e.target)) closeMenu(); });
 addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
 addEventListener("blur", closeMenu);
@@ -323,7 +337,7 @@ function item(row, name) {
   more.setAttribute("aria-expanded", "false");
   more.dataset.fragment = name;
   more.innerHTML = svg("more");
-  more.onclick = (e) => { e.stopPropagation(); openMenu(more, name); };
+  more.onclick = (e) => { e.stopPropagation(); openMenu(more, [{ id: "menu-share", icon: "share", text: "Share…", onClick: () => share(name) }]); };
   wrap.append(row, more);
   return wrap;
 }
@@ -369,6 +383,8 @@ function openChat(name) {
   state.current = name;
   store.set(CURRENT, name);
   $("chat-title").textContent = label(name);
+  // its owner invites people into it, in its share sheet
+  $("invite").hidden = f.role !== "owner";
   if (state.frame !== true) {
     renderChats();
     return cannotFrame(name);
@@ -384,10 +400,25 @@ function openChat(name) {
   renderChats();
 }
 
-$("new-chat").onclick = async () => {
+// A new chat asks who answers it: the owner's agent, a Hermes of theirs
+// (a computer of theirs whose preset is Hermes), or no one, the people in
+// it alone (docs/one-home.md, phase 5); the chat's fragment.json says so.
+function answerers() {
+  const hermes = state.fragments.filter((f) => f.role === "owner" && kindOf(f).computer === "hermes");
+  return [
+    { heading: "Who answers?" },
+    { icon: "chat", text: "Your agent", data: { answers: "agent" }, onClick: () => newChat("agent") },
+    ...hermes.map((f) => ({ icon: "computer", text: hermes.length > 1 ? `Hermes · ${label(f.name)}` : "Hermes", data: { answers: "computer", computer: f.name }, onClick: () => newChat({ computer: f.name }) })),
+    { icon: "people", text: "Just people", data: { answers: "people" }, onClick: () => newChat("people") },
+  ];
+}
+$("new-chat").setAttribute("aria-haspopup", "menu");
+$("new-chat").onclick = () => openMenu($("new-chat"), answerers());
+
+async function newChat(answers) {
   $("new-chat").disabled = true;
   try {
-    const made = await platform({ label: fresh("chat"), template: "chat" });
+    const made = await platform({ label: fresh("chat"), template: "chat", answers });
     await fragment.call("add_chat", { name: made.name });
     await load();
     openChat(made.name);
@@ -397,7 +428,8 @@ $("new-chat").onclick = async () => {
   } finally {
     $("new-chat").disabled = false;
   }
-};
+}
+$("invite").onclick = () => { if (state.current) share(state.current); };
 
 // ---- apps: every other fragment, each a pane in the viewer ----
 const PASTELS = [["#8ab4ff", "rgba(138,180,255,.16)"], ["#39d98a", "rgba(57,217,138,.16)"], ["#f2b36b", "rgba(242,179,107,.16)"], ["#e58fd1", "rgba(229,143,209,.16)"], ["#9ad0d8", "rgba(154,208,216,.16)"], ["#c9b6ff", "rgba(201,182,255,.16)"]];
@@ -674,15 +706,19 @@ setInterval(() => { if (!document.hidden) checkTemplate(); }, TEMPLATE_MS);
 // ---- loading ----
 let seen = "";
 async function load() {
-  const [{ fragments, frame = null }, { chats }] = await Promise.all([platform(), fragment.call("chats", {})]);
+  const [{ fragments, frame = null, settings }, { chats }] = await Promise.all([platform(), fragment.call("chats", {})]);
+  if (settings) {
+    $("settings").href = settings;
+    $("settings").hidden = false;
+  }
   // allowed or stopped since this page showed: it shows again, as it now may
   if (state.frame !== undefined && frame !== state.frame) return location.reload();
   state.frame = frame;
   const now = JSON.stringify([fragments, chats]);
   if (now === seen) return;
   seen = now;
-  // the rows are made again: a menu open on one closes
-  closeMenu();
+  // the rows are made again: a menu open on one closes (New chat's stays)
+  if (menuFor?.button.classList.contains("more")) closeMenu();
   state.fragments = fragments;
   state.chats = chats;
   // this desktop is one of them: the one this page is under

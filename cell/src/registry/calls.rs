@@ -177,6 +177,29 @@ impl Call for Memory {
     type Answer = MemoryName;
 }
 
+/// `POST /home`: the fragment the platform records as `owner`'s home, their
+/// desktop (cell/src/home.rs; docs/one-home.md, decision 7), recording
+/// `name` when there is none yet (the first recorded stays), or in place of
+/// the one there with `replace` (it is gone): the one recorded, if any.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Home {
+    pub owner: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub replace: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct HomeName {
+    pub name: Option<String>,
+}
+
+impl Call for Home {
+    const PATH: &'static str = "/home";
+    type Answer = HomeName;
+}
+
 /// `POST /computers/redeem`: a key pairs as the computer a token names
 /// (the router checked the key signed the request). Again, by the same
 /// key, the same computer.

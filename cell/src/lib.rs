@@ -42,6 +42,7 @@ mod error;
 mod files;
 mod fragment;
 mod hermes;
+mod home;
 mod relay;
 mod jobs;
 mod js;
@@ -1130,7 +1131,7 @@ async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellResult<Respons
     }
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     match (req.method(), segments.as_slice()) {
-        (_, [""] | ["auth", ..] | ["cli"] | ["cli", "approve"]) => {
+        (_, [""] | ["settings"] | ["auth", ..] | ["cli"] | ["cli", "approve"]) => {
             let segs = segments.clone();
             auth::platform(req, env, cfg, &url, &segs).await
         }

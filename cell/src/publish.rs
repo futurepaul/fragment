@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use fragment_core::site;
-use fragment_proto::{CreateFragment, ErrorBody, ErrorCode, IdentityKind, Role, Visibility};
+use fragment_proto::{ChatAnswers, CreateFragment, ErrorBody, ErrorCode, IdentityKind, Role, Visibility};
 use fragment_templates::{Template, BLANK, BUILDER, CALORIES, CHAT, DESKTOP, HERMES, INBOX, PET, TODO};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -23,8 +23,9 @@ use crate::js;
 use crate::registry::calls;
 use crate::routed::{Credential, Signed};
 
-/// The templates a fragment can start from, in the order the home page
-/// offers them: the simplest first, the desktop (a demo) last. `notes`
+/// The templates a fragment can start from, in the order the settings page
+/// offers them: the simplest first, the desktop (everyone's home, made on
+/// their first visit: home.rs) last. `notes`
 /// stays with the CLI (`fragment new --template notes`): at 3 MiB it would
 /// double the cell. `builder` is also what an agent's hand-off makes.
 /// `hermes` makes its owner's own Hermes on the fleet's sandcastle node
@@ -87,22 +88,28 @@ pub(crate) fn frames(name: &str) -> bool {
     template(name).is_some_and(|t| manifest(t)["capabilities"].as_array().is_some_and(|c| c.iter().any(|c| c == "frame")))
 }
 
-/// The template's fragment.json with the fragment's own name in it.
-fn stamp(bytes: &[u8], name: &str) -> Vec<u8> {
+/// The template's fragment.json with the fragment's own name in it, and,
+/// for a chat its create said who answers, that (docs/one-home.md, phase 5).
+fn stamp(bytes: &[u8], name: &str, answers: Option<&ChatAnswers>) -> CellResult<Vec<u8>> {
     match serde_json::from_slice::<Value>(bytes) {
         Ok(Value::Object(mut o)) => {
             o.insert("name".into(), name.into());
-            serde_json::to_vec_pretty(&o).expect("a manifest serializes")
+            let v = match answers {
+                Some(a) => fragment_core::manifest::answered(Value::Object(o), a).map_err(CellError::invalid)?,
+                None => Value::Object(o),
+            };
+            Ok(serde_json::to_vec_pretty(&v).expect("a manifest serializes"))
         }
-        _ => bytes.to_vec(),
+        _ if answers.is_some() => Err(CellError::invalid("only a chat (a `chat` channel) is told who answers it")),
+        _ => Ok(bytes.to_vec()),
     }
 }
 
 /// A template's files as the fragment `name` holds them: its fragment.json
-/// stamped with that name.
-fn stamped(t: Template, name: &str) -> Vec<FileWrite> {
+/// stamped with that name (and who answers it, when its create said).
+pub(crate) fn stamped(t: Template, name: &str, answers: Option<&ChatAnswers>) -> CellResult<Vec<FileWrite>> {
     t.iter()
-        .map(|(path, bytes)| FileWrite { path: path.to_string(), bytes: Some(if *path == "fragment.json" { stamp(bytes, name) } else { bytes.to_vec() }) })
+        .map(|(path, bytes)| Ok(FileWrite { path: path.to_string(), bytes: Some(if *path == "fragment.json" { stamp(bytes, name, answers)? } else { bytes.to_vec() }) }))
         .collect()
 }
 
@@ -132,13 +139,19 @@ impl FragmentCell {
         let t = template(&which).ok_or_else(|| CellError::host(format!("no template {which}")))?;
         let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
         let key = format!("template:{}", self.must(MetaKey::CreatedAt)?);
-        if let Wrote::Conflict(why) = self.commit(&key, &stamped(t, &name), &BTreeMap::new(), &format!("start from the {which} template"), &owner, 0).await? {
+        let files = stamped(t, &name, self.answers()?.as_ref())?;
+        if let Wrote::Conflict(why) = self.commit(&key, &files, &BTreeMap::new(), &format!("start from the {which} template"), &owner, 0).await? {
             return Err(CellError::host(why));
         }
         self.go_live(&owner, &format!("deploy {name}")).await?;
         self.event("template", &format!("{name} starts from the {which} template"), json!({ "template": which }));
         self.set_meta(MetaKey::Template, &which)?;
         self.del_meta(MetaKey::TemplatePending)
+    }
+
+    /// Who its create said answers it (a chat), if it said.
+    fn answers(&self) -> CellResult<Option<ChatAnswers>> {
+        self.meta(MetaKey::TemplateAnswers)?.map(|a| serde_json::from_str(&a).map_err(|e| CellError::host(format!("template_answers: {e}")))).transpose()
     }
 
     /// The template this fragment was made from, while the platform still
@@ -180,7 +193,7 @@ impl FragmentCell {
         self.ensure_pins(&mut facts).await?;
         let cs = self.cs()?;
         let (repo, live, cs) = (&facts.repo, facts.pin_live.as_deref(), &cs);
-        let compared = stamped(t, name).into_iter().map(|w| async move {
+        let compared = stamped(t, name, self.answers()?.as_ref())?.into_iter().map(|w| async move {
             let want = w.bytes.expect("a template writes each of its files");
             let same = match (live, self.tree_row("live", &w.path)?) {
                 (Some(live), Some(row)) if row.size == want.len() as u64 => cs.read(repo, live, &w.path, want.len()).await? == Some(want),
@@ -218,7 +231,8 @@ impl FragmentCell {
         }
         let key = format!("template-update:{}:{}", template_hash(t), self.pin("live")?.unwrap_or_default());
         let message = format!("update to the latest {which} template");
-        if let Wrote::Conflict(why) = self.commit(&key, &stamped(t, &name), &BTreeMap::new(), &message, &owner, 0).await? {
+        let files = stamped(t, &name, self.answers()?.as_ref())?;
+        if let Wrote::Conflict(why) = self.commit(&key, &files, &BTreeMap::new(), &message, &owner, 0).await? {
             return Err(CellError::host(why));
         }
         let live = self.go_live(&owner, &format!("deploy {name}: {message}")).await?;
@@ -468,7 +482,11 @@ impl FragmentCell {
         let name = self.name()?;
         let (_, username) = fragment_proto::split_fragment_name(&name).ok_or_else(|| CellError::host(format!("{name} is not <label>.<username>")))?;
         let text = |k: &str| body[k].as_str().map(str::to_string).ok_or_else(|| CellError::invalid(format!("{k} is a string")));
-        let create = CreateFragment { name: text("label")?, visibility: None, template: Some(text("template")?), throwaway: false };
+        let answers = match body.get("answers") {
+            None | Some(Value::Null) => None,
+            Some(a) => Some(serde_json::from_value::<ChatAnswers>(a.clone()).map_err(|_| CellError::invalid("answers is \"agent\", \"people\", or {\"computer\": \"<fragment>\"}"))?),
+        };
+        let create = CreateFragment { name: text("label")?, visibility: None, template: Some(text("template")?), throwaway: false, answers };
         let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: Some(username.to_string()) };
         let signer = Signed::new(identity, None);
         let mut made = crate::create_fragment(&self.env, self.cfg, &caller.url, create, signer).await?;

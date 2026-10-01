@@ -124,7 +124,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let got = seen.lock().expect("upstream log").clone();
     s.ok("after a restart a sealed secret opens: the job's fetch carries it", ran["status"] == "succeeded" && got == [format!("Bearer {SECRET}")], format!("{ran} {got:?}"));
     // a browser's sessions, and the key its push subscriptions were made with
-    let r = with_session(&api, "GET", "/", &member_session)?;
+    let r = with_session(&api, "GET", "/settings", &member_session)?;
     s.ok("after a restart a browser's platform session still signs it in", r.status == 200 && r.text.contains(MEMBER_EMAIL), &r);
     let r = push_key(&api)?;
     s.ok("and its site session on a fragment still works", r.status == 200, &r);

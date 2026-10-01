@@ -144,7 +144,7 @@ fn script(parent: Option<&str>) -> String {
   for (const b of document.querySelectorAll("button[data-done]")) b.onclick = () => {{
     if (framed) return tell("done");
     close();
-    if (!window.closed) location.href = "/";
+    if (!window.closed) location.href = "/settings";
   }};
 }})();</script>"#,
         delay = form::DELAY_MS

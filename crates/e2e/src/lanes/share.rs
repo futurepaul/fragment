@@ -560,9 +560,9 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{:?} {:?}", chrome.eval(&page, "window.__sheet.closed"), chrome.pages()?),
     );
 
-    // ---- the platform's home, the one page that frames the sheet: its
+    // ---- the platform's settings, the one page that frames the sheet: its
     // Share opens it in a dialog, and Done closes it
-    let home = chrome.open(&format!("{platform}/"))?;
+    let home = chrome.open(&format!("{platform}/settings"))?;
     let link = format!("a[data-share][href={sheet:?}]");
     // A hand's click lands where the link is drawn: only once the page has
     // loaded, its fonts are in, and the link's handler is set, or a layout
@@ -580,7 +580,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let done = shown && chrome.eval_in_frame(&home, "/share/", "(document.querySelector('button[data-done]').click(), true)").is_ok();
     let closed = done && chrome.until(&home, "!window.before && !document.getElementById('share').open", wait);
     s.ok(
-        "the platform's home opens the sheet in a dialog (a frame on its own origin), and its Done closes it (the home reloads, showing what changed)",
+        "the platform's settings open the sheet in a dialog (a frame on its own origin), and its Done closes it (the page reloads, showing what changed)",
         shown && closed,
         format!("listed {listed} shown {shown} done {done}: {}", inside(&mut chrome)),
     );

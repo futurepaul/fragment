@@ -453,6 +453,22 @@ pub struct CreateFragment {
     /// records the agent, which alone may delete it (docs/api.md, Hand-offs).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub throwaway: bool,
+    /// Who answers a chat made from the `chat` template (docs/one-home.md,
+    /// phase 5): its fragment.json says so from its first commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answers: Option<ChatAnswers>,
+}
+
+/// Who answers a new chat: its owner's own agent (the `chat` template's
+/// `"agent": {"personal": true}`), a Hermes of theirs (`{"computer":
+/// "<fragment>"}`, a fragment of theirs that declares one), or no one, the
+/// people in it alone (`"people"`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatAnswers {
+    Agent,
+    People,
+    Computer(String),
 }
 
 /// The answer to a create: the only time the webhook secret is shown

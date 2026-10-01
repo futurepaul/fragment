@@ -349,6 +349,10 @@ pub(crate) enum MetaKey {
     /// The template it was made from, once it landed (publish.rs `seed`);
     /// one made before this was kept is read from its `template` event.
     Template,
+    /// Who its create said answers it, a chat made from the `chat`
+    /// template (`ChatAnswers`, JSON): its fragment.json is stamped so at
+    /// its first commit, and compared and updated so (publish.rs).
+    TemplateAnswers,
     /// What live's `agent` block declares, still to make so (agents.rs
     /// `sync_agent`): a new value each time live declares one.
     AgentPending,
@@ -439,6 +443,7 @@ impl MetaKey {
             MetaKey::OutsideAt => "outside_at",
             MetaKey::TemplatePending => "template_pending",
             MetaKey::Template => "template",
+            MetaKey::TemplateAnswers => "template_answers",
             MetaKey::AgentPending => "agent_pending",
             MetaKey::AgentLive => "agent_live",
             MetaKey::AgentJoined => "agent_joined",
@@ -1037,6 +1042,11 @@ impl FragmentCell {
             let names: Vec<&str> = crate::publish::TEMPLATES.iter().map(|(n, _)| *n).collect();
             return Err(CellError::invalid(format!("no template {t:?}; the templates are {}", names.join(", "))));
         }
+        // who answers a chat: checked against its template before anything is made
+        if let Some(answers) = &body.answers {
+            let t = body.template.as_deref().and_then(crate::publish::template).ok_or_else(|| CellError::invalid("`answers` is for a fragment made from a template (a chat)"))?;
+            crate::publish::stamped(t, &body.name, Some(answers))?;
+        }
         let cs_cfg = self.cfg.codestorage()?;
         // Claim the name before the first await: a concurrent create for the
         // same name reaches this same object and must see it taken.
@@ -1099,6 +1109,9 @@ impl FragmentCell {
         )?;
         self.index_change(&owner, Some(Role::Owner))?;
         if let Some(t) = &body.template {
+            if let Some(answers) = &body.answers {
+                self.set_meta(MetaKey::TemplateAnswers, &serde_json::to_string(answers).expect("serializes"))?;
+            }
             self.set_meta(MetaKey::TemplatePending, t)?;
         }
         self.event("create", &format!("fragment {} created by {owner} (repo {repo})", body.name), json!({ "repo": repo, "key": caller.key().map(npub::display) }));

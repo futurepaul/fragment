@@ -1,7 +1,11 @@
 # desktop
 
-Your fragments side by side: chats in the middle, apps, computers, and
-files stacked in a viewer on the right, all of them fragments of yours.
+Your home (docs/one-home.md): the platform makes one for you on your
+first visit, and its `/` opens it; its settings (pairing a CLI, your
+picture, your fragments, signing out) are a link at the foot of the
+sidebar. Your fragments side by side: chats in the middle, apps,
+computers, and files stacked in a viewer on the right, all of them
+fragments of yours.
 Each shows in
 its own frame, signed in on its own origin; the desktop holds no
 authority over any of them.
@@ -22,10 +26,15 @@ authority over any of them.
   asked on load and every 10 minutes). Its Update commits the template's
   files over your desktop's and deploys them; files the template does
   not have stay, and the old version stays in its history.
-- A chat is a fragment New chat named (`chat-…`), and a computer one New
-  computer named (`computer-…`, from the pet template: a Sprite of its
-  own, on your budget), wherever you made it; every other fragment is an
-  app. `app.mjs` keeps the chats this desktop made (`chats`, `add_chat`,
+- New chat asks who answers it: your agent, a Hermes of yours (a
+  computer of yours made from the hermes template), or just the people
+  in it; the new chat's `fragment.json` says so (`__fragments`'
+  `answers`). Its header's Invite opens its share sheet, where you invite
+  someone by username.
+- A chat is a fragment that says it is one (its kind, in your list), and a
+  computer one that declares one (New computer makes it from the pet
+  template: a Sprite of its own, on your budget), wherever you made it;
+  every other fragment is an app. `app.mjs` keeps the chats this desktop made (`chats`, `add_chat`,
   `remove_chat`), listed first, newest first.
 - A computer opens as a pane, like an app. Its page is what keeps it
   awake: while its pane is open, and 5 minutes after it closes. Your

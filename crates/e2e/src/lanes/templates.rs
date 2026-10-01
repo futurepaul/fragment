@@ -228,26 +228,26 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{made} / {st}"),
     );
 
-    // the platform's home: the person's fragments, and making one
-    let home = with_session(api, "GET", "/", &owner_session)?;
+    // the platform's settings (its home before the desktop was): the person's fragments, and making one
+    let home = with_session(api, "GET", "/settings", &owner_session)?;
     let row = |page: &Reply, name: &str| page.text.split("<li>").find(|li| li.contains(&format!("/share/{name}\""))).unwrap_or_default().to_string();
     s.ok(
-        "the platform's home lists the person's fragments: each one's link, who may open it, and its share sheet",
+        "the platform's settings list the person's fragments: each one's link, who may open it, and its share sheet",
         home.text.contains("Your fragments")
             && row(&home, &chat).contains(&format!("href=\"{}\"", api.site_url(&chat, "")))
             && row(&home, &chat).contains("yours · anyone with the link")
             && row(&home, &desk).contains("yours · only the people in it"),
         &home,
     );
-    let theirs = with_session(api, "GET", "/", &editor_session)?;
+    let theirs = with_session(api, "GET", "/settings", &editor_session)?;
     s.ok("and says which are shared with them, and as what", row(&theirs, &blank).contains("shared with you · editor"), &theirs);
     let offered: Vec<usize> = ["blank", "todo", "inbox", "calories", "pet", "builder", "chat", "hermes", "desktop"].iter().filter_map(|t| home.text.find(&format!("value=\"{t}\""))).collect();
     s.ok(
-        "and offers the templates, the simplest first and the desktop last, as the demo it is, saying it will show their fragments inside it",
+        "and offer the templates, the simplest first and the desktop last, saying it will show their fragments inside it",
         home.text.contains("New fragment")
             && offered.len() == 9
             && offered.is_sorted()
-            && home.text.contains("A demo of what fragments can do")
+            && home.text.contains("Your home: your chats, apps, and computers side by side")
             && home.text.contains("It will show your fragments inside it, signed in as you"),
         &home,
     );
@@ -272,7 +272,49 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 302 && st.body["visibility"] == "members" && st.body["frame"] == json!(true),
         format!("{r} / {st}"),
     );
+    answers(s, api, &owner)?;
     pet(s, api, &owner, &chat)
+}
+
+/// A chat made from the template told who answers it (docs/one-home.md,
+/// phase 5): its fragment.json says so from its first commit, and its
+/// template still counts it up to date; told wrongly, nothing is made.
+fn answers(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let manifest = |name: &str| api.signed(owner, "GET", &format!("/api/f/{name}/manifest"), None).map(|r| r.body).unwrap_or_default();
+    let up_to_date = |name: &str| api.signed(owner, "GET", &format!("/api/f/{name}/template"), None).map(|r| r.body["upToDate"] == true).unwrap_or(false);
+    let people = s.named(api, owner, "tpeople")?;
+    let r = api.create_with(owner, json!({ "name": people, "template": "chat", "answers": "people" }))?;
+    let members = api.signed(owner, "GET", &format!("/api/f/{people}/members"), None)?;
+    let no_agent = members.body["members"].as_array().is_some_and(|m| m.iter().all(|m| m["kind"] != "agent"));
+    s.ok(
+        "a chat for the people alone: its fragment.json names no agent, none joins, and its template counts it up to date",
+        r.status == 200 && manifest(&people)["agent"].is_null() && no_agent && up_to_date(&people),
+        format!("{r} {members}"),
+    );
+    let hermes = api.qualified(owner, "myhermes")?;
+    let answered = s.named(api, owner, "thermes")?;
+    let r = api.create_with(owner, json!({ "name": answered, "template": "chat", "answers": { "computer": hermes } }))?;
+    s.ok(
+        "a chat a Hermes of theirs answers: its fragment.json names it on its chat channel",
+        r.status == 200 && manifest(&answered)["agent"] == json!({ "channel": "chat", "computer": hermes }) && up_to_date(&answered),
+        &r,
+    );
+    let refused: Vec<(&str, Value)> = vec![
+        ("a template that is no chat", json!({ "name": s.named(api, owner, "tbad1")?, "template": "todo", "answers": "people" })),
+        ("no template", json!({ "name": s.named(api, owner, "tbad2")?, "answers": "people" })),
+        ("a Hermes that is no fragment's name", json!({ "name": s.named(api, owner, "tbad3")?, "template": "chat", "answers": { "computer": "Not A Name" } })),
+        ("an answer it does not know", json!({ "name": s.named(api, owner, "tbad4")?, "template": "chat", "answers": "everyone" })),
+    ];
+    let mut wrong = vec![];
+    for (what, body) in refused {
+        let name = body["name"].as_str().unwrap_or("").to_string();
+        let r = api.create_with(owner, body)?;
+        if r.status != 400 || api.status(owner, &name)?.status != 404 {
+            wrong.push(format!("{what}: {r}"));
+        }
+    }
+    s.ok("told wrongly (a template that is no chat, none, a name that is no fragment's, an answer it does not know), nothing is made", wrong.is_empty(), format!("{wrong:?}"));
+    Ok(())
 }
 
 /// A stand-in for Stagehand 4.1.0, where the pet's `do` installs the real

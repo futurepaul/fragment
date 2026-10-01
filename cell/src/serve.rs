@@ -307,8 +307,9 @@ impl FragmentCell {
     }
 
     /// `__fragments`' list with each fragment's share sheet (on the
-    /// platform's origin) added, for the desktop's Share item. Its badges
-    /// read `sharing`, which the owner's list carries: a read here asks the
+    /// platform's origin) added, for the desktop's Share item, and the
+    /// platform's settings page, for its Settings link. Its badges read
+    /// `sharing`, which the owner's list carries: a read here asks the
     /// Principal cell alone, and wakes none of the fragments it lists.
     fn with_share_sheets(&self, caller: &Caller, mut listed: Value) -> CellResult<Value> {
         let platform = self.cfg.platform(&caller.url);
@@ -317,6 +318,7 @@ impl FragmentCell {
             let name = f["name"].as_str().unwrap_or_default().to_string();
             f["share"] = json!(format!("{platform}/share/{name}"));
         }
+        listed["settings"] = json!(format!("{platform}/settings"));
         Ok(listed)
     }
 
