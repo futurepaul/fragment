@@ -1,5 +1,13 @@
 # A Hermes chat fragment on sandcastle
 
+*Changed 2026-10-01:* docs/one-home.md moved the chat onto the platform's
+chat page, Hermes answering through its Relay, so editors and invited
+guests chat there; `POST /__hermes/access` (Hermes' session token, which
+is the whole computer: its screen, the logins on it, and the lease that
+takes it over) is now the owner's alone (one-home's decision 5, Paul's:
+only the owner takes over a screen). It supersedes "the owner and
+editors" in the grant below, which was the page that was the chat.
+
 *Changed 2026-09-30:* docs/runtime-seam.md's cut made Hermes a preset
 of one computer (`"computer": {"preset": "hermes"}`), reached over iroh
 by an admission, in place of the `Hermes` cell's public URL, CORS, and

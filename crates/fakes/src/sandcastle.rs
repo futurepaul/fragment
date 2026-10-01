@@ -20,7 +20,8 @@
 //!   upgrade names no subprotocol (Hermes v0.21.5 names one only for its
 //!   ticket), JSON-RPC (`session.create`, `session.resume`,
 //!   `prompt.submit`, whose turn echoes the prompt in two deltas,
-//!   `gateway.ping`).
+//!   `gateway.ping`, and its screen's `display.*`), and its screen's
+//!   `api/display/ws?display_ticket=` (hermes_screen.rs).
 //!
 //! - Its Hermes' gateway dials the platform's Relay when its spec names
 //!   `GATEWAY_RELAY_URL` (relay_gateway.rs); the owner's `POST
@@ -42,6 +43,7 @@ use iroh::{Endpoint, RelayMode, RelayUrl};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::hermes_screen::{self, Screens};
 use crate::http::{Request, Response, Server};
 use crate::relay_gateway;
 
@@ -81,6 +83,8 @@ struct State {
     next: u64,
     /// The computers whose gateway runs.
     gateways: HashSet<String>,
+    /// Their screens (each computer's own, by name).
+    screens: Arc<Mutex<Screens>>,
 }
 
 pub struct Sandcastle {
@@ -207,6 +211,25 @@ impl Sandcastle {
     }
 
     /// The runtime its endpoints run on, for a test's own iroh peer.
+    /// What reached a screen's desktop, past its lease's filter, in order.
+    pub fn screen_input(&self) -> Vec<Value> {
+        self.screens().lock().unwrap().input.clone()
+    }
+
+    /// Input its filter dropped (a viewer not holding the lease).
+    pub fn screen_dropped(&self) -> u64 {
+        self.screens().lock().unwrap().dropped
+    }
+
+    /// Display sockets a ticket opened.
+    pub fn screen_sockets(&self) -> u64 {
+        self.screens().lock().unwrap().sockets
+    }
+
+    fn screens(&self) -> Arc<Mutex<Screens>> {
+        Arc::clone(&self.state.lock().unwrap().screens)
+    }
+
     pub fn runtime(&self) -> tokio::runtime::Handle {
         self.runtime.handle().clone()
     }
@@ -456,6 +479,13 @@ fn native(state: &Arc<Mutex<State>>, name: &str, req: &Request) -> Response {
     if (req.method.as_str(), path) == ("GET", "api/status") {
         return Response::json(200, &json!({ "gateway_running": true, "active_agents": 0 }));
     }
+    if path == "api/display/ws" {
+        // its ticket is its only gate (no session token), as Hermes'
+        let Some(key) = req.header("sec-websocket-key") else { return problem(400, "bad_request", "a WebSocket upgrade") };
+        let (screens, name) = (Arc::clone(&state.lock().unwrap().screens), name.to_string());
+        let ticket = req.query.get("display_ticket").cloned().unwrap_or_default();
+        return Response::websocket(key, None, move |stream| hermes_screen::display(stream, &screens, &name, &ticket));
+    }
     if path == "api/ws" {
         let given = req.query.get("token").map(String::as_str).unwrap_or("");
         let key = req.header("sec-websocket-key").filter(|_| !token.is_empty() && given == token);
@@ -503,6 +533,8 @@ fn gateway(mut stream: TcpStream, state: &Arc<Mutex<State>>, name: &str) {
     }
     // live handles (this connection's) → stored ids
     let mut live: HashMap<String, String> = HashMap::new();
+    // the screen's viewer ids this connection minted
+    let mut minted: HashSet<String> = HashSet::new();
     // Bounded by the connection: it ends when the client closes.
     while let Some((op, payload)) = read_frame(&mut stream) {
         match op {
@@ -517,9 +549,18 @@ fn gateway(mut stream: TcpStream, state: &Arc<Mutex<State>>, name: &str) {
         let Ok(msg) = serde_json::from_slice::<Value>(&payload) else { continue };
         let (id, params) = (msg["id"].clone(), &msg["params"]);
         let mut after: Vec<Value> = vec![];
+        let mut told: Option<Value> = None;
         let answer = {
             let mut s = state.lock().unwrap();
             match msg["method"].as_str() {
+                Some(m) if m.starts_with("display.") => {
+                    let screens = Arc::clone(&s.screens);
+                    let mut screens = screens.lock().unwrap();
+                    hermes_screen::rpc(&mut screens, name, &mut minted, m, params).map(|(result, event)| {
+                        told = event;
+                        result
+                    })
+                }
                 Some("gateway.ping") => {
                     s.pings += 1;
                     Ok(json!({ "ok": true }))
@@ -573,7 +614,7 @@ fn gateway(mut stream: TcpStream, state: &Arc<Mutex<State>>, name: &str) {
             Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
             Err(message) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": message } }),
         };
-        if send(&reply).is_err() {
+        if send(&reply).is_err() || told.is_some_and(|e| send(&e).is_err()) {
             return;
         }
         if after.is_empty() {

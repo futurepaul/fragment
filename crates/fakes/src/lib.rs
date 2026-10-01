@@ -6,6 +6,7 @@
 //! and a sandcastle node with a Hermes behind each computer.
 
 pub mod codestorage;
+pub mod hermes_screen;
 pub mod http;
 pub mod openrouter;
 pub mod push;

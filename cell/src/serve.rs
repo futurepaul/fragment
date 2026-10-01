@@ -35,6 +35,10 @@ const CLIENT_JS: &str = include_str!("../client.mjs");
 /// agents write, so it ships with the platform (docs/platform.md).
 const CHAT_JS: &str = include_str!("../chat.mjs");
 const CHAT_CSS: &str = include_str!("../chat.css");
+/// A computer's screen beside its chat (`./__screen.js`, `./__screen.css`):
+/// a Hermes' screen for its owner's page (docs/one-home.md, phase 4).
+const SCREEN_JS: &str = include_str!("../screen.mjs");
+const SCREEN_CSS: &str = include_str!("../screen.css");
 /// The files viewer (`__files`'s page, with `./__files.js`, `./__files.css`):
 /// a fragment's files as a tree beside a reader.
 const FILES_JS: &str = include_str!("../files.mjs");
@@ -44,6 +48,8 @@ const FILES_CSS: &str = include_str!("../files.css");
 const CLIENT_JS_HASH: u64 = site::content_hash(CLIENT_JS.as_bytes());
 const CHAT_JS_HASH: u64 = site::content_hash(CHAT_JS.as_bytes());
 const CHAT_CSS_HASH: u64 = site::content_hash(CHAT_CSS.as_bytes());
+const SCREEN_JS_HASH: u64 = site::content_hash(SCREEN_JS.as_bytes());
+const SCREEN_CSS_HASH: u64 = site::content_hash(SCREEN_CSS.as_bytes());
 const FILES_JS_HASH: u64 = site::content_hash(FILES_JS.as_bytes());
 const FILES_CSS_HASH: u64 = site::content_hash(FILES_CSS.as_bytes());
 const SW_JS_HASH: u64 = site::content_hash(crate::push::SW_JS.as_bytes());
@@ -382,6 +388,12 @@ impl FragmentCell {
         }
         if path == "__chat.css" {
             return compiled_in(req, CHAT_CSS, CHAT_CSS_HASH, "text/css; charset=utf-8");
+        }
+        if path == "__screen.js" {
+            return script(req, SCREEN_JS, SCREEN_JS_HASH);
+        }
+        if path == "__screen.css" {
+            return compiled_in(req, SCREEN_CSS, SCREEN_CSS_HASH, "text/css; charset=utf-8");
         }
         if path == "__files.js" {
             return script(req, FILES_JS, FILES_JS_HASH);
