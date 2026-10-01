@@ -7,6 +7,7 @@
 //   fragment.live("list", {}, (r) => render(r.todos));         // a query, re-run on changes
 //   fragment.subscribe("activity", (rec) => log(rec.body));    // a channel, from a cursor
 //   fragment.subscribe("chat", show, { last: 100 });           // or from near its end
+//   fragment.subscribe("chat", show, { onDraft: (d) => … });   // and its drafts, as written
 //   fragment.presence.set({ name: "paul" });                   // who is here
 //   fragment.presence.on((list) => showWho(list));             // now, and on each change
 //   await fragment.push.register("everyone");                  // web push (after a click)
@@ -165,6 +166,9 @@ function connect() {
         // not live yet: the next page, from the cursor
         if (m.more) send(subscribeFrame(m.channel, s));
       }
+    } else if (m.type === "draft") {
+      const s = subs.get(m.channel);
+      if (s) for (const h of s.drafts) h(m);
     } else if (m.type === "presence") {
       if (m.data === null) present.delete(m.id);
       else present.set(m.id, { id: m.id, principal: m.principal, data: m.data });
@@ -247,18 +251,23 @@ export function live(op, input, onResult, onError) {
 }
 
 /// Follows a channel from after `after` (0: from the start), or from its
-/// last `last` records (at most 1000); returns a stop function.
-export function subscribe(channel, onRecord, { after = 0, last = null } = {}) {
+/// last `last` records (at most 1000); returns a stop function. `onDraft`
+/// hears the channel's drafts while it is live: `{principal, turn, text,
+/// at}`, each the whole text so far (`text: null` once its writer stopped);
+/// the record its writer then posts with the same `turn` replaces it.
+export function subscribe(channel, onRecord, { after = 0, last = null, onDraft = null } = {}) {
   let s = subs.get(channel);
   if (!s) {
-    s = { after, last, handlers: new Set() };
+    s = { after, last, handlers: new Set(), drafts: new Set() };
     subs.set(channel, s);
     send(subscribeFrame(channel, s));
   }
   s.handlers.add(onRecord);
+  if (onDraft) s.drafts.add(onDraft);
   connect();
   return () => {
     s.handlers.delete(onRecord);
+    if (onDraft) s.drafts.delete(onDraft);
     if (s.handlers.size === 0) {
       subs.delete(channel);
       send({ type: "unsubscribe", channel });

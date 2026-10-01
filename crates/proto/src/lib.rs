@@ -561,17 +561,22 @@ pub struct FragmentKind {
     pub computer: Option<String>,
 }
 
-/// Who answers a chat.
+/// Who answers a chat: with `computer`, the fragment whose computer's
+/// agent answers (none: the chat's own).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatKind {
     pub answers: Answers,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer: Option<String>,
 }
 
-/// `agent`: an agent (the owner's own, or the fragment's); `people`: no one.
+/// `agent`: an agent (the owner's own, or the fragment's); `computer`: a
+/// computer's agent (a Hermes); `people`: no one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Answers {
     Agent,
+    Computer,
     People,
 }
 
@@ -942,6 +947,18 @@ pub struct PostRecord {
     pub id: String,
     /// At most `limits::RECORD_BODY_MAX_BYTES` of JSON.
     pub body: Value,
+}
+
+/// `PUT /api/f/<name>/channels/<channel>/draft`, by whoever may post
+/// there: a record not written yet, as it is written (a reply as it
+/// streams), shown to the channel's readers live and never stored (a
+/// `draft` frame on `__live`); `text: null` stops it. The record its poster
+/// then writes with the same `turn` replaces it on a page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PutDraft {
+    pub turn: String,
+    /// At most `limits::RECORD_BODY_MAX_BYTES`.
+    pub text: Option<String>,
 }
 
 /// A post's answer: the record, and whether this id had posted it before.
@@ -1539,7 +1556,7 @@ mod tests {
         let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner, sharing: None, kind: None }] };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes.ann", "role": "owner" }] }));
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1 };
-        let kind = FragmentKind { chat: Some(ChatKind { answers: Answers::Agent }), computer: None };
+        let kind = FragmentKind { chat: Some(ChatKind { answers: Answers::Agent, computer: None }), computer: None };
         let listed = FragmentList { fragments: vec![ListedFragment { name: "chat.ann".into(), role: Role::Owner, sharing: Some(sharing), kind: Some(kind) }] };
         assert_eq!(
             value(&listed),

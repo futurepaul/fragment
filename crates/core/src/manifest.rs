@@ -76,11 +76,16 @@ impl Manifest {
     /// What it says the fragment is, for its owner's list (decision 25).
     pub fn kind(&self) -> fragment_proto::FragmentKind {
         use fragment_proto::{Answers, ChatKind};
-        let chat = self.channels.contains_key("chat").then(|| ChatKind {
-            answers: match &self.agent {
-                Some(a) if a.channel == "chat" => Answers::Agent,
-                _ => Answers::People,
+        let chat = self.channels.contains_key("chat").then(|| match &self.agent {
+            Some(AgentDecl { channel, computer: Some(c), .. }) if channel == "chat" => ChatKind {
+                answers: Answers::Computer,
+                computer: match c {
+                    AnswerComputer::Own => None,
+                    AnswerComputer::Named(n) => Some(n.clone()),
+                },
             },
+            Some(a) if a.channel == "chat" => ChatKind { answers: Answers::Agent, computer: None },
+            _ => ChatKind { answers: Answers::People, computer: None },
         });
         let computer = self.computer.as_ref().map(|c| c.preset.map_or("default", Preset::name).to_string());
         fragment_proto::FragmentKind { chat, computer }
@@ -103,7 +108,8 @@ pub const COMPUTER_START_MAX_BYTES: usize = 4096;
 /// `agent`: the fragment's own agent, with instructions from a file of
 /// its repo (read at live), the operations of this fragment it may call,
 /// and a model; or, with `personal`, its owner's own agent
-/// (`agent.<username>`, with its own instructions and tools). Either
+/// (`agent.<username>`, with its own instructions and tools); or, with
+/// `computer`, a computer's agent: its Hermes (docs/one-home.md). Each
 /// answers messages posted to `channel`.
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct AgentDecl {
@@ -116,6 +122,18 @@ pub struct AgentDecl {
     pub tools: Vec<String>,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer: Option<AnswerComputer>,
+}
+
+/// The computer whose agent answers a chat (`agent.computer`): this
+/// fragment's own (`true`), or another fragment's, its owner's too (its
+/// name). Either runs the `hermes` preset.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnswerComputer {
+    Own,
+    Named(String),
 }
 
 const ACCESS_KEYS: [&str; 3] = ["visibility", "editors", "viewers"];
@@ -248,8 +266,8 @@ fn trigger(i: usize, v: &Value, m: &Manifest) -> Result<TriggerDecl, String> {
 /// agent may (never an owner's: an agent acts as an editor at most).
 fn agent(v: &Value, m: &Manifest) -> Result<AgentDecl, String> {
     let obj = v.as_object().ok_or("agent must be an object")?;
-    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "channel" | "personal" | "instructions" | "tools" | "model")) {
-        return Err(format!("agent has an unknown key {k:?} (channel, personal, instructions, tools, model)"));
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "channel" | "personal" | "instructions" | "tools" | "model" | "computer")) {
+        return Err(format!("agent has an unknown key {k:?} (channel, personal, instructions, tools, model, computer)"));
     }
     let text = |k: &str| obj.get(k).map(|v| v.as_str().map(str::to_string).ok_or_else(|| format!("agent.{k} must be a string"))).transpose();
     let channel = text("channel")?.ok_or("agent needs channel: a channel this fragment.json declares, which people post to")?;
@@ -269,6 +287,21 @@ fn agent(v: &Value, m: &Manifest) -> Result<AgentDecl, String> {
         Some(_) => return Err("agent.tools must be an array of operation names".into()),
     };
     let (instructions, model) = (text("instructions")?, text("model")?);
+    let computer = match obj.get("computer") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(true)) => Some(AnswerComputer::Own),
+        Some(Value::String(name)) if fragment_proto::valid_fragment_name(name) => Some(AnswerComputer::Named(name.clone())),
+        Some(_) => return Err("agent.computer is true (this fragment's own computer answers) or another fragment's name (<label>.<username>), whose computer answers".into()),
+    };
+    if let Some(computer) = computer {
+        if personal || instructions.is_some() || model.is_some() || !tools.is_empty() {
+            return Err("agent.computer answers with its own instructions, model, and tools: name only its channel".into());
+        }
+        if computer == AnswerComputer::Own && m.preset() != Some(Preset::Hermes) {
+            return Err("agent.computer: true needs this fragment's own computer to answer: \"computer\": {\"preset\": \"hermes\"}".into());
+        }
+        return Ok(AgentDecl { channel, computer: Some(computer), ..AgentDecl::default() });
+    }
     if personal {
         if instructions.is_some() || model.is_some() || !tools.is_empty() {
             return Err("agent.personal is its owner's own agent, with its own instructions, model, and tools: name only its channel".into());
@@ -290,7 +323,7 @@ fn agent(v: &Value, m: &Manifest) -> Result<AgentDecl, String> {
             Some(_) => {}
         }
     }
-    Ok(AgentDecl { channel, personal, instructions: Some(instructions), tools, model })
+    Ok(AgentDecl { channel, personal, instructions: Some(instructions), tools, model, computer: None })
 }
 
 pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
@@ -462,6 +495,21 @@ mod tests {
             serde_json::json!({ "chat": { "answers": "agent" } })
         );
         assert_eq!(kind(r#"{"channels":{"desk":{"post":"viewer"}},"agent":{"personal":true,"channel":"desk"}}"#), serde_json::json!({}));
+        // a computer's agent answers: another fragment's Hermes, or this one's own
+        let hermes_chat = r#"{"channels":{"chat":{"post":"viewer"},"work":{}},"agent":{"channel":"chat","computer":"hermes.ann"}}"#;
+        assert_eq!(kind(hermes_chat), serde_json::json!({ "chat": { "answers": "computer", "computer": "hermes.ann" } }));
+        assert_eq!(parse(hermes_chat.as_bytes()).unwrap().agent.unwrap().computer, Some(AnswerComputer::Named("hermes.ann".into())));
+        let own = r#"{"computer":{"preset":"hermes"},"channels":{"chat":{"post":"viewer"}},"agent":{"channel":"chat","computer":true}}"#;
+        assert_eq!(kind(own), serde_json::json!({ "chat": { "answers": "computer" }, "computer": "hermes" }));
+        for bad in [
+            r#"{"channels":{"chat":{"post":"viewer"}},"agent":{"channel":"chat","computer":true}}"#,
+            r#"{"channels":{"chat":{"post":"viewer"}},"agent":{"channel":"chat","computer":"no dots"}}"#,
+            r#"{"channels":{"chat":{"post":"viewer"}},"agent":{"channel":"chat","computer":false}}"#,
+            r#"{"channels":{"chat":{"post":"viewer"}},"agent":{"channel":"chat","computer":"hermes.ann","personal":true}}"#,
+            r#"{"channels":{"chat":{"post":"viewer"}},"agent":{"channel":"chat","computer":"hermes.ann","model":"m"}}"#,
+        ] {
+            assert!(parse(bad.as_bytes()).is_err(), "{bad}");
+        }
         let long = format!(r#"{{"computer":{{"start":"{}"}}}}"#, "x".repeat(COMPUTER_START_MAX_BYTES + 1));
         for start in [r#"{"computer":{"start":""}}"#, r#"{"computer":{"start":7}}"#, r#"{"computer":{"start":"a","size":1}}"#, &long] {
             assert!(parse(start.as_bytes()).is_err(), "{}", &start[..40.min(start.len())]);
@@ -520,7 +568,7 @@ mod tests {
         let own = with(r#"{"instructions":"agent.md","tools":["log","today"],"channel":"ask","model":"z-ai/glm-5.3-flash"}"#).unwrap().agent.unwrap();
         assert_eq!(
             own,
-            AgentDecl { channel: "ask".into(), personal: false, instructions: Some("agent.md".into()), tools: vec!["log".into(), "today".into()], model: Some("z-ai/glm-5.3-flash".into()) }
+            AgentDecl { channel: "ask".into(), personal: false, instructions: Some("agent.md".into()), tools: vec!["log".into(), "today".into()], computer: None, model: Some("z-ai/glm-5.3-flash".into()) }
         );
         let personal = with(r#"{"personal":true,"channel":"ask"}"#).unwrap().agent.unwrap();
         assert_eq!(personal, AgentDecl { channel: "ask".into(), personal: true, ..AgentDecl::default() });

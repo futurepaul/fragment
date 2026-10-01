@@ -504,6 +504,7 @@ before, whatever else it carries.
 | `GET /api/f/{name}/channels` | viewer | → `{channels: [{name, read, post, signedIn, seq}]}`: `events`, `ops`, `inbox`, and the app's (`post`: who may post, or null; `signedIn`: only people signed in) |
 | `GET /api/f/{name}/channels/{channel}?after=&limit=` | the channel's reader | → `{channel, records: [{channel, seq, at, principal, kind, body}], next}` (1000 a page) |
 | `POST /api/f/{name}/channels/{channel}` | the channel's `post` role | `{id, body}` → `{record, replayed}` (`Posted`): the platform appends `body` (any JSON, at most 64 KiB of it; 413) as a record of kind `message` naming the poster, with no app code; it reaches sockets, subscriptions, and the channel's triggers as a mutation's record does. The same id and body again answer that record and append nothing (a retry also finishes what the first try left: its deliveries, its triggers' runs); the same id with another body, or on another channel, is 409 (ids are the poster's, kept as long as the record). A channel without a `post` role, and `events`, `ops`, and `inbox`, refuse posts (403); one that says `signedIn` refuses an anonymous poster (401). A poster holding only `public` spends a public call (Serving, `__op`) |
+| `PUT /api/f/{name}/channels/{channel}/draft` | the channel's `post` role | `{turn, text}` → `{ok}`: a record its poster is writing (a Hermes' reply as it streams), its whole text so far (at most 64 KiB), shown to the sockets following the channel at once (a `draft` frame on `__live`) and never stored; `text: null` stops it. The record its poster then writes with the same `turn` replaces it on a page. At most 10 a second across the fragment (429 past that: the poster's next carries the whole text anyway); `turn` is `^[A-Za-z0-9._:-]{1,128}$` |
 
 ## Apps
 
@@ -989,6 +990,10 @@ the upgrade, as a call does.
   [{id, principal, data}]}` (everyone sharing presence as it opens),
   `{type: "record", channel, seq, at, principal, kind, body}`,
   `{type: "subscribed", channel, next, more}` (after each page),
+  `{type: "draft", channel, principal, turn, text, at}` (a record its
+  poster is writing, to the sockets following its channel; `text: null`
+  once they stopped; never stored, so a page that joins late sees the
+  next),
   `{type: "presence", id, principal, data}` (one socket's change, to
   every socket, its own too; `data: null` once it cleared or left),
   `{type: "changed", op}` (after every applied mutation),
@@ -1041,8 +1046,9 @@ record comes back, and the same id again is the same record), `live(op, input,
 onResult, onError?)` (re-runs a query after every change, over the socket
 when it is open and over HTTP when not, or when its principal's budget is
 spent; one run at a time, however many changes came), `subscribe(
-channel, onRecord, {after?, last?})` (pages through the backlog, then
-follows live; after a reconnect it resumes after the last record),
+channel, onRecord, {after?, last?, onDraft?})` (pages through the backlog, then
+follows live; after a reconnect it resumes after the last record;
+`onDraft` hears the channel's drafts while it is live),
 `presence.set(data)` (changes within 150 ms go as one, the latest),
 `presence.on(fn)` (called with everyone here now, and on each change),
 `me()`, `closed(fn)`. The page's
@@ -1114,6 +1120,8 @@ else).
 | `POST /api/a/{name}/job` | owner (a fragment's job) | `{id, asker, conversation, channel?, text}` → `{turn}`: a turn of a fragment's own agent for `asker`, once per `id` (again: the same `turn`, `replayed`); it waits for a turn of its own and never steers another. Its conversation is `job:<asker>:<conversation>`, under `<fragment>/<channel>/` when it names a channel |
 | `GET /api/a/{name}/job?turn=` | the same | → `{ended, outcome, text?, error?}`: `running` until it ends, then `idle` (answered, `text` its answer), `stopped`, `yielded`, or `error` |
 | `PUT /api/a/{name}/scope` | owner (a fragment's deploy) | `{fragment, tools, instructions, model?}` → `{fragment, tools, model}`: a fragment's own agent takes what its block declares (A fragment's agent, below); 403 for any agent not made for that fragment |
+| `GET /api/hermes/{fragment}/relay` | a Hermes' gateway, with its per-gateway token | a WebSocket: the fragment's Hermes, dialing its Relay connector (docs/hermes-relay.md); the token is `Bearer base64url(id:exp:hex(HMAC-SHA256(secret, "id:exp")))` (its id the fragment's name, its secret its cell's, sealed there and in its computer's spec), good 2 minutes past `exp`. A wrong or missing one is accepted and closed 4401 (`expired`, or `unauthorized`); a new dial replaces the one before (4000). The cell answers its frames and hands it its chats' messages (docs/one-home.md) |
+| `POST /api/hermes/{fragment}/inbox/{token}` | the deliveries of a chat its Hermes follows (the token is the capability) | a `Delivery`, as an agent's inbox takes one: a message is kept for the Hermes and handed to it in its turn (one of a chat's at a time), with its writer's username; a Stop from the chat stops the chat's running turn (`interrupt_inbound`); the Hermes' own records and any other kind are let be. An unknown token is 403 |
 | `POST /api/a/{name}/inbox/{token}` | the fragment's delivery (the token is the capability) | a `Delivery` (`crates/proto`), decoded whole: one that does not decode (a record without its `seq`, say) is 400. A message (a body with no `kind`, or `kind: "message"`: its `text`, else its JSON) from an identity starts a turn in the chat's conversation, acting for that identity; from the running turn's starter in its conversation, it steers that turn; any other waits for a turn of its own (429 past 64 waiting: the fragment delivers it again). `{kind: "stop", turn?}` from the running turn's starter, in its chat, naming that turn (or none), stops it; from anyone else, or another kind, it is ignored, never a message, and so is a computer's answer to a hand-off (a body whose `turn` is `hand-off:…`). The agent's own, one heard before (within a day: past the longest redelivery), and a message from an anonymous visitor (`anon:`) are ignored (the owner's view keeps the newest 32 anonymous ones). The turn's last answer goes back as the agent, with the id `rp:<40 hex of SHA-256 of its message id>`: posted to the channel as `{text, turn}` when it takes posts (`POST /api/f/{fragment}/channels/{channel}`), else `POST /api/f/{fragment}/ops/{reply}` `{text}`; an unknown token is 404 |
 | `PUT /api/a/{name}/computer` | owner | `{url, token, cwd? ("work")}` → `{url, cwd, tools}`: attaches a computer once it answers `GET /tools` with that token (400 when it refuses it, 502 when it does not answer); the token is sealed like the agent's key |
 | `PUT /api/a/{name}/computer` | owner | `{connect: true, cwd?}` → `{connect, agent, token, cwd}`: a computer that connects out instead (`fragment computer connect --agent <agent> --token-file <f>`): a new connect token, answered once (the agent keeps its SHA-256), replacing any computer before |
@@ -1388,6 +1396,19 @@ owner's own agent answering (the `agent` block, above):
 },
 "agent": { "personal": true, "channel": "chat" }
 ```
+
+A chat a Hermes answers names it instead (decision 25, docs/one-home.md):
+`"agent": {"channel": "chat", "computer": true}` for the fragment's own
+(it declares `"computer": {"preset": "hermes"}`: the `hermes` template),
+or `"computer": "<fragment>"` for another fragment's Hermes, its owner's
+too (a Hermes answers its owner's chats alone; 403 otherwise). With
+`computer`, the block names only its channel (`personal`, `instructions`,
+`tools`, and `model` are refused). The deploy makes the Hermes' computer
+identity an editor of the chat and has its cell follow the channel; the
+Hermes answers through its Relay, its reply streaming as a `draft`, then
+`{text, turn}` (its turn `hermes:<seq of the message>`), its tool
+progress as `work` steps. A Hermes removed and made again is a new
+identity: the chats that named it join the new one.
 
 - `chat`: messages, `{text}`, posted by viewers and up (link holders
   too; `fragment.post("chat", {text})`); an agent's answer, `{text,

@@ -331,8 +331,9 @@ pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and one computer of its owner's for it", paired == 1, &r);
     let r = access(&api, &name, Some(&owner), &page.id())?;
     s.ok("its owner's page is admitted to the new one, with a new token", r.status == 200 && r.body["token"] != token.as_str() && r.body["endpoint"] != fake.endpoint.as_str(), &r);
+    let (api, chat) = chats(s, api, &home, &owner, &name)?;
     chat_page(s, &api, &home, &owner, &name, &view)?;
-    ends(s, &api, &home, &owner, &name, &page.id())
+    ends(s, &api, &home, &owner, &name, &page.id(), &chat)
 }
 
 /// The manifest that declares a Hermes.
@@ -369,16 +370,165 @@ pub(crate) fn client_checks(api: &Api, name: &str) -> Result<Vec<(&'static str, 
     ])
 }
 
-/// The hermes template's page in headless Chrome: the computer client,
-/// an admission for the page's key, and Hermes by its key through the
-/// relay: a chat streamed, listed, and read again from Hermes' history; a
-/// long turn pinged; and no chat for someone signed out.
+/// A chat's records on `channel`, as `keys` reads them.
+fn records(api: &Api, keys: &Keys, chat: &str, channel: &str) -> Vec<Value> {
+    let r = api.signed(keys, "GET", &format!("/api/f/{chat}/channels/{channel}?after=0&limit=500"), None).map(|r| r.body).unwrap_or_default();
+    r["records"].as_array().cloned().unwrap_or_default()
+}
+
+/// A post to a chat's `chat` channel, as `keys`.
+fn post(api: &Api, keys: &Keys, chat: &str, id: &str, body: Value) -> Result<crate::api::Reply> {
+    api.signed(keys, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": id, "body": body })))
+}
+
+/// How often `by` said `text` in the chat (its answers carry a turn).
+fn said(api: &Api, keys: &Keys, chat: &str, by: &str, text: &str) -> usize {
+    records(api, keys, chat, "chat").iter().filter(|r| r["principal"] == by && r["body"]["text"] == text && r["body"]["turn"].is_string()).count()
+}
+
+/// A page that is the platform's chat.
+const CHAT_PAGE: &str = r#"<!doctype html><html><head><link rel="stylesheet" href="./__chat.css"></head><body><script type="module">import { mount } from "./__chat.js"; mount(document.body);</script></body></html>"#;
+
+/// A chat that names the Hermes as who answers (docs/one-home.md, phase
+/// 2), through its Relay on the fake's gateway: its owner and a guest
+/// answered by name; someone not in it unheard; one message at a time; its
+/// tool steps; a Stop; a Hermes away woken for a message, and one kept
+/// across a node restart, each answered once. Answers the node's API
+/// after its restart, and the chat.
+fn chats(s: &mut Suite, api: Api, home: &std::path::Path, owner: &Keys, hermes: &str) -> Result<(Api, String)> {
+    let made = s.cli_json(&api, home, &["create", &s.name("hchat"), "--json"])?;
+    let chat = made["name"].as_str().unwrap_or("").to_string();
+    s.hook(&api, &made);
+    let dir = s.dir("hermes-chat");
+    std::fs::write(dir.join("index.html"), CHAT_PAGE)?;
+    let manifest = json!({
+        "channels": { "chat": { "read": "viewer", "post": "viewer", "signedIn": true }, "work": { "read": "viewer", "post": "editor" } },
+        "agent": { "channel": "chat", "computer": hermes },
+    });
+    std::fs::write(dir.join("fragment.json"), manifest.to_string())?;
+    let o = s.cli(&api, home, &["deploy", &chat, "--dir", dir.to_str().expect("a UTF-8 path")]);
+    s.ok("a chat that names its owner's Hermes as who answers deploys", o.status.success(), out(&o));
+    let member = || {
+        let r = api.signed(owner, "GET", &format!("/api/f/{chat}/members"), None).map(|r| r.body).unwrap_or_default();
+        r["members"].as_array().into_iter().flatten().find(|m| m["kind"] == "computer" && m["role"] == "editor").and_then(|m| m["principal"].as_str().map(str::to_string))
+    };
+    s.ok("its Hermes joins it: its computer identity an editor there", soon(s, || member().is_some()), api.signed(owner, "GET", &format!("/api/f/{chat}/members"), None)?);
+    let by = member().unwrap_or_default();
+    s.ok("and its gateway has dialed the platform's Relay", soon(s, || s.sandcastle.relay_dials() > 0), s.sandcastle.relay_dials());
+    let me = api.username(owner)?;
+
+    // the owner's message: Hermes reads it as a group message, with their name
+    let heard = s.sandcastle.relay_heard().len();
+    post(&api, owner, &chat, "h1", json!({ "text": "hello hermes" }))?;
+    let reply = format!("echo: [{me}] hello hermes");
+    s.ok("the owner's message is answered there, by its Hermes", soon(s, || said(&api, owner, &chat, &by, &reply) == 1), json!(records(&api, owner, &chat, "chat")));
+    let ev = s.sandcastle.relay_heard().get(heard).cloned().unwrap_or_default();
+    s.ok(
+        "Hermes read it as the chat's group message, with its writer's name",
+        ev["source"]["chat_id"] == chat.as_str() && ev["source"]["chat_type"] == "group" && ev["source"]["user_name"] == me.as_str() && ev["text"] == "hello hermes",
+        &ev,
+    );
+    let turn = records(&api, owner, &chat, "chat").iter().find(|r| r["body"]["text"] == reply.as_str()).map(|r| r["body"]["turn"].clone()).unwrap_or_default();
+    let owner_id = api.identity(owner)?;
+    // its end is written just after its answer
+    let bracketed = soon(s, || {
+        let work = records(&api, owner, &chat, "work");
+        work.iter().any(|r| r["body"]["kind"] == "turn.start" && r["body"]["turn"] == turn && r["body"]["asker"] == owner_id.as_str())
+            && work.iter().any(|r| r["body"]["kind"] == "turn.end" && r["body"]["turn"] == turn && r["body"]["outcome"] == "done")
+    });
+    s.ok("its turn starts and ends in work, asked by the owner, answered", bracketed, json!(records(&api, owner, &chat, "work")));
+
+    // a guest the owner invites: answered too, by name
+    let guest = api.person()?;
+    let (guest_id, guest_name) = (api.identity(&guest)?, api.username(&guest)?);
+    api.signed(owner, "PUT", &format!("/api/f/{chat}/members/{guest_id}"), Some(&json!({ "role": "viewer" })))?;
+    post(&api, &guest, &chat, "g1", json!({ "text": "hi from a guest" }))?;
+    let guest_reply = format!("echo: [{guest_name}] hi from a guest");
+    s.ok("an invited guest's message is answered too, with their name", soon(s, || said(&api, owner, &chat, &by, &guest_reply) == 1), json!(records(&api, owner, &chat, "chat")));
+    let stranger = api.person()?;
+    let r = post(&api, &stranger, &chat, "x1", json!({ "text": "let me in" }))?;
+    let unheard = !s.sandcastle.relay_heard().iter().any(|e| e["text"] == "let me in");
+    s.ok("someone not in the chat cannot post there, and Hermes never hears them", r.status == 403 && unheard, &r);
+
+    // one message of the chat's at a time: Hermes in queue mode drops a third writer's mid-turn
+    s.sandcastle.slow_turns(2500);
+    let heard = s.sandcastle.relay_heard().len();
+    post(&api, owner, &chat, "q1", json!({ "text": "first of two" }))?;
+    let handed = soon(s, || s.sandcastle.relay_heard().len() == heard + 1);
+    post(&api, &guest, &chat, "q2", json!({ "text": "second of two" }))?;
+    std::thread::sleep(Duration::from_millis(1200));
+    let one = handed && s.sandcastle.relay_heard().len() == heard + 1;
+    s.ok("a message that comes during a turn waits: Hermes has one of the chat's at a time", one, json!(s.sandcastle.relay_heard()[heard..]));
+    let (a, b) = (format!("echo: [{me}] first of two"), format!("echo: [{guest_name}] second of two"));
+    let both = soon(s, || said(&api, owner, &chat, &by, &a) == 1 && said(&api, owner, &chat, &by, &b) == 1);
+    let texts: Vec<String> = records(&api, owner, &chat, "chat").iter().filter_map(|r| r["body"]["text"].as_str().map(str::to_string)).collect();
+    let in_order = texts.iter().position(|t| *t == a) < texts.iter().position(|t| *t == b);
+    s.ok("then the next: both answered, in order", both && in_order, json!(texts));
+    s.sandcastle.slow_turns(0);
+
+    // its tool progress, as the turn's steps
+    post(&api, owner, &chat, "t1", json!({ "text": "use a tool please" }))?;
+    let steps = || records(&api, owner, &chat, "work").iter().filter(|r| r["body"]["kind"] == "turn.step").filter_map(|r| r["body"]["tool"].as_str().map(str::to_string)).collect::<Vec<_>>();
+    s.ok(
+        "its tool progress shows as the turn's steps",
+        soon(s, || {
+            let st = steps();
+            st.iter().any(|t| t == "💻 terminal") && st.iter().any(|t| t == "🔍 Searching the web")
+        }),
+        json!(steps()),
+    );
+
+    // a Stop cuts a turn short
+    s.sandcastle.slow_turns(8000);
+    let interrupted = s.sandcastle.relay_interrupted();
+    let long = post(&api, owner, &chat, "s1", json!({ "text": "a long one" }))?;
+    let stopped_turn = format!("hermes:{}", long.body["record"]["seq"]);
+    let started = soon(s, || records(&api, owner, &chat, "work").iter().any(|r| r["body"]["kind"] == "turn.start" && r["body"]["turn"] == stopped_turn.as_str()));
+    post(&api, owner, &chat, "stop-s1", json!({ "kind": "stop", "turn": stopped_turn }))?;
+    let ended = soon(s, || records(&api, owner, &chat, "work").iter().any(|r| r["body"]["kind"] == "turn.end" && r["body"]["turn"] == stopped_turn.as_str() && r["body"]["outcome"] == "stopped"));
+    let unanswered = !records(&api, owner, &chat, "chat").iter().any(|r| r["principal"] == by.as_str() && r["body"]["turn"] == stopped_turn.as_str());
+    s.ok("a Stop interrupts Hermes, and its turn ends with no answer", started && ended && unanswered && s.sandcastle.relay_interrupted() > interrupted, json!(records(&api, owner, &chat, "work")));
+    s.sandcastle.slow_turns(0);
+
+    // its Hermes away (its computer asleep): woken, and answers once
+    s.sandcastle.relay_away();
+    std::thread::sleep(Duration::from_millis(500));
+    let wakes = s.sandcastle.wakes();
+    post(&api, owner, &chat, "w1", json!({ "text": "are you awake?" }))?;
+    s.ok("with its Hermes away, the message is kept and its computer woken", soon(s, || s.sandcastle.wakes() > wakes), s.sandcastle.wakes());
+    let woke = format!("echo: [{me}] are you awake?");
+    let once = |s: &Suite, text: &str, reply: &str| s.sandcastle.relay_heard().iter().filter(|e| e["text"] == text).count() == 1 && said(&api, owner, &chat, &by, reply) == 1;
+    s.ok("it comes back for it, and answers once", soon(s, || once(s, "are you awake?", &woke)), json!(records(&api, owner, &chat, "chat")));
+
+    // kept across a node restart
+    s.sandcastle.relay_away();
+    std::thread::sleep(Duration::from_millis(500));
+    post(&api, owner, &chat, "r1", json!({ "text": "after a restart?" }))?;
+    s.crash()?;
+    let api = s.start(false, true)?;
+    let restarted = format!("echo: [{me}] after a restart?");
+    let kept = soon(s, || {
+        let heard = s.sandcastle.relay_heard().iter().filter(|e| e["text"] == "after a restart?").count() == 1;
+        heard && said(&api, owner, &chat, &by, &restarted) == 1
+    });
+    s.ok("a message kept for it across a node restart is answered once", kept, json!(records(&api, owner, &chat, "chat")));
+    Ok((api, chat))
+}
+
+/// The hermes template in headless Chrome: the platform's chat, answered
+/// by this fragment's own Hermes, its reply streaming as a draft before it
+/// lands; and no chat for someone signed out. Its client still serves for
+/// the computer's screen (phase 4).
 fn chat_page(s: &mut Suite, api: &Api, home: &std::path::Path, owner: &Keys, name: &str, view: &str) -> Result<()> {
     let dir = s.dir("hermes-page");
     let dir_s = dir.to_str().expect("a UTF-8 path").to_string();
     let o = s.cli(api, home, &["new", &dir_s, "--template", "hermes"]);
     let manifest: Value = serde_json::from_slice(&std::fs::read(dir.join("fragment.json")).unwrap_or_default()).unwrap_or_default();
-    s.ok("the hermes template scaffolds, declaring a Hermes computer", o.status.success() && manifest["computer"] == json!({ "preset": "hermes" }), out(&o));
+    s.ok(
+        "the hermes template scaffolds a chat its own Hermes answers",
+        o.status.success() && manifest["computer"] == json!({ "preset": "hermes" }) && manifest["agent"] == json!({ "channel": "chat", "computer": true }),
+        out(&o),
+    );
     let o = s.cli(api, home, &["deploy", name, "--dir", &dir_s]);
     s.ok("and deploys onto the fragment that has one", o.status.success(), out(&o));
     for (label, held, detail) in client_checks(api, name)? {
@@ -392,52 +542,51 @@ fn chat_page(s: &mut Suite, api: &Api, home: &std::path::Path, owner: &Keys, nam
     let session = api.sign_in(&crate::cli_email(&fragment_core::npub::encode(owner.pubkey_hex()))?)?;
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
     let tab = chrome.open(&api.site_url(name, "__signin?return=/"))?;
-    let said = |chrome: &mut crate::browser::Browser, tab: &crate::browser::Page| chrome.eval(tab, "document.body.dataset.state + ': ' + document.body.innerText.slice(0, 400)").unwrap_or_default();
-    let admitted = s.sandcastle.admitted();
-    let ready = chrome.until(&tab, "document.body.dataset.state === 'ready'", wait);
-    s.ok("signed in, the page reaches its Hermes by its key: the client, an admission, the relay", ready && s.sandcastle.admitted() > admitted, said(&mut chrome, &tab));
-    let submit = |text: &str| format!("document.getElementById('text').value = {text:?}; document.getElementById('composer').requestSubmit(); true");
-    let replied = |text: &str| format!("[...document.querySelectorAll('.row.assistant')].some(r => r.textContent === {:?} && !r.classList.contains('streaming'))", format!("echo: {text}"));
-    chrome.eval(&tab, &submit("hello from the page"))?;
-    s.ok("a message from the page gets Hermes' reply, streamed over its socket", chrome.until(&tab, &replied("hello from the page"), wait), said(&mut chrome, &tab));
-    let listed = "document.querySelector('#chats li.open')?.textContent === 'hello from the page'";
-    s.ok("the new chat is listed and open", chrome.until(&tab, listed, wait), said(&mut chrome, &tab));
-    chrome.reload(&tab)?;
-    let history = "document.body.dataset.state === 'ready' && document.querySelectorAll('.row.user').length === 1 && [...document.querySelectorAll('.row.assistant')].some(r => r.textContent === 'echo: hello from the page')";
-    s.ok("a reload opens it again, from Hermes' history", chrome.until(&tab, history, wait) && chrome.until(&tab, listed, wait), said(&mut chrome, &tab));
-
-    // a long turn: the page pings while it runs (the node's sign of a turn)
-    s.sandcastle.slow_turns(17_000);
-    let pinged = s.sandcastle.pings();
-    chrome.eval(&tab, &submit("take your time"))?;
-    let long = chrome.until(&tab, &replied("take your time"), Duration::from_secs(40));
+    let said = |chrome: &mut crate::browser::Browser, tab: &crate::browser::Page| chrome.eval(tab, "(document.getElementById('messages')?.innerText || '').slice(-600)").unwrap_or_default();
+    let ready = chrome.until(&tab, "document.getElementById('say')?.dataset.ready === '1'", wait);
+    s.ok("signed in, the page is the platform's chat, ready", ready, said(&mut chrome, &tab));
+    // its own Hermes joined its chat before a message is asked of it
+    let joined = soon(s, || {
+        let r = api.signed(owner, "GET", &format!("/api/f/{name}/members"), None).map(|r| r.body).unwrap_or_default();
+        r["members"].as_array().into_iter().flatten().any(|m| m["kind"] == "computer" && m["role"] == "editor")
+    });
+    s.ok("its own Hermes answers its chat: a member there", joined, "");
+    s.sandcastle.slow_turns(4000);
+    let me = api.username(owner)?;
+    chrome.eval(&tab, "document.getElementById('text').value = 'hello from the page'; document.getElementById('say').requestSubmit(); true")?;
+    let half = "echo: [";
+    let drafting = format!("[...document.querySelectorAll('.msg.agent.streaming')].some(m => m.textContent.includes({half:?}) && !!m.querySelector('.cursor') && !!m.querySelector('.who .face.hermes') && m.querySelector('.who')?.textContent.endsWith('Hermes'))");
+    s.ok("its reply streams in as a draft, by Hermes, as it writes", chrome.until(&tab, &drafting, wait), said(&mut chrome, &tab));
+    let landed = format!("!document.querySelector('.msg.agent.streaming') && [...document.querySelectorAll('.msg.agent .md')].some(m => m.textContent === {:?})", format!("echo: [{me}] hello from the page"));
+    s.ok("and gives way to its answer once the turn ends", chrome.until(&tab, &landed, wait), said(&mut chrome, &tab));
     s.sandcastle.slow_turns(0);
-    s.ok("a long turn in the same chat, resumed on a new socket, is answered", long, said(&mut chrome, &tab));
-    s.ok("and the page pinged its Hermes while it ran", s.sandcastle.pings() > pinged, format!("{} pings before, {} after", pinged, s.sandcastle.pings()));
-    let one = chrome.eval(&tab, "document.querySelectorAll('#chats li').length === 1 && document.querySelectorAll('.row.user').length === 2")?;
-    s.ok("one chat holds both turns", one == json!(true), said(&mut chrome, &tab));
+    chrome.reload(&tab)?;
+    s.ok("a reload shows it from the chat's own records", chrome.until(&tab, &landed, wait), said(&mut chrome, &tab));
 
-    // signed out, with its link: no chat, and a way to sign in
+    // signed out, with its link (this one's fragment opens to its link): the
+    // chat reads, and writing in it asks them to sign in (a member's alone)
     let context = chrome.another_context()?;
     let stranger = chrome.open_in(&context, &api.site_url(name, &format!("?view={view}")))?;
-    let signin = chrome.until(&stranger, "document.body.dataset.state === 'signin' && !!document.querySelector('#status a[href*=\"__signin\"]')", wait);
-    s.ok("signed out, the page offers sign-in and no chat", signin, said(&mut chrome, &stranger));
+    let asked = chrome.until(&stranger, "document.getElementById('say')?.dataset.ready === '1' && !!document.querySelector('#note a[href*=\"__signin\"]')", wait);
+    s.ok("signed out, with its link, the page asks them to sign in to write", asked, chrome.eval(&stranger, "document.body.innerText.slice(0, 300)").unwrap_or_default());
     Ok(())
 }
 
 /// The ways a Hermes ends: its owner removes its key's computer (a later
 /// deploy that declares it makes a new one), and its fragment is deleted.
-fn ends(s: &mut Suite, api: &Api, home: &std::path::Path, owner: &Keys, name: &str, peer: &str) -> Result<()> {
+fn ends(s: &mut Suite, api: &Api, home: &std::path::Path, owner: &Keys, name: &str, peer: &str, chat: &str) -> Result<()> {
     let hermes_of = |api: &Api| -> Vec<String> {
         let r = api.signed(owner, "GET", "/api/identities/me", None).map(|r| r.body).unwrap_or_default();
         r["computers"].as_array().into_iter().flatten().filter_map(|c| c["name"].as_str()).filter(|n| n.contains("hermes")).map(str::to_string).collect()
     };
     let serving = |s: &Suite| s.sandcastle.computers().into_iter().filter(|(_, c)| c.spec["service"]["env"]["HERMES_DASHBOARD"] == "1").count();
     let [identity] = hermes_of(api).try_into().map_err(|v| anyhow::anyhow!("one Hermes computer of its owner's: {v:?}"))?;
+    let closes = s.sandcastle.relay_closes().len();
     let o = s.cli(api, home, &["computers", "rm", &identity]);
     s.ok("its owner removes its key's computer", o.status.success(), out(&o));
     let gone = soon(s, || serving(s) == 0);
     s.ok("and its computer leaves the node", gone, format!("{:?}", s.sandcastle.computers().keys()));
+    s.ok("its gateway's socket is closed, refused (4401)", soon(s, || s.sandcastle.relay_closes()[closes..].contains(&4401)), json!(s.sandcastle.relay_closes()));
     let r = access(api, name, Some(owner), peer)?;
     s.ok("with no Hermes, no session", r.status == 404, &r);
     let dir = s.dir("hermes-template");
@@ -447,6 +596,18 @@ fn ends(s: &mut Suite, api: &Api, home: &std::path::Path, owner: &Keys, name: &s
     s.ok("a deploy that declares it again goes live", o.status.success() && deployed.status.success(), out(&deployed));
     let again = soon(s, || serving(s) == 1 && hermes_of(api).len() == 1 && access(api, name, Some(owner), peer).is_ok_and(|r| r.status == 200));
     s.ok("and makes a new one", again, format!("{:?} {:?}", s.sandcastle.computers().keys(), hermes_of(api)));
+    // the chat that named it joins the new one: a new identity
+    let me = api.username(owner)?;
+    let new_by = || {
+        let r = api.signed(owner, "GET", &format!("/api/f/{chat}/members"), None).map(|r| r.body).unwrap_or_default();
+        r["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "computer").filter_map(|m| m["principal"].as_str().map(str::to_string)).collect::<Vec<_>>()
+    };
+    let rejoined = Duration::from_secs(60);
+    let one = s.eventually(rejoined, || new_by().len() == 1 && hermes_of(api).len() == 1);
+    let by = new_by().pop().unwrap_or_default();
+    post(api, owner, chat, "n1", json!({ "text": "are you new?" }))?;
+    let answered = s.eventually(rejoined, || said(api, owner, chat, &by, &format!("echo: [{me}] are you new?")) == 1);
+    s.ok("a chat that named it joins the new one, which answers there", one && answered, json!({ "members": new_by(), "chat": records(api, owner, chat, "chat") }));
     let o = s.cli(api, home, &["rm", name]);
     s.ok("its owner deletes the fragment", o.status.success(), out(&o));
     let gone = soon(s, || serving(s) == 0 && hermes_of(api).is_empty());

@@ -18,8 +18,9 @@
 // the model's text before it, and a screenshot it showed: `shot`, a blob of
 // this fragment's, shown small at `__blob/<shot>`), `turn.end`. The page
 // groups a turn's steps above its answer, shows who is working while one
-// runs, and gives the person who started it a Stop button. Nothing streams:
-// each record is a whole step. Everyone who writes has a face (a person's
+// runs, and gives the person who started it a Stop button. A reply that
+// streams (a Hermes') shows as its draft until its record lands. Everyone
+// who writes has a face (a person's
 // picture or initial; an agent's, a computer's, a Hermes' mark), and who is
 // here, and who is writing, shows above the composer (the fragment's
 // presence: this page shares `{typing}`).
@@ -53,6 +54,8 @@ const PENDING_MS = 15000;
 const TYPING_MS = 4000;
 // Faces shown in the "here" line; more are counted.
 const HERE_FACES_MAX = 5;
+// A draft no word came for in this long is let go (its writer went away).
+const DRAFT_STALE_MS = 120000;
 const ROLES = ["public", "viewer", "editor", "owner"];
 const atLeast = (role, floor) => ROLES.indexOf(role) >= ROLES.indexOf(floor);
 
@@ -100,6 +103,7 @@ export function mount(root, options = {}) {
     stopping: new Set(), // turns this page asked to stop
     work: false, // whether this page reads the work channel
     here: [], // the fragment's presence: [{ id, principal, data }]
+    drafts: new Map(), // turn -> { principal, text, at }: replies as they stream
   };
   const nodes = new Map(); // a message's seq -> its node (records never change)
   const people = new Map(); // principal -> a promise of its profile
@@ -177,6 +181,8 @@ export function mount(root, options = {}) {
     const text = object && typeof body.text === "string" ? body.text : JSON.stringify(body);
     const turn = object && typeof body.turn === "string" ? body.turn : null;
     state.messages.push({ seq: record.seq, at: record.at, principal: record.principal, text, turn });
+    // its record replaces the draft as it stood (a later draft of the turn shows again)
+    if (turn) state.drafts.delete(turn);
     if (turn) {
       const t = turnOf(turn);
       t.answered = true;
@@ -202,6 +208,13 @@ export function mount(root, options = {}) {
       t.at ??= record.at;
       t.end = { outcome: b.outcome, error: b.error, at: record.at };
     }
+    schedule();
+  }
+
+  function onDraft(d) {
+    if (typeof d.turn !== "string") return;
+    if (typeof d.text !== "string") state.drafts.delete(d.turn);
+    else state.drafts.set(d.turn, { principal: d.principal, text: d.text, at: Date.now() });
     schedule();
   }
 
@@ -243,8 +256,13 @@ export function mount(root, options = {}) {
       if (item.type === "message") out.push(message(item.m));
       else out.push(...turnNodes(item.t));
     }
-    for (const t of live) out.push(workingLine(t));
-    if (!live.length && state.pending) out.push(workingLine(null));
+    // a reply as it streams, in place of its turn's working line
+    for (const [turn, d] of state.drafts) {
+      if (Date.now() - d.at > DRAFT_STALE_MS) state.drafts.delete(turn);
+    }
+    for (const [turn, d] of state.drafts) out.push(draftNode(turn, d));
+    for (const t of live) if (!state.drafts.has(t.turn)) out.push(workingLine(t));
+    if (!live.length && !state.drafts.size && state.pending) out.push(workingLine(null));
     if (!out.length) out.push(emptyState());
     col.replaceChildren(...out);
     // the Stop button: for whoever started a turn that runs
@@ -309,6 +327,16 @@ export function mount(root, options = {}) {
     copy.onclick = () => copyText(m.text, copy);
     actions.append(copy, el("span", "time", time(m.at)));
     wrap.append(byline(who, "the agent"), body, actions);
+    return wrap;
+  }
+
+  function draftNode(turn, d) {
+    const wrap = el("div", "msg agent streaming");
+    wrap.dataset.turn = turn;
+    const body = el("div", "md");
+    body.append(renderMarkdown(d.text));
+    body.append(el("span", "cursor"));
+    wrap.append(byline(named(d.principal), "the agent"), body);
     return wrap;
   }
 
@@ -517,7 +545,7 @@ export function mount(root, options = {}) {
   };
 
   // ---- who this page is, then the channels it may read, and who is here ----
-  fragment.subscribe("chat", onChat, { last: 200 });
+  fragment.subscribe("chat", onChat, { last: 200, onDraft });
   fragment.presence.set({ typing: false });
   fragment.presence.on((list) => {
     state.here = list;

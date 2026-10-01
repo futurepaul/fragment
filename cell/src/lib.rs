@@ -42,6 +42,7 @@ mod error;
 mod files;
 mod fragment;
 mod hermes;
+mod relay;
 mod jobs;
 mod js;
 mod keys;
@@ -1166,6 +1167,13 @@ async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellResult<Respons
             Ok(env.durable_object("PRINCIPAL")?.get_by_name(&principal.id)?.fetch_with_request(list).await?)
         }
         (Method::Post, ["api", "sandcastle", "credentials"]) => sandcastle_credentials(req, env, cfg, &url).await,
+        // a Hermes' Relay (relay.rs): its gateway's socket, which it opens
+        // with its token, and its chats' deliveries, to its inbox's token
+        (Method::Get, ["api", "hermes", fragment, "relay"]) => hermes::forward(env, fragment, "/relay", req).await,
+        (Method::Post, ["api", "hermes", fragment, "inbox", token]) => {
+            let path = format!("/inbox/{token}");
+            hermes::forward(env, fragment, &path, req).await
+        }
         (_, ["api", "budget", rest @ ..]) => {
             let rest = rest.to_vec();
             budget_route(req, env, cfg, &url, &rest).await

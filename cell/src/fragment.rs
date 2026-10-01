@@ -35,6 +35,7 @@
 //!   GET    /api/events?since=|tail=       viewer
 //!   GET    /api/channels  /api/channels/<channel>?after=   viewer; the channel's reader
 //!   POST   /api/channels/<channel>        the channel's post role ({id, body}: the platform appends)
+//!   PUT    /api/channels/<channel>/draft  the channel's post role ({turn, text}: shown live, never stored)
 //!   POST   /api/ops/<operation>           the operation's role (a job answers its run)
 //!   GET    /api/runs?status=&op=  /api/runs/<id>   viewer
 //!   POST   /api/replay  POST /api/pause   editor
@@ -848,6 +849,9 @@ impl FragmentCell {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
             }
             let what = what.to_string();
+            if what == "rejoin" {
+                return self.hermes_rejoin().await;
+            }
             return self.hermes_asks(&what, &body_json::<Value>(&mut req).await?);
         }
         if let Some(what) = path.strip_prefix("/computer/") {
@@ -972,6 +976,11 @@ impl FragmentCell {
                 let body = body_json(&mut req).await?;
                 let channel = channel.to_string();
                 self.post_api(&caller, &channel, body).await
+            }
+            (Method::Put, ["api", "channels", channel, "draft"]) => {
+                let body = body_json(&mut req).await?;
+                let channel = channel.to_string();
+                self.draft_api(&caller, &channel, body)
             }
             (Method::Post, ["api", "ops", op]) => {
                 let body = body_json(&mut req).await?;

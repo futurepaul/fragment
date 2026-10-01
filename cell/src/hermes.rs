@@ -43,7 +43,10 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS hermes (
   one INTEGER PRIMARY KEY CHECK (one = 1), fragment TEXT NOT NULL, owner TEXT NOT NULL, declared INTEGER NOT NULL,
   phase TEXT NOT NULL, computer TEXT NOT NULL, pubkey TEXT, key_sealed TEXT, identity TEXT, granted INTEGER NOT NULL,
-  token_sealed TEXT, made INTEGER NOT NULL, endpoint TEXT, relay TEXT, node_key TEXT, tries INTEGER NOT NULL);";
+  token_sealed TEXT, made INTEGER NOT NULL, endpoint TEXT, relay TEXT, node_key TEXT, tries INTEGER NOT NULL,
+  relay_sealed TEXT, inbox TEXT);";
+/// Columns a row from before its Relay lacks.
+const RELAY_COLUMNS: [&str; 2] = ["relay_sealed", "inbox"];
 
 /// What is asked of a Hermes.
 #[derive(Serialize, Deserialize)]
@@ -54,6 +57,13 @@ pub(crate) enum Ask {
     Declare { fragment: String, owner: String, declared: bool },
     /// An admission for a page's iroh key, for a viewer the fragment let in.
     Access { peer: String },
+    /// A chat of `owner`'s that names it as who answers asks who that is:
+    /// its computer identity, once made (relay.rs).
+    Answerer { owner: String },
+    /// That chat, with its Hermes a member, asks it to follow `channel`.
+    Listen { chat: String, channel: String, owner: String },
+    /// A chat no longer names it.
+    Unlisten { chat: String },
     /// Its fragment was deleted, or its owner removed its key's computer
     /// (`fragment computers rm`): its computer goes, and the key's computer.
     /// A later deploy that declares it makes a new one.
@@ -61,32 +71,38 @@ pub(crate) enum Ask {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-struct Row {
-    fragment: String,
-    owner: String,
+pub(crate) struct Row {
+    pub fragment: String,
+    pub owner: String,
     #[serde(deserialize_with = "flag")]
-    declared: bool,
-    phase: Phase,
+    pub declared: bool,
+    pub phase: Phase,
     /// Its name on the node: derived from the platform and the fragment,
     /// so a retried create names the same one.
-    computer: String,
-    pubkey: Option<String>,
-    key_sealed: Option<String>,
-    identity: Option<String>,
+    pub computer: String,
+    pub pubkey: Option<String>,
+    pub key_sealed: Option<String>,
+    pub identity: Option<String>,
     #[serde(deserialize_with = "flag")]
-    granted: bool,
+    pub granted: bool,
     /// Hermes' session token, pinned in its spec: its second check behind
     /// the admission.
-    token_sealed: Option<String>,
+    pub token_sealed: Option<String>,
     /// The node took the computer as last specified.
     #[serde(deserialize_with = "flag")]
-    made: bool,
+    pub made: bool,
     /// Its iroh key (64 hex) and its node's relay, as the node's view says.
-    endpoint: Option<String>,
-    relay: Option<String>,
+    pub endpoint: Option<String>,
+    pub relay: Option<String>,
     /// The node's own key (64 hex), which an admission names.
-    node_key: Option<String>,
-    tries: i64,
+    pub node_key: Option<String>,
+    pub tries: i64,
+    /// Its Relay's per-gateway secret (sealed), and the token of the inbox
+    /// its chats deliver to (relay.rs).
+    #[serde(default)]
+    pub relay_sealed: Option<String>,
+    #[serde(default)]
+    pub inbox: Option<String>,
 }
 
 fn flag<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<bool, D::Error> {
@@ -125,30 +141,67 @@ pub(crate) async fn ask(env: &Env, fragment: &str, what: &Ask) -> CellResult<Val
     }
 }
 
+/// A request to the Hermes of `fragment` at `path`, as it came (its method,
+/// its headers: a WebSocket's upgrade and its token; its body): its Relay's
+/// own routes, which check what they are given (relay.rs).
+pub(crate) async fn forward(env: &Env, fragment: &str, path: &str, mut req: Request) -> CellResult<Response> {
+    if !fragment_proto::valid_fragment_name(fragment) {
+        return Err(CellError::new(ErrorCode::NotFound, "no Hermes there"));
+    }
+    let mut init = RequestInit::new();
+    init.with_method(req.method()).with_headers(req.headers().clone());
+    if req.method() != Method::Get {
+        init.with_body(Some(req.bytes().await?.into()));
+    }
+    let inner = Request::new_with_init(&format!("https://hermes.internal{path}"), &init)?;
+    Ok(env.durable_object("HERMES")?.get_by_name(fragment)?.fetch_with_request(inner).await?)
+}
+
 fn upstream(m: impl Into<String>) -> CellError {
     CellError::new(ErrorCode::UpstreamFailed, m)
 }
 
 #[durable_object]
 pub struct HermesCell {
-    state: State,
-    env: Env,
-    cfg: &'static Config,
+    pub(crate) state: State,
+    pub(crate) env: Env,
+    pub(crate) cfg: &'static Config,
     /// One alarm step at a time (celld fires an alarm again when a handler
     /// outlives the node's operation deadline).
     stepping: futures_util::lock::Mutex<()>,
+    /// Its Relay's work, one piece at a time: frames, deliveries, its look.
+    pub(crate) relaying: futures_util::lock::Mutex<()>,
 }
 
 impl DurableObject for HermesCell {
     fn new(state: State, env: Env) -> Self {
-        state.storage().sql().exec(SCHEMA, None).expect("the Hermes schema applies");
+        let sql = state.storage().sql();
+        sql.exec(SCHEMA, None).expect("the Hermes schema applies");
+        sql.exec(crate::relay::SCHEMA, None).expect("the Relay schema applies");
+        // a row from before its Relay
+        let cols: Vec<Value> = sql.exec("PRAGMA table_info(hermes)", None).and_then(|c| c.to_array()).unwrap_or_default();
+        for col in RELAY_COLUMNS.iter().filter(|c| !cols.iter().any(|x| x["name"] == **c)) {
+            sql.exec(&format!("ALTER TABLE hermes ADD COLUMN {col} TEXT"), None).expect("the hermes table migrates");
+        }
         let cfg = Config::from_env(&env);
-        HermesCell { state, env, cfg, stepping: futures_util::lock::Mutex::new(()) }
+        HermesCell { state, env, cfg, stepping: futures_util::lock::Mutex::new(()), relaying: futures_util::lock::Mutex::new(()) }
     }
 
     async fn fetch(&self, mut req: Request) -> Result<Response> {
+        // its Hermes' socket, and its chats' deliveries (the router's, relay.rs)
+        let path = req.path();
+        if path == "/relay" {
+            return self.relay_upgrade(req).await.or_else(|e| e.response());
+        }
+        if let Some(token) = path.strip_prefix("/inbox/") {
+            let _one = self.relaying.lock().await;
+            return self.inbox(token, req).await.or_else(|e| e.response());
+        }
         let asked = match serde_json::from_slice::<Ask>(&req.bytes().await?) {
             Ok(Ask::Access { peer }) => self.access(&peer).await.and_then(|g| serde_json::to_value(g).map_err(|e| CellError::host(e.to_string()))),
+            Ok(Ask::Answerer { owner }) => self.answerer(&owner),
+            Ok(Ask::Listen { chat, channel, owner }) => self.listen(&chat, &channel, &owner).await,
+            Ok(Ask::Unlisten { chat }) => self.unlisten(&chat).await,
             Ok(a) => self.asked(a).await.map(|()| Value::Null),
             Err(e) => Err(CellError::invalid(format!("body: {e}"))),
         };
@@ -158,39 +211,62 @@ impl DurableObject for HermesCell {
         }
     }
 
+    async fn websocket_message(&self, ws: WebSocket, message: WebSocketIncomingMessage) -> Result<()> {
+        let text = match message {
+            WebSocketIncomingMessage::String(s) => s,
+            WebSocketIncomingMessage::Binary(b) => String::from_utf8_lossy(&b).into_owned(),
+        };
+        self.relay_message(&ws, &text).await;
+        Ok(())
+    }
+
+    async fn websocket_close(&self, _ws: WebSocket, _code: usize, _reason: String, _clean: bool) -> Result<()> {
+        Ok(())
+    }
+
+    async fn websocket_error(&self, _ws: WebSocket, _error: Error) -> Result<()> {
+        Ok(())
+    }
+
     async fn alarm(&self) -> Result<Response> {
         let _one = self.stepping.lock().await;
-        match self.step().await {
-            Ok(Some(again_ms)) => {
-                let _ = self.arm(again_ms).await;
-            }
-            Ok(None) => {}
+        let mut next = match self.step().await {
+            Ok(again) => again,
             Err(e) => {
                 let Some(mut h) = self.row().ok().flatten() else { return Response::ok("") };
                 h.tries += 1;
                 let wait = (self.cfg.hermes_tick_ms << h.tries.min(12)).min(RETRY_MAX_MS);
                 let _ = self.save_step(&mut h);
                 self.tell(&h, "hermes.failed", &format!("{} (again in {} s)", e.message, wait / 1000)).await;
-                let _ = self.arm(wait).await;
+                Some(wait)
             }
+        };
+        match self.relay_tick().await {
+            Ok(Some(ms)) => next = Some(next.map_or(ms, |n| n.min(ms))),
+            Ok(None) => {}
+            Err(e) => console_error!("its Relay's look: {}", e.message),
+        }
+        if let Some(ms) = next {
+            let _ = self.arm(ms).await;
         }
         Response::ok("")
     }
 }
 
 impl HermesCell {
-    fn sql(&self) -> SqlStorage {
+    pub(crate) fn sql(&self) -> SqlStorage {
         self.state.storage().sql()
     }
 
-    fn row(&self) -> CellResult<Option<Row>> {
+    pub(crate) fn row(&self) -> CellResult<Option<Row>> {
         Ok(self.sql().exec("SELECT * FROM hermes", None)?.to_array::<Row>()?.pop())
     }
 
-    fn save(&self, h: &Row) -> CellResult<()> {
+    pub(crate) fn save(&self, h: &Row) -> CellResult<()> {
         let v = serde_json::to_value(h).map_err(|e| CellError::host(e.to_string()))?;
         let cols = [
             "fragment", "owner", "declared", "phase", "computer", "pubkey", "key_sealed", "identity", "granted", "token_sealed", "made", "endpoint", "relay", "node_key", "tries",
+            "relay_sealed", "inbox",
         ];
         let binds = cols.iter().map(|k| match &v[*k] {
             Value::Bool(b) => SqlStorageValue::Integer(i64::from(*b)),
@@ -206,14 +282,14 @@ impl HermesCell {
     /// Saves a step's row over what asks wrote while it ran (every write
     /// but an ask's own: a step's awaits let a deploy's ask in): a deploy's
     /// `declared` and a removal stand.
-    fn save_step(&self, h: &mut Row) -> CellResult<()> {
+    pub(crate) fn save_step(&self, h: &mut Row) -> CellResult<()> {
         if let Some(asked) = self.row()? {
             (h.declared, h.phase) = pure::merged(asked.declared, asked.phase, h.phase);
         }
         self.save(h)
     }
 
-    async fn arm(&self, in_ms: i64) -> CellResult<()> {
+    pub(crate) async fn arm(&self, in_ms: i64) -> CellResult<()> {
         let at = js::now_ms() + in_ms;
         Ok(self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&worker::wasm_bindgen::JsValue::from_f64(at as f64)))).await?)
     }
@@ -240,6 +316,8 @@ impl HermesCell {
                     relay: None,
                     node_key: None,
                     tries: 0,
+                    relay_sealed: None,
+                    inbox: None,
                 }
             }
             // nothing was ever declared here: nothing to make or remove
@@ -255,7 +333,7 @@ impl HermesCell {
                 }
                 h
             }
-            (_, Ask::Access { .. }) => unreachable!("an access is asked of `access`"),
+            (_, Ask::Access { .. } | Ask::Answerer { .. } | Ask::Listen { .. } | Ask::Unlisten { .. }) => unreachable!("asked of their own methods"),
         };
         let due = matches!(h.phase, Phase::Make | Phase::Remove);
         h.tries = if due { 0 } else { h.tries };
@@ -318,6 +396,11 @@ impl HermesCell {
             h.node_key = Some(self.node_key(api).await?);
             self.save_step(h)?;
         }
+        // its Relay: every Hermes may answer chats (relay.rs)
+        if h.relay_sealed.is_none() || h.inbox.is_none() {
+            self.give_relay(h).await?;
+            self.save_step(h)?;
+        }
         if !h.made {
             self.put_computer(h, api, platform).await?;
             h.made = true;
@@ -351,7 +434,9 @@ impl HermesCell {
     async fn put_computer(&self, h: &mut Row, api: &str, platform: &str) -> CellResult<()> {
         let _ = api;
         let token = self.token(h).await?;
-        let body = pure::Spec { image: &self.cfg.hermes_image, model: &self.cfg.hermes_model, platform }.json(&token);
+        let secret = self.relay_secret(h).await?;
+        let relay = secret.as_deref().map(|secret| pure::Relay { id: &h.fragment, secret });
+        let body = pure::Spec { image: &self.cfg.hermes_image, model: &self.cfg.hermes_model, platform }.json(&token, relay.as_ref());
         let (status, answer) = self.node(h, "PUT", &format!("/v1/computers/{}", h.computer), Some(&body)).await?;
         match status {
             200 | 201 => Ok(()),
@@ -376,8 +461,25 @@ impl HermesCell {
                 Err(e) => return Err(e),
             }
         }
-        // A new declaration makes a new one: a new key, a new computer.
+        // A new declaration makes a new one: a new key, a new computer, a new Relay.
         (h.pubkey, h.key_sealed, h.identity, h.granted, h.token_sealed, h.made, h.endpoint, h.relay) = (None, None, None, false, None, false, None, None);
+        (h.relay_sealed, h.inbox) = (None, None);
+        self.relay_revoked();
+        // the chats it answered join again: a new Hermes is a new identity
+        let chats: Vec<Value> = self.sql().exec("SELECT chat FROM relay_chats", None)?.to_array()?;
+        for chat in chats.iter().filter_map(|c| c["chat"].as_str()) {
+            let told = async {
+                let req = crate::routed::internal_request("hermes/rejoin", "{}")?;
+                self.env.durable_object("FRAGMENT")?.get_by_name(chat)?.fetch_with_request(req).await?;
+                Ok::<(), CellError>(())
+            };
+            if let Err(e) = told.await {
+                console_error!("{}: {chat} was not told to join anew: {}", h.fragment, e.message);
+            }
+        }
+        for t in ["relay_chats", "relay_inbox", "relay_out", "relay_state"] {
+            self.sql().exec(&format!("DELETE FROM {t}"), None)?;
+        }
         h.phase = Phase::Gone;
         self.tell(h, "hermes.removed", "its Hermes was removed").await;
         Ok(())
@@ -407,7 +509,7 @@ impl HermesCell {
 
     /// One call to the node's API, signed by its computer's key: (status,
     /// the answer as JSON, or null).
-    async fn node(&self, h: &mut Row, method: &str, path: &str, body: Option<&Value>) -> CellResult<(u16, Value)> {
+    pub(crate) async fn node(&self, h: &mut Row, method: &str, path: &str, body: Option<&Value>) -> CellResult<(u16, Value)> {
         let (api, _) = self.cfg.sandcastle()?;
         let url = format!("{api}{path}");
         let bytes = body.map(|b| b.to_string()).unwrap_or_default();
@@ -528,6 +630,15 @@ impl FragmentCell {
         }
         let access = ask(&self.env, &self.name()?, &Ask::Access { peer: peer.to_string() }).await?;
         json_response(&access)
+    }
+
+    /// `hermes/rejoin`: a Hermes this chat names was removed (a new one, a
+    /// new identity, may come): the chat joins whoever answers anew, at its
+    /// alarm, until it can.
+    pub(crate) async fn hermes_rejoin(&self) -> CellResult<Response> {
+        self.set_meta(MetaKey::AgentPending, &js::random_hex::<8>())?;
+        self.schedule().await?;
+        json_response(&json!({ "ok": true }))
     }
 
     /// An event its Hermes tells (`hermes/event`).

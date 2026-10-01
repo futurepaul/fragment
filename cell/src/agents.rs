@@ -21,7 +21,7 @@ use worker::*;
 use std::collections::HashMap;
 
 use fragment_core::access::{listed_role, Cap};
-use fragment_core::manifest::AgentDecl;
+use fragment_core::manifest::{AgentDecl, AnswerComputer};
 use fragment_core::npub;
 use fragment_core::steps::AgentTurn;
 use fragment_proto::{limits, split_fragment_name, valid_fragment_name, valid_label, ErrorCode, FragmentList, IdentityKind, ListedFragment, Role};
@@ -267,6 +267,10 @@ struct Joined {
     agent: String,
     name: String,
     channel: String,
+    /// A computer's agent (a Hermes: `name` is its fragment), which the
+    /// Hermes' cell makes listen (relay.rs).
+    #[serde(default)]
+    computer: bool,
 }
 
 /// Where the agent of a newly declared channel starts hearing it
@@ -357,12 +361,22 @@ impl FragmentCell {
         let signed = Signed::new(identity, None);
         let wanted = match &live {
             None => None,
+            // a computer's agent: its Hermes, its owner's (the chat's owner's) too
+            Some(live) if live.decl.computer.is_some() => {
+                let hermes = match live.decl.computer.as_ref().expect("matched") {
+                    AnswerComputer::Own => name.clone(),
+                    AnswerComputer::Named(n) => n.clone(),
+                };
+                let who = crate::hermes::ask(&self.env, &hermes, &crate::hermes::Ask::Answerer { owner: owner.clone() }).await?;
+                let agent = who["identity"].as_str().ok_or_else(|| CellError::host(format!("{hermes}'s Hermes named no identity")))?.to_string();
+                Some(Joined { agent, name: hermes, channel: live.decl.channel.clone(), computer: true })
+            }
             Some(live) => {
                 let (agent, agent_name) = match live.decl.personal {
                     true => own_agent(&self.env, &owner, username).await.map(|(id, _, name)| (id, name))?,
                     false => self.fragment_agent(&signed, label, &name, live).await?,
                 };
-                Some(Joined { agent, name: agent_name, channel: live.decl.channel.clone() })
+                Some(Joined { agent, name: agent_name, channel: live.decl.channel.clone(), computer: false })
             }
         };
         let as_owner = Caller { signed: Some(signed), unresolved: None, url: url::Url::parse("https://fragment.internal/").expect("a URL"), mode: None };
@@ -371,6 +385,14 @@ impl FragmentCell {
                 self.exec("DELETE FROM subs WHERE principal = ? AND channel = ?", vec![before.agent.as_str().into(), before.channel.as_str().into()])?;
             } else if self.member_role(&before.agent)?.is_some() {
                 self.remove_member(&as_owner, &before.agent).await?;
+            }
+            // a Hermes forgets the chat (a Hermes removed already has: its row is gone)
+            if before.computer && !wanted.as_ref().is_some_and(|w| w.agent == before.agent) {
+                match crate::hermes::ask(&self.env, &before.name, &crate::hermes::Ask::Unlisten { chat: name.clone() }).await {
+                    Ok(_) => {}
+                    Err(e) if e.code == ErrorCode::NotFound => {}
+                    Err(e) => return Err(e),
+                }
             }
             self.event("agent.left", &format!("{} no longer answers on {}", before.name, before.channel), json!({ "agent": before.agent }));
         }
@@ -381,8 +403,16 @@ impl FragmentCell {
         if self.member_role(&wanted.agent)?.is_none() {
             self.set_member(&as_owner, &wanted.agent, fragment_proto::SetRole { role: Role::Editor }).await?;
         }
-        let listen = json!({ "fragment": name, "channel": wanted.channel });
-        let listening = ask_json(&self.env, Method::Post, &format!("/api/a/{}/listen", wanted.name), &owner, &listen).await?;
+        let listening = match wanted.computer {
+            true => {
+                let listen = crate::hermes::Ask::Listen { chat: name.clone(), channel: wanted.channel.clone(), owner: owner.clone() };
+                crate::hermes::ask(&self.env, &wanted.name, &listen).await?
+            }
+            false => {
+                let listen = json!({ "fragment": name, "channel": wanted.channel });
+                ask_json(&self.env, Method::Post, &format!("/api/a/{}/listen", wanted.name), &owner, &listen).await?
+            }
+        };
         self.set_meta(MetaKey::AgentJoined, &serde_json::to_string(&wanted).expect("a join serializes"))?;
         self.event("agent.joined", &format!("{} answers on {}", wanted.name, wanted.channel), json!({ "agent": wanted.agent }));
         let sub = listening["subscription"].as_i64().ok_or_else(|| CellError::host("the agent's listen named no subscription"))?;

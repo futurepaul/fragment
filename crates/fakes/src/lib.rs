@@ -9,6 +9,7 @@ pub mod codestorage;
 pub mod http;
 pub mod openrouter;
 pub mod push;
+pub mod relay_gateway;
 pub mod sandcastle;
 pub mod sprites;
 pub mod workos;

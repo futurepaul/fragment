@@ -42,7 +42,7 @@ use fragment_core::access::Purpose;
 use fragment_core::effects::{self, Effect};
 use fragment_core::npub;
 use fragment_proto::{
-    limits, valid_channel_name, valid_op_id, ChannelPage, ChannelRecord, ErrorCode, PostRecord, Posted, Role, BUILTIN_CHANNELS, POST_KIND,
+    limits, valid_channel_name, valid_op_id, ChannelPage, ChannelRecord, ErrorCode, PostRecord, Posted, PutDraft, Role, BUILTIN_CHANNELS, POST_KIND,
 };
 use futures_util::lock::{Mutex, OwnedMutexGuard};
 use serde::Deserialize;
@@ -371,6 +371,39 @@ impl FragmentCell {
         }
         assert_eq!(record.kind, POST_KIND, "a post's key names a posted record");
         Ok(record)
+    }
+
+    /// `PUT /api/f/<name>/channels/<channel>/draft` `{turn, text}`: a record
+    /// its poster is writing, to the channel's readers live (`draft`
+    /// frames), never stored. Whoever may post there may draft there; a
+    /// draft past the fragment's pace is refused (429), and the poster's
+    /// next one carries the whole text anyway.
+    pub(crate) fn draft_api(&self, caller: &Caller, channel: &str, draft: PutDraft) -> CellResult<Response> {
+        let who = self.caller_id(caller)?.to_string();
+        let facts = self.facts()?;
+        let standing = self.standing(caller, false)?;
+        decide(facts.visibility, standing, Purpose::Read, Role::Public)?;
+        if !valid_channel_name(channel) || BUILTIN_CHANNELS.contains(&channel) {
+            return Err(CellError::invalid("drafts go to a channel fragment.json declares with a post role"));
+        }
+        let decl = self.declared_channel(channel)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no channel named {channel:?}")))?;
+        let Some(needs) = decl.post else {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("channel {channel} takes no posts: its fragment.json names no post role")));
+        };
+        decide(facts.visibility, standing, Purpose::Act, needs)?;
+        if decl.signed_in && caller.principal().is_none() {
+            return Err(CellError::new(ErrorCode::Unauthenticated, format!("channel {channel} takes posts from people signed in: sign in to post")));
+        }
+        if !valid_op_id(&draft.turn) {
+            return Err(CellError::invalid("a draft's turn must match ^[A-Za-z0-9._:-]{1,128}$"));
+        }
+        if let Some(size) = draft.text.as_ref().map(String::len).filter(|n| *n > limits::RECORD_BODY_MAX_BYTES) {
+            return Err(CellError::too_large("a draft's text", size, limits::RECORD_BODY_MAX_BYTES));
+        }
+        if !self.broadcast_draft(channel, &who, &draft.turn, draft.text.as_deref()) {
+            return Err(CellError::new(ErrorCode::RateLimited, format!("drafts past {} a second are dropped", limits::PRESENCE_PER_S)));
+        }
+        json_response(&json!({ "ok": true }))
     }
 
     /// `POST /api/f/<name>/channels/<channel>`: a signed poster.
