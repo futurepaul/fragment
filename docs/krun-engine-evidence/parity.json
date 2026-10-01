@@ -7,6 +7,7 @@
       "exec_stderr_combined": true,
       "exec_stdout_ignored": true,
       "guest_sees_the_instance": true,
+      "inspect_image_empty_when_restored": true,
       "inspect_labels_and_image": true,
       "inspect_null_after_destroy": true,
       "inspect_resources": true,
@@ -31,23 +32,23 @@
       "snapshot_shape": true
     },
     "pass": true,
-    "restore_start_ms": 215.2,
+    "restore_start_ms": 213.0,
     "snapshot": {
-      "createdAtMs": 1790828929881,
-      "expiresAtMs": 1793420929881,
-      "id": "2f7bb39957c573fced86756d494b5c47",
+      "createdAtMs": 1790834004310,
+      "expiresAtMs": 1793426004310,
+      "id": "36ffbf45342403a760fc4fed50b990f1",
       "image": "busybox:1.37.0",
       "name": "parity-snap",
       "size": 4100096
     },
-    "snapshot_ms": 46.6
+    "snapshot_ms": 46.5
   },
   "scenario": "parity",
   "versions": {
-    "engine_sha256_16": "364f2f6fac921a28",
+    "engine_sha256_16": "bb125a0375086607",
     "guest_sha256_16": "418f05f5f5c6fd78",
     "libkrun": "b63baa1895c60d58b731fdebb9180ba266292848",
     "libkrunfw": "f6a710faaa8cfe3b67a4bcdadb082c2183a914f1 (5.6.2, linux 6.12.109)",
-    "runner_sha256_16": "6942962ad58808f7"
+    "runner_sha256_16": "173a31b4853d5612"
   }
 }

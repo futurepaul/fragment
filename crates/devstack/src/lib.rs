@@ -23,9 +23,11 @@ pub const STOP_TIMEOUT: Duration = Duration::from_secs(60);
 /// seam that serves `KEYS` from crates/native, and the settings
 /// docs/hardening.md turns on: `CELLD_FACET_MAX_BYTES`,
 /// `CELLD_LOADED_WORKERS_MAX`, `CELLD_DYNAMIC_LOCKDOWN`,
-/// `CELLD_INTERNAL_PEER_ONLY`, and a hard heap ceiling.
+/// `CELLD_INTERNAL_PEER_ONLY`, and a hard heap ceiling. On `krun-spike`
+/// only, branch `krun-engine` over it: `ctx.container` on an engine trait,
+/// with the krun microVM engine beside Docker (docs/krun-engine.md, E6).
 pub const CELLD_FORK_URL: &str = "https://github.com/futurepaul/celld.git";
-pub const CELLD_FORK_REV: &str = "4f50c819214d85d604e09f12a10a90ca0b37119e";
+pub const CELLD_FORK_REV: &str = "56ccbd47ffb94864a3ac5a5b8c5e9ad9192570a2";
 
 pub fn repo_root() -> PathBuf {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));

@@ -237,8 +237,7 @@ The work, on branch `krun-engine` of the celld fork (from the pinned
 
 ## Results
 
-*2026-10-01, on finite-lat-6.* E1 to E5 are done; E6 (celld) and E7
-(CI) are next. Every number below is from one engine build
+*2026-10-01, on finite-lat-6.* E1 to E6 are done; E7 (CI) is next. Every number below is from one engine build
 (`engine_sha256_16` 364f2f6fac921a28), with seccomp enforced, in
 `docs/krun-engine-evidence/`. Medians, with the range in brackets.
 
@@ -246,9 +245,9 @@ The work, on branch `krun-engine` of the celld fork (from the pinned
 
 | | Item | State |
 |---|---|---|
-| 1 | Cloudflare's container API | Every call but `interceptOutboundHttp`'s callback to the Durable Object, which waits for celld (E6); 28 parity checks pass (`parity.json`) |
+| 1 | Cloudflare's container API | Every call, the intercepts' callback to the Durable Object included (E6); 29 parity checks pass (`parity.json`) |
 | 2 | Speed | Met but one: a jailed start is 108.1 ms against the 107 ms bar (below) |
-| 3 | celld on the engine | Not started (E6) |
+| 3 | celld on the engine | Met: the conformance Worker passes 25 of 25 on this engine, and on Docker every method Docker has but its own three gaps (E6, below) |
 | 4 | Images | Met: the corpus, file capabilities granted to a non-root user, `docker save` loads, Cloudflare's `sandbox-shim` |
 | 5 | Hardening | Met: the allowlist holds every scenario; adoption; limits refused with typed errors |
 | 6 | Clean | Clippy and tests pass on the Mac and on Linux; CI is E7 |
@@ -328,6 +327,53 @@ weaker entropy where RDRAND is missing); skipping btrfs's initcall
   stat, list, rename, recursive remove, errno for a missing path and for
   a write `user` may not make).
 
+### E6: celld on the engine
+
+*2026-10-01.* celld's fork, branch `krun-engine` (56ccbd4, pinned on
+`krun-spike` only), puts `ctx.container` on an engine trait with Docker
+and this engine behind it, on Cloudflare's current surface. The
+conformance Worker (the fork's `examples/container-conformance`) calls
+every method and answers per method; evidence in `conformance-krun.json`
+and `conformance-docker.json`.
+
+| Engine | Passed | Unsupported | Failed |
+|---|---|---|---|
+| krun, celld on lat-6, seccomp enforced | 25 | 0 | 0 |
+| Docker 29.4, celld on the Mac | 16 | 5 (snapshots, interception) | 4 |
+
+Docker's four are its own gaps, not regressions: its `exec()` inherits
+the container's whole environment; its exec `kill()` (twice) signals a
+pid the daemon reports from the host's namespace; `enableInternet: false`
+is not enforced off Linux. On the engine, through celld: exec 3 to 4 ms,
+an intercepted HTTP request 3 ms and HTTPS 86 ms (on `lite`), a snapshot
+46 ms.
+
+What E6 added to the engine:
+
+- **exec over the API** (`exec_stream`): an upgraded, framed stream, so
+  celld never speaks the agent's wire. 4.0 ms request to exit, as straight
+  to the agent (`exec-api.json`).
+- **Intercepts name their container and index** (`x-sandcastle-container`,
+  `x-sandcastle-intercept`, both overwriting what the guest sent), so one
+  celld socket serves the node and finds the binding.
+- **`ports.sock` falls back to the guest's loopback** over vsock when the
+  NIC refuses, so a server bound to 127.0.0.1 is reached too; a
+  connection made while a server starts can land there (`port-nic.json`:
+  `nic_fresh_vm.transport`). With the server up, the first connection to
+  a fresh VM is over the NIC, nine times of nine.
+- **`inspect()`'s image is empty** while starting and after a restore.
+- **Two load fixes:** a reference arrives percent-escaped in the query and
+  is decoded; an image loaded again under another name answers to it.
+
+What it found and fixed in celld along the way: an inactivity sweeper that
+dropping did not cancel (it killed a re-activated cell's container);
+`monitor()` rejecting after a plain `destroy()`; `destroy()` during a
+start leaving the container running; exec's ignored streams buffering
+until the process blocked; a refused intercept poisoning every later
+start; the public-only egress policy refusing an object's own container
+port. Docker's gaps above stay, written into the fork's
+docs/services/containers.md.
+
 ### Debt
 
 Into `docs/technical-debt-ledger.md` when this merges:
@@ -337,6 +383,13 @@ Into `docs/technical-debt-ledger.md` when this merges:
 - The build VM ends the same way the run VM did before `Recorded`: its
   `Finished` reply races its power-off. No build has lost it yet.
 - `ended` keeps the last 4096 exits and drops by name order, not age.
+- celld's `getTcpPort()` on the krun engine relays through a loopback
+  listener per port; a dial path that hands the engine's socket to
+  `fetch`, `connect`, and WebSocket upgrades directly would drop the hop.
+  The listener is reachable from the node's loopback, as Docker's bridge
+  address is.
+- An intercepted request's body is held whole (at most 32 MiB) for the
+  service call.
 - Memory is now reported as the VM's cgroup (730 MiB for an idle Hermes
   after a reclaim), which counts the page cache of its disks; the
   spike's 604 MiB was the VMM's resident memory alone.
