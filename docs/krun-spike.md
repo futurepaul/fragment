@@ -321,8 +321,18 @@ v1.22.0) and NVIDIA OpenShell (@ 2935e973, its `openshell-driver-vm`).
    subordinate range, so no user namespace on the host maps it), in new
    PID, mount, network, IPC, and UTS namespaces. A user namespace would add
    kernel surface and buy nothing a dropped uid does not.
-8. **One more privileged action, for reset**: `sudo systemctl stop
-   krun-spike.slice` (it stops only the spike's own scopes).
+8. **Two more privileged actions, for reset.**
+   - `sudo systemctl stop krun-spike.slice` stops only the spike's own
+     scopes.
+   - `sudo sandcastle-vm restore --settings jail.json` hands back to
+     `ubuntu` any file under the spike's `vms/` and `data/` that a VM uid
+     still owns. It never follows a link and touches only owners in the VM
+     range.
+
+   A jailer that `systemctl stop` killed before the fix below left its run
+   directory owned by uid 300000, which is why `restore` exists. The jailer
+   now takes SIGTERM, SIGINT, and SIGHUP synchronously: it kills its VM and
+   hands the files back itself.
 
 ### Phase 1: pin, build, boot (2026-10-01)
 
@@ -408,3 +418,49 @@ The parent stays root only to wait, then hands the files back to
   - ZFS still has only `tank/sandcastle`, and the nft ruleset's hash is
     unchanged.
   - No spike scope is left.
+
+### Phase 3: exec and exit (2026-10-01, jailed)
+
+Every check passes:
+
+- stdout and stderr arrive separately, with an exit code of 3;
+- stdin reaches `cat`;
+- 10 MB of stdout arrives whole;
+- a PTY reports `24 80`, is resized, then reports `50 120`;
+- `SIGKILL` gives the exit signal 9;
+- a missing binary is refused ("No such file or directory");
+- the 65th process at once is refused ("64 processes at once"), and the
+  slots come back once those connections drop;
+- an entrypoint that runs `exit 7` is reported as code 7.
+
+Numbers:
+
+- **Exec round trip** (`/bin/true`, from request to its exit, n = 20):
+  **median 4.0 ms**, range 1.8 to 4.1. msb: 9 to 20 ms.
+- **Kill to exit:** 2.1 ms.
+- **The entrypoint's exit to the runner gone:** 20 ms. The VM stops as a
+  container does.
+
+### Phase 4: any port (2026-10-01, jailed)
+
+No port is declared anywhere: each connection asks the agent for
+`127.0.0.1:<port>` inside the guest.
+
+- **HTTP** to `jmalloc/echo-server:v0.3.7` on an undeclared port (9123):
+  the whole request, connection included, takes a **median 4.0 ms**
+  (n = 10).
+- **A WebSocket through it**: `101 Switching Protocols`, the server's
+  greeting, and an echo in 0.2 ms.
+- **First byte from a server already listening: 2.7 ms.** Later samples
+  read 25 ms, but that is busybox `nc` restarting between connections plus
+  the driver's 20 ms retry, not the path.
+- **Throughput over 100 MB** is bound by the guest's CPU and libkrun's
+  vsock path:
+
+  | vCPUs | `nc` | exec's stdout (no TCP) |
+  |---|---|---|
+  | 1 | 155 MiB/s | 117 MiB/s |
+  | 2 | 197 MiB/s | 217 MiB/s |
+
+  This is enough for web apps and model streams, not for bulk data.
+  Larger copy buffers in the agent changed it by 2%.
