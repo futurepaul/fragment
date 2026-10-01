@@ -321,13 +321,19 @@ pub(crate) struct Profiles {
     pub ids: Vec<String>,
 }
 
-/// A person's username and picture, or an agent's or computer's owner's username.
+/// A person's username and picture, or an agent's or computer's owner's
+/// username; a computer's own name too, and its preset when it is one (a
+/// fragment's Hermes: `hermes`).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Profile {
     pub kind: IdentityKind,
     pub username: Option<String>,
     /// Where the picture is served, on the platform's origin.
     pub picture: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]

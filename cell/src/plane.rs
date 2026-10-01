@@ -334,6 +334,7 @@ impl FragmentCell {
             self.del_meta(MetaKey::CapabilitiesLive)?;
             self.want_computer(None, None)?;
             self.want_hermes(false)?;
+            self.set_kind(&fragment_proto::FragmentKind::default())?;
             self.del_meta(MetaKey::CodeError)?;
             self.set_agent_live(None)?;
             js::abort_app_facet(&self.raw, &self.app_facet()?, "live is gone")?;
@@ -366,6 +367,7 @@ impl FragmentCell {
         self.set_agent_live(agent.as_ref())?;
         self.want_computer(manifest.default_computer(), Some(sha))?;
         self.want_hermes(manifest.preset() == Some(manifest::Preset::Hermes))?;
+        self.set_kind(&manifest.kind())?;
         if self.tree_row("live", "app.mjs")?.is_none() {
             self.exec("DELETE FROM code", vec![])?;
             // no operations to run, so nothing for a trigger to start

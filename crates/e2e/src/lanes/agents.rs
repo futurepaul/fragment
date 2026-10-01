@@ -610,6 +610,20 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.eval(&page, "document.getElementById('text').value = 'from the page'; document.getElementById('say').requestSubmit(); true")?;
         let landed = ready && s.eventually(wait, || chat_records(api, &owner, &chat).iter().any(|r| r["body"]["text"] == "from the page"));
         s.ok("a message sent from the page lands in the channel, and shows", landed && chrome.until(&page, "document.getElementById('messages').textContent.includes('from the page')", wait), "");
+        let byline = "[...document.querySelectorAll('.msg.agent > .who')].some(w => !!w.querySelector('.face.agent') && w.textContent.includes(\"'s agent\"))";
+        s.ok("an agent's answer shows its face and whose agent it is", chrome.until(&page, byline, wait), chrome.eval(&page, "[...document.querySelectorAll('.who')].map(w => w.textContent).join(' | ')").unwrap_or_default());
+        // a second reader, in a browser of their own: each page says who else is here, and who is writing
+        let context = chrome.another_context()?;
+        let other = chrome.open_in(&context, &api.site_url(&chat, &format!("?view={}", room["viewToken"].as_str().unwrap_or(""))))?;
+        let here = "!document.getElementById('here').hidden && document.getElementById('here').textContent.endsWith('is here') && !!document.querySelector('#here .face')";
+        let said = |chrome: &mut crate::browser::Browser, page: &crate::browser::Page| chrome.eval(page, "document.getElementById('here').hidden + ' ' + document.getElementById('here').textContent").unwrap_or_default();
+        s.ok("a second reader shows as here, with a face, on the first page", chrome.until(&page, here, wait), said(&mut chrome, &page));
+        s.ok("and the first on the second's", chrome.until(&other, here, wait), said(&mut chrome, &other));
+        chrome.until(&other, "document.getElementById('say')?.dataset.ready === '1'", wait);
+        chrome.eval(&other, "const t = document.getElementById('text'); t.value = 'typing'; t.dispatchEvent(new Event('input')); true")?;
+        s.ok("while they type, the first page says they are writing", chrome.until(&page, "document.getElementById('here').textContent.endsWith('is writing…')", wait), said(&mut chrome, &page));
+        chrome.close(other)?;
+        s.ok("and once they leave, no one else is here", chrome.until(&page, "document.getElementById('here').hidden", wait), said(&mut chrome, &page));
     } else {
         s.ok("Chrome is installed for the chat page (set CHROME_BIN)", false, "no Chrome found");
     }
