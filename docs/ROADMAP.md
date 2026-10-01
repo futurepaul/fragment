@@ -323,6 +323,20 @@ docs/agent-computer.md.
     examples of what the blessed path allows; they are not designed
     now.
 
+### 25. One home: the desktop, any agent (Paul, 2026-10-01)
+
+A person's desktop is their home: `/` opens it, made on first sign-in,
+and `/settings` holds what the home page holds today. A chat is still a
+fragment's `chat` channel (decision 24), and who answers it is the
+person's goose agent, their Hermes (through Hermes' Relay, the platform
+its connector), or no one; one chat page renders each, with its people's
+faces and presence, and invites make any chat multiplayer. The design,
+its decisions (Relay's secret in the guest, Hermes queuing, only the
+owner taking over a screen, guests' turns on the owner's budget), and
+its phases are in docs/one-home.md. Amends decision 19 (the desktop gets
+new features) and decision 24's "not now" (a second agent, Hermes, is
+designed).
+
 ## Truth map (every change is checked against this)
 
 | Thing | Source of truth | Derived/copies must be |

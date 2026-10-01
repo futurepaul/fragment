@@ -163,7 +163,7 @@ pub(crate) async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellRes
         .into_iter()
         .filter_map(|f| {
             let cap = Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied() };
-            listed_role(Some(f.role), cap).map(|role| ListedFragment { name: f.name, role, sharing: None })
+            listed_role(Some(f.role), cap).map(|role| ListedFragment { name: f.name, role, sharing: None, kind: None })
         })
         .collect();
     Ok(FragmentList { fragments })

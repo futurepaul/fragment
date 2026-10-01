@@ -62,8 +62,10 @@ jobs:
   # The kit (`cargo xtask e2e-kit`) in two parts, built in parallel; each
   # shard unpacks both. The cell's wasm builds on Linux (wasm is wasm, and
   # Linux runners are plenty); on macOS, whose binaries the shards run, the
-  # agent's wasm builds alongside the node, the CLI, and the suite, and the
-  # esbuild worker-build fetched there (the node bundles with it) goes too.
+  # agent's wasm and the computer client (cell/client; the runner's
+  # Homebrew LLVM compiles ring's C for wasm32) build alongside the node,
+  # the CLI, and the suite, and the esbuild worker-build fetched there (the
+  # node bundles with it) goes too.
   kit:
     strategy:
       matrix:
@@ -81,7 +83,7 @@ jobs:
               cell/target
           - name: macos
             os: macos-14
-            build: cargo xtask e2e-kit e2e-kit-macos.tar.gz agent native
+            build: cargo xtask e2e-kit e2e-kit-macos.tar.gz agent client native
             tree: target/ci-tree
             paths: |
               ~/.cargo/bin

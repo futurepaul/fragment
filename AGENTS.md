@@ -38,6 +38,8 @@ github.com/futurepaul/fragment's `master`, which fragment.club runs) and on cell
    sandcastle engine and the stubs filled;
    `docs/sandcastle-on-libkrun.md` — sandcastle on libkrun directly,
    without msb: where we fight msb, what we would build, the spike;
+   `docs/one-home.md` — the desktop as home, chats any agent answers
+   (goose or Hermes through its Relay), multiplayer chats, screens;
    `docs/phase-3.md` — hosting on fragment.club;
    `docs/phase-2.md` — the record of the core cut (slices A–G);
    `docs/operate.md` — the operator runbook.
@@ -58,9 +60,16 @@ Python, or Node tooling (the notes viewer's prebuilt bundle is in the
 debt ledger).
 
 - One-time setup: `cargo install worker-build --version 0.8.5 --locked`,
-  `rustup target add wasm32-unknown-unknown`, then `cargo xtask celld`
-  (builds our celld fork, v0.6.0 with `KEYS` and the hardening settings,
-  into `target/celld/bin`).
+  `rustup target add wasm32-unknown-unknown`, an LLVM clang that compiles
+  for wasm32 (Apple's does not: `brew install llvm`, or Nix, which xtask
+  finds; or name one with `CC_wasm32_unknown_unknown` and
+  `AR_wasm32_unknown_unknown`), then `cargo xtask celld` (builds our celld
+  fork, v0.6.0 with `KEYS` and the hardening settings, into
+  `target/celld/bin`).
+- `cargo xtask build`: the cell and the agents for wasm32, and the
+  computer client (sandcastle-web, xtask/src/client.rs) into `cell/client/`,
+  the cell's static assets, served at `/__computer/` on every host
+  (docs/runtime-seam.md).
 - `cargo xtask check`: host tests and clippy (host and wasm), warnings
   denied.
 - `cargo xtask e2e [--only <section>[,...] | --except <section>[,...]]`:
@@ -109,7 +118,7 @@ debt ledger).
   the state, read through `App.fetch`, refreshed by a file trigger).
   `fragment new|init --template` scaffolds any of `templates/` (also
   `blank`, `chat`, `desktop`, `hermes`); the platform's "new" page offers all but
-  `notes` and `hermes`.
+  `notes`.
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
   logic, host-tested), `crates/nip98`, `crates/native` (`KEYS`, built
   into the celld fork), `crates/templates` (`templates/`, embedded),
@@ -128,8 +137,9 @@ debt ledger).
   for this.
 - `.github/workflows/ci.yml` runs `check`, and the e2e in parallel: two
   jobs build what it runs (`cargo xtask e2e-kit`: the cell's wasm on
-  Linux; on macOS the agent's wasm, the node cached by its fork commit,
-  the CLI, and the suite), four shards each run a slice of the sections
+  Linux; on macOS the agent's wasm, the computer client (Homebrew's
+  LLVM there), the node cached by its fork commit, the CLI, and the
+  suite), four shards each run a slice of the sections
   from that kit (`--only`, and `--except` for the rest), and one `e2e`
   check passes when every shard does. Master's runs save the build
   caches with the tree they were built from, so a pull request's run

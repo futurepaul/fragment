@@ -1,6 +1,7 @@
 //! `cargo xtask <command>`: the repo's tooling, in Rust.
 //!
-//!   build            build cell/ and agent/ for wasm32 (worker-build 0.8.5)
+//!   build            build cell/ and agent/ for wasm32 (worker-build 0.8.5),
+//!                    and the computer client into cell/client (src/client.rs)
 //!   celld            build the pinned celld fork into target/celld/bin
 //!   dev [--clean]    build, then run the stack in the foreground: the cell on
 //!                    :8790 (fragments at <label>--<username>.fragment.localhost:8790), the
@@ -16,7 +17,7 @@
 //!                    or --except <section>[,...]);
 //!                    with --fleet <fleet> first, run its hosted sections against
 //!                    that fleet instead
-//!   e2e-kit <file> [cell] [agent] [native]
+//!   e2e-kit <file> [cell] [agent] [client] [native]
 //!                    build what the e2e runs and pack it into one .tar.gz, for
 //!                    CI's shards: unpacked at the repo root, they run
 //!                    target/release/fragment-e2e with no toolchain; with parts
@@ -37,6 +38,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use fragment_devstack as devstack;
 
+mod client;
 mod deploy;
 
 const WORKER_BUILD_VERSION: &str = "0.8.5";
@@ -66,7 +68,8 @@ fn run(cmd: &mut Command) -> Result<()> {
 
 fn build() -> Result<()> {
     build_worker(&devstack::cell_dir())?;
-    build_worker(&devstack::agent_dir())
+    build_worker(&devstack::agent_dir())?;
+    client::build()
 }
 
 /// One celld project (`cell/` or `agent/`) for wasm32, into its `build/`.
@@ -306,6 +309,9 @@ enum KitPart {
     Cell,
     /// `agent/` for wasm32.
     Agent,
+    /// The computer client, the cell's static assets (`cell/client/`): built
+    /// on macOS, whose runners carry an LLVM clang for wasm32.
+    Client,
     /// This machine's binaries: the node (`xtask celld` first), the CLI, the
     /// suite, and the esbuild the node bundles with (worker-build's: a
     /// worker has been built on this machine).
@@ -313,7 +319,7 @@ enum KitPart {
 }
 
 impl KitPart {
-    const ALL: [KitPart; 3] = [KitPart::Cell, KitPart::Agent, KitPart::Native];
+    const ALL: [KitPart; 4] = [KitPart::Cell, KitPart::Agent, KitPart::Client, KitPart::Native];
 
     fn parse(name: &str) -> Option<KitPart> {
         KitPart::ALL.into_iter().find(|p| p.name() == name)
@@ -323,6 +329,7 @@ impl KitPart {
         match self {
             KitPart::Cell => "cell",
             KitPart::Agent => "agent",
+            KitPart::Client => "client",
             KitPart::Native => "native",
         }
     }
@@ -336,6 +343,7 @@ fn build_parts(parts: &[KitPart]) -> Result<()> {
         let native = parts.contains(&KitPart::Native).then(|| s.spawn(build_native));
         let workers = [(KitPart::Cell, devstack::cell_dir()), (KitPart::Agent, devstack::agent_dir())];
         let workers = workers.iter().filter(|(part, _)| parts.contains(part)).try_for_each(|(_, dir)| build_worker(dir));
+        let workers = workers.and_then(|()| if parts.contains(&KitPart::Client) { client::build() } else { Ok(()) });
         let native = native.map_or(Ok(()), |build| build.join().expect("the native build does not panic"));
         workers.and(native)
     })
@@ -345,7 +353,7 @@ fn build_parts(parts: &[KitPart]) -> Result<()> {
 /// under the repo root: each CI shard unpacks the parts and runs the suite
 /// (`CELLD_ESBUILD` set to `KIT_ESBUILD`), no toolchain.
 fn e2e_kit(args: &[String]) -> Result<()> {
-    let usage = || anyhow::anyhow!("usage: cargo xtask e2e-kit <file.tar.gz> [cell] [agent] [native]");
+    let usage = || anyhow::anyhow!("usage: cargo xtask e2e-kit <file.tar.gz> [cell] [agent] [client] [native]");
     let [out, names @ ..] = args else { return Err(usage()) };
     let mut parts = names.iter().map(|n| KitPart::parse(n).ok_or_else(usage)).collect::<Result<Vec<_>>>()?;
     if parts.is_empty() {
@@ -359,6 +367,7 @@ fn e2e_kit(args: &[String]) -> Result<()> {
         match part {
             KitPart::Cell => paths.push("cell/build".to_string()),
             KitPart::Agent => paths.push("agent/build".to_string()),
+            KitPart::Client => paths.push("cell/client".to_string()),
             KitPart::Native => {
                 let esbuild = devstack::esbuild()?;
                 std::fs::create_dir_all(root.join(KIT_ESBUILD).parent().expect("the kit's directory"))?;

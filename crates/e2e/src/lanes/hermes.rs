@@ -1,21 +1,28 @@
 //! A fragment's own Hermes on the fleet's sandcastle node
-//! (docs/hermes-chat.md), on the sandcastle fake: a deploy that declares
-//! `"hermes": {}` has the platform make a key for it (in `KEYS`), register
-//! it as a computer its owner owns, grant it one computer with the
-//! platform's grantor key, and make that computer: Hermes, public at the
-//! node's router, its own login the gate. A viewer who owns or edits the
-//! fragment gets a native session for it (`POST /__hermes/access`), as
-//! Finite's dashboard does, and chats with Hermes directly; anyone else,
-//! and anyone signed out, is refused, and no one ever sees its password.
-//! Its model calls are billed to the fragment's owner. A deploy that drops
-//! the block removes the computer and revokes its key.
+//! (docs/hermes-chat.md, docs/runtime-seam.md), on the sandcastle fake: a
+//! deploy that declares `"computer": {"preset": "hermes"}` has the platform
+//! make a key for it
+//! (in `KEYS`), register it as a computer its owner owns, grant it one
+//! computer with the platform's grantor key, and make that computer:
+//! Hermes in loopback mode behind its bridge, reached by its key over iroh,
+//! with no login and no password. A viewer who owns or edits the fragment
+//! gets an admission for their page's iroh key (`POST /__hermes/access`),
+//! signed by the computer's key, and Hermes' session token; anyone else,
+//! and anyone signed out, is refused. Its model calls are billed to the
+//! fragment's owner. The template's page does all of that in headless
+//! Chrome, with the platform's computer client (served on every host at
+//! `/__computer/`). A deploy that drops the block removes the computer and
+//! revokes its key.
 
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use fragment_nip98::Keys;
 use fragment_proto::ErrorCode;
+use iroh::endpoint::{presets, Connection};
+use iroh::{Endpoint, EndpointAddr, RelayMode, RelayUrl, SecretKey};
 use serde_json::{json, Value};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::api::{Api, Call, Reply};
 use crate::Suite;
@@ -28,17 +35,80 @@ fn out(o: &std::process::Output) -> String {
     format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
 }
 
-/// `POST /__hermes/access` on the fragment's own host, as `keys` (none:
-/// signed out).
-fn access(api: &Api, name: &str, keys: Option<&Keys>) -> Result<Reply> {
-    api.call(Call { method: "POST", url: api.site_url(name, "__hermes/access"), body: Some(b"{}".to_vec()), content_type: Some("application/json"), keys, ..Call::default() })
+/// `POST /__hermes/access` `{peer}` on the fragment's own host, as `keys`
+/// (none: signed out).
+pub(crate) fn access(api: &Api, name: &str, keys: Option<&Keys>, peer: &str) -> Result<Reply> {
+    let body = json!({ "peer": peer }).to_string().into_bytes();
+    api.call(Call { method: "POST", url: api.site_url(name, "__hermes/access"), body: Some(body), content_type: Some("application/json"), keys, ..Call::default() })
 }
 
-/// A call to the Hermes a grant names, as a page makes it (its origin, the
-/// session as a bearer).
-fn native(base: &str, method: &str, path: &str, token: &str, origin: &str) -> Result<reqwest::blocking::Response> {
-    let client = reqwest::blocking::Client::new();
-    Ok(client.request(method.parse()?, format!("{base}{path}")).header("authorization", format!("Bearer {token}")).header("origin", origin).send()?)
+/// A page's own iroh key, as the platform's client makes one: its endpoint
+/// binds at the first connect, homed on that computer's relay (a page names
+/// its key to get the admission that names the relay).
+pub(crate) struct Peer {
+    secret: SecretKey,
+    ep: std::sync::OnceLock<Endpoint>,
+    rt: tokio::runtime::Handle,
+}
+
+impl Peer {
+    pub(crate) fn new(rt: tokio::runtime::Handle) -> Peer {
+        Peer { secret: SecretKey::generate(), ep: std::sync::OnceLock::new(), rt }
+    }
+
+    pub(crate) fn id(&self) -> String {
+        self.secret.public().to_string()
+    }
+
+    /// Connects to the computer an access names and presents its admission:
+    /// the connection and the node's answer.
+    pub(crate) fn connect(&self, access: &Value) -> Result<(Connection, Value)> {
+        let endpoint = access["endpoint"].as_str().context("an endpoint")?.parse()?;
+        let relay: RelayUrl = access["relay"].as_str().context("a relay")?.parse()?;
+        let admission = access["admission"].as_str().context("an admission")?.to_string();
+        let ep = match self.ep.get() {
+            Some(ep) => ep,
+            None => {
+                let bound = self.rt.block_on(Endpoint::builder(presets::Minimal).secret_key(self.secret.clone()).relay_mode(RelayMode::Custom(relay.clone().into())).bind())?;
+                self.ep.get_or_init(|| bound)
+            }
+        };
+        self.rt.block_on(async {
+            let conn = ep.connect(EndpointAddr::new(endpoint).with_relay_url(relay), b"sandcastle/1").await?;
+            let (mut send, mut recv) = conn.open_bi().await?;
+            send.write_all(b"A").await?;
+            send.write_u16(u16::try_from(admission.len())?).await?;
+            send.write_all(admission.as_bytes()).await?;
+            send.finish()?;
+            let len = recv.read_u16().await?;
+            let mut body = vec![0u8; usize::from(len)];
+            recv.read_exact(&mut body).await?;
+            Ok((conn, serde_json::from_slice(&body)?))
+        })
+    }
+
+    /// A loopback port whose each TCP connection is one stream on `conn`:
+    /// the blocking HTTP and WebSocket clients reach Hermes through it, with
+    /// a loopback Host, as the platform's client does.
+    pub(crate) fn tunnel(&self, conn: Connection) -> Result<u16> {
+        let listener = self.rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))?;
+        let port = listener.local_addr()?.port();
+        self.rt.spawn(async move {
+            // Bounded by its runtime: the fake's ends with the suite, the hosted run's with the run.
+            while let Ok((mut tcp, _)) = listener.accept().await {
+                let conn = conn.clone();
+                tokio::spawn(async move {
+                    let Ok((mut send, recv)) = conn.open_bi().await else { return };
+                    if send.write_all(b"H").await.is_err() {
+                        return;
+                    }
+                    let mut stream = tokio::io::join(recv, send);
+                    let _ = tokio::io::copy_bidirectional(&mut tcp, &mut stream).await;
+                });
+            }
+        });
+        Ok(port)
+    }
 }
 
 type Ws = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
@@ -67,28 +137,64 @@ fn rpc(ws: &mut Ws, id: u64, method: &str, params: Value) -> Result<(Value, Vec<
     anyhow::bail!("no answer to {method} in {events:?}")
 }
 
-/// One turn over Hermes' `/api/ws` with a single-use ticket, as the page
-/// takes it: the reply's text.
-fn turn(base: &str, token: &str, origin: &str, text: &str) -> Result<String> {
-    let ticket: Value = native(base, "POST", "api/auth/ws-ticket", token, origin)?.json()?;
-    let ticket = ticket["ticket"].as_str().context("a ticket")?;
-    let url = format!("{}api/ws", base.replacen("http://", "ws://", 1));
-    let mut req = tungstenite::client::IntoClientRequest::into_client_request(url.as_str())?;
-    req.headers_mut().insert("sec-websocket-protocol", format!("hermes-gateway-v1, hermes-gateway-ticket.{ticket}").parse()?);
-    let (mut ws, resp) = tungstenite::connect(req)?;
-    anyhow::ensure!(resp.headers().get("sec-websocket-protocol").is_some_and(|p| p == "hermes-gateway-v1"), "the protocol chosen");
+/// Hermes' socket, `/api/ws?token=`, through a tunnel's port, offering
+/// `hermes-gateway-v1` as the page does. Hermes in loopback mode upgrades
+/// without naming a subprotocol (it names one only for its ticket), which
+/// tungstenite's client refuses; so the upgrade is read here, a byte at a
+/// time (the gateway's first frame may follow at once), and the socket
+/// taken as it is, as the page's client takes it.
+fn gateway(port: u16, token: &str) -> Result<Ws> {
+    use std::io::{Read, Write};
+    /// The longest upgrade answer read.
+    const HEAD_MAX: usize = 16 * 1024;
+    let mut tcp = std::net::TcpStream::connect(("127.0.0.1", port))?;
+    // a cold wake and a real model's first words fit
+    tcp.set_read_timeout(Some(Duration::from_secs(60)))?;
+    let key = tungstenite::handshake::client::generate_key();
+    write!(
+        tcp,
+        "GET /api/ws?token={token} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Protocol: hermes-gateway-v1\r\n\r\n"
+    )?;
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        anyhow::ensure!(head.len() < HEAD_MAX, "an upgrade answer over {HEAD_MAX} bytes");
+        tcp.read_exact(&mut byte)?;
+        head.push(byte[0]);
+    }
+    let head = String::from_utf8_lossy(&head);
+    anyhow::ensure!(head.starts_with("HTTP/1.1 101"), "the socket answered {}", head.lines().next().unwrap_or(""));
+    Ok(tungstenite::WebSocket::from_raw_socket(tungstenite::stream::MaybeTlsStream::Plain(tcp), tungstenite::protocol::Role::Client, None))
+}
+
+/// One turn in a new chat over Hermes' socket, through a tunnel's port: the
+/// reply's text.
+pub(crate) fn turn(port: u16, token: &str, text: &str) -> Result<String> {
+    let mut ws = gateway(port, token)?;
     let ready = next(&mut ws)?;
     anyhow::ensure!(ready["params"]["type"] == "gateway.ready", "{ready}");
     let (made, _) = rpc(&mut ws, 1, "session.create", json!({ "title": "e2e" }))?;
     let live = made["session_id"].as_str().context("a live session")?.to_string();
     let (_, mut events) = rpc(&mut ws, 2, "prompt.submit", json!({ "session_id": live, "text": text }))?;
-    for _ in 0..20 {
+    // bounded: a real model's short reply is a few hundred deltas at most
+    for _ in 0..2000 {
         if let Some(done) = events.iter().find(|e| e["params"]["type"] == "message.complete") {
             return Ok(done["params"]["payload"]["text"].as_str().unwrap_or("").to_string());
         }
         events.push(next(&mut ws)?);
     }
     anyhow::bail!("no message.complete in {events:?}")
+}
+
+/// A GET through a tunnel's port, with Hermes' session token or none.
+pub(crate) fn get(port: u16, path: &str, token: Option<&str>) -> Result<(u16, Value)> {
+    let mut req = reqwest::blocking::Client::new().get(format!("http://127.0.0.1:{port}{path}"));
+    if let Some(t) = token {
+        req = req.header("x-hermes-session-token", t);
+    }
+    let r = req.send()?;
+    let status = r.status().as_u16();
+    Ok((status, r.json().unwrap_or(Value::Null)))
 }
 
 pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
@@ -104,18 +210,24 @@ pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
     s.hook(api, &made);
     let site = s.dir("hermes-site");
     std::fs::write(site.join("index.html"), "<h1>chat</h1>")?;
-    std::fs::write(site.join("fragment.json"), r#"{"hermes":{}}"#)?;
+    std::fs::write(site.join("fragment.json"), HERMES)?;
     let computers_before = s.sandcastle.computers();
+    let page = Peer::new(s.sandcastle.runtime());
     // a Hermes being made answers "starting", however soon it is asked
     s.sandcastle.serving_after(3);
     let o = s.cli(api, &home, &["deploy", &name, "--dir", site.to_str().expect("a UTF-8 path")]);
     s.ok("a deploy that declares a Hermes goes live", o.status.success(), out(&o));
-    let r = access(api, &name, Some(&owner))?;
-    s.ok("while it is being made, a session is not ready yet", r.status == 409 && r.code() == Some(ErrorCode::NotReady), &r);
+    let r = access(api, &name, Some(&owner), &page.id())?;
+    s.ok("while it is being made, an admission is not ready yet", r.status == 409 && r.code() == Some(ErrorCode::NotReady), &r);
 
     let events = || events_of(api, &owner, &name);
     let ready = soon(s, || events().iter().any(|e| e.starts_with("hermes.ready")));
     s.ok("the platform makes it, and the fragment's events say it serves", ready, format!("{:?}", events()));
+    let kind = || {
+        let listed = api.signed(&owner, "GET", "/api/fragments", None).map(|r| r.body).unwrap_or_default();
+        listed["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == name.as_str()).map(|f| f["kind"].clone()).unwrap_or_default()
+    };
+    s.ok("its owner's list says it is a Hermes computer", soon(s, || kind() == json!({ "computer": "hermes" })), kind());
     let computers = s.sandcastle.computers();
     s.ok("one computer on the node", computers.len() == computers_before.len() + 1, format!("{:?}", computers.keys()));
     let (computer, fake) = computers.into_iter().find(|(n, _)| !computers_before.contains_key(n)).context("its computer")?;
@@ -123,11 +235,17 @@ pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
     let grants = s.sandcastle.grants();
     s.ok("granted by the platform's key, to a key of its own", grants.get(&key).is_some_and(|g| g["computers_max"] == 1) && key != owner.pubkey_hex(), format!("{grants:?}"));
     let spec = &fake.spec;
-    let password = spec["service"]["env"]["HERMES_DASHBOARD_BASIC_AUTH_PASSWORD"].as_str().unwrap_or("").to_string();
+    let env = &spec["service"]["env"];
+    let token = env["HERMES_DASHBOARD_SESSION_TOKEN"].as_str().unwrap_or("").to_string();
     s.ok(
-        "Hermes under its own init, public, its login the gate, awake while its gateway works",
-        spec["url_auth"] == "public" && spec["service"]["init"]["argv"][0] == "/init" && password.len() == 64 && spec["service"]["busy"]["field"] == "active_agents",
-        spec["service"]["init"].to_string(),
+        "Hermes in loopback mode behind its bridge: no login, no password, its URL its owner's",
+        env["HERMES_DASHBOARD_HOST"] == "127.0.0.1"
+            && token.len() == 64
+            && env.as_object().is_some_and(|e| e.keys().all(|k| !k.contains("BASIC_AUTH")))
+            && spec["service"]["init"]["argv"][1] == "/bin/sh"
+            && spec["url_auth"] == "owner"
+            && spec["service"]["busy"]["field"] == "active_agents",
+        spec["service"]["init"]["argv"][0].to_string(),
     );
 
     // its key is a computer its owner owns: the model route bills them
@@ -139,32 +257,47 @@ pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&node, "POST", "/api/sandcastle/credentials", Some(&ask))?;
     s.ok("the node's ask for its credentials is answered: its owner pays", r.status == 200 && r.body["credentials"][0]["name"] == "OPENAI_API_KEY", &r);
 
-    // who may have a session
-    let r = access(api, &name, Some(&owner))?;
-    let grant = r.body.clone();
-    let base = grant["baseUrl"].as_str().unwrap_or("").to_string();
-    let token = grant["accessToken"].as_str().unwrap_or("").to_string();
-    s.ok("its owner gets a native session for it, and never its password", r.status == 200 && !token.is_empty() && base.ends_with(&format!("/c/{computer}/")) && !r.text.contains(&password), &r);
-    let origin = api.site_origin(&name);
-    let named = s.sandcastle.computers().get(&computer).map(|c| c.spec["cors_origins"].clone()).unwrap_or_default();
-    s.ok("the page's origin is named on its computer", named.as_array().is_some_and(|o| o.iter().any(|x| x == origin.as_str())), &named);
-    let r = native(&base, "GET", "api/sessions", &token, &origin)?;
-    let allowed = r.headers().get("access-control-allow-origin").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-    s.ok("with it, the page reads Hermes directly, across origins", r.status() == 200 && allowed == origin, format!("{} {allowed}", r.status()));
-    let reply = turn(&base, &token, &origin, "hello hermes");
-    s.ok("and chats with it over its socket, with a single-use ticket", reply.as_deref().is_ok_and(|t| t.contains("hello hermes")), format!("{reply:?}"));
-    let again = access(api, &name, Some(&owner))?;
-    s.ok("asked again, the same session while it lasts", again.body["accessToken"] == token.as_str(), &again);
+    // who may be admitted, and what the admission is
+    let r = access(api, &name, Some(&owner), &page.id())?;
+    let granted = r.body.clone();
+    let now = crate::api::now_s();
+    let verified = granted["admission"].as_str().map(|a| fragment_nip98::verify_admission(a, now, 60));
+    let admitted_right = verified.as_ref().is_some_and(|v| {
+        v.as_ref().is_ok_and(|a| a.signer == key && a.peer == page.id() && a.computer == computer && a.node == s.sandcastle.node && a.expires_at > now && a.expires_at <= now + 300)
+    });
+    s.ok(
+        "its owner's page gets an admission for its own key, signed by the computer's key, for this computer and node, five minutes long",
+        r.status == 200 && admitted_right && granted["endpoint"] == fake.endpoint.as_str() && granted["relay"] == s.sandcastle.relay.as_str() && granted["node"] == s.sandcastle.node.as_str(),
+        format!("{} {verified:?}", r.status),
+    );
+    s.ok("and Hermes' session token, and a loopback Host", granted["token"] == token.as_str() && granted["host"] == "127.0.0.1", &r);
+    let r = access(api, &name, Some(&owner), "not a key")?;
+    s.ok("a peer that is not an iroh key is refused", r.status == 400, &r);
     let stranger = api.person()?;
-    let r = access(api, &name, Some(&stranger))?;
+    let r = access(api, &name, Some(&stranger), &page.id())?;
     s.ok("someone else signed in is refused", r.status == 403, &r);
-    let r = access(api, &name, None)?;
+    let r = access(api, &name, None, &page.id())?;
     s.ok("and anyone signed out", r.status == 401, &r);
     let editor = api.person()?;
     let editor_id = api.identity(&editor)?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{editor_id}"), Some(&json!({ "role": "editor" })))?;
-    let r = access(api, &name, Some(&editor))?;
-    s.ok("an editor gets one too", r.status == 200 && !r.body["accessToken"].as_str().unwrap_or("").is_empty(), &r);
+    let r = access(api, &name, Some(&editor), &page.id())?;
+    s.ok("an editor is admitted too", r.status == 200 && r.body["admission"].is_string(), &r);
+
+    // the page talks to Hermes by its key, through the relay
+    let (conn, answer) = page.connect(&granted)?;
+    s.ok("the page's key connects through the relay and is admitted", answer["admitted"] == true, &answer);
+    let port = page.tunnel(conn)?;
+    let (status, _) = get(port, "/api/sessions", None)?;
+    s.ok("without its session token, Hermes refuses a read", status == 401, status);
+    let (status, body) = get(port, "/api/sessions", Some(&token))?;
+    s.ok("with it, Hermes answers: no login, the admission its gate", status == 200 && body["sessions"].is_array(), &body);
+    let reply = turn(port, &token, "hello hermes");
+    s.ok("and chats over its socket", reply.as_deref().is_ok_and(|t| t.contains("hello hermes")), format!("{reply:?}"));
+    let other = Peer::new(s.sandcastle.runtime());
+    let refused = s.sandcastle.refused();
+    let (_, answer) = other.connect(&granted)?;
+    s.ok("another key with the page's admission is refused by the node", answer["admitted"] == false && s.sandcastle.refused() > refused, &answer);
 
     // dropping the block removes it
     std::fs::write(site.join("fragment.json"), r#"{}"#)?;
@@ -174,13 +307,13 @@ pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its computer is removed from the node", gone, format!("{:?}", events()));
     let r = api.signed(&node, "POST", "/api/sandcastle/credentials", Some(&ask))?;
     s.ok("and its key revoked: the node's ask gets nothing", r.status == 403 && r.body["credentials"].is_null(), &r);
-    let r = access(api, &name, Some(&owner))?;
-    s.ok("and no session is given", r.status == 404, &r);
+    let r = access(api, &name, Some(&owner), &page.id())?;
+    s.ok("and no admission is given", r.status == 404, &r);
 
     // the node crashes while one is being made: made once when it is back
     let grants_before = s.sandcastle.grants().len();
     s.sandcastle.serving_after(u32::MAX);
-    std::fs::write(site.join("fragment.json"), r#"{"hermes":{}}"#)?;
+    std::fs::write(site.join("fragment.json"), HERMES)?;
     let o = s.cli(api, &home, &["deploy", &name, "--dir", site.to_str().expect("a UTF-8 path")]);
     s.ok("declared again, it goes live", o.status.success(), out(&o));
     let started = soon(s, || s.sandcastle.computers().len() > computers_before.len());
@@ -196,62 +329,73 @@ pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "GET", "/api/identities/me", None)?;
     let paired = r.body["computers"].as_array().map_or(0, |c| c.iter().filter(|c| c["name"].as_str().is_some_and(|n| n.contains("hermes"))).count());
     s.ok("and one computer of its owner's for it", paired == 1, &r);
-    let r = access(&api, &name, Some(&owner))?;
-    s.ok("its owner gets a session for the new one", r.status == 200 && r.body["accessToken"] != token.as_str(), &r);
-    page(s, &api, &home, &owner, &name, &view)?;
-    ends(s, &api, &home, &owner, &name)
+    let r = access(&api, &name, Some(&owner), &page.id())?;
+    s.ok("its owner's page is admitted to the new one, with a new token", r.status == 200 && r.body["token"] != token.as_str() && r.body["endpoint"] != fake.endpoint.as_str(), &r);
+    chat_page(s, &api, &home, &owner, &name, &view)?;
+    ends(s, &api, &home, &owner, &name, &page.id())
 }
 
-/// The ways a Hermes ends: its owner removes its key's computer (a later
-/// deploy that declares it makes a new one), and its fragment is deleted.
-fn ends(s: &mut Suite, api: &Api, home: &std::path::Path, owner: &Keys, name: &str) -> Result<()> {
-    let hermes_of = |api: &Api| -> Vec<String> {
-        let r = api.signed(owner, "GET", "/api/identities/me", None).map(|r| r.body).unwrap_or_default();
-        r["computers"].as_array().into_iter().flatten().filter_map(|c| c["name"].as_str()).filter(|n| n.contains("hermes")).map(str::to_string).collect()
+/// The manifest that declares a Hermes.
+const HERMES: &str = r#"{"computer":{"preset":"hermes"}}"#;
+
+/// The platform's computer client as a fragment's host serves it: the
+/// entry, and the build it names, kept a year (label, held, detail).
+pub(crate) fn client_checks(api: &Api, name: &str) -> Result<Vec<(&'static str, bool, String)>> {
+    let at = |path: &str| -> Result<crate::api::Reply> {
+        let url = reqwest::Url::parse(&api.site_url(name, ""))?.join(path)?;
+        api.call(Call { method: "GET", url: url.to_string(), ..Call::default() })
     };
-    let serving = |s: &Suite| s.sandcastle.computers().into_iter().filter(|(_, c)| c.spec["service"]["env"]["HERMES_DASHBOARD"] == "1").count();
-    let [identity] = hermes_of(api).try_into().map_err(|v| anyhow::anyhow!("one Hermes computer of its owner's: {v:?}"))?;
-    let o = s.cli(api, home, &["computers", "rm", &identity]);
-    s.ok("its owner removes its key's computer", o.status.success(), out(&o));
-    let gone = soon(s, || serving(s) == 0);
-    s.ok("and its computer leaves the node", gone, format!("{:?}", s.sandcastle.computers().keys()));
-    let r = access(api, name, Some(owner))?;
-    s.ok("with no Hermes, no session", r.status == 404, &r);
-    let dir = s.dir("hermes-template");
-    let o = s.cli(api, home, &["new", dir.to_str().expect("a UTF-8 path"), "--template", "hermes"]);
-    std::fs::write(dir.join("site/notes.txt"), "declared again")?;
-    let deployed = s.cli(api, home, &["deploy", name, "--dir", dir.to_str().expect("a UTF-8 path")]);
-    s.ok("a deploy that declares it again goes live", o.status.success() && deployed.status.success(), out(&deployed));
-    let again = soon(s, || serving(s) == 1 && hermes_of(api).len() == 1 && access(api, name, Some(owner)).is_ok_and(|r| r.status == 200));
-    s.ok("and makes a new one", again, format!("{:?} {:?}", s.sandcastle.computers().keys(), hermes_of(api)));
-    let o = s.cli(api, home, &["rm", name]);
-    s.ok("its owner deletes the fragment", o.status.success(), out(&o));
-    let gone = soon(s, || serving(s) == 0 && hermes_of(api).is_empty());
-    s.ok("and its Hermes goes with it: its computer, and its key's computer", gone, format!("{:?} {:?}", s.sandcastle.computers().keys(), hermes_of(api)));
-    Ok(())
+    let header = |r: &crate::api::Reply, h: &str| r.headers.get(h).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let entry = at("/__computer/client.js")?;
+    let build = entry.text.lines().find_map(|l| l.strip_prefix("import init from \"./")).and_then(|l| l.split('/').next()).unwrap_or("").to_string();
+    let module = at(&format!("/__computer/{build}/sandcastle_web_bg.wasm.gz"))?;
+    let glue = at(&format!("/__computer/{build}/sandcastle_web.js"))?;
+    Ok(vec![
+        (
+            "a fragment's host serves the computer client's entry, revalidated on each load",
+            entry.status == 200 && header(&entry, "content-type").starts_with("text/javascript") && header(&entry, "cache-control").contains("max-age=0") && build.len() == 16,
+            format!("{} {:?} {:?}", entry.status, entry.headers, build),
+        ),
+        (
+            "and its module, gzipped and declared so, under its digest, kept a year",
+            module.status == 200
+                && header(&module, "content-type") == "application/wasm"
+                && header(&module, "content-encoding") == "gzip"
+                && header(&module, "cache-control").contains("immutable")
+                && module.bytes.starts_with(&[0x1f, 0x8b]),
+            format!("{} {:?} {} bytes", module.status, module.headers, module.bytes.len()),
+        ),
+        ("and its glue", glue.status == 200 && header(&glue, "cache-control").contains("immutable"), format!("{} {:?}", glue.status, glue.headers)),
+    ])
 }
 
-/// The `hermes` template's page, in a browser: a chat with the fragment's
-/// Hermes as its owner has one, straight to Hermes over the grant.
-fn page(s: &mut Suite, api: &Api, home: &std::path::Path, owner: &Keys, name: &str, view: &str) -> Result<()> {
-    let dir = s.dir("hermes-template");
+/// The hermes template's page in headless Chrome: the computer client,
+/// an admission for the page's key, and Hermes by its key through the
+/// relay: a chat streamed, listed, and read again from Hermes' history; a
+/// long turn pinged; and no chat for someone signed out.
+fn chat_page(s: &mut Suite, api: &Api, home: &std::path::Path, owner: &Keys, name: &str, view: &str) -> Result<()> {
+    let dir = s.dir("hermes-page");
     let dir_s = dir.to_str().expect("a UTF-8 path").to_string();
     let o = s.cli(api, home, &["new", &dir_s, "--template", "hermes"]);
     let manifest: Value = serde_json::from_slice(&std::fs::read(dir.join("fragment.json")).unwrap_or_default()).unwrap_or_default();
-    s.ok("the hermes template scaffolds, declaring its Hermes", o.status.success() && manifest["hermes"] == json!({}), out(&o));
+    s.ok("the hermes template scaffolds, declaring a Hermes computer", o.status.success() && manifest["computer"] == json!({ "preset": "hermes" }), out(&o));
     let o = s.cli(api, home, &["deploy", name, "--dir", &dir_s]);
     s.ok("and deploys onto the fragment that has one", o.status.success(), out(&o));
+    for (label, held, detail) in client_checks(api, name)? {
+        s.ok(label, held, detail);
+    }
     let Some(mut chrome) = s.browser()? else {
         s.ok("Chrome is installed for the hermes page (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());
     };
-    let wait = Duration::from_secs(20);
+    let wait = Duration::from_secs(30);
     let session = api.sign_in(&crate::cli_email(&fragment_core::npub::encode(owner.pubkey_hex()))?)?;
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
     let tab = chrome.open(&api.site_url(name, "__signin?return=/"))?;
     let said = |chrome: &mut crate::browser::Browser, tab: &crate::browser::Page| chrome.eval(tab, "document.body.dataset.state + ': ' + document.body.innerText.slice(0, 400)").unwrap_or_default();
+    let admitted = s.sandcastle.admitted();
     let ready = chrome.until(&tab, "document.body.dataset.state === 'ready'", wait);
-    s.ok("signed in, the page gets its session from the platform", ready, said(&mut chrome, &tab));
+    s.ok("signed in, the page reaches its Hermes by its key: the client, an admission, the relay", ready && s.sandcastle.admitted() > admitted, said(&mut chrome, &tab));
     let submit = |text: &str| format!("document.getElementById('text').value = {text:?}; document.getElementById('composer').requestSubmit(); true");
     let replied = |text: &str| format!("[...document.querySelectorAll('.row.assistant')].some(r => r.textContent === {:?} && !r.classList.contains('streaming'))", format!("echo: {text}"));
     chrome.eval(&tab, &submit("hello from the page"))?;
@@ -278,6 +422,35 @@ fn page(s: &mut Suite, api: &Api, home: &std::path::Path, owner: &Keys, name: &s
     let stranger = chrome.open_in(&context, &api.site_url(name, &format!("?view={view}")))?;
     let signin = chrome.until(&stranger, "document.body.dataset.state === 'signin' && !!document.querySelector('#status a[href*=\"__signin\"]')", wait);
     s.ok("signed out, the page offers sign-in and no chat", signin, said(&mut chrome, &stranger));
+    Ok(())
+}
+
+/// The ways a Hermes ends: its owner removes its key's computer (a later
+/// deploy that declares it makes a new one), and its fragment is deleted.
+fn ends(s: &mut Suite, api: &Api, home: &std::path::Path, owner: &Keys, name: &str, peer: &str) -> Result<()> {
+    let hermes_of = |api: &Api| -> Vec<String> {
+        let r = api.signed(owner, "GET", "/api/identities/me", None).map(|r| r.body).unwrap_or_default();
+        r["computers"].as_array().into_iter().flatten().filter_map(|c| c["name"].as_str()).filter(|n| n.contains("hermes")).map(str::to_string).collect()
+    };
+    let serving = |s: &Suite| s.sandcastle.computers().into_iter().filter(|(_, c)| c.spec["service"]["env"]["HERMES_DASHBOARD"] == "1").count();
+    let [identity] = hermes_of(api).try_into().map_err(|v| anyhow::anyhow!("one Hermes computer of its owner's: {v:?}"))?;
+    let o = s.cli(api, home, &["computers", "rm", &identity]);
+    s.ok("its owner removes its key's computer", o.status.success(), out(&o));
+    let gone = soon(s, || serving(s) == 0);
+    s.ok("and its computer leaves the node", gone, format!("{:?}", s.sandcastle.computers().keys()));
+    let r = access(api, name, Some(owner), peer)?;
+    s.ok("with no Hermes, no session", r.status == 404, &r);
+    let dir = s.dir("hermes-template");
+    let o = s.cli(api, home, &["new", dir.to_str().expect("a UTF-8 path"), "--template", "hermes"]);
+    std::fs::write(dir.join("site/notes.txt"), "declared again")?;
+    let deployed = s.cli(api, home, &["deploy", name, "--dir", dir.to_str().expect("a UTF-8 path")]);
+    s.ok("a deploy that declares it again goes live", o.status.success() && deployed.status.success(), out(&deployed));
+    let again = soon(s, || serving(s) == 1 && hermes_of(api).len() == 1 && access(api, name, Some(owner), peer).is_ok_and(|r| r.status == 200));
+    s.ok("and makes a new one", again, format!("{:?} {:?}", s.sandcastle.computers().keys(), hermes_of(api)));
+    let o = s.cli(api, home, &["rm", name]);
+    s.ok("its owner deletes the fragment", o.status.success(), out(&o));
+    let gone = soon(s, || serving(s) == 0 && hermes_of(api).is_empty());
+    s.ok("and its Hermes goes with it: its computer, and its key's computer", gone, format!("{:?} {:?}", s.sandcastle.computers().keys(), hermes_of(api)));
     Ok(())
 }
 
