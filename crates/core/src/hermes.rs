@@ -65,6 +65,10 @@ asyncio.run(main())
 /// no restart or still-working notes in the chat. Written as Hermes'
 /// managed overlay (`/etc/hermes/config.yaml`, over its own config) by the
 /// init, as root, until a derived image carries it.
+///
+/// Its screen too (docs/one-home.md, phase 3: the `-desktop` image's
+/// TigerVNC and Xfce): started with it, its browser shown there, so its
+/// owner watches it work and can take over (phase 4).
 const CONFIG: &str = "group_sessions_per_user: false
 streaming:
   enabled: true
@@ -77,7 +81,17 @@ display:
 platforms:
   relay:
     gateway_restart_notification: false
+bot_desktop:
+  auto_start: true
+browser:
+  headed: true
 ";
+/// A Hermes' memory: Hermes' own two processes, its screen (about 216
+/// MiB), and a headed browser on it (about 1 GiB more, Hermes' figures).
+/// One made before its screen keeps the size it was made with (a node
+/// refuses a computer's new size: `LEGACY_MEMORY_MIB`).
+pub const MEMORY_MIB: u64 = 6144;
+pub const LEGACY_MEMORY_MIB: u64 = 4096;
 
 /// Where a fragment's Hermes is.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -146,6 +160,8 @@ pub fn fragment_of_identity(name: &str) -> Option<String> {
 pub struct Spec<'a> {
     pub image: &'a str,
     pub model: &'a str,
+    /// Its size, as it was made (`MEMORY_MIB`, or a legacy one's).
+    pub memory_mib: u64,
     /// The platform's URL: its model route, its credential source, and its
     /// Relay connector.
     pub platform: &'a str,
@@ -175,7 +191,7 @@ impl Spec<'_> {
         let mut spec = json!({
             "image": self.image,
             "vcpus": 2,
-            "memory_mib": 4096,
+            "memory_mib": self.memory_mib,
             "storage": "data",
             "data_gib": 10,
             "data_path": "/opt/data",
@@ -217,8 +233,8 @@ impl Spec<'_> {
 
 /// The grant the platform gives each Hermes' key: one computer of the
 /// spec's size.
-pub fn grant() -> Value {
-    json!({ "computers_max": 1, "vcpus_max": 2, "memory_mib_max": 4096, "data_gib_max": 10 })
+pub fn grant(memory_mib: u64) -> Value {
+    json!({ "computers_max": 1, "vcpus_max": 2, "memory_mib_max": memory_mib, "data_gib_max": 10 })
 }
 
 /// Whether `peer` is an iroh key a page may be admitted as: 64 lowercase hex.
@@ -291,7 +307,7 @@ mod tests {
     /// its owner's. Method: one spec, each part checked.
     #[test]
     fn the_spec_is_loopback_hermes_behind_its_bridge() {
-        let spec = Spec { image: "img", model: "m", platform: "https://fragment.club" }.json("tok", None);
+        let spec = Spec { image: "img", model: "m", memory_mib: MEMORY_MIB, platform: "https://fragment.club" }.json("tok", None);
         let env = &spec["service"]["env"];
         assert_eq!(env["HERMES_DASHBOARD_HOST"], "127.0.0.1", "loopback mode: Hermes' login is off");
         assert_eq!(env["HERMES_DASHBOARD_PORT"], "9120");
@@ -308,11 +324,14 @@ mod tests {
         assert_eq!(spec["credentials_url"], "https://fragment.club/api/sandcastle/credentials");
         assert_eq!(spec["url_auth"], "owner");
         assert!(spec.get("cors_origins").is_none());
-        assert_eq!(grant()["computers_max"], 1);
+        assert_eq!(grant(MEMORY_MIB)["computers_max"], 1);
         assert!(env.get("GATEWAY_RELAY_URL").is_none(), "no relay unless asked");
         // the platform's settings, as Hermes' managed overlay, before anything starts
         assert!(script.starts_with("mkdir -p /etc/hermes && cat > /etc/hermes/config.yaml <<'YAML'\ngroup_sessions_per_user: false\n"));
         assert!(script.contains("  busy_input_mode: queue\n") && script.contains("streaming:\n  enabled: true\n") && script.contains("\nYAML\n"));
+        // its screen, with its browser on it, and room for both
+        assert!(script.contains("bot_desktop:\n  auto_start: true\n") && script.contains("browser:\n  headed: true\n"));
+        assert_eq!((spec["memory_mib"].as_u64(), grant(MEMORY_MIB)["memory_mib_max"].as_u64()), (Some(6144), Some(6144)));
     }
 
     /// Goal: a Hermes that answers chats dials its fragment's connector,
@@ -320,7 +339,7 @@ mod tests {
     #[test]
     fn a_relayed_spec_dials_its_cell() {
         let relay = Relay { id: "hermes.alice", secret: "s3cr3t" };
-        let spec = Spec { image: "img", model: "m", platform: "https://fragment.club" }.json("tok", Some(&relay));
+        let spec = Spec { image: "img", model: "m", memory_mib: MEMORY_MIB, platform: "https://fragment.club" }.json("tok", Some(&relay));
         let env = &spec["service"]["env"];
         assert_eq!(env["GATEWAY_RELAY_URL"], "https://fragment.club/api/hermes/hermes.alice");
         assert_eq!((env["GATEWAY_RELAY_ID"].as_str(), env["GATEWAY_RELAY_SECRET"].as_str()), (Some("hermes.alice"), Some("s3cr3t")));

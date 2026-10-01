@@ -121,14 +121,21 @@ them are Paul's to approve.
      answering once; a message kept across a node restart answered once;
      the draft streaming in Chrome, then the answer; 4401 for a removed
      Hermes; its chat joining the new one.
-3. **The Hermes image.** Derived from Hermes' `-desktop` image: its
-   screen and computer-use tools, the loopback bridge as a service, and
-   the defaults decisions 2 and 4 need (now written by the init). Waking
-   needs nothing new of sandcastle: the cell holds the computer's key and
-   uses the node's own wake. Publishing the image is Paul's to approve.
-   - Checks: the sandcastle e2e on lat-6 runs a chat turn through the
-     relay from a sleeping Hermes, and Hermes drives a browser on its
-     own screen.
+3. **The Hermes image** (built 2026-10-01, but for its proof on lat-6).
+   Hermes' own `v2026.9.24-desktop` image (its screen: TigerVNC and Xfce,
+   and a browser for it), no image of ours: its init still writes the
+   platform's settings (now its screen started with it, its browser shown
+   there) and starts the bridge. A Hermes is made with 6 GiB (its screen
+   and a headed browser on it); one made before keeps its 4 GiB, since a
+   node refuses a computer's new size. Waking needs nothing new of
+   sandcastle: the cell holds the computer's key and uses the node's own
+   wake. A derived image (the bridge as an s6 service, the settings
+   baked, `cua-driver` pinned for `computer_use`) waits for a registry to
+   publish to, Paul's to approve.
+   - Checks: the spec's (core tests: the image's settings, its size, a
+     legacy one's); the proof is a real Hermes on lat-6 answering a chat
+     on fragment.club through its Relay, woken from sleep, its turn
+     driving its browser on its screen: after the deploy.
 4. **The screen.** The computer pane shows Hermes' screen by the
    computer's key (binary WebSockets in the computer client), with Take
    over and Give back for its owner.

@@ -44,9 +44,9 @@ CREATE TABLE IF NOT EXISTS hermes (
   one INTEGER PRIMARY KEY CHECK (one = 1), fragment TEXT NOT NULL, owner TEXT NOT NULL, declared INTEGER NOT NULL,
   phase TEXT NOT NULL, computer TEXT NOT NULL, pubkey TEXT, key_sealed TEXT, identity TEXT, granted INTEGER NOT NULL,
   token_sealed TEXT, made INTEGER NOT NULL, endpoint TEXT, relay TEXT, node_key TEXT, tries INTEGER NOT NULL,
-  relay_sealed TEXT, inbox TEXT);";
+  relay_sealed TEXT, inbox TEXT, memory_mib INTEGER);";
 /// Columns a row from before its Relay lacks.
-const RELAY_COLUMNS: [&str; 2] = ["relay_sealed", "inbox"];
+const RELAY_COLUMNS: [(&str, &str); 3] = [("relay_sealed", "TEXT"), ("inbox", "TEXT"), ("memory_mib", "INTEGER")];
 
 /// What is asked of a Hermes.
 #[derive(Serialize, Deserialize)]
@@ -103,6 +103,17 @@ pub(crate) struct Row {
     pub relay_sealed: Option<String>,
     #[serde(default)]
     pub inbox: Option<String>,
+    /// Its size, as made: none for one made before sizes were kept
+    /// (`pure::LEGACY_MEMORY_MIB`).
+    #[serde(default)]
+    pub memory_mib: Option<i64>,
+}
+
+impl Row {
+    /// Its size: as made, or a legacy one's.
+    pub(crate) fn memory(&self) -> u64 {
+        self.memory_mib.and_then(|m| u64::try_from(m).ok()).unwrap_or(pure::LEGACY_MEMORY_MIB)
+    }
 }
 
 fn flag<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<bool, D::Error> {
@@ -180,8 +191,8 @@ impl DurableObject for HermesCell {
         sql.exec(crate::relay::SCHEMA, None).expect("the Relay schema applies");
         // a row from before its Relay
         let cols: Vec<Value> = sql.exec("PRAGMA table_info(hermes)", None).and_then(|c| c.to_array()).unwrap_or_default();
-        for col in RELAY_COLUMNS.iter().filter(|c| !cols.iter().any(|x| x["name"] == **c)) {
-            sql.exec(&format!("ALTER TABLE hermes ADD COLUMN {col} TEXT"), None).expect("the hermes table migrates");
+        for (col, ty) in RELAY_COLUMNS.iter().filter(|(c, _)| !cols.iter().any(|x| x["name"] == **c)) {
+            sql.exec(&format!("ALTER TABLE hermes ADD COLUMN {col} {ty}"), None).expect("the hermes table migrates");
         }
         let cfg = Config::from_env(&env);
         HermesCell { state, env, cfg, stepping: futures_util::lock::Mutex::new(()), relaying: futures_util::lock::Mutex::new(()) }
@@ -266,7 +277,7 @@ impl HermesCell {
         let v = serde_json::to_value(h).map_err(|e| CellError::host(e.to_string()))?;
         let cols = [
             "fragment", "owner", "declared", "phase", "computer", "pubkey", "key_sealed", "identity", "granted", "token_sealed", "made", "endpoint", "relay", "node_key", "tries",
-            "relay_sealed", "inbox",
+            "relay_sealed", "inbox", "memory_mib",
         ];
         let binds = cols.iter().map(|k| match &v[*k] {
             Value::Bool(b) => SqlStorageValue::Integer(i64::from(*b)),
@@ -318,6 +329,7 @@ impl HermesCell {
                     tries: 0,
                     relay_sealed: None,
                     inbox: None,
+                    memory_mib: Some(pure::MEMORY_MIB as i64),
                 }
             }
             // nothing was ever declared here: nothing to make or remove
@@ -381,7 +393,7 @@ impl HermesCell {
             self.save_step(h)?;
         }
         if !h.granted {
-            let (status, answer) = keys::sandcastle_grant(&self.env, &pubkey, &pure::grant()).await?;
+            let (status, answer) = keys::sandcastle_grant(&self.env, &pubkey, &pure::grant(h.memory())).await?;
             if status != 200 {
                 return Err(upstream(format!("the sandcastle node refused the grant ({status}): {answer}")));
             }
@@ -436,7 +448,7 @@ impl HermesCell {
         let token = self.token(h).await?;
         let secret = self.relay_secret(h).await?;
         let relay = secret.as_deref().map(|secret| pure::Relay { id: &h.fragment, secret });
-        let body = pure::Spec { image: &self.cfg.hermes_image, model: &self.cfg.hermes_model, platform }.json(&token, relay.as_ref());
+        let body = pure::Spec { image: &self.cfg.hermes_image, model: &self.cfg.hermes_model, memory_mib: h.memory(), platform }.json(&token, relay.as_ref());
         let (status, answer) = self.node(h, "PUT", &format!("/v1/computers/{}", h.computer), Some(&body)).await?;
         match status {
             200 | 201 => Ok(()),
@@ -463,7 +475,7 @@ impl HermesCell {
         }
         // A new declaration makes a new one: a new key, a new computer, a new Relay.
         (h.pubkey, h.key_sealed, h.identity, h.granted, h.token_sealed, h.made, h.endpoint, h.relay) = (None, None, None, false, None, false, None, None);
-        (h.relay_sealed, h.inbox) = (None, None);
+        (h.relay_sealed, h.inbox, h.memory_mib) = (None, None, Some(pure::MEMORY_MIB as i64));
         self.relay_revoked();
         // the chats it answered join again: a new Hermes is a new identity
         let chats: Vec<Value> = self.sql().exec("SELECT chat FROM relay_chats", None)?.to_array()?;
