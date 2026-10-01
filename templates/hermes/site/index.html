@@ -6,13 +6,29 @@
   <title>Hermes</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Funnel+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
-  <!-- the chat's page is the platform's: Hermes answers here, as anyone's agent does -->
+  <!-- the chat's page and the screen are the platform's: Hermes answers
+       here, as anyone's agent does, and its owner sees its screen beside -->
   <link rel="stylesheet" href="./__chat.css">
+  <link rel="stylesheet" href="./__screen.css">
+  <style>
+    body { height: 100vh; height: 100dvh; display: flex; overflow: hidden; }
+    #chat { flex: 1 1 0; min-width: 0; min-height: 0; }
+    #chat.fragment-chat { min-height: 0; height: 100%; }
+    #screen { flex: 0 0 min(52%, 960px); border-left: 1px solid var(--border); }
+    @media (max-width: 860px) {
+      body { flex-direction: column; }
+      #screen { flex: 0 0 42vh; border-left: 0; border-bottom: 1px solid var(--border); order: -1; }
+    }
+  </style>
 </head>
 <body>
+  <main id="chat"></main>
+  <aside id="screen" hidden></aside>
   <script type="module">
     import { mount } from "./__chat.js";
-    mount(document.body, { placeholder: "Message Hermes", suggestions: ["What can you do?", "Find me a cabin for the weekend"] });
+    import { mountScreen } from "./__screen.js";
+    mount(document.querySelector("#chat"), { placeholder: "Message Hermes", suggestions: ["What can you do?", "Find me a cabin for the weekend"] });
+    mountScreen(document.querySelector("#screen"));
   </script>
 </body>
 </html>

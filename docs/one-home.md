@@ -136,11 +136,38 @@ them are Paul's to approve.
      legacy one's); the proof is a real Hermes on lat-6 answering a chat
      on fragment.club through its Relay, woken from sleep, its turn
      driving its browser on its screen: after the deploy.
-4. **The screen.** The computer pane shows Hermes' screen by the
-   computer's key (binary WebSockets in the computer client), with Take
-   over and Give back for its owner.
-   - Checks (e2e, Chrome, fakes): the owner sees frames, takes over and
-     gives back; a guest sees frames and has no take-over.
+4. **The screen** (built 2026-10-01, but for guests watching). The
+   Hermes page shows Hermes' screen beside its chat, to its owner, by
+   the computer's key, with Take over and Give back
+   (`./__screen.js`, the platform's, as `./__chat.js` is). The computer
+   client gained binary WebSocket messages and an RFB client of its own
+   (`sandcastle-web`'s `rfb`, pure and host-tested; `Computer.screen`
+   hands the page what to draw); the page asks Hermes' socket for a
+   ticket and a viewer id (`display.observe`), opens its display socket
+   with it, and takes and gives back the lease (`display.lease.acquire`,
+   `release`), whose holder alone Hermes passes pointer and keys from.
+   `__hermes/access` is now the owner's alone: Hermes' session token is
+   the whole computer, so an editor holding it could take the screen
+   over (decision 5), and editors chat through the Relay now.
+   - Checks (e2e, Chrome, on the sandcastle fake's screen, which serves
+     RFB and filters input by the lease as Hermes does; 76 in the
+     `hermes` lane): the owner sees the desktop live with Hermes
+     driving, and their click goes nowhere; takes over, and their click
+     lands where they clicked (the desktop answers on their screen) and
+     their keys reach it; gives back, and their click goes nowhere
+     again; an editor's access is refused, and a signed-out page shows
+     no screen.
+   - Guests watching is open: a display ticket comes only from Hermes'
+     own socket, which needs its session token, and nothing a guest's
+     page can reach holds it but the owner's page. Ways in: a ticket
+     broker in the guest (the bridge, minting watch-only tickets with
+     the token it is given; Hermes' filter keeps a ticket's viewer from
+     input), or a node route that asks a computer's port as its owner.
+     Either is a trust-floor decision, so it waits for Paul.
+   - The screen shows on the Hermes fragment's own page; a chat of
+     another fragment that names the Hermes shows none yet (its page
+     would need the Hermes fragment's access, on another origin): phase
+     5's desktop opens the Hermes beside it.
 5. **Home.** `/` opens the person's desktop (made on first sign-in);
    `/settings` holds the rest; a new chat asks who answers; an invite
    from the chat.

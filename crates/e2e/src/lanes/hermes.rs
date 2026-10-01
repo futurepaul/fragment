@@ -5,10 +5,12 @@
 //! (in `KEYS`), register it as a computer its owner owns, grant it one
 //! computer with the platform's grantor key, and make that computer:
 //! Hermes in loopback mode behind its bridge, reached by its key over iroh,
-//! with no login and no password. A viewer who owns or edits the fragment
-//! gets an admission for their page's iroh key (`POST /__hermes/access`),
-//! signed by the computer's key, and Hermes' session token; anyone else,
-//! and anyone signed out, is refused. Its model calls are billed to the
+//! with no login and no password. The fragment's owner alone gets an
+//! admission for their page's iroh key (`POST /__hermes/access`), signed
+//! by the computer's key, and Hermes' session token (docs/one-home.md,
+//! decision 5); anyone else, an editor too, and anyone signed out, is
+//! refused. Its page shows its screen beside the chat to its owner, live,
+//! with Take over and Give back (phase 4). Its model calls are billed to the
 //! fragment's owner. The template's page does all of that in headless
 //! Chrome, with the platform's computer client (served on every host at
 //! `/__computer/`). A deploy that drops the block removes the computer and
@@ -282,7 +284,7 @@ pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
     let editor_id = api.identity(&editor)?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{editor_id}"), Some(&json!({ "role": "editor" })))?;
     let r = access(api, &name, Some(&editor), &page.id())?;
-    s.ok("an editor is admitted too", r.status == 200 && r.body["admission"].is_string(), &r);
+    s.ok("an editor is refused: a Hermes, its screen and logins with it, is its owner's alone", r.status == 403 && r.body["admission"].is_null(), &r);
 
     // the page talks to Hermes by its key, through the relay
     let (conn, answer) = page.connect(&granted)?;
@@ -562,6 +564,7 @@ fn chat_page(s: &mut Suite, api: &Api, home: &std::path::Path, owner: &Keys, nam
     s.sandcastle.slow_turns(0);
     chrome.reload(&tab)?;
     s.ok("a reload shows it from the chat's own records", chrome.until(&tab, &landed, wait), said(&mut chrome, &tab));
+    screen(s, &mut chrome, &tab)?;
 
     // signed out, with its link (this one's fragment opens to its link): the
     // chat reads, and writing in it asks them to sign in (a member's alone)
@@ -569,6 +572,75 @@ fn chat_page(s: &mut Suite, api: &Api, home: &std::path::Path, owner: &Keys, nam
     let stranger = chrome.open_in(&context, &api.site_url(name, &format!("?view={view}")))?;
     let asked = chrome.until(&stranger, "document.getElementById('say')?.dataset.ready === '1' && !!document.querySelector('#note a[href*=\"__signin\"]')", wait);
     s.ok("signed out, with its link, the page asks them to sign in to write", asked, chrome.eval(&stranger, "document.body.innerText.slice(0, 300)").unwrap_or_default());
+    let unseen = chrome.until(&stranger, "document.getElementById('screen').dataset.access === 'refused' && document.getElementById('screen').hidden", wait);
+    s.ok("and shows no screen: it is its owner's", unseen, chrome.eval(&stranger, SCREEN_STATE).unwrap_or_default());
+    Ok(())
+}
+
+/// How the page's screen pane stands (its data attributes and its line).
+const SCREEN_STATE: &str = "(() => { const r = document.getElementById('screen'); return JSON.stringify({ hidden: r.hidden, ...r.dataset, line: r.querySelector('#screen-state')?.textContent, control: r.querySelector('#screen-control')?.textContent }); })()";
+
+/// A press and release of the left button at the desktop's (x, y), as the
+/// page maps it (the desktop fits the pane, centred).
+fn click_at(x: u16, y: u16) -> String {
+    format!(
+        "(() => {{ const c = document.querySelector('#screen canvas'); const r = c.getBoundingClientRect();
+          const scale = Math.min(r.width / c.width, r.height / c.height);
+          const at = {{ clientX: r.left + (r.width - c.width * scale) / 2 + ({x} + 0.5) * scale, clientY: r.top + (r.height - c.height * scale) / 2 + ({y} + 0.5) * scale, bubbles: true }};
+          c.dispatchEvent(new PointerEvent('pointerdown', {{ ...at, buttons: 1 }}));
+          c.dispatchEvent(new PointerEvent('pointerup', {{ ...at, buttons: 0 }}));
+          return true; }})()"
+    )
+}
+
+/// The desktop's pixel at (x, y) on the page's canvas is `rgb`.
+fn pixel_is(x: u16, y: u16, rgb: [u8; 3]) -> String {
+    format!(
+        "(() => {{ const d = document.querySelector('#screen canvas').getContext('2d').getImageData({x}, {y}, 1, 1).data; return d[0] === {} && d[1] === {} && d[2] === {}; }})()",
+        rgb[0], rgb[1], rgb[2]
+    )
+}
+
+/// Its screen beside the chat, on its owner's page (docs/one-home.md, phase
+/// 4): live, Hermes driving; taken over, the owner's click and keys reach
+/// the desktop; given back, they go nowhere.
+fn screen(s: &mut Suite, chrome: &mut crate::browser::Browser, tab: &crate::browser::Page) -> Result<()> {
+    use fragment_fakes::hermes_screen::{COLOURS, HEIGHT, WIDTH};
+    let wait = Duration::from_secs(30);
+    let state = |chrome: &mut crate::browser::Browser| chrome.eval(tab, SCREEN_STATE).unwrap_or_default();
+    let (x, y) = (WIDTH / 2, HEIGHT / 2);
+    let live = format!(
+        "(() => {{ const r = document.getElementById('screen'); return !r.hidden && r.dataset.access === 'admitted' && r.dataset.size === '{WIDTH}x{HEIGHT}' && Number(r.dataset.frames) > 1 && r.dataset.lease === 'agent'; }})()"
+    );
+    s.ok("its screen shows beside the chat to its owner, live, Hermes driving", chrome.until(tab, &live, wait), state(chrome));
+    s.ok("through a ticket of Hermes' own, on its display socket", s.sandcastle.screen_sockets() > 0, s.sandcastle.screen_sockets());
+    s.ok("its pixels the desktop's", chrome.until(tab, &pixel_is(x, y, COLOURS[0]), wait), state(chrome));
+    let before = s.sandcastle.screen_input().len();
+    chrome.eval(tab, &click_at(x, y))?;
+    std::thread::sleep(Duration::from_millis(800));
+    s.ok("while Hermes drives, a click on it goes nowhere", s.sandcastle.screen_input().len() == before && s.sandcastle.screen_dropped() == 0, json!(s.sandcastle.screen_input()));
+
+    chrome.eval(tab, "document.getElementById('screen-control').click(); true")?;
+    let mine = "document.getElementById('screen').dataset.lease === 'mine' && document.getElementById('screen-control').textContent === 'Give back'";
+    s.ok("Take over: the screen is its owner's", chrome.until(tab, mine, wait), state(chrome));
+    chrome.eval(tab, &click_at(x, y))?;
+    let clicked = soon(s, || s.sandcastle.screen_input()[before..].iter().any(|e| e["kind"] == "pointer" && e["mask"] == 1 && e["x"] == x && e["y"] == y));
+    s.ok("their click reaches the desktop, where they clicked", clicked, json!(s.sandcastle.screen_input()));
+    s.ok("and the desktop answers on their screen", chrome.until(tab, &pixel_is(x, y, COLOURS[1]), wait), state(chrome));
+    chrome.eval(tab, "(() => { const c = document.querySelector('#screen canvas'); for (const t of ['keydown', 'keyup']) c.dispatchEvent(new KeyboardEvent(t, { key: 'h', bubbles: true, cancelable: true })); return true; })()")?;
+    let keyed = soon(s, || {
+        let keys: Vec<(bool, u64)> = s.sandcastle.screen_input()[before..].iter().filter(|e| e["kind"] == "key").map(|e| (e["down"] == true, e["keysym"].as_u64().unwrap_or(0))).collect();
+        keys == [(true, 0x68), (false, 0x68)]
+    });
+    s.ok("and their keys, pressed and let go", keyed, json!(s.sandcastle.screen_input()));
+
+    chrome.eval(tab, "document.getElementById('screen-control').click(); true")?;
+    let back = "document.getElementById('screen').dataset.lease === 'agent' && document.getElementById('screen-control').textContent === 'Take over'";
+    s.ok("Give back: Hermes drives again", chrome.until(tab, back, wait), state(chrome));
+    let after = s.sandcastle.screen_input().len();
+    chrome.eval(tab, &click_at(x, y))?;
+    std::thread::sleep(Duration::from_millis(800));
+    s.ok("and their click goes nowhere again", s.sandcastle.screen_input().len() == after, json!(s.sandcastle.screen_input()));
     Ok(())
 }
 

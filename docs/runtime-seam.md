@@ -332,8 +332,9 @@ After the measurement, the cut to one computer resource, in steps:
 2. **The `Hermes` cell by its key:** Hermes in loopback mode behind the
    bridge, its session token made and sealed by the cell; the computer's
    key, relay, and node recorded; `__hermes/access {peer}` answers an
-   owner's or editor's page with an admission for the page's key, signed
-   by the computer's key (five minutes). The sandcastle fake serves its
+   owner's page (an editor's too, until docs/one-home.md's decision 5
+   made it the owner's alone) with an admission for the page's key,
+   signed by the computer's key (five minutes). The sandcastle fake serves its
    computers by their keys through an in-process relay.
 3. **The shared client:** sandcastle-web, built by `cargo xtask build`
    (xtask/src/client.rs) and served on every host at `/__computer/` as

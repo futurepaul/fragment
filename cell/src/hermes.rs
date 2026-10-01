@@ -633,10 +633,11 @@ impl FragmentCell {
     }
 
     /// `POST /__hermes/access` `{peer}`: an admission to its Hermes for the
-    /// page's iroh key, for a signed-in viewer who owns or edits the
-    /// fragment (docs/runtime-seam.md).
+    /// page's iroh key, for its owner alone (docs/runtime-seam.md; Hermes'
+    /// session token is the whole computer, its screen and logins with it:
+    /// docs/one-home.md, decision 5).
     pub(crate) async fn hermes_access(&self, caller: &crate::fragment::Caller, peer: &str) -> CellResult<Response> {
-        self.require(caller, false, fragment_proto::Role::Editor)?;
+        self.require(caller, false, fragment_proto::Role::Owner)?;
         if self.meta(MetaKey::HermesDeclared)?.is_none() {
             return Err(CellError::new(ErrorCode::NotFound, "this fragment declares no Hermes"));
         }
