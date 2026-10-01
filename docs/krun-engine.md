@@ -392,6 +392,108 @@ docs/services/containers.md.
   directories, stops the engine and the slice, and hands every file back
   (E1, used throughout).
 
+### Hermes's start, measured
+
+*After E7, 2026-10-01.* `hermes-trace` is a diagnostic. `--snoop` copies
+`sandcastle-snoop` into the guest, which records every process, its CPU,
+and each port as it listens, on the guest's clock; `--env`, `--argv`,
+`--vcpu` and `--after` vary the start. Its evidence is
+`hermes-start.json`. Run 0 has a fresh `/opt/data`, Hermes migrates its
+config on run 1, and from run 2 on is its steady state, which is what a
+user's Hermes is.
+
+Of the 4.45 s to serving, 0.25 s is the engine. The rest is the image's
+own start, and it is CPU-bound: the 2 vCPUs run at 94–100% from 1.4 s to
+4.7 s, iowait stays under 2%, and the 113 MiB read from the image's
+disk comes out of the host's page cache. Nothing is installed on the
+path, since the venv is baked into the image. But the image ships no
+bytecode (8,744 `.py` files under `/opt/hermes`, no `.pyc`) and sets
+`PYTHONDONTWRITEBYTECODE=1`, so every Python process compiles everything
+it imports, on every start.
+
+| Steady state, guest clock (s) | As run | Bytecode cache | Cache, dashboard alone |
+|---|---|---|---|
+| kernel and our init, to the workload | 0.18 | 0.19 | 0.21 |
+| s6-overlay, the setup hook's shell | 0.09 | 0.09 | 0.05 |
+| `docker_config_migrate.py` | 0.22 | 0.15 | 0.15 |
+| `skills_sync.py` | 0.18 | 0.14 | 0.12 |
+| `container_boot` (reconciles profiles) | 0.52 | 0.23 | 0.23 |
+| the dashboard: its service to listening | 3.70 | 1.77 | 1.25 |
+| **to serving, from the request, unsampled** | **4.45** | **2.42** | **2.06** |
+
+- **Six Python processes.** Three setup helpers run in series (0.9 s).
+  Then three processes start together on 2 vCPUs: the dashboard, the
+  gateway s6 supervises, and our main program, `hermes gateway run`. The
+  main program hands the gateway to s6 and stays up, having paid for a
+  full import (0.95 s of CPU) in the window the dashboard needs.
+- **The cache.** Set `PYTHONDONTWRITEBYTECODE=` and
+  `PYTHONPYCACHEPREFIX=/opt/data/.pycache` in the start's environment,
+  and change nothing else. Steady state goes from 4.45 s to 2.42 s, and
+  the gateway's API from 4.94 s to 2.43 s.
+  - Run 0 writes the cache (3.85 s).
+  - Hermes's own second run, its config migration from schema 0 to 46,
+    rewrites 1,568 of the cache's 1,569 files. Why was not chased.
+  - The cache holds from the third run on.
+  - Baked into the image, it would hold from the first.
+- **The dashboard.** In a booted guest its imports take 1.59 s from
+  source and 0.60 s from bytecode. Started by hand in a steady-state
+  guest it is ready in 1.06 s, 0.88 s of that importing 1,529 modules.
+  Two of them serve nothing the dashboard needs at start:
+  `tui_gateway.server` (229 ms) and `gateway.host_rendezvous` (72 ms).
+- **After serving.** The gateway runs `uv pip install edge-tts` into
+  `/opt/data/lazy-packages` on every start. It is off the path to
+  serving, and whether it succeeds was not checked.
+
+Toward 1 s, in order, each measured or estimated:
+
+1. **Bytecode in the image**, measured above at 2.0 s.
+   - A derived image adds `RUN python -m compileall -q -j0
+     --invalidation-mode unchecked-hash /opt/hermes`.
+   - Upstream, it is `UV_COMPILE_BYTECODE=1` in Hermes's Dockerfile.
+   - The start-environment cache is the stopgap.
+2. **One gateway, started after the dashboard listens.**
+   - Measured: 0.36 s of contention (2.42 against 2.06).
+   - The main program should be `sleep infinity`, not `gateway run`;
+     the supervised gateway is the gateway. On a fresh disk, seed it
+     with `HERMES_GATEWAY_BOOTSTRAP_STATE=running`.
+   - Engine-side, a startup boost would also help: more CPU for a VM's
+     first seconds, like Cloud Run's.
+3. **Setup skipped when nothing changed.** The three helpers cost
+   0.5 s with bytecode, and each is a pure function of the image and
+   `/opt/data`. Keyed by the image's digest on the data disk:
+   - set `HERMES_SKIP_CONFIG_MIGRATION=1`, which already exists;
+   - skip the skills sync;
+   - reconcile in shell.
+
+   This is a derived image's hook, or upstream. Estimate: 0.4–0.5 s.
+4. **Lazy imports in the dashboard.** Bind the port first and import the
+   TUI gateway, host rendezvous, routers and MCP on first use. This is
+   upstream. Estimate: 0.3–0.5 s.
+5. **The VM.** Hermes's guest reaches its init at 0.17 s against
+   busybox's 0.05; likely its 6 GiB and 2 vCPUs, not yet measured.
+   - The cuts above apply to it.
+   - So would a pool of prepared, unassigned VMs, as Cloudflare
+     restores them (below). That is a generic pool, not a warm tier.
+   - Estimate: 0.1–0.2 s.
+
+With 1–3, which are ours to make, steady state is about 1.6 s. With 4
+and 5 as well it is 0.9–1.3 s, so under 1 s takes the better end of
+both, or a dashboard that imports less still.
+
+Against Cloudflare's "faster agent sandboxes" (2026-09-30; a median of
+4.05 s down to 648 ms, time until a `debian-trixie` sandbox is
+interactive, not an application's start):
+
+| Practice | Here |
+|---|---|
+| Placement on the Durable Object's machine first | The engine is on celld's node; there is no multi-node placement yet |
+| Restore a prepared VM that is not yet assigned | Not done: each start boots its own (108 ms busybox, 250 ms Hermes) |
+| Reuse networking and filesystem setup; batch repeated work | Partly: the jail is 6 ms, the nft ruleset still spawns `nft` |
+| Don't wait on services the first command doesn't need | Not done for Hermes: its setup helpers and gateway come before its dashboard (steps 2 and 3) |
+| Image and instance as start arguments | Done (the 5.x surface) |
+| Images on the host before the request | One node: converted once and hot in its page cache; no fleet pre-pull |
+| Filesystem snapshots | Done: `snapshotContainer`, 46 ms; a start from one, 215 ms |
+
 ### Open for Paul
 
 1. **More start speed.** About 45 ms from the first `KVM_RUN` to the
@@ -400,6 +502,13 @@ docs/services/containers.md.
    would carry), a libkrun patch upstream for `KVM_REINJECT_CONTROL`
    (4.4 ms), the VM's nft ruleset by netlink rather than spawning `nft`
    (about 2 ms). Recommended: the last two now, the kernel config later.
+   For Hermes, the image's own start is the 4.2 s (above). Recommended:
+   - a derived Hermes image with bytecode and the setup stamps;
+   - `sleep infinity` as its main program;
+   - the lazy imports offered upstream.
+
+   Whether a pool of prepared VMs counts as the warm tier you ruled out
+   is your call.
 2. **Where it runs.** The engine needs KVM: fleet nodes are bare metal
    like lat-6, not Fly machines.
 3. **The celld branch.** `krun-engine` is pushed to the fork with no PR,

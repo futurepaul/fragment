@@ -1,0 +1,289 @@
+{
+  "scenario": "hermes-trace",
+  "image": "nousresearch/hermes-agent:v2026.9.24",
+  "instance": {
+    "vcpu": 2,
+    "memoryMib": 6144
+  },
+  "node": "finite-lat-6",
+  "serving": "GET /api/auth/providers on the dashboard (9119) answers; gateway_api: its loopback API (8642) accepts a connection. Run 0 has a fresh /opt/data; Hermes migrates its config on run 1; runs 2 and on are its steady state.",
+  "versions": {
+    "engine_sha256_16": "bb125a0375086607",
+    "guest_sha256_16": "418f05f5f5c6fd78",
+    "libkrun": "b63baa1895c60d58b731fdebb9180ba266292848",
+    "libkrunfw": "f6a710faaa8cfe3b67a4bcdadb082c2183a914f1 (5.6.2, linux 6.12.109)",
+    "runner_sha256_16": "173a31b4853d5612"
+  },
+  "experiments": [
+    {
+      "name": "x0-baseline",
+      "what": "the image as sandcastle runs it (hermes.json's start)",
+      "env": [],
+      "main_program": [
+        "gateway",
+        "run"
+      ],
+      "start_to_serving_ms": [
+        {
+          "data": "fresh",
+          "serving": 4414.9,
+          "gateway_api": 5049
+        },
+        {
+          "data": "kept",
+          "serving": 4476.6,
+          "gateway_api": 5124.3
+        },
+        {
+          "data": "kept",
+          "serving": 4456,
+          "gateway_api": 4937.5
+        },
+        {
+          "data": "kept",
+          "serving": 4446.9,
+          "gateway_api": 4944.8
+        }
+      ]
+    },
+    {
+      "name": "x1-pyc",
+      "what": "a bytecode cache on /opt/data",
+      "env": [
+        "PYTHONDONTWRITEBYTECODE=",
+        "PYTHONPYCACHEPREFIX=/opt/data/.pycache"
+      ],
+      "main_program": [
+        "gateway",
+        "run"
+      ],
+      "start_to_serving_ms": [
+        {
+          "data": "fresh",
+          "serving": 3845.1,
+          "gateway_api": 4553.3
+        },
+        {
+          "data": "kept",
+          "serving": 3794.4,
+          "gateway_api": 4433.2
+        },
+        {
+          "data": "kept",
+          "serving": 2420.2,
+          "gateway_api": 2424
+        },
+        {
+          "data": "kept",
+          "serving": 2431.7,
+          "gateway_api": 2436.9
+        }
+      ]
+    },
+    {
+      "name": "x6-pyc-dashboard-alone",
+      "what": "the cache, and no gateway: the dashboard alone",
+      "env": [
+        "PYTHONDONTWRITEBYTECODE=",
+        "PYTHONPYCACHEPREFIX=/opt/data/.pycache"
+      ],
+      "main_program": [
+        "sleep",
+        "infinity"
+      ],
+      "start_to_serving_ms": [
+        {
+          "data": "fresh",
+          "serving": 3762.7,
+          "gateway_api": null
+        },
+        {
+          "data": "kept",
+          "serving": 3920.6,
+          "gateway_api": null
+        },
+        {
+          "data": "kept",
+          "serving": 2055.9,
+          "gateway_api": null
+        }
+      ]
+    },
+    {
+      "name": "x2-pyc-onegw",
+      "what": "the cache, sleep as the main program, the supervised gateway seeded running (it starts on the fresh run only)",
+      "env": [
+        "PYTHONDONTWRITEBYTECODE=",
+        "PYTHONPYCACHEPREFIX=/opt/data/.pycache",
+        "HERMES_GATEWAY_BOOTSTRAP_STATE=running"
+      ],
+      "main_program": [
+        "sleep",
+        "infinity"
+      ],
+      "start_to_serving_ms": [
+        {
+          "data": "fresh",
+          "serving": 3680.2,
+          "gateway_api": 4348
+        },
+        {
+          "data": "kept",
+          "serving": 3736.2,
+          "gateway_api": null
+        },
+        {
+          "data": "kept",
+          "serving": 2075,
+          "gateway_api": null
+        }
+      ]
+    },
+    {
+      "name": "x5-pyc-onegw-nomigrate",
+      "what": "as x2, with HERMES_SKIP_CONFIG_MIGRATION=1",
+      "env": [
+        "PYTHONDONTWRITEBYTECODE=",
+        "PYTHONPYCACHEPREFIX=/opt/data/.pycache",
+        "HERMES_GATEWAY_BOOTSTRAP_STATE=running",
+        "HERMES_SKIP_CONFIG_MIGRATION=1"
+      ],
+      "main_program": [
+        "sleep",
+        "infinity"
+      ],
+      "start_to_serving_ms": [
+        {
+          "data": "fresh",
+          "serving": 3761.9,
+          "gateway_api": 4367.7
+        },
+        {
+          "data": "kept",
+          "serving": 3636.8,
+          "gateway_api": null
+        },
+        {
+          "data": "kept",
+          "serving": 2108.5,
+          "gateway_api": null
+        }
+      ]
+    }
+  ],
+  "stages_steady_state_guest_ms": {
+    "note": "from sandcastle-snoop inside the guest (it costs the guest some CPU: sampled runs are slower), the guest's boot clock; run 2 of each",
+    "baseline": {
+      "workload_pid1": 180,
+      "config_migrate": [
+        269,
+        488,
+        {
+          "cpu": 180
+        }
+      ],
+      "skills_sync": [
+        488,
+        665,
+        {
+          "cpu": 140
+        }
+      ],
+      "reconcile_profiles": [
+        675,
+        1198,
+        {
+          "cpu": 500
+        }
+      ],
+      "dashboard_service_to_listen": [
+        1198,
+        4899,
+        {
+          "cpu": 2690
+        }
+      ],
+      "gateway_default_cpu": 4220,
+      "main_program_gateway_run_cpu": 950,
+      "gateway_api_listen": 5651,
+      "machine_cpu_1.4_to_4.7_s": "94-100% of 2 vCPUs",
+      "image_disk_read_mib_to_serving": 113
+    },
+    "bytecode_cache_dashboard_alone": {
+      "workload_pid1": 210,
+      "config_migrate": [
+        263,
+        412,
+        {
+          "cpu": 110
+        }
+      ],
+      "skills_sync": [
+        412,
+        532,
+        {
+          "cpu": 80
+        }
+      ],
+      "reconcile_profiles": [
+        544,
+        777,
+        {
+          "cpu": 210
+        }
+      ],
+      "dashboard_service_to_listen": [
+        777,
+        2025,
+        {
+          "cpu": 1230
+        }
+      ]
+    }
+  },
+  "image_bytecode": {
+    "venv_py": 6578,
+    "venv_pyc": 0,
+    "hermes_src_py": 2166,
+    "hermes_src_pyc": 0,
+    "image_env": "PYTHONDONTWRITEBYTECODE=1",
+    "stdlib": "Debian python3.13 ships its .pyc"
+  },
+  "cache_rewrites_per_run": [
+    {
+      "data": "fresh",
+      "after": "total 1532 written_this_boot 1532"
+    },
+    {
+      "data": "kept",
+      "after": "total 1569 written_this_boot 1568"
+    },
+    {
+      "data": "kept",
+      "after": "total 1569 written_this_boot 0"
+    }
+  ],
+  "imports_in_a_booted_guest": [
+    "cold (no pyc) wall_ms 1590",
+    "warm (pyc) wall_ms 602",
+    "bare interpreter wall_ms 13",
+    "hermes --version wall_ms 88"
+  ],
+  "dashboard_manual_start_steady_state": [
+    "run 1: start to READY 1060 ms",
+    "  imports (top-level cumulative) 876 ms over 1529 modules",
+    "  heaviest top-level imports:",
+    "    129631 |     285519 | hermes_cli.web_server",
+    "      8728 |     228785 | tui_gateway.server",
+    "       150 |      89851 | fastapi",
+    "      6187 |      87819 | hermes_cli.main",
+    "       570 |      72434 | gateway.host_rendezvous",
+    "   -848179 |      13421 | hermes_cli.gateway",
+    "        12 |      13282 | plugins.browser.browser_use.provider",
+    "       483 |       8994 | hermes_cli.kanban",
+    "       746 |       8419 | site",
+    "       118 |       6026 | gateway.platforms._shared",
+    "       784 |       5787 | hermes_cli.runtime_provider",
+    "       110 |       5775 | uvicorn"
+  ]
+}
