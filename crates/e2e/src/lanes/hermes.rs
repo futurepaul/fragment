@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 use fragment_nip98::Keys;
 use fragment_proto::ErrorCode;
 use iroh::endpoint::{presets, Connection};
-use iroh::{Endpoint, EndpointAddr, RelayMode, RelayUrl};
+use iroh::{Endpoint, EndpointAddr, RelayMode, RelayUrl, SecretKey};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -37,38 +37,44 @@ fn out(o: &std::process::Output) -> String {
 
 /// `POST /__hermes/access` `{peer}` on the fragment's own host, as `keys`
 /// (none: signed out).
-fn access(api: &Api, name: &str, keys: Option<&Keys>, peer: &str) -> Result<Reply> {
+pub(crate) fn access(api: &Api, name: &str, keys: Option<&Keys>, peer: &str) -> Result<Reply> {
     let body = json!({ "peer": peer }).to_string().into_bytes();
     api.call(Call { method: "POST", url: api.site_url(name, "__hermes/access"), body: Some(body), content_type: Some("application/json"), keys, ..Call::default() })
 }
 
-/// A page's own iroh endpoint, as the platform's client makes one, on the
-/// fake node's relay.
-struct Peer {
-    ep: Endpoint,
+/// A page's own iroh key, as the platform's client makes one: its endpoint
+/// binds at the first connect, homed on that computer's relay (a page names
+/// its key to get the admission that names the relay).
+pub(crate) struct Peer {
+    secret: SecretKey,
+    ep: std::sync::OnceLock<Endpoint>,
     rt: tokio::runtime::Handle,
 }
 
 impl Peer {
-    fn new(s: &Suite) -> Result<Peer> {
-        let rt = s.sandcastle.runtime();
-        let relay: RelayUrl = s.sandcastle.relay.parse()?;
-        let ep = rt.block_on(Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Custom(relay.into())).bind())?;
-        Ok(Peer { ep, rt })
+    pub(crate) fn new(rt: tokio::runtime::Handle) -> Peer {
+        Peer { secret: SecretKey::generate(), ep: std::sync::OnceLock::new(), rt }
     }
 
-    fn id(&self) -> String {
-        self.ep.id().to_string()
+    pub(crate) fn id(&self) -> String {
+        self.secret.public().to_string()
     }
 
     /// Connects to the computer an access names and presents its admission:
     /// the connection and the node's answer.
-    fn connect(&self, access: &Value) -> Result<(Connection, Value)> {
+    pub(crate) fn connect(&self, access: &Value) -> Result<(Connection, Value)> {
         let endpoint = access["endpoint"].as_str().context("an endpoint")?.parse()?;
         let relay: RelayUrl = access["relay"].as_str().context("a relay")?.parse()?;
         let admission = access["admission"].as_str().context("an admission")?.to_string();
+        let ep = match self.ep.get() {
+            Some(ep) => ep,
+            None => {
+                let bound = self.rt.block_on(Endpoint::builder(presets::Minimal).secret_key(self.secret.clone()).relay_mode(RelayMode::Custom(relay.clone().into())).bind())?;
+                self.ep.get_or_init(|| bound)
+            }
+        };
         self.rt.block_on(async {
-            let conn = self.ep.connect(EndpointAddr::new(endpoint).with_relay_url(relay), b"sandcastle/1").await?;
+            let conn = ep.connect(EndpointAddr::new(endpoint).with_relay_url(relay), b"sandcastle/1").await?;
             let (mut send, mut recv) = conn.open_bi().await?;
             send.write_all(b"A").await?;
             send.write_u16(u16::try_from(admission.len())?).await?;
@@ -84,11 +90,11 @@ impl Peer {
     /// A loopback port whose each TCP connection is one stream on `conn`:
     /// the blocking HTTP and WebSocket clients reach Hermes through it, with
     /// a loopback Host, as the platform's client does.
-    fn tunnel(&self, conn: Connection) -> Result<u16> {
+    pub(crate) fn tunnel(&self, conn: Connection) -> Result<u16> {
         let listener = self.rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))?;
         let port = listener.local_addr()?.port();
         self.rt.spawn(async move {
-            // Bounded by the lane: the fake's runtime ends with the suite.
+            // Bounded by its runtime: the fake's ends with the suite, the hosted run's with the run.
             while let Ok((mut tcp, _)) = listener.accept().await {
                 let conn = conn.clone();
                 tokio::spawn(async move {
@@ -133,20 +139,22 @@ fn rpc(ws: &mut Ws, id: u64, method: &str, params: Value) -> Result<(Value, Vec<
 
 /// One turn in a new chat over Hermes' `/api/ws?token=`, through a tunnel's
 /// port: the reply's text.
-fn turn(port: u16, token: &str, text: &str) -> Result<String> {
+pub(crate) fn turn(port: u16, token: &str, text: &str) -> Result<String> {
     let url = format!("ws://127.0.0.1:{port}/api/ws?token={token}");
     let mut req = tungstenite::client::IntoClientRequest::into_client_request(url.as_str())?;
     req.headers_mut().insert("sec-websocket-protocol", "hermes-gateway-v1".parse()?);
     let (mut ws, _) = tungstenite::connect(req)?;
     if let tungstenite::stream::MaybeTlsStream::Plain(s) = ws.get_ref() {
-        s.set_read_timeout(Some(Duration::from_secs(30)))?;
+        // a cold wake and a real model's first words fit
+        s.set_read_timeout(Some(Duration::from_secs(60)))?;
     }
     let ready = next(&mut ws)?;
     anyhow::ensure!(ready["params"]["type"] == "gateway.ready", "{ready}");
     let (made, _) = rpc(&mut ws, 1, "session.create", json!({ "title": "e2e" }))?;
     let live = made["session_id"].as_str().context("a live session")?.to_string();
     let (_, mut events) = rpc(&mut ws, 2, "prompt.submit", json!({ "session_id": live, "text": text }))?;
-    for _ in 0..20 {
+    // bounded: a real model's short reply is a few hundred deltas at most
+    for _ in 0..2000 {
         if let Some(done) = events.iter().find(|e| e["params"]["type"] == "message.complete") {
             return Ok(done["params"]["payload"]["text"].as_str().unwrap_or("").to_string());
         }
@@ -156,7 +164,7 @@ fn turn(port: u16, token: &str, text: &str) -> Result<String> {
 }
 
 /// A GET through a tunnel's port, with Hermes' session token or none.
-fn get(port: u16, path: &str, token: Option<&str>) -> Result<(u16, Value)> {
+pub(crate) fn get(port: u16, path: &str, token: Option<&str>) -> Result<(u16, Value)> {
     let mut req = reqwest::blocking::Client::new().get(format!("http://127.0.0.1:{port}{path}"));
     if let Some(t) = token {
         req = req.header("x-hermes-session-token", t);
@@ -181,7 +189,7 @@ pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
     std::fs::write(site.join("index.html"), "<h1>chat</h1>")?;
     std::fs::write(site.join("fragment.json"), HERMES)?;
     let computers_before = s.sandcastle.computers();
-    let page = Peer::new(s)?;
+    let page = Peer::new(s.sandcastle.runtime());
     // a Hermes being made answers "starting", however soon it is asked
     s.sandcastle.serving_after(3);
     let o = s.cli(api, &home, &["deploy", &name, "--dir", site.to_str().expect("a UTF-8 path")]);
@@ -258,7 +266,7 @@ pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("with it, Hermes answers: no login, the admission its gate", status == 200 && body["sessions"].is_array(), &body);
     let reply = turn(port, &token, "hello hermes");
     s.ok("and chats over its socket", reply.as_deref().is_ok_and(|t| t.contains("hello hermes")), format!("{reply:?}"));
-    let other = Peer::new(s)?;
+    let other = Peer::new(s.sandcastle.runtime());
     let refused = s.sandcastle.refused();
     let (_, answer) = other.connect(&granted)?;
     s.ok("another key with the page's admission is refused by the node", answer["admitted"] == false && s.sandcastle.refused() > refused, &answer);
@@ -303,8 +311,8 @@ pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
 const HERMES: &str = r#"{"computer":{"preset":"hermes"}}"#;
 
 /// The platform's computer client as a fragment's host serves it: the
-/// entry, and the build it names, kept a year.
-fn client(s: &mut Suite, api: &Api, name: &str) -> Result<()> {
+/// entry, and the build it names, kept a year (label, held, detail).
+pub(crate) fn client_checks(api: &Api, name: &str) -> Result<Vec<(&'static str, bool, String)>> {
     let at = |path: &str| -> Result<crate::api::Reply> {
         let url = reqwest::Url::parse(&api.site_url(name, ""))?.join(path)?;
         api.call(Call { method: "GET", url: url.to_string(), ..Call::default() })
@@ -312,24 +320,25 @@ fn client(s: &mut Suite, api: &Api, name: &str) -> Result<()> {
     let header = |r: &crate::api::Reply, h: &str| r.headers.get(h).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     let entry = at("/__computer/client.js")?;
     let build = entry.text.lines().find_map(|l| l.strip_prefix("import init from \"./")).and_then(|l| l.split('/').next()).unwrap_or("").to_string();
-    s.ok(
-        "a fragment's host serves the computer client's entry, revalidated on each load",
-        entry.status == 200 && header(&entry, "content-type").starts_with("text/javascript") && header(&entry, "cache-control").contains("max-age=0") && build.len() == 16,
-        format!("{} {:?} {:?}", entry.status, entry.headers, build),
-    );
     let module = at(&format!("/__computer/{build}/sandcastle_web_bg.wasm.gz"))?;
-    s.ok(
-        "and its module, gzipped and declared so, under its digest, kept a year",
-        module.status == 200
-            && header(&module, "content-type") == "application/wasm"
-            && header(&module, "content-encoding") == "gzip"
-            && header(&module, "cache-control").contains("immutable")
-            && module.bytes.starts_with(&[0x1f, 0x8b]),
-        format!("{} {:?} {} bytes", module.status, module.headers, module.bytes.len()),
-    );
     let glue = at(&format!("/__computer/{build}/sandcastle_web.js"))?;
-    s.ok("and its glue", glue.status == 200 && header(&glue, "cache-control").contains("immutable"), format!("{} {:?}", glue.status, glue.headers));
-    Ok(())
+    Ok(vec![
+        (
+            "a fragment's host serves the computer client's entry, revalidated on each load",
+            entry.status == 200 && header(&entry, "content-type").starts_with("text/javascript") && header(&entry, "cache-control").contains("max-age=0") && build.len() == 16,
+            format!("{} {:?} {:?}", entry.status, entry.headers, build),
+        ),
+        (
+            "and its module, gzipped and declared so, under its digest, kept a year",
+            module.status == 200
+                && header(&module, "content-type") == "application/wasm"
+                && header(&module, "content-encoding") == "gzip"
+                && header(&module, "cache-control").contains("immutable")
+                && module.bytes.starts_with(&[0x1f, 0x8b]),
+            format!("{} {:?} {} bytes", module.status, module.headers, module.bytes.len()),
+        ),
+        ("and its glue", glue.status == 200 && header(&glue, "cache-control").contains("immutable"), format!("{} {:?}", glue.status, glue.headers)),
+    ])
 }
 
 /// The hermes template's page in headless Chrome: the computer client,
@@ -344,7 +353,9 @@ fn chat_page(s: &mut Suite, api: &Api, home: &std::path::Path, owner: &Keys, nam
     s.ok("the hermes template scaffolds, declaring a Hermes computer", o.status.success() && manifest["computer"] == json!({ "preset": "hermes" }), out(&o));
     let o = s.cli(api, home, &["deploy", name, "--dir", &dir_s]);
     s.ok("and deploys onto the fragment that has one", o.status.success(), out(&o));
-    client(s, api, name)?;
+    for (label, held, detail) in client_checks(api, name)? {
+        s.ok(label, held, detail);
+    }
     let Some(mut chrome) = s.browser()? else {
         s.ok("Chrome is installed for the hermes page (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());
