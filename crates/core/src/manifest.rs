@@ -326,6 +326,32 @@ fn agent(v: &Value, m: &Manifest) -> Result<AgentDecl, String> {
     Ok(AgentDecl { channel, personal, instructions: Some(instructions), tools, model, computer: None })
 }
 
+/// A chat template's fragment.json (as JSON) with who answers it set
+/// (docs/one-home.md, phase 5): its own agent block for its owner's agent,
+/// none for the people alone, or a Hermes of theirs on its `chat` channel.
+/// A Hermes named is checked when the chat joins it (a Hermes answers its
+/// owner's chats alone), not here.
+pub fn answered(mut manifest: Value, answers: &fragment_proto::ChatAnswers) -> Result<Value, String> {
+    use fragment_proto::ChatAnswers;
+    let o = manifest.as_object_mut().ok_or("fragment.json must be an object")?;
+    if !o.get("channels").and_then(|c| c.get("chat")).is_some_and(Value::is_object) {
+        return Err("only a chat (a `chat` channel) is told who answers it".into());
+    }
+    match answers {
+        ChatAnswers::Agent => {}
+        ChatAnswers::People => {
+            o.remove("agent");
+        }
+        ChatAnswers::Computer(name) => {
+            if !fragment_proto::valid_fragment_name(name) {
+                return Err(format!("{name:?} is not a fragment's name (<label>.<username>)"));
+            }
+            o.insert("agent".into(), serde_json::json!({ "channel": "chat", "computer": name }));
+        }
+    }
+    Ok(manifest)
+}
+
 pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
     if bytes.len() > limits::MANIFEST_MAX_BYTES {
         return Err(format!("fragment.json is over {} bytes", limits::MANIFEST_MAX_BYTES));
@@ -450,6 +476,26 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chat_is_told_who_answers_it() {
+        use fragment_proto::{Answers, ChatAnswers};
+        let chat = serde_json::json!({ "name": "chat", "channels": { "chat": { "read": "public", "post": "viewer" } }, "agent": { "personal": true, "channel": "chat" } });
+        let kind = |v: &Value| parse(&serde_json::to_vec(v).unwrap()).unwrap().kind();
+        let own = answered(chat.clone(), &ChatAnswers::Agent).unwrap();
+        assert_eq!(own, chat, "its owner's agent: the template's own");
+        assert_eq!(kind(&own).chat.unwrap().answers, Answers::Agent);
+        let people = answered(chat.clone(), &ChatAnswers::People).unwrap();
+        assert!(people.get("agent").is_none());
+        assert_eq!(kind(&people).chat.unwrap().answers, Answers::People);
+        let hermes = answered(chat.clone(), &ChatAnswers::Computer("hermes.paul".into())).unwrap();
+        let k = kind(&hermes).chat.unwrap();
+        assert_eq!((k.answers, k.computer.as_deref()), (Answers::Computer, Some("hermes.paul")));
+        // invalid: a name that is no fragment's, and a fragment that is no chat
+        assert!(answered(chat, &ChatAnswers::Computer("Hermes!".into())).is_err());
+        assert!(answered(serde_json::json!({ "name": "todo" }), &ChatAnswers::People).is_err());
+        assert!(answered(serde_json::json!([]), &ChatAnswers::People).is_err());
+    }
 
     #[test]
     fn operations_and_defaults() {

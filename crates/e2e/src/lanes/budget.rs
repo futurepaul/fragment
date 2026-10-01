@@ -185,8 +185,8 @@ pub fn budget(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // where people see it
-    let r = api.call(crate::api::Call { method: "GET", url: format!("{}/", api.base), cookie: Some(format!("fragment_session={session}")), ..crate::api::Call::default() })?;
-    s.ok("the platform page shows what is left this month", r.text.contains("left") && r.text.contains("AI this month"), &r);
+    let r = api.call(crate::api::Call { method: "GET", url: format!("{}/settings", api.base), cookie: Some(format!("fragment_session={session}")), ..crate::api::Call::default() })?;
+    s.ok("the settings page shows what is left this month", r.text.contains("left") && r.text.contains("AI this month"), &r);
     let home = s.dir("budget-home");
     s.login(api, &home);
     let out = s.cli(api, &home, &["budget"]);

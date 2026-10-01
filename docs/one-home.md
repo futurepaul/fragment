@@ -168,12 +168,31 @@ them are Paul's to approve.
      another fragment that names the Hermes shows none yet (its page
      would need the Hermes fragment's access, on another origin): phase
      5's desktop opens the Hermes beside it.
-5. **Home.** `/` opens the person's desktop (made on first sign-in);
-   `/settings` holds the rest; a new chat asks who answers; an invite
-   from the chat.
-   - Checks (e2e, Chrome): a new person's first sign-in lands on their
-     desktop; settings pairs a CLI; a new Hermes chat, an invite, and the
-     guest's first message answered.
+5. **Home** (built 2026-10-01). `/` opens the person's desktop, made on
+   their first visit and recorded in the registry as their memory is
+   (`cell/src/home.rs`: `desktop.<username>`; a desktop of theirs
+   already so named is taken as theirs, a fragment so named that is no
+   desktop is never taken over, one they deleted is made again), its
+   `frame` granted as the New fragment form grants it (the username form
+   says taking it makes their desktop). `/settings` holds what `/` held.
+   The desktop's New chat asks who answers (their agent, a Hermes of
+   theirs, or just people: `answers` on the create, stamped into the
+   chat's `fragment.json` and kept by `__template`), the open chat's
+   header has Invite (its share sheet), and its sidebar Settings. The
+   desktop's description says it is home, not a demo.
+   - Checks (e2e): `signin` (the first visit makes and opens the desktop,
+     the next the same one; settings lists it and pairs a CLI; a
+     `desktop` that is no desktop, one made before, one deleted; settings
+     signed out and with no username), `templates` (a chat for people
+     alone, one a Hermes answers, `__template` up to date for each; four
+     wrong `answers` make nothing), `desktop` (New chat asks; Invite), and
+     `phase7` in Chrome with two people: each first sign-in lands on their
+     desktop; the owner's Hermes, offered by New chat, answers a chat it
+     makes; Invite in its header; the guest joins and is answered by
+     name, live on both pages.
+   - The Hermes screen beside a chat other than the Hermes' own is still
+     to come (phase 4's note): the Hermes opens as a pane, its screen
+     there.
 6. **The hosted proof.** On fragment.club and lat-6: two people in one
    Hermes chat, a turn each, Hermes' screen in the owner's pane;
    recorded here.

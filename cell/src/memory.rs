@@ -46,7 +46,7 @@ pub(crate) async fn recorded(env: &Env, owner: &str) -> CellResult<Option<String
 /// Makes `label.<username>`, members only, as its owner: whether it was
 /// made (false: the name is taken).
 async fn make(env: &Env, cfg: &Config, url: &Url, owner: &str, username: &str, label: &str) -> CellResult<bool> {
-    let create = CreateFragment { name: label.to_string(), visibility: Some(Visibility::Members), template: None, throwaway: false };
+    let create = CreateFragment { name: label.to_string(), visibility: Some(Visibility::Members), template: None, throwaway: false, answers: None };
     let mut made = create_fragment(env, cfg, url, create, person(owner, Some(username))).await?;
     match made.status_code() {
         200 => Ok(true),

@@ -315,6 +315,10 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         Reply::Text("Here it is.\n\n![a picture](__file?path=pics/dot.png)".into()),
     ]);
     chrome.eval(&page, "document.getElementById('new-chat').click(); true")?;
+    // it asks who answers: their agent, or the people alone (they have no Hermes)
+    let asks = "!document.getElementById('menu').hidden && [...document.querySelectorAll('#menu [data-answers]')].map(b => b.dataset.answers + ':' + b.textContent).join() === 'agent:Your agent,people:Just people'";
+    s.ok("New chat asks who answers it: their agent, or the people alone", chrome.until(&page, asks, wait), chrome.eval(&page, "document.getElementById('menu').innerText").unwrap_or_default());
+    chrome.eval(&page, "document.querySelector('#menu [data-answers=agent]').click(); true")?;
     let chatted = chrome.until(
         &page,
         &format!("document.querySelectorAll('#chats .row').length === 2 && document.querySelector('#chats .row')?.dataset.key !== 'chat:{elsewhere}' && !!document.querySelector('#frames iframe:not([hidden])')?.dataset.fragment?.startsWith('chat-')"),
@@ -325,6 +329,8 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("New chat makes a chat fragment and opens it in the middle, first among the chats", chatted && !chat.is_empty(), format!("{mine} {}", sidebar(&mut chrome)));
     let chat_title = s.eventually(wait, || chrome.eval_in_frame(&page, &format!("{}--", label(&chat)), "document.title").ok() == Some(json!("Chat")));
     s.ok("the chat's own page shows there, signed in on its origin", chat_title, "");
+    let invite = chrome.eval(&page, "!document.getElementById('invite').hidden")?;
+    s.ok("its header offers its owner Invite", invite == json!(true), &invite);
     // the page is ready once it knows who it is (its socket said hello)
     let ready = s.eventually(wait, || {
         chrome.eval_in_frame(&page, &format!("{}--", label(&chat)), "document.getElementById('say')?.dataset.ready === '1'").ok() == Some(json!(true))

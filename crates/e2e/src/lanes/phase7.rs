@@ -5,8 +5,11 @@
 //! platform's page, and a CLI key approved on its page (the harness's
 //! hands for what it reads back). The node is shaped as fragment.club is.
 //!
-//! 1. The owner makes a chat from their desktop (New chat) and shares it
-//!    with the guest by username, in the share sheet the desktop opens.
+//! 0. Each person's first sign-in lands on their desktop, their home, which
+//!    the platform made then (docs/one-home.md, decision 7).
+//! 1. The owner makes a chat from their desktop (New chat, answered by
+//!    their agent) and shares it with the guest by username, in the share
+//!    sheet the desktop opens.
 //! 2. The guest accepts at `/join` and lands in the chat.
 //! 3. Both see each other's messages arrive live, each labeled with its
 //!    sender (the owner's agent's answers too).
@@ -23,6 +26,9 @@
 //!    gets a frame without it", "a window it opens on the sheet is severed
 //!    from it …", "it takes nothing from its URL …", and "a form sent before
 //!    its buttons arm is refused …".
+//! 9. Phase 5 (docs/one-home.md): the owner's Hermes answers a chat their
+//!    desktop makes for it (New chat, Hermes); they invite the guest from
+//!    the chat's header, and the guest's first message is answered by name.
 //!
 //! Each step's details are other lanes': the share lane (the sheet's and the
 //! join page's forms and refusals, the badges), the chat section's
@@ -191,8 +197,10 @@ fn sign_in(chrome: &mut Browser, api: &Api, email: &str, username: &str) -> Resu
     let input = format!("{take} input[name=username]");
     chrome.eval(&home, &format!("document.querySelector({input:?}).value = {username:?}; true"))?;
     chrome.click(&home, &format!("{take} button"))?;
-    let signed_in = format!("!!document.body?.innerText.includes({:?})", format!("Signed in as {username}"));
-    anyhow::ensure!(chrome.until(&home, &signed_in, WAIT), "{email} did not take {username}: {}", shown(chrome, &home));
+    // taken, they are home: their desktop, made now, signed in on its origin
+    let brand = format!("document.getElementById('brand')?.textContent === {:?}", format!("{username}'s desktop"));
+    let landed = format!("location.host.startsWith('desktop--') && {brand}");
+    anyhow::ensure!(chrome.until(&home, &landed, WAIT), "{email} took {username} and did not land on their desktop: {}", shown(chrome, &home));
     let keys = Keys::generate();
     let approve = chrome.open_in(&browser, &api.approval_link(&keys, 0))?;
     let button = "form[action=\"/cli/approve\"] button";
@@ -256,29 +264,21 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "writing {app}'s notes: {r}");
     let notes = || api.signed(&owner.keys, "GET", &format!("/api/f/{app}/file?path=notes.txt"), None).map(|r| r.text).unwrap_or_default();
 
-    // ---- 1. the owner makes a desktop (the platform's New fragment form),
-    // a chat from it, and shares the chat by username in the sheet
-    let desk_label = s.name("desk");
-    let new = "form[action=\"/auth/new\"]";
-    chrome.viewport(&home, 1440, 900, false)?;
-    chrome.eval(
-        &home,
-        &format!("(() => {{ const f = document.querySelector({new:?}); f.querySelector('input[name=template][value=desktop]').checked = true; f.querySelector('input[name=label]').value = {desk_label:?}; return true; }})()"),
-    )?;
-    chrome.click(&home, &format!("{new} button"))?;
-    let desk = home;
-    let brand = format!("document.getElementById('brand')?.textContent === {:?}", format!("{}'s desktop", owner.username));
-    let on_desk = chrome.until(&desk, &format!("location.host.startsWith({:?}) && {brand}", format!("{desk_label}--")), WAIT);
-    // made through the platform's form: its owner's alone, and it shows
-    // their fragments inside it (the form's submit was their grant)
-    let desk_name = api.qualified(&owner.keys, &desk_label)?;
-    let st = api.status(&owner.keys, &desk_name)?;
+    // ---- 0. each landed on their desktop as they took their username (sign_in)
+    let homes: Vec<Value> = [&owner, &guest].iter().map(|p| api.status(&p.keys, &format!("desktop.{}", p.username)).map(|r| r.body).unwrap_or_default()).collect();
     s.ok(
-        "a desktop made with the platform's New fragment form is its owner's alone (members only), and may show their fragments inside it with no visit to the share sheet",
-        st.body["visibility"] == "members" && st.body["frame"] == json!(true),
-        &st,
+        "each person's first sign-in lands on their desktop, their home, made then: theirs alone (members only), showing their fragments inside it with no visit to the share sheet",
+        homes.iter().all(|st| st["visibility"] == "members" && st["frame"] == json!(true)),
+        json!(homes),
     );
+
+    // ---- 1. the owner makes a chat from their desktop, and shares the
+    // chat by username in the sheet
+    let desk = home;
+    chrome.viewport(&desk, 1440, 900, false)?;
     chrome.click(&desk, "#new-chat")?;
+    anyhow::ensure!(chrome.until(&desk, "!document.getElementById('menu').hidden", WAIT), "New chat did not ask who answers");
+    chrome.click(&desk, "#menu [data-answers=agent]")?;
     let opened = chrome.until(&desk, "document.querySelectorAll('#chats .row').length === 1 && !!document.querySelector('#frames iframe:not([hidden])')?.dataset.fragment", WAIT);
     let name = chrome.eval(&desk, "document.querySelector('#frames iframe:not([hidden])')?.dataset.fragment ?? ''")?.as_str().unwrap_or("").to_string();
     let chat_host = format!("{}--", label(&name));
@@ -293,9 +293,9 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let mine = api.signed(&owner.keys, "GET", "/api/fragments", None)?;
     let owns = mine.body["fragments"].as_array().is_some_and(|a| a.iter().any(|f| f["name"] == name.as_str() && f["role"] == "owner"));
     s.ok(
-        "the owner makes a desktop, and a chat from it (New chat): a fragment of theirs, open in the middle, their agent in it",
-        on_desk && opened && owns && joined && ready,
-        format!("{name:?}: desk {on_desk} opened {opened} owns {owns} agent {joined} ready {ready}: {}", shown(&mut chrome, &desk)),
+        "the owner makes a chat from their desktop (New chat, their agent answering): a fragment of theirs, open in the middle, their agent in it",
+        opened && owns && joined && ready,
+        format!("{name:?}: opened {opened} owns {owns} agent {joined} ready {ready}: {}", shown(&mut chrome, &desk)),
     );
     let agent = agent_of().unwrap_or_default();
     let chat = Chat { api, owner: &owner.keys, name, agent };
@@ -462,5 +462,94 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{fetched} / {signed} / {}", shown(&mut chrome, &theirs)),
     );
     s.openrouter.clear_script();
+
+    // ---- 9. phase 5: a chat the owner's Hermes answers, the guest invited from its header
+    hermes_chat(s, &mut chrome, api, &owner, &guest, &desk)
+}
+
+/// Phase 5's acceptance (docs/one-home.md): the owner makes a Hermes (the
+/// hermes template, on the sandcastle fake's node, whose gateway answers
+/// as Hermes does: `echo: [<name>] <text>`); their desktop's New chat
+/// offers it, and makes a chat it answers; Invite, in the chat's header,
+/// opens its share sheet, where they invite the guest by username; the
+/// guest joins, writes, and Hermes answers them by name, live on both
+/// pages.
+fn hermes_chat(s: &mut Suite, chrome: &mut Browser, api: &Api, owner: &Person, guest: &Person, desk: &Page) -> Result<()> {
+    let hermes = api.qualified(&owner.keys, &s.name("herm"))?;
+    let r = api.create_with(&owner.keys, json!({ "name": hermes, "template": "hermes" }))?;
+    anyhow::ensure!(r.status == 200, "making {hermes}: {r}");
+    // ready once it answers its own chat: its computer's identity a member there
+    let computer_of = |name: &str| -> Option<String> {
+        let r = api.signed(&owner.keys, "GET", &format!("/api/f/{name}/members"), None).ok()?;
+        r.body["members"].as_array()?.iter().find(|m| m["kind"] == "computer").and_then(|m| m["principal"].as_str().map(str::to_string))
+    };
+    let ready = s.eventually(WAIT, || computer_of(&hermes).is_some());
+    chrome.front(desk)?;
+    let row = format!("!!document.querySelector('#computers .row[data-key={:?}]')", format!("app:{hermes}"));
+    let listed = chrome.until(desk, &row, WAIT);
+    chrome.click(desk, "#new-chat")?;
+    let offered = format!("[...document.querySelectorAll('#menu [data-answers=computer]')].map(b => b.dataset.computer).join() === {hermes:?}");
+    let offers = chrome.until(desk, &offered, WAIT);
+    s.ok(
+        "the owner's Hermes is made, listed among their computers, and New chat offers it",
+        ready && listed && offers,
+        format!("ready {ready} listed {listed} offers {offers}: {}", chrome.eval(desk, "document.getElementById('menu').innerText").unwrap_or_default()),
+    );
+    let before = chrome.eval(desk, "document.querySelector('#frames iframe:not([hidden])')?.dataset.fragment ?? ''")?;
+    chrome.click(desk, "#menu [data-answers=computer]")?;
+    let opened = chrome.until(desk, &format!("(document.querySelector('#frames iframe:not([hidden])')?.dataset.fragment ?? '') !== {before} && document.getElementById('chat-title').textContent.startsWith('chat-')"), WAIT);
+    let name = chrome.eval(desk, "document.querySelector('#frames iframe:not([hidden])')?.dataset.fragment ?? ''")?.as_str().unwrap_or("").to_string();
+    let manifest = api.signed(&owner.keys, "GET", &format!("/api/f/{name}/manifest"), None)?;
+    let joined = s.eventually(WAIT, || computer_of(&name).is_some() && computer_of(&name) == computer_of(&hermes));
+    s.ok(
+        "Hermes there makes a chat it answers: its fragment.json names the owner's Hermes, which joins it",
+        opened && manifest.body["agent"] == json!({ "channel": "chat", "computer": hermes }) && joined,
+        format!("{name:?} {opened} {joined} {manifest}"),
+    );
+    let chat_host = format!("{}--", label(&name));
+    let platform = api.base.clone();
+    let sheet = format!("{platform}/share/{name}");
+    chrome.click(desk, "#invite")?;
+    let opened = chrome.until(desk, "document.getElementById('sheet').open", WAIT)
+        && s.eventually(WAIT, || chrome.eval_in_frame(desk, &sheet, "document.body.innerText.includes('General access')").ok() == Some(json!(true)));
+    let in_sheet = |chrome: &mut Browser, js: &str| chrome.eval_in_frame(desk, &sheet, js).ok() == Some(json!(true));
+    let invite = "form:has(input[name=action][value=invite]) button[data-arm]";
+    let can_invite = s.eventually(WAIT, || in_sheet(chrome, &armed(invite)));
+    chrome.eval_in_frame(desk, &sheet, &format!("document.querySelector('input[name=username]').value = {:?}; document.querySelector({invite:?}).click(); true", guest.username))?;
+    let got_link = s.eventually(WAIT, || in_sheet(chrome, "!!document.getElementById('invite-link')?.value"));
+    let link = chrome.eval_in_frame(desk, &sheet, "document.getElementById('invite-link')?.value ?? ''")?.as_str().unwrap_or("").to_string();
+    s.ok(
+        "Invite, in the chat's header, opens its share sheet, where the owner invites the guest by username",
+        opened && can_invite && got_link && link.starts_with(&format!("{platform}/join/{name}?token=")),
+        format!("{link:?} | {}", in_sheet_text(chrome, desk, &sheet)),
+    );
+    close_sheet(chrome, desk, &sheet)?;
+
+    let theirs = chrome.open_in(&guest.browser, &link)?;
+    chrome.front(&theirs)?;
+    let join = "button[data-arm]";
+    let can_join = chrome.until(&theirs, &armed(join), WAIT);
+    chrome.click(&theirs, join)?;
+    let landed = chrome.until(&theirs, &format!("location.host.startsWith({chat_host:?}) && document.getElementById('say')?.dataset.ready === '1'"), WAIT);
+    let hello = "Hello Hermes, it's the guest";
+    chrome.eval(&theirs, &send(hello))?;
+    let answer = format!("echo: [{}] {hello}", guest.username);
+    let by_hermes = format!(
+        "[...document.querySelectorAll('.msg.agent:not(.streaming)')].some(m => m.querySelector('.md')?.textContent === {answer:?} && !!m.querySelector('.who .face.hermes') && m.querySelector('.who')?.textContent.endsWith('Hermes'))"
+    );
+    let guest_sees = chrome.until(&theirs, &by_hermes, WAIT);
+    s.ok(
+        "the guest joins, writes, and the owner's Hermes answers them by name, labeled as Hermes",
+        can_join && landed && guest_sees,
+        format!("{can_join} {landed} | {}", chrome.eval(&theirs, MESSAGES).unwrap_or_default()),
+    );
+    chrome.front(desk)?;
+    let owner_sees = s.eventually(WAIT, || chrome.eval_in_frame(desk, &chat_host, &by_hermes).ok() == Some(json!(true)));
+    s.ok("and the owner sees it live in their desktop", owner_sees, chrome.eval_in_frame(desk, &chat_host, MESSAGES).unwrap_or_default());
+    chrome.close(theirs)?;
+    // its Hermes goes with its fragment: the node is as the lanes after expect it
+    let r = api.signed(&owner.keys, "DELETE", &format!("/api/f/{hermes}"), None)?;
+    let gone = r.status == 200 && s.eventually(WAIT, || !s.sandcastle.computers().values().any(|c| c.spec["service"]["env"]["HERMES_DASHBOARD"] == "1"));
+    anyhow::ensure!(gone, "{hermes}, deleted, left its computer on the node: {r}");
     Ok(())
 }

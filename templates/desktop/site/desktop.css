@@ -88,6 +88,12 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; }
 .menu button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 10px; border: 0; border-radius: 6px; background: none; text-align: left; font-size: 14px; }
 .menu button:hover, .menu button:focus-visible { background: var(--bg-hover); outline: none; }
 .menu svg { width: 15px; height: 15px; color: var(--text-secondary); }
+.menu .menu-heading { padding: 6px 10px 4px; font-size: 12px; font-weight: 600; color: var(--text-tertiary); }
+.topbar .invite { display: inline-flex; align-items: center; gap: 6px; height: 28px; margin-left: 8px; padding: 0 11px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-secondary); font-size: 13px; font-weight: 600; flex: none; }
+.topbar .invite:hover { background: var(--bg-hover); color: var(--text-primary); }
+.topbar .invite svg { width: 15px; height: 15px; }
+.row.settings { color: var(--text-secondary); text-decoration: none; }
+.row.settings svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 /* the share sheet's dialog: the sheet's own card colors, as tall as it says (desktop.js, share) */
 .sheet { padding: 0; border: 0; border-radius: 14px; width: min(30rem, calc(100vw - 32px)); background: #fff; box-shadow: 0 12px 48px rgba(0,0,0,.45); overflow: hidden; }
 .sheet::backdrop { background: rgba(0,0,0,.55); }

@@ -58,7 +58,7 @@ pub(crate) mod calls;
 mod signin;
 use calls::{
     Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, ClaimUsername, Claimed, EndSession, Exchange, FindUsername, Holder, Logout, Lookup, Mint,
-    Memory, MemoryName, MintFrame, MintPairing, PairComputer, PairWithToken, PairingToken, Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername, RemoveComputer, RemovedComputer,
+    Home, HomeName, Memory, MemoryName, MintFrame, MintPairing, PairComputer, PairWithToken, PairingToken, Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername, RemoveComputer, RemovedComputer,
     Resolve, RevokeKey, Session, SetPicture, TestHook, View, TEST_HOLD_MAX_MS,
 };
 pub use signin::SESSION_TTL_MS;
@@ -87,6 +87,8 @@ CREATE TABLE IF NOT EXISTS computers (
 CREATE TABLE IF NOT EXISTS pairings (
   hash TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL, expires_at INTEGER NOT NULL, identity TEXT, UNIQUE (owner, name));
 CREATE TABLE IF NOT EXISTS memories (
+  owner TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, recorded_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS homes (
   owner TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, recorded_at INTEGER NOT NULL);
 ";
 /// How long a fragment's computer has to pair with the token it was handed.
@@ -607,6 +609,24 @@ impl RegistryCell {
         Ok(MemoryName { name: self.row::<NameRow>("SELECT name FROM memories WHERE owner = ?", vec![b.owner.as_str().into()])?.map(|r| r.name) })
     }
 
+    /// A person's home, their desktop (cell/src/home.rs): the one recorded,
+    /// recording `name` first when there is none, or in its place with
+    /// `replace` (the one recorded is gone). A person has one home.
+    fn home(&self, b: Home) -> CellResult<HomeName> {
+        if let Some(name) = &b.name {
+            assert!(fragment_proto::valid_fragment_name(name), "a home is a fragment");
+            if self.named_identity(&b.owner)?.kind != IdentityKind::Person {
+                return Err(CellError::host(format!("{} is not a person, and has no home", b.owner)));
+            }
+            let q = match b.replace {
+                true => "INSERT INTO homes (owner, name, recorded_at) VALUES (?, ?, ?) ON CONFLICT (owner) DO UPDATE SET name = excluded.name, recorded_at = excluded.recorded_at",
+                false => "INSERT INTO homes (owner, name, recorded_at) VALUES (?, ?, ?) ON CONFLICT (owner) DO NOTHING",
+            };
+            self.exec(q, vec![b.owner.as_str().into(), name.as_str().into(), SqlStorageValue::Integer(js::now_ms())])?;
+        }
+        Ok(HomeName { name: self.row::<NameRow>("SELECT name FROM homes WHERE owner = ?", vec![b.owner.as_str().into()])?.map(|r| r.name) })
+    }
+
     /// A key pairs as the computer a token names, spending it; the same key
     /// again answers the same computer.
     fn pair_with_token(&self, b: PairWithToken) -> CellResult<IdentityView> {
@@ -833,6 +853,7 @@ impl RegistryCell {
             MintPairing::PATH => reply::<MintPairing>(self.mint_pairing(body(&bytes)?)),
             PairWithToken::PATH => reply::<PairWithToken>(self.pair_with_token(body(&bytes)?)),
             Memory::PATH => reply::<Memory>(self.memory(body(&bytes)?)),
+            Home::PATH => reply::<Home>(self.home(body(&bytes)?)),
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
         }
     }

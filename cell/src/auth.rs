@@ -426,6 +426,29 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
     )
 }
 
+/// `/settings`: who they are (their picture), their month's budget, their
+/// fragments with each one's share sheet, a new fragment, pairing a CLI,
+/// and signing out (once the platform's page, before the desktop was home).
+async fn settings(env: &Env, cfg: &Config, url: &Url, live: calls::LiveSession) -> String {
+    let (who, email) = (live.identity, live.email.unwrap_or_default());
+    let username = who.username.clone().unwrap_or_default();
+    // the month and the fragments, asked of their cells at once
+    let (budget, fragments) = futures_util::future::join(budget_line(env, &who.id), fragments_list(env, cfg, url, &who.id)).await;
+    format!(
+        "<h1>Settings</h1><p><a href=\"/\">Your desktop</a></p>\
+         <p><img src=\"/api/users/{u}/picture\" alt=\"\" width=\"48\" height=\"48\" style=\"border-radius:50%;vertical-align:middle;object-fit:cover\" onerror=\"this.remove()\"> Signed in as <b>{u}</b> ({e}).</p>{b}{f}{n}{p}\
+         <h2>You</h2><form method=\"post\" action=\"/auth/picture\" enctype=\"multipart/form-data\"><p>Picture: <input type=\"file\" name=\"picture\" accept=\"image/png,image/jpeg,image/webp,image/gif\" required> <button>Set</button></p></form>\
+         <p><a href=\"/auth/logout\">Sign out</a> · <a href=\"/auth/link\">Add another sign-in to you</a> · <code>{id}</code></p>",
+        u = esc(&username),
+        e = esc(&email),
+        id = esc(&who.id),
+        b = budget,
+        f = fragments,
+        n = new_form(&after_label(cfg, &username)),
+        p = pair(),
+    )
+}
+
 /// Sign-in's routes on the platform origin (the router sends only these).
 pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segments: &[&str]) -> CellResult<Response> {
     let method = req.method();
@@ -439,34 +462,33 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                         let email = live.email.unwrap_or_default();
                         format!(
                             "<h1>Choose your username</h1><p>Signed in as <b>{}</b>. Your fragments will live at <code>&lt;label&gt;{}</code>; a username is chosen once.</p>\
+                             <p>Taking it makes your desktop, your home here: it shows your chats and apps inside it, signed in as you.</p>\
                              <form method=\"post\" action=\"/auth/username\"><p><input name=\"username\" required minlength=\"3\" maxlength=\"32\" pattern=\"[a-z0-9]([a-z0-9-]*[a-z0-9])?\" autocomplete=\"username\" style=\"font:inherit;padding:.4em .6em;border-radius:8px;border:1px solid #aab\"> <button>Take it</button></p></form>\
                              <p><a href=\"/auth/logout\">Sign out</a></p>",
                             esc(&email),
                             esc(&after_label(cfg, "username")),
                         )
                     }
-                    Some((_, live)) => {
-                        let (who, email) = (live.identity, live.email.unwrap_or_default());
-                        let username = who.username.clone().unwrap_or_default();
-                        // the month and the fragments, asked of their cells at once
-                        let (budget, fragments) = futures_util::future::join(budget_line(env, &who.id), fragments_list(env, cfg, url, &who.id)).await;
-                        format!(
-                            "<p><img src=\"/api/users/{u}/picture\" alt=\"\" width=\"48\" height=\"48\" style=\"border-radius:50%;vertical-align:middle;object-fit:cover\" onerror=\"this.remove()\"> Signed in as <b>{u}</b> ({e}).</p>{b}{f}{n}{p}\
-                             <h2>You</h2><form method=\"post\" action=\"/auth/picture\" enctype=\"multipart/form-data\"><p>Picture: <input type=\"file\" name=\"picture\" accept=\"image/png,image/jpeg,image/webp,image/gif\" required> <button>Set</button></p></form>\
-                             <p><a href=\"/auth/logout\">Sign out</a> · <a href=\"/auth/link\">Add another sign-in to you</a> · <code>{id}</code></p>",
-                            u = esc(&username),
-                            e = esc(&email),
-                            id = esc(&who.id),
-                            b = budget,
-                            f = fragments,
-                            n = new_form(&after_label(cfg, &username)),
-                            p = pair(),
-                        )
-                    }
+                    // their home: their desktop, made on this first visit (home.rs), signed in there
+                    Some((_, live)) if live.identity.kind == IdentityKind::Person => match crate::home::ensure(env, cfg, url, &live.identity).await {
+                        Ok(home) => return redirect(&format!("/auth/fragment?name={}&return=/", enc(&home)), &[]),
+                        Err(e) => {
+                            console_error!("{}'s home: {:?} {}", live.identity.id, e.code, e.message);
+                            let missing = format!("<p><b>Your desktop could not be opened</b> ({}). Here are your settings; try your desktop again soon.</p>", esc(&e.message));
+                            return page(200, "Settings", &format!("{missing}{}", settings(env, cfg, url, live).await));
+                        }
+                    },
+                    Some((_, live)) => settings(env, cfg, url, live).await,
                     None => "<p>Small web apps that keep their state, live for everyone who opens them. Invite-only for now.</p><p><a href=\"/auth/login\">Sign in</a></p>".to_string(),
                 };
                 page(200, "fragment", &body)
             }
+            // what the platform's page held before the desktop was home (docs/one-home.md, decision 7)
+            (Method::Get, ["settings"]) => match platform_session(&req, env, url).await? {
+                None => to_login(&platform, "/settings"),
+                Some((_, live)) if live.identity.username.is_none() && live.identity.kind == IdentityKind::Person => redirect("/", &[]),
+                Some((_, live)) => page(200, "Settings", &settings(env, cfg, url, live).await),
+            },
             (Method::Get, ["auth", "login"]) => begin(env, cfg, url, None).await,
             // the registry checks the session is live as the sign-in begins
             (Method::Get, ["auth", "link"]) => match cookie_of(&req, SESSION_COOKIE, secure(url), "/")? {
@@ -495,18 +517,18 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
             }
             (Method::Post, ["auth", "new"]) => {
                 same_origin(&req, &platform)?;
-                let Some((_, live)) = platform_session(&req, env, url).await? else { return to_login(&platform, "/") };
+                let Some((_, live)) = platform_session(&req, env, url).await? else { return to_login(&platform, "/settings") };
                 let bytes = crate::read_body(&mut req, SHORT_FORM_MAX_BYTES).await?;
                 let field = |name: &str| url::form_urlencoded::parse(&bytes).find(|(k, _)| k == name).map(|(_, v)| v.trim().to_string()).unwrap_or_default();
-                let create = fragment_proto::CreateFragment { name: field("label"), visibility: None, template: Some(field("template")), throwaway: false };
+                let create = fragment_proto::CreateFragment { name: field("label"), visibility: None, template: Some(field("template")), throwaway: false, answers: None };
                 let owner = Signed::new(live.identity, None);
                 let v: serde_json::Value = match crate::create_fragment(env, cfg, url, create, owner.clone()).await {
                     Ok(mut made) if made.status_code() == 200 => made.json().await?,
                     Ok(mut made) => {
                         let v: serde_json::Value = made.json().await.unwrap_or_default();
-                        return page(400, "New fragment", &format!("<p>{}</p><p><a href=\"/\">Back</a></p>", esc(v["message"].as_str().unwrap_or("it could not be made"))));
+                        return page(400, "New fragment", &format!("<p>{}</p><p><a href=\"/settings\">Back</a></p>", esc(v["message"].as_str().unwrap_or("it could not be made"))));
                     }
-                    Err(e) => return page(400, "New fragment", &format!("<p>{}</p><p><a href=\"/\">Back</a></p>", esc(&e.message))),
+                    Err(e) => return page(400, "New fragment", &format!("<p>{}</p><p><a href=\"/settings\">Back</a></p>", esc(&e.message))),
                 };
                 let name = v["name"].as_str().ok_or_else(|| CellError::host("the create answered no name"))?;
                 // The form said it will show their fragments inside it: its submit is the owner's grant, the
@@ -525,20 +547,20 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 // Two round trips, on purpose: the bytes land in BLOBS before
                 // the registry names them, so the session is checked first.
                 same_origin(&req, &platform)?;
-                let Some((token, _)) = platform_session(&req, env, url).await? else { return to_login(&platform, "/") };
+                let Some((token, _)) = platform_session(&req, env, url).await? else { return to_login(&platform, "/settings") };
                 let form = req.form_data().await?;
                 let Some(FormEntry::File(file)) = form.get("picture") else { return Err(CellError::invalid("choose a picture")) };
                 let bytes = file.bytes().await?;
                 if bytes.len() > fragment_proto::limits::PICTURE_MAX_BYTES {
-                    return page(400, "Picture", &format!("<p>A picture is at most {} KiB.</p><p><a href=\"/\">Back</a></p>", fragment_proto::limits::PICTURE_MAX_BYTES / 1024));
+                    return page(400, "Picture", &format!("<p>A picture is at most {} KiB.</p><p><a href=\"/settings\">Back</a></p>", fragment_proto::limits::PICTURE_MAX_BYTES / 1024));
                 }
                 let Some(mime) = crate::picture_type(&bytes) else {
-                    return page(400, "Picture", "<p>A picture is a PNG, JPEG, WebP, or GIF.</p><p><a href=\"/\">Back</a></p>");
+                    return page(400, "Picture", "<p>A picture is a PNG, JPEG, WebP, or GIF.</p><p><a href=\"/settings\">Back</a></p>");
                 };
                 let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes));
                 crate::js::blob_put_bytes(env.as_ref(), &format!("pictures/{sha}"), &bytes).await?;
                 ask_registry(env, &calls::SetPicture { by: calls::By::Session(token), sha, mime: mime.to_string() }).await?;
-                redirect("/", &[])
+                redirect("/settings", &[])
             }
             (Method::Get, ["auth", "logout"]) => page(200, "Sign out", "<form method=\"post\" action=\"/auth/logout\"><button>Sign out</button></form>"),
             (Method::Post, ["auth", "logout"]) => {
@@ -756,7 +778,7 @@ pub(crate) fn refused(cfg: &Config, url: &Url, name: &str, rest: &str, framed: b
     let tab = if framed { " target=\"_blank\" rel=\"noopener\"" } else { "" };
     let a = |href: &str, text: &str| format!("<a href=\"{}\"{tab}>{}</a>", esc(href), esc(text));
     let sign_in = a(&format!("{base}__signin?return={}", enc(&back)), &format!("Sign in to {label}"));
-    let home = a(&format!("{}/", cfg.platform(url)), "Your fragments");
+    let home = a(&format!("{}/", cfg.platform(url)), "Your desktop");
     let why = format!("<p style=\"opacity:.7;font-size:.9em\">{}</p>", esc(&e.message));
     let l = esc(label);
     let (title, body) = if is_frame_route(rest) {

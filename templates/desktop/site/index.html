@@ -26,6 +26,8 @@
       <div class="section-label">Computers<button class="icon-button small" id="new-computer" type="button" title="New computer: awake while open, on your budget" aria-label="New computer"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button></div>
       <nav class="rows" id="computers"></nav>
       <div class="spacer"></div>
+      <!-- the platform's settings: pairing a CLI, your picture, your fragments, signing out -->
+      <a class="row settings" id="settings" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span class="label">Settings</span></a>
       <!-- when the desktop template has newer files than this desktop's own (desktop.js, template updates) -->
       <div class="update" id="update" hidden>
         <div class="update-confirm" id="update-confirm" hidden>
@@ -44,6 +46,8 @@
         <span class="crumb">Chats</span>
         <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
         <strong class="title" id="chat-title">No chat open</strong>
+        <!-- the open chat's share sheet, for its owner: invite someone into it -->
+        <button class="invite" id="invite" type="button" title="Invite someone into this chat" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 19a6 6 0 0 1 12 0"/><path d="M19 8v6M16 11h6"/></svg>Invite</button>
         <span class="grow"></span>
         <button class="icon-button toggle-right" id="toggle-right" type="button" title="Toggle viewer (⌥⌘B)" aria-label="Toggle viewer"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M15 4v16"/></svg><span class="badge" id="viewer-count" hidden></span></button>
       </header>
@@ -66,7 +70,7 @@
     </section>
   </div>
   <div class="scrim" id="scrim"></div>
-  <div class="menu" id="menu" role="menu" hidden><button type="button" role="menuitem" id="menu-share"></button></div>
+  <div class="menu" id="menu" role="menu" hidden></div>
   <!-- the platform's share sheet, a frame of __share while it is open (desktop.js, share) -->
   <dialog class="sheet" id="sheet"></dialog>
   <script type="module" src="desktop.js"></script>
