@@ -14,7 +14,7 @@ mod computers;
 mod control;
 mod deliver;
 mod desktop;
-mod hermes;
+pub(crate) mod hermes;
 mod identities;
 mod isolation;
 pub(crate) mod jobs;
