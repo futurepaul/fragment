@@ -417,7 +417,12 @@ impl FragmentCell {
             .flatten()
             .filter_map(|f| {
                 let name = f["name"].as_str()?;
-                Some(json!({ "name": name, "role": f["role"], "url": self.cfg.canonical(&caller.url, name), "sharing": f["sharing"], "kind": f["kind"] }))
+                let mut row = json!({ "name": name, "role": f["role"], "url": self.cfg.canonical(&caller.url, name), "sharing": f["sharing"] });
+                // what it is, once it has said (a fragment from before: at its next deploy)
+                if !f["kind"].is_null() {
+                    row["kind"] = f["kind"].clone();
+                }
+                Some(row)
             })
             .collect();
         // without it, the desktop says so in place of its panes
