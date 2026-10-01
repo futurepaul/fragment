@@ -333,6 +333,10 @@ pub(crate) enum MetaKey {
     /// The owner's row in their list has been sent this fragment's sharing
     /// (members.rs); a fragment from before sends it once.
     SharingSent,
+    /// What live's manifest says the fragment is (`FragmentKind`, JSON), as
+    /// its owner's row carries it: set at install, the row sent again when
+    /// it changes (plane.rs `set_kind`).
+    Kind,
     /// When the poll backstop runs next (a day after the last pass, or
     /// within the poll interval while the fragment is busy: plane.rs `busy`).
     PollAt,
@@ -429,6 +433,7 @@ impl MetaKey {
             MetaKey::Repo => "repo",
             MetaKey::IndexVersion => "index_version",
             MetaKey::SharingSent => "sharing_sent",
+            MetaKey::Kind => "kind",
             MetaKey::PollAt => "poll_at",
             MetaKey::OutsideAt => "outside_at",
             MetaKey::TemplatePending => "template_pending",

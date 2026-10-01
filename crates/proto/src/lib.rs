@@ -541,6 +541,38 @@ pub struct ListedFragment {
     /// (`None` until it has: a fragment from before sends it once).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sharing: Option<Sharing>,
+    /// Its owner's row only: what its live manifest says it is (`None`
+    /// until it has said: a fragment from before says so at its next
+    /// deploy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<FragmentKind>,
+}
+
+/// What a fragment is, from its live manifest, as its owner's list carries
+/// it (the desktop's chats, apps, and computers: ROADMAP decision 25): a
+/// chat (it declares a `chat` channel) and who answers it, and the computer
+/// it declares (`default`, a Sprite, or a preset: `hermes`). Neither: an
+/// app.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FragmentKind {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<ChatKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer: Option<String>,
+}
+
+/// Who answers a chat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatKind {
+    pub answers: Answers,
+}
+
+/// `agent`: an agent (the owner's own, or the fragment's); `people`: no one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Answers {
+    Agent,
+    People,
 }
 
 /// A fragment's sharing, in its owner's list (the desktop's badges): who
@@ -1504,14 +1536,17 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner, sharing: None }] };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner, sharing: None, kind: None }] };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes.ann", "role": "owner" }] }));
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1 };
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "chat.ann".into(), role: Role::Owner, sharing: Some(sharing) }] };
+        let kind = FragmentKind { chat: Some(ChatKind { answers: Answers::Agent }), computer: None };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "chat.ann".into(), role: Role::Owner, sharing: Some(sharing), kind: Some(kind) }] };
         assert_eq!(
             value(&listed),
-            serde_json::json!({ "fragments": [{ "name": "chat.ann", "role": "owner", "sharing": { "visibility": "link", "members": 3, "guests": 1 } }] })
+            serde_json::json!({ "fragments": [{ "name": "chat.ann", "role": "owner", "sharing": { "visibility": "link", "members": 3, "guests": 1 }, "kind": { "chat": { "answers": "agent" } } }] })
         );
+        let app = ListedFragment { name: "todo.ann".into(), role: Role::Owner, sharing: None, kind: Some(FragmentKind::default()) };
+        assert_eq!(value(&app), serde_json::json!({ "name": "todo.ann", "role": "owner", "kind": {} }));
         let members = MemberList { members: vec![] };
         assert_eq!(value(&members), serde_json::json!({ "members": [] }));
         let invites = InviteList { invites: vec![] };

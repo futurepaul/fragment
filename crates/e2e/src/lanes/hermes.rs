@@ -223,6 +223,11 @@ pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
     let events = || events_of(api, &owner, &name);
     let ready = soon(s, || events().iter().any(|e| e.starts_with("hermes.ready")));
     s.ok("the platform makes it, and the fragment's events say it serves", ready, format!("{:?}", events()));
+    let kind = || {
+        let listed = api.signed(&owner, "GET", "/api/fragments", None).map(|r| r.body).unwrap_or_default();
+        listed["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == name.as_str()).map(|f| f["kind"].clone()).unwrap_or_default()
+    };
+    s.ok("its owner's list says it is a Hermes computer", soon(s, || kind() == json!({ "computer": "hermes" })), kind());
     let computers = s.sandcastle.computers();
     s.ok("one computer on the node", computers.len() == computers_before.len() + 1, format!("{:?}", computers.keys()));
     let (computer, fake) = computers.into_iter().find(|(n, _)| !computers_before.contains_key(n)).context("its computer")?;

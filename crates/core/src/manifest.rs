@@ -73,6 +73,19 @@ impl Preset {
 }
 
 impl Manifest {
+    /// What it says the fragment is, for its owner's list (decision 25).
+    pub fn kind(&self) -> fragment_proto::FragmentKind {
+        use fragment_proto::{Answers, ChatKind};
+        let chat = self.channels.contains_key("chat").then(|| ChatKind {
+            answers: match &self.agent {
+                Some(a) if a.channel == "chat" => Answers::Agent,
+                _ => Answers::People,
+            },
+        });
+        let computer = self.computer.as_ref().map(|c| c.preset.map_or("default", Preset::name).to_string());
+        fragment_proto::FragmentKind { chat, computer }
+    }
+
     /// The default computer it declares (a Sprite), not a preset's.
     pub fn default_computer(&self) -> Option<&ComputerDecl> {
         self.computer.as_ref().filter(|c| c.preset.is_none())
@@ -438,6 +451,17 @@ mod tests {
         }
         // the cut: `hermes` is no key of a manifest's (docs/runtime-seam.md, decision 1)
         assert_eq!(parse(br#"{"hermes":{}}"#).unwrap().computer, None);
+        // what each says it is
+        let kind = |j: &str| serde_json::to_value(parse(j.as_bytes()).unwrap().kind()).unwrap();
+        assert_eq!(kind(r#"{}"#), serde_json::json!({}));
+        assert_eq!(kind(r#"{"computer":{}}"#), serde_json::json!({ "computer": "default" }));
+        assert_eq!(kind(r#"{"computer":{"preset":"hermes"}}"#), serde_json::json!({ "computer": "hermes" }));
+        assert_eq!(kind(r#"{"channels":{"chat":{}}}"#), serde_json::json!({ "chat": { "answers": "people" } }));
+        assert_eq!(
+            kind(r#"{"channels":{"chat":{"post":"viewer"},"work":{}},"agent":{"personal":true,"channel":"chat"}}"#),
+            serde_json::json!({ "chat": { "answers": "agent" } })
+        );
+        assert_eq!(kind(r#"{"channels":{"desk":{"post":"viewer"}},"agent":{"personal":true,"channel":"desk"}}"#), serde_json::json!({}));
         let long = format!(r#"{{"computer":{{"start":"{}"}}}}"#, "x".repeat(COMPUTER_START_MAX_BYTES + 1));
         for start in [r#"{"computer":{"start":""}}"#, r#"{"computer":{"start":7}}"#, r#"{"computer":{"start":"a","size":1}}"#, &long] {
             assert!(parse(start.as_bytes()).is_err(), "{}", &start[..40.min(start.len())]);

@@ -75,17 +75,25 @@ reply as a `chat` record, and, new, its reply as it is written as a
 Each phase is a pull request with its own checks; the deploys between
 them are Paul's to approve.
 
-1. **The chat for anyone.** The platform's chat page (`cell/chat.mjs`)
-   shows each author's face (a person's picture; an agent's or a
-   computer's own mark beside its owner's), who is here (presence), and
-   a reply as it streams (`draft`). `__fragments` says what each
-   fragment is from its live manifest (a chat and who answers it, a
-   computer and its preset, an app), and the desktop reads that in place
-   of name prefixes.
-   - Checks (e2e, Chrome): two people in a chat see each other's
-     messages with names and faces, and each other's presence; a draft
-     shows as it grows and gives way to the final record; the desktop
-     lists a chat, a computer, and an app by their manifests.
+1. **The chat for anyone** (built 2026-10-01). The platform's chat page
+   (`cell/chat.mjs`) shows each author's face (a person's picture or
+   initial; an agent's, a computer's, or a Hermes' mark; your own agent
+   as "Your agent"), and who else is here and who is writing, from the
+   fragment's presence (each page shares `{typing}`). `__people` names a
+   computer and marks a fragment's Hermes (`preset`). Each fragment's
+   owner's row carries what its live manifest says it is (`kind`: a chat
+   and who answers it, a computer and its preset, or an app), sent only
+   when an install changes it, and the desktop's sections read that, not
+   name prefixes (a fragment listed before kinds: by its name until its
+   next deploy). The streaming `draft` moved to phase 2, which first
+   writes one.
+   - Checks (e2e, Chrome): an agent's answer shows its face and whose
+     agent it is, and the owner's own as "Your agent"; a second reader
+     shows as here on the first page, and the first on theirs, then as
+     writing while they type, and gone once they leave; a chat made
+     elsewhere under any name is listed under Chats, and the owner's
+     list says what each is; a Hermes' fragment is listed as a `hermes`
+     computer.
 2. **Hermes answers a chat.** A chat names its owner's Hermes as who
    answers. The Hermes cell is the Relay connector: Hermes' gateway
    dials it, authenticated by its secret; the cell hands it the chat's

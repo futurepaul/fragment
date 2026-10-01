@@ -19,7 +19,10 @@
 // this fragment's, shown small at `__blob/<shot>`), `turn.end`. The page
 // groups a turn's steps above its answer, shows who is working while one
 // runs, and gives the person who started it a Stop button. Nothing streams:
-// each record is a whole step.
+// each record is a whole step. Everyone who writes has a face (a person's
+// picture or initial; an agent's, a computer's, a Hermes' mark), and who is
+// here, and who is writing, shows above the composer (the fragment's
+// presence: this page shares `{typing}`).
 //
 // Ported from finite-mono's hosted chat (the desktop's look): Funnel Sans and
 // JetBrains Mono, a 720 px column, dark unless the system asks for light.
@@ -35,6 +38,8 @@ const ICON = {
   chat: '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/>',
   stop: '<rect x="7" y="7" width="10" height="10" rx="1.5"/>',
   send: '<path d="M12 19V5M5 12l7-7 7 7"/>',
+  spark: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M18 6l-2.5 2.5M8.5 15.5 6 18"/>',
+  monitor: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
 };
 const svg = (name, cls = "") => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICON[name]}</svg>`;
 
@@ -44,6 +49,10 @@ const TEXT_MAX = 16000;
 // After a message of one's own, the working line shows at once, until the
 // agent's turn starts (or this long passes: an agent may not be listening).
 const PENDING_MS = 15000;
+// Typing shows to others until this long after the last keystroke.
+const TYPING_MS = 4000;
+// Faces shown in the "here" line; more are counted.
+const HERE_FACES_MAX = 5;
 const ROLES = ["public", "viewer", "editor", "owner"];
 const atLeast = (role, floor) => ROLES.indexOf(role) >= ROLES.indexOf(floor);
 
@@ -68,6 +77,7 @@ export function mount(root, options = {}) {
     <div class="composer-wrap">
       <button class="latest" id="latest" type="button" hidden>Latest</button>
       <div class="banner" id="banner" hidden><span id="banner-text"></span><button type="button" id="banner-dismiss">Dismiss</button></div>
+      <div class="here" id="here" hidden></div>
       <form class="composer" id="say">
         <textarea id="text" rows="1" aria-label="Message" maxlength="${TEXT_MAX}"></textarea>
         <div class="composer-actions">
@@ -89,15 +99,24 @@ export function mount(root, options = {}) {
     pending: 0, // when this page sent a message the agent has not started on
     stopping: new Set(), // turns this page asked to stop
     work: false, // whether this page reads the work channel
+    here: [], // the fragment's presence: [{ id, principal, data }]
   };
   const nodes = new Map(); // a message's seq -> its node (records never change)
   const people = new Map(); // principal -> a promise of its profile
   const known = new Map(); // principal -> its profile, once fetched
 
-  // ---- names: a person by username, an agent as its owner's ----
+  // ---- names and faces: a person by username and picture, an agent as
+  // its owner's, a computer by its name, a Hermes as Hermes ----
+  function described(p, principal) {
+    const owner = p.username ?? null;
+    if (p.kind === "agent") return { agent: true, mark: "agent", owner, label: `${owner ?? "someone"}'s agent` };
+    if (p.kind === "computer" && p.preset === "hermes") return { agent: true, mark: "hermes", owner, label: "Hermes" };
+    if (p.kind === "computer") return { agent: true, mark: "computer", owner, label: p.name ?? `${owner ?? "someone"}'s computer` };
+    return { agent: false, mark: "person", owner: null, label: p.username ?? `id:…${principal.slice(-6)}`, picture: typeof p.picture === "string" ? p.picture : null };
+  }
   function profile(principal) {
     if (!principal.startsWith("id:")) {
-      known.set(principal, { agent: false, label: "a visitor" });
+      known.set(principal, { agent: false, mark: "person", label: "a visitor" });
       return Promise.resolve(known.get(principal));
     }
     if (!people.has(principal)) {
@@ -107,7 +126,7 @@ export function mount(root, options = {}) {
           .then((r) => r.json())
           .then((v) => v.profiles?.[principal] ?? {})
           .catch(() => ({}))
-          .then((p) => ({ agent: p.kind === "agent", label: p.kind === "agent" || p.kind === "computer" ? `${p.username ?? "someone"}'s ${p.kind}` : (p.username ?? `id:…${principal.slice(-6)}`) }))
+          .then((p) => described(p, principal))
           .then((p) => {
             known.set(principal, p);
             // a name that arrives later: the nodes that show it are made again
@@ -124,6 +143,25 @@ export function mount(root, options = {}) {
     return known.get(principal);
   }
   const labelOf = (principal, fallback) => named(principal)?.label ?? fallback;
+  // whose agent is this page's: an agent named for this page's person
+  const isMine = (who) => who?.mark === "agent" && !!who.owner && who.owner === named(state.me?.principal ?? "")?.label;
+
+  function face(who) {
+    const f = el("span", `face ${who?.mark ?? "person"}`);
+    if (who?.picture) {
+      const img = el("img");
+      img.src = who.picture;
+      img.alt = "";
+      f.append(img);
+    } else if (who?.mark === "agent" || who?.mark === "computer") f.innerHTML = svg(who.mark === "agent" ? "spark" : "monitor");
+    else f.textContent = who?.mark === "hermes" ? "H" : (who?.label ?? "?").replace(/^id:…/, "").charAt(0).toUpperCase();
+    return f;
+  }
+  function byline(who, fallback) {
+    const line = el("div", "who");
+    line.append(face(who), who ? (isMine(who) ? "Your agent" : who.label) : fallback);
+    return line;
+  }
 
   // ---- records ----
   function turnOf(id) {
@@ -216,8 +254,30 @@ export function mount(root, options = {}) {
     $("stop").dataset.turn = mine?.turn ?? "";
     input.placeholder = mine ? "Add to what your agent is doing" : placeholder;
     $("send").disabled = !input.value.trim() || !canPost();
+    renderHere();
     if (stuck) scroll.scrollTop = scroll.scrollHeight;
     showLatest();
+  }
+
+  // Who else is here (each person once, whatever their tabs), and who of
+  // them is writing.
+  function renderHere() {
+    const others = new Map();
+    for (const p of state.here) {
+      if (p.principal === state.me?.principal) continue;
+      const was = others.get(p.principal);
+      others.set(p.principal, { typing: !!(was?.typing || p.data?.typing) });
+    }
+    const line = $("here");
+    line.hidden = others.size === 0;
+    if (!others.size) return line.replaceChildren();
+    const faces = el("span", "faces");
+    for (const principal of [...others.keys()].slice(0, HERE_FACES_MAX)) faces.append(face(named(principal)));
+    const names = [...others.keys()].map((p) => labelOf(p, "someone"));
+    const typing = [...others].filter(([, v]) => v.typing).map(([p]) => labelOf(p, "someone"));
+    const list = (xs) => (xs.length === 1 ? xs[0] : xs.length === 2 ? `${xs[0]} and ${xs[1]}` : `${xs[0]} and ${xs.length - 1} others`);
+    const said = typing.length ? `${list(typing)} ${typing.length === 1 ? "is" : "are"} writing…` : `${list(names)} ${names.length === 1 ? "is" : "are"} here`;
+    line.replaceChildren(faces, el("span", null, said));
   }
 
   function message(m) {
@@ -232,7 +292,7 @@ export function mount(root, options = {}) {
   function userMessage(m, who) {
     const mine = m.principal === state.me?.principal;
     const wrap = el("div", `msg user ${mine ? "mine" : "other"}`);
-    if (!mine) wrap.append(el("div", "who", who?.label ?? "…"));
+    if (!mine) wrap.append(byline(who, "…"));
     wrap.append(el("div", "bubble", m.text), el("div", "time", time(m.at)));
     return wrap;
   }
@@ -247,8 +307,8 @@ export function mount(root, options = {}) {
     copy.title = "Copy";
     copy.innerHTML = svg("copy");
     copy.onclick = () => copyText(m.text, copy);
-    actions.append(copy, el("span", "who", who?.label ?? "the agent"), el("span", "time", time(m.at)));
-    wrap.append(body, actions);
+    actions.append(copy, el("span", "time", time(m.at)));
+    wrap.append(byline(who, "the agent"), body, actions);
     return wrap;
   }
 
@@ -315,9 +375,9 @@ export function mount(root, options = {}) {
     const hint = el("span", "hint");
     const dots = el("span", "dots");
     dots.append(el("i"), el("i"), el("i"));
-    const agent = t?.agent ? named(t.agent)?.label : null;
+    const agent = t?.agent ? named(t.agent) : null;
     const forWhom = t?.asker && t.asker !== state.me?.principal ? ` for ${labelOf(t.asker, "someone")}` : "";
-    const who = !t || t.asker === state.me?.principal ? "Your agent" : agent ? capital(agent) : "The agent";
+    const who = agent && !isMine(agent) ? capital(agent.label) : !t || t.asker === state.me?.principal || isMine(agent) ? "Your agent" : "The agent";
     hint.append(dots, `${who} is working${forWhom}`);
     line.append(hint);
     return line;
@@ -387,6 +447,18 @@ export function mount(root, options = {}) {
     $("send").disabled = !input.value.trim() || !canPost();
   }
   input.addEventListener("input", grow);
+  // this page's typing, to everyone here: on while there is text and a key
+  // came lately, off after a send or TYPING_MS of quiet
+  let typing = false;
+  let typingTimer = null;
+  function setTyping(on) {
+    clearTimeout(typingTimer);
+    if (on) typingTimer = setTimeout(() => setTyping(false), TYPING_MS);
+    if (on === typing) return;
+    typing = on;
+    fragment.presence.set({ typing: on });
+  }
+  input.addEventListener("input", () => setTyping(!!input.value.trim()));
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
@@ -414,6 +486,7 @@ export function mount(root, options = {}) {
     const draft = input.value;
     input.value = "";
     grow();
+    setTyping(false);
     try {
       await fragment.post("chat", { text });
       $("banner").hidden = true;
@@ -443,8 +516,13 @@ export function mount(root, options = {}) {
     }
   };
 
-  // ---- who this page is, then the channels it may read ----
+  // ---- who this page is, then the channels it may read, and who is here ----
   fragment.subscribe("chat", onChat, { last: 200 });
+  fragment.presence.set({ typing: false });
+  fragment.presence.on((list) => {
+    state.here = list;
+    schedule();
+  });
   fragment.me().then((hello) => {
     state.me = hello;
     for (const m of state.messages) nodes.delete(m.seq);
