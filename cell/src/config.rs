@@ -175,7 +175,8 @@ impl Config {
             operators: var(env, "FRAGMENT_OPERATORS").map(|l| fragment_core::npub::parse_list(&l)),
             sandcastle_nodes: var(env, "FRAGMENT_SANDCASTLE_NODES").map(|l| fragment_core::npub::parse_list(&l)),
             sandcastle_api: var(env, "FRAGMENT_SANDCASTLE_API").map(|u| u.trim_end_matches('/').to_string()),
-            hermes_image: var(env, "FRAGMENT_HERMES_IMAGE").unwrap_or_else(|| "nousresearch/hermes-agent:v2026.9.24".into()),
+            // the desktop build: its screen (TigerVNC, Xfce) and a browser for it
+            hermes_image: var(env, "FRAGMENT_HERMES_IMAGE").unwrap_or_else(|| "nousresearch/hermes-agent:v2026.9.24-desktop".into()),
             hermes_model: var(env, "FRAGMENT_HERMES_MODEL").unwrap_or_else(|| "z-ai/glm-5.3-flash".into()),
             hermes_tick_ms: var(env, "FRAGMENT_HERMES_TICK_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(5) * 1000,
             signins_pending_max: var(env, "FRAGMENT_SIGNINS_PENDING_MAX")
