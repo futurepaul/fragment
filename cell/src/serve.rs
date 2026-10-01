@@ -235,13 +235,14 @@ impl FragmentCell {
             };
             json_response(&answer)?
         } else if path == "__hermes/access" {
-            // a native session for its Hermes (hermes.rs), for the page's own
-            // origin, as the router took it (never the client's `Origin`)
+            // an admission to its Hermes for the page's iroh key (hermes.rs;
+            // a cross-site form cannot send JSON without a preflight)
             if req.method() != Method::Post || !req.headers().get("content-type")?.is_some_and(|c| c.starts_with("application/json")) {
-                return Err(CellError::invalid("POST for a session as application/json"));
+                return Err(CellError::invalid("POST {peer} for an admission as application/json"));
             }
-            let origin = self.cfg.origin(&caller.url, name);
-            self.hermes_access(caller, &origin).await?
+            let body: Value = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let peer = body["peer"].as_str().ok_or_else(|| CellError::invalid("peer is the page's iroh key"))?.to_string();
+            self.hermes_access(caller, &peer).await?
         } else if path == "__presence" {
             // who has each of the owner's named fragments open (publish.rs)
             json_response(&self.owner_presence(caller).await?)?

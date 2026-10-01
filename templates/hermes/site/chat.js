@@ -44,7 +44,7 @@ function toolRow(name) {
 async function start() {
   state("connecting", "Connecting…");
   try {
-    await hermes.grant();
+    await hermes.connect();
   } catch (e) {
     return refused(e);
   }

@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::site;
 use fragment_proto::{CreateFragment, ErrorBody, ErrorCode, IdentityKind, Role, Visibility};
-use fragment_templates::{Template, BLANK, BUILDER, CALORIES, CHAT, DESKTOP, INBOX, PET, TODO};
+use fragment_templates::{Template, BLANK, BUILDER, CALORIES, CHAT, DESKTOP, HERMES, INBOX, PET, TODO};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use worker::*;
@@ -27,8 +27,19 @@ use crate::routed::{Credential, Signed};
 /// offers them: the simplest first, the desktop (a demo) last. `notes`
 /// stays with the CLI (`fragment new --template notes`): at 3 MiB it would
 /// double the cell. `builder` is also what an agent's hand-off makes.
-pub(crate) const TEMPLATES: [(&str, Template); 8] =
-    [("blank", BLANK), ("todo", TODO), ("inbox", INBOX), ("calories", CALORIES), ("pet", PET), ("builder", BUILDER), ("chat", CHAT), ("desktop", DESKTOP)];
+/// `hermes` makes its owner's own Hermes on the fleet's sandcastle node
+/// (docs/hermes-chat.md).
+pub(crate) const TEMPLATES: [(&str, Template); 9] = [
+    ("blank", BLANK),
+    ("todo", TODO),
+    ("inbox", INBOX),
+    ("calories", CALORIES),
+    ("pet", PET),
+    ("builder", BUILDER),
+    ("chat", CHAT),
+    ("hermes", HERMES),
+    ("desktop", DESKTOP),
+];
 
 /// `live` moving under a deploy this many times is an error.
 const DEPLOY_ATTEMPTS: usize = 5;
@@ -406,7 +417,12 @@ impl FragmentCell {
             .flatten()
             .filter_map(|f| {
                 let name = f["name"].as_str()?;
-                Some(json!({ "name": name, "role": f["role"], "url": self.cfg.canonical(&caller.url, name), "sharing": f["sharing"] }))
+                let mut row = json!({ "name": name, "role": f["role"], "url": self.cfg.canonical(&caller.url, name), "sharing": f["sharing"] });
+                // what it is, once it has said (a fragment from before: at its next deploy)
+                if !f["kind"].is_null() {
+                    row["kind"] = f["kind"].clone();
+                }
+                Some(row)
             })
             .collect();
         // without it, the desktop says so in place of its panes

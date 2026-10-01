@@ -257,9 +257,9 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let todo_st = api.status(&owner, &todo)?;
     s.ok("(other templates keep theirs: a todo opens to anyone with its link)", todo_st.body["visibility"] == "link", &todo_st);
 
-    // a chat made elsewhere (the API, another desktop) under the name New
-    // chat gives one is a chat here too
-    let elsewhere = make(&s.name("chat"), "chat")?;
+    // a chat made elsewhere (the API, another desktop), under any name, is a
+    // chat here too: its manifest says so (its kind, in its owner's list)
+    let elsewhere = make(&s.name("talk"), "chat")?;
 
     // signed in on the platform, the browser walks to the desktop's origin
     chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
@@ -270,7 +270,14 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("but not itself", chrome.eval(&page, &format!("![...document.querySelectorAll('#apps .row .label')].map(l => l.textContent).includes({:?})", label(&desk)))? == json!(true), "");
     let sidebar = |chrome: &mut Browser| chrome.eval(&page, "[...document.querySelectorAll('#chats .row, #apps .row')].map(r => r.dataset.key)").unwrap_or_default();
     let sorted = format!("!!document.querySelector('#chats .row[data-key=\"chat:{elsewhere}\"]') && !document.querySelector('#apps .row[data-key=\"app:{elsewhere}\"]')");
-    s.ok("a chat made elsewhere, named as New chat names one (chat-…), is listed under Chats, not Apps", chrome.until(&page, &sorted, wait), sidebar(&mut chrome));
+    s.ok("a chat made elsewhere, whatever its name, is listed under Chats, not Apps: its manifest says it is one", chrome.until(&page, &sorted, wait), sidebar(&mut chrome));
+    let mine = api.signed(&owner, "GET", "/api/fragments", None)?;
+    let kind = |name: &str| mine.body["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == name).map(|f| f["kind"].clone()).unwrap_or_default();
+    s.ok(
+        "and its owner's list says what each is: a chat and who answers it, an app",
+        kind(&elsewhere) == json!({ "chat": { "answers": "agent" } }) && kind(&todo) == json!({}),
+        format!("{} / {}", kind(&elsewhere), kind(&todo)),
+    );
 
     // Clickjacking: a fragment's page (its author's code, or an agent's)
     // frames the platform's approval of a key of its own. The two are one
@@ -334,8 +341,10 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.eval_in_frame(&page, &format!("{}--", label(&chat)), "document.getElementById('messages').textContent").ok().and_then(|v| v.as_str().map(|t| t.contains(text))) == Some(true)
     };
     s.ok("the owner's agent answers in it", s.eventually(wait, || in_chat(&mut chrome, "Hi! I'm your agent.")), "");
-    let named = format!("{}'s agent", api.username(&owner)?);
-    s.ok("named as its owner's agent", s.eventually(wait, || in_chat(&mut chrome, &named)), &named);
+    let mine = |chrome: &mut Browser| {
+        chrome.eval_in_frame(&page, &format!("{}--", label(&chat)), "[...document.querySelectorAll('.msg.agent > .who')].some(w => w.textContent === 'Your agent' && !!w.querySelector('.face.agent'))").ok() == Some(json!(true))
+    };
+    s.ok("named, to its owner, as their own agent, with its face", s.eventually(wait, || mine(&mut chrome)), "");
 
     // A socket has no CORS, and every fragment is one site with the others:
     // a page on the todo's origin (its author's code, or an agent's) opens

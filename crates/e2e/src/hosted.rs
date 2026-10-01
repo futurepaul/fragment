@@ -33,7 +33,9 @@ const AI_JSON: &[u8] = include_bytes!("../fixtures/hosted_ai.json");
 const RUN_WAIT: Duration = Duration::from_secs(120);
 /// The fragments a run makes (labels): a run first removes any a crashed
 /// run left behind.
-const MADE: [&str; 5] = ["todo", "inbox", "blobs", "egress", "ai"];
+const MADE: [&str; 6] = ["todo", "inbox", "blobs", "egress", "ai", "hermes"];
+/// How long the fleet's sandcastle node may take to make a Hermes.
+const HERMES_READY: Duration = Duration::from_secs(300);
 
 struct CodeStorage {
     org: String,
@@ -229,6 +231,7 @@ pub fn run(cli: PathBuf, scratch: PathBuf, only: Option<String>) -> Result<()> {
         blobs(&mut h)?;
         egress(&mut h)?;
         ai(&mut h)?;
+        hermes(&mut h)?;
         Ok(())
     })();
     cleanup(&mut h);
@@ -490,6 +493,74 @@ fn ai(h: &mut Hosted) -> Result<()> {
 
 /// Deletes this run's fragments, then their repos (the cell keeps a
 /// deleted fragment's repo; a test run should leave nothing behind).
+/// A fragment's own Hermes on the fleet's sandcastle node, the hosted
+/// proof (docs/hermes-chat.md): made by a deploy of the hermes template,
+/// then reached by its key the way the template's page reaches it (a key
+/// of its own, an admission from the fragment, Hermes' REST and its socket
+/// over one iroh connection through the node's relay), and a turn on the
+/// real model, billed to the e2e person. The page itself needs a person
+/// signed in through WorkOS, which a run is not: the `hermes` lane drives
+/// it in Chrome on fakes, and the sandcastle e2e's `web` section drives
+/// the same client in Chrome on the node.
+fn hermes(h: &mut Hosted) -> Result<()> {
+    use crate::lanes::hermes as lane;
+    if !h.section("hermes") {
+        return Ok(());
+    }
+    let name = h.name("hermes");
+    let dir = h.dir("hermes");
+    let t0 = Instant::now();
+    let init = h.cli_json(&dir, &["init", &name, "--template", "hermes", "--json"]);
+    h.remember(&name);
+    let init = init?;
+    h.ok("fragment init makes and deploys the hermes template", init["shareLink"].as_str().is_some_and(|l| l.starts_with("https://")), &init);
+    for (label, held, detail) in lane::client_checks(&h.api, &name)? {
+        h.ok(label, held, detail);
+    }
+    let events = |h: &Hosted| -> Vec<String> {
+        let r = h.signed("GET", &format!("/api/f/{name}/events?tail=50"), None).map(|r| r.body).unwrap_or_default();
+        r["events"].as_array().into_iter().flatten().map(|e| format!("{}: {}", e["kind"].as_str().unwrap_or(""), e["summary"].as_str().unwrap_or(""))).collect()
+    };
+    let ready = h.eventually(HERMES_READY, || events(h).iter().any(|e| e.starts_with("hermes.ready")));
+    h.ok("the platform makes its Hermes on the sandcastle node", ready, format!("{:?}", events(h)));
+    h.note("made (init to hermes.ready)", format!("{:.1?}", t0.elapsed()));
+    if !ready {
+        return Ok(());
+    }
+    let rt = tokio::runtime::Runtime::new()?;
+    let page = lane::Peer::new(rt.handle().clone());
+    let r = lane::access(&h.api, &name, None, &page.id())?;
+    h.ok("signed out, no admission", r.status == 401, &r);
+    let t = Instant::now();
+    let r = lane::access(&h.api, &name, Some(&h.key), &page.id())?;
+    let granted = r.body.clone();
+    let now = now_s();
+    let admission = granted["admission"].as_str().map(|a| fragment_nip98::verify_admission(a, now, 60));
+    let right = admission.as_ref().is_some_and(|a| a.as_ref().is_ok_and(|a| a.peer == page.id() && a.node == granted["node"] && a.expires_at <= now + 300));
+    h.ok("its owner gets an admission for the page's own key, five minutes long", r.status == 200 && right && granted["host"] == "127.0.0.1", format!("{} {admission:?}", r.status));
+    h.note("the admission", format!("{} ms; relay {}", t.elapsed().as_millis(), granted["relay"]));
+    let t = Instant::now();
+    let (conn, answer) = page.connect(&granted)?;
+    h.ok("the key connects through the node's relay and is admitted", answer["admitted"] == true, &answer);
+    h.note("connected and admitted", format!("{} ms", t.elapsed().as_millis()));
+    let port = page.tunnel(conn)?;
+    let token = granted["token"].as_str().unwrap_or("").to_string();
+    let (status, _) = lane::get(port, "/api/sessions", None)?;
+    h.ok("without its session token, Hermes refuses a read", status == 401, status);
+    let t = Instant::now();
+    let (status, body) = lane::get(port, "/api/sessions", Some(&token))?;
+    h.ok("with it, Hermes answers by its key", status == 200 && body["sessions"].is_array(), &body);
+    h.note("first answer (a wake when it slept)", format!("{} ms", t.elapsed().as_millis()));
+    let t = Instant::now();
+    let reply = lane::turn(port, &token, "Reply with exactly: hosted by its key");
+    h.ok("a turn on the real model over its socket", reply.as_deref().is_ok_and(|t| t.to_lowercase().contains("hosted by its key")), format!("{reply:?}"));
+    h.note("the turn", format!("{:.1?}", t.elapsed()));
+    let other = lane::Peer::new(rt.handle().clone());
+    let (_, answer) = other.connect(&granted)?;
+    h.ok("another key with the page's admission is refused by the node", answer["admitted"] == false, &answer);
+    Ok(())
+}
+
 fn cleanup(h: &mut Hosted) {
     let made = std::mem::take(&mut h.made);
     let mut left = vec![];

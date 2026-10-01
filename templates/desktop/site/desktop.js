@@ -328,14 +328,26 @@ function item(row, name) {
   return wrap;
 }
 
+// ---- what each fragment is: its live manifest's kind, as its owner's list
+// carries it (a chat and who answers it; a computer and its preset). One
+// listed before kinds says so at its next deploy; until then, by the name
+// New chat or New computer gave it (`chat-…`, `computer-…`). ----
+function kindOf(f) {
+  if (f?.kind) return f.kind;
+  const l = label(f?.name ?? "");
+  return l.startsWith("chat-") ? { chat: { answers: "agent" } } : l.startsWith("computer-") ? { computer: "default" } : {};
+}
+
 // ---- chats: each a chat fragment, shown in the middle column ----
-// A chat is a fragment New chat named (`chat-…`), wherever it was made; the
-// ones this desktop made come first, newest first.
+// A chat is a fragment that says it is one, wherever it was made (a
+// computer's own chat is with its computer); the ones this desktop made
+// come first, newest first.
 function chatNames() {
   const made = state.chats.filter(byName);
-  const others = state.fragments.filter((f) => label(f.name).startsWith("chat-") && f.name !== state.self && !made.includes(f.name)).map((f) => f.name);
+  const others = state.fragments.filter((f) => kindOf(f).chat && !kindOf(f).computer && f.name !== state.self && !made.includes(f.name)).map((f) => f.name);
   return [...made, ...others];
 }
+const ANSWERS = { agent: "agent", people: "people" };
 
 function renderChats() {
   const chats = chatNames();
@@ -344,6 +356,8 @@ function renderChats() {
     row.dataset.key = `chat:${name}`;
     row.innerHTML = svg("chat");
     row.append(el("span", "label", label(name)), ...badges(byName(name)));
+    const answers = ANSWERS[kindOf(byName(name)).chat?.answers];
+    if (answers) row.append(el("span", "meta", answers));
     row.onclick = () => { openChat(name); leaveSidebar(); };
     return item(row, name);
   }) : [el("div", "empty-row", "No chats yet")]));
@@ -401,11 +415,12 @@ function paneIcon(name) {
   return i;
 }
 
-// A computer is a fragment New computer named (`computer-…`, from the pet
-// template), wherever it was made: a pane like an app, awake while its page
-// is open (the platform's rule, on its owner's budget) and asleep a few
-// minutes after its pane closes.
-const isComputer = (name) => label(name).startsWith("computer-") && name !== state.self;
+// A computer is a fragment that declares one (New computer makes one from
+// the pet template; a Hermes is one too), wherever it was made: a pane like
+// an app, awake while its page is open (the platform's rule, on its
+// owner's budget) and asleep a few minutes after its pane closes.
+const isComputer = (name) => name !== state.self && !!kindOf(byName(name)).computer;
+const PRESETS = { hermes: "Hermes" };
 const iconOf = (name) => (isComputer(name) ? paneIcon("computer") : appIcon(label(name)));
 
 const apps = () => {
@@ -417,6 +432,8 @@ function appRow(f) {
   const row = el("button", `row${viewer.keys.includes(`app:${f.name}`) ? " open" : ""}`);
   row.dataset.key = `app:${f.name}`;
   row.append(iconOf(f.name), el("span", "label", label(f.name)), ...badges(f));
+  const preset = PRESETS[kindOf(f).computer];
+  if (preset) row.append(el("span", "meta", preset));
   if (f.role !== "owner") row.append(el("span", "meta", f.role));
   row.onclick = () => { openApp(f.name); leaveSidebar(); };
   return item(row, f.name);

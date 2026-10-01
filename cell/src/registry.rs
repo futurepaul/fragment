@@ -401,8 +401,9 @@ impl RegistryCell {
     }
 
     /// What anyone may know of identities, as a page shows a name: a
-    /// person's username and picture, or that it is someone's agent. An id
-    /// the registry does not hold (an anonymous visitor's) is left out.
+    /// person's username and picture, that it is someone's agent, or a
+    /// computer's name (and `hermes`, a fragment's Hermes). An id the
+    /// registry does not hold (an anonymous visitor's) is left out.
     fn profiles(&self, b: Profiles) -> CellResult<ProfilesAnswer> {
         if b.ids.len() > PROFILES_MAX {
             return Err(CellError::invalid(format!("at most {PROFILES_MAX} identities at once")));
@@ -415,8 +416,10 @@ impl RegistryCell {
                 (IdentityKind::Person, Some(u)) => self.picture_of(&id)?.map(|p| format!("/api/users/{u}/picture?v={}", &p.sha[..12])),
                 _ => None,
             };
+            let name = if who.kind == IdentityKind::Computer { self.computer_name(&id)? } else { None };
+            let preset = name.as_deref().and_then(fragment_core::hermes::fragment_of_identity).map(|_| "hermes".to_string());
             // an agent's identity carries its owner's username
-            profiles.insert(id, Profile { kind: who.kind, username: who.username, picture });
+            profiles.insert(id, Profile { kind: who.kind, username: who.username, picture, name, preset });
         }
         Ok(ProfilesAnswer { profiles })
     }
