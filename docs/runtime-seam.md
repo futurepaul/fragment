@@ -28,7 +28,9 @@ decisions behind it, and the measurement that comes before any cut.
    - Snapshots are out of the guest's reach.
 
    A provider that cannot meet the floor does not hold computers for
-   untrusted people. Sprites keep secrets in the guest and update in
+   untrusted people. One exception (Paul, 2026-10-01): Hermes' Relay
+   secret lives in its computer, scoped to that Hermes in its own chats
+   (docs/one-home.md, decision 3). Sprites keep secrets in the guest and update in
    place, so they fall short on the first two. The rented placement's
    candidate is microsandbox's cloud, which runs the engine sandcastle
    already runs (open questions below).
