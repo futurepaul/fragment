@@ -661,6 +661,8 @@ fn ends(s: &mut Suite, api: &Api, home: &std::path::Path, owner: &Keys, name: &s
     s.ok("its gateway's socket is closed, refused (4401)", soon(s, || s.sandcastle.relay_closes()[closes..].contains(&4401)), json!(s.sandcastle.relay_closes()));
     let r = access(api, name, Some(owner), peer)?;
     s.ok("with no Hermes, no session", r.status == 404, &r);
+    // said while there is none: the new one hears it as it joins
+    post(api, owner, chat, "n0", json!({ "text": "anyone there?" }))?;
     let dir = s.dir("hermes-template");
     let o = s.cli(api, home, &["new", dir.to_str().expect("a UTF-8 path"), "--template", "hermes"]);
     std::fs::write(dir.join("site/notes.txt"), "declared again")?;
@@ -680,6 +682,8 @@ fn ends(s: &mut Suite, api: &Api, home: &std::path::Path, owner: &Keys, name: &s
     post(api, owner, chat, "n1", json!({ "text": "are you new?" }))?;
     let answered = s.eventually(rejoined, || said(api, owner, chat, &by, &format!("echo: [{me}] are you new?")) == 1);
     s.ok("a chat that named it joins the new one, which answers there", one && answered, json!({ "members": new_by(), "chat": records(api, owner, chat, "chat") }));
+    let caught_up = s.eventually(rejoined, || said(api, owner, chat, &by, &format!("echo: [{me}] anyone there?")) == 1);
+    s.ok("and answers what was said while there was none, once", caught_up, json!(records(api, owner, chat, "chat")));
     let o = s.cli(api, home, &["rm", name]);
     s.ok("its owner deletes the fragment", o.status.success(), out(&o));
     let gone = soon(s, || serving(s) == 0 && hermes_of(api).is_empty());
