@@ -163,8 +163,59 @@ commit.
    - the callback route for intercepted requests;
    - `inspect`, `snapshotContainer`, and the intercepts wired to the
      engine;
-   - the conformance Worker, run on lat-6 against both engines.
+   - the conformance Worker, run on lat-6 against this engine and on
+     the Mac against Docker (lat-6 has no Docker, and installing it
+     would rewrite the host's firewall).
 7. **E7, results:** CI, reset, and the evidence.
+
+## E6 design
+
+*2026-10-01.* celld's `ctx.container` today: Docker only, with no
+abstraction (`ContainerEngine` holds a `Docker`); the harness predates
+Cloudflare's current surface (workers-types 5.20261001.1); `inspect`,
+`snapshotContainer`, and the intercepts are stubs that reject. A survey
+also found two celld defects on the way: an inactivity sweeper that
+dropping does not cancel (a re-activated cell's container is killed under
+it), and `CELLD_EGRESS_PUBLIC_ONLY` refusing a container's own port.
+
+The work, on branch `krun-engine` of the celld fork (from the pinned
+`hardening-v0.6.0`, 4f50c81), fragment pinning it only on `krun-spike`:
+
+1. **The engine's exec over its API.** `POST /v1/containers/{name}/exec`
+   with the exec's JSON (`cmd`, `env`, `cwd`, `user`, `stdin`, `stdout`,
+   `stderr`, `pty`) upgrades to a framed stream, Docker's 8-byte frame
+   header (stream byte, big-endian length): to the client 1 stdout,
+   2 stderr, 4 started `{pid}`, 3 exited `{code, signal}`, 5 error; from
+   the client 0 stdin (empty is EOF), 6 resize `{cols, rows}`, 7 signal
+   `{signal}`. The engine applies Cloudflare's env rule (only `PATH`
+   inherited). The guest agent's wire stays the engine's own.
+2. **Intercepts reach celld.** The engine's egress names the container in
+   `x-sandcastle-container` (overwriting whatever the guest sent), so one
+   celld socket serves every VM on the node.
+3. **An engine trait in celld** (`Backend`): reap, prepare, image presence
+   and load (`docker save` tars, as today), create-and-start, wait, kill,
+   remove, inspect, exec, and the new calls (snapshot, intercepts).
+   Docker moves behind it unchanged; the krun backend is a client of the
+   engine's socket. `CELLD_CONTAINER_ENGINE=krun:<engine.sock>` selects
+   it.
+4. **The harness moves to Cloudflare's current surface:** `start({image |
+   containerSnapshot, instance, ...})`, `images`, `inspect()`,
+   `snapshotContainer()`, `interceptOutboundHttp/Https`,
+   `interceptAllOutboundHttp`, and `exec` with `pty`, `resize`, and an
+   `AbortSignal`. Docker gets `inspect`; what Docker cannot do rejects
+   with "not supported by celld's Docker engine".
+5. **Ports.** `getTcpPort` on the krun backend: a celld listener on
+   loopback per (container, port) that takes a socket from `ports.sock`
+   per connection and splices it, so `fetch`, `connect`, and WebSocket
+   upgrades stay celld's own. A dial path that hands the socket to them
+   directly, with no relay, comes after.
+6. **The callback route.** `intercept*` stores the binding's route (the
+   `Fetcher`'s unforgeable side table, as `globalOutbound` uses) on the
+   cell; celld's intercept socket maps `x-sandcastle-container` to the
+   cell and dispatches the request on the service-call path.
+7. **The conformance Worker** in the fork's `examples/`: one Durable
+   Object calling every method of `ctx.container` with a JSON verdict per
+   method, deployable unchanged to Cloudflare.
 
 ## Evaluation
 
