@@ -357,11 +357,12 @@ After the measurement, the cut to one computer resource, in steps:
 The e2e lane `hermes` proves 2 to 4 on fakes (49 checks), the template's
 page in headless Chrome included.
 
+Live on fragment.club since 2026-10-01: the node image, then the cell
+with its static assets, and no wildcard certificate. The hosted proof
+passes (docs/hermes-chat.md, "Phase 5, live").
+
 Still to do:
 
 - **A derived Hermes image** with the bridge as an s6 service, in place
   of the init command.
-- ~~fragment.club~~ live 2026-10-01: the node image, then the cell with
-  its static assets, no wildcard certificate; the hosted proof passes
-  (docs/hermes-chat.md, "Phase 5, live").
 - **The `goose` preset**, and presets on a rented site.
