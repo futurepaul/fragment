@@ -1,0 +1,99 @@
+== date
+2026-10-01T00:44:53Z
+== units
+iroh-relay.service 921147 0 Wed 2026-09-30 18:41:01 UTC 
+sandcastled.service 932627 0 Wed 2026-09-30 18:56:58 UTC 
+== user units
+== msb procs
+ 932627 ubuntu   Wed Sep 30 18:56:57 2026 /home/ubuntu/sandcastle/target/release/sandcastled serve --state-dir /var/lib/sandcastle --domain sandcastle.fragment.club --tls-cert /etc/sandcastle/le-cert.
+1028699 ubuntu   Wed Sep 30 21:34:37 2026 /home/ubuntu/.microsandbox/bin/msb machine --name sc-017ba7df771d19e0 --sandbox-id 182 --startup-fd 98 --vcpus 2 --memory-mib 4096 --config-fd 96 --lifecycle-
+== zfs
+NAME                                          USED  AVAIL  REFER  ORIGIN
+tank                                         10.4G  1.67T    96K  -
+tank/sandcastle                              10.4G  1.45T    96K  -
+tank/sandcastle/017ba7df771d19e0             10.4G  1.46T   249M  -
+tank/sandcastle/017ba7df771d19e0@sc-1-auto    384K      -  36.9M  -
+tank/sandcastle/017ba7df771d19e0@sc-2-pause   328K      -  36.9M  -
+tank/sandcastle/017ba7df771d19e0@sc-3-pause   324K      -  37.0M  -
+tank/sandcastle/017ba7df771d19e0@sc-4-auto    368K      -  37.1M  -
+tank/sandcastle/017ba7df771d19e0@sc-5-auto    652K      -   249M  -
+tank/sandcastle/017ba7df771d19e0@sc-6-auto    580K      -   249M  -
+tank/sandcastle/017ba7df771d19e0@sc-7-pause   144K      -   249M  -
+== mem
+               total        used        free      shared  buff/cache   available
+Mem:             124           4         112           0           9         120
+Swap:              0           0           0
+== listen
+0.0.0.0:22 users:(("sshd",pid=4067),("systemd",pid=1))
+0.0.0.0:443 users:(("sandcastled",pid=932627),("systemd",pid=1))
+127.0.0.1:20000 users:(("libkrun
+127.0.0.1:3340 users:(("iroh-relay",pid=921147))
+127.0.0.1:9091 users:(("iroh-relay",pid=921147))
+127.0.0.53%lo:53 users:(("systemd-resolve",pid=796))
+127.0.0.54:53 users:(("systemd-resolve",pid=796))
+[::]:22 users:(("sshd",pid=4067),("systemd",pid=1))
+*:8443 users:(("iroh-relay",pid=921147))
+Local Peer
+== nft hash
+0bc3739bf4e3714f2e0b81c64952afc8242df72e783f042827b8d0335b2e8a63  -
+== iptables hash
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  -
+== netns
+== home
+total 68
+drwxr-x--- 11 ubuntu ubuntu 4096 Sep 30 21:34 .
+drwxr-xr-x  3 root   root   4096 Sep 29 12:19 ..
+-rw-r--r--  1 ubuntu ubuntu  220 Mar 31  2024 .bash_logout
+-rw-r--r--  1 ubuntu ubuntu 3792 Sep 29 15:20 .bashrc
+drwx------  2 ubuntu ubuntu 4096 Sep 29 14:33 .cache
+drwxrwxr-x  4 ubuntu ubuntu 4096 Sep 30 18:56 .cargo
+drwxrwxr-x  3 ubuntu ubuntu 4096 Sep 30 18:40 iroh
+drwxrwxr-x  3 ubuntu kvm    4096 Sep 29 14:38 .local
+drwxrwxr-x 10 ubuntu kvm    4096 Sep 29 17:58 .microsandbox
+-rw-r--r--  1 ubuntu ubuntu  828 Sep 29 15:20 .profile
+drwxrwxr-x  6 ubuntu ubuntu 4096 Sep 29 15:20 .rustup
+drwxr-xr-x  4 ubuntu ubuntu 4096 Sep 30 01:31 sandcastle
+drwx------  2 ubuntu ubuntu 4096 Sep 29 15:13 spike
+-rw-rw-r--  1 ubuntu ubuntu 1584 Sep 29 15:13 spike1.log
+-rw-r--r--  1 ubuntu ubuntu 4835 Sep 29 15:13 spike1.sh
+drwx------  2 ubuntu ubuntu 4096 Sep 29 12:19 .ssh
+-rw-r--r--  1 ubuntu ubuntu    0 Sep 29 14:33 .sudo_as_admin_successful
+== kvm
+crw-rw---- 1 root kvm 10, 232 Sep 30 22:02 /dev/kvm
+uid=1000(ubuntu) gid=1000(ubuntu) groups=1000(ubuntu),27(sudo),994(kvm)
+kvm:x:994:ubuntu
+== subuid
+ubuntu:100000:65536
+ubuntu:100000:65536
+== kernel
+Linux finite-lat-6 6.8.0-142-generic #142-Ubuntu SMP PREEMPT_DYNAMIC Wed Sep  2 14:24:27 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+PRETTY_NAME="Ubuntu 24.04.5 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+== cpu
+32
+model name	: AMD EPYC 4564P 16-Core Processor
+== tools
+/usr/sbin/mke2fs
+/usr/sbin/nft
+/usr/sbin/zfs
+/usr/bin/gcc
+/usr/bin/make
+/usr/bin/pkg-config
+/usr/bin/git
+bash: line 20: cargo: command not found
+bash: line 20: rustup: command not found
+== slices
+  -.slice                      loaded active active Root Slice
+  system-getty.slice           loaded active active Slice /system/getty
+  system-modprobe.slice        loaded active active Slice /system/modprobe
+  system-serial\x2dgetty.slice loaded active active Slice /system/serial-getty
+  system-systemd\x2dfsck.slice loaded active active Slice /system/systemd-fsck
+  system.slice                 loaded active active System Slice
+  user.slice                   loaded active active User and Session Slice
+== userns
+kernel.unprivileged_userns_clone = 1
+user.max_user_namespaces = 510535
+0
+== vhost-vsock
+crw-rw---- 1 root kvm 10, 241 Sep 29 12:22 /dev/vhost-vsock

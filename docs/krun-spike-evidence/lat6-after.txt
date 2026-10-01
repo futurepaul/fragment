@@ -1,0 +1,63 @@
+{'removed': ['/home/ubuntu/krun-spike/vms', '/home/ubuntu/krun-spike/data', '/home/ubuntu/krun-spike/jailroot'], 'restore': '{"restored":0}', 'slice_stopped': True}
+{'run_dirs': [], 'scopes': [], 'vm_owned_files': [], 'vm_processes': []}
+== date
+2026-10-01T02:21:16Z
+== units
+iroh-relay.service 921147 0 Wed 2026-09-30 18:41:01 UTC 
+sandcastled.service 932627 0 Wed 2026-09-30 18:56:58 UTC 
+== msb procs
+1028699 ubuntu   Wed Sep 30 21:34:37 2026 /home/ubuntu/.microsandbox/bin/msb machine --name sc-017ba7df771d19e0 --sandbo
+== zfs
+NAME
+tank
+tank/sandcastle
+tank/sandcastle/017ba7df771d19e0
+tank/sandcastle/017ba7df771d19e0@sc-1-auto
+tank/sandcastle/017ba7df771d19e0@sc-2-pause
+tank/sandcastle/017ba7df771d19e0@sc-3-pause
+tank/sandcastle/017ba7df771d19e0@sc-4-auto
+tank/sandcastle/017ba7df771d19e0@sc-5-auto
+tank/sandcastle/017ba7df771d19e0@sc-6-auto
+tank/sandcastle/017ba7df771d19e0@sc-7-pause
+tank/sandcastle/017ba7df771d19e0@sc-8-auto
+tank/sandcastle/017ba7df771d19e0@sc-9-pause
+== listen
+0.0.0.0:22 users:(("sshd",pid=4067),("systemd",pid=1))
+0.0.0.0:443 users:(("sandcastled",pid=932627),("systemd",pid=1))
+127.0.0.1:20000 users:(("libkrun
+127.0.0.1:3340 users:(("iroh-relay",pid=921147))
+127.0.0.1:9091 users:(("iroh-relay",pid=921147))
+127.0.0.53%lo:53 users:(("systemd-resolve",pid=796))
+127.0.0.54:53 users:(("systemd-resolve",pid=796))
+[::]:22 users:(("sshd",pid=4067),("systemd",pid=1))
+*:8443 users:(("iroh-relay",pid=921147))
+Local Peer
+== nft hash
+0bc3739bf4e3714f2e0b81c64952afc8242df72e783f042827b8d0335b2e8a63  -
+== iptables hash
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  -
+== netns
+== slices
+  krun.slice                   loaded active active Slice /krun
+== spike dir
+6.4M	/home/ubuntu/krun-spike/bin
+939M	/home/ubuntu/krun-spike/blobs
+1.6M	/home/ubuntu/krun-spike/boot
+0	/home/ubuntu/krun-spike/hermes-image.err
+12K	/home/ubuntu/krun-spike/hermes-image.json
+0	/home/ubuntu/krun-spike/hermes-run.err
+4.0K	/home/ubuntu/krun-spike/hermes-run.json
+2.9G	/home/ubuntu/krun-spike/images
+4.0K	/home/ubuntu/krun-spike/jail.json
+8.0K	/home/ubuntu/krun-spike/libkrun-build.log
+120K	/home/ubuntu/krun-spike/libkrunfw-build.log
+0	/home/ubuntu/krun-spike/mem-balloon.err
+4.0K	/home/ubuntu/krun-spike/mem-balloon.json
+0	/home/ubuntu/krun-spike/mem-noballoon.err
+4.0K	/home/ubuntu/krun-spike/mem-noballoon.json
+0	/home/ubuntu/krun-spike/mem-order0.err
+4.0K	/home/ubuntu/krun-spike/mem-order0.json
+26M	/home/ubuntu/krun-spike/prefix
+184K	/home/ubuntu/krun-spike/results
+3.3G	/home/ubuntu/krun-spike/sandcastle
+2.9G	/home/ubuntu/krun-spike/src

@@ -529,3 +529,173 @@ The guest itself has no proxy setting: a static address, a default route,
   address, which is not public. It is now judged by name, and the real
   address the proxy resolves is checked instead (`Compiled::reachable`).
   The tests cover both.
+
+### Escalation: pause and resume on Linux (Paul's call)
+
+**Finding.** At the pinned libkrun (b63baa18), `krun_vmm_handle_pause`
+and `krun_vmm_handle_resume` answer `FeatureDisabled` on Linux:
+
+- The handle's path to the VMM (`VmCtl` to `Vmm::pause`) is compiled for
+  macOS (HVF) only, though the header promises pause and resume.
+- The Linux vCPU loop already has `Pause` and `Resume` events, and a
+  signal that kicks a vCPU out of `KVM_RUN` (Firecracker's, inherited).
+  Only the wiring is missing.
+- smolvm's fork wires it on Linux, with `KVM_KVMCLOCK_CTRL` so a resumed
+  guest's watchdogs do not fire.
+
+The balloon is there on Linux. So the plan's escalation ("no pinned
+libkrun offers pause, resume, and the balloon together") holds, and
+pause stopped here. Nothing else depends on it, so the other phases went
+on.
+
+The options:
+
+1. **A small libkrun patch, upstreamed** (recommended): wire `VmCtl` on
+   Linux.
+   - `Vmm::pause` sends `Pause` to each vCPU and kicks it out of
+     `KVM_RUN`.
+   - `resume` sends `Resume` and calls `KVM_KVMCLOCK_CTRL`.
+   - Roughly 150 lines with tests, carried as one patch on the pinned
+     commit until it merges.
+   - This is a real VM pause: memory stays put and the guest's clock is
+     told. That is the warm tier msb gave (8 ms).
+2. **The cgroup freezer on the VM's own scope** (`systemctl freeze`): no
+   libkrun change.
+   - The guest is not told it was frozen, so it sees its clock jump.
+   - It needs one more root action per pause.
+   - An interim, at most.
+3. **No warm tier on libkrun until upstream has one.** A cold start to
+   serving is 4.4 s here, against msb's 6.0 to 6.2.
+
+Blocked by this, and so not measured: pause and resume times, and a
+connection waking a paused VM (acceptance 2). The client's wake path
+(`connect_waking`: resume, then connect) is written and waits on it.
+
+### Phase 6: Hermes (2026-10-01, jailed)
+
+`nousresearch/hermes-agent:v2026.9.24` ran as sandcastle runs it on msb:
+
+- its image's s6 `/init /opt/hermes/docker/main-wrapper.sh gateway run`
+  is the entrypoint, and inside the workload's PID namespace PID 1 is
+  `s6-svscan`;
+- its dashboard is on 9119, its health path `/api/auth/providers`;
+- `/opt/data` is its own disk (ext4 with a journal);
+- 2 vCPUs, 4 GiB, and the balloon;
+- a NIC behind the egress proxy: the internet on, model hosts
+  intercepted to the stand-in, no model key on the node.
+
+The dashboard's basic-auth values are labeled test strings.
+
+- **The image:** 42 layers, 968 MB compressed, pulled in 14.7 s. A build
+  VM unpacked its 107,405 entries in 14.3 s (the largest layer, 404 MB,
+  in 4.6 s).
+- **Boot to serving (acceptance 1)**, the driver's clock from spawning
+  the jailer to the first answer from `/api/auth/providers` over the agent:
+  - **median 4.37 s, range 4.26 to 4.45** (n = 9, each a fresh root with
+    `/opt/data` already initialized, as msb's cold wake of an existing
+    computer has);
+  - the first boot, which initialized `/opt/data`, 4.48 s;
+  - the guest itself is ready at 224 ms; the rest is Hermes starting;
+  - msb: 6.0 to 6.2 s.
+- **Exec into Hermes:** 4.0 ms median. A health GET through the port
+  path: 4.4 ms median.
+- **`/opt/data` kept, the root fresh (acceptance 8, the data half).**
+  After a restart, a file written to `/opt/data` was there and one
+  written to `/` was not. Pass.
+- **Memory (acceptance 6).** Hermes ran serving and then idle, with a
+  reclaim at 90 s: the agent's `Reclaim` drops the guest's page cache and
+  compacts, smolvm's idea. Measured: the VM process's resident memory
+  (its cgroup's charge is within 2 to 9%).
+
+  | Hermes, idle | 0 s | 30 to 90 s | after a reclaim (5 to 45 s on) |
+  |---|---|---|---|
+  | msb (earlier, no reclaim) | | 892 to 925 MiB | |
+  | no balloon (the control) | 634 | 915 | **916** |
+  | balloon, the kernel's default reporting (2 MiB blocks) | 633 | 906 | **674** |
+  | balloon, `page_reporting.page_reporting_order=0` (4 KiB) | 633 | 844 to 858 | **604** |
+
+  Hermes kept serving after every reclaim (200). Free-page reporting
+  alone barely moves an idle Hermes (906 against 915). With a reclaim it
+  returns about 300 MiB, a third of msb's figure: 604 against 892 to 925.
+
+  The guest then holds about 470 MB. The rest is the guest kernel's and
+  the VMM's own memory, and free pages too scattered to report.
+
+  So the engine should reclaim on idle (the node's idle timer calls it
+  before a computer sleeps), and run its guests at reporting order 0.
+  The kernel arguments are validated: plain `key=value` only, never a
+  root or an init.
+
+### Phase 7: crash and reset (2026-10-01, jailed)
+
+- **A VM ended at once mid-write.** The guest was writing to `/data` in
+  a loop, and the runner was ended with `_exit`, as a crash would.
+  - It was gone in 32 ms.
+  - No VM process, no scope, and no file owned by a VM uid were left,
+    because the jailer handed them back.
+  - A 64 MiB file written and synced before the crash read back on the
+    next start with the same SHA-256. `/data` is ext4 with a journal.
+- **The jailer itself killed outright.** `sudo systemctl kill
+  --signal=KILL` on its scope (systemd exits 1, "Failed to send signal
+  SIGKILL to auxiliary processes", about the runner in its own PID
+  namespace) left:
+  - its run directory and data disk owned by the VM uid;
+  - **no VM process**, since the runner now has `PR_SET_PDEATHSIG(SIGKILL)`.
+
+  The first run, before that was added, showed a runner outliving its
+  jailer; reset stopped it, and this run proves the fix. `reset` (stop
+  the slice, restore, remove) handed 11 entries back and left nothing:
+  no processes, no scopes, no files owned by a VM uid, no run directories.
+- **Nothing else moved (acceptance 10).** Compare
+  `docs/krun-spike-evidence/lat6-before.txt` with `lat6-after.txt`:
+  - `sandcastled` (PID 932627, up since 18:56:58) and `iroh-relay` (PID
+    921147, since 18:41:01) have zero restarts each.
+  - The other session's `msb machine` (PID 1028699) and its paused
+    computer are untouched.
+  - Listening sockets are the same, and the nftables and iptables hashes
+    are the same. There is no named network namespace.
+  - ZFS gained two snapshots of the other session's computer
+    (`@sc-8-auto`, `@sc-9-pause`), taken by `sandcastled` itself; the
+    spike never ran `zfs`.
+  - What remains of the spike is `/home/ubuntu/krun-spike` (sources, the
+    prefix, binaries, and 3.8 GB of cached images and blobs that `reset
+    --all` removes), and an empty `krun.slice`: systemd made it as the
+    parent of `krun-spike.slice`, and it is gone at the next reboot.
+
+### Acceptance
+
+| # | What | Result |
+|---|---|---|
+| 1 | Boot | busybox **107 ms** (jailed 124 to 129); Hermes to serving **4.37 s** (msb 6.0 to 6.2) |
+| 2 | Pause and resume, a wake on connection | **Blocked: escalated** (libkrun pauses on macOS only) |
+| 3 | Exec | **4.0 ms** round trip (msb 9 to 20); PTY, resize, stdin, kill, codes, limits; the entrypoint's exit stops the VM |
+| 4 | Any port | HTTP and WebSocket undeclared; first byte 2.7 ms; about 200 MiB/s on 2 vCPUs |
+| 5 | Interception | Handler, substitution, splice, refusals, the internet off: all pass, with no proxy setting |
+| 6 | Memory back | Idle Hermes **604 MiB** after a reclaim at 4 KiB reporting (msb 892 to 925) |
+| 7 | Isolation | The escape probe reaches nothing; its own uid, no capabilities, seccomp |
+| 8 | Fresh roots | Pass (busybox and Hermes), `/data` and `/opt/data` kept |
+| 9 | The build | clippy `-D warnings` and every test, whole workspace, on the Mac and on Linux; CI on the draft pull request |
+| 10 | Nothing else moved | Pass |
+
+### What would ship differently (the ledger, if this goes on)
+
+- **Pause and resume**, per the escalation.
+- **The seccomp filter is a denylist.** An allowlist built from what
+  libkrun actually calls is stronger: smolvm's approach, with
+  seccompiler.
+- **The forwarder runs as threads in the runner**, inside the VMM's own
+  jail. A small process of its own in the same jail would keep it apart
+  from libkrun.
+- **The jailer runs through `sudo` and `systemd-run`**, costing about 22
+  ms a start. sandcastled would run it directly, as a root helper it owns
+  (the privilege model is Paul's call either way).
+- **Image builds skip xattrs**, so file capabilities are lost, and skip
+  device nodes. zstd layers are decoded as one frame.
+- **The runner's exit status is libkrun's, not the entrypoint's.** The
+  entrypoint's code travels over the lifecycle channel, which is what
+  the node reads.
+- **Throughput through a guest port is vsock-bound** (about 200 MiB/s on
+  2 vCPUs). Enough for web and model traffic. A bulk path would want
+  virtio-net ingress.
+- **The handler is a stand-in.** celld's callback route (containers-on-
+  celld.md) is the real one.
