@@ -392,6 +392,20 @@ docs/services/containers.md.
   directories, stops the engine and the slice, and hands every file back
   (E1, used throughout).
 
+### Open for Paul
+
+1. **More start speed.** About 45 ms from the first `KVM_RUN` to the
+   guest kernel's clock is unexplained without `perf` on the node. Known
+   cuts: a trimmed libkrunfw config (10 ms or more, a kernel config we
+   would carry), a libkrun patch upstream for `KVM_REINJECT_CONTROL`
+   (4.4 ms), the VM's nft ruleset by netlink rather than spawning `nft`
+   (about 2 ms). Recommended: the last two now, the kernel config later.
+2. **Where it runs.** The engine needs KVM: fleet nodes are bare metal
+   like lat-6, not Fly machines.
+3. **The celld branch.** `krun-engine` is pushed to the fork with no PR,
+   pinned on `krun-spike` only: a PR on the fork now, or after #103 is
+   proven?
+
 ### Debt
 
 Into `docs/technical-debt-ledger.md` when this merges:
