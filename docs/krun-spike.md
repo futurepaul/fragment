@@ -530,7 +530,11 @@ The guest itself has no proxy setting: a static address, a default route,
   address the proxy resolves is checked instead (`Compiled::reachable`).
   The tests cover both.
 
-### Escalation: pause and resume on Linux (Paul's call)
+### Escalation: pause and resume on Linux (decided: no warm tier)
+
+*Paul, 2026-10-01: "I think we're fine without warm... that's parity with
+cloudflare anyway."* An idle VM stops and a wake is a cold start. What
+comes next is docs/krun-engine.md.
 
 **Finding.** At the pinned libkrun (b63baa18), `krun_vmm_handle_pause`
 and `krun_vmm_handle_resume` answer `FeatureDisabled` on Linux:
