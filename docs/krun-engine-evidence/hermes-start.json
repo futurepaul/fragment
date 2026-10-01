@@ -499,5 +499,105 @@
         }
       ]
     }
+  },
+  "derived_image": {
+    "dockerfile": "sandcastle/crates/krun-spike/images/hermes-bytecode/Dockerfile",
+    "built": "docker buildx --platform linux/amd64 on the Mac, 2 min; its one new layer 121 MB, 45 MB gzipped; loaded through the engine (43 layers, 15.6 s to its ext4)",
+    "experiments": [
+      {
+        "name": "hb-asrun",
+        "what": "the derived image (images/hermes-bytecode), as sandcastle runs Hermes",
+        "image": "sandcastle-hermes-bytecode:local",
+        "env": [],
+        "ready_port": 9119,
+        "start_to_serving_ms": [
+          {
+            "data": "fresh",
+            "serving": 2686.4,
+            "gateway_api": 2689.5
+          },
+          {
+            "data": "kept",
+            "serving": 2490.8,
+            "gateway_api": 2494.4
+          },
+          {
+            "data": "kept",
+            "serving": 2428.9,
+            "gateway_api": 2432
+          },
+          {
+            "data": "kept",
+            "serving": 2497.3,
+            "gateway_api": 2503.8
+          }
+        ]
+      },
+      {
+        "name": "hb-gateway-1",
+        "what": "the derived image, the gateway alone",
+        "image": "sandcastle-hermes-bytecode:local",
+        "env": [
+          "HERMES_DASHBOARD=0",
+          "HERMES_GATEWAY_NO_SUPERVISE=1"
+        ],
+        "ready_port": 8642,
+        "start_to_serving_ms": [
+          {
+            "data": "fresh",
+            "serving": 2123.9,
+            "gateway_api": 2128
+          },
+          {
+            "data": "kept",
+            "serving": 2070.2,
+            "gateway_api": 2078.2
+          },
+          {
+            "data": "kept",
+            "serving": 2030.4,
+            "gateway_api": 2034.4
+          },
+          {
+            "data": "kept",
+            "serving": 2018.9,
+            "gateway_api": 2022.9
+          }
+        ]
+      },
+      {
+        "name": "hb-gateway-2",
+        "what": "the derived image, the gateway alone, again",
+        "image": "sandcastle-hermes-bytecode:local",
+        "env": [
+          "HERMES_DASHBOARD=0",
+          "HERMES_GATEWAY_NO_SUPERVISE=1"
+        ],
+        "ready_port": 8642,
+        "start_to_serving_ms": [
+          {
+            "data": "fresh",
+            "serving": 2182.2,
+            "gateway_api": 2186.3
+          },
+          {
+            "data": "kept",
+            "serving": 2054.6,
+            "gateway_api": 2062.6
+          },
+          {
+            "data": "kept",
+            "serving": 1988,
+            "gateway_api": 1991.8
+          },
+          {
+            "data": "kept",
+            "serving": 2037,
+            "gateway_api": 2041
+          }
+        ]
+      }
+    ],
+    "note": "one earlier set of the gateway alone on this image had a run whose API did not listen within 120 s (1 of 12 runs); not reproduced in 8 more"
   }
 }

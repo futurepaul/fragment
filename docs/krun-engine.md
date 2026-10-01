@@ -471,7 +471,15 @@ Toward 1 s, in order, each measured or estimated:
 
 1. **Bytecode in the image**, measured above at 2.0 s.
    - A derived image adds `RUN python -m compileall -q -j0
-     --invalidation-mode unchecked-hash /opt/hermes`.
+     --invalidation-mode unchecked-hash /opt/hermes`. Built:
+     `sandcastle/crates/krun-spike/images/hermes-bytecode`, loaded
+     through the engine; run with `hermes-trace --image`.
+   - Measured, the start as sandcastle runs it: 2.69 s on a fresh disk
+     (4.41 before) and 2.43–2.50 s after.
+   - Measured, the gateway alone: 2.12–2.18 s fresh and 1.99–2.07 s
+     after, over 8 runs. One earlier run of 12 never listened within
+     120 s; it did not recur, and a failed wait now keeps the run's
+     output.
    - That compiles all 8,823 modules in 6.6 s, adding 134 MiB to the
      image, or 43 MiB gzipped (4.5% of its 968 MB).
    - `unchecked-hash` keeps the bytecode valid where a builder rewrites
