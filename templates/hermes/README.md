@@ -12,11 +12,11 @@ writer's name, so invite people (the share sheet) and chat with it
 together: their messages are answered too, from your budget. Its replies
 stream as it writes them, and its tool steps show above each answer.
 
-Beside the chat, on your page alone, is its screen (`./__screen.js`):
-the desktop it works on, its browser shown there, live. Take over to
-drive it yourself (sign in to a site for it, say), then Give back; while
-you hold it, Hermes' own clicks and keys wait. Guests see the chat
-without it.
+Beside the chat, on your page and your editors' (people you trust as
+you), is its screen (`./__screen.js`): the desktop it works on, its
+browser shown there, live. Take over to drive it yourself (sign in to a
+site for it, say), then Give back; while you hold it, Hermes' own clicks
+and keys wait. Guests (viewers) see the chat without it.
 
 Another chat can name this Hermes too: `"agent": {"channel": "chat",
 "computer": "<this fragment's name>"}` in that chat's `fragment.json`
