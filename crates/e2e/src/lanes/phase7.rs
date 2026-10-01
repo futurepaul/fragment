@@ -154,12 +154,12 @@ fn send(text: &str) -> String {
 
 /// Whether a chat's page shows someone else's message `text`, labeled `who`.
 fn from_other(text: &str, who: &str) -> String {
-    format!("[...document.querySelectorAll('.msg.user.other')].some(m => m.querySelector('.bubble')?.textContent === {text:?} && m.querySelector('.who')?.textContent === {who:?})")
+    format!("[...document.querySelectorAll('.msg.user.other')].some(m => m.querySelector('.bubble')?.textContent === {text:?} && !!m.querySelector('.who .face') && m.querySelector('.who')?.textContent.endsWith({who:?}))")
 }
 
 /// Whether a chat's page shows an agent's answer `text`, labeled `who`.
 fn from_agent(text: &str, who: &str) -> String {
-    format!("[...document.querySelectorAll('.msg.agent')].some(m => m.querySelector('.md')?.textContent.includes({text:?}) && m.querySelector('.who')?.textContent === {who:?})")
+    format!("[...document.querySelectorAll('.msg.agent')].some(m => m.querySelector('.md')?.textContent.includes({text:?}) && !!m.querySelector('.who .face.agent') && m.querySelector('.who')?.textContent === {who:?})")
 }
 
 /// Whether a chat's page shows turn `turn`'s tool group, done and folded,
@@ -357,9 +357,10 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.front(&theirs)?;
     let answers_both = [WELCOME, GLAD].iter().all(|text| chrome.until(&theirs, &from_agent(text, &agent_label), WAIT));
     chrome.front(&desk)?;
-    let answers_owner = [WELCOME, GLAD].iter().all(|text| s.eventually(WAIT, || in_desk(&mut chrome, &from_agent(text, &agent_label))));
+    // to its owner, their own agent is "Your agent"
+    let answers_owner = [WELCOME, GLAD].iter().all(|text| s.eventually(WAIT, || in_desk(&mut chrome, &from_agent(text, "Your agent"))));
     s.ok(
-        "the owner's agent answers each of them, and both see its answers, labeled as the owner's agent",
+        "the owner's agent answers each of them, and both see its answers, labeled as the owner's agent (to the owner, as theirs)",
         welcomed && glad && answers_both && answers_owner,
         format!("{welcomed} {glad} {answers_both} {answers_owner} | {}", chrome.eval(&theirs, MESSAGES).unwrap_or_default()),
     );
