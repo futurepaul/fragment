@@ -237,7 +237,7 @@ The work, on branch `krun-engine` of the celld fork (from the pinned
 
 ## Results
 
-*2026-10-01, on finite-lat-6.* E1 to E6 are done; E7 (CI) is next. Every number below is from one engine build
+*2026-10-01, on finite-lat-6.* E1 to E7 are done. Every number below is from one engine build
 (`engine_sha256_16` 364f2f6fac921a28), with seccomp enforced, in
 `docs/krun-engine-evidence/`. Medians, with the range in brackets.
 
@@ -250,7 +250,7 @@ The work, on branch `krun-engine` of the celld fork (from the pinned
 | 3 | celld on the engine | Met: the conformance Worker passes 25 of 25 on this engine, and on Docker every method Docker has but its own three gaps (E6, below) |
 | 4 | Images | Met: the corpus, file capabilities granted to a non-root user, `docker save` loads, Cloudflare's `sandbox-shim` |
 | 5 | Hardening | Met: the allowlist holds every scenario; adoption; limits refused with typed errors |
-| 6 | Clean | Clippy and tests pass on the Mac and on Linux; CI is E7 |
+| 6 | Clean | Clippy and tests on the Mac, on Linux, and in CI; lat-6 as found (E7) |
 
 ### Speed
 
@@ -373,6 +373,24 @@ until the process blocked; a refused intercept poisoning every later
 start; the public-only egress policy refusing an object's own container
 port. Docker's gaps above stay, written into the fork's
 docs/services/containers.md.
+
+### E7: clean, and lat-6 as found
+
+- Clippy with warnings denied and every test pass for the sandcastle
+  workspace on the Mac and on lat-6, and CI's `sandcastle` job runs both
+  on every push; the celld fork's crate builds and its new tests pass
+  (its other clippy findings are this toolchain's new lints in files the
+  branch does not touch). fragment's whole CI, e2e included, runs against
+  the pinned fork.
+- lat-6 as found (`lat6-after-engine.txt` against the spike's
+  `lat6-before.txt`): `iroh-relay` and `sandcastled` keep their pids, the
+  other session's paused Hermes still runs (its dataset gained that
+  session's own snapshots), and the host's nftables and iptables hashes
+  are unchanged. The engine runs in `krun-spike.slice` with no VMs; the
+  spike's directory holds 14 GB (images, the celld build).
+- `sandcastle-krun-spike reset [--all]` clears the engine's VMs and run
+  directories, stops the engine and the slice, and hands every file back
+  (E1, used throughout).
 
 ### Debt
 

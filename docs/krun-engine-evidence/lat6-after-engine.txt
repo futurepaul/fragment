@@ -1,0 +1,42 @@
+== date
+2026-10-01T05:55:42Z
+== units
+iroh-relay.service 921147 Wed 2026-09-30 18:41:01 UTC
+krun-engine.service 1378606 Thu 2026-10-01 05:53:49 UTC
+sandcastled.service 932627 Wed 2026-09-30 18:56:58 UTC
+== msb procs
+ 932627 ubuntu   Wed Sep 30 18:56:57 2026 /home/ubuntu/sandcastle/target/release/sandcastled serve --state-dir /var/lib/sandcastle --domain sandcastle.fragment.
+1028699 ubuntu   Wed Sep 30 21:34:37 2026 /home/ubuntu/.microsandbox/bin/msb machine --name sc-017ba7df771d19e0 --sandbox-id 182 --startup-fd 98 --vcpus 2 --mem
+== zfs
+NAME                                          USED  AVAIL  REFER  ORIGIN
+tank                                         10.4G  1.67T    96K  -
+tank/sandcastle                              10.4G  1.45T    96K  -
+tank/sandcastle/017ba7df771d19e0             10.4G  1.46T   250M  -
+tank/sandcastle/017ba7df771d19e0@sc-1-auto    384K      -  36.9M  -
+tank/sandcastle/017ba7df771d19e0@sc-2-pause   328K      -  36.9M  -
+tank/sandcastle/017ba7df771d19e0@sc-3-pause   324K      -  37.0M  -
+tank/sandcastle/017ba7df771d19e0@sc-4-auto    368K      -  37.1M  -
+tank/sandcastle/017ba7df771d19e0@sc-5-auto    652K      -   249M  -
+tank/sandcastle/017ba7df771d19e0@sc-6-auto    580K      -   249M  -
+tank/sandcastle/017ba7df771d19e0@sc-7-pause   436K      -   249M  -
+tank/sandcastle/017ba7df771d19e0@sc-8-auto    316K      -   249M  -
+tank/sandcastle/017ba7df771d19e0@sc-9-pause   100K      -   250M  -
+== listen
+0.0.0.0:22 users:(("sshd",pid=4067,fd=3),("systemd",pid=1,fd=150))
+0.0.0.0:443 users:(("sandcastled",pid=932627,fd=13),("systemd",pid=1,fd=74))
+127.0.0.1:20000 users:(("libkrun
+127.0.0.1:3340 users:(("iroh-relay",pid=921147,fd=10))
+127.0.0.1:9091 users:(("iroh-relay",pid=921147,fd=9))
+127.0.0.53%lo:53 users:(("systemd-resolve",pid=796,fd=15))
+127.0.0.54:53 users:(("systemd-resolve",pid=796,fd=17))
+[::]:22 users:(("sshd",pid=4067,fd=4),("systemd",pid=1,fd=151))
+*:8443 users:(("iroh-relay",pid=921147,fd=11))
+== nft hash
+0bc3739bf4e3714f2e0b81c64952afc8242df72e783f042827b8d0335b2e8a63  -
+== iptables hash
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  -
+== netns
+== krun
+MainPID=1378606
+ActiveState=active
+14G	/home/ubuntu/krun-spike
