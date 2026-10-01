@@ -333,6 +333,14 @@ v1.22.0) and NVIDIA OpenShell (@ 2935e973, its `openshell-driver-vm`).
    directory owned by uid 300000, which is why `restore` exists. The jailer
    now takes SIGTERM, SIGINT, and SIGHUP synchronously: it kills its VM and
    hands the files back itself.
+9. **The network is a tap, not TSI**, on smolvm's evidence (above): the
+   guest has a real NIC (virtio-net), so the kernel's own TCP runs on both
+   sides.
+10. **The intercepting proxy runs on the node, outside the jail**, not
+    "jailed with" the VM as the plan said. It holds the CA's key and the
+    secrets it substitutes, which must stay out of reach of an escape
+    from the VMM. Inside the jail is only a forwarder (the runner's
+    threads), which decides nothing.
 
 ### Phase 1: pin, build, boot (2026-10-01)
 
@@ -464,3 +472,60 @@ No port is declared anywhere: each connection asks the agent for
 
   This is enough for web apps and model streams, not for bulk data.
   Larger copy buffers in the agent changed it by 2%.
+
+### Phase 5: the network and interception (2026-10-01, jailed)
+
+**How it is built.** The jailer gives the VM process's network namespace
+a tap (10.0.2.2/24, owned by the VM uid) and its own nftables:
+
+- every TCP connection arriving on the tap is redirected to the runner's
+  forwarder on `:15001`, and DNS on `:53` to `:15353`;
+- the input chain drops everything else;
+- the forward chain drops everything.
+
+The namespace has no other interface and no route out. The host's
+firewall and its namespace are unchanged.
+
+The forwarder reads `SO_ORIGINAL_DST` and hands each connection or query
+over the run directory's unix socket to the node's proxy
+(`sandcastle-egress`). The proxy decides:
+
+- **Names** get fake addresses from 198.18.0.0/15, as OpenShell's do, so
+  the rules decide by name and the guest never learns a real address.
+- **Intercepted hosts** are TLS-terminated with a leaf the node's CA mints
+  per name, then sent to the handler or have their placeholders
+  substituted.
+- **Everything else** is spliced to the real destination after the
+  rules, which are Cloudflare's: 128 entries; hosts, globs, addresses,
+  `ip:port`, and ranges; private addresses and the node's own refused.
+
+The guest itself has no proxy setting: a static address, a default route,
+`/etc/resolv.conf`, and the CA at Cloudflare's path,
+`/etc/cloudflare/certs/cloudflare-containers-ca.crt`.
+
+**Acceptance 5: pass.** From `curlimages/curl:8.22.0`:
+
+- **An intercepted HTTPS request handed to a handler, which answers it.**
+  `POST https://model.example.com/v1/chat/completions` reached the
+  stand-in (labeled "the spike's stand-in for celld's callback route")
+  with the method, path, host, scheme, and the request's own
+  `Authorization` intact. The request took 2.7 ms median (n = 5, curl's
+  `time_total` inside the guest).
+- **A placeholder substituted with a value.** `Authorization: Bearer
+  SC_PLACEHOLDER_TEST_0001` to `https://httpbin.org/headers` reached
+  httpbin.org, over real TLS, as `Bearer sk-test-not-a-real-secret` (a
+  labeled test string).
+- **Everything else spliced with its real TLS.** `https://example.com/`
+  answered 200, with curl verifying example.com's own certificate.
+- **Private addresses refused.** `10.0.0.1`, `169.254.169.254` (cloud
+  metadata), and the node's own `206.223.228.129:22` and `:443` each got
+  an empty reply: the forwarder accepted, and the proxy closed.
+- **With the internet off:**
+  - `nslookup example.com` gets NXDOMAIN;
+  - `nslookup model.example.com` gets 198.18.0.1;
+  - the handler still answers;
+  - `https://1.1.1.1/` by address is refused.
+- **A bug the run found:** a connection by name was judged by its fake
+  address, which is not public. It is now judged by name, and the real
+  address the proxy resolves is checked instead (`Compiled::reachable`).
+  The tests cover both.
