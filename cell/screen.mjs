@@ -1,8 +1,9 @@
 // A computer's screen beside its chat, served by the platform on every
 // fragment as ./__screen.js (with ./__screen.css): a Hermes' screen, its
 // bot desktop (docs/one-home.md, phase 4), shown live, with Take over and
-// Give back. Its owner's page alone is admitted (decision 5: the screen
-// holds the owner's logins); on anyone else's the pane stays hidden.
+// Give back. Its owner's and their editors' pages alone are admitted
+// (decision 5: the screen holds the owner's logins); on anyone else's the
+// pane stays hidden.
 //
 //   <link rel="stylesheet" href="./__screen.css">
 //   <script type="module">

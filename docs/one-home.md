@@ -36,9 +36,13 @@ architecture).
 4. **Hermes queues.** A message that arrives mid-turn waits for the turn
    to end (`display.busy_input_mode: queue`); Hermes' default would let
    a second person's message cut off the first's turn.
-5. **Only the owner takes over a screen.** In a shared chat, guests watch
-   the computer's screen; its owner alone takes it over from the agent
-   and gives it back. The screen holds the owner's logins.
+5. **The owner and their editors take over a screen.** An editor is
+   trusted as the owner is (Paul, 2026-10-01: "if I add someone as
+   editor they're highly trusted and I want them to do whatever I can
+   do"), so the computer's owner and the people they made its editors
+   see its screen and take it over from the agent and give it back.
+   The screen holds the owner's logins, so no one else does; a chat's
+   guests (viewers) do not see it for now (phase 4).
 6. **Guests' turns are the owner's.** A turn a guest starts in a chat is
    paid from the chat's owner's budget, as the owner's own are. The
    owner chooses who can chat.
@@ -137,8 +141,8 @@ them are Paul's to approve.
      on fragment.club through its Relay, woken from sleep, its turn
      driving its browser on its screen: after the deploy.
 4. **The screen** (built 2026-10-01, but for guests watching). The
-   Hermes page shows Hermes' screen beside its chat, to its owner, by
-   the computer's key, with Take over and Give back
+   Hermes page shows Hermes' screen beside its chat, to its owner and
+   their editors, by the computer's key, with Take over and Give back
    (`./__screen.js`, the platform's, as `./__chat.js` is). The computer
    client gained binary WebSocket messages and an RFB client of its own
    (`sandcastle-web`'s `rfb`, pure and host-tested; `Computer.screen`
@@ -146,18 +150,19 @@ them are Paul's to approve.
    ticket and a viewer id (`display.observe`), opens its display socket
    with it, and takes and gives back the lease (`display.lease.acquire`,
    `release`), whose holder alone Hermes passes pointer and keys from.
-   `__hermes/access` is now the owner's alone: Hermes' session token is
-   the whole computer, so an editor holding it could take the screen
-   over (decision 5), and editors chat through the Relay now.
+   `__hermes/access` stays the owner's and their editors': Hermes'
+   session token is the whole computer, the screen and its logins with
+   it, which decision 5 gives them alone.
    - Checks (e2e, Chrome, on the sandcastle fake's screen, which serves
      RFB and filters input by the lease as Hermes does; 76 in the
      `hermes` lane): the owner sees the desktop live with Hermes
      driving, and their click goes nowhere; takes over, and their click
      lands where they clicked (the desktop answers on their screen) and
      their keys reach it; gives back, and their click goes nowhere
-     again; an editor's access is refused, and a signed-out page shows
-     no screen.
-   - Guests watching is open: a display ticket comes only from Hermes'
+     again; an editor is admitted as the owner is, someone signed in
+     who is neither is refused, and a signed-out page shows no screen.
+   - Guests (viewers) watching waits (Paul left it to us, 2026-10-01;
+     not now): a display ticket comes only from Hermes'
      own socket, which needs its session token, and nothing a guest's
      page can reach holds it but the owner's page. Ways in: a ticket
      broker in the guest (the bridge, minting watch-only tickets with

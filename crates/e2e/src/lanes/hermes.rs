@@ -5,12 +5,12 @@
 //! (in `KEYS`), register it as a computer its owner owns, grant it one
 //! computer with the platform's grantor key, and make that computer:
 //! Hermes in loopback mode behind its bridge, reached by its key over iroh,
-//! with no login and no password. The fragment's owner alone gets an
-//! admission for their page's iroh key (`POST /__hermes/access`), signed
-//! by the computer's key, and Hermes' session token (docs/one-home.md,
-//! decision 5); anyone else, an editor too, and anyone signed out, is
-//! refused. Its page shows its screen beside the chat to its owner, live,
-//! with Take over and Give back (phase 4). Its model calls are billed to the
+//! with no login and no password. The fragment's owner and their editors
+//! get an admission for their page's iroh key (`POST /__hermes/access`),
+//! signed by the computer's key, and Hermes' session token (docs/one-home.md,
+//! decision 5); anyone else, and anyone signed out, is refused. Its page
+//! shows its screen beside the chat to them, live, with Take over and Give
+//! back (phase 4). Its model calls are billed to the
 //! fragment's owner. The template's page does all of that in headless
 //! Chrome, with the platform's computer client (served on every host at
 //! `/__computer/`). A deploy that drops the block removes the computer and
@@ -284,7 +284,7 @@ pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
     let editor_id = api.identity(&editor)?;
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{editor_id}"), Some(&json!({ "role": "editor" })))?;
     let r = access(api, &name, Some(&editor), &page.id())?;
-    s.ok("an editor is refused: a Hermes, its screen and logins with it, is its owner's alone", r.status == 403 && r.body["admission"].is_null(), &r);
+    s.ok("an editor is admitted as the owner is: its screen and logins with it", r.status == 200 && r.body["admission"].is_string(), &r);
 
     // the page talks to Hermes by its key, through the relay
     let (conn, answer) = page.connect(&granted)?;
@@ -573,7 +573,7 @@ fn chat_page(s: &mut Suite, api: &Api, home: &std::path::Path, owner: &Keys, nam
     let asked = chrome.until(&stranger, "document.getElementById('say')?.dataset.ready === '1' && !!document.querySelector('#note a[href*=\"__signin\"]')", wait);
     s.ok("signed out, with its link, the page asks them to sign in to write", asked, chrome.eval(&stranger, "document.body.innerText.slice(0, 300)").unwrap_or_default());
     let unseen = chrome.until(&stranger, "document.getElementById('screen').dataset.access === 'refused' && document.getElementById('screen').hidden", wait);
-    s.ok("and shows no screen: it is its owner's", unseen, chrome.eval(&stranger, SCREEN_STATE).unwrap_or_default());
+    s.ok("and shows no screen: it is its owner's and their editors'", unseen, chrome.eval(&stranger, SCREEN_STATE).unwrap_or_default());
     Ok(())
 }
 
