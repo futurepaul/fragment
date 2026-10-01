@@ -169,6 +169,73 @@
           "gateway_api": null
         }
       ]
+    },
+    {
+      "name": "g0-gateway-only",
+      "what": "the gateway alone, the dashboard off: ready is its API (8642)",
+      "env": [
+        "HERMES_DASHBOARD=0",
+        "HERMES_GATEWAY_NO_SUPERVISE=1"
+      ],
+      "main_program": [
+        "gateway",
+        "run"
+      ],
+      "ready_port": 8642,
+      "start_to_serving_ms": [
+        {
+          "data": "fresh",
+          "serving": 4571.1,
+          "gateway_api": 4575.1
+        },
+        {
+          "data": "kept",
+          "serving": 4569.5,
+          "gateway_api": 4573.4
+        },
+        {
+          "data": "kept",
+          "serving": 4492.5,
+          "gateway_api": 4496.5
+        }
+      ]
+    },
+    {
+      "name": "g1-gateway-only-pyc",
+      "what": "the gateway alone, with the bytecode cache",
+      "env": [
+        "HERMES_DASHBOARD=0",
+        "HERMES_GATEWAY_NO_SUPERVISE=1",
+        "PYTHONDONTWRITEBYTECODE=",
+        "PYTHONPYCACHEPREFIX=/opt/data/.pycache"
+      ],
+      "main_program": [
+        "gateway",
+        "run"
+      ],
+      "ready_port": 8642,
+      "start_to_serving_ms": [
+        {
+          "data": "fresh",
+          "serving": 4652.7,
+          "gateway_api": 4656.8
+        },
+        {
+          "data": "kept",
+          "serving": 4741,
+          "gateway_api": 4745.1
+        },
+        {
+          "data": "kept",
+          "serving": 2018,
+          "gateway_api": 2021.9
+        },
+        {
+          "data": "kept",
+          "serving": 2001.9,
+          "gateway_api": 2009.9
+        }
+      ]
     }
   ],
   "stages_steady_state_guest_ms": {
@@ -239,6 +306,37 @@
           "cpu": 1230
         }
       ]
+    },
+    "bytecode_cache_gateway_alone": {
+      "workload_pid1": 190,
+      "config_migrate": [
+        280,
+        429,
+        {
+          "cpu": 110
+        }
+      ],
+      "skills_sync": [
+        429,
+        564,
+        {
+          "cpu": 100
+        }
+      ],
+      "reconcile_profiles": [
+        576,
+        808,
+        {
+          "cpu": 200
+        }
+      ],
+      "gateway_start_to_api_listen": [
+        817,
+        2025,
+        {
+          "cpu": 1890
+        }
+      ]
     }
   },
   "image_bytecode": {
@@ -285,5 +383,13 @@
     "       118 |       6026 | gateway.platforms._shared",
     "       784 |       5787 | hermes_cli.runtime_provider",
     "       110 |       5775 | uvicorn"
-  ]
+  ],
+  "compile_all_of_opt_hermes": {
+    "what": "python -m compileall -q -j0 /opt/hermes in a booted guest (2 vCPU), into a prefix",
+    "output": [
+      "compileall exit 0 wall_ms 6639",
+      "pyc_files 8823 MiB 134 gzip_MiB 43",
+      "of_which_venv_MiB 80 node_modules_MiB 1"
+    ]
+  }
 }

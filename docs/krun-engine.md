@@ -443,14 +443,32 @@ it imports, on every start.
 - **After serving.** The gateway runs `uv pip install edge-tts` into
   `/opt/data/lazy-packages` on every start. It is off the path to
   serving, and whether it succeeds was not checked.
+- **The gateway alone.** With the dashboard off (`HERMES_DASHBOARD=0`,
+  the main program `gateway run` with `HERMES_GATEWAY_NO_SUPERVISE=1`),
+  ready means its API (8642) listening. That takes 4.5 s, or 2.0 s with
+  the cache: the gateway is one process, 1.21 s from its start to
+  listening, the same as the dashboard alone. A Hermes reached only
+  through Relay, whose connection the gateway dials out, starts as fast
+  as one reached only through the dashboard.
 
 Toward 1 s, in order, each measured or estimated:
 
 1. **Bytecode in the image**, measured above at 2.0 s.
    - A derived image adds `RUN python -m compileall -q -j0
      --invalidation-mode unchecked-hash /opt/hermes`.
-   - Upstream, it is `UV_COMPILE_BYTECODE=1` in Hermes's Dockerfile.
-   - The start-environment cache is the stopgap.
+   - That compiles all 8,823 modules in 6.6 s, adding 134 MiB to the
+     image, or 43 MiB gzipped (4.5% of its 968 MB).
+   - `unchecked-hash` keeps the bytecode valid where a builder rewrites
+     file times. `/opt/hermes` is sealed by design, so nothing can make
+     the bytecode stale.
+   - Upstream, it is `uv sync --compile-bytecode` (or
+     `UV_COMPILE_BYTECODE=1`) and a `compileall` of the editable source.
+   - The start-environment cache is the stopgap. It works only where
+     `/opt/data` persists.
+   - On Cloudflare, the baked image gets the same win: its containers run
+     the image as built. The cache does not carry over, because a
+     container's disk is fresh at every start unless it starts from a
+     snapshot.
 2. **One gateway, started after the dashboard listens.**
    - Measured: 0.36 s of contention (2.42 against 2.06).
    - The main program should be `sleep infinity`, not `gateway run`;
@@ -473,7 +491,7 @@ Toward 1 s, in order, each measured or estimated:
    busybox's 0.05; likely its 6 GiB and 2 vCPUs, not yet measured.
    - The cuts above apply to it.
    - So would a pool of prepared, unassigned VMs, as Cloudflare
-     restores them (below). That is a generic pool, not a warm tier.
+     restores them (below). That is under Future improvements.
    - Estimate: 0.1–0.2 s.
 
 With 1–3, which are ours to make, steady state is about 1.6 s. With 4
@@ -487,7 +505,7 @@ interactive, not an application's start):
 | Practice | Here |
 |---|---|
 | Placement on the Durable Object's machine first | The engine is on celld's node; there is no multi-node placement yet |
-| Restore a prepared VM that is not yet assigned | Not done: each start boots its own (108 ms busybox, 250 ms Hermes) |
+| Restore a prepared VM that is not yet assigned | Not done: each start boots its own (108 ms busybox, 250 ms Hermes); under Future improvements |
 | Reuse networking and filesystem setup; batch repeated work | Partly: the jail is 6 ms, the nft ruleset still spawns `nft` |
 | Don't wait on services the first command doesn't need | Not done for Hermes: its setup helpers and gateway come before its dashboard (steps 2 and 3) |
 | Image and instance as start arguments | Done (the 5.x surface) |
@@ -506,14 +524,20 @@ interactive, not an application's start):
    - a derived Hermes image with bytecode and the setup stamps;
    - `sleep infinity` as its main program;
    - the lazy imports offered upstream.
-
-   Whether a pool of prepared VMs counts as the warm tier you ruled out
-   is your call.
 2. **Where it runs.** The engine needs KVM: fleet nodes are bare metal
    like lat-6, not Fly machines.
 3. **The celld branch.** `krun-engine` is pushed to the fork with no PR,
    pinned on `krun-spike` only: a PR on the fork now, or after #103 is
    proven?
+
+### Future improvements
+
+- **A pool of prepared VMs** (Paul, 2026-10-01: later, not needed now).
+  Booted, unassigned guests take an image and disks at start, as
+  Cloudflare restores a prepared VM. This would save most of a VM's own
+  start: 0.1–0.2 s of Hermes's, and about 0.1 s of busybox's 108 ms.
+  libkrun fixes a VM's disks when it is built, so an image would arrive
+  over virtio-fs into a directory the host binds late.
 
 ### Debt
 
