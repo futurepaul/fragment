@@ -391,5 +391,113 @@
       "pyc_files 8823 MiB 134 gzip_MiB 43",
       "of_which_venv_MiB 80 node_modules_MiB 1"
     ]
+  },
+  "snapshots_cloudflare_way": {
+    "scenario": "hermes-snapshot",
+    "snapshot_only": {
+      "what": "no data disk; each start from the snapshot of the run before (Cloudflare's way); the image's env",
+      "env": [],
+      "runs": [
+        {
+          "run": 0,
+          "from": "image",
+          "ready": 242.3,
+          "serving": 4507.6,
+          "gateway_api": 5191.5,
+          "snapshot_taken_ms": 128.4,
+          "snapshot_mib": 24.1
+        },
+        {
+          "run": 1,
+          "from": "snapshot",
+          "ready": 279.1,
+          "serving": 4541.7,
+          "gateway_api": 5177.3,
+          "snapshot_taken_ms": 160.4,
+          "snapshot_mib": 39.9
+        },
+        {
+          "run": 2,
+          "from": "snapshot",
+          "ready": 307.7,
+          "serving": 4582.5,
+          "gateway_api": 5183.5,
+          "snapshot_taken_ms": 200.4,
+          "snapshot_mib": 55.5
+        },
+        {
+          "run": 3,
+          "from": "snapshot",
+          "ready": 341.8,
+          "serving": 4703.1,
+          "gateway_api": 5252.6,
+          "snapshot_taken_ms": 240.4,
+          "snapshot_mib": 71.1
+        },
+        {
+          "run": 4,
+          "from": "snapshot",
+          "ready": 373.3,
+          "serving": 4625.6,
+          "gateway_api": 5295.4,
+          "snapshot_taken_ms": 257.6,
+          "snapshot_mib": 86.8
+        }
+      ]
+    },
+    "snapshot_with_bytecode": {
+      "what": "as above, with bytecode written to the root (it rides in the snapshot)",
+      "env": [
+        "PYTHONDONTWRITEBYTECODE=",
+        "PYTHONPYCACHEPREFIX=/var/tmp/hermes-pyc"
+      ],
+      "runs": [
+        {
+          "run": 0,
+          "from": "image",
+          "ready": 243.1,
+          "serving": 3942.4,
+          "gateway_api": 4641.2,
+          "snapshot_taken_ms": 376.5,
+          "snapshot_mib": 84.9
+        },
+        {
+          "run": 1,
+          "from": "snapshot",
+          "ready": 415.4,
+          "serving": 2743.5,
+          "gateway_api": 2746.5,
+          "snapshot_taken_ms": 284.6,
+          "snapshot_mib": 100.6
+        },
+        {
+          "run": 2,
+          "from": "snapshot",
+          "ready": 425.2,
+          "serving": 2729.3,
+          "gateway_api": 2731.6,
+          "snapshot_taken_ms": 316.4,
+          "snapshot_mib": 116.4
+        },
+        {
+          "run": 3,
+          "from": "snapshot",
+          "ready": 467.9,
+          "serving": 2766.3,
+          "gateway_api": 2769.7,
+          "snapshot_taken_ms": 364.4,
+          "snapshot_mib": 132
+        },
+        {
+          "run": 4,
+          "from": "snapshot",
+          "ready": 485.6,
+          "serving": 2771.9,
+          "gateway_api": 2774.9,
+          "snapshot_taken_ms": 384.2,
+          "snapshot_mib": 147.6
+        }
+      ]
+    }
   }
 }

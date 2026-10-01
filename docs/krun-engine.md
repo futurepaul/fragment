@@ -451,6 +451,22 @@ it imports, on every start.
   through Relay, whose connection the gateway dials out, starts as fast
   as one reached only through the dashboard.
 
+- **Snapshots, Cloudflare's way** (`hermes-snapshot`: no data disk, and
+  each start from the snapshot the run before took). A filesystem
+  snapshot keeps the disk, not the processes, so each start still runs
+  all of Hermes's start.
+  - With the image's environment: 4.5–4.7 s, no gain. Nothing slow is
+    ever written to disk.
+  - With bytecode written to the root: 2.73–2.77 s from the second run
+    on, against 2.42 s for the cache on `/opt/data`.
+  - The restore copies the snapshot and adds 0.17–0.24 s to ready.
+    Taking one at each stop adds 0.3–0.4 s.
+  - The snapshot grows about 16 MiB a run with Hermes's logs and state:
+    85 MiB to 148 MiB over four starts.
+  - It also binds the user's state to the image it was taken over.
+  - Here `/opt/data` does a snapshot's job more cheaply. Only memory (a
+    paused or memory-snapshotted VM) starts well under a second.
+
 Toward 1 s, in order, each measured or estimated:
 
 1. **Bytecode in the image**, measured above at 2.0 s.
