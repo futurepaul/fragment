@@ -340,6 +340,21 @@ impl FragmentCell {
         self.set_meta(MetaKey::AgentPending, &js::random_hex::<8>())
     }
 
+    /// Its answerer left, and another is to join (a Hermes made again:
+    /// `hermes/rejoin`): what is said meanwhile reaches the new one as it
+    /// joins (`catch_up`), from the channel's last record now. A floor a
+    /// deploy set, not yet caught up on, stays.
+    pub(crate) fn hold_floor(&self) -> CellResult<()> {
+        let live: Option<AgentLive> = stored(self.meta(MetaKey::AgentLive)?, "agent block")?;
+        let Some(live) = live else { return Ok(()) };
+        if self.meta(MetaKey::AgentFloor)?.is_some() {
+            return Ok(());
+        }
+        let last = self.rows("SELECT MAX(seq) AS seq FROM records WHERE channel = ?", vec![live.decl.channel.as_str().into()])?;
+        let floor = Floor { channel: live.decl.channel.clone(), seq: last.first().and_then(|r| r["seq"].as_i64()).unwrap_or(0) };
+        self.set_meta(MetaKey::AgentFloor, &serde_json::to_string(&floor).expect("a floor serializes"))
+    }
+
     /// Makes the agent live declares answer here: its owner's own, or the
     /// fragment's (made on first need, and given what the block declares),
     /// an editor that listens to the declared channel, caught up on what

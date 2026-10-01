@@ -647,8 +647,10 @@ impl FragmentCell {
 
     /// `hermes/rejoin`: a Hermes this chat names was removed (a new one, a
     /// new identity, may come): the chat joins whoever answers anew, at its
-    /// alarm, until it can.
+    /// alarm, until it can, and what is said meanwhile reaches it as it
+    /// joins (`hold_floor`).
     pub(crate) async fn hermes_rejoin(&self) -> CellResult<Response> {
+        self.hold_floor()?;
         self.set_meta(MetaKey::AgentPending, &js::random_hex::<8>())?;
         self.schedule().await?;
         json_response(&json!({ "ok": true }))
