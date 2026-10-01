@@ -22,9 +22,14 @@
 //!   `prompt.submit`, whose turn echoes the prompt in two deltas,
 //!   `gateway.ping`).
 //!
+//! - Its Hermes' gateway dials the platform's Relay when its spec names
+//!   `GATEWAY_RELAY_URL` (relay_gateway.rs); the owner's `POST
+//!   /v1/computers/{name}/wake` brings an `away` gateway back.
+//!
 //! A computer serves after `serving_after` looks at it (a platform waits
 //! for it), and never sleeps. A turn's second delta waits `slow_turns` (a
-//! page's heartbeat is heard meanwhile: `pings`).
+//! page's heartbeat is heard meanwhile: `pings`), and a Relay turn's reply
+//! as much between its two parts.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
@@ -38,6 +43,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::http::{Request, Response, Server};
+use crate::relay_gateway;
 
 const ALPN: &[u8] = b"sandcastle/1";
 const STREAM_ADMISSION: u8 = b'A';
@@ -73,6 +79,8 @@ struct State {
     admitted: u64,
     refused: u64,
     next: u64,
+    /// The computers whose gateway runs.
+    gateways: HashSet<String>,
 }
 
 pub struct Sandcastle {
@@ -83,6 +91,7 @@ pub struct Sandcastle {
     /// The in-process relay's URL (plain HTTP).
     pub relay: String,
     state: Arc<Mutex<State>>,
+    gateways: Arc<Mutex<relay_gateway::Shared>>,
     _server: Server,
     _relay: iroh_relay::server::Server,
     runtime: tokio::runtime::Runtime,
@@ -103,6 +112,8 @@ struct Node {
     node: String,
     relay: RelayUrl,
     runtime: tokio::runtime::Handle,
+    /// What the computers' Relay gateways share with the fake.
+    gateways: Arc<Mutex<relay_gateway::Shared>>,
 }
 
 impl Sandcastle {
@@ -122,10 +133,11 @@ impl Sandcastle {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
         let url = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
         let state = Arc::new(Mutex::new(State { serving_after: 1, ..State::default() }));
-        let n = Arc::new(Node { base: url.clone(), grantor: grantor.to_string(), node: node.clone(), relay: relay_url.clone(), runtime: runtime.handle().clone() });
+        let gateways = Arc::new(Mutex::new(relay_gateway::Shared::default()));
+        let n = Arc::new(Node { base: url.clone(), grantor: grantor.to_string(), node: node.clone(), relay: relay_url.clone(), runtime: runtime.handle().clone(), gateways: Arc::clone(&gateways) });
         let s = Arc::clone(&state);
         let server = Server::serve(listener, Arc::new(move |req: &Request| handle(&s, &n, req)))?;
-        Ok(Sandcastle { url, grantor: grantor.to_string(), node, relay: relay_url.to_string(), state, _server: server, _relay: relay, runtime })
+        Ok(Sandcastle { url, grantor: grantor.to_string(), node, relay: relay_url.to_string(), state, gateways, _server: server, _relay: relay, runtime })
     }
 
     /// Its computers now (a test lever).
@@ -145,6 +157,38 @@ impl Sandcastle {
     /// How long each turn takes between its two deltas (default none).
     pub fn slow_turns(&self, ms: u64) {
         self.state.lock().unwrap().turn_ms = ms;
+        self.gateways.lock().unwrap().turn_ms = ms;
+    }
+
+    /// Each message its Hermes' gateways were handed, as Hermes read it.
+    pub fn relay_heard(&self) -> Vec<Value> {
+        self.gateways.lock().unwrap().heard.clone()
+    }
+
+    /// The close codes its gateways' sockets got.
+    pub fn relay_closes(&self) -> Vec<u16> {
+        self.gateways.lock().unwrap().closes.clone()
+    }
+
+    /// Its gateways' dials that opened.
+    pub fn relay_dials(&self) -> u64 {
+        self.gateways.lock().unwrap().dials
+    }
+
+    /// Turns a Stop cut short.
+    pub fn relay_interrupted(&self) -> u64 {
+        self.gateways.lock().unwrap().interrupted
+    }
+
+    /// Sends every gateway away (its computer asleep) until its wake URL
+    /// is fetched.
+    pub fn relay_away(&self) {
+        self.gateways.lock().unwrap().away = true;
+    }
+
+    /// Its computers' wakes, by their owners.
+    pub fn wakes(&self) -> u64 {
+        self.gateways.lock().unwrap().wakes
     }
 
     /// The `gateway.ping`s its Hermes have heard.
@@ -199,7 +243,10 @@ fn handle(state: &Arc<Mutex<State>>, n: &Arc<Node>, req: &Request) -> Response {
                 Some(c) if c.owner != signer => problem(409, "name_taken", "that name is taken"),
                 Some(c) => {
                     c.spec = spec;
-                    Response::json(200, &view(n, name, c, serving_after))
+                    let v = view(n, name, c, serving_after);
+                    drop(s);
+                    relay(state, n, name);
+                    Response::json(200, &v)
                 }
                 None => {
                     let mine = s.computers.values().filter(|c| c.owner == signer).count() as u64;
@@ -216,6 +263,8 @@ fn handle(state: &Arc<Mutex<State>>, n: &Arc<Node>, req: &Request) -> Response {
                     let mut s = state.lock().unwrap();
                     s.computers.insert(name.to_string(), c);
                     s.running.insert(name.to_string(), (ep, hermes));
+                    drop(s);
+                    relay(state, n, name);
                     Response::json(201, &v)
                 }
             }
@@ -230,6 +279,16 @@ fn handle(state: &Arc<Mutex<State>>, n: &Arc<Node>, req: &Request) -> Response {
                 _ => problem(404, "not_found", "no such computer"),
             }
         }
+        // its owner wakes it: its gateway, away, comes back
+        ("POST", ["v1", "computers", name, "wake"]) => match s.computers.get(*name) {
+            Some(c) if c.owner == signer => {
+                let v = view(n, name, c, s.serving_after);
+                let mut g = n.gateways.lock().unwrap();
+                (g.away, g.wakes) = (false, g.wakes + 1);
+                Response::json(202, &v)
+            }
+            _ => problem(404, "not_found", "no such computer"),
+        },
         ("DELETE", ["v1", "computers", name]) => match s.computers.get(*name) {
             Some(c) if c.owner == signer => {
                 // its disk goes with it, and Hermes' chats on it; its key answers no one
@@ -256,6 +315,30 @@ fn view(n: &Node, name: &str, c: &Computer, serving_after: u32) -> Value {
         "url": format!("{}/c/{name}/", n.base),
         "iroh": { "endpoint": c.endpoint, "relay": n.relay.to_string() },
     })
+}
+
+/// Its Hermes' gateway, once its spec names a Relay: one a computer, for
+/// its life, dialing with its spec's settings as they are at each dial.
+fn relay(state: &Arc<Mutex<State>>, n: &Arc<Node>, name: &str) {
+    let relay_env = |s: &State, name: &str| -> Option<(String, String, String)> {
+        let env = &s.computers.get(name)?.spec["service"]["env"];
+        let text = |k: &str| env[k].as_str().map(str::to_string);
+        Some((text("GATEWAY_RELAY_URL")?, text("GATEWAY_RELAY_ID")?, text("GATEWAY_RELAY_SECRET")?))
+    };
+    let mut s = state.lock().unwrap();
+    if relay_env(&s, name).is_none() || !s.gateways.insert(name.to_string()) {
+        return;
+    }
+    drop(s);
+    let (st, who) = (Arc::clone(state), name.to_string());
+    relay_gateway::run(Arc::clone(&n.gateways), move || {
+        let mut s = st.lock().unwrap();
+        let env = relay_env(&s, &who);
+        if env.is_none() {
+            s.gateways.remove(&who);
+        }
+        env
+    });
 }
 
 /// A new computer's Hermes (on a port of its own) and its endpoint.

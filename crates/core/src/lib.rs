@@ -21,6 +21,7 @@ pub mod live;
 pub mod manifest;
 pub mod npub;
 pub mod ratelimit;
+pub mod relay;
 pub mod registry;
 pub mod schema;
 pub mod secrets;

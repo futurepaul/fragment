@@ -130,6 +130,9 @@ pub(crate) struct LiveMemory {
     /// Memory only, never an attachment (a credential is not stored); a
     /// socket this activation holds none for is closed at that point.
     credentials: BTreeMap<String, Credential>,
+    /// When the fragment's next draft is due at its steady pace
+    /// (`presence_admit`'s, across its drafts).
+    draft_at: i64,
 }
 
 fn state_of(ws: &WebSocket) -> Option<LiveState> {
@@ -267,6 +270,26 @@ impl FragmentCell {
         if let Some(followers) = self.live.borrow_mut().followers.as_mut() {
             followers.insert(r.channel.clone(), found);
         }
+    }
+
+    /// A draft to the sockets following its channel, at most
+    /// `limits::PRESENCE_PER_S` a second across the fragment (a poster
+    /// sends only its latest): `false` when past that pace, and dropped.
+    pub(crate) fn broadcast_draft(&self, channel: &str, principal: &str, turn: &str, text: Option<&str>) -> bool {
+        let now = js::now_ms();
+        let due = self.live.borrow().draft_at;
+        let Some(next) = presence_admit(due, now) else { return false };
+        self.live.borrow_mut().draft_at = next;
+        if !self.followed(channel) {
+            return true;
+        }
+        let frame = LiveOut::Draft { channel: channel.to_string(), principal: principal.to_string(), turn: turn.to_string(), text: text.map(str::to_string), at: now };
+        for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
+            if state_of(&ws).is_some_and(|st| st.subs.iter().any(|c| c == channel)) {
+                send(&ws, &frame);
+            }
+        }
+        true
     }
 
     pub(crate) fn broadcast_changed(&self, op: &str) {

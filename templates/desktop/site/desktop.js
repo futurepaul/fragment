@@ -347,7 +347,7 @@ function chatNames() {
   const others = state.fragments.filter((f) => kindOf(f).chat && !kindOf(f).computer && f.name !== state.self && !made.includes(f.name)).map((f) => f.name);
   return [...made, ...others];
 }
-const ANSWERS = { agent: "agent", people: "people" };
+const ANSWERS = { agent: "agent", computer: "Hermes", people: "people" };
 
 function renderChats() {
   const chats = chatNames();

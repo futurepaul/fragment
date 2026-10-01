@@ -94,24 +94,38 @@ them are Paul's to approve.
      elsewhere under any name is listed under Chats, and the owner's
      list says what each is; a Hermes' fragment is listed as a `hermes`
      computer.
-2. **Hermes answers a chat.** A chat names its owner's Hermes as who
-   answers. The Hermes cell is the Relay connector: Hermes' gateway
-   dials it, authenticated by its secret; the cell hands it the chat's
-   new records and turns its sends, edits, and tool progress into
-   `draft`, `work`, and `chat` records, posted as the Hermes' computer
-   identity. While Hermes is away, the cell keeps the records and pokes
-   its computer's wake URL; Hermes takes them on reconnect, in order,
-   once. The sandcastle fake's Hermes speaks Relay.
-   - Checks (e2e, fakes): two people's messages reach Hermes with their
-     names; both see the reply stream and land; a message mid-turn
-     waits; someone who cannot chat is not heard; an asleep Hermes is
-     woken and gets each message once, across a node restart; a removed
-     Hermes is refused (4401).
+2. **Hermes answers a chat** (built 2026-10-01; the wire:
+   docs/hermes-relay.md). A chat names its owner's Hermes as who answers:
+   `"agent": {"channel": "chat", "computer": true}` (its own, the `hermes`
+   template) or `"computer": "<fragment>"`. The deploy makes the Hermes'
+   computer identity an editor of the chat and has the Hermes' cell
+   follow its channel. The Hermes cell is the Relay connector: Hermes'
+   gateway dials `/api/hermes/<fragment>/relay` with its secret (made with
+   its computer, in its spec, with Hermes' managed settings: a shared
+   session per chat, streaming, queue mode); the cell hands it the chat's
+   messages one at a time, each with its writer's name, kept until acked;
+   it turns Hermes' reply into a `draft` (a new, never-stored record on
+   `__live`: `PUT …/channels/<channel>/draft`) and then `{text, turn}`,
+   its tool progress into `turn.step`s, its reactions into the turn's
+   start and end, a Stop into `interrupt_inbound`. It wakes the computer
+   as its owner (sandcastle's signed wake) with each message, and while
+   Hermes is away. A Hermes removed
+   is closed 4401, and its chats join the new one. The `hermes` template
+   is now a chat its own Hermes answers, on the platform's chat page; the
+   iroh page it had is gone (the client stays, for phase 4's screen).
+   - Checks (e2e, on the sandcastle fake's gateway, which speaks Relay as
+     Hermes does; 65 in the `hermes` lane): the chat's owner and an
+     invited guest answered by name; someone not in it unheard; a
+     message during a turn waits, then both answered in order; tool
+     steps; a Stop interrupts with no answer; an away Hermes woken and
+     answering once; a message kept across a node restart answered once;
+     the draft streaming in Chrome, then the answer; 4401 for a removed
+     Hermes; its chat joining the new one.
 3. **The Hermes image.** Derived from Hermes' `-desktop` image: its
    screen and computer-use tools, the loopback bridge as a service, and
-   the defaults decisions 2 and 4 need. sandcastle gains a wake URL per
-   computer: an unauthenticated poke that only wakes it. Publishing the
-   image is Paul's to approve.
+   the defaults decisions 2 and 4 need (now written by the init). Waking
+   needs nothing new of sandcastle: the cell holds the computer's key and
+   uses the node's own wake. Publishing the image is Paul's to approve.
    - Checks: the sandcastle e2e on lat-6 runs a chat turn through the
      relay from a sleeping Hermes, and Hermes drives a browser on its
      own screen.
@@ -138,4 +152,7 @@ them are Paul's to approve.
 - Hermes reports tool progress as edited text over Relay, not as
   structured tool events, so its `work` steps may be coarser than
   goose's.
-- Whether a cell can hold Hermes' Relay socket while it hibernates.
+- Whether a cell holds Hermes' Relay socket through hibernation on the
+  fleet (celld accepts it hibernating, as `__live`; the e2e's restarts
+  show the gateway dialing back), and the real gateway's pings against
+  it: phase 3's run on lat-6.

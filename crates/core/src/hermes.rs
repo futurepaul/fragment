@@ -58,6 +58,27 @@ async def main():
 asyncio.run(main())
 '"#;
 
+/// What the platform requires of a Hermes that answers its chats through
+/// the Relay (docs/one-home.md, decisions 2 and 4): one session per chat,
+/// shared by everyone in it (each message `[name] …`); replies streamed as
+/// edits; a message that comes mid-turn queued, never cutting a turn off;
+/// no restart or still-working notes in the chat. Written as Hermes'
+/// managed overlay (`/etc/hermes/config.yaml`, over its own config) by the
+/// init, as root, until a derived image carries it.
+const CONFIG: &str = "group_sessions_per_user: false
+streaming:
+  enabled: true
+  transport: edit
+display:
+  busy_input_mode: queue
+  tool_progress: all
+  tool_progress_grouping: accumulate
+  long_running_notifications: false
+platforms:
+  relay:
+    gateway_restart_notification: false
+";
+
 /// Where a fragment's Hermes is.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
@@ -125,8 +146,22 @@ pub fn fragment_of_identity(name: &str) -> Option<String> {
 pub struct Spec<'a> {
     pub image: &'a str,
     pub model: &'a str,
-    /// The platform's URL: its model route and credential source.
+    /// The platform's URL: its model route, its credential source, and its
+    /// Relay connector.
     pub platform: &'a str,
+}
+
+/// How a Hermes' gateway dials its cell: its id (its fragment's name) and
+/// its per-gateway secret (in the guest by decision 3 of
+/// docs/one-home.md).
+pub struct Relay<'a> {
+    pub id: &'a str,
+    pub secret: &'a str,
+}
+
+/// The URL its gateway is given: the gateway dials `<it>/relay`.
+pub fn relay_url(platform: &str, fragment: &str) -> String {
+    format!("{platform}/api/hermes/{fragment}")
 }
 
 impl Spec<'_> {
@@ -134,10 +169,10 @@ impl Spec<'_> {
     /// and gateway), its dashboard in loopback mode behind the bridge, its
     /// session token pinned, its model's key from the platform's credential
     /// source, its URL its owner's alone, and awake while its gateway
-    /// works.
-    pub fn json(&self, token: &str) -> Value {
+    /// works. With `relay`, its gateway dials the platform's connector.
+    pub fn json(&self, token: &str, relay: Option<&Relay>) -> Value {
         let platform = self.platform;
-        json!({
+        let mut spec = json!({
             "image": self.image,
             "vcpus": 2,
             "memory_mib": 4096,
@@ -147,7 +182,7 @@ impl Spec<'_> {
             "service": {
                 "argv": [],
                 "init": {
-                    "argv": ["/init", "/bin/sh", "-c", format!("{BRIDGE} & exec /opt/hermes/docker/main-wrapper.sh gateway run")],
+                    "argv": ["/init", "/bin/sh", "-c", format!("mkdir -p /etc/hermes && cat > /etc/hermes/config.yaml <<'YAML'\n{CONFIG}YAML\n{BRIDGE} & exec /opt/hermes/docker/main-wrapper.sh gateway run")],
                     "stop": ["/run/s6/basedir/bin/halt"],
                 },
                 "port": PUBLISHED_PORT,
@@ -166,7 +201,17 @@ impl Spec<'_> {
             },
             "url_auth": "owner",
             "credentials_url": format!("{platform}/api/sandcastle/credentials"),
-        })
+        });
+        if let Some(r) = relay {
+            let env = spec["service"]["env"].as_object_mut().expect("the spec's env is an object");
+            env.insert("GATEWAY_RELAY_URL".into(), json!(relay_url(platform, r.id)));
+            env.insert("GATEWAY_RELAY_ID".into(), json!(r.id));
+            env.insert("GATEWAY_RELAY_SECRET".into(), json!(r.secret));
+            // a chat of its own as home, so no session opens with "no home channel"
+            env.insert("RELAY_HOME_CHANNEL".into(), json!(r.id));
+            env.insert("HERMES_GATEWAY_BUSY_INPUT_MODE".into(), json!("queue"));
+        }
+        spec
     }
 }
 
@@ -246,7 +291,7 @@ mod tests {
     /// its owner's. Method: one spec, each part checked.
     #[test]
     fn the_spec_is_loopback_hermes_behind_its_bridge() {
-        let spec = Spec { image: "img", model: "m", platform: "https://fragment.club" }.json("tok");
+        let spec = Spec { image: "img", model: "m", platform: "https://fragment.club" }.json("tok", None);
         let env = &spec["service"]["env"];
         assert_eq!(env["HERMES_DASHBOARD_HOST"], "127.0.0.1", "loopback mode: Hermes' login is off");
         assert_eq!(env["HERMES_DASHBOARD_PORT"], "9120");
@@ -264,6 +309,23 @@ mod tests {
         assert_eq!(spec["url_auth"], "owner");
         assert!(spec.get("cors_origins").is_none());
         assert_eq!(grant()["computers_max"], 1);
+        assert!(env.get("GATEWAY_RELAY_URL").is_none(), "no relay unless asked");
+        // the platform's settings, as Hermes' managed overlay, before anything starts
+        assert!(script.starts_with("mkdir -p /etc/hermes && cat > /etc/hermes/config.yaml <<'YAML'\ngroup_sessions_per_user: false\n"));
+        assert!(script.contains("  busy_input_mode: queue\n") && script.contains("streaming:\n  enabled: true\n") && script.contains("\nYAML\n"));
+    }
+
+    /// Goal: a Hermes that answers chats dials its fragment's connector,
+    /// with its own id and secret, queuing.
+    #[test]
+    fn a_relayed_spec_dials_its_cell() {
+        let relay = Relay { id: "hermes.alice", secret: "s3cr3t" };
+        let spec = Spec { image: "img", model: "m", platform: "https://fragment.club" }.json("tok", Some(&relay));
+        let env = &spec["service"]["env"];
+        assert_eq!(env["GATEWAY_RELAY_URL"], "https://fragment.club/api/hermes/hermes.alice");
+        assert_eq!((env["GATEWAY_RELAY_ID"].as_str(), env["GATEWAY_RELAY_SECRET"].as_str()), (Some("hermes.alice"), Some("s3cr3t")));
+        assert_eq!(env["RELAY_HOME_CHANNEL"], "hermes.alice");
+        assert_eq!(env["HERMES_GATEWAY_BUSY_INPUT_MODE"], "queue");
     }
 
     #[test]
