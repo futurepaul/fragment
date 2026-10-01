@@ -4,8 +4,8 @@
 of one computer (`"computer": {"preset": "hermes"}`), reached over iroh
 by an admission, in place of the `Hermes` cell's public URL, CORS, and
 login ("The seam, built", below). Phases 1 to 4 are the record of what
-came before. Phase 5 no longer needs the wildcard certificate; the
-fragment.club deploy and the hosted proof are Paul's to approve.
+came before. Phase 5 is live on fragment.club (2026-10-01), with no
+wildcard certificate: "Phase 5, live", below.
 
 Status: design agreed 2026-09-30 (Finite's model); phase 1 in progress. Paul's calls, 2026-09-30:
 
@@ -367,6 +367,42 @@ stranger, signed out, another key with the page's admission); Hermes
 refusing a read without its token; the client's entry, module, and glue
 as a fragment's host serves them; and the template's page in headless
 Chrome by its key, as in phase 4.
+
+### Phase 5, live (2026-10-01)
+
+Deployed to fragment.club (Paul approved): the node image (`KEYS` signs
+admissions and grants; the platform's grantor key a fleet secret), then
+the cell at `0707806`, its static assets the computer client. lat-6
+needed nothing new: it already listed the platform's grantor, named no
+admitters (so a computer's owner key admits), ran its relay, and its key
+was the fleet's `FRAGMENT_SANDCASTLE_NODES`. The `hermes` template is on
+the platform's "new" page.
+
+The hosted proof, `cargo xtask e2e --fleet fragment-club --only hermes`
+(12 checks, run by Paul): the template made and deployed by the e2e
+person; the client as a `fragment.boats` host serves it; its Hermes made
+on lat-6; an admission for a fresh key (none signed out); that key
+connected through lat-6's relay and admitted; Hermes refusing a read
+without its session token and answering with it; a turn on the real
+model over its socket; another key with the same admission refused.
+
+| | fragment.club to lat-6, from the Mac |
+|---|---|
+| Init to `hermes.ready` | 12.8–13.6 s |
+| The admission (the cell, `KEYS`) | 53–58 ms |
+| Connected and admitted through the relay | 271–345 ms |
+| Hermes' first answer by its key | 48 ms |
+| A turn on the real model | 4.0 s |
+
+Its first run found what the fakes hid: Hermes in loopback mode upgrades
+its socket naming no subprotocol (only its ticket mode names one). The
+page's client never minded; the lane's client did, and the fake now
+answers as Hermes does.
+
+The page in a browser on fragment.club needs a person signed in through
+WorkOS, which a run is not: the lane drives it in Chrome on fakes, and
+the sandcastle e2e's `web` section drives the same client in Chrome on
+lat-6.
 
 ## Evaluation
 

@@ -361,9 +361,7 @@ Still to do:
 
 - **A derived Hermes image** with the bridge as an s6 service, in place
   of the init command.
-- **fragment.club (Paul approves):** the grantor secret, a node deploy
-  (`KEYS`' admission kind) and the cell (its static assets ship with
-  it); no wildcard certificate is needed any more. Then the hosted
-  proof: a person on fragment.club chats with their Hermes on lat-6 by
-  its key.
+- ~~fragment.club~~ live 2026-10-01: the node image, then the cell with
+  its static assets, no wildcard certificate; the hosted proof passes
+  (docs/hermes-chat.md, "Phase 5, live").
 - **The `goose` preset**, and presets on a rented site.
