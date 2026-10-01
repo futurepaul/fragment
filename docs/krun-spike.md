@@ -316,6 +316,13 @@ v1.22.0) and NVIDIA OpenShell (@ 2935e973, its `openshell-driver-vm`).
    libelf-dev bc`, which pulled `m4 zlib1g-dev libzstd-dev`.
 6. **ubuntu's own toolchain** gained the `x86_64-unknown-linux-musl`
    target and `clippy`.
+7. **The jail is Firecracker's model, not a user namespace.** The VM
+   process runs as a plain uid of its own, 300000 + slot (outside every
+   subordinate range, so no user namespace on the host maps it), in new
+   PID, mount, network, IPC, and UTS namespaces. A user namespace would add
+   kernel surface and buy nothing a dropped uid does not.
+8. **One more privileged action, for reset**: `sudo systemctl stop
+   krun-spike.slice` (it stops only the spike's own scopes).
 
 ### Phase 1: pin, build, boot (2026-10-01)
 
@@ -343,3 +350,61 @@ v1.22.0) and NVIDIA OpenShell (@ 2935e973, its `openshell-driver-vm`).
 - **Fresh roots (acceptance 8)**: a first start wrote `/marker` and
   `/data/marker`; a second start from the same image and data disk saw
   `root-fresh` and `kept`. Pass.
+
+### Phase 2: the jail (2026-10-01)
+
+The jailer (`sandcastle-vm jail`, run as `sudo -n systemd-run --scope
+--slice=krun-spike.slice`) plans the jail as pure data (refused when it
+would leak: a writable mount outside the spike's root, a shared disk
+writable, a uid of root's or the node's, a device not on the list), then:
+
+- makes the VM's run directory and writable disks the VM uid's;
+- forks a child into new PID, mount, network, IPC, and UTS namespaces;
+- builds a tmpfs root holding only:
+  - the VM's disks (shared ones read-only);
+  - its run directory;
+  - the runner, libkrun, and libkrunfw (read-only);
+  - the C library's directories (read-only);
+  - `/dev/kvm`, `/dev/null`, and `/dev/urandom`;
+- pivots into that root and remounts it read-only;
+- empties the capability bounding and ambient sets;
+- drops to the VM uid, keeping only the `kvm` group;
+- sets no-new-privileges and `RLIMIT_CORE` 0;
+- installs a seccomp filter (namespaces, mounts, tracing, BPF, keys,
+  modules, io_uring, `clone3` answered ENOSYS so `clone`'s flags can be
+  filtered);
+- execs the runner.
+
+The parent stays root only to wait, then hands the files back to
+`ubuntu`. The slice: `MemoryMax=8G`, `CPUQuota=800%`.
+
+- **Escape probe (acceptance 7): pass.** In the jail, as uid 300000 with
+  groups `994` (kvm) only:
+  - Capabilities: effective and bounding sets both empty;
+    no-new-privileges set; seccomp mode 2.
+  - Processes: it sees only itself (`/proc` holds PID 1).
+  - Root: `config.json dev disks krun lib lib64 proc usr vm`, read-only
+    (a write gets EROFS).
+  - Not found (ENOENT): `/etc/sandcastle/node.key`, `/etc/sandcastle`,
+    `/var/lib/sandcastle`, `/home/ubuntu`, its `.ssh` and `.microsandbox`,
+    the spike's own directory, and a second jailed VM's disk.
+  - Network: the node's own `:22` and `:443`, and 1.1.1.1, are
+    unreachable; `127.0.0.1:3340` (iroh-relay on the host's loopback)
+    and `127.0.0.53:53` are refused, since this is the jail's own
+    loopback.
+  - Refused with EPERM: `mount`, `unshare(CLONE_NEWUSER)`, `ptrace`,
+    `setuid(0)`, `chroot`, `bpf`. `clone3` gets ENOSYS.
+  - Writes refused: opening libkrun or the boot disk for writing.
+  - `/dev/kvm` opens.
+- **Boot to ready, jailed, n = 10: median 128.7 ms, range 122.9 to 132.1**
+  (unjailed 107.0). The runner's own clock is unchanged (107.3 ms); the
+  jail costs about 22 ms, most of it `sudo` and `systemd-run`.
+- **Fresh roots, jailed: pass.** Afterwards the VMs' files are `ubuntu`'s
+  again.
+- **Nothing else moved:**
+  - `sandcastled` (PID 932627, up since 18:56:58) and `iroh-relay` (PID
+    921147, since 18:41:01) are unchanged, with no restarts.
+  - The other session's `msb machine` is untouched.
+  - ZFS still has only `tank/sandcastle`, and the nft ruleset's hash is
+    unchanged.
+  - No spike scope is left.
