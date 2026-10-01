@@ -137,17 +137,40 @@ fn rpc(ws: &mut Ws, id: u64, method: &str, params: Value) -> Result<(Value, Vec<
     anyhow::bail!("no answer to {method} in {events:?}")
 }
 
-/// One turn in a new chat over Hermes' `/api/ws?token=`, through a tunnel's
-/// port: the reply's text.
-pub(crate) fn turn(port: u16, token: &str, text: &str) -> Result<String> {
-    let url = format!("ws://127.0.0.1:{port}/api/ws?token={token}");
-    let mut req = tungstenite::client::IntoClientRequest::into_client_request(url.as_str())?;
-    req.headers_mut().insert("sec-websocket-protocol", "hermes-gateway-v1".parse()?);
-    let (mut ws, _) = tungstenite::connect(req)?;
-    if let tungstenite::stream::MaybeTlsStream::Plain(s) = ws.get_ref() {
-        // a cold wake and a real model's first words fit
-        s.set_read_timeout(Some(Duration::from_secs(60)))?;
+/// Hermes' socket, `/api/ws?token=`, through a tunnel's port, offering
+/// `hermes-gateway-v1` as the page does. Hermes in loopback mode upgrades
+/// without naming a subprotocol (it names one only for its ticket), which
+/// tungstenite's client refuses; so the upgrade is read here, a byte at a
+/// time (the gateway's first frame may follow at once), and the socket
+/// taken as it is, as the page's client takes it.
+fn gateway(port: u16, token: &str) -> Result<Ws> {
+    use std::io::{Read, Write};
+    /// The longest upgrade answer read.
+    const HEAD_MAX: usize = 16 * 1024;
+    let mut tcp = std::net::TcpStream::connect(("127.0.0.1", port))?;
+    // a cold wake and a real model's first words fit
+    tcp.set_read_timeout(Some(Duration::from_secs(60)))?;
+    let key = tungstenite::handshake::client::generate_key();
+    write!(
+        tcp,
+        "GET /api/ws?token={token} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Protocol: hermes-gateway-v1\r\n\r\n"
+    )?;
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        anyhow::ensure!(head.len() < HEAD_MAX, "an upgrade answer over {HEAD_MAX} bytes");
+        tcp.read_exact(&mut byte)?;
+        head.push(byte[0]);
     }
+    let head = String::from_utf8_lossy(&head);
+    anyhow::ensure!(head.starts_with("HTTP/1.1 101"), "the socket answered {}", head.lines().next().unwrap_or(""));
+    Ok(tungstenite::WebSocket::from_raw_socket(tungstenite::stream::MaybeTlsStream::Plain(tcp), tungstenite::protocol::Role::Client, None))
+}
+
+/// One turn in a new chat over Hermes' socket, through a tunnel's port: the
+/// reply's text.
+pub(crate) fn turn(port: u16, token: &str, text: &str) -> Result<String> {
+    let mut ws = gateway(port, token)?;
     let ready = next(&mut ws)?;
     anyhow::ensure!(ready["params"]["type"] == "gateway.ready", "{ready}");
     let (made, _) = rpc(&mut ws, 1, "session.create", json!({ "title": "e2e" }))?;

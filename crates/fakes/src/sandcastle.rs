@@ -16,9 +16,11 @@
 //! - Its Hermes is Hermes in loopback mode on a port of its own: a loopback
 //!   Host only (else 400), its session token (the spec's
 //!   `HERMES_DASHBOARD_SESSION_TOKEN`) on `api/sessions` and a session's
-//!   `messages` (else 401), `api/status` open, and `api/ws?token=`,
-//!   JSON-RPC (`session.create`, `session.resume`, `prompt.submit`, whose
-//!   turn echoes the prompt in two deltas, `gateway.ping`).
+//!   `messages` (else 401), `api/status` open, and `api/ws?token=`, whose
+//!   upgrade names no subprotocol (Hermes v0.21.5 names one only for its
+//!   ticket), JSON-RPC (`session.create`, `session.resume`,
+//!   `prompt.submit`, whose turn echoes the prompt in two deltas,
+//!   `gateway.ping`).
 //!
 //! A computer serves after `serving_after` looks at it (a platform waits
 //! for it), and never sleeps. A turn's second delta waits `slow_turns` (a
@@ -375,9 +377,9 @@ fn native(state: &Arc<Mutex<State>>, name: &str, req: &Request) -> Response {
         let given = req.query.get("token").map(String::as_str).unwrap_or("");
         let key = req.header("sec-websocket-key").filter(|_| !token.is_empty() && given == token);
         let Some(key) = key else { return problem(403, "forbidden", "a socket needs the session token") };
-        let offered = req.header("sec-websocket-protocol").unwrap_or("").split(',').any(|p| p.trim() == "hermes-gateway-v1");
+        // as Hermes in loopback mode answers: no subprotocol named, whatever was offered
         let (state, name) = (Arc::clone(state), name.to_string());
-        return Response::websocket(key, offered.then_some("hermes-gateway-v1"), move |stream| gateway(stream, &state, &name));
+        return Response::websocket(key, None, move |stream| gateway(stream, &state, &name));
     }
     let given = req.header("x-hermes-session-token").or_else(|| req.header("authorization").and_then(|h| h.strip_prefix("Bearer "))).unwrap_or("");
     if token.is_empty() || given != token {
