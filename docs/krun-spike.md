@@ -255,6 +255,91 @@ next begins.
 - **Debt:** anything the spike skips on purpose gets a ledger entry
   before it could ship.
 
+## What two other libkrun sandboxes taught (Paul's gut check)
+
+Read before phase 1 (2026-10-01): smolvm (smol-machines/smolvm @ 9f446ae,
+v1.22.0) and NVIDIA OpenShell (@ 2935e973, its `openshell-driver-vm`).
+
+- **Neither uses upstream libkrun's pause, resume, or balloon.** smolvm
+  carries a fork 230 commits ahead (and 197 behind) for exactly those;
+  OpenShell has none of them. Upstream master gained them on 2026-09-11 (the
+  builder API), unreleased: pinned here at master.
+- **OpenShell boots what this spike boots**: a read-only bootstrap ext4,
+  a per-sandbox sparse overlay disk, a read-only image disk, all
+  virtio-blk; and it unpacks OCI images inside a VM ("image-prep"), because
+  a host cannot be trusted to make Linux ext4 ownership right. Both are
+  this spike's choices too (below).
+- **TSI is where smolvm hurts**: idle keep-alive connections dropped after
+  about six minutes, a guest-kernel NULL dereference in TSI's setsockopt,
+  half-close bugs, and TSI's own egress filter not enforced. OpenShell
+  dropped TSI and gvproxy for no NIC at all and a seccomp-notify broker in
+  the guest. So phase 5 starts with virtio-net on a tap inside the VM
+  process's network namespace (kernel TCP, the namespace's nftables), not
+  TSI, reversing the plan's preference on this evidence.
+- **Neither jails its VMM by default.** smolvm's hardening (a per-VM uid,
+  cgroup, Landlock, a seccomp allowlist) is opt-in by environment
+  variable; OpenShell's VMM runs unjailed. The jail here is the default.
+- **Copied**: the guest dials out to say ready (no polling); the vsock
+  listener is bound before ready is said; the exit code travels over vsock
+  (libkrun's own path needs a virtio-fs root); fake addresses from
+  198.18.0.0/15 for intercepted names (OpenShell's DNS), for phase 5;
+  dropping the guest's page cache on idle so free-page reporting returns
+  it (smolvm's reclaim pulse), for phase 6.
+- **Not copied**: a bash PID 1 (OpenShell), forking from a tokio process
+  (OpenShell's launcher), environment on argv, a 32 MiB frame (smolvm; 1
+  MiB here), crun inside the guest (smolvm).
+
 ## Results
 
-*(Filled as each phase lands.)*
+### Deviations from the plan, and why
+
+1. **Roots are overlays, not ZFS clones.** The image is one read-only ext4
+   disk shared by every VM of that image; each start gets a fresh sparse
+   scratch ext4 (4.6 ms to make 4 GiB, median) as the overlay's upper
+   layer. Cloudflare's semantics exactly, no ZFS needed for roots (the
+   engine runs on any Linux host), and no `sudo zfs` at all: the spike's
+   ZFS dataset was never created. `/data` is its own disk (a file here; a
+   zvol in sandcastle, as today).
+2. **Images are unpacked inside a build VM.** lat-6's `mke2fs` cannot read
+   a tarball (no libarchive), and unpacking as `ubuntu` would own every
+   file by uid 1000; in a VM the guest is root, so owners, modes, and
+   whiteouts are exact, and a hostile layer reaches only that VM's target
+   disk. The host only downloads and checks digests (on download, and
+   again before each use).
+3. **The guest ends the VM by rebooting.** x86 without ACPI cannot power
+   off ("Power off not available: System halted instead"); libkrun's
+   `reboot=k` turns the reset into the VMM's exit.
+4. **Phase 1 ran unjailed, as `ubuntu`, with no privilege at all** (one
+   test VM at a time, 512 MiB); the jail and the slice come with phase 2.
+5. **Build-only packages installed** (needrestart suspended, nothing
+   upgraded, no service restarted): `python3-pyelftools flex bison
+   libelf-dev bc`, which pulled `m4 zlib1g-dev libzstd-dev`.
+6. **ubuntu's own toolchain** gained the `x86_64-unknown-linux-musl`
+   target and `clippy`.
+
+### Phase 1: pin, build, boot (2026-10-01)
+
+- **libkrun** `b63baa1895c60d58b731fdebb9180ba266292848` (master, Apache-2.0;
+  the builder API with `krun_vmm_handle_pause/resume` and a balloon that
+  offers free-page reporting, which `MADV_DONTNEED`s reported pages), built
+  with `--features ffi,blk,net` in 14 s. **libkrunfw**
+  `f6a710faaa8cfe3b67a4bcdadb082c2183a914f1` (5.6.2, Linux 6.12.109,
+  LGPL-2.1 with a GPL-2.0 kernel), built from source in about two minutes.
+  Both in `/home/ubuntu/krun-spike/prefix/lib`, loaded by path; msb's
+  `libkrunfw.so.5.6.1` untouched.
+- **The guest**: `sandcastle-guest`, 1.4 MB, static (musl), the boot disk's
+  `/init`. The boot disk is 16 MiB, made in 6 ms.
+- **busybox:1.37.0** pulled (one layer, 2.2 MB) in 428 ms and made a disk by
+  a build VM in 195 ms, its boot included (442 entries; one device node
+  skipped).
+- **Boot to ready, busybox, 1 vCPU, 512 MiB, n = 10** (the driver's clock,
+  from spawning the runner to the guest's ready on the lifecycle channel):
+  **median 107.0 ms, range 103.8 to 109.8**. Of that, the guest kernel's
+  own clock reads 55.5 ms (53 to 58) at ready: about 50 ms is the runner
+  (loading libkrun and libkrunfw, building the VMM: 5.7 ms) and libkrun
+  starting the kernel. The first agent round trip after ready: median 2.1
+  ms. msb's Hermes cold start is 6.0 to 6.2 s; Hermes's own number comes
+  in phase 6.
+- **Fresh roots (acceptance 8)**: a first start wrote `/marker` and
+  `/data/marker`; a second start from the same image and data disk saw
+  `root-fresh` and `kept`. Pass.
