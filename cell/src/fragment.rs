@@ -368,10 +368,6 @@ pub(crate) enum MetaKey {
     ComputerPending,
     /// Its computer was last told live declares one.
     ComputerDeclared,
-    /// What its Hermes is still to be told (`{"declared": bool}`: hermes.rs).
-    HermesPending,
-    /// Its Hermes was last told live declares one.
-    HermesDeclared,
     /// The agent that made it as a hand-off's throwaway (its only deleter
     /// besides its owner), as the router named it at create.
     ThrowawayOf,
@@ -450,8 +446,6 @@ impl MetaKey {
             MetaKey::AgentFloor => "agent_floor",
             MetaKey::ComputerPending => "computer_pending",
             MetaKey::ComputerDeclared => "computer_declared",
-            MetaKey::HermesPending => "hermes_pending",
-            MetaKey::HermesDeclared => "hermes_declared",
             MetaKey::ThrowawayOf => "throwaway_of",
             MetaKey::PinMain => "pin_main",
             MetaKey::PinLive => "pin_live",
@@ -848,17 +842,6 @@ impl FragmentCell {
             let report = body_json(&mut req).await?;
             return json_response(&self.delivery_report(&report)?);
         }
-        if let Some(what) = path.strip_prefix("/hermes/") {
-            // Only its Hermes sets the header; the router never passes it.
-            if req.headers().get(crate::hermes::HEADER)?.is_none() {
-                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
-            }
-            let what = what.to_string();
-            if what == "rejoin" {
-                return self.hermes_rejoin().await;
-            }
-            return self.hermes_asks(&what, &body_json::<Value>(&mut req).await?);
-        }
         if let Some(what) = path.strip_prefix("/computer/") {
             // Only its computer sets the header; the router never passes it.
             if req.headers().get(crate::computer::HEADER)?.is_none() {
@@ -1145,11 +1128,6 @@ impl FragmentCell {
             self.index_change(m, None)?;
         }
         self.flush_index().await;
-        // its Hermes goes with it: its computer, and its key's computer
-        // (asked before the meta that says it has one is wiped)
-        if self.meta(MetaKey::HermesDeclared)?.is_some() || self.meta(MetaKey::HermesPending)?.is_some() {
-            crate::hermes::ask(&self.env, &name, &crate::hermes::Ask::Destroy).await?;
-        }
         for ws in self.state.get_websockets() {
             let _ = ws.close(Some(4004), Some("the fragment was deleted"));
         }
@@ -1245,7 +1223,6 @@ impl FragmentCell {
             self.event("agent.join-failed", &e.message, json!({ "code": e.code }));
         }
         self.tell_computer().await;
-        self.tell_hermes().await;
         self.drain_deliveries().await;
         // Settles pending mutations that are due; one that fails waits for
         // its own next try and never fails the alarm.

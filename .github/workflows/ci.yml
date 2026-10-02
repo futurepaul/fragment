@@ -35,37 +35,11 @@ jobs:
           restore-keys: check-${{ runner.os }}-
       - run: cargo xtask check
 
-  # sandcastle, a workspace of its own (docs/sandbox.md): clippy, its
-  # tests, and the simulator's default seeds. The real engine needs a KVM
-  # host; its e2e (sandcastle-e2e) runs by hand on finite-lat-6.
-  sandcastle:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: sandcastle
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            sandcastle/target
-          key: sandcastle-${{ runner.os }}-${{ hashFiles('sandcastle/Cargo.lock') }}
-          restore-keys: sandcastle-${{ runner.os }}-
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace --all-features
-
   # The kit (`cargo xtask e2e-kit`) in two parts, built in parallel; each
   # shard unpacks both. The cell's wasm builds on Linux (wasm is wasm, and
   # Linux runners are plenty); on macOS, whose binaries the shards run, the
-  # agent's wasm and the computer client (cell/client; the runner's
-  # Homebrew LLVM compiles ring's C for wasm32) build alongside the node,
-  # the CLI, and the suite, and the esbuild worker-build fetched there (the
-  # node bundles with it) goes too.
+  # agent's wasm builds alongside the node, the CLI, and the suite, and the
+  # esbuild worker-build fetched there (the node bundles with it) goes too.
   kit:
     strategy:
       matrix:
@@ -83,7 +57,7 @@ jobs:
               cell/target
           - name: macos
             os: macos-14
-            build: cargo xtask e2e-kit e2e-kit-macos.tar.gz agent client native
+            build: cargo xtask e2e-kit e2e-kit-macos.tar.gz agent native
             tree: target/ci-tree
             paths: |
               ~/.cargo/bin
@@ -211,13 +185,6 @@ jobs:
           pattern: e2e-kit-*
           merge-multiple: true
       - run: for part in e2e-kit-*.tar.gz; do tar -xzf "$part"; done
-      # the node shaped as fragment.club (`start_as_browsers_see_it`) names
-      # its platform fragment.localhost, which the node and the fakes reach
-      # themselves (a Hermes' inbox and its Relay): loopback, as a
-      # developer's Mac resolves it and this runner's resolver does not
-      - run: |
-          echo "127.0.0.1 fragment.localhost" | sudo tee -a /etc/hosts
-          sudo dscacheutil -flushcache
       - run: target/release/fragment-e2e ${{ matrix.args }}
         env:
           CELLD_ESBUILD: ${{ github.workspace }}/target/e2e-kit/esbuild

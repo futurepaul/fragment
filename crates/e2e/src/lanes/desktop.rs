@@ -315,7 +315,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         Reply::Text("Here it is.\n\n![a picture](__file?path=pics/dot.png)".into()),
     ]);
     chrome.eval(&page, "document.getElementById('new-chat').click(); true")?;
-    // it asks who answers: their agent, or the people alone (they have no Hermes)
+    // it asks who answers: their agent, or the people alone
     let asks = "!document.getElementById('menu').hidden && [...document.querySelectorAll('#menu [data-answers]')].map(b => b.dataset.answers + ':' + b.textContent).join() === 'agent:Your agent,people:Just people'";
     s.ok("New chat asks who answers it: their agent, or the people alone", chrome.until(&page, asks, wait), chrome.eval(&page, "document.getElementById('menu').innerText").unwrap_or_default());
     chrome.eval(&page, "document.querySelector('#menu [data-answers=agent]').click(); true")?;

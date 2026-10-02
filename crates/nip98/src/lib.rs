@@ -10,11 +10,6 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 pub const KIND: u64 = 27235;
-/// An admission's kind (sandcastle's, `sandcastle_nip98::ADMISSION_KIND`):
-/// one iroh peer may reach one computer on one node until a time.
-pub const ADMISSION_KIND: u64 = 27237;
-/// The longest an admission lasts; a sandcastle node refuses one longer.
-pub const ADMISSION_LIFETIME_MAX_S: i64 = 600;
 
 /// Why a request's auth was refused. Each maps to 401 at the edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,10 +26,6 @@ pub enum AuthError {
     BadSignature,
     /// A key proof that names someone other than the request's signer.
     NotForSigner,
-    /// An admission past its `expiration`.
-    Expired,
-    /// An admission meant to last longer than `ADMISSION_LIFETIME_MAX_S`.
-    TooLong { lifetime_s: i64 },
 }
 
 impl std::fmt::Display for AuthError {
@@ -51,8 +42,6 @@ impl std::fmt::Display for AuthError {
             AuthError::IdMismatch => write!(f, "auth event id does not match its content"),
             AuthError::BadSignature => write!(f, "auth event signature does not verify"),
             AuthError::NotForSigner => write!(f, "the key proof's `p` tag does not name this request's signer"),
-            AuthError::Expired => write!(f, "the admission has expired"),
-            AuthError::TooLong { lifetime_s } => write!(f, "the admission would last {lifetime_s} s, longer than {ADMISSION_LIFETIME_MAX_S}"),
         }
     }
 }
@@ -201,57 +190,6 @@ fn signed(event: &Event) -> Result<(), AuthError> {
     key.verify_raw(&id, &sig).map_err(|_| AuthError::BadSignature)
 }
 
-/// A verified admission.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Admission {
-    /// Who signed it (64 hex).
-    pub signer: String,
-    /// The iroh key it admits (64 hex).
-    pub peer: String,
-    pub computer: String,
-    /// The node's key (64 hex).
-    pub node: String,
-    pub expires_at: i64,
-}
-
-/// Verifies an admission (the event's JSON), as a sandcastle node does
-/// (`sandcastle_nip98::verify_admission`): made no more than `window_s`
-/// ahead of `now_s`, not yet expired, and lasting at most
-/// `ADMISSION_LIFETIME_MAX_S`. Who may sign one is the verifier's to decide.
-pub fn verify_admission(raw: &str, now_s: i64, window_s: i64) -> Result<Admission, AuthError> {
-    assert!(window_s >= 0, "a window is a duration");
-    if raw.len() > 4096 {
-        return Err(AuthError::Malformed("an admission over 4 KiB"));
-    }
-    let event: Event = serde_json::from_str(raw).map_err(|_| AuthError::Malformed("not an event"))?;
-    if event.kind != ADMISSION_KIND {
-        return Err(AuthError::WrongKind);
-    }
-    if !is_hex64(&event.pubkey) {
-        return Err(AuthError::BadPubkey);
-    }
-    if event.created_at.saturating_sub(now_s) > window_s {
-        return Err(AuthError::Stale { skew_s: event.created_at.saturating_sub(now_s) });
-    }
-    let expires_at = event.tag("expiration").and_then(|e| e.parse::<i64>().ok()).ok_or(AuthError::Malformed("expiration"))?;
-    let lifetime_s = expires_at.saturating_sub(event.created_at);
-    if lifetime_s <= 0 {
-        return Err(AuthError::Malformed("expiration before created_at"));
-    }
-    if lifetime_s > ADMISSION_LIFETIME_MAX_S {
-        return Err(AuthError::TooLong { lifetime_s });
-    }
-    if expires_at <= now_s {
-        return Err(AuthError::Expired);
-    }
-    let lower = |s: &str| s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-    let peer = event.tag("peer").filter(|p| is_hex64(p) && lower(p)).ok_or(AuthError::Malformed("peer"))?.to_string();
-    let node = event.tag("node").filter(|n| is_hex64(n) && lower(n)).ok_or(AuthError::Malformed("node"))?.to_string();
-    let computer = event.tag("computer").filter(|c| !c.is_empty() && c.len() <= 63).ok_or(AuthError::Malformed("computer"))?.to_string();
-    signed(&event)?;
-    Ok(Admission { signer: event.pubkey, peer, computer, node, expires_at })
-}
-
 /// Verifies a NIP-98 header for `method url` with its `payload`: the body
 /// the router read (empty when it holds none: then the event must carry no
 /// payload tag, or the hash of nothing), or one it streams through, at
@@ -331,18 +269,7 @@ impl Keys {
     /// `header` for a body the signer holds only the SHA-256 (hex) of, or
     /// for none (`None`: no payload tag).
     pub fn header_for_payload(&self, method: &str, url: &str, payload_sha_hex: Option<&str>, created_at: i64) -> String {
-        self.header_with_nonce(method, url, payload_sha_hex, None, created_at)
-    }
-
-    /// `header_for_payload` with a `nonce` tag (hex): every header a new
-    /// event, for a verifier whose replay cache keys on the event id (a
-    /// sandcastle node's), where the same request signed twice in one
-    /// second would otherwise be refused the second time.
-    pub fn header_with_nonce(&self, method: &str, url: &str, payload_sha_hex: Option<&str>, nonce_hex: Option<&str>, created_at: i64) -> String {
         let mut tags = vec![tag("u", url), tag("method", &method.to_ascii_uppercase())];
-        if let Some(n) = nonce_hex {
-            tags.push(tag("nonce", n));
-        }
         if let Some(p) = payload_sha_hex {
             tags.push(tag("payload", p));
         }
@@ -354,25 +281,6 @@ impl Keys {
     pub fn proof(&self, method: &str, url: &str, signer_hex: &str, created_at: i64) -> String {
         let tags = vec![tag("u", url), tag("method", &method.to_ascii_uppercase()), tag("p", signer_hex)];
         self.event(tags, created_at)
-    }
-
-    /// An admission (docs/runtime-seam.md; sandcastle's `verify_admission`
-    /// reads it): `peer` (an iroh key, 64 hex) may reach `computer` on the
-    /// node `node` (64 hex) until `expires_at`. The event, as JSON.
-    pub fn admission(&self, peer: &str, computer: &str, node: &str, created_at: i64, expires_at: i64) -> String {
-        let tags = vec![tag("peer", peer), tag("computer", computer), tag("node", node), tag("expiration", &expires_at.to_string())];
-        let id = event_id(&self.pubkey_hex, created_at, ADMISSION_KIND, &tags, "");
-        let sig = self.key.sign_raw(&id, &[0u8; 32]).expect("BIP-340 signing a 32-byte digest");
-        let event = Event {
-            id: hex::encode(id),
-            pubkey: self.pubkey_hex.clone(),
-            created_at,
-            kind: ADMISSION_KIND,
-            tags,
-            content: String::new(),
-            sig: hex::encode(sig.to_bytes()),
-        };
-        serde_json::to_string(&event).expect("an event serializes")
     }
 
     fn event(&self, tags: Vec<Vec<String>>, created_at: i64) -> String {
@@ -413,36 +321,6 @@ mod tests {
 
     fn url(s: &str) -> Url {
         Url::parse(s).expect("a test URL")
-    }
-
-    /// Goal: an admission is the event sandcastle verifies: its kind, its
-    /// four tags, an id over them, and the key's signature. Method: sign
-    /// one and check each part, the signature by BIP-340.
-    #[test]
-    fn an_admission_is_sandcastles_event() {
-        let k = keys(7);
-        let (peer, node) = ("1".repeat(64), "2".repeat(64));
-        let raw = k.admission(&peer, "hermes", &node, NOW, NOW + 300);
-        let ev: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(ev["kind"], ADMISSION_KIND);
-        assert_eq!(ev["pubkey"], k.pubkey_hex());
-        assert_eq!(ev["tags"], serde_json::json!([["peer", peer], ["computer", "hermes"], ["node", node], ["expiration", (NOW + 300).to_string()]]));
-        let tags: Vec<Vec<String>> = serde_json::from_value(ev["tags"].clone()).unwrap();
-        let id = event_id(k.pubkey_hex(), NOW, ADMISSION_KIND, &tags, "");
-        assert_eq!(ev["id"], hex::encode(id));
-        let key = k256::schnorr::VerifyingKey::from_bytes(&hex::decode(k.pubkey_hex()).unwrap()).unwrap();
-        let sig = k256::schnorr::Signature::try_from(hex::decode(ev["sig"].as_str().unwrap()).unwrap().as_slice()).unwrap();
-        key.verify_raw(&id, &sig).expect("the key's signature over the id");
-        let v = verify_admission(&raw, NOW + 10, 60).expect("it verifies");
-        assert_eq!((v.signer.as_str(), v.peer.as_str(), v.computer.as_str(), v.node.as_str(), v.expires_at), (k.pubkey_hex(), peer.as_str(), "hermes", node.as_str(), NOW + 300));
-        assert_eq!(verify_admission(&raw, NOW + 300, 60), Err(AuthError::Expired));
-        assert_eq!(verify_admission(&k.admission(&peer, "hermes", &node, NOW, NOW + 601), NOW, 60), Err(AuthError::TooLong { lifetime_s: 601 }));
-        let mut forged: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        forged["tags"][1][1] = serde_json::json!("other");
-        assert_eq!(verify_admission(&forged.to_string(), NOW, 60), Err(AuthError::IdMismatch), "a tag changed after signing");
-        let header = k.header("GET", URL, b"", NOW);
-        let decoded = String::from_utf8(base64::engine::general_purpose::STANDARD.decode(&header[6..]).unwrap()).unwrap();
-        assert_eq!(verify_admission(&decoded, NOW, 60), Err(AuthError::WrongKind), "a request's header is not an admission");
     }
 
     fn verify_at(header: &str, method: &str, at: &str, body: &[u8]) -> Result<String, AuthError> {
@@ -492,22 +370,6 @@ mod tests {
         assert!(verify_at(&k.header("GET", "https://x:443/a", b"", NOW), "GET", "https://x/a", b"").is_ok());
         // the edge of the window is inside it
         assert!(verify_request(Some(&k.header("GET", URL, b"", NOW - 60)), "GET", &url(URL), Payload::Read(b""), NOW, 60).is_ok());
-    }
-
-    /// Goal: a nonce makes the same request two events, and both verify
-    /// (a sandcastle node's replay cache keys on the event id).
-    #[test]
-    fn a_nonce_makes_the_same_request_two_events() {
-        let k = keys(1);
-        let body = br#"{"a":1}"#;
-        let payload = hex::encode(Sha256::digest(body));
-        let one = k.header_with_nonce("PUT", URL, Some(&payload), Some("01"), NOW);
-        let two = k.header_with_nonce("PUT", URL, Some(&payload), Some("02"), NOW);
-        assert_ne!(decoded(&one).id, decoded(&two).id);
-        for h in [&one, &two] {
-            assert_eq!(verify_at(h, "PUT", URL, body).as_deref(), Ok(k.pubkey_hex()));
-        }
-        assert_eq!(k.header_for_payload("PUT", URL, Some(&payload), NOW), k.header_with_nonce("PUT", URL, Some(&payload), None, NOW), "no nonce: as before");
     }
 
     #[test]

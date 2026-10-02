@@ -343,9 +343,6 @@ pub enum ErrorCode {
     /// 410: the fragment moved to another host; the message names its URL
     /// there (a write or a socket to its old host: docs/api.md, Moved hosts).
     Moved,
-    /// 409: what was asked for is still being made (a fragment's Hermes
-    /// starting); ask again shortly.
-    NotReady,
 }
 
 impl ErrorCode {
@@ -366,7 +363,6 @@ impl ErrorCode {
             ErrorCode::StorageFull => 507,
             ErrorCode::NodeFull => 503,
             ErrorCode::Moved => 410,
-            ErrorCode::NotReady => 409,
         }
     }
 }
@@ -460,15 +456,13 @@ pub struct CreateFragment {
 }
 
 /// Who answers a new chat: its owner's own agent (the `chat` template's
-/// `"agent": {"personal": true}`), a Hermes of theirs (`{"computer":
-/// "<fragment>"}`, a fragment of theirs that declares one), or no one, the
-/// people in it alone (`"people"`).
+/// `"agent": {"personal": true}`), or no one, the people in it alone
+/// (`"people"`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChatAnswers {
     Agent,
     People,
-    Computer(String),
 }
 
 /// The answer to a create: the only time the webhook secret is shown
@@ -567,8 +561,7 @@ pub struct ListedFragment {
 /// What a fragment is, from its live manifest, as its owner's list carries
 /// it (the desktop's chats, apps, and computers: ROADMAP decision 25): a
 /// chat (it declares a `chat` channel) and who answers it, and the computer
-/// it declares (`default`, a Sprite, or a preset: `hermes`). Neither: an
-/// app.
+/// it declares (`default`, a Sprite). Neither: an app.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct FragmentKind {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -577,22 +570,17 @@ pub struct FragmentKind {
     pub computer: Option<String>,
 }
 
-/// Who answers a chat: with `computer`, the fragment whose computer's
-/// agent answers (none: the chat's own).
+/// Who answers a chat.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatKind {
     pub answers: Answers,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub computer: Option<String>,
 }
 
-/// `agent`: an agent (the owner's own, or the fragment's); `computer`: a
-/// computer's agent (a Hermes); `people`: no one.
+/// `agent`: an agent (the owner's own, or the fragment's); `people`: no one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Answers {
     Agent,
-    Computer,
     People,
 }
 
@@ -1572,7 +1560,7 @@ mod tests {
         let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner, sharing: None, kind: None }] };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes.ann", "role": "owner" }] }));
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1 };
-        let kind = FragmentKind { chat: Some(ChatKind { answers: Answers::Agent, computer: None }), computer: None };
+        let kind = FragmentKind { chat: Some(ChatKind { answers: Answers::Agent }), computer: None };
         let listed = FragmentList { fragments: vec![ListedFragment { name: "chat.ann".into(), role: Role::Owner, sharing: Some(sharing), kind: Some(kind) }] };
         assert_eq!(
             value(&listed),

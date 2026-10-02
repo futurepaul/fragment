@@ -69,7 +69,7 @@ impl Code {
             ErrorCode::BudgetUsedUp => Code::BudgetUsedUp,
             ErrorCode::StorageFull => Code::StorageFull,
             ErrorCode::HostFailed => Code::ServerError,
-            ErrorCode::UpstreamFailed | ErrorCode::RegistryUnavailable | ErrorCode::NodeFull | ErrorCode::NotReady => Code::Unavailable,
+            ErrorCode::UpstreamFailed | ErrorCode::RegistryUnavailable | ErrorCode::NodeFull => Code::Unavailable,
         }
     }
 
@@ -565,7 +565,6 @@ mod tests {
             (ErrorCode::StorageFull, "storage_full"),
             (ErrorCode::NodeFull, "unavailable"),
             (ErrorCode::Moved, "not_found"),
-            (ErrorCode::NotReady, "unavailable"),
         ];
         for (error, cli) in table {
             let body = serde_json::to_vec(&ErrorBody { error, message: "name taken, already exists".into() }).unwrap();

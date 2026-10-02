@@ -222,8 +222,6 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
         Ok(Some((crate::files::CAP_HEADER, "files")))
     } else if path.starts_with("computer/") {
         Ok(Some((crate::computer::HEADER, "1")))
-    } else if path.starts_with("hermes/") {
-        Ok(Some((crate::hermes::HEADER, "1")))
     } else if path == "deliver/report" {
         Ok(Some((crate::deliveries::REPORT_HEADER, "1")))
     } else if path.starts_with("test/") {
