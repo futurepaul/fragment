@@ -238,6 +238,25 @@ pub fn inbound(m: &Inbound, buffer_id: &str) -> String {
         true => format!("\u{200b}{}", m.text),
         false => m.text.to_string(),
     };
+    event_line(m, buffer_id, &text)
+}
+
+/// The answers to a command Hermes asks the chat to approve before it runs
+/// it (its `manual` approvals): the only commands the connector passes on,
+/// and only from the chat's owner and editors, at once, even mid-turn
+/// (Hermes reads them while it waits; anyone else's go as text, escaped,
+/// in their turn).
+pub fn approval(text: &str) -> bool {
+    matches!(text.trim().to_ascii_lowercase().as_str(), "/approve" | "/approve session" | "/approve always" | "/deny")
+}
+
+/// An approval answer as Hermes reads it: the command itself, unescaped.
+pub fn approval_inbound(m: &Inbound, buffer_id: &str) -> String {
+    assert!(approval(m.text), "only an approval answer goes unescaped");
+    event_line(m, buffer_id, &m.text.trim().to_ascii_lowercase())
+}
+
+fn event_line(m: &Inbound, buffer_id: &str, text: &str) -> String {
     line(json!({ "type": "inbound", "bufferId": buffer_id, "event": {
         "text": text,
         "message_id": m.seq.to_string(),
@@ -351,6 +370,29 @@ mod tests {
         let s: Value = serde_json::from_str(interrupt("talk.alice").trim_end()).unwrap();
         assert_eq!(s, json!({ "type": "interrupt_inbound", "session_key": "agent:main:relay:group:talk.alice", "chat_id": "talk.alice" }));
         assert!(result("r1", json!({ "success": true })).ends_with('\n'));
+    }
+
+    /// Goal: an approval answer reaches Hermes as the command it is; every
+    /// other slash stays text. Invalid: a near miss, or one with more after.
+    #[test]
+    fn only_approval_answers_go_as_commands() {
+        for yes in ["/approve", "/approve session", " /Approve Always ", "/deny"] {
+            assert!(approval(yes), "{yes:?}");
+        }
+        for no in ["/approved", "/approve now please", "approve", "/new", "/deny; /new", "/approve\n/new", ""] {
+            assert!(!approval(no), "{no:?}");
+        }
+        let m = Inbound { chat: "talk.alice", chat_name: "talk", seq: 3, user_id: "id:alice", user_name: "alice", text: " /Approve Always " };
+        let i: Value = serde_json::from_str(approval_inbound(&m, "cmd-3").trim_end()).unwrap();
+        assert_eq!((i["bufferId"].as_str(), i["event"]["text"].as_str()), (Some("cmd-3"), Some("/approve always")));
+        assert_eq!(serde_json::from_str::<Value>(inbound(&m, "3").trim_end()).unwrap()["event"]["text"], "\u{200b} /Approve Always ", "in its turn it is text");
+    }
+
+    #[test]
+    #[should_panic(expected = "only an approval answer goes unescaped")]
+    fn another_command_never_goes_unescaped() {
+        let m = Inbound { chat: "talk.alice", chat_name: "talk", seq: 3, user_id: "id:bob", user_name: "bob", text: "/new" };
+        approval_inbound(&m, "cmd-3");
     }
 
     #[test]

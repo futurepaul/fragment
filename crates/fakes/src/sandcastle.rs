@@ -187,6 +187,11 @@ impl Sandcastle {
         self.gateways.lock().unwrap().dials
     }
 
+    /// Approval answers its gateways took mid-turn: (who, the command).
+    pub fn relay_approvals(&self) -> Vec<(String, String)> {
+        self.gateways.lock().unwrap().approvals.clone()
+    }
+
     /// Turns a Stop cut short.
     pub fn relay_interrupted(&self) -> u64 {
         self.gateways.lock().unwrap().interrupted

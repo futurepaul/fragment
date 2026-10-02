@@ -281,6 +281,16 @@ impl HermesCell {
             return Ok(Response::from_json(&json!({ "ok": true, "kept": false }))?);
         }
         match work::said(d.record.body.get()) {
+            // an answer to what Hermes asked to run: on at once, mid-turn,
+            // from those who may say yes for its owner (its own approvals)
+            work::Said::Message(text) if wire::approval(&text) && self.socket().is_some() && self.may_approve(&h, &d.fragment, &d.record.principal).await? => {
+                let ws = self.socket().expect("checked");
+                let name = self.name_of(&d.record.principal).await;
+                let chat_name = fragment_proto::split_fragment_name(&d.fragment).map_or(d.fragment.as_str(), |(label, _)| label);
+                let m = wire::Inbound { chat: &d.fragment, chat_name, seq: d.record.seq, user_id: &d.record.principal, user_name: &name, text: &text };
+                ws.send_with_str(wire::approval_inbound(&m, &format!("cmd-{}", d.record.seq)))?;
+                return Ok(Response::from_json(&json!({ "ok": true, "kept": false, "approval": true }))?);
+            }
             work::Said::Message(text) => {
                 let text: String = text.chars().take(TEXT_MAX_BYTES).collect();
                 let name = self.name_of(&d.record.principal).await;
@@ -306,6 +316,19 @@ impl HermesCell {
             work::Said::Other => {}
         }
         Ok(Response::from_json(&json!({ "ok": true, "kept": true }))?)
+    }
+
+    /// Whether `principal` may answer Hermes' approvals in `chat`: its owner
+    /// (whose computer it is), or an editor there (trusted as the owner is,
+    /// docs/one-home.md decision 5); a guest's answer is text in its turn.
+    async fn may_approve(&self, h: &Row, chat: &str, principal: &str) -> CellResult<bool> {
+        if principal == h.owner {
+            return Ok(true);
+        }
+        let (_, platform) = self.cfg.sandcastle()?;
+        let url = url::Url::parse(platform).map_err(|e| CellError::host(format!("FRAGMENT_PLATFORM_URL: {e}")))?;
+        let members = crate::share::ask(&self.env, &url, chat, &self.hermes_signed(h)?, Method::Get, "/api/members", None).await?;
+        Ok(members["members"].as_array().into_iter().flatten().any(|m| m["principal"] == principal && matches!(m["role"].as_str(), Some("owner" | "editor"))))
     }
 
     /// The name Hermes calls a writer by: a person's username, or "a visitor".

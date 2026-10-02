@@ -64,6 +64,15 @@ proven on Discord and Telegram, so a Hermes upgrade re-reads it.
   pending message and one per writer's debounce, and drops a third
   writer's mid-turn, so the cell hands it the chat's next message only
   once its turn ends (its `👀` off, or `TURN_MAX_MS`).
+- **Approvals from the owner and editors, at once.** Hermes asks before a
+  risky command (its `manual` approvals: a progress line, "Reply
+  `/approve`…"), and its turn waits. The chat's next message would wait
+  for the turn, and a leading `/` is escaped, so an answer would never
+  arrive: `/approve`, `/approve session`, `/approve always` and `/deny`
+  alone go on as the command itself, at once, mid-turn, from the chat's
+  owner or an editor (trusted as the owner is: docs/one-home.md,
+  decision 5). A guest's is text, in its turn. Hermes confirms it as a
+  reply of the running turn.
 - **Kept until acked.** Each message is kept until Hermes acks it, and
   handed again on its next dial (it drops one it saw, by `(chat_id,
   message_id)`).
