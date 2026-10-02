@@ -333,6 +333,13 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // touched): the read still says what the owner's list says, not what
     // the fragment would; the fragment's next real change updates the list.
     let quiet = make(&s.name("squiet"), "blank")?;
+    // its template's first install tells the list what it is (its kind),
+    // with its counts then: a real change, so it lands before the fill
+    let installed = s.eventually(wait, || {
+        let r = api.signed(&owner, "GET", "/api/fragments", None).map(|r| r.body).unwrap_or_default();
+        r["fragments"].as_array().into_iter().flatten().any(|f| f["name"] == quiet.as_str() && f.get("kind").is_some())
+    });
+    anyhow::ensure!(installed, "{quiet}'s first install never reached its owner's list");
     let before = listed(&quiet)?;
     let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": quiet, "op": "members", "fill": 4 })))?;
     let filled = api.status(&owner, &quiet)?;
