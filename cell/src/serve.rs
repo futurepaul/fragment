@@ -19,7 +19,7 @@
 
 use fragment_core::access::Purpose;
 use fragment_core::{npub, site};
-use fragment_proto::{valid_repo_path, ErrorCode, IdentityKind, OpCall, Role, Visibility};
+use fragment_proto::{valid_repo_path, ErrorCode, OpCall, Role, Visibility};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use worker::*;
@@ -275,12 +275,7 @@ impl FragmentCell {
                     anon_principal(&fresh)
                 }
             };
-            let socket = self.live(&req, caller, credential, &principal, link)?;
-            // a page wakes the fragment's computer; a computer's socket is no page
-            if caller.kind() != Some(IdentityKind::Computer) {
-                self.viewed().await;
-            }
-            socket
+            self.live(&req, caller, credential, &principal, link)?
         } else {
             match req.method() {
                 Method::Get | Method::Head => self.site(&mut req, caller, &mut facts, &path, &url, link, anon).await?,

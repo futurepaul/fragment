@@ -121,21 +121,6 @@ impl Route for Reserve {
     type Answer = Reserved;
 }
 
-/// A span of a computer's (computer.rs), held before the computer is: as
-/// `reserve` holds a paid step, refused past the month, but without
-/// `reserve`'s OpenRouter key (a computer's awake time needs none, on a
-/// fleet with no AI too). It is then settled (`settle`) once the computer
-/// was held, or given back (`release`) when it never was; the same
-/// reference again holds nothing more.
-#[derive(Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Hold(pub Reserve);
-
-impl Route for Hold {
-    const PATH: &'static str = "/hold";
-    type Answer = ();
-}
-
 /// The org's OpenRouter key, for a step that costs nothing (a video's polls).
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -449,16 +434,6 @@ impl LedgerCell {
         Ok(key.to_string())
     }
 
-    fn hold_span(&self, Hold(b): Hold) -> CellResult<()> {
-        if b.amount <= 0 || b.reference.is_empty() || b.reference.len() > 512 {
-            return Err(CellError::invalid("a hold names its span and a positive amount"));
-        }
-        if self.rows("SELECT state FROM usage WHERE ref = ?", vec![b.reference.as_str().into()])?.is_empty() {
-            self.hold(&b)?;
-        }
-        Ok(())
-    }
-
     fn settle(&self, b: Settle) -> CellResult<Settlement> {
         let rows = self.rows("SELECT state, reserved, cost FROM usage WHERE ref = ?", vec![b.reference.as_str().into()])?;
         let Some(row) = rows.first() else { return Err(CellError::new(ErrorCode::NotFound, "no such reservation")) };
@@ -593,7 +568,6 @@ impl LedgerCell {
                 reply::<Key>(self.key().await.map(|key| KeyAnswer { key }))
             }
             Settle::PATH => reply::<Settle>(self.settle(decode(&body)?)),
-            Hold::PATH => reply::<Hold>(self.hold_span(decode(&body)?)),
             SettleVideo::PATH => reply::<SettleVideo>(self.settle_video(decode(&body)?)),
             Release::PATH => reply::<Release>(self.release(decode(&body)?)),
             Status::PATH => {

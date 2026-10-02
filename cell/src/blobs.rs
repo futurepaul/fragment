@@ -10,9 +10,7 @@
 //! latest versions' bytes are kept.
 //!
 //! A page reads one of its fragment's blobs by hash at `__blob/<sha>` (a
-//! step's screenshot, a computer's screen), typed as its upload declared.
-//! A computer's screen is a frame (`?frame` on its upload), collected soon
-//! after the next frame replaces it rather than after the week's grace.
+//! step's screenshot), typed as its upload declared.
 
 use fragment_core::{blob, site};
 use fragment_proto::{ErrorCode, Role};
@@ -27,10 +25,6 @@ use crate::js;
 const POINTER_MIN_BYTES: u64 = 126;
 /// How often the collection runs at most (it runs with the poll backstop).
 const GC_EVERY_MS: i64 = 24 * 3600 * 1000;
-/// A frame is kept this long after its upload (or the grace period, when
-/// shorter): pages show the latest, and at a frame a second the week's
-/// grace would keep 600,000 of them, more than the daily sweep deletes.
-const FRAME_GRACE_MS: i64 = 60 * 1000;
 /// `__blob` answers the same bytes for a hash forever.
 const IMMUTABLE: &str = "private, max-age=31536000, immutable";
 
@@ -52,26 +46,24 @@ impl FragmentCell {
         Ok(format!("{}/{sha}", self.must(MetaKey::Npub)?))
     }
 
-    /// A blob seen now; its type the latest upload's that declared one, and
-    /// a frame only while every upload of it said so.
-    fn record_blob(&self, sha: &str, size: u64, mime: Option<&str>, frame: bool) -> CellResult<()> {
+    /// A blob seen now; its type the latest upload's that declared one.
+    fn record_blob(&self, sha: &str, size: u64, mime: Option<&str>) -> CellResult<()> {
         let now = SqlStorageValue::Integer(js::now_ms());
         self.exec(
-            "INSERT INTO blobs (sha, size, uploaded_at, seen_at, mime, frame) VALUES (?, ?, ?, ?, ?, ?)
-             ON CONFLICT (sha) DO UPDATE SET seen_at = excluded.seen_at, mime = coalesce(excluded.mime, blobs.mime), frame = min(blobs.frame, excluded.frame)",
-            vec![sha.into(), SqlStorageValue::Integer(size as i64), now.clone(), now, mime.map_or(SqlStorageValue::Null, Into::into), SqlStorageValue::Integer(frame.into())],
+            "INSERT INTO blobs (sha, size, uploaded_at, seen_at, mime) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (sha) DO UPDATE SET seen_at = excluded.seen_at, mime = coalesce(excluded.mime, blobs.mime)",
+            vec![sha.into(), SqlStorageValue::Integer(size as i64), now.clone(), now, mime.map_or(SqlStorageValue::Null, Into::into)],
         )
     }
 
-    /// `PUT /api/f/<name>/blobs/<sha256>[?frame]` (editor): the body, streamed
-    /// in and hashed on the way; bytes that are not what they claim are
+    /// `PUT /api/f/<name>/blobs/<sha256>` (editor): the body, streamed in
+    /// and hashed on the way; bytes that are not what they claim are
     /// deleted. Its `content-type` is what `__blob` serves it as, when that
-    /// is passive media; a frame's upload collects the frames before it.
+    /// is passive media.
     pub(crate) async fn put_blob(&self, caller: &Caller, sha: &str, req: &Request) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
         check_sha(sha)?;
         let mime = req.headers().get("content-type")?.as_deref().and_then(blob::served_type);
-        let frame = caller.url.query_pairs().any(|(k, _)| k == "frame");
         let key = self.blob_key(sha)?;
         let (size, stored) = match js::blob_head(self.env.as_ref(), &key).await? {
             Some(size) => (size, false),
@@ -85,12 +77,7 @@ impl FragmentCell {
                 (size, true)
             }
         };
-        self.record_blob(sha, size, mime, frame)?;
-        if frame {
-            if let Err(e) = self.collect_frames().await {
-                self.event("blobs.collect-failed", &e.message, json!({ "code": e.code, "frames": true }));
-            }
-        }
+        self.record_blob(sha, size, mime)?;
         json_response(&json!({ "ok": true, "sha": sha, "size": size, "stored": stored }))
     }
 
@@ -130,7 +117,7 @@ impl FragmentCell {
         if js::blob_head(self.env.as_ref(), &key).await?.is_none() {
             js::blob_put_bytes(self.env.as_ref(), &key, &bytes).await?;
         }
-        self.record_blob(sha, size, None, false)
+        self.record_blob(sha, size, None)
     }
 
     /// `GET|HEAD /api/f/<name>/blobs/<sha256>` (viewer)
@@ -220,21 +207,6 @@ impl FragmentCell {
             self.event("blobs.collected", &format!("{count} blob(s) no branch has named for the grace period"), json!({ "count": count }));
         }
         self.set_meta(MetaKey::BlobsGcAt, &(now + self.cfg.blob_grace_ms.min(GC_EVERY_MS)).to_string())
-    }
-
-    /// At a frame's upload, at most once a frame's grace: the frames seen
-    /// before it go (never one a pointer names), so a frame a second costs
-    /// one bulk delete a minute and keeps about two minutes of frames. The
-    /// newest, which pages show, is the one just uploaded.
-    async fn collect_frames(&self) -> CellResult<()> {
-        let now = js::now_ms();
-        let grace = self.cfg.blob_grace_ms.min(FRAME_GRACE_MS);
-        if self.meta(MetaKey::FramesGcAt)?.and_then(|s| s.parse::<i64>().ok()).is_some_and(|due| due > now) {
-            return Ok(());
-        }
-        self.set_meta(MetaKey::FramesGcAt, &(now + grace).to_string())?;
-        self.drop_blobs("SELECT sha FROM blobs WHERE frame = 1 AND seen_at < ? AND sha NOT IN (SELECT sha FROM pointers) LIMIT 1000", now - grace).await?;
-        Ok(())
     }
 
     /// Deletes the blobs `query` selects (it takes one parameter: the time

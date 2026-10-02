@@ -92,91 +92,6 @@ impl Call for RegisterAgent {
     type Answer = IdentityView;
 }
 
-/// `POST /computers/pair`: a machine's key the signed-in person approved
-/// as their computer `name` (the router checked the key's own proof, made
-/// for that name): a new computer identity they own, holding it. Again,
-/// the same one.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct PairComputer {
-    pub token: String,
-    pub key: String,
-    pub name: String,
-}
-
-impl Call for PairComputer {
-    const PATH: &'static str = "/computers/pair";
-    type Answer = IdentityView;
-}
-
-/// `POST /computers/remove`: its owner removes a computer: every key it
-/// holds is revoked at once, and its name is free again.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct RemoveComputer {
-    pub by: By,
-    pub computer: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct RemovedComputer {
-    /// Whom it removed, as the fragments it was in name it.
-    pub identity: Identity,
-    /// Whether this call removed it (again: `false`).
-    pub removed: bool,
-    /// Its name, when this call removed it: a fragment's own computer is
-    /// named by its fragment, whose Sprite goes too.
-    pub name: Option<String>,
-}
-
-impl Call for RemoveComputer {
-    const PATH: &'static str = "/computers/remove";
-    type Answer = RemovedComputer;
-    fn checked(answer: RemovedComputer) -> CellResult<RemovedComputer> {
-        Ok(RemovedComputer { identity: identity_checked(answer.identity)?, ..answer })
-    }
-}
-
-/// `POST /computers/mint`: a single-use token (an hour good) that pairs
-/// `owner`'s computer `name` (a fragment's own, named by its fragment),
-/// for the Sprite the platform made for it; a new one replaces the last.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct MintPairing {
-    pub owner: String,
-    pub name: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct PairingToken {
-    pub token: String,
-}
-
-impl Call for MintPairing {
-    const PATH: &'static str = "/computers/mint";
-    type Answer = PairingToken;
-}
-
-/// `POST /memory`: the fragment the platform records as `owner`'s memory
-/// (docs/agent-computer.md, slice 3), recording `name` when there is none
-/// yet (the first recorded stays), or in place of the one there with
-/// `replace` (its owner's choice): the one recorded, if any.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct Memory {
-    pub owner: String,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub replace: bool,
-}
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct MemoryName {
-    pub name: Option<String>,
-}
-
-impl Call for Memory {
-    const PATH: &'static str = "/memory";
-    type Answer = MemoryName;
-}
-
 /// `POST /home`: the fragment the platform records as `owner`'s home, their
 /// desktop (cell/src/home.rs; docs/one-home.md, decision 7), recording
 /// `name` when there is none yet (the first recorded stays), or in place of
@@ -198,20 +113,6 @@ pub(crate) struct HomeName {
 impl Call for Home {
     const PATH: &'static str = "/home";
     type Answer = HomeName;
-}
-
-/// `POST /computers/redeem`: a key pairs as the computer a token names
-/// (the router checked the key signed the request). Again, by the same
-/// key, the same computer.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct PairWithToken {
-    pub token: String,
-    pub key: String,
-}
-
-impl Call for PairWithToken {
-    const PATH: &'static str = "/computers/redeem";
-    type Answer = IdentityView;
 }
 
 /// A key changed on an identity (`None`: the asker's own) by `by` (its
@@ -344,16 +245,13 @@ pub(crate) struct Profiles {
     pub ids: Vec<String>,
 }
 
-/// A person's username and picture, or an agent's or computer's owner's
-/// username; a computer's own name too.
+/// A person's username and picture, or an agent's owner's username.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Profile {
     pub kind: IdentityKind,
     pub username: Option<String>,
     /// Where the picture is served, on the platform's origin.
     pub picture: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]

@@ -210,11 +210,11 @@ impl Api {
     }
 
     /// The signed-in browser approves the key an approval link names
-    /// (`/cli`'s form, with the link's key, proof, and computer, if any).
+    /// (`/cli`'s form, with the link's key and proof).
     pub fn approve_link(&self, session: &str, link: &str) -> Result<Reply> {
         let url = reqwest::Url::parse(link)?;
         let field = |k: &str| url.query_pairs().find(|(q, _)| q == k).map(|(_, v)| v.into_owned()).unwrap_or_default();
-        let body = format!("key={}&proof={}&computer={}", url_enc(&field("key")), url_enc(&field("proof")), url_enc(&field("computer")));
+        let body = format!("key={}&proof={}", url_enc(&field("key")), url_enc(&field("proof")));
         self.call(Call {
             method: "POST",
             url: format!("{}/cli/approve", self.base),

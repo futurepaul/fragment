@@ -59,8 +59,7 @@ const ATTEMPTS: usize = 2;
 const SSE_LINE_MAX: usize = 1024 * 1024;
 /// The most of one answer read (4096 tokens stream as far less).
 const ANSWER_BYTES_MAX: usize = 8 * 1024 * 1024;
-const TIMEOUT_NUDGE: &str = "(Your last reply took longer than the time limit and was lost. Reply again, shorter: \
-     hand long work to a computer with platform__hand_off.)";
+const TIMEOUT_NUDGE: &str = "(Your last reply took longer than the time limit and was lost. Reply again, shorter.)";
 const EMPTY_NUDGE: &str = "(Your last reply was empty. Reply again: call a tool, or answer the person in a sentence or two, \
      saying what you did and where it is.)";
 
@@ -426,7 +425,6 @@ fn summary(messages: &[Message]) -> Option<String> {
         let answer: Value = MessageContent::as_tool_response_text(content).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
         let line = match *name {
             "platform__create_fragment" => format!("made {}", answer["name"].as_str().unwrap_or("a fragment")),
-            crate::handoff::TOOL => format!("handed the work to {}", answer["computer"].as_str().unwrap_or("a computer")),
             other => format!("ran {other}"),
         };
         if !did.contains(&line) {

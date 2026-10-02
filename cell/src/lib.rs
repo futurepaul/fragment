@@ -33,7 +33,6 @@ mod agents;
 mod ai;
 mod auth;
 mod blobs;
-mod computer;
 mod config;
 mod channels;
 mod deliveries;
@@ -48,7 +47,6 @@ mod keys;
 mod ledger;
 mod live;
 mod members;
-mod memory;
 mod ops;
 mod plane;
 mod principal;
@@ -74,7 +72,6 @@ use error::{CellError, CellResult};
 use registry::calls::{self, Call};
 use routed::{Credential, Mode, Routed, Signed};
 
-pub use computer::ComputerCell;
 pub use fragment::FragmentCell;
 pub use principal::PrincipalCell;
 pub use ledger::LedgerCell;
@@ -99,8 +96,8 @@ async fn queue(batch: MessageBatch<deliveries::Delivery>, env: Env, _ctx: Contex
 }
 
 #[event(fetch)]
-async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
-    match route(req, &env, &ctx).await {
+async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+    match route(req, &env).await {
         Ok(resp) => Ok(resp),
         Err(e) => e.response(),
     }
@@ -364,221 +361,14 @@ async fn release_username(env: &Env, username: &str) -> CellResult<Response> {
     json_answer(&ask_registry(env, &calls::ReleaseUsername { username: username.to_string() }).await?)
 }
 
-/// How many fragments a removed computer leaves at once.
-const LEAVES_AT_ONCE: usize = 16;
-
-/// A removed computer (its keys revoked already: `RemoveComputer`) leaves
-/// every fragment its list names, as a member may, so no grant names it
-/// and its sockets close: `{id, removed, left, failed}`. A leave that
-/// fails is named in `failed`; removing it again retries them. Its list
-/// is fed from each fragment's outbox, so a membership granted a moment
-/// before may not be there yet: that grant stays, naming an identity no
-/// key signs as.
-async fn remove_computer(env: &Env, url: &Url, removed: calls::RemovedComputer) -> CellResult<Response> {
-    let id = removed.identity.id.clone();
-    // a fragment's own computer is named by its fragment: its Sprite goes too
-    if let Some(fragment) = removed.name.as_deref().filter(|n| valid_fragment_name(n)) {
-        computer::ask(env, fragment, &computer::Ask::Destroy).await?;
-    }
-    let list = Request::new("https://principal.internal/list", Method::Get)?;
-    let listed: fragment_proto::FragmentList = env.durable_object("PRINCIPAL")?.get_by_name(&id)?.fetch_with_request(list).await?.json().await?;
-    let (mut left, mut failed) = (vec![], vec![]);
-    // bounded by the list, which is finite: a batch at a time, each leave one hop
-    for batch in listed.fragments.chunks(LEAVES_AT_ONCE) {
-        let leaves = batch.iter().map(|f| {
-            let who = Signed::new(removed.identity.clone(), None);
-            let routed = Routed { name: f.name.clone(), url: url.clone(), mode: None, signed: Some(who), credential: None };
-            async move {
-                let delete = Request::new(url.as_str(), Method::Delete)?;
-                let answer = forward(env, &delete, None, Forward { routed, inner: "/api/members/me".into(), extra: vec![] }).await?;
-                Ok::<u16, CellError>(answer.status_code())
-            }
-        });
-        for (f, answer) in batch.iter().zip(futures_util::future::join_all(leaves).await) {
-            match answer {
-                // 404: not a member there (any more): nothing to leave
-                Ok(200 | 404) => left.push(f.name.clone()),
-                Ok(status) => failed.push(json!({ "fragment": f.name, "status": status })),
-                Err(e) => failed.push(json!({ "fragment": f.name, "error": e.message })),
-            }
-        }
-    }
-    assert!(left.len() + failed.len() == listed.fragments.len(), "every listed fragment is left or named as failed");
-    json_answer(&json!({ "id": id, "removed": removed.removed, "left": left, "failed": failed }))
-}
-
-/// `POST /api/computers/pair`: a fragment's own computer pairs, signed by
-/// the key it just made, with the token its fragment's computer cell
-/// handed it: the computer becomes its fragment's editor, for its owner,
-/// and an editor of its owner's memory (memory.rs; its sync tries again).
-async fn pair_computer(mut req: Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
-    #[derive(Deserialize)]
-    struct Pair {
-        token: String,
-    }
-    let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
-    let key = authenticate(&req, url, Payload::Read(&body))?;
-    let Pair { token } = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-    let view = ask_registry(env, &calls::PairWithToken { token, key }).await?;
-    let (Some(fragment), Some(owner)) = (view.name.clone(), view.owner.clone()) else {
-        return Err(CellError::host("a paired computer has a name and an owner"));
-    };
-    let identity = fragment_proto::Identity { id: owner.clone(), kind: IdentityKind::Person, owner: None, username: None };
-    let routed = Routed { name: fragment.clone(), url: url.clone(), mode: None, signed: Some(Signed::new(identity, None)), credential: None };
-    let role = serde_json::to_vec(&json!({ "role": "editor" })).map_err(|e| CellError::host(e.to_string()))?;
-    let put = Request::new(url.as_str(), Method::Put)?;
-    let mut added = forward(env, &put, bytes_body(role), Forward { routed, inner: format!("/api/members/{}", view.id), extra: vec![] }).await?;
-    if added.status_code() != 200 {
-        return Err(CellError::host(format!("{} paired, but did not join {fragment}: {}", view.id, added.text().await.unwrap_or_default())));
-    }
-    computer::ask(env, &fragment, &computer::Ask::Paired).await?;
-    if let Err(e) = memory::grant(env, cfg, url, &owner, &view.id).await {
-        console_error!("{fragment} paired, and was not made an editor of its owner's memory: {}", e.message);
-    }
-    json_answer(&view)
-}
-
-/// How long a computer's model call may take (a reasoning step can take 96 s).
-const MODEL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-
-/// `POST /api/model/chat/completions`: a computer calls the model through
-/// the platform (docs/computers.md), signed by its own key: an OpenAI-style
-/// chat request, on a model it names from `fragment_proto::COMPUTER_MODELS`
-/// (none: the platform's), paid from its owner's month as an agent's call is
-/// (`agent_spend`: the same ledger reserve, settle, and release), except
-/// that the platform makes the call: the owner's OpenRouter key never
-/// reaches the computer. A request that streams is answered as its chunks
-/// arrive (`relay`). The rest of the request goes as it came (its
-/// `reasoning`, with no default added, and its `session_id`, which keeps a
-/// session's calls on one provider's cache), but for `transforms`.
-async fn model_call(mut req: Request, env: &Env, ctx: &Context, cfg: &Config, url: &Url) -> CellResult<Response> {
-    // screenshots: more than any other request carries
-    let body = read_body(&mut req, limits::MODEL_BODY_MAX_BYTES).await?;
-    // who pays (the computer's owner), and who is calling, for the usage row
-    let who = signer(env, &req, url, &body).await?;
-    let (owner, caller) = match (who.kind, who.owner.as_deref()) {
-        (IdentityKind::Computer, Some(owner)) => (owner.to_string(), who.id.clone()),
-        _ => return Err(CellError::new(ErrorCode::Forbidden, "only a computer calls the model here, on its owner's budget")),
-    };
-    let mut ask: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-    if !ask["messages"].is_array() {
-        return Err(CellError::invalid("a chat request's messages are an array"));
-    }
-    let models = fragment_proto::COMPUTER_MODELS;
-    let model = match &ask["model"] {
-        Value::Null => fragment_proto::AGENT_MODEL,
-        named => models.into_iter().find(|m| named.as_str() == Some(*m)).ok_or_else(|| {
-            CellError::invalid(format!("a computer calls {} (the default), or {}; not {named}", models[0], models[1..].join(" or ")))
-        })?,
-    };
-    // OpenRouter's fallbacks would name models past the list
-    if !ask["models"].is_null() {
-        return Err(CellError::invalid("a computer names one model (`model`), not `models`"));
-    }
-    ask["model"] = json!(model);
-    // OpenRouter's prompt transforms (`middle-out`) rewrite the prompt a
-    // cache holds; the models here need none (an empty list is the same)
-    if let Some(ask) = ask.as_object_mut() {
-        ask.remove("transforms");
-    }
-    // the provider that answers soonest, unless the request says: a sort
-    // pins none, so OpenRouter's sticky routing keeps a cached prompt's
-    // calls on the provider that holds it
-    if ask["provider"].is_null() {
-        ask["provider"] = json!({ "sort": "latency" });
-    }
-    let streams = ask["stream"] == json!(true);
-    if streams {
-        // its last chunk then carries the answer's usage, and its cost
-        ask["stream_options"] = json!({ "include_usage": true });
-    }
-    let org = ledger::org_of(&owner).ok_or_else(|| CellError::host("a computer's owner is an identity"))?;
-    // namespaced by the computer, as an agent's are by the agent
-    let reference = format!("computer:{caller}/{}", js::random_hex::<16>());
-    let reserve = ledger::Reserve {
-        reference: reference.clone(),
-        kind: "computer.text".into(),
-        model: Some(model.into()),
-        amount: match model {
-            fragment_proto::ROUTER_MODEL => fragment_core::budget::ROUTER_RESERVE,
-            _ => fragment_core::budget::TEXT_RESERVE,
-        },
-        fragment: caller.clone(),
-        run: 0,
-        principal: caller,
-        agent: None,
-    };
-    let ledger::Reserved::Held { key } = ledger::ask(env, &org, &reserve).await? else {
-        return Err(CellError::host("a fresh model call's reservation answered a replay"));
-    };
-    let headers = Headers::new();
-    headers.set("authorization", &format!("Bearer {key}"))?;
-    headers.set("content-type", "application/json")?;
-    let mut init = RequestInit::new();
-    init.with_method(Method::Post).with_headers(headers).with_body(Some(ask.to_string().into()));
-    let call = Request::new_with_init(&format!("{}/api/v1/chat/completions", cfg.openrouter_url), &init)?;
-    let failed = match cs::fetch(call, MODEL_CALL_TIMEOUT).await {
-        Ok(answer) if streams && answer.status_code() == 200 => return relay(ctx, env, org, reference, answer),
-        Ok(mut answer) => match (answer.status_code(), answer.bytes().await) {
-            (200, Ok(bytes)) if serde_json::from_slice::<Value>(&bytes).is_ok_and(|v| v.get("error").is_none()) => {
-                let v: Value = serde_json::from_slice(&bytes).expect("parsed just above");
-                let cost = fragment_core::budget::charge(v["usage"]["cost"].as_f64(), None);
-                ledger::ask(env, &org, &ledger::Settle { reference, cost, result: Value::Null, video: None }).await?;
-                return Ok(Response::from_bytes(bytes)?.with_headers(Headers::from_iter([("content-type", "application/json")])));
-            }
-            (status, Ok(bytes)) => CellError::new(ErrorCode::UpstreamFailed, format!("OpenRouter ({status}): {}", String::from_utf8_lossy(&bytes))),
-            (_, Err(e)) => CellError::from(e),
-        },
-        Err(e) => CellError::from(e),
-    };
-    // nothing was answered: the reservation goes back
-    ledger::ask(env, &org, &ledger::Release { reference }).await?;
-    Err(failed)
-}
-
-/// A streamed answer, relayed to the computer as its chunks arrive. The
-/// relay runs past the response (`wait_until`), so the call settles once
-/// whether the computer reads it all or leaves: to the cost its last chunk
-/// reports, or its reservation when it reported none (cut off, or the
-/// computer gone, which stops the read and so the call). The node ends the
-/// answer at its fetch timeout (120 s, to the last byte).
-fn relay(ctx: &Context, env: &Env, org: String, reference: String, mut answer: Response) -> CellResult<Response> {
-    let js_failed = |e: wasm_bindgen::JsValue| CellError::host(format!("the relay: {e:?}"));
-    let mut chunks = answer.stream()?;
-    let pipe = web_sys::TransformStream::new().map_err(js_failed)?;
-    let writer = pipe.writable().get_writer().map_err(js_failed)?;
-    let env = env.clone();
-    ctx.wait_until(async move {
-        let mut cost = fragment_core::budget::StreamCost::default();
-        while let Ok(Some(chunk)) = chunks.try_next().await {
-            cost.push(&chunk);
-            let piece = js_sys::Uint8Array::from(chunk.as_slice());
-            if wasm_bindgen_futures::JsFuture::from(writer.write_with_chunk(&piece)).await.is_err() {
-                break;
-            }
-        }
-        // what is left unread is dropped now: a computer that left ends the call
-        drop(chunks);
-        let _ = wasm_bindgen_futures::JsFuture::from(writer.close()).await;
-        let settle = ledger::Settle { reference, cost: fragment_core::budget::charge(cost.finish(), None), result: Value::Null, video: None };
-        let reference = settle.reference.clone();
-        if let Err(e) = ledger::ask(&env, &org, &settle).await {
-            console_error!("{reference}: a streamed model call did not settle (it stays reserved): {}", e.message);
-        }
-    });
-    let headers = Headers::from_iter([("content-type", "text/event-stream"), ("cache-control", "no-store")]);
-    Ok(Response::from_body(ResponseBody::Stream(pipe.readable()))?.with_headers(headers))
-}
-
 /// Makes a fragment for a person, under their username: the API's create
-/// and the platform's "new" page. An agent or a computer makes one for its
-/// owner: the owner's (on their budget, in their list), under their
-/// username, with its maker an editor of it.
+/// and the platform's "new" page. An agent makes one for its owner: the
+/// owner's (on their budget, in their list), under their username, with
+/// the agent an editor of it.
 pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut create: CreateFragment, principal: Signed) -> CellResult<Response> {
-    let by_agent = principal.kind == IdentityKind::Agent;
     let (maker, agent) = match principal.kind {
         IdentityKind::Person => (principal, None),
-        IdentityKind::Agent | IdentityKind::Computer => {
+        IdentityKind::Agent => {
             let owner = principal.owner.clone().ok_or_else(|| CellError::host(format!("{} {} has no owner", principal.kind.as_str(), principal.id)))?;
             let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: principal.username.clone() };
             (Signed::new(identity, None), Some(principal.identity.id))
@@ -586,17 +376,11 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
     };
     let username = maker.username.clone().ok_or_else(|| CellError::invalid(format!("choose a username first (sign in at {}/)", cfg.platform(url))))?;
     create.name = qualify(&create.name, &username)?;
-    // a hand-off's throwaway: the fragment records the agent that makes it
-    let extra = match (create.throwaway, by_agent, &agent) {
-        (false, _, _) => vec![],
-        (true, true, Some(agent)) => vec![(agents::THROWAWAY_HEADER, agent.clone())],
-        (true, _, _) => return Err(CellError::new(ErrorCode::Forbidden, "only an agent makes a throwaway, for its owner")),
-    };
     let body = serde_json::to_vec(&create).map_err(|e| CellError::host(e.to_string()))?;
     // a fresh request: nothing of the caller's but what the router decided
     let bare = Request::new(url.as_str(), Method::Post)?;
     let routed = Routed { name: create.name.clone(), url: url.clone(), mode: None, signed: Some(maker.clone()), credential: None };
-    let made = forward(env, &bare, bytes_body(body), Forward { routed, inner: "/create".into(), extra }).await?;
+    let made = forward(env, &bare, bytes_body(body), Forward { routed, inner: "/create".into(), extra: vec![] }).await?;
     if let (Some(agent), 200) = (agent, made.status_code()) {
         let put = Request::new(url.as_str(), Method::Put)?;
         let role = serde_json::to_vec(&json!({ "role": "editor" })).map_err(|e| CellError::host(e.to_string()))?;
@@ -681,14 +465,11 @@ fn json_answer<T: serde::Serialize>(v: &T) -> CellResult<Response> {
     Ok(Response::from_json(v)?)
 }
 
-/// Whose budget a signer sees: a person's own org; an agent's owner's. A
-/// computer sees none: it spends only through the fragments it is in,
-/// whose owners pay, and reads nothing else of its owner's.
+/// Whose budget a signer sees: a person's own org; an agent's owner's.
 fn billing_org(who: &Signed) -> CellResult<String> {
     let person = match who.kind {
         IdentityKind::Person => who.id.as_str(),
         IdentityKind::Agent => who.owner.as_deref().ok_or_else(|| CellError::host("an agent without an owner"))?,
-        IdentityKind::Computer => return Err(CellError::new(ErrorCode::Forbidden, "a computer has no budget: the fragments it works in bill their owners")),
     };
     ledger::org_of(person).ok_or_else(|| CellError::host("no billing org"))
 }
@@ -781,7 +562,6 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
         let reg: Register = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
         return match reg.kind {
             IdentityKind::Person => Err(CellError::invalid("people sign in: `fragment login` adds a key to you")),
-            IdentityKind::Computer => Err(CellError::invalid("a computer pairs on the platform: `fragment login --computer <name>` on it, approved by its owner")),
             // FIN-11's trusted initial registration: the owner signs, and the
             // agent's key proves itself inside
             IdentityKind::Agent => {
@@ -835,11 +615,6 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
             let identity = named_identity(id)?;
             let key = key_in_path(k)?;
             json_answer(&ask_registry(env, &calls::CheckKey(calls::KeyChange { identity, key, by: by() })).await?)
-        }
-        (Method::Delete, [id]) => {
-            let computer = named_identity(id)?.ok_or_else(|| CellError::invalid("name the computer to remove (id:…); `me` is not one"))?;
-            let removed = ask_registry(env, &calls::RemoveComputer { by: by(), computer }).await?;
-            remove_computer(env, url, removed).await
         }
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
     }
@@ -1003,7 +778,7 @@ fn moved(to: &str) -> CellResult<Response> {
     Ok(resp)
 }
 
-async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellResult<Response> {
+async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     // as its client named it: signatures, links, and cookies name the https URL
     let url = fragment_nip98::arrived_url(req.url()?, req.headers().get("x-forwarded-proto")?.as_deref());
@@ -1094,13 +869,6 @@ async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellResult<Respons
             }
             release_username(env, username).await
         }
-        (Method::Post, ["api", "computers", "pair"]) => pair_computer(req, env, cfg, &url).await,
-        (method @ (Method::Get | Method::Post | Method::Put), ["api", "memory"]) => {
-            let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
-            let who = signer_for(env, &req, &url, &body).await?;
-            memory::route(env, cfg, &url, method, who, &body).await
-        }
-        (Method::Post, ["api", "model", "chat", "completions"]) => model_call(req, env, ctx, cfg, &url).await,
         (_, ["api", "identities", rest @ ..]) => {
             let rest = rest.to_vec();
             identities(req, env, &url, &rest).await
@@ -1146,8 +914,6 @@ async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellResult<Respons
                 return Err(CellError::invalid("a fragment's name is <label>.<username>"));
             }
             let owner_only = fragment_core::access::owner_only(method.as_ref(), rest);
-            let deleting = method == Method::Delete && matches!(rest, [] | [""]);
-            let putting = method == Method::Put;
             let inner = match (method, rest) {
                 (Method::Delete, [] | [""]) => "/delete".to_string(),
                 (_, [] | [""]) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
@@ -1169,21 +935,10 @@ async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellResult<Respons
                 }
                 _ => Some(signer_for(env, &req, &url, &body).await?),
             };
-            // but two: an agent deletes a throwaway it made (the fragment
-            // decides), and makes its owner's computer, named by its
-            // fragment, an editor of its owner's fragment (a hand-off's chat)
-            if let Some(agent) = principal.as_ref().filter(|p| deleting && p.kind == IdentityKind::Agent) {
-                return agents::remove_throwaway(env, &url, agent, &named_fragment(name, Some(agent))?).await;
-            }
-            if let (Some(agent), ["members", computer]) = (principal.as_ref().filter(|p| putting && p.kind == IdentityKind::Agent), rest) {
-                if valid_fragment_name(computer) {
-                    return agents::add_computer(env, &url, agent, &named_fragment(name, Some(agent))?, computer).await;
-                }
-            }
             // owner-only actions never go through an agent, whatever it acts
-            // for, nor a computer: only a person owns a fragment
+            // for: only a person owns a fragment
             if owner_only && principal.as_ref().is_some_and(|p| p.kind != IdentityKind::Person) {
-                return Err(CellError::new(ErrorCode::Forbidden, "an agent or a computer never manages members, invites, visibility, or links, nor deletes a fragment: its owner does"));
+                return Err(CellError::new(ErrorCode::Forbidden, "an agent never manages members, invites, visibility, or links, nor deletes a fragment: its owner does"));
             }
             let name = named_fragment(name, principal.as_ref())?;
             let routed = Routed { name, url: url.clone(), mode: None, signed: principal, credential: None };

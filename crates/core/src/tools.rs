@@ -21,47 +21,15 @@ pub fn op_id(tool_call_id: &str) -> String {
     format!("tc:{}", &hex::encode(Sha256::digest(tool_call_id.as_bytes()))[..40])
 }
 
-/// A computer call's id (`fragment computer serve` journals calls by it,
-/// in `[A-Za-z0-9_-]`): the same tool call always names the same id, so a
-/// replayed call re-attaches to its run instead of starting another.
-pub fn call_id(tool_call_id: &str) -> String {
-    format!("tc-{}", &hex::encode(Sha256::digest(tool_call_id.as_bytes()))[..40])
-}
-
 /// The operation id of an agent's reply to a chat, from its message id:
 /// the same message is posted once, however often the post is retried.
 pub fn reply_id(message_id: &str) -> String {
     format!("rp:{}", &hex::encode(Sha256::digest(message_id.as_bytes()))[..40])
 }
 
-/// A hand-off's throwaway computer is a fragment labeled `handoff-` and 12
-/// hex of the tool call's id: a replayed call makes the same one, and a
-/// crash's leftovers are found by their name. Its agent may remove it
-/// (docs/platform.md), the one delete an agent makes.
-pub const THROWAWAY_PREFIX: &str = "handoff-";
-
-/// The throwaway label a hand-off's tool call makes.
-pub fn throwaway_label(tool_call_id: &str) -> String {
-    format!("{THROWAWAY_PREFIX}{}", &hex::encode(Sha256::digest(tool_call_id.as_bytes()))[..12])
-}
-
-/// Whether a fragment's name is a throwaway's (`throwaway_label`, under a username).
-pub fn is_throwaway(fragment: &str) -> bool {
-    let label = fragment_proto::split_fragment_name(fragment).map(|(label, _)| label).unwrap_or_default();
-    label.strip_prefix(THROWAWAY_PREFIX).is_some_and(|h| h.len() == 12 && h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn throwaways() {
-        let label = throwaway_label("call_abc123");
-        assert_eq!(label, throwaway_label("call_abc123"));
-        assert!(fragment_proto::valid_label(&label) && is_throwaway(&format!("{label}.paul")));
-        assert!(!is_throwaway(&label) && !is_throwaway("handoff-notes.paul") && !is_throwaway("handoff-0123456789AB.paul"));
-    }
 
     #[test]
     fn names_and_ids() {
@@ -73,8 +41,5 @@ mod tests {
         assert!(fragment_proto::valid_op_id(&id));
         assert!(fragment_proto::valid_op_id(&reply_id("msg_0b6e7e3c-1d2f-4c55-9d0e-4f7b1d2a3c4e")));
         assert_ne!(reply_id("a"), op_id("a"));
-        let call = call_id("call_abc123");
-        assert_eq!(call, call_id("call_abc123"));
-        assert!(call.len() == 43 && call.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
     }
 }

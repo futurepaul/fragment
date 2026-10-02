@@ -68,10 +68,6 @@ pub const BUDGET_USD: &str = "0.4";
 /// The WorkOS fake's environment.
 const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";
-/// The Sprites fake's token, and a computer's tick and idle wait here.
-const SPRITES_TOKEN: &str = "sprites-e2e-token";
-pub const COMPUTER_TICK_S: u32 = 1;
-pub const COMPUTER_IDLE_S: u32 = 3;
 
 pub struct Suite {
     /// The sections to run (`None`: all of them), and those not to.
@@ -102,7 +98,6 @@ pub struct Suite {
     pub fake: CodeStorage,
     pub openrouter: fragment_fakes::openrouter::OpenRouter,
     pub push: fragment_fakes::push::PushService,
-    pub sprites: fragment_fakes::sprites::Sprites,
     org_key: String,
     host_secret: String,
     /// Sign-in's stand-in: people sign in through it (`Api::person`).
@@ -131,7 +126,6 @@ impl Suite {
             ("code.storage key", self.org_key.lines().find(|l| !l.starts_with("-----") && !l.trim().is_empty()).unwrap_or_default().trim().to_string()),
             ("WorkOS API key", WORKOS_KEY.into()),
             ("OpenRouter management key", OPENROUTER_MANAGEMENT.into()),
-            ("Sprites token", SPRITES_TOKEN.into()),
         ]
     }
 
@@ -278,13 +272,6 @@ impl Suite {
             operators: Some(fragment_core::npub::encode(self.operator.pubkey_hex())),
             signins_pending_max: Some(SIGNINS_PENDING_MAX),
             test_hooks: true,
-            computers: Some(devstack::ComputerVars {
-                sprites_url: self.sprites.url.clone(),
-                sprites_token: SPRITES_TOKEN.into(),
-                release_url: format!("{}/download", self.sprites.url),
-                tick_s: COMPUTER_TICK_S,
-                idle_s: COMPUTER_IDLE_S,
-            }),
         }
         .configure(&self.project)?;
         // the agents' script is co-hosted, as the fleet runs it: the
@@ -295,7 +282,6 @@ impl Suite {
             agent_url: format!("http://127.0.0.1:{}", self.port),
             openrouter_url: Some(self.openrouter.url.clone()),
             test_hooks: true,
-            egress_local: true,
         }
         .configure(&self.agents_project)?;
         let env = env.into_iter().chain(self.node_env_extra.iter().cloned()).collect();
@@ -496,12 +482,6 @@ fn approve_login(api: &Api, pending: &Value) -> Result<()> {
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // the hands' goose (every computer's), and the pet's Cua Driver, where the Sprites fake runs them
-    match args.first().map(String::as_str) {
-        Some("goose") => return lanes::builder::stand_in_goose(&args[1..]),
-        Some("cua-driver") => return lanes::builder::stand_in_cua(&args[1..]),
-        _ => {}
-    }
     let list = |names: &str| names.split(',').map(str::to_string).collect::<Vec<_>>();
     let (only, except) = match args.as_slice() {
         [] => (None, vec![]),
@@ -540,7 +520,6 @@ fn main() -> Result<()> {
         fake,
         openrouter: fragment_fakes::openrouter::OpenRouter::start(OPENROUTER_KEY, OPENROUTER_MANAGEMENT)?,
         push: fragment_fakes::push::PushService::start()?,
-        sprites: fragment_fakes::sprites::Sprites::start(SPRITES_TOKEN, &scratch.join("sprites"), &cli)?,
         org_key,
         host_secret: devstack::random_hex(32),
         workos: fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY)?,
@@ -552,9 +531,6 @@ fn main() -> Result<()> {
         node_env_extra: vec![],
         shape: Shape::Plain,
     };
-    // every computer's hands find the stand-in goose where they install the pinned one
-    let goose = format!("#!/bin/sh\nexec '{}' goose \"$@\"\n", std::env::current_exe()?.display());
-    s.sprites.seed(&format!(".local/share/goose-{}/goose", fragment_core::computer::GOOSE_VERSION), goose.as_bytes());
     s.start(true, true)?;
     lanes::run(&mut s);
     for (flag, name) in s.only.clone().unwrap_or_default().into_iter().map(|n| ("--only", n)).chain(s.except.clone().into_iter().map(|n| ("--except", n))) {

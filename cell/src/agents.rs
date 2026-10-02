@@ -2,8 +2,8 @@
 //! step 4). It has no ingress of its own: this router authenticates each
 //! request as it does its own (a signature resolved to an identity by the
 //! registry) and hands it on with the caller's identity, which the script
-//! trusts. An inbox delivery, and a computer that connects out asking for
-//! work, pass as they came: their tokens are the capability.
+//! trusts. An inbox delivery passes as it came: its token is the
+//! capability.
 //!
 //! An agent's name is `<label>.<username>`, its owner's username, as a
 //! fragment's is; a bare label names one of the signer's own. Making an
@@ -41,9 +41,8 @@ pub(crate) const DEFAULT_LABEL: &str = "agent";
 
 /// `/api/agents` and `/api/a/*`.
 pub(crate) async fn route(mut req: Request, env: &Env, url: &Url, segments: &[&str]) -> CellResult<Response> {
-    // an inbox delivery (its token) and a computer that connects out (its
-    // connect token) carry their own capability
-    if let (Method::Post, ["api", "a", _, "inbox", _] | ["api", "a", _, "computer", "poll" | "answer"]) = (req.method(), segments) {
+    // an inbox delivery carries its own capability, its token
+    if let (Method::Post, ["api", "a", _, "inbox", _]) = (req.method(), segments) {
         return js::service_fetch(env.as_ref(), "AGENTS", req).await;
     }
     let body = read_body(&mut req, fragment_proto::limits::BODY_MAX_BYTES).await?;
@@ -167,89 +166,6 @@ pub(crate) async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellRes
         })
         .collect();
     Ok(FragmentList { fragments })
-}
-
-/// Marks a create as a hand-off's throwaway, naming the agent that makes
-/// it: set by the router's create alone (no request's own header passes).
-pub(crate) const THROWAWAY_HEADER: &str = "x-fragment-throwaway-of";
-
-/// `DELETE /api/f/{name}` by an agent: allowed only for a throwaway it made
-/// (`POST /api/fragments {throwaway: true}`, which the fragment recorded;
-/// agent/src/handoff.rs), for its owner or itself; any other delete stays
-/// its owner's (decision 17). The one owner-only action an agent takes,
-/// confirmed by Paul on 2026-09-27. The fragment's computer goes
-/// first (its keys revoked, it leaves every fragment, its Sprite
-/// destroyed), then the fragment, as its owner deletes one. What the
-/// computer built stays its owner's.
-pub(crate) async fn remove_throwaway(env: &Env, url: &Url, agent: &Signed, name: &str) -> CellResult<Response> {
-    let owner = agent.owner.clone().ok_or_else(|| CellError::host("an agent without an owner"))?;
-    let refused = || CellError::new(ErrorCode::Forbidden, "an agent deletes only a throwaway it made, for its owner: any other fragment is its owner's to delete");
-    if agent.acting_for.as_ref().is_some_and(|asker| *asker != owner) {
-        return Err(refused());
-    }
-    // what the fragment recorded, read as the agent itself (gone: 404)
-    let as_agent = Signed { acting_for: None, ..agent.clone() };
-    let routed = crate::routed::Routed { name: name.to_string(), url: url.clone(), mode: None, signed: Some(as_agent), credential: None };
-    let read = Request::new(url.as_str(), Method::Get)?;
-    let mut status = crate::forward(env, &read, None, crate::Forward { routed, inner: "/api/status".into(), extra: vec![] }).await?;
-    let status: Option<fragment_proto::FragmentStatus> = match status.status_code() {
-        200 => Some(status.json().await?),
-        404 => return Err(CellError::new(ErrorCode::NotFound, format!("no fragment {name}"))),
-        _ => None,
-    };
-    if status.and_then(|s| s.throwaway_of).as_deref() != Some(agent.id.as_str()) {
-        return Err(refused());
-    }
-    let by = || calls::By::Identity(owner.clone());
-    let computers = ask_registry(env, &calls::View { identity: None, by: by() }).await?.computers;
-    match computers.into_iter().find(|c| c.name == name) {
-        Some(c) => {
-            let removed = ask_registry(env, &calls::RemoveComputer { by: by(), computer: c.id }).await?;
-            crate::remove_computer(env, url, removed).await?;
-        }
-        // one never paired (a boot that failed) still has its Sprite
-        None => {
-            crate::computer::ask(env, name, &crate::computer::Ask::Destroy).await?;
-        }
-    }
-    let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: agent.username.clone() };
-    let routed = crate::routed::Routed { name: name.to_string(), url: url.clone(), mode: None, signed: Some(Signed::new(identity, None)), credential: None };
-    let delete = Request::new(url.as_str(), Method::Delete)?;
-    crate::forward(env, &delete, None, crate::Forward { routed, inner: "/delete".into(), extra: vec![] }).await
-}
-
-/// `PUT /api/f/{name}/members/{computer}` by an agent, naming a computer by
-/// its fragment's name: its owner's computer of that name becomes an editor
-/// of `name`, a fragment its owner owns (a hand-off's chat, where the
-/// computer posts its steps as its owner's computer: agent/src/handoff.rs,
-/// docs/agent-computer.md). The second owner-only action an agent takes,
-/// for its owner or itself; its body is not read (always `editor`), and any
-/// other member change stays its owner's (decision 17).
-pub(crate) async fn add_computer(env: &Env, url: &Url, agent: &Signed, name: &str, computer: &str) -> CellResult<Response> {
-    let owner = agent.owner.clone().ok_or_else(|| CellError::host("an agent without an owner"))?;
-    let refused = || CellError::new(ErrorCode::Forbidden, "an agent adds only its owner's computer, as an editor, to its owner's fragment: any other member is its owner's to add");
-    if agent.acting_for.as_ref().is_some_and(|asker| *asker != owner) {
-        return Err(refused());
-    }
-    // whose the fragment is, read as the request reads it
-    let routed = crate::routed::Routed { name: name.to_string(), url: url.clone(), mode: None, signed: Some(agent.clone()), credential: None };
-    let read = Request::new(url.as_str(), Method::Get)?;
-    let mut status = crate::forward(env, &read, None, crate::Forward { routed, inner: "/api/status".into(), extra: vec![] }).await?;
-    let status: Option<fragment_proto::FragmentStatus> = match status.status_code() {
-        200 => Some(status.json().await?),
-        404 => return Err(CellError::new(ErrorCode::NotFound, format!("no fragment {name}"))),
-        _ => None,
-    };
-    if status.map(|s| s.owner).as_deref() != Some(owner.as_str()) {
-        return Err(refused());
-    }
-    let computers = ask_registry(env, &calls::View { identity: None, by: calls::By::Identity(owner.clone()) }).await?.computers;
-    let c = computers.into_iter().find(|c| c.name == computer).ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("its owner has no computer named {computer}")))?;
-    let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: agent.username.clone() };
-    let routed = crate::routed::Routed { name: name.to_string(), url: url.clone(), mode: None, signed: Some(Signed::new(identity, None)), credential: None };
-    let put = Request::new(url.as_str(), Method::Put)?;
-    let body = crate::bytes_body(json!({ "role": Role::Editor }).to_string().into_bytes());
-    crate::forward(env, &put, body, crate::Forward { routed, inner: format!("/api/members/{}", c.id), extra: vec![] }).await
 }
 
 /// What live's `agent` block declares, as the fragment keeps it

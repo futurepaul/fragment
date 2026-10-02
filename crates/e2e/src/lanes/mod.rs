@@ -8,9 +8,6 @@ mod blobs;
 mod author;
 mod budget;
 mod build;
-pub(crate) mod builder;
-mod computer;
-mod computers;
 mod control;
 mod deliver;
 mod desktop;
@@ -24,7 +21,6 @@ mod notes;
 mod plane;
 mod posts;
 mod restart;
-mod runtime;
 mod share;
 mod signin;
 mod site;
@@ -52,10 +48,6 @@ const LANES: &[Lane] = &[
     members::members,
     identities::identities,
     signin::signin,
-    computers::computers,
-    computers::sprites,
-    runtime::computer_runtime,
-    builder::builder,
     members::secrets,
     plane::files,
     plane::deploy,
@@ -98,8 +90,6 @@ const LANES: &[Lane] = &[
     agents::agents,
     addon::addon,
     agents::chat,
-    computer::computer,
-    computer::screenshots,
     sync::folder_sync,
     restart::restart,
     restart::pathmode,

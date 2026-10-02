@@ -1,18 +1,12 @@
 //! The node's `KEYS` service (`crates/native`, docs/hardening.md H1). The
 //! agent's nostr key is made there and signs there: the agent holds it
-//! only sealed, and only this agent cell can have it used. A computer's
-//! token is sealed for this cell alone too.
+//! only sealed, and only this agent cell can have it used.
 
 use anyhow::{anyhow, Context};
-use base64::Engine;
 use serde_json::{json, Value};
 use worker::Env;
 
 use crate::js;
-
-fn b64() -> base64::engine::GeneralPurpose {
-    base64::engine::general_purpose::STANDARD
-}
 
 async fn call(env: &Env, route: &str, body: &Value) -> anyhow::Result<Value> {
     let (status, text) = js::service_post(env.as_ref(), "KEYS", &format!("https://keys/{route}"), &body.to_string()).await?;
@@ -25,24 +19,6 @@ async fn call(env: &Env, route: &str, body: &Value) -> anyhow::Result<Value> {
 
 fn field(answer: &Value, name: &str) -> anyhow::Result<String> {
     answer[name].as_str().map(str::to_string).with_context(|| format!("KEYS answered no {name}"))
-}
-
-pub async fn seal(env: &Env, plaintext: &[u8]) -> anyhow::Result<String> {
-    field(&call(env, "seal", &json!({ "plaintext": b64().encode(plaintext) })).await?, "sealed")
-}
-
-pub struct Opened {
-    pub plaintext: Vec<u8>,
-    /// Sealed again under the current host secret: store it.
-    pub resealed: Option<String>,
-}
-
-/// Opens a value sealed for this cell (`legacy_salt`: what the agent
-/// sealed it with itself, before `KEYS`).
-pub async fn open(env: &Env, sealed: &str, legacy_salt: &str) -> anyhow::Result<Opened> {
-    let answer = call(env, "open", &json!({ "sealed": sealed, "legacySalt": legacy_salt })).await?;
-    let plaintext = b64().decode(field(&answer, "plaintext")?).context("KEYS open answered no base64")?;
-    Ok(Opened { plaintext, resealed: answer["resealed"].as_str().map(str::to_string) })
 }
 
 /// A new nostr key: (public key hex, its secret sealed for this cell).

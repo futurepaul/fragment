@@ -19,7 +19,7 @@
     ]
   },
   // The node's keys (crates/native, docs/hardening.md H1): sealing, the
-  // code.storage JWT, WorkOS's exchange, OpenRouter's key API, Sprites. Needs our
+  // code.storage JWT, WorkOS's exchange, OpenRouter's key API. Needs our
   // celld fork, which routes `native:*` targets to that crate.
   // AGENTS is the agents' script (agent/), co-hosted in this fleet: it has
   // no ingress of its own, and the router hands it /api/agents and /api/a/*.
@@ -31,9 +31,7 @@
       // The identity registry: one cell for the fleet (registry.rs).
       { "name": "REGISTRY", "class_name": "Registry" },
       // A billing org's budget and usage: one cell per org (ledger.rs).
-      { "name": "LEDGER", "class_name": "Ledger" },
-      // A fragment's own computer, its Sprite's life: one cell per fragment that declares one (computer.rs).
-      { "name": "COMPUTER", "class_name": "Computer" }
+      { "name": "LEDGER", "class_name": "Ledger" }
     ]
   },
   "migrations": [
@@ -41,11 +39,12 @@
     { "tag": "v2", "new_sqlite_classes": ["Principal"] },
     { "tag": "v3", "new_sqlite_classes": ["Registry"] },
     { "tag": "v4", "new_sqlite_classes": ["Ledger"] },
+    // Computer and Hermes went at the cut (celld-final): neither is bound
+    // or exported any more. celld takes `new_sqlite_classes` alone and stops
+    // a deployment that deletes a class, so `{"tag": "v7",
+    // "deleted_classes": ["Computer", "Hermes"]}` waits for wrangler
+    // (docs/cloudflare-v1.md, phase 2).
     { "tag": "v5", "new_sqlite_classes": ["Computer"] },
-    // Hermes went at the cut (celld-final): it is bound and exported no
-    // more. celld takes `new_sqlite_classes` alone and stops a deployment
-    // that deletes a class, so `{"tag": "v7", "deleted_classes":
-    // ["Hermes"]}` waits for wrangler (docs/cloudflare-v1.md, phase 2).
     { "tag": "v6", "new_sqlite_classes": ["Hermes"] }
   ]
 }

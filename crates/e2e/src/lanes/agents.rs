@@ -87,8 +87,6 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     let r = agents.signed(&owner, "GET", &format!("/api/a/{name}/tools"), None)?;
     let platform = [
         "platform__create_fragment",
-        "platform__hand_off",
-        "platform__remember",
         "platform__list_fragments",
         "platform__operations",
         "platform__call",
@@ -158,43 +156,6 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
         "an agent never changes members, visibility, links, or invites, nor deletes, even for its owner",
         refused.iter().all(|(_, status)| *status == 403) && st.status == 200 && st.body["visibility"] == "link" && members.body["members"].as_array().map(Vec::len) == Some(1),
         json!({ "refused": refused, "visibility": st.body["visibility"], "members": members.body }),
-    );
-    // but a throwaway it made (a hand-off's): the platform recorded it at
-    // create, and the name is no authority. One the owner made, named as a
-    // throwaway and with the agent in it, stays the owner's to delete.
-    let remove = |name: &str, who: &str| api.signed(&hand, "DELETE", &format!("/api/f/{name}?{}", acting(who)), None).map_or(0, |r| r.status);
-    let by_hand = format!("handoff-0123456789ab.{username}");
-    s.create(api, &owner, &by_hand)?;
-    api.signed(&owner, "PUT", &format!("/api/f/{by_hand}/members/{hand_id}"), Some(&json!({ "role": "editor" })))?;
-    let refused = remove(&by_hand, &owner_id);
-    s.ok(
-        "a fragment the owner made, named handoff-… with the agent in it, is refused to the agent",
-        refused == 403 && api.status(&owner, &by_hand)?.status == 200,
-        json!({ "refused": refused }),
-    );
-    let by_person = api.create_with(&owner, json!({ "name": s.name("tw-person"), "throwaway": true }))?;
-    let made = api.signed(&hand, "POST", &format!("/api/fragments?{}", acting(&owner_id)), Some(&json!({ "name": "handoff-0123456789cd", "throwaway": true })))?;
-    let throwaway = made.body["name"].as_str().unwrap_or("").to_string();
-    let recorded = api.status(&owner, &throwaway)?.body["throwawayOf"].clone();
-    let (for_stranger, for_owner) = (remove(&throwaway, &stranger_id), remove(&throwaway, &owner_id));
-    s.ok(
-        "a throwaway is made only by an agent, which the fragment records; that agent deletes it, for its owner only: then it is gone",
-        by_person.status == 403 && made.status == 200 && recorded == hand_id.as_str() && for_stranger == 403 && for_owner == 200 && api.status(&owner, &throwaway)?.status == 404,
-        json!({ "by a person": by_person.status, "made": made.body, "recorded": recorded, "for a stranger": for_stranger, "for its owner": for_owner }),
-    );
-    // and one member change (a hand-off's): its owner's computer, named by
-    // its fragment, an editor of a fragment its owner owns; nothing else
-    let strange = s.named(api, &stranger, "agent-strange")?;
-    s.create(api, &stranger, &strange)?;
-    let add_member = |fragment: &str, who: &str| {
-        let path = format!("/api/f/{fragment}/members/nope.{username}?{}", acting(who));
-        api.signed(&hand, "PUT", &path, Some(&json!({ "role": "editor" }))).map_or(0, |r| r.status)
-    };
-    let tried = [add_member(&other, &owner_id), add_member(&other, &stranger_id), add_member(&strange, &owner_id)];
-    s.ok(
-        "an agent may make its owner's computer a member of its owner's fragment, for its owner only: of a name no computer of theirs has, 404; for anyone else, or on another's fragment, 403",
-        tried == [404, 403, 403],
-        json!(tried),
     );
     // a post to a postable channel is decided as a call is: for its
     // asker, capped (`notes` takes an editor's posts)

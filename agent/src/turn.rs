@@ -27,12 +27,10 @@ use goose_provider_types::conversation::{Conversation, EffectiveRole};
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
-use worker::send::SendFuture;
 use worker::{Delay, SqlStorage, Storage};
 
-use crate::computer::{self, Computer, ComputerTools};
 use crate::fleet::Fleet;
-use crate::{handoff, js};
+use crate::js;
 use crate::model::{self, OpenRouter, Spend};
 use crate::progress::Progress;
 use crate::store::{self, kv_get, kv_set, kv_u64, Effect, Session, Store};
@@ -54,12 +52,6 @@ pub struct Model {
     pub spend: Spend,
 }
 
-/// A computer attached to the agent, and the project directory its tools work in.
-pub struct Attached {
-    pub computer: Computer,
-    pub cwd: String,
-}
-
 /// One turn's driver: its conversation, and whom it acts for.
 pub struct Driver {
     /// The agent cell's, shared by the turns one driver runs.
@@ -68,7 +60,6 @@ pub struct Driver {
     /// The agent's own; the turn's tools act for `asker` through it.
     pub fleet: Fleet,
     pub instructions: String,
-    pub computer: Option<Attached>,
     pub cancel: CancellationToken,
     pub id: String,
     /// The turn's conversation (store.rs `DIRECT`, or a chat's).
@@ -128,27 +119,6 @@ impl Operation<Session, Effect> for Unoffered {
             return not_applicable();
         }
         let message = emit.message(message).await;
-        applied([Effect::Message(message)])
-    }
-}
-
-/// A turn that started a hand-off ends there: once the step that ran it
-/// stored its results, the platform says the work is on its way
-/// (handoff::acknowledgement), and the model is not asked again, so it
-/// cannot go on to write a result it has not received. It reads the stored
-/// turn, so a driver that replaces a dead one ends it alike. It runs before
-/// a steer: a message the turn ended before reading gets a turn of its own.
-struct HandedOff;
-
-#[async_trait]
-impl Operation<Session, Effect> for HandedOff {
-    fn name(&self) -> &'static str {
-        "handed_off"
-    }
-
-    async fn run(&self, _: &Session, conversation: &Conversation, emit: &Emitter) -> anyhow::Result<OperationResult<Effect>> {
-        let Some(said) = handoff::acknowledgement(messages_since_kickoff(conversation)?) else { return not_applicable() };
-        let message = emit.message(Message::assistant().with_text(said)).await;
         applied([Effect::Message(message)])
     }
 }
@@ -269,45 +239,19 @@ fn ended(conversation: &Conversation) -> anyhow::Result<TurnOutcome> {
 /// (the model answered), yielded, stopped, or an error.
 pub async fn drive(driver: Driver) -> anyhow::Result<TurnOutcome> {
     let sql = driver.storage.sql();
-    // armed before reaching a computer, which can take its retries
     arm_watchdog(&driver.storage, &sql).await?;
     let store = Store { sql: driver.storage.sql() };
     let provider: Arc<dyn Provider> =
         Arc::new(OpenRouter { base: driver.model.base.clone(), deadline_ms: driver.model.deadline_ms, spend: driver.model.spend.clone() });
     let fleet = driver.fleet.acting_for(&driver.asker);
     let tools = FragmentTools::new(fleet, driver.storage.sql(), driver.id.clone(), driver.conv.clone(), driver.owner_turn, driver.scope.clone());
-    let mut operation = ToolOperation::new().with_provider(Arc::new(tools));
-    let mut instructions = driver.instructions.clone();
-    let in_flight = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
-    // the computer is its owner's: someone else's turn never reaches it
-    assert!(driver.computer.is_none() || driver.owner_turn, "a computer joins its owner's turns only");
-    if let Some(attached) = &driver.computer {
-        // the computer's tools join the fragments' for this turn
-        let c = attached.computer.clone();
-        let manifest = SendFuture::new(async move { c.get("/tools").await }).await?;
-        instructions.push_str(&format!(
-            "\n\nYou also have a computer. Its tools (shell, write, edit, tree) start in your project directory there \
-             (`{}`): give paths relative to it (`index.html`, not `{}/index.html`).\n\n{}",
-            attached.cwd,
-            attached.cwd,
-            manifest["instructions"].as_str().unwrap_or("")
-        ));
-        operation = operation.with_provider(Arc::new(ComputerTools {
-            computer: attached.computer.clone(),
-            cwd: attached.cwd.clone(),
-            tools: computer::tools_of(&manifest)?,
-            sql: driver.storage.sql(),
-            driver: driver.id.clone(),
-            in_flight: in_flight.clone(),
-        }));
-    }
+    let operation = ToolOperation::new().with_provider(Arc::new(tools));
     let machine: StateMachine<Session, Effect> = StateMachine::new(
         vec![
             Step::Operation(Arc::new(operation)),
             Step::Operation(Arc::new(Unoffered)),
-            Step::Operation(Arc::new(HandedOff)),
             Step::Operation(Arc::new(Steer { sql: driver.storage.sql() })),
-            Step::Operation(Arc::new(Instructions(instructions))),
+            Step::Operation(Arc::new(Instructions(driver.instructions.clone()))),
             Step::Inference(Arc::new(InferenceRunner::new(provider, model::config(&driver.model.name)))),
         ],
         driver.cancel.clone(),
@@ -323,11 +267,6 @@ pub async fn drive(driver: Driver) -> anyhow::Result<TurnOutcome> {
     };
     let (outcome, events) = futures::join!(run_steps(&driver, &machine, &store, emit), drain);
     kv_set(&sql, "events", kv_u64(&sql, "events")? + events)?;
-    let left: Vec<String> = std::mem::take(&mut *in_flight.lock().expect("in-flight lock")).into_iter().collect();
-    if let (Some(attached), false) = (&driver.computer, left.is_empty()) {
-        let c = attached.computer.clone();
-        SendFuture::new(async move { c.cancel_all(left).await }).await;
-    }
     if kv_get(&sql, "cancel")?.as_deref() == Some("1") && outcome.is_ok() {
         return Ok(TurnOutcome::Stopped);
     }

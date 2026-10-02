@@ -1,13 +1,12 @@
-//! The agent's work guide, and a turn that never fails silently, in the
+//! The agent's turn notes, and a turn that never fails silently, in the
 //! `chat` section. On fragment.club (2026-09-25) an agent asked to build a
 //! countdown page read other fragments for a dozen calls, wrote the whole
 //! page in one reply that outlasted the node's 120 s fetch, and ended its
-//! turn with nothing said; since 2026-09-27 it builds nothing itself and
-//! hands such work to a computer (the `builder` section's hand-offs). With
+//! turn with nothing said; since 2026-09-27 it builds nothing itself. With
 //! the OpenRouter fake scripted as the model:
 //!
-//! - every turn's instructions carry the work guide, not the build guide it
-//!   replaced (an agent made with an old default gets today's); each
+//! - every turn's instructions carry the turn notes, not the build guide
+//!   they replaced (an agent made with an old default gets today's); each
 //!   request bounds its output.
 //! - a slow model: a call past its deadline is made once more; a second
 //!   timeout ends the turn in an error, said in the chat and on `work`.
@@ -26,8 +25,8 @@ use super::agents::{chat_records, say, settle};
 use crate::api::Api;
 use crate::Suite;
 
-/// Lines of the guide the model must be told (agent/src/lib.rs `WORK_GUIDE`).
-const GUIDE_LINES: [&str; 3] = ["What you do, and what you hand off:", "Hand off the rest with platform__hand_off", "Only your owner's turns can hand off"];
+/// Lines of the notes the model must be told (agent/src/lib.rs `TURN_NOTES`).
+const GUIDE_LINES: [&str; 2] = ["Your answer to a chat message is posted to that chat for you.", "You act for the person who asked"];
 /// The oldest default's advice, and the build guide's opening: gone.
 const OLD_ADVICE: [&str; 2] = ["read the todo template's files for the shape", "How to build an app (a fragment):"];
 
@@ -81,7 +80,7 @@ pub(super) fn build(s: &mut Suite, api: &Api) -> Result<()> {
     let test = |controls: Value| agents.signed(&owner, "POST", "/api/a/agent/test", Some(&controls));
     let turn_of = |answer: &Value| answer["body"]["turn"].as_str().unwrap_or("").to_string();
 
-    // every turn's instructions carry the work guide
+    // every turn's instructions carry the turn notes
     s.openrouter.clear_script();
     s.openrouter.script(&[Reply::Text("Hi there.".into())]);
     let asked = s.openrouter.chats().len();
@@ -90,7 +89,7 @@ pub(super) fn build(s: &mut Suite, api: &Api) -> Result<()> {
     let requests: Vec<Value> = s.openrouter.chats()[asked..].to_vec();
     let prompt = requests.first().map(system).unwrap_or_default();
     s.ok(
-        "the instructions the model is sent include the work guide, not the build guide it replaced",
+        "the instructions the model is sent include the turn notes, not the build guide they replaced",
         done && GUIDE_LINES.iter().all(|l| prompt.contains(l)) && !OLD_ADVICE.iter().any(|l| prompt.contains(l)),
         &prompt,
     );

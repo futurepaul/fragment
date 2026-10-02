@@ -49,7 +49,7 @@ pub(crate) async fn ensure(env: &Env, cfg: &Config, url: &Url, who: &Identity) -
     for n in 1..=NAMES_MAX {
         let label = if n == 1 { TEMPLATE.to_string() } else { format!("{TEMPLATE}-{n}") };
         let name = fragment_name(&label, username);
-        let create = CreateFragment { name: label, visibility: None, template: Some(TEMPLATE.into()), throwaway: false, answers: None };
+        let create = CreateFragment { name: label, visibility: None, template: Some(TEMPLATE.into()), answers: None };
         let mut made = create_fragment(env, cfg, url, create, signer.clone()).await?;
         match made.status_code() {
             200 => {

@@ -121,8 +121,7 @@ CREATE TABLE IF NOT EXISTS op_breakers (op TEXT PRIMARY KEY, reset_at INTEGER NO
 CREATE TABLE IF NOT EXISTS file_commits (key TEXT PRIMARY KEY, sha TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS own_commits (sha TEXT PRIMARY KEY, depth INTEGER NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS blobs (
-  sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, mime TEXT,
-  frame INTEGER NOT NULL DEFAULT 0);
+  sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, mime TEXT);
 CREATE TABLE IF NOT EXISTS pointers (
   ref TEXT NOT NULL, path TEXT NOT NULL, sha TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY (ref, path));
 CREATE TABLE IF NOT EXISTS subs (
@@ -225,10 +224,6 @@ impl DurableObject for FragmentCell {
     async fn websocket_close(&self, ws: WebSocket, code: usize, reason: String, _clean: bool) -> Result<()> {
         if self.state.get_tags(&ws).iter().any(|t| t == "live") {
             self.live_closed(&ws);
-            // its computer's idle wait runs from the last page's close
-            if self.is_page(&ws) {
-                self.viewed().await;
-            }
         }
         let code = if code == 1005 || code == 1006 { 1000 } else { code as u16 };
         let _ = ws.close(Some(code), Some(reason));
@@ -363,14 +358,6 @@ pub(crate) enum MetaKey {
     /// Where a newly declared channel's agent starts hearing it, until it
     /// joins (agents.rs `Floor`).
     AgentFloor,
-    /// What its computer is still to be told: `1` live declares one, `0`
-    /// it no longer does (computer.rs).
-    ComputerPending,
-    /// Its computer was last told live declares one.
-    ComputerDeclared,
-    /// The agent that made it as a hand-off's throwaway (its only deleter
-    /// besides its owner), as the router named it at create.
-    ThrowawayOf,
     /// The commits the cell pins (plane.rs).
     PinMain,
     PinLive,
@@ -394,8 +381,6 @@ pub(crate) enum MetaKey {
     CodeError,
     /// When the blob collection runs next.
     BlobsGcAt,
-    /// When a frame's upload next collects the frames before it (blobs.rs).
-    FramesGcAt,
     /// The fragment's VAPID key, sealed (push.rs).
     Vapid,
     /// Test fleets only: a shorter ledger window (`/test/fragment ledger`).
@@ -444,9 +429,6 @@ impl MetaKey {
             MetaKey::AgentLive => "agent_live",
             MetaKey::AgentJoined => "agent_joined",
             MetaKey::AgentFloor => "agent_floor",
-            MetaKey::ComputerPending => "computer_pending",
-            MetaKey::ComputerDeclared => "computer_declared",
-            MetaKey::ThrowawayOf => "throwaway_of",
             MetaKey::PinMain => "pin_main",
             MetaKey::PinLive => "pin_live",
             MetaKey::PinsCheckedAt => "pins_checked_at",
@@ -458,7 +440,6 @@ impl MetaKey {
             MetaKey::FrameGranted => "frame_granted",
             MetaKey::CodeError => "code_error",
             MetaKey::BlobsGcAt => "blobs_gc_at",
-            MetaKey::FramesGcAt => "frames_gc_at",
             MetaKey::Vapid => "vapid",
             MetaKey::TestLedgerMs => "test_ledger_ms",
             MetaKey::TestFailDeliveries => "test_fail_deliveries",
@@ -842,14 +823,6 @@ impl FragmentCell {
             let report = body_json(&mut req).await?;
             return json_response(&self.delivery_report(&report)?);
         }
-        if let Some(what) = path.strip_prefix("/computer/") {
-            // Only its computer sets the header; the router never passes it.
-            if req.headers().get(crate::computer::HEADER)?.is_none() {
-                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
-            }
-            let what = what.to_string();
-            return self.computer_asks(&what, &body_json::<Value>(&mut req).await?);
-        }
         if let Some(op) = path.strip_prefix("/cap/files/") {
             // Only the `Files` capability sets the header; the router never passes it.
             if req.headers().get(crate::files::CAP_HEADER)?.as_deref() != Some("files") {
@@ -879,12 +852,7 @@ impl FragmentCell {
                 if body.name != routed_name {
                     return Err(CellError::host("the router addressed a different fragment than the body names"));
                 }
-                // only the router's create names a throwaway's agent (no request passes the header on)
-                let throwaway_of = req.headers().get(crate::agents::THROWAWAY_HEADER)?.filter(|a| npub::is_identity(a));
-                if body.throwaway != throwaway_of.is_some() {
-                    return Err(CellError::host("a throwaway's create names the agent that makes it"));
-                }
-                self.create(&caller, body, throwaway_of).await
+                self.create(&caller, body).await
             }
             (Method::Delete, ["delete"]) => self.delete(&caller).await,
             (Method::Get, ["api", "status"]) => self.status(&caller),
@@ -1016,7 +984,7 @@ impl FragmentCell {
         }
     }
 
-    async fn create(&self, caller: &Caller, body: CreateFragment, throwaway_of: Option<String>) -> CellResult<Response> {
+    async fn create(&self, caller: &Caller, body: CreateFragment) -> CellResult<Response> {
         let owner = self.caller_id(caller)?.to_string();
         if !valid_fragment_name(&body.name) {
             return Err(CellError::invalid("a fragment name must match ^[a-z0-9][a-z0-9-]{0,62}$"));
@@ -1073,7 +1041,6 @@ impl FragmentCell {
             (MetaKey::Repo, repo.as_str()),
             (MetaKey::IndexVersion, "0"),
             (MetaKey::PollAt, poll_at.as_str()),
-            (MetaKey::ThrowawayOf, throwaway_of.as_deref().unwrap_or_default()),
             (MetaKey::AppFacet, format!("{}@{created_at}", js::APP_FACET).as_str()),
             // written last: a fragment exists once it has created_at
             (MetaKey::CreatedAt, created_at.as_str()),
@@ -1172,7 +1139,6 @@ impl FragmentCell {
             urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name) },
             blob_min_bytes: Some(fragment_core::blob::BLOB_MIN_BYTES as u64),
             frame: self.framing()?,
-            throwaway_of: self.meta(MetaKey::ThrowawayOf)?.filter(|a| !a.is_empty()),
             name: facts.name,
         })
     }
@@ -1222,7 +1188,6 @@ impl FragmentCell {
         } else if let Err(e) = self.sync_agent().await {
             self.event("agent.join-failed", &e.message, json!({ "code": e.code }));
         }
-        self.tell_computer().await;
         self.drain_deliveries().await;
         // Settles pending mutations that are due; one that fails waits for
         // its own next try and never fails the alarm.
