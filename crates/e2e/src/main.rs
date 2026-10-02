@@ -248,6 +248,11 @@ impl Suite {
     }
 
     fn start_shaped(&mut self, shape: Shape) -> Result<Api> {
+        // the node and the fakes reach the platform by its name (a Hermes'
+        // inbox and its Relay), as fragment.club's does: it must be loopback here
+        use std::net::ToSocketAddrs;
+        let loopback = (SUFFIX, self.port).to_socket_addrs().is_ok_and(|mut a| a.any(|a| a.ip() == std::net::Ipv4Addr::LOCALHOST));
+        anyhow::ensure!(loopback, "{SUFFIX} does not resolve to 127.0.0.1 here: add `127.0.0.1 {SUFFIX}` to /etc/hosts (CI does)");
         self.shape = shape;
         let started = self.start(false, true);
         self.shape = Shape::Plain;

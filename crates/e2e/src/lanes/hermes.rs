@@ -509,7 +509,8 @@ fn chats(s: &mut Suite, api: Api, home: &std::path::Path, owner: &Keys, hermes: 
     s.crash()?;
     let api = s.start(false, true)?;
     let restarted = format!("echo: [{me}] after a restart?");
-    let kept = soon(s, || {
+    // a reboot, the delivery's retry, and its wake: longer than a turn
+    let kept = s.eventually(Duration::from_secs(60), || {
         let heard = s.sandcastle.relay_heard().iter().filter(|e| e["text"] == "after a restart?").count() == 1;
         heard && said(&api, owner, &chat, &by, &restarted) == 1
     });
