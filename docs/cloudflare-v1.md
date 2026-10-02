@@ -175,9 +175,13 @@ speaking Cloudflare's APIs) returns once this product works.
     point-in-time restore when the new image moved its data's schema.
 20. **Preview environments.** Every branch deploys a complete, separately
     named copy to the dev account with one command: its own Workers, DOs,
-    Workflows, Queues, containers and R2 prefix. It is routed on a dev
-    zone with leading-wildcard routes (`*--<branch>.<dev zone>`), which a
-    one-level certificate covers. The hosted e2e runs against it,
+    Workflows, Queues, containers and R2 prefix. It is routed on the dev
+    zone `finite.place` (Paul's, 2026-10-02), with one proxied wildcard
+    DNS record that Universal SSL covers:
+    - the shell for branch `b` is `b.finite.place`;
+    - its fragments are `<label>--<user>--b.finite.place`, routed by
+      `*--b.finite.place/*`;
+    - the long-lived dev deployment is the branch `dev`. The hosted e2e runs against it,
     including real Hermes on the candidate image. A teardown command
     removes a branch's copy, since an account holds at most 500 DO
     classes (about 80 branches).
