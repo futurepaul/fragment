@@ -292,10 +292,16 @@ impl HermesCell {
 
     /// Saves a step's row over what asks wrote while it ran (every write
     /// but an ask's own: a step's awaits let a deploy's ask in): a deploy's
-    /// `declared` and a removal stand.
+    /// `declared` and a removal stand, and so does a Relay a chat's `Listen`
+    /// gave this same Hermes (its key) meanwhile, since the chat subscribed
+    /// with its inbox; a computer made without it is made again with it.
     pub(crate) fn save_step(&self, h: &mut Row) -> CellResult<()> {
         if let Some(asked) = self.row()? {
             (h.declared, h.phase) = pure::merged(asked.declared, asked.phase, h.phase);
+            if h.relay_sealed.is_none() && asked.relay_sealed.is_some() && h.pubkey.is_some() && h.pubkey == asked.pubkey {
+                (h.relay_sealed, h.inbox) = (asked.relay_sealed, asked.inbox);
+                h.made = h.made && asked.made;
+            }
         }
         self.save(h)
     }

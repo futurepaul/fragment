@@ -334,6 +334,7 @@ pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
     let r = access(&api, &name, Some(&owner), &page.id())?;
     s.ok("its owner's page is admitted to the new one, with a new token", r.status == 200 && r.body["token"] != token.as_str() && r.body["endpoint"] != fake.endpoint.as_str(), &r);
     let (api, chat) = chats(s, api, &home, &owner, &name)?;
+    joined_while_made(s, &api, &owner)?;
     chat_page(s, &api, &home, &owner, &name, &view)?;
     ends(s, &api, &home, &owner, &name, &page.id(), &chat)
 }
@@ -386,6 +387,37 @@ fn post(api: &Api, keys: &Keys, chat: &str, id: &str, body: Value) -> Result<cra
 /// How often `by` said `text` in the chat (its answers carry a turn).
 fn said(api: &Api, keys: &Keys, chat: &str, by: &str, text: &str) -> usize {
     records(api, keys, chat, "chat").iter().filter(|r| r["principal"] == by && r["body"]["text"] == text && r["body"]["turn"].is_string()).count()
+}
+
+/// A Hermes made from the template, whose own chat joins it while its
+/// computer is still being made (its grant slow): both give it a Relay, and
+/// the first given stands, so the chat's deliveries reach its inbox (as on
+/// fragment.club, 2026-10-02, they did not: 403, a second inbox).
+fn joined_while_made(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let name = api.qualified(owner, &s.name("hmade"))?;
+    s.sandcastle.slow_grants(3000);
+    let r = api.create_with(owner, json!({ "name": name, "template": "hermes" }));
+    let ready = soon(s, || events_of(api, owner, &name).iter().any(|e| e.starts_with("hermes.ready")));
+    s.sandcastle.slow_grants(0);
+    let r = r?;
+    anyhow::ensure!(r.status == 200, "making {name}: {r}");
+    let events = events_of(api, owner, &name);
+    let (joined, served) = (events.iter().position(|e| e.starts_with("agent.joined")), events.iter().position(|e| e.starts_with("hermes.ready")));
+    s.ok("a Hermes from the template: its chat joins it while its computer is still being made", ready && joined.zip(served).is_some_and(|(j, r)| j < r), format!("{events:?}"));
+    let by = {
+        let r = api.signed(owner, "GET", &format!("/api/f/{name}/members"), None)?;
+        r.body["members"].as_array().into_iter().flatten().find(|m| m["kind"] == "computer").and_then(|m| m["principal"].as_str().map(str::to_string)).unwrap_or_default()
+    };
+    let me = api.username(owner)?;
+    post(api, owner, &name, "jm1", json!({ "text": "made while you joined" }))?;
+    let answered = soon(s, || said(api, owner, &name, &by, &format!("echo: [{me}] made while you joined")) == 1);
+    let refused: Vec<String> = events_of(api, owner, &name).into_iter().filter(|e| e.starts_with("delivery.failed")).collect();
+    s.ok("and answers its first message: one Relay, its deliveries reach its inbox", answered && refused.is_empty(), format!("{refused:?} {}", json!(records(api, owner, &name, "chat"))));
+    // gone again, so the lane's own Hermes is the node's one
+    let r = api.signed(owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    let gone = r.status == 200 && soon(s, || !s.sandcastle.computers().values().any(|c| c.spec["service"]["env"]["GATEWAY_RELAY_ID"] == name.as_str()));
+    anyhow::ensure!(gone, "{name}, deleted, left its computer on the node: {r}");
+    Ok(())
 }
 
 /// A page that is the platform's chat.

@@ -192,6 +192,19 @@ impl HermesCell {
         let url = format!("{}/inbox/{inbox}", fragment_core::hermes::relay_url(platform, &h.fragment));
         let sub = self.to_chat(&h, chat, Method::Post, "/api/subscriptions", json!({ "channel": channel, "url": url })).await?;
         let id = sub["id"].as_i64().ok_or_else(|| CellError::host("the chat's subscription has no id"))?;
+        // one it had there before (to an inbox it no longer has) goes
+        #[derive(Deserialize)]
+        struct Had {
+            sub: i64,
+        }
+        let had: Vec<Had> = self.relay_rows("SELECT sub FROM relay_chats WHERE chat = ?", vec![chat.into()])?;
+        if let Some(old) = had.first().map(|h| h.sub).filter(|s| *s != id) {
+            if let Err(e) = self.to_chat(&h, chat, Method::Delete, &format!("/api/subscriptions/{old}"), json!({})).await {
+                if e.code != ErrorCode::NotFound {
+                    return Err(e);
+                }
+            }
+        }
         self.relay_exec(
             "INSERT INTO relay_chats (chat, channel, sub) VALUES (?, ?, ?) ON CONFLICT (chat) DO UPDATE SET channel = excluded.channel, sub = excluded.sub",
             vec![chat.into(), channel.into(), SqlStorageValue::Integer(id)],
@@ -223,12 +236,21 @@ impl HermesCell {
     /// Its Relay's secret (sealed) and its inbox's token: made once, with
     /// its computer (or the first time it answers a chat, for one made before).
     pub(crate) async fn give_relay(&self, h: &mut Row) -> CellResult<()> {
-        if h.relay_sealed.is_none() {
-            h.relay_sealed = Some(keys::seal(&self.env, js::random_hex::<32>().as_bytes()).await?);
+        if h.relay_sealed.is_some() && h.inbox.is_some() {
+            return Ok(());
         }
-        if h.inbox.is_none() {
-            h.inbox = Some(js::random_hex::<16>());
-        }
+        let sealed = keys::seal(&self.env, js::random_hex::<32>().as_bytes()).await?;
+        // The first given stands: its making and a chat's Listen both give
+        // one, and either may have while this one sealed (a chat subscribes
+        // with its inbox, the computer is told its secret). Stored at once,
+        // where neither can be given twice.
+        self.sql().exec(
+            "UPDATE hermes SET relay_sealed = COALESCE(relay_sealed, ?), inbox = COALESCE(inbox, ?) WHERE one = 1",
+            vec![sealed.as_str().into(), js::random_hex::<16>().as_str().into()],
+        )?;
+        let stored = self.row()?.ok_or_else(|| CellError::host("a Hermes given its Relay has its row"))?;
+        (h.relay_sealed, h.inbox) = (stored.relay_sealed, stored.inbox);
+        assert!(h.relay_sealed.is_some() && h.inbox.is_some(), "a Relay given is stored");
         Ok(())
     }
 
