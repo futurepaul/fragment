@@ -1,5 +1,5 @@
-//! A chat turn's progress on the chat's `work` channel (docs/api.md, the
-//! chat template): `turn.start`, one record per tool call once its result
+//! A chat turn's progress on the chat's `work` channel (docs/api.md,
+//! Agents): `turn.start`, one record per tool call once its result
 //! is stored, and `turn.end`, each built by `fragment_core::work`. Posted
 //! as the agent, best-effort: a post that fails is logged and tried again
 //! after the next step, and never fails the turn.

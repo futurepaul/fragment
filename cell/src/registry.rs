@@ -53,7 +53,7 @@ pub(crate) mod calls;
 mod signin;
 use calls::{
     Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, ClaimUsername, Claimed, EndSession, Exchange, FindUsername, Holder, Logout, Lookup, Mint,
-    Home, HomeName, MintFrame, Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername,
+    Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername,
     Resolve, RevokeKey, Session, SetPicture, TestHook, View, TEST_HOLD_MAX_MS,
 };
 pub use signin::SESSION_TTL_MS;
@@ -77,8 +77,6 @@ CREATE TABLE IF NOT EXISTS usernames (
   username TEXT PRIMARY KEY, identity TEXT NOT NULL UNIQUE, claimed_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS pictures (
   identity TEXT PRIMARY KEY, sha TEXT NOT NULL, mime TEXT NOT NULL, set_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS homes (
-  owner TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, recorded_at INTEGER NOT NULL);
 ";
 
 #[durable_object]
@@ -198,11 +196,6 @@ struct HolderRow {
 #[derive(Deserialize)]
 struct UsernameRow {
     username: String,
-}
-
-#[derive(Deserialize)]
-struct NameRow {
-    name: String,
 }
 
 #[derive(Deserialize)]
@@ -498,24 +491,6 @@ impl RegistryCell {
         }
     }
 
-    /// A person's home, their desktop (cell/src/home.rs): the one recorded,
-    /// recording `name` first when there is none, or in its place with
-    /// `replace` (the one recorded is gone). A person has one home.
-    fn home(&self, b: Home) -> CellResult<HomeName> {
-        if let Some(name) = &b.name {
-            assert!(fragment_proto::valid_fragment_name(name), "a home is a fragment");
-            if self.named_identity(&b.owner)?.kind != IdentityKind::Person {
-                return Err(CellError::host(format!("{} is not a person, and has no home", b.owner)));
-            }
-            let q = match b.replace {
-                true => "INSERT INTO homes (owner, name, recorded_at) VALUES (?, ?, ?) ON CONFLICT (owner) DO UPDATE SET name = excluded.name, recorded_at = excluded.recorded_at",
-                false => "INSERT INTO homes (owner, name, recorded_at) VALUES (?, ?, ?) ON CONFLICT (owner) DO NOTHING",
-            };
-            self.exec(q, vec![b.owner.as_str().into(), name.as_str().into(), SqlStorageValue::Integer(js::now_ms())])?;
-        }
-        Ok(HomeName { name: self.row::<NameRow>("SELECT name FROM homes WHERE owner = ?", vec![b.owner.as_str().into()])?.map(|r| r.name) })
-    }
-
     /// The identity a call names (`None`: the asker's own).
     fn named_or(&self, identity: Option<&str>, by: &Identity) -> CellResult<Identity> {
         identity.map_or_else(|| Ok(by.clone()), |id| self.named_identity(id))
@@ -671,10 +646,8 @@ impl RegistryCell {
             EndSession::PATH => reply::<EndSession>(self.end_site_session(body(&bytes)?)),
             Logout::PATH => reply::<Logout>(self.logout(body(&bytes)?)),
             Mint::PATH => reply::<Mint>(self.mint(body(&bytes)?).await),
-            MintFrame::PATH => reply::<MintFrame>(self.mint_frame(body(&bytes)?).await),
             Redeem::PATH => reply::<Redeem>(self.redeem(body(&bytes)?)),
             ApproveKey::PATH => reply::<ApproveKey>(self.add_by_session(body(&bytes)?)),
-            Home::PATH => reply::<Home>(self.home(body(&bytes)?)),
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
         }
     }

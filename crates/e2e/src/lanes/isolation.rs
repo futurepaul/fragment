@@ -1,33 +1,32 @@
-//! Isolation between fragments, the desktop's frames, and the move
-//! (docs/fragment-boats.md, slices 1 and 2). Which of a browser's cookies count on
-//! a fragment's origin follows the Fetch Metadata the browser sends, so
-//! another fragment's page (one site with it) reaches it only as a
-//! stranger would; a frame signs in only through the page that frames it
-//! (`__frame`, a capability its owner allows); signing in and out cannot
-//! be set off from another page; and a fragment that is not yours, nor
-//! shared with you, asks before it learns who you are. A fragment's old
-//! host sends a browser on to its new one.
+//! Isolation between fragments, and the move (docs/fragment-boats.md,
+//! slices 1 and 2). Which of a browser's cookies count on a fragment's
+//! origin follows the Fetch Metadata the browser sends, so another
+//! fragment's page (one site with it) reaches it only as a stranger would;
+//! a frame of a fragment signs in nowhere (no page mints a frame session
+//! since the desktop went at the cut: docs/technical-debt-ledger.md);
+//! signing in and out cannot be set off from another page; and a fragment
+//! that is not yours, nor shared with you, asks before it learns who you
+//! are. A fragment's old host sends a browser on to its new one.
 //!
 //! `isolation` runs as fragment.club is shaped (the platform cross-site
 //! from the fragments, which are one site with each other), in Chrome where
 //! the browser is the point: each open bug is an attack page on another
-//! fragment. `frames` runs as a domain on
-//! the Public Suffix List is (every fragment its own site), in a Chrome
-//! that blocks third-party cookies, as Safari does.
+//! fragment.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::Result;
-use fragment_core::form;
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
-use super::desktop::{DOT_PNG, OPEN_HELLO, POP_OUT};
 use super::signin::{consent, signout, unframed, with_session};
 use super::templates::person;
 use crate::api::{url_enc, Api, Call, Reply, Socket};
 use crate::browser::{Browser, Page};
 use crate::Suite;
+
+/// A one-pixel PNG.
+const DOT_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
 /// An app whose one route records who posted to it, and a query that says.
 const POSTED_APP: &str = r#"import { DurableObject } from "cloudflare:workers";
@@ -168,43 +167,12 @@ fn attacks(s: &mut Suite, api: &Api) -> Result<()> {
     let x = made(api, &owner, &s.name("ix"), "blank", files, "members")?;
     let y = made(api, &owner, &s.name("iy"), "blank", json!([]), "members")?;
     let z = made(api, &owner, &s.name("iz"), "blank", json!([]), "members")?;
-    let todo = made(api, &owner, &s.name("itodo"), "todo", json!([]), "link")?;
-    // a desktop whose code is no longer the platform's (its owner changed
-    // it): it frames only once its owner allows it in its share sheet
-    let changed = json!([{ "path": "site/mine.txt", "text": "the owner's own change" }]);
-    let desk = made(api, &owner, &s.name("idesk"), "desktop", changed, "link")?;
     let evil = made(api, &mallory, &s.name("ievil"), "blank", json!([]), "public")?;
     let r = api.signed(&member, "GET", "/api/identities/me", None)?;
     let r = api.signed(&owner, "PUT", &format!("/api/f/{y}/members/{}", r.body["id"].as_str().unwrap_or("")), Some(&json!({ "role": "viewer" })))?;
     anyhow::ensure!(r.status == 200, "adding a member to {y}: {r}");
-    let now_ms = || SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
 
-    // ---- the grant: the owner allows the desktop's frames in its share sheet
-    let sheet = |name: &str| with_session(api, "GET", &format!("/share/{name}"), &session);
-    let (desk_sheet, todo_sheet) = (sheet(&desk)?, sheet(&todo)?);
-    s.ok(
-        "the owner's share sheet offers the frame grant for a fragment that asks for it (a changed desktop), with a warning in plain words, and not for one that does not",
-        desk_sheet.text.contains("Your fragments inside it")
-            && desk_sheet.text.contains(">Allow<")
-            && desk_sheet.text.contains("catch your clicks")
-            && desk_sheet.text.contains("Allow it only if you trust that code")
-            && !todo_sheet.text.contains("Your fragments inside it"),
-        &desk_sheet,
-    );
-    let grant = form::issue(&session, &format!("share:{desk}"), now_ms() - form::DELAY_MS - 50);
-    let body = format!("form={}&action=frame&granted=yes", url_enc(&grant));
-    let post = |origin: String| {
-        let cookie = Some(format!("fragment_session={session}"));
-        let url = format!("{}/share/{desk}", api.base);
-        api.call(Call { method: "POST", url, body: Some(body.clone().into_bytes()), content_type: Some("application/x-www-form-urlencoded"), cookie, extra: vec![("origin", origin)], ..Call::default() })
-    };
-    let refused = post(api.site_origin(&desk))?;
-    let status = |name: &str| api.status(&owner, name).map(|r| r.body["frame"].clone());
-    s.ok("the desktop's own page cannot grant it (403)", refused.status == 403 && status(&desk)? == json!(false), &refused);
-    let r = post(api.base.clone())?;
-    s.ok("the owner allows it from the sheet", r.status == 303 && status(&desk)? == json!(true), &r);
-
-    // ---- the owner, signed in on x's own page and in the desktop's frame of it
+    // ---- the owner, signed in on x's own page
     let Some(mut chrome) = s.browser()? else {
         s.ok("Chrome is installed for the isolation lane (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());
@@ -213,19 +181,6 @@ fn attacks(s: &mut Suite, api: &Api) -> Result<()> {
     let inside = "(document.body?.innerText ?? '').includes('inside x')";
     let top = chrome.open(&api.site_url(&x, "__signin?return=/"))?;
     s.ok("the owner reads x (members only) signed in on its own page", chrome.until(&top, inside, wait), "");
-    let d = chrome.open(&api.site_url(&desk, "__signin?return=/"))?;
-    chrome.viewport(&d, 1440, 900, false)?;
-    let row = format!("[...document.querySelectorAll('#apps .row')].find(r => r.dataset.key === {:?})", format!("app:{x}"));
-    let listed = chrome.until(&d, &format!("!!{row}"), wait);
-    chrome.eval(&d, &format!("{row}?.click(); true"))?;
-    let x_host = format!("{}--", label(&x));
-    let panel = listed && s.eventually(wait, || chrome.eval_in_frame(&d, &x_host, inside).ok() == Some(json!(true)));
-    let framed = cookie_of(&mut chrome, api, &x, "fragment_frame");
-    s.ok(
-        "and in the desktop's pane of it, signed in through the desktop's __frame, in a partitioned cookie (SameSite=None, Secure)",
-        panel && framed.as_ref().is_some_and(|c| c["sameSite"] == "None" && c["secure"] == true && c["partitionKey"].is_object()),
-        json!(framed),
-    );
     let site_x = cookie_of(&mut chrome, api, &x, "fragment_site").and_then(|c| c["value"].as_str().map(str::to_string)).unwrap_or_default();
 
     // ---- an attack page: a stranger's fragment, one site with x
@@ -262,19 +217,12 @@ fn attacks(s: &mut Suite, api: &Api) -> Result<()> {
     frame(&mut chrome, &e, &api.site_url(&x, "?attack"))?;
     run(&mut chrome, format!("(() => {{ const o = document.createElement('object'); o.data = {:?}; o.type = 'text/html'; document.body.append(o); return true; }})()", api.site_url(&x, "?object")));
     let shown = s.eventually(Duration::from_secs(5), || ["?attack", "?object"].iter().any(|at| chrome.eval_in_frame(&e, at, inside).ok() == Some(json!(true))));
-    s.ok("a frame of it on another fragment's page (an iframe, an object) shows nothing: its answer names only the desktop that framed it", !shown, "");
-    let frame_x = framed.as_ref().and_then(|c| c["value"].as_str()).unwrap_or_default();
-    let (with, without) = (
-        as_browser(api, "GET", api.site_url(&x, ""), "iframe", "same-site", &format!("fragment_frame={frame_x}"))?,
-        as_browser(api, "GET", api.site_url(&x, ""), "iframe", "same-site", &format!("fragment_site={site_x}"))?,
-    );
+    s.ok("a frame of it on another fragment's page (an iframe, an object) shows nothing", !shown, "");
+    let without = as_browser(api, "GET", api.site_url(&x, ""), "iframe", "same-site", &format!("fragment_site={site_x}"))?;
     s.ok(
-        "(frame-ancestors: the desktop's origin with its frame session, else this origin's own pages; never cached without it)",
-        with.header("content-security-policy") == format!("frame-ancestors {}", api.site_origin(&desk))
-            && with.header("cache-control") == "private, no-cache"
-            && without.header("content-security-policy") == "frame-ancestors 'self'"
-            && without.status == 401,
-        format!("{} {:?} / {} {:?}", with.status, with.header("content-security-policy"), without.status, without.header("content-security-policy")),
+        "(frame-ancestors: this origin's own pages; a frame with the site cookie alone is a stranger's, 401)",
+        without.header("content-security-policy") == "frame-ancestors 'self'" && without.status == 401,
+        format!("{} {:?}", without.status, without.header("content-security-policy")),
     );
 
     // ---- sign-out and sign-in set off from another page
@@ -296,25 +244,6 @@ fn attacks(s: &mut Suite, api: &Api) -> Result<()> {
         "nor does a frame of it: the frame offers the fragment in a tab of its own instead",
         told && cookie_of(&mut chrome, api, &z, "fragment_site").is_none() && cookie_of(&mut chrome, api, &z, "fragment_frame").is_none(),
         "",
-    );
-
-    // ---- framing without the capability
-    frame(&mut chrome, &e, &api.site_url(&evil, &format!("__frame?name={x}")))?;
-    let t = chrome.open(&api.site_url(&todo, "__signin?return=/"))?;
-    let on_todo = format!("location.host.startsWith({:?}) && location.pathname === '/' && document.readyState === 'complete'", format!("{}--", label(&todo)));
-    anyhow::ensure!(chrome.until(&t, &on_todo, wait), "the owner's todo did not open");
-    frame(&mut chrome, &t, &api.site_url(&todo, &format!("__frame?name={x}")))?;
-    let refused = frame_says(s, &mut chrome, &t, "__frame?name=", "does not ask for the frame capability", wait);
-    let stranger = frame_says(s, &mut chrome, &e, "__frame?name=", "does not ask for the frame capability", wait);
-    let shown = s.eventually(Duration::from_secs(3), || chrome.eval_in_frame(&t, &x_host, inside).ok() == Some(json!(true)));
-    s.ok("a fragment whose fragment.json does not ask for frame (the owner's own todo, a stranger's page) cannot frame x signed in", refused && stranger && !shown, "");
-    let desk_site = cookie_of(&mut chrome, api, &desk, "fragment_site").and_then(|c| c["value"].as_str().map(str::to_string)).unwrap_or_default();
-    let at_desk = |dest: &str| as_browser(api, "GET", api.site_url(&desk, &format!("__frame?name={x}")), dest, "same-origin", &format!("fragment_site={desk_site}"));
-    let (fetched, opened, frame_ok) = (at_desk("empty")?, at_desk("document")?, at_desk("iframe")?);
-    s.ok(
-        "__frame is only a frame of the page's own: a fetch of it, or a tab of it, is refused (403), even on the desktop",
-        fetched.status == 403 && opened.status == 403 && frame_ok.status == 302,
-        format!("{fetched} / {opened} / {frame_ok}"),
     );
 
     // ---- asked once: a fragment that is not yours, nor shared with you
@@ -518,129 +447,3 @@ fn by_url(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a guest the owner removed who reloads gets a page saying they have no access, not JSON", gone, shown(&mut chrome, &g));
     Ok(())
 }
-
-/// On a node shaped as a listed domain is (every fragment its own site),
-/// in a Chrome of its own, then back as it was.
-pub fn frames(s: &mut Suite, _: &Api) -> Result<()> {
-    if !s.section("frames") {
-        return Ok(());
-    }
-    s.stop()?;
-    let api = s.start_listed()?;
-    let result = listed(s, &api);
-    drop(api);
-    s.stop()?;
-    s.start(false, true)?;
-    result
-}
-
-fn listed(s: &mut Suite, api: &Api) -> Result<()> {
-    let wait = Duration::from_secs(20);
-    let (owner, session) = person(api)?;
-    // a desktop made without the platform's form (the API, as the CLI makes
-    // one): it asks for frame, and its owner has not allowed it yet
-    let desk = made(api, &owner, &s.name("fdesk"), "desktop", json!([]), "members")?;
-    let files = json!([{ "path": "site/index.html", "text": "<p>inside the app</p>" }, { "path": "notes/hello.txt", "text": "hello from a file" }]);
-    let app = made(api, &owner, &s.name("fapp"), "blank", files, "members")?;
-    let shut = made(api, &owner, &s.name("fshut"), "blank", json!([{ "path": "site/index.html", "text": "<p>inside shut</p>" }]), "members")?;
-    // and a chat, which it opens first (named as its New chat names one)
-    let chat = made(api, &owner, &s.name("chat"), "chat", json!([]), "members")?;
-    let st = |name: &str| api.status(&owner, name).map(|r| r.body["frame"].clone());
-    s.ok("a desktop made without the platform's form may not frame until its owner allows it", st(&desk)? == json!(false), st(&desk)?);
-    // Third-party cookies blocked (Chrome's own switch), as Safari blocks
-    // them; and every cookie of `shut`'s blocked (a site setting), as a
-    // browser that keeps a fragment signed out in frames does. Frames stay
-    // in the page's process, so the lane can read them.
-    let blocked = json!({ "profile": { "content_settings": { "exceptions": { "cookies": { format!("{},*", api.site_origin(&shut)): { "setting": 2 } } } } } });
-    let args = ["--test-third-party-cookie-phaseout", "--disable-site-isolation-trials"];
-    let Some(mut chrome) = Browser::launch_with(&s.scratch, &args, Some(&blocked))? else {
-        s.ok("Chrome is installed for the frames lane (set CHROME_BIN)", false, "no Chrome found");
-        return Ok(());
-    };
-    chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
-
-    // ---- without the grant: a notice in place of the panes, never the refusal
-    let h = chrome.open(&api.site_url(&desk, "__signin?return=/"))?;
-    chrome.viewport(&h, 1440, 900, false)?;
-    let row_of = |name: &str| format!("[...document.querySelectorAll('#apps .row')].find(r => r.dataset.key === {:?})", format!("app:{name}"));
-    let open_in = |chrome: &mut Browser, page: &Page, name: &str| {
-        let row = row_of(name);
-        chrome.until(page, &format!("!!{row}"), wait) && chrome.eval(page, &format!("{row}.click(); true")).is_ok()
-    };
-    let noticed = "(() => { const n = document.getElementById('notice'); return !n.hidden && n.offsetParent !== null && n.textContent.includes('Let this desktop show your fragments') && !!n.querySelector('button.allow'); })()";
-    let chat_opened = format!("document.getElementById('chat-title').textContent === {:?}", label(&chat));
-    let asked = chrome.until(&h, &format!("{chat_opened} && {noticed}"), wait);
-    let pane = open_in(&mut chrome, &h, &app) && chrome.until(&h, &format!("!!document.querySelector('.pane[data-key={:?}] .pane-note.blocked button.allow')", format!("app:{app}")), wait);
-    std::thread::sleep(Duration::from_secs(1));
-    let seen = chrome.eval(&h, "({ frames: document.querySelectorAll('iframe').length, text: document.body.innerText })")?;
-    let raw = seen["text"].as_str().is_some_and(|t| t.contains("\"error\"") || t.contains("forbidden"));
-    chrome.screenshot(&h, &s.scratch.join("frames-ungranted.png"))?;
-    s.ok(
-        "without the grant, the desktop shows a notice with its share sheet's button where the chat would be, and in the app's pane, and frames nothing (no raw refusal anywhere)",
-        asked && pane && seen["frames"] == json!(0) && !raw && cookie_of(&mut chrome, api, &app, "fragment_frame").is_none(),
-        &seen,
-    );
-    let opened_sheet = chrome.click(&h, "#notice button.allow").is_ok()
-        && s.eventually(wait, || chrome.pages().is_ok_and(|p| p.iter().any(|(_, url)| url.ends_with(&format!("/share/{desk}")))));
-    s.ok("its button opens the desktop's own share sheet", opened_sheet, format!("{:?}", chrome.pages()?));
-    if let Some((target, _)) = chrome.pages()?.into_iter().find(|(_, url)| url.ends_with(&format!("/share/{desk}"))) {
-        chrome.close_target(&target)?;
-    }
-    chrome.front(&h)?;
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{desk}/grants/frame"), Some(&json!({ "granted": true })))?;
-    let chat_host = format!("{}--", label(&chat));
-    let shown = r.status == 200 && s.eventually(Duration::from_secs(30), || chrome.eval_in_frame(&h, &chat_host, "document.title").ok() == Some(json!("Chat")));
-    s.ok("once its owner allows it, the open desktop shows the chat inside it, signed in (it notices, and reloads)", shown, &r);
-    chrome.close(h)?;
-
-    // ---- allowed: its panes sign in
-    let page = chrome.open(&api.site_url(&desk, "__signin?return=/"))?;
-    chrome.viewport(&page, 1440, 900, false)?;
-    let open = |chrome: &mut Browser, name: &str| open_in(chrome, &page, name);
-    let app_host = format!("{}--", label(&app));
-    let inside = open(&mut chrome, &app) && frame_says(s, &mut chrome, &page, &app_host, "inside the app", wait);
-    let desk_host = api.site_origin(&desk).trim_start_matches("http://").split(':').next().unwrap_or("").to_string();
-    // the app's frame cookie in the desktop's partition
-    let app_host_name = api.site_url(&app, "").split("//").nth(1).and_then(|h| h.split(':').next()).unwrap_or("").to_string();
-    let framed = chrome.cookies().ok().into_iter().flatten().find(|c| {
-        c["name"] == "fragment_frame" && c["domain"] == app_host_name.as_str() && c["partitionKey"]["topLevelSite"].as_str().is_some_and(|t| t.ends_with(&desk_host))
-    });
-    let own = cookie_of(&mut chrome, api, &app, "fragment_site");
-    s.ok(
-        "with third-party cookies blocked, the desktop's pane of a members-only app, another site, signs in through __frame",
-        inside && framed.as_ref().is_some_and(|c| c["partitionKey"]["topLevelSite"].as_str().is_some_and(|t| t.ends_with(&desk_host))) && own.is_none(),
-        json!({ "frame": framed, "site": own }),
-    );
-    // its Share: the app's sheet in a dialog, signed in through `__share`
-    chrome.eval(&page, &format!("document.querySelector('.pane[data-key={:?}] .pane-action[title=\"Share…\"]').click(); true", format!("app:{app}")))?;
-    let sheet = format!("/share/{app}");
-    let signed = chrome.until(&page, "document.getElementById('sheet').open", wait) && frame_says(s, &mut chrome, &page, &sheet, "General access", wait);
-    let kept = chrome.cookies().ok().into_iter().flatten().find(|c| {
-        c["name"] == "fragment_share" && c["path"] == sheet.as_str() && c["partitionKey"]["topLevelSite"].as_str().is_some_and(|t| t.ends_with(&desk_host))
-    });
-    let closed = chrome.eval_in_frame(&page, &sheet, "(document.querySelector('button[data-done]').click(), true)").is_ok()
-        && chrome.until(&page, "!document.getElementById('sheet').open", wait);
-    s.ok(
-        "and its Share opens the app's sheet in a dialog there, signed in through __share, the sheet's cookie partitioned under the desktop; Done closes it",
-        signed && kept.is_some() && closed,
-        json!({ "sheet": kept }),
-    );
-    let token = framed.as_ref().and_then(|c| c["value"].as_str()).unwrap_or_default();
-    let r = as_browser(api, "GET", api.site_url(&app, ""), "iframe", "cross-site", &format!("fragment_frame={token}"))?;
-    let top = as_browser(api, "GET", api.site_url(&app, ""), "document", "cross-site", &format!("fragment_frame={token}"))?;
-    s.ok(
-        "its page answers the frame with frame-ancestors naming the desktop alone; the frame's cookie opens no top-level page (members only: 401)",
-        r.status == 200 && r.header("content-security-policy") == format!("frame-ancestors {}", api.site_origin(&desk)) && top.status == 401,
-        format!("{r} {:?} / {top}", r.header("content-security-policy")),
-    );
-    chrome.eval(&page, &format!("document.querySelector('.pane[data-key={:?}] .pane-action[title=Files]').click(); true", format!("app:{app}")))?;
-    let clicked = s.eventually(wait, || chrome.eval_in_frame(&page, "/__files", OPEN_HELLO).ok() == Some(json!(true)));
-    let popped = clicked && s.eventually(wait, || chrome.eval_in_frame(&page, "/__files", POP_OUT).ok() == Some(json!(true)));
-    s.ok("a file pane opens through __frame too", popped && frame_says(s, &mut chrome, &page, "__file?path=", "hello from a file", wait), "");
-    let told = open(&mut chrome, &shut) && frame_says(s, &mut chrome, &page, &format!("{}--", label(&shut)), "in a tab", wait);
-    let heard = chrome.until(&page, "document.getElementById('notice').textContent.includes('signed out inside this page')", wait);
-    chrome.screenshot(&page, &s.scratch.join("frames-blocked.png"))?;
-    s.ok("a pane whose fragment the browser keeps signed out in frames offers it in a tab, and the desktop hears so", told && heard, "");
-    Ok(())
-}
-

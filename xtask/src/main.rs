@@ -10,7 +10,7 @@
 //!                    management key OPENROUTER_MANAGEMENT_KEY_FILE names)
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
-//!                    (todo, inbox, notes, chat), scaffolded under target/devstack/try
+//!                    (todo, inbox, notes), scaffolded under target/devstack/try
 //!                    so nothing lands in the repo; prints what to open and paste
 //!   e2e [args...]    build, then run crates/e2e (args pass through: --only <section>[,...]
 //!                    or --except <section>[,...])
@@ -203,7 +203,7 @@ fn dev(args: &[String]) -> Result<()> {
 }
 
 /// The templates `try` scaffolds.
-const TRY_TEMPLATES: [&str; 4] = ["todo", "inbox", "notes", "chat"];
+const TRY_TEMPLATES: [&str; 3] = ["todo", "inbox", "notes"];
 
 fn try_template(args: &[String]) -> Result<()> {
     let usage = || format!("usage: cargo xtask try <{}> [name]", TRY_TEMPLATES.join("|"));

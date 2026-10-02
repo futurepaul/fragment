@@ -112,8 +112,8 @@ fn clear_installed(sql: &SqlStorage) -> Result<()> {
 /// B1), then whether they must be signed in, and ephemeral mutations after
 /// the operation table: a table from before gains the columns, and its
 /// channels take no posts, from anyone, and its mutations keep ledger rows.
-/// A blob's served type and whether it is a frame came after the blob
-/// table (blobs.rs): one from before is served untyped, and is no frame.
+/// A blob's served type came after the blob table (blobs.rs): one from
+/// before is served untyped.
 /// Runs in the constructor, before anything reads these tables.
 pub(crate) fn migrate_code(sql: &SqlStorage) {
     for (table, column, decl) in [
@@ -121,7 +121,6 @@ pub(crate) fn migrate_code(sql: &SqlStorage) {
         ("code_channels", "signed_in", "INTEGER NOT NULL DEFAULT 0"),
         ("code_ops", "ephemeral", "INTEGER NOT NULL DEFAULT 0"),
         ("blobs", "mime", "TEXT"),
-        ("blobs", "frame", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         let cols: Vec<Value> = sql.exec(&format!("PRAGMA table_info({table})"), None).and_then(|c| c.to_array()).expect("a table's columns read");
         if !cols.iter().any(|c| c["name"] == column) {
@@ -329,8 +328,6 @@ impl FragmentCell {
             clear_installed(&self.sql())?;
             self.sync_schedules(&[])?;
             self.del_meta(MetaKey::MetaLive)?;
-            self.del_meta(MetaKey::CapabilitiesLive)?;
-            self.set_kind(&fragment_proto::FragmentKind::default())?;
             self.del_meta(MetaKey::CodeError)?;
             self.set_agent_live(None)?;
             js::abort_app_facet(&self.raw, &self.app_facet()?, "live is gone")?;
@@ -359,9 +356,7 @@ impl FragmentCell {
             Some(meta) => self.set_meta(MetaKey::MetaLive, &serde_json::to_string(meta).expect("meta serializes"))?,
             None => self.del_meta(MetaKey::MetaLive)?,
         }
-        self.set_meta(MetaKey::CapabilitiesLive, &serde_json::to_string(&manifest.capabilities).expect("a list serializes"))?;
         self.set_agent_live(agent.as_ref())?;
-        self.set_kind(&manifest.kind())?;
         if self.tree_row("live", "app.mjs")?.is_none() {
             self.exec("DELETE FROM code", vec![])?;
             // no operations to run, so nothing for a trigger to start

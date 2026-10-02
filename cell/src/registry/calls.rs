@@ -92,29 +92,6 @@ impl Call for RegisterAgent {
     type Answer = IdentityView;
 }
 
-/// `POST /home`: the fragment the platform records as `owner`'s home, their
-/// desktop (cell/src/home.rs; docs/one-home.md, decision 7), recording
-/// `name` when there is none yet (the first recorded stays), or in place of
-/// the one there with `replace` (it is gone): the one recorded, if any.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct Home {
-    pub owner: String,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub replace: bool,
-}
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct HomeName {
-    pub name: Option<String>,
-}
-
-impl Call for Home {
-    const PATH: &'static str = "/home";
-    type Answer = HomeName;
-}
-
 /// A key changed on an identity (`None`: the asker's own) by `by` (its
 /// proof checked by the router).
 #[derive(Serialize, Deserialize)]
@@ -390,8 +367,8 @@ pub(crate) struct LiveSession {
     #[serde(flatten)]
     pub identity: Identity,
     pub email: Option<String>,
-    /// A frame's session: the origin of the page that framed it
-    /// (`__frame`), the only page its answers may show in.
+    /// A frame's session: the origin of the page that framed it, the only
+    /// page its answers may show in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedder: Option<String>,
 }
@@ -473,40 +450,6 @@ impl Call for Mint {
     type Answer = Minted;
     fn checked(answer: Minted) -> CellResult<Minted> {
         Ok(Minted { identity: identity_checked(answer.identity)?, ..answer })
-    }
-}
-
-/// Where a share sheet's embed session signs in (`__share`), in place of a
-/// fragment's name in `MintFrame`, `Redeem`, and `Session`: the sheet's
-/// path on the platform's origin. No fragment's name holds a `/`, so no
-/// fragment's origin takes the sheet's redemption or session, nor the
-/// sheet a fragment's.
-pub(crate) fn sheet(name: &str) -> String {
-    assert!(fragment_proto::valid_fragment_name(name), "a share sheet is a fragment's");
-    format!("/share/{name}")
-}
-
-/// `POST /redeem/frame`: a frame redemption (`__frame`): from the session
-/// `token` names on `from` (a site or frame session, `frame` says which),
-/// which must be `owner`'s, for `fragment` in a frame of `embedder` only
-/// (`fragment` is a share sheet's `sheet` for `__share`).
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct MintFrame {
-    pub token: String,
-    pub frame: bool,
-    pub from: String,
-    pub owner: String,
-    pub fragment: String,
-    pub embedder: String,
-    pub return_to: String,
-}
-
-impl Call for MintFrame {
-    const PATH: &'static str = "/redeem/frame";
-    type Answer = Minted;
-    fn checked(answer: Minted) -> CellResult<Minted> {
-        Mint::checked(answer)
     }
 }
 

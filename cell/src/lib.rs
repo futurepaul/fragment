@@ -40,7 +40,6 @@ mod cs;
 mod error;
 mod files;
 mod fragment;
-mod home;
 mod jobs;
 mod js;
 mod keys;
@@ -724,10 +723,6 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
         return auth::fragment(&req, env, cfg, url, name, rest, mode == Mode::Path, fetched).await;
     }
     own_page_socket(&req, cfg, url, name)?;
-    // a sign-in for a frame of this origin's own page, and nowhere else
-    if auth::is_frame_route(rest) && !(fetched.framed && req.headers().get("sec-fetch-site")?.as_deref() == Some("same-origin")) {
-        return Err(CellError::new(ErrorCode::Forbidden, format!("{rest} is a frame of this fragment's own page")));
-    }
     // a GET or HEAD has no body to wait for
     let body = match req.method() {
         Method::Get | Method::Head => Vec::new(),
@@ -737,7 +732,7 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
     // a frame's page shows only in the page its session was made for: that
     // session is asked for here, for the page's origin (`bound`)
     let (mut signed, mut embedder) = (None, None);
-    if let (true, Some(Credential::Frame(token))) = (fetched.framed && !auth::is_frame_route(rest), &credential) {
+    if let (true, Some(Credential::Frame(token))) = (fetched.framed, &credential) {
         if let Some(live) = routed::site_session(env, token.clone(), name, true).await? {
             (signed, embedder) = (Some(Signed::new(live.identity, None)), live.embedder);
         }

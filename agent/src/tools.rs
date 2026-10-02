@@ -85,10 +85,10 @@ fn platform_tools(owner_turn: bool) -> Vec<(&'static str, &'static str, Value)> 
     let create = (
         "platform__create_fragment",
         "Makes a new fragment for your owner from a template, as they could, named <label>.<their username>: blank (one \
-         page), todo (a live list), inbox, or chat. You become its editor. Answers its name and URL.",
+         page), todo (a live list), inbox, or calories. You become its editor. Answers its name and URL.",
         json!({ "type": "object", "required": ["label"], "additionalProperties": false, "properties": {
             "label": { "type": "string", "description": "lowercase letters, digits, and single dashes" },
-            "template": { "type": "string", "enum": ["blank", "todo", "inbox", "chat"] },
+            "template": { "type": "string", "enum": ["blank", "todo", "inbox", "calories"] },
         } }),
     );
     let mut tools = if owner_turn { vec![create] } else { Vec::new() };

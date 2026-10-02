@@ -28,50 +28,9 @@ pub(super) fn with_session(api: &Api, method: &str, path: &str, session: &str) -
     api.call(Call { method, url: format!("{}{path}", api.base), cookie: Some(format!("fragment_session={session}")), ..Call::default() })
 }
 
-/// A person's home (docs/one-home.md, decision 7), its other cases: a
-/// fragment of theirs called `desktop` that is no desktop is never taken
-/// over (theirs is `desktop-2`); a desktop they made as `desktop` before is
-/// theirs already; a home they deleted is made again; `/settings` sends the
+/// The platform's settings, its other cases: `/settings` sends the
 /// signed-out to sign in, and someone with no username yet to choose one.
-fn home_cases(s: &mut Suite, api: &Api) -> Result<()> {
-    let person = |email: &str| -> Result<(String, Keys)> {
-        let session = api.sign_in(email)?;
-        let keys = Keys::generate();
-        api.approve(&session, &keys)?;
-        Ok((session, keys))
-    };
-    // the home `/` opens: the fragment its redirect signs in on
-    let home_of = |session: &str| -> Result<String> {
-        let r = with_session(api, "GET", "/", session)?;
-        let to = reqwest::Url::parse(&format!("{}{}", api.base, r.header("location")))?;
-        Ok(to.query_pairs().find(|(k, _)| k == "name").map(|(_, v)| v.into_owned()).unwrap_or_default())
-    };
-    let template_of = |keys: &Keys, name: &str| api.signed(keys, "GET", &format!("/api/f/{name}/template"), None).map(|r| r.body["template"].clone()).unwrap_or_default();
-
-    let (taken, keys) = person("home-taken@e2e.test")?;
-    let todo = api.qualified(&keys, "desktop")?;
-    let r = api.create_with(&keys, json!({ "name": todo, "template": "todo" }))?;
-    anyhow::ensure!(r.status == 200, "making {todo}: {r}");
-    let home = home_of(&taken)?;
-    s.ok(
-        "a fragment of theirs called desktop that is no desktop is never taken over: their home is desktop-2",
-        home == api.qualified(&keys, "desktop-2")? && template_of(&keys, &home) == "desktop" && template_of(&keys, &todo) == "todo",
-        &home,
-    );
-    let r = api.signed(&keys, "DELETE", &format!("/api/f/{home}"), None)?;
-    anyhow::ensure!(r.status == 200, "deleting {home}: {r}");
-    let again = home_of(&taken)?;
-    s.ok("a home they deleted is made again", !again.is_empty() && api.status(&keys, &again)?.status == 200 && template_of(&keys, &again) == "desktop", &again);
-
-    let (had, keys) = person("home-had@e2e.test")?;
-    let made = api.qualified(&keys, "desktop")?;
-    let r = api.create_with(&keys, json!({ "name": made, "template": "desktop" }))?;
-    anyhow::ensure!(r.status == 200, "making {made}: {r}");
-    let home = home_of(&had)?;
-    let listed = api.signed(&keys, "GET", "/api/fragments", None)?;
-    let desktops = listed.body["fragments"].as_array().map_or(0, |f| f.iter().filter(|f| f["name"].as_str().is_some_and(|n| n.starts_with("desktop"))).count());
-    s.ok("a desktop they made as desktop before is their home already: no second one", home == made && desktops == 1, format!("{home} {listed}"));
-
+fn settings_cases(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.unsigned("GET", "/settings", None)?;
     s.ok("signed out, settings asks them to sign in", r.status == 302 && r.header("location").contains("/auth/login"), &r);
     let fresh = api.sign_in("home-fresh@e2e.test")?;
@@ -309,36 +268,23 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     };
     let asked = with_session(api, "GET", "/", &chooser)?;
     s.ok("the page asking for a username says where their fragments will live", asked.text.contains("&lt;label&gt;--username."), &asked);
-    s.ok("the username form says taking it makes their desktop", asked.text.contains("Taking it makes your desktop"), &asked);
     let (r, calls) = calls_of(api, || choose(&chooser, &chosen))?;
     s.ok("a person chooses their username on the platform's page, asking the registry once, and goes home", r.status == 302 && calls == 1 && r.header("location") == "/", format!("{calls} calls: {r}"));
-    let desk = format!("desktop.{chosen}");
-    let opens = format!("/auth/fragment?name={}&return=/", url_enc(&desk));
     let home = with_session(api, "GET", "/", &chooser)?;
-    s.ok("their first visit home makes their desktop, their home, and opens it, signed in there", home.status == 302 && home.header("location") == opens, &home);
-    let again = with_session(api, "GET", "/", &chooser)?;
-    s.ok("and the next opens the same one: one home", again.status == 302 && again.header("location") == opens, &again);
+    s.ok("home, with a username, is their settings", home.status == 302 && home.header("location") == "/settings", &home);
     let settings = with_session(api, "GET", "/settings", &chooser)?;
     s.ok(
-        "their settings say who they are, list their desktop, and how to pair a CLI and a coding agent",
+        "their settings say who they are, that they have no fragments yet, and how to pair a CLI and a coding agent",
         settings.status == 200
             && settings.text.contains(&format!("Signed in as <b>{chosen}</b>"))
-            && settings.text.contains(&desk)
+            && settings.text.contains("None yet")
             && settings.text.contains("Pair your CLI")
             && settings.text.contains("releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz")
             && settings.text.contains("<code>fragment login</code>")
             && settings.text.contains("fragment skill &gt; ~/.claude/skills/fragment/SKILL.md"),
         &settings,
     );
-    let keys = Keys::generate();
-    api.approve(&chooser, &keys)?;
-    let st = api.status(&keys, &desk)?;
-    s.ok(
-        "made from the desktop template, theirs alone, and showing their fragments inside it from the start",
-        st.status == 200 && st.body["visibility"] == "members" && st.body["frame"] == json!(true),
-        &st,
-    );
-    home_cases(s, api)?;
+    settings_cases(s, api)?;
     let r = choose(&chooser, &format!("{chosen}x"))?;
     s.ok("and only once", r.status == 400 && r.text.contains("chosen once"), &r);
     let r = choose(&"0".repeat(64), &format!("{chosen}y"))?;
@@ -422,7 +368,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = with_session(api, "GET", &path, &paul)?;
     s.ok("signed in, it shows the key's ending to compare with the terminal", r.status == 200 && r.text.contains(&cli_npub[cli_npub.len() - 8..]), &r);
-    s.ok("and no page may frame it: a fragment's page could lay \"Add this key\" under a click (the desktop lane tries, in Chrome)", unframed(&r), framing(&r));
+    s.ok("and no page may frame it: a fragment's page could lay \"Add this key\" under a click", unframed(&r), framing(&r));
     let r = with_session(api, "GET", &format!("/cli?key={cli_npub}"), &paul)?;
     s.ok("a link without the key's proof is refused", r.status == 400, &r);
     let stale = api.approval_link(&cli, 11 * 60);
@@ -453,8 +399,8 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("(approving asks the registry once)", calls == 1, calls);
     let r = api.approve_link(&paul, &link)?;
     s.ok("approving it again changes nothing", r.status == 200, &r);
-    // every platform page refuses frames; its redirects need not (the
-    // desktop's frames sign in through them, and a redirect shows nothing)
+    // every platform page refuses frames; its redirects need not (a
+    // redirect shows nothing)
     let pages = [
         ("the settings page's forms", "Make it", with_session(api, "GET", "/settings", &paul)?),
         ("the username form", "Take it", with_session(api, "GET", "/", &newcomer)?),

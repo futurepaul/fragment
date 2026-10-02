@@ -12,12 +12,12 @@
 //!
 //! Tokens and states are 32 random bytes; the cell keeps their SHA-256.
 //!
-//! A frame's session (`__frame`, docs/fragment-boats.md) is a site session
-//! bound to the origin of the page that framed it (`embedder`): minted
-//! from the framing page's own session, redeemed only in a frame, and
-//! looked up only as a frame's. A share sheet's embed session (`__share`)
-//! is one too, for the sheet's path (`calls::sheet`) where a fragment's
-//! name would be.
+//! A frame's session (docs/fragment-boats.md) is a site session bound to
+//! the origin of the page that framed it (`embedder`): redeemed only in a
+//! frame, and looked up only as a frame's. Nothing mints a frame
+//! redemption since the desktop went (it minted from its own page's
+//! session); the shell will, from the platform's (docs/cloudflare-v1.md,
+//! phase 5; docs/technical-debt-ledger.md).
 //!
 //! A person's yes to a fragment that is not theirs or shared with them
 //! ("Continue to X as you?") is remembered (`consents`) until they sign
@@ -38,7 +38,7 @@ use serde::de::IgnoredAny;
 use sha2::{Digest, Sha256};
 
 use super::calls::{
-    ApproveKey, Began, Begin, Consent, EndSession, Exchange, Exchanged, LiveSession, LoggedOut, Logout, Mint, MintFrame, Minted, Redeem,
+    ApproveKey, Began, Begin, Consent, EndSession, Exchange, Exchanged, LiveSession, LoggedOut, Logout, Mint, Minted, Redeem,
     Redeemed, Session, SigninCounts, SigninsHook,
 };
 use super::*;
@@ -174,11 +174,9 @@ struct RedemptionRow {
     embedder: Option<String>,
 }
 
-/// A live session as the registry found it: its hash, the platform
-/// session it came from (a site or frame session's), and whom it names.
+/// A live session as the registry found it: its hash, and whom it names.
 pub(super) struct Live {
     pub hash: String,
-    pub parent: Option<String>,
     pub session: LiveSession,
 }
 
@@ -311,8 +309,7 @@ impl RegistryCell {
     /// The live session a token names: not revoked, not expired, for this
     /// fragment (`None`: a platform session), a frame's when `frame` says
     /// so and a top-level one otherwise, its parent live too. Answers the
-    /// session's hash, its parent, its identity, and their first sign-in's
-    /// email.
+    /// session's hash, its identity, and their first sign-in's email.
     pub(super) fn live_session(&self, token: &str, fragment: Option<&str>, frame: bool) -> CellResult<Live> {
         // the email's subquery reads `subjects_identity` (at most SUBJECTS_MAX)
         const Q: &str = concat!(
@@ -337,7 +334,7 @@ impl RegistryCell {
             return Err(not_signed_in());
         }
         let identity = joined_identity(row.identity, row.kind, row.owner, row.username, "a session")?;
-        Ok(Live { hash, parent: row.parent, session: LiveSession { identity, email: row.email, embedder: row.embedder } })
+        Ok(Live { hash, session: LiveSession { identity, email: row.email, embedder: row.embedder } })
     }
 
     fn new_session(&self, identity: &str, fragment: Option<&str>, parent: Option<&str>, sid: Option<&str>, embedder: Option<&str>, expires_at: i64) -> CellResult<String> {
@@ -521,20 +518,6 @@ impl RegistryCell {
         Ok(Minted { redeem: Some(redeem), identity })
     }
 
-    /// A frame redemption (`__frame`): from the framing page's own session
-    /// on `from`, which must be its owner's, for `fragment` in a frame of
-    /// `embedder` only. It comes from that session's platform session, as
-    /// the page's own did.
-    pub(super) async fn mint_frame(&self, b: MintFrame) -> CellResult<Minted> {
-        let Live { parent, session, .. } = self.live_session(&b.token, Some(&b.from), b.frame)?;
-        if session.identity.id != b.owner {
-            return Err(CellError::new(ErrorCode::Forbidden, format!("only {}'s owner shows their fragments inside it", b.from)));
-        }
-        let parent = parent.ok_or_else(|| CellError::host("a fragment's session has no platform session"))?;
-        let redeem = self.new_redemption(&parent, &b.fragment, &b.return_to, Some(&b.embedder)).await?;
-        Ok(Minted { redeem: Some(redeem), identity: session.identity })
-    }
-
     async fn new_redemption(&self, session: &str, fragment: &str, return_to: &str, embedder: Option<&str>) -> CellResult<String> {
         let expires_at = js::now_ms() + REDEEM_TTL_MS;
         self.sweep_by(expires_at).await?;
@@ -590,7 +573,7 @@ impl RegistryCell {
         let token = self.new_session(&p.identity, Some(&b.fragment), Some(parent), None, row.embedder.as_deref(), p.expires_at)?;
         // bounded: this session and the newest others of its kind on this
         // fragment are kept, the oldest end (a browser holds one cookie of
-        // each an origin), so a desktop reloading its frames never ends
+        // each an origin), so a page reloading its frames never ends
         // the top-level session
         self.exec(
             "DELETE FROM sessions WHERE hash IN (SELECT hash FROM sessions WHERE parent = ? AND fragment = ? AND (embedder IS NULL) = ? AND hash != ? ORDER BY created_at DESC LIMIT -1 OFFSET ?)",
