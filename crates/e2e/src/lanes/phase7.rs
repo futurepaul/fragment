@@ -557,7 +557,7 @@ fn hermes_chat(s: &mut Suite, chrome: &mut Browser, api: &Api, owner: &Person, g
     s.ok(
         "the guest joins, writes, and the owner's Hermes answers them by name, labeled as Hermes",
         can_join && landed && guest_sees,
-        format!("{can_join} {landed} | {}", chrome.eval(&theirs, MESSAGES).unwrap_or_default()),
+        format!("{can_join} {landed} (its gateway dialed {} times) | {}", s.sandcastle.relay_dials(), chrome.eval(&theirs, MESSAGES).unwrap_or_default()),
     );
     chrome.front(desk)?;
     let owner_sees = s.eventually(WAIT, || chrome.eval_in_frame(desk, &chat_host, &by_hermes).ok() == Some(json!(true)));
