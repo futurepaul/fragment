@@ -36,12 +36,6 @@ pub fn cell_dir() -> PathBuf {
     repo_root().join("cell")
 }
 
-/// The cell's static assets: the computer client (`cargo xtask build`,
-/// xtask/src/client.rs), served at `/__computer/` on every host.
-pub fn client_dir() -> PathBuf {
-    cell_dir().join("client")
-}
-
 /// The agents' celld project (goose's loop; phase 5).
 pub fn agent_dir() -> PathBuf {
     repo_root().join("agent")
@@ -58,8 +52,8 @@ pub fn stage_agent(dir: &Path) -> Result<PathBuf> {
     Ok(dir.to_path_buf())
 }
 
-/// A copy of the built cell project at `dir` (its config, shim, build, and
-/// static assets), so a node run from it keeps its state and variables
+/// A copy of the built cell project at `dir` (its config, shim, and build),
+/// so a node run from it keeps its state and variables
 /// apart from `cell/`, where `xtask dev` runs.
 pub fn stage_project(dir: &Path) -> Result<PathBuf> {
     fn copy_dir(from: &Path, to: &Path) -> Result<()> {
@@ -82,8 +76,6 @@ pub fn stage_project(dir: &Path) -> Result<PathBuf> {
     }
     let _ = fs::remove_dir_all(dir.join("build"));
     copy_dir(&cell.join("build"), &dir.join("build")).context("stage cell/build (run `cargo xtask build`)")?;
-    let _ = fs::remove_dir_all(dir.join("client"));
-    copy_dir(&client_dir(), &dir.join("client")).context("stage cell/client (run `cargo xtask build`)")?;
     Ok(dir.to_path_buf())
 }
 
@@ -193,9 +185,6 @@ pub struct Fleet {
     pub openrouter_management: Option<String>,
     pub budget_usd: Option<String>,
     pub operators: Option<String>,
-    /// The sandcastle nodes that may ask for a computer's credentials
-    /// (npubs or 64 hex, comma-separated; `None`: none may).
-    pub sandcastle_nodes: Option<String>,
     /// Pending sign-ins the Registry keeps (`None`: the cell's default,
     /// `limits::SIGNINS_PENDING_MAX_DEFAULT`).
     pub signins_pending_max: Option<u64>,
@@ -204,18 +193,6 @@ pub struct Fleet {
     pub test_hooks: bool,
     /// Computers on Sprites (`None`: a fragment that declares one waits for them).
     pub computers: Option<ComputerVars>,
-    /// A fragment's Hermes on a sandcastle node (docs/hermes-chat.md;
-    /// `None`: a fragment that declares one waits for it).
-    pub hermes: Option<HermesVars>,
-}
-
-/// Hermes on a sandcastle node: the node's API (for the cell and for
-/// `KEYS`), the platform's grantor key there (for `KEYS`: 64 hex), and how
-/// often a Hermes being made is looked at.
-pub struct HermesVars {
-    pub sandcastle_url: String,
-    pub grantor_key: String,
-    pub tick_s: u32,
 }
 
 /// Computers on Sprites: the Sprites API and its token (for `KEYS`), where
@@ -277,10 +254,6 @@ impl Fleet {
             env.push(("FRAGMENT_KEYS_SPRITES_TOKEN".into(), c.sprites_token.clone()));
             env.push(("FRAGMENT_KEYS_SPRITES_URL".into(), c.sprites_url.clone()));
         }
-        if let Some(h) = &self.hermes {
-            env.push(("FRAGMENT_KEYS_SANDCASTLE_GRANTOR_KEY".into(), h.grantor_key.clone()));
-            env.push(("FRAGMENT_KEYS_SANDCASTLE_URL".into(), h.sandcastle_url.clone()));
-        }
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
         let (tick, idle) = self.computers.as_ref().map_or((String::new(), String::new()), |c| (c.tick_s.to_string(), c.idle_s.to_string()));
@@ -326,9 +299,6 @@ impl Fleet {
         if let Some(o) = &self.operators {
             vars.push(("FRAGMENT_OPERATORS", o.as_str()));
         }
-        if let Some(n) = &self.sandcastle_nodes {
-            vars.push(("FRAGMENT_SANDCASTLE_NODES", n.as_str()));
-        }
         let signins = self.signins_pending_max.map(|n| n.to_string());
         if let Some(n) = &signins {
             vars.push(("FRAGMENT_SIGNINS_PENDING_MAX", n.as_str()));
@@ -338,10 +308,6 @@ impl Fleet {
         }
         if let Some(c) = &self.computers {
             vars.extend([("FRAGMENT_CLI_RELEASE_URL", c.release_url.as_str()), ("FRAGMENT_COMPUTER_TICK_S", &tick), ("FRAGMENT_COMPUTER_IDLE_S", &idle)]);
-        }
-        let hermes_tick = self.hermes.as_ref().map(|h| h.tick_s.to_string()).unwrap_or_default();
-        if let Some(h) = &self.hermes {
-            vars.extend([("FRAGMENT_SANDCASTLE_API", h.sandcastle_url.as_str()), ("FRAGMENT_HERMES_TICK_S", hermes_tick.as_str())]);
         }
         write_dev_vars(project, &vars)?;
         Ok(env)

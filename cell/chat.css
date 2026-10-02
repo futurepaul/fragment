@@ -51,11 +51,10 @@ html, body { margin: 0; background: var(--bg-window); color: var(--text-primary)
 .msg .who { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--text-secondary); }
 .msg.user .who { margin: 0 0 4px 4px; }
 .msg.agent > .who { margin-bottom: 6px; }
-/* faces: a person's picture or initial, an agent's, a computer's, a Hermes' mark */
+/* faces: a person's picture or initial, an agent's or a computer's mark */
 .face { display: inline-grid; place-items: center; width: 20px; height: 20px; flex: none; border-radius: 50%; overflow: hidden; background: var(--surface-muted); color: var(--text-secondary); font-size: 10px; font-weight: 700; line-height: 1; }
 .face img { width: 100%; height: 100%; object-fit: cover; }
 .face svg { width: 12px; height: 12px; }
-.face.hermes { background: var(--accent-blue); color: var(--bg-window); }
 .face.agent { background: var(--agent); color: #3b2410; }
 .face.computer { border-radius: 6px; border: 1px solid var(--border-strong); }
 /* who else is here, above the composer */

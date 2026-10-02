@@ -1,10 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["cli", "crates/proto", "crates/nip98", "crates/core", "crates/native", "crates/fakes", "crates/devstack", "crates/e2e", "crates/computer", "crates/templates", "xtask"]
-# cell/ builds for wasm32 with worker-build; sandcastle/ is a workspace of
-# its own that must not depend on fragment's crates (docs/sandbox.md,
-# decision 4).
-exclude = ["cell", "agent", "sandcastle"]
+# cell/ and agent/ build for wasm32 with worker-build.
+exclude = ["cell", "agent"]
 
 [workspace.package]
 edition = "2021"

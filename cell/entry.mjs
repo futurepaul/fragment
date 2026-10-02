@@ -46,19 +46,6 @@ export class Computer extends DurableObject {
   alarm(info) { return this.rs.alarm(info); }
 }
 
-export class Hermes extends DurableObject {
-  constructor(ctx, env) {
-    super(ctx, env);
-    this.rs = new rs.HermesCell(ctx, env);
-  }
-  fetch(request) { return this.rs.fetch(request); }
-  alarm(info) { return this.rs.alarm(info); }
-  // its Hermes' Relay socket (relay.rs)
-  webSocketMessage(ws, message) { return this.rs.webSocketMessage(ws, message); }
-  webSocketClose(ws, code, reason, clean) { return this.rs.webSocketClose(ws, code, reason, clean); }
-  webSocketError(ws, error) { return this.rs.webSocketError(ws, error); }
-}
-
 export class Registry extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);

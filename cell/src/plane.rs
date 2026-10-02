@@ -282,7 +282,6 @@ impl FragmentCell {
             (_, live) => {
                 self.install_code(live).await?;
                 self.tell_computer().await;
-                self.tell_hermes().await;
             }
         }
         match pin {
@@ -333,7 +332,6 @@ impl FragmentCell {
             self.del_meta(MetaKey::MetaLive)?;
             self.del_meta(MetaKey::CapabilitiesLive)?;
             self.want_computer(None, None)?;
-            self.want_hermes(false)?;
             self.set_kind(&fragment_proto::FragmentKind::default())?;
             self.del_meta(MetaKey::CodeError)?;
             self.set_agent_live(None)?;
@@ -365,8 +363,7 @@ impl FragmentCell {
         }
         self.set_meta(MetaKey::CapabilitiesLive, &serde_json::to_string(&manifest.capabilities).expect("a list serializes"))?;
         self.set_agent_live(agent.as_ref())?;
-        self.want_computer(manifest.default_computer(), Some(sha))?;
-        self.want_hermes(manifest.preset() == Some(manifest::Preset::Hermes))?;
+        self.want_computer(manifest.computer.as_ref(), Some(sha))?;
         self.set_kind(&manifest.kind())?;
         if self.tree_row("live", "app.mjs")?.is_none() {
             self.exec("DELETE FROM code", vec![])?;
@@ -561,10 +558,10 @@ impl FragmentCell {
         }
         let rows: Vec<Busy> = self.typed(
             "SELECT (SELECT value FROM meta WHERE key = ?) AS outside_at,
-               EXISTS (SELECT 1 FROM meta WHERE key IN (?, ?, ?, ?)) AS pending,
+               EXISTS (SELECT 1 FROM meta WHERE key IN (?, ?, ?)) AS pending,
                EXISTS (SELECT 1 FROM runs WHERE status = 'running') AS running,
                EXISTS (SELECT 1 FROM spend WHERE video IS NOT NULL AND run IN (SELECT id FROM runs WHERE status = 'held')) AS videos",
-            vec![MetaKey::OutsideAt.key().into(), MetaKey::TemplatePending.key().into(), MetaKey::AgentPending.key().into(), MetaKey::ComputerPending.key().into(), MetaKey::HermesPending.key().into()],
+            vec![MetaKey::OutsideAt.key().into(), MetaKey::TemplatePending.key().into(), MetaKey::AgentPending.key().into(), MetaKey::ComputerPending.key().into()],
         )?;
         let b = rows.into_iter().next().expect("a SELECT without FROM answers one row");
         let outside = b.outside_at.and_then(|at| at.parse::<i64>().ok()).is_some_and(|at| js::now_ms() - at < OUTSIDE_WRITES_MS);

@@ -19,9 +19,9 @@
 // this fragment's, shown small at `__blob/<shot>`), `turn.end`. The page
 // groups a turn's steps above its answer, shows who is working while one
 // runs, and gives the person who started it a Stop button. A reply that
-// streams (a Hermes') shows as its draft until its record lands. Everyone
+// streams shows as its draft until its record lands. Everyone
 // who writes has a face (a person's
-// picture or initial; an agent's, a computer's, a Hermes' mark), and who is
+// picture or initial; an agent's or a computer's mark), and who is
 // here, and who is writing, shows above the composer (the fragment's
 // presence: this page shares `{typing}`).
 //
@@ -110,11 +110,10 @@ export function mount(root, options = {}) {
   const known = new Map(); // principal -> its profile, once fetched
 
   // ---- names and faces: a person by username and picture, an agent as
-  // its owner's, a computer by its name, a Hermes as Hermes ----
+  // its owner's, a computer by its name ----
   function described(p, principal) {
     const owner = p.username ?? null;
     if (p.kind === "agent") return { agent: true, mark: "agent", owner, label: `${owner ?? "someone"}'s agent` };
-    if (p.kind === "computer" && p.preset === "hermes") return { agent: true, mark: "hermes", owner, label: "Hermes" };
     if (p.kind === "computer") return { agent: true, mark: "computer", owner, label: p.name ?? `${owner ?? "someone"}'s computer` };
     return { agent: false, mark: "person", owner: null, label: p.username ?? `id:…${principal.slice(-6)}`, picture: typeof p.picture === "string" ? p.picture : null };
   }
@@ -158,7 +157,7 @@ export function mount(root, options = {}) {
       img.alt = "";
       f.append(img);
     } else if (who?.mark === "agent" || who?.mark === "computer") f.innerHTML = svg(who.mark === "agent" ? "spark" : "monitor");
-    else f.textContent = who?.mark === "hermes" ? "H" : (who?.label ?? "?").replace(/^id:…/, "").charAt(0).toUpperCase();
+    else f.textContent = (who?.label ?? "?").replace(/^id:…/, "").charAt(0).toUpperCase();
     return f;
   }
   function byline(who, fallback) {

@@ -136,7 +136,7 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
 
     let none = s.name("tnone");
     let r = api.create_with(&owner, json!({ "name": none, "template": "nope" }))?;
-    s.ok("an unknown template is refused, naming the templates", r.status == 400 && r.message().contains("blank, todo, inbox, calories, pet, builder, chat, hermes, desktop"), &r);
+    s.ok("an unknown template is refused, naming the templates", r.status == 400 && r.message().contains("blank, todo, inbox, calories, pet, builder, chat, desktop"), &r);
     let r = api.status(&owner, &api.qualified(&owner, &none)?)?;
     s.ok("and nothing is made", r.status == 404, &r);
 
@@ -241,7 +241,7 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let theirs = with_session(api, "GET", "/settings", &editor_session)?;
     s.ok("and says which are shared with them, and as what", row(&theirs, &blank).contains("shared with you · editor"), &theirs);
-    let offered: Vec<usize> = ["blank", "todo", "inbox", "calories", "pet", "builder", "chat", "hermes", "desktop"].iter().filter_map(|t| home.text.find(&format!("value=\"{t}\""))).collect();
+    let offered: Vec<usize> = ["blank", "todo", "inbox", "calories", "pet", "builder", "chat", "desktop"].iter().filter_map(|t| home.text.find(&format!("value=\"{t}\""))).collect();
     s.ok(
         "and offer the templates, the simplest first and the desktop last, saying it will show their fragments inside it",
         home.text.contains("New fragment")
@@ -291,18 +291,9 @@ fn answers(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         r.status == 200 && manifest(&people)["agent"].is_null() && no_agent && up_to_date(&people),
         format!("{r} {members}"),
     );
-    let hermes = api.qualified(owner, "myhermes")?;
-    let answered = s.named(api, owner, "thermes")?;
-    let r = api.create_with(owner, json!({ "name": answered, "template": "chat", "answers": { "computer": hermes } }))?;
-    s.ok(
-        "a chat a Hermes of theirs answers: its fragment.json names it on its chat channel",
-        r.status == 200 && manifest(&answered)["agent"] == json!({ "channel": "chat", "computer": hermes }) && up_to_date(&answered),
-        &r,
-    );
     let refused: Vec<(&str, Value)> = vec![
         ("a template that is no chat", json!({ "name": s.named(api, owner, "tbad1")?, "template": "todo", "answers": "people" })),
         ("no template", json!({ "name": s.named(api, owner, "tbad2")?, "answers": "people" })),
-        ("a Hermes that is no fragment's name", json!({ "name": s.named(api, owner, "tbad3")?, "template": "chat", "answers": { "computer": "Not A Name" } })),
         ("an answer it does not know", json!({ "name": s.named(api, owner, "tbad4")?, "template": "chat", "answers": "everyone" })),
     ];
     let mut wrong = vec![];
@@ -313,7 +304,7 @@ fn answers(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
             wrong.push(format!("{what}: {r}"));
         }
     }
-    s.ok("told wrongly (a template that is no chat, none, a name that is no fragment's, an answer it does not know), nothing is made", wrong.is_empty(), format!("{wrong:?}"));
+    s.ok("told wrongly (a template that is no chat, none, an answer it does not know), nothing is made", wrong.is_empty(), format!("{wrong:?}"));
     Ok(())
 }
 

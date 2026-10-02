@@ -115,8 +115,8 @@ pub enum LiveOut {
     /// One socket's presence changed: its data, or `null` once it cleared
     /// it or left.
     Presence(Present),
-    /// A channel's draft: a record its poster is writing (a Hermes' reply
-    /// as it streams), its whole text so far, or `null` once they stopped.
+    /// A channel's draft: a record its poster is writing (a reply as it
+    /// streams), its whole text so far, or `null` once they stopped.
     /// Never stored; the record that carries the same `turn` replaces it.
     Draft { channel: String, principal: String, turn: String, text: Option<String>, at: i64 },
     /// A mutation applied: re-run live queries.

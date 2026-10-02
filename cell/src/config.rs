@@ -76,22 +76,6 @@ pub struct Config {
     /// `FRAGMENT_OPERATORS`: identities and keys (as `parse_list` reads
     /// them) that may top up a budget.
     operators: Option<Result<Vec<String>, String>>,
-    /// `FRAGMENT_SANDCASTLE_NODES`: the keys (npubs or 64 hex) of the
-    /// sandcastle nodes that may ask for a computer's credentials
-    /// (docs/sandbox.md, Credentials).
-    sandcastle_nodes: Option<Result<Vec<String>, String>>,
-    /// `FRAGMENT_SANDCASTLE_API`: the fleet's sandcastle node's API
-    /// (`https://api.<domain>`), where a fragment's Hermes is made
-    /// (docs/hermes-chat.md). `KEYS` holds the platform's grantor key for it.
-    sandcastle_api: Option<String>,
-    /// `FRAGMENT_HERMES_IMAGE` and `FRAGMENT_HERMES_MODEL`: what a
-    /// fragment's Hermes runs, and the model it asks through the platform's
-    /// model route (defaults: Hermes v0.21.5, and the fleet's cheap model).
-    pub hermes_image: String,
-    pub hermes_model: String,
-    /// `FRAGMENT_HERMES_TICK_S` (default 5): how often a Hermes being made
-    /// is looked at, and the first wait after a failed step.
-    pub hermes_tick_ms: i64,
     /// `FRAGMENT_SIGNINS_PENDING_MAX`: sign-ins begun and not finished that
     /// the Registry keeps before it lets the oldest go (default
     /// `SIGNINS_PENDING_MAX_DEFAULT`).
@@ -173,12 +157,6 @@ impl Config {
                 .map(|v| (v * fragment_core::budget::USD as f64).round() as i64)
                 .unwrap_or(20 * fragment_core::budget::USD),
             operators: var(env, "FRAGMENT_OPERATORS").map(|l| fragment_core::npub::parse_list(&l)),
-            sandcastle_nodes: var(env, "FRAGMENT_SANDCASTLE_NODES").map(|l| fragment_core::npub::parse_list(&l)),
-            sandcastle_api: var(env, "FRAGMENT_SANDCASTLE_API").map(|u| u.trim_end_matches('/').to_string()),
-            // the desktop build: its screen (TigerVNC, Xfce) and a browser for it
-            hermes_image: var(env, "FRAGMENT_HERMES_IMAGE").unwrap_or_else(|| "nousresearch/hermes-agent:v2026.9.24-desktop".into()),
-            hermes_model: var(env, "FRAGMENT_HERMES_MODEL").unwrap_or_else(|| "z-ai/glm-5.3-flash".into()),
-            hermes_tick_ms: var(env, "FRAGMENT_HERMES_TICK_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(5) * 1000,
             signins_pending_max: var(env, "FRAGMENT_SIGNINS_PENDING_MAX")
                 .and_then(|s| s.parse::<u64>().ok())
                 .filter(|n| *n >= 1)
@@ -203,24 +181,6 @@ impl Config {
             Some(Err(e)) => Err(CellError::host(format!("FRAGMENT_OPERATORS: {e}"))),
             Some(Ok(listed)) => Ok(listed.iter().any(|l| l == identity || Some(l.as_str()) == key)),
         }
-    }
-
-    /// Whether `key` (64 hex, a request's signer) is one of the fleet's
-    /// sandcastle nodes.
-    pub fn is_sandcastle_node(&self, key: &str) -> CellResult<bool> {
-        match &self.sandcastle_nodes {
-            None => Ok(false),
-            Some(Err(e)) => Err(CellError::host(format!("FRAGMENT_SANDCASTLE_NODES: {e}"))),
-            Some(Ok(listed)) => Ok(listed.iter().any(|l| l == key)),
-        }
-    }
-
-    /// Where a fragment's Hermes is made, and the platform it calls back:
-    /// (the node's API, the platform's origin). Both are the fleet's to set.
-    pub fn sandcastle(&self) -> CellResult<(&str, &str)> {
-        let api = self.sandcastle_api.as_deref().ok_or_else(|| CellError::new(ErrorCode::HostFailed, "this fleet has no sandcastle node (FRAGMENT_SANDCASTLE_API)"))?;
-        let platform = self.platform_url.as_deref().ok_or_else(|| CellError::new(ErrorCode::HostFailed, "a Hermes calls the platform back at FRAGMENT_PLATFORM_URL, which this fleet does not set"))?;
-        Ok((api, platform))
     }
 
     pub fn workos(&self) -> CellResult<&WorkOsConfig> {

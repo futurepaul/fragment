@@ -6,11 +6,6 @@
   "main": "entry.mjs",
   "compatibility_date": "2026-01-01",
   "worker_loaders": [{ "binding": "LOADER" }],
-  // The computer client (docs/runtime-seam.md; `cargo xtask build` writes
-  // client/, xtask/src/client.rs): served at /__computer/ on every host
-  // before the cell runs, so its module never enters an isolate. Every
-  // other path goes to the cell with no asset lookup.
-  "assets": { "directory": "./client", "run_worker_first": ["/*", "!/__computer/*"] },
   // One Workflow instance per run of a job or triggered operation (jobs.rs).
   "workflows": [{ "name": "fragment-jobs", "binding": "JOBS", "class_name": "Job" }],
   // Blobs: the bytes of files of 1 MiB or more (blobs.rs), in the fleet bucket.
@@ -38,9 +33,7 @@
       // A billing org's budget and usage: one cell per org (ledger.rs).
       { "name": "LEDGER", "class_name": "Ledger" },
       // A fragment's own computer, its Sprite's life: one cell per fragment that declares one (computer.rs).
-      { "name": "COMPUTER", "class_name": "Computer" },
-      // A fragment's own Hermes on the fleet's sandcastle node: one cell per fragment that declares one (hermes.rs).
-      { "name": "HERMES", "class_name": "Hermes" }
+      { "name": "COMPUTER", "class_name": "Computer" }
     ]
   },
   "migrations": [
@@ -49,6 +42,10 @@
     { "tag": "v3", "new_sqlite_classes": ["Registry"] },
     { "tag": "v4", "new_sqlite_classes": ["Ledger"] },
     { "tag": "v5", "new_sqlite_classes": ["Computer"] },
+    // Hermes went at the cut (celld-final): it is bound and exported no
+    // more. celld takes `new_sqlite_classes` alone and stops a deployment
+    // that deletes a class, so `{"tag": "v7", "deleted_classes":
+    // ["Hermes"]}` waits for wrangler (docs/cloudflare-v1.md, phase 2).
     { "tag": "v6", "new_sqlite_classes": ["Hermes"] }
   ]
 }

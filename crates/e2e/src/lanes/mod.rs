@@ -14,7 +14,6 @@ mod computers;
 mod control;
 mod deliver;
 mod desktop;
-pub(crate) mod hermes;
 mod identities;
 mod isolation;
 pub(crate) mod jobs;
@@ -22,12 +21,10 @@ mod keys;
 mod limits;
 mod members;
 mod notes;
-mod phase7;
 mod plane;
 mod posts;
 mod restart;
 mod runtime;
-mod sandcastle;
 mod share;
 mod signin;
 mod site;
@@ -65,7 +62,6 @@ const LANES: &[Lane] = &[
     templates::templates,
     desktop::desktop,
     share::share,
-    phase7::phase7,
     isolation::isolation,
     isolation::frames,
     app::ops,
@@ -99,8 +95,6 @@ const LANES: &[Lane] = &[
     deliver::push,
     deliver::ai,
     budget::budget,
-    sandcastle::sandcastle,
-    hermes::hermes,
     agents::agents,
     addon::addon,
     agents::chat,

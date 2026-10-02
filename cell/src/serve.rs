@@ -35,10 +35,6 @@ const CLIENT_JS: &str = include_str!("../client.mjs");
 /// agents write, so it ships with the platform (docs/platform.md).
 const CHAT_JS: &str = include_str!("../chat.mjs");
 const CHAT_CSS: &str = include_str!("../chat.css");
-/// A computer's screen beside its chat (`./__screen.js`, `./__screen.css`):
-/// a Hermes' screen for its owner's page (docs/one-home.md, phase 4).
-const SCREEN_JS: &str = include_str!("../screen.mjs");
-const SCREEN_CSS: &str = include_str!("../screen.css");
 /// The files viewer (`__files`'s page, with `./__files.js`, `./__files.css`):
 /// a fragment's files as a tree beside a reader.
 const FILES_JS: &str = include_str!("../files.mjs");
@@ -48,8 +44,6 @@ const FILES_CSS: &str = include_str!("../files.css");
 const CLIENT_JS_HASH: u64 = site::content_hash(CLIENT_JS.as_bytes());
 const CHAT_JS_HASH: u64 = site::content_hash(CHAT_JS.as_bytes());
 const CHAT_CSS_HASH: u64 = site::content_hash(CHAT_CSS.as_bytes());
-const SCREEN_JS_HASH: u64 = site::content_hash(SCREEN_JS.as_bytes());
-const SCREEN_CSS_HASH: u64 = site::content_hash(SCREEN_CSS.as_bytes());
 const FILES_JS_HASH: u64 = site::content_hash(FILES_JS.as_bytes());
 const FILES_CSS_HASH: u64 = site::content_hash(FILES_CSS.as_bytes());
 const SW_JS_HASH: u64 = site::content_hash(crate::push::SW_JS.as_bytes());
@@ -125,7 +119,7 @@ fn compiled_in(req: &Request, body: &'static str, hash: u64, content_type: &str)
 /// owner's fragments and who has them open, or its template's update. Its
 /// caller is resolved first.
 fn answers_someone(path: &str) -> bool {
-    path.starts_with("__op/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__fragments" | "__presence" | "__template" | "__watch" | "__live" | "__hermes/access")
+    path.starts_with("__op/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__fragments" | "__presence" | "__template" | "__watch" | "__live")
 }
 
 fn with_cookies(mut resp: Response, cookies: &[String]) -> CellResult<Response> {
@@ -240,15 +234,6 @@ impl FragmentCell {
                 self.template_status(caller).await?
             };
             json_response(&answer)?
-        } else if path == "__hermes/access" {
-            // an admission to its Hermes for the page's iroh key (hermes.rs;
-            // a cross-site form cannot send JSON without a preflight)
-            if req.method() != Method::Post || !req.headers().get("content-type")?.is_some_and(|c| c.starts_with("application/json")) {
-                return Err(CellError::invalid("POST {peer} for an admission as application/json"));
-            }
-            let body: Value = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            let peer = body["peer"].as_str().ok_or_else(|| CellError::invalid("peer is the page's iroh key"))?.to_string();
-            self.hermes_access(caller, &peer).await?
         } else if path == "__presence" {
             // who has each of the owner's named fragments open (publish.rs)
             json_response(&self.owner_presence(caller).await?)?
@@ -390,12 +375,6 @@ impl FragmentCell {
         }
         if path == "__chat.css" {
             return compiled_in(req, CHAT_CSS, CHAT_CSS_HASH, "text/css; charset=utf-8");
-        }
-        if path == "__screen.js" {
-            return script(req, SCREEN_JS, SCREEN_JS_HASH);
-        }
-        if path == "__screen.css" {
-            return compiled_in(req, SCREEN_CSS, SCREEN_CSS_HASH, "text/css; charset=utf-8");
         }
         if path == "__files.js" {
             return script(req, FILES_JS, FILES_JS_HASH);
