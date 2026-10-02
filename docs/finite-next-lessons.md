@@ -52,14 +52,14 @@ time; read it before touching the matching phase.
 - `celld dev` runs the node as a child process (`celld
   --no-control-plane …`). Killing `celld dev` with SIGKILL orphans the
   node, which keeps the port; a crash test kills the child
-  (`spikes/driver/src/celld.rs`).
+  (`spikes/driver/src/celld.rs` at the tag `celld-final`).
 - celld module `rules` accept only `**/*.ext` globs.
 - workers-rs Durable Objects do not `extend DurableObject`, so celld
   refuses RPC to them; a JavaScript class that extends it and forwards to
-  the Rust object fixes that (`spikes/cells-rs/entry.mjs`).
+  the Rust object fixes that (`spikes/cells-rs/entry.mjs` at the tag).
 - A root storage transaction cannot enclose a facet call past ~1.6 MB of
   facet database, and a capability call inside one deadlocks
-  (`spikes/apps/README.md`; celld v0.5.1). Since v0.6.0 a facet is a
+  (`spikes/apps/README.md` at the tag; celld v0.5.1). Since v0.6.0 a facet is a
   database of its own that never joins a root transaction.
 - libfx's host `fetch` must speak AI SDK LanguageModelV3 stream parts
   (`finishReason: {unified, raw}`, nested usage); a V2-shaped `finish`

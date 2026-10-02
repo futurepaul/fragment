@@ -1,5 +1,9 @@
 # Phase 3: hosted on fragment.club
 
+**The record of a phase.** Since the cut, the fleet's path (`fleets/`,
+`crates/node`, `cargo xtask deploy`, `e2e --fleet`) is the `celld`
+branch's (tag `celld-final`; docs/operate.md), not `master`'s.
+
 Status: started 2026-09-23 on Paul's go (costs approved; fragment.club
 itself, no staging name); cut over the same day (F). Left: slice D and
 cell-to-Sprite latency (phase 8), the push to a phone, and retiring the

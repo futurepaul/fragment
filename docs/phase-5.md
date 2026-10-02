@@ -70,7 +70,8 @@ once); SIGKILL between steps (nothing runs again).
 
 - Streaming a turn's tokens to viewers; an owner's list of their agents.
 - The computer shape: its first part (tools on an attached computer, the
-  loop still in the cell) is in `docs/phase-8.md`.
+  loop still in the cell) was in `docs/phase-8.md`, which went with it
+  at the cut (tag `celld-final`).
 
 ## Phase 7's first part: chats with an agent in them
 
