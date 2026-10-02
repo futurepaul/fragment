@@ -1,4 +1,4 @@
-//! A chat turn's progress (docs/api.md, the chat template): the records an
+//! A chat turn's progress (docs/api.md, Agents): the records an
 //! agent posts to a chat's `work` channel while a turn started in that chat
 //! runs, what the chat's own records say to the agent, and the ids that
 //! make each record once. The agent reads its turn from its own SQL and

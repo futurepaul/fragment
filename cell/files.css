@@ -1,6 +1,6 @@
 /* The files viewer (./__files.css, with ./__files.js), served by the
-   platform: Finite's look, the desktop's tokens. Dark by default; light when
-   the system asks. The fonts are the desktop's when the system has them (the
+   platform: Finite's look and tokens. Dark by default; light when the
+   system asks. The fonts are Finite's when the system has them (the
    page loads none: it is every fragment's, private ones too). */
 :root {
   --bg-window:#212121; --bg-sidebar:#181818; --bg-hover:rgba(255,255,255,.055); --bg-active:#2f2f2f;

@@ -10,8 +10,8 @@
 //! agent also registers it as its owner's, in the same request.
 //!
 //! A fragment's `agent` block is made so here (`sync_agent`, after a
-//! deploy): its owner's own agent, or the fragment's own (named as the
-//! fragment is), an editor that listens to the declared channel.
+//! deploy): the fragment's own agent (named as the fragment is), an editor
+//! that listens to the declared channel.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -36,8 +36,6 @@ use crate::{ask_registry, js, read_body, signer};
 /// The caller's identity, set by this router only (the script has no other
 /// way in); one name for both ends (`fragment_proto::routed`).
 pub(crate) const PRINCIPAL_HEADER: &str = fragment_proto::routed::AGENT_PRINCIPAL;
-/// Each person's own agent, made on first need (a chat's).
-pub(crate) const DEFAULT_LABEL: &str = "agent";
 
 /// `/api/agents` and `/api/a/*`.
 pub(crate) async fn route(mut req: Request, env: &Env, url: &Url, segments: &[&str]) -> CellResult<Response> {
@@ -132,16 +130,6 @@ pub(crate) async fn create(env: &Env, who: &Signed, label: &str, options: &Value
     Ok(made)
 }
 
-/// The person's own agent, `agent.<username>`, made on first need:
-/// `(identity, npub, name)`.
-pub(crate) async fn own_agent(env: &Env, owner: &str, username: &str) -> CellResult<(String, String, String)> {
-    let identity = fragment_proto::Identity { id: owner.to_string(), kind: IdentityKind::Person, owner: None, username: Some(username.to_string()) };
-    let who = Signed::new(identity, None);
-    let made = create(env, &who, DEFAULT_LABEL, &Value::Null, None).await?;
-    let text = |k: &str| made[k].as_str().map(str::to_string).ok_or_else(|| CellError::host(format!("the agent answered no {k}")));
-    Ok((text("id")?, text("npub")?, text("name")?))
-}
-
 /// An identity's fragments, as its `Principal` cell lists them.
 async fn listed(env: &Env, identity: &str) -> CellResult<FragmentList> {
     let list = Request::new("https://principal.internal/list", Method::Get)?;
@@ -162,7 +150,7 @@ pub(crate) async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellRes
         .into_iter()
         .filter_map(|f| {
             let cap = Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied() };
-            listed_role(Some(f.role), cap).map(|role| ListedFragment { name: f.name, role, sharing: None, kind: None })
+            listed_role(Some(f.role), cap).map(|role| ListedFragment { name: f.name, role, sharing: None })
         })
         .collect();
     Ok(FragmentList { fragments })
@@ -220,9 +208,8 @@ impl FragmentCell {
         }))
     }
 
-    /// The fragment's own agent (not its owner's personal one: that is
-    /// named `agent.<username>`, and a fragment's own is named as the
-    /// fragment), once the platform has made it answer here.
+    /// The fragment's own agent (named as the fragment), once the platform
+    /// has made it answer here.
     pub(crate) fn own_agent(&self) -> CellResult<Option<String>> {
         let joined: Option<Joined> = stored(self.meta(MetaKey::AgentJoined)?, "agent joined")?;
         let name = self.name()?;
@@ -252,8 +239,8 @@ impl FragmentCell {
         self.set_meta(MetaKey::AgentPending, &js::random_hex::<8>())
     }
 
-    /// Makes the agent live declares answer here: its owner's own, or the
-    /// fragment's (made on first need, and given what the block declares),
+    /// Makes the agent live declares answer here: the fragment's own (made
+    /// on first need, and given what the block declares),
     /// an editor that listens to the declared channel, caught up on what
     /// was posted there since its channel was declared (`catch_up`). The
     /// one that answered before leaves when it is not that one, and stops
@@ -268,16 +255,13 @@ impl FragmentCell {
         let [live, joined] = self.metas([MetaKey::AgentLive, MetaKey::AgentJoined])?;
         let (live, joined): (Option<AgentLive>, Option<Joined>) = (stored(live, "agent block")?, stored(joined, "agent joined")?);
         let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
-        let (label, username) = split_fragment_name(&name).ok_or_else(|| CellError::host(format!("{name} is not <label>.<username>")))?;
+        let (_, username) = split_fragment_name(&name).ok_or_else(|| CellError::host(format!("{name} is not <label>.<username>")))?;
         let identity = fragment_proto::Identity { id: owner.clone(), kind: IdentityKind::Person, owner: None, username: Some(username.to_string()) };
         let signed = Signed::new(identity, None);
         let wanted = match &live {
             None => None,
             Some(live) => {
-                let (agent, agent_name) = match live.decl.personal {
-                    true => own_agent(&self.env, &owner, username).await.map(|(id, _, name)| (id, name))?,
-                    false => self.fragment_agent(&signed, label, &name, live).await?,
-                };
+                let (agent, agent_name) = self.fragment_agent(&signed, &name, live).await?;
                 Some(Joined { agent, name: agent_name, channel: live.decl.channel.clone() })
             }
         };
@@ -338,11 +322,8 @@ impl FragmentCell {
     /// The fragment's own agent, named as the fragment is: made its owner's
     /// on first need, for this fragment alone (`scope`), then given what
     /// live declares. An agent of that name made otherwise is not taken
-    /// over, nor is the owner's own (`agent.<username>`).
-    async fn fragment_agent(&self, owner: &Signed, label: &str, name: &str, live: &AgentLive) -> CellResult<(String, String)> {
-        if label == DEFAULT_LABEL {
-            return Err(CellError::invalid(format!("{name} cannot have an agent of its own: {name} is its owner's own agent")));
-        }
+    /// over.
+    async fn fragment_agent(&self, owner: &Signed, name: &str, live: &AgentLive) -> CellResult<(String, String)> {
         let options = json!({ "model": live.decl.model, "instructions": live.instructions });
         let made = create(&self.env, owner, name, &options, Some(name)).await?;
         if made["scope"] != name {
@@ -361,7 +342,6 @@ impl FragmentCell {
         let [live, joined, owner] = self.metas([MetaKey::AgentLive, MetaKey::AgentJoined, MetaKey::Owner]).map_err(retry)?;
         let (live, joined): (Option<AgentLive>, Option<Joined>) = (stored(live, "agent block").map_err(retry)?, stored(joined, "agent joined").map_err(retry)?);
         match (live, joined, owner) {
-            (Some(live), _, _) if live.decl.personal => Err(permanent("job.agent runs the fragment's own agent; its agent block names its owner's")),
             (Some(_), Some(joined), Some(owner)) => Ok((joined, owner)),
             (Some(_), None, _) => Err(StepFail::Retry("the fragment's agent is still being made".into())),
             _ => Err(permanent("job.agent needs an agent of the fragment's own: declare one in fragment.json (`agent`)")),

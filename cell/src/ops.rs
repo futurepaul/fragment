@@ -484,12 +484,7 @@ impl FragmentCell {
                 json!({ "members": self.fill_members(fill)? })
             }
             Some("code-builds") => json!({ "builds": self.app.builds() }),
-            Some("forget-template") => {
-                // as a fragment made before `seed` kept its template
-                self.del_meta(MetaKey::Template)?;
-                json!({ "ok": true })
-            }
-            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, forget-steps, hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, forget-template, alarm, or age-outside")),
+            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, forget-steps, hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, or age-outside")),
         })
     }
 }

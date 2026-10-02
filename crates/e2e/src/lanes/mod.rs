@@ -7,10 +7,8 @@ mod appfiles;
 mod blobs;
 mod author;
 mod budget;
-mod build;
 mod control;
 mod deliver;
-mod desktop;
 mod identities;
 mod isolation;
 pub(crate) mod jobs;
@@ -26,7 +24,6 @@ mod signin;
 mod site;
 mod sync;
 mod templates;
-mod work;
 
 use std::panic::{self, AssertUnwindSafe};
 use std::time::Instant;
@@ -52,10 +49,8 @@ const LANES: &[Lane] = &[
     plane::files,
     plane::deploy,
     templates::templates,
-    desktop::desktop,
     share::share,
     isolation::isolation,
-    isolation::frames,
     app::ops,
     app::public,
     app::effects,
@@ -89,7 +84,6 @@ const LANES: &[Lane] = &[
     budget::budget,
     agents::agents,
     addon::addon,
-    agents::chat,
     sync::folder_sync,
     restart::restart,
     restart::pathmode,

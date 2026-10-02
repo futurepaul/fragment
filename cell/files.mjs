@@ -12,7 +12,7 @@
 // README.md or index.md at the root when none is named. The list is
 // `__files` asked for JSON and the bytes `__file?path=`, as anyone who may
 // see the fragment reads them; `__watch` (viewers and up) says when main
-// moves, and the tree and the open file follow. Framed (a desktop's pane),
+// moves, and the tree and the open file follow. Framed (a pane of a page),
 // the reader's bar also offers to open a file as a pane of its own: it asks
 // the page around it, `{fragment: "open", url, title}`.
 

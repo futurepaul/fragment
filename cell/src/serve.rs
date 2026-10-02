@@ -31,10 +31,6 @@ use crate::routed::Mode;
 
 /// The browser library pages import as `./__fragment.js`.
 const CLIENT_JS: &str = include_str!("../client.mjs");
-/// The chat's page (`./__chat.js`, `./__chat.css`): it renders the records
-/// agents write, so it ships with the platform (docs/platform.md).
-const CHAT_JS: &str = include_str!("../chat.mjs");
-const CHAT_CSS: &str = include_str!("../chat.css");
 /// The files viewer (`__files`'s page, with `./__files.js`, `./__files.css`):
 /// a fragment's files as a tree beside a reader.
 const FILES_JS: &str = include_str!("../files.mjs");
@@ -42,8 +38,6 @@ const FILES_CSS: &str = include_str!("../files.css");
 /// The scripts' entity tags, hashed at build time: a page view revalidates
 /// them (`no-cache`) and gets 304 until a cell deploy changes their bytes.
 const CLIENT_JS_HASH: u64 = site::content_hash(CLIENT_JS.as_bytes());
-const CHAT_JS_HASH: u64 = site::content_hash(CHAT_JS.as_bytes());
-const CHAT_CSS_HASH: u64 = site::content_hash(CHAT_CSS.as_bytes());
 const FILES_JS_HASH: u64 = site::content_hash(FILES_JS.as_bytes());
 const FILES_CSS_HASH: u64 = site::content_hash(FILES_CSS.as_bytes());
 const SW_JS_HASH: u64 = site::content_hash(crate::push::SW_JS.as_bytes());
@@ -115,11 +109,10 @@ fn compiled_in(req: &Request, body: &'static str, hash: u64, content_type: &str)
 
 /// Whether a site path's answer is someone's, beyond whether they may see
 /// the fragment: an operation's call, a socket (`__live`'s presence; a
-/// member's `__watch` closes when they leave), a push subscription, the
-/// owner's fragments and who has them open, or its template's update. Its
+/// member's `__watch` closes when they leave), or a push subscription. Its
 /// caller is resolved first.
 fn answers_someone(path: &str) -> bool {
-    path.starts_with("__op/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__fragments" | "__presence" | "__template" | "__watch" | "__live")
+    path.starts_with("__op/") || matches!(path, "__push-key" | "__push-sub" | "__push-unsub" | "__watch" | "__live")
 }
 
 fn with_cookies(mut resp: Response, cookies: &[String]) -> CellResult<Response> {
@@ -209,39 +202,6 @@ impl FragmentCell {
                 }
             };
             json_response(&answer)?
-        } else if path == "__fragments" {
-            let answer = if req.method() == Method::Post {
-                // a cross-site form cannot send JSON without a preflight
-                if !req.headers().get("content-type")?.is_some_and(|c| c.starts_with("application/json")) {
-                    return Err(CellError::invalid("send the fragment to make as application/json"));
-                }
-                let body: Value = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-                self.owner_create(caller, body).await?
-            } else {
-                let listed = self.owner_fragments(caller).await?;
-                self.with_share_sheets(caller, listed)?
-            };
-            json_response(&answer)?
-        } else if path == "__template" {
-            // its owner's: whether live holds its template's latest files, and the update (publish.rs)
-            let answer = if req.method() == Method::Post {
-                // a cross-site form cannot send JSON without a preflight
-                if !req.headers().get("content-type")?.is_some_and(|c| c.starts_with("application/json")) {
-                    return Err(CellError::invalid("ask for the update as application/json"));
-                }
-                self.template_update(caller).await?
-            } else {
-                self.template_status(caller).await?
-            };
-            json_response(&answer)?
-        } else if path == "__presence" {
-            // who has each of the owner's named fragments open (publish.rs)
-            json_response(&self.owner_presence(caller).await?)?
-        } else if crate::auth::is_frame_route(rest) {
-            // a frame of this page, on to one of its owner's fragments, or to
-            // the share sheet of one (publish.rs); named as the router took
-            // it, never percent-encoded past its check
-            self.frame_redirect(caller, name, rest == "__share").await?
         } else if path == "__people" {
             // names for a page: a person's username and picture, or whose agent
             self.reader(&mut facts, caller, link, Role::Public).await?;
@@ -284,22 +244,6 @@ impl FragmentCell {
             }
         };
         with_cookies(resp, &set)
-    }
-
-    /// `__fragments`' list with each fragment's share sheet (on the
-    /// platform's origin) added, for the desktop's Share item, and the
-    /// platform's settings page, for its Settings link. Its badges read
-    /// `sharing`, which the owner's list carries: a read here asks the
-    /// Principal cell alone, and wakes none of the fragments it lists.
-    fn with_share_sheets(&self, caller: &Caller, mut listed: Value) -> CellResult<Value> {
-        let platform = self.cfg.platform(&caller.url);
-        let Some(list) = listed["fragments"].as_array_mut() else { return Err(CellError::host("__fragments lists no fragments")) };
-        for f in list {
-            let name = f["name"].as_str().unwrap_or_default().to_string();
-            f["share"] = json!(format!("{platform}/share/{name}"));
-        }
-        listed["settings"] = json!(format!("{platform}/settings"));
-        Ok(listed)
     }
 
     /// The author's `fetch` for a path that is not a site file: it sees the
@@ -364,12 +308,6 @@ impl FragmentCell {
         let head = req.method() == Method::Head;
         if path == "__fragment.js" {
             return script(req, CLIENT_JS, CLIENT_JS_HASH);
-        }
-        if path == "__chat.js" {
-            return script(req, CHAT_JS, CHAT_JS_HASH);
-        }
-        if path == "__chat.css" {
-            return compiled_in(req, CHAT_CSS, CHAT_CSS_HASH, "text/css; charset=utf-8");
         }
         if path == "__files.js" {
             return script(req, FILES_JS, FILES_JS_HASH);

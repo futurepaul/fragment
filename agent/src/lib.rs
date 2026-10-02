@@ -45,7 +45,7 @@
 //! someone else starts a turn in that chat's conversation (or steers or
 //! waits, as above); a stop from the running turn's starter stops it. The
 //! turn's last answer is posted to the chat's channel, naming its turn,
-//! when the channel takes posts (the chat template's, docs/api.md), and
+//! when the channel takes posts (docs/api.md), and
 //! goes through the fragment's reply operation otherwise (chats made
 //! before). Such a turn also posts its progress to the chat's `work`
 //! channel (progress.rs).
@@ -94,8 +94,7 @@ const MODEL_MAX: usize = fragment_proto::limits::AGENT_MODEL_MAX_BYTES;
 const INSTRUCTIONS_MAX: usize = fragment_proto::limits::AGENT_INSTRUCTIONS_MAX_BYTES;
 const TEST_HOLD_MS_MAX: u64 = 60_000;
 const BODY_MAX: usize = 64 * 1024;
-/// The channels one agent follows (the desktop's own limit on a person's
-/// fragments).
+/// The channels one agent follows.
 const LISTENS_MAX: usize = 500;
 /// Listens whose fragment the agent is no longer in, checked (and dropped
 /// when it answers 404 or 403) as a new listen is made, at most.

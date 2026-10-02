@@ -24,7 +24,6 @@
 //!   POST   /api/join/preview              the same: what joining would do, joining no one
 //!   PUT    /api/visibility                owner
 //!   POST   /api/rotate                    owner
-//!   PUT    /api/grants/frame              owner: {granted} lets it show their fragments inside it
 //!   PUT    /api/secrets/<KEY>  GET /api/secrets  DELETE /api/secrets/<KEY>   editor
 //!   GET    /api/storage-token             editor
 //!   POST   /api/refresh                   editor
@@ -329,10 +328,6 @@ pub(crate) enum MetaKey {
     /// The owner's row in their list has been sent this fragment's sharing
     /// (members.rs); a fragment from before sends it once.
     SharingSent,
-    /// What live's manifest says the fragment is (`FragmentKind`, JSON), as
-    /// its owner's row carries it: set at install, the row sent again when
-    /// it changes (plane.rs `set_kind`).
-    Kind,
     /// When the poll backstop runs next (a day after the last pass, or
     /// within the poll interval while the fragment is busy: plane.rs `busy`).
     PollAt,
@@ -341,13 +336,6 @@ pub(crate) enum MetaKey {
     OutsideAt,
     /// A template still to commit (publish.rs).
     TemplatePending,
-    /// The template it was made from, once it landed (publish.rs `seed`);
-    /// one made before this was kept is read from its `template` event.
-    Template,
-    /// Who its create said answers it, a chat made from the `chat`
-    /// template (`ChatAnswers`, JSON): its fragment.json is stamped so at
-    /// its first commit, and compared and updated so (publish.rs).
-    TemplateAnswers,
     /// What live's `agent` block declares, still to make so (agents.rs
     /// `sync_agent`): a new value each time live declares one.
     AgentPending,
@@ -372,11 +360,6 @@ pub(crate) enum MetaKey {
     ManifestMain,
     /// The live manifest's `meta`, as JSON text: a page's Open Graph tags.
     MetaLive,
-    /// The live manifest's `capabilities`, as a JSON list.
-    CapabilitiesLive,
-    /// Its owner lets it show their fragments inside it (`__frame`), when
-    /// live asks for `frame`: `1` allowed; `0` (a stop) or absent, not.
-    FrameGranted,
     /// Why live's code was not installed.
     CodeError,
     /// When the blob collection runs next.
@@ -419,12 +402,9 @@ impl MetaKey {
             MetaKey::Repo => "repo",
             MetaKey::IndexVersion => "index_version",
             MetaKey::SharingSent => "sharing_sent",
-            MetaKey::Kind => "kind",
             MetaKey::PollAt => "poll_at",
             MetaKey::OutsideAt => "outside_at",
             MetaKey::TemplatePending => "template_pending",
-            MetaKey::Template => "template",
-            MetaKey::TemplateAnswers => "template_answers",
             MetaKey::AgentPending => "agent_pending",
             MetaKey::AgentLive => "agent_live",
             MetaKey::AgentJoined => "agent_joined",
@@ -436,8 +416,6 @@ impl MetaKey {
             MetaKey::LiveReadAt => "live_read_at",
             MetaKey::ManifestMain => "manifest_main",
             MetaKey::MetaLive => "meta_live",
-            MetaKey::CapabilitiesLive => "capabilities_live",
-            MetaKey::FrameGranted => "frame_granted",
             MetaKey::CodeError => "code_error",
             MetaKey::BlobsGcAt => "blobs_gc_at",
             MetaKey::Vapid => "vapid",
@@ -858,7 +836,6 @@ impl FragmentCell {
             (Method::Get, ["api", "status"]) => self.status(&caller),
             (Method::Get, ["api", "manifest"]) => self.manifest(&caller),
             (Method::Get, ["api", "members"]) => self.members(&caller),
-            (Method::Get, ["api", "presence"]) => self.presence_api(&caller),
             (Method::Put, ["api", "members", who]) => {
                 let body = body_json(&mut req).await?;
                 self.set_member(&caller, who, body).await
@@ -881,10 +858,6 @@ impl FragmentCell {
             (Method::Put, ["api", "visibility"]) => {
                 let body = body_json(&mut req).await?;
                 self.set_visibility(&caller, body).await
-            }
-            (Method::Put, ["api", "grants", "frame"]) => {
-                let body = body_json(&mut req).await?;
-                self.grant_frame(&caller, body)
             }
             (Method::Post, ["api", "rotate"]) => {
                 let bytes = req.bytes().await?;
@@ -917,8 +890,6 @@ impl FragmentCell {
                     if bytes.is_empty() { json!({}) } else { serde_json::from_slice(&bytes).map_err(|e| CellError::invalid(format!("body: {e}")))? };
                 self.deploy_api(&caller, body).await
             }
-            (Method::Get, ["api", "template"]) => json_response(&self.template_status(&caller).await?),
-            (Method::Post, ["api", "template"]) => json_response(&self.template_update(&caller).await?),
             (Method::Get, ["api", "file"]) => self.file(&caller, &query("path").unwrap_or_default()).await,
             (Method::Get, ["api", "file", "stat"]) => self.stat(&caller, &query("path").unwrap_or_default()).await,
             (Method::Get, ["api", "events"]) => self.events(&caller, query("since").and_then(|s| s.parse().ok()).unwrap_or(0), query("tail")),
@@ -993,11 +964,6 @@ impl FragmentCell {
             let names: Vec<&str> = crate::publish::TEMPLATES.iter().map(|(n, _)| *n).collect();
             return Err(CellError::invalid(format!("no template {t:?}; the templates are {}", names.join(", "))));
         }
-        // who answers a chat: checked against its template before anything is made
-        if let Some(answers) = &body.answers {
-            let t = body.template.as_deref().and_then(crate::publish::template).ok_or_else(|| CellError::invalid("`answers` is for a fragment made from a template (a chat)"))?;
-            crate::publish::stamped(t, &body.name, Some(answers))?;
-        }
         let cs_cfg = self.cfg.codestorage()?;
         // Claim the name before the first await: a concurrent create for the
         // same name reaches this same object and must see it taken.
@@ -1026,7 +992,7 @@ impl FragmentCell {
         };
         let now = js::now_ms();
         let fragment_npub = npub::encode(&fragment_pub);
-        let visibility = body.visibility.unwrap_or_else(|| crate::publish::first_visibility(body.template.as_deref()));
+        let visibility = body.visibility.unwrap_or(Visibility::Link);
         let (view_token, inbox_token, webhook_secret) = (js::random_hex::<12>(), js::random_hex::<16>(), js::random_hex::<16>());
         let poll_at = (now + self.cfg.poll_interval_ms).to_string();
         let created_at = now.to_string();
@@ -1059,9 +1025,6 @@ impl FragmentCell {
         )?;
         self.index_change(&owner, Some(Role::Owner))?;
         if let Some(t) = &body.template {
-            if let Some(answers) = &body.answers {
-                self.set_meta(MetaKey::TemplateAnswers, &serde_json::to_string(answers).expect("serializes"))?;
-            }
             self.set_meta(MetaKey::TemplatePending, t)?;
         }
         self.event("create", &format!("fragment {} created by {owner} (repo {repo})", body.name), json!({ "repo": repo, "key": caller.key().map(npub::display) }));
@@ -1138,7 +1101,6 @@ impl FragmentCell {
             inbox_token: if role >= Role::Editor { Some(inbox_token.ok_or_else(|| missing(MetaKey::InboxToken))?) } else { None },
             urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name) },
             blob_min_bytes: Some(fragment_core::blob::BLOB_MIN_BYTES as u64),
-            frame: self.framing()?,
             name: facts.name,
         })
     }

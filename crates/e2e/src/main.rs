@@ -36,8 +36,7 @@ pub const SUFFIX: &str = "fragment.localhost";
 pub const BOATS: &str = "boats.localhost";
 /// Where the next node puts the platform and the fragments, as a browser
 /// tells sites apart: Chrome takes an unknown top-level domain's last label
-/// as its suffix, so every `*.fragment.localhost` is one site, and every
-/// `*.localhost` its own.
+/// as its suffix, so every `*.fragment.localhost` is one site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Shape {
     /// The platform on 127.0.0.1, the fragments under `fragment.localhost`.
@@ -47,9 +46,6 @@ enum Shape {
     /// (`<flat>.boats.localhost`, one site with each other), whose old
     /// hosts under `fragment.localhost` redirect to their new ones.
     TwoSites,
-    /// As a domain the Public Suffix List lists: every fragment its own
-    /// site (`<flat>.localhost`), the platform at `fragment.localhost`.
-    Listed,
 }
 const ORG: &str = "fragment-e2e";
 /// The poll backstop runs this often here (5 minutes in production).
@@ -113,7 +109,7 @@ pub struct Suite {
     agents_project: PathBuf,
     /// More environment for the next node started (celld settings a lane tries).
     pub node_env_extra: Vec<(String, String)>,
-    /// The next node's shape (`start_as_browsers_see_it`, `start_listed`).
+    /// The next node's shape (`start_as_browsers_see_it`).
     shape: Shape,
 }
 
@@ -226,13 +222,6 @@ impl Suite {
         self.start_shaped(Shape::TwoSites)
     }
 
-    /// Starts the node as a domain on the Public Suffix List is shaped:
-    /// every fragment its own site (`<flat>.localhost`), the platform at
-    /// `fragment.localhost` (docs/fragment-boats.md, the e2e's listed mode).
-    pub fn start_listed(&mut self) -> Result<Api> {
-        self.start_shaped(Shape::Listed)
-    }
-
     fn start_shaped(&mut self, shape: Shape) -> Result<Api> {
         self.shape = shape;
         let started = self.start(false, true);
@@ -264,7 +253,7 @@ impl Suite {
                 api_url: Some(self.workos.url.clone()),
             }),
             platform_url: Some(match (self.shape, suffix) {
-                (Shape::TwoSites | Shape::Listed, true) => format!("http://{SUFFIX}:{}", self.port),
+                (Shape::TwoSites, true) => format!("http://{SUFFIX}:{}", self.port),
                 _ => format!("http://127.0.0.1:{}", self.port),
             }),
             openrouter_management: Some(OPENROUTER_MANAGEMENT.into()),
@@ -305,7 +294,6 @@ impl Suite {
     /// The fragments' suffix in the next node's shape.
     fn suffix(&self) -> &'static str {
         match self.shape {
-            Shape::Listed => "localhost",
             Shape::TwoSites => BOATS,
             Shape::Plain => SUFFIX,
         }

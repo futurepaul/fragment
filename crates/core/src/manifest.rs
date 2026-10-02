@@ -27,38 +27,18 @@ pub struct Manifest {
     pub triggers: Vec<TriggerDecl>,
     /// Where a `changed` frame goes on each move of `main`.
     pub notify_urls: Vec<String>,
-    /// Platform powers the page asks for; each is granted only to the
-    /// fragment's owner viewing it ([`CAPABILITIES`]), `frame` only once
-    /// they allow it too.
-    pub capabilities: Vec<String>,
     /// The agent people talk to through one of its channels (`agent`).
     pub agent: Option<AgentDecl>,
     /// Top-level keys that no longer do anything here.
     pub ignored: Vec<&'static str>,
 }
 
-impl Manifest {
-    /// What it says the fragment is, for its owner's list (decision 25).
-    pub fn kind(&self) -> fragment_proto::FragmentKind {
-        use fragment_proto::{Answers, ChatKind};
-        let chat = self.channels.contains_key("chat").then(|| match &self.agent {
-            Some(a) if a.channel == "chat" => ChatKind { answers: Answers::Agent },
-            _ => ChatKind { answers: Answers::People },
-        });
-        fragment_proto::FragmentKind { chat }
-    }
-}
-
 /// `agent`: the fragment's own agent, with instructions from a file of
 /// its repo (read at live), the operations of this fragment it may call,
-/// and a model; or, with `personal`, its owner's own agent
-/// (`agent.<username>`, with its own instructions and tools). Each answers
-/// messages posted to `channel`.
+/// and a model. It answers messages posted to `channel`.
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct AgentDecl {
     pub channel: String,
-    #[serde(default)]
-    pub personal: bool,
     #[serde(default)]
     pub instructions: Option<String>,
     #[serde(default)]
@@ -68,11 +48,6 @@ pub struct AgentDecl {
 }
 
 const ACCESS_KEYS: [&str; 3] = ["visibility", "editors", "viewers"];
-/// The capabilities a manifest may declare. `fragments`: the page may list
-/// the fragments its owner belongs to (`__fragments`), as a dashboard does.
-/// `frame`: the page may show them inside it, signed in as its owner
-/// (`__frame`), once its owner allows it (the share sheet).
-pub const CAPABILITIES: [&str; 2] = ["fragments", "frame"];
 
 fn text(v: &Value, key: &str, max: usize) -> Result<Option<String>, String> {
     match &v[key] {
@@ -197,8 +172,8 @@ fn trigger(i: usize, v: &Value, m: &Manifest) -> Result<TriggerDecl, String> {
 /// agent may (never an owner's: an agent acts as an editor at most).
 fn agent(v: &Value, m: &Manifest) -> Result<AgentDecl, String> {
     let obj = v.as_object().ok_or("agent must be an object")?;
-    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "channel" | "personal" | "instructions" | "tools" | "model")) {
-        return Err(format!("agent has an unknown key {k:?} (channel, personal, instructions, tools, model)"));
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "channel" | "instructions" | "tools" | "model")) {
+        return Err(format!("agent has an unknown key {k:?} (channel, instructions, tools, model)"));
     }
     let text = |k: &str| obj.get(k).map(|v| v.as_str().map(str::to_string).ok_or_else(|| format!("agent.{k} must be a string"))).transpose();
     let channel = text("channel")?.ok_or("agent needs channel: a channel this fragment.json declares, which people post to")?;
@@ -207,24 +182,13 @@ fn agent(v: &Value, m: &Manifest) -> Result<AgentDecl, String> {
         Some(_) => return Err(format!("agent.channel: {channel} takes no posts (give it a post role)")),
         None => return Err(format!("agent.channel names no declared channel: {channel:?}")),
     }
-    let personal = match obj.get("personal") {
-        None => false,
-        Some(Value::Bool(b)) => *b,
-        Some(_) => return Err("agent.personal must be true or false".into()),
-    };
     let tools: Vec<String> = match obj.get("tools") {
         None => Vec::new(),
         Some(Value::Array(list)) => list.iter().map(|t| t.as_str().map(str::to_string).ok_or("agent.tools are operation names")).collect::<Result<_, _>>()?,
         Some(_) => return Err("agent.tools must be an array of operation names".into()),
     };
     let (instructions, model) = (text("instructions")?, text("model")?);
-    if personal {
-        if instructions.is_some() || model.is_some() || !tools.is_empty() {
-            return Err("agent.personal is its owner's own agent, with its own instructions, model, and tools: name only its channel".into());
-        }
-        return Ok(AgentDecl { channel, personal, ..AgentDecl::default() });
-    }
-    let instructions = instructions.ok_or("agent needs instructions (a file of this fragment, such as agent.md), or personal: true")?;
+    let instructions = instructions.ok_or("agent needs instructions (a file of this fragment, such as agent.md)")?;
     if !valid_repo_path(&instructions) {
         return Err(format!("agent.instructions must be a relative path in the repo, not {instructions:?}"));
     }
@@ -239,25 +203,7 @@ fn agent(v: &Value, m: &Manifest) -> Result<AgentDecl, String> {
             Some(_) => {}
         }
     }
-    Ok(AgentDecl { channel, personal, instructions: Some(instructions), tools, model })
-}
-
-/// A chat template's fragment.json (as JSON) with who answers it set
-/// (docs/one-home.md, phase 5): its own agent block for its owner's agent,
-/// or none for the people alone.
-pub fn answered(mut manifest: Value, answers: &fragment_proto::ChatAnswers) -> Result<Value, String> {
-    use fragment_proto::ChatAnswers;
-    let o = manifest.as_object_mut().ok_or("fragment.json must be an object")?;
-    if !o.get("channels").and_then(|c| c.get("chat")).is_some_and(Value::is_object) {
-        return Err("only a chat (a `chat` channel) is told who answers it".into());
-    }
-    match answers {
-        ChatAnswers::Agent => {}
-        ChatAnswers::People => {
-            o.remove("agent");
-        }
-    }
-    Ok(manifest)
+    Ok(AgentDecl { channel, instructions: Some(instructions), tools, model })
 }
 
 pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
@@ -328,18 +274,6 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
         }
         Some(_) => return Err("notifyUrls must be an array of URLs".into()),
     }
-    match obj.get("capabilities") {
-        None | Some(Value::Null) => {}
-        Some(Value::Array(list)) => {
-            for c in list {
-                match c.as_str() {
-                    Some(c) if CAPABILITIES.contains(&c) => m.capabilities.push(c.to_string()),
-                    _ => return Err(format!("capabilities: {c} is not one of {CAPABILITIES:?}")),
-                }
-            }
-        }
-        Some(_) => return Err("capabilities must be an array".into()),
-    }
     match obj.get("triggers") {
         None | Some(Value::Null) => {}
         Some(Value::Array(list)) => {
@@ -365,22 +299,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_chat_is_told_who_answers_it() {
-        use fragment_proto::{Answers, ChatAnswers};
-        let chat = serde_json::json!({ "name": "chat", "channels": { "chat": { "read": "public", "post": "viewer" } }, "agent": { "personal": true, "channel": "chat" } });
-        let kind = |v: &Value| parse(&serde_json::to_vec(v).unwrap()).unwrap().kind();
-        let own = answered(chat.clone(), &ChatAnswers::Agent).unwrap();
-        assert_eq!(own, chat, "its owner's agent: the template's own");
-        assert_eq!(kind(&own).chat.unwrap().answers, Answers::Agent);
-        let people = answered(chat.clone(), &ChatAnswers::People).unwrap();
-        assert!(people.get("agent").is_none());
-        assert_eq!(kind(&people).chat.unwrap().answers, Answers::People);
-        // invalid: a fragment that is no chat
-        assert!(answered(serde_json::json!({ "name": "todo" }), &ChatAnswers::People).is_err());
-        assert!(answered(serde_json::json!([]), &ChatAnswers::People).is_err());
-    }
-
-    #[test]
     fn operations_and_defaults() {
         let m = parse(br#"{"name":"t","visibility":"public","editors":[],"workflows":[],
             "operations":{"list":{"kind":"query"},"add":{"kind":"mutation","input":{"type":"object"}},
@@ -398,17 +316,6 @@ mod tests {
         assert_eq!(m.meta.unwrap().title.as_deref(), Some("T"));
         assert_eq!(m.ignored, vec!["visibility", "editors"]);
         assert_eq!(parse(b"{}").unwrap(), Manifest::default());
-        assert_eq!(parse(br#"{"capabilities":["fragments"]}"#).unwrap().capabilities, vec!["fragments"]);
-        assert!(parse(br#"{"capabilities":["everything"]}"#).is_err());
-        // what each says it is
-        let kind = |j: &str| serde_json::to_value(parse(j.as_bytes()).unwrap().kind()).unwrap();
-        assert_eq!(kind(r#"{}"#), serde_json::json!({}));
-        assert_eq!(kind(r#"{"channels":{"chat":{}}}"#), serde_json::json!({ "chat": { "answers": "people" } }));
-        assert_eq!(
-            kind(r#"{"channels":{"chat":{"post":"viewer"},"work":{}},"agent":{"personal":true,"channel":"chat"}}"#),
-            serde_json::json!({ "chat": { "answers": "agent" } })
-        );
-        assert_eq!(kind(r#"{"channels":{"desk":{"post":"viewer"}},"agent":{"personal":true,"channel":"desk"}}"#), serde_json::json!({}));
         let m = parse(br#"{"channels":{"chat":{},"news":{"read":"public"}}}"#).unwrap();
         assert_eq!(m.channels["chat"].read, Role::Viewer);
         assert_eq!(m.channels["news"].read, Role::Public);
@@ -463,10 +370,8 @@ mod tests {
         let own = with(r#"{"instructions":"agent.md","tools":["log","today"],"channel":"ask","model":"z-ai/glm-5.3-flash"}"#).unwrap().agent.unwrap();
         assert_eq!(
             own,
-            AgentDecl { channel: "ask".into(), personal: false, instructions: Some("agent.md".into()), tools: vec!["log".into(), "today".into()], model: Some("z-ai/glm-5.3-flash".into()) }
+            AgentDecl { channel: "ask".into(), instructions: Some("agent.md".into()), tools: vec!["log".into(), "today".into()], model: Some("z-ai/glm-5.3-flash".into()) }
         );
-        let personal = with(r#"{"personal":true,"channel":"ask"}"#).unwrap().agent.unwrap();
-        assert_eq!(personal, AgentDecl { channel: "ask".into(), personal: true, ..AgentDecl::default() });
         assert_eq!(with(r#"{"instructions":"a.md","channel":"ask"}"#).unwrap().agent.unwrap().tools, Vec::<String>::new(), "an agent that only talks");
         assert_eq!(with("null").unwrap().agent, None, "no agent");
         for (bad, says) in [
@@ -482,8 +387,7 @@ mod tests {
             (r#"{"instructions":"a.md","channel":"ask","tools":["log","log"]}"#, "names log twice"),
             (r#"{"instructions":"a.md","channel":"ask","tools":"log"}"#, "array of operation names"),
             (r#"{"instructions":"a.md","channel":"ask","model":""}"#, "agent.model"),
-            (r#"{"personal":true,"channel":"ask","tools":["log"]}"#, "name only its channel"),
-            (r#"{"personal":"yes","channel":"ask"}"#, "true or false"),
+            (r#"{"personal":true,"channel":"ask"}"#, "unknown key \"personal\""),
         ] {
             let why = with(bad).expect_err(bad);
             assert!(why.contains(says), "{bad}: {why}");

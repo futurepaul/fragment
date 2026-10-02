@@ -4,7 +4,8 @@
 //!
 //! Platform origin:
 //!
-//!   GET  /                        the home: your fragments, a new one, pairing your CLI; or sign in
+//!   GET  /                        choosing a username, then on to /settings; or sign in
+//!   GET  /settings                your fragments, a new one, pairing your CLI
 //!   GET  /auth/login?return=&login_hint=&invitation_token=   → WorkOS (a state cookie binds the
 //!                                 round trip; an invitation's token lets its invitee sign up, since
 //!                                 sign-up is off: WorkOS's "User invitation URL" points here)
@@ -26,8 +27,8 @@
 //! only on a top-level visit; a fleet whose platform shares the fragments'
 //! domain puts them on one site, where the pages' forms, fetches, and
 //! frames carry it. Either way every page here refuses frames (`unframed`;
-//! the share sheet alone is framed, by the home and by its owner's desktop:
-//! share.rs) and severs a window that opened it (`unopened`), and every form is
+//! the share sheet alone is framed, by the platform's own page: share.rs)
+//! and severs a window that opened it (`unopened`), and every form is
 //! refused from another origin (`same_origin`). Sharing's pages (share.rs) add a form token and armed
 //! buttons.
 //!
@@ -40,7 +41,9 @@
 //!
 //! A fragment's origin: `__signin?token=&return=` redeems the platform's
 //! redemption for this fragment only and sets its own session cookie (a
-//! frame's partitioned one, in a frame: `__frame`); `__signin` without a
+//! frame's partitioned one, in a frame, from a frame redemption: nothing
+//! mints one since the desktop went, until the shell does; see
+//! docs/technical-debt-ledger.md); `__signin` without a
 //! token starts at the platform, from a navigation of a page of its own
 //! only; `__signout` (a POST from the fragment's own page) ends its
 //! sessions in the registry and drops the cookies. Which cookies count on
@@ -63,13 +66,8 @@ use crate::{share, Fetched};
 
 pub const SESSION_COOKIE: &str = "fragment_session";
 pub const SITE_COOKIE: &str = "fragment_site";
-/// A frame's session cookie (`__frame`): partitioned, for the page that
-/// framed it.
+/// A frame's session cookie: partitioned, for the page that framed it.
 pub const FRAME_COOKIE: &str = "fragment_frame";
-/// A share sheet's embed session cookie (`__share`), on the platform's
-/// origin: partitioned, for the owner's desktop that framed the sheet, on
-/// that sheet's path alone (share.rs).
-pub const SHARE_COOKIE: &str = "fragment_share";
 const LOGIN_COOKIE: &str = "fragment_login";
 const LOGIN_HINT_MAX: usize = 320;
 const INVITATION_TOKEN_MAX: usize = 256;
@@ -125,8 +123,8 @@ pub fn set_cookie(base: &str, value: &str, path: &str, max_age_s: i64, secure: b
     format!("{name}={value}; Path={path}; Max-Age={max_age_s}; HttpOnly; SameSite=Lax{s}")
 }
 
-/// A frame's session cookie (`base`: a fragment's frame's, or a share
-/// sheet's embed session): `SameSite=None`, so it is sent in a frame of
+/// A frame's session cookie (`base`: a fragment's frame's): `SameSite=None`,
+/// so it is sent in a frame of
 /// another site's page, and `Partitioned` (CHIPS), so a browser that
 /// blocks third-party cookies keeps it, in that page's partition only.
 /// Both need `Secure`, which browsers take from `localhost` over http too.
@@ -172,7 +170,7 @@ pub(crate) fn redirect(to: &str, cookies: &[String]) -> CellResult<Response> {
 /// rides into a frame, and a page there could lay the button under a click
 /// of its own. A redirect stays framable: it shows nothing,
 /// and a frame's `__signin` refuses what the platform's sign-in mints (a
-/// frame signs in only through `__frame`).
+/// frame signs in only with a frame redemption).
 pub(crate) fn unframed(h: &Headers) -> worker::Result<()> {
     h.set("content-security-policy", "frame-ancestors 'none'")?;
     h.set("x-frame-options", "DENY")
@@ -342,13 +340,11 @@ fn new_form(after: &str) -> String {
         .map(|(i, (name, t))| {
             let (title, description) = crate::publish::describe(t);
             format!(
-                "<p><label><input type=\"radio\" name=\"template\" value=\"{n}\"{c}> <b>{t}</b> {d}{f}</label></p>",
+                "<p><label><input type=\"radio\" name=\"template\" value=\"{n}\"{c}> <b>{t}</b> {d}</label></p>",
                 n = esc(name),
                 c = if i == 0 { " checked" } else { "" },
                 t = esc(if title.is_empty() { name } else { &title }),
                 d = esc(&description),
-                // making it here is the owner's frame grant (`/auth/new`), so the form says what it allows
-                f = if crate::publish::frames(name) { "<br><small>It will show your fragments inside it, signed in as you: making it here allows that. You can stop it in its share sheet.</small>" } else { "" },
             )
         })
         .collect();
@@ -411,15 +407,14 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
 
 /// `/settings`: who they are (their picture), their month's budget, their
 /// fragments with each one's share sheet, a new fragment, pairing a CLI,
-/// and signing out (once the platform's page, before the desktop was home).
+/// and signing out.
 async fn settings(env: &Env, cfg: &Config, url: &Url, live: calls::LiveSession) -> String {
     let (who, email) = (live.identity, live.email.unwrap_or_default());
     let username = who.username.clone().unwrap_or_default();
     // the month and the fragments, asked of their cells at once
     let (budget, fragments) = futures_util::future::join(budget_line(env, &who.id), fragments_list(env, cfg, url, &who.id)).await;
     format!(
-        "<h1>Settings</h1><p><a href=\"/\">Your desktop</a></p>\
-         <p><img src=\"/api/users/{u}/picture\" alt=\"\" width=\"48\" height=\"48\" style=\"border-radius:50%;vertical-align:middle;object-fit:cover\" onerror=\"this.remove()\"> Signed in as <b>{u}</b> ({e}).</p>{b}{f}{n}{p}\
+        "<p><img src=\"/api/users/{u}/picture\" alt=\"\" width=\"48\" height=\"48\" style=\"border-radius:50%;vertical-align:middle;object-fit:cover\" onerror=\"this.remove()\"> Signed in as <b>{u}</b> ({e}).</p>{b}{f}{n}{p}\
          <h2>You</h2><form method=\"post\" action=\"/auth/picture\" enctype=\"multipart/form-data\"><p>Picture: <input type=\"file\" name=\"picture\" accept=\"image/png,image/jpeg,image/webp,image/gif\" required> <button>Set</button></p></form>\
          <p><a href=\"/auth/logout\">Sign out</a> · <a href=\"/auth/link\">Add another sign-in to you</a> · <code>{id}</code></p>",
         u = esc(&username),
@@ -445,28 +440,17 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                         let email = live.email.unwrap_or_default();
                         format!(
                             "<h1>Choose your username</h1><p>Signed in as <b>{}</b>. Your fragments will live at <code>&lt;label&gt;{}</code>; a username is chosen once.</p>\
-                             <p>Taking it makes your desktop, your home here: it shows your chats and apps inside it, signed in as you.</p>\
                              <form method=\"post\" action=\"/auth/username\"><p><input name=\"username\" required minlength=\"3\" maxlength=\"32\" pattern=\"[a-z0-9]([a-z0-9-]*[a-z0-9])?\" autocomplete=\"username\" style=\"font:inherit;padding:.4em .6em;border-radius:8px;border:1px solid #aab\"> <button>Take it</button></p></form>\
                              <p><a href=\"/auth/logout\">Sign out</a></p>",
                             esc(&email),
                             esc(&after_label(cfg, "username")),
                         )
                     }
-                    // their home: their desktop, made on this first visit (home.rs), signed in there
-                    Some((_, live)) if live.identity.kind == IdentityKind::Person => match crate::home::ensure(env, cfg, url, &live.identity).await {
-                        Ok(home) => return redirect(&format!("/auth/fragment?name={}&return=/", enc(&home)), &[]),
-                        Err(e) => {
-                            console_error!("{}'s home: {:?} {}", live.identity.id, e.code, e.message);
-                            let missing = format!("<p><b>Your desktop could not be opened</b> ({}). Here are your settings; try your desktop again soon.</p>", esc(&e.message));
-                            return page(200, "Settings", &format!("{missing}{}", settings(env, cfg, url, live).await));
-                        }
-                    },
-                    Some((_, live)) => settings(env, cfg, url, live).await,
+                    Some(_) => return redirect("/settings", &[]),
                     None => "<p>Small web apps that keep their state, live for everyone who opens them. Invite-only for now.</p><p><a href=\"/auth/login\">Sign in</a></p>".to_string(),
                 };
                 page(200, "fragment", &body)
             }
-            // what the platform's page held before the desktop was home (docs/one-home.md, decision 7)
             (Method::Get, ["settings"]) => match platform_session(&req, env, url).await? {
                 None => to_login(&platform, "/settings"),
                 Some((_, live)) if live.identity.username.is_none() && live.identity.kind == IdentityKind::Person => redirect("/", &[]),
@@ -503,9 +487,9 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 let Some((_, live)) = platform_session(&req, env, url).await? else { return to_login(&platform, "/settings") };
                 let bytes = crate::read_body(&mut req, SHORT_FORM_MAX_BYTES).await?;
                 let field = |name: &str| url::form_urlencoded::parse(&bytes).find(|(k, _)| k == name).map(|(_, v)| v.trim().to_string()).unwrap_or_default();
-                let create = fragment_proto::CreateFragment { name: field("label"), visibility: None, template: Some(field("template")), answers: None };
+                let create = fragment_proto::CreateFragment { name: field("label"), visibility: None, template: Some(field("template")) };
                 let owner = Signed::new(live.identity, None);
-                let v: serde_json::Value = match crate::create_fragment(env, cfg, url, create, owner.clone()).await {
+                let v: serde_json::Value = match crate::create_fragment(env, cfg, url, create, owner).await {
                     Ok(mut made) if made.status_code() == 200 => made.json().await?,
                     Ok(mut made) => {
                         let v: serde_json::Value = made.json().await.unwrap_or_default();
@@ -514,15 +498,6 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                     Err(e) => return page(400, "New fragment", &format!("<p>{}</p><p><a href=\"/settings\">Back</a></p>", esc(&e.message))),
                 };
                 let name = v["name"].as_str().ok_or_else(|| CellError::host("the create answered no name"))?;
-                // The form said it will show their fragments inside it: its submit is the owner's grant, the
-                // share sheet's own. No page can send it (the Origin is the platform's). One that does not land
-                // leaves the desktop asking, with its share sheet's button.
-                if crate::publish::frames(&field("template")) {
-                    let allow = Some(serde_json::json!({ "granted": true }));
-                    if let Err(e) = crate::share::ask(env, url, name, &owner, Method::Put, "/api/grants/frame", allow).await {
-                        console_error!("{name}: the form's frame grant did not land ({:?}): {}", e.code, e.message);
-                    }
-                }
                 // signed in on its own origin, then there
                 redirect(&format!("/auth/fragment?name={}&return=/", enc(name)), &[])
             }
@@ -591,7 +566,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
             }
             (Method::Post, ["auth", "fragment"]) => {
                 let (name, back) = fragment_asked(url)?;
-                let (session, _, _) = match share::poster(&mut req, env, url, &platform, &format!("consent:{name}"), None).await? {
+                let (session, _, _) = match share::poster(&mut req, env, url, &platform, &format!("consent:{name}")).await? {
                     Ok(posted) => posted,
                     Err(page) => return Ok(page),
                 };
@@ -678,8 +653,8 @@ fn consent_page(session: &str, who: &Signed, name: &str, back: &str) -> CellResu
 }
 
 /// What a frame shows when it cannot sign in: its browser kept the frame
-/// cookie out, or a page framed its sign-in instead of going through
-/// `__frame`. A link to open the fragment in a tab of its own, and a word
+/// cookie out, or a page framed its sign-in without a frame redemption.
+/// A link to open the fragment in a tab of its own, and a word
 /// to the page around it (`{fragment: "signin-blocked", name}`). It holds
 /// nothing but the link, so any page may frame it.
 fn blocked(cfg: &Config, url: &Url, name: &str, back: &str) -> CellResult<Response> {
@@ -735,13 +710,10 @@ pub(crate) fn refused(cfg: &Config, url: &Url, name: &str, rest: &str, framed: b
     let tab = if framed { " target=\"_blank\" rel=\"noopener\"" } else { "" };
     let a = |href: &str, text: &str| format!("<a href=\"{}\"{tab}>{}</a>", esc(href), esc(text));
     let sign_in = a(&format!("{base}__signin?return={}", enc(&back)), &format!("Sign in to {label}"));
-    let home = a(&format!("{}/", cfg.platform(url)), "Your desktop");
+    let home = a(&format!("{}/", cfg.platform(url)), "Your fragments");
     let why = format!("<p style=\"opacity:.7;font-size:.9em\">{}</p>", esc(&e.message));
     let l = esc(label);
-    let (title, body) = if is_frame_route(rest) {
-        // a frame's own refusal, whose page's owner acts on it
-        ("This can't be shown here".to_string(), format!("<p>{}</p><p>{home}</p>", esc(&e.message)))
-    } else if link_changed {
+    let (title, body) = if link_changed {
         let links = if signed_out { format!("{sign_in} · {home}") } else { home };
         ("This link has changed".to_string(), format!("<p>The link you opened no longer opens <b>{l}</b>: ask {ask} for the new one.</p>{why}<p>{links}</p>"))
     } else if signed_out {
@@ -767,14 +739,6 @@ async fn signed_in_here(req: &Request, env: &Env, name: &str, url: &Url, path_mo
 /// Whether a path on a fragment's origin is sign-in's.
 pub fn is_fragment_route(rest: &str) -> bool {
     matches!(rest, "__signin" | "__signout")
-}
-
-/// Whether a path on a fragment's origin signs a frame of its own page in
-/// elsewhere: on one of its owner's fragments (`__frame`), or on the share
-/// sheet of one (`__share`). Each is taken only as a frame of this origin's
-/// own page, and with its credential unresolved (the registry mints from it).
-pub fn is_frame_route(rest: &str) -> bool {
-    matches!(rest, "__frame" | "__share")
 }
 
 /// `__signin` and `__signout` on a fragment's own origin, as the

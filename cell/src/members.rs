@@ -15,7 +15,7 @@
 //! owner's row also carries the fragment's sharing (`Sharing`: who may
 //! open it, its members and guests), made when the row is sent: a change
 //! to members or visibility sends it again (`sharing_changed`), so the
-//! desktop's badges read the owner's list alone.
+//! platform's page reads the owner's list alone.
 //!
 //! An invite may be for one identity (`invitee`, the share sheet's invite by
 //! username): only they may accept it, so a forwarded link admits no one
@@ -24,7 +24,7 @@
 use fragment_core::access;
 use fragment_core::npub;
 use fragment_proto::{
-    limits, CreateInvite, ErrorCode, FragmentKind, Identity, IdentityKind, Invite, InviteList, Join, Member, MemberList, Role, Rotated, SetRole, SetVisibility,
+    limits, CreateInvite, ErrorCode, Identity, IdentityKind, Invite, InviteList, Join, Member, MemberList, Role, Rotated, SetRole, SetVisibility,
     Sharing, Visibility,
 };
 use serde_json::{json, Value};
@@ -104,18 +104,6 @@ impl FragmentCell {
         self.set_meta(MetaKey::SharingSent, "1")
     }
 
-    /// What live's manifest says the fragment is (decision 25): kept, and
-    /// the owner's row sent again when it changed, with its sharing (a
-    /// deploy that changes neither sends nothing).
-    pub(crate) fn set_kind(&self, kind: &FragmentKind) -> CellResult<()> {
-        let now = serde_json::to_string(kind).expect("a kind serializes");
-        if self.meta(MetaKey::Kind)?.as_deref() == Some(now.as_str()) {
-            return Ok(());
-        }
-        self.set_meta(MetaKey::Kind, &now)?;
-        self.sharing_changed()
-    }
-
     /// Delivers due index changes to the people's `Principal` cells. A
     /// failure stays in the outbox with a backoff; the alarm retries it.
     /// A fragment from before the owner's row carried its sharing sends it
@@ -148,13 +136,6 @@ impl FragmentCell {
                 match self.sharing_counts() {
                     Ok(sharing) => body["sharing"] = json!(sharing),
                     Err(e) => console_error!("{name}: its sharing did not read ({:?}): {}", e.code, e.message),
-                }
-                // and what it is, once an install has said (a fragment from before: at its next deploy)
-                match self.meta(MetaKey::Kind).map(|k| k.map(|k| serde_json::from_str::<FragmentKind>(&k))) {
-                    Ok(Some(Ok(kind))) => body["kind"] = json!(kind),
-                    Ok(None) => {}
-                    Ok(Some(Err(e))) => console_error!("{name}: its stored kind is not one: {e}"),
-                    Err(e) => console_error!("{name}: its kind did not read ({:?}): {}", e.code, e.message),
                 }
             }
             let delivered = async {

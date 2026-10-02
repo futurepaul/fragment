@@ -4,20 +4,21 @@
 //! so its session reaches a fragment's page only on a top-level visit), in
 //! Chrome where the browser is the point.
 //!
-//! The owner shares a chat by username; the guest accepts at `/join`, sees
-//! it live, and posts in it; the owner removes them, and their socket
-//! closes and the chat answers them 403. A member sees who is in and
-//! changes nothing. A rewritten desktop (its owner's agent rewrites it)
+//! The owner shares a todo list by username; the guest accepts at `/join`,
+//! sees it live, and adds to it; the owner removes them, and their socket
+//! closes and the list answers them 403. A member sees who is in and
+//! changes nothing. A fragment's page (its author's code, or an agent's)
 //! cannot share: not by fetching the sheet or the API, not by framing the
 //! sheet, not with a signed call (it holds no key), and not by scripting
-//! the window it opens on the sheet (only the platform's home frames it, in
-//! a dialog). Every form needs the page's own
-//! token, bound to the session, and arms only after a moment.
+//! the window it opens on the sheet (only the platform's own page frames
+//! it, in a dialog). Every form needs the page's own token, bound to the
+//! session, and arms only after a moment.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use fragment_core::form;
+use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
 use super::signin::{site_cookie, unframed, with_session};
@@ -35,11 +36,10 @@ pub fn share(s: &mut Suite, _: &Api) -> Result<()> {
     s.stop()?;
     let api = s.start_as_browsers_see_it()?;
     let result = run(s, &api);
-    let embedded = in_a_desktop(s, &api);
     drop(api);
     s.stop()?;
     s.start(false, true)?;
-    result.and(embedded)
+    result
 }
 
 fn now_ms() -> i64 {
@@ -94,19 +94,6 @@ fn post(api: &Api, path: &str, session: &str, origin: &str, fields: &[(&str, &st
     })
 }
 
-/// A navigation as a browser sends it: a frame's (`iframe`) or a tab's
-/// (`document`), from a page on `site` (`same-origin`, `cross-site`), with
-/// `cookie`.
-fn navigate(api: &Api, url: String, dest: &str, site: &str, cookie: Option<String>) -> Result<Reply> {
-    let extra = vec![("sec-fetch-dest", dest.to_string()), ("sec-fetch-site", site.to_string()), ("sec-fetch-mode", "navigate".to_string())];
-    api.call(Call { method: "GET", url, cookie, extra, ..Call::default() })
-}
-
-/// The `frame-ancestors` directives of a page's policy.
-fn ancestors(r: &Reply) -> Vec<String> {
-    r.header("content-security-policy").split(';').map(str::trim).filter(|d| d.starts_with("frame-ancestors")).map(str::to_string).collect()
-}
-
 /// A page's form token once its buttons have armed.
 fn armed(api: &Api, path: &str, session: &str) -> Result<String> {
     let r = with_session(api, "GET", path, session)?;
@@ -124,21 +111,21 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let (member, member_session) = person(api)?;
     let (owner_name, guest_name, stranger_name) = (api.username(&owner)?, api.username(&guest)?, api.username(&stranger)?);
     let (guest_id, stranger_id) = (api.identity(&guest)?, api.identity(&stranger)?);
-    // the owner's agent is in every chat, and echoes what it hears
-    s.openrouter.clear_script();
     let make = |label: &str, template: &str| -> Result<String> {
         let name = api.qualified(&owner, label)?;
         let r = api.create_with(&owner, json!({ "name": name, "template": template }))?;
         anyhow::ensure!(r.status == 200, "making {name}: {r}");
         Ok(name)
     };
-    let chat = make(&s.name("chat"), "chat")?;
-    let desk = make(&s.name("sdesk"), "desktop")?;
-    // the owner's agent joins the chat on its alarm
-    let agent_in = s.eventually(wait, || {
-        api.signed(&owner, "GET", &format!("/api/f/{chat}/members"), None).is_ok_and(|r| r.body["members"].as_array().is_some_and(|a| a.iter().any(|m| m["kind"] == "agent")))
-    });
-    anyhow::ensure!(agent_in, "the owner's agent did not join {chat}");
+    let chat = make(&s.name("list"), "todo")?;
+    // an agent of the owner's is in it too: it counts as no guest
+    let hand = Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &owner) })))?;
+    anyhow::ensure!(r.status == 200, "registering the owner's agent: {r}");
+    let agent = r.body["id"].as_str().unwrap_or("").to_string();
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{chat}/members/{agent}"), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "the owner's agent joins {chat}: {r}");
     let chat_label = chat.split('.').next().unwrap_or("").to_string();
     let sheet = format!("/share/{chat}");
     let invites_for = |id: &str| -> Result<Vec<Value>> {
@@ -174,24 +161,6 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = with_session(api, "GET", &sheet, &stranger_session)?;
     s.ok("someone who is not in it gets a 403 page", r.status == 403 && r.text.contains("Not yours to share") && !r.text.contains("name=\"form\"") && unframed(&r), &r);
-    // a desktop made without the platform's form (the API, as the CLI makes
-    // one): its sheet asks, and says plainly what allowing it risks
-    let r = with_session(api, "GET", &format!("/share/{desk}"), &owner_session)?;
-    s.ok(
-        "a desktop made without the platform's form asks in its sheet whether it may show your fragments inside it, saying plainly what that risks",
-        r.status == 200
-            && r.text.contains("Your fragments inside it")
-            && r.text.contains("It asks to show your other fragments inside it, signed in as you")
-            && r.text.contains("catch your clicks")
-            && r.text.contains(">Allow<"),
-        &r,
-    );
-    s.ok(
-        "and a desktop is its owner's alone from the start: only the people in it may open it (Copy link copies its address, not a share link)",
-        r.text.contains("value=\"members\" selected") && !r.text.contains("?view="),
-        "",
-    );
-
     // ---- its forms: the page's own token, from the platform's origin, after a moment
     let invite = |form: &str, session: &str, origin: &str| {
         post(api, &sheet, session, origin, &[("form", form), ("action", "invite"), ("username", guest_name.as_str()), ("role", "editor")])
@@ -210,7 +179,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let others = armed(api, &sheet, &other_session)?;
     let r = invite(&others, &owner_session, &platform)?;
     s.ok("and one with another session's token (the same person's other browser)", r.status == 403 && invites_for(&guest_id)?.is_empty(), &r);
-    let r = invite(&fresh, &owner_session, &api.site_origin(&desk))?;
+    let r = invite(&fresh, &owner_session, &api.site_origin(&chat))?;
     s.ok("a POST from a fragment's page is refused (403), with a good token too", r.status == 403 && invites_for(&guest_id)?.is_empty(), &r);
     let r = post(api, &sheet, &owner_session, &platform, &[("form", &fresh), ("action", "invite"), ("username", "nobody-here-e2e"), ("role", "viewer")])?;
     s.ok("inviting a username no one holds says so", r.status == 404 && r.text.contains("no one is @nobody-here-e2e"), &r);
@@ -286,71 +255,55 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.screenshot(&page, &s.scratch.join("share-join.png"))?;
     chrome.click(&page, "button[data-arm]")?;
     let chat_host = format!("{chat_label}--");
-    let landed = chrome.until(&page, &format!("location.host.startsWith({chat_host:?}) && document.title === 'Chat'"), wait);
+    let landed = chrome.until(&page, &format!("location.host.startsWith({chat_host:?}) && document.title === 'Todo'"), wait);
     s.ok(
         "a moment later it arms; the guest accepts at /join and lands in the chat, signed in on its origin",
         armed_in_time && landed && role_of(&guest_id)?.as_deref() == Some("editor"),
         chrome.eval(&page, "location.href + ' ' + document.title").unwrap_or_default(),
     );
-    // the chat's page (the platform's, __chat.js) is ready once it knows who it is
-    let connected = chrome.until(&page, "document.getElementById('say')?.dataset.ready === '1'", wait);
-    let r = super::agents::say(api, &owner, &chat, "share-owner-1", "hello from the owner")?;
-    let live = chrome.until(&page, "document.getElementById('messages').textContent.includes('hello from the owner')", wait);
-    s.ok("the guest sees the owner's message arrive live", connected && r.status == 200 && live, &r);
-    chrome.eval(&page, "document.getElementById('text').value = 'hello from the guest'; document.getElementById('say').requestSubmit(); true")?;
-    let posted = s.eventually(wait, || {
-        api.signed(&owner, "GET", &format!("/api/f/{chat}/channels/chat"), None)
-            .is_ok_and(|r| r.body["records"].as_array().is_some_and(|a| a.iter().any(|x| x["body"]["text"] == "hello from the guest" && x["principal"] == guest_id.as_str())))
+    // the list's page is live once it knows who is here
+    let connected = chrome.until(&page, "document.getElementById('here')?.textContent.includes('here')", wait);
+    let r = api.op(&owner, &chat, "add", "share-owner-1", json!({ "text": "from the owner" }))?;
+    let live = chrome.until(&page, "document.getElementById('todos').textContent.includes('from the owner')", wait);
+    s.ok("the guest sees the owner's change arrive live", connected && r.status == 200 && live, &r);
+    chrome.eval(&page, "document.getElementById('text').value = 'from the guest'; document.getElementById('add').requestSubmit(); true")?;
+    let ops = || api.signed(&owner, "GET", &format!("/api/f/{chat}/channels/ops"), None);
+    let added = s.eventually(wait, || {
+        ops().is_ok_and(|r| r.body["records"].as_array().is_some_and(|a| a.iter().any(|x| x["body"]["op"] == "add" && x["principal"] == guest_id.as_str())))
     });
-    s.ok("and posts in it, as themselves", posted, api.signed(&owner, "GET", &format!("/api/f/{chat}/channels/chat"), None)?);
+    s.ok("and adds to it, as themselves", added, ops()?);
 
-    // ---- __fragments: who else is in each of the owner's fragments,
-    // from the owner's list (the fragment sent it as the guest joined)
-    let owner_site = site_cookie(api, &owner_session, &desk)?;
+    // ---- the owner's list: who else is in each of their fragments (the
+    // fragment sent it as the guest joined), as the platform's page shows
     let listed = |name: &str| -> Result<Value> {
-        let r = api.call(Call { method: "GET", url: api.site_url(&desk, "__fragments"), cookie: Some(format!("fragment_site={owner_site}")), ..Call::default() })?;
-        Ok(r.body["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == name).cloned().unwrap_or_default())
-    };
-    let in_list = |name: &str| -> Result<Value> {
         let r = api.signed(&owner, "GET", "/api/fragments", None)?;
-        Ok(r.body["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == name).map(|f| f["sharing"].clone()).unwrap_or_default())
+        Ok(r.body["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == name).cloned().unwrap_or_default())
     };
     let entry = listed(&chat)?;
     let members = api.signed(&owner, "GET", &format!("/api/f/{chat}/members"), None)?.body["members"].as_array().map_or(0, Vec::len);
     s.ok(
-        "__fragments reports each fragment's member count and guests (not the owner or their agents), its visibility, and its share sheet",
-        entry["sharing"] == json!({ "visibility": "link", "members": members, "guests": 1 }) && members == 3 && entry["share"] == format!("{platform}{sheet}"),
+        "the owner's list reports each fragment's member count and guests (not the owner or their agents), and its visibility",
+        entry["sharing"] == json!({ "visibility": "link", "members": members, "guests": 1 }) && members == 3,
         &entry,
     );
-    let whole = api.call(Call { method: "GET", url: api.site_url(&desk, "__fragments"), cookie: Some(format!("fragment_site={owner_site}")), ..Call::default() })?;
-    s.ok(
-        "and whether the desktop may show them inside it (not until its owner allows it)",
-        whole.status == 200 && whole.body["frame"] == json!(false),
-        &whole,
-    );
-    // Goal: a __fragments read wakes no fragment. Method: a test hook adds
-    // members to a fragment without it telling anyone (its index is not
-    // touched): the read still says what the owner's list says, not what
-    // the fragment would; the fragment's next real change updates the list.
+    // Goal: the list reads no fragment. Method: a test hook adds members
+    // to a fragment without it telling anyone (its index is not touched):
+    // the list still says what it was sent, not what the fragment would;
+    // the fragment's next real change updates it.
     let quiet = make(&s.name("squiet"), "blank")?;
-    // its template's first install tells the list what it is (its kind),
-    // with its counts then: a real change, so it lands before the fill
-    let installed = s.eventually(wait, || {
-        let r = api.signed(&owner, "GET", "/api/fragments", None).map(|r| r.body).unwrap_or_default();
-        r["fragments"].as_array().into_iter().flatten().any(|f| f["name"] == quiet.as_str() && f.get("kind").is_some())
-    });
-    anyhow::ensure!(installed, "{quiet}'s first install never reached its owner's list");
+    // its create told the list who is in it: a real change, so it lands before the fill
+    let installed = s.eventually(wait, || listed(&quiet).is_ok_and(|f| f.get("sharing").is_some()));
+    anyhow::ensure!(installed, "{quiet}'s create never reached its owner's list");
     let before = listed(&quiet)?;
     let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": quiet, "op": "members", "fill": 4 })))?;
     let filled = api.status(&owner, &quiet)?;
-    let (after, list) = (listed(&quiet)?, in_list(&quiet)?);
+    let after = listed(&quiet)?;
     s.ok(
-        "a __fragments read wakes no fragment: its counts are the owner's list's, not the fragment's own",
+        "the owner's list wakes no fragment: its counts are the list's, not the fragment's own",
         before["sharing"] == json!({ "visibility": "link", "members": 1, "guests": 0 })
             && r.status == 200
             && filled.body["counts"]["members"] == 4
-            && after["sharing"] == before["sharing"]
-            && list == before["sharing"],
+            && after["sharing"] == before["sharing"],
         format!("{before} / {after} / {}", filled.body["counts"]),
     );
     let r = api.signed(&owner, "PUT", &format!("/api/f/{quiet}/visibility"), Some(&json!({ "visibility": "public" })))?;
@@ -365,8 +318,8 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let form = armed(api, &sheet, &owner_session)?;
     let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "role"), ("member", &guest_id), ("role", "remove")])?;
     s.ok("the owner removes the guest from the sheet (the last choice of their role's menu)", r.status == 303 && r.header("location") == sheet && role_of(&guest_id)?.is_none(), &r);
-    let said = "document.getElementById('banner-text')?.textContent ?? ''";
-    let closed = chrome.until(&page, &format!("!document.getElementById('banner').hidden && ({said}).includes('access to this chat changed')"), wait);
+    let said = "document.getElementById('here')?.textContent ?? ''";
+    let closed = chrome.until(&page, &format!("({said}).includes('access changed')"), wait);
     s.ok("the guest's socket closes (their page says its access changed)", closed, chrome.eval(&page, said).unwrap_or_default());
     let again = site_cookie(api, &guest_session, &chat)?;
     let r = api.page(&chat, "", Some(&format!("fragment_site={again}")))?;
@@ -400,13 +353,6 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // a good token for the member's own session (the harness holds the
     // cookie a browser would), so only the fragment's rule is left to refuse
     let token_of_member = form::issue(&member_session, &format!("share:{chat}"), now_ms() - form::DELAY_MS - 50);
-    let agent = api.signed(&owner, "GET", &format!("/api/f/{chat}/members"), None)?.body["members"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|m| m["kind"] == "agent")
-        .and_then(|m| m["principal"].as_str().map(str::to_string))
-        .context("the owner's agent is in the chat")?;
     let open = api.signed(&owner, "POST", &format!("/api/f/{chat}/invites"), Some(&json!({ "role": "viewer" })))?;
     let open_id = open.body["id"].as_str().unwrap_or("").to_string();
     let before = api.status(&owner, &chat)?;
@@ -451,34 +397,12 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "visibility"), ("visibility", "link")])?;
     anyhow::ensure!(r.status == 303, "visibility back to link: {r}");
 
-    // ---- the owner's desktop: badges and the Share item
+    // ---- a fragment's page cannot share: its code (its author's, or an
+    // agent's) runs in the owner's browser, with the platform's session
     let Some(mut chrome) = s.browser()? else { return Ok(()) };
     chrome.set_cookie(&format!("{platform}/"), "fragment_session", &owner_session)?;
-    let page = chrome.open(&api.site_url(&desk, "__signin?return=/"))?;
-    chrome.viewport(&page, 1440, 900, false)?;
-    // the chat (made elsewhere, named as New chat names one) is listed among its chats
-    let row = format!("document.querySelector('#chats .row[data-key={:?}]')", format!("chat:{chat}"));
-    let badged = chrome.until(&page, &format!("{row}?.querySelector('.shared')?.textContent === '1'"), wait);
-    s.ok("the desktop badges a fragment shared with someone (the member: 1)", badged, chrome.eval(&page, "document.getElementById('chats').innerHTML").unwrap_or_default());
-    let quiet_row = format!("document.querySelector('#apps .row[data-key={:?}]')", format!("app:{quiet}"));
-    let public = chrome.until(&page, &format!("{quiet_row}?.querySelectorAll('.shared').length === 2"), wait);
-    let unbadged = chrome.eval(&page, "[...document.querySelectorAll('#chats .row, #apps .row')].filter(r => r.querySelector('.shared')).length === 2")? == json!(true);
-    s.ok("(the public one with three guests has both badges, and no other fragment has any: the owner's agent is not a guest)", public && unbadged, "");
-    chrome.click(&page, &format!(".more[data-fragment={chat:?}]"))?;
-    let menu = chrome.until(&page, "!document.getElementById('menu').hidden", wait);
-    chrome.click(&page, "#menu-share")?;
-    let mut opened = None;
-    let shown = s.eventually(wait, || {
-        opened = chrome.pages().ok().and_then(|p| p.into_iter().find(|(_, url)| url.ends_with(&sheet)));
-        opened.is_some()
-    });
-    s.ok("its … menu's Share opens the platform's sheet in a window of its own", menu && shown, format!("{:?}", chrome.pages()?));
-    if let Some((target, _)) = opened {
-        chrome.close_target(&target)?;
-    }
-
-    // ---- a rewritten desktop cannot share: its code (as if an agent
-    // wrote it) runs in the owner's browser, with the platform's session
+    let page = chrome.open(&api.site_url(&chat, "__signin?return=/"))?;
+    anyhow::ensure!(chrome.until(&page, "document.title === 'Todo'", wait), "the owner's list did not open: {}", chrome.eval(&page, "location.href")?);
     let attempt = |chrome: &mut Browser, page: &Page, js: &str| chrome.eval(page, js).unwrap_or_else(|e| json!(e.to_string()));
     let read = attempt(
         &mut chrome,
@@ -496,7 +420,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     );
     std::thread::sleep(Duration::from_millis(300));
     s.ok(
-        "a rewritten desktop cannot read the sheet (no CORS: it never holds the form's token), and what it posts to it invites no one",
+        "a fragment's page cannot read the sheet (no CORS: it never holds the form's token), and what it posts to it invites no one",
         read.as_str().is_some_and(|r| r.starts_with("refused")) && invites_for(&stranger_id)?.is_empty(),
         format!("{read} / {posted}"),
     );
@@ -530,7 +454,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         body: Some(br#"{"role":"editor"}"#.to_vec()),
         content_type: Some("application/json"),
         cookie: Some(format!("fragment_session={owner_session}")),
-        extra: vec![("origin", api.site_origin(&desk))],
+        extra: vec![("origin", api.site_origin(&chat))],
         ..Call::default()
     })?;
     s.ok("(the signed API takes no session: a call it sends with the cookie and no key's signature is 401)", r.status == 401 && role_of(&stranger_id)?.is_none(), &r);
@@ -540,7 +464,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.eval(&page, &format!("(() => {{ const f = document.createElement('iframe'); f.src = {:?}; document.body.append(f); return true; }})()", format!("{platform}{sheet}")))?;
     let framed = |chrome: &mut Browser| chrome.eval_in_frame(&page, "/share/", "document.body?.innerText ?? ''").ok().and_then(|v| v.as_str().map(str::to_string));
     let shown = s.eventually(Duration::from_secs(5), || framed(&mut chrome).is_some_and(|t| t.contains("General access")));
-    s.ok("a rewritten desktop that frames the sheet gets a frame without it", !shown, format!("{:?}", framed(&mut chrome)));
+    s.ok("a fragment's page that frames the sheet gets a frame without it", !shown, format!("{:?}", framed(&mut chrome)));
 
     // scripting the window it opens on the sheet (on a click of the
     // owner's, as a popup must be): the sheet severs it
@@ -574,7 +498,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // A hand's click lands where the link is drawn: only once the page has
     // loaded, its fonts are in, and the link's handler is set, or a layout
     // still moving puts the click on the row's other link (on CI it opened
-    // the owner's desktop).
+    // the fragment itself).
     let settled = format!("document.readyState === 'complete' && document.fonts.status === 'loaded' && !!document.querySelector({link:?})?.onclick");
     let listed = chrome.until(&home, &settled, wait);
     if listed {
@@ -605,208 +529,5 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.screenshot(&shown, &s.scratch.join(shot))?;
     }
     s.ok("the sheet fits a popup's width and a phone's, with no sideways scroll", fits.iter().all(|(_, fit)| *fit), format!("{fits:?}"));
-    Ok(())
-}
-
-/// The share sheet in its owner's desktop (`__share`; docs/api.md, The
-/// share sheet in a frame): the platform's session never reaches a frame
-/// of a page on another site, so the desktop's own frame signs in on one
-/// sheet of its owner's own fragments, for that desktop alone. Only its
-/// owner, signed in there, once they allow it to frame; the sheet's cookie
-/// opens that sheet, in a frame, and nothing else of the platform's; and a
-/// desktop never changes its own frame grant from inside itself.
-fn in_a_desktop(s: &mut Suite, api: &Api) -> Result<()> {
-    let platform = api.base.clone();
-    let (owner, owner_session) = person(api)?;
-    let (other, other_session) = person(api)?;
-    let make = |keys: &fragment_nip98::Keys, label: &str, template: &str| -> Result<String> {
-        let name = api.qualified(keys, label)?;
-        let r = api.create_with(keys, json!({ "name": name, "template": template }))?;
-        anyhow::ensure!(r.status == 200, "making {name}: {r}");
-        Ok(name)
-    };
-    // a desktop made without the platform's form: it asks for frame, not allowed yet
-    let desk = make(&owner, &s.name("edesk"), "desktop")?;
-    let app = make(&owner, &s.name("eapp"), "blank")?;
-    let second = make(&owner, &s.name("esecond"), "blank")?;
-    // in the owner's list, but not theirs; and not in it at all
-    let shared = make(&other, &s.name("eshared"), "blank")?;
-    let r = api.signed(&other, "PUT", &format!("/api/f/{shared}/members/{}", api.identity(&owner)?), Some(&json!({ "role": "editor" })))?;
-    anyhow::ensure!(r.status == 200, "sharing {shared} with the owner: {r}");
-    let foreign = make(&other, &s.name("eforeign"), "blank")?;
-    let in_list = s.eventually(Duration::from_secs(10), || {
-        api.signed(&owner, "GET", "/api/fragments", None).is_ok_and(|r| r.body["fragments"].as_array().is_some_and(|a| a.iter().any(|f| f["name"] == shared.as_str())))
-    });
-    anyhow::ensure!(in_list, "{shared} did not reach the owner's list");
-    let desk_origin = api.site_origin(&desk);
-    let owner_site = site_cookie(api, &owner_session, &desk)?;
-    // `__share` as the desktop's own page frames it
-    let share = |name: &str, cookie: Option<&str>| {
-        navigate(api, api.site_url(&desk, &format!("__share?name={}", url_enc(name))), "iframe", "same-origin", cookie.map(|c| format!("fragment_site={c}")))
-    };
-    let grant = |granted: bool| -> Result<()> {
-        let r = api.signed(&owner, "PUT", &format!("/api/f/{desk}/grants/frame"), Some(&json!({ "granted": granted })))?;
-        anyhow::ensure!(r.status == 200, "the desktop's frame grant: {r}");
-        Ok(())
-    };
-
-    // ---- refused: no grant, not its owner, not framed, not the owner's own
-    let r = share(&app, Some(&owner_site))?;
-    s.ok("__share: a desktop its owner has not let frame their fragments is refused (403), and mints nothing", r.status == 403 && r.header("location").is_empty(), &r);
-    grant(true)?;
-    let r = share(&app, None)?;
-    s.ok("allowed, it refuses someone signed out on the desktop's origin (401)", r.status == 401, &r);
-    let r = share(&app, Some(&site_cookie(api, &other_session, &desk)?))?;
-    s.ok("and someone signed in there who is not its owner (403)", r.status == 403 && r.header("location").is_empty(), &r);
-    let top = navigate(api, api.site_url(&desk, &format!("__share?name={}", url_enc(&app))), "document", "cross-site", Some(format!("fragment_site={owner_site}")))?;
-    let theirs = navigate(api, api.site_url(&desk, &format!("__share?name={}", url_enc(&app))), "iframe", "same-site", Some(format!("fragment_site={owner_site}")))?;
-    let encoded = navigate(api, api.site_url(&desk, &format!("%5F%5Fshare?name={}", url_enc(&app))), "document", "same-origin", Some(format!("fragment_site={owner_site}")))?;
-    s.ok(
-        "and anything but a frame of the desktop's own page: a tab, another page's frame, a percent-encoded __share (no redemption)",
-        top.status == 403 && theirs.status == 403 && !encoded.header("location").contains("token="),
-        format!("{top} / {theirs} / {encoded}"),
-    );
-    let r = share(&shared, Some(&owner_site))?;
-    let r2 = share(&foreign, Some(&owner_site))?;
-    s.ok(
-        "a fragment in the owner's list that is not theirs (shared with them), or one not in it, is refused (403)",
-        r.status == 403 && r2.status == 403 && r.message().contains("its owner's own"),
-        format!("{r} / {r2}"),
-    );
-
-    // ---- the owner's desktop: on to the sheet, its cookie, the sheet signed in
-    let r = share(&app, Some(&owner_site))?;
-    let embed_url = r.header("location");
-    s.ok(
-        "the owner's desktop's frame of __share goes on to the app's sheet on the platform (its embed, with a redemption), never reused from a cache",
-        r.status == 302 && embed_url.starts_with(&format!("{platform}/share/{app}/embed?token=")) && ["no-store", "no-cache"].iter().any(|d| r.header("cache-control").contains(d)),
-        format!("{r} location {embed_url:?} cache-control {:?}", r.header("cache-control")),
-    );
-    let r = navigate(api, embed_url.clone(), "iframe", "cross-site", None)?;
-    let set = r.headers.get_all("set-cookie").iter().filter_map(|v| v.to_str().ok()).find(|c| c.starts_with("fragment_share=")).unwrap_or("").to_string();
-    let token = set.split(';').next().and_then(|c| c.strip_prefix("fragment_share=")).unwrap_or("").to_string();
-    let attrs: Vec<&str> = set.split(';').map(str::trim).collect();
-    s.ok(
-        "its embed sets the sheet's cookie (HttpOnly, Secure, SameSite=None, Partitioned, on the sheet's path alone) and goes on to the sheet, no token in its URL",
-        r.status == 302
-            && r.header("location") == format!("/share/{app}")
-            && token.len() == 64
-            && ["HttpOnly", "Secure", "SameSite=None", "Partitioned"].iter().all(|a| attrs.contains(a))
-            && attrs.contains(&format!("Path=/share/{app}").as_str()),
-        &set,
-    );
-    let r = navigate(api, embed_url.clone(), "iframe", "cross-site", None)?;
-    s.ok("its redemption is spent: again, 401", r.status == 401, &r);
-    let embed = format!("fragment_share={token}");
-    let sheet = format!("{platform}/share/{app}");
-    let r = navigate(api, sheet.clone(), "iframe", "cross-site", Some(embed.clone()))?;
-    s.ok(
-        "in the desktop's frame, the sheet is the owner's (their controls), and only that desktop may frame it: frame-ancestors its origin, no X-Frame-Options",
-        r.status == 200
-            && r.text.contains("General access")
-            && r.text.contains("name=\"username\"")
-            && ancestors(&r) == [format!("frame-ancestors {desk_origin}")]
-            && r.header("x-frame-options").is_empty(),
-        headers(&r),
-    );
-    s.ok(
-        "it tells that origin alone its height and Done",
-        r.text.contains(&format!("offsetHeight }}, {})", json!(desk_origin))) && !r.text.contains("offsetHeight }, location.origin)"),
-        "",
-    );
-    let form = form_of(&r);
-
-    // ---- that cookie opens that sheet, in a frame, and nothing else
-    let top = navigate(api, sheet.clone(), "document", "cross-site", Some(embed.clone()))?;
-    let fetched = api.call(Call {
-        method: "GET",
-        url: sheet.clone(),
-        cookie: Some(embed.clone()),
-        extra: vec![("sec-fetch-dest", "empty".to_string()), ("sec-fetch-site", "cross-site".to_string()), ("sec-fetch-mode", "cors".to_string())],
-        ..Call::default()
-    })?;
-    let login = |r: &Reply| r.status == 302 && r.header("location").contains("/auth/login?");
-    s.ok("with only the sheet's cookie, a tab of the sheet, or a fetch of it, is signed out (→ sign in)", login(&top) && login(&fetched), format!("{top} / {fetched}"));
-    let other_sheet = navigate(api, format!("{platform}/share/{second}"), "iframe", "cross-site", Some(embed.clone()))?;
-    let home = navigate(api, format!("{platform}/"), "iframe", "cross-site", Some(embed.clone()))?;
-    let listed = api.call(Call { method: "GET", url: format!("{platform}/api/fragments"), cookie: Some(embed.clone()), ..Call::default() })?;
-    let join = navigate(api, format!("{platform}/join/{app}?token={}", "0".repeat(48)), "iframe", "cross-site", Some(embed.clone()))?;
-    s.ok(
-        "another fragment's sheet, the home, /join, and the API take it for no one (→ sign in, signed out, 401)",
-        login(&other_sheet) && home.status == 200 && home.text.contains("/auth/login") && !home.text.contains("Signed in as") && listed.status == 401 && login(&join),
-        format!("{other_sheet} / {home} / {listed} / {join}"),
-    );
-    let both = navigate(api, sheet.clone(), "iframe", "same-origin", Some(format!("fragment_session={owner_session}; {embed}")))?;
-    s.ok("a request with the platform's session is answered as before, whatever else it carries: only the platform frames it", framed_by_platform(&both), headers(&both));
-
-    // ---- its form works in the frame, as the owner
-    std::thread::sleep(Duration::from_millis(form::DELAY_MS as u64 + 100));
-    let post = |form: &str, fields: &[(&str, &str)]| {
-        let mut body = format!("form={}", url_enc(form));
-        for (k, v) in fields {
-            body += &format!("&{k}={}", url_enc(v));
-        }
-        let extra = vec![
-            ("origin", platform.clone()),
-            ("sec-fetch-dest", "iframe".to_string()),
-            ("sec-fetch-site", "same-origin".to_string()),
-            ("sec-fetch-mode", "navigate".to_string()),
-        ];
-        api.call(Call { method: "POST", url: sheet.clone(), body: Some(body.into_bytes()), content_type: Some("application/x-www-form-urlencoded"), cookie: Some(embed.clone()), extra, ..Call::default() })
-    };
-    let r = post(&form, &[("action", "visibility"), ("visibility", "public")])?;
-    let now = api.status(&owner, &app)?;
-    s.ok("the sheet's form in the frame changes who can open it, as its owner", r.status == 303 && r.header("location") == format!("/share/{app}") && now.body["visibility"] == "public", format!("{r} {now}"));
-    let r = post(&format!("{form}x"), &[("action", "visibility"), ("visibility", "members")])?;
-    s.ok("(a forged form token is refused there too: 403)", r.status == 403 && api.status(&owner, &app)?.body["visibility"] == "public", &r);
-
-    // ---- the desktop's own sheet, inside it: no frame grant, and none changed
-    let r = share(&desk, Some(&owner_site))?;
-    let r = navigate(api, r.header("location"), "iframe", "cross-site", None)?;
-    let own = r.cookies().into_iter().find_map(|c| c.strip_prefix("fragment_share=").map(str::to_string)).unwrap_or_default();
-    let own_sheet = format!("{platform}/share/{desk}");
-    let r = navigate(api, own_sheet.clone(), "iframe", "cross-site", Some(format!("fragment_share={own}")))?;
-    let shown = r.status == 200 && r.text.contains("General access") && !r.text.contains("Your fragments inside it") && !r.text.contains("name=\"granted\"");
-    let form = form_of(&r);
-    std::thread::sleep(Duration::from_millis(form::DELAY_MS as u64 + 100));
-    let stop = api.call(Call {
-        method: "POST",
-        url: own_sheet.clone(),
-        body: Some(format!("form={}&action=frame&granted=no", url_enc(&form)).into_bytes()),
-        content_type: Some("application/x-www-form-urlencoded"),
-        cookie: Some(format!("fragment_share={own}")),
-        extra: vec![("origin", platform.clone()), ("sec-fetch-dest", "iframe".to_string()), ("sec-fetch-site", "same-origin".to_string()), ("sec-fetch-mode", "navigate".to_string())],
-        ..Call::default()
-    })?;
-    let still = api.status(&owner, &desk)?;
-    s.ok(
-        "the desktop's own sheet inside it leaves out the frame grant, and refuses its change (403): a desktop never allows or stops itself",
-        shown && stop.status == 403 && still.body["frame"] == json!(true),
-        format!("{} / {stop} / {}", r.status, still.body["frame"]),
-    );
-
-    // ---- a redemption for the wrong place, or the wrong kind of page
-    let r = share(&app, Some(&owner_site))?;
-    let to = r.header("location");
-    let at_signin = navigate(api, api.site_url(&app, &format!("__signin?{}", to.split('?').nth(1).unwrap_or(""))), "iframe", "same-origin", None)?;
-    let then = navigate(api, to.clone(), "iframe", "cross-site", None)?;
-    s.ok(
-        "the sheet's redemption is refused by its fragment's own __signin (401, unspent: the sheet still takes it)",
-        at_signin.status == 401 && then.status == 302 && then.cookies().iter().any(|c| c.starts_with("fragment_share=")),
-        format!("{at_signin} / {then}"),
-    );
-    let r = share(&app, Some(&owner_site))?;
-    let tab = navigate(api, r.header("location"), "document", "cross-site", None)?;
-    let again = navigate(api, r.header("location"), "iframe", "cross-site", None)?;
-    s.ok("shown to a tab it is refused (401), and spent", tab.status == 401 && again.status == 401, format!("{tab} / {again}"));
-    let framed = navigate(api, api.site_url(&desk, &format!("__frame?name={}&return=/", url_enc(&app))), "iframe", "same-origin", Some(format!("fragment_site={owner_site}")))?;
-    let token = framed.header("location").split("token=").nth(1).unwrap_or("").to_string();
-    let r = navigate(api, format!("{platform}/share/{app}/embed?token={token}"), "iframe", "cross-site", None)?;
-    s.ok("and a fragment's frame redemption (__frame) opens no sheet (401)", framed.status == 302 && token.len() == 64 && r.status == 401, &r);
-
-    // ---- stopped, it mints no more
-    grant(false)?;
-    let r = share(&app, Some(&owner_site))?;
-    s.ok("once its owner stops the grant, __share is refused again (403)", r.status == 403 && r.header("location").is_empty(), &r);
     Ok(())
 }
