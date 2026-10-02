@@ -75,6 +75,8 @@ struct State {
     serving_after: u32,
     /// How long a turn's reply takes between its two deltas.
     turn_ms: u64,
+    /// How long a grant takes to be written (a Hermes being made waits).
+    grant_ms: u64,
     /// `gateway.ping`s heard, on every socket.
     pings: u64,
     /// Admissions taken and refused, on every endpoint.
@@ -158,6 +160,12 @@ impl Sandcastle {
         self.state.lock().unwrap().serving_after = looks;
     }
 
+    /// How long each grant takes (default none): a Hermes stays being made
+    /// that long after its identity is registered, while its chats may join.
+    pub fn slow_grants(&self, ms: u64) {
+        self.state.lock().unwrap().grant_ms = ms;
+    }
+
     /// How long each turn takes between its two deltas (default none).
     pub fn slow_turns(&self, ms: u64) {
         self.state.lock().unwrap().turn_ms = ms;
@@ -238,6 +246,10 @@ impl Sandcastle {
 fn handle(state: &Arc<Mutex<State>>, n: &Arc<Node>, req: &Request) -> Response {
     if (req.method.as_str(), req.path.as_str()) == ("GET", "/v1/health") {
         return Response::json(200, &json!({ "ok": true, "node_key": n.node }));
+    }
+    if req.method == "PUT" && req.path.starts_with("/v1/grants/") {
+        let wait = state.lock().unwrap().grant_ms;
+        std::thread::sleep(std::time::Duration::from_millis(wait));
     }
     let url = format!("{}{}", n.base, req.path);
     let signer = match fragment_nip98::verify(req.header("authorization"), &req.method, &url, &req.body, now_s(), 60) {
