@@ -6,7 +6,7 @@
 // supervisor applies (and re-applies idempotently) after the commit. (A
 // root storage transaction cannot enclose a facet image above ~1.6 MB,
 // and a capability call inside one deadlocks or is refused:
-// spikes/apps/README.md.)
+// the phase 1 spike's finding, spikes/apps/README.md at the tag celld-final.)
 //
 // Every method receives (input, call): `call.principal` and `call.role`
 // name the caller (an agent acting for someone: them, the agent in
