@@ -6,6 +6,12 @@ Reshaped 2026-09-26: the fragment is the product (decisions 19–22).
 Re-aimed 2026-10-02: `docs/cloudflare-v1.md` is the plan of record (all
 on Cloudflare, Hermes agents, the hard cut), and wins where it
 disagrees with this file.
+Cut 2026-10-02 (that plan's phase 1, its decision 33): Hermes on
+sandcastle, computers (decision 21, and decision 24's hands), the
+desktop and one home (decision 25), the personal agent's chat, and the
+fleet's deploy path left `master`. Their decisions and phases below
+(6, 8, and C–F) are the record; their code and docs are at the tag
+`celld-final`.
 Engineering style: `/Users/futurepaul/dev/finite/engineering-style/
 engineering-style.md` (the Finite contract), including hard cuts, the
 debt ledger (`docs/technical-debt-ledger.md`), and assertions on in
@@ -240,7 +246,7 @@ it publishes. It holds its own revocable key and no other credential
 platform provisions a Sprite for it that runs the `fragment` CLI to talk
 back to its parent fragment.
 
-Paul's answers for declared computers (2026-09-26; docs/computers.md):
+Paul's answers for declared computers (2026-09-26; docs/computers.md at the tag):
 1. **Sprites org:** the org used so far; its token is the node secret
    `FRAGMENT_KEYS_SPRITES_TOKEN`, used only by `KEYS`, and each
    `Computer` cell reaches only its own Sprite.
@@ -275,7 +281,7 @@ site with each other until the Public Suffix List lists
 The blessed path is chat → agent. The brain runs in the cell, and the
 hands are on a computer: the same split as Grok's bot and Meta's Muse.
 The design, the research behind it, and its slices are in
-docs/agent-computer.md.
+docs/agent-computer.md (at the tag).
 
 - **One interface: the chat.** A chat is a fragment's chat channel. The
   desktop, custom pages, and bridges such as Telegram (bridge fragments)
@@ -336,7 +342,7 @@ its connector), or no one; one chat page renders each, with its people's
 faces and presence, and invites make any chat multiplayer. The design,
 its decisions (Relay's secret in the guest, Hermes queuing, only the
 owner taking over a screen, guests' turns on the owner's budget), and
-its phases are in docs/one-home.md. Amends decision 19 (the desktop gets
+its phases are in docs/one-home.md (at the tag). Amends decision 19 (the desktop gets
 new features) and decision 24's "not now" (a second agent, Hermes, is
 designed).
 
@@ -352,9 +358,8 @@ designed).
 | Large file bytes (1 MiB or more: uploads, generated media) | blobs in Tigris (celld's R2 binding, the fleet bucket under `r2/`), keyed by SHA-256 | git holds a pointer; a sync resolves it to the real file; blobs no branch tip references are deleted; never in cell SQL |
 | Identities ↔ keys, designated owners | the registry cell (BANKS's shape; BANKS itself later, `docs/finite-integration.md`) | sessions and caches name an identity and never outlive a revocation |
 | Browser sessions | platform session cookie (platform origin only) | maps to one identity key; re-checked against grants per request |
-| Agent conversations and turns | the agent's cell (goose's conversation in SQL) | a computer holds a working copy and a tool journal; effects dedupe at their owners by tool-call id |
-| Computer disks | Sprites durable storage | the front door's registry records ownership only |
-| Secrets (personal, fragment, host, OpenRouter, code.storage, Sprites) | the owning cell, encrypted by the node's `KEYS` for that cell alone; fleet secrets in the node's environment, used only by `KEYS` (`docs/secrets.md`, `docs/hardening.md`) | never in a repo, a bucket in plaintext, a log, a command line, or a computer's disk; computers use Sprites connectors |
+| Agent conversations and turns | the agent's cell (goose's conversation in SQL) | effects dedupe at their owners by tool-call id |
+| Secrets (personal, fragment, host, OpenRouter, code.storage) | the owning cell, encrypted by the node's `KEYS` for that cell alone; fleet secrets in the node's environment, used only by `KEYS` (`docs/secrets.md`, `docs/hardening.md`) | never in a repo, a bucket in plaintext, a log, or a command line |
 | Compute/audit trail | the `events` channel | webhook deliveries recorded as events, deduped by delivery key |
 
 Hard rule kept: **no file bytes persist in cell SQLite.** File bytes live
@@ -406,8 +411,8 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
 - The four spikes in `docs/MODEL.md`: Rust platform cells (workers-rs,
   with Worker Loader and facets), the app facet as author SQL,
   deterministic agent turns in Workflows, and celld v0.5.1. Verdicts live
-  in `spikes/<name>/README.md`.
-- Done 2026-09-23, all four adopted (`spikes/README.md`): Rust platform
+  in `spikes/<name>/README.md` (at the tag `celld-final`).
+- Done 2026-09-23, all four adopted (`spikes/README.md` at the tag): Rust platform
   cells (workers-rs plus a ~35-line JS shim); the app facet with
   synchronous mutations and a facet-local ledger (the root transaction
   cannot enclose a facet past ~1.6 MB); agent turns as Workflows (SIGKILL
@@ -564,7 +569,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   a platform kill mid-tool runs the tool once; a computer restart
   resumes the turn from the cell's conversation; no credential is on the
   Sprite's disk.
-- *Live:* the first part (`docs/phase-8.md`): `fragment computer serve`
+- *Live:* the first part (`docs/phase-8.md`, at the tag): `fragment computer serve`
   attached to an agent by URL and token, the loop still in the agent's
   cell; phase 6 added `fragment computer connect` (no public URL) and
   screenshots in the chat. *Not built:* the `Computer` cell and Sprites
@@ -619,7 +624,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   lands in the chat from the agent's alarm. Its write and deploy tools and
   the build guide are gone (docs/api.md, Hand-offs).
 - *Since `computer-sessions` (2026-09-27; decision 24, slice 1 of
-  docs/agent-computer.md):* every computer runs the hands, `goose serve`
+  docs/agent-computer.md at the tag):* every computer runs the hands, `goose serve`
   (v1.52.0) on `fragment model --serve`, with one long-lived session per
   chat; a hand-off goes by default to the owner's home computer (`fragment
   agent home`), bound to the chat, whose steps the computer posts into
@@ -670,7 +675,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   computer becomes (it stays asleep until `fragment computers rm`);
   billing what a computer uses rather than a footprint; and whether the
   Tasks-API hold keeps a Sprite running between ticks
-  (docs/computers.md).
+  (docs/computers.md at the tag).
 - Computers as identities first (decision 21): a computer's npub in the
   registry, owned by a person, revocable, acting on what its owner
   granted and on fragments it publishes. Then, on Paul's call on the
@@ -695,7 +700,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   while that pane is open. The pet's editor-only `run` job
   (`job.computer.exec`) is how your agent runs commands there, from any
   chat, through the platform's verbs; a job's call now answers what the
-  job answered (docs/computers.md). Since #60 keyed `first_visibility` on
+  job answered (docs/computers.md at the tag). Since #60 keyed `first_visibility` on
   what a template declares, docs/platform.md names the desktop only as the
   first user of `fragments` and `frame`: no special case is left. *Since
   `agent-handoff`:* your agent hands work to a computer from any chat (a

@@ -5,6 +5,12 @@ Each entry names where it was observed, the risk, the first proof that
 would show it biting, and the condition that deletes it. An entry
 without a delete condition is unfinished design, not debt.
 
+Entries whose subject went at the cut (computers, sandcastle, Hermes,
+the desktop, chats; docs/cloudflare-v1.md, decision 33) went with it
+and are at the tag `celld-final`. Entries about the hosted fleet (Fly,
+the node image, its secrets) are the `celld` branch's, which runs
+fragment.club until cutover (decisions 34–35).
+
 ## Author code shares a process with every fragment and the host secrets
 
 - **Observed:** each fragment's `app.mjs` (its operations, jobs, and
@@ -217,7 +223,7 @@ without a delete condition is unfinished design, not debt.
 - **First proof:** the first change to the viewer, or an advisory
   against marked or Shiki.
 - **Delete when:** the viewer is small enough to ship as source (no
-  bundler), or the desktop phase replaces it with its own file viewer.
+  bundler), or a viewer of the platform's replaces it.
 
 ## Fly's remote builders cannot push the node image
 
@@ -378,27 +384,6 @@ without a delete condition is unfinished design, not debt.
   the summary are deleted, with a test that a fact from before the
   window survives in the summary.
 
-## The computer kills a shell command's tree itself
-
-- **Observed:** phase 8. `goose-developer`'s shell runs `$SHELL -c
-  <command>` in the computer's own process group and, on cancel or
-  timeout, kills only that shell: the command's children run on.
-  `fragment computer serve` starts each command by writing the shell's
-  pid under its journal (`echo $$ > <state>/pids/<id>;`, a pid a shell
-  keeps when it execs the command in its place) and, on cancel, kills
-  the tree under that pid first (`crates/computer`).
-- **Risk:** a command that detaches into its own session escapes the
-  kill; a timed-out command's children still run on, since the timeout
-  is goose's.
-- **First proof:** a builder's dev server, or a runaway build, still
-  running after its turn was stopped or its call timed out.
-- **Delete when:** `goose-developer` gives each command its own process
-  group and kills the group on cancel and on timeout (a commit on
-  `futurepaul/goose`, and upstream), proven by the unit tests
-  `cancelling_a_shell_call_kills_its_children` and
-  `cancelling_kills_the_children_of_an_execed_command` with the pid
-  file removed.
-
 ## A socket opened with a key outlives that key's revocation
 
 - **Observed:** phase 4 slice A. Every request resolves its key live, so
@@ -466,7 +451,8 @@ without a delete condition is unfinished design, not debt.
 
 - **Observed:** phase 6, 2026-09-24. In two of about six full e2e runs
   (both with the machine's load at 20 to 30 from other sessions' runs),
-  the computer lane's check that kills the node mid-command ended with
+  the computer lane's check (gone at the cut) that killed the node
+  mid-command ended with
   the restarted node exiting on SIGILL: a V8 fatal error, most likely,
   as hundreds of cells from the earlier lanes woke at once, the agents'
   script co-hosted beside the cell. It never happened with the lane run
@@ -530,28 +516,6 @@ without a delete condition is unfinished design, not debt.
   re-created (their images go with them), or upstream fixes the import
   and nothing needs it.
 
-## A computer's long steps run inside its alarm
-
-- **Observed:** 2026-09-27, fragment.club. A `Computer` cell's alarm
-  makes Sprites calls that can take minutes (a boot's install and
-  pairing, a sync, a hold on a Sprite slow to wake; `KEYS` waits up to
-  180 s), and celld fires an alarm again whenever its handler outlives
-  the operation deadline (15 s; docs/finite-next-lessons.md). Two steps
-  at once gave back each other's holds on the month, and a wake failed on
-  `no such reservation`. The cell now runs one step at a time
-  (`stepping`, cell/src/computer.rs): a handler fired again waits for the
-  one before it.
-- **Risk:** a long step gathers a waiting handler every ~15 s, each of
-  which then steps in turn (cheaply, from the row the long one left); a
-  step that hangs holds every later one until `KEYS`' timeout. A job's
-  command's start still waits on it (20 s at most, then retried); its
-  polls do not (2026-09-27).
-- **First proof:** a boot on a real Sprite that takes minutes, or a node
-  log with many of one `Computer`'s alarm handlers waiting.
-- **Delete when:** the long Sprites calls leave the alarm (run from
-  `waitUntil`, with a watchdog alarm armed first, as the lessons say), so
-  no step outlives the deadline.
-
 ## A deleted fragment's app stream can outlive it
 
 - **Observed:** 2026-09-27, the hosted e2e on celld v0.6.0 (fork
@@ -583,7 +547,7 @@ without a delete condition is unfinished design, not debt.
   turn's starter, waits (at most 64) until the running turn ends. One
   driver, one watchdog alarm, and one cancel token per agent stay as
   phase 5 built them.
-- **Risk:** a long turn in one chat (a computer's build, a slow model)
+- **Risk:** a long turn in one chat (a slow model, a long tool call)
   delays every other chat's answer; a busy agent turns messages away
   (429, redelivered) past 64 waiting.
 - **First proof:** an owner whose agent is in several busy chats sees
@@ -593,25 +557,23 @@ without a delete condition is unfinished design, not debt.
   driver, a watchdog, and a cancel token per conversation), proven by an
   e2e where chat B's answer lands while chat A's turn is held in a tool.
 
-## Chats made before phase 7 answer through `say`
+## An agent still answers through a reply operation
 
 - **Observed:** phase 7 slice C made the chat template two postable
-  channels and no app code; the agent posts its answer to a chat whose
-  `chat` channel takes posts. A chat made before still has the old
-  template's `app.mjs` (a `say` operation, a worker) and its old page, so
-  the agent reads each chat's channels as a turn starts
-  (agent/src/progress.rs `shape`) and answers such a chat through its
-  listen's reply operation (agent/src/lib.rs `reply`), with no `work`
-  records. The e2e keeps the old template as a fixture
-  (crates/e2e/fixtures/old_chat.*).
-- **Risk:** two answer paths in the agent, and old chats keep a worker
-  each and the low-effort page.
-- **First proof:** a change to how answers are posted that the old path
-  misses (the e2e's old chat stops getting answers).
-- **Delete when:** no chat on the hosted fleet has a `say` operation
-  (each rewritten to the template's `fragment.json` and page, or
-  deleted), proven by a fleet listing; then `reply` posts only, and the
-  listen's `reply` field goes.
+  channels and no app code, so the agent posts its answer to a followed
+  channel that takes posts. Chats made before still had a `say`
+  operation, so the agent reads each channel's shape as a turn starts
+  (agent/src/progress.rs `shape`) and answers a channel that takes no
+  posts through its listen's reply operation (agent/src/lib.rs
+  `post_answer`; the listen's `reply` field, `fragment agent listen
+  --reply`). The chat template, the old chats' fixture, and the lane that
+  drove both went at the cut, and nothing on fragment.club migrates
+  (docs/cloudflare-v1.md, decision 33): no e2e takes the reply path now.
+- **Risk:** two answer paths in the agent, one untested.
+- **First proof:** a change to how answers are posted that the reply path
+  misses.
+- **Delete when:** the reply operation path goes (an answer only posts,
+  and the listen's `reply` field goes), or a lane drives it again.
 
 ## A postable channel's retention is fixed
 
@@ -626,95 +588,13 @@ without a delete condition is unfinished design, not debt.
 - **Delete when:** a channel's `keep` is declarable (bounded, with this
   as its default) and tested past it.
 
-## A removed computer leaves only the fragments its list names
-
-- **Observed:** `DELETE /api/identities/{computer}` revokes its keys in
-  the registry, then has it leave each fragment its `Principal` list
-  names (cell/src/lib.rs `remove_computer`). That list is fed from each
-  fragment's outbox, so a membership whose delivery is still being
-  retried is not in it, and that grant stays.
-- **Risk:** a members list shows a removed computer. It cannot act there,
-  because no key signs as it, and nothing adds one again.
-- **First proof:** a removed computer still listed among a fragment's
-  members.
-- **Delete when:** the registry answers "removed" for an identity (a
-  fragment drops such a member when it reads it), or the removal waits
-  for every fragment's outbox, tested with a delivery held.
-
-## A computer is billed for a footprint, not what it used
-
-- **Observed:** Sprites meter a Sprite's actual CPU and memory, which the
-  platform cannot read, so each awake tick is charged as the idle
-  footprint measured on one ($0.0726 an hour), and its disk as its home
-  directory's size when it last woke (`fragment_core::budget::computer`,
-  cell/src/computer.rs). Nothing alerts anyone to a computer that stays
-  awake longer than expected (Paul, 2026-09-26: later).
-- **Risk:** a busy computer (a build, image generation) costs Paul more
-  than its owner is charged; files written outside its home are not
-  charged; a page left open keeps one awake, charged, and unnoticed.
-- **First proof:** the Sprites org's bill for a month against the
-  `computer.awake` and `computer.asleep` usage rows.
-- **Delete when:** the charge comes from what the Sprite reports it used
-  (Sprites' own usage, or its cgroup's `cpu.stat` and memory read on each
-  tick), and an owner hears of a computer awake past a bound.
-
-## A chat's session takes one task at a time, unqueued
-
-- **Observed:** 2026-09-27, slice 1 of docs/agent-computer.md. Each chat
-  has one goose session on its computer, and the task client
-  (crates/core/src/computer/task.mjs) sends its task to that session
-  whatever else runs there: nothing queues a second hand-off from the
-  same chat behind the first, and what goose serve does with a prompt
-  for a session that is mid-turn is its own (it keeps a registry of a
-  session's active runs).
-- **Risk:** two hand-offs from one chat at once: the second fails, or
-  both run in one history, interleaved.
-- **First proof:** a chat whose agent hands off twice before the first
-  ends, on a real Sprite (the chat hears "could not finish", or one
-  task's steps land in the other's).
-- **Delete when:** a chat's tasks wait their turn (a lock per session in
-  the task client, or the agent holding a chat's second hand-off until
-  the first ends), proven by an e2e that hands off twice from one chat
-  at once and gets both answers, in order.
-
-## The agent's remembered fact can lose a computer's write to the same file
-
-- **Observed:** 2026-09-27, `memory-followups`. `platform__remember`
-  (agent/src/memory.rs) reads `memory/<topic>.md` at main, then commits
-  the whole file (`POST /api/f/<memory>/files`), which expects nothing of
-  main. A computer's sync that commits the same file between the read
-  and the write is overwritten; git keeps it in history.
-- **Risk:** a fact goose wrote in a task that ends while the owner tells
-  the agent another, to the same topic, drops out of the memory.
-- **First proof:** a memory file whose history shows a computer's line
-  gone at the agent's next commit.
-- **Delete when:** the files API takes an expected blob per path (the
-  cell's commit already takes `expect`), the agent passes the one it
-  read and reads again on a conflict, proven by an e2e that commits
-  between the read and the write and keeps both lines.
-
-## The platform carries two markdown renderers
-
-- **Observed:** 2026-09-28, `files-view`. The files viewer
-  (`cell/files.mjs`) renders markdown to DOM with textContent only, as
-  the chat's page (`cell/chat.mjs`, `renderMarkdown`) does; the viewer's
-  also takes nested lists, wikilinks, links to the fragment's own files,
-  and front matter. The chat's was left as it was to keep the change off
-  the chat.
-- **Risk:** a fix to one (a rendering bug, a safety rule for links) is
-  missed in the other.
-- **First proof:** a markdown case that renders in one and not the other
-  in a way someone reports.
-- **Delete when:** the chat renders with the viewer's renderer (one
-  module served to both, the chat's picture links kept), proven by the
-  chat, desktop, and files e2e sections.
-
 ## Files depend on code.storage, a hosted service with no self-hosted twin
 
 - **Observed:** 2026-09-29, while scoping self-hosting (the sandbox
-  investigation). Every fragment's files and history live in a
-  code.storage repo (`cell/src/cs.rs`, `cli/src/sync.rs`), reached only
-  through its REST API: repos, repo urls, branches, file metadata and
+  investigation, docs/sandbox.md at the tag `celld-final`). Every
+  fragment's files and history live in a code.storage repo
+  (`cell/src/cs.rs`, `cli/src/sync.rs`), reached only through its REST
+  API: repos, repo urls, branches, file metadata and
   reads, commits, commit packs with expected-parent CAS, merges,
   restore commits, and signed push webhooks, under ES256 JWTs minted with
   the org key. No git smart-HTTP is used. The only other implementation
@@ -733,216 +613,55 @@ without a delete condition is unfinished design, not debt.
   rules as its conformance suite, and the e2e passes against it as well
   as against the fake.
 
-## sandcastle copies fragment's NIP-98 crate
+## Frame sessions have no minter
 
-- **Observed:** 2026-09-29. `sandcastle/crates/nip98` is fragment's
-  `crates/nip98` adapted (verify also returns the event id; signing adds a
-  `nonce` tag; key proofs left out), because sandcastle must not depend on
-  fragment's crates (docs/sandbox.md, decision 4).
-- **Risk:** a fix to one copy misses the other.
-- **First proof:** a verification bug fixed in one crate and found later
-  in the other.
-- **Delete when:** both use one crate: Finite's `finite-nostr` once
-  sandcastle moves to Finite, or a NIP-98 crate both workspaces depend on.
+- **Observed:** the cut (2026-10-02). The desktop framed its owner's
+  fragments through `__frame`, which minted a frame redemption from the
+  framing page's own site session, behind the `frame` capability and
+  its owner's grant. `__frame`, the capability, the grant, and the share
+  sheet's embed went with the desktop; the redeeming half stays, generic:
+  a frame redemption spent only in a frame, into the partitioned
+  `fragment_frame` cookie, a frame-bound session naming its `embedder`,
+  the router's frame credential, `frame-ancestors` naming the embedder,
+  the `blocked` page, and `check=frame` (cell/src/auth.rs,
+  cell/src/registry/signin.rs). Nothing mints a frame redemption now,
+  so none of it runs, and the e2e's `frames` section (and the listed
+  node shape it ran on) went too; the `isolation` section still checks
+  that a frame signs in nowhere.
+- **Risk:** code no test reaches rots: a change breaks it, and the shell
+  that frames fragments next finds out.
+- **First proof:** the first page that frames a fragment signed in.
+- **Delete when:** a platform-origin mint (a `Mint` naming its embedder,
+  from the shell's own session) frames a fragment signed in, with a
+  frames lane again; or the redeeming half is deleted if the shell does
+  not frame fragments.
 
-## sandcastle's real-engine e2e runs by hand
+## Channel drafts have no e2e
 
-- **Observed:** 2026-09-29. `sandcastle-e2e` (`sandcastle/crates/e2e`)
-  drives a real node on a KVM host through its API and URLs and checks
-  the host over SSH (62 checks on `finite-lat-6`, JSON evidence), but it
-  runs only when someone runs it: CI has no KVM host, and nothing runs it
-  before a deploy.
-- **Risk:** an msb upgrade or a node change breaks the real path with
-  every CI check green. Three of the first day's bugs showed only on the
-  real engine.
-- **First proof:** the next msb release.
-- **Delete when:** the e2e runs on a KVM host for every change that
-  reaches a node (a CI runner with `/dev/kvm`, or a deploy command that
-  runs it first and refuses on a failure).
+- **Observed:** the cut (2026-10-02). `PUT /api/f/<name>/channels/<channel>/draft`
+  (cell/src/channels.rs `draft_api`: a record its poster is writing,
+  sent to the channel's readers as `draft` frames, never stored) was
+  driven only by the Hermes lane, through Hermes' Relay; that lane went
+  with Hermes. The route stays: decision 21's bridge streams through it.
+- **Risk:** a change breaks drafts (who may draft, the pace, the frame's
+  shape) and nothing says so until the bridge is built on it.
+- **First proof:** the bridge's first streamed reply.
+- **Delete when:** a lane drafts on a declared channel and checks that a
+  reader's socket hears the frame, that a stranger is refused, and that
+  a draft past the pace is refused (429).
 
-## A sandcastle node keeps service env in plaintext
+## The Computer and Hermes classes are migrated but not deleted
 
-- **Observed:** 2026-09-29. A computer's `service.env` (Hermes' dashboard
-  password and session secret) is stored in the node's SQLite as part of
-  the spec, and in the guest's `/run/sandcastle/service.env`. Views
-  redact it.
-- **Risk:** a copy of the node's state file discloses every service's
-  settings.
-- **First proof:** a backup of `/var/lib/sandcastle` leaving the host.
-- **Delete when:** env values are sealed at rest with a key the node holds
-  apart from its state, or come from the credential source like every
-  other secret.
-
-## A sandcastle node has no per-signer rate limit
-
-- **Observed:** 2026-09-29. The API bounds bodies, headers, connections,
-  tickets, sessions, and the replay cache, but not how often one key
-  calls. Brain limits per signer.
-- **Risk:** one key, granted or not, spends the node's CPU on signature
-  checks and its disk on replay rows.
-- **First proof:** a misbehaving client in a loop.
-- **Delete when:** a per-signer token bucket answers 429 before signature
-  verification's cost, with its limits documented and tested.
-
-## sandcastle's test node has per-name certificates renewed by hand
-
-- **Observed:** 2026-09-29. `finite-lat-6` serves
-  `*.sandcastle.fragment.club` (Paul's A record) with one Let's Encrypt
-  certificate naming `api`, `hermes`, and `demo`. It was issued by certbot
-  over HTTP-01, with port 80 opened for the issue only, and copied to
-  `/etc/sandcastle/le-*.pem` for the daemon.
-- **Risk:**
-  - A computer with any other name fails TLS in a browser (the e2e
-    reaches such computers with the API's TLS name and their own Host
-    header).
-  - certbot's renewal timer will fail with port 80 closed, and even when
-    it succeeds it does not copy the files or restart the daemon, so the
-    certificate lapses on 2026-12-28.
-- **First proof:** the first computer named otherwise, or 2026-12-28.
-- **Delete when:** the router issues and renews each computer's
-  certificate itself on first use (ACME TLS-ALPN-01 on 443, only for
-  names of existing computers: a self-hoster then needs only a wildcard A
-  record), or a wildcard certificate by DNS-01 renews itself. Either is
-  tested against a staging CA.
-
-## A sandcastle node does not notice engine machines it has no row for
-
-- **Observed:** 2026-09-29. When a node's state is lost, its `sc-…`
-  machines and disks keep running and holding space with no row, and
-  nothing reports them (it happened once on `finite-lat-6`).
-  `sandcastled reset` removes them on a test node that starts over; a
-  node that serves people has nothing.
-- **Risk:** leaked machines and disks, and a person's data orphaned with
-  no owner on record.
-- **First proof:** any state restore or reset on a node with computers.
-- **Delete when:** the node lists `sc-…` machines and volumes with no
-  row and reports them to the operator (never deleting data on its own),
-  with a test in the simulator.
-
-## The test node is set up by hand and runs as a login user
-
-- **Observed:** 2026-09-29. On `finite-lat-6`, `sandcastled` runs as
-  `ubuntu`, whose home holds microsandbox's state, because msb was
-  installed there first. Everything the node needs from the host was done
-  by hand (sandcastle/README.md, Running a node):
-  - the ZFS pool and its delegation;
-  - the zvol udev rule;
-  - the nftables rules;
-  - the systemd units;
-  - the certificate.
-- **Risk:**
-  - Anything else running as that user (an operator's shell) can reach
-    every computer's engine state and disks.
-  - A second node is set up differently from the first.
-- **First proof:** a second node, or a second use of the test host.
-- **Delete when:** a Rust install step sets up a node from nothing as a
-  dedicated system user with its own `MSB_HOME`, and a check on a fresh
-  host proves it.
-
-## sandcastle backups are sealed with one key per node
-
-- **Observed:** 2026-09-29 (phase 3). Every backup a node ships is sealed
-  under keys derived from that node's one backup key. The operator holds
-  a copy (for `finite-lat-6`: Paul's Mac). Restoring on another node
-  needs that key too.
-- **Risk:**
-  - Whoever takes the node's key file opens every backup the node ever
-    made, for every owner.
-  - Losing both copies loses them all.
-  - A key cannot be rotated without re-sending everything.
-- **First proof:** a node compromise, or a second node restoring the
-  first one's backups.
-- **Delete when:** each computer's backups are sealed under a key only
-  its owner can unwrap (wrapped to the owner's public key with NIP-44, or
-  held by the platform's credential source), with rotation, and a
-  restore on a node that never held the key is tested.
-
-## sandcastle backups never expire
-
-- **Observed:** 2026-09-29. A node ships whole streams and
-  incrementals forever, and records every one. Nothing deletes a chain
-  from the bucket or the store, not even a deleted computer's; a
-  computer's manifest lists its newest 100,000.
-- **Risk:** the bucket's size and cost grow without bound, and a
-  person's data outlives their wish to delete it.
-- **First proof:** the bucket's first invoice, or someone asking that
-  their data be gone.
-- **Delete when:** a retention policy keeps chains back to a whole
-  stream and drops older ones (never breaking a chain), an owner can
-  delete a deleted computer's backups through the API, and both are
-  tested against the fake bucket and checked on Tigris.
-
-## A sandcastle computer's token lives in its host VM process's environment
-
-- **Observed:** 2026-09-29 (sandbox phase 4, lat-6). The node hands
-  msb a value in `msb create`'s environment, never its arguments; the
-  `msb machine` process it spawns inherits that environment, so
-  `/proc/<pid>/environ` of the computer's VM process on the host holds
-  the value (on fragment, the computer's token) for as long as the
-  machine runs. The guest cannot see it.
-- **Risk:** anything running as the node's user (an operator's shell, on
-  the test node the login user) can spend any running computer's model
-  budget until its owner's key or the node's listing is revoked.
-- **First proof:** already present, on finite-lat-6.
-- **Delete when:** the node runs as its own system user (see the test
-  node entry), and msb resolves the value without leaving it in the
-  child's environment (an upstream change, or the SDK behind the engine
-  trait), checked by reading the VM process's environ.
-
-## A deleted sandcastle computer's token lives a day
-
-- **Observed:** 2026-09-29. A node does not tell the platform when a
-  computer is deleted; its token lapses only when its node has not asked
-  for it in a day (`COMPUTER_TOKEN_IDLE_MS`), and a stopped computer's
-  token lapses the same way (its next start asks again).
-- **Risk:** for a day after a deletion, whoever holds the token (only
-  the node) could still spend its owner's month with it.
-- **First proof:** a token used after its computer was deleted.
-- **Delete when:** the node tells the platform (a signed call to the
-  credential source) when a computer is deleted, and the platform drops
-  its token, with a test.
-
-## A sleeping sandcastle computer hears only what comes through its URL
-
-- **Observed:** 2026-09-30 (phase 5, tiers). A computer sleeps after 30 s
-  with no activity the node sees: requests through its URL, a client's
-  WebSocket data, its guest's CPU and network over the floors. A
-  gateway its guest keeps outbound (Hermes' Telegram long-poll, Finite
-  Chat's relay connection) is frozen with it: a message waits at its
-  platform until something else wakes the computer.
-- **Risk:** an agent reached only through an outbound gateway stops
-  answering 30 s after its last conversation.
-- **First proof:** a Hermes with a polling Telegram gateway, or Finite
-  Chat, on a node that sleeps computers.
-- **Delete when:** every gateway Finite ships delivers through the
-  computer's URL (a webhook) or its platform calls `POST .../wake` for a
-  message, proven by an e2e that sends a message to a warm Hermes and
-  gets its answer.
-
-## A sleeping sandcastle computer's cron does not run
-
-- **Observed:** 2026-09-30 (phase 5, tiers). Hermes' cron ticks in its
-  gateway, inside the guest; a paused or stopped guest does not tick. A
-  job due while it sleeps fires once when it next wakes (a one-shot more
-  than 120 s late is dropped by Hermes).
-- **Risk:** scheduled jobs of an idle agent are late by as long as it
-  sleeps, or lost.
-- **First proof:** any Hermes cron job on a node that sleeps computers.
-- **Delete when:** the cron provider (docs/sandcastle-sleep.md, step 4)
-  wakes a computer for each job it fires, proven by the e2e firing a job
-  on a warm and on a cold Hermes.
-
-## A sandcastle demotion resumes a machine with only its warm hold
-
-- **Observed:** 2026-09-30. A warm computer demoted to cold (its room
-  wanted, or a day warm) is resumed so its service stops gracefully (msb
-  refuses a graceful stop of a paused machine), holding in the ledger
-  only what it measured when it paused; while its service stops, it may
-  use more.
-- **Risk:** machines briefly hold more than the ledger says; the unit's
-  `MemoryMax=` (a GiB over the reserve on lat-6) is the line then.
-- **First proof:** many demotions at once on a node near its reserve.
-- **Delete when:** a demotion takes room for the whole allocation before
-  it resumes (or kills the paused machine once its guest flushed, if
-  that is judged safe for services), with a sim invariant that committed
-  memory covers every running machine's allocation.
+- **Observed:** the cut (2026-10-02). `cell/wrangler.jsonc` keeps the
+  `v5` and `v6` migrations that made the `Computer` and `Hermes` classes;
+  neither is bound or exported any more. celld takes
+  `new_sqlite_classes` alone and stops a deployment that deletes a class,
+  so the `deleted_classes` migration waits.
+- **Risk:** a deploy to a real Workers account with those migrations and
+  no class carries two dead classes' objects (and refuses, if Cloudflare
+  checks the export); a reader takes the tags for live classes.
+- **First proof:** the first `wrangler deploy` of the cell.
+- **Delete when:** phase 2 moves the cell to wrangler and adds
+  `{"tag": "v7", "deleted_classes": ["Computer", "Hermes"]}` (or starts
+  the migrations over, since nothing on fragment.club migrates), proven
+  by a deploy to a preview.

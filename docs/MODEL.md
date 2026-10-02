@@ -1,7 +1,7 @@
 # MODEL — the fragment-next core model
 
 Status: proposed 2026-09-23, revised the same day by the phase 1 spikes
-(`spikes/README.md`). This is the target shape the runtime is hard-cut to
+(`spikes/README.md` at the tag `celld-final`). This is the target shape the runtime is hard-cut to
 (ROADMAP decisions 2-4 and the five changes Paul approved). Every
 mechanism names the celld primitive it uses; read with the celld docs
 (https://celld.dev/docs/, v0.5.1).
@@ -22,7 +22,7 @@ mechanism names the celld primitive it uses; read with the celld docs
 2. **One execution primitive: the operation.** Named, schema-typed,
    role-checked, idempotent by operation id, ledgered. Every trigger
    (browser, CLI, agent tool call, cron, webhook, channel message, file
-   change, computer event) is a way to invoke an operation.
+   change) is a way to invoke an operation.
 3. **One log: channels.** Append-only, ordered, paged, per fragment. The
    audit trail, the inbox, room messages, and chat transcripts are all
    channels. Presence stays ephemeral.
@@ -32,10 +32,11 @@ mechanism names the celld primitive it uses; read with the celld docs
    (a page everyone who may see it gets alike asks nothing). Grants,
    invites, and revocations are transactional and take effect on the
    next request. Each fragment is its own browser origin.
-5. **Agents and computers are add-ons a fragment declares** (ROADMAP
-   decisions 19–21); a fragment that declares neither carries nothing of
-   them. Agents are hosted members with durable turns; a computer is an
-   identity owned by a person, which a fragment can declare (a Sprite).
+5. **Agents are add-ons a fragment declares** (ROADMAP decisions 19–20);
+   a fragment that declares none carries nothing of them. Agents are
+   hosted members with durable turns. Computers (decision 21) went at the
+   cut (tag `celld-final`) and come back on Cloudflare
+   (docs/cloudflare-v1.md, phase 4).
 
 ## Anatomy of a fragment, in celld terms
 
@@ -54,7 +55,7 @@ caller's role, validates input, applies quotas, and ledgers the result
 before the app code runs or its result leaves. The app facet is built
 with an empty binding set, so it reaches only what the supervisor hands
 it in `env`: capability objects (`ctx.exports.X({ props })`) for files,
-channels, blobs, AI, and the fragment's computer, plus a
+channels, blobs, and AI, plus a
 `globalOutbound` Fetcher that brokers egress (hop headers, allowlist,
 secret injection) or `null` to remove ambient network entirely.
 `WorkerCode.limits` bounds `cpuMs` and `subRequests` per invocation.
@@ -151,9 +152,9 @@ leaves the run pending for a later try (docs/api.md, Apps).
 
 Triggers: an HTTP call from the UI (`POST /__op/<name>`), `fragment call`
 from the CLI, an agent tool call (an operation's schema *is* its tool
-schema), a cron entry, an inbox webhook, a channel message, a pin move
-(file change), and a computer event. The last four are declared in
-`fragment.json`'s `triggers` and start runs as the fragment's own key;
+schema), a cron entry, an inbox webhook, a channel message, and a pin
+move (file change). Cron entries, channel messages, and pin moves are
+declared in `fragment.json`'s `triggers` and start runs as the fragment's own key;
 a triggered mutation is a run of one step, so it retries and is held
 like a job. A custom `App.fetch` stays
 available for routes that are not operations (dynamic HTML, file
@@ -187,8 +188,8 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
 
 ## Principals and membership
 
-- A principal is an identity: a person, an agent, a computer, or a
-  fragment, with one or more public keys in the registry (finite.computer's BANKS
+- A principal is an identity: a person, an agent, or a fragment, with
+  one or more public keys in the registry (finite.computer's BANKS
   model, ROADMAP decision 15). The CLI proves a key with NIP-98 and the
   registry names its identity; a browser has a platform session that
   maps to the person (phase 4 slice B); an agent signs with its cell's
@@ -227,7 +228,7 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
 The agent loop is goose's (`goose-agent`, the GDK), everywhere: it
 replaces libfx in cells and fx over ACP on computers (Paul, 2026-09-23;
 the spike and its handoff are on branch `spike/goose-agent`,
-`spikes/goose-agent/HANDOFF.md`).
+`spikes/goose-agent/HANDOFF.md`, and at the tag `celld-final`).
 
 - A fragment declares its agent in `fragment.json`: instructions, the
   operations it may call, the postable channel it answers, and its model
@@ -237,10 +238,8 @@ the spike and its handoff are on branch `spike/goose-agent`,
   its conversation in SQL. It runs as its own celld project (`agent/`,
   a workers-rs Durable Object, ~6 MB of wasm), so fragment cells do not
   carry goose.
-- **The loop runs where the agent's hands are**: on its computer when it
-  has one (`fragment computer serve` on the Sprite), in its cell when it
-  does not. The conversation always lives in the agent's cell, so a dead
-  computer loses nothing.
+- **The loop runs in the agent's cell**, where its conversation lives
+  (running it on the agent's computer went with computers at the cut).
 - A turn is goose's state machine: load the conversation, run one step (a
   model call, a batch of tool calls, or a steer), apply the step's
   effects in SQL, repeat. The saved conversation is the replay ledger; a
@@ -250,40 +249,28 @@ the spike and its handoff are on branch `spike/goose-agent`,
   `job` operations.
 - Tools are the operations of the fragments the agent belongs to, the
   platform's verbs for any fragment its asker reaches (list, read one's
-  operations, call one, files, deploy), and goose's developer tools on
-  its owner's computer (in its owner's turns). The model's tool-call id is
+  operations, call one, files, deploy). The model's tool-call id is
   the operation id, so the operation ledger dedupes a replayed call.
 - People steer a running turn (a durable queue drained between steps) and
   stop it (11–15 ms in a cell).
-- A chat is a fragment whose agent answers its `chat` channel. A
-  member's message starts a turn; the messages people
-  should see are the turn's effects appended to that channel, while the
-  full working conversation (tool calls and results) stays in the agent's
-  cell. The agent keeps one conversation per chat, and a turn answers in
-  its own. A turn acts for whoever started it: every call names them
+- An agent answers the postable channels it follows (a fragment's own
+  agent its declared one, calories' `ask`). A member's message starts a
+  turn; the messages people should see are the turn's effects appended
+  to that channel, while the full working conversation (tool calls and
+  results) stays in the agent's cell. The agent keeps one conversation
+  per channel it answers, and a turn answers in its own. (The chat
+  template went at the cut; chats come back as a blessed fragment
+  template: docs/cloudflare-v1.md, "The rule".) A turn acts for whoever started it: every call names them
   (`for`), and acts with the lower of their role and the agent's cap
   (ROADMAP decision 17). An anonymous visitor's message starts nothing.
 - Model calls use the owner's own model credential (`docs/secrets.md`).
 
 ## Computers
 
-- A computer is an identity with its own key, owned by a person; it
-  works on whatever its owner delegated or authorized, including
-  fragments it publishes (ROADMAP decision 21). A fragment can declare
-  one, and the platform provisions a Sprite for it (later, designed in
-  `docs/computers.md`: the Sprites token is Paul's call). One `Computer` Durable Object per Sprite holds
-  ownership, lifecycle, and idle policy (an alarm), and speaks to the
-  Sprites API with the owner's Sprites org token: ours by default, the
-  owner's own if they bring a Sprites org. No computer holds that token.
-- The computer runs one binary, `fragment computer serve` (the CLI):
-  goose's loop and tools over HTTP with a journal keyed by tool-call id,
-  file sync through git, and no credential on disk but its own revocable
-  key; others stay in Sprites connectors (`docs/secrets.md`).
-- A fragment that declares a computer calls it through a capability in
-  its app `env`; output streams into a channel (the Blender example).
-- A builder workspace is a computer its fragment declares, running the
-  `fragment` CLI as itself to talk back to that fragment and to build and
-  publish fancier ones.
+Computers (an identity per machine, a Sprite each behind a `Computer`
+cell, `fragment computer serve`, builder workspaces) went at the cut
+(tag `celld-final`). The generic Computer comes back on Cloudflare
+(docs/cloudflare-v1.md, phase 4).
 
 ## Limits (initial; each enforced and tested)
 
@@ -315,7 +302,7 @@ the spike and its handoff are on branch `spike/goose-agent`,
 - The internal listener is plaintext and unauthenticated beyond the fleet
   HMAC; it must stay on Fly's private (WireGuard) network.
 
-## Spikes (done 2026-09-23; `spikes/README.md`)
+## Spikes (done 2026-09-23; `spikes/README.md` at the tag `celld-final`)
 
 1. **Rust cells** — adopted: workers-rs 0.8.5 covers SQL, alarms, and
    hibernatable WebSockets; the Worker Loader and facets are reached

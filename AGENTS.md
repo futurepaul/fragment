@@ -1,12 +1,16 @@
 # fragment-next
 
 Fragment is the product: stateful, multiplayer web apps published from
-the CLI. Agents and computers are optional add-ons a fragment declares;
-the desktop is a showcase template (ROADMAP decision 19).
+the CLI. Agents are optional add-ons a fragment declares; computers come
+back on Cloudflare (docs/cloudflare-v1.md, phase 4).
 Built on fragment (this repo carries fragment's full history; its
 TypeScript runtime was cut in phase 2; this repo is
-github.com/futurepaul/fragment's `master`, which fragment.club runs) and on celld
-(https://celld.dev/docs/).
+github.com/futurepaul/fragment's `master`, the Cloudflare line since the
+cut: fragment.club runs the `celld` branch, tag `celld-final`, until
+cutover, decision 35) and, until phase 2 of that plan, on celld
+(https://celld.dev/docs/). The cut (decision 33) took Hermes, computers,
+the desktop, the personal agent's chat, sandcastle, and the fleet's
+deploy path off master; they live at the tag `celld-final`.
 
 ## Read first
 
@@ -22,24 +26,17 @@ github.com/futurepaul/fragment's `master`, which fragment.club runs) and on cell
    `docs/finite-integration.md` — how fragment will move into
    finite.computer (Finite V3): every Core concern, its stand-in here,
    and the swap; update its row with any change that touches one;
-   `docs/phase-6.md` — the desktop as a template, usernames and flat
-   hosts, your agent making apps, computers with screenshots (live);
+   `docs/phase-6.md` — usernames and flat hosts, templates, your agent
+   making apps (its desktop and computers went at the cut);
    `docs/phase-4.md` — sign-in, identities, budgets (live);
    `docs/hardening.md` — the hardening pass (H1–H3 live): native keys,
    the isolation findings;
    `docs/phase-5.md` — agents (choices for review);
-   `docs/phase-8.md` — computers, first part;
-   `docs/sandbox.md` — self-hosted computers: the research and the
-   sandbox service, sandcastle (phases 1–4 live on its test node);
-   `docs/sandcastle-rewrite.md` — its rewrite to engineering style;
-   `docs/runtime-seam.md` — one computer wherever it runs: presets,
-   sites, the trust floor, iroh and admissions (decided 2026-09-30),
-   and the measurement before the cut;
-   `docs/one-home.md` — the desktop as home, chats any agent answers
-   (goose or Hermes through its Relay), multiplayer chats, screens;
+   `docs/hermes-relay.md` — Hermes' Relay contract, read from its code
+   (its connector went at the cut);
    `docs/phase-3.md` — hosting on fragment.club;
    `docs/phase-2.md` — the record of the core cut (slices A–G);
-   `docs/operate.md` — the operator runbook.
+   `docs/operate.md` — the operator runbook (the `celld` branch's).
 3. `docs/finite-next-lessons.md` — what to port from finite-next and the
    gotchas (celld, libfx, fx over ACP, Sprites), prices, resources.
 4. `docs/published-fragments.md` — primitives that must stay expressible.
@@ -63,27 +60,21 @@ debt ledger).
   `AR_wasm32_unknown_unknown`), then `cargo xtask celld` (builds our celld
   fork, v0.6.0 with `KEYS` and the hardening settings, into
   `target/celld/bin`).
-- `cargo xtask build`: the cell and the agents for wasm32, and the
-  computer client (sandcastle-web, xtask/src/client.rs) into `cell/client/`,
-  the cell's static assets, served at `/__computer/` on every host
-  (docs/runtime-seam.md).
+- `cargo xtask build`: the cell and the agents for wasm32.
 - `cargo xtask check`: host tests and clippy (host and wasm), warnings
   denied.
 - `cargo xtask e2e [--only <section>[,...] | --except <section>[,...]]`:
-  builds `cell/`, `agent/`, and the CLI (with its `computer` feature),
-  then runs `crates/e2e` against a fresh `celld dev` node and the
-  in-process fakes (sections, in order: auth, create, lockdown, keys,
-  members, identities, signin, computers, sprites, computer-runtime, builder, secrets, files, deploy, templates,
-  desktop, share, phase7, ops, public, effects, facet-cap, app-lockdown,
-  site, watch, schemas, channels, live, routes, cli, browser, jobs,
-  triggers, appfiles, blobs, notes, push, ai, budget, sandcastle, hermes, agents, addon, chat,
-  computer, screenshots, sync, restart, pathmode, node-full;
-  `crates/e2e/src/lanes/mod.rs`). The browser, notes, desktop, share,
-  phase7, chat, and screenshots sections drive headless Chrome
-  (`CHROME_BIN` to choose one; one Chrome serves the whole run, a fresh
-  browser context per section, and phase7's second person a context of
-  their own); `phase7` is phase 7's acceptance, the whole flow with two
-  people; `--only triggers` waits for a cron
+  builds `cell/`, `agent/`, and the CLI, then runs `crates/e2e` against
+  a fresh `celld dev` node and the in-process fakes (sections, in order:
+  auth, create, lockdown, keys, members, identities, signin, secrets,
+  files, deploy, templates, share, isolation, ops, public, effects,
+  facet-cap, app-lockdown, site, watch, schemas, channels, live, routes,
+  cli, browser, jobs, triggers, appfiles, blobs, notes, push, ai,
+  budget, agents, addon, sync, restart, pathmode, node-full;
+  `crates/e2e/src/lanes/mod.rs`). The share, isolation, browser, and
+  notes sections drive headless Chrome (`CHROME_BIN` to choose one; one
+  Chrome serves the whole run, a fresh browser context per section);
+  `--only triggers` waits for a cron
   minute (up to a minute; a full run deploys its cron fragment sections
   earlier). A section that errors or panics is one FAIL and the sections
   after it still run. The node runs from a staged copy of the cell in the
@@ -106,7 +97,7 @@ debt ledger).
   `FRAGMENT_NODE_LOGS=1` adds the node's own logs). Point the CLI at it with
   `FRAGMENT_HOST=http://127.0.0.1:8790` and run `fragment login` once. Dev fleets let jobs
   fetch local addresses (`FRAGMENT_EGRESS_LOCAL=allow`).
-- `cargo xtask try <todo|inbox|notes|chat> [name]` (with `cargo xtask dev` running):
+- `cargo xtask try <todo|inbox|notes> [name]` (with `cargo xtask dev` running):
   creates and deploys a fragment from a template under
   `target/devstack/try/` (never in the repo) and prints the link to open,
   a curl for the inbox, and a `fragment` alias for the dev stack. The
@@ -114,42 +105,27 @@ debt ledger).
   library), `inbox` (a trigger, a job, the inbox), and `notes` (files as
   the state, read through `App.fetch`, refreshed by a file trigger).
   `fragment new|init --template` scaffolds any of `templates/` (also
-  `blank`, `chat`, `desktop`, `hermes`); the platform's "new" page offers all but
-  `notes`.
+  `blank` and `calories`, which has a goose agent of its own); the
+  platform's "new" page offers all but `notes`.
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
   logic, host-tested), `crates/nip98`, `crates/native` (`KEYS`, built
   into the celld fork), `crates/templates` (`templates/`, embedded),
-  `crates/computer` (`fragment computer`), `crates/node` (the fleet's
-  launcher), `crates/fakes` (code.storage, OpenRouter, WorkOS, a push
-  service, Sprites), `crates/devstack`, `crates/e2e`.
-- `sandcastle/` is a separate Cargo workspace (self-hosted computers on
-  microVMs, docs/sandbox.md; a pure core, a deterministic simulator,
-  docs/sandcastle-rewrite.md) that must not depend on fragment's crates;
-  `cargo xtask check` does not cover it, CI's `sandcastle` job does. From
-  `sandcastle/`: `cargo clippy --workspace --all-targets --all-features --
-  -D warnings` and `cargo test --workspace --all-features`
-  (`SANDCASTLE_SIM_SEEDS=n` for more simulator seeds). Its test node is
-  `finite-lat-6`, and `sandcastle-e2e` its real-engine e2e
-  (`sandcastle/README.md`); changes to that host are fine, it was rented
-  for this.
+  `crates/fakes` (code.storage, OpenRouter, WorkOS, a push service),
+  `crates/devstack`, `crates/e2e`.
 - `.github/workflows/ci.yml` runs `check`, and the e2e in parallel: two
   jobs build what it runs (`cargo xtask e2e-kit`: the cell's wasm on
-  Linux; on macOS the agent's wasm, the computer client (Homebrew's
-  LLVM there), the node cached by its fork commit, the CLI, and the
-  suite), four shards each run a slice of the sections
+  Linux; on macOS the agent's wasm, the node cached by its fork commit,
+  the CLI, and the suite), four shards each run a slice of the sections
   from that kit (`--only`, and `--except` for the rest), and one `e2e`
   check passes when every shard does. Master's runs save the build
   caches with the tree they were built from, so a pull request's run
   rebuilds only the crates its changes reach.
-- The hosted fleet (`fleets/fragment-club.json`, `docs/operate.md`):
-  `cargo xtask deploy fragment-club` ships the agents' script and the
-  cell; `--nodes` ships the node image (local Docker), nodes before the
-  cell when both change; `cargo xtask e2e --fleet fragment-club` runs
-  the hosted e2e (live OpenRouter: a few cents); `cargo xtask fleet
-  fragment-club <celld command>` runs celld's operator commands
-  (`diagnose`, `cell list`, `queue info <q>`) with the bucket's keys.
-  Deploys to the hosted fleet and changes to its Fly app, bucket, or DNS
-  are Paul's to approve.
+- Nothing on master deploys. fragment.club (the hosted fleet) deploys
+  only from the `celld` branch (tag `celld-final`) until cutover: its
+  fleet file, node image, `cargo xtask deploy`/`fleet`/`e2e --fleet`,
+  and docs/operate.md's commands are that branch's. Deploys to the
+  hosted fleet and changes to its Fly app, bucket, or DNS are Paul's to
+  approve.
 
 ## Rules
 

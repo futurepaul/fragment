@@ -1,5 +1,12 @@
 # fragment.boats: fragments on a domain of their own
 
+**Since the cut** (tag `celld-final`; docs/cloudflare-v1.md, decision
+33): the desktop, `__frame`, the `frame` capability and its grant, the
+share sheet's embed, and the e2e's listed shape and `frames` section are
+gone. A frame session's redeeming half stays, with nothing to mint one
+(docs/technical-debt-ledger.md); isolation, the asked-once sign-in, and
+the move stay, tested by the `isolation` section.
+
 Status: **decided 2026-09-25.** Paul answered the three open questions
 (Answers, at the end). Slice 1 (decisions 2–4: isolation, framed
 sign-in, sign-in and sign-out) is built and live on fragment.club (PR

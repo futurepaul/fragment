@@ -19,8 +19,8 @@ is upstream's now (#228), and the commit ids below are the rebased ones. Sources
 | Tenants with identical app source shared one V8 realm | fixed (phase 4: one loaded worker per fragment) | `cell/src/ops.rs` |
 | A supervisor fetch could reach celld's internal listener or 6PN (SSRF) | mitigated since phase 3 (`CELLD_EGRESS_PUBLIC_ONLY`); **now also closed at the listener** | fork `1413fcd`, `ccdeb54` |
 | celld's internal listener has no auth (`/state`, `/do`, `/evict`, `/shutdown`) | **fixed**: `CELLD_INTERNAL_PEER_ONLY=1` serves only the fleet-signed routes (`/peer/*`, `/runtime/`) | fork `ccdeb54` |
-| Fleet secrets are Worker `vars` (in every isolate, and in the manifest in the bucket) | **fixed**: they are the node's environment (Fly secrets), read only by `KEYS`; a cell deploy refuses a var that holds one. The old deployments' manifests still hold them (debt ledger) | `crates/native`, `xtask/src/deploy.rs` |
-| Key material in wasm/JS heaps (sealing, the code.storage key, agents' nostr keys) | **fixed** for the fleet's keys and the agents' and fragments' own keys; tenant secrets (a fragment's `{{NAME}}`, an org's OpenRouter key, a VAPID key, a computer's token) still open in the cell at the egress point, now only for the cell that sealed them | `cell/src/keys.rs`, `agent/src/keys.rs` |
+| Fleet secrets are Worker `vars` (in every isolate, and in the manifest in the bucket) | **fixed**: they are the node's environment (Fly secrets), read only by `KEYS`; a cell deploy refuses a var that holds one. The old deployments' manifests still hold them (debt ledger) | `crates/native`, `xtask/src/deploy.rs` (the `celld` branch's) |
+| Key material in wasm/JS heaps (sealing, the code.storage key, agents' nostr keys) | **fixed** for the fleet's keys and the agents' and fragments' own keys; tenant secrets (a fragment's `{{NAME}}`, an org's OpenRouter key, a VAPID key) still open in the cell at the egress point, now only for the cell that sealed them | `cell/src/keys.rs`, `agent/src/keys.rs` |
 | A facet's SQLite has no size cap | **fixed**: 16 MiB per app (a mutation past it rolls back, 507), and the node's hard stop 4 MiB above | `cell/platform.mjs`, fork `553e923` |
 | 255 loaded workers per node, never released; one tenant can fill a node | **visible**: the next app answers 503 `node_full` and the rest serve on. Release is not built (debt ledger) | `cell/src/js.rs`, fork `8393f75` |
 | Code generation from strings, `Atomics.wait` in facets | **fixed**: `CELLD_DYNAMIC_LOCKDOWN=1` | fork `8393f75` |
@@ -53,9 +53,9 @@ is upstream's now (#228), and the commit ids below are the rebased ones. Sources
   body lost `fragmentSecret`). `fragment_core::secrets` keeps only the
   `{{NAME}}` parser.
 - **The agent** (`agent/src/keys.rs`): its nostr key is made by `KEYS`
-  and signs there (`Signer` in `agent/src/fleet.rs`); its computer's
-  token is sealed for it.
-- **Fleet config:** the fleet file's `secret_vars` became `node_secrets`
+  and signs there (`Signer` in `agent/src/fleet.rs`).
+- **Fleet config** (the `celld` branch's since the cut, tag
+  `celld-final`): the fleet file's `secret_vars` became `node_secrets`
   (Fly secrets, `FRAGMENT_KEYS_*`, staged by `deploy --nodes` from stdin,
   values never printed) and `var_files` (WorkOS's client id, not secret).
   `cargo xtask deploy` refuses a Worker variable that is a fleet secret by

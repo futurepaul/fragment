@@ -7,13 +7,13 @@ Hosting, permissions, sharing, crons, jobs, and channels are built in.
 
 A fragment is a folder of files in git, an app of named operations over
 its own SQLite, channels that pages follow live, and members with roles.
-Two add-ons are optional, and a fragment that declares neither carries
-nothing of them: an **agent** (goose, so a calorie tracker can take "2
-eggs and toast") and a **computer** (a Sprite that runs the `fragment`
-CLI and can build and publish fragments of its own). The **desktop** is
-a template that shows them off. Fragments run on
-[celld](https://celld.dev) (self-hosted Durable Objects that keep their
-state in a bucket); each is a cell that sleeps when idle.
+An **agent** is an optional add-on, and a fragment that declares none
+carries nothing of it: goose, so a calorie tracker can take "2 eggs and
+toast". Fragments run on [celld](https://celld.dev) (self-hosted Durable
+Objects that keep their state in a bucket); each is a cell that sleeps
+when idle. `master` is moving to Cloudflare
+([docs/cloudflare-v1.md](docs/cloudflare-v1.md)); computers come back
+there.
 
 This repo holds:
 
@@ -30,10 +30,10 @@ This repo holds:
 
 Read [docs/MODEL.md](docs/MODEL.md) for the model,
 [docs/api.md](docs/api.md) for the wire contract, and
-[docs/ROADMAP.md](docs/ROADMAP.md) for where it is going. fragment.club
-runs it: this repo is
-[futurepaul/fragment](https://github.com/futurepaul/fragment)'s `master`. MIT
-licensed; see [LICENSE](LICENSE).
+[docs/cloudflare-v1.md](docs/cloudflare-v1.md) for where it is going.
+This repo is [futurepaul/fragment](https://github.com/futurepaul/fragment);
+fragment.club runs its `celld` branch (tag `celld-final`) until it moves
+to Cloudflare. MIT licensed; see [LICENSE](LICENSE).
 
 ## Use it
 
@@ -63,7 +63,7 @@ Then:
 
 ```
 cargo xtask dev            # the cell and its agents on :8790, the code.storage and WorkOS fakes
-cargo xtask try todo       # in another terminal: todo | inbox | notes | chat
+cargo xtask try todo       # in another terminal: todo | inbox | notes
 ```
 
 `try` creates and deploys a fragment from a template under
@@ -80,9 +80,7 @@ cargo xtask e2e            # the full suite against a fresh celld node (--only a
 
 The e2e stages its own copy of the cell, so it runs alongside
 `cargo xtask dev`. Its browser sections drive headless Chrome
-(`CHROME_BIN` to choose one). `cargo xtask e2e --fleet fragment-club`
-runs the hosted sections against the live fleet (see
-[docs/operate.md](docs/operate.md)).
+(`CHROME_BIN` to choose one).
 
 ## Layout
 
@@ -94,14 +92,11 @@ crates/proto   wire types and limits
 crates/core    the cell's pure logic, host-tested (schemas, cron, globs, budgets, web push)
 crates/nip98   NIP-98 signing and verification
 crates/native  KEYS: the fleet's keys, served by the celld fork
-crates/computer  `fragment computer`: goose's developer tools on a computer
 crates/templates  templates/, embedded in the CLI and the cell
 crates/fakes   code.storage, OpenRouter, WorkOS, and push-service fakes
 crates/devstack  runs a celld node and the fakes
 crates/e2e     the end-to-end suite
-templates/     blank, chat, desktop, inbox, notes, todo
-fleets/        hosted fleets' settings (no secrets) and the node image's Dockerfile
-crates/node    the launcher that starts celld on a fleet Machine
-xtask/         build, celld, dev, try, check, e2e, e2e-kit, deploy, fleet
+templates/     blank, calories, inbox, notes, todo
+xtask/         build, celld, dev, try, check, e2e, e2e-kit
 docs/          model, contract, roadmap, phase records, the debt ledger
 ```

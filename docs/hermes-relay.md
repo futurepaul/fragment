@@ -1,6 +1,13 @@
 # Hermes' Relay, with the platform its connector
 
-How a fragment's Hermes answers its chats (docs/one-home.md, phase 2).
+**Its connector was deleted at the cut** (tag `celld-final`): the
+platform carries no Hermes code (docs/cloudflare-v1.md, "The rule"), and
+the bridge's next version lives in the Hermes image (decision 21). This
+file keeps what was read from Hermes' code about Relay, for that bridge;
+the paths below (`cell/src/relay.rs`, `/api/hermes/*`) are the tag's.
+
+How a fragment's Hermes answered its chats (docs/one-home.md at the tag,
+phase 2).
 Hermes' gateway has a generic connector protocol, Relay: it dials out
 to a connector over a WebSocket, and the connector hands it messages
 with who wrote them and turns its sends and edits into its own
@@ -18,7 +25,8 @@ proven on Discord and Telegram, so a Hermes upgrade re-reads it.
 - Hermes is told, in its computer's spec: `GATEWAY_RELAY_URL`
   (`<platform>/api/hermes/<fragment>`; it appends `/relay`),
   `GATEWAY_RELAY_ID` (the fragment's name), `GATEWAY_RELAY_SECRET` (the
-  cell's, sealed there; in the guest by decision 3 of docs/one-home.md),
+  cell's, sealed there; in the guest by decision 3 of docs/one-home.md
+  at the tag),
   `RELAY_HOME_CHANNEL`, and `HERMES_GATEWAY_BUSY_INPUT_MODE=queue`. With
   the id and secret pinned it provisions nothing; the URL turns its other
   messaging platforms off.
@@ -70,8 +78,8 @@ proven on Discord and Telegram, so a Hermes upgrade re-reads it.
   for the turn, and a leading `/` is escaped, so an answer would never
   arrive: `/approve`, `/approve session`, `/approve always` and `/deny`
   alone go on as the command itself, at once, mid-turn, from the chat's
-  owner or an editor (trusted as the owner is: docs/one-home.md,
-  decision 5). A guest's is text, in its turn. Hermes confirms it as a
+  owner or an editor (trusted as the owner is: docs/one-home.md at
+  the tag, decision 5). A guest's is text, in its turn. Hermes confirms it as a
   reply of the running turn.
 - **Kept until acked.** Each message is kept until Hermes acks it, and
   handed again on its next dial (it drops one it saw, by `(chat_id,

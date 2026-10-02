@@ -1,5 +1,12 @@
 # Phase 7: chats and sharing
 
+**The record of a phase.** Its chats (the chat template, the desktop it
+was driven from, the `phase7` section) went at the cut (tag
+`celld-final`; chats come back as a blessed fragment template:
+docs/cloudflare-v1.md, "The rule"). Sharing stays: the share sheet,
+`/join`, guests, and opening a fragment by its URL (the `share` and
+`isolation` sections).
+
 Status: **done (2026-09-25) when the e2e's `phase7` section is green,
 except the share header.** Slices A, B1, C, and D are merged; E is the
 `phase7` section. The ROADMAP keeps the acceptance (phase 7); this file

@@ -1,5 +1,11 @@
 # Operating a fleet
 
+**This runbook is the `celld` branch's** (tag `celld-final`), which
+fragment.club deploys from until cutover (docs/cloudflare-v1.md,
+decision 35): `fleets/`, the node image, `crates/node`, and
+`cargo xtask deploy`, `fleet`, and `e2e --fleet` are not on `master`.
+Run what follows from a checkout of that branch.
+
 How a hosted fleet runs and how to change it. The fleet `fragment-club`
 is the only one; everything below takes the fleet's name, and reads its
 settings from `fleets/<fleet>.json` (no secret values there: only the
@@ -88,7 +94,7 @@ person's OpenRouter key; `FRAGMENT_BUDGET_USD` (default 20) and
 <usd>`) in `vars`.
 `FRAGMENT_SANDCASTLE_NODES` in `vars` lists the sandcastle nodes (their
 own keys, npub or 64 hex, comma-separated) that may fetch a computer's
-model token (`POST /api/sandcastle/credentials`, docs/sandbox.md); a node
+model token (`POST /api/sandcastle/credentials`, docs/sandbox.md at the tag); a node
 shows its key at `GET https://api.<its domain>/v1/health` (`node_key`).
 Removing a node's key refuses its computers' model calls at once, and its
 next refetch, which withdraws the tokens from its machines.
