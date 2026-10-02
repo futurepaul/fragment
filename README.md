@@ -104,5 +104,4 @@ fleets/        hosted fleets' settings (no secrets) and the node image's Dockerf
 crates/node    the launcher that starts celld on a fleet Machine
 xtask/         build, celld, dev, try, check, e2e, e2e-kit, deploy, fleet
 docs/          model, contract, roadmap, phase records, the debt ledger
-spikes/        the phase 1 spikes and their verdicts
 ```
