@@ -79,7 +79,18 @@ fn dial(url: &str, id: &str, secret: &str) -> Result<Ws, String> {
     let mut req = tungstenite::client::IntoClientRequest::into_client_request(format!("{at}/relay")).map_err(|e| e.to_string())?;
     let bearer = format!("Bearer {}", fragment_core::relay::token(id, secret, exp));
     req.headers_mut().insert("authorization", bearer.parse().map_err(|_| "a header")?);
-    let (ws, _) = tungstenite::connect(req).map_err(|e| e.to_string())?;
+    // a `.localhost` name is loopback (RFC 6761), whether or not the
+    // machine's resolver knows it (CI's does not): reached at 127.0.0.1, the
+    // name kept in `Host`, as the e2e's own client reaches a local node
+    let uri = req.uri().clone();
+    let host = uri.host().unwrap_or("");
+    let ws = if host == "localhost" || host.ends_with(".localhost") {
+        let port = uri.port_u16().unwrap_or(80);
+        let tcp = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+        tungstenite::client(req, MaybeTlsStream::Plain(tcp)).map_err(|e| e.to_string())?.0
+    } else {
+        tungstenite::connect(req).map_err(|e| e.to_string())?.0
+    };
     if let MaybeTlsStream::Plain(s) = ws.get_ref() {
         s.set_read_timeout(Some(POLL)).map_err(|e| e.to_string())?;
     }
