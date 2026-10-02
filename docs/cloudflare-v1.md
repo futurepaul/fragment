@@ -452,6 +452,38 @@ exit says.
 - **The self-deploy lane** (phase 8), and **restore drills** into an
   empty computer.
 
+## Bugs the port must fix
+
+Found 2026-10-02 building `avatar-lab` on fragment.club (`celld-final`).
+Each one needs a test in the phase that ports its feature.
+
+1. **AI images between 256 KiB and 1 MiB can't be saved.** `store_media`
+   (`cell/src/ai.rs`) commits through `commit_files`, which caps a write
+   at 256 KiB, while blobs start at 1 MiB. The error was "the files
+   written is 347234 bytes; the limit is 262144". Phase 7: a generated
+   file is a blob from the first byte, or the two limits meet.
+2. **A retried image step buys a new image.** Every `store_media` error
+   is retryable, so each retry calls the model again, and only the last
+   attempt is settled in the ledger. Phase 3/7: a storage failure after
+   a paid call is not retried against the model, and every paid call is
+   metered.
+3. **A failed step keeps its reservation.** A step that fails for good
+   still holds its budget reservation. Phase 3: a final failure releases
+   it, with a test.
+4. **`fragment deploy` reports success when the code is refused.** It
+   printed `live:` while the status said an operation name broke
+   `^[a-z][a-z0-9_]{0,63}$`, and the guide never names that rule. Phase 2:
+   a refused deploy exits non-zero with the reason; the guide states the
+   rule.
+5. **An image is served by its path's extension, not its bytes.** A JPEG
+   saved at `.png` is served as `image/png`. Phase 7: `job.ai.image`
+   picks the extension from the media type, or `__file` sniffs it.
+6. **Small job-written files have no cacheable URL.** `__file` is
+   `no-store`, and only blobs (1 MiB and up) have `__blob/<sha>`. Phase 7:
+   a content-addressed, immutable URL for any committed file.
+7. **`fragment create` prints secrets.** The `?view=` token and the
+   inbox token go to stdout. Phase 2: they're shown only on request.
+
 ## Risks
 
 - **Gmail scopes.** Google's verification (a CASA assessment) is needed
