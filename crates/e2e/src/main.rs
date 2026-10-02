@@ -16,7 +16,6 @@
 
 mod api;
 mod browser;
-mod hosted;
 mod lanes;
 
 use std::path::{Path, PathBuf};
@@ -517,26 +516,17 @@ fn main() -> Result<()> {
         Some("cua-driver") => return lanes::builder::stand_in_cua(&args[1..]),
         _ => {}
     }
-    let (hosted, rest) = match args.split_first() {
-        Some((flag, rest)) if flag == "--hosted" => (true, rest),
-        _ => (false, args.as_slice()),
-    };
     let list = |names: &str| names.split(',').map(str::to_string).collect::<Vec<_>>();
-    let (only, except) = match rest {
+    let (only, except) = match args.as_slice() {
         [] => (None, vec![]),
         [flag, sections] if flag == "--only" => (Some(list(sections)), vec![]),
-        [flag, sections] if flag == "--except" && !hosted => (None, list(sections)),
-        _ => bail!("usage: fragment-e2e [--hosted] [--only <section>[,<section>...] | --except <section>[,<section>...]]"),
+        [flag, sections] if flag == "--except" => (None, list(sections)),
+        _ => bail!("usage: fragment-e2e [--only <section>[,<section>...] | --except <section>[,<section>...]]"),
     };
     let root = devstack::repo_root();
     let cli = std::env::var_os("FRAGMENT_BIN").map(PathBuf::from).unwrap_or_else(|| root.join("target/release/fragment"));
     if !cli.is_file() {
         bail!("no CLI at {} (cargo build --release -p fragment-cli, or set FRAGMENT_BIN)", cli.display());
-    }
-    if hosted {
-        let scratch = root.join("target/e2e-hosted");
-        std::fs::create_dir_all(&scratch)?;
-        return hosted::run(cli, scratch, only.map(|o| o.join(",")));
     }
     let tools = devstack::Tools::locate()?;
     let org_key = fake::generate_org_key_pem();

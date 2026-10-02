@@ -95,9 +95,6 @@ pub struct Api {
     pub base: String,
     pub port: u16,
     pub suffix: Option<String>,
-    /// A hosted fleet: requests go to their URLs as they are (a local node
-    /// is reached at 127.0.0.1 with the site in `Host`).
-    remote: bool,
 }
 
 impl Api {
@@ -107,18 +104,7 @@ impl Api {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("http client");
-        Api { http, base: format!("http://127.0.0.1:{port}"), port, suffix: suffix.map(str::to_string), remote: false }
-    }
-
-    /// A hosted fleet at `base` (https), its fragments on `<label>--<username>.<suffix>`
-    /// when it has a suffix.
-    pub fn remote(base: &str, suffix: Option<&str>) -> Api {
-        let http = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(120))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("http client");
-        Api { http, base: base.trim_end_matches('/').to_string(), port: 443, suffix: suffix.map(str::to_string), remote: true }
+        Api { http, base: format!("http://127.0.0.1:{port}"), port, suffix: suffix.map(str::to_string) }
     }
 
     /// The URL of `path` on a fragment's own host (or its `/f/<name>/` path
@@ -128,7 +114,6 @@ impl Api {
     pub fn site_url(&self, name: &str, path: &str) -> String {
         let host = fragment_proto::flat_name(name).unwrap_or_else(|| name.to_string());
         match &self.suffix {
-            Some(s) if self.remote => format!("https://{host}.{s}/{path}"),
             Some(s) => format!("http://{host}.{s}:{}/{path}", self.port),
             None => format!("{}/f/{name}/{path}", self.base),
         }
@@ -142,16 +127,12 @@ impl Api {
     pub fn call(&self, c: Call<'_>) -> Result<Reply> {
         let url = reqwest::Url::parse(&c.url)?;
         let body = c.body.unwrap_or_default();
-        let mut req = if self.remote {
-            self.http.request(c.method.parse()?, url.clone()).body(body.clone())
-        } else {
-            // Everything goes to the node; the Host header names the site.
-            let host = format!("{}:{}", url.host_str().unwrap_or(""), url.port().unwrap_or(80));
-            let mut to = url.clone();
-            to.set_host(Some("127.0.0.1")).expect("an http URL takes a host");
-            to.set_port(Some(self.port)).expect("an http URL takes a port");
-            self.http.request(c.method.parse()?, to).header("host", host).body(body.clone())
-        };
+        // Everything goes to the node; the Host header names the site.
+        let host = format!("{}:{}", url.host_str().unwrap_or(""), url.port().unwrap_or(80));
+        let mut to = url.clone();
+        to.set_host(Some("127.0.0.1")).expect("an http URL takes a host");
+        to.set_port(Some(self.port)).expect("an http URL takes a port");
+        let mut req = self.http.request(c.method.parse()?, to).header("host", host).body(body.clone());
         if let Some(ct) = c.content_type {
             req = req.header("content-type", ct);
         }
@@ -397,15 +378,11 @@ impl Socket {
         let url = reqwest::Url::parse(http)?;
         let mut to = url.clone();
         to.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" }).map_err(|()| anyhow::anyhow!("{http} is not http(s)"))?;
-        if !api.remote {
-            // a local node is reached at 127.0.0.1, the site in `Host` (as `call` does)
-            to.set_host(Some("127.0.0.1"))?;
-            to.set_port(Some(api.port)).map_err(|()| anyhow::anyhow!("{http} takes no port"))?;
-        }
+        // the node is reached at 127.0.0.1, the site in `Host` (as `call` does)
+        to.set_host(Some("127.0.0.1"))?;
+        to.set_port(Some(api.port)).map_err(|()| anyhow::anyhow!("{http} takes no port"))?;
         let mut req = to.as_str().into_client_request()?;
-        if !api.remote {
-            req.headers_mut().insert("host", format!("{}:{}", url.host_str().unwrap_or(""), url.port().unwrap_or(80)).parse()?);
-        }
+        req.headers_mut().insert("host", format!("{}:{}", url.host_str().unwrap_or(""), url.port().unwrap_or(80)).parse()?);
         if let Some(k) = keys {
             req.headers_mut().insert("authorization", k.header("GET", http, &[], now_s()).parse()?);
         }
