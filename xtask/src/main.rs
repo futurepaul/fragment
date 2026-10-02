@@ -14,22 +14,17 @@
 //!                    (todo, inbox, notes, chat), scaffolded under target/devstack/try
 //!                    so nothing lands in the repo; prints what to open and paste
 //!   e2e [args...]    build, then run crates/e2e (args pass through: --only <section>[,...]
-//!                    or --except <section>[,...]);
-//!                    with --fleet <fleet> first, run its hosted sections against
-//!                    that fleet instead
+//!                    or --except <section>[,...])
 //!   e2e-kit <file> [cell] [agent] [client] [native]
 //!                    build what the e2e runs and pack it into one .tar.gz, for
 //!                    CI's shards: unpacked at the repo root, they run
 //!                    target/release/fragment-e2e with no toolchain; with parts
 //!                    named, those alone (CI builds them on two machines)
 //!   check            host tests and clippy, warnings denied
-//!   deploy <fleet> [--nodes | --secrets]
-//!                    ship the cell to a hosted fleet (fleets/<fleet>.json), or
-//!                    with --nodes roll its Machines to a new node image (and
-//!                    its secrets), with --secrets set its secrets alone
-//!   fleet <fleet> <celld command...>
-//!                    a celld operator command against the fleet's bucket
-//!                    (diagnose, cell list, queue info <queue>, ...)
+//!
+//! No command deploys: fragment.club runs on celld from the `celld` branch
+//! (the tag celld-final) until the move to Cloudflare (docs/cloudflare-v1.md,
+//! decision 35), and master's deploy arrives with it.
 
 use std::net::TcpStream;
 use std::path::Path;
@@ -39,7 +34,6 @@ use anyhow::{bail, Context, Result};
 use fragment_devstack as devstack;
 
 mod client;
-mod deploy;
 
 const WORKER_BUILD_VERSION: &str = "0.8.5";
 const DEV_PORT: u16 = 8790;
@@ -51,8 +45,8 @@ const DEV_WORKOS_KEY: &str = "sk_test_fragment_dev";
 const DEV_ORG: &str = "fragment-dev";
 
 /// A command as errors show it: the program and its arguments only
-/// (`{cmd:?}` would print the environment set on it, and a deploy sets
-/// tokens there).
+/// (`{cmd:?}` would print the environment set on it, and the dev stack
+/// sets the node's secrets there).
 fn shown(cmd: &Command) -> String {
     std::iter::once(cmd.get_program()).chain(cmd.get_args()).map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" ")
 }
@@ -265,19 +259,6 @@ fn try_template(args: &[String]) -> Result<()> {
 }
 
 fn e2e(args: &[String]) -> Result<()> {
-    let manifest = devstack::repo_root().join("Cargo.toml");
-    // against a hosted fleet: its deployed cell, the CLI built here
-    if let [flag, fleet, rest @ ..] = args {
-        if flag == "--fleet" {
-            run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli"]))?;
-            return run(Command::new("cargo")
-                .args(["run", "--quiet", "--release", "--manifest-path"])
-                .arg(&manifest)
-                .args(["-p", "fragment-e2e", "--", "--hosted"])
-                .args(rest)
-                .envs(deploy::hosted_e2e_env(fleet)?));
-        }
-    }
     build_e2e()?;
     run(Command::new(devstack::repo_root().join(E2E_BIN)).args(args))
 }
@@ -490,9 +471,7 @@ fn main() -> Result<()> {
         Some("e2e") => e2e(&args[1..]),
         Some("e2e-kit") => e2e_kit(&args[1..]),
         Some("check") => check(),
-        Some("deploy") => deploy::run(&args[1..]),
-        Some("fleet") => deploy::operate(&args[1..]),
-        _ => bail!("usage: cargo xtask build | celld | dev [--clean] | try <template> [name] | e2e [--fleet <fleet>] [--only | --except <section>[,...]] | e2e-kit <file> [cell] [agent] [native] | check | deploy <fleet> [--nodes | --secrets] | fleet <fleet> <celld command...>"),
+        _ => bail!("usage: cargo xtask build | celld | dev [--clean] | try <template> [name] | e2e [--only | --except <section>[,...]] | e2e-kit <file> [cell] [agent] [client] [native] | check"),
     }
 }
 
@@ -549,8 +528,8 @@ mod tests {
 
     #[test]
     fn a_failed_command_never_shows_its_environment() {
-        let mut cmd = std::process::Command::new("flyctl");
-        cmd.args(["deploy", "--remote-only"]).env("FLY_API_TOKEN", "FlyV1 not-a-real-token");
-        assert_eq!(super::shown(&cmd), "flyctl deploy --remote-only");
+        let mut cmd = std::process::Command::new("celld");
+        cmd.args(["dev", "--port", "8790"]).env("FRAGMENT_KEYS_HOST_SECRET", "not-a-real-secret");
+        assert_eq!(super::shown(&cmd), "celld dev --port 8790");
     }
 }
