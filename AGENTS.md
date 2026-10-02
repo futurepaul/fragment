@@ -10,6 +10,11 @@ github.com/futurepaul/fragment's `master`, which fragment.club runs) and on cell
 
 ## Read first
 
+0. `docs/cloudflare-v1.md` — **the plan of record since 2026-10-02**:
+   fragment v1 entirely on Cloudflare, its decisions, phases and the
+   hard cut. Where it disagrees with anything below, it wins.
+   `SPECIAL-CASE-INVENTORY.md` lists the platform surfaces that are not
+   fragments, and why; keep it short.
 1. `docs/ROADMAP.md` — decisions, truth map, phases (and what is live),
    escalations.
 2. `docs/MODEL.md` — the core model on celld primitives and the spikes.

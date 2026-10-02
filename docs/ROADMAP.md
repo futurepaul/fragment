@@ -3,6 +3,9 @@
 Decided 2026-09-23. This supersedes fragment's 2026-09-07 roadmap (git
 history keeps it); its truth map and wire contract carry forward below.
 Reshaped 2026-09-26: the fragment is the product (decisions 19–22).
+Re-aimed 2026-10-02: `docs/cloudflare-v1.md` is the plan of record (all
+on Cloudflare, Hermes agents, the hard cut), and wins where it
+disagrees with this file.
 Engineering style: `/Users/futurepaul/dev/finite/engineering-style/
 engineering-style.md` (the Finite contract), including hard cuts, the
 debt ledger (`docs/technical-debt-ledger.md`), and assertions on in
