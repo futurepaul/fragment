@@ -512,6 +512,24 @@ fn chats(s: &mut Suite, api: Api, home: &std::path::Path, owner: &Keys, hermes: 
         json!(steps()),
     );
 
+    // its approvals: it asks before something risky, and waits; the owner
+    // answers mid-turn (the command itself), a guest's answer is text
+    let approvals = s.sandcastle.relay_approvals().len();
+    post(&api, owner, &chat, "a1", json!({ "text": "do something risky" }))?;
+    let asked = soon(s, || steps().iter().any(|t| t.contains("needs your OK")));
+    s.ok("Hermes asks before something risky, and its turn waits for an answer", asked, json!(steps()));
+    post(&api, &guest, &chat, "a2", json!({ "text": "/approve" }))?;
+    std::thread::sleep(Duration::from_millis(1200));
+    let unanswered = s.sandcastle.relay_approvals().len() == approvals;
+    s.ok("a guest's /approve answers nothing: a guest does not say yes for the owner", unanswered, json!(s.sandcastle.relay_approvals()));
+    post(&api, owner, &chat, "a3", json!({ "text": "/approve" }))?;
+    let approved = soon(s, || s.sandcastle.relay_approvals()[approvals..] == [(me.clone(), "/approve".to_string())]);
+    let finished = soon(s, || said(&api, owner, &chat, &by, &format!("echo: [{me}] do something risky (approved)")) == 1);
+    s.ok("its owner's /approve reaches it at once, mid-turn, and the turn goes on", approved && finished, json!({ "approvals": s.sandcastle.relay_approvals(), "chat": records(&api, owner, &chat, "chat") }));
+    let as_text = soon(s, || s.sandcastle.relay_heard().iter().any(|e| e["text"] == "\u{200b}/approve" && e["source"]["user_name"] == guest_name.as_str()));
+    s.ok("and the guest's comes in its own turn, as text", as_text, json!(s.sandcastle.relay_heard()));
+    soon(s, || said(&api, owner, &chat, &by, &format!("echo: [{guest_name}] /approve")) == 1);
+
     // a Stop cuts a turn short
     s.sandcastle.slow_turns(8000);
     let interrupted = s.sandcastle.relay_interrupted();

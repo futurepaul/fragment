@@ -7,7 +7,12 @@
 //! streamed (a first send with the cursor, the whole text as an edit),
 //! `👀` off, `✅`. Its reply echoes what it was told as Hermes reads a
 //! shared group message: `echo: [name] text`. A Stop mid-turn
-//! (`interrupt_inbound`) cancels it: no reply, only `👀` off.
+//! (`interrupt_inbound`) cancels it: no reply, only `👀` off. A message
+//! that asks for something risky waits for an approval, as Hermes' manual
+//! approvals do: its prompt as progress, then an inbound `/approve…` or
+//! `/deny` (the command itself, unescaped: one escaped is text) answered at
+//! once mid-turn with a confirmation, and its reply says `(approved)`,
+//! `(denied)`, or `(not approved)` past `ANSWER_WAIT`.
 //!
 //! Levers (the fake's): `away` closes every gateway's socket and keeps it
 //! away until its computer is woken (its owner's wake); `turn_ms` slows a
@@ -39,6 +44,8 @@ pub struct Shared {
     pub turn_ms: u64,
     /// Turns a Stop cut short.
     pub interrupted: u64,
+    /// Approval answers a gateway took mid-turn: (who, the command).
+    pub approvals: Vec<(String, String)>,
 }
 
 type Ws = WebSocket<MaybeTlsStream<TcpStream>>;
@@ -175,6 +182,29 @@ fn wait(shared: &Arc<Mutex<Shared>>, ws: &mut Ws, lines: &mut VecDeque<Value>, m
     Ok(false)
 }
 
+/// Waits for an approval answer mid-turn, as Hermes' gateway takes one
+/// while its turn waits: an inbound whose text is the command itself
+/// (escaped, it is text, and waits its turn): its sender, command, and id.
+fn approval(shared: &Arc<Mutex<Shared>>, ws: &mut Ws, lines: &mut VecDeque<Value>) -> Result<Option<(String, String, String)>, ()> {
+    let until = Instant::now() + ANSWER_WAIT;
+    // bounded by ANSWER_WAIT
+    while Instant::now() < until {
+        let at = lines.iter().position(|f| f["type"] == "inbound" && f["event"]["text"].as_str().is_some_and(|t| t.starts_with("/approve") || t == "/deny"));
+        if let Some(i) = at {
+            let f = lines.remove(i).expect("found");
+            if let Some(b) = f["bufferId"].as_str() {
+                send(ws, json!({ "type": "inbound_ack", "bufferId": b }))?;
+            }
+            let field = |p: &str| f.pointer(p).and_then(Value::as_str).unwrap_or("").to_string();
+            let answer = (field("/event/source/user_name"), field("/event/text"), field("/event/message_id"));
+            shared.lock().unwrap().approvals.push((answer.0.clone(), answer.1.clone()));
+            return Ok(Some(answer));
+        }
+        read(shared, ws, lines)?;
+    }
+    Ok(None)
+}
+
 fn turn(shared: &Arc<Mutex<Shared>>, ws: &mut Ws, lines: &mut VecDeque<Value>, next_id: &mut u64, frame: &Value) -> Result<(), ()> {
     let event = &frame["event"];
     let (chat, mid) = (event["source"]["chat_id"].as_str().unwrap_or("").to_string(), event["message_id"].as_str().unwrap_or("").to_string());
@@ -190,7 +220,22 @@ fn turn(shared: &Arc<Mutex<Shared>>, ws: &mut Ws, lines: &mut VecDeque<Value>, n
         let id = sent["message_id"].as_str().unwrap_or("").to_string();
         act(shared, ws, lines, next_id, json!({ "op": "edit", "chat_id": chat, "message_id": id, "content": "💻 terminal\n🔍 Searching the web", "metadata": {} }))?;
     }
-    let reply = format!("echo: [{}] {text}", event["source"]["user_name"].as_str().unwrap_or("?"));
+    let mut reply = format!("echo: [{}] {text}", event["source"]["user_name"].as_str().unwrap_or("?"));
+    if text.contains("risky") {
+        let ask = "⚠️ **Hermes wants to run a command that needs your OK**\nReply `/approve` to run it once, or `/deny`.";
+        act(shared, ws, lines, next_id, json!({ "op": "send", "chat_id": chat, "content": ask, "reply_to": null, "metadata": {} }))?;
+        let answered = approval(shared, ws, lines)?;
+        if let Some((who, cmd, mid)) = &answered {
+            // confirmed at once, as a reply to the answer
+            act(shared, ws, lines, next_id, json!({ "op": "send", "chat_id": chat, "content": format!("✅ {cmd} from {who}"), "reply_to": mid, "metadata": { "reply_to_message_id": mid } }))?;
+        }
+        let said = match answered.as_ref().map(|a| a.1.as_str()) {
+            Some("/deny") => "denied",
+            Some(_) => "approved",
+            None => "not approved",
+        };
+        reply = format!("{reply} ({said})");
+    }
     let half: String = reply.chars().take(reply.chars().count() / 2).collect();
     let first = json!({ "op": "send", "chat_id": chat, "content": format!("{half} ▉"), "reply_to": mid,
         "metadata": { "reply_to_message_id": mid, "expect_edits": true } });
