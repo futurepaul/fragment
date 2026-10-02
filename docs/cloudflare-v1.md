@@ -174,9 +174,18 @@ speaking Cloudflare's APIs) returns once this product works.
     A canary is a per-computer pin. Rollback is the pin back, plus a
     point-in-time restore when the new image moved its data's schema.
 20. **Preview environments.** Every branch deploys a complete, separately
-    named copy to the dev account (its own Workers, DOs, containers and
-    R2 prefix) with one command. The hosted e2e runs against it,
-    including real Hermes on the candidate image.
+    named copy to the dev account with one command: its own Workers, DOs,
+    Workflows, Queues, containers and R2 prefix. It is routed on a dev
+    zone with leading-wildcard routes (`*--<branch>.<dev zone>`), which a
+    one-level certificate covers. The hosted e2e runs against it,
+    including real Hermes on the candidate image. A teardown command
+    removes a branch's copy, since an account holds at most 500 DO
+    classes (about 80 branches).
+
+    Cloudflare's Worker Previews can't be this. Spike S1 (2026-10-02)
+    found that a Preview's Workflows, Queue consumers and service bindings
+    stay on production, and that it can't host per-fragment origins.
+    Previews may still serve the shell alone.
 21. **The Hermes bridge lives in the Hermes image.** It is a small process
     next to Hermes. It speaks Hermes' Relay contract locally, with the
     structured operations:
@@ -451,6 +460,43 @@ exit says.
 - **The browser lane:** headless Chrome on the shell, desktop and phone.
 - **The self-deploy lane** (phase 8), and **restore drills** into an
   empty computer.
+
+## Spike results
+
+**S1, the Worker Loader and Facets (2026-10-02, deployed and local;
+evidence in the session's `spikes/s1-loader/RESULTS.md`).** The cell's
+shape (`js.rs`) runs on real Workers essentially unchanged.
+
+What held:
+- each facet has its own SQLite, invisible to the supervisor and to
+  other facets;
+- a facet's data survives eviction, a parent redeploy, and new code
+  (`facets.abort` then `get` with the new class);
+- FTS5 and JSON1 work;
+- `limits` are enforced;
+- `globalOutbound: null` and the Egress loopback behave as fragment
+  needs;
+- capability props can't be forged from inside.
+
+What the port must add:
+- **`platform.mjs` locks the author's storage.** It wraps `setAlarm`,
+  `transaction` and `ctx.facets` before `super()`. A facet that sets an
+  alarm wedges, answering `internal error` with `durableObjectReset`,
+  until the platform Worker is redeployed. Author code could also start
+  nested facets outside its database cap.
+- **The capability API is batched, or `subRequests` raised.** Capability
+  RPC calls count against `subRequests`, so the current cap of 50 limits
+  a query to 50 capability calls.
+- **`facet_error` mapping:** the 10-in-flight concurrency error maps to
+  `NodeFull`, and the CPU error to `AppFailed`. Never retry on
+  `overloaded`.
+- **Runaway-CPU tests run only on a deployment.** Local workerd enforces
+  no `cpuMs`, `subRequests` or concurrency limit, and a busy loop takes
+  the whole dev node down.
+- **A Loader id is per fragment and per code version.** The isolate, and
+  with it its env and props, is shared by everything that uses one id.
+  That also gives the billing unit: $0.002 per fragment per version per
+  day, past 1,000 a month.
 
 ## Bugs the port must fix
 
