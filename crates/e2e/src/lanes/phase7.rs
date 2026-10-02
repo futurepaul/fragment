@@ -214,6 +214,20 @@ fn sign_in(chrome: &mut Browser, api: &Api, email: &str, username: &str) -> Resu
     Ok((Person { browser, keys, id, username: username.to_string() }, home))
 }
 
+/// New chat's menu, open: who answers the new chat. A click that a late
+/// resize or a lost focus closed again (the desktop closes its menus so)
+/// is made again.
+fn ask_who_answers(s: &Suite, chrome: &mut Browser, desk: &Page) -> bool {
+    let open = |chrome: &mut Browser| chrome.eval(desk, "!document.getElementById('menu').hidden && !!document.querySelector('#menu [data-answers]')").ok() == Some(json!(true));
+    s.eventually(WAIT, || {
+        if !open(chrome) {
+            let _ = chrome.click(desk, "#new-chat");
+            std::thread::sleep(Duration::from_millis(400));
+        }
+        open(chrome)
+    })
+}
+
 /// The desktop opens the chat's share sheet as a person does, a click each
 /// on its row's … menu and on Share…: a dialog on the desktop, framing the
 /// platform's sheet at `sheet`, signed in through `__share`.
@@ -276,8 +290,10 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // chat by username in the sheet
     let desk = home;
     chrome.viewport(&desk, 1440, 900, false)?;
-    chrome.click(&desk, "#new-chat")?;
-    anyhow::ensure!(chrome.until(&desk, "!document.getElementById('menu').hidden", WAIT), "New chat did not ask who answers");
+    chrome.front(&desk)?;
+    // the desktop closes a menu as its window resizes or loses focus: the new size first
+    anyhow::ensure!(chrome.until(&desk, "innerWidth === 1440", WAIT), "the desktop did not take its new size");
+    anyhow::ensure!(ask_who_answers(s, &mut chrome, &desk), "New chat did not ask who answers: {}", shown(&mut chrome, &desk));
     chrome.click(&desk, "#menu [data-answers=agent]")?;
     let opened = chrome.until(&desk, "document.querySelectorAll('#chats .row').length === 1 && !!document.querySelector('#frames iframe:not([hidden])')?.dataset.fragment", WAIT);
     let name = chrome.eval(&desk, "document.querySelector('#frames iframe:not([hidden])')?.dataset.fragment ?? ''")?.as_str().unwrap_or("").to_string();
@@ -487,7 +503,7 @@ fn hermes_chat(s: &mut Suite, chrome: &mut Browser, api: &Api, owner: &Person, g
     chrome.front(desk)?;
     let row = format!("!!document.querySelector('#computers .row[data-key={:?}]')", format!("app:{hermes}"));
     let listed = chrome.until(desk, &row, WAIT);
-    chrome.click(desk, "#new-chat")?;
+    ask_who_answers(s, chrome, desk);
     let offered = format!("[...document.querySelectorAll('#menu [data-answers=computer]')].map(b => b.dataset.computer).join() === {hermes:?}");
     let offers = chrome.until(desk, &offered, WAIT);
     s.ok(
