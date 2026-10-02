@@ -69,6 +69,12 @@ asyncio.run(main())
 /// Its screen too (docs/one-home.md, phase 3: the `-desktop` image's
 /// TigerVNC and Xfce): started with it, its browser shown there, so its
 /// owner watches it work and can take over (phase 4).
+///
+/// Its model as well (`config`): the messaging gateway, which the Relay
+/// is, reads its model from config.yaml alone (`model.default`), never from
+/// `HERMES_INFERENCE_MODEL`, which only the dashboard reads; without it the
+/// gateway asks for Hermes' own default, which the platform's model route
+/// refuses (fragment.club, 2026-10-02).
 const CONFIG: &str = "group_sessions_per_user: false
 streaming:
   enabled: true
@@ -86,6 +92,14 @@ bot_desktop:
 browser:
   headed: true
 ";
+
+/// The managed overlay for a Hermes on `model` (one of the platform's,
+/// `fragment_proto::COMPUTER_MODELS`: no quote or line break in it).
+fn config(model: &str) -> String {
+    assert!(!model.is_empty() && !model.contains(['"', '\\', '\n']), "a model's name is one plain line: {model:?}");
+    format!("{CONFIG}model:\n  default: \"{model}\"\n")
+}
+
 /// A Hermes' memory: Hermes' own two processes, its screen (about 216
 /// MiB), and a headed browser on it (about 1 GiB more, Hermes' figures).
 /// One made before its screen keeps the size it was made with (a node
@@ -198,7 +212,7 @@ impl Spec<'_> {
             "service": {
                 "argv": [],
                 "init": {
-                    "argv": ["/init", "/bin/sh", "-c", format!("mkdir -p /etc/hermes && cat > /etc/hermes/config.yaml <<'YAML'\n{CONFIG}YAML\n{BRIDGE} & exec /opt/hermes/docker/main-wrapper.sh gateway run")],
+                    "argv": ["/init", "/bin/sh", "-c", format!("mkdir -p /etc/hermes && cat > /etc/hermes/config.yaml <<'YAML'\n{}YAML\n{BRIDGE} & exec /opt/hermes/docker/main-wrapper.sh gateway run", config(self.model))],
                     "stop": ["/run/s6/basedir/bin/halt"],
                 },
                 "port": PUBLISHED_PORT,
@@ -331,7 +345,17 @@ mod tests {
         assert!(script.contains("  busy_input_mode: queue\n") && script.contains("streaming:\n  enabled: true\n") && script.contains("\nYAML\n"));
         // its screen, with its browser on it, and room for both
         assert!(script.contains("bot_desktop:\n  auto_start: true\n") && script.contains("browser:\n  headed: true\n"));
+        // its model where the gateway reads it (config.yaml alone), not only in the env the dashboard reads
+        assert!(script.contains("model:\n  default: \"m\"\nYAML\n"), "{script}");
         assert_eq!((spec["memory_mib"].as_u64(), grant(MEMORY_MIB)["memory_mib_max"].as_u64()), (Some(6144), Some(6144)));
+    }
+
+    /// Goal: a model's name goes into the overlay as one plain YAML string.
+    /// Invalid: a quote or a line break in it would write other settings.
+    #[test]
+    #[should_panic(expected = "a model's name is one plain line")]
+    fn a_model_with_a_line_break_is_refused() {
+        config("m\nbrowser: {}");
     }
 
     /// Goal: a Hermes that answers chats dials its fragment's connector,
