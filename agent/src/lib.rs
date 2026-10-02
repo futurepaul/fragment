@@ -38,9 +38,6 @@
 //!   PUT  /api/a/{name}/scope          {fragment, tools, instructions, model?}: a fragment's own agent takes its block
 //!   POST /api/a/{name}/job            {id, asker, conversation, channel?, text}: a job's turn (`job.agent`), once per id
 //!   GET  /api/a/{name}/job?turn=      that turn's state: {ended, outcome, text, error}
-//!   PUT  /api/a/{name}/computer       {url, token, cwd? ("work")}: attach a computer (`fragment computer serve`)
-//!   DELETE /api/a/{name}/computer     detach it
-//!   PUT  /api/a/{name}/home           {computer | null}: the owner's home computer, where hand-offs go by default
 //!   POST /api/a/{name}/test           test controls (dev fleets: AGENT_TEST_HOOKS=allow)
 //!
 //! A listened-to channel's records arrive at `POST /api/a/{name}/inbox/{token}`
@@ -53,24 +50,15 @@
 //! before). Such a turn also posts its progress to the chat's `work`
 //! channel (progress.rs).
 //!
-//! A person's agent does light work itself and hands the rest to a
-//! computer (handoff.rs): a turn that hands off ends there, the platform
-//! saying the work is on its way; the computer answers in the chat itself,
-//! and its result reaches the conversation that asked as a note. Its
-//! owner's turns are told what their computers remember of them (memory.rs).
-//!
 //! A fragment's own agent (its `fragment.json` `agent` block; its deploy
 //! makes it, with a `scope`) is this same agent with three differences:
 //! its tools are the operations its block names, of that fragment alone
 //! (tools.rs `Scope`); it keeps one conversation per person who posts
-//! there; and it gets no work guide, no hand-off, and no computer.
+//! there; and it gets no work guide.
 
-mod computer;
 mod fleet;
-mod handoff;
 mod js;
 mod keys;
-mod memory;
 mod model;
 mod progress;
 mod store;
@@ -94,22 +82,13 @@ use tokio_util::sync::CancellationToken;
 use worker::wasm_bindgen;
 use worker::{durable_object, event, DurableObject, Env, Headers, Method, Request, RequestInit, Response, State};
 
-use crate::computer::Computer;
 use crate::fleet::Fleet;
 use crate::model::Spend;
 use crate::progress::{Progress, Shape};
 use crate::store::{kv_get, kv_set, kv_u64, last_answer, recent_messages};
-use crate::turn::{Attached, Driver, Model, WATCHDOG_MS_DEFAULT, WATCHDOG_MS_MIN};
+use crate::turn::{Driver, Model, WATCHDOG_MS_DEFAULT, WATCHDOG_MS_MIN};
 
 const PRINCIPAL_HEADER: &str = fragment_proto::routed::AGENT_PRINCIPAL;
-/// A computer that connects out presents its connect token here.
-const COMPUTER_TOKEN_HEADER: &str = "x-computer-token";
-/// A computer's long poll waits this long, and a request it fetched but
-/// never answered is handed out again after this.
-const POLL_WAIT_MS: u64 = 25_000;
-const RESEND_MS: i64 = 40_000;
-/// A computer's answer (a screenshot inside) is at most this.
-const ANSWER_BODY_MAX: usize = 6 * 1024 * 1024;
 const MESSAGE_TEXT_MAX: usize = 16 * 1024;
 const MODEL_MAX: usize = fragment_proto::limits::AGENT_MODEL_MAX_BYTES;
 const INSTRUCTIONS_MAX: usize = fragment_proto::limits::AGENT_INSTRUCTIONS_MAX_BYTES;
@@ -131,9 +110,6 @@ const IGNORED_KEEP: i64 = 32;
 const TURNS_PER_DRIVER_MAX: usize = 256;
 /// The platform's default model (ROADMAP decision 7).
 const DEFAULT_MODEL: &str = fragment_proto::AGENT_MODEL;
-/// A computer's URL, and its token.
-const COMPUTER_URL_MAX: usize = 1024;
-const COMPUTER_TOKEN_MAX: usize = 256;
 /// The newest rows of each list the owner's view shows (messages, steers,
 /// tool runs, steps): the view grew with the agent's age.
 const VIEW_ROWS_MAX: usize = fragment_core::history::WINDOW_MESSAGES_MAX;
@@ -186,14 +162,9 @@ type Answer<T> = Result<T, Fail>;
 
 /// Hands a request to an agent's cell, as `principal` (none for an inbox delivery).
 async fn forward(env: &Env, name: &str, action: &str, method: Method, principal: Option<&str>, body: Vec<u8>) -> Answer<Response> {
-    forward_with(env, name, action, method, principal.map(|p| (PRINCIPAL_HEADER, p)), body).await
-}
-
-/// `forward`, with one header of the caller's (who, or a computer's token).
-async fn forward_with(env: &Env, name: &str, action: &str, method: Method, header: Option<(&str, &str)>, body: Vec<u8>) -> Answer<Response> {
     let headers = Headers::new();
-    if let Some((k, v)) = header {
-        headers.set(k, v)?;
+    if let Some(p) = principal {
+        headers.set(PRINCIPAL_HEADER, p)?;
     }
     let mut init = RequestInit::new();
     init.with_method(method).with_headers(headers);
@@ -238,15 +209,6 @@ async fn route(mut req: Request, env: &Env) -> Answer<Response> {
         let (name, action) = (name.to_string(), format!("inbox/{token}"));
         let body = read_body(&mut req, BODY_MAX).await?;
         return forward(env, &name, &action, Method::Post, None, body).await;
-    }
-    // a computer that connects out: its connect token is the capability
-    if let (Method::Post, ["api", "a", name, "computer", op @ ("poll" | "answer")]) = (req.method(), segments.as_slice()) {
-        if !valid_fragment_name(name) {
-            return Err(Fail::new(ErrorCode::NotFound, "no such agent"));
-        }
-        let token = req.headers().get(COMPUTER_TOKEN_HEADER)?.unwrap_or_default();
-        let body = read_body(&mut req, ANSWER_BODY_MAX).await?;
-        return forward_with(env, name, &format!("computer/{op}"), Method::Post, Some((COMPUTER_TOKEN_HEADER, &token)), body).await;
     }
     // the platform's router, the only way in, names who is calling
     let principal = req.headers().get(PRINCIPAL_HEADER)?.filter(|p| npub::is_identity(p)).ok_or_else(|| Fail::new(ErrorCode::Unauthenticated, "reach agents through the platform"))?;
@@ -334,16 +296,6 @@ struct ListenBody {
     reply: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct ComputerBody {
-    url: Option<String>,
-    token: Option<String>,
-    /// A computer that connects out: no URL, a connect token made here.
-    #[serde(default)]
-    connect: bool,
-    cwd: Option<String>,
-}
-
 #[derive(Deserialize, Default)]
 struct TestControls {
     hold_in_tool_ms: Option<u64>,
@@ -362,13 +314,6 @@ fn var(env: &Env, name: &str) -> Option<String> {
     env.var(name).ok().map(|v| v.to_string().trim().to_string()).filter(|s| !s.is_empty())
 }
 
-fn unanswered(why: computer::Unanswered) -> Fail {
-    match why {
-        computer::Unanswered::Refused => Fail::invalid("the computer refused this token (it is in the file `fragment computer serve --token-file` names)"),
-        computer::Unanswered::Unreachable(e) => Fail::new(ErrorCode::UpstreamFailed, format!("the computer did not answer: {e}")),
-    }
-}
-
 /// Told to the model on every turn, after the agent's instructions: those
 /// are stored when the agent is made, so a line added to
 /// `default_instructions` would never reach the agents made before it. The
@@ -376,27 +321,6 @@ fn unanswered(why: computer::Unanswered) -> Fail {
 const TURN_NOTES: &str = "Your answer to a chat message is posted to that chat for you. You act for the person who \
      asked: you reach only what they may (platform__list_fragments lists it), and platform__operations and \
      platform__call reach a fragment you have no tools for.";
-
-/// What the agent does itself and what it hands to a computer, told on
-/// every turn with the notes above (about 290 tokens). Paul, 2026-09-27:
-/// "the in-cell agent should only do easy and obvious stuff, it should hand
-/// off work to a computer as its primary tool." An agent that built apps
-/// itself, file by file, outlasted its model calls and its turns.
-const WORK_GUIDE: &str = "What you do, and what you hand off:
-- Do yourself what takes a few calls: answer questions, and use the person's fragments through their operations \
-(add a todo, read a list, look up a date), with your tools or platform__operations then platform__call. You may make \
-a fragment from a template (platform__create_fragment), as a person can.
-- Hand off the rest with platform__hand_off: building or changing an app, writing code, research, anything longer. \
-Your owner's computer does it, and remembers what was handed off from this conversation before; it sees nothing else \
-of it, so put what it needs in the task. To build an app, ask for a throwaway; to change one of theirs, name it in \
-`fragments` (a throwaway does it, as their editor). Name a computer only when the person names one of theirs.
-- A hand-off takes minutes, and your turn ends as it starts (the person is told it is on its way), so do your own \
-part first. The computer answers here itself, and you get its answer as a note. Don't describe results you haven't \
-received.
-- When your owner tells you a lasting fact about themselves or asks you to remember something, keep it with \
-platform__remember yourself (no computer); skills and code are the computer's.
-- Only your owner's turns can hand off (you have no platform__hand_off otherwise): tell anyone else it is theirs to \
-ask the owner.";
 
 fn default_instructions(name: &str) -> String {
     let name = name.split('.').next().unwrap_or(name);
@@ -421,7 +345,7 @@ const SCOPED_NOTES: &str = "Your answer to a message is posted where it was aske
      asked: your tools are this fragment's operations, and each acts as them.";
 
 /// What a turn tells the model: the agent's instructions, then the notes
-/// and the work guide every turn gets (a fragment's own agent, its notes).
+/// every turn gets (a fragment's own agent, its notes).
 fn turn_instructions(stored: Option<String>, name: &str, scoped: bool) -> String {
     let own = match stored {
         Some(s) if !s.starts_with(&default_opening(name.split('.').next().unwrap_or(name))) => s,
@@ -429,7 +353,7 @@ fn turn_instructions(stored: Option<String>, name: &str, scoped: bool) -> String
     };
     match scoped {
         true => format!("{own}\n\n{SCOPED_NOTES}"),
-        false => format!("{own}\n\n{TURN_NOTES}\n\n{WORK_GUIDE}"),
+        false => format!("{own}\n\n{TURN_NOTES}"),
     }
 }
 
@@ -479,123 +403,6 @@ impl Agent {
 
     fn fleet(&self) -> Answer<Fleet> {
         Ok(Fleet { base: fleet::base(&self.env)?, signer: fleet::Signer { env: self.env.clone(), sql: self.sql() }, acting_for: None })
-    }
-
-    /// The attached computer, its token opened by `KEYS` (sealed for this
-    /// agent cell alone).
-    async fn computer(&self) -> Answer<Option<Attached>> {
-        open_computer(&self.env, &self.sql()).await.map_err(Fail::host)
-    }
-
-    /// Attaches a computer once it answers with this token: its tools join
-    /// the agent's next turns.
-    async fn attach(&self, body: ComputerBody) -> Answer<Value> {
-        if body.connect {
-            return self.attach_connecting(body.cwd);
-        }
-        let (Some(url), Some(token)) = (body.url, body.token) else { return Err(Fail::invalid("a computer has a url and a token, or connects out (connect: true)")) };
-        let body = ComputerBody { url: Some(url.clone()), token: Some(token.clone()), connect: false, cwd: body.cwd };
-        let url = url.trim().trim_end_matches('/').to_string();
-        if url.len() > COMPUTER_URL_MAX {
-            return Err(Fail::invalid(format!("a computer URL is at most {COMPUTER_URL_MAX} bytes")));
-        }
-        let local = var(&self.env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow");
-        fragment_core::egress::check(&url, local).map_err(|e| Fail::invalid(format!("url: {e}")))?;
-        let token = body.token.unwrap_or_default();
-        if token.len() < 16 || token.len() > COMPUTER_TOKEN_MAX {
-            return Err(Fail::invalid(format!("a computer token is 16-{COMPUTER_TOKEN_MAX} bytes")));
-        }
-        let cwd = body.cwd.unwrap_or_else(|| "work".into());
-        if !computer::valid_cwd(&cwd) {
-            return Err(Fail::invalid(format!("cwd is 1-{} of [a-z0-9-]", computer::CWD_MAX)));
-        }
-        let c = Computer { url: url.clone(), token: token.clone(), tunnel: None };
-        let manifest = c.check().await.map_err(unanswered)?;
-        let tools: Vec<String> = computer::tools_of(&manifest)?.iter().map(|t| t.name.to_string()).collect();
-        let sealed = keys::seal(&self.env, token.as_bytes()).await.map_err(Fail::host)?;
-        let sql = self.sql();
-        kv_set(&sql, "computer_url", &url)?;
-        kv_set(&sql, "computer_token", sealed)?;
-        kv_set(&sql, "computer_cwd", &cwd)?;
-        Ok(json!({ "url": url, "cwd": cwd, "tools": tools }))
-    }
-
-    /// Attaches a computer that connects out: a new connect token (only its
-    /// hash is kept), answered once, for `fragment computer connect`.
-    fn attach_connecting(&self, cwd: Option<String>) -> Answer<Value> {
-        let cwd = cwd.unwrap_or_else(|| "work".into());
-        if !computer::valid_cwd(&cwd) {
-            return Err(Fail::invalid(format!("cwd is 1-{} of [a-z0-9-]", computer::CWD_MAX)));
-        }
-        let token = hex::encode(js::random_bytes::<32>());
-        let sql = self.sql();
-        kv_set(&sql, "computer_url", computer::CONNECTS)?;
-        kv_set(&sql, "computer_token", hex::encode(<sha2::Sha256 as sha2::Digest>::digest(token.as_bytes())))?;
-        kv_set(&sql, "computer_cwd", &cwd)?;
-        kv_set(&sql, "computer_seen_at", 0)?;
-        sql.exec("DELETE FROM tunnel", None)?;
-        let name = kv_get(&sql, "name")?.unwrap_or_default();
-        let agent = format!("{}/api/a/{name}", var(&self.env, "AGENT_URL").unwrap_or_default().trim_end_matches('/'));
-        Ok(json!({ "connect": true, "agent": agent, "token": token, "cwd": cwd }))
-    }
-
-    /// Whether `token` is the connect token of the computer attached here.
-    fn require_computer(&self, token: &str) -> Answer<worker::SqlStorage> {
-        let sql = self.sql();
-        let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(token.as_bytes()));
-        let stored = kv_get(&sql, "computer_token")?.unwrap_or_default();
-        let same = hash.len() == stored.len() && hash.bytes().zip(stored.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0;
-        if kv_get(&sql, "computer_url")?.as_deref() != Some(computer::CONNECTS) || !same {
-            return Err(Fail::new(ErrorCode::Forbidden, "not this agent's computer (its connect token was replaced, or it was detached)"));
-        }
-        kv_set(&sql, "computer_seen_at", js::now_ms())?;
-        Ok(sql)
-    }
-
-    /// `computer/poll`: the requests waiting for the computer that connects
-    /// out, answered at once, or as they come for up to 25 s.
-    async fn computer_poll(&self, token: &str) -> Answer<Value> {
-        let deadline = js::now_ms() + POLL_WAIT_MS;
-        loop {
-            let sql = self.require_computer(token)?;
-            let now = js::now_ms() as i64;
-            let rows: Vec<Value> = sql
-                .exec(
-                    "SELECT rid, method, path, body FROM tunnel WHERE status IS NULL AND (sent_at IS NULL OR sent_at < ?) ORDER BY created_at LIMIT 16",
-                    vec![(now - RESEND_MS).into()],
-                )?
-                .to_array()?;
-            if !rows.is_empty() || js::now_ms() > deadline {
-                for r in &rows {
-                    sql.exec("UPDATE tunnel SET sent_at = ? WHERE rid = ?", vec![now.into(), r["rid"].as_str().unwrap_or("").into()])?;
-                }
-                let requests: Vec<Value> = rows
-                    .iter()
-                    .map(|r| json!({ "rid": r["rid"], "method": r["method"], "path": r["path"], "body": r["body"].as_str().and_then(|b| serde_json::from_str::<Value>(b).ok()) }))
-                    .collect();
-                return Ok(json!({ "requests": requests }));
-            }
-            worker::Delay::from(std::time::Duration::from_millis(200)).await;
-        }
-    }
-
-    /// `computer/answer {rid, status, body}`: a request's answer.
-    fn computer_answer(&self, token: &str, body: Value) -> Answer<Value> {
-        let sql = self.require_computer(token)?;
-        let rid = body["rid"].as_str().ok_or_else(|| Fail::invalid("rid is required"))?;
-        let status = body["status"].as_i64().ok_or_else(|| Fail::invalid("status is required"))?;
-        sql.exec("UPDATE tunnel SET status = ?, answer = ? WHERE rid = ? AND status IS NULL", vec![status.into(), body["body"].to_string().into(), rid.into()])?;
-        Ok(json!({ "ok": true }))
-    }
-
-    fn detach(&self) -> Answer<Value> {
-        let sql = self.sql();
-        sql.exec("DELETE FROM tunnel", None)?;
-        let attached = kv_get(&sql, "computer_url")?.is_some_and(|u| !u.is_empty());
-        for k in ["computer_url", "computer_token", "computer_cwd"] {
-            kv_set(&sql, k, "")?;
-        }
-        Ok(json!({ "detached": attached }))
     }
 
     async fn create(&self, principal: &str, body: CreateBody) -> Answer<Value> {
@@ -733,7 +540,6 @@ impl Agent {
                 ms => ms,
             },
             fleet: self.fleet()?,
-            env: self.env.clone(),
             storage: Rc::new(self.state.storage()),
             id: format!("{}:{reason}", self.booted_at),
         };
@@ -775,14 +581,11 @@ impl Agent {
             cancel_slot.borrow_mut().take();
             driving.set(false);
             // Issued before anything else runs: a driver started after it
-            // arms its own watchdog after this lands. At rest, the alarm is
-            // the next hand-off's (handoff.rs), if any.
-            let armed = match resting {
-                true => handoff::arm(&setup.storage, &sql).await,
-                false => setup.storage.set_alarm(std::time::Duration::from_millis(50)).await.map_err(|e| anyhow::anyhow!("{e}")),
-            };
-            if let Err(e) = armed {
-                worker::console_error!("arming the alarm at rest: {e:#}");
+            // arms its own watchdog after this lands. At rest, no alarm.
+            if !resting {
+                if let Err(e) = setup.storage.set_alarm(std::time::Duration::from_millis(50)).await {
+                    worker::console_error!("arming the alarm: {e}");
+                }
             }
         });
         Ok(true)
@@ -1155,11 +958,6 @@ impl Agent {
             "outcome": get("outcome")?,
             "error": get("last_error")?,
             "tokens": { "input": kv_u64(&sql, "tokens_in")?, "output": kv_u64(&sql, "tokens_out")? },
-            "computer": match get("computer_url")? {
-                url if url.is_empty() => Value::Null,
-                url if url == computer::CONNECTS => json!({ "connect": true, "cwd": get("computer_cwd")?, "seenAt": kv_u64(&sql, "computer_seen_at")? }),
-                url => json!({ "url": url, "cwd": get("computer_cwd")? }),
-            },
             "watchdogRestarts": kv_u64(&sql, "watchdog_restarts")?,
             "conversation": get("turn_conv")?,
             "asker": get("turn_asker")?,
@@ -1170,9 +968,6 @@ impl Agent {
                 "newest": newest("SELECT fragment, channel, created_at AS at FROM listens ORDER BY created_at DESC LIMIT ?")?,
             },
             "ignored": table("fragment, channel, principal, at", "ignored")?,
-            "handoffs": newest("SELECT fragment, run, conv AS conversation, throwaway = 1 AS throwaway, said = 1 AS said, started_at AS at FROM handoffs ORDER BY started_at DESC LIMIT ?")?,
-            "home": kv_get(&sql, handoff::HOME)?.filter(|h| !h.is_empty()),
-            "bound": newest("SELECT conv AS conversation, computer, at FROM bound ORDER BY at DESC LIMIT ?")?,
             "messages": messages,
             "steer": table("seq, text, consumed", "steer")?,
             "toolRuns": table("tool_call_id, tool, at, driver", "tool_runs")?,
@@ -1190,7 +985,6 @@ impl Agent {
             }
             serde_json::from_slice(bytes).map_err(|e| Fail::invalid(format!("body: {e}")))
         };
-        let computer_token = req.headers().get(COMPUTER_TOKEN_HEADER)?.unwrap_or_default();
         let bytes = req.bytes().await?;
         if let Some(token) = action.strip_prefix("inbox/") {
             // decoded whole at the door, once, from its bytes: a delivery
@@ -1203,11 +997,6 @@ impl Agent {
         }
         let body = parse(&bytes)?;
         let from = |v: Value| -> Answer<Value> { Ok(v) };
-        match action.as_str() {
-            "computer/poll" => return Ok(Response::from_json(&self.computer_poll(&computer_token).await?)?),
-            "computer/answer" => return Ok(Response::from_json(&self.computer_answer(&computer_token, body)?)?),
-            _ => {}
-        }
         let answer = match (req.method(), action.as_str()) {
             (Method::Post, "create") => self.create(&principal, serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?).await,
             (method, action) => {
@@ -1226,23 +1015,9 @@ impl Agent {
                     (Method::Get, "job") => self.job_state(&url),
                     (Method::Get, "tools") => {
                         // what the owner's own turn has
-                        let mut names = tools::list(self.fleet()?.acting_for(&principal), &self.sql()).await?;
-                        if let Some(attached) = self.computer().await? {
-                            let manifest = attached.computer.check().await.map_err(unanswered)?;
-                            names.extend(computer::tools_of(&manifest)?.iter().map(|t| t.name.to_string()));
-                        }
+                        let names = tools::list(self.fleet()?.acting_for(&principal), &self.sql()).await?;
                         from(json!({ "tools": names }))
                     }
-                    (Method::Put, "home") => {
-                        let computer = match &body["computer"] {
-                            Value::Null => None,
-                            Value::String(c) => Some(c.as_str()),
-                            _ => return Err(Fail::invalid("computer is a fragment's name, or null")),
-                        };
-                        handoff::set_home(&self.fleet()?.acting_for(&principal), &self.sql(), &principal, computer).await.map_err(Fail::invalid)
-                    }
-                    (Method::Put, "computer") => self.attach(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?).await,
-                    (Method::Delete, "computer") => self.detach(),
                     (Method::Post, "test") => self.test(serde_json::from_value(body).map_err(|e| Fail::invalid(format!("body: {e}")))?),
                     _ => Err(Fail::new(ErrorCode::NotFound, format!("no route {} {action}", method.as_ref()))),
                 }
@@ -1261,29 +1036,6 @@ fn wait_ms(url: &worker::Url) -> Answer<u64> {
     }
 }
 
-/// The attached computer, its token opened by `KEYS` (sealed for this
-/// agent cell alone).
-async fn open_computer(env: &Env, sql: &worker::SqlStorage) -> anyhow::Result<Option<Attached>> {
-    let Some(url) = kv_get(sql, "computer_url")?.filter(|u| !u.is_empty()) else { return Ok(None) };
-    if url == computer::CONNECTS {
-        // one that has not asked lately is not there: the turn goes on without it
-        if js::now_ms() > kv_u64(sql, "computer_seen_at")? + computer::SEEN_WITHIN_MS {
-            return Ok(None);
-        }
-        let cwd = kv_get(sql, "computer_cwd")?.unwrap_or_else(|| "work".into());
-        return Ok(Some(Attached { computer: Computer { url, token: String::new(), tunnel: Some(sql.clone()) }, cwd }));
-    }
-    let sealed = kv_get(sql, "computer_token")?.ok_or_else(|| anyhow::anyhow!("the computer has no token"))?;
-    let npub = kv_get(sql, "npub")?.unwrap_or_default();
-    let opened = keys::open(env, &sealed, &format!("{npub}/computer")).await.map_err(|e| anyhow::anyhow!("the computer's token: {e}"))?;
-    if let Some(fresh) = opened.resealed {
-        kv_set(sql, "computer_token", fresh)?;
-    }
-    let token = String::from_utf8(opened.plaintext).map_err(|_| anyhow::anyhow!("the computer's token is not text"))?;
-    let cwd = kv_get(sql, "computer_cwd")?.unwrap_or_else(|| "work".into());
-    Ok(Some(Attached { computer: Computer { url, token, tunnel: None }, cwd }))
-}
-
 /// What every turn one driver runs shares.
 struct Setup {
     /// The model service's base URL.
@@ -1297,7 +1049,6 @@ struct Setup {
     deadline_ms: u64,
     /// The agent's own; each turn's tools act for its asker through it.
     fleet: Fleet,
-    env: Env,
     storage: Rc<worker::Storage>,
     /// The driver's name in the steps it records.
     id: String,
@@ -1378,17 +1129,6 @@ async fn drive_turn(setup: &Setup, cancel: CancellationToken, conv: &str, asker:
     let sql = setup.storage.sql();
     // the owner is learned before any turn can start (`registration`)
     let owner_turn = kv_get(&sql, "owner")?.is_some_and(|owner| owner == asker);
-    // the computer is its owner's: it joins its owner's own agent's turns only
-    let computer = if owner_turn && setup.scope.is_none() { open_computer(&setup.env, &sql).await? } else { None };
-    // and so is its memory: its facts, read into its owner's turns alone,
-    // which may keep one (memory.rs)
-    let mut instructions = setup.instructions.clone();
-    if owner_turn && setup.scope.is_none() {
-        match memory::view(&setup.fleet.acting_for(&asker), &sql).await {
-            Ok(view) => instructions.push_str(&view),
-            Err(e) => worker::console_warn!("reading the owner's memory: {e:#}"),
-        }
-    }
     let spend = Spend {
         fleet: setup.fleet.clone(),
         sql: sql.clone(),
@@ -1405,8 +1145,7 @@ async fn drive_turn(setup: &Setup, cancel: CancellationToken, conv: &str, asker:
         model: Model { base: setup.base.clone(), name: setup.model.clone(), deadline_ms: setup.deadline_ms, spend },
         scope: setup.scope.clone(),
         fleet: setup.fleet.clone(),
-        instructions,
-        computer,
+        instructions: setup.instructions.clone(),
         cancel,
         id: setup.id.clone(),
         conv: conv.to_string(),
@@ -1492,10 +1231,8 @@ fn next_turn(sql: &worker::SqlStorage) -> anyhow::Result<bool> {
     let rows: Vec<Waiting> = sql.exec("SELECT seq, conv, asker, text, kick FROM pending ORDER BY seq LIMIT 1", None)?.to_array()?;
     let Some(next) = rows.into_iter().next() else { return Ok(false) };
     sql.exec("DELETE FROM pending WHERE seq = ?", vec![next.seq.into()])?;
-    // the steers an earlier turn's model read are in its conversation, and
-    // the images it kept and never showed are dropped
+    // the steers an earlier turn's model read are in its conversation
     sql.exec("DELETE FROM steer", None)?;
-    sql.exec("DELETE FROM shots", None)?;
     let id = next.kick.unwrap_or_else(|| format!("msg_{}", uuid::Uuid::new_v4()));
     let mut kickoff = Message::user().with_text(next.text);
     kickoff.id = Some(id.clone());
@@ -1535,32 +1272,12 @@ fn waiting(sql: &worker::SqlStorage) -> anyhow::Result<usize> {
     Ok(rows.first().map_or(0, |c| c.n.max(0) as usize))
 }
 
-/// Posts a chat turn's last answer, with the images the turn kept (a
-/// screenshot, in the chat's files, shown with the answer). The owner's
-/// own conversation has nowhere to post.
+/// Posts a chat turn's last answer. The owner's own conversation has
+/// nowhere to post.
 async fn reply(sql: &worker::SqlStorage, fleet: &Fleet, conv: &str, shape: Option<Shape>, turn: Option<&str>) -> anyhow::Result<()> {
-    let (Some((fragment, _)), Some(answer)) = (store::chat_of(conv), last_answer(sql, conv)?) else { return Ok(()) };
+    let (Some(_), Some(answer)) = (store::chat_of(conv), last_answer(sql, conv)?) else { return Ok(()) };
     let id = fragment_core::tools::reply_id(answer.id.as_deref().unwrap_or(""));
-    let mut text = answer.as_concat_text();
-    let shots: Vec<Value> = sql.exec("SELECT seq, mime, data FROM shots ORDER BY seq", None)?.to_array()?;
-    if !shots.is_empty() {
-        let paths: Vec<String> = shots
-            .iter()
-            .map(|s| format!("shots/{id}-{}.{}", s["seq"], if s["mime"] == "image/jpeg" { "jpg" } else { "png" }))
-            .collect();
-        let files: Vec<Value> = shots.iter().zip(&paths).map(|(s, p)| json!({ "path": p, "base64": s["data"] })).collect();
-        let (status, body) = fleet.call(Method::Post, &format!("/api/f/{fragment}/files"), Some(&json!({ "files": files, "message": "screenshots", "key": format!("{id}-shots") }))).await?;
-        if status == 200 {
-            for p in &paths {
-                text.push_str(&format!("\n\n![screenshot](__file?path={p})"));
-            }
-        } else {
-            text.push_str(&format!("\n\n(the screenshot could not be shown here: {})", fleet::message(&body)));
-        }
-    }
-    post_answer(sql, fleet, conv, &id, &text, shape, turn).await?;
-    sql.exec("DELETE FROM shots", None)?;
-    Ok(())
+    post_answer(sql, fleet, conv, &id, &answer.as_concat_text(), shape, turn).await
 }
 
 /// Posts an answer in a chat conversation's fragment, once (`id`, from its
@@ -1647,16 +1364,6 @@ impl DurableObject for Agent {
             if let Err(f) = self.start_driver("waiting") {
                 worker::console_error!("starting a waiting turn: {}", f.message);
             }
-        }
-        // the hand-offs whose time came (a hand-off's turn learned the owner);
-        // a driver arms its own alarm, and at rest this one comes back for the next
-        if let (Ok(fleet), Some(owner)) = (self.fleet(), kv_get(&sql, "owner").map_err(failed)?) {
-            if let Err(e) = handoff::watch(&fleet, &sql, &owner).await {
-                worker::console_error!("watching hand-offs: {e:#}");
-            }
-        }
-        if !self.driving.get() {
-            handoff::arm(&self.state.storage(), &sql).await.map_err(failed)?;
         }
         Response::ok("ok")
     }

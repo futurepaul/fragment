@@ -21,7 +21,7 @@
 // runs, and gives the person who started it a Stop button. A reply that
 // streams shows as its draft until its record lands. Everyone
 // who writes has a face (a person's
-// picture or initial; an agent's or a computer's mark), and who is
+// picture or initial; an agent's mark), and who is
 // here, and who is writing, shows above the composer (the fragment's
 // presence: this page shares `{typing}`).
 //
@@ -110,11 +110,10 @@ export function mount(root, options = {}) {
   const known = new Map(); // principal -> its profile, once fetched
 
   // ---- names and faces: a person by username and picture, an agent as
-  // its owner's, a computer by its name ----
+  // its owner's ----
   function described(p, principal) {
     const owner = p.username ?? null;
     if (p.kind === "agent") return { agent: true, mark: "agent", owner, label: `${owner ?? "someone"}'s agent` };
-    if (p.kind === "computer") return { agent: true, mark: "computer", owner, label: p.name ?? `${owner ?? "someone"}'s computer` };
     return { agent: false, mark: "person", owner: null, label: p.username ?? `id:…${principal.slice(-6)}`, picture: typeof p.picture === "string" ? p.picture : null };
   }
   function profile(principal) {
@@ -156,7 +155,7 @@ export function mount(root, options = {}) {
       img.src = who.picture;
       img.alt = "";
       f.append(img);
-    } else if (who?.mark === "agent" || who?.mark === "computer") f.innerHTML = svg(who.mark === "agent" ? "spark" : "monitor");
+    } else if (who?.mark === "agent") f.innerHTML = svg("spark");
     else f.textContent = (who?.label ?? "?").replace(/^id:…/, "").charAt(0).toUpperCase();
     return f;
   }

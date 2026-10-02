@@ -2,7 +2,6 @@ mod api;
 mod auth;
 mod blobs;
 mod codestorage;
-mod serve;
 mod sync;
 mod watch;
 
@@ -51,19 +50,10 @@ struct Cli {
 enum Cmd {
     /// Make a nostr key (or use the one you have) and add it to you: sign
     /// in on the host in a browser and approve it there (--force makes a
-    /// new key). With --computer, pair this machine as your computer instead
+    /// new key)
     Login {
         #[arg(long)]
         force: bool,
-        /// Pair this machine as your computer <name>: an identity of its own
-        /// that you own, acting only in the fragments you add it to (and
-        /// those it makes for you), never as you
-        #[arg(long, value_name = "NAME")]
-        computer: Option<String>,
-        /// Pair as a fragment's own computer, with the single-use token the
-        /// platform hands its Sprite on stdin (the platform runs this)
-        #[arg(long, conflicts_with_all = ["computer", "no_wait"])]
-        pair: bool,
         /// Print the approval link and return (run `fragment login` again after approving)
         #[arg(long)]
         no_wait: bool,
@@ -73,30 +63,6 @@ enum Cmd {
     },
     /// Who the host says you are: your identity, username, this key, your other keys
     Whoami,
-    /// Ask the model through the platform, as this computer (its owner's
-    /// budget pays): a prompt, or with --request an OpenAI-style chat
-    /// request on stdin, answered with the response's JSON; or --serve
-    Model {
-        prompt: Option<String>,
-        #[arg(long, conflicts_with_all = ["prompt", "serve"])]
-        request: bool,
-        /// Serve an OpenAI-compatible endpoint on 127.0.0.1 (POST
-        /// /v1/chat/completions, or OpenRouter's /api/v1/chat/completions,
-        /// streamed or not) that signs each call as this computer: goose,
-        /// or anything that speaks to such a provider, needs no key
-        #[arg(long, conflicts_with = "prompt")]
-        serve: bool,
-        /// The port --serve listens on (0: any free one)
-        #[arg(long, requires = "serve", default_value_t = serve::PORT)]
-        port: u16,
-    },
-    /// Your computers (machines paired with `fragment login --computer`):
-    /// list them, or remove one (its keys are revoked, and it leaves every
-    /// fragment it is in)
-    Computers {
-        #[command(subcommand)]
-        sub: Option<ComputersCmd>,
-    },
     /// Your username, chosen once: your fragments live at
     /// <label>--<username>.<host>
     Username {
@@ -159,7 +125,7 @@ enum Cmd {
         #[arg(long)]
         prune: bool,
         /// Pull what is live (the files served), not main: into the folder
-        /// only, deletions included (a computer's copy of its fragment)
+        /// only, deletions included
         #[arg(long, conflicts_with_all = ["mode", "watch", "install", "uninstall", "mirror_from"])]
         live: bool,
         /// Overlay this read-only source folder into --dir before each
@@ -261,18 +227,6 @@ enum Cmd {
         #[command(subcommand)]
         sub: AgentCmd,
     },
-    /// Your memory: the fragment of yours your computers keep facts and
-    /// skills in, and your agent reads (`use` names one of yours)
-    Memory {
-        #[command(subcommand)]
-        sub: Option<MemoryCmd>,
-    },
-    /// A computer an agent works on: `fragment computer serve` runs goose's
-    /// developer tools for the agent that attaches it (`fragment agent computer`)
-    Computer {
-        #[command(subcommand)]
-        sub: ComputerCmd,
-    },
     /// A fragment's members: list, add, remove, or leave
     Members {
         #[command(subcommand)]
@@ -358,18 +312,6 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
-enum MemoryCmd {
-    /// Name a fragment of yours as your memory; your computers become its editors
-    Use {
-        /// The fragment (a label: yours)
-        fragment: String,
-        /// Replace the memory you have (it is left as it is)
-        #[arg(long)]
-        replace: bool,
-    },
-}
-
-#[derive(Subcommand)]
 enum AgentCmd {
     /// Make an agent you own; prints its npub (add it to fragments as a member)
     Create {
@@ -394,37 +336,6 @@ enum AgentCmd {
     Stop { name: String },
     /// The tools its memberships give it (fragment operations)
     Tools { name: String },
-    /// Attach a computer (`fragment computer serve`): its shell and file tools join the agent's turns
-    Computer {
-        name: String,
-        /// The computer's URL (`fragment computer serve`)
-        #[arg(long, required_unless_present_any = ["detach", "connect"])]
-        url: Option<String>,
-        /// A file holding its token: the one `fragment computer serve` made,
-        /// or, with --connect, where to write the new connect token
-        #[arg(long, required_unless_present = "detach")]
-        token_file: Option<PathBuf>,
-        /// The computer connects out to the agent instead (`fragment computer
-        /// connect`): no public URL. Writes its connect token to --token-file
-        #[arg(long, conflicts_with = "url")]
-        connect: bool,
-        /// The project directory its tools work in, on the computer
-        #[arg(long, default_value = "work")]
-        cwd: String,
-        /// Detach the computer instead
-        #[arg(long, conflicts_with_all = ["url", "token_file", "connect"])]
-        detach: bool,
-    },
-    /// Your home computer: where the agent hands work off by default, each chat in a session of its own
-    Home {
-        name: String,
-        /// A fragment of yours with a computer and a `do` or `build` job (a label: yours)
-        #[arg(required_unless_present = "clear")]
-        computer: Option<String>,
-        /// No home computer: hand-offs go to throwaways
-        #[arg(long, conflicts_with = "computer")]
-        clear: bool,
-    },
     /// Follow a fragment's channel: others' messages start turns, answers go back through the reply operation
     Listen {
         name: String,
@@ -437,40 +348,6 @@ enum AgentCmd {
 }
 
 #[derive(Subcommand)]
-enum ComputerCmd {
-    /// Answer an agent without a public URL: poll it for work, and run it here
-    /// (goose's developer tools and screenshots)
-    Connect {
-        /// The agent: its URL (`fragment agent computer --connect` prints it)
-        #[arg(long)]
-        agent: String,
-        /// The connect token its owner was given
-        #[arg(long)]
-        token_file: PathBuf,
-        /// Projects live under this directory, one per attached cwd
-        #[arg(long, default_value = "work")]
-        work: PathBuf,
-        /// The call journal
-        #[arg(long, default_value = ".fragment-computer")]
-        state: PathBuf,
-    },
-    /// Serve goose's developer tools (shell, write, edit, tree) over HTTP to the agent that attaches this computer
-    Serve {
-        #[arg(long, default_value = "0.0.0.0:8080")]
-        listen: std::net::SocketAddr,
-        /// Projects live under this directory, one per attached cwd
-        #[arg(long, default_value = "work")]
-        work: PathBuf,
-        /// The call journal
-        #[arg(long, default_value = ".fragment-computer")]
-        state: PathBuf,
-        /// The bearer token an agent presents; made here (0600) if missing
-        #[arg(long, default_value = ".fragment-computer/token")]
-        token_file: PathBuf,
-    },
-}
-
-#[derive(Subcommand)]
 enum BudgetCmd {
     /// Every paid step this month (or --period YYYY-MM)
     Usage {
@@ -479,12 +356,6 @@ enum BudgetCmd {
     },
     /// Add dollars to someone's month (the fleet's operators)
     TopUp { who: String, usd: f64 },
-}
-
-#[derive(Subcommand)]
-enum ComputersCmd {
-    /// Remove a computer (its name, or id:…)
-    Rm { name: String },
 }
 
 #[derive(Subcommand)]
@@ -505,9 +376,6 @@ enum BlobCmd {
     Put {
         name: String,
         file: PathBuf,
-        /// A computer's screen: deleted a minute after the next frame
-        #[arg(long)]
-        frame: bool,
     },
 }
 
@@ -518,8 +386,7 @@ enum MembersCmd {
     /// Add a member, or change their role (owner only)
     Add {
         name: String,
-        /// identity (id:…), npub, 64-hex key, NIP-05 name (name@domain), or
-        /// the name of one of your computers
+        /// identity (id:…), npub, 64-hex key, or NIP-05 name (name@domain)
         who: String,
         /// viewer | editor
         #[arg(long, default_value = "viewer")]
@@ -603,9 +470,6 @@ fn save_config(key: &str, value: &str) -> Result<PathBuf> {
 
 fn print_identity(v: &IdentityView, this_key: &str) {
     println!("identity: {} ({})", v.id, v.kind.as_str());
-    if let (Some(name), Some(owner)) = (&v.name, &v.owner) {
-        println!("computer: {name}, owned by {owner}: it acts only where it is a member, never as them");
-    }
     match &v.username {
         Some(u) => println!("username: {u} (your fragments are <name>.{u})"),
         None if v.kind == fragment_proto::IdentityKind::Person => println!("username: none yet (fragment username <name>, or on the host's page)"),
@@ -622,21 +486,13 @@ fn print_identity(v: &IdentityView, this_key: &str) {
     for a in &v.agents {
         println!("  agent {a}");
     }
-    for m in &v.computers {
-        println!("  computer {} {}", m.name, m.id);
-    }
 }
 
-/// Whom `members add|rm` names: an identity (`id:…`), a key (an npub, 64
-/// hex, or a NIP-05 name), or one of the signer's computers by its name.
-fn member_named(c: &api::Client, who: String) -> Result<String> {
+/// Whom `members add|rm` names: an identity (`id:…`), or a key (an npub,
+/// 64 hex, or a NIP-05 name).
+fn member_named(who: String) -> Result<String> {
     if who.starts_with("id:") {
         return Ok(who);
-    }
-    if fragment_proto::valid_label(&who) && fragment_core::npub::parse(&who).is_none() {
-        let me: IdentityView = c.call_as(c.get("/api/identities/me")?)?;
-        let computer = me.computers.into_iter().find(|m| m.name == who);
-        return computer.map(|m| m.id).ok_or_else(|| usage(format!("{who} is none of your computers (`fragment computers`), and not an identity, npub, or NIP-05 name")));
     }
     auth::resolve_npub(&who)
 }
@@ -819,10 +675,7 @@ fn run(cli: Cli) -> Result<()> {
     let j = cli.json || json_env_flag();
 
     match cli.cmd {
-        Cmd::Login { force, no_wait, no_browser, computer, pair } => {
-            if computer.as_deref().is_some_and(|n| !fragment_proto::valid_label(n)) {
-                return Err(usage("a computer's name is a label: lowercase letters, digits, and single dashes, at most 63"));
-            }
+        Cmd::Login { force, no_wait, no_browser } => {
             // the key this machine signs with: the one it has, or a new one
             let key_existed = !force && load_config().secret_key.is_some();
             if !key_existed {
@@ -837,33 +690,15 @@ fn run(cli: Cli) -> Result<()> {
                     _ => c.call_as(r).map(Some),
                 }
             };
-            let mut done = match pair {
-                // this key, made here, pairs with the token: it never leaves this machine
-                true => {
-                    let mut token = String::new();
-                    std::io::stdin().read_to_string(&mut token)?;
-                    Some(c.call_as(c.post_json("/api/computers/pair", &json!({ "token": token.trim() }))?)?)
-                }
-                false => me()?,
-            };
-            // a computer pairs with a key of its own: one that signs as someone else stays theirs
-            if let (Some(name), Some(v)) = (&computer, &done) {
-                if v.name.as_ref() != Some(name) {
-                    return Err(usage(format!("this key signs as {} ({}): `fragment login --computer {name} --force` makes the computer's own", v.id, v.kind.as_str())));
-                }
-            }
+            let mut done = me()?;
             if done.is_none() {
-                // the link carries this key's own proof (ten minutes good),
-                // naming the computer it pairs as: approving it in a
-                // signed-in browser adds the key at once
+                // the link carries this key's own proof (ten minutes good):
+                // approving it in a signed-in browser adds the key at once
                 let npub = c.id.npub();
-                let (approve, named) = match &computer {
-                    Some(name) => (format!("{}/cli/approve?computer={name}", c.host), format!("&computer={name}")),
-                    None => (format!("{}/cli/approve", c.host), String::new()),
-                };
+                let approve = format!("{}/cli/approve", c.host);
                 let proof = c.id.nip98_header("POST", &approve, &[]);
                 let proof = proof.strip_prefix("Nostr ").unwrap_or(&proof);
-                let url = format!("{}/cli?key={npub}&proof={}{named}", c.host, encode_q(proof));
+                let url = format!("{}/cli?key={npub}&proof={}", c.host, encode_q(proof));
                 let tail = &npub[npub.len() - 8..];
                 if no_wait {
                     json_exit(j, &json!({ "npub": npub, "pending": true, "approve": url }));
@@ -889,12 +724,9 @@ fn run(cli: Cli) -> Result<()> {
             // never echo the key itself
             json_exit(
                 j,
-                &json!({ "npub": c.id.npub(), "id": v.id, "kind": v.kind, "name": v.name, "owner": v.owner, "host": c.host, "config": config_path().display().to_string(), "existing": key_existed }),
+                &json!({ "npub": c.id.npub(), "id": v.id, "kind": v.kind, "owner": v.owner, "host": c.host, "config": config_path().display().to_string(), "existing": key_existed }),
             );
-            match (&v.name, &v.owner) {
-                (Some(name), Some(owner)) => println!("paired as computer {name} ({}), owned by {owner}, on {}", v.id, c.host),
-                _ => println!("logged in as {} on {}", v.id, c.host),
-            }
+            println!("logged in as {} on {}", v.id, c.host);
             println!("key: {}", c.id.npub());
             return Ok(());
         }
@@ -945,24 +777,6 @@ fn run(cli: Cli) -> Result<()> {
             println!("  fragment init <name> --template <tpl>  (scaffold + create + deploy in one step)");
             return Ok(());
         }
-        Cmd::Computer { sub: ComputerCmd::Connect { agent, token_file, work, state } } => {
-            #[cfg(feature = "computer")]
-            return fragment_computer::connect(fragment_computer::ConnectArgs { agent, work, state, token_file });
-            #[cfg(not(feature = "computer"))]
-            {
-                let _ = (agent, work, state, token_file);
-                anyhow::bail!("this fragment was built without computers: cargo install --path cli --features computer");
-            }
-        }
-        Cmd::Computer { sub: ComputerCmd::Serve { listen, work, state, token_file } } => {
-            #[cfg(feature = "computer")]
-            return fragment_computer::serve(fragment_computer::ServeArgs { listen, work, state, token_file });
-            #[cfg(not(feature = "computer"))]
-            {
-                let _ = (listen, work, state, token_file);
-                anyhow::bail!("this fragment was built without computers: cargo install --path cli --features computer");
-            }
-        }
         _ => {}
     }
 
@@ -1012,55 +826,6 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "npub": new.id.npub(), "revoked": old.id.npub(), "identity": v }));
             println!("{} replaces {} (revoked); every grant stays with {}", new.id.npub(), old.id.npub(), v.id);
         }
-        Cmd::Model { serve: true, port, .. } => serve::serve(c, port)?,
-        Cmd::Model { prompt, request, .. } => {
-            let body: Value = match (prompt, request) {
-                (Some(p), false) => json!({ "messages": [{ "role": "user", "content": p }] }),
-                (None, true) => {
-                    let mut text = String::new();
-                    std::io::stdin().read_to_string(&mut text)?;
-                    serde_json::from_str(&text).context("stdin is not a JSON chat request")?
-                }
-                _ => return Err(usage("fragment model <prompt>, or --request with a chat request on stdin")),
-            };
-            // a model call may take two minutes (the platform's own bound)
-            let v = c.call(c.post_json_waiting("/api/model/chat/completions", &body, std::time::Duration::from_secs(150))?)?;
-            if request {
-                println!("{v}");
-                return Ok(());
-            }
-            json_exit(j, &v);
-            println!("{}", v["choices"][0]["message"]["content"].as_str().unwrap_or_default());
-        }
-        Cmd::Computers { sub } => {
-            let me: IdentityView = c.call_as(c.get("/api/identities/me")?)?;
-            match sub {
-                None => {
-                    json_exit(j, &json!({ "computers": me.computers }));
-                    if me.computers.is_empty() {
-                        println!("no computers: pair one with `fragment login --computer <name>` on it");
-                    }
-                    for m in &me.computers {
-                        println!("{}  {}", m.name, m.id);
-                    }
-                }
-                Some(ComputersCmd::Rm { name }) => {
-                    // an id removes one whose name is gone already (a removal tried again)
-                    let id = match me.computers.iter().find(|m| m.name == name) {
-                        Some(m) => m.id.clone(),
-                        None if name.starts_with("id:") => name.clone(),
-                        None => return Err(usage(format!("{name} is none of your computers (`fragment computers`)"))),
-                    };
-                    let v = c.call(c.delete(&format!("/api/identities/{id}"))?)?;
-                    json_exit(j, &v);
-                    let left = v["left"].as_array().map_or(0, Vec::len);
-                    println!("removed computer {name} ({id}): its keys are revoked, and it left {left} fragment(s)");
-                    if let Some(failed) = v["failed"].as_array().filter(|f| !f.is_empty()) {
-                        println!("it could not leave {} fragment(s) yet: run `fragment computers rm {id}` again", failed.len());
-                    }
-                }
-            }
-        }
         Cmd::Keys { sub: Some(KeysCmd::Revoke { npub }) } => {
             let hex = fragment_core::npub::parse(&npub).ok_or_else(|| anyhow!("{npub} is not an npub or a 64-hex key"))?;
             if hex == c.id.pubkey_hex() {
@@ -1076,7 +841,7 @@ fn run(cli: Cli) -> Result<()> {
                 Some(v) => Some(Visibility::parse(v).ok_or_else(|| usage(format!("--visibility is public, link, or members, not {v:?}")))?),
                 None => None,
             };
-            let body = fragment_proto::CreateFragment { name: name.clone(), visibility, template: None, throwaway: false, answers: None };
+            let body = fragment_proto::CreateFragment { name: name.clone(), visibility, template: None, answers: None };
             let v: Created = c.call_as(c.post_json("/api/fragments", &body)?)?;
             json_exit(j, &v);
             println!("created fragment {}", v.name);
@@ -1500,21 +1265,6 @@ fn run(cli: Cli) -> Result<()> {
             println!("share link:  {link}");
             println!("webhook URL: {webhook}");
         }
-        Cmd::Memory { sub } => {
-            let v = match sub {
-                None => c.call(c.get("/api/memory")?)?,
-                Some(MemoryCmd::Use { fragment, replace }) => {
-                    // a bare label is one of yours: the signed API resolves it
-                    let fragment = if fragment.contains('.') { fragment } else { c.call_as::<FragmentStatus>(c.get(&format!("/api/f/{fragment}/status"))?)?.name };
-                    c.call(c.put_json("/api/memory", &json!({ "fragment": fragment, "replace": replace }))?)?
-                }
-            };
-            json_exit(j, &v);
-            match v["name"].as_str() {
-                Some(name) => println!("your memory is {name}"),
-                None => println!("you have no memory yet: the platform makes one when a computer of yours pairs, or name one of yours (`fragment memory use <fragment>`)"),
-            }
-        }
         Cmd::Agent { sub } => {
             let a = agents_client(cli.verbose)?;
             match sub {
@@ -1590,49 +1340,10 @@ fn run(cli: Cli) -> Result<()> {
                         println!("{}", t.as_str().unwrap_or(""));
                     }
                 }
-                AgentCmd::Home { name, computer, clear: _ } => {
-                    // a bare label is one of yours: the signed API resolves it
-                    let computer = match computer {
-                        Some(label) if !label.contains('.') => Some(c.call_as::<FragmentStatus>(c.get(&format!("/api/f/{label}/status"))?)?.name),
-                        named => named,
-                    };
-                    let v = a.call(a.put_json(&format!("/api/a/{name}/home"), &json!({ "computer": computer }))?)?;
-                    json_exit(j, &v);
-                    match v["home"].as_str() {
-                        Some(home) => println!("{name} hands work to {home} by default: each chat has a session there"),
-                        None => println!("{name} has no home computer: hand-offs go to throwaways"),
-                    }
-                }
                 AgentCmd::Listen { name, fragment, channel, reply } => {
                     let v = a.call(a.post_json(&format!("/api/a/{name}/listen"), &json!({ "fragment": fragment, "channel": channel, "reply": reply }))?)?;
                     json_exit(j, &v);
                     println!("{name} follows {fragment}'s {channel} channel and answers through {reply}");
-                }
-                AgentCmd::Computer { name, url, token_file, connect, cwd, detach } => {
-                    let path = format!("/api/a/{name}/computer");
-                    if connect {
-                        let token_file = token_file.unwrap_or_default();
-                        let v = a.call(a.put_json(&path, &json!({ "connect": true, "cwd": cwd }))?)?;
-                        let token = v["token"].as_str().ok_or_else(|| anyhow!("the agent answered no connect token"))?;
-                        write_secret_file(&token_file, token)?;
-                        let agent = v["agent"].as_str().unwrap_or("");
-                        json_exit(j, &json!({ "agent": agent, "cwd": v["cwd"], "tokenFile": token_file }));
-                        println!("{name} takes a computer that connects out; its token is in {} (0600).", token_file.display());
-                        println!("on the computer: fragment computer connect --agent {agent} --token-file <that file>");
-                        return Ok(());
-                    }
-                    if detach {
-                        let v = a.call(a.delete(&path)?)?;
-                        json_exit(j, &v);
-                        println!("{}", if v["detached"] == true { "detached" } else { "no computer was attached" });
-                        return Ok(());
-                    }
-                    let (url, token_file) = (url.unwrap_or_default(), token_file.unwrap_or_default());
-                    let token = std::fs::read_to_string(&token_file).with_context(|| format!("reading {}", token_file.display()))?.trim().to_string();
-                    let v = a.call(a.put_json(&path, &json!({ "url": url, "token": token, "cwd": cwd }))?)?;
-                    json_exit(j, &v);
-                    let tools: Vec<&str> = v["tools"].as_array().into_iter().flatten().filter_map(|t| t.as_str()).collect();
-                    println!("{name} works on {} in {} ({})", v["url"].as_str().unwrap_or(""), v["cwd"].as_str().unwrap_or(""), tools.join(", "));
                 }
             }
         }
@@ -1641,7 +1352,7 @@ fn run(cli: Cli) -> Result<()> {
                 let v: MemberList = c.call_as(c.get(&format!("/api/f/{name}/members"))?)?;
                 json_exit(j, &v);
                 for m in &v.members {
-                    // an agent's or a computer's owner, named with what it is
+                    // an agent's owner, named with what it is
                     let owned = match (&m.owner, m.kind) {
                         (Some(o), Some(kind)) => format!("\t{} of {o}", kind.as_str()),
                         (Some(o), None) => format!("\towned by {o}"),
@@ -1651,18 +1362,17 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
             MembersCmd::Add { name, who, role } => {
-                let who = member_named(&c, who)?;
+                let who = member_named(who)?;
                 let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
                 let v: Member = c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&fragment_proto::SetRole { role })?)?)?;
                 json_exit(j, &v);
                 println!("{} is now {} on {name}", v.principal, v.role.as_str());
                 if let Some(owner) = &v.owner {
-                    let what = if v.kind == Some(fragment_proto::IdentityKind::Computer) { "a computer" } else { "an agent" };
-                    println!("  {what}: its owner {owner} can read {name} too");
+                    println!("  an agent: its owner {owner} can read {name} too");
                 }
             }
             MembersCmd::Rm { name, who } => {
-                let who = member_named(&c, who)?;
+                let who = member_named(who)?;
                 let v = c.call(c.delete(&format!("/api/f/{name}/members/{who}"))?)?;
                 json_exit(j, &v);
                 println!("removed {who} from {name}");
@@ -1737,11 +1447,11 @@ fn run(cli: Cli) -> Result<()> {
                 eprintln!("(replayed: operation {id} had already run)");
             }
         }
-        Cmd::Blob { sub: BlobCmd::Put { name, file, frame } } => {
+        Cmd::Blob { sub: BlobCmd::Put { name, file } } => {
             let bytes = std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
             let sha = sync::sha256_hex(&bytes);
             let kind = fragment_core::site::mime_for_path(&file.to_string_lossy());
-            let path = format!("/api/f/{name}/blobs/{sha}{}", if frame { "?frame" } else { "" });
+            let path = format!("/api/f/{name}/blobs/{sha}");
             let v = c.call(c.put_blob(&path, bytes, Some(kind))?)?;
             json_exit(j, &v);
             println!("{sha}");
@@ -1799,7 +1509,7 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "visibility": visibility }));
             println!("{name}: {}", visibility.as_str());
         }
-        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Computer { .. } => unreachable!(),
+        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } => unreachable!(),
     }
     Ok(())
 }
@@ -2088,13 +1798,6 @@ fn uid() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A sync brings a computer's CLI up to the version the platform
-    /// expects: this one, so a platform deploy updates computers to it.
-    #[test]
-    fn computers_run_this_cli() {
-        assert_eq!(fragment_core::computer::CLI_VERSION, env!("CARGO_PKG_VERSION"));
-    }
 
     /// Goal: a deploy of a folder mints one storage token, reads main's
     /// head once (its sync's), lists once, and nudges the pins once.

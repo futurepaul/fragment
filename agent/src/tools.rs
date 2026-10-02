@@ -20,10 +20,7 @@
 //! The platform's own verbs (`platform__*`), for everything else: list the
 //! fragments the asker reaches, read one's operations, call one, and list
 //! and read its files, each the signed API the CLI uses; and, in its
-//! owner's turns only, make a fragment from a template for the owner, hand
-//! work to a computer (handoff.rs), and keep a fact in the owner's memory
-//! (memory.rs). The agent builds nothing itself
-//! (Paul, 2026-09-27): what it cannot do in a few calls goes to a computer.
+//! owner's turns only, make a fragment from a template for the owner.
 //! A fragment's own agent (`Scope`) has neither kind but one: the
 //! operations of its fragment that its block names.
 
@@ -46,7 +43,7 @@ use worker::{Delay, Method, SqlStorage};
 
 use crate::fleet::{self, Fleet};
 use crate::store::{chat_of, kv_u64, Session};
-use crate::{handoff, js, memory};
+use crate::js;
 
 /// The fragments, and the tools, one agent's turn considers at most.
 pub const FRAGMENTS_MAX: usize = 16;
@@ -81,36 +78,20 @@ enum Route {
     Platform(&'static str),
 }
 
-/// The platform's verbs: (name, description, input schema). The first
-/// three are offered in its owner's turns only.
+/// The platform's verbs: (name, description, input schema). The first is
+/// offered in its owner's turns only.
 fn platform_tools(owner_turn: bool) -> Vec<(&'static str, &'static str, Value)> {
     let fragment = json!({ "type": "string", "description": "the fragment's full name, <label>.<username>" });
     let create = (
         "platform__create_fragment",
         "Makes a new fragment for your owner from a template, as they could, named <label>.<their username>: blank (one \
-         page), todo (a live list), inbox, or chat. You become its editor. Answers its name and URL. To build something \
-         new in it, hand the work off.",
+         page), todo (a live list), inbox, or chat. You become its editor. Answers its name and URL.",
         json!({ "type": "object", "required": ["label"], "additionalProperties": false, "properties": {
             "label": { "type": "string", "description": "lowercase letters, digits, and single dashes" },
             "template": { "type": "string", "enum": ["blank", "todo", "inbox", "chat"] },
         } }),
     );
-    let hand_off = (
-        handoff::TOOL,
-        "Hands work to a computer: building or changing an app, writing code, research, anything more than a few calls. \
-         It starts the work and ends your turn (the person is told it is on its way); the work runs for minutes on its \
-         own, the computer answers here itself, and its answer reaches you as a note. It goes to your owner's own \
-         computer, in this conversation's session there, which remembers the work handed off from here before. With \
-         `fragments` (their apps it changes) or `throwaway`, or when they have no computer, a throwaway computer does \
-         it, made an editor of each of `fragments`, and is removed after, keeping what it built or changed.",
-        json!({ "type": "object", "required": ["task"], "additionalProperties": false, "properties": {
-            "task": { "type": "string", "description": "the task, as the computer should read it: it sees only what was handed off from this conversation before" },
-            "computer": { "type": "string", "description": "only when the person names one: a fragment of theirs with a computer and a `do` or `build` job (<label>.<username>)" },
-            "throwaway": { "type": "boolean", "description": "a new computer just for this: for building an app, extra hands alongside other work, or risky work" },
-            "fragments": { "type": "array", "maxItems": 8, "items": { "type": "string" }, "description": "the person's existing fragments the work changes (<label>.<username>): the computer is made an editor of each" },
-        } }),
-    );
-    let mut tools = if owner_turn { vec![create, hand_off, memory::tool()] } else { Vec::new() };
+    let mut tools = if owner_turn { vec![create] } else { Vec::new() };
     tools.extend([
         (
             "platform__list_fragments",
@@ -331,8 +312,7 @@ impl FragmentTools {
     /// An operation's answer, as the model reads it. A job's call answers
     /// only the run it started (`{run, status}`), so the tool waits for the
     /// run to end (at most `JOB_WAIT_MS`, read `for` the asker) and answers
-    /// what the job answered, or why it was held: an agent that runs a
-    /// command on a computer reads what it printed. A run still going by
+    /// what the job answered, or why it was held. A run still going by
     /// then is said to be.
     async fn op_answer(&self, fragment: &str, op: &str, answer: &Value) -> Result<String, String> {
         let done = OpResult::deserialize(answer).map_err(|e| format!("the fragment's answer is not an operation's result: {e}"))?;
@@ -413,19 +393,6 @@ impl ToolProvider<Session> for FragmentTools {
             return Ok(CallToolResult::error(vec![ContentBlock::text(format!("no tool named {}", call.name))]));
         };
         let args = Value::Object(call.arguments.unwrap_or_default());
-        if let Route::Platform(tool @ (handoff::TOOL | memory::TOOL)) = route {
-            let (fleet, sql, conv, id) = (self.fleet.clone(), self.sql.clone(), self.conv.clone(), request_id.to_string());
-            let done = SendFuture::new(async move {
-                match tool {
-                    handoff::TOOL => handoff::start(&fleet, &sql, &conv, &id, &args).await,
-                    _ => memory::remember(&fleet, &id, &args).await,
-                }
-            });
-            return Ok(match done.await {
-                Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
-                Err(why) => CallToolResult::error(vec![ContentBlock::text(why)]),
-            });
-        }
         let request = match &route {
             Route::Op { fragment, op } => Ok((Method::Post, format!("/api/f/{fragment}/ops/{op}"), Some(json!({ "id": op_id(request_id), "input": args })))),
             Route::Platform(tool) => platform_request(tool, &args, request_id),

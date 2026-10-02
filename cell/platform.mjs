@@ -113,10 +113,6 @@ const VIDEO_POLLS_MAX = 45;
 // to end, in at most 81 of a run's 256 steps.
 const AGENT_POLLS_MAX = 40;
 const AGENT_POLL_MS_MAX = 30_000;
-// A command's polls each wait up to 100 seconds on the computer
-// (fragment_core::computer::POLL_WAIT_S): 45 outlast its longest timeout.
-const EXEC_POLLS_MAX = 45;
-const EXEC_TIMEOUT_MAX_MS = 60 * 60_000;
 
 // Milliseconds, or "N seconds|minutes|hours|days"; NaN for anything else.
 function durationMs(duration) {
@@ -389,37 +385,6 @@ class Job {
       await this.sleep(Math.min(2000 * 2 ** i, AGENT_POLL_MS_MAX));
     }
     throw new StepError("agent.poll", `the agent's turn ${turn} did not end after ${AGENT_POLLS_MAX} polls`);
-  }
-
-  // The fragment's own computer (fragment.json's `computer`):
-  //   computer.exec(command, { timeout?, cwd?, env? }) → { code, stdout, stderr, truncated }
-  // runs `bash -lc command` there, in ~/fragment unless `cwd` says, for at
-  // most `timeout` (ms or "N seconds|minutes"; 10 minutes, at most 60). A
-  // nonzero exit is a result. The command is named by the run and this
-  // step, so a retried or replayed run reattaches to it and never runs it
-  // twice; the job waits for it in polls.
-  get computer() {
-    return {
-      exec: async (command, { timeout, cwd, env } = {}) => {
-        if (typeof command !== "string" || command.trim() === "") throw new TypeError("job.computer.exec(command): command is a string");
-        const args = { command };
-        if (timeout !== undefined) {
-          const ms = durationMs(timeout);
-          if (!Number.isFinite(ms) || ms < 1000 || ms > EXEC_TIMEOUT_MAX_MS) {
-            throw new Error('job.computer.exec\'s timeout is milliseconds or "N seconds|minutes", from 1 second to 60 minutes');
-          }
-          args.timeout_ms = Math.round(ms);
-        }
-        if (cwd !== undefined) args.cwd = String(cwd);
-        if (env !== undefined) args.env = Object.fromEntries(Object.entries(env).map(([k, v]) => [k, String(v)]));
-        const { exec } = await this.#step("computer.exec", args);
-        for (let i = 0; i < EXEC_POLLS_MAX; i++) {
-          const st = await this.#step("computer.exec.poll", { exec });
-          if (st.done) return st.result;
-        }
-        throw new StepError("computer.exec.poll", `the command ${exec} did not end after ${EXEC_POLLS_MAX} polls`);
-      },
-    };
   }
 
   // A web push to the subscriptions tagged `who` ("*": all).

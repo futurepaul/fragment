@@ -5,10 +5,7 @@
 //! Chat completions stream (server-sent events, OpenAI's chunk format) when
 //! asked to, and answer scripted replies (text, tool calls, nothing, or
 //! reasoning alone; unstreamed, text) in order before falling back to an
-//! echo; an in-cell agent's requests (no `session_id`: goose's name their
-//! session) take their own script first, so a test scripts the agent and
-//! the computer's goose apart. Jev's router (`typesafe/jev-router`) refuses
-//! a named reasoning effort (400), as it did. A streamed answer keeps to
+//! echo. A streamed answer keeps to
 //! the request's `max_tokens` (`CHARS_PER_TOKEN` characters each): one
 //! longer is cut there and ends `length`, as the service's do.
 //! An answer can be held back first (`delay_next`), as a slow model's is,
@@ -89,8 +86,6 @@ struct State {
     /// Answers leave out `usage.cost`.
     costless: bool,
     script: VecDeque<Reply>,
-    /// Replies for requests with no `session_id` only, before `script`.
-    agent_script: VecDeque<Reply>,
     chats: Vec<Value>,
     tool_calls: u64,
     video_ids: usize,
@@ -253,17 +248,12 @@ fn answer(s: &mut State, req: &Request, expected: &str, manager: &str, base_in: 
     let costless = s.costless;
     match (req.method.as_str(), path) {
         ("POST", "/api/v1/chat/completions") => {
-            // the router picks each call's reasoning effort itself, and refused one named (2026-09-27)
-            if body["model"] == "typesafe/jev-router" && !body["reasoning"]["effort"].is_null() {
-                return problem(400, "No configured model/effort candidate satisfies the requested reasoning effort");
-            }
             if let Err(r) = s.charge(&auth, costs.text) {
                 return r;
             }
             let last = body["messages"].as_array().and_then(|m| m.last()).map(|m| m["content"].clone()).unwrap_or(Value::Null);
             s.chats.push(body.clone());
-            let agent = body["session_id"].is_null().then(|| s.agent_script.pop_front()).flatten();
-            let scripted = agent.or_else(|| s.script.pop_front());
+            let scripted = s.script.pop_front();
             s.sleep_ms = s.delays.pop_front().unwrap_or(0);
             if body["stream"] == true {
                 let reply = scripted.unwrap_or_else(|| Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))));
@@ -408,17 +398,10 @@ impl OpenRouter {
         self.state.lock().expect("openrouter state").script.extend(replies.iter().cloned());
     }
 
-    /// Replies the next streamed chat completions an in-cell agent asks for
-    /// (no `session_id`) answer, in order, before the shared script.
-    pub fn script_agent(&self, replies: &[Reply]) {
-        self.state.lock().expect("openrouter state").agent_script.extend(replies.iter().cloned());
-    }
-
     /// Drops any scripted replies not yet answered, and any delays.
     pub fn clear_script(&self) {
         let mut s = self.state.lock().expect("openrouter state");
         s.script.clear();
-        s.agent_script.clear();
         s.delays.clear();
     }
 

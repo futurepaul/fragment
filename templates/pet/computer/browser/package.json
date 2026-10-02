@@ -1,6 +1,0 @@
-{
-  "name": "pet-browser",
-  "private": true,
-  "type": "module",
-  "dependencies": { "@browserbasehq/stagehand": "4.1.0" }
-}

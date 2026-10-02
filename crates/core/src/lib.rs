@@ -8,7 +8,6 @@ pub mod blob;
 pub mod body;
 pub mod budget;
 pub mod codestorage;
-pub mod computer;
 pub mod cron;
 pub mod effects;
 pub mod egress;

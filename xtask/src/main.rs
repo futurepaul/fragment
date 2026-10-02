@@ -161,7 +161,6 @@ fn dev(args: &[String]) -> Result<()> {
         workos: Some(workos),
         // the CLI's host: sign-in and approvals happen where it points
         platform_url: Some(format!("http://127.0.0.1:{DEV_PORT}")),
-        computers: None,
         // budgets pay for AI only with a management key (real OpenRouter: real money)
         openrouter_management: read("OPENROUTER_MANAGEMENT_KEY_FILE")?,
         budget_usd: None,
@@ -177,7 +176,6 @@ fn dev(args: &[String]) -> Result<()> {
         agent_url: format!("http://127.0.0.1:{DEV_PORT}"),
         openrouter_url: None,
         test_hooks: false,
-        egress_local: true,
     }
     .configure(&devstack::agent_dir())?;
     let opts = devstack::NodeOptions {
@@ -263,8 +261,8 @@ const E2E_BIN: &str = "target/release/fragment-e2e";
 /// Where the kit keeps worker-build's esbuild (the node bundles with it).
 const KIT_ESBUILD: &str = "target/e2e-kit/esbuild";
 
-/// What the e2e runs: the workers, the CLI (the e2e drives it too,
-/// computers included), and the suite.
+/// What the e2e runs: the workers, the CLI (the e2e drives it too), and the
+/// suite.
 fn build_e2e() -> Result<()> {
     build_parts(&KitPart::ALL)
 }
@@ -272,7 +270,7 @@ fn build_e2e() -> Result<()> {
 /// The CLI and the suite, for this machine.
 fn build_native() -> Result<()> {
     let manifest = devstack::repo_root().join("Cargo.toml");
-    run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli", "--features", "computer"]))?;
+    run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli"]))?;
     run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-e2e"]))
 }
 

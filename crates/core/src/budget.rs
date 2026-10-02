@@ -10,15 +10,11 @@ use crate::steps::Step;
 
 /// One US dollar in micro-dollars.
 pub const USD: i64 = 1_000_000;
-/// A text completion's reservation, and each model call's of an agent or a
-/// computer: on the platform's model (`fragment_proto::AGENT_MODEL`, about
-/// $1.20 in and $4.00 out per million tokens), a call of 150,000 tokens in
-/// and 4,096 out.
+/// A text completion's reservation, and each model call's of an agent: on
+/// the platform's model (`fragment_proto::AGENT_MODEL`, about $1.20 in and
+/// $4.00 out per million tokens), a call of 150,000 tokens in and 4,096
+/// out.
 pub const TEXT_RESERVE: i64 = 200_000;
-/// A computer's call on the router with variable pricing
-/// (`fragment_proto::ROUTER_MODEL`): its price is known only once it
-/// answers, so it holds this cap, then settles to the cost reported.
-pub const ROUTER_RESERVE: i64 = 500_000;
 /// An image's.
 pub const IMAGE_RESERVE: i64 = 100_000;
 /// A video's, per second of it (the models this plan names cost about
@@ -103,62 +99,6 @@ pub fn charge(reported_usd: Option<f64>, video: Option<VideoEnd>) -> Option<i64>
     }
 }
 
-/// The longest server-sent event line a streamed answer's cost is looked
-/// for in: the chunk that carries `usage` is small, so a longer line (a
-/// big piece of text) is passed over, never held.
-pub const STREAM_LINE_MAX: usize = 64 * 1024;
-
-/// The cost a streamed chat completion reports (OpenAI's chunk format):
-/// fed the answer's bytes as they pass, it keeps the last `usage.cost` a
-/// `data:` line carried, which OpenRouter sends in the answer's last
-/// chunk. An answer cut off before then has none, which `charge` settles
-/// at the reservation.
-#[derive(Default)]
-pub struct StreamCost {
-    line: Vec<u8>,
-    /// The line being read is over `STREAM_LINE_MAX`: skipped to its end.
-    skipping: bool,
-    cost: Option<f64>,
-}
-
-impl StreamCost {
-    pub fn push(&mut self, mut bytes: &[u8]) {
-        while let Some(end) = bytes.iter().position(|b| *b == b'\n') {
-            self.take(&bytes[..end]);
-            self.end_line();
-            bytes = &bytes[end + 1..];
-        }
-        self.take(bytes);
-    }
-
-    fn take(&mut self, piece: &[u8]) {
-        if self.skipping || self.line.len() + piece.len() > STREAM_LINE_MAX {
-            (self.skipping, self.line) = (true, Vec::new());
-            return;
-        }
-        self.line.extend_from_slice(piece);
-    }
-
-    fn end_line(&mut self) {
-        let line = std::mem::take(&mut self.line);
-        if std::mem::take(&mut self.skipping) {
-            return;
-        }
-        let Some(data) = line.strip_prefix(b"data:".as_slice()) else { return };
-        let cost = serde_json::from_slice::<serde_json::Value>(data).ok().and_then(|v| v["usage"]["cost"].as_f64());
-        if cost.is_some() {
-            self.cost = cost;
-        }
-    }
-
-    /// The cost reported, once the answer has ended (a last line without
-    /// its newline counts).
-    pub fn finish(mut self) -> Option<f64> {
-        self.end_line();
-        self.cost
-    }
-}
-
 /// A month's standing: the allowance (the budget plus top-ups), what has
 /// been spent (settled), and what is reserved by steps still running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,43 +124,10 @@ impl Month {
     }
 }
 
-/// A computer's Sprite at list price (docs/computers.md): an awake hour is
-/// billed as the idle footprint measured on one (a tenth of a CPU at
-/// $0.07 a CPU-hour, 1.5 GB at $0.04375 a GB-hour; Sprites meter what is
-/// used, which the platform cannot see), and its disk, measured when it
-/// wakes, at $0.000683 a GB-hour while awake and $0.000027 while asleep.
-pub const AWAKE_PER_HOUR: i64 = 70_000 / 10 + 43_750 * 3 / 2;
-pub const DISK_HOT_PER_GB_HOUR: i64 = 683;
-pub const DISK_COLD_PER_GB_HOUR: i64 = 27;
-const HOUR_MS: i128 = 3_600_000;
-const GB: i128 = 1_000_000_000;
-
-/// What `ms` of a computer costs, awake or asleep, with `disk_bytes` on
-/// its disk: rounded up, so a charge is never zero.
-pub fn computer(ms: i64, disk_bytes: i64, awake: bool) -> i64 {
-    assert!(ms >= 0 && disk_bytes >= 0, "a span and a size are not negative");
-    let disk_rate = if awake { DISK_HOT_PER_GB_HOUR } else { DISK_COLD_PER_GB_HOUR };
-    // micro-dollars times GB·ms: i128, so a year of a 100 GB disk fits
-    let per_hour_gb = i128::from(if awake { AWAKE_PER_HOUR } else { 0 }) * GB + i128::from(disk_rate) * i128::from(disk_bytes);
-    let (n, d) = (per_hour_gb * i128::from(ms), HOUR_MS * GB);
-    let micros = ((n + d - 1) / d).max(1);
-    i64::try_from(micros).expect("a computer's charge fits an i64")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn computers_at_list_price() {
-        assert_eq!(AWAKE_PER_HOUR, 72_625);
-        assert_eq!(computer(3_600_000, 0, true), 72_625);
-        assert_eq!(computer(60_000, 0, true), 1_211, "a minute, rounded up");
-        assert_eq!(computer(3_600_000, 10_000_000_000, true), 72_625 + 6_830);
-        assert_eq!(computer(30 * 24 * 3_600_000, 10_000_000_000, false), 194_400, "a month asleep with 10 GB");
-        assert_eq!(computer(1, 0, false), 1, "never zero");
-    }
 
     #[test]
     fn months_are_utc() {
@@ -277,26 +184,6 @@ mod tests {
         assert_eq!(charge(None, Some(VideoEnd::Completed)), None, "a delivered video that reported no cost");
         assert_eq!(charge(None, Some(VideoEnd::Undelivered)), Some(0));
         assert_eq!(charge(Some(0.01), Some(VideoEnd::Undelivered)), Some(10_000), "a reported cost is charged, delivered or not");
-    }
-
-    #[test]
-    fn a_streamed_answer_s_cost_is_its_last_usage() {
-        let answer = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n: keep-alive\n\ndata: {\"choices\":[],\"usage\":{\"cost\":0.0021}}\n\ndata: [DONE]\n\n";
-        for size in [1, 7, answer.len()] {
-            let mut scan = StreamCost::default();
-            answer.as_bytes().chunks(size).for_each(|c| scan.push(c));
-            assert_eq!(scan.finish(), Some(0.0021), "in pieces of {size}");
-        }
-        let mut cut = StreamCost::default();
-        cut.push(b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: {\"usage\":{\"co");
-        assert_eq!(cut.finish(), None, "cut off before its usage: charged the reservation");
-        let mut unended = StreamCost::default();
-        unended.push(b"data: {\"usage\":{\"cost\":0.5}}");
-        assert_eq!(unended.finish(), Some(0.5), "a last line without its newline");
-        let mut long = StreamCost::default();
-        long.push(format!("data: {{\"x\":\"{}\",\"usage\":{{\"cost\":9}}}}\n", "a".repeat(STREAM_LINE_MAX)).as_bytes());
-        long.push(b"data: {\"usage\":{\"cost\":0.25}}\n");
-        assert_eq!(long.finish(), Some(0.25), "a line over the limit is passed over, and the next one read");
     }
 
     #[test]

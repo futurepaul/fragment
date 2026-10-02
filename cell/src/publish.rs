@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::site;
 use fragment_proto::{ChatAnswers, CreateFragment, ErrorBody, ErrorCode, IdentityKind, Role, Visibility};
-use fragment_templates::{Template, BLANK, BUILDER, CALORIES, CHAT, DESKTOP, INBOX, PET, TODO};
+use fragment_templates::{Template, BLANK, CALORIES, CHAT, DESKTOP, INBOX, TODO};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use worker::*;
@@ -27,14 +27,12 @@ use crate::routed::{Credential, Signed};
 /// offers them: the simplest first, the desktop (everyone's home, made on
 /// their first visit: home.rs) last. `notes`
 /// stays with the CLI (`fragment new --template notes`): at 3 MiB it would
-/// double the cell. `builder` is also what an agent's hand-off makes.
-pub(crate) const TEMPLATES: [(&str, Template); 8] = [
+/// double the cell.
+pub(crate) const TEMPLATES: [(&str, Template); 6] = [
     ("blank", BLANK),
     ("todo", TODO),
     ("inbox", INBOX),
     ("calories", CALORIES),
-    ("pet", PET),
-    ("builder", BUILDER),
     ("chat", CHAT),
     ("desktop", DESKTOP),
 ];
@@ -49,13 +47,12 @@ const API_WRITE_MAX_BYTES: usize = 1024 * 1024;
 const PRESENCE_NAMES_MAX: usize = 8;
 
 /// Who may open a fragment made from a template, when its create does not
-/// say, from what the template declares (fragment.json holds no access): a
-/// computer (awake on its owner's budget while a page is open) or any
-/// capability (its owner's powers: `fragments`, `frame`; the desktop) make
-/// it its owner's alone; anything else, whoever holds its link.
+/// say, from what the template declares (fragment.json holds no access):
+/// any capability (its owner's powers: `fragments`, `frame`; the desktop)
+/// makes it its owner's alone; anything else, whoever holds its link.
 pub(crate) fn first_visibility(name: Option<&str>) -> Visibility {
     let m = name.and_then(template).map(manifest).unwrap_or_default();
-    if m["computer"].is_object() || m["capabilities"].as_array().is_some_and(|c| !c.is_empty()) {
+    if m["capabilities"].as_array().is_some_and(|c| !c.is_empty()) {
         Visibility::Members
     } else {
         Visibility::Link
@@ -481,9 +478,9 @@ impl FragmentCell {
         let text = |k: &str| body[k].as_str().map(str::to_string).ok_or_else(|| CellError::invalid(format!("{k} is a string")));
         let answers = match body.get("answers") {
             None | Some(Value::Null) => None,
-            Some(a) => Some(serde_json::from_value::<ChatAnswers>(a.clone()).map_err(|_| CellError::invalid("answers is \"agent\", \"people\", or {\"computer\": \"<fragment>\"}"))?),
+            Some(a) => Some(serde_json::from_value::<ChatAnswers>(a.clone()).map_err(|_| CellError::invalid("answers is \"agent\" or \"people\""))?),
         };
-        let create = CreateFragment { name: text("label")?, visibility: None, template: Some(text("template")?), throwaway: false, answers };
+        let create = CreateFragment { name: text("label")?, visibility: None, template: Some(text("template")?), answers };
         let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: Some(username.to_string()) };
         let signer = Signed::new(identity, None);
         let mut made = crate::create_fragment(&self.env, self.cfg, &caller.url, create, signer).await?;

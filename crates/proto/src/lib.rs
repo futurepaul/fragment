@@ -40,9 +40,6 @@ pub mod limits {
     pub const AUTH_WINDOW_S: i64 = 60;
     /// Request bodies the router reads (to hash for NIP-98).
     pub const BODY_MAX_BYTES: usize = 2 * 1024 * 1024;
-    /// A computer's model request (`POST /api/model/chat/completions`),
-    /// which carries screenshots.
-    pub const MODEL_BODY_MAX_BYTES: usize = 8 * 1024 * 1024;
     /// A secret's value.
     pub const SECRET_MAX_BYTES: usize = 64 * 1024;
     /// The app facet's database (docs/MODEL.md): a mutation that leaves it
@@ -147,11 +144,10 @@ pub mod limits {
     /// Unspent single-use redemptions (a fragment origin's way in) one
     /// platform session holds: past this, the oldest go first.
     pub const REDEMPTIONS_PER_SESSION_MAX: u64 = 16;
-    /// Keys one identity has held (active and revoked), and agents and
-    /// computers one person owns (a removed computer no longer counts).
+    /// Keys one identity has held (active and revoked), and agents one
+    /// person owns.
     pub const KEYS_PER_IDENTITY_MAX: u64 = 64;
     pub const AGENTS_PER_OWNER_MAX: u64 = 100;
-    pub const COMPUTERS_PER_OWNER_MAX: u64 = 32;
     /// A file an app reads (a larger one is served from the site).
     pub const FILE_READ_MAX_BYTES: usize = 1024 * 1024;
     /// What one mutation or one job step may write to files, and in how many.
@@ -445,10 +441,6 @@ pub struct CreateFragment {
     /// `todo`, `blank`, …): its files are the first commit, and live.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
-    /// A hand-off's throwaway, made by an agent for its owner: the fragment
-    /// records the agent, which alone may delete it (docs/api.md, Hand-offs).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub throwaway: bool,
     /// Who answers a chat made from the `chat` template (docs/one-home.md,
     /// phase 5): its fragment.json says so from its first commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -537,9 +529,6 @@ pub struct FragmentStatus {
     /// its owner lets it show their fragments inside it (`__frame`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame: Option<bool>,
-    /// The agent that made it as a hand-off's throwaway, which may delete it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub throwaway_of: Option<String>,
 }
 
 /// A fragment the signer holds a role on.
@@ -559,15 +548,12 @@ pub struct ListedFragment {
 }
 
 /// What a fragment is, from its live manifest, as its owner's list carries
-/// it (the desktop's chats, apps, and computers: ROADMAP decision 25): a
-/// chat (it declares a `chat` channel) and who answers it, and the computer
-/// it declares (`default`, a Sprite). Neither: an app.
+/// it (the desktop's chats and apps: ROADMAP decision 25): a chat (it
+/// declares a `chat` channel) and who answers it. Otherwise: an app.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct FragmentKind {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat: Option<ChatKind>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub computer: Option<String>,
 }
 
 /// Who answers a chat.
@@ -609,10 +595,10 @@ pub struct Member {
     /// The identity that granted it (the owner), or `invite:<id>`.
     pub added_by: String,
     pub added_at: i64,
-    /// `person`, `agent`, or `computer`.
+    /// `person` or `agent`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<IdentityKind>,
-    /// An agent or computer member's owner, who reads what it reads.
+    /// An agent member's owner, who reads what it reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
 }
@@ -623,27 +609,19 @@ pub struct MemberList {
     pub members: Vec<Member>,
 }
 
-/// The platform's model: agents in cells use it unless they name another,
-/// and a computer's call through the platform when it names none. The
-/// high-speed variant of `z-ai/glm-5.3-flash`, at about 8 times its price.
+/// The platform's model: agents in cells use it unless they name another.
+/// The high-speed variant of `z-ai/glm-5.3-flash`, at about 8 times its
+/// price.
 pub const AGENT_MODEL: &str = "z-ai/glm-5.3-flashx";
-/// A router with variable pricing: its cost is known only once it answers.
-pub const ROUTER_MODEL: &str = "typesafe/jev-router";
-/// The models a computer may name (`POST /api/model/chat/completions`);
-/// any other is refused. The first is the default.
-pub const COMPUTER_MODELS: [&str; 3] = [AGENT_MODEL, "z-ai/glm-5.3-flash", ROUTER_MODEL];
 
 /// What an identity is (docs/finite-integration.md). A fragment's own key
-/// stays the fragment's and is not registered. An agent and a computer each
-/// have a designated owner, a person; a computer is a machine its owner
-/// paired (`fragment login --computer`), which acts only where it is a
-/// member, never as its owner.
+/// stays the fragment's and is not registered. An agent has a designated
+/// owner, a person.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdentityKind {
     Person,
     Agent,
-    Computer,
 }
 
 impl IdentityKind {
@@ -651,7 +629,6 @@ impl IdentityKind {
         match self {
             IdentityKind::Person => "person",
             IdentityKind::Agent => "agent",
-            IdentityKind::Computer => "computer",
         }
     }
 
@@ -659,7 +636,6 @@ impl IdentityKind {
         match s {
             "person" => Some(IdentityKind::Person),
             "agent" => Some(IdentityKind::Agent),
-            "computer" => Some(IdentityKind::Computer),
             _ => None,
         }
     }
@@ -673,11 +649,11 @@ pub struct Identity {
     /// `id:` and 32 hex.
     pub id: String,
     pub kind: IdentityKind,
-    /// An agent's or a computer's owner.
+    /// An agent's owner.
     #[serde(default)]
     pub owner: Option<String>,
-    /// A person's username; an agent's or computer's owner's (the namespace
-    /// its fragments go in). `None` until a person chooses one.
+    /// A person's username; an agent's owner's (the namespace its
+    /// fragments go in). `None` until a person chooses one.
     #[serde(default)]
     pub username: Option<String>,
 }
@@ -748,12 +724,9 @@ pub struct KeyView {
 pub struct IdentityView {
     pub id: String,
     pub kind: IdentityKind,
-    /// An agent's or a computer's owner.
+    /// An agent's owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
-    /// A computer's name, as its owner paired it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
     /// A person's username (decision 16): their fragments are
     /// `<label>.<username>`. An agent's fragments go under its owner's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -766,25 +739,12 @@ pub struct IdentityView {
     /// A person's agents.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<String>,
-    /// A person's computers (a removed one is not listed).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub computers: Vec<ComputerRef>,
     /// A person's sign-ins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subjects: Vec<Subject>,
     /// Whether this answer made it (a registration's replay answers false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<bool>,
-}
-
-/// One of a person's computers, as their identity lists it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ComputerRef {
-    pub id: String,
-    /// A label, unique among its owner's computers.
-    pub name: String,
-    pub paired_at: i64,
 }
 
 /// `PUT /api/f/<name>/members/<npub>` (owner)
@@ -1373,9 +1333,7 @@ mod tests {
         let bare: Identity = serde_json::from_str(r#"{"id":"id:0123456789abcdef0123456789abcdef","kind":"person"}"#).unwrap();
         assert_eq!((bare.owner, bare.username), (None, None));
         assert!(serde_json::from_str::<Identity>(r#"{"id":"id:0123456789abcdef0123456789abcdef","kind":"robot"}"#).is_err(), "an unknown kind is refused");
-        let computer: Identity = serde_json::from_str(r#"{"id":"id:0123456789abcdef0123456789abcdef","kind":"computer","owner":"id:ffffffffffffffffffffffffffffffff"}"#).unwrap();
-        assert_eq!(computer.kind, IdentityKind::Computer);
-        for kind in [IdentityKind::Person, IdentityKind::Agent, IdentityKind::Computer] {
+        for kind in [IdentityKind::Person, IdentityKind::Agent] {
             assert_eq!(IdentityKind::parse(kind.as_str()), Some(kind), "a kind's column reads back as itself");
         }
         let subject = Subject { issuer: "workos:client_1".into(), email: None, linked_at: 7 };
@@ -1560,7 +1518,7 @@ mod tests {
         let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner, sharing: None, kind: None }] };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes.ann", "role": "owner" }] }));
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1 };
-        let kind = FragmentKind { chat: Some(ChatKind { answers: Answers::Agent }), computer: None };
+        let kind = FragmentKind { chat: Some(ChatKind { answers: Answers::Agent }) };
         let listed = FragmentList { fragments: vec![ListedFragment { name: "chat.ann".into(), role: Role::Owner, sharing: Some(sharing), kind: Some(kind) }] };
         assert_eq!(
             value(&listed),

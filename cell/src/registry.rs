@@ -1,14 +1,9 @@
 //! The `Registry` cell: fragment's stand-in for finite.computer's BANKS
 //! (FIN-11; docs/finite-integration.md). One cell for the fleet holds every
-//! identity (a person, an agent, or a computer), the public keys each has
-//! held, the sign-in subjects that name a person (phase 4 slice B), and the
-//! names of each person's computers. It never holds a grant or a private
-//! key: fragments keep their members, and keys stay with whoever signs.
-//!
-//! A computer is a machine its owner paired (`fragment login --computer`,
-//! approved on `/cli`): owned as an agent is, its key signs as the
-//! computer, never as its owner. Removing it revokes all its keys and
-//! drops its `computers` row; the identity stays, so they stay revoked.
+//! identity (a person or an agent), the public keys each has held, and the
+//! sign-in subjects that name a person (phase 4 slice B). It never holds a
+//! grant or a private key: fragments keep their members, and keys stay
+//! with whoever signs.
 //!
 //! It is asked live about every signed request whose answer depends on who
 //! is asking (`/resolve`, `/session`: the router on the control API, a
@@ -31,7 +26,7 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use fragment_core::{blob, npub, registry};
-use fragment_proto::{limits, ComputerRef, ErrorCode, Identity, IdentityKind, IdentityView, KeyView};
+use fragment_proto::{limits, ErrorCode, Identity, IdentityKind, IdentityView, KeyView};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -58,7 +53,7 @@ pub(crate) mod calls;
 mod signin;
 use calls::{
     Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, ClaimUsername, Claimed, EndSession, Exchange, FindUsername, Holder, Logout, Lookup, Mint,
-    Home, HomeName, Memory, MemoryName, MintFrame, MintPairing, PairComputer, PairWithToken, PairingToken, Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername, RemoveComputer, RemovedComputer,
+    Home, HomeName, MintFrame, Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername,
     Resolve, RevokeKey, Session, SetPicture, TestHook, View, TEST_HOLD_MAX_MS,
 };
 pub use signin::SESSION_TTL_MS;
@@ -82,17 +77,9 @@ CREATE TABLE IF NOT EXISTS usernames (
   username TEXT PRIMARY KEY, identity TEXT NOT NULL UNIQUE, claimed_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS pictures (
   identity TEXT PRIMARY KEY, sha TEXT NOT NULL, mime TEXT NOT NULL, set_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS computers (
-  identity TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL, paired_at INTEGER NOT NULL, UNIQUE (owner, name));
-CREATE TABLE IF NOT EXISTS pairings (
-  hash TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL, expires_at INTEGER NOT NULL, identity TEXT, UNIQUE (owner, name));
-CREATE TABLE IF NOT EXISTS memories (
-  owner TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, recorded_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS homes (
   owner TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, recorded_at INTEGER NOT NULL);
 ";
-/// How long a fragment's computer has to pair with the token it was handed.
-const PAIRING_TTL_MS: i64 = 3_600_000;
 
 #[durable_object]
 pub struct RegistryCell {
@@ -403,9 +390,8 @@ impl RegistryCell {
     }
 
     /// What anyone may know of identities, as a page shows a name: a
-    /// person's username and picture, that it is someone's agent, or a
-    /// computer's name. An id the
-    /// registry does not hold (an anonymous visitor's) is left out.
+    /// person's username and picture, or that it is someone's agent. An id
+    /// the registry does not hold (an anonymous visitor's) is left out.
     fn profiles(&self, b: Profiles) -> CellResult<ProfilesAnswer> {
         if b.ids.len() > PROFILES_MAX {
             return Err(CellError::invalid(format!("at most {PROFILES_MAX} identities at once")));
@@ -418,9 +404,8 @@ impl RegistryCell {
                 (IdentityKind::Person, Some(u)) => self.picture_of(&id)?.map(|p| format!("/api/users/{u}/picture?v={}", &p.sha[..12])),
                 _ => None,
             };
-            let name = if who.kind == IdentityKind::Computer { self.computer_name(&id)? } else { None };
             // an agent's identity carries its owner's username
-            profiles.insert(id, Profile { kind: who.kind, username: who.username, picture, name });
+            profiles.insert(id, Profile { kind: who.kind, username: who.username, picture });
         }
         Ok(ProfilesAnswer { profiles })
     }
@@ -443,13 +428,6 @@ impl RegistryCell {
             .into_iter()
             .map(|r| r.id)
             .collect();
-        // bounded: a person owns at most COMPUTERS_PER_OWNER_MAX computers
-        let computers = self.rows::<ComputerRef>(
-            "SELECT identity AS id, name, paired_at AS pairedAt FROM computers WHERE owner = ? ORDER BY paired_at, name",
-            vec![who.id.as_str().into()],
-        )?;
-        assert!(computers.len() as u64 <= limits::COMPUTERS_PER_OWNER_MAX, "a person owns at most COMPUTERS_PER_OWNER_MAX computers");
-        let name = if who.kind == IdentityKind::Computer { self.computer_name(&who.id)? } else { None };
         let row = self
             .row::<CreatedRow>("SELECT created_at FROM identities WHERE id = ?", vec![who.id.as_str().into()])?
             .ok_or_else(|| CellError::host(format!("the identity {} went missing during its view", who.id)))?;
@@ -463,13 +441,11 @@ impl RegistryCell {
             id: who.id.clone(),
             kind: who.kind,
             owner: who.owner.clone(),
-            name,
             username,
             picture,
             created_at: row.created_at,
             keys,
             agents,
-            computers,
             subjects: self.subjects_of(&who.id)?,
             created,
         })
@@ -485,7 +461,7 @@ impl RegistryCell {
             "INSERT INTO identities (id, kind, owner, created_at) VALUES (?, ?, ?, ?)",
             vec![id.as_str().into(), kind.as_str().into(), owner_v, SqlStorageValue::Integer(now)],
         )?;
-        // an identity added its own first key; an agent's or computer's owner added its
+        // an identity added its own first key; an agent's owner added its
         let added_by = if by.is_empty() { id.as_str() } else { by };
         self.exec(
             "INSERT INTO keys (key, identity, added_at, added_by) VALUES (?, ?, ?, ?)",
@@ -522,92 +498,6 @@ impl RegistryCell {
         }
     }
 
-    /// A computer's name, while it is paired (`None`: removed).
-    fn computer_name(&self, id: &str) -> CellResult<Option<String>> {
-        Ok(self.row::<NameRow>("SELECT name FROM computers WHERE identity = ?", vec![id.into()])?.map(|r| r.name))
-    }
-
-    /// A machine's key its owner approved as their computer `name` (the
-    /// router checked the key's own proof, made for that name), in one
-    /// transaction: a computer identity they own, holding the key, and its
-    /// name among theirs. The same approval again answers the same computer.
-    fn pair_computer(&self, b: PairComputer) -> CellResult<IdentityView> {
-        check_key(&b.key)?;
-        if !fragment_proto::valid_label(&b.name) {
-            return Err(CellError::invalid("a computer's name is a label: lowercase letters, digits, and single dashes, at most 63"));
-        }
-        let owner = self.live_session(&b.token, None, false)?.session.identity;
-        if owner.kind != IdentityKind::Person {
-            return Err(CellError::new(ErrorCode::Forbidden, "a computer's owner is a person"));
-        }
-        match self.key_row(&b.key)? {
-            Some(row) if !row.active() => Err(conflict("this key was revoked: pair with a new one (`fragment login --computer <name> --force`)")),
-            Some(row) => {
-                let holder = self.stored_identity(&row.identity, &format!("the key {}", b.key))?;
-                let same = holder.kind == IdentityKind::Computer && holder.owner.as_deref() == Some(owner.id.as_str());
-                if same && self.computer_name(&holder.id)?.as_deref() == Some(b.name.as_str()) {
-                    return self.view(&holder, Some(false));
-                }
-                Err(conflict("this key already belongs to someone: a computer pairs with a key of its own"))
-            }
-            None => self.new_computer(&owner.id, &b.key, &b.name),
-        }
-    }
-
-    /// A new computer `name` of `owner`'s, holding `key` (no one holds it
-    /// yet: the caller checked), in one transaction.
-    fn new_computer(&self, owner: &str, key: &str, name: &str) -> CellResult<IdentityView> {
-        if self.count("SELECT COUNT(*) AS n FROM computers WHERE owner = ? AND name = ?", vec![owner.into(), name.into()])? > 0 {
-            return Err(conflict(format!("you have a computer named {name}: remove it first (`fragment computers rm {name}`), or pair this one under another name")));
-        }
-        if self.count("SELECT COUNT(*) AS n FROM computers WHERE owner = ?", vec![owner.into()])? >= limits::COMPUTERS_PER_OWNER_MAX {
-            return Err(CellError::invalid(format!("a person owns at most {} computers", limits::COMPUTERS_PER_OWNER_MAX)));
-        }
-        let computer = self.make(IdentityKind::Computer, Some(owner), key, owner)?;
-        self.exec(
-            "INSERT INTO computers (identity, owner, name, paired_at) VALUES (?, ?, ?, ?)",
-            vec![computer.id.as_str().into(), owner.into(), name.into(), SqlStorageValue::Integer(js::now_ms())],
-        )?;
-        let view = self.view(&computer, Some(true))?;
-        assert!(view.name.as_deref() == Some(name), "a paired computer reads back under its name");
-        Ok(view)
-    }
-
-    /// A token that pairs a fragment's own computer (named by its fragment)
-    /// for its owner: the platform hands it to the Sprite it made, which
-    /// pairs with a key it made itself. One a name: a new one replaces it.
-    fn mint_pairing(&self, b: MintPairing) -> CellResult<PairingToken> {
-        assert!(fragment_proto::valid_fragment_name(&b.name), "a fragment's computer is named by its fragment");
-        if self.named_identity(&b.owner)?.kind != IdentityKind::Person {
-            return Err(CellError::host(format!("{} is not a person, and owns no computer", b.owner)));
-        }
-        let token = signin::fresh_token();
-        self.exec(
-            "INSERT INTO pairings (hash, owner, name, expires_at) VALUES (?, ?, ?, ?)
-             ON CONFLICT (owner, name) DO UPDATE SET hash = excluded.hash, expires_at = excluded.expires_at, identity = NULL",
-            vec![signin::sha(&token).into(), b.owner.as_str().into(), b.name.as_str().into(), SqlStorageValue::Integer(js::now_ms() + PAIRING_TTL_MS)],
-        )?;
-        Ok(PairingToken { token })
-    }
-
-    /// A person's memory fragment (cell/src/memory.rs): the one recorded,
-    /// recording `name` first when there is none, or in its place with
-    /// `replace`. A person has one memory.
-    fn memory(&self, b: Memory) -> CellResult<MemoryName> {
-        if let Some(name) = &b.name {
-            assert!(fragment_proto::valid_fragment_name(name), "a memory is a fragment");
-            if self.named_identity(&b.owner)?.kind != IdentityKind::Person {
-                return Err(CellError::host(format!("{} is not a person, and has no memory", b.owner)));
-            }
-            let q = match b.replace {
-                true => "INSERT INTO memories (owner, name, recorded_at) VALUES (?, ?, ?) ON CONFLICT (owner) DO UPDATE SET name = excluded.name, recorded_at = excluded.recorded_at",
-                false => "INSERT INTO memories (owner, name, recorded_at) VALUES (?, ?, ?) ON CONFLICT (owner) DO NOTHING",
-            };
-            self.exec(q, vec![b.owner.as_str().into(), name.as_str().into(), SqlStorageValue::Integer(js::now_ms())])?;
-        }
-        Ok(MemoryName { name: self.row::<NameRow>("SELECT name FROM memories WHERE owner = ?", vec![b.owner.as_str().into()])?.map(|r| r.name) })
-    }
-
     /// A person's home, their desktop (cell/src/home.rs): the one recorded,
     /// recording `name` first when there is none, or in its place with
     /// `replace` (the one recorded is gone). A person has one home.
@@ -626,56 +516,6 @@ impl RegistryCell {
         Ok(HomeName { name: self.row::<NameRow>("SELECT name FROM homes WHERE owner = ?", vec![b.owner.as_str().into()])?.map(|r| r.name) })
     }
 
-    /// A key pairs as the computer a token names, spending it; the same key
-    /// again answers the same computer.
-    fn pair_with_token(&self, b: PairWithToken) -> CellResult<IdentityView> {
-        #[derive(Deserialize)]
-        struct Pairing {
-            owner: String,
-            name: String,
-            expires_at: i64,
-            identity: Option<String>,
-        }
-        check_key(&b.key)?;
-        let refused = || unauthenticated("this pairing token expired, was spent, or was never made: its fragment's next deploy makes the computer again");
-        let hash = signin::sha(&b.token);
-        let p = self.row::<Pairing>("SELECT owner, name, expires_at, identity FROM pairings WHERE hash = ?", vec![hash.as_str().into()])?.ok_or_else(refused)?;
-        let held = self.key_row(&b.key)?;
-        match (p.identity, held) {
-            (Some(id), Some(k)) if k.identity == id && k.active() => self.view(&self.stored_identity(&id, "a pairing")?, Some(false)),
-            (Some(_), _) => Err(refused()),
-            (None, _) if p.expires_at <= js::now_ms() => Err(refused()),
-            (None, Some(_)) => Err(conflict("this key already belongs to someone: a computer pairs with a key of its own")),
-            (None, None) => {
-                let view = self.new_computer(&p.owner, &b.key, &p.name)?;
-                self.exec("UPDATE pairings SET identity = ? WHERE hash = ?", vec![view.id.as_str().into(), hash.as_str().into()])?;
-                Ok(view)
-            }
-        }
-    }
-
-    /// Its owner removes a computer, in one transaction: every key it holds
-    /// is revoked, so it is 401 from its next request, and its name goes.
-    /// Its identity stays, so its keys stay revoked and no key joins it
-    /// again (`add_key`); the router then has it leave its fragments.
-    fn remove_computer(&self, b: RemoveComputer) -> CellResult<RemovedComputer> {
-        let by = self.by(&b.by)?;
-        let computer = self.named_identity(&b.computer)?;
-        if computer.owner.as_deref() != Some(by.id.as_str()) {
-            return Err(CellError::new(ErrorCode::NotFound, format!("no computer {} of yours", computer.id)));
-        }
-        if computer.kind != IdentityKind::Computer {
-            return Err(CellError::invalid(format!("{} is your agent, not a computer", computer.id)));
-        }
-        let id = || computer.id.as_str().into();
-        let name = self.computer_name(&computer.id)?;
-        self.exec("UPDATE keys SET revoked_at = ? WHERE identity = ? AND revoked_at IS NULL", vec![SqlStorageValue::Integer(js::now_ms()), id()])?;
-        self.exec("DELETE FROM computers WHERE identity = ?", vec![id()])?;
-        let active = self.count("SELECT COUNT(*) AS n FROM keys WHERE identity = ? AND revoked_at IS NULL", vec![id()])?;
-        assert!(active == 0, "a removed computer holds no active key");
-        Ok(RemovedComputer { identity: computer, removed: name.is_some(), name })
-    }
-
     /// The identity a call names (`None`: the asker's own).
     fn named_or(&self, identity: Option<&str>, by: &Identity) -> CellResult<Identity> {
         identity.map_or_else(|| Ok(by.clone()), |id| self.named_identity(id))
@@ -690,7 +530,6 @@ impl RegistryCell {
                 match who.kind {
                     IdentityKind::Person => "only this person manages their keys",
                     IdentityKind::Agent => "only the agent's owner manages its keys",
-                    IdentityKind::Computer => "only the computer's owner manages its keys",
                 },
             ));
         }
@@ -720,10 +559,6 @@ impl RegistryCell {
         let by = self.by(&b.by)?;
         check_key(&b.key)?;
         let who = self.managed(b.identity.as_deref(), &by)?;
-        // a removed computer stays removed: its owner pairs a new one
-        if who.kind == IdentityKind::Computer && self.computer_name(&who.id)?.is_none() {
-            return Err(conflict("this computer was removed: pair a new one (`fragment login --computer <name>`)"));
-        }
         let added = self.insert_key(&who.id, &b.key, &by.id)?;
         self.view(&who, Some(added))
     }
@@ -737,15 +572,11 @@ impl RegistryCell {
             Some(row) if !row.active() => return self.view(&who, Some(false)),
             Some(_) => {}
         }
-        // an agent, and a paired computer, always keep a key; a person who
-        // signs in may hold none
+        // an agent always keeps a key; a person who signs in may hold none
         let active = self.count("SELECT COUNT(*) AS n FROM keys WHERE identity = ? AND revoked_at IS NULL", vec![who.id.as_str().into()])?;
         let signs_in = who.kind == IdentityKind::Person && self.signs_in(&who.id)?;
         if active <= 1 && !signs_in {
-            return Err(CellError::invalid(match who.kind {
-                IdentityKind::Computer => "a computer keeps at least one key: add the new key before revoking the last, or remove it (`fragment computers rm`)",
-                _ => "an agent keeps at least one key: add the new key before revoking the last",
-            }));
+            return Err(CellError::invalid("an agent keeps at least one key: add the new key before revoking the last"));
         }
         self.exec("UPDATE keys SET revoked_at = ? WHERE key = ?", vec![SqlStorageValue::Integer(js::now_ms()), b.key.as_str().into()])?;
         self.view(&who, Some(true))
@@ -755,11 +586,7 @@ impl RegistryCell {
         let who = b.who;
         let missing = || CellError::new(ErrorCode::NotFound, format!("{who} names no one on this fleet (they register with `fragment login`)"));
         match npub::parse_named(&who) {
-            Some(npub::Named::Identity(id)) => match self.identity(&id)? {
-                // a removed computer is granted nothing again
-                Some(who) if who.kind == IdentityKind::Computer && self.computer_name(&id)?.is_none() => Err(CellError::new(ErrorCode::NotFound, format!("the computer {id} was removed"))),
-                who => who.ok_or_else(missing),
-            },
+            Some(npub::Named::Identity(id)) => self.identity(&id)?.ok_or_else(missing),
             Some(npub::Named::Key(key)) => match self.key_row(&key)? {
                 Some(row) if row.active() => self.stored_identity(&row.identity, &format!("the key {key}")),
                 Some(_) => Err(CellError::new(ErrorCode::NotFound, format!("the key {who} was revoked"))),
@@ -847,11 +674,6 @@ impl RegistryCell {
             MintFrame::PATH => reply::<MintFrame>(self.mint_frame(body(&bytes)?).await),
             Redeem::PATH => reply::<Redeem>(self.redeem(body(&bytes)?)),
             ApproveKey::PATH => reply::<ApproveKey>(self.add_by_session(body(&bytes)?)),
-            PairComputer::PATH => reply::<PairComputer>(self.pair_computer(body(&bytes)?)),
-            RemoveComputer::PATH => reply::<RemoveComputer>(self.remove_computer(body(&bytes)?)),
-            MintPairing::PATH => reply::<MintPairing>(self.mint_pairing(body(&bytes)?)),
-            PairWithToken::PATH => reply::<PairWithToken>(self.pair_with_token(body(&bytes)?)),
-            Memory::PATH => reply::<Memory>(self.memory(body(&bytes)?)),
             Home::PATH => reply::<Home>(self.home(body(&bytes)?)),
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
         }
