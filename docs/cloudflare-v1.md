@@ -105,8 +105,9 @@ speaking Cloudflare's APIs) returns once this product works.
    people collaborate with you in other fragments, not in chats.
 9. **Chat in v1** comes from the chat template: streaming replies
    (drafts), tool steps as cards, approvals as buttons, Stop,
-   attachments both ways (blobs), voice input (an AI step running
-   Workers AI speech to text), push notifications (fragment push), and
+   attachments both ways (blobs), voice input (a voice memo, an audio
+   attachment the agent transcribes itself: the platform runs no speech
+   to text; Paul, 2026-10-03), push notifications (fragment push), and
    rename and archive. Search across chats, apps and messages is the
    shell's, over your fragments' channels and files.
 10. **First run:** choose a username, then "What should your first
