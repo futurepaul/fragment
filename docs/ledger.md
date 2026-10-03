@@ -20,7 +20,11 @@ is the wire contract. It replaced the OpenRouter-backed ledger and
   - a fragment's hosting (requests, storage, dynamic workers,
     screenshots) and its AI steps bill the fragment's owner.
 - **Guests pay for nothing.** A guest's ledger refuses reservations and
-  meter batches (`guest_payer`). A guest owns nothing billable.
+  meter batches (`guest_payer`). A guest owns nothing billable, so a
+  guest makes no fragment either (`guest_creates`, 403: "guests can't
+  create fragments"; Paul, 2026-10-03): every create asks its maker's
+  ledger first (`may_spend(create)`). A guest still edits the fragments
+  shared with them, whose writes bill those fragments' owners.
 - **Plans** (decision 25): `guest`; `seat` ($100 a month, $50 of credit
   included, a computer that sleeps); `seat_always_on` ($200 a month,
   $100 included, an always-on computer whose awake time is not metered).
@@ -57,7 +61,9 @@ is the wire contract. It replaced the OpenRouter-backed ledger and
 - **Overdraft and read-only.** At a balance of minus the overdraft ($2
   unless an operator sets another) the person's fragments go read-only.
   They stay read-only until the balance is above zero again. An operator
-  who changes the overdraft decides it afresh.
+  who changes the overdraft decides it afresh. Read-only, the person
+  makes no new fragment, and their fragments' cron and triggers start no
+  runs: each is recorded `blocked`, saying why (Paul, 2026-10-03).
 - **Meters always record.** Usage that happened is charged, past zero
   and past the overdraft. A reservation must fit the balance less what is
   held (`credit_short`); a settle larger than its reservation is charged
@@ -148,7 +154,10 @@ mutation first brings the ledger to its time's month.
   refused as `stale`, so a forgotten reference is never charged again.
   Commands are never forgotten.
 - **Reads** (`standing`, `gate`, `fragment_open`, `may_spend`, `status`)
-  roll a copy of the head to their own month and change nothing.
+  roll a copy of the head to their own month and change nothing. A
+  spend is an agent's turn, an AI step, a wake, a write, or a create (a
+  fragment made, a write to one of the maker's own: refused for a guest
+  as `guest_creates`, otherwise as a write is).
   `may_spend(spend, fragment, by_owner)` is the whole question when the
   payer owns the fragment (or there is none). When another person owns
   it, that owner's ledger also answers `fragment_open`.

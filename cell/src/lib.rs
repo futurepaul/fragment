@@ -344,9 +344,12 @@ async fn release_username(env: &Env, username: &str) -> CellResult<Response> {
 }
 
 /// Makes a fragment for a person, under their username: the API's create
-/// and the platform's "new" page. An agent makes one for its owner: the
-/// owner's (billed to them, in their list), under their username, with
-/// the agent an editor of it.
+/// and the platform's "new" page, the one door every fragment is made
+/// through (an agent's or a template's included). An agent makes one for
+/// its owner: the owner's (billed to them, in their list), under their
+/// username, with the agent an editor of it. Its maker's ledger is asked
+/// first: a guest makes none (Paul, 2026-10-03), nor does someone whose
+/// fragments are read-only past the overdraft.
 pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut create: CreateFragment, principal: Signed) -> CellResult<Response> {
     let (maker, agent) = match principal.kind {
         IdentityKind::Person => (principal, None),
@@ -356,8 +359,10 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
             (Signed::new(identity, None), Some(principal.identity.id))
         }
     };
+    assert_eq!(maker.kind, IdentityKind::Person, "a fragment is a person's: an agent's maker is its owner");
     let username = maker.username.clone().ok_or_else(|| CellError::invalid(format!("choose a username first (sign in at {}/)", cfg.platform(url))))?;
     create.name = qualify(&create.name, &username)?;
+    may_create(env, &maker.id).await?;
     let body = serde_json::to_vec(&create).map_err(|e| CellError::host(e.to_string()))?;
     // a fresh request: nothing of the caller's but what the router decided
     let bare = Request::new(url.as_str(), Method::Post)?;
@@ -373,6 +378,23 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
         }
     }
     Ok(made)
+}
+
+/// Whether `maker`'s ledger lets them make a fragment (`Spend::Create`):
+/// its refusal is theirs to read, 403 for a guest and 402 past the
+/// overdraft. A ledger that does not answer refuses nothing, as a write's
+/// does (meter.rs `writable`): making a fragment is the product, and an
+/// outage lets at most a guest's fragment through, billed nothing.
+async fn may_create(env: &Env, maker: &str) -> CellResult<()> {
+    let may = ledger::MaySpend { spend: fragment_core::ledger::Spend::Create, fragment: None, by_owner: true };
+    match ledger::ask(env, maker, &may).await {
+        Ok(_) => Ok(()),
+        Err(e) if e.refused.is_some() => Err(CellError::new(e.code, e.message)),
+        Err(e) => {
+            console_error!("{}", json!({ "event": "create.standing-unknown", "maker": maker, "message": e.message }));
+            Ok(())
+        }
+    }
 }
 
 fn qualify(name: &str, username: &str) -> CellResult<String> {

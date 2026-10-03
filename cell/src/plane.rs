@@ -480,13 +480,20 @@ impl FragmentCell {
 
     async fn interpret_locked(&self, refs: &[&str]) -> CellResult<Vec<(String, PinMove)>> {
         let _held = self.plane.lock().await;
+        // A move of main starts its file triggers' runs in the turn its pin
+        // moves, so the owner's standing (which blocks them past the
+        // overdraft) is read before, and only when there are any.
+        let read_only = match refs.contains(&"main") && self.triggers()?.iter().any(|t| matches!(t.on, TriggerOn::Files(_))) {
+            true => self.read_only().await?,
+            false => None,
+        };
         let mut out = vec![];
         for which in refs {
             let moved = self.refresh_pin(which).await?;
             if *which == "main" && moved.changed {
                 self.broadcast_change(moved.to.as_deref(), &moved.paths);
                 let depth = self.commit_depth(moved.to.as_deref())?;
-                self.fire_files(moved.to.as_deref(), &moved.paths, depth)?;
+                self.fire_files(moved.to.as_deref(), &moved.paths, depth, read_only)?;
             }
             self.follow(which).await?;
             out.push((which.to_string(), moved));

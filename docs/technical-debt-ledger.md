@@ -398,18 +398,27 @@ fragment.club until cutover (decisions 34–35).
   git), sampled as `Storage { class: git }`, and samples run hourly from
   a cron the plan named (docs/ledger.md).
 
-## Triggers and the platform's own writes go on past the overdraft
+## A run in flight and the platform's own writes go on past the overdraft
 
 - **Observed:** phase 3. Past its owner's overdraft a fragment refuses
   the writes a principal asks for (mutations and jobs, posts, file
-  writes, deploys, storage tokens, blobs, its inbox: `writable` in
-  cell/src/meter.rs), but its cron and file triggers still start runs,
-  and a run in flight still writes.
-- **Risk:** a read-only fragment's own schedule keeps writing (its AI
-  steps are refused by the ledger all the same).
-- **First proof:** a read-only fragment whose events show a cron run.
-- **Delete when:** a trigger's run asks `writable` before it starts (held
-  with the ledger's reason), with an e2e check.
+  writes, deploys, storage tokens, blobs, its inbox, replays: `writable`
+  in cell/src/meter.rs), and since 2026-10-03 its cron, channel and file
+  triggers start no runs (each recorded `blocked` with the ledger's
+  reason: `start_run` in cell/src/jobs.rs, the ledger section's e2e). But
+  a run already in flight still writes (its mutations, publishes, file
+  writes) and starts the jobs it calls, and the platform's own records
+  (an agent's `joined` on its `tasks`: cell/src/runs_on.rs) still append.
+- **Risk:** a run that started before the overdraft writes a read-only
+  fragment for as long as it runs (its AI steps are refused by the
+  ledger all the same); the platform's own records are a few bytes each.
+- **First proof:** a read-only fragment whose events show a run's
+  writes landing after its owner went past the overdraft.
+- **Delete when:** each step of a run asks the owner's standing before
+  it writes (a step past the overdraft fails for good, saying why, so
+  the run is held and replays after a top-up), with an e2e check; the
+  platform's own records stay (they cost nothing, and an agent must hear
+  where it joined).
 
 ## An app's database size is read from its own realm
 

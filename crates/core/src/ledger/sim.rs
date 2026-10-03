@@ -840,12 +840,13 @@ impl Sim {
     /// Reads change nothing and agree with the standing.
     fn reads(&mut self) {
         let standing = self.ledger.standing(self.now);
-        for spend in [Spend::AgentTurn, Spend::AiStep, Spend::Wake, Spend::Write] {
+        for spend in [Spend::AgentTurn, Spend::AiStep, Spend::Wake, Spend::Write, Spend::Create] {
             let gate = self.ledger.gate(spend, self.now);
             let expected = match (self.model.plan, standing, spend) {
+                (Plan::Guest, _, Spend::Create) => Err(Refused::GuestCreates),
                 (Plan::Guest, _, _) => Err(Refused::GuestPayer),
                 (_, Standing::ReadOnly { why }, _) => Err(Refused::ReadOnly { why }),
-                (_, _, Spend::Write) | (_, Standing::Ok, _) => Ok(()),
+                (_, _, Spend::Write | Spend::Create) | (_, Standing::Ok, _) => Ok(()),
                 (_, Standing::AgentsStopped { why }, _) => Err(Refused::AgentsStopped { why }),
             };
             assert_eq!(gate, expected, "{spend:?} at {standing:?}");

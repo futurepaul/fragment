@@ -185,6 +185,10 @@ skipped, as cron skips a missed run.
 { "kind": "joined", "fragment": "<fragment>" }
 ```
 
-Posted after adding the agent to a fragment: it wakes the computer,
-which lists its agent's fragments again and follows the new chat at
-once (the listing is otherwise read every 5 minutes while awake).
+Posted by the platform, as the agent fragment itself (its own key),
+when the agent is added as a member of `fragment` (docs/computers.md,
+"An agent added to a fragment wakes its computer"): once for that
+membership, and the platform wakes the computer too. The guest lists its
+agent's fragments again and follows the new chat at once (the listing is
+otherwise read every 5 minutes while awake). No template, page or shell
+posts it: whatever adds an agent to a fragment needs to do nothing more.

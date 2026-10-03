@@ -89,6 +89,8 @@ CREATE TABLE IF NOT EXISTS invites (
   expires_at INTEGER NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, invitee TEXT);
 CREATE TABLE IF NOT EXISTS index_outbox (
   principal TEXT PRIMARY KEY, role TEXT, version INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS joined_outbox (
+  principal TEXT PRIMARY KEY, owner TEXT NOT NULL, added_at INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS secrets (
   name TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_by TEXT NOT NULL, set_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS records (
@@ -1226,7 +1228,7 @@ impl FragmentCell {
         json_response(&Events { events })
     }
 
-    /// The alarm runs the index and delivery outboxes, due schedules,
+    /// The alarm runs the index, joined and delivery outboxes, due schedules,
     /// queued runs, and the pass: the poll backstop, which also checks
     /// running runs. The next pass is a day away, or within the poll
     /// interval while the fragment is busy (`arm`). Then it re-arms.
@@ -1235,6 +1237,7 @@ impl FragmentCell {
             return Ok(());
         }
         self.flush_index().await;
+        self.flush_joined().await;
         if let Err(e) = self.seed().await {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
         } else if let Err(e) = self.sync_agent().await {
@@ -1247,7 +1250,7 @@ impl FragmentCell {
         // Settles pending mutations that are due; one that fails waits for
         // its own next try and never fails the alarm.
         self.sweep_due().await?;
-        self.fire_cron()?;
+        self.fire_cron().await?;
         self.launch_queued().await;
         let poll_at: i64 = self.meta(MetaKey::PollAt)?.and_then(|s| s.parse().ok()).unwrap_or(0);
         if poll_at <= js::now_ms() {
@@ -1295,7 +1298,7 @@ impl FragmentCell {
             self.set_meta(MetaKey::PollAt, &poll_at.to_string())?;
         }
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
-        let due = [outbox, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, also];
+        let due = [outbox, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, also];
 
         let at = due.into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + min_ms);
         self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;

@@ -19,8 +19,14 @@
 //!   and the keepalive socket that holds it awake. A request to a
 //!   connection's or an operator key's host has its placeholders swapped
 //!   for the credential (`egress_swap`, decisions 22 and 37), which this
-//!   cell resolves: only for an agent allowed it, and a connection's token
-//!   from WorkOS Pipes, held until shortly before it expires.
+//!   cell resolves: for an agent that runs here (any of its owner's
+//!   connections, unless its owner narrowed them: decision 44), and a
+//!   connection's token from WorkOS Pipes, held until shortly before it
+//!   expires.
+//! - **Its agents' new fragments** (`computer/joined`, from a fragment an
+//!   agent of its was added to): the agent's own fragment posts `joined`
+//!   on its `tasks`, and the fragment that added it then wakes the
+//!   computer (`Wake::Joined`; docs/computers.md).
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -56,9 +62,12 @@ const AGENT_HEADER: &str = "x-fragment-agent";
 /// The cookie that signs a browser in to a computer's origin.
 const SESSION_COOKIE: &str = "fragment_computer";
 
+/// `agents.connections` is JSON: `null`, every connection the owner has
+/// (decision 44), or a list that narrows it. An agent's row names it as
+/// it is made (`computer/assign`), so the column's default is never read.
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL, connections TEXT NOT NULL DEFAULT '[]');
+CREATE TABLE IF NOT EXISTS agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL, connections TEXT NOT NULL DEFAULT 'null');
 CREATE TABLE IF NOT EXISTS awake (from_ms INTEGER PRIMARY KEY, to_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS tickets (hash TEXT PRIMARY KEY, port INTEGER NOT NULL, identity TEXT NOT NULL, expires_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, identity TEXT NOT NULL, expires_at INTEGER NOT NULL);
@@ -223,7 +232,22 @@ struct Unassign {
 #[derive(Deserialize)]
 struct SetConnections {
     fragment: String,
-    connections: Vec<String>,
+    /// `None`: every connection the owner has (decision 44).
+    connections: Option<Vec<String>>,
+}
+
+/// What an agent may have swapped in, as `agents.connections` keeps it.
+fn stored_connections(text: &str, fragment: &str) -> CellResult<Option<Vec<String>>> {
+    serde_json::from_str(text).map_err(|e| CellError::host(format!("{fragment}'s stored connections {text:?}: {e}")))
+}
+
+/// `computer/joined`'s body: the agent `identity` was added to `fragment`,
+/// its membership made at `at` (which keys the notice: runs_on.rs).
+#[derive(Deserialize)]
+struct JoinedAsk {
+    identity: String,
+    fragment: String,
+    at: i64,
 }
 
 /// `computer/credential`'s body: what `agent` asked to have swapped in.
@@ -566,21 +590,23 @@ impl ComputerCell {
     }
 
     fn agents(&self) -> CellResult<Vec<ComputerAgent>> {
-        Ok(self
-            .rows("SELECT fragment, identity, owner, connections FROM agents ORDER BY added_at", vec![])?
-            .into_iter()
-            .map(|r| {
-                let fragment = r["fragment"].as_str().unwrap_or_default().to_string();
-                let name = fragment_proto::split_fragment_name(&fragment).map(|(label, _)| label.to_string()).unwrap_or_default();
-                ComputerAgent {
-                    identity: r["identity"].as_str().unwrap_or_default().to_string(),
-                    owner: r["owner"].as_str().unwrap_or_default().to_string(),
-                    fragment,
-                    name,
-                    connections: serde_json::from_str(r["connections"].as_str().unwrap_or("[]")).unwrap_or_default(),
-                }
-            })
-            .collect())
+        let rows = self.rows("SELECT fragment, identity, owner, connections FROM agents ORDER BY added_at", vec![])?;
+        assert!(rows.len() as u64 <= AGENTS_MAX, "a computer runs at most AGENTS_MAX agents");
+        let mut agents = Vec::with_capacity(rows.len());
+        for r in rows {
+            let fragment = r["fragment"].as_str().unwrap_or_default().to_string();
+            let name = fragment_proto::split_fragment_name(&fragment).map(|(label, _)| label.to_string()).unwrap_or_default();
+            // a stored value that does not read is a host fault, never "all"
+            let connections = stored_connections(r["connections"].as_str().unwrap_or_default(), &fragment)?;
+            agents.push(ComputerAgent {
+                identity: r["identity"].as_str().unwrap_or_default().to_string(),
+                owner: r["owner"].as_str().unwrap_or_default().to_string(),
+                fragment,
+                name,
+                connections,
+            });
+        }
+        Ok(agents)
     }
 
     fn view(&self) -> CellResult<ComputerView> {
@@ -655,8 +681,10 @@ impl ComputerCell {
                 if n.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) >= AGENTS_MAX {
                     return Err(CellError::invalid(format!("a computer runs at most {AGENTS_MAX} agents")));
                 }
+                // a new agent may use every connection its owner has (decision
+                // 44); assigned again, it keeps what its owner narrowed it to
                 self.exec(
-                    "INSERT INTO agents (fragment, identity, owner, added_at) VALUES (?, ?, ?, ?) ON CONFLICT (fragment) DO UPDATE SET identity = excluded.identity",
+                    "INSERT INTO agents (fragment, identity, owner, added_at, connections) VALUES (?, ?, ?, ?, 'null') ON CONFLICT (fragment) DO UPDATE SET identity = excluded.identity",
                     vec![b.fragment.as_str().into(), b.identity.as_str().into(), b.owner.as_str().into(), js::now_ms().into()],
                 )?;
                 json_response(&self.view()?)
@@ -679,22 +707,29 @@ impl ComputerCell {
             }
             "computer/connections" => {
                 let mut b: SetConnections = body_json(&mut req).await?;
-                b.connections.sort();
-                b.connections.dedup();
-                if let Some(c) = b.connections.iter().find(|c| !self.cfg.connections.contains_key(c.as_str())) {
-                    let offered: Vec<&String> = self.cfg.connections.keys().collect();
-                    return Err(CellError::invalid(format!("no connection {c:?} on this deployment (its connections: {offered:?})")));
+                if let Some(list) = b.connections.as_mut() {
+                    list.sort();
+                    list.dedup();
+                    if let Some(c) = list.iter().find(|c| !self.cfg.connections.contains_key(c.as_str())) {
+                        let offered: Vec<&String> = self.cfg.connections.keys().collect();
+                        return Err(CellError::invalid(format!("no connection {c:?} on this deployment (its connections: {offered:?})")));
+                    }
                 }
                 if self.rows("SELECT fragment FROM agents WHERE fragment = ?", vec![b.fragment.as_str().into()])?.is_empty() {
                     return Err(CellError::new(ErrorCode::NotFound, format!("{} does not run on this computer", b.fragment)));
                 }
-                let list = serde_json::to_string(&b.connections).map_err(|e| CellError::host(e.to_string()))?;
-                self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![list.into(), b.fragment.as_str().into()])?;
+                let text = serde_json::to_string(&b.connections).map_err(|e| CellError::host(e.to_string()))?;
+                assert_eq!(stored_connections(&text, &b.fragment)?, b.connections, "connections read back as they are written");
+                self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![text.into(), b.fragment.as_str().into()])?;
                 json_response(&self.view()?)
             }
             "computer/credential" => {
                 let b: CredentialAsk = body_json(&mut req).await?;
                 json_response(&self.credential(b).await?)
+            }
+            "computer/joined" => {
+                let b: JoinedAsk = body_json(&mut req).await?;
+                json_response(&self.joined(b).await?)
             }
             "computer/ticket" => {
                 let b: TicketAsk = body_json(&mut req).await?;
@@ -745,7 +780,10 @@ impl ComputerCell {
 
     /// The secret to swap in for `b`'s placeholder, when its agent runs here
     /// and may use it: `{secret, owner, identity}` (the agent's), so the
-    /// egress meters a key's call to its owner.
+    /// egress meters a key's call to its owner. An agent may use every
+    /// connection its owner has unless its owner narrowed it to a list
+    /// (decision 44: a person's agents are not fenced from each other, so
+    /// the list is a role's specialization, not a wall).
     async fn credential(&self, b: CredentialAsk) -> CellResult<Value> {
         let rows = self.rows("SELECT owner, identity, connections FROM agents WHERE fragment = ?", vec![b.agent.as_str().into()])?;
         let agent = rows.first().ok_or_else(|| CellError::new(ErrorCode::Forbidden, format!("{} does not run on this computer", b.agent)))?;
@@ -753,11 +791,15 @@ impl ComputerCell {
         let identity = agent["identity"].as_str().unwrap_or_default().to_string();
         let secret = match (b.connection, b.key) {
             (Some(provider), None) => {
-                let allowed: Vec<String> = serde_json::from_str(agent["connections"].as_str().unwrap_or("[]")).unwrap_or_default();
-                if !allowed.contains(&provider) {
+                let narrowed = stored_connections(agent["connections"].as_str().unwrap_or_default(), &b.agent)?;
+                if let Some(list) = narrowed.filter(|list| !list.contains(&provider)) {
                     return Err(CellError::new(
                         ErrorCode::Forbidden,
-                        format!("{} may not use the {provider} connection: its owner allows it on their computer", b.agent),
+                        format!(
+                            "{} may not use the {provider} connection: its owner narrowed it to {} on their computer (null lets it use every connection its owner has)",
+                            b.agent,
+                            if list.is_empty() { "none".to_string() } else { list.join(", ") }
+                        ),
                     ));
                 }
                 self.connection_token(&owner, &provider).await
@@ -782,6 +824,26 @@ impl ComputerCell {
             _ => Err(CellError::invalid("ask for one connection or one key")),
         }?;
         Ok(json!({ "secret": secret, "owner": owner, "identity": identity }))
+    }
+
+    /// The agent `b.identity` was added to `b.fragment` (runs_on.rs, from
+    /// that fragment's outbox): when it runs here, its own fragment posts
+    /// `joined` on its `tasks` (once by the membership: a retry posts
+    /// nothing twice), so a guest that is awake lists its fragments again.
+    /// Answers `{runs}`: whether it runs here, and so whether there is a
+    /// computer to wake (its caller wakes it, on its own: a member's change
+    /// never waits for a start). Here is no one's computer, or the
+    /// identity no agent of it: nothing to tell.
+    async fn joined(&self, b: JoinedAsk) -> CellResult<Value> {
+        if !fragment_core::npub::is_identity(&b.identity) || !fragment_proto::valid_fragment_name(&b.fragment) || b.at <= 0 {
+            return Err(CellError::invalid("a join names an identity, a fragment and when it joined"));
+        }
+        let Some(id) = self.meta(MetaKey::Id)? else { return Ok(json!({ "runs": false })) };
+        let rows = self.rows("SELECT fragment FROM agents WHERE identity = ?", vec![b.identity.as_str().into()])?;
+        let Some(agent) = rows.first().and_then(|r| r["fragment"].as_str()).map(str::to_string) else { return Ok(json!({ "runs": false })) };
+        let posted = crate::fragment::ask(&self.env, &agent, "computer/joined", &json!({ "computer": id, "fragment": b.fragment, "at": b.at })).await?;
+        console_log!("{}", json!({ "computer": id, "joined": b.fragment, "agent": agent, "posted": posted["posted"] }));
+        Ok(json!({ "runs": true, "computer": id, "agent": agent, "posted": posted["posted"] }))
     }
 
     /// `owner`'s token for `provider`: the one held, or WorkOS Pipes' for
@@ -951,9 +1013,16 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
         }
         (Method::Put, [id, "agents", fragment, "connections"]) => {
             owned(env, who, id).await?;
-            let b: AgentConnections = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            if b.connections.len() > swap::CREDENTIALS_MAX || b.connections.iter().any(|c| !swap::valid_name(c)) {
-                return Err(CellError::invalid(format!("connections are at most {} provider names", swap::CREDENTIALS_MAX)));
+            let v: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            // a body that forgot the field is not a reset to every connection
+            if v.get("connections").is_none() {
+                return Err(CellError::invalid("name connections: a list of providers, or null for every connection its owner has"));
+            }
+            let b: AgentConnections = serde_json::from_value(v).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            if let Some(list) = &b.connections {
+                if list.len() > swap::CREDENTIALS_MAX || list.iter().any(|c| !swap::valid_name(c)) {
+                    return Err(CellError::invalid(format!("connections are at most {} provider names, or null", swap::CREDENTIALS_MAX)));
+                }
             }
             let set = json!({ "fragment": fragment, "connections": b.connections });
             json_response(&view_of(ask(env, id, "computer/connections", &set).await?)?)
