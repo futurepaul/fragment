@@ -434,6 +434,9 @@ pub struct Swept {
 pub fn sweep_on(api: &Api) -> Result<Swept> {
     assert!(api.signs_in_by_levers(), "a sweep signs the e2e people in through the levers");
     let (mut people, mut deleted, mut kept, mut slept) = (0usize, 0usize, 0usize, 0usize);
+    // one that did not go (a delete past the client's timeout) is named at
+    // the end; the rest still go, and a sweep again finishes it
+    let mut left: Vec<String> = Vec::new();
     let mut after: Option<String> = None;
     for page in 0..=SWEEP_PAGES_MAX {
         anyhow::ensure!(page < SWEEP_PAGES_MAX, "more than {SWEEP_PAGES_MAX} pages of e2e people: sweep again");
@@ -452,16 +455,20 @@ pub fn sweep_on(api: &Api) -> Result<Swept> {
                     kept += 1;
                     continue;
                 }
-                let r = shell(api, &session, "DELETE", &format!("/api/f/{name}"))?;
-                anyhow::ensure!(r.status == 200 || r.status == 404, "deleting {name}: {r}");
-                deleted += 1;
+                match shell(api, &session, "DELETE", &format!("/api/f/{name}")) {
+                    Ok(r) if r.status == 200 || r.status == 404 => deleted += 1,
+                    Ok(r) => left.push(format!("deleting {name}: {r}")),
+                    Err(e) => left.push(format!("deleting {name}: {e:#}")),
+                }
             }
             let computers = shell(api, &session, "GET", "/api/computers")?;
             for c in computers.body["computers"].as_array().into_iter().flatten().filter(|c| c["phase"] != "asleep") {
                 let id = c["computer"].as_str().unwrap_or("");
-                let r = shell(api, &session, "POST", &format!("/api/computers/{id}/sleep"))?;
-                anyhow::ensure!(r.status == 200, "putting {id} to sleep: {r}");
-                slept += 1;
+                match shell(api, &session, "POST", &format!("/api/computers/{id}/sleep")) {
+                    Ok(r) if r.status == 200 => slept += 1,
+                    Ok(r) => left.push(format!("putting {id} to sleep: {r}")),
+                    Err(e) => left.push(format!("putting {id} to sleep: {e:#}")),
+                }
             }
         }
         after = r.body["next"].as_str().map(str::to_string);
@@ -469,6 +476,7 @@ pub fn sweep_on(api: &Api) -> Result<Swept> {
             break;
         }
     }
+    anyhow::ensure!(left.is_empty(), "the sweep left {} (sweep again):\n  {}", left.len(), left.join("\n  "));
     Ok(Swept { people, deleted, kept, slept })
 }
 
