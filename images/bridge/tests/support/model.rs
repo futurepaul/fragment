@@ -3,9 +3,10 @@
 //!
 //! - the answer is `scripted: <the last user message's text>`;
 //! - a last user message asking to `use the terminal`, with no tool result
-//!   yet, is answered with a `terminal` tool call (`echo tool-ran`), and one
-//!   saying `risky` with one Hermes flags (`rm -rf …`); once a tool result is
-//!   in the transcript, the answer names it;
+//!   yet, is answered with a `terminal` tool call (`echo tool-ran`; `use the
+//!   terminal slowly`: `sleep 8` first), and one saying `risky` with one
+//!   Hermes flags (`rm -rf …`); once a tool result is in the transcript, the
+//!   answer names it;
 //! - Hermes' smart-approval guardian is answered `ESCALATE`, so a person is
 //!   asked.
 //!
@@ -78,6 +79,8 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     }
     let command = if last_user.contains("risky") {
         Some("rm -rf /tmp/fragment-risky && echo tool-ran")
+    } else if last_user.contains("use the terminal slowly") {
+        Some("sleep 8 && echo tool-ran")
     } else if last_user.contains("use the terminal") {
         Some("echo tool-ran")
     } else {

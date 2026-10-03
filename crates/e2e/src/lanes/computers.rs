@@ -354,7 +354,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let maple_id = r.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == maple_name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
     s.ok("a second agent runs on the same computer", r.status == 200 && maple_id.starts_with("id:") && maple_id != identity, &r);
     api.signed(&owner, "PUT", &format!("/api/f/{chat_name}/members/{maple_id}"), Some(&json!({ "role": "editor" })))?;
-    // the guest reads its agents at start: a sleep and a wake follows the new one at once
+    // the stub's bridge reads its agents again every minute (the Hermes lane
+    // proves the seconds of our Hermes image): a sleep and a wake follows the
+    // new one at once
     api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
     let maple_label = maple_name.split('.').next().unwrap_or("").to_string();

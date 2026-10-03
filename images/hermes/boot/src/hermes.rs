@@ -1,9 +1,10 @@
-//! What the Hermes image writes for Hermes v0.21.5 at each boot, as pure
-//! functions of the computer's agents: the managed overlay
-//! (`/etc/hermes/config.yaml`, merged over every profile's config), each
-//! agent's profile config, the gateway's Relay environment, and Litestream's
-//! configuration. YAML is written by hand: every string is a JSON string,
-//! which is a YAML double-quoted scalar.
+//! What the Hermes image writes for Hermes v0.21.5 at each boot (and for an
+//! agent assigned while it runs), as pure functions of the computer's
+//! agents: the managed overlay (`/etc/hermes/config.yaml`, merged over every
+//! profile's config), each agent's profile config, the gateway's Relay
+//! environment, and Litestream's configuration; and the wire of the
+//! gateway's control socket. YAML is written by hand: every string is a
+//! JSON string, which is a YAML double-quoted scalar.
 
 use std::path::{Path, PathBuf};
 
@@ -144,9 +145,52 @@ pub fn litestream_config(dbs: &[(String, PathBuf)], storage: &str) -> String {
     y
 }
 
+/// The databases Litestream streams: the gateway's own and each agent
+/// profile's `state.db`, as `(replica name, path)`. Hermes makes a
+/// profile's database at its first turn, so the boot streams those that
+/// exist, and starts Litestream again when that set changes.
+pub fn litestream_dbs(agents: &[Agent], home: &Path) -> Vec<(String, PathBuf)> {
+    let mut dbs = vec![("default".to_string(), home.join("state.db"))];
+    dbs.extend(agents.iter().map(|a| (wire::profile(&a.fragment), profile_dir(home, &a.fragment).join("state.db"))));
+    dbs
+}
+
 /// A profile's directory, under the Hermes home.
 pub fn profile_dir(home: &Path, agent_fragment: &str) -> PathBuf {
     home.join("profiles").join(wire::profile(agent_fragment))
+}
+
+/// The gateway's control socket (Hermes' `gateway/control_socket.py`):
+/// `$HERMES_HOME/gateway.sock`, or the path its pointer file names when the
+/// home's is too long for a socket. One JSON line in, one out, per
+/// connection.
+pub const CONTROL_SOCKET: &str = "gateway.sock";
+pub const CONTROL_POINTER: &str = "gateway.sock.path";
+/// The control protocol's version (`CONTROL_PROTOCOL_VERSION`).
+pub const CONTROL_PROTOCOL: u64 = 1;
+/// An answer is at most this many bytes (its `_MAX_RESPONSE_BYTES`).
+pub const CONTROL_ANSWER_MAX_BYTES: usize = 512 * 1024;
+
+/// One control request: `verb`, with no arguments.
+pub fn control_request(verb: &str) -> String {
+    assert!(!verb.is_empty() && verb.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'), "a control verb: {verb}");
+    format!("{}\n", serde_json::json!({ "verb": verb, "id": 1, "protocol": CONTROL_PROTOCOL }))
+}
+
+/// A control answer's `result`, or why there is none (`ok: false` names
+/// its error).
+pub fn control_answer(line: &[u8]) -> Result<serde_json::Value, String> {
+    if line.len() > CONTROL_ANSWER_MAX_BYTES {
+        return Err(format!("an answer of {} bytes", line.len()));
+    }
+    let v: serde_json::Value = serde_json::from_slice(line).map_err(|e| format!("an answer that is not JSON: {e}"))?;
+    if v["ok"] != true {
+        return Err(v["error"].as_str().unwrap_or("refused, saying nothing").to_string());
+    }
+    match &v["result"] {
+        r @ serde_json::Value::Object(_) => Ok(r.clone()),
+        _ => Err("an answer with no result".into()),
+    }
 }
 
 /// The directories a profile holds from its start (Hermes' `_PROFILE_DIRS`).
@@ -202,6 +246,33 @@ mod tests {
         let l = litestream_config(&[("juniper-paul".into(), PathBuf::from("/data/hermes/profiles/juniper-paul/state.db"))], "http://storage.fragment.internal");
         assert!(l.contains("path: \"litestream/juniper-paul\"") && l.contains("endpoint: \"http://storage.fragment.internal\""), "{l}");
         assert_eq!(profile_dir(Path::new("/data/hermes"), "juniper.paul"), PathBuf::from("/data/hermes/profiles/juniper-paul"));
+    }
+
+    /// The gateway's control wire as `gateway/control_socket.py` speaks it:
+    /// a request is one line; an answer's result, or its refusal.
+    #[test]
+    fn the_control_socket_wire() {
+        let r: serde_json::Value = serde_json::from_str(control_request("rescan-profiles").trim_end()).unwrap();
+        assert_eq!(r, serde_json::json!({ "verb": "rescan-profiles", "id": 1, "protocol": 1 }));
+        assert!(control_request("status").ends_with('\n'), "one line");
+        let ok = br#"{"ok": true, "protocol": 1, "result": {"multiplex": true, "added": ["maple-paul"], "served_profiles": ["default", "maple-paul"]}, "id": 1}"#;
+        assert_eq!(control_answer(ok).unwrap()["added"][0], "maple-paul");
+        assert_eq!(control_answer(br#"{"ok": false, "error": "unknown verb: 'x'", "protocol": 1}"#).unwrap_err(), "unknown verb: 'x'");
+        assert!(control_answer(b"not json").is_err());
+        assert!(control_answer(br#"{"ok": true, "result": null}"#).is_err());
+        assert!(control_answer(&vec![b' '; CONTROL_ANSWER_MAX_BYTES + 1]).is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "a control verb")]
+    fn a_verb_out_of_shape_is_a_bug() {
+        control_request("rescan profiles\n{");
+    }
+
+    #[test]
+    fn litestream_streams_the_gateways_and_each_profiles_database() {
+        let dbs = litestream_dbs(&[agent()], Path::new("/data/hermes"));
+        assert_eq!(dbs, vec![("default".into(), PathBuf::from("/data/hermes/state.db")), ("juniper-paul".into(), PathBuf::from("/data/hermes/profiles/juniper-paul/state.db"))]);
     }
 
     #[test]

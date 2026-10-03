@@ -31,6 +31,11 @@ const WAKE: Duration = Duration::from_secs(300);
 const TURN: Duration = Duration::from_secs(120);
 /// A routine's cron minute, and the wake it starts.
 const ROUTINE: Duration = Duration::from_secs(420);
+/// An agent assigned to the awake computer, to its first reply: the image
+/// reads its agents every 3 s, writes the new one's profile, and has its
+/// gateway serve it; its bridge follows the agent within a second of that
+/// (the lower rung, `images/bridge/tests/docker.rs`, takes about one).
+const NEW_AGENT: Duration = Duration::from_secs(30);
 /// A 1×1 PNG: an image a person attaches.
 const PNG: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15,
@@ -323,30 +328,74 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "version": version(), "reply": reply_of(&rolled) }),
     );
 
-    // two profiles: a second agent on the same computer, @mentioned
+    // two profiles: a second agent assigned to the awake computer while the
+    // lead's turn runs (docs/computers.md: a computer's agents may change
+    // while it runs). The image writes its profile and its gateway serves it,
+    // nothing restarted: it answers in its own chat as itself within
+    // seconds, and the lead's turn runs on, whole
     let maple_name = s.named(api, &owner, "maple")?;
     let maple = s.create(api, &owner, &maple_name)?;
-    s.commit(&maple, &[("fragment.json", Some(ROUTINE_JSON)), ("app.mjs", Some(routine_app(&chat_name).as_bytes())), ("SOUL.md", Some(b"You are Maple, who tends the trees.\n"))]);
+    s.commit(&maple, &[("fragment.json", Some(AGENT_JSON)), ("SOUL.md", Some(b"You are Maple, who tends the trees.\n"))]);
     s.deploy(&maple);
+    let grove_name = s.named(api, &owner, "grove")?;
+    let grove = s.create(api, &owner, &grove_name)?;
+    s.commit(&grove, &[("fragment.json", Some(CHAT_JSON))]);
+    s.deploy(&grove);
+    api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
+    let r = say(14, "run: sleep 20 && echo slow-ran")?;
+    let slow = turn_for(&r);
+    let running = s.eventually(TURN, || work_of(&records(api, &owner, &chat_name, "work"), &slow).iter().any(|r| r["body"]["kind"] == "turn.start"));
+    let t0 = std::time::Instant::now();
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{maple_name}"), Some(&json!({})))?;
     let maple_id = r.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == maple_name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
+    s.ok(
+        "a second agent is assigned to the awake computer while the lead's turn runs",
+        running && r.status == 200 && maple_id.starts_with("id:") && maple_id != identity && r.body["phase"] == "awake" && ended(&slow).is_none(),
+        json!({ "assigned": r.body, "slow": work_of(&records(api, &owner, &chat_name, "work"), &slow) }),
+    );
+    api.signed(&owner, "PUT", &format!("/api/f/{grove_name}/members/{maple_id}"), Some(&json!({ "role": "editor" })))?;
+    let r = api.signed(&owner, "POST", &format!("/api/f/{grove_name}/channels/chat"), Some(&json!({ "id": "g1", "body": { "text": "hello maple" } })))?;
+    let greeted = turn_of(&maple_name, &grove_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+    let maple_reply = |turn: &str| agent_replies(&records(api, &owner, &grove_name, "chat"), &maple_id).into_iter().find(|r| r["body"]["turn"] == turn).and_then(|r| r["body"]["text"].as_str().map(str::to_string));
+    let answered = s.eventually(NEW_AGENT, || maple_reply(&greeted).is_some());
+    let took = t0.elapsed();
+    println!("      (a second agent, assigned while awake, to its first reply in its own chat: {took:.1?})");
+    let maple_ended = || work_of(&records(api, &owner, &grove_name, "work"), &greeted).into_iter().find(|r| r["body"]["kind"] == "turn.end").map(|r| r["body"]["outcome"].clone());
+    s.ok(
+        &format!("it answers in its own chat within {}s, as itself: its own profile's model answer (no 401), its turn ended idle", NEW_AGENT.as_secs()),
+        answered && maple_reply(&greeted).is_some_and(|t| t.contains("hello maple")) && s.eventually(TURN, || maple_ended() == Some(json!("idle"))),
+        json!({ "tookMs": took.as_millis() as u64, "reply": maple_reply(&greeted), "work": work_of(&records(api, &owner, &grove_name, "work"), &greeted) }),
+    );
+    s.ok(
+        "nothing restarted: the lead's turn ran on, and ends idle with its whole answer",
+        s.eventually(TURN, || ended(&slow) == Some(json!("idle"))) && reply_of(&slow).is_some_and(|t| t.contains("slow-ran")) && phase(api, &owner, &id) == "awake",
+        json!({ "reply": reply_of(&slow), "work": work_of(&records(api, &owner, &chat_name, "work"), &slow) }),
+    );
+
+    // added to the lead's chat while awake: @mentioned it answers there, the
+    // lead does not (its view of the chat is read again on the join)
     api.signed(&owner, "PUT", &format!("/api/f/{chat_name}/members/{maple_id}"), Some(&json!({ "role": "editor" })))?;
-    std::thread::sleep(QUEUE_DRAIN);
-    api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
-    api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
+    let wakes = || {
+        api.signed(&owner, "GET", &format!("/api/f/{chat_name}/subscriptions"), None)
+            .ok()
+            .map_or(0, |r| r.body["subscriptions"].as_array().map_or(0, |l| l.iter().filter(|x| x["wake"] == true && x["channel"] == "chat").count()))
+    };
+    let followed = s.eventually(NEW_AGENT, || wakes() >= 2);
     let maple_label = maple_name.split('.').next().unwrap_or("").to_string();
     let lead_before = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len();
-    let r = say(14, &format!("@{maple_label} what do you think"))?;
+    let r = say(15, &format!("@{maple_label} what do you think"))?;
     let mentioned = turn_of(&maple_name, &chat_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
-    let heard = s.eventually(WAKE, || agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id).iter().any(|r| r["body"]["turn"] == mentioned.as_str()));
-    s.ok("a second Hermes profile answers when @mentioned, as its own agent", heard, json!(agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id)));
+    let heard = s.eventually(TURN, || agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id).iter().any(|r| r["body"]["turn"] == mentioned.as_str()));
+    s.ok("a second Hermes profile, joined to the lead's chat while awake, answers there when @mentioned", followed && heard, json!(agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id)));
     std::thread::sleep(Duration::from_secs(5));
     s.ok("and the lead does not", agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == lead_before, "");
 
     // a routine: the second agent's cron wakes the sleeping computer on time.
     // Its cron runs each minute from its deploy: one answered awake first,
     // so the sleep comes a minute before the next
-    let routines = || agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id).into_iter().filter(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("water the plants"))).count();
+    s.commit(&maple, &[("fragment.json", Some(ROUTINE_JSON)), ("app.mjs", Some(routine_app(&chat_name).as_bytes()))]);
+    s.deploy(&maple);
+    let routines =|| agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id).into_iter().filter(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("water the plants"))).count();
     let awake_routines = routines();
     s.eventually(ROUTINE, || routines() > awake_routines);
     std::thread::sleep(QUEUE_DRAIN);
