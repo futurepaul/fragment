@@ -426,7 +426,6 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let ran = s.eventually(Duration::from_secs(150), || routine(&records(api, &owner, &chat_name, "chat")));
     s.ok("its cron's routine wakes it, and the agent does it in the chat", ran, "");
     api.signed(&owner, "POST", &format!("/api/f/{agent_name}/pause"), Some(&json!({ "op": "routine", "paused": true })))?;
-    let routines = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len();
 
     // asleep, its agent added to a new chat wakes it, and it follows that
     // chat before anyone speaks there (Paul, 2026-10-03)
@@ -470,13 +469,17 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let api = s.start(false, true)?;
     let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": "m40", "body": { "text": "after the crash" } })))?;
     s.ok("after a crash of the platform, a message to the chat", r.status == 200, &r);
-    let after = s.eventually(WAKE, || agent_replies(&records(&api, &owner, &chat_name, "chat"), &identity).len() == routines + 1);
+    // its own turn's replies: a routine's, on its cron minute, may land in
+    // the same window and is no second answer
+    let turn = turn_of(&agent_name, &chat_name, "chat", r.body["seq"].as_i64().unwrap_or(0));
+    let its = |api: &Api| agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().filter(|r| r["body"]["turn"] == turn.as_str()).collect::<Vec<_>>();
+    let after = s.eventually(WAKE, || its(&api).len() == 1);
     std::thread::sleep(Duration::from_secs(2));
-    let replies = agent_replies(&records(&api, &owner, &chat_name, "chat"), &identity);
+    let replies = its(&api);
     s.ok(
         "the computer answers it, once",
-        after && replies.len() == routines + 1 && replies.last().is_some_and(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("after the crash"))),
-        json!(replies.len()),
+        after && replies.len() == 1 && replies[0]["body"]["text"].as_str().is_some_and(|t| t.contains("after the crash")),
+        json!(replies),
     );
     std::thread::sleep(QUEUE_DRAIN);
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
