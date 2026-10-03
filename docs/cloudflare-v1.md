@@ -363,6 +363,104 @@ speaking Cloudflare's APIs) returns once this product works.
     any other UI an image serves are reached. Nothing else is
     reachable from outside.
 
+### Defaults taken 2026-10-02 (from the cloudflare/agents study)
+
+42. **Only an agent's owner answers its approvals.** In your chats that
+    is you. When Skyler's agent works in your fragment, its approvals go
+    to Skyler. An approval has an id and an expiry, and the first answer
+    wins. While a turn waits on an approval, the bridge drops its busy
+    flag, so the computer can sleep instead of billing for hours. An
+    answer that arrives after a sleep resumes the turn, or the card says
+    it expired.
+43. **Computers reach the internet.** Browsing is the point, so
+    `enableInternet` is on. The guest holds no secrets, so traffic that
+    bypasses the intercepts (ports other than 80 and 443) carries nothing
+    of ours.
+
+## Lessons from cloudflare/agents
+
+Read 2026-10-02 at commit `2f3176b`: `agents` 0.26.0, especially
+`packages/agents/src/harness/pi`; the full notes are in the session's
+`research/RESULTS.md`. Cloudflare runs pi inside the DO, not in a
+container. That is a choice our rule rules out, but its patterns carry
+over. Each lesson names the smallest change it makes here:
+
+1. **Split work by who has authority over it.**
+   - The chat channel owns what was said, and its ids.
+   - Hermes owns the model context and the in-flight turn.
+   - The Computer DO owns the computer's lifecycle.
+   - The ledger owns usage.
+
+   The bridge translates between them and owns nothing.
+2. **A turn is admitted once, by its operation id.** The bridge uses a
+   record's `(channel, seq)` as Hermes' message id, so catching up after
+   a deploy or a wake never starts a second turn. Routine records carry
+   `(trigger, scheduled minute)`, because cron has no overlap guard.
+3. **One job queue drives each DO's one alarm.** It is a pure state
+   machine in `crates/core`, shared by the Computer and Fragment DOs:
+   - the newest push wins, which settles a wake racing a sleep;
+   - a deadman alarm catches a hung job;
+   - delivery is at least once.
+4. **A failure is classified before it is retried.** A platform
+   transient, such as a code-update reset or a lost network connection,
+   is deferred to a fresh invocation and never retried in the dying
+   isolate. A memory-limit reset gets three strikes and is then sealed.
+   A computer whose wake keeps failing shows "won't wake" instead of
+   paying for container starts. A throwing alarm is retried forever.
+5. **Deploys are routine and noisy.** In-flight work gets about 30 s;
+   sockets drop several times over 11–22 s; code-update evictions happen
+   once or twice a day anyway. The bridge reconnects with jitter, and
+   the hosted lane runs several real deploys mid-turn, then asserts one
+   reply, no duplicate turn and no duplicate meter row.
+6. **A container can outlive a deploy.** A new isolate may find
+   `ctx.container.running` true with no monitor attached. The Computer
+   DO's constructor attaches `monitor()` again, sets the timeout again,
+   and registers its intercepts again (idempotently; S3 saw them
+   survive). It never destroys the container, since `/data` may be
+   unsaved. After any `destroy()`, it polls `running` to false before
+   `start()`.
+7. **The model intercept is bounded.** It allows only the provider's
+   endpoints and methods, the tier's model, and a capped `max_tokens`.
+   It strips auth headers, passes the native wire format through, and
+   persists only the final usage, never the request or its stream.
+8. **The two gateway paths differ.**
+   - `env.AI.run` with a catalog model streams the provider's native SSE
+     and gives a run id that can resume a dropped stream.
+   - `env.AI.gateway(id).run` gives a log id, caching and ZDR.
+
+   GLM calls send `x-session-affinity` set to the agent id, for
+   prefix-cache hits. Each meter row is keyed on the log id or run id,
+   which is the ledger's replay key. Read the id from the response
+   header, not the binding property, which concurrent calls overwrite.
+9. **Native snapshots exist in the runtime types:** `snapshotDirectory`,
+   `snapshotContainer`, and `start({directorySnapshots,
+   containerSnapshot})`. The wake investigation measures them against
+   our exec-driven restore (decision 18).
+10. **Staying awake means an alarm, and facets have none.** This agrees
+    with S1's lock on `setAlarm` and S3's keepalive rule.
+11. **A late page gets a snapshot plus the in-flight partial, and the
+    final replaces it by id.** A chat's final record carries its draft's
+    id, and push notifications fire only on finals.
+12. **The person's index is a fenced projection.** Each fragment pushes
+    its snapshot after a commit; the Principal applies it with a
+    constrained update, never an upsert, and repairs by pulling. The
+    shell's search (decision 9) is FTS5 in the Principal.
+13. **A layered test ladder:**
+    - per PR: vitest-pool-workers, crashing with
+      `abortAllDurableObjects` and `runDurableObjectAlarm`;
+    - nightly: SIGKILL a `wrangler dev --persist-to`;
+    - containers under `wrangler dev --local` with Docker;
+    - fixtures that assert meaning, not bytes, with a scripted model that
+      is a pure function of the transcript.
+14. **Gotchas:**
+    - `enable_abortsignal_rpc` when an AbortSignal crosses RPC to a
+      container's DO;
+    - `run_worker_first` so the shell's WebSocket upgrades reach the
+      Worker past static assets;
+    - `ctx.waitUntil` is cut about 30 s after the response;
+    - never wrap a turn in a Workflow;
+    - log one JSON line per event, because `wrangler tail` drops lines.
+
 ## Architecture
 
 ```
@@ -605,7 +703,7 @@ What it changes:
   `state.db` for Litestream, and keep the screen's lease;
 - a risk: cold wakes are slow.
 
-**S4, AI Gateway (2026-10-02, half run; evidence in
+**S4, AI Gateway (2026-10-02, both halves; evidence in
 `spikes/s4-gateway/RESULTS.md`; about $0.62 of Workers AI).** Wrangler's
 OAuth login has no AI Gateway scope, so the gateway, Unified Billing,
 Opus, ZDR and spend limits wait on an API token with AI Gateway Edit.
@@ -631,6 +729,40 @@ Intercept facts:
 - Gateway spend limits are eventually consistent, so they are only a
   backstop. Our ledger stays authoritative.
 
+Phase two (2026-10-02, with an AI Gateway token, on gateway `spike-s4`
+with ZDR on and logs off; about $0.27 of credits):
+- **All three tiers work through the gateway** with tool calls and
+  streaming usage.
+  - GLM goes through `env.AI.run` with the gateway option.
+  - Opus goes in Anthropic's native Messages shape through `env.AI.run`,
+    with `system` flattened to a string and top-level `cache_control`.
+    Its model id there is `anthropic/claude-opus-5.5`.
+  - Hermes uses its Anthropic provider for the high tier, so the
+    intercept passes Messages through rather than translating from
+    OpenAI.
+  - The compat path also works, but it ignores caching. Native
+    non-streaming responses drop the cache fields, so Opus is metered
+    from the stream.
+- **Unified Billing's limit on third-party models is per edge machine.**
+  From one DO, Opus allows a burst of 3 calls, then about 2 a minute;
+  the 4th answers 429 (code 2018, "Wholesale rate limit exceeded"). A
+  computer's model calls all leave from its DO's machine. **So the high
+  tier is unusable** until Cloudflare raises this, or Opus goes BYOK, or
+  calls are sharded across gateways. GLM is unaffected.
+- **"Logs off" still keeps one row per call**: model, tokens, cost, our
+  `user_id` and `agent_id`, and timings. Prompts and responses are not
+  kept. So metadata is always opaque ids.
+- **Per-user spend rules work.** A rule partitioned on `user_id` blocks
+  that user on every model with a 429 (code 2045) on the next request;
+  other users still pass. A new rule takes about 40 s to apply.
+- **Dynamic-route fallback to a cheaper model fails** (400, code 5006),
+  so the downgrade happens in the intercept.
+- **Cost:** the gateway's log rows carry the cost even with logs off,
+  matching tokens × catalog price exactly. The credit balance is
+  readable (`GET /ai-gateway/billing/credit-balance`). The ledger's cost
+  basis is list price × 1.05, because credits carry a 5% fee, and the
+  charge is that times 1.5.
+
 **S5, WorkOS Pipes for Google (2026-10-02, staging, with Paul).** It
 works end to end.
 
@@ -655,9 +787,9 @@ The calls:
 With that token, read-only calls to Gmail, Calendar, Drive, Docs and
 Sheets all answered.
 
-Contacts was refused because the People API was disabled in that
-project. finite.computer's own `contacts.readonly` never worked there
-either; enabling the API fixes both.
+Contacts was refused at first because the People API was disabled in
+that project, so finite.computer's own `contacts.readonly` never worked
+there either. Paul enabled it, and Contacts then answered 200.
 
 The placeholder swap at the computer's intercept is tested in phase 4,
 against Google's own client libraries.
@@ -703,6 +835,11 @@ Each one needs a test in the phase that ports its feature.
     gateway until raised;
   - the Worker Loader, Facets and the containers' `durable_object`
     scheduling policy are betas.
+- **Opus through Unified Billing is limited to about 2 calls a minute per
+  edge machine**, so about 2 a minute per computer (spike S4). The high
+  tier needs Cloudflare to raise it, or BYOK for Anthropic (exempt; ZDR
+  then rests on Anthropic's terms), or sharding across gateways
+  (untested).
 - **Workers AI rate limits.** GLM-5.3 and Flash are "paid models":
   20 requests a minute per model per account on standard billing, and 50
   with prepaid credits through a gateway. At about 4 calls a Hermes
