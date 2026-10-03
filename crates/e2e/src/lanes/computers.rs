@@ -471,7 +471,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("after a crash of the platform, a message to the chat", r.status == 200, &r);
     // its own turn's replies: a routine's, on its cron minute, may land in
     // the same window and is no second answer
-    let turn = turn_of(&agent_name, &chat_name, "chat", r.body["seq"].as_i64().unwrap_or(0));
+    let turn = turn_of(&agent_name, &chat_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
     let its = |api: &Api| agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().filter(|r| r["body"]["turn"] == turn.as_str()).collect::<Vec<_>>();
     let after = s.eventually(WAKE, || its(&api).len() == 1);
     std::thread::sleep(Duration::from_secs(2));
