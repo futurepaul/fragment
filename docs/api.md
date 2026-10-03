@@ -581,8 +581,11 @@ fragment's blobs go with it.
 
 A page reads one of its fragment's blobs by hash at `__blob/<sha256>`
 (Serving, below), with no row in the app's database and no record
-holding the bytes. One nothing names is deleted after the grace period
-like any other (uploads never committed included). It is served as the
+holding the bytes. A channel record that names one in its body's
+`attachments` (`[{ "sha256": … }]`, as a chat's records do:
+docs/chat-records.md) keeps it while the channel keeps the record; one
+nothing names, by pointer or record, is deleted after the grace period
+like any other (uploads never committed or posted included). It is served as the
 type its upload's `content-type` declared when that is passive media
 (JPEG, PNG, WebP, GIF, MP4, WebM, MP3, WAV, PDF: `blob::served_type`),
 else as `application/octet-stream`, so a blob never runs as a page or a

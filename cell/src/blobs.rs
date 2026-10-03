@@ -7,7 +7,8 @@
 //! then commits the pointer. The cell tracks the pointers at each pin, so
 //! serving a pointer's path streams its bytes, and a blob no pointer at
 //! `main` or `live` has named for a grace period is deleted: only the
-//! latest versions' bytes are kept.
+//! latest versions' bytes are kept. A channel record that names one
+//! (`attachments[].sha256`) keeps it too, while the record is kept.
 //!
 //! A page reads one of its fragment's blobs by hash at `__blob/<sha>` (a
 //! step's screenshot, a chat's attachment), typed as its upload declared,
@@ -203,8 +204,9 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// From the alarm: deletes blobs no pointer at `main` or `live` has
-    /// named for the grace period (uploads never committed included).
+    /// From the alarm: deletes blobs no pointer at `main` or `live`, nor
+    /// any kept record, has named for the grace period (uploads never
+    /// committed or posted included).
     pub(crate) async fn collect_blobs(&self) -> CellResult<()> {
         let now = js::now_ms();
         let due: i64 = self.meta(MetaKey::BlobsGcAt)?.and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -212,7 +214,15 @@ impl FragmentCell {
             return Ok(());
         }
         let now_v = SqlStorageValue::Integer(now);
-        self.exec("UPDATE blobs SET seen_at = ? WHERE sha IN (SELECT sha FROM pointers)", vec![now_v])?;
+        self.exec("UPDATE blobs SET seen_at = ? WHERE sha IN (SELECT sha FROM pointers)", vec![now_v.clone()])?;
+        // a record that names a blob (`attachments[].sha256`: a chat's files)
+        // keeps it while the channel keeps the record
+        self.exec(
+            "UPDATE blobs SET seen_at = ? WHERE sha IN (
+               SELECT json_extract(a.value, '$.sha256') FROM records r, json_each(r.body, '$.attachments') a
+               WHERE json_valid(r.body) AND json_type(r.body, '$.attachments') = 'array' AND a.type = 'object')",
+            vec![now_v],
+        )?;
         let count = self.drop_blobs("SELECT sha FROM blobs WHERE seen_at < ? LIMIT 1000", now - self.cfg.blob_grace_ms).await?;
         if count > 0 {
             self.event("blobs.collected", &format!("{count} blob(s) no branch has named for the grace period"), json!({ "count": count }));

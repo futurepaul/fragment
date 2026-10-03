@@ -38,11 +38,6 @@ fn shows(chrome: &mut Browser, page: &Page, cond: &str) -> bool {
     chrome.until(page, cond, TURN)
 }
 
-/// The template's files, as a CLI sync would commit them.
-fn template_files() -> Vec<(&'static str, Option<&'static [u8]>)> {
-    fragment_templates::CHAT.iter().map(|(path, bytes)| (*path, Some(*bytes))).collect()
-}
-
 /// A JS string literal.
 fn js(s: &str) -> String {
     serde_json::to_string(s).expect("a string encodes")
@@ -58,7 +53,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let computer = r.body["computer"].as_str().unwrap_or("").to_string();
     anyhow::ensure!(r.status == 200 && computer.starts_with("computer:"), "making the computer: {r}");
 
-    // an agent fragment on the computer, and a chat whose files are the template's
+    // an agent fragment on the computer, and a chat on the blessed template
     let agent_name = s.named(api, &owner, "juniper")?;
     let agent = s.create(api, &owner, &agent_name)?;
     s.commit(&agent, &[("fragment.json", Some(AGENT_JSON))]);
@@ -67,13 +62,12 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let identity = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
     anyhow::ensure!(r.status == 200 && identity.starts_with("id:"), "assigning the agent: {r}");
     let chat_name = s.named(api, &owner, "talk")?;
-    let chat = s.create(api, &owner, &chat_name)?;
-    s.commit(&chat, &template_files());
-    s.deploy(&chat);
+    let r = api.create_with(&owner, json!({ "name": chat_name, "template": "chat" }))?;
+    anyhow::ensure!(r.status == 200, "making the chat on the template: {r}");
+    s.hook(api, &r.body);
     let r = api.signed(&owner, "PUT", &format!("/api/f/{chat_name}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
     s.ok("the agent joins the chat on the template", r.status == 200, &r);
-    let joined = json!({ "id": "joined-chat", "body": { "kind": "joined", "fragment": chat_name } });
-    api.signed(&owner, "POST", &format!("/api/f/{agent_name}/channels/tasks"), Some(&joined))?;
+    // the platform tells the agent it joined (Paul, 2026-10-03), and wakes its computer
     let member_id = api.identity(&member)?;
     let r = api.signed(&owner, "PUT", &format!("/api/f/{chat_name}/members/{member_id}"), Some(&json!({ "role": "viewer" })))?;
     anyhow::ensure!(r.status == 200, "adding a viewer: {r}");
@@ -313,6 +307,23 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("every message the page sent was one turn", turns.len() == 7 && once.len() == turns.len(), json!(turns));
     let first_turn = turn_of(&agent_name, &chat_name, "chat", sent.and_then(|x| x["seq"].as_i64()).unwrap_or(0));
     s.ok("the first of them the turn of the page's first message", turns.first() == Some(&first_turn), json!({ "first": first_turn, "turns": turns }));
+
+    // files a record names stay past the grace period; an upload none names goes
+    let blob = |sha: &str| api.signed(&owner, "HEAD", &format!("/api/f/{chat_name}/blobs/{sha}"), None).map(|r| r.status).unwrap_or(0);
+    let collected = s.eventually(Duration::from_secs(60), || blob(&sha) == 404);
+    s.ok("an upload no record names is collected after the grace period", collected, blob(&sha));
+    let named: Vec<String> = records(api, &owner, &chat_name, "chat")
+        .iter()
+        .flat_map(|r| r["body"]["attachments"].as_array().cloned().unwrap_or_default())
+        .filter_map(|a| a["sha256"].as_str().map(str::to_string))
+        .collect();
+    let kept: Vec<(String, u16)> = named.iter().map(|sha| (sha.clone(), blob(sha))).collect();
+    s.ok(
+        "while the files the chat's records name stay (the picture, the agent's drawing)",
+        collected && kept.len() >= 2 && kept.iter().all(|(_, status)| *status == 200),
+        json!(kept),
+    );
+
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
     Ok(())

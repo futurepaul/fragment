@@ -169,7 +169,9 @@ A file is one of the chat fragment's blobs: its poster uploads it first
 (`PUT /api/f/{chat}/blobs/{sha256}`, which takes editors; a page, `PUT
 __blob/<sha256>` through `fragment.blob(file)`), then posts the record
 naming it; a page reads it at `__blob/<sha256>`. At most 8 a record, 25
-MiB each.
+MiB each. The record keeps the file while the channel keeps the record
+(docs/api.md, Blobs); an upload no record names goes after the grace
+period.
 
 ## The page (`templates/chat`)
 
