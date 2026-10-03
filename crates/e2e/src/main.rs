@@ -381,7 +381,9 @@ impl Suite {
 
     fn cli_command(&self, api: &Api, home: &Path, args: &[&str]) -> Command {
         let mut c = Command::new(&self.cli);
-        c.args(args).env("HOME", home).env("FRAGMENT_HOST", &api.base).env_remove("FRAGMENT_OUTPUT");
+        // its config under this HOME on every system: a Linux runner's
+        // XDG_CONFIG_HOME would put every lane's key in one place
+        c.args(args).env("HOME", home).env("FRAGMENT_HOST", &api.base).env_remove("FRAGMENT_OUTPUT").env_remove("XDG_CONFIG_HOME");
         c
     }
 
