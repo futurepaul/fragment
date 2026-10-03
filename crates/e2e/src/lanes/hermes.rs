@@ -79,7 +79,7 @@ pub fn stage_images(project: &Path) -> Result<()> {
 }
 
 pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section_by_name(SECTION, "it builds and runs the Hermes image") {
+    if !s.section_by_name(SECTION, &[crate::Need::Fakes, crate::Need::LocalDocker], "it builds and runs the Hermes image") {
         return Ok(());
     }
     s.ai.clear_script();

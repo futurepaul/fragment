@@ -55,7 +55,7 @@ fn js(s: &str) -> String {
 }
 
 pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("chat") {
+    if !s.section("chat", &[crate::Need::Fakes, crate::Need::LocalDocker, crate::Need::Chrome, crate::Need::Levers]) {
         return Ok(());
     }
     let owner = api.person()?;

@@ -29,7 +29,7 @@ fn count(api: &Api, keys: &Keys, name: &str) -> i64 {
 }
 
 pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
-    if !s.section("restart") {
+    if !s.section("restart", &[crate::Need::Node, crate::Need::Deployment, crate::Need::Levers]) {
         return Ok(());
     }
     let api = s.api();
@@ -201,7 +201,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
 
 /// A fleet without a hostname suffix serves fragments under `/f/<name>/`.
 pub fn pathmode(s: &mut Suite, _: &Api) -> Result<()> {
-    if !s.section("pathmode") {
+    if !s.section("pathmode", &[crate::Need::Node]) {
         return Ok(());
     }
     s.stop()?;

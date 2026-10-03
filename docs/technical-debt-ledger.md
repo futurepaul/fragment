@@ -469,24 +469,6 @@ fragment.club until cutover (decisions 34–35).
   driver, a watchdog, and a cancel token per conversation), proven by an
   e2e where chat B's answer lands while chat A's turn is held in a tool.
 
-## An agent still answers through a reply operation
-
-- **Observed:** phase 7 slice C made the chat template two postable
-  channels and no app code, so the agent posts its answer to a followed
-  channel that takes posts. Chats made before still had a `say`
-  operation, so the agent reads each channel's shape as a turn starts
-  (agent/src/progress.rs `shape`) and answers a channel that takes no
-  posts through its listen's reply operation (agent/src/lib.rs
-  `post_answer`; the listen's `reply` field, `fragment agent listen
-  --reply`). The chat template, the old chats' fixture, and the lane that
-  drove both went at the cut, and nothing on fragment.club migrates
-  (docs/cloudflare-v1.md, decision 33): no e2e takes the reply path now.
-- **Risk:** two answer paths in the agent, one untested.
-- **First proof:** a change to how answers are posted that the reply path
-  misses.
-- **Delete when:** the reply operation path goes (an answer only posts,
-  and the listen's `reply` field goes), or a lane drives it again.
-
 ## A postable channel's retention is fixed
 
 - **Observed:** a channel people may post to keeps its newest
@@ -539,21 +521,30 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** a lane checks that a stranger's draft is refused and
   that a draft past the pace is refused (429).
 
-## The hosted lane is not built
+## The hosted lane runs part of the suite, and not from CI
 
-- **Observed:** phase 2 (2026-10-03). The e2e runs on local workerd,
+- **Observed:** phase 2 (2026-10-03): the e2e runs on local workerd,
   whose limits differ from Cloudflare's: it enforces no CPU, memory,
   subrequest or concurrency limit (spike S1), and its Workflows keep a
   sleep as a timer in the process, so one never wakes after a crash of
-  `wrangler dev`. Those checks are `skip`s, counted in every run. The
-  branch deployment exists (`cargo xtask deploy --branch`), but nothing
-  runs the suite against one yet: it waits on the dev zone's wildcard DNS
-  record and on how test people sign in on WorkOS staging (Paul).
-- **Risk:** a limit or a Workflow resume that only Cloudflare exercises
-  breaks unseen.
-- **First proof:** any skip in a run's summary.
-- **Delete when:** the hosted lane runs the suite against a branch
-  deployment from CI, with no skips left.
+  `wrangler dev`. Those checks are `skip`s, counted in every run. Phase 7
+  (2026-10-03, `claude/phase-7`) built the hosted lane (`cargo xtask e2e
+  --hosted`, crates/e2e/src/hosted.rs): it runs on a preview the sections
+  whose declared needs a preview meets. The rest are skips there, each
+  saying why: those that script a vendor fake (the model: ai, ledger,
+  agents, addon, chat; code.storage's git or webhooks: create, files,
+  ops, effects, site, sync, blobs, appfiles; a local upstream or push
+  service: jobs, triggers, push, channels' posts), the node's (restart,
+  lockdown, isolation, share, pathmode), and the whole deployment's
+  (identities, signin, ledger's operator). Nothing runs it from CI.
+- **Risk:** a limit, a Workflow resume, or a skipped section's behaviour
+  on real vendors breaks unseen.
+- **First proof:** any skip in a run's summary, local or hosted.
+- **Delete when:** the hosted lane runs from CI against a branch
+  deployment, each section that needs a fake today reaching a target on
+  the deployment itself instead (a fragment's own route as a job's
+  upstream, its inbox as a webhook's, the real model within the run's
+  paid calls), and the local skips made there.
 
 ## A query can write past its app's cap
 

@@ -72,6 +72,11 @@ struct Deployment {
     /// The price book's version: raise it with every change to a key's
     /// price, or ledgers made before keep the book they have.
     price_book_version: Option<u32>,
+    /// A branch deployment's test levers (`FRAGMENT_TEST_SECRET`, docs/secrets.md):
+    /// the file of a secret of 32 bytes or more, with which the hosted e2e
+    /// signs its people in and pulls its levers there. Only a `--branch`
+    /// deploy takes it: a deployment of its own (production) is refused.
+    test_secret_file: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -132,15 +137,7 @@ struct WorkOs {
     api_key_file: PathBuf,
 }
 
-/// What `--branch` may be: a DNS label short enough that
-/// `<label>--<username>--<branch>` fits in one (63 bytes).
-fn valid_branch(b: &str) -> bool {
-    (1..=16).contains(&b.len())
-        && b.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-        && !b.starts_with('-')
-        && !b.ends_with('-')
-        && !b.contains("--")
-}
+use devstack::valid_branch;
 
 fn expand(path: &Path) -> PathBuf {
     match path.strip_prefix("~") {
@@ -223,6 +220,24 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
         (Some(_), _, _) => bail!("a config with platform_host and fragment_suffix deploys one deployment of its own: no --branch"),
         (None, _, _) => bail!("name a --branch (or give the config both platform_host and fragment_suffix)"),
     }
+}
+
+/// The test secret's file a deploy of `branch` takes, if the config names
+/// one: a branch deployment's alone. A deployment of its own is refused
+/// outright (its levers would be production's), before anything is read.
+fn test_secret_file<'a>(d: &'a Deployment, branch: Option<&str>) -> Result<Option<&'a Path>> {
+    match (&d.test_secret_file, branch) {
+        (None, _) => Ok(None),
+        (Some(_), None) => bail!("test_secret_file is a branch deployment's (a preview's): a deployment of its own never has test levers. Remove it, or deploy a --branch"),
+        (Some(file), Some(_)) => Ok(Some(file.as_path())),
+    }
+}
+
+/// The test secret, from its file, checked as the cell checks it (never printed).
+fn read_test_secret(file: &Path) -> Result<String> {
+    let secret = read_secret(file)?;
+    fragment_core::levers::check(&secret).map_err(|why| anyhow::anyhow!("test_secret_file {}: {}", file.display(), why.message()))?;
+    Ok(secret)
 }
 
 fn load(config: &Path) -> Result<Deployment> {
@@ -315,6 +330,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     let workos_client = read_secret(&d.workos.client_id_file)?;
     let workos_key = read_secret(&d.workos.api_key_file)?;
     let dns_token = d.dns_token_file.as_deref().map(read_secret).transpose()?;
+    let test_secret = test_secret_file(&d, branch.as_deref())?.map(read_test_secret).transpose()?;
     if let Some(p) = &d.default_plan {
         anyhow::ensure!(matches!(p.as_str(), "guest" | "seat" | "seat_always_on"), "default_plan is guest, seat or seat_always_on, not {p:?}");
     }
@@ -451,14 +467,62 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     for (name, key) in operator_keys {
         secrets[name] = json!(key);
     }
+    // a preview's levers (cell/src/levers.rs): a branch's alone, checked above
+    if let Some(secret) = &test_secret {
+        assert!(n.label_suffix.is_some(), "only a branch deployment takes a test secret");
+        secrets["FRAGMENT_TEST_SECRET"] = json!(secret);
+    }
     let cell_secrets = SecretFile::write(dir.join("cell-secrets.json"), &secrets)?;
     crate::run(wrangler(&tools, &d.account_id).arg("deploy").arg("-c").arg(&cell_config).arg("--secrets-file").arg(&cell_secrets.0))?;
     drop(cell_secrets);
     println!("deployed {deploy_id}:");
     println!("  the platform  {platform_url}/  (sign-in redirect: {platform_url}/auth/callback)");
+    if test_secret.is_some() {
+        println!("  test levers   on (test_secret_file): cargo xtask e2e --hosted --config <this config> --branch {}", branch.as_deref().unwrap_or(""));
+    }
     println!("  fragments     https://<label>--<username>{}.{}/", n.label_suffix.as_deref().unwrap_or(""), n.suffix);
     println!("  check         curl -sI {platform_url}/healthz | grep x-fragment-deploy");
     Ok(())
+}
+
+/// `cargo xtask e2e --hosted --config <file> --branch <b> [--only … |
+/// --except …] [--dry-run | --sweep] [--max-paid-calls <n>]`: the suite's
+/// own arguments for that branch deployment, from its config: the zone, the
+/// test secret's file (named, never read here), and what the deployment
+/// offers (computers, models). A deployment of its own is refused: the
+/// hosted lane runs on a preview.
+pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
+    let usage = || anyhow::anyhow!("usage: cargo xtask e2e --hosted --config <file> --branch <name> [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep] [--max-paid-calls <n>]");
+    let (mut config, mut branch, mut passed) = (None, None, vec![]);
+    let mut it = rest.iter();
+    // bounded: each pass takes one argument at least
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--hosted" => {}
+            "--config" => config = Some(PathBuf::from(it.next().ok_or_else(usage)?)),
+            "--branch" => branch = Some(it.next().ok_or_else(usage)?.clone()),
+            "--only" | "--except" | "--max-paid-calls" => {
+                passed.push(a.clone());
+                passed.push(it.next().ok_or_else(usage)?.clone());
+            }
+            "--dry-run" | "--sweep" => passed.push(a.clone()),
+            _ => return Err(usage()),
+        }
+    }
+    let (config, branch) = (config.ok_or_else(usage)?, branch.ok_or_else(usage)?);
+    let d = load(&config)?;
+    // a deployment of its own takes no --branch: production never runs it
+    names(&d, Some(&branch)).context("the hosted lane runs on a branch deployment (a preview)")?;
+    let mut args = vec!["--hosted".to_string(), "--zone".into(), d.zone.clone(), "--branch".into(), branch.clone()];
+    if let Some(file) = test_secret_file(&d, Some(&branch))? {
+        args.extend(["--secret-file".to_string(), expand(file).to_string_lossy().into_owned()]);
+    }
+    let offers: Vec<&str> = [(d.computers.is_some(), "computers"), (d.ai_gateway.is_some(), "models")].into_iter().filter(|(on, _)| *on).map(|(_, o)| o).collect();
+    if !offers.is_empty() {
+        args.extend(["--offers".to_string(), offers.join(",")]);
+    }
+    args.extend(passed);
+    Ok(args)
 }
 
 /// Removes a branch deployment: its Workers (their Durable Objects and
@@ -503,7 +567,81 @@ mod tests {
             connections: BTreeMap::new(),
             operator_keys: BTreeMap::new(),
             price_book_version: None,
+            test_secret_file: None,
         }
+    }
+
+    /// A config file of `body` in this test's own scratch, and its path.
+    fn config_file(test: &str, body: &Value) -> PathBuf {
+        let dir = devstack::repo_root().join("target/xtask-tests").join(test);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("deploy.jsonc");
+        fs::write(&path, body.to_string()).unwrap();
+        path
+    }
+
+    /// The test levers are a preview's: a deployment of its own (production)
+    /// that names a test secret is refused before anything is read, a
+    /// branch takes it, and a config without one has none.
+    #[test]
+    fn a_test_secret_is_a_branch_deployments_alone() {
+        let mut production = deployment(Some("fragment.club"), Some("fragment.boats"));
+        production.test_secret_file = Some("~/.config/fragment/secrets/test-secret".into());
+        let refused = test_secret_file(&production, None).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(refused.contains("never has test levers"), "{refused}");
+        // nor may it be deployed as a branch to slip one in
+        assert!(names(&production, Some("p5")).is_err());
+
+        let mut branch = deployment(None, None);
+        assert!(matches!(test_secret_file(&branch, Some("p5")), Ok(None)), "no field, no levers");
+        branch.test_secret_file = Some("/run/secrets/test".into());
+        assert_eq!(test_secret_file(&branch, Some("p5")).unwrap(), Some(Path::new("/run/secrets/test")));
+        assert!(test_secret_file(&branch, None).is_err(), "a branch config deployed without --branch is a deployment of its own");
+    }
+
+    /// A test secret is checked as the cell checks it: too short is refused.
+    #[test]
+    fn a_short_test_secret_is_refused() {
+        let dir = devstack::repo_root().join("target/xtask-tests/short-secret");
+        fs::create_dir_all(&dir).unwrap();
+        let (short, long) = (dir.join("short"), dir.join("long"));
+        fs::write(&short, "too-short\n").unwrap();
+        fs::write(&long, format!("{}\n", "a1".repeat(32))).unwrap();
+        let refused = read_test_secret(&short).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(refused.contains("at least 32 bytes") && !refused.contains("too-short"), "{refused}");
+        assert_eq!(read_test_secret(&long).unwrap().len(), 64);
+    }
+
+    /// The hosted e2e reads its preview from the deployment's config: its
+    /// zone, the secret's file (named, not read), and what it offers. A
+    /// deployment of its own is refused.
+    #[test]
+    fn the_hosted_e2e_reads_its_preview_from_the_config() {
+        let text = fs::read_to_string(devstack::repo_root().join("deploy/example.jsonc")).unwrap();
+        let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+        v["zone"] = json!("finite.place");
+        v["ai_gateway"] = json!("fragment-dev");
+        v["test_secret_file"] = json!("/run/secrets/p5-test");
+        let args = |rest: &[&str]| hosted_e2e_args(&rest.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let path = config_file("hosted-args", &v);
+        let got = args(&["--hosted", "--config", path.to_str().unwrap(), "--branch", "p5", "--dry-run", "--only", "computers,templates"]).unwrap();
+        assert_eq!(
+            got,
+            ["--hosted", "--zone", "finite.place", "--branch", "p5", "--secret-file", "/run/secrets/p5-test", "--offers", "computers,models", "--dry-run", "--only", "computers,templates"]
+        );
+        // no gateway, no computers: it offers neither
+        v.as_object_mut().unwrap().remove("ai_gateway");
+        v.as_object_mut().unwrap().remove("computers");
+        let path = config_file("hosted-args-bare", &v);
+        let got = args(&["--hosted", "--config", path.to_str().unwrap(), "--branch", "p5"]).unwrap();
+        assert_eq!(got, ["--hosted", "--zone", "finite.place", "--branch", "p5", "--secret-file", "/run/secrets/p5-test"]);
+        // production: a deployment of its own runs no hosted lane
+        v["platform_host"] = json!("fragment.club");
+        v["fragment_suffix"] = json!("fragment.boats");
+        let path = config_file("hosted-args-production", &v);
+        assert!(args(&["--hosted", "--config", path.to_str().unwrap(), "--branch", "p5"]).is_err());
+        assert!(args(&["--hosted", "--config", path.to_str().unwrap()]).is_err(), "a branch is named");
+        assert!(args(&["--hosted", "--branch", "p5"]).is_err(), "a config is named");
     }
 
     /// A branch is a copy of its own beside the others: every name is

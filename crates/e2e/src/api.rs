@@ -1,7 +1,9 @@
 //! Signed and unsigned HTTP against the node, the way the CLI and a
 //! browser call it. Fragment hosts (`<label>--<username>.<suffix>`) are reached by
-//! sending the node the right `Host` header.
+//! sending the node the right `Host` header; a hosted run's, at their own
+//! names over https (`Target::Hosted`).
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -20,6 +22,14 @@ pub fn url_enc(s: &str) -> String {
 
 pub fn now_s() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).expect("clock after 1970").as_secs() as i64
+}
+
+fn client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("http client")
 }
 
 /// The current second, waited for until it has just begun: a request sent
@@ -65,15 +75,38 @@ impl Reply {
         self.headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("").to_string()
     }
 
-    /// `name=value` of each Set-Cookie.
+    /// `name=value` of each Set-Cookie, a `__Host-` name as its plain one
+    /// (over https the platform's and a site's sessions are `__Host-`
+    /// cookies: the hosted run's checks read them as a local run's).
     pub fn cookies(&self) -> Vec<String> {
         self.headers
             .get_all("set-cookie")
             .iter()
             .filter_map(|v| v.to_str().ok())
-            .map(|c| c.split(';').next().unwrap_or("").to_string())
+            .map(|c| c.split(';').next().unwrap_or(""))
+            .map(|c| c.strip_prefix(HOST_PREFIX).unwrap_or(c).to_string())
             .collect()
     }
+}
+
+/// The prefix browsers hold an https host's own cookies under (auth.rs `cookie_name`).
+const HOST_PREFIX: &str = "__Host-";
+/// The cookies the cell names `__Host-` over https, at a host's root.
+const HOST_COOKIES: [&str; 5] = ["fragment_session", "fragment_site", "fragment_frame", "fragment_login", "fragment_computer"];
+
+/// A `Cookie` header as a browser on https sends it: each of the cell's
+/// host cookies under its `__Host-` name, the rest as they are.
+pub fn https_cookies(header: &str) -> String {
+    header
+        .split(';')
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(|c| match c.split_once('=') {
+            Some((name, value)) if HOST_COOKIES.contains(&name) => format!("{HOST_PREFIX}{name}={value}"),
+            _ => c.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// One request's shape.
@@ -90,21 +123,172 @@ pub struct Call<'a> {
     pub extra: Vec<(&'a str, String)>,
 }
 
+/// Where a run's requests go.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// The local node: every request to 127.0.0.1 on its port, the site
+    /// named in `Host` (`*.localhost`, as a browser resolves it).
+    Local,
+    /// A branch deployment (a preview), over https at its own hosts: the
+    /// platform at `<branch>.<zone>`, a fragment at
+    /// `<label>--<username>--<branch>.<zone>`.
+    Hosted(Preview),
+}
+
+/// A branch deployment, as the hosted run reaches it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Preview {
+    pub zone: String,
+    pub branch: String,
+    /// `https`, but in the client's own tests, which serve http on a port.
+    scheme: &'static str,
+    port: Option<u16>,
+}
+
+impl Preview {
+    pub fn new(zone: &str, branch: &str) -> Preview {
+        Preview { zone: zone.to_string(), branch: branch.to_string(), scheme: "https", port: None }
+    }
+
+    /// The platform's origin.
+    pub fn platform(&self) -> String {
+        format!("{}://{}.{}{}", self.scheme, self.branch, self.zone, self.port_part())
+    }
+
+    /// A fragment's origin (`name` is `<label>.<username>`).
+    pub fn fragment(&self, name: &str) -> Option<String> {
+        Some(format!("{}://{}--{}.{}{}", self.scheme, fragment_proto::flat_name(name)?, self.branch, self.zone, self.port_part()))
+    }
+
+    fn port_part(&self) -> String {
+        self.port.map(|p| format!(":{p}")).unwrap_or_default()
+    }
+
+    /// A preview served over http on `port`: the client's own tests'.
+    #[cfg(test)]
+    pub fn local_http(zone: &str, branch: &str, port: u16) -> Preview {
+        Preview { zone: zone.to_string(), branch: branch.to_string(), scheme: "http", port: Some(port) }
+    }
+}
+
+/// What every API of one run shares: the levers' secret (sent to the
+/// platform's `/api/test/*` and nowhere else), and, hosted, the people it
+/// signed in and the paid calls it may still lend them.
+pub struct Run {
+    secret: String,
+    /// People sign in through the levers (the hosted lane's rules: a
+    /// preview, or its rehearsal on the local node), not through WorkOS.
+    levers_sign_in: bool,
+    /// Lanes call from threads of their own (site.rs): shared under locks.
+    people: Mutex<Vec<String>>,
+    budget: Mutex<Budget>,
+}
+
+/// The run's paid calls: those it may still lend, and those it lent.
+#[derive(Clone, Copy)]
+struct Budget {
+    left: u64,
+    lent: u64,
+}
+
+impl Run {
+    /// A local run's: people sign in through the WorkOS fake.
+    pub fn new(secret: String, paid_calls: u64) -> Arc<Run> {
+        Run::make(secret, false, paid_calls)
+    }
+
+    /// The hosted lane's: people sign in through the levers, each lent
+    /// some of `paid_calls`.
+    pub fn signing_in_by_levers(secret: String, paid_calls: u64) -> Arc<Run> {
+        Run::make(secret, true, paid_calls)
+    }
+
+    fn make(secret: String, levers_sign_in: bool, paid_calls: u64) -> Arc<Run> {
+        assert!(secret.len() >= fragment_core::levers::SECRET_BYTES_MIN, "a test secret is long");
+        Arc::new(Run { secret, levers_sign_in, people: Mutex::new(vec![]), budget: Mutex::new(Budget { left: paid_calls, lent: 0 }) })
+    }
+
+    /// The people this run signed in (hosted), oldest first.
+    pub fn people(&self) -> Vec<String> {
+        self.people.lock().expect("the people's lock").clone()
+    }
+
+    /// The paid calls the run may still lend, and those it lent.
+    pub fn paid_calls_left(&self) -> u64 {
+        self.budget.lock().expect("the budget's lock").left
+    }
+
+    pub fn paid_calls_lent(&self) -> u64 {
+        self.budget.lock().expect("the budget's lock").lent
+    }
+
+    /// Lends `n` of the run's paid calls to a person about to sign in;
+    /// refused when the run has fewer left.
+    fn lend(&self, n: u64) -> Result<()> {
+        let mut budget = self.budget.lock().expect("the budget's lock");
+        let before = *budget;
+        anyhow::ensure!(n <= before.left, "the run's paid calls are spent: {n} asked, {} left (--max-paid-calls)", before.left);
+        *budget = Budget { left: before.left - n, lent: before.lent + n };
+        assert_eq!(budget.left + budget.lent, before.left + before.lent, "lending moves calls, and makes none");
+        Ok(())
+    }
+
+    /// Notes a person this run signed in, once.
+    fn signed_in(&self, identity: &str) {
+        let mut people = self.people.lock().expect("the people's lock");
+        if !people.iter().any(|p| p == identity) {
+            people.push(identity.to_string());
+        }
+    }
+}
+
 pub struct Api {
     http: reqwest::blocking::Client,
     pub base: String,
     pub port: u16,
     pub suffix: Option<String>,
+    /// A branch's mark on its fragments' hosts (`--<branch>`), on a local
+    /// node shaped as a branch deployment (the hosted lane's rehearsal).
+    label_suffix: String,
+    pub target: Target,
+    run: Arc<Run>,
 }
 
 impl Api {
-    pub fn new(port: u16, suffix: Option<&str>) -> Api {
-        let http = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("http client");
-        Api { http, base: format!("http://127.0.0.1:{port}"), port, suffix: suffix.map(str::to_string) }
+    /// The local node's API (`suffix`: fragments on their own hosts).
+    pub fn new(port: u16, suffix: Option<&str>, run: &Arc<Run>) -> Api {
+        let base = format!("http://127.0.0.1:{port}");
+        Api { http: client(), base, port, suffix: suffix.map(str::to_string), label_suffix: String::new(), target: Target::Local, run: Arc::clone(run) }
+    }
+
+    /// The local node's API, the node shaped as the branch `branch`.
+    pub fn branch(mut self, branch: &str) -> Api {
+        self.label_suffix = format!("--{branch}");
+        self
+    }
+
+    /// A preview's API, at its own hosts over https.
+    pub fn hosted(preview: &Preview, run: &Arc<Run>) -> Api {
+        let (base, label_suffix) = (preview.platform(), String::new());
+        Api { http: client(), base, port: preview.port.unwrap_or(443), suffix: Some(preview.zone.clone()), label_suffix, target: Target::Hosted(preview.clone()), run: Arc::clone(run) }
+    }
+
+    /// `hosted`, each of `hosts` resolved to `at`: the client's own tests,
+    /// against a server of theirs.
+    #[cfg(test)]
+    pub fn hosted_at(preview: &Preview, run: &Arc<Run>, hosts: &[String], at: std::net::SocketAddr) -> Api {
+        let mut api = Api::hosted(preview, run);
+        let mut builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10)).redirect(reqwest::redirect::Policy::none());
+        for host in hosts {
+            builder = builder.resolve(host, at);
+        }
+        api.http = builder.build().expect("http client");
+        api
+    }
+
+    /// Whether people sign in through the levers (the hosted lane's rules).
+    pub fn signs_in_by_levers(&self) -> bool {
+        self.run.levers_sign_in
     }
 
     /// The URL of `path` on a fragment's own host (or its `/f/<name>/` path
@@ -113,9 +297,13 @@ impl Api {
     /// when the fleet has a suffix, else by path.
     pub fn site_url(&self, name: &str, path: &str) -> String {
         let host = fragment_proto::flat_name(name).unwrap_or_else(|| name.to_string());
-        match &self.suffix {
-            Some(s) => format!("http://{host}.{s}:{}/{path}", self.port),
-            None => format!("{}/f/{name}/{path}", self.base),
+        match (&self.target, &self.suffix) {
+            (Target::Hosted(preview), _) => match preview.fragment(name) {
+                Some(origin) => format!("{origin}/{path}"),
+                None => format!("{}://{host}--{}.{}{}/{path}", preview.scheme, preview.branch, preview.zone, preview.port_part()),
+            },
+            (Target::Local, Some(s)) => format!("http://{host}{}.{s}:{}/{path}", self.label_suffix, self.port),
+            (Target::Local, None) => format!("{}/f/{name}/{path}", self.base),
         }
     }
 
@@ -124,23 +312,54 @@ impl Api {
         reqwest::Url::parse(&self.site_url(name, "")).expect("a fragment's URL parses").origin().ascii_serialization()
     }
 
+    /// Whether a request to `url` is a lever's: the platform's `/api/test/*`.
+    fn is_lever(&self, url: &str) -> bool {
+        url.strip_prefix(self.base.as_str()).is_some_and(|path| path.starts_with("/api/test/"))
+    }
+
     pub fn call(&self, c: Call<'_>) -> Result<Reply> {
+        self.send(c, true)
+    }
+
+    /// `call`, without the run's secret even on a lever's route: the gate's
+    /// own checks send none, or another.
+    pub fn call_without_secret(&self, c: Call<'_>) -> Result<Reply> {
+        self.send(c, false)
+    }
+
+    fn send(&self, c: Call<'_>, secret: bool) -> Result<Reply> {
         let url = reqwest::Url::parse(&c.url)?;
         let body = c.body.unwrap_or_default();
-        // Everything goes to the node; the Host header names the site.
-        let host = format!("{}:{}", url.host_str().unwrap_or(""), url.port().unwrap_or(80));
-        let mut to = url.clone();
-        to.set_host(Some("127.0.0.1")).expect("an http URL takes a host");
-        to.set_port(Some(self.port)).expect("an http URL takes a port");
-        let mut req = self.http.request(c.method.parse()?, to).header("host", host).body(body.clone());
+        let mut req = match &self.target {
+            // Everything goes to the node; the Host header names the site.
+            Target::Local => {
+                let host = format!("{}:{}", url.host_str().unwrap_or(""), url.port().unwrap_or(80));
+                let mut to = url.clone();
+                to.set_host(Some("127.0.0.1")).expect("an http URL takes a host");
+                to.set_port(Some(self.port)).expect("an http URL takes a port");
+                self.http.request(c.method.parse()?, to).header("host", host)
+            }
+            // A deployment's hosts are its own, over https.
+            Target::Hosted(_) => self.http.request(c.method.parse()?, url.clone()),
+        }
+        .body(body.clone());
         if let Some(ct) = c.content_type {
             req = req.header("content-type", ct);
         }
         if let Some(cookie) = c.cookie {
+            let cookie = match url.scheme() {
+                "https" => https_cookies(&cookie),
+                _ => cookie,
+            };
             req = req.header("cookie", cookie);
         }
         if let Some(keys) = c.keys {
             req = req.header("authorization", keys.header(c.method, &c.url, &body, now_s()));
+        }
+        // the secret goes to the platform's levers, never to a fragment's
+        // host, where an app's code reads the request's headers
+        if secret && self.is_lever(&c.url) {
+            req = req.header(fragment_core::levers::SECRET_HEADER, self.run.secret.as_str());
         }
         for (k, v) in c.extra {
             req = req.header(k, v);
@@ -186,9 +405,47 @@ impl Api {
         Ok(Reply { status, body: serde_json::from_str(&text).unwrap_or(Value::Null), text, bytes, headers })
     }
 
+    /// A browser signing in as `email`: the platform session's cookie
+    /// value. Locally through WorkOS (the fake); hosted, through the
+    /// levers' e2e sign-in, with no paid calls.
+    pub fn sign_in(&self, email: &str) -> Result<String> {
+        match self.run.levers_sign_in {
+            false => self.sign_in_through_workos(email),
+            true => self.e2e_sign_in(email, 0).map(|(session, _)| session),
+        }
+    }
+
+    /// An e2e person's platform session and identity, from the levers'
+    /// sign-in (`POST /api/test/signin`): a seat whose paid calls (model
+    /// calls and AI steps) are capped at `paid_calls`, lent from the run's
+    /// budget. Their identity joins the run's people (its spend is theirs).
+    pub fn e2e_sign_in(&self, email: &str, paid_calls: u64) -> Result<(String, String)> {
+        self.run.lend(paid_calls)?;
+        let r = self.unsigned("POST", "/api/test/signin", Some(&json!({ "email": email, "paidCalls": paid_calls })))?;
+        anyhow::ensure!(r.status == 200, "the e2e sign-in of {email}: {r}");
+        let session = r.body["session"].as_str().context("an e2e sign-in answers a session")?.to_string();
+        let identity = r.body["identity"].as_str().context("an e2e sign-in answers an identity")?.to_string();
+        anyhow::ensure!(r.body["paidCalls"] == paid_calls, "the e2e sign-in capped {email} at {}, not {paid_calls}", r.body["paidCalls"]);
+        self.run.signed_in(&identity);
+        Ok((session, identity))
+    }
+
+    /// Someone who signs, with `paid_calls` of the run's budget to spend
+    /// (hosted; locally `person`, whose model is the fake's).
+    pub fn person_paying(&self, paid_calls: u64) -> Result<Keys> {
+        if !self.run.levers_sign_in {
+            return self.person();
+        }
+        let keys = Keys::generate();
+        let (session, _) = self.e2e_sign_in(&Api::email_of(&keys), paid_calls)?;
+        let me = self.approve(&session, &keys)?;
+        anyhow::ensure!(me.status == 200 && me.body["id"].is_string(), "an approved key works: {me}");
+        Ok(keys)
+    }
+
     /// A browser signing in as `email` through WorkOS (the fake): the
     /// platform session's cookie value.
-    pub fn sign_in(&self, email: &str) -> Result<String> {
+    fn sign_in_through_workos(&self, email: &str) -> Result<String> {
         let path = format!("/auth/login?return=/&login_hint={}", url_enc(email));
         let start = self.unsigned("GET", &path, None)?;
         anyhow::ensure!(start.status == 302, "GET {path}: {start}");
@@ -332,6 +589,15 @@ impl Api {
     }
 }
 
+/// The TCP stream under a socket, plain (local) or TLS (hosted), for its timeouts.
+fn tcp(stream: &tungstenite::stream::MaybeTlsStream<std::net::TcpStream>) -> Option<&std::net::TcpStream> {
+    match stream {
+        tungstenite::stream::MaybeTlsStream::Plain(s) => Some(s),
+        tungstenite::stream::MaybeTlsStream::Rustls(s) => Some(s.get_ref()),
+        _ => None,
+    }
+}
+
 /// Opens the change feed; `keys` signs the upgrade.
 pub fn watch(api: &Api, name: &str, query: &str, keys: Option<&Keys>) -> Result<tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>> {
     use tungstenite::client::IntoClientRequest;
@@ -341,7 +607,7 @@ pub fn watch(api: &Api, name: &str, query: &str, keys: Option<&Keys>) -> Result<
         req.headers_mut().insert("authorization", k.header("GET", &http, &[], now_s()).parse()?);
     }
     let (socket, _) = tungstenite::connect(req)?;
-    if let tungstenite::stream::MaybeTlsStream::Plain(s) = socket.get_ref() {
+    if let Some(s) = tcp(socket.get_ref()) {
         s.set_read_timeout(Some(Duration::from_secs(10)))?;
     }
     Ok(socket)
@@ -383,22 +649,33 @@ impl Socket {
         let url = reqwest::Url::parse(http)?;
         let mut to = url.clone();
         to.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" }).map_err(|()| anyhow::anyhow!("{http} is not http(s)"))?;
-        // the node is reached at 127.0.0.1, the site in `Host` (as `call` does)
-        to.set_host(Some("127.0.0.1"))?;
-        to.set_port(Some(api.port)).map_err(|()| anyhow::anyhow!("{http} takes no port"))?;
-        let mut req = to.as_str().into_client_request()?;
-        req.headers_mut().insert("host", format!("{}:{}", url.host_str().unwrap_or(""), url.port().unwrap_or(80)).parse()?);
+        let mut req = match api.target {
+            // the node is reached at 127.0.0.1, the site in `Host` (as `call` does)
+            Target::Local => {
+                to.set_host(Some("127.0.0.1"))?;
+                to.set_port(Some(api.port)).map_err(|()| anyhow::anyhow!("{http} takes no port"))?;
+                let mut req = to.as_str().into_client_request()?;
+                req.headers_mut().insert("host", format!("{}:{}", url.host_str().unwrap_or(""), url.port().unwrap_or(80)).parse()?);
+                req
+            }
+            // a deployment's hosts are its own, over TLS
+            Target::Hosted(_) => to.as_str().into_client_request()?,
+        };
         if let Some(k) = keys {
             req.headers_mut().insert("authorization", k.header("GET", http, &[], now_s()).parse()?);
         }
         if let Some(c) = cookie {
+            let c = match url.scheme() {
+                "https" => https_cookies(c),
+                _ => c.to_string(),
+            };
             req.headers_mut().insert("cookie", c.parse()?);
         }
         if let Some(o) = origin {
             req.headers_mut().insert("origin", o.parse()?);
         }
         let (socket, answer) = tungstenite::connect(req)?;
-        if let tungstenite::stream::MaybeTlsStream::Plain(s) = socket.get_ref() {
+        if let Some(s) = tcp(socket.get_ref()) {
             s.set_read_timeout(Some(Duration::from_secs(5)))?;
         }
         let cookies = answer.headers().get_all("set-cookie").iter().filter_map(|v| v.to_str().ok()).map(str::to_string).collect();
@@ -433,7 +710,7 @@ impl Socket {
     /// How long one frame may take to come (5 s unless set): a real
     /// runtime's first reply after a wake may take longer.
     pub fn patience(&mut self, wait: Duration) -> Result<()> {
-        if let tungstenite::stream::MaybeTlsStream::Plain(s) = self.0.get_ref() {
+        if let Some(s) = tcp(self.0.get_ref()) {
             s.set_read_timeout(Some(wait))?;
         }
         Ok(())

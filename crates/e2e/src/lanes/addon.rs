@@ -52,7 +52,7 @@ pub(super) fn events(api: &Api, owner: &Keys, name: &str, kind: &str) -> usize {
 }
 
 pub fn addon(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("addon") {
+    if !s.section("addon", &[crate::Need::Fakes]) {
         return Ok(());
     }
     let agents = s.agents()?;

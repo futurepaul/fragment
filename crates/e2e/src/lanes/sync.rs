@@ -21,7 +21,7 @@ fn code(out: &std::process::Output) -> i32 {
 }
 
 pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("sync") {
+    if !s.section("sync", &[crate::Need::Fakes, crate::Need::Levers]) {
         return Ok(());
     }
     let home = s.dir("sync-home");

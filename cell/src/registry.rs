@@ -90,7 +90,7 @@ pub struct RegistryCell {
     cfg: &'static Config,
     /// Dev fleets' test hook: every call but the hooks' is 503. It lasts
     /// for this cell's life (a restart answers again), and only the hook,
-    /// which answers only with `FRAGMENT_TEST_HOOKS=allow`, sets it.
+    /// which answers only on a fleet with levers (`FRAGMENT_TEST_SECRET`), sets it.
     down: Cell<bool>,
     /// The calls answered (or refused) since this cell started, the hooks'
     /// aside: what a test counts a request's Registry round trips by.
@@ -658,6 +658,9 @@ impl RegistryCell {
                 Ok(json!({ "hold": ms }))
             }
             TestHook::Signins(hook) => Ok(json!(self.signins_hook(hook).await?)),
+            TestHook::E2eSignIn(asked) => Ok(json!(self.e2e_sign_in(&asked.email, asked.paid_calls)?)),
+            TestHook::E2ePeople(page) => Ok(json!(self.e2e_people(page.after.as_deref())?)),
+            TestHook::E2eIs(identity) => Ok(json!({ "e2e": self.is_e2e(&identity)? })),
         }
     }
 

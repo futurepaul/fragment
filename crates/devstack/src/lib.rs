@@ -23,6 +23,17 @@ pub const STOP_TIMEOUT: Duration = Duration::from_secs(60);
 /// The wrangler the repo pins (package.json; `npm ci` installs it).
 pub const WRANGLER_VERSION: &str = "4.145.0";
 
+/// What a branch deployment's name may be (`cargo xtask deploy --branch`,
+/// and the hosted e2e's): a DNS label short enough that
+/// `<label>--<username>--<branch>` fits in one (63 bytes).
+pub fn valid_branch(b: &str) -> bool {
+    (1..=16).contains(&b.len())
+        && b.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+        && !b.starts_with('-')
+        && !b.ends_with('-')
+        && !b.contains("--")
+}
+
 pub fn repo_root() -> PathBuf {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
     here.parent().and_then(Path::parent).expect("crates/devstack sits two levels below the repo root").to_path_buf()
@@ -213,6 +224,10 @@ pub struct Fleet {
     /// Where fragments were served before the suffix moved: a fragment's
     /// host there redirects to its host under the suffix.
     pub legacy_host_suffix: Option<String>,
+    /// A branch deployment's mark on its fragments' hosts (`--<branch>`:
+    /// `<label>--<username>--<branch>.<suffix>`), which also scopes its
+    /// test levers to the e2e's own things (the hosted lane's rehearsal).
+    pub host_label_suffix: Option<String>,
     pub poll_interval_s: u32,
     /// Jobs may fetch loopback and private addresses (the local fakes).
     pub egress_local: bool,
@@ -240,9 +255,10 @@ pub struct Fleet {
     /// Pending sign-ins the Registry keeps (`None`: the cell's default,
     /// `limits::SIGNINS_PENDING_MAX_DEFAULT`).
     pub signins_pending_max: Option<u64>,
-    /// Test controls (`FRAGMENT_TEST_HOOKS=allow`: the registry can be made
-    /// to fail). Never on a shared fleet.
-    pub test_hooks: bool,
+    /// The test levers' secret (`FRAGMENT_TEST_SECRET`: `/api/test/*`
+    /// answers requests that carry it; the registry can be made to fail).
+    /// The e2e's, made per run; never dev's.
+    pub test_secret: Option<String>,
     /// The image new computers are pinned to (a name in cell/wrangler.jsonc's
     /// `containers` images), and whether they sleep with a snapshot.
     pub computer_image: Option<String>,
@@ -308,6 +324,9 @@ impl Fleet {
         if let Some(s) = &self.legacy_host_suffix {
             vars.push(("FRAGMENT_LEGACY_HOST_SUFFIX", s.as_str()));
         }
+        if let Some(s) = &self.host_label_suffix {
+            vars.push(("FRAGMENT_HOST_LABEL_SUFFIX", s.as_str()));
+        }
         if let Some(w) = &self.workos {
             vars.push(("WORKOS_CLIENT_ID", w.client_id.as_str()));
             vars.push(("WORKOS_API_KEY", w.api_key.as_str()));
@@ -325,8 +344,8 @@ impl Fleet {
         if let Some(n) = &signins {
             vars.push(("FRAGMENT_SIGNINS_PENDING_MAX", n.as_str()));
         }
-        if self.test_hooks {
-            vars.push(("FRAGMENT_TEST_HOOKS", "allow"));
+        if let Some(secret) = &self.test_secret {
+            vars.push(("FRAGMENT_TEST_SECRET", secret.as_str()));
         }
         if let Some(image) = &self.computer_image {
             vars.push(("FRAGMENT_COMPUTER_IMAGE", image.as_str()));

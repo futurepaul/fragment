@@ -106,8 +106,20 @@ pub struct Config {
     /// the Registry keeps before it lets the oldest go (default
     /// `SIGNINS_PENDING_MAX_DEFAULT`).
     pub signins_pending_max: u64,
-    /// `FRAGMENT_TEST_HOOKS=allow`: dev and e2e fleets only.
+    /// `FRAGMENT_TEST_SECRET` (a Worker secret): the test levers
+    /// (`/api/test/*`) answer requests that carry it, on a local fleet or a
+    /// branch deployment only (`fragment_core::levers`). Without it they
+    /// are no route, as on production.
+    pub test_secret: Option<fragment_core::levers::TestSecret>,
+    /// Whether this fleet has test levers (`test_secret` is set): the
+    /// cells' test controls answer only on one, and only through the
+    /// router's routes, which check the secret.
     pub test_hooks: bool,
+    /// A branch deployment's levers reach the e2e's own things alone
+    /// (`fragment_core::levers::Fleet::Branch`): its `e2e-…` fragments and
+    /// its e2e people's ledgers, never the registry's, and its e2e people
+    /// are made within a day's caps. A local fleet's reach everything.
+    pub levers_scoped: bool,
     /// `FRAGMENT_DEPLOY_ID`: which deployment this is (the deploy sets it;
     /// `/healthz` answers it in `x-fragment-deploy`; default `dev`).
     pub deploy_id: String,
@@ -143,6 +155,29 @@ fn var(env: &Env, name: &str) -> Option<String> {
 /// it first).
 fn hosts(env: &Env, name: &str) -> BTreeMap<String, Vec<String>> {
     var(env, name).map(|v| fragment_core::swap::parse_hosts(&v).unwrap_or_else(|e| panic!("{name}: {e}"))).unwrap_or_default()
+}
+
+/// Where this fleet runs, as its levers see it (`levers::fleet_of`): its
+/// fragments' hosts carry a branch's mark, or it lets jobs reach local
+/// addresses (dev's and the e2e's), or neither.
+fn levers_fleet(local: bool, branch: bool) -> fragment_core::levers::Fleet {
+    fragment_core::levers::fleet_of(branch, local)
+}
+
+/// `FRAGMENT_TEST_SECRET`, as this fleet honours it: a local fleet's or a
+/// branch deployment's. One set on a deployment of its own, or one too
+/// short, is said in the log and honoured nowhere: the levers stay off,
+/// and nothing else is refused.
+fn test_secret(env: &Env, fleet: fragment_core::levers::Fleet) -> Option<fragment_core::levers::TestSecret> {
+    use fragment_core::levers::honoured;
+    let secret = env.secret("FRAGMENT_TEST_SECRET").ok().map(|s| s.to_string().trim().to_string()).filter(|s| !s.is_empty());
+    match honoured(secret.as_deref(), fleet) {
+        Ok(secret) => secret,
+        Err(why) => {
+            worker::console_error!("{}", serde_json::json!({ "event": "levers.refused", "why": why.message() }));
+            None
+        }
+    }
 }
 
 /// `FRAGMENT_DEPLOY_ID`, or `dev` where a fleet names none.
@@ -193,6 +228,9 @@ impl Config {
             host_suffix.as_deref().is_none_or(|s| fragment_core::frames::is_origin(&format!("https://{s}"))),
             "FRAGMENT_HOST_SUFFIX is a host name"
         );
+        let egress_local = var(env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow");
+        let levers_fleet = levers_fleet(egress_local, host_label_suffix.is_some());
+        let test_secret = test_secret(env, levers_fleet);
         Config {
             codestorage: var(env, "CODESTORAGE_ORG").map(|org| {
                 let api =
@@ -210,7 +248,7 @@ impl Config {
             computer_image: var(env, "FRAGMENT_COMPUTER_IMAGE"),
             computer_snapshots: var(env, "FRAGMENT_COMPUTER_SNAPSHOTS").as_deref() != Some("off"),
             poll_interval_ms: var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000,
-            egress_local: var(env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow"),
+            egress_local,
             blob_grace_ms: var(env, "FRAGMENT_BLOB_GRACE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(7 * 24 * 3600) * 1000,
             push_subject: var(env, "FRAGMENT_PUSH_SUBJECT").unwrap_or_else(|| "mailto:webpush@fragment.invalid".into()),
             delivery_retry_s,
@@ -232,7 +270,9 @@ impl Config {
                 // the registry counts rows as i64; a larger setting means "no cap to speak of"
                 .map(|n| n.min(i64::MAX as u64))
                 .unwrap_or(fragment_proto::limits::SIGNINS_PENDING_MAX_DEFAULT),
-            test_hooks: var(env, "FRAGMENT_TEST_HOOKS").as_deref() == Some("allow"),
+            test_hooks: test_secret.is_some(),
+            levers_scoped: test_secret.is_some() && levers_fleet == fragment_core::levers::Fleet::Branch,
+            test_secret,
             deploy_id: deploy_id(env),
             connections: hosts(env, "FRAGMENT_CONNECTIONS"),
             operator_keys: hosts(env, "FRAGMENT_OPERATOR_KEYS"),

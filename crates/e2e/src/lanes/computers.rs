@@ -81,19 +81,44 @@ pub(super) fn phase(api: &Api, owner: &crate::Keys, id: &str) -> String {
     api.signed(owner, "GET", &format!("/api/computers/{id}"), None).ok().and_then(|r| r.body["phase"].as_str().map(str::to_string)).unwrap_or_default()
 }
 
+/// The paid calls the computers section lends its owner on the hosted lane:
+/// the turns a real model answers there (a reply, a wake's, two agents'
+/// three, a routine's, a new chat's), each a few model calls at most.
+const HOSTED_PAID_CALLS: u64 = 40;
+/// A first start on a preview pulls the deployment's image (3.8 GB for our
+/// Hermes', about 29 s) and boots its runtime: far longer than the stub's.
+const HOSTED_WAKE: Duration = Duration::from_secs(300);
+
+/// A reply a real model could have made: some text, as the agent, naming
+/// its turn. Never its words.
+fn said_something(reply: &Value) -> bool {
+    reply["body"]["text"].as_str().is_some_and(|t| !t.trim().is_empty())
+}
+
 pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("computers") {
+    if !s.section("computers", &[crate::Need::Computers, crate::Need::Models]) {
         return Ok(());
     }
-    let owner = api.person()?;
+    // a hosted run's owner pays a real model, from the run's budget
+    let owner = api.person_paying(HOSTED_PAID_CALLS)?;
     let stranger = api.person()?;
     let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
     let id = r.body["computer"].as_str().unwrap_or("").to_string();
     s.ok("a person makes their computer, asleep", r.status == 200 && id.starts_with("computer:") && r.body["phase"] == "asleep", &r);
+    // The stub's scripted runtime (images/stub) answers its commands ("tool
+    // please", "slow…", "fetch …", "think …") and echoes the rest; the
+    // deployment's own image (our Hermes) answers as its real model does.
+    // Checks that need the script run on the stub alone; the rest assert
+    // what any real model's answer satisfies. The fakes (the swap's
+    // upstream and accounts), the node, and the operator are a local run's.
+    let scripted = r.body["image"] == "stub";
+    let fakes = !s.hosted();
+    let wake = if scripted { WAKE } else { HOSTED_WAKE };
+    let unscripted = |s: &mut Suite, label: &str| s.skip(label, "it needs the stub image's scripted runtime, and this computer runs the deployment's own image");
     let again = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
     s.ok("making it again answers the same one", again.status == 200 && again.body["computer"] == id.as_str(), &again);
     let origin = r.body["origin"].as_str().unwrap_or("").to_string();
-    s.ok("it has an origin of its own, cross-site from the platform", origin.contains("--computer."), &origin);
+    s.ok("it has an origin of its own, cross-site from the platform", origin.contains("--computer.") || (s.hosted() && origin.contains("--computer--")), &origin);
     let r = api.signed(&stranger, "GET", &format!("/api/computers/{id}"), None)?;
     s.ok("no one else sees it", r.status == 404, &r);
 
@@ -134,12 +159,12 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         json!(notices),
     );
     // awake, the guest follows the chat as the agent
-    let woke = s.eventually(WAKE, || phase(api, &owner, &id) == "awake");
+    let woke = s.eventually(wake, || phase(api, &owner, &id) == "awake");
     s.ok("and wakes its computer, unasked", woke, phase(api, &owner, &id));
     println!("      (awake in {:.1?})", t0.elapsed());
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
     s.ok("its owner's wake of it awake answers awake", r.status == 200 && r.body["phase"] == "awake", &r);
-    let subscribed = s.eventually(WAKE, || {
+    let subscribed = s.eventually(wake, || {
         api.signed(&owner, "GET", &format!("/api/f/{chat_name}/subscriptions"), None)
             .ok()
             .is_some_and(|r| r.body["subscriptions"].as_array().is_some_and(|l| l.iter().any(|x| x["wake"] == true && x["channel"] == "chat")))
@@ -148,179 +173,246 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let say = |n: u32, text: &str| api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": format!("m{n}"), "body": { "text": text } })));
     let r = say(1, "hello there")?;
     s.ok("a message to the chat", r.status == 200, &r);
-    let answered = s.eventually(WAKE, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == 1);
+    let answered = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == 1);
     let replies = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity);
-    s.ok("the agent answers it, as itself, naming its turn", answered && replies[0]["body"]["text"].as_str().is_some_and(|t| t.contains("hello there")), json!(replies));
+    let echoed = |r: &Value, text: &str| r["body"]["text"].as_str().is_some_and(|t| t.contains(text));
+    s.ok(
+        "the agent answers it, as itself, naming its turn",
+        answered && replies.first().is_some_and(|r| if scripted { echoed(r, "hello there") } else { said_something(r) }),
+        json!(replies),
+    );
     let work = records(api, &owner, &chat_name, "work");
     s.ok("its turn starts and ends on work", ["turn.start", "turn.end"].iter().all(|k| work.iter().any(|r| r["body"]["kind"] == *k && r["principal"] == identity.as_str())), json!(work));
-    say(2, "tool please")?;
-    let stepped = s.eventually(WAKE, || records(api, &owner, &chat_name, "work").iter().any(|r| r["body"]["kind"] == "turn.step"));
-    s.ok("a tool step is a record on work", stepped && s.eventually(WAKE, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == 2), "");
-    let mut replies_so_far = 2;
+    let mut replies_so_far = 1;
+    if !scripted {
+        for label in [
+            "a tool step is a record on work",
+            "a page sees the reply's draft live, as the agent",
+            "then the reply, naming the draft's turn",
+            "its asker posts Stop for the turn",
+            "the turn stops, and never gives its whole answer",
+            "a prompt is a card on work, asking the agent's owner",
+            "its owner answers it",
+            "the turn goes on approved, the card closed",
+            "a reply carries a file, uploaded as the chat's blob",
+        ] {
+            unscripted(s, label);
+        }
+    } else {
+        say(2, "tool please")?;
+        let stepped = s.eventually(wake, || records(api, &owner, &chat_name, "work").iter().any(|r| r["body"]["kind"] == "turn.step"));
+        s.ok("a tool step is a record on work", stepped && s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == 2), "");
+        replies_so_far = 2;
 
-    // a page sees the reply's draft live, then the reply that replaces it
-    let mut page = Socket::open(api, &chat_name, "__live", Some(&owner), None)?;
-    page.until("hello", 5)?;
-    let seq = records(api, &owner, &chat_name, "chat").last().and_then(|r| r["seq"].as_i64()).unwrap_or(0);
-    page.send(&json!({ "type": "subscribe", "channel": "chat", "after": seq }))?;
-    page.until("subscribed", 20)?;
-    say(10, "slow, for the page")?;
-    let draft = page.until("draft", 200);
-    let reply = page.until("record", 200);
-    let drafted = draft.as_ref().is_ok_and(|d| d["principal"] == identity.as_str() && d["text"].as_str().is_some_and(|t| !t.is_empty()));
-    let replaced = matches!((&draft, &reply), (Ok(d), Ok(r)) if r["body"]["turn"] == d["turn"] && r["principal"] == identity.as_str());
-    s.ok("a page sees the reply's draft live, as the agent", drafted, format!("{draft:?}"));
-    s.ok("then the reply, naming the draft's turn", replaced, format!("{reply:?}"));
-    page.close();
-    replies_so_far += 1;
-    s.eventually(WAKE, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far);
+        // a page sees the reply's draft live, then the reply that replaces it
+        let mut page = Socket::open(api, &chat_name, "__live", Some(&owner), None)?;
+        page.until("hello", 5)?;
+        let seq = records(api, &owner, &chat_name, "chat").last().and_then(|r| r["seq"].as_i64()).unwrap_or(0);
+        page.send(&json!({ "type": "subscribe", "channel": "chat", "after": seq }))?;
+        page.until("subscribed", 20)?;
+        say(10, "slow, for the page")?;
+        let draft = page.until("draft", 200);
+        let reply = page.until("record", 200);
+        let drafted = draft.as_ref().is_ok_and(|d| d["principal"] == identity.as_str() && d["text"].as_str().is_some_and(|t| !t.is_empty()));
+        let replaced = matches!((&draft, &reply), (Ok(d), Ok(r)) if r["body"]["turn"] == d["turn"] && r["principal"] == identity.as_str());
+        s.ok("a page sees the reply's draft live, as the agent", drafted, format!("{draft:?}"));
+        s.ok("then the reply, naming the draft's turn", replaced, format!("{reply:?}"));
+        page.close();
+        replies_so_far += 1;
+        s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far);
 
-    // the turn's asker stops it
-    let r = say(11, "slow, then stopped")?;
-    let stopped_seq = r.body["record"]["seq"].as_i64().unwrap_or(0);
-    let turn = turn_of(&agent_name, &chat_name, "chat", stopped_seq);
-    let stop = json!({ "id": "stop-1", "body": { "kind": "stop", "turn": turn } });
-    let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&stop))?;
-    s.ok("its asker posts Stop for the turn", r.status == 200, &r);
-    let ended = s.eventually(WAKE, || {
-        let w = work_of(&records(api, &owner, &chat_name, "work"), &turn);
-        // stopped as it ran, or never run at all
-        w.iter().any(|r| r["body"]["kind"] == "turn.end" && r["body"]["outcome"] == "stopped") || (w.is_empty() && records(api, &owner, &chat_name, "chat").iter().any(|r| r["body"]["kind"] == "stop"))
-    });
-    std::thread::sleep(Duration::from_secs(2));
-    let full = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|r| r["body"]["turn"] == turn.as_str());
-    s.ok("the turn stops, and never gives its whole answer", ended && !full, json!(work_of(&records(api, &owner, &chat_name, "work"), &turn)));
+        // the turn's asker stops it
+        let r = say(11, "slow, then stopped")?;
+        let stopped_seq = r.body["record"]["seq"].as_i64().unwrap_or(0);
+        let turn = turn_of(&agent_name, &chat_name, "chat", stopped_seq);
+        let stop = json!({ "id": "stop-1", "body": { "kind": "stop", "turn": turn } });
+        let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&stop))?;
+        s.ok("its asker posts Stop for the turn", r.status == 200, &r);
+        let ended = s.eventually(wake, || {
+            let w = work_of(&records(api, &owner, &chat_name, "work"), &turn);
+            // stopped as it ran, or never run at all
+            w.iter().any(|r| r["body"]["kind"] == "turn.end" && r["body"]["outcome"] == "stopped") || (w.is_empty() && records(api, &owner, &chat_name, "chat").iter().any(|r| r["body"]["kind"] == "stop"))
+        });
+        std::thread::sleep(Duration::from_secs(2));
+        let full = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|r| r["body"]["turn"] == turn.as_str());
+        s.ok("the turn stops, and never gives its whole answer", ended && !full, json!(work_of(&records(api, &owner, &chat_name, "work"), &turn)));
 
-    // only the agent's owner answers its prompt
-    let r = say(12, "approve this, please")?;
-    let turn = turn_of(&agent_name, &chat_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
-    let asked = s.eventually(WAKE, || work_of(&records(api, &owner, &chat_name, "work"), &turn).iter().any(|r| r["body"]["kind"] == "turn.prompt"));
-    let work = work_of(&records(api, &owner, &chat_name, "work"), &turn);
-    let card = work.iter().find(|r| r["body"]["kind"] == "turn.prompt").cloned().unwrap_or_default();
-    let prompt = card["body"]["prompt"].as_str().unwrap_or("").to_string();
-    s.ok("a prompt is a card on work, asking the agent's owner", asked && card["body"]["asks"] == api.identity(&owner)?.as_str(), &card);
-    let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "once" } });
-    let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&answer))?;
-    s.ok("its owner answers it", r.status == 200, &r);
-    let approved = s.eventually(WAKE, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|r| r["body"]["turn"] == turn.as_str() && r["body"]["text"].as_str().is_some_and(|t| t.contains("(approved)"))));
-    let closed = work_of(&records(api, &owner, &chat_name, "work"), &turn).iter().any(|r| r["body"]["kind"] == "turn.prompt.closed" && r["body"]["outcome"] == "answered");
-    s.ok("the turn goes on approved, the card closed", approved && closed, json!(work_of(&records(api, &owner, &chat_name, "work"), &turn)));
-    replies_so_far += 1;
+        // only the agent's owner answers its prompt
+        let r = say(12, "approve this, please")?;
+        let turn = turn_of(&agent_name, &chat_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+        let asked = s.eventually(wake, || work_of(&records(api, &owner, &chat_name, "work"), &turn).iter().any(|r| r["body"]["kind"] == "turn.prompt"));
+        let work = work_of(&records(api, &owner, &chat_name, "work"), &turn);
+        let card = work.iter().find(|r| r["body"]["kind"] == "turn.prompt").cloned().unwrap_or_default();
+        let prompt = card["body"]["prompt"].as_str().unwrap_or("").to_string();
+        s.ok("a prompt is a card on work, asking the agent's owner", asked && card["body"]["asks"] == api.identity(&owner)?.as_str(), &card);
+        let answer = json!({ "id": format!("pr:{prompt}"), "body": { "kind": "prompt_response", "prompt": prompt, "option": "once" } });
+        let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&answer))?;
+        s.ok("its owner answers it", r.status == 200, &r);
+        let approved = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|r| r["body"]["turn"] == turn.as_str() && r["body"]["text"].as_str().is_some_and(|t| t.contains("(approved)"))));
+        let closed = work_of(&records(api, &owner, &chat_name, "work"), &turn).iter().any(|r| r["body"]["kind"] == "turn.prompt.closed" && r["body"]["outcome"] == "answered");
+        s.ok("the turn goes on approved, the card closed", approved && closed, json!(work_of(&records(api, &owner, &chat_name, "work"), &turn)));
+        replies_so_far += 1;
 
-    // a reply carries a file, one of the chat's blobs
-    let r = say(13, "draw me something")?;
-    let turn = turn_of(&agent_name, &chat_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
-    let drew = s.eventually(WAKE, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|r| r["body"]["turn"] == turn.as_str() && r["body"]["attachments"][0]["sha256"].is_string()));
-    let file = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str()).map(|r| r["body"]["attachments"][0].clone()).unwrap_or_default();
-    let sha = file["sha256"].as_str().unwrap_or("");
-    let blob = api.signed(&owner, "GET", &format!("/api/f/{chat_name}/blobs/{sha}"), None)?;
-    s.ok("a reply carries a file, uploaded as the chat's blob", drew && blob.status == 200 && blob.text.contains("a drawing for"), format!("{file} {}", blob.status));
-    replies_so_far += 1;
-    s.eventually(WAKE, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far);
+        // a reply carries a file, one of the chat's blobs
+        let r = say(13, "draw me something")?;
+        let turn = turn_of(&agent_name, &chat_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+        let drew = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).iter().any(|r| r["body"]["turn"] == turn.as_str() && r["body"]["attachments"][0]["sha256"].is_string()));
+        let file = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str()).map(|r| r["body"]["attachments"][0].clone()).unwrap_or_default();
+        let sha = file["sha256"].as_str().unwrap_or("");
+        let blob = api.signed(&owner, "GET", &format!("/api/f/{chat_name}/blobs/{sha}"), None)?;
+        s.ok("a reply carries a file, uploaded as the chat's blob", drew && blob.status == 200 && blob.text.contains("a drawing for"), format!("{file} {}", blob.status));
+        replies_so_far += 1;
+        s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far);
+    }
+    let owner_id = api.identity(&owner)?;
 
     // the swap: the guest's request to a connection's host, with its placeholder
     let fetched = |s: &Suite, n: u32, text: &str| -> Result<String> {
         let r = say(n, text)?;
         let turn = turn_of(&agent_name, &chat_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
         let reply = || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str());
-        s.eventually(WAKE, || reply().is_some());
+        s.eventually(wake, || reply().is_some());
         Ok(reply().and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default())
     };
-    let gh = format!("http://{SWAP_CONNECTION_HOST}/user with fragment-connection:{SWAP_CONNECTION}");
-    let seen_before = s.upstream.seen().len();
-    let said = fetched(s, 14, &format!("fetch {gh}"))?;
-    replies_so_far += 1;
-    s.ok(
-        "by default it may use the connection, but its owner connected no account: refused, saying so",
-        said.starts_with("fetched 403") && said.contains("not_connected") && said.contains("connect github first"),
-        &said,
-    );
-    s.ok("and nothing reaches the provider", s.upstream.seen().len() == seen_before, json!(s.upstream.seen()));
     let connections = format!("/api/computers/{id}/agents/{agent_name}/connections");
     let allow = |who: &crate::Keys, list: Value| api.signed(who, "PUT", &connections, Some(&json!({ "connections": list })));
-    let r = allow(&stranger, json!([SWAP_CONNECTION]))?;
-    s.ok("no one else narrows its agents' connections", r.status == 404, &r);
-    let r = allow(&owner, json!(["notion"]))?;
-    s.ok("a connection the deployment does not offer is refused", r.status == 400, &r);
-    let r = api.signed(&owner, "PUT", &connections, Some(&json!({})))?;
-    s.ok("a body that names no connections is refused, never read as every one", r.status == 400, &r);
-    let r = allow(&owner, json!([]))?;
-    let again = allow(&owner, json!([]))?;
-    s.ok(
-        "its owner narrows the agent to none (a role's specialization, decision 44); again is the same",
-        r.status == 200 && r.body["agents"][0]["connections"] == json!([]) && again.status == 200 && again.body["agents"] == r.body["agents"],
-        &r,
-    );
-    s.workos.connect(&Api::email_of(&owner), SWAP_CONNECTION, true);
-    let seen_before = s.upstream.seen().len();
-    let said = fetched(s, 15, &format!("fetch {gh}"))?;
-    replies_so_far += 1;
-    s.ok(
-        "narrowed, it is refused a connection its owner has",
-        said.starts_with("fetched 403") && said.contains("may not use the github connection") && s.upstream.seen().len() == seen_before,
-        &said,
-    );
-    let r = allow(&owner, Value::Null)?;
-    s.ok("null gives it every connection its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
-    // the tokens this computer asks for, after any the run's earlier sections did
-    let minted_before = s.workos.tokens(SWAP_CONNECTION).len();
-    let minted = |s: &Suite| s.workos.tokens(SWAP_CONNECTION).split_off(minted_before);
-    let said = fetched(s, 16, &format!("fetch {gh}"))?;
-    replies_so_far += 1;
-    let tokens = minted(s);
-    let seen = s.upstream.seen().last().cloned().unwrap_or_default();
-    s.ok(
-        "with the default, the provider gets the owner's token from Pipes in the placeholder's place",
-        said.starts_with("fetched 200") && tokens.len() == 1 && seen["host"] == SWAP_CONNECTION_HOST && seen["auth"]["authorization"] == format!("Bearer {}", tokens[0]),
-        json!({ "said": said, "seen": seen, "tokens": tokens }),
-    );
-    s.ok("and never the agent's header", seen["agent"].is_null(), &seen);
-    let said = fetched(s, 17, &format!("fetch http://{SWAP_CONNECTION_HOST}/redirect with fragment-connection:{SWAP_CONNECTION}"))?;
-    replies_so_far += 1;
-    s.ok("a token is held until shortly before it expires", minted(s).len() == 1, json!(minted(s)));
-    s.ok("a provider's redirect is the guest's to follow, never followed with the token", said.starts_with("fetched 302"), &said);
-    let seen_before = s.upstream.seen().len();
-    let said = fetched(s, 18, &format!("fetch http://{SWAP_KEY_HOST}/q with fragment-connection:{SWAP_CONNECTION}"))?;
-    replies_so_far += 1;
-    s.ok(
-        "a placeholder sent to a host that is not its credential's is refused",
-        said.starts_with("fetched 403") && said.contains("is for api.github.test") && s.upstream.seen().len() == seen_before,
-        &said,
-    );
-    let said = fetched(s, 19, &format!("fetch http://{SWAP_KEY_HOST}/q with fragment-key:{SWAP_KEY} in x-api-key"))?;
-    replies_so_far += 1;
-    let seen = s.upstream.seen().last().cloned().unwrap_or_default();
-    s.ok(
-        "an operator key is swapped into the header that named it",
-        said.starts_with("fetched 200") && seen["host"] == SWAP_KEY_HOST && seen["auth"]["x-api-key"] == SWAP_KEY_VALUE,
-        json!({ "said": said, "seen": seen }),
-    );
-    let owner_id = api.identity(&owner)?;
-    let keyed = s.eventually(Duration::from_secs(20), || entries(api, &owner_id, &format!("key:{id}:")).len() == 1);
-    let rows = entries(api, &owner_id, &format!("key:{id}:"));
-    s.ok(
-        "its call is metered to the agent's owner, as the agent, at the key's price and the margin",
-        keyed && rows[0]["entry"]["row"]["usage"] == json!({ "kind": "key", "key": SWAP_KEY, "units": 1 }) && rows[0]["entry"]["row"]["agent"] == identity.as_str()
-            && rows[0]["entry"]["charge"].as_i64().is_some_and(|c| c > SWAP_KEY_MICROS),
-        json!(rows),
-    );
-    let said = fetched(s, 22, &format!("fetch http://{SWAP_KEY_HOST}/plain with nothing-swapped"))?;
-    replies_so_far += 1;
-    let seen = s.upstream.seen().last().cloned().unwrap_or_default();
-    s.ok("a request with no placeholder goes on as it came", said.starts_with("fetched 200") && seen["auth"]["authorization"] == "Bearer nothing-swapped", &seen);
+    if !(fakes && scripted) {
+        // the agent's connections as its owner sets them; what the swap does
+        // with them needs the stub's fetch and the fakes' accounts and provider
+        let r = allow(&stranger, json!([]))?;
+        s.ok("no one else narrows its agents' connections", r.status == 404, &r);
+        let r = allow(&owner, json!(["nonesuch"]))?;
+        s.ok("a connection the deployment does not offer is refused", r.status == 400, &r);
+        let r = api.signed(&owner, "PUT", &connections, Some(&json!({})))?;
+        s.ok("a body that names no connections is refused, never read as every one", r.status == 400, &r);
+        let (r, again) = (allow(&owner, json!([]))?, allow(&owner, json!([]))?);
+        s.ok(
+            "its owner narrows the agent to none (a role's specialization, decision 44); again is the same",
+            r.status == 200 && r.body["agents"][0]["connections"] == json!([]) && again.status == 200 && again.body["agents"] == r.body["agents"],
+            &r,
+        );
+        let r = allow(&owner, Value::Null)?;
+        s.ok("null gives it every connection its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
+        for label in [
+            "by default it may use the connection, but its owner connected no account: refused, saying so",
+            "narrowed, it is refused a connection its owner has",
+            "with the default, the provider gets the owner's token from Pipes in the placeholder's place",
+            "a placeholder sent to a host that is not its credential's is refused",
+            "an operator key is swapped into the header that named it",
+            "its call is metered to the agent's owner, as the agent, at the key's price and the margin",
+            "a request with no placeholder goes on as it came",
+        ] {
+            s.skip(label, "it needs the stub's fetch, and the fakes' accounts and provider behind the swap");
+        }
+    } else {
+        let gh = format!("http://{SWAP_CONNECTION_HOST}/user with fragment-connection:{SWAP_CONNECTION}");
+        let seen_before = s.upstream.seen().len();
+        let said = fetched(s, 14, &format!("fetch {gh}"))?;
+        replies_so_far += 1;
+        s.ok(
+            "by default it may use the connection, but its owner connected no account: refused, saying so",
+            said.starts_with("fetched 403") && said.contains("not_connected") && said.contains("connect github first"),
+            &said,
+        );
+        s.ok("and nothing reaches the provider", s.upstream.seen().len() == seen_before, json!(s.upstream.seen()));
+        let r = allow(&stranger, json!([SWAP_CONNECTION]))?;
+        s.ok("no one else narrows its agents' connections", r.status == 404, &r);
+        let r = allow(&owner, json!(["notion"]))?;
+        s.ok("a connection the deployment does not offer is refused", r.status == 400, &r);
+        let r = api.signed(&owner, "PUT", &connections, Some(&json!({})))?;
+        s.ok("a body that names no connections is refused, never read as every one", r.status == 400, &r);
+        let r = allow(&owner, json!([]))?;
+        let again = allow(&owner, json!([]))?;
+        s.ok(
+            "its owner narrows the agent to none (a role's specialization, decision 44); again is the same",
+            r.status == 200 && r.body["agents"][0]["connections"] == json!([]) && again.status == 200 && again.body["agents"] == r.body["agents"],
+            &r,
+        );
+        s.workos.connect(&Api::email_of(&owner), SWAP_CONNECTION, true);
+        let seen_before = s.upstream.seen().len();
+        let said = fetched(s, 15, &format!("fetch {gh}"))?;
+        replies_so_far += 1;
+        s.ok(
+            "narrowed, it is refused a connection its owner has",
+            said.starts_with("fetched 403") && said.contains("may not use the github connection") && s.upstream.seen().len() == seen_before,
+            &said,
+        );
+        let r = allow(&owner, Value::Null)?;
+        s.ok("null gives it every connection its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
+        // the tokens this computer asks for, after any the run's earlier sections did
+        let minted_before = s.workos.tokens(SWAP_CONNECTION).len();
+        let minted = |s: &Suite| s.workos.tokens(SWAP_CONNECTION).split_off(minted_before);
+        let said = fetched(s, 16, &format!("fetch {gh}"))?;
+        replies_so_far += 1;
+        let tokens = minted(s);
+        let seen = s.upstream.seen().last().cloned().unwrap_or_default();
+        s.ok(
+            "with the default, the provider gets the owner's token from Pipes in the placeholder's place",
+            said.starts_with("fetched 200") && tokens.len() == 1 && seen["host"] == SWAP_CONNECTION_HOST && seen["auth"]["authorization"] == format!("Bearer {}", tokens[0]),
+            json!({ "said": said, "seen": seen, "tokens": tokens }),
+        );
+        s.ok("and never the agent's header", seen["agent"].is_null(), &seen);
+        let said = fetched(s, 17, &format!("fetch http://{SWAP_CONNECTION_HOST}/redirect with fragment-connection:{SWAP_CONNECTION}"))?;
+        replies_so_far += 1;
+        s.ok("a token is held until shortly before it expires", minted(s).len() == 1, json!(minted(s)));
+        s.ok("a provider's redirect is the guest's to follow, never followed with the token", said.starts_with("fetched 302"), &said);
+        let seen_before = s.upstream.seen().len();
+        let said = fetched(s, 18, &format!("fetch http://{SWAP_KEY_HOST}/q with fragment-connection:{SWAP_CONNECTION}"))?;
+        replies_so_far += 1;
+        s.ok(
+            "a placeholder sent to a host that is not its credential's is refused",
+            said.starts_with("fetched 403") && said.contains("is for api.github.test") && s.upstream.seen().len() == seen_before,
+            &said,
+        );
+        let said = fetched(s, 19, &format!("fetch http://{SWAP_KEY_HOST}/q with fragment-key:{SWAP_KEY} in x-api-key"))?;
+        replies_so_far += 1;
+        let seen = s.upstream.seen().last().cloned().unwrap_or_default();
+        s.ok(
+            "an operator key is swapped into the header that named it",
+            said.starts_with("fetched 200") && seen["host"] == SWAP_KEY_HOST && seen["auth"]["x-api-key"] == SWAP_KEY_VALUE,
+            json!({ "said": said, "seen": seen }),
+        );
+        let keyed = s.eventually(Duration::from_secs(20), || entries(api, &owner_id, &format!("key:{id}:")).len() == 1);
+        let rows = entries(api, &owner_id, &format!("key:{id}:"));
+        s.ok(
+            "its call is metered to the agent's owner, as the agent, at the key's price and the margin",
+            keyed && rows[0]["entry"]["row"]["usage"] == json!({ "kind": "key", "key": SWAP_KEY, "units": 1 }) && rows[0]["entry"]["row"]["agent"] == identity.as_str()
+                && rows[0]["entry"]["charge"].as_i64().is_some_and(|c| c > SWAP_KEY_MICROS),
+            json!(rows),
+        );
+        let said = fetched(s, 22, &format!("fetch http://{SWAP_KEY_HOST}/plain with nothing-swapped"))?;
+        replies_so_far += 1;
+        let seen = s.upstream.seen().last().cloned().unwrap_or_default();
+        s.ok("a request with no placeholder goes on as it came", said.starts_with("fetched 200") && seen["auth"]["authorization"] == "Bearer nothing-swapped", &seen);
+    }
 
     // the model intercept: the agent's call is the platform's model route, its owner paying
-    s.ai.clear_script();
-    let aig_before = entries(api, &owner_id, "aig:").len();
-    let said = fetched(s, 23, "think hello model")?;
-    replies_so_far += 1;
-    s.ok("a model call through the computer's intercept answers as the model did", said == "thought: echo: hello model", &said);
-    let aig = entries(api, &owner_id, "aig:");
-    s.ok(
-        "and is metered to the agent's owner, settled from its usage",
-        aig.len() == aig_before + 1 && aig.iter().filter(|e| end_of(e) == "settled").count() == aig_before + 1,
-        json!(aig),
-    );
+    if scripted {
+        if fakes {
+            s.ai.clear_script();
+        }
+        let aig_before = entries(api, &owner_id, "aig:").len();
+        let said = fetched(s, 23, "think hello model")?;
+        replies_so_far += 1;
+        s.ok("a model call through the computer's intercept answers as the model did", said == "thought: echo: hello model", &said);
+        let aig = entries(api, &owner_id, "aig:");
+        s.ok(
+            "and is metered to the agent's owner, settled from its usage",
+            aig.len() == aig_before + 1 && aig.iter().filter(|e| end_of(e) == "settled").count() == aig_before + 1,
+            json!(aig),
+        );
+    } else {
+        // a real runtime called its model to answer at all: each call went
+        // through the intercept, reserved and settled on its owner's ledger
+        let settled = |aig: &[Value]| !aig.is_empty() && aig.iter().all(|e| end_of(e) == "settled");
+        s.eventually(Duration::from_secs(20), || settled(&entries(api, &owner_id, "aig:")));
+        let aig = entries(api, &owner_id, "aig:");
+        s.ok(
+            "its answer's model calls went through the computer's intercept, each metered to the agent's owner and settled from its usage",
+            settled(&aig),
+            json!(aig),
+        );
+    }
 
     // asleep, a record wakes it, restored, and nothing is answered twice
     std::thread::sleep(QUEUE_DRAIN);
@@ -335,10 +427,14 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let t0 = std::time::Instant::now();
     say(3, "are you there")?;
     replies_so_far += 1;
-    let woke = s.eventually(WAKE, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far);
+    let woke = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far);
     println!("      (woken and answered in {:.1?})", t0.elapsed());
     let replies = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity);
-    s.ok("a record on the chat wakes it, and it answers", woke && replies.last().is_some_and(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("are you there"))), json!(replies));
+    s.ok(
+        "a record on the chat wakes it, and it answers",
+        woke && replies.last().is_some_and(|r| if scripted { echoed(r, "are you there") } else { said_something(r) }),
+        json!(replies),
+    );
     let r = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?;
     s.ok("awake again", r.body["phase"] == "awake", &r);
     std::thread::sleep(Duration::from_secs(3));
@@ -361,14 +457,14 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
     let maple_label = maple_name.split('.').next().unwrap_or("").to_string();
     say(20, &format!("@{maple_label} what do you think"))?;
-    let heard = s.eventually(WAKE, || agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id).len() == 1);
+    let heard = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id).len() == 1);
     s.ok("@mentioned, the second agent answers", heard, json!(agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id)));
     std::thread::sleep(Duration::from_secs(2));
     let lead_quiet = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far;
     s.ok("and the lead does not", lead_quiet, json!(agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len()));
     say(21, "anyone home")?;
     replies_so_far += 1;
-    let led = s.eventually(WAKE, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far);
+    let led = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far);
     s.ok("unmentioned, the lead answers", led && agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id).len() == 1, "");
 
     // its ports, on its own origin, for its owner
@@ -390,29 +486,39 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("nor anyone else who signs", r.status == 401, &r);
     let r = api.call(Call { method: "GET", url: format!("{origin}/p/6080/"), keys: Some(&owner), ..Call::default() })?;
     s.ok("its owner's signed request needs no session", r.status == 200, &r);
-    // and in a frame of the platform's page (the shell's tab onto its screen)
-    super::frames::computer_ports(s, api, &owner, &id, &origin, cookie.as_deref().unwrap_or(""))?;
+    // and in a frame of the platform's page (the shell's tab onto its screen),
+    // where the platform is cross-site from the computer's origin
+    match s.hosted() {
+        true => s.skip("its ports open in a frame of the platform's page", "a branch preview puts the platform and the computer's origin in one zone: one site (frames.rs needs two)"),
+        false => super::frames::computer_ports(s, api, &owner, &id, &origin, cookie.as_deref().unwrap_or(""))?,
+    }
 
     // its image pin: an upgrade at the next wake, then a rollback, its data kept
     let version = || api.call(Call { method: "GET", url: format!("{origin}/p/6080/version.txt"), keys: Some(&owner), ..Call::default() }).map(|r| r.text.trim().to_string()).unwrap_or_default();
-    s.ok("it runs its first build", version() == "1", version());
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "no-such-image" })))?;
     s.ok("an image the deployment does not have is refused", r.status == 400, &r);
-    let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "stub-next" })))?;
-    s.ok("the next build is pinned", r.status == 200 && r.body["image"] == "stub-next", &r);
-    s.ok("it keeps running the build it started with until it sleeps", version() == "1", version());
-    std::thread::sleep(QUEUE_DRAIN);
-    api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
-    s.ok("woken, it runs the next build (an upgrade)", version() == "2", version());
-    say(30, "after the upgrade")?;
-    replies_so_far += 1;
-    let kept = s.eventually(WAKE, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far);
-    s.ok("with its /data restored: it answers anew, and nothing twice", kept, json!(agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len()));
-    let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "stub" })))?;
-    s.ok("the first build is pinned again", r.status == 200 && r.body["image"] == "stub", &r);
-    std::thread::sleep(QUEUE_DRAIN);
-    api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
-    s.ok("woken, it runs the first build again (a rollback)", version() == "1", version());
+    if !scripted {
+        for label in ["it runs its first build", "the next build is pinned", "woken, it runs the next build (an upgrade)", "with its /data restored: it answers anew, and nothing twice", "woken, it runs the first build again (a rollback)"] {
+            s.skip(label, "it needs the stub's two builds (stub, stub-next) and the version its screen serves");
+        }
+    } else {
+        s.ok("it runs its first build", version() == "1", version());
+        let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "stub-next" })))?;
+        s.ok("the next build is pinned", r.status == 200 && r.body["image"] == "stub-next", &r);
+        s.ok("it keeps running the build it started with until it sleeps", version() == "1", version());
+        std::thread::sleep(QUEUE_DRAIN);
+        api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+        s.ok("woken, it runs the next build (an upgrade)", version() == "2", version());
+        say(30, "after the upgrade")?;
+        replies_so_far += 1;
+        let kept = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far);
+        s.ok("with its /data restored: it answers anew, and nothing twice", kept, json!(agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len()));
+        let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "stub" })))?;
+        s.ok("the first build is pinned again", r.status == 200 && r.body["image"] == "stub", &r);
+        std::thread::sleep(QUEUE_DRAIN);
+        api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+        s.ok("woken, it runs the first build again (a rollback)", version() == "1", version());
+    }
 
     // a computer's egress alone asks for a wake subscription
     let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/subscriptions"), Some(&json!({ "channel": "chat", "wake": true })))?;
@@ -424,8 +530,13 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     std::thread::sleep(QUEUE_DRAIN);
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     s.ok("asleep, it waits for its routine", r.body["phase"] == "asleep", &r);
-    let routine = |recs: &[Value]| agent_replies(recs, &identity).iter().any(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("water the plants")));
-    let ran = s.eventually(Duration::from_secs(150), || routine(&records(api, &owner, &chat_name, "chat")));
+    // the stub says the routine's text; a real model says what it likes, in a reply of its own
+    let replied_before = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len();
+    let routine = |recs: &[Value]| match scripted {
+        true => agent_replies(recs, &identity).iter().any(|r| echoed(r, "water the plants")),
+        false => agent_replies(recs, &identity).iter().skip(replied_before).any(said_something),
+    };
+    let ran = s.eventually(Duration::from_secs(150) + if scripted { Duration::ZERO } else { wake }, || routine(&records(api, &owner, &chat_name, "chat")));
     s.ok("its cron's routine wakes it, and the agent does it in the chat", ran, "");
     api.signed(&owner, "POST", &format!("/api/f/{agent_name}/pause"), Some(&json!({ "op": "routine", "paused": true })))?;
 
@@ -444,9 +555,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let t0 = std::time::Instant::now();
     let r = api.signed(&owner, "PUT", &format!("/api/f/{next_name}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
     s.ok("its agent is added to the new chat", r.status == 200, &r);
-    let woke = s.eventually(WAKE, || phase(api, &owner, &id) == "awake");
+    let woke = s.eventually(wake, || phase(api, &owner, &id) == "awake");
     s.ok("which wakes the sleeping computer", woke && told(api, &owner, &agent_name, &next_name).len() == 1, phase(api, &owner, &id));
-    let followed = s.eventually(WAKE, || {
+    let followed = s.eventually(wake, || {
         api.signed(&owner, "GET", &format!("/api/f/{next_name}/subscriptions"), None)
             .ok()
             .is_some_and(|r| r.body["subscriptions"].as_array().is_some_and(|l| l.iter().any(|x| x["wake"] == true && x["channel"] == "chat")))
@@ -461,9 +572,19 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "PUT", &format!("/api/f/{next_name}/members/{stranger_id}"), Some(&json!({ "role": "viewer" })))?;
     s.ok("a person added is no agent's join: nothing is posted", r.status == 200 && all_joined(api) == before, json!(all_joined(api)));
     let r = api.signed(&owner, "POST", &format!("/api/f/{next_name}/channels/chat"), Some(&json!({ "id": "n1", "body": { "text": "hello in the new chat" } })))?;
-    let answered = s.eventually(WAKE, || agent_replies(&records(api, &owner, &next_name, "chat"), &identity).len() == 1);
+    let answered = s.eventually(wake, || agent_replies(&records(api, &owner, &next_name, "chat"), &identity).len() == 1);
     s.ok("it answers there", r.status == 200 && answered, json!(agent_replies(&records(api, &owner, &next_name, "chat"), &identity)));
 
+    if !fakes {
+        // the node and the deployment's operator are a local run's; a
+        // preview's computer is put to sleep, so it bills no awake time after
+        s.skip("after a crash of the platform, the computer answers what comes next, once", "it crashes the node");
+        s.skip("at zero credit no wake starts, nor does a record wake it", "it needs the deployment's operator (to make its owner a guest)");
+        std::thread::sleep(QUEUE_DRAIN);
+        let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+        s.ok("it sleeps at the end", r.body["phase"] == "asleep", &r);
+        return Ok(());
+    }
     // the platform crashes while it is awake: a new isolate takes the
     // computer over (lesson 6), and it answers what comes next, once
     api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
@@ -475,7 +596,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     // the same window and is no second answer
     let turn = turn_of(&agent_name, &chat_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
     let its = |api: &Api| agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().filter(|r| r["body"]["turn"] == turn.as_str()).collect::<Vec<_>>();
-    let after = s.eventually(WAKE, || its(&api).len() == 1);
+    let after = s.eventually(wake, || its(&api).len() == 1);
     std::thread::sleep(Duration::from_secs(2));
     let replies = its(&api);
     s.ok(

@@ -62,7 +62,7 @@ pub(super) fn event_kinds(api: &Api, keys: &Keys, name: &str) -> Vec<String> {
 }
 
 pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("site") {
+    if !s.section("site", &[crate::Need::Fakes, crate::Need::Deployment, crate::Need::Levers]) {
         return Ok(());
     }
     let owner = api.person()?;
@@ -347,7 +347,7 @@ fn preview_cards(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
 }
 
 pub fn watch(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("watch") {
+    if !s.section("watch", &[]) {
         return Ok(());
     }
     let owner = api.person()?;

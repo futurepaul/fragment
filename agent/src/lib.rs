@@ -297,6 +297,10 @@ struct ListenBody {
 struct TestControls {
     hold_in_tool_ms: Option<u64>,
     hold_after_tool_ms: Option<u64>,
+    /// Hold after a chat turn's answer is posted, before its end is
+    /// recorded, so a kill lands between the two (the answer is posted
+    /// again, under its id, by the driver that replaces it).
+    hold_after_answer_ms: Option<u64>,
     watchdog_ms: Option<u64>,
     /// A smaller conversation window, so a test can outgrow it in a few turns.
     window_messages: Option<u64>,
@@ -836,7 +840,11 @@ impl Agent {
             return Err(Fail::new(ErrorCode::NotFound, "test controls are off on this fleet"));
         }
         let sql = self.sql();
-        for (key, value) in [("test_hold_in_tool_ms", body.hold_in_tool_ms), ("test_hold_after_tool_ms", body.hold_after_tool_ms)] {
+        for (key, value) in [
+            ("test_hold_in_tool_ms", body.hold_in_tool_ms),
+            ("test_hold_after_tool_ms", body.hold_after_tool_ms),
+            ("test_hold_after_answer_ms", body.hold_after_answer_ms),
+        ] {
             let value = value.unwrap_or(0);
             if value > TEST_HOLD_MS_MAX {
                 return Err(Fail::invalid(format!("{key} is at most {TEST_HOLD_MS_MAX}")));
@@ -1106,11 +1114,17 @@ async fn drive_and_answer(
     progress: Option<Rc<Progress>>,
 ) -> anyhow::Result<TurnOutcome> {
     let sql = setup.storage.sql();
-    let outcome = drive_turn(setup, cancel, conv, asker, progress).await;
+    let outcome = drive_turn(setup, cancel.clone(), conv, asker, progress).await;
     match outcome {
         // a turn a chat started answers there
         Ok(TurnOutcome::Idle) => {
             reply(&sql, &setup.fleet, conv, shape, turn).await?;
+            // Test hook: hold after the answer is posted, before the turn's
+            // end is recorded, so a kill lands between the two.
+            let hold = kv_u64(&sql, "test_hold_after_answer_ms")?;
+            if hold > 0 && !cancel.is_cancelled() {
+                futures::future::select(Box::pin(worker::Delay::from(std::time::Duration::from_millis(hold))), Box::pin(cancel.cancelled())).await;
+            }
             Ok(TurnOutcome::Idle)
         }
         Ok(other) => Ok(other),
@@ -1280,8 +1294,10 @@ async fn reply(sql: &worker::SqlStorage, fleet: &Fleet, conv: &str, shape: Optio
 /// message's: `reply_id`): to the chat's channel, naming its turn, when the
 /// channel takes posts; else through the listen's reply operation, as
 /// chats made before postable channels answer. The owner's own
-/// conversation has nowhere to post. A chat that is gone (404), or that no
-/// longer has the agent (403), drops its listen.
+/// conversation has nowhere to post. A chat that is gone (404, `not_found`),
+/// or that no longer has the agent (403), drops its listen; a reply
+/// operation the chat does not have (404, `unknown_operation`) fails the
+/// turn and keeps the listen, which a listen naming the right one mends.
 async fn post_answer(sql: &worker::SqlStorage, fleet: &Fleet, conv: &str, id: &str, text: &str, shape: Option<Shape>, turn: Option<&str>) -> anyhow::Result<()> {
     let Some((fragment, channel)) = store::chat_of(conv) else { return Ok(()) };
     #[derive(Deserialize)]
@@ -1305,7 +1321,7 @@ async fn post_answer(sql: &worker::SqlStorage, fleet: &Fleet, conv: &str, id: &s
         Some(op) => (format!("/api/f/{fragment}/ops/{op}"), json!({ "id": id, "input": { "text": text } })),
     };
     let (status, body) = fleet.call(Method::Post, &path, Some(&body)).await?;
-    if matches!(status, 403 | 404) {
+    if gone(status, &body) {
         sql.exec("DELETE FROM listens WHERE fragment = ?", vec![fragment.into()])?;
     }
     // 409: its id posted already, with another body (said again after a crash)
@@ -1313,6 +1329,18 @@ async fn post_answer(sql: &worker::SqlStorage, fleet: &Fleet, conv: &str, id: &s
         anyhow::bail!("posting the answer to {path}: {status} {}", fleet::message(&body));
     }
     Ok(())
+}
+
+/// Whether an answer to a post in a chat says the chat is gone for this
+/// agent: the fragment is no more (404 `not_found`), or the agent is no
+/// longer in it (403). A 404 for anything else (an operation it does not
+/// have, no code deployed) is the chat's, and its listen stays.
+fn gone(status: u16, body: &Value) -> bool {
+    match status {
+        403 => true,
+        404 => serde_json::from_value::<ErrorCode>(body["error"].clone()).is_ok_and(|code| code == ErrorCode::NotFound),
+        _ => false,
+    }
 }
 
 impl DurableObject for Agent {

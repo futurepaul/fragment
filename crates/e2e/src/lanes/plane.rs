@@ -132,7 +132,7 @@ fn files_lane(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 pub fn files(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("files") {
+    if !s.section("files", &[crate::Need::Fakes]) {
         return Ok(());
     }
     files_lane(s, api)
@@ -143,7 +143,7 @@ fn text(out: &std::process::Output) -> String {
 }
 
 pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("deploy") {
+    if !s.section("deploy", &[]) {
         return Ok(());
     }
     let home = s.dir("deploy-home");
@@ -200,7 +200,10 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
     let (same, old) = (conditional(&tag2)?, conditional(&tag1)?);
     s.ok("the card revalidates by its tag: 304 for the current one, the new image for the one before", same.status == 304 && same.bytes.is_empty() && old.status == 200 && old.header("etag") == tag2, format!("{} | {}", same.status, old.status));
     let repo = created["repo"].as_str().unwrap_or("");
-    s.ok("code.storage holds live where the CLI moved it", s.fake.branch(repo, "live").as_deref() == st2["pins"]["live"].as_str(), "");
+    match s.hosted() {
+        true => s.skip("code.storage holds live where the CLI moved it", "it reads the code.storage fake's branches (a preview's git is real)"),
+        false => s.ok("code.storage holds live where the CLI moved it", s.fake.branch(repo, "live").as_deref() == st2["pins"]["live"].as_str(), ""),
+    }
 
     let out = s.cli(api, &home, &["drafts", &name]);
     let drafts = text(&out);
@@ -214,7 +217,10 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
     let out = s.cli(api, &home, &["deploy", &name, "--dir", site.to_str().unwrap(), "--preview"]);
     let slug = text(&out).split_whitespace().find(|w| w.starts_with("preview/")).map(str::to_string).unwrap_or_default();
     s.ok("a preview names its ephemeral ref", !slug.is_empty(), text(&out));
-    s.ok("the preview ref is ephemeral at main's tip", s.fake.is_ephemeral(repo, &slug) && s.fake.branch(repo, &slug) == s.fake.branch(repo, "main"), &slug);
+    match s.hosted() {
+        true => s.skip("the preview ref is ephemeral at main's tip", "it reads the code.storage fake's refs (a preview's git is real)"),
+        false => s.ok("the preview ref is ephemeral at main's tip", s.fake.is_ephemeral(repo, &slug) && s.fake.branch(repo, &slug) == s.fake.branch(repo, "main"), &slug),
+    }
     let st4 = s.cli_json(api, &home, &["status", &name, "--json"])?;
     s.ok("a preview leaves live alone", st4["pins"]["live"] == st3["pins"]["live"] && page(api).contains("v1 marker"), &st4);
 

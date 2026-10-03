@@ -19,7 +19,7 @@ const TODO_APP: &[u8] = include_bytes!("../../fixtures/todo.mjs");
 const TODO_JSON: &[u8] = include_bytes!("../../fixtures/todo.json");
 
 pub fn delegation(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("delegation") {
+    if !s.section("delegation", &[]) {
         return Ok(());
     }
     let (paul, skyler) = (api.person()?, api.person()?);

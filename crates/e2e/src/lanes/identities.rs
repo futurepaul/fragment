@@ -27,7 +27,7 @@ fn keys_of(v: &Value) -> Vec<(String, bool)> {
 }
 
 pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("identities") {
+    if !s.section("identities", &[crate::Need::Deployment, crate::Need::Levers]) {
         return Ok(());
     }
 
