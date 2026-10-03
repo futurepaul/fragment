@@ -495,8 +495,9 @@ exit says.
 8. **Self-deploy.** An agent following `SETUP.md` deploys into a fresh
    account from a clean config, and the hosted e2e passes there.
 9. **SimpleX** on $200 seats, always on.
-10. **Cutover.** Zones to Cloudflare, the production deploy, the username
-    seed, invites; then the old infra comes down (decision 34).
+10. **Cutover.** Zones to Cloudflare, the production account and its
+    raised Workers AI and gateway limits, the production deploy, the
+    username seed, invites; then the old infra comes down (decision 34).
 
 ## Evaluation
 
@@ -674,8 +675,11 @@ Each one needs a test in the phase that ports its feature.
   20 requests a minute per model per account on standard billing, and 50
   with prepaid credits through a gateway. At about 4 calls a Hermes
   turn, that is roughly 12 turns a minute for the whole account.
-  Escalation: ask Cloudflare for an increase (the Custom Requirements
-  Form) before launch. The gateway's own cap is 200 requests a minute.
+  Escalation: ask Cloudflare for an increase through the Custom
+  Requirements Form (https://forms.gle/axnnpGDb6xrmR31T6), together with
+  raising the gateway's own cap of 200 requests a minute. Paul,
+  2026-10-02: don't worry about it while building; request it in the
+  production account during cutover (phase 10).
 - **Slow cold wakes.** Hermes takes about 21 s to wake with a restore,
   and 42–82 s on a new image. The chat must show the computer waking.
   The idle window and the $200 always-on seat hide it. Hermes' boot
