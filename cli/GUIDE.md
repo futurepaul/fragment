@@ -28,11 +28,7 @@ browser, it prints the link to open anywhere you are signed in
 https://fragment.club unless `--host`, `FRAGMENT_HOST`, or `fragment
 host <url>` names another. The host knows which identity (`id:…`) each
 key belongs to: memberships name you, not the key. `fragment keys
-rotate` replaces the key and keeps everything you have. A machine that
-works for someone without being them pairs as their computer instead:
-`fragment login --computer <name>`, approved by its owner. It acts only
-in the fragments it is added to and those it makes (its owner's); its
-owner lists and removes it with `fragment computers [rm <name>]`.
+rotate` replaces the key and keeps everything you have.
 
 A person chooses a username once (`fragment username <name>`, or the
 host's page after the first sign-in) and can create nothing before. A
@@ -68,7 +64,7 @@ yours (`fragment status todo` is `todo.<your username>`).
 fragment login                            # once per machine: sign in in a browser, approve this machine's key
 fragment init my-thing                    # scaffold (todo) + create + deploy → live URL,
                                           #   share link, webhook URL
-fragment init my-inbox --template inbox   # or: todo | notes | calories | pet | chat | desktop | builder | blank
+fragment init my-inbox --template inbox   # or: todo | notes | calories | blank
 ```
 
 `fragment new <dir> --template T` scaffolds without creating;
@@ -78,13 +74,6 @@ fragment init my-inbox --template inbox   # or: todo | notes | calories | pet | 
 - `inbox`: webhook deliveries start a job that fetches and records.
 - `notes`: a folder of markdown as a live site; the files are the state.
 - `calories`: a food log you tell what you ate; its own agent logs it.
-- `pet`: a computer everyone here shares: its screen live, driven together
-  and by its agent (`do`, for editors).
-- `chat`: a live chat room; an agent member can answer in it.
-- `desktop`: a demo: your fragments side by side (chats, apps, files).
-- `builder`: a fragment that builds fragments: say what you want, and goose,
-  on the fragment's own computer, makes it as a new fragment and deploys
-  it (the computer's time and goose's model calls are on your budget).
 - `blank`: one page, to build on.
 
 `fragment status my-thing` shows the URLs, the view token (the share
@@ -191,24 +180,14 @@ fragment verify my-thing --dir .            # full-content audit
 - `input` is a JSON Schema (types, enums, lengths, ranges, `properties`,
   `required`, `additionalProperties`, `items`). A call that does not fit
   is refused before your code runs, naming the field.
-- `"ephemeral": true` on a mutation you call often with a "latest value"
-  (a screen's frame): its calls keep no ledger row (a mutation's id is
+- `"ephemeral": true` on a mutation you call often with a "latest value":
+  its calls keep no ledger row (a mutation's id is
   otherwise kept a week in your app's 16 MiB database), so the same id
   runs again rather than replaying, and it may not publish, push, or
   write files.
 - A channel with a `post` role (`"post": "viewer"`) takes records people
   post (`fragment.post`, `fragment post`); `"signedIn": true` beside it
   refuses anyone not signed in (a link holder is a viewer).
-- `"computer": {}` gives the fragment a Linux machine of its own (a Fly
-  Sprite) with this CLI installed, paired as your computer and an editor
-  of the fragment. It is awake while a page of the fragment is open (and
-  5 minutes after), billed to your budget; `fragment computers rm
-  <fragment>` destroys it. On it, `fragment model "<prompt>"` (or
-  `--request` with an OpenAI-style chat request on stdin) asks the model
-  through the platform, on your budget, with no key of its own; `fragment
-  model --serve` serves the same as an OpenAI-compatible endpoint on
-  `http://127.0.0.1:8765/v1` (streamed or not), so a coding agent there
-  (goose) needs no key either.
 
 ```js
 // app.mjs
@@ -253,7 +232,7 @@ export class App extends DurableObject {
   body)`, `job.sleep("2 hours")`, `job.files.read|list|stat|write|remove`
   (`write(path, content, {expect: sha})` compares and swaps),
   `job.push(who, payload)`, `job.ai.text|image|video(...)`,
-  `job.agent({prompt})`, `job.computer.exec(command)` (below). A step that
+  `job.agent({prompt})` (below). A step that
   may pass later (429, 5xx, timeout) is retried with backoff; one that
   cannot throws a `StepError` you may catch. A job that throws is
   **held** until someone replays it.
@@ -309,8 +288,8 @@ calories` is a working example):
   with the lower of their role and the agent's: `call.principal` is the
   person (`call.agent` the agent), so what it logs is theirs.
 - Its answer lands on the channel as `{text, turn}`, and its steps on
-  `work` (a start naming who asked, each tool call, an end), the chat
-  template's records: render them as you like.
+  `work` (a start naming who asked, each tool call, an end): render them
+  as you like.
 - You pay for its model calls, from your budget.
 
 A job asks it too, for the run's principal (a triggered run's: the
@@ -327,52 +306,6 @@ async summarize(input, job) {
 each run has its own. `channel` posts the turn's steps and answer there
 too. A replayed run reattaches to the turn it started; a turn that fails
 or is stopped throws a `StepError`.
-
-`"agent": {"personal": true, "channel": "chat"}` (the chat template's)
-has your own agent answer there instead, with its own tools.
-
-## A computer in your fragment
-
-With `"computer": {}` in `fragment.json`, a job runs shell commands on
-the fragment's own Linux machine:
-
-```js
-async build(input, job) {
-  const r = await job.computer.exec("npm ci && npm test", { timeout: "20 minutes", env: { CI: "1" } });
-  if (r.code !== 0) return { failed: r.stderr };
-  return { ok: r.stdout };
-}
-```
-
-- It is `bash -lc <command>` as the computer, in `~/fragment` (or
-  `cwd`), with this CLI on its PATH signed in as the computer: `fragment
-  post`, `fragment call`, `fragment sync` reach your fragments as it.
-- It answers `{code, stdout, stderr, truncated}`; a nonzero exit is an
-  answer, not a throw. Each stream keeps its first 256 KiB. `timeout` is
-  ms or "N seconds|minutes" (default 10 minutes, at most 60); past it the
-  command is stopped and answers code 124.
-- It runs once: a retried or replayed run gets the same command's answer
-  and never runs it again. `env` takes plain values; for a secret, use
-  `job.fetch`.
-- The computer is woken for it and sleeps 5 minutes after, billed to
-  your budget. No computer declared, or no budget left, throws a
-  `StepError`.
-
-The computer keeps your fragment's live files at `~/fragment`, synced
-when it is made and after each deploy. `"computer": {"start": "node
-server.js"}` runs a command from there as a long-lived service while the
-computer is awake:
-
-- It runs as the computer, like `exec`, with `FRAGMENT_NAME` set:
-  `fragment post "$FRAGMENT_NAME" screen --body '{...}'` reaches the
-  page's channels.
-- If it exits, it runs again (1 s later, doubling to a minute; back to 1
-  s after a minute up). A deploy restarts it with the new files.
-- Its output is in `~/fragment.log` (the last MiB or so); a job reads it
-  with `job.computer.exec("tail -n 50 ~/fragment.log")`.
-- Keep what it writes outside `~/fragment` (say `~/data`): a file it
-  changes there keeps its change, and a deploy's copy lands beside it as
-  a conflict copy.
 
 ## Pages
 
@@ -494,50 +427,11 @@ fragment agent show my-bot                            # its turn and recent mess
 fragment agent stop my-bot
 ```
 
-A message sent while it works steers the running turn. A chat (the
-`chat` template) with the agent as a member, after `fragment agent listen
-my-bot my-chat`, gets an answer to every message from someone else. The
-agents answer on the platform's own host (their script is co-hosted in
-its fleet); `FRAGMENT_AGENTS` names another.
-
-Your own agent (`agent.<you>`) hands longer work (building an app, code,
-research) to a computer: by default your home computer, where each chat
-has a goose session of its own that remembers what the chat handed it
-before. Name it once, a fragment of yours with a computer and a `do` or
-`build` job (a pet, a builder); without one, each hand-off gets a
-throwaway computer:
-
-```
-fragment agent home agent.<you> my-pet            # hand-offs go to my-pet
-fragment agent home agent.<you> --clear
-```
-
-An agent with a computer also gets goose's developer tools (shell,
-write, edit, tree) there, and `screenshot {url}` (headless Chrome; a
-turn in a chat shows the image there). On the computer (a CLI built with
-`--features computer`):
-
-```
-fragment computer serve --listen 0.0.0.0:8080   # makes .fragment-computer/token the first time
-```
-
-and from anywhere, with a copy of that token file:
-
-```
-fragment agent computer my-bot --url https://my-computer.example --token-file token --cwd site
-fragment agent computer my-bot --detach
-```
-
-or, with no public URL, the computer connects out:
-
-```
-fragment agent computer my-bot --connect --token-file token   # prints the command below
-fragment computer connect --agent <its URL> --token-file token   # on the computer
-```
-
-Its commands run in `work/<cwd>` on the computer. Stop kills a running
-command; a replayed call never runs twice, and one the computer's own
-restart cut off comes back "interrupted".
+A message sent while it works steers the running turn. A chat with the
+agent as a member, after `fragment agent listen my-bot my-chat`, gets an
+answer to every message from someone else. The agents answer on the
+platform's own host (their script is co-hosted in its fleet);
+`FRAGMENT_AGENTS` names another.
 
 ## Secrets
 
@@ -565,9 +459,6 @@ secret values into files.
 
 ```
 fragment login [--force] [--no-wait]     fragment call <name> <op> [--input JSON|@file|-] [--id ID]
-fragment login --computer <name>         fragment computers [rm <name>]
-fragment model <prompt> | --request      (a computer: the model, on its owner's budget)
-fragment model --serve [--port N]        (a computer: that model at http://127.0.0.1:N/v1)
 fragment whoami                          fragment channel <name> [<channel>] [--after N] [--follow]
 fragment username [<name>]
 fragment keys [list|rotate|revoke <npub>]
@@ -587,10 +478,8 @@ fragment sync <name> [--dir D] [--watch] [--mode M | --live] [--install | --unin
 fragment verify <name> [--dir D]         fragment secret set|list|rm ...
 fragment deploy <name> [--dir D] [--preview] [--note N]
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]
-fragment rm <name>
-fragment agent create|show|say|stop|tools|listen|computer ...
-fragment computer serve [--listen A]     fragment guide | skill
-fragment computer connect --agent U --token-file F
+fragment rm <name>                       fragment guide | skill
+fragment agent create|show|say|stop|tools|listen ...
 ```
 
 Global flags: `--host <url>` (or `FRAGMENT_HOST`, or `fragment host
