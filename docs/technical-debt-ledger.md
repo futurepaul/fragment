@@ -532,20 +532,6 @@ fragment.club until cutover (decisions 34–35).
 - **First proof:** already present.
 - **Delete when:** the hosted lane checks the 413 itself, or miniflare
   passes the early answer through.
-||||||| 3490a8c
-- **Observed:** the cut (2026-10-02). `cell/wrangler.jsonc` keeps the
-  `v5` and `v6` migrations that made the `Computer` and `Hermes` classes;
-  neither is bound or exported any more. celld takes
-  `new_sqlite_classes` alone and stops a deployment that deletes a class,
-  so the `deleted_classes` migration waits.
-- **Risk:** a deploy to a real Workers account with those migrations and
-  no class carries two dead classes' objects (and refuses, if Cloudflare
-  checks the export); a reader takes the tags for live classes.
-- **First proof:** the first `wrangler deploy` of the cell.
-- **Delete when:** phase 2 moves the cell to wrangler and adds
-  `{"tag": "v7", "deleted_classes": ["Computer", "Hermes"]}` (or starts
-  the migrations over, since nothing on fragment.club migrates), proven
-  by a deploy to a preview.
 
 ## The Hermes image patches Hermes' own boot
 
