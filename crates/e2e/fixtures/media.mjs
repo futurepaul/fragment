@@ -1,5 +1,5 @@
 // Deliveries and AI (slice F): pushes from a mutation and a job, and
-// OpenRouter text, images, and video as a job's steps.
+// text (the model route), images and video (OpenRouter) as a job's steps.
 import { DurableObject } from "cloudflare:workers";
 
 export class App extends DurableObject {
@@ -19,7 +19,12 @@ export class App extends DurableObject {
   }
 
   async summarize({ text }, job) {
-    return await job.ai.text({ model: "openai/gpt-5-mini", prompt: text, reasoning: { effort: "low" } });
+    return await job.ai.text({ model: "medium", prompt: text, reasoning_effort: "high" });
+  }
+
+  // the high tier is off (decision 23): the step says so
+  async summarize_high({ text }, job) {
+    return await job.ai.text({ model: "high", prompt: text });
   }
 
   async draw({ prompt, path }, job) {

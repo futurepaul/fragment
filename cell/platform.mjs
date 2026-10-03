@@ -585,6 +585,11 @@ export class App extends AuthorApp {
     return JSON.stringify({ result: { run: row.run ?? null, effects } });
   }
 
+  // The app's database size, for the owner's storage meter (meter.rs).
+  __size() {
+    return this.ctx.storage.sql.databaseSize;
+  }
+
   // Custom routes: the author's fetch, when there is one.
   fetch(request) {
     const own = AuthorApp.prototype.fetch;

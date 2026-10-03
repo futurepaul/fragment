@@ -245,18 +245,6 @@ pub fn message_seq(sql: &SqlStorage, id: &str) -> anyhow::Result<i64> {
     rows.first().map(|r| r.seq).ok_or_else(|| anyhow!("message {id} is not stored"))
 }
 
-/// How many messages the running turn has stored (from its first,
-/// `turn_seq`): the same when a step is made again after a crash.
-pub fn turn_length(sql: &SqlStorage) -> anyhow::Result<u64> {
-    #[derive(Deserialize)]
-    struct Row {
-        n: i64,
-    }
-    let (conv, from) = (kv_get(sql, "turn_conv")?.unwrap_or_default(), kv_u64(sql, "turn_seq")? as i64);
-    let rows: Vec<Row> = ah(ah(sql.exec("SELECT COUNT(*) AS n FROM messages WHERE conv = ? AND seq >= ?", vec![conv.into(), from.into()]))?.to_array())?;
-    Ok(rows.first().map_or(0, |r| r.n.max(0) as u64))
-}
-
 pub fn steer(sql: &SqlStorage, text: &str) -> anyhow::Result<()> {
     ah(sql.exec("INSERT INTO steer (text) VALUES (?)", vec![text.into()]))?;
     Ok(())

@@ -192,8 +192,11 @@ fn agent(v: &Value, m: &Manifest) -> Result<AgentDecl, String> {
     if !valid_repo_path(&instructions) {
         return Err(format!("agent.instructions must be a relative path in the repo, not {instructions:?}"));
     }
-    if model.as_ref().is_some_and(|m| m.is_empty() || m.len() > limits::AGENT_MODEL_MAX_BYTES) {
-        return Err(format!("agent.model is an OpenRouter model id of 1-{} bytes", limits::AGENT_MODEL_MAX_BYTES));
+    // a tier, never a model id; `high` is refused as the model route refuses it
+    if let Some(name) = model.as_deref() {
+        if let Err(why) = crate::models::tier_named(Some(name)).and_then(crate::models::model_of) {
+            return Err(format!("agent.model: {}", why.message()));
+        }
     }
     for (i, tool) in tools.iter().enumerate() {
         match m.operations.get(tool) {
@@ -367,11 +370,8 @@ mod tests {
             );
             parse(text.as_bytes())
         };
-        let own = with(r#"{"instructions":"agent.md","tools":["log","today"],"channel":"ask","model":"z-ai/glm-5.3-flash"}"#).unwrap().agent.unwrap();
-        assert_eq!(
-            own,
-            AgentDecl { channel: "ask".into(), instructions: Some("agent.md".into()), tools: vec!["log".into(), "today".into()], model: Some("z-ai/glm-5.3-flash".into()) }
-        );
+        let own = with(r#"{"instructions":"agent.md","tools":["log","today"],"channel":"ask","model":"medium"}"#).unwrap().agent.unwrap();
+        assert_eq!(own, AgentDecl { channel: "ask".into(), instructions: Some("agent.md".into()), tools: vec!["log".into(), "today".into()], model: Some("medium".into()) });
         assert_eq!(with(r#"{"instructions":"a.md","channel":"ask"}"#).unwrap().agent.unwrap().tools, Vec::<String>::new(), "an agent that only talks");
         assert_eq!(with("null").unwrap().agent, None, "no agent");
         for (bad, says) in [
@@ -386,7 +386,9 @@ mod tests {
             (r#"{"instructions":"a.md","channel":"ask","tools":["wipe"]}"#, "wipe needs the owner role"),
             (r#"{"instructions":"a.md","channel":"ask","tools":["log","log"]}"#, "names log twice"),
             (r#"{"instructions":"a.md","channel":"ask","tools":"log"}"#, "array of operation names"),
-            (r#"{"instructions":"a.md","channel":"ask","model":""}"#, "agent.model"),
+            (r#"{"instructions":"a.md","channel":"ask","model":""}"#, "agent.model: model names a tier"),
+            (r#"{"instructions":"a.md","channel":"ask","model":"z-ai/glm-5.3-flash"}"#, "agent.model: model names a tier"),
+            (r#"{"instructions":"a.md","channel":"ask","model":"high"}"#, "agent.model: the high tier is off"),
             (r#"{"personal":true,"channel":"ask"}"#, "unknown key \"personal\""),
         ] {
             let why = with(bad).expect_err(bad);

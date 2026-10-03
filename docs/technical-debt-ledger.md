@@ -329,49 +329,99 @@ fragment.club until cutover (decisions 34–35).
   already lists them), with an e2e check; or every socket re-resolves
   its key on a timer, not only at a frame it sends.
 
-## A paid step's reservation is an estimate per kind of step
+## Images and videos stay on OpenRouter, with the deployment's key
 
-- **Observed:** phase 4 slice C. A step reserves a fixed worst case (text
-  $0.20, an image $0.10, a video $0.10 a second), not the model's price
-  times its tokens. A long answer from an expensive model can cost more
-  than it reserved; the ledger records what it did cost, so a month can
-  pass its allowance by that difference.
-- **Risk:** the ledger's month a little past the allowance. OpenRouter
-  itself cannot pass it: each org's key carries the allowance as its
-  limit, and a call past it is refused (402, the step held).
-- **First proof:** a settled cost above its reservation (the usage row
-  shows both).
-- **Delete when:** reservations come from the model's prices
-  (`/api/v1/models`) and the step's `max_tokens`, with a test that a
-  month never passes its allowance.
+- **Observed:** phase 3 of docs/cloudflare-v1.md moved text onto Workers
+  AI through the model route, and left `job.ai.image` and `job.ai.video`
+  on OpenRouter (cell/src/ai.rs), paid by the deployment's own key (the
+  Worker secret `OPENROUTER_API_KEY`), each call reserved at a fixed
+  worst case (an image $0.10, a video $0.10 a second: `fragment_core::media`)
+  and metered on the payer's ledger as OpenRouter's reported cost
+  (`Usage::Billed`, the margin on top, no fee).
+- **Risk:** a second vendor and a second key for the deployment to hold;
+  a reported cost the platform cannot check against a price of its own;
+  an image or video dearer than its fixed worst case reserves less than
+  it costs (the settle charges it in full, so only the hold is short).
+  OpenRouter's account balance is the deployment's, not the person's: a
+  person cannot pass their ledger, but the deployment can run its
+  OpenRouter credit out for everyone.
+- **First proof:** a settle whose `usage` charge is above its
+  reservation, or an OpenRouter 402 on a step.
+- **Delete when:** phase 7 moves image (and video) generation onto
+  Cloudflare's own inference (decision 17's `fal-image-editing` move),
+  metered from its usage like text, and `OPENROUTER_API_KEY`, the
+  OpenRouter fake, `Usage::Billed`'s OpenRouter vendor and
+  `fragment_core::media` go with it.
 
-## A held run's video that finishes anyway is not charged to the month
+## A held run's video that finishes anyway is not charged
 
-- **Observed:** the reliability pass (audit R13). A run held while its
-  video still waits for its cost gives the reservation back, since
-  nothing polls the video any more. OpenRouter may still finish it and
-  charge the org's key; the ledger never learns that cost.
-- **Risk:** the ledger's month under what the key really spent, by at
-  most one video per held run. OpenRouter cannot pass the allowance: the
-  key carries it as its limit.
-- **First proof:** the key's usage (`GET /api/v1/key`) above the month's
-  `spentMicros`.
+- **Observed:** the reliability pass (audit R13), kept through phase 3. A
+  run held while its video still waits for its cost gives the reservation
+  back, since nothing polls the video any more. OpenRouter may still
+  finish it and charge the deployment's key; the ledger never learns that
+  cost.
+- **Risk:** the deployment pays OpenRouter for a video no ledger was
+  charged for, at most one per held run.
+- **First proof:** the deployment key's usage (`GET /api/v1/key`) above
+  the ledgers' `Billed` charges for OpenRouter.
 - **Delete when:** a released video is polled once more on the alarm
   until OpenRouter says it ended, and settled at what it reports, with a
-  budget check that holds a run mid-video and sees the cost arrive.
+  check that holds a run mid-video and sees the cost arrive; or videos
+  leave OpenRouter (the entry above).
 
-## A paid step whose result was not stored is paid again
+## The price book is the core's defaults
 
-- **Observed:** phase 4 slice C. A paid step settles once its whole
-  result is in hand (an image is written to `main` first). If that write
-  fails for now, the step is retried on the reservation it holds and
-  calls OpenRouter again; only the retry's cost is recorded.
-- **Risk:** a second charge at OpenRouter that the ledger does not show
-  (the key's limit still counts it).
-- **First proof:** an image step retried after a code.storage failure.
-- **Delete when:** a paid step's answer is kept before anything else
-  runs (the image as a blob by its hash first), so a retry settles
-  without calling again.
+- **Observed:** phase 3. Every ledger charges with
+  `PriceBook::defaults()` (cell/src/ledger.rs `configured_book`): the
+  list prices of 2026-10-02 and a 50% margin, version 1. Decision 4 puts
+  pricing in the deployment's configuration.
+- **Risk:** a self-deployer cannot set their own margin or prices without
+  a fork; a Cloudflare price change needs a code change and a deploy.
+- **First proof:** a deployment that wants another margin.
+- **Delete when:** `xtask deploy` renders a price book from the
+  deployment's config (a versioned file) into a Worker variable that
+  `configured_book` reads, and each ledger takes the newer version at its
+  next call (`take_book` already does), with a test of a book's change.
+
+## A fragment's git repository is not metered, and storage is sampled daily
+
+- **Observed:** phase 3 (cell/src/meter.rs). A fragment's storage meter
+  samples its SQLite (its own and its app facet's) and its blobs once a
+  day from its alarm, as byte-hours since the last sample. Its
+  code.storage repository is not sampled (code.storage publishes no size
+  or price to us), and a computer's backups do not exist yet.
+- **Risk:** git storage is free to its owner; a fragment that grows and
+  shrinks within a day is billed at the day's sample.
+- **First proof:** a repository at code.storage larger than a fragment's
+  SQLite.
+- **Delete when:** code.storage reports a repository's size (or we host
+  git), sampled as `Storage { class: git }`, and samples run hourly from
+  a cron the plan named (docs/ledger.md).
+
+## Triggers and the platform's own writes go on past the overdraft
+
+- **Observed:** phase 3. Past its owner's overdraft a fragment refuses
+  the writes a principal asks for (mutations and jobs, posts, file
+  writes, deploys, storage tokens, blobs, its inbox: `writable` in
+  cell/src/meter.rs), but its cron and file triggers still start runs,
+  and a run in flight still writes.
+- **Risk:** a read-only fragment's own schedule keeps writing (its AI
+  steps are refused by the ledger all the same).
+- **First proof:** a read-only fragment whose events show a cron run.
+- **Delete when:** a trigger's run asks `writable` before it starts (held
+  with the ledger's reason), with an e2e check.
+
+## An app's database size is read from its own realm
+
+- **Observed:** phase 3. The storage meter asks the app facet's platform
+  code for its database size (`__size` in cell/platform.mjs), which runs
+  in the author's realm: an app can override it.
+- **Risk:** an app understates its own storage, by at most its cap
+  (`limits::APP_DB_MAX_BYTES`, which the meter clamps to).
+- **First proof:** a `__size` far under the facet's real size.
+- **Delete when:** the runtime lets the supervisor read a facet's storage
+  size itself.
+
 
 ## An agent runs one turn at a time, across all its chats
 

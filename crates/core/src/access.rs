@@ -114,6 +114,8 @@ pub fn owner_only(method: &str, rest: &[&str]) -> bool {
         (_, ["invites", ..]) => true,
         ("PUT", ["visibility"]) => true,
         ("POST", ["rotate"]) => true,
+        // a fragment's cap is its owner's money (docs/ledger.md)
+        ("PUT", ["cap"]) => true,
         _ => false,
     }
 }
@@ -276,6 +278,7 @@ mod tests {
             ("DELETE", &["invites", "ab12"][..]),
             ("PUT", &["visibility"][..]),
             ("POST", &["rotate"][..]),
+            ("PUT", &["cap"][..]),
         ] {
             assert!(owner_only(method, rest), "{method} {rest:?}");
         }

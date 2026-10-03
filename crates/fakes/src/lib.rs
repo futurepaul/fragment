@@ -2,10 +2,12 @@
 //! dev`, and unit tests. Each implements the documented HTTP shape of the
 //! real service for the surface the platform touches, plus test levers the
 //! real service does not have (they are methods, never production routes):
-//! code.storage, OpenRouter, a web push service, and WorkOS AuthKit.
+//! code.storage, OpenRouter (images and videos), Workers AI (the model
+//! route's lower rung), a web push service, and WorkOS AuthKit.
 
 pub mod codestorage;
 pub mod http;
 pub mod openrouter;
 pub mod push;
+pub mod workers_ai;
 pub mod workos;

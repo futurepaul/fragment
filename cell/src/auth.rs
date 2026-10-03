@@ -255,19 +255,20 @@ pub(crate) fn same_origin(req: &Request, platform: &str) -> CellResult<()> {
     }
 }
 
-/// The platform bar's budget: what is left of this month's allowance.
-async fn budget_line(env: &Env, id: &str) -> String {
-    use fragment_core::budget::dollars;
-    let Some(org) = crate::ledger::org_of(id) else { return String::new() };
-    match crate::ledger::ask(env, &org, &crate::ledger::Status {}).await {
-        Ok(month) => {
-            let warn = if month.warn { " <b>Most of it is used.</b>" } else { "" };
-            format!(
-                "<p>AI this month ({}): <b>{}</b> of {} left.{warn}</p>",
-                esc(&month.period),
-                dollars(month.remaining_micros.max(0)),
-                dollars(month.allowance_micros)
-            )
+/// The platform bar's ledger: the person's credit this month, and what
+/// their standing stops, as the shell will say it (decision 27).
+async fn ledger_line(env: &Env, id: &str) -> String {
+    use fragment_core::ledger::Refused;
+    use fragment_core::price::dollars;
+    use fragment_proto::ledger::Standing;
+    match crate::ledger::ask(env, id, &crate::ledger::Status {}).await {
+        Ok(s) => {
+            let stopped = match s.standing {
+                Standing::Ok => String::new(),
+                Standing::AgentsStopped { why } => format!(" <b>{}.</b>", esc(&Refused::AgentsStopped { why }.message())),
+                Standing::ReadOnly { why } => format!(" <b>{}.</b>", esc(&Refused::ReadOnly { why }.message())),
+            };
+            format!("<p>Credit this month ({}): <b>{}</b> available.{stopped}</p>", esc(&s.month), dollars(s.available_micros.max(0)))
         }
         Err(_) => String::new(),
     }
@@ -406,14 +407,14 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
     )
 }
 
-/// `/settings`: who they are (their picture), their month's budget, their
+/// `/settings`: who they are (their picture), their credit this month, their
 /// fragments with each one's share sheet, a new fragment, pairing a CLI,
 /// and signing out.
 async fn settings(env: &Env, cfg: &Config, url: &Url, live: calls::LiveSession) -> String {
     let (who, email) = (live.identity, live.email.unwrap_or_default());
     let username = who.username.clone().unwrap_or_default();
     // the month and the fragments, asked of their cells at once
-    let (budget, fragments) = futures_util::future::join(budget_line(env, &who.id), fragments_list(env, cfg, url, &who.id)).await;
+    let (credit, fragments) = futures_util::future::join(ledger_line(env, &who.id), fragments_list(env, cfg, url, &who.id)).await;
     format!(
         "<p><img src=\"/api/users/{u}/picture\" alt=\"\" width=\"48\" height=\"48\" style=\"border-radius:50%;vertical-align:middle;object-fit:cover\" onerror=\"this.remove()\"> Signed in as <b>{u}</b> ({e}).</p>{b}{f}{n}{p}\
          <h2>You</h2><form method=\"post\" action=\"/auth/picture\" enctype=\"multipart/form-data\"><p>Picture: <input type=\"file\" name=\"picture\" accept=\"image/png,image/jpeg,image/webp,image/gif\" required> <button>Set</button></p></form>\
@@ -421,7 +422,7 @@ async fn settings(env: &Env, cfg: &Config, url: &Url, live: calls::LiveSession) 
         u = esc(&username),
         e = esc(&email),
         id = esc(&who.id),
-        b = budget,
+        b = credit,
         f = fragments,
         n = new_form(&after_label(cfg, &username)),
         p = pair(),

@@ -26,8 +26,11 @@ use fragment_core::npub;
 use fragment_core::steps::AgentTurn;
 use fragment_proto::{limits, split_fragment_name, valid_fragment_name, valid_label, ErrorCode, FragmentList, IdentityKind, ListedFragment, Role};
 
+use fragment_core::ledger::Spend;
+
 use crate::error::{CellError, CellResult};
 use crate::fragment::{Caller, FragmentCell, MetaKey};
+use crate::ledger::MaySpend;
 use crate::jobs::{permanent, RunRow, StepFail};
 use crate::registry::calls;
 use crate::routed::Signed;
@@ -362,6 +365,15 @@ impl FragmentCell {
             }
         }
         let asker = if npub::is_identity(&run.principal) { run.principal.clone() } else { joined.agent.clone() };
+        // a turn its owner's ledger would refuse never starts (decision 27):
+        // stopped agents, no credit, or this fragment's cap for anyone but its
+        // owner (the fragment's own agent acting as itself is the owner's)
+        let by_owner = asker == owner || asker == joined.agent;
+        let may = MaySpend { spend: Spend::AgentTurn, fragment: Some(self.name().map_err(|e| StepFail::Retry(e.message))?), by_owner };
+        crate::ledger::ask(&self.env, &owner, &may).await.map_err(|e| match e.refused {
+            Some(_) => permanent(e.message),
+            None => StepFail::Retry(format!("the owner's ledger: {}", e.message)),
+        })?;
         let id = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(self.step_ref(run, index)?.as_bytes()));
         let body = json!({
             "id": id,

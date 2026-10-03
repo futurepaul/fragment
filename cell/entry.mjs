@@ -35,6 +35,7 @@ export class Ledger extends DurableObject {
     this.rs = new rs.LedgerCell(ctx, env);
   }
   fetch(request) { return this.rs.fetch(request); }
+  alarm(info) { return this.rs.alarm(info); }
 }
 
 export class Registry extends DurableObject {

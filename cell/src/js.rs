@@ -1,6 +1,7 @@
 //! The JavaScript surfaces workers-rs 0.8.5 does not wrap: the Worker
-//! Loader, Durable Object facets, and the Workflows binding. Every
-//! `Reflect` call in the cell lives here, behind typed functions.
+//! Loader, Durable Object facets, the Workflows binding, the AI binding's
+//! options, and synchronous storage transactions. Every `Reflect` call in
+//! the cell lives here, behind typed functions.
 
 use fragment_core::facet::{self, Answer, LedgerRow, Mutated, Queried};
 use fragment_proto::ErrorCode;
@@ -464,6 +465,59 @@ pub async fn blob_list(env: &JsValue, prefix: &str, cursor: Option<&str>) -> Cel
     let keys = objects.iter().filter_map(|o| get(&o, "key").ok().and_then(|k| k.as_string())).collect();
     let next = if get(&listed, "truncated")?.as_bool() == Some(true) { get(&listed, "cursor")?.as_string() } else { None };
     Ok((keys, next))
+}
+
+/// Runs `f` as one `storage.transactionSync` of the Durable Object whose
+/// state is `state` (workers-rs 0.8.5 has no synchronous transaction): it
+/// commits when `f` answers `Ok`, and rolls back when `f` answers `Err`,
+/// which is thrown into the runtime so that it rolls back, then answered
+/// here as it was. `f` is synchronous, as SQL in a Durable Object is: no
+/// other event runs inside it.
+pub fn transaction_sync<T: 'static>(state: &JsValue, f: impl FnOnce() -> CellResult<T> + 'static) -> CellResult<T> {
+    let storage = get(state, "storage")?;
+    let slot: std::rc::Rc<std::cell::RefCell<Option<CellResult<T>>>> = std::rc::Rc::default();
+    let out = slot.clone();
+    let body = Closure::once(move || -> Result<JsValue, JsValue> {
+        let answer = f();
+        let failed = answer.is_err();
+        *out.borrow_mut() = Some(answer);
+        if failed {
+            return Err(thrown("rolled back"));
+        }
+        Ok(JsValue::UNDEFINED)
+    });
+    let ran = call(&storage, "transactionSync", &[body.as_ref().clone()]);
+    let answered = slot.borrow_mut().take();
+    match (ran, answered) {
+        (Ok(_), Some(Ok(v))) => Ok(v),
+        // f's own refusal: the runtime rolled back and threw it back here
+        (Err(_), Some(Err(e))) => Err(e),
+        // f answered, and the commit failed; or the runtime never ran f
+        (Err(e), _) => Err(CellError::host(format!("transactionSync: {}", js_message(&e)))),
+        (Ok(_), Some(Err(_))) => unreachable!("transactionSync returned past a callback that threw"),
+        (Ok(_), None) => unreachable!("transactionSync returned without running its callback"),
+    }
+}
+
+/// `env.AI.run(model, input, {gateway, returnRawResponse: true})`: the
+/// model's answer as the vendor sent it, through the named AI Gateway
+/// (spike S4: the binding is pre-authenticated, so the Worker holds no
+/// token). `options` is `{gateway: {id, metadata, collectLog}, extraHeaders}`.
+pub async fn ai_run(env: &JsValue, model: &str, input: &serde_json::Value, options: &serde_json::Value) -> CellResult<worker::Response> {
+    let ai = binding(env, "AI", "ai")?;
+    let opts = to_js(options);
+    set(opts.unchecked_ref::<Object>(), "returnRawResponse", true);
+    let out = await_js(call(&ai, "run", &[model.into(), to_js(input), opts]), "AI.run").await?;
+    let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host("AI.run answered no Response"))?;
+    Ok(worker::Response::from(resp))
+}
+
+/// A stream as two that read the same bytes (`ReadableStream.tee`): one
+/// may be read while the other is dropped.
+pub fn tee(stream: &worker_sys::web_sys::ReadableStream) -> CellResult<(worker_sys::web_sys::ReadableStream, worker_sys::web_sys::ReadableStream)> {
+    let pair: Array = call(stream.as_ref(), "tee", &[]).map_err(|e| CellError::host(format!("tee: {}", js_message(&e))))?.unchecked_into();
+    let branch = |i: u32| pair.get(i).dyn_into::<worker_sys::web_sys::ReadableStream>().map_err(|_| CellError::host("tee answered no stream"));
+    Ok((branch(0)?, branch(1)?))
 }
 
 pub fn now_ms() -> i64 {

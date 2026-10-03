@@ -5,14 +5,14 @@
 //! ate from its page; the agent calls `log_food` for each item for them
 //! (the rows are theirs) and answers on the channel. An
 //! anonymous post is refused (`ask` says `signedIn`); the agent is offered only the operations
-//! its block names; its owner's budget pays for it; a job's turn
+//! its block names; its owner's ledger pays for it; a job's turn
 //! (`job.agent`) runs once across a replay; a redeploy keeps the one agent,
 //! and one without the block removes it.
 
 use std::time::Duration;
 
 use anyhow::Result;
-use fragment_fakes::openrouter::Reply;
+use fragment_fakes::workers_ai::Reply;
 use fragment_nip98::Keys;
 use fragment_proto::ErrorCode;
 use serde_json::{json, Value};
@@ -39,7 +39,14 @@ fn listening(api: &Api, owner: &Keys, name: &str) -> Vec<(String, String)> {
     subs.as_array().into_iter().flatten().map(|s| (s["principal"].as_str().unwrap_or("").to_string(), s["channel"].as_str().unwrap_or("").to_string())).collect()
 }
 
+/// An identity's model calls, as its ledger keeps them (a test hook).
+fn model_calls(api: &Api, identity: &str) -> Vec<Value> {
+    let r = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": identity, "op": "entries", "prefix": "aig:" })));
+    r.ok().and_then(|r| r.body["entries"].as_array().cloned()).unwrap_or_default()
+}
+
 pub(super) fn events(api: &Api, owner: &Keys, name: &str, kind: &str) -> usize {
+
     let r = api.signed(owner, "GET", &format!("/api/f/{name}/events?tail=200"), None);
     r.map_or(0, |r| r.body["events"].as_array().into_iter().flatten().filter(|e| e["kind"] == kind).count())
 }
@@ -78,12 +85,12 @@ pub fn addon(s: &mut Suite, api: &Api) -> Result<()> {
     // a signed-in visitor holding the link says what they ate; the agent logs it for them
     let tool = |op: &str| fragment_core::tools::tool_name(&name, op).expect("a tool name");
     let (log, answer) = (tool("log_food"), "Logged 2 eggs and toast: 220 kcal today.");
-    s.openrouter.clear_script();
-    s.openrouter.script(&[
+    s.ai.clear_script();
+    s.ai.script(&[
         Reply::Tools(vec![(log.clone(), json!({ "food": "2 eggs", "calories": 140 })), (log.clone(), json!({ "food": "toast", "calories": 80 }))]),
         Reply::Text(answer.into()),
     ]);
-    let asked = s.openrouter.chats().len();
+    let asked = s.ai.chats().len();
     let r = api.browser_op(&name, "channels/ask", "a1", json!({ "text": "2 eggs and toast" }), Some(&visiting))?;
     anyhow::ensure!(r.status == 200 && r.body["result"]["principal"] == visitor_id.as_str(), "the visitor's post from the page: {r}");
     let answered = || records(api, &owner, &name, "ask").into_iter().find(|r| r["principal"] == agent.as_str() && r["body"]["text"] == answer);
@@ -103,26 +110,29 @@ pub fn addon(s: &mut Suite, api: &Api) -> Result<()> {
             && role_of(&members.body, &visitor_id).is_none(),
         json!({ "theirs": theirs, "owners": owners, "ask": records(api, &owner, &name, "ask") }),
     );
-    let offered: Vec<String> = s.openrouter.chats().get(asked).and_then(|c| c["tools"].as_array().cloned()).unwrap_or_default().iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_string)).collect();
+    let offered: Vec<String> = s.ai.chats().get(asked).and_then(|c| c["tools"].as_array().cloned()).unwrap_or_default().iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_string)).collect();
     s.ok(
         "the agent is offered only the operations its block names: not forget, not another fragment's, no platform verb",
         offered.len() == 2 && offered.contains(&log) && offered.contains(&tool("today")),
         json!(offered),
     );
-    let budget = api.signed(&owner, "GET", "/api/budget", None)?;
-    let paid: Vec<&Value> = budget.body["usage"].as_array().into_iter().flatten().filter(|u| u["kind"] == "agent.text" && u["fragment"] == name.as_str()).collect();
-    let visitors = api.signed(&visitor, "GET", "/api/budget", None)?;
+    let paid = model_calls(api, &owner_id);
+    let visitors = model_calls(api, &visitor_id);
+    let theirs = api.signed(&visitor, "GET", "/api/ledger", None)?;
     s.ok(
-        "its owner pays: each model call reserved and settled on the owner's month, for the visitor; the visitor's month untouched",
+        "its owner pays: each model call reserved and settled on the owner's ledger, in this fragment, under its cap (a visitor asked); the visitor's ledger untouched",
         paid.len() == 2
-            && paid.iter().all(|u| u["state"] == "settled" && u["quantity"].as_i64().is_some_and(|q| q > 0) && u["principal"] == visitor_id.as_str() && u["agent"] == agent.as_str())
-            && budget.body["spentMicros"].as_i64().is_some_and(|m| m > 0)
-            && visitors.body["spentMicros"] == 0,
-        json!({ "owner": budget.body, "visitor": visitors.body["spentMicros"] }),
+            && paid.iter().all(|e| {
+                let r = &e["entry"]["reserve"];
+                e["entry"]["end"]["end"] == "settled" && e["entry"]["end"]["charge"].as_i64().is_some_and(|c| c > 0) && r["agent"] == agent.as_str() && r["fragment"] == name.as_str() && r["capped"] == true
+            })
+            && visitors.is_empty()
+            && theirs.body["balanceMicros"] == theirs.body["includedGrantedMicros"],
+        json!({ "owner": paid, "visitor": theirs.body }),
     );
 
     // an anonymous visitor holding the link is a viewer, and `ask` takes posts from people signed in
-    let before = (s.openrouter.chats().len(), records(api, &owner, &name, "ask").len());
+    let before = (s.ai.chats().len(), records(api, &owner, &name, "ask").len());
     let anon = api.call(Call {
         method: "POST",
         url: api.site_url(&name, "__op/channels/ask"),
@@ -133,7 +143,7 @@ pub fn addon(s: &mut Suite, api: &Api) -> Result<()> {
     })?;
     s.ok(
         "an anonymous post is refused (401, signed in only): it appends nothing and starts nothing",
-        anon.code() == Some(ErrorCode::Unauthenticated) && (s.openrouter.chats().len(), records(api, &owner, &name, "ask").len()) == before,
+        anon.code() == Some(ErrorCode::Unauthenticated) && (s.ai.chats().len(), records(api, &owner, &name, "ask").len()) == before,
         &anon,
     );
 
@@ -163,7 +173,7 @@ pub fn addon(s: &mut Suite, api: &Api) -> Result<()> {
     s.deploy(&made.body);
     let refused = s.eventually(wait, || api.status(&owner, &name).is_ok_and(|r| r.body["code"]["error"].as_str().is_some_and(|e| e.contains("nowhere.md is not in live"))));
     s.ok("an agent whose instructions are not in live is refused at deploy", refused && listening(api, &owner, &name).is_empty(), json!(api.status(&owner, &name)?.body["code"]));
-    s.openrouter.clear_script();
+    s.ai.clear_script();
     Ok(())
 }
 
@@ -175,10 +185,11 @@ pub fn addon(s: &mut Suite, api: &Api) -> Result<()> {
 fn job_turn(s: &mut Suite, api: &Api, owner: &Keys, visiting: &str, name: &str, agent: &str) -> Result<()> {
     let (wait, summary) = (Duration::from_secs(30), "You ate 2 eggs and toast today: 220 kcal.");
     let lever = |op: &str, on: Option<bool>| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": op, "on": on })));
-    let paid = || api.signed(owner, "GET", "/api/budget", None).map_or(0, |r| r.body["usage"].as_array().into_iter().flatten().filter(|u| u["kind"] == "agent.text").count());
-    s.openrouter.clear_script();
-    s.openrouter.script(&[Reply::Text(summary.into())]);
-    let (asked, paid_before) = (s.openrouter.chats().len(), paid());
+    let owner_id = api.identity(owner)?;
+    let paid = || model_calls(api, &owner_id).len();
+    s.ai.clear_script();
+    s.ai.script(&[Reply::Text(summary.into())]);
+    let (asked, paid_before) = (s.ai.chats().len(), paid());
     lever("hold-advances", Some(true))?;
     let run = started(&api.browser_op(name, "summarize", "sum-1", json!({}), Some(visiting))?);
     let caught = s.eventually(wait, || lever("advance-held", None).is_ok_and(|r| r.body["run"] == run));
@@ -193,8 +204,8 @@ fn job_turn(s: &mut Suite, api: &Api, owner: &Keys, visiting: &str, name: &str, 
         "a job's turn (job.agent) runs once across a replay: its answer is the step's result, on the channel it named",
         caught && held["status"] == "held" && answered && r.status == 200 && done["status"] == "succeeded" && done["attempt"] == 2
             && done["output"] == json!({ "text": summary, "turn": turn })
-            && s.openrouter.chats().len() == asked + 1,
-        json!({ "held": held, "run": done, "model requests": s.openrouter.chats().len() - asked }),
+            && s.ai.chats().len() == asked + 1,
+        json!({ "held": held, "run": done, "model requests": s.ai.chats().len() - asked }),
     );
     s.ok("and its owner pays for it", paid() == paid_before + 1, json!({ "before": paid_before, "after": paid() }));
     Ok(())

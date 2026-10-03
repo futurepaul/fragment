@@ -51,17 +51,17 @@ enum Shape {
 const ORG: &str = "fragment-e2e";
 /// The poll backstop runs this often here (5 minutes in production).
 pub const POLL_S: u32 = 2;
-/// The key the OpenRouter fake takes (a fragment's OPENROUTER_API_KEY secret here).
+/// The deployment's OpenRouter key (its `OPENROUTER_API_KEY` Worker
+/// secret), which the OpenRouter fake takes: it pays for image and video steps.
 pub const OPENROUTER_KEY: &str = "sk-or-e2e-7c1d";
 /// Blobs no branch names are kept this long here (7 days in production).
 pub const BLOB_GRACE_S: u32 = 4;
 /// The pending sign-ins this fleet keeps: small, so the signin lane fills
 /// the table and proves the oldest goes first in a few hundred requests.
 pub const SIGNINS_PENDING_MAX: u64 = 200;
-/// The OpenRouter fake's management key, and each person's monthly budget
-/// here (small, so a few steps use it up).
-pub const OPENROUTER_MANAGEMENT: &str = "sk-or-v1-management-e2e";
-pub const BUDGET_USD: &str = "0.4";
+/// A new person's plan here: a seat, so each starts the month with its
+/// included credit (production's is `guest`).
+pub const DEFAULT_PLAN: &str = "seat";
 /// The WorkOS fake's environment.
 const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";
@@ -95,7 +95,10 @@ pub struct Suite {
     /// Distinguishes this run's fragment names from any earlier state.
     run: String,
     pub fake: CodeStorage,
+    /// Images and videos (until phase 7).
     pub openrouter: fragment_fakes::openrouter::OpenRouter,
+    /// The model route's vendor boundary: Workers AI, scripted.
+    pub ai: fragment_fakes::workers_ai::WorkersAi,
     pub push: fragment_fakes::push::PushService,
     org_key: String,
     host_secret: String,
@@ -123,7 +126,7 @@ impl Suite {
             // a line of the PEM's body: found however the PEM was escaped
             ("code.storage key", self.org_key.lines().find(|l| !l.starts_with("-----") && !l.trim().is_empty()).unwrap_or_default().trim().to_string()),
             ("WorkOS API key", WORKOS_KEY.into()),
-            ("OpenRouter management key", OPENROUTER_MANAGEMENT.into()),
+            ("OpenRouter key", OPENROUTER_KEY.into()),
         ]
     }
 
@@ -191,7 +194,7 @@ impl Suite {
     /// platform on 127.0.0.1, no extra settings, and no model answers left
     /// scripted.
     fn recover(&mut self) -> Result<()> {
-        self.openrouter.clear_script();
+        self.ai.clear_script();
         self.shape = Shape::Plain;
         if let Some(node) = self.node.take() {
             // one that does not stop in time is killed, and starts all the same
@@ -254,6 +257,11 @@ impl Suite {
             job_retry_delay_s: 1,
             blob_grace_s: Some(BLOB_GRACE_S),
             openrouter_url: Some(self.openrouter.url.clone()),
+            openrouter_key: Some(OPENROUTER_KEY.into()),
+            // the lower rung: the model route's calls go to the Workers AI fake
+            ai_url: Some(self.ai.url.clone()),
+            ai_gateway: None,
+            default_plan: Some(DEFAULT_PLAN.into()),
             delivery_retry_s: Some(1),
             workos: Some(devstack::WorkOsVars {
                 client_id: self.workos.client_id.clone(),
@@ -264,8 +272,6 @@ impl Suite {
                 (Shape::TwoSites, true) => format!("http://{SUFFIX}:{}", self.port),
                 _ => format!("http://127.0.0.1:{}", self.port),
             }),
-            openrouter_management: Some(OPENROUTER_MANAGEMENT.into()),
-            budget_usd: Some(BUDGET_USD.into()),
             operators: Some(fragment_core::npub::encode(self.operator.pubkey_hex())),
             signins_pending_max: Some(SIGNINS_PENDING_MAX),
             test_hooks: true,
@@ -277,7 +283,6 @@ impl Suite {
             host_secret: self.host_secret.clone(),
             fragment_api: format!("http://127.0.0.1:{}", self.port),
             agent_url: format!("http://127.0.0.1:{}", self.port),
-            openrouter_url: Some(self.openrouter.url.clone()),
             test_hooks: true,
         }
         .configure(&self.agents_project)?;
@@ -512,7 +517,9 @@ fn main() -> Result<()> {
         port: devstack::free_port()?,
         run,
         fake,
-        openrouter: fragment_fakes::openrouter::OpenRouter::start(OPENROUTER_KEY, OPENROUTER_MANAGEMENT)?,
+        openrouter: fragment_fakes::openrouter::OpenRouter::start(OPENROUTER_KEY)?,
+        ai: fragment_fakes::workers_ai::WorkersAi::start(0)?,
+
         push: fragment_fakes::push::PushService::start()?,
         org_key,
         host_secret: devstack::random_hex(32),

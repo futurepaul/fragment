@@ -6,13 +6,13 @@ mod app;
 mod appfiles;
 mod blobs;
 mod author;
-mod budget;
 mod control;
 mod deliver;
 mod identities;
 mod isolation;
 pub(crate) mod jobs;
 mod keys;
+mod ledger;
 mod limits;
 mod members;
 mod notes;
@@ -81,7 +81,7 @@ const LANES: &[Lane] = &[
     notes::notes,
     deliver::push,
     deliver::ai,
-    budget::budget,
+    ledger::ledger_lane,
     agents::agents,
     addon::addon,
     sync::folder_sync,
