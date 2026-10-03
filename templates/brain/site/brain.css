@@ -1,0 +1,15 @@
+/* the brain's search, beside the notes viewer's styles (assets/viewer.css) */
+#search { margin: 0 12px 8px; }
+#q {
+  width: 100%; padding: 7px 10px; font-size: 14px; color: var(--fg);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 7px; outline: none;
+}
+#q:focus { border-color: var(--accent); }
+.brain-list { list-style: none; padding: 0; margin: 20px 0 0; }
+.brain-result { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.brain-result:last-child { border-bottom: none; }
+.brain-title { font-size: 17px; font-weight: 600; }
+.brain-where { color: var(--fg2); font-size: 13px; margin-top: 2px; }
+.brain-snippet { margin-top: 6px; font-size: 14.5px; }
+.brain-path { color: var(--fg2); font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; margin-top: 6px; word-break: break-all; }
+.brain-error { color: var(--wl-missing); }

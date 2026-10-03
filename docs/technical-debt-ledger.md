@@ -218,10 +218,16 @@ fragment.club until cutover (decisions 34–35).
   committed esbuild output (marked 18.0.4 and @pierre/diffs 1.2.2, with
   Shiki's language chunks trimmed to a list); its source is
   `templates/notes/src/viewer.mjs`. The repo has no Node tooling, so a
-  rebuild is by hand (the recipe is at the top of the source).
+  rebuild is by hand (the recipe is at the top of the source). Since
+  phase 6 the blessed brain template serves the same bundle
+  (`templates/brain/site/assets` is a symlink to it, embedded once), and
+  its search box is a separate script beside it (`site/brain.js`), not a
+  change to the viewer: nothing pins the bundle's transitive dependencies
+  (Shiki's among them), so a rebuild could not be checked against the
+  committed bytes.
 - **Risk:** a viewer change needs a toolchain the repo no longer has;
-  third-party code ships in every notes fragment without a build the
-  repo can reproduce.
+  third-party code ships in every notes fragment and every brain without
+  a build the repo can reproduce.
 - **First proof:** the first change to the viewer, or an advisory
   against marked or Shiki.
 - **Delete when:** the viewer is small enough to ship as source (no
