@@ -383,6 +383,38 @@ that also makes Cloudflare simpler or safer:
    Mac (aarch64, Hypervisor.framework) needs its own jail and egress
    path.
 
+## What the spike found (running it)
+
+These are listed as found. Each names where it bites and what to do.
+
+1. **Preview cards share the delivery queue with chat.** On the first
+   shot, `wrangler dev`'s local Browser Rendering downloads Chrome. The
+   shot took 55 s, and the queue consumer held the next batch behind it.
+   A person's first message to an agent waited 45 s before its delivery
+   ran. Offline, a deployment has no Chrome to download.
+   - **Master:** cards should get their own queue, or the shot should go
+     after the batch's deliveries. Cards are already skipped when there
+     is no hostname suffix; a deployment without Browser Rendering should
+     skip them the same way.
+2. **The agent's model deadline is fixed at 100 s** (`agent/src/model.rs`,
+   `DEADLINE_MS`). Bonsai-2-27B on this box's CPU processes a prompt at
+   about 8 tokens a second, so the agent's ~700-token first prompt alone
+   takes 90 s. On the GPU it takes 0.2 s. A self-hosted model's speed
+   varies by orders of magnitude.
+   - **Master:** the deadline should be configuration that the
+     deployment's model route announces.
+3. **A failing model upstream fails well.** A dead port ("Network
+   connection lost") and a slow model (the deadline) both release the
+   call's reservation on the ledger, and the agent says in the chat what
+   failed.
+4. **The dev stack needed Docker even with no computers to run.** Now,
+   with no Docker and no node, it runs without computers and says so.
+5. **celld's fork still depends on fragment's deleted native crate.** The
+   `native:<name>` seam that served `KEYS` (commits `5b76ced` and
+   `aecfbb6`) points at `crates/native`, which phase 2 removed. The
+   branch `selfhost` of the celld fork deletes the seam: master needs it
+   no longer, and that is one less difference from upstream celld.
+
 ## The spike, on this box
 
 This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX

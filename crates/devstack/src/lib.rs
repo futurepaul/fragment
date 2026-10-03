@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
+pub mod celld;
 pub mod node;
 mod node_release;
 pub mod summary;
@@ -530,7 +531,7 @@ pub const BOOT_LOGS_MAX: u32 = 10_000;
 /// boot number `dir` has no log for. A node started again on its port (the
 /// e2e's restarts) never truncates the log of the one before, which a
 /// crash leaves there, and its own `Ready on` is the only one in its file.
-fn boot_log(dir: &Path, port: u16) -> Result<(PathBuf, fs::File)> {
+pub(crate) fn boot_log(dir: &Path, port: u16) -> Result<(PathBuf, fs::File)> {
     fs::create_dir_all(dir)?;
     for boot in 1..=BOOT_LOGS_MAX {
         let path = dir.join(format!("node-{port}-{boot}.log"));
