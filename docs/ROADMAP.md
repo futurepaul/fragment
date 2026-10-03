@@ -158,6 +158,9 @@ rollback), members and invites, call (operations), and read and follow
     credit limit equal to their budget. A fragment that sets its own
     `OPENROUTER_API_KEY` pays for itself and is not metered. Paul's
     exposure is at most $20 a month per invited person, plus hosting.
+    (On master the usage ledger replaced this budget, its per-person
+    keys, and a fragment's own key: docs/cloudflare-v1.md, phase 3, and
+    docs/ledger.md.)
 15. **Identity follows finite.computer's BANKS model (FIN-11)** (Paul,
     2026-09-24), so that fragment's people can move to finite.computer
     without rewriting a grant. Stable identities for people, agents, and
