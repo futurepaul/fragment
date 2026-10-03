@@ -14,28 +14,30 @@ use worker::*;
 use crate::config::Config;
 
 /// The shell's files: published name, content type, and bytes.
-const FILES: [(&str, &str, &str); 15] = [
-    ("shell.js", "text/javascript; charset=utf-8", include_str!("../shell/shell.js")),
-    ("shell.css", "text/css; charset=utf-8", include_str!("../shell/shell.css")),
-    ("layout.js", "text/javascript; charset=utf-8", include_str!("../shell/layout.js")),
-    ("viewer.js", "text/javascript; charset=utf-8", include_str!("../shell/viewer.js")),
-    ("agent-identity.js", "text/javascript; charset=utf-8", include_str!("../shell/agent-identity.js")),
-    ("agent-identity.css", "text/css; charset=utf-8", include_str!("../shell/agent-identity.css")),
-    ("app-icons.js", "text/javascript; charset=utf-8", include_str!("../shell/app-icons.js")),
-    ("lucide-icons.js", "text/javascript; charset=utf-8", include_str!("../shell/lucide-icons.js")),
-    ("icon-metrics.css", "text/css; charset=utf-8", include_str!("../shell/icon-metrics.css")),
-    ("tooltips.js", "text/javascript; charset=utf-8", include_str!("../shell/tooltips.js")),
-    ("tooltips.css", "text/css; charset=utf-8", include_str!("../shell/tooltips.css")),
-    ("scrollbars.css", "text/css; charset=utf-8", include_str!("../shell/scrollbars.css")),
-    ("vendor/split-grid.js", "text/javascript; charset=utf-8", include_str!("../shell/vendor/split-grid.js")),
-    ("manifest.webmanifest", "application/manifest+json", include_str!("../shell/manifest.webmanifest")),
-    ("icon.svg", "image/svg+xml", include_str!("../shell/icon.svg")),
+const FILES: [(&str, &str, &[u8]); 16] = [
+    ("shell.js", "text/javascript; charset=utf-8", include_bytes!("../shell/shell.js")),
+    ("shell.css", "text/css; charset=utf-8", include_bytes!("../shell/shell.css")),
+    ("layout.js", "text/javascript; charset=utf-8", include_bytes!("../shell/layout.js")),
+    ("viewer.js", "text/javascript; charset=utf-8", include_bytes!("../shell/viewer.js")),
+    ("agent-identity.js", "text/javascript; charset=utf-8", include_bytes!("../shell/agent-identity.js")),
+    ("agent-identity.css", "text/css; charset=utf-8", include_bytes!("../shell/agent-identity.css")),
+    ("app-icons.js", "text/javascript; charset=utf-8", include_bytes!("../shell/app-icons.js")),
+    ("lucide-icons.js", "text/javascript; charset=utf-8", include_bytes!("../shell/lucide-icons.js")),
+    ("icon-metrics.css", "text/css; charset=utf-8", include_bytes!("../shell/icon-metrics.css")),
+    ("tooltips.js", "text/javascript; charset=utf-8", include_bytes!("../shell/tooltips.js")),
+    ("tooltips.css", "text/css; charset=utf-8", include_bytes!("../shell/tooltips.css")),
+    ("scrollbars.css", "text/css; charset=utf-8", include_bytes!("../shell/scrollbars.css")),
+    ("vendor/split-grid.js", "text/javascript; charset=utf-8", include_bytes!("../shell/vendor/split-grid.js")),
+    ("manifest.webmanifest", "application/manifest+json", include_bytes!("../shell/manifest.webmanifest")),
+    ("icon.svg", "image/svg+xml", include_bytes!("../shell/icon.svg")),
+    // the viewer's wallpaper: Teo Badini's photograph on Pexels (cell/shell/CREDITS.md)
+    ("wallpaper.jpg", "image/jpeg", include_bytes!("../shell/wallpaper.jpg")),
 ];
 const PAGE: &str = include_str!("../shell/index.html");
 
 /// A file's validator: its bytes' hash (a release changes them).
-fn etag(body: &str) -> String {
-    let digest = <sha2::Sha256 as sha2::Digest>::digest(body.as_bytes());
+fn etag(body: &[u8]) -> String {
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(body);
     format!("\"s-{}\"", hex::encode(&digest[..10]))
 }
 
@@ -89,5 +91,5 @@ pub fn asset(req: &Request, name: &str) -> Result<Option<Response>> {
     if not_modified(req, &tag)? {
         return Ok(Some(Response::empty()?.with_status(304).with_headers(h)));
     }
-    Ok(Some(Response::ok(*body)?.with_headers(h)))
+    Ok(Some(Response::from_bytes(body.to_vec())?.with_headers(h)))
 }

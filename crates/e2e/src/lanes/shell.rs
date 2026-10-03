@@ -217,13 +217,15 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.eval(&page, &fill("#new-agent-job", "keep my reading list"))?;
     b.eval(&page, &fill("#new-agent-name", "Reader"))?;
     b.eval(&page, "document.getElementById('new-agent-form').requestSubmit()")?;
-    let two = b.until(&page, "document.querySelectorAll('#chats .agent-row').length === 2", agent_wait);
+    // its row may show before the dialog closes (the list is read again as it is made)
+    let two = b.until(&page, "document.querySelectorAll('#chats .agent-row').length === 2 && !document.getElementById('new-agent-dialog').open", agent_wait);
     s.ok("a second agent, named, gets a chat of its own in the sidebar", two, "");
 
     // an app's window
     b.click(&page, "#add-app")?;
-    b.until(&page, "document.querySelector('.catalog form')", wait);
-    b.eval(&page, "document.querySelector('.catalog form').requestSubmit()")?;
+    let catalog = b.until(&page, "document.querySelector('.catalog form')", wait);
+    s.ok("Add an app opens the catalog in the viewer", catalog, "");
+    b.eval(&page, "document.querySelector('.catalog form')?.requestSubmit()")?;
     let window = b.until(&page, "document.querySelectorAll('#apps .row[data-key]').length === 1 && document.querySelector('.viewer iframe')", wait);
     s.ok("an app from the catalog opens in a window beside the chat", window, "");
     let _ = b.screenshot(&page, &shots.join("desktop-app.png"));

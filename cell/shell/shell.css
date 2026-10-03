@@ -3,8 +3,9 @@
 @import url("./icon-metrics.css");
 
 /* The shell: Finite.Computer's look (Skyler's handoff, 2026-10-02; tokens
-   from finitecomputer-v2's dashboard). Dark by default. The wallpaper is a
-   stand-in: the handoff's Bliss photograph is not ours to ship. */
+   from finitecomputer-v2's dashboard). Dark by default. The wallpaper is
+   Teo Badini's photograph on Pexels (CREDITS.md; credited in settings), in
+   the handoff's Bliss's place: a portrait, as the viewer is. */
 :root {
   --bg-window:#212121; --bg-sidebar:#181818; --bg-hover:rgba(255,255,255,.055); --bg-active:#2f2f2f;
   --bg-card:#171615; --surface-subtle:#262625; --surface-muted:#2b2b2a;
@@ -16,7 +17,7 @@
   --primary:var(--text-primary); --primary-foreground:var(--bg-window);
   --font-sans:"Funnel Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono:"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  --wallpaper: radial-gradient(120% 90% at 20% 0%, #4d7fc4 0%, #2d5c9e 38%, transparent 70%), radial-gradient(140% 80% at 80% 110%, #5f9a4a 0%, #3f7a35 35%, transparent 72%), #2a4f7f;
+  --wallpaper: #6f8fd8 url("/__shell/wallpaper.jpg") center / cover no-repeat;
   color-scheme: dark;
 }
 @media (prefers-color-scheme: light) {

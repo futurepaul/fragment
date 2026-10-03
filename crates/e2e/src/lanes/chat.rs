@@ -310,7 +310,9 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
 
     // files a record names stay past the grace period; an upload none names goes
     let blob = |sha: &str| api.signed(&owner, "HEAD", &format!("/api/f/{chat_name}/blobs/{sha}"), None).map(|r| r.status).unwrap_or(0);
-    let collected = s.eventually(Duration::from_secs(60), || blob(&sha) == 404);
+    // a quiet fragment's poll pass, which collects, is a day off: a test lever brings it in
+    let poll_now = || api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": chat_name, "op": "poll-now" })));
+    let collected = s.eventually(Duration::from_secs(30), || poll_now().is_ok_and(|r| r.status == 200) && blob(&sha) == 404);
     s.ok("an upload no record names is collected after the grace period", collected, blob(&sha));
     let named: Vec<String> = records(api, &owner, &chat_name, "chat")
         .iter()

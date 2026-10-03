@@ -520,8 +520,16 @@ impl FragmentCell {
                 self.schedule().await?;
                 json!({ "due": due })
             }
+            Some("poll-now") => {
+                // the next alarm is a poll pass (the blob collection's), so a
+                // test need not wait a quiet fragment's day for one
+                let now = js::now_ms();
+                self.set_meta(MetaKey::PollAt, &now.to_string())?;
+                self.schedule().await?;
+                json!({ "pollAt": now })
+            }
             _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, fail-meter-acks, fail-after-paid, forget-steps,
- hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, meter-now, meter, forget-standing, or cron-now")),
+ hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, meter-now, meter, forget-standing, cron-now, or poll-now")),
         })
     }
 }
