@@ -342,8 +342,10 @@ class Job {
     };
   }
 
-  // OpenRouter, with the fragment's OPENROUTER_API_KEY secret:
-  //   ai.text({ model, prompt | messages, max_tokens })   → { text, model, usage }
+  // Text through the platform's model route (a tier: cheap unless named),
+  // image and video through OpenRouter with the platform's key; the owner's
+  // ledger pays for each (docs/ledger.md):
+  //   ai.text({ model?, prompt | messages, max_tokens?, reasoning_effort? }) → { text, model, usage }
   //   ai.image({ prompt, path, model?, aspect_ratio? })  → { path, size, sha256 }: a file on main
   //   ai.video({ prompt, path, model?, duration?, resolution?, aspect_ratio? })
   // A video takes minutes: the job polls it and sleeps between polls, all as steps.
@@ -583,6 +585,11 @@ export class App extends AuthorApp {
       effects = null;
     }
     return JSON.stringify({ result: { run: row.run ?? null, effects } });
+  }
+
+  // The app's database size, for the owner's storage meter (meter.rs).
+  __size() {
+    return this.ctx.storage.sql.databaseSize;
   }
 
   // Custom routes: the author's fetch, when there is one.

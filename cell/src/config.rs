@@ -2,12 +2,13 @@
 //! rendered `vars` at deploy), built once per isolate (`CONFIG`). Nothing about a fleet is a constant in code
 //! (ROADMAP decision 13): the hostname suffix and the code.storage org
 //! arrive here. The fleet's secrets do not: the host secret, the
-//! code.storage key, the WorkOS API key, and the OpenRouter management key
-//! live in the node's environment, used through `KEYS` (keys.rs).
+//! code.storage key, the WorkOS API key, and the OpenRouter key are Worker
+//! secrets, read only by keys.rs.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
+use fragment_proto::ledger::Plan;
 use fragment_proto::{flat_name, from_flat_name, ErrorCode};
 use worker::Env;
 
@@ -80,18 +81,29 @@ pub struct Config {
     /// `FRAGMENT_DELIVERY_RETRY_MAX_S`: the longest (default an hour, and
     /// never under the shortest; a test fleet sets both, for a fixed pace).
     pub delivery_retry_max_s: u32,
-    /// `OPENROUTER_API_URL`: where AI calls go (default https://openrouter.ai; the e2e's fake).
+    /// `OPENROUTER_API_URL`: where image and video steps go (default
+    /// https://openrouter.ai; the e2e's fake), until phase 7.
     pub openrouter_url: String,
+    /// `AI_GATEWAY_ID`: the AI Gateway the model route calls through
+    /// (models.rs): the deployment's own, named, since `default` makes a
+    /// gateway that logs (spike S4).
+    pub ai_gateway_id: Option<String>,
+    /// `FRAGMENT_AI_URL`: dev and the e2e only. The model route POSTs the
+    /// AI binding's input to `<url>/run/<model>` instead (a fake at the
+    /// vendor boundary, labeled so: models.rs) and needs no gateway.
+    pub ai_url: Option<String>,
     workos: Option<WorkOsConfig>,
     /// `FRAGMENT_PLATFORM_URL`: the platform's own origin, where sign-in
     /// and the platform session live (default: the hostname suffix itself,
     /// e.g. https://fragment.club; without a suffix, the origin a request
     /// arrived on).
     pub platform_url: Option<String>,
-    /// `FRAGMENT_BUDGET_USD`: each person's monthly budget (default 20).
-    pub budget_micros: i64,
+    /// `FRAGMENT_DEFAULT_PLAN`: a new person's plan (docs/ledger.md):
+    /// `guest`, the default and production's, or `seat` or
+    /// `seat_always_on` (dev and the e2e: `seat`).
+    pub default_plan: Plan,
     /// `FRAGMENT_OPERATORS`: identities and keys (as `parse_list` reads
-    /// them) that may top up a budget.
+    /// them) that grant credit and set plans, seats and overdrafts.
     operators: Option<Result<Vec<String>, String>>,
     /// `FRAGMENT_SIGNINS_PENDING_MAX`: sign-ins begun and not finished that
     /// the Registry keeps before it lets the oldest go (default
@@ -109,6 +121,17 @@ pub struct Config {
     /// `FRAGMENT_OPERATOR_KEYS`: the operator's keys and each one's hosts,
     /// each key the secret `swap::key_secret_name` names.
     pub operator_keys: BTreeMap<String, Vec<String>>,
+    /// `FRAGMENT_KEY_PRICES`: what each operator key's use costs
+    /// (`[{"key", "micros", "per"}]`, the price book's `keys`); a key with
+    /// no price is not swapped in. `FRAGMENT_PRICE_BOOK_VERSION` (default
+    /// the defaults' 1) grows with every change to them, or ledgers made
+    /// before keep their book.
+    pub key_prices: Vec<fragment_core::price::KeyPrice>,
+    pub price_book_version: u32,
+    /// `FRAGMENT_COMPUTER_INSTANCE`: the price book's name for the
+    /// deployment's computer instance (default the book's own default,
+    /// decision 13's 2 vCPU and 6 GiB), its awake time priced by it.
+    pub computer_instance: String,
     /// `FRAGMENT_SWAP_UPSTREAM` (the e2e only): a swapped request goes here,
     /// its host in `x-fragment-upstream-host`, instead of to its host.
     pub swap_upstream: Option<String>,
@@ -190,11 +213,11 @@ impl Config {
                 api: var(env, "WORKOS_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.workos.com".into()),
             }),
             platform_url: var(env, "FRAGMENT_PLATFORM_URL").map(|u| u.trim_end_matches('/').to_string()),
-            budget_micros: var(env, "FRAGMENT_BUDGET_USD")
-                .and_then(|v| v.parse::<f64>().ok())
-                .filter(|v| v.is_finite() && *v >= 0.0)
-                .map(|v| (v * fragment_core::budget::USD as f64).round() as i64)
-                .unwrap_or(20 * fragment_core::budget::USD),
+            default_plan: default_plan(env),
+            ai_gateway_id: var(env, "AI_GATEWAY_ID").inspect(|id| {
+                assert!(id != "default", "AI_GATEWAY_ID names the deployment's own gateway: `default` makes one that logs (spike S4)");
+            }),
+            ai_url: var(env, "FRAGMENT_AI_URL").map(|u| u.trim_end_matches('/').to_string()),
             operators: var(env, "FRAGMENT_OPERATORS").map(|l| fragment_core::npub::parse_list(&l)),
             signins_pending_max: var(env, "FRAGMENT_SIGNINS_PENDING_MAX")
                 .and_then(|s| s.parse::<u64>().ok())
@@ -206,12 +229,19 @@ impl Config {
             deploy_id: deploy_id(env),
             connections: hosts(env, "FRAGMENT_CONNECTIONS"),
             operator_keys: hosts(env, "FRAGMENT_OPERATOR_KEYS"),
+            key_prices: var(env, "FRAGMENT_KEY_PRICES")
+                .map(|v| serde_json::from_str(&v).unwrap_or_else(|e| panic!("FRAGMENT_KEY_PRICES is [{{\"key\", \"micros\", \"per\"}}]: {e}")))
+                .unwrap_or_default(),
+            price_book_version: var(env, "FRAGMENT_PRICE_BOOK_VERSION")
+                .map(|v| v.parse().unwrap_or_else(|_| panic!("FRAGMENT_PRICE_BOOK_VERSION is a whole number")))
+                .unwrap_or(1),
+            computer_instance: var(env, "FRAGMENT_COMPUTER_INSTANCE").unwrap_or_else(|| fragment_core::price::DEFAULT_INSTANCES[0].0.into()),
             swap_upstream: var(env, "FRAGMENT_SWAP_UPSTREAM").map(|u| u.trim_end_matches('/').to_string()),
         }
     }
 
     /// Whether the signer (its key, 64 hex, if it signed, and its identity)
-    /// may top up budgets.
+    /// is one of the deployment's operators.
     pub fn is_operator(&self, key: Option<&str>, identity: &str) -> CellResult<bool> {
         match &self.operators {
             None => Ok(false),
@@ -338,6 +368,17 @@ impl Config {
             }
             None => format!("{}://{}{port}", arrived.scheme(), arrived.host_str().unwrap_or("localhost")),
         }
+    }
+}
+
+/// `FRAGMENT_DEFAULT_PLAN`, `guest` when unset. Any other value is the
+/// deployment's mistake, found as its first isolate starts.
+fn default_plan(env: &Env) -> Plan {
+    match var(env, "FRAGMENT_DEFAULT_PLAN").as_deref() {
+        None | Some("guest") => Plan::Guest,
+        Some("seat") => Plan::Seat,
+        Some("seat_always_on") => Plan::SeatAlwaysOn,
+        Some(other) => panic!("FRAGMENT_DEFAULT_PLAN is guest, seat or seat_always_on, not {other:?}"),
     }
 }
 

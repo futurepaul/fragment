@@ -17,6 +17,9 @@
 //!   (`authorization: Bearer …` unless named): the reply is the answer's
 //!   status and its first 300 characters (the computer's swap, decisions
 //!   22 and 37);
+//! - `think <text>`: one model call through the computer's model intercept
+//!   (`$FRAGMENT_MODEL`, the cheap tier, as the agent): the reply is the
+//!   model's answer;
 //! - a message with attachments: the reply names them;
 //! - `@<name>` of another agent in the reply's text hands off to it, as
 //!   any reply's does (the bridge reads mentions, not this runtime).
@@ -126,6 +129,37 @@ async fn fetch(agent: &str, text: &str) -> Result<(u16, String), String> {
     tokio::time::timeout(Duration::from_millis(crate::limits::HTTP_TIMEOUT_MS), call).await.map_err(|_| format!("{url}: no answer"))?
 }
 
+/// One model call, `said` as the user's message, as `agent`: the answer's
+/// text.
+async fn think(agent: &str, said: &str) -> Result<String, String> {
+    use http_body_util::{BodyExt, Full, Limited};
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::TokioExecutor;
+
+    let model = std::env::var("FRAGMENT_MODEL").map_err(|_| "no FRAGMENT_MODEL".to_string())?;
+    let base = crate::net::Base::parse(&model)?;
+    let body = serde_json::json!({ "model": "cheap", "messages": [{ "role": "user", "content": said }] }).to_string();
+    let req = hyper::Request::post(base.url("/v1/chat/completions"))
+        .header("host", base.authority())
+        .header("x-fragment-agent", agent)
+        .header("content-type", "application/json")
+        .header("content-length", body.len())
+        .body(Full::new(bytes::Bytes::from(body)))
+        .map_err(|e| e.to_string())?;
+    let client = Client::builder(TokioExecutor::new()).build_http();
+    let call = async {
+        let res = client.request(req).await.map_err(|e| e.to_string())?;
+        let status = res.status().as_u16();
+        let bytes = Limited::new(res.into_body(), 256 * 1024).collect().await.map_err(|e| e.to_string())?.to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+        match v["choices"][0]["message"]["content"].as_str() {
+            Some(answer) if status == 200 => Ok(answer.to_string()),
+            _ => Err(format!("{status} {}", String::from_utf8_lossy(&bytes).chars().take(300).collect::<String>())),
+        }
+    };
+    tokio::time::timeout(Duration::from_millis(crate::limits::HTTP_TIMEOUT_MS), call).await.map_err(|_| "the model did not answer".to_string())?
+}
+
 /// Waits `pace`, hearing a Stop meanwhile (true).
 async fn pause(pace: Duration, rx: &mut mpsc::Receiver<Heard>) -> bool {
     tokio::select! {
@@ -153,6 +187,12 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         return;
     }
     let mut reply = format!("echo: [{}] {}", ts.asker_name, ts.text);
+    if let Some(said) = ts.text.strip_prefix("think ") {
+        reply = match think(&ts.agent.fragment, said).await {
+            Ok(answer) => format!("thought: {answer}"),
+            Err(e) => format!("think failed: {e}"),
+        };
+    }
     if text.starts_with("fetch ") {
         reply = match fetch(&ts.agent.fragment, &ts.text).await {
             Ok((status, body)) => format!("fetched {status}: {}", body.chars().take(300).collect::<String>()),

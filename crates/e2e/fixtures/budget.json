@@ -1,8 +1,0 @@
-{
-  "operations": {
-    "summarize": { "kind": "job" },
-    "twice": { "kind": "job" },
-    "ask": { "kind": "job", "role": "public" },
-    "film": { "kind": "job" }
-  }
-}

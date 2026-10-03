@@ -552,7 +552,7 @@ impl FragmentCell {
             "SELECT (SELECT value FROM meta WHERE key = ?) AS outside_at,
                EXISTS (SELECT 1 FROM meta WHERE key IN (?, ?)) AS pending,
                EXISTS (SELECT 1 FROM runs WHERE status = 'running') AS running,
-               EXISTS (SELECT 1 FROM spend WHERE video IS NOT NULL AND run IN (SELECT id FROM runs WHERE status = 'held')) AS videos",
+               EXISTS (SELECT 1 FROM charges WHERE held = 1 AND run NOT IN (SELECT id FROM runs WHERE status IN ('queued', 'running'))) AS videos",
             vec![MetaKey::OutsideAt.key().into(), MetaKey::TemplatePending.key().into(), MetaKey::AgentPending.key().into()],
         )?;
         let b = rows.into_iter().next().expect("a SELECT without FROM answers one row");
@@ -626,6 +626,9 @@ impl FragmentCell {
 
     pub(crate) async fn storage_token(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
+        // its token writes the repo: a deploy's first step
+        self.writable().await?;
+
         let who = self.caller_id(caller)?;
         let repo = self.must(MetaKey::Repo)?;
         let token = self.cs()?.storage_token(&repo, who).await?;

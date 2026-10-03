@@ -74,6 +74,13 @@ The guest holds no credential. Every outbound request to the hosts above
 is caught by the Computer DO's intercepts, which add what the platform
 holds. Other internet traffic goes out as it is (decision 43).
 
+### Its process
+
+The image's entrypoint is PID 1, in a PID namespace of its own (the
+cell's `containers_pid_namespace` compatibility flag, so `wrangler dev`
+matches Containers). PIDs repeat from one start to the next: a lock
+that names a PID from before a sleep can name a live process after it.
+
 ### What every image carries
 
 - `/usr/local/bin/sandbox-shim` from `cloudflare/sandbox:1.0.0`: the
@@ -147,21 +154,28 @@ holds. Other internet traffic goes out as it is (decision 43).
 
 - `POST http://model.fragment.internal/v1/chat/completions`, OpenAI's
   shape, with `model` a tier (`cheap`, `medium`, or `high` while it is
-  on) and `x-fragment-agent`. The intercept allows only these
-  endpoints, the tier's model and a capped `max_tokens`, strips any auth
-  header, calls AI Gateway, streams the provider's answer back, and
-  meters the final usage to the agent's owner (lesson 7).
-- `POST http://model.fragment.internal/anthropic/v1/messages` is
-  Anthropic's shape for the high tier, passed through as it is.
-- An owner at zero credit, or a fragment past its cap, gets 402 with the
-  reason, and no call is made.
+  on) and `x-fragment-agent`. The intercept makes it the platform's
+  model route as that agent (`POST /api/models/v1/chat/completions`,
+  signed as the agent: docs/api.md, docs/ledger.md), which allows only
+  the tier's model and a capped `max_tokens`, drops the guest's auth
+  headers, reserves the call's worst case on the agent's owner's ledger,
+  calls the model through AI Gateway, streams its answer back, and
+  settles the final usage (lesson 7).
+- A call its owner's ledger refuses (zero credit or a canceled seat:
+  402 `budget_used_up`; a guest: 403) gets the ledger's reason, and no
+  call is made.
 - Any other path is 404, unmetered. Hermes probes `GET /api/show`
   (Ollama's model metadata) with no `x-fragment-agent`; it falls back to
-  its configured context length.
-- A call without `x-fragment-agent` is refused (no one to bill). Our
-  Hermes image sets it on every call of an agent's profile (its
+  its configured context length. Anthropic's shape
+  (`/anthropic/v1/messages`) comes with the high tier, which is off
+  (decision 23).
+- A call without `x-fragment-agent` is refused (401: no one to bill).
+  Our Hermes image sets it on every call of an agent's profile (its
   `model.default_headers`), the main model's and the auxiliary ones'
   (titles, the smart-approval guardian).
+- The intercept names no fragment, so a call bills its agent's owner
+  and no fragment's cap applies (decision 36: an agent's model calls are
+  its owner's).
 
 ### Storage
 
@@ -248,9 +262,22 @@ settings and state):
 
 ## Billing
 
-Awake time is metered at the instance's rate to the computer's owner
-(decision 24), except on a $200 seat. Model calls and swaps bill the
-agent's owner. At zero credit no wake starts (decision 27).
+- Awake time is metered at the instance's rate (`FRAGMENT_COMPUTER_INSTANCE`,
+  the price book's name for it) to the computer's owner (decision 24):
+  an interval every five minutes awake and one at each sleep, kept by the
+  Computer DO until the owner's ledger has it (each once, by its
+  reference `awake:<computer>:<from>`). A $200 seat's awake time is not
+  charged.
+- Model calls bill the agent's owner, through the platform's model
+  route. Each operator key's call the provider answered is metered to
+  the agent's owner at the key's price and the margin (`key:<computer>:…`;
+  decision 37); a key with no price on the deployment is not lent.
+  Connections cost nothing to swap.
+- At zero credit, or with agents stopped, no wake starts (decision 27):
+  the owner's wake is refused with the ledger's reason (402
+  `budget_used_up` at zero credit or a canceled seat; 403 for a guest,
+  who pays for nothing), which the view's `why` keeps; a record or a page wakes nothing; no model call or
+  key call is made. A computer already awake runs on until it sleeps.
 
 ## Tests
 

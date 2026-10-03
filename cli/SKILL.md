@@ -37,4 +37,4 @@ username once, on that page or with `fragment username <name>`.
 ## Then
 
 Run `fragment guide` and read it all before you build: it is the whole
-manual (the folder, operations, deploys, sharing, the budget, errors).
+manual (the folder, operations, deploys, sharing, the ledger, errors).

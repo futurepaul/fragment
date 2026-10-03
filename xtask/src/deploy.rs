@@ -47,13 +47,17 @@ struct Deployment {
     host_secret_file: PathBuf,
     codestorage: CodeStorage,
     workos: WorkOs,
-    /// Who may top up budgets and release usernames (npubs).
+    /// Who may grant credit, set plans, and release usernames (npubs).
     #[serde(default)]
     operators: Vec<String>,
-    /// OpenRouter's management key (until phase 3 moves models to AI Gateway).
-    openrouter_management_key_file: Option<PathBuf>,
-    /// Each person's monthly budget in dollars.
-    budget_usd: Option<String>,
+    /// The AI Gateway the model route calls through (its id, named: never
+    /// `default`, which makes one that logs). Without it, models are off.
+    ai_gateway: Option<String>,
+    /// A new person's plan: `guest` (the default), `seat`, or `seat_always_on`.
+    default_plan: Option<String>,
+    /// The deployment's OpenRouter key, which pays for image and video
+    /// steps until phase 7. Without it, they are off.
+    openrouter_api_key_file: Option<PathBuf>,
     /// Computers (docs/computers.md): the images they run, and the one a
     /// new computer is pinned to. Without it, the deployment makes none.
     computers: Option<Computers>,
@@ -64,6 +68,9 @@ struct Deployment {
     /// The operator's keys a computer's swap offers (decision 37).
     #[serde(default)]
     operator_keys: BTreeMap<String, OperatorKey>,
+    /// The price book's version: raise it with every change to a key's
+    /// price, or ledgers made before keep the book they have.
+    price_book_version: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -93,6 +100,16 @@ struct OperatorKey {
     hosts: Vec<String>,
     /// The file holding the key.
     key_file: PathBuf,
+    /// What its use costs at list price: `micros` per `per` calls (the
+    /// margin is added). A key with no price is not lent.
+    price: KeyPrice,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeyPrice {
+    micros: i64,
+    per: u64,
 }
 
 #[derive(Deserialize)]
@@ -145,6 +162,8 @@ struct Names {
     jobs: String,
     deliveries: String,
     dead: String,
+    /// The meters' queue (cell/src/meter.rs).
+    ledger: String,
     bucket: String,
     platform_host: String,
     suffix: String,
@@ -165,6 +184,7 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
                 jobs: format!("fragment-jobs-{b}"),
                 deliveries: format!("fragment-deliveries-{b}"),
                 dead: format!("fragment-deliveries-dead-{b}"),
+                ledger: format!("fragment-ledger-{b}"),
                 bucket: format!("fragment-blobs-{b}"),
                 platform_host: format!("{b}.{}", d.zone),
                 suffix: d.zone.clone(),
@@ -179,6 +199,7 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
             jobs: "fragment-jobs".into(),
             deliveries: "fragment-deliveries".into(),
             dead: "fragment-deliveries-dead".into(),
+            ledger: "fragment-ledger".into(),
             bucket: "fragment-blobs".into(),
             platform_host: platform.clone(),
             suffix: suffix.clone(),
@@ -203,6 +224,9 @@ fn checked(d: Deployment) -> Result<Deployment> {
     fragment_core::swap::parse_hosts(&serde_json::to_string(&d.connections)?).map_err(|e| anyhow::anyhow!("connections: {e}"))?;
     let hosts: BTreeMap<&String, &Vec<String>> = d.operator_keys.iter().map(|(name, k)| (name, &k.hosts)).collect();
     fragment_core::swap::parse_hosts(&serde_json::to_string(&hosts)?).map_err(|e| anyhow::anyhow!("operator_keys: {e}"))?;
+    if let Some((name, _)) = d.operator_keys.iter().find(|(_, k)| k.price.micros < 1 || k.price.per < 1) {
+        bail!("operator_keys: {name}'s price is at least one micro-dollar per at least one call");
+    }
     if let Some(c) = &d.computers {
         if !c.images.contains_key(&c.default_image) {
             bail!("computers: the default image {:?} is not one of its images", c.default_image);
@@ -277,7 +301,11 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     let org_key = read_secret(&d.codestorage.private_key_file)?;
     let workos_client = read_secret(&d.workos.client_id_file)?;
     let workos_key = read_secret(&d.workos.api_key_file)?;
-    let openrouter = d.openrouter_management_key_file.as_deref().map(read_secret).transpose()?;
+    let openrouter = d.openrouter_api_key_file.as_deref().map(read_secret).transpose()?;
+    if let Some(p) = &d.default_plan {
+        anyhow::ensure!(matches!(p.as_str(), "guest" | "seat" | "seat_always_on"), "default_plan is guest, seat or seat_always_on, not {p:?}");
+    }
+    anyhow::ensure!(d.ai_gateway.as_deref() != Some("default"), "ai_gateway names the deployment's own gateway: `default` makes one that logs");
     let operator_keys: Vec<(String, String)> =
         d.operator_keys.iter().map(|(name, k)| Ok((fragment_core::swap::key_secret_name(name), read_secret(&k.key_file)?))).collect::<Result<_>>()?;
     let tools = devstack::Tools::locate()?;
@@ -309,11 +337,24 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     c.insert("routes".into(), json!(n.routes.iter().map(|p| json!({ "pattern": p, "zone_name": d.zone })).collect::<Vec<_>>()));
     c.insert("workflows".into(), json!([{ "name": n.jobs, "binding": "JOBS", "class_name": "Job" }]));
     c.insert("r2_buckets".into(), json!([{ "binding": "BLOBS", "bucket_name": n.bucket }]));
+    // every queue the checked-in config names, renamed for this deployment
+    let renamed = |q: &Value| -> Result<Value> {
+        match q.as_str() {
+            Some("fragment-deliveries") => Ok(json!(n.deliveries)),
+            Some("fragment-deliveries-dead") => Ok(json!(n.dead)),
+            Some("fragment-ledger") => Ok(json!(n.ledger)),
+            other => bail!("cell/wrangler.jsonc names a queue this deploy does not know: {other:?}"),
+        }
+    };
     let queues = &mut c["queues"];
-    queues["producers"][0]["queue"] = json!(n.deliveries);
-    queues["consumers"][0]["queue"] = json!(n.deliveries);
-    queues["consumers"][0]["dead_letter_queue"] = json!(n.dead);
-    queues["consumers"][1]["queue"] = json!(n.dead);
+    for list in ["producers", "consumers"] {
+        for q in queues[list].as_array_mut().context("cell/wrangler.jsonc lists its queues")? {
+            q["queue"] = renamed(&q["queue"])?;
+            if !q["dead_letter_queue"].is_null() {
+                q["dead_letter_queue"] = renamed(&q["dead_letter_queue"])?;
+            }
+        }
+    }
     c.insert("services".into(), json!([{ "binding": "AGENTS", "service": n.agent }]));
     // the deployment's own images in place of the e2e's stubs, or none
     match &d.computers {
@@ -355,8 +396,11 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     if !d.operators.is_empty() {
         v.insert("FRAGMENT_OPERATORS".into(), json!(d.operators.join(",")));
     }
-    if let Some(b) = &d.budget_usd {
-        v.insert("FRAGMENT_BUDGET_USD".into(), json!(b));
+    if let Some(g) = &d.ai_gateway {
+        v.insert("AI_GATEWAY_ID".into(), json!(g));
+    }
+    if let Some(p) = &d.default_plan {
+        v.insert("FRAGMENT_DEFAULT_PLAN".into(), json!(p));
     }
     if let Some(computers) = &d.computers {
         v.insert("FRAGMENT_COMPUTER_IMAGE".into(), json!(computers.default_image));
@@ -367,6 +411,11 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     if !d.operator_keys.is_empty() {
         let hosts: BTreeMap<&String, &Vec<String>> = d.operator_keys.iter().map(|(name, k)| (name, &k.hosts)).collect();
         v.insert("FRAGMENT_OPERATOR_KEYS".into(), Value::String(serde_json::to_string(&hosts)?));
+        let prices: Vec<Value> = d.operator_keys.iter().map(|(name, k)| json!({ "key": name, "micros": k.price.micros, "per": k.price.per })).collect();
+        v.insert("FRAGMENT_KEY_PRICES".into(), Value::String(serde_json::to_string(&prices)?));
+    }
+    if let Some(version) = d.price_book_version {
+        v.insert("FRAGMENT_PRICE_BOOK_VERSION".into(), json!(version.to_string()));
     }
     c.insert("vars".into(), vars);
     let cell_config = dir.join("cell.json");
@@ -374,7 +423,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
 
     println!("deploying {} ({deploy_id}) to {platform_url}", n.cell);
     ensure(wrangler(&tools, &d.account_id).args(["r2", "bucket", "create", &n.bucket]), "the bucket")?;
-    for q in [&n.dead, &n.deliveries] {
+    for q in [&n.dead, &n.deliveries, &n.ledger] {
         ensure(wrangler(&tools, &d.account_id).args(["queues", "create", q]), "a queue")?;
     }
     let agent_secrets = SecretFile::write(dir.join("agent-secrets.json"), &json!({ "FRAGMENT_HOST_SECRET": host_secret }))?;
@@ -386,7 +435,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         "WORKOS_API_KEY": workos_key,
     });
     if let Some(k) = openrouter {
-        secrets["OPENROUTER_MANAGEMENT_KEY"] = json!(k);
+        secrets["OPENROUTER_API_KEY"] = json!(k);
     }
     for (name, key) in operator_keys {
         secrets[name] = json!(key);
@@ -415,7 +464,7 @@ pub fn teardown(rest: &[String]) -> Result<()> {
         ensure(wrangler(&tools, &d.account_id).args(["delete", "--name", worker, "--force"]), "a Worker")?;
     }
     ensure(wrangler(&tools, &d.account_id).args(["workflows", "delete", &n.jobs]), "the Workflow")?;
-    for q in [&n.deliveries, &n.dead] {
+    for q in [&n.deliveries, &n.dead, &n.ledger] {
         ensure(wrangler(&tools, &d.account_id).args(["queues", "delete", q, "--force"]), "a queue")?;
     }
     println!("removed {}; its bucket {} stays (empty it, then `wrangler r2 bucket delete {}`)", n.cell, n.bucket, n.bucket);
@@ -436,11 +485,13 @@ mod tests {
             codestorage: CodeStorage { org: "o".into(), private_key_file: "k".into(), api: None },
             workos: WorkOs { client_id_file: "c".into(), api_key_file: "a".into() },
             operators: vec![],
-            openrouter_management_key_file: None,
-            budget_usd: None,
+            ai_gateway: None,
+            default_plan: None,
+            openrouter_api_key_file: None,
             computers: None,
             connections: BTreeMap::new(),
             operator_keys: BTreeMap::new(),
+            price_book_version: None,
         }
     }
 
@@ -450,6 +501,8 @@ mod tests {
     fn a_branch_names_everything_for_itself() {
         let n = names(&deployment(None, None), Some("dev")).unwrap();
         assert_eq!((n.cell.as_str(), n.agent.as_str(), n.bucket.as_str()), ("fragment-dev", "fragment-agent-dev", "fragment-blobs-dev"));
+        assert_eq!((n.deliveries.as_str(), n.dead.as_str(), n.ledger.as_str()), ("fragment-deliveries-dev", "fragment-deliveries-dead-dev", "fragment-ledger-dev"));
+
         assert_eq!(n.platform_host, "dev.finite.place");
         assert_eq!(n.routes, ["dev.finite.place/*", "*--dev.finite.place/*"]);
         assert_eq!((n.label_suffix.as_deref(), n.repo_prefix.as_deref()), (Some("--dev"), Some("dev--")));
@@ -486,7 +539,7 @@ mod tests {
         d.connections.insert("GitHub".into(), vec!["api.github.com".into()]);
         assert!(checked(d).is_err());
         let mut d = deployment(None, None);
-        d.operator_keys.insert("search".into(), OperatorKey { hosts: vec!["localhost".into()], key_file: "k".into() });
+        d.operator_keys.insert("search".into(), OperatorKey { hosts: vec!["localhost".into()], key_file: "k".into(), price: KeyPrice { micros: 1, per: 1 } });
         assert!(checked(d).is_err());
         let mut d = deployment(None, None);
         d.computers = Some(Computers { default_image: "hermes".into(), images: BTreeMap::new(), instance_type: None });

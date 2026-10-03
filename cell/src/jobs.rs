@@ -150,8 +150,8 @@ pub(crate) struct RunRow {
 }
 
 const RUN_COLUMNS: &str = "id, op, via, trigger, principal, role, depth, status, attempt, created_at, finished_at, error";
-/// What a run's paid steps cost (`spend`, ai.rs).
-const RUN_COST: &str = "(SELECT SUM(micros) FROM spend WHERE spend.run = runs.id) AS cost_micros";
+/// What a run's paid steps were charged (`charges`, ai.rs).
+const RUN_COST: &str = "(SELECT SUM(micros) FROM charges WHERE charges.run = runs.id) AS cost_micros";
 
 /// Only the cell writes `runs`: a NOT NULL column that is missing, or a
 /// stored state that does not parse, is corruption, never a default.
@@ -388,7 +388,7 @@ impl FragmentCell {
         Ok(Started { id, status, replayed: false })
     }
 
-    fn count_of(&self, q: &str, binds: Vec<SqlStorageValue>) -> CellResult<u64> {
+    pub(crate) fn count_of(&self, q: &str, binds: Vec<SqlStorageValue>) -> CellResult<u64> {
         Ok(self.rows(q, binds)?.first().and_then(|r| r["n"].as_u64()).expect("COUNT(*) answers one integer"))
     }
 
@@ -478,7 +478,11 @@ impl FragmentCell {
         // replay takes its steps afresh: the kept answers go.
         self.exec("DELETE FROM steps WHERE run = ?", vec![SqlStorageValue::Integer(id)])?;
         match outcome {
-            Ok(_) => self.event("run.succeeded", &format!("{op} run #{id}"), json!({ "op": op, "run": id })),
+            Ok(_) => {
+                // what its paid steps bought is kept for a replay, which a run that succeeded has none of
+                self.exec("DELETE FROM paid WHERE run = ?", vec![SqlStorageValue::Integer(id)])?;
+                self.event("run.succeeded", &format!("{op} run #{id}"), json!({ "op": op, "run": id }))
+            }
             Err(e) => {
                 self.event("run.held", &format!("{op} run #{id}: {}", clip(&e)), json!({ "op": op, "run": id, "attempt": attempt }));
                 let since = self.breaker_reset_at(op)?;
@@ -512,9 +516,9 @@ impl FragmentCell {
         match route {
             "advance" => {
                 let answer = self.advance(decode(body)?).await?;
-                if answer.get("failed").is_some() {
-                    // the held run polls its videos no more: their reservations go back
-                    self.release_held_videos().await;
+                if answer.get("failed").is_some() || answer.get("done").is_some() {
+                    // the run ended: nothing settles its holds now (a video still waiting on its cost)
+                    self.release_ended_holds().await;
                 }
                 Ok(answer)
             }
@@ -523,6 +527,7 @@ impl FragmentCell {
                 let call: FinishCall = decode(body)?;
                 if let Some(run) = self.current_run(call.run, call.attempt)? {
                     self.finish_run(&run, Err(call.error))?;
+                    self.release_ended_holds().await;
                 }
                 Ok(json!({ "ok": true }))
             }
@@ -544,6 +549,10 @@ impl FragmentCell {
         if let Some(f) = call.failed {
             if f.index.checked_add(1) != Some(count) {
                 return Err(CellError::invalid(format!("step {} ran out of retries, but the advance is after {count} steps", f.index)));
+            }
+            // a paid step that failed for good gives its reservation back (bug 3)
+            if f.kind.starts_with("ai.") {
+                self.release_step(&run, f.index).await;
             }
             self.keep_step(run_id, attempt, f.index, &StepResult { kind: f.kind, outcome: StepOutcome::Error(clip(&f.error)) })?;
         }
@@ -1075,8 +1084,10 @@ impl FragmentCell {
             "DELETE FROM runs WHERE status NOT IN ('queued', 'running') AND (finished_at < ? OR id <= (SELECT MAX(id) FROM runs) - ?)",
             vec![SqlStorageValue::Integer(js::now_ms() - limits::RUN_RETENTION_MS), SqlStorageValue::Integer(limits::RUNS_KEPT)],
         )?;
-        // a run's costs go with it (the ledger keeps the month's usage)
-        self.exec("DELETE FROM spend WHERE run NOT IN (SELECT id FROM runs)", vec![])
+        // a run's charges and what its steps bought go with it (the ledger keeps the month's usage)
+        self.exec("DELETE FROM charges WHERE run NOT IN (SELECT id FROM runs) AND held = 0", vec![])?;
+        self.exec("DELETE FROM paid WHERE run NOT IN (SELECT id FROM runs)", vec![])
+
     }
 
     /// `GET /api/f/<name>/runs?status=&op=&limit=`
@@ -1179,6 +1190,9 @@ impl FragmentCell {
         if !crate::serve::eq_ct(token, &self.must(MetaKey::InboxToken)?) {
             return Err(CellError::new(ErrorCode::Forbidden, "bad inbox token (x-fragment-inbox-token, or ?t=)"));
         }
+        // a delivery to the inbox is a write
+        self.writable().await?;
+
         let pending = self.count_of(
             "SELECT COUNT(*) AS n FROM runs WHERE via = 'channel' AND trigger = 'inbox' AND status IN ('queued', 'running', 'held', 'blocked')",
             vec![],

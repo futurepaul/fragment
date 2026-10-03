@@ -582,6 +582,22 @@ exit says.
    read-only, and operator commands. Exit: metering matches the price
    book, and caps and zero behave; valid, invalid and replay tests for
    each mutation.
+
+   Status, 2026-10-03 (branch `claude/phase-3-ledger`; docs/ledger.md):
+   - Built: the `Ledger` Durable Object on the pure core; the model
+     route (`cheap` and `medium` on Workers AI through the gateway,
+     `high` refused) for the agents' Worker and, from phase 4, the
+     computer's intercept (`models::complete`); AI steps on it (images
+     and videos on OpenRouter with the deployment's key until phase 7,
+     metered as `Usage::Billed`; bugs 2 and 3 fixed); the gates (at
+     zero, agents and AI stop; past the overdraft, a fragment refuses
+     writes); each fragment's meters (requests, dynamic workers,
+     storage) through the `fragment-ledger` queue; `fragment ledger` and
+     `fragment cap`. The OpenRouter-key ledger and `budget.rs` went (a
+     hard cut).
+   - Evidence: the e2e's `ledger` section on workerd, with the Workers
+     AI fake behind the model route (a lower rung). The binding itself,
+     the gateway's metadata and its logs-off rows are the hosted lane's.
 4. **Computers.** The generic Computer DO (lifecycle, wake on
    subscription, intercepts, ports, backups, pins), then our Hermes
    image (bridge, boot script, Litestream). Exit: the real-Hermes lane

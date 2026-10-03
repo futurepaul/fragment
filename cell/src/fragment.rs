@@ -42,8 +42,10 @@
 //!   POST   /api/inbox                     the inbox token (no signature)
 //!   *      /serve/<path>                  the site, `__tree`, `__file`, `__op`, `__watch`
 //!   POST   /job/advance|effect|finish     a run's Workflow (jobs.rs); never routed from outside
+//!   PUT    /api/cap                       owner: the fragment's monthly cap on the owner's ledger (meter.rs)
 //!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
 //!   POST   /deliver/report                the delivery consumer (deliveries.rs); never routed from outside
+//!   POST   /meter/acked  /meter/whose     the ledger queue's consumer, and the model route (meter.rs); never routed from outside
 //!   POST   /test/keys  /test/fragment     the router's `/api/test/*`, on fleets with test hooks only (ops.rs)
 
 use std::borrow::Cow;
@@ -141,8 +143,17 @@ CREATE TABLE IF NOT EXISTS delivery_outbox (
   attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS delivery_outbox_due ON delivery_outbox (next_at);
 CREATE INDEX IF NOT EXISTS delivery_outbox_waiting ON delivery_outbox (id) WHERE attempts > 0;
-CREATE TABLE IF NOT EXISTS spend (ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, at INTEGER NOT NULL, video TEXT);
-CREATE INDEX IF NOT EXISTS spend_run ON spend (run);
+CREATE TABLE IF NOT EXISTS charges (
+  ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, held INTEGER NOT NULL, video TEXT, at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS charges_run ON charges (run);
+CREATE INDEX IF NOT EXISTS charges_video ON charges (video) WHERE video IS NOT NULL;
+CREATE TABLE IF NOT EXISTS paid (
+  key TEXT PRIMARY KEY, run INTEGER NOT NULL, result TEXT NOT NULL, usage TEXT, settled INTEGER NOT NULL, at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS paid_run ON paid (run);
+CREATE TABLE IF NOT EXISTS meter_requests (minute INTEGER PRIMARY KEY, count INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS meter_rows (ref TEXT PRIMARY KEY, row TEXT NOT NULL, batch INTEGER);
+CREATE INDEX IF NOT EXISTS meter_rows_batch ON meter_rows (batch);
+CREATE TABLE IF NOT EXISTS meter_batches (id INTEGER PRIMARY KEY AUTOINCREMENT, sent_at INTEGER);
 ";
 
 #[durable_object]
@@ -165,6 +176,12 @@ pub struct FragmentCell {
     pub(crate) app: js::AppLoader,
     /// What this activation knows of its live sockets (live.rs).
     pub(crate) live: RefCell<crate::live::LiveMemory>,
+    /// What it last heard of its owner's standing (meter.rs `writable`).
+    pub(crate) standing: RefCell<crate::meter::StandingSeen>,
+    /// The minute it last set the alarm to close a request count for.
+    pub(crate) meter_armed: Cell<i64>,
+    /// The code version and UTC day it last noted a dynamic worker for.
+    pub(crate) dw_noted: RefCell<Option<(String, i64)>>,
 }
 
 impl DurableObject for FragmentCell {
@@ -190,6 +207,9 @@ impl DurableObject for FragmentCell {
             settling: RefCell::default(),
             app,
             live: RefCell::default(),
+            standing: RefCell::new(None),
+            meter_armed: Cell::new(-1),
+            dw_noted: RefCell::new(None),
         }
     }
 
@@ -389,6 +409,16 @@ pub(crate) enum MetaKey {
     AgentIdentity,
     /// The next time a page may pre-wake the computers its channels wake.
     PrewakeAt,
+    /// Test fleets only: how many more paid AI steps fail just after their
+    /// call was paid and kept (`fail-after-paid`), so the step is retried.
+    TestFailAfterPaid,
+    /// Test fleets only: how many more meter acknowledgements are lost
+    /// (`fail-meter-acks`), so the queue delivers their batch again.
+    TestFailMeterAcks,
+    /// The last minute whose request count was closed into a row (meter.rs).
+    MeterClosed,
+    /// When storage was last sampled (meter.rs).
+    StorageSampledAt,
 }
 
 impl MetaKey {
@@ -436,6 +466,11 @@ impl MetaKey {
             MetaKey::Computer => "computer",
             MetaKey::AgentIdentity => "agent_identity",
             MetaKey::PrewakeAt => "prewake_at",
+            MetaKey::TestFailAfterPaid => "test_fail_after_paid",
+            MetaKey::TestFailMeterAcks => "test_fail_meter_acks",
+
+            MetaKey::MeterClosed => "meter_closed",
+            MetaKey::StorageSampledAt => "storage_sampled_at",
         }
     }
 
@@ -833,6 +868,21 @@ impl FragmentCell {
             let body: Value = body_json(&mut req).await?;
             return json_response(&self.runs_on(&route, &body).await?);
         }
+        if let Some(route) = path.strip_prefix("/meter/") {
+            // Only platform code sets the header; the router never passes it.
+            if req.headers().get(crate::meter::METER_HEADER)?.is_none() {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            let body: Value = body_json(&mut req).await?;
+            return match route {
+                "acked" => {
+                    let acked: crate::meter::Acked = serde_json::from_value(body).map_err(|e| CellError::invalid(format!("meter/acked: {e}")))?;
+                    json_response(&self.meter_acked(&acked).await?)
+                }
+                "whose" => json_response(&self.whose(body["principal"].as_str().unwrap_or_default())?),
+                _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
+            };
+        }
         if let Some(op) = path.strip_prefix("/cap/files/") {
             // Only the `Files` capability sets the header; the router never passes it.
             if req.headers().get(crate::files::CAP_HEADER)?.as_deref() != Some("files") {
@@ -845,6 +895,9 @@ impl FragmentCell {
         // Every route below is the router's: decoded once, from headers only it sets.
         let Routed { name: routed_name, url, mode, signed, credential } = Routed::from_headers(req.headers())?;
         let caller = Caller { signed, unresolved: credential, url, mode };
+        // every request the router hands a fragment is its owner's to pay for
+        self.count_request();
+        self.meter_soon().await;
         if let Some(rest) = path.strip_prefix("/serve/") {
             let rest = rest.to_string();
             return self.serve(req, &caller, &routed_name, &rest).await;
@@ -886,6 +939,10 @@ impl FragmentCell {
             (Method::Post, ["api", "join", "preview"]) => {
                 let body = body_json(&mut req).await?;
                 self.join_preview(&caller, body)
+            }
+            (Method::Put, ["api", "cap"]) => {
+                let body = body_json(&mut req).await?;
+                self.put_cap(&caller, body).await
             }
             (Method::Put, ["api", "visibility"]) => {
                 let body = body_json(&mut req).await?;
@@ -1184,6 +1241,9 @@ impl FragmentCell {
             self.event("agent.join-failed", &e.message, json!({ "code": e.code }));
         }
         self.drain_deliveries().await;
+        if let Err(e) = self.flush_meters(false).await {
+            self.event("meter.flush-failed", &e.message, json!({ "code": e.code }));
+        }
         // Settles pending mutations that are due; one that fails waits for
         // its own next try and never fails the alarm.
         self.sweep_due().await?;
@@ -1199,7 +1259,10 @@ impl FragmentCell {
                 self.event("blobs.collect-failed", &e.message, json!({ "code": e.code }));
             }
             self.reconcile_runs().await;
-            self.release_held_videos().await;
+            self.release_ended_holds().await;
+            if let Err(e) = self.sample_storage(false).await {
+                self.event("meter.sample-failed", &e.message, json!({ "code": e.code }));
+            }
             self.launch_queued().await;
             let quiet = crate::plane::QUIET_PASS_MS.max(self.cfg.poll_interval_ms);
             self.set_meta(MetaKey::PollAt, &(js::now_ms() + quiet).to_string())?;
@@ -1232,7 +1295,8 @@ impl FragmentCell {
             self.set_meta(MetaKey::PollAt, &poll_at.to_string())?;
         }
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
-        let due = [outbox, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, also];
+        let due = [outbox, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, also];
+
         let at = due.into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + min_ms);
         self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;
         Ok(())

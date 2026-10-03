@@ -177,10 +177,13 @@ fn quiet_poll(s: &mut Suite, api: &Api) -> Result<()> {
     api.signed(&owner, "GET", &format!("/api/f/{name}/files"), None)?;
 
     let quiet = s.eventually(interval * 5, || ahead(&hook("alarm", None), "pollAt") > day_ms - 60_000);
+    // the alarm also wakes for the request just counted: its minute closes,
+    // its meter batch goes to the ledger and is acknowledged (cell/src/meter.rs)
+    let idle = s.eventually(Duration::from_secs(150), || ahead(&hook("alarm", None), "alarmAt") > day_ms - 180_000);
     let alarm = hook("alarm", None);
     s.ok(
         "a fragment nothing outside the platform writes is polled once a day: its next pass and its alarm are a day away",
-        quiet && ahead(&alarm, "alarmAt") > day_ms - 60_000,
+        quiet && idle,
         &alarm,
     );
     let reads = s.fake.requests(&repo, "GET branch");

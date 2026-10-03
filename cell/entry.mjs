@@ -41,6 +41,7 @@ export class Ledger extends DurableObject {
     this.rs = new rs.LedgerCell(ctx, env);
   }
   fetch(request) { return this.rs.fetch(request); }
+  alarm(info) { return this.rs.alarm(info); }
 }
 
 export class Registry extends DurableObject {
@@ -352,6 +353,6 @@ export class ComputerEgress extends WorkerEntrypoint {
     if (route === "storage") {
       return handleS3(request, this.env.BLOBS, `computers/${computer}/storage/`).then(([resp]) => resp);
     }
-    return rs.ComputerEgress.handle(request, this.env, computer, route);
+    return rs.ComputerEgress.handle(request, this.env, this.ctx, computer, route);
   }
 }

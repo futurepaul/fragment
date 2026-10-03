@@ -42,7 +42,7 @@ pub(crate) fn maybe_pointer(size: u64) -> bool {
 }
 
 impl FragmentCell {
-    fn blob_key(&self, sha: &str) -> CellResult<String> {
+    pub(crate) fn blob_key(&self, sha: &str) -> CellResult<String> {
         Ok(format!("{}/{sha}", self.must(MetaKey::Npub)?))
     }
 
@@ -62,6 +62,8 @@ impl FragmentCell {
     /// is passive media.
     pub(crate) async fn put_blob(&self, caller: &Caller, sha: &str, req: &Request) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
+        self.writable().await?;
+
         check_sha(sha)?;
         let mime = req.headers().get("content-type")?.as_deref().and_then(blob::served_type);
         let key = self.blob_key(sha)?;

@@ -27,7 +27,7 @@
 //! name is `<label>.<username>`, its owner's username.
 //!
 //! The owner's API (through the platform; the router checks the signature):
-//!   POST /api/agents                  {name, model?, instructions?} → {name, npub, model}
+//!   POST /api/agents                  {name, model? (a tier), instructions?} → {name, npub, model}
 //!                                     (again, by its owner: the same answer, `replayed`)
 //!   GET  /api/a/{name}                its conversations, and its turns' state
 //!   GET  /api/a/{name}/state?wait_ms= the owner's own turn's state, once it ends (or wait_ms, at most 25 s)
@@ -83,14 +83,12 @@ use worker::wasm_bindgen;
 use worker::{durable_object, event, DurableObject, Env, Headers, Method, Request, RequestInit, Response, State};
 
 use crate::fleet::Fleet;
-use crate::model::Spend;
 use crate::progress::{Progress, Shape};
 use crate::store::{kv_get, kv_set, kv_u64, last_answer, recent_messages};
 use crate::turn::{Driver, Model, WATCHDOG_MS_DEFAULT, WATCHDOG_MS_MIN};
 
 const PRINCIPAL_HEADER: &str = fragment_proto::routed::AGENT_PRINCIPAL;
 const MESSAGE_TEXT_MAX: usize = 16 * 1024;
-const MODEL_MAX: usize = fragment_proto::limits::AGENT_MODEL_MAX_BYTES;
 const INSTRUCTIONS_MAX: usize = fragment_proto::limits::AGENT_INSTRUCTIONS_MAX_BYTES;
 const TEST_HOLD_MS_MAX: u64 = 60_000;
 const BODY_MAX: usize = 64 * 1024;
@@ -107,8 +105,8 @@ const IGNORED_KEEP: i64 = 32;
 /// Turns one driver runs back to back before it rests and leaves the next
 /// to the alarm.
 const TURNS_PER_DRIVER_MAX: usize = 256;
-/// The platform's default model (ROADMAP decision 7).
-const DEFAULT_MODEL: &str = fragment_proto::AGENT_MODEL;
+/// The tier an agent runs on unless it names another (decision 23).
+const DEFAULT_MODEL: &str = fragment_proto::DEFAULT_TIER.as_str();
 /// The newest rows of each list the owner's view shows (messages, steers,
 /// tool runs, steps): the view grew with the agent's age.
 const VIEW_ROWS_MAX: usize = fragment_core::history::WINDOW_MESSAGES_MAX;
@@ -313,6 +311,14 @@ fn var(env: &Env, name: &str) -> Option<String> {
     env.var(name).ok().map(|v| v.to_string().trim().to_string()).filter(|s| !s.is_empty())
 }
 
+/// An agent's model: a tier the platform's model route runs (`cheap`
+/// unless named; `high` is off: fragment_core::models).
+fn tier(model: Option<String>) -> Answer<String> {
+    let tier = fragment_core::models::tier_named(model.as_deref()).map_err(|why| Fail::invalid(format!("model: {}", why.message())))?;
+    fragment_core::models::model_of(tier).map_err(|why| Fail::invalid(format!("model: {}", why.message())))?;
+    Ok(tier.as_str().to_string())
+}
+
 /// Told to the model on every turn, after the agent's instructions: those
 /// are stored when the agent is made, so a line added to
 /// `default_instructions` would never reach the agents made before it. The
@@ -415,10 +421,7 @@ impl Agent {
             let get = |k: &str| kv_get(&sql, k).map(|v| v.unwrap_or_default());
             return Ok(json!({ "name": get("name")?, "npub": get("npub")?, "model": get("model")?, "scope": get("scope")?, "replayed": true }));
         }
-        let model = body.model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
-        if model.is_empty() || model.len() > MODEL_MAX {
-            return Err(Fail::invalid(format!("a model is 1-{MODEL_MAX} bytes (an OpenRouter model id)")));
-        }
+        let model = tier(body.model)?;
         let instructions = body.instructions.unwrap_or_else(|| default_instructions(&body.name));
         if instructions.len() > INSTRUCTIONS_MAX {
             return Err(Fail::invalid(format!("instructions are at most {INSTRUCTIONS_MAX} bytes")));
@@ -458,10 +461,10 @@ impl Agent {
         if kv_get(&sql, "scope")?.as_deref() != Some(body.fragment.as_str()) {
             return Err(Fail::new(ErrorCode::Forbidden, format!("this agent is not {}'s", body.fragment)));
         }
-        let model = body.model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
+        let model = tier(body.model)?;
         let tools_fit = body.tools.len() <= fragment_proto::limits::OPERATIONS_MAX && body.tools.iter().all(|t| valid_op_name(t));
-        if model.is_empty() || model.len() > MODEL_MAX || body.instructions.is_empty() || body.instructions.len() > INSTRUCTIONS_MAX || !tools_fit {
-            return Err(Fail::invalid(format!("a model of 1-{MODEL_MAX} bytes, instructions of 1-{INSTRUCTIONS_MAX}, and operation names")));
+        if body.instructions.is_empty() || body.instructions.len() > INSTRUCTIONS_MAX || !tools_fit {
+            return Err(Fail::invalid(format!("instructions of 1-{INSTRUCTIONS_MAX} bytes, and operation names")));
         }
         kv_set(&sql, "tools", serde_json::to_string(&body.tools).map_err(Fail::host)?)?;
         kv_set(&sql, "instructions", &body.instructions)?;
@@ -526,11 +529,9 @@ impl Agent {
             return Ok(false);
         }
         let sql = self.sql();
-        let base = var(&self.env, "OPENROUTER_API_URL").unwrap_or_else(|| "https://openrouter.ai".into()).trim_end_matches('/').to_string();
         let name = kv_get(&sql, "name")?.unwrap_or_default();
         let scope = tools::scope_of(&sql)?;
         let setup = Setup {
-            base,
             model: kv_get(&sql, "model")?.unwrap_or_else(|| DEFAULT_MODEL.into()),
             instructions: turn_instructions(kv_get(&sql, "instructions")?, &name, scope.is_some()),
             scope,
@@ -1037,9 +1038,7 @@ fn wait_ms(url: &worker::Url) -> Answer<u64> {
 
 /// What every turn one driver runs shares.
 struct Setup {
-    /// The model service's base URL.
-    base: String,
-    /// The model's name.
+    /// The agent's tier.
     model: String,
     instructions: String,
     /// A fragment's own agent's (tools.rs).
@@ -1128,20 +1127,18 @@ async fn drive_turn(setup: &Setup, cancel: CancellationToken, conv: &str, asker:
     let sql = setup.storage.sql();
     // the owner is learned before any turn can start (`registration`)
     let owner_turn = kv_get(&sql, "owner")?.is_some_and(|owner| owner == asker);
-    let spend = Spend {
-        fleet: setup.fleet.clone(),
-        sql: sql.clone(),
-        turn: kv_get(&sql, "turn_id")?.unwrap_or_default(),
-        // where it was asked: its chat, or the agent itself (its owner's own conversation)
-        fragment: match store::chat_of(conv) {
-            Some((fragment, _)) => fragment.to_string(),
-            None => kv_get(&sql, "name")?.unwrap_or_default(),
-        },
-        asker: asker.clone(),
+    // where it was asked, for that fragment's cap: its chat, or the
+    // fragment a fragment's own agent serves (a job's turn names no chat);
+    // the owner's own conversation is in no fragment
+    let fragment = match (store::chat_of(conv), &setup.scope) {
+        (Some((fragment, _)), _) => Some(fragment.to_string()),
+        (None, Some(scope)) => Some(scope.fragment.clone()),
+        (None, None) => None,
     };
     let driver = Driver {
         storage: setup.storage.clone(),
-        model: Model { base: setup.base.clone(), name: setup.model.clone(), deadline_ms: setup.deadline_ms, spend },
+        model: Model { name: setup.model.clone(), deadline_ms: setup.deadline_ms, fragment },
+
         scope: setup.scope.clone(),
         fleet: setup.fleet.clone(),
         instructions: setup.instructions.clone(),

@@ -123,7 +123,7 @@ impl Code {
             Code::TooLarge => "see the limit in the message; files of 1 MiB and up sync as blobs",
             Code::AppFailed => "the app's code refused or threw (the message says why): see `fragment events <name>` and `fragment runs <name>`",
             Code::RateLimited => "back off and retry shortly",
-            Code::BudgetUsedUp => "this month's AI budget cannot cover it: `fragment budget` shows what is left; replay a held run after a top-up or next month",
+            Code::BudgetUsedUp => "the payer's ledger refused it (no credit, a fragment's cap, or read-only past the overdraft): `fragment ledger` shows why; replay a held run after a top-up or next month",
             Code::StorageFull => "the app's database is at its cap and the change was rolled back: delete data before writing more",
             Code::Unavailable => "usually transient; retrying is safe",
             Code::OutcomeUnknown => "the change may have been applied: check (`fragment status`, `fragment list`, `fragment events`) before repeating it",

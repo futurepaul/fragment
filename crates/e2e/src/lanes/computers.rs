@@ -24,11 +24,12 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::jobs::records;
+use super::ledger::{end_of, entries};
 use crate::api::{Api, Call, Socket};
-use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST, SWAP_KEY, SWAP_KEY_HOST, SWAP_KEY_VALUE};
+use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST, SWAP_KEY, SWAP_KEY_HOST, SWAP_KEY_MICROS, SWAP_KEY_VALUE};
 
-const CHAT_JSON: &[u8] = br#"{ "channels": { "chat": { "read": "public", "post": "viewer" }, "work": { "read": "viewer", "post": "editor" } } }"#;
-const AGENT_JSON: &[u8] = br#"{ "channels": { "tasks": { "read": "editor", "post": "editor" } } }"#;
+pub(super) const CHAT_JSON: &[u8] = br#"{ "channels": { "chat": { "read": "public", "post": "viewer" }, "work": { "read": "viewer", "post": "editor" } } }"#;
+pub(super) const AGENT_JSON: &[u8] = br#"{ "channels": { "tasks": { "read": "editor", "post": "editor" } } }"#;
 /// A start of the stub, its restore, and its bridge's first follow: well
 /// under this on any machine that built the image.
 const WAKE: Duration = Duration::from_secs(90);
@@ -37,31 +38,31 @@ const WAKE: Duration = Duration::from_secs(90);
 /// that wake, and the computer starts again (the newest push wins, so no
 /// wake is lost to a sleep). The lane lets the queue drain before its
 /// owner's sleeps.
-const QUEUE_DRAIN: Duration = Duration::from_secs(3);
+pub(super) const QUEUE_DRAIN: Duration = Duration::from_secs(3);
 
-fn agent_replies(recs: &[Value], agent: &str) -> Vec<Value> {
+pub(super) fn agent_replies(recs: &[Value], agent: &str) -> Vec<Value> {
     recs.iter().filter(|r| r["principal"] == agent && r["body"]["turn"].is_string() && r["body"]["text"].is_string()).cloned().collect()
 }
 
 /// A turn's id, as docs/chat-records.md defines it: what one agent does
 /// about one record.
-fn turn_of(agent: &str, fragment: &str, channel: &str, seq: i64) -> String {
+pub(super) fn turn_of(agent: &str, fragment: &str, channel: &str, seq: i64) -> String {
     hex::encode(&Sha256::digest(format!("{agent}|{fragment}/{channel}/{seq}").as_bytes())[..12])
 }
 
 /// The work records of one turn.
-fn work_of(recs: &[Value], turn: &str) -> Vec<Value> {
+pub(super) fn work_of(recs: &[Value], turn: &str) -> Vec<Value> {
     recs.iter().filter(|r| r["body"]["turn"] == turn).cloned().collect()
 }
 
 /// The agent fragment's app: its routine, which its cron runs.
-fn routine_app(chat: &str) -> String {
+pub(super) fn routine_app(chat: &str) -> String {
     format!(
         "import {{ DurableObject }} from \"cloudflare:workers\";\nexport class App extends DurableObject {{\n  routine(input, call) {{\n    call.publish(\"tasks\", {{ kind: \"routine\", text: \"water the plants\", chat: {chat:?} }});\n    return {{ ok: true }};\n  }}\n}}\n"
     )
 }
 
-const ROUTINE_JSON: &[u8] = br#"{ "operations": { "routine": { "kind": "mutation", "role": "editor" } }, "channels": { "tasks": { "read": "editor", "post": "editor" } }, "triggers": [{ "cron": "* * * * *", "run": "routine" }] }"#;
+pub(super) const ROUTINE_JSON: &[u8] = br#"{ "operations": { "routine": { "kind": "mutation", "role": "editor" } }, "channels": { "tasks": { "read": "editor", "post": "editor" } }, "triggers": [{ "cron": "* * * * *", "run": "routine" }] }"#;
 
 pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("computers") {
@@ -242,15 +243,43 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         said.starts_with("fetched 200") && seen["host"] == SWAP_KEY_HOST && seen["auth"]["x-api-key"] == SWAP_KEY_VALUE,
         json!({ "said": said, "seen": seen }),
     );
+    let owner_id = api.identity(&owner)?;
+    let keyed = s.eventually(Duration::from_secs(20), || entries(api, &owner_id, &format!("key:{id}:")).len() == 1);
+    let rows = entries(api, &owner_id, &format!("key:{id}:"));
+    s.ok(
+        "its call is metered to the agent's owner, as the agent, at the key's price and the margin",
+        keyed && rows[0]["entry"]["row"]["usage"] == json!({ "kind": "key", "key": SWAP_KEY, "units": 1 }) && rows[0]["entry"]["row"]["agent"] == identity.as_str()
+            && rows[0]["entry"]["charge"].as_i64().is_some_and(|c| c > SWAP_KEY_MICROS),
+        json!(rows),
+    );
     let said = fetched(s, 22, &format!("fetch http://{SWAP_KEY_HOST}/plain with nothing-swapped"))?;
     replies_so_far += 1;
     let seen = s.upstream.seen().last().cloned().unwrap_or_default();
     s.ok("a request with no placeholder goes on as it came", said.starts_with("fetched 200") && seen["auth"]["authorization"] == "Bearer nothing-swapped", &seen);
 
+    // the model intercept: the agent's call is the platform's model route, its owner paying
+    s.ai.clear_script();
+    let aig_before = entries(api, &owner_id, "aig:").len();
+    let said = fetched(s, 23, "think hello model")?;
+    replies_so_far += 1;
+    s.ok("a model call through the computer's intercept answers as the model did", said == "thought: echo: hello model", &said);
+    let aig = entries(api, &owner_id, "aig:");
+    s.ok(
+        "and is metered to the agent's owner, settled from its usage",
+        aig.len() == aig_before + 1 && aig.iter().filter(|e| end_of(e) == "settled").count() == aig_before + 1,
+        json!(aig),
+    );
+
     // asleep, a record wakes it, restored, and nothing is answered twice
     std::thread::sleep(QUEUE_DRAIN);
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     s.ok("its owner puts it to sleep", r.status == 200 && r.body["phase"] == "asleep", &r);
+    let awake = entries(api, &owner_id, &format!("awake:{id}:"));
+    s.ok(
+        "its awake time reaches its owner's ledger at the sleep, priced",
+        !awake.is_empty() && awake.iter().all(|e| e["entry"]["row"]["usage"]["ms"].as_u64().is_some_and(|ms| ms > 0) && e["entry"]["charge"].as_i64().is_some_and(|c| c > 0)),
+        json!(awake),
+    );
     let t0 = std::time::Instant::now();
     say(3, "are you there")?;
     replies_so_far += 1;
@@ -363,5 +392,27 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     std::thread::sleep(QUEUE_DRAIN);
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     s.ok("it sleeps at the end", r.body["phase"] == "asleep", &r);
+
+    // at zero credit agents stop, and no wake starts (decision 27): an
+    // operator makes its owner a guest
+    let op_session = api.sign_in("operator@e2e.test")?;
+    // the ledger section approves the operator's key when it runs first
+    let _ = api.approve(&op_session, &s.operator);
+    let r = api.signed(&s.operator, "POST", &format!("/api/ledger/{owner_id}/plan"), Some(&json!({ "id": "computers-guest", "plan": "guest" })))?;
+    s.ok("an operator makes its owner a guest", r.status == 200, &r);
+    let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
+    // a guest's ledger answers 403 (a guest pays for nothing); one at zero, 402
+    s.ok("its owner's ledger refuses the wake, saying why", r.status == 403 && r.text.contains("a guest pays for nothing"), &r);
+    let r = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?;
+    s.ok("it stays asleep, the refusal its why", r.body["phase"] == "asleep" && r.body["why"].as_str().is_some_and(|w| w.contains("a guest pays for nothing")), &r);
+    let replies_now = agent_replies(&records(&api, &owner, &chat_name, "chat"), &identity).len();
+    say(31, "anyone there?")?;
+    std::thread::sleep(Duration::from_secs(5));
+    let r = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?;
+    s.ok(
+        "nor does a record on its chat wake it",
+        r.body["phase"] == "asleep" && agent_replies(&records(&api, &owner, &chat_name, "chat"), &identity).len() == replies_now,
+        &r,
+    );
     Ok(())
 }

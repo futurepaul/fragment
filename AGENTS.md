@@ -72,7 +72,7 @@ prebuilt bundle is in the debt ledger).
   files, deploy, templates, share, isolation, ops, public, effects,
   facet-cap, app-lockdown, site, watch, schemas, channels, live, routes,
   cli, browser, jobs, triggers, appfiles, blobs, notes, push, ai,
-  budget, agents, addon, sync, restart, pathmode;
+  ledger, agents, addon, sync, restart, pathmode;
   `crates/e2e/src/lanes/mod.rs`). A check local workerd cannot make (its
   CPU and memory limits, a Workflow that sleeps through a crash) is a
   `skip`, printed and counted: the hosted lane's. The share, isolation, browser, and
@@ -92,9 +92,11 @@ prebuilt bundle is in the debt ledger).
   `http://<label>--<username>.fragment.localhost:8790/`, which rebuilds
   when `cell/src` or `crates/` change,
   agents (`agent/`, goose's loop) beside it in the same process (the router
-  hands them `/api/agents` and `/api/a/*`), whose turns spend their
-  owner's budget (a per-person OpenRouter key, minted with the management
-  key `OPENROUTER_MANAGEMENT_KEY_FILE` names), the code.storage fake on :8792 (state in `target/devstack/`; its org
+  hands them `/api/agents` and `/api/a/*`), whose model calls go through
+  the model route to the Workers AI fake on :8796 (echoes; dev never calls
+  a real model) and spend their owner's ledger (dev people are seats, with
+  the month's included credit; images and videos only with the key
+  `OPENROUTER_API_KEY_FILE` names), the code.storage fake on :8792 (state in `target/devstack/`; its org
   key and the host secret are made there on first run), and sign-in at
   http://127.0.0.1:8790/ through the WorkOS fake on :8794 (any email), or
   a real WorkOS environment when `WORKOS_CLIENT_ID_FILE` and
@@ -122,7 +124,8 @@ prebuilt bundle is in the debt ledger).
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
   logic, host-tested; sealing at rest is `seal.rs`), `crates/nip98`,
   `crates/templates` (`templates/`, embedded),
-  `crates/fakes` (code.storage, OpenRouter, WorkOS, a push service),
+  `crates/fakes` (code.storage, Workers AI, OpenRouter, WorkOS, a push service),
+
   `crates/devstack`, `crates/e2e`.
 - `images/` (the computer images: the bridge, the stub, our Hermes image;
   docs/bridge.md) is its own workspace: `cargo test --workspace` and

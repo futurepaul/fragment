@@ -4,10 +4,10 @@
 //!   dev [--clean]    build, then run the stack in the foreground under
 //!                    `wrangler dev`: the cell on :8790 (fragments at
 //!                    <label>--<username>.fragment.localhost:8790), the
-//!                    code.storage fake on :8792, and the agents' Worker beside
-//!                    it (their turns spend their owner's budget: a
-//!                    real OpenRouter key per person, minted with the
-//!                    management key OPENROUTER_MANAGEMENT_KEY_FILE names)
+//!                    code.storage fake on :8792, the Workers AI fake on :8796
+//!                    behind the model route, and the agents' Worker beside it
+//!                    (their turns spend their owner's ledger; new people are
+//!                    seats with the month's included credit)
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -40,6 +40,9 @@ const WORKER_BUILD_VERSION: &str = "0.8.5";
 const DEV_PORT: u16 = 8790;
 const DEV_CODESTORAGE_PORT: u16 = 8792;
 const DEV_WORKOS_PORT: u16 = 8794;
+/// The Workers AI fake behind the model route (`FRAGMENT_AI_URL`): dev
+/// never calls real models.
+const DEV_AI_PORT: u16 = 8796;
 /// The WorkOS fake's environment in dev.
 const DEV_WORKOS_CLIENT: &str = "client_fragment_dev";
 const DEV_WORKOS_KEY: &str = "sk_test_fragment_dev";
@@ -111,6 +114,7 @@ fn dev(args: &[String]) -> Result<()> {
             (devstack::WorkOsVars { client_id: DEV_WORKOS_CLIENT.into(), api_key: DEV_WORKOS_KEY.into(), api_url: Some(fake.url.clone()) }, Some(fake))
         }
     };
+    let ai = fragment_fakes::workers_ai::WorkersAi::start(DEV_AI_PORT)?;
     let workos_label = match &workos.api_url {
         Some(u) => format!("{u} (the fake)"),
         None => format!("WorkOS {}", workos.client_id),
@@ -128,13 +132,16 @@ fn dev(args: &[String]) -> Result<()> {
         job_retry_delay_s: 2,
         blob_grace_s: None,
         openrouter_url: None,
+        // images and videos only with a key of the deployment's own (real OpenRouter: real money)
+        openrouter_key: read("OPENROUTER_API_KEY_FILE")?,
+        ai_url: Some(ai.url.clone()),
+        ai_gateway: None,
+        // a dev person is a seat, with the month's included credit
+        default_plan: Some("seat".into()),
         delivery_retry_s: None,
         workos: Some(workos),
         // the CLI's host: sign-in and approvals happen where it points
         platform_url: Some(format!("http://127.0.0.1:{DEV_PORT}")),
-        // budgets pay for AI only with a management key (real OpenRouter: real money)
-        openrouter_management: read("OPENROUTER_MANAGEMENT_KEY_FILE")?,
-        budget_usd: None,
         operators: None,
         signins_pending_max: None,
         test_hooks: false,
@@ -143,6 +150,7 @@ fn dev(args: &[String]) -> Result<()> {
         connections: None,
         operator_keys: None,
         operator_key_values: vec![],
+        key_prices: None,
         swap_upstream: None,
     }
     .configure(&devstack::cell_dir())?;
@@ -151,7 +159,6 @@ fn dev(args: &[String]) -> Result<()> {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
         fragment_api: format!("http://127.0.0.1:{DEV_PORT}"),
         agent_url: format!("http://127.0.0.1:{DEV_PORT}"),
-        openrouter_url: None,
         test_hooks: false,
     }
     .configure(&devstack::agent_dir())?;
@@ -170,6 +177,8 @@ fn dev(args: &[String]) -> Result<()> {
     println!("  fragments:    http://<label>--<username>.fragment.localhost:{DEV_PORT}/");
     println!("  agents:       {}/api/agents (beside it; signed)", node.base);
     println!("  code.storage: {} (the fake)", fake.url);
+    println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url);
+
     println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
     println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");
     let status = node.wait()?;

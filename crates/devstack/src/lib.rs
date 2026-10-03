@@ -127,6 +127,27 @@ pub fn absolute_images(config: &mut serde_json::Value, from: &Path) -> Result<()
     Ok(())
 }
 
+/// Bindings `wrangler dev` always runs against Cloudflare itself: it starts
+/// a remote session for them as it boots, which takes a login and an
+/// account, so a local node runs without them. The model route's AI
+/// binding is one; dev and the e2e point the route at the Workers AI fake
+/// instead (`FRAGMENT_AI_URL`), and the cell never reads the binding then.
+const REMOTE_ONLY_BINDINGS: [&str; 1] = ["ai"];
+
+/// The project's config as a local node runs it: `wrangler.local.jsonc`,
+/// beside its own (so its paths resolve the same), less the remote-only
+/// bindings.
+fn local_config(project: &Path) -> Result<PathBuf> {
+    let mut config = read_config(project)?;
+    let obj = config.as_object_mut().context("a wrangler config is an object")?;
+    for b in REMOTE_ONLY_BINDINGS {
+        obj.remove(b);
+    }
+    let path = project.join("wrangler.local.jsonc");
+    fs::write(&path, serde_json::to_string_pretty(&config)?)?;
+    Ok(path)
+}
+
 /// A copy of the built agent project at `dir`.
 pub fn stage_agent(dir: &Path) -> Result<PathBuf> {
     stage(&agent_dir(), dir, &[])
@@ -199,8 +220,17 @@ pub struct Fleet {
     pub job_retry_delay_s: u32,
     /// How long a blob no branch names is kept (`None`: the cell's 7 days).
     pub blob_grace_s: Option<u32>,
-    /// Where AI calls go (`None`: OpenRouter itself).
+    /// Where image and video steps go (`None`: OpenRouter itself), and the
+    /// deployment's key for them (`None`: they are off).
     pub openrouter_url: Option<String>,
+    pub openrouter_key: Option<String>,
+    /// Where the model route sends its calls (`FRAGMENT_AI_URL`: the Workers
+    /// AI fake in dev and the e2e; `None`: the AI binding, through
+    /// `ai_gateway`).
+    pub ai_url: Option<String>,
+    pub ai_gateway: Option<String>,
+    /// A new person's plan (`FRAGMENT_DEFAULT_PLAN`; `None`: the cell's, guest).
+    pub default_plan: Option<String>,
     /// The wait before a delivery is retried, every time (`None`: the
     /// cell's, 10 s growing with the delivery's age to an hour).
     pub delivery_retry_s: Option<u32>,
@@ -209,11 +239,7 @@ pub struct Fleet {
     /// The platform's origin (sign-in, the platform session), when it is
     /// not the hostname suffix itself.
     pub platform_url: Option<String>,
-    /// Budgets: the OpenRouter management key that mints each person's key
-    /// (`None`: only a fragment's own key pays), the monthly budget in
-    /// dollars (`None`: the cell's 20), and who may top one up.
-    pub openrouter_management: Option<String>,
-    pub budget_usd: Option<String>,
+    /// Who may grant credit and set plans (`FRAGMENT_OPERATORS`).
     pub operators: Option<String>,
     /// Pending sign-ins the Registry keeps (`None`: the cell's default,
     /// `limits::SIGNINS_PENDING_MAX_DEFAULT`).
@@ -232,6 +258,8 @@ pub struct Fleet {
     pub connections: Option<String>,
     pub operator_keys: Option<String>,
     pub operator_key_values: Vec<(String, String)>,
+    /// The keys' prices (`FRAGMENT_KEY_PRICES`' JSON).
+    pub key_prices: Option<String>,
     pub swap_upstream: Option<String>,
 }
 
@@ -267,6 +295,18 @@ impl Fleet {
         if let Some(u) = &self.openrouter_url {
             vars.push(("OPENROUTER_API_URL", u.as_str()));
         }
+        if let Some(k) = &self.openrouter_key {
+            vars.push(("OPENROUTER_API_KEY", k.as_str()));
+        }
+        if let Some(u) = &self.ai_url {
+            vars.push(("FRAGMENT_AI_URL", u.as_str()));
+        }
+        if let Some(g) = &self.ai_gateway {
+            vars.push(("AI_GATEWAY_ID", g.as_str()));
+        }
+        if let Some(p) = &self.default_plan {
+            vars.push(("FRAGMENT_DEFAULT_PLAN", p.as_str()));
+        }
         let retry = self.delivery_retry_s.map(|r| r.to_string());
         if let Some(r) = &retry {
             vars.push(("FRAGMENT_DELIVERY_RETRY_S", r.as_str()));
@@ -287,12 +327,6 @@ impl Fleet {
         }
         if let Some(p) = &self.platform_url {
             vars.push(("FRAGMENT_PLATFORM_URL", p.as_str()));
-        }
-        if let Some(k) = &self.openrouter_management {
-            vars.push(("OPENROUTER_MANAGEMENT_KEY", k.as_str()));
-        }
-        if let Some(b) = &self.budget_usd {
-            vars.push(("FRAGMENT_BUDGET_USD", b.as_str()));
         }
         if let Some(o) = &self.operators {
             vars.push(("FRAGMENT_OPERATORS", o.as_str()));
@@ -320,6 +354,9 @@ impl Fleet {
         for ((_, value), name) in self.operator_key_values.iter().zip(&key_names) {
             vars.push((name.as_str(), value.as_str()));
         }
+        if let Some(p) = &self.key_prices {
+            vars.push(("FRAGMENT_KEY_PRICES", p.as_str()));
+        }
         if let Some(u) = &self.swap_upstream {
             vars.push(("FRAGMENT_SWAP_UPSTREAM", u.as_str()));
         }
@@ -327,8 +364,8 @@ impl Fleet {
     }
 }
 
-/// What an agent fleet is configured with: the platform it acts on, the
-/// model service, and its own host secret.
+/// What an agent fleet is configured with: the platform it acts on (its
+/// model calls are the platform's model route's), and its own host secret.
 pub struct AgentFleet {
     pub host_secret: String,
     /// The fragment platform's base URL (`FRAGMENT_API`).
@@ -336,9 +373,6 @@ pub struct AgentFleet {
     /// The agent fleet's own base URL (`AGENT_URL`): the inboxes it gives
     /// fragments to deliver to.
     pub agent_url: String,
-    /// Where model calls go (`None`: OpenRouter itself). The key is each
-    /// owner's, which the platform's `Ledger` mints (`POST /api/budget/key`).
-    pub openrouter_url: Option<String>,
     /// The owner's test controls (holds, the watchdog period): dev and e2e only.
     pub test_hooks: bool,
 }
@@ -351,10 +385,8 @@ impl AgentFleet {
             ("FRAGMENT_API", self.fragment_api.as_str()),
             ("AGENT_URL", self.agent_url.as_str()),
         ];
-        if let Some(u) = &self.openrouter_url {
-            vars.push(("OPENROUTER_API_URL", u.as_str()));
-        }
         if self.test_hooks {
+
             vars.push(("AGENT_TEST_HOOKS", "allow"));
         }
         write_dev_vars(project, &vars)
@@ -448,7 +480,7 @@ impl Node {
         }
         let (log, out) = boot_log(&opts.log_dir, opts.port)?;
         let mut cmd = Command::new(&tools.wrangler);
-        cmd.arg("dev").arg("-c").arg(opts.project.join("wrangler.jsonc"));
+        cmd.arg("dev").arg("-c").arg(local_config(&opts.project)?);
         for other in &opts.with {
             cmd.arg("-c").arg(other.join("wrangler.jsonc"));
         }

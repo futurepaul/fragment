@@ -369,10 +369,11 @@ async fn send(env: &Env, d: &Delivery) -> Result<Option<String>> {
 /// its own: one slow receiver holds up only its own delivery, never the
 /// rest of the batch (other fragments' included). The queue's
 /// `max_batch_size` (wrangler.jsonc) bounds how many are in flight.
-pub async fn consume(batch: MessageBatch<Delivery>, env: Env) -> Result<()> {
+pub async fn consume(batch: MessageBatch<Value>, env: Env) -> Result<()> {
     let cfg = Config::from_env(&env);
-    let dead = batch.queue() == DEAD_QUEUE;
-    let messages = batch.messages()?;
+    // a branch deployment's queue is named for its branch after this
+    let dead = batch.queue().starts_with(DEAD_QUEUE);
+    let messages: Vec<Message<Delivery>> = batch.raw_iter().map(Message::try_from).collect::<Result<_>>()?;
     assert!(messages.len() <= CONSUME_BATCH_MAX, "a delivery batch holds at most {CONSUME_BATCH_MAX} messages, not {}", messages.len());
     futures_util::future::join_all(messages.into_iter().map(|message| consume_one(message, &env, cfg, dead))).await;
     Ok(())

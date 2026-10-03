@@ -167,8 +167,7 @@ pub mod limits {
     /// How long `GET /api/a/{name}/state?wait_ms=` may wait in the agent's
     /// cell for its turn to end (inside a client's 30 s request timeout).
     pub const AGENT_STATE_WAIT_MS_MAX: u64 = 25_000;
-    /// An agent's model (an OpenRouter model id), and its instructions.
-    pub const AGENT_MODEL_MAX_BYTES: usize = 128;
+    /// An agent's instructions.
     pub const AGENT_INSTRUCTIONS_MAX_BYTES: usize = 8 * 1024;
 }
 
@@ -329,7 +328,9 @@ pub enum ErrorCode {
     /// 503: the identity registry did not answer; nothing signed is
     /// decided without it (docs/finite-integration.md, rule 7).
     RegistryUnavailable,
-    /// 402: the paying person's budget for the month cannot cover the step.
+    /// 402: the paying person's ledger refused the spend (no credit, a
+    /// fragment's cap, a read-only overdraft; the message says which:
+    /// docs/ledger.md).
     BudgetUsedUp,
     /// 507: the app's database is at its cap (`limits::APP_DB_MAX_BYTES`);
     /// the mutation was rolled back.
@@ -574,10 +575,37 @@ pub struct MemberList {
     pub members: Vec<Member>,
 }
 
-/// The platform's model: agents in cells use it unless they name another.
-/// The high-speed variant of `z-ai/glm-5.3-flash`, at about 8 times its
-/// price.
-pub const AGENT_MODEL: &str = "z-ai/glm-5.3-flashx";
+/// A model tier (docs/cloudflare-v1.md, decision 23): what an agent's
+/// `model`, a fragment's `agent.model`, a job's `ai.text` `model`, and a
+/// model call's `model` name. The platform maps each to its model
+/// (`fragment_core::models`): `cheap` is GLM-5.3 Flash and `medium`
+/// GLM-5.3, both on Workers AI. `high` (Opus) is a name the platform
+/// refuses, saying why, until Cloudflare raises Unified Billing's Opus
+/// limit; a model id is never one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tier {
+    Cheap,
+    Medium,
+    High,
+}
+
+impl Tier {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Tier::Cheap => "cheap",
+            Tier::Medium => "medium",
+            Tier::High => "high",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Tier> {
+        [Tier::Cheap, Tier::Medium, Tier::High].into_iter().find(|t| t.as_str() == s)
+    }
+}
+
+/// The tier agents and AI steps run on unless they name another.
+pub const DEFAULT_TIER: Tier = Tier::Cheap;
 
 /// What an identity is (docs/finite-integration.md). A fragment's own key
 /// stays the fragment's and is not registered. An agent has a designated
@@ -1128,7 +1156,7 @@ pub struct Run {
     pub input: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Value>,
-    /// What its paid steps cost the budget that paid (micro-dollars).
+    /// What its paid steps were charged on the ledger that paid (micro-dollars).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_micros: Option<i64>,
 }
@@ -1141,79 +1169,6 @@ pub struct RunList {
     pub runs: Vec<Run>,
     pub counts: std::collections::BTreeMap<String, u64>,
     pub paused: Vec<String>,
-}
-
-/// A month of a billing org's budget (`GET /api/budget`). Money is in
-/// micro-dollars; the allowance is the budget plus the month's top-ups.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BudgetView {
-    pub billing_org: String,
-    pub period: String,
-    pub budget_micros: i64,
-    pub topped_up_micros: i64,
-    pub allowance_micros: i64,
-    pub spent_micros: i64,
-    pub reserved_micros: i64,
-    pub remaining_micros: i64,
-    /// At or past 80% of the allowance.
-    pub warn: bool,
-    /// The newest usage first.
-    #[serde(default)]
-    pub usage: Vec<UsageRow>,
-}
-
-/// One paid step, in the shape finite.computer's Core takes usage
-/// (FIN-10: source reference, agent, billing org, period, unit, quantity),
-/// recorded once per source reference.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsageRow {
-    /// `<fragment>@<incarnation>/run/<run>/step/<index>`
-    pub source_ref: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>,
-    pub billing_org: String,
-    pub period: String,
-    pub unit: UsageUnit,
-    /// What it cost (settled), or what it holds (reserved).
-    pub quantity: i64,
-    pub state: UsageState,
-    pub kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    pub fragment: String,
-    /// Who started the run (it may be a visitor; the owner pays).
-    pub principal: String,
-    pub at: i64,
-}
-
-/// What a usage row's quantity counts: micro-dollars.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UsageUnit {
-    UsdMicro,
-}
-
-/// A paid step holds its reservation until it settles to its cost.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UsageState {
-    Reserved,
-    Settled,
-}
-
-impl UsageState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            UsageState::Reserved => "reserved",
-            UsageState::Settled => "settled",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<UsageState> {
-        [UsageState::Reserved, UsageState::Settled].into_iter().find(|u| u.as_str() == s)
-    }
 }
 
 /// `POST /api/f/<name>/pause` (editor): triggers stop starting runs of
@@ -1525,12 +1480,12 @@ mod tests {
         assert_eq!(Via::parse("inbox"), None);
         assert!(!Via::Call.triggered() && !Via::Job.triggered());
         assert!(Via::Cron.triggered() && Via::Channel.triggered() && Via::Files.triggered());
-        for u in [UsageState::Reserved, UsageState::Settled] {
-            assert_eq!(UsageState::parse(u.as_str()), Some(u));
-            assert_eq!(serde_json::to_value(u).unwrap(), u.as_str());
+        for t in [Tier::Cheap, Tier::Medium, Tier::High] {
+            assert_eq!(Tier::parse(t.as_str()), Some(t));
+            assert_eq!(serde_json::to_value(t).unwrap(), t.as_str());
         }
-        assert_eq!(UsageState::parse("pending"), None);
-        assert_eq!(serde_json::to_value(UsageUnit::UsdMicro).unwrap(), "usd_micro");
+        assert_eq!(Tier::parse("z-ai/glm-5.3-flashx"), None, "a tier is named, never a model id");
+        assert_eq!(DEFAULT_TIER.as_str(), "cheap");
     }
 
     #[test]

@@ -19,8 +19,8 @@ use crate::Suite;
 
 const TODO_APP: &[u8] = include_bytes!("../../fixtures/todo.mjs");
 const TODO_JSON: &[u8] = include_bytes!("../../fixtures/todo.json");
-const BUDGET_APP: &[u8] = include_bytes!("../../fixtures/budget.mjs");
-const BUDGET_JSON: &[u8] = include_bytes!("../../fixtures/budget.json");
+const LEDGER_APP: &[u8] = include_bytes!("../../fixtures/ledger.mjs");
+const LEDGER_JSON: &[u8] = include_bytes!("../../fixtures/ledger.json");
 const SECRET: &str = "sk-e2e-restart-5b2e07";
 const MEMBER_EMAIL: &str = "restart-member@e2e.test";
 
@@ -58,10 +58,21 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     // a ledger: a month with something spent
     let paid = s.named(&api, &owner, "restart-paid")?;
     let pc = s.create(&api, &owner, &paid)?;
-    ship(s, &pc, BUDGET_APP, BUDGET_JSON);
+    ship(s, &pc, LEDGER_APP, LEDGER_JSON);
+    // the deploy lands by the webhook: a query answers once it has
+    s.eventually(Duration::from_secs(30), || api.op(&owner, &paid, "notes", "q", json!({})).is_ok_and(|r| r.status == 200));
     let r = api.op(&owner, &paid, "summarize", "before", json!({ "text": "before the restart" }))?;
     jobs::settle(&api, &owner, &paid, jobs::started(&r), &["succeeded"], Duration::from_secs(40));
-    let spent = api.signed(&owner, "GET", "/api/budget", None)?.body["spentMicros"].clone();
+    // an operator's grant and the fragment's cap: commands the ledger keeps
+    let op_session = api.sign_in("operator@e2e.test")?;
+    let op_id = api.approve(&op_session, &s.operator)?.body["id"].as_str().unwrap_or("").to_string();
+    let owner_id = api.identity(&owner)?;
+    let grant = json!({ "id": "restart-g", "micros": 1_000_000, "by": op_id, "why": "before the restart" });
+    let r = api.signed(&s.operator, "POST", &format!("/api/ledger/{owner_id}/grant"), Some(&grant))?;
+    let cap = json!({ "id": "restart-c", "micros": 7_000_000 });
+    let r2 = api.signed(&owner, "PUT", &format!("/api/f/{paid}/cap"), Some(&cap))?;
+    anyhow::ensure!(r.status == 200 && r2.status == 200, "ledger setup: {r} {r2}");
+    let balance = api.signed(&owner, "GET", "/api/ledger", None)?.body["balanceMicros"].clone();
     // a paused operation: its pause is a row, not a cached list
     let r = api.signed(&owner, "POST", &format!("/api/f/{paid}/pause"), Some(&json!({ "op": "summarize", "paused": true })))?;
     anyhow::ensure!(r.status == 200, "pause setup: {r}");
@@ -87,8 +98,24 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.ok("after a restart the registry still knows an added key", r.status == 200, &r);
     let r = api.signed(&revoked, "GET", "/api/fragments", None)?;
     s.ok("and a revoked key stays revoked", r.status == 401, &r);
-    let r = api.signed(&owner, "GET", "/api/budget", None)?;
-    s.ok("after a restart the month's spend is what it was", r.status == 200 && r.body["spentMicros"] == spent && spent.as_i64().unwrap_or(0) > 0, &r);
+    let r = api.signed(&owner, "GET", "/api/ledger", None)?;
+    let steps = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": owner_id, "op": "entries", "prefix": format!("step:{paid}@") })))?;
+    let settled = steps.body["entries"].as_array().is_some_and(|e| e.len() == 1 && e[0]["entry"]["end"]["end"] == "settled");
+    // the fragments' meters land when their batches do: requests and a few
+    // dynamic workers' days (3000 µ$ each) may have charged the owner since
+    let kept = r.body["balanceMicros"].as_i64().zip(balance.as_i64()).is_some_and(|(now, then)| now <= then && then - now < 50_000 && then < 51_000_000 && then > 50_000_000);
+    s.ok("after a restart the ledger is what it was: the step's charge settled, the balance less it", r.status == 200 && settled && kept, json!({ "ledger": r.body, "then": balance, "steps": steps.body }));
+    let capped = r.body["fragments"].as_array().is_some_and(|f| f.iter().any(|f| f["fragment"] == paid.as_str() && f["capMicros"] == 7_000_000));
+    let again = api.signed(&s.operator, "POST", &format!("/api/ledger/{owner_id}/grant"), Some(&grant))?;
+    let other = api.signed(&s.operator, "POST", &format!("/api/ledger/{owner_id}/grant"), Some(&json!({ "id": "restart-g", "micros": 2_000_000, "by": op_id, "why": "" })))?;
+    let cap_again = api.signed(&owner, "PUT", &format!("/api/f/{paid}/cap"), Some(&cap))?;
+    let after = api.signed(&owner, "GET", "/api/ledger", None)?;
+    s.ok(
+        "and its commands: the cap holds, a grant or a cap again changes nothing, another body under a grant's id is 409",
+        capped && again.status == 200 && other.status == 409 && cap_again.status == 200 && after.body["purchasedMicros"] == r.body["purchasedMicros"],
+        format!("{again} | {other} | {cap_again} | {}", after.body),
+    );
+
     let r = api.signed(&owner, "GET", &format!("/api/f/{paid}/runs?limit=1"), None)?;
     s.ok("after a restart a paused operation is still paused", r.status == 200 && r.body["paused"] == json!(["summarize"]), &r);
     let r = api.status(&owner, &stored)?;

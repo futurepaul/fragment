@@ -1,13 +1,14 @@
 # The usage ledger
 
-Status: **the pure core is built** (phase 3 of docs/cloudflare-v1.md,
-decisions 24–28 and 36–37; spike S4). It is `crates/core/src/ledger.rs`
-(the state machine) and `crates/core/src/price.rs` (the price book), with
-the public wire types in `crates/proto/src/ledger.rs`. The Ledger Durable
-Object that runs it, and the meter sources that feed it, are the
-integrator's (below). It supersedes `crates/core/src/budget.rs` and the
-OpenRouter-backed `Ledger` cell (`cell/src/ledger.rs`), which go when the
-cell moves onto it.
+Status: **built** (phase 3 of docs/cloudflare-v1.md, decisions 24–28 and
+36–37; spike S4). The pure core is `crates/core/src/ledger.rs` (the state
+machine) and `crates/core/src/price.rs` (the price book), with the public
+wire types in `crates/proto/src/ledger.rs`. The cell runs it: the
+`Ledger` Durable Object (`cell/src/ledger.rs`), the model route
+(`cell/src/models.rs`), AI steps (`cell/src/ai.rs`), and each fragment's
+meters and write gate (`cell/src/meter.rs`); docs/api.md (Models, Ledger)
+is the wire contract. It replaced the OpenRouter-backed ledger and
+`crates/core/src/budget.rs` (a hard cut).
 
 ## The model
 
@@ -86,6 +87,7 @@ the gateway's log `cost`) and its cost basis (list plus fee).
 | `browser` | ms of Browser Rendering | $0.09 an hour | Browser Rendering pricing |
 | `images` | unique transformations | $0.50 per thousand | Cloudflare Images pricing |
 | `key` | the key's own unit | set per key (`micros` per `per` units) | the operator; none by default |
+| `billed` | a vendor's reported cost, micro-dollars | the vendor's own, plus its fee from the book (`openrouter`: none, its cost includes it) | the vendor's answer (OpenRouter's `usage.cost`, images and videos until phase 7) |
 
 Checked against S4's real numbers: a $0.004 Flash turn is charged
 $0.0063; the gateway's own `cost` equals our list price on every call;
@@ -172,19 +174,22 @@ for people.
 | `REF_KEEP_MS` | 90 days | the audit retention; sources retry within hours |
 | `CLOCK_SKEW_MS` | 5 minutes | a row's source runs on its own clock |
 
-## The Ledger Durable Object (proposed)
+## The Ledger Durable Object
 
-One `Ledger` DO per person, named by the person's identity. Each route is
-one `transactionSync` over the head and the store. The bodies are the
-core's types (inner) or proto's (public); answers are JSON of the answer
-types, and refusals are `ErrorBody {error: code(), message: message()}`.
+One `Ledger` DO per person, named by the person's identity (cell/src/ledger.rs).
+Each route is one `transactionSync` over the head and the store (a
+`js.rs` helper: workers-rs 0.8.5 has none). The bodies are the core's
+types (inner) or proto's (public); answers are JSON of the answer types,
+and refusals are `ErrorBody {error: code(), message: message()}` with the
+typed `refused` beside it, so a caller tells a read-only owner from a
+guest. A statement that fails marks the store at fault, and the route
+rolls back whole. A new person's ledger starts as the core makes it (a
+guest), then takes `FRAGMENT_DEFAULT_PLAN` under `plan:default`.
 
 Tables:
 
-- `head`: one row of columns (plan, seat, seat_seq, overdraft, month,
-  included_granted, included_left, purchased_left, read_only, the
-  totals) plus the book (JSON: bounded and typed) and `holds (ref, amount,
-  fragment, at_ms)`;
+- `head`: the head (`Ledger`), kept whole as one JSON row: small and
+  bounded (at most 256 holds), checked as it is read back;
 - `entries (ref PRIMARY KEY, kind, at_ms, …)`, `batches (id PRIMARY KEY,
   digest, answer, at_ms)`, `commands (id PRIMARY KEY, command, at_ms)`;
 - `spend (month, fragment, micros, PRIMARY KEY (month, fragment))`,
@@ -202,19 +207,23 @@ Inner routes (platform code only, through the DO's stub):
 | `POST /fragment-open` | `{fragment}` | `{}` or `cap_reached` |
 | `POST /grant`, `/plan`, `/seat`, `/overdraft`, `/cap` | proto's `GrantCredit`, `SetPlan`, `SetSeat`, `SetOverdraft`, `SetFragmentCap` | `{}` |
 | `POST /status` | `{}` | proto's `LedgerStatus` |
+| `POST /test` | `{op: clock {offsetMs} \| sweep \| entries {prefix} \| totals}` | test fleets only |
 
 Before each route the DO compares its book's version with the
 configured one and applies `SetPriceBook {id: "book:<version>"}` when the
-configuration is newer. Its alarm runs `sweep` at `next_sweep_ms`.
+configuration is newer (`configured_book`: the core's defaults until the
+deployment's configuration carries one; the debt ledger). Its alarm runs
+`sweep` at `next_sweep_ms`.
 
-Public routes (a hard cut of `/api/budget`):
+Public routes (a hard cut of `/api/budget`; docs/api.md, Ledger):
 
 - `GET /api/ledger` (the person; an agent reads its owner's) →
-  `LedgerStatus`.
-- `PUT /api/f/<name>/cap {id, micros}` (the fragment's owner).
+  `LedgerStatus`; `fragment ledger [--json]`.
+- `PUT /api/f/<name>/cap {id, micros}` (the fragment's owner; kept as
+  `cap:<fragment>:<id>`); `fragment cap <name> <usd>|default`.
 - Operators: `POST /api/ledger/<user>/grant|plan|seat|overdraft` with
-  proto's bodies (the CLI's `fragment budget … top-up` becomes `fragment
-  ledger grant`).
+  proto's bodies, their ids kept as `<kind>:<id>`; `fragment ledger
+  grant <user> <usd> --why <text>`.
 
 ## How each meter reaches it
 
@@ -233,11 +242,17 @@ mark sends the same batch again, which answers as before.
   rule is only a backstop. The payer is the agent's owner; the fragment
   is the agent's.
 - **AI steps** (a job's `ai.*`, voice input). The step's reference
-  (`step:<fragment>@<incarnation>/run/<run>/step/<index>`) is reserved
-  before the call, settled after, and released on a final failure. A
-  retried step whose reservation answers `settled` reuses the result the
-  DO kept beside the reference and never calls the model again (bug 2).
-  The payer is the fragment's owner, `capped` when the spender is not.
+  (`step:<fragment>@<incarnation>/run/<run>/attempt/<attempt>/step/<index>`:
+  a replay is a new attempt, so a step released before reserves again) is
+  reserved before the call; what the call bought is kept in the Fragment
+  DO beside the step (by its key without the attempt, so a replay finds
+  it), and then it is settled. A retried step that finds what it kept
+  reuses it and never calls the model again (bug 2); one whose
+  reservation answers `settled` with nothing kept (the node died between
+  the two) fails rather than buy again. A final failure releases (bug 3),
+  as does a step whose retries ran out and any hold of a run that ended.
+  The payer is the fragment's owner, `capped` when the run's principal is
+  neither the owner nor an agent of theirs.
 - **The in-fragment agent's turns**: as model calls, the fragment's owner
   paying.
 - **Operator keys** (decision 37): the intercept reserves a `key` worst
@@ -247,14 +262,24 @@ mark sends the same batch again, which answers as before.
   (`awake:<computer>:<from ms>`). The payer is the computer's owner. The
   ledger waives an always-on seat's awake time; no wake starts when
   `may_spend(wake)` refuses.
-- **Storage** (a cron, hourly). It samples each fragment's R2 prefix, its
-  SQLite and its git repository, and meters `bytes × hours since the last
-  sample` (`store:<fragment>:<class>:<hour>`) to the fragment's owner. A
-  computer's backups bill the computer's owner.
-- **Requests** (the Fragment DO, which sees each one): a row per minute
-  (`req:<fragment>:<minute>`) to the fragment's owner.
+- **Storage** (the Fragment DO's alarm, daily). It samples the fragment's
+  SQLite (its own and its app facet's) and its blobs, and meters `bytes ×
+  hours since the last sample` (`store:<fragment>@<incarnation>:<class>:<at>`)
+  to the fragment's owner. Its git repository is not sampled yet (the
+  debt ledger). A computer's backups bill the computer's owner.
+- **Requests** (the Fragment DO, which sees each one the router hands
+  it): a row per minute (`req:<fragment>@<incarnation>:<minute>`) to the
+  fragment's owner, closed once the minute has passed.
 - **Dynamic workers** (the Fragment DO): one row the first time a code
-  version loads on a UTC day (`dw:<fragment>:<version>:<day>`).
+  version loads on a UTC day (`dw:<fragment>@<incarnation>:<version>:<day>`).
+
+The fragment's three meters share its outbox (`meter_rows`), flushed by
+its alarm one batch at a time (at most 200 rows, under the queue's 128 KB
+message) as `frag:<fragment>@<incarnation>:<n>`; the queue's consumer
+applies it and tells the fragment, which forgets it, and one not
+acknowledged within five minutes is sent again. A guest's ledger refuses
+the batch, so a guest's fragments are billed nothing.
+
 - **Screenshots and images** (the deploy path): `browser` and `images`
   rows to the fragment's owner.
 

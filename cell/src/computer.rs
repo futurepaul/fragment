@@ -26,6 +26,8 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use fragment_core::computer::{Action, Event, Lifecycle, Phase, Socket, Step, Wake};
+use fragment_core::ledger::{Meter, MeterRow, Spend};
+use fragment_core::price::Usage;
 use fragment_core::swap::{self, Credential};
 use fragment_proto::computer::{valid_computer_id, AgentConnections, ComputerAgent, ComputerPhase, ComputerView, PortTicket};
 use fragment_proto::{ErrorCode, IdentityKind};
@@ -91,6 +93,8 @@ const TOKEN_MARGIN_MS: i64 = 60_000;
 const TOKEN_HOLD_MAX_MS: i64 = 10 * 60_000;
 /// Tokens held at once (all go when it is full: there are few owners).
 const TOKENS_MAX: usize = 64;
+/// Awake intervals one flush sends (one is made every five minutes awake).
+const METER_ROWS_MAX: u64 = 64;
 
 #[derive(Clone, Copy)]
 enum MetaKey {
@@ -374,20 +378,84 @@ impl ComputerCell {
                 Action::Start { generation } => reported.push(self.start(generation).await),
                 Action::Sleep { generation } => reported.push(self.sleep(generation).await),
                 Action::Meter { from_ms, to_ms } => {
-                    // the owner's ledger takes these from here (phase 3's meters)
+                    // kept until the owner's ledger has it: a flush that fails
+                    // is tried again at the next interval, or the next wake
                     self.exec("INSERT INTO awake (from_ms, to_ms) VALUES (?, ?) ON CONFLICT (from_ms) DO NOTHING", vec![from_ms.into(), to_ms.into()])?;
+                    self.flush_awake().await;
                 }
             }
         }
         Ok(reported)
     }
 
-    /// The environment every image may rely on (docs/computers.md).
+    /// A wake, unless the owner's ledger refuses it (decision 27: at zero
+    /// credit, no wakes). A computer already up is not asked about. A
+    /// ledger that does not answer lets it wake (docs/ledger.md).
+    async fn wake(&self, why: Wake) -> CellResult<()> {
+        let owner = self.must(MetaKey::Owner)?;
+        if !matches!(self.lifecycle()?.phase, Phase::Awake { .. } | Phase::Starting { .. }) {
+            let may = crate::ledger::MaySpend { spend: Spend::Wake, fragment: None, by_owner: true };
+            if let Err(e) = crate::ledger::ask(&self.env, &owner, &may).await {
+                if e.refused.is_some() {
+                    self.set_meta(MetaKey::Note, &e.message)?;
+                    console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "wake": why, "refused": e.message }));
+                    return Err(CellError::new(e.code, e.message));
+                }
+                console_error!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "wake": why, "ledger": e.message }));
+            }
+            self.flush_awake().await;
+        }
+        // a wake that started nothing says why
+        if let Some(why) = self.drive(Event::Wake { why }).await? {
+            return Err(CellError::new(ErrorCode::WontWake, why));
+        }
+        Ok(())
+    }
+
+    /// Sends the awake intervals the ledger has not taken to the owner's
+    /// ledger (each once, by its reference), and forgets those it took. A
+    /// failure is logged; they go with the next flush.
+    async fn flush_awake(&self) {
+        if let Err(e) = self.try_flush_awake().await {
+            console_error!("{}", json!({ "computer": "awake-flush", "error": e.message }));
+        }
+    }
+
+    async fn try_flush_awake(&self) -> CellResult<()> {
+        let (id, owner) = (self.must(MetaKey::Id)?, self.must(MetaKey::Owner)?);
+        let rows = self.rows("SELECT from_ms, to_ms FROM awake ORDER BY from_ms LIMIT ?", vec![(METER_ROWS_MAX as i64).into()])?;
+        let intervals: Vec<(i64, i64)> = rows.iter().filter_map(|r| Some((r["from_ms"].as_i64()?, r["to_ms"].as_i64()?))).collect();
+        let Some((first, _)) = intervals.first().copied() else { return Ok(()) };
+        let last = intervals.last().map_or(first, |(from, _)| *from);
+        let meter_rows = intervals
+            .iter()
+            .filter(|(from, to)| to > from)
+            .map(|(from, to)| MeterRow {
+                reference: format!("awake:{id}:{from}"),
+                usage: Usage::Awake { instance: self.cfg.computer_instance.clone(), ms: (to - from) as u64 },
+                fragment: None,
+                agent: None,
+                computer: Some(id.clone()),
+                at_ms: *to,
+            })
+            .collect::<Vec<_>>();
+        if !meter_rows.is_empty() {
+            let meter = Meter { batch: format!("awake:{id}:{first}-{last}"), rows: meter_rows };
+            let metered = crate::ledger::ask(&self.env, &owner, &meter).await.map_err(CellError::from)?;
+            for r in &metered.refused {
+                // a row the ledger refused changed nothing there: it is logged, not kept
+                console_error!("{}", json!({ "computer": id, "awake": meter.rows.get(r.index as usize).map(|m| &m.reference), "refused": r.why }));
+            }
+        }
+        self.exec("DELETE FROM awake WHERE from_ms >= ? AND from_ms <= ?", vec![first.into(), last.into()])
+    }
+
     /// The hosts the swap intercepts: every connection's and operator key's.
     fn swap_hosts(&self) -> JsValue {
         js::to_js(&json!(swap::all_hosts([&self.cfg.connections, &self.cfg.operator_keys])))
     }
 
+    /// The environment every image may rely on (docs/computers.md).
     fn guest_env(&self, id: &str, image: &str, restoring: bool) -> Value {
         let mut env = json!({
             "FRAGMENT_COMPUTER": id,
@@ -570,10 +638,7 @@ impl ComputerCell {
             "computer/wake" => {
                 let b: WakeBody = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;
-                // a wake that started nothing says why
-                if let Some(why) = self.drive(Event::Wake { why: b.why }).await? {
-                    return Err(CellError::new(ErrorCode::WontWake, why));
-                }
+                self.wake(b.why).await?;
                 json_response(&self.view()?)
             }
             "computer/sleep" => {
@@ -629,7 +694,7 @@ impl ComputerCell {
             }
             "computer/credential" => {
                 let b: CredentialAsk = body_json(&mut req).await?;
-                json_response(&json!({ "secret": self.credential(b).await? }))
+                json_response(&self.credential(b).await?)
             }
             "computer/ticket" => {
                 let b: TicketAsk = body_json(&mut req).await?;
@@ -679,12 +744,14 @@ impl ComputerCell {
     }
 
     /// The secret to swap in for `b`'s placeholder, when its agent runs here
-    /// and may use it.
-    async fn credential(&self, b: CredentialAsk) -> CellResult<String> {
-        let rows = self.rows("SELECT owner, connections FROM agents WHERE fragment = ?", vec![b.agent.as_str().into()])?;
+    /// and may use it: `{secret, owner, identity}` (the agent's), so the
+    /// egress meters a key's call to its owner.
+    async fn credential(&self, b: CredentialAsk) -> CellResult<Value> {
+        let rows = self.rows("SELECT owner, identity, connections FROM agents WHERE fragment = ?", vec![b.agent.as_str().into()])?;
         let agent = rows.first().ok_or_else(|| CellError::new(ErrorCode::Forbidden, format!("{} does not run on this computer", b.agent)))?;
         let owner = agent["owner"].as_str().unwrap_or_default().to_string();
-        match (b.connection, b.key) {
+        let identity = agent["identity"].as_str().unwrap_or_default().to_string();
+        let secret = match (b.connection, b.key) {
             (Some(provider), None) => {
                 let allowed: Vec<String> = serde_json::from_str(agent["connections"].as_str().unwrap_or("[]")).unwrap_or_default();
                 if !allowed.contains(&provider) {
@@ -699,10 +766,22 @@ impl ComputerCell {
                 if !self.cfg.operator_keys.contains_key(&name) {
                     return Err(CellError::invalid(format!("no operator key {name:?} on this deployment")));
                 }
+                if !self.cfg.key_prices.iter().any(|p| p.key == name) {
+                    return Err(CellError::new(ErrorCode::Forbidden, format!("the operator key {name} has no price on this deployment, so it is not lent")));
+                }
+                // a paid call its owner's ledger would refuse is never made (decision 27)
+                let may = crate::ledger::MaySpend { spend: Spend::AgentTurn, fragment: None, by_owner: true };
+                if let Err(e) = crate::ledger::ask(&self.env, &owner, &may).await {
+                    if e.refused.is_some() {
+                        return Err(CellError::new(e.code, e.message));
+                    }
+                    console_error!("{}", json!({ "computer": "key", "ledger": e.message }));
+                }
                 crate::keys::operator_key(&self.env, &name).ok_or_else(|| CellError::host(format!("{} is not set", swap::key_secret_name(&name))))
             }
             _ => Err(CellError::invalid("ask for one connection or one key")),
-        }
+        }?;
+        Ok(json!({ "secret": secret, "owner": owner, "identity": identity }))
     }
 
     /// `owner`'s token for `provider`: the one held, or WorkOS Pipes' for
@@ -794,9 +873,7 @@ impl ComputerCell {
         // a request to a sleeping computer's port wakes it, as a tab does
         let life = self.lifecycle()?;
         if !matches!(life.phase, Phase::Awake { .. }) {
-            if let Some(why) = self.drive(Event::Wake { why: Wake::Tab }).await? {
-                return Err(CellError::new(ErrorCode::WontWake, why));
-            }
+            self.wake(Wake::Tab).await?;
         }
         let out = self.call("port", &[JsValue::from_f64(f64::from(port)), JsValue::from(req.inner())]).await?;
         let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host("the port answered no Response"))?;
@@ -962,13 +1039,14 @@ pub struct ComputerEgress;
 
 #[wasm_bindgen]
 impl ComputerEgress {
-    pub async fn handle(request: worker_sys::web_sys::Request, env: Env, computer: String, route: String) -> worker_sys::web_sys::Response {
+    pub async fn handle(request: worker_sys::web_sys::Request, env: Env, ctx: worker_sys::Context, computer: String, route: String) -> worker_sys::web_sys::Response {
         let req = Request::from(request);
+        let ctx = Context::new(ctx);
         let (method, path) = (req.method().to_string(), req.path());
         let answered = match route.as_str() {
-            "api" => egress_api(req, &env, &computer).await,
-            "model" => Err(CellError::new(ErrorCode::HostFailed, "the model route arrives with the ledger (phase 3)")),
-            "swap" => egress_swap(req, &env, &computer).await,
+            "api" => egress_api(req, &env, &ctx, &computer).await,
+            "model" => egress_model(req, &env, &ctx, &computer).await,
+            "swap" => egress_swap(req, &env, &ctx, &computer).await,
             r => Err(CellError::new(ErrorCode::NotFound, format!("no egress route {r}"))),
         };
         // one line per refusal (lesson 14): the guest's requests never reach
@@ -990,7 +1068,7 @@ impl ComputerEgress {
 /// names: the agent fragment signs it (NIP-98) only when it runs on this
 /// computer, and the router answers it as it would from the internet.
 /// Without the header, only the computer's own routes answer.
-async fn egress_api(mut req: Request, env: &Env, computer: &str) -> CellResult<Response> {
+async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     let url = req.url()?;
     let path = url.path().to_string();
@@ -1085,7 +1163,33 @@ async fn egress_api(mut req: Request, env: &Env, computer: &str) -> CellResult<R
         init.with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
     }
     let out = Request::new_with_init(&target, &init)?;
-    crate::route(out, env).await
+    crate::route(out, env, ctx).await
+}
+
+/// The guest's model call (docs/computers.md, Models): `POST
+/// /v1/chat/completions`, OpenAI's shape, with `model` a tier and
+/// `x-fragment-agent`. It is the platform's model route as that agent
+/// (`models::route`, signed as egress_api signs), which bounds it, meters
+/// it to the agent's owner, and refuses at zero credit. Its auth headers
+/// are the guest's and go nowhere; any other path is 404, unmetered.
+async fn egress_model(mut req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
+    if req.method() != Method::Post || req.path() != "/v1/chat/completions" {
+        return Err(CellError::new(ErrorCode::NotFound, "the model intercept answers POST /v1/chat/completions"));
+    }
+    if req.headers().get(AGENT_HEADER)?.is_none() {
+        return Err(CellError::new(ErrorCode::Unauthenticated, "name the agent this call is for (x-fragment-agent): its owner pays for it"));
+    }
+    let headers = Headers::new();
+    for k in [AGENT_HEADER, "content-type", "accept"] {
+        if let Some(v) = req.headers().get(k)? {
+            headers.set(k, &v)?;
+        }
+    }
+    let body = crate::read_body(&mut req, crate::models::MODEL_BODY_MAX_BYTES).await?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post).with_headers(headers).with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
+    let api = Request::new_with_init("http://api.fragment.internal/api/models/v1/chat/completions", &init)?;
+    egress_api(api, env, ctx, computer).await
 }
 
 /// Headers a hop answers for itself, never sent on.
@@ -1097,7 +1201,7 @@ const HOP_HEADERS: [&str; 9] = ["connection", "keep-alive", "proxy-authorization
 /// hosts, for the agent `x-fragment-agent` names, and it goes on over
 /// HTTPS. A request with no placeholder goes on as it is (decision 43).
 /// Only headers carry placeholders; a body or a URL is sent as it came.
-async fn egress_swap(mut req: Request, env: &Env, computer: &str) -> CellResult<Response> {
+async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     let url = req.url()?;
     let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
@@ -1128,6 +1232,8 @@ async fn egress_swap(mut req: Request, env: &Env, computer: &str) -> CellResult<
         return Err(CellError::invalid(format!("at most {} placeholders a request", swap::PLACEHOLDERS_MAX)));
     }
     let mut resolved = BTreeMap::new();
+    // whose ledger a key's call goes on, and as which agent
+    let mut payer: Option<(String, String)> = None;
     if !wanted.is_empty() {
         let agent = agent.ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "name the agent this acts as (x-fragment-agent)"))?;
         if !fragment_proto::valid_fragment_name(&agent) {
@@ -1141,6 +1247,9 @@ async fn egress_swap(mut req: Request, env: &Env, computer: &str) -> CellResult<
             let answer = ask(env, computer, "computer/credential", &ask_body).await?;
             let secret = answer["secret"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| CellError::host("the computer resolved no credential"))?;
             resolved.insert(c.clone(), secret.to_string());
+            if let (Some(owner), Some(identity)) = (answer["owner"].as_str(), answer["identity"].as_str()) {
+                payer = Some((owner.to_string(), identity.to_string()));
+            }
         }
     }
     let headers = Headers::new();
@@ -1174,6 +1283,31 @@ async fn egress_swap(mut req: Request, env: &Env, computer: &str) -> CellResult<
         .send()
         .await
         .map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")))?;
+    // each key's call the provider answered is metered to the agent's owner
+    // (decision 37), after the answer: a failed meter is logged, never retried
+    // into the guest's call
+    if let Some((owner, identity)) = payer.filter(|_| out.status_code() < 500) {
+        for key in wanted.iter().filter_map(|c| match c {
+            Credential::Key(k) => Some(k.clone()),
+            Credential::Connection(_) => None,
+        }) {
+            let reference = format!("key:{computer}:{}", js::random_hex::<12>());
+            let row = MeterRow {
+                reference: reference.clone(),
+                usage: Usage::Key { key, units: 1 },
+                fragment: None,
+                agent: Some(identity.clone()),
+                computer: Some(computer.to_string()),
+                at_ms: js::now_ms(),
+            };
+            let (env, owner) = (env.clone(), owner.clone());
+            ctx.wait_until(async move {
+                if let Err(e) = crate::ledger::ask(&env, &owner, &Meter { batch: reference, rows: vec![row] }).await {
+                    console_error!("{}", json!({ "egress": "swap", "meter": e.message }));
+                }
+            });
+        }
+    }
     // one line per swap (lesson 14), naming the credentials, never their values
     if !wanted.is_empty() {
         let names: Vec<String> = wanted.iter().map(Credential::placeholder).collect();

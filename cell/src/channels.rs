@@ -341,8 +341,11 @@ impl FragmentCell {
         if size > limits::RECORD_BODY_MAX_BYTES {
             return Err(CellError::too_large("a record's body", size, limits::RECORD_BODY_MAX_BYTES));
         }
+        // a post is a write: past its owner's overdraft the fragment takes none
+        self.writable().await?;
         let key = post_key(principal, id);
         // the append and the look for an earlier one are one step (no await between)
+
         let (record, appended) = match self.append(channel, principal, POST_KIND, body, Some((&key, POST_INDEX)))? {
             Some(record) => (record, true),
             None => (self.posted(&key, channel, body)?, false),
