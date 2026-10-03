@@ -11,27 +11,6 @@ and are at the tag `celld-final`. Entries about the hosted fleet (Fly,
 the node image, its secrets) are the `celld` branch's, which runs
 fragment.club until cutover (decisions 34–35).
 
-## Author code shares a process with every fragment and the host secrets
-
-- **Observed:** each fragment's `app.mjs` (its operations, jobs, and
-  `fetch`) runs in a loaded worker inside the same celld process that
-  holds the fleet's keys (in `KEYS`'s memory and the node's environment,
-  since H1: no longer in any isolate) and every other fragment's cells.
-  The hardening pass took `eval` and `Atomics.wait` from loaded workers,
-  capped their heaps and databases, and closed the internal listener to
-  unsigned callers. Its env holds only its own capabilities, but an
-  isolate escape is not ruled out: celld's own security page calls it
-  not safe for hostile multi-tenant use while it is alpha.
-- **Risk:** an isolate escape or side channel reads other fragments' data
-  and the host's secrets.
-- **First proof:** any author able to publish code they did not write
-  themselves (public signup, agent-written code for strangers).
-- **Delete when:** before strangers can publish code, author code runs
-  somewhere that holds no platform secrets and no other tenant's state
-  (a separate fleet reached only through per-fragment capability
-  tokens), proven by a test that an author isolate cannot reach another
-  fragment or a host secret.
-
 ## Pages loaded before presence changes came one at a time hear the whole list
 
 - **Observed:** round 3 (S8) made a presence change one socket's change
@@ -199,17 +178,6 @@ fragment.club until cutover (decisions 34–35).
   "Photoshop file" exception in MODEL), and a per-fragment policy keeps
   the bytes named by the last N live commits.
 
-## workers-rs cannot take celld's queue binding
-
-- **Observed:** phase 2 slice F. `env.queue()` in workers-rs 0.8.5 checks
-  the binding's constructor name (`WorkerQueue`); celld's is `Queue`, so
-  the cell sends through the binding with `Reflect` (`js::queue_send`).
-  The service-binding spike found the same kind of mismatch.
-- **Risk:** none today; a surprise when another binding type is added.
-- **First proof:** already present.
-- **Delete when:** workers-rs or celld agree on the names (a one-line
-  upstream change on either side).
-
 ## The notes viewer is a prebuilt bundle
 
 - **Observed:** phase 2 slice G. `templates/notes/site/assets/` is
@@ -292,61 +260,19 @@ fragment.club until cutover (decisions 34–35).
   (`fragment-node` chowns it once, then drops privileges before exec),
   shipped in a node deploy and checked on the fleet.
 
-## Loaded workers are never released
+## The cell signs code.storage tokens for any repo a fragment names
 
-- **Observed:** the isolation spike (2026-09-23); the hardening pass (H2)
-  made it visible. celld holds at most 255 loaded workers per script (256
-  per process) and releases a named one (`LOADER.get`) only when the node
-  restarts. We load one per fragment with an app, so a node that has
-  served 255 fragments' apps answers 503 `node_full` for the next one
-  (the e2e's `node-full` lane, with the bound lowered through our fork's
-  `CELLD_LOADED_WORKERS_MAX`); the apps it holds keep serving.
-- **Risk:** past about 255 active apps per node, new apps stop loading
-  until a restart; a tenant that makes many fragments can fill a node.
-- **First proof:** `node_full` answered on the fleet, or a node's
-  loaded-worker count (its `/state`, by the operator) near 255.
-- **Delete when:** the fork releases an idle loaded worker (evicting it
-  from the registry and the harness's `byName` memo, and aborting the
-  facet that used it) with per-tenant accounting, proven by a test that
-  loads more apps than the bound and every one still answers.
-
-## KEYS signs code.storage tokens for any repo a fragment names
-
-- **Observed:** H1. `KEYS` signs a code.storage JWT only for a `Fragment`
-  cell (the host attests the class), but for whatever repo that cell
-  names: the binding between a fragment and its repo is the cell's own
-  record. A repo's id is opaque (code.storage makes it), so `KEYS` cannot
-  derive it from the caller.
+- **Observed:** H1, and in the cell since phase 2 (`cell/src/keys.rs`).
+  A code.storage JWT is signed for whatever repo the fragment's
+  supervisor names: the binding between a fragment and its repo is the
+  cell's own record. A repo's id is opaque (code.storage makes it), so
+  the signer cannot derive it from the caller.
 - **Risk:** a supervisor made to ask for another fragment's repo gets a
-  token for it (at most fifteen minutes). Supervisors share a V8 context
-  (up to 32 cells), so a compromised one could act as any cell there
-  anyway; the org key itself stays in the node.
+  token for it (at most fifteen minutes).
 - **First proof:** a bug in the cell that lets a caller choose the repo
   a token names.
-- **Delete when:** `KEYS` makes the repo (or answers a binding it signed
-  when it did) and checks it on every token.
-
-## ArrayBuffer memory is outside the heap ceiling
-
-- **Observed:** H3. Our fork ends an isolate's execution once its V8
-  heap passes twice its limit (the e2e's `app-lockdown` lane), but an
-  ArrayBuffer's bytes live outside the V8 heap and are not counted.
-- **Risk:** an app that allocates large ArrayBuffers can still grow the
-  node's memory.
-- **First proof:** a node's memory growing with one fragment's traffic.
-- **Delete when:** the fork gives each loaded worker an ArrayBuffer
-  allocator with a budget (ending the isolate past it), with a test.
-
-## WebAssembly compiled from bytes never settles in an app
-
-- **Observed:** H3. With `CELLD_DYNAMIC_LOCKDOWN=1`, `eval` and `new
-  Function` throw in an app, but `WebAssembly.compile(bytes)` neither
-  resolves nor rejects (the call hangs until the client gives up). Only
-  the app's own call waits, as a never-settling promise would.
-- **Risk:** an author who tries Wasm gets a hang instead of an error.
-- **First proof:** an author asking why their Wasm module hangs.
-- **Delete when:** the fork refuses Wasm from bytes with an error in a
-  locked-down worker (or allows it deliberately), with a test.
+- **Delete when:** tokens are signed only for the repo the fragment's
+  creation recorded, checked on every token, with a test.
 
 ## A deleted fragment leaves its agent registered
 
@@ -446,98 +372,6 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** a paid step's answer is kept before anything else
   runs (the image as a blob by its hash first), so a retry settles
   without calling again.
-
-## A node restarted after a kill has twice died of SIGILL
-
-- **Observed:** phase 6, 2026-09-24. In two of about six full e2e runs
-  (both with the machine's load at 20 to 30 from other sessions' runs),
-  the computer lane's check (gone at the cut) that killed the node
-  mid-command ended with
-  the restarted node exiting on SIGILL: a V8 fatal error, most likely,
-  as hundreds of cells from the earlier lanes woke at once, the agents'
-  script co-hosted beside the cell. It never happened with the lane run
-  alone (five runs, one at load 30), nor in the full run with the node's
-  own logs on (848 passed).
-- **Risk:** a fragment.club node that dies hard, restarts, and wakes
-  everything at once could die again.
-- **First proof:** the next time it happens: the e2e runs its nodes with
-  their own logs on and keeps a failing run's scratch, one log per boot
-  (`target/e2e/<run>/celld-<port>-<boot>.log`, the killed node's among
-  them); or a node on the fleet restarting twice.
-- **Delete when:** the fatal is caught and fixed in celld or here, or a
-  run of full e2es under load no longer shows it.
-
-## After a restart the registry waits behind every alarm wake
-
-- **Observed:** phase 6, 2026-09-24. On CI's runners the checks right
-  after a node restart failed with `registry_unavailable` ("route
-  failed: CapacityExhausted"): celld admits cold cells first come, first
-  served, and the registry, the one cell every signed request needs,
-  waited out its 15 s deadline behind the fragments whose alarms all
-  woke at once. `ask_registry` now asks again twice (after 250 ms, then
-  500 ms) when the node refused the route that way, so a request can wait
-  about 45 s instead of failing. It retries only that refusal, which
-  celld answers for a request still queued at its gate: any other failure
-  may come after the registry acted, and its calls are not idempotent.
-- **Risk:** on a fleet with many fragments, a restarted node answers
-  signed requests slowly, or with 503s, until its alarm wakes drain.
-- **First proof:** CI's e2e (three-core macOS runners), the checks that
-  restart the node in the agents and restart lanes. A gate narrowed
-  locally with `CELLD_ACTIVATIONS=1` is not a stand-in: celld's own
-  readiness gives up first.
-- **Delete when:** the registry is admitted ahead of alarm wakes (a
-  priority in celld's gate, or a registry kept warm), or the node wakes
-  its alarms in a bounded trickle.
-
-## App data from before celld v0.6.0 reads as empty
-
-- **Observed:** 2026-09-27, after fragment.club's nodes moved from the
-  v0.5.1 fork to v0.6.0 (#57, `--nodes --stop-first`, ~12:50Z). Every
-  app's own database written before then read as empty (a guestbook's
-  rows, the desktop's chats, the pet's frame); the supervisors' data
-  (channels, events, members) was intact, and the hosted e2e passed,
-  since it makes fresh fragments. An upstream bug, reproduced with
-  denoland's own 0.5.1 and 0.6.0 binaries: v0.6.0 imports a facet's
-  v0.5.1 image (a row of its root's `_cf_FACETS`) only into a new file
-  that is empty (`PRAGMA page_count` 0) and not restored, but under
-  replication the facet's stream creates the file first, with ltx's
-  control tables, so the import never runs.
-- **Risk:** none now: Paul, the only user, chose to start over rather than
-  restore, and the fork stays at `4f50c81` (no patch). The old images
-  still sit in each fragment's root database; deleting the fragment
-  removes its image (`facets.delete`). A later celld upgrade can lose data
-  the same way unless it is tested (docs/operate.md, celld upgrades).
-- **First proof:** already present.
-- **Fix in hand, not used:** a fork commit that imports the image table by
-  table, once, keeping ltx's control tables (a whole-file backup would
-  wedge replication), on the unpushed local branch
-  `facet-legacy-import-unpushed` of `celld-worktrees/v060` (`6b296a2`).
-- **Delete when:** the fragments from before 2026-09-27 are deleted or
-  re-created (their images go with them), or upstream fixes the import
-  and nothing needs it.
-
-## A deleted fragment's app stream can outlive it
-
-- **Observed:** 2026-09-27, the hosted e2e on celld v0.6.0 (fork
-  `4f50c81`): a fragment deleted and made again under the same name failed
-  its app calls with "refusing to restore Fragment:…/facets/… from used
-  epoch 10 into writer epoch …". Since v0.6.0 an app's database is a
-  stream of its own under the fragment's cell, and the old life's objects
-  were in the bucket at an epoch the new life could not start from. Not
-  reproduced on one local node (bucket durability); the fleet runs fleet
-  durability, whose uploads trail, and `rm` did not wait for
-  `facets.delete`.
-- **Fix:** each life of a name has its own app facet, `app@<incarnation>`
-  (`MetaKey::AppFacet`; fragments made before keep `app`), so a new life
-  never opens an old stream; `rm` waits for `facets.delete`. The `ops`
-  e2e deletes a fragment with app data and makes it again.
-- **Risk:** an old life's stream that `facets.delete` did not remove stays
-  in the bucket as garbage (bytes, never read).
-- **First proof:** objects under `cells/Fragment:<id>/facets/` for a
-  facet no live fragment names.
-- **Delete when:** celld's facet delete is proven complete under fleet
-  durability (or reported and fixed upstream), and a sweep has removed
-  what earlier deletes left.
 
 ## An agent runs one turn at a time, across all its chats
 
@@ -650,18 +484,51 @@ fragment.club until cutover (decisions 34–35).
   reader's socket hears the frame, that a stranger is refused, and that
   a draft past the pace is refused (429).
 
-## The Computer and Hermes classes are migrated but not deleted
+## The hosted lane is not built
 
-- **Observed:** the cut (2026-10-02). `cell/wrangler.jsonc` keeps the
-  `v5` and `v6` migrations that made the `Computer` and `Hermes` classes;
-  neither is bound or exported any more. celld takes
-  `new_sqlite_classes` alone and stops a deployment that deletes a class,
-  so the `deleted_classes` migration waits.
-- **Risk:** a deploy to a real Workers account with those migrations and
-  no class carries two dead classes' objects (and refuses, if Cloudflare
-  checks the export); a reader takes the tags for live classes.
-- **First proof:** the first `wrangler deploy` of the cell.
-- **Delete when:** phase 2 moves the cell to wrangler and adds
-  `{"tag": "v7", "deleted_classes": ["Computer", "Hermes"]}` (or starts
-  the migrations over, since nothing on fragment.club migrates), proven
-  by a deploy to a preview.
+- **Observed:** phase 2 (2026-10-03). The e2e runs on local workerd,
+  whose limits differ from Cloudflare's: it enforces no CPU, memory,
+  subrequest or concurrency limit (spike S1), and its Workflows keep a
+  sleep as a timer in the process, so one never wakes after a crash of
+  `wrangler dev`. Those checks are `skip`s, counted in every run. The
+  branch deployment exists (`cargo xtask deploy --branch`), but nothing
+  runs the suite against one yet: it waits on the dev zone's wildcard DNS
+  record and on how test people sign in on WorkOS staging (Paul).
+- **Risk:** a limit or a Workflow resume that only Cloudflare exercises
+  breaks unseen.
+- **First proof:** any skip in a run's summary.
+- **Delete when:** the hosted lane runs the suite against a branch
+  deployment from CI, with no skips left.
+
+## A query can write past its app's cap
+
+- **Observed:** phase 2. A mutation that leaves the app's database over
+  16 MiB rolls back (507), but a query (or a route) that writes anyway is
+  not stopped: celld's hard stop 4 MiB above the cap went with the fork.
+- **Risk:** an app grows its database without bound outside mutations,
+  at its owner's storage cost.
+- **First proof:** an app's database over 16 MiB.
+- **Delete when:** writes outside a mutation and the constructor are
+  refused (or capped) by `platform.mjs`, with a test.
+
+## A blob larger than the zone's request limit cannot be uploaded
+
+- **Observed:** phase 2. A blob route takes up to 256 MiB, but
+  Cloudflare refuses a request body past the zone plan's limit (100 MB
+  on Free and Pro) before the Worker sees it.
+- **Risk:** `fragment sync` of a file between 100 MB and 256 MiB fails.
+- **First proof:** a 101 MB file synced to a deployment on a Free zone.
+- **Delete when:** blobs upload in parts (R2 multipart through the
+  cell), each under the limit, with a test of a 150 MB file.
+
+## The dev proxy may answer an early refusal with its own 500
+
+- **Observed:** phase 2. Under `wrangler dev`, a Worker that answers
+  before a chunked upload ends (the body limit's 413) sometimes reaches
+  the client as miniflare's own 500, "Network connection lost". The e2e
+  accepts that answer locally, saying so; Cloudflare's edge has no such
+  proxy.
+- **Risk:** none in production; a weaker local check.
+- **First proof:** already present.
+- **Delete when:** the hosted lane checks the 413 itself, or miniflare
+  passes the early answer through.

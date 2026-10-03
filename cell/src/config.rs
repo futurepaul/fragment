@@ -238,8 +238,8 @@ impl Config {
 
     /// The fragment a hostname names, when it is `<label>--<username>.<suffix>`
     /// (one DNS label, so the suffix's one wildcard certificate covers every
-    /// fragment). celld does not vouch for `Host`, so this is the only way a
-    /// host becomes a fragment: an exact single label under the suffix.
+    /// fragment). This is the only way a host becomes a fragment: an exact
+    /// single label under the suffix (with a branch's mark, its own).
     pub fn fragment_of_host(&self, host: &str) -> Option<String> {
         let label = label_under(host, self.host_suffix.as_deref()?)?;
         let flat = match &self.host_label_suffix {

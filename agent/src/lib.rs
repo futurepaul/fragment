@@ -1,4 +1,4 @@
-//! Agents on celld (ROADMAP phase 5): a Durable Object per agent, with its
+//! Agents on Cloudflare Workers (ROADMAP phase 5): a Durable Object per agent, with its
 //! own key, its conversations in SQL, and goose's loop (`goose-agent`) as
 //! its turn. Its tools are fragments' operations and the platform's verbs,
 //! which it calls through the platform's signed API with its own key.

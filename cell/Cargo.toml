@@ -3,7 +3,7 @@ name = "fragment-cell"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "The fragment platform cells on celld: the router and the Fragment supervisor."
+description = "The fragment platform on Cloudflare Workers: the router and the Durable Objects."
 
 # Built for wasm32 by worker-build (`cargo xtask build`), outside the host workspace.
 [workspace]

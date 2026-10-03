@@ -61,32 +61,21 @@ fn seg(repo: &str) -> String {
     url::form_urlencoded::byte_serialize(repo.as_bytes()).collect::<String>().replace('+', "%20")
 }
 
-/// celld rejects a fetch its egress check refused with this prefix
-/// (`crates/celld/egress.rs`, `CELLD_EGRESS_PUBLIC_ONLY`): its contract
-/// for "this request can never pass".
-const EGRESS_REFUSED_PREFIX: &str = "egress refused:";
-
-/// Why a fetch has no response, decided once, here.
+/// Why a fetch has no response: the network failed or the deadline
+/// passed, so a retry may pass. (A Worker's fetch reaches only the public
+/// internet: the address checks are `fragment_core::egress`, before it.)
 #[derive(Debug)]
-pub enum FetchError {
-    /// The node refused the address: no retry passes.
-    Refused(String),
-    /// The network failed or the deadline passed: a retry may pass.
-    Failed(String),
-}
+pub struct FetchFailed(pub String);
 
-impl From<FetchError> for CellError {
-    fn from(e: FetchError) -> CellError {
-        match e {
-            FetchError::Refused(m) => CellError::new(ErrorCode::Forbidden, m),
-            FetchError::Failed(m) => CellError::new(ErrorCode::UpstreamFailed, m),
-        }
+impl From<FetchFailed> for CellError {
+    fn from(e: FetchFailed) -> CellError {
+        CellError::new(ErrorCode::UpstreamFailed, e.0)
     }
 }
 
 /// A fetch with a deadline. The loser of the race is dropped: a finished
 /// fetch clears its timer, and a timed-out fetch is aborted.
-pub async fn fetch(req: Request, deadline: Duration) -> Result<Response, FetchError> {
+pub async fn fetch(req: Request, deadline: Duration) -> Result<Response, FetchFailed> {
     let ctrl = AbortController::default();
     let signal = ctrl.signal();
     let fetch = Fetch::Request(req);
@@ -95,21 +84,10 @@ pub async fn fetch(req: Request, deadline: Duration) -> Result<Response, FetchEr
     futures_util::pin_mut!(send, timer);
     match select(send, timer).await {
         Either::Left((Ok(resp), _)) => Ok(resp),
-        Either::Left((Err(e), _)) => {
-            // a Worker's fetch rejects with an Error whose message is all it
-            // says; celld documents the prefix as the refusal's mark
-            let refused = match &e {
-                worker::Error::UnknownJsError { message, .. } | worker::Error::JsError(message) => message.starts_with(EGRESS_REFUSED_PREFIX),
-                _ => false,
-            };
-            match refused {
-                true => Err(FetchError::Refused(e.to_string())),
-                false => Err(FetchError::Failed(format!("fetch failed: {e}"))),
-            }
-        }
+        Either::Left((Err(e), _)) => Err(FetchFailed(format!("fetch failed: {e}"))),
         Either::Right(_) => {
             ctrl.abort();
-            Err(FetchError::Failed(format!("no answer within {deadline:?}")))
+            Err(FetchFailed(format!("no answer within {deadline:?}")))
         }
     }
 }

@@ -9,21 +9,20 @@ A fragment is a folder of files in git, an app of named operations over
 its own SQLite, channels that pages follow live, and members with roles.
 An **agent** is an optional add-on, and a fragment that declares none
 carries nothing of it: goose, so a calorie tracker can take "2 eggs and
-toast". Fragments run on [celld](https://celld.dev) (self-hosted Durable
-Objects that keep their state in a bucket); each is a cell that sleeps
-when idle. `master` is moving to Cloudflare
+toast". Fragments run on Cloudflare: each is a Durable Object that
+sleeps when idle, its app in a Worker of its own
 ([docs/cloudflare-v1.md](docs/cloudflare-v1.md)); computers come back
 there.
 
 This repo holds:
 
-- **the cell** (`cell/`): Rust (workers-rs) on celld, with a small
-  JavaScript shim. It answers the control API, serves sites, runs each
+- **the cell** (`cell/`): Rust (workers-rs) on Cloudflare Workers, with a
+  small JavaScript shim. It answers the control API, serves sites, runs each
   fragment's app in its own loaded worker, and runs jobs as Workflows.
 - **the `fragment` CLI** (`cli/`): the whole control surface, built for
   agents. `fragment guide` prints the agent guide.
 - **the agents** (`agent/`): goose's loop in a Durable Object per agent,
-  co-hosted on the cell's nodes; an agent joins fragments as a member.
+  a Worker beside the cell's; an agent joins fragments as a member.
 - **the harness** (`xtask/`, `crates/`): the dev stack, Rust fakes for
   code.storage, OpenRouter, WorkOS, and a push service, and the e2e suite
   that drives the real cell, CLI, and a browser.
@@ -32,8 +31,8 @@ Read [docs/MODEL.md](docs/MODEL.md) for the model,
 [docs/api.md](docs/api.md) for the wire contract, and
 [docs/cloudflare-v1.md](docs/cloudflare-v1.md) for where it is going.
 This repo is [futurepaul/fragment](https://github.com/futurepaul/fragment);
-fragment.club runs its `celld` branch (tag `celld-final`) until it moves
-to Cloudflare. MIT licensed; see [LICENSE](LICENSE).
+fragment.club runs its `celld` branch (tag `celld-final`) on celld until
+it moves to Cloudflare. MIT licensed; see [LICENSE](LICENSE).
 
 ## Use it
 
@@ -56,13 +55,13 @@ One-time setup:
 ```
 rustup target add wasm32-unknown-unknown
 cargo install worker-build --version 0.8.5 --locked
-cargo xtask celld          # builds the celld fork into target/celld/bin
+npm ci                     # the pinned wrangler (Node 22 or later)
 ```
 
 Then:
 
 ```
-cargo xtask dev            # the cell and its agents on :8790, the code.storage and WorkOS fakes
+cargo xtask dev            # the cell and its agents on :8790 under wrangler dev, the code.storage and WorkOS fakes
 cargo xtask try todo       # in another terminal: todo | inbox | notes
 ```
 
@@ -75,7 +74,7 @@ alias pointed at the dev stack. Fragments are served at
 
 ```
 cargo xtask check          # host tests, clippy on host and wasm, warnings denied
-cargo xtask e2e            # the full suite against a fresh celld node (--only a,b | --except a,b)
+cargo xtask e2e            # the full suite against a fresh wrangler dev node (--only a,b | --except a,b)
 ```
 
 The e2e stages its own copy of the cell, so it runs alongside
@@ -86,17 +85,17 @@ The e2e stages its own copy of the cell, so it runs alongside
 
 ```
 cell/          the cell: router, registry, fragment supervisor, jobs, files, blobs, deliveries, ledger
-agent/         the agents' celld project (goose's loop)
+agent/         the agents' Worker (goose's loop)
 cli/           the fragment CLI and GUIDE.md (the agent guide)
 crates/proto   wire types and limits
 crates/core    the cell's pure logic, host-tested (schemas, cron, globs, budgets, web push)
 crates/nip98   NIP-98 signing and verification
-crates/native  KEYS: the fleet's keys, served by the celld fork
 crates/templates  templates/, embedded in the CLI and the cell
 crates/fakes   code.storage, OpenRouter, WorkOS, and push-service fakes
-crates/devstack  runs a celld node and the fakes
+crates/devstack  runs wrangler dev and the fakes
 crates/e2e     the end-to-end suite
 templates/     blank, calories, inbox, notes, todo
-xtask/         build, celld, dev, try, check, e2e
+xtask/         build, dev, try, check, e2e, deploy, teardown
+deploy/        example.jsonc: a deployment's config (yours lives outside the repo)
 docs/          model, contract, roadmap, phase records, the debt ledger
 ```

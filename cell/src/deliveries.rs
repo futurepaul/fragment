@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use worker::*;
 
 use crate::config::Config;
-use crate::cs::FetchError;
+use crate::cs::FetchFailed;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{FragmentCell, MetaKey};
 use crate::js;
@@ -331,12 +331,7 @@ async fn send(env: &Env, d: &Delivery) -> Result<Option<String>> {
     let req = Request::new_with_init(&d.url, &init)?;
     let resp = match crate::cs::fetch(req, SEND_TIMEOUT).await {
         Ok(r) => r,
-        Err(FetchError::Failed(why)) => return Ok(Some(why)),
-        // the node refused the address: no retry passes
-        Err(FetchError::Refused(why)) => {
-            report(env, d, Outcome::Failed, 0, &why).await?;
-            return Ok(None);
-        }
+        Err(FetchFailed(why)) => return Ok(Some(why)),
     };
     let status = resp.status_code();
     Ok(match status {

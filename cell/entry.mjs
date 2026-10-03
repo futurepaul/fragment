@@ -1,6 +1,6 @@
 // The only hand-written JavaScript on the platform side (besides
 // platform.mjs, which runs inside the app facet). Everything else is Rust.
-// celld refuses RPC to a class that does not extend DurableObject, and
+// The runtime gives RPC only to a class that extends DurableObject, and
 // workers-rs classes do not, so these classes do and forward each handler.
 // workers-rs 0.8.5 has no Workflows, so the job driver is here too; it
 // only loops and calls back: every decision is the supervisor's (jobs.rs).

@@ -134,8 +134,8 @@ type Callback = Closure<dyn FnMut() -> Result<JsValue, JsValue>>;
 /// call only asks the facet table for the running facet (`facet`); the two
 /// callbacks run when there is none. `start` names the worker the installed
 /// code needs by its loader id and asks the loader for it; the loader runs
-/// `get_code` only when it holds no worker by that id (celld memoizes
-/// `LOADER.get` by id, per isolate, and skips the callback on a hit), and
+/// `get_code` only when it holds no worker by that id (the runtime keeps
+/// `LOADER.get` workers by id and skips the callback on a hit), and
 /// only then are the app's modules read and copied for it.
 pub struct AppLoader {
     start: Callback,
@@ -201,16 +201,14 @@ pub fn abort_app_facet(ctx: &JsValue, name: &str, reason: &str) -> CellResult<()
     Ok(())
 }
 
-/// A failure calling into the app facet: the author's, unless the node
-/// could not load the app at all. celld keeps at most 255 loaded workers
-/// per script and releases none until the node restarts
-/// (docs/hardening.md), so that one is the node's, and says so.
+/// A failure calling into the app facet: the author's (a throw, or
+/// `Worker exceeded CPU time limit.`), unless the runtime refused the call
+/// for now: each request may have at most 10 dynamic worker invocations in
+/// flight (spike S1), so that one is the platform's, and says so. Both
+/// carry `overloaded: true`; nothing retries on it.
 fn facet_error(message: String) -> CellError {
-    if message.contains("too many loaded workers") {
-        CellError::new(
-            ErrorCode::NodeFull,
-            "the node serving this fragment cannot load another app until it restarts (it holds as many as it can); try again later",
-        )
+    if message.contains("Dynamic worker concurrency limit exceeded") {
+        CellError::new(ErrorCode::NodeFull, "this fragment's app is answering as many calls at once as it may; try again shortly")
     } else {
         CellError::new(ErrorCode::AppFailed, message)
     }
@@ -292,8 +290,7 @@ fn app_answer(method: &str, why: String) -> CellError {
 }
 
 /// Stops the app facet `name` and deletes its database (a deleted
-/// fragment), waiting until celld has: since v0.6.0 the delete is a promise
-/// that removes the facet's own stream from the bucket.
+/// fragment), waiting until the runtime has.
 pub async fn delete_app_facet(ctx: &JsValue, name: &str) -> CellResult<()> {
     let facets = get(ctx, "facets")?;
     let done = call(&facets, "delete", &[name.into()]).map_err(|e| CellError::host(format!("facets.delete: {}", js_message(&e))))?;
@@ -325,9 +322,9 @@ pub async fn jobs_create(env: &JsValue, id: &str, params: &serde_json::Value) ->
     Ok(())
 }
 
-/// celld's Workflows binding rejects `get(id)` for an instance it has no
+/// The Workflows binding rejects `get(id)` for an instance it has no
 /// record of with an Error whose message ends so (`WORKFLOW_ERROR:
-/// instance does not exist`, as Cloudflare's does).
+/// instance does not exist`).
 const NO_INSTANCE: &str = "instance does not exist";
 
 /// A Workflow instance's `status()`: `{status, error?, output?}`, or
@@ -373,9 +370,8 @@ pub async fn blob_put(env: &JsValue, key: &str, body: JsValue) -> CellResult<(u6
     Ok((size, hex::encode(bytes)))
 }
 
-/// Sends messages to a queue binding (`sendBatch`, at most 100 a call).
-/// workers-rs 0.8.5 refuses celld's queue binding (its constructor is not
-/// named `WorkerQueue`), so this goes to the binding itself.
+/// Sends messages to a queue binding (`sendBatch`, at most 100 a call),
+/// through the binding itself: its bodies are JSON values already.
 pub async fn queue_send(env: &JsValue, binding: &str, bodies: &[serde_json::Value]) -> CellResult<()> {
     let queue = self::binding(env, binding, "queues")?;
     for chunk in bodies.chunks(100) {
@@ -474,9 +470,7 @@ pub fn now_ms() -> i64 {
     js_sys::Date::now() as i64
 }
 
-/// Cryptographically random bytes. celld's `crypto.getRandomValues` fills
-/// the buffer from the OS in a host op (`getrandom`, its
-/// `op_webcrypto_random`), the same source `KEYS` draws from.
+/// Cryptographically random bytes (the runtime's `crypto.getRandomValues`).
 pub fn random_bytes<const N: usize>() -> [u8; N] {
     let crypto = Reflect::get(&js_sys::global(), &JsValue::from_str("crypto")).expect("globalThis.crypto");
     let buf = js_sys::Uint8Array::new_with_length(N as u32);

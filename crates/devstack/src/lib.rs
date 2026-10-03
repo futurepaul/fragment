@@ -31,7 +31,7 @@ pub fn cell_dir() -> PathBuf {
     repo_root().join("cell")
 }
 
-/// The agents' celld project (goose's loop; phase 5).
+/// The agents' Worker project (goose's loop; phase 5).
 pub fn agent_dir() -> PathBuf {
     repo_root().join("agent")
 }

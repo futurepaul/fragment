@@ -30,7 +30,7 @@ const GUIDE: &str = include_str!("../GUIDE.md");
 const SKILL: &str = include_str!("../SKILL.md");
 
 #[derive(Parser)]
-#[command(name = "fragment", version, about = "make and run fragments: a folder in git, an app of operations and jobs, channels, members; on celld")]
+#[command(name = "fragment", version, about = "make and run fragments: a folder in git, an app of operations and jobs, channels, members; on Cloudflare")]
 struct Cli {
     /// Host base URL (else FRAGMENT_HOST, else config, else https://fragment.club)
     #[arg(long, global = true)]

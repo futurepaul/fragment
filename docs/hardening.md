@@ -12,6 +12,35 @@ is upstream's now (#228), and the commit ids below are the rebased ones. Sources
 (`spike/native-services`, cd1d6d8), and the two isolation spikes
 (`spike/cell-isolation` 35c51f1; `spike/isolation` dadbadb).
 
+## On Cloudflare (phase 2, 2026-10-03)
+
+The celld fork and `crates/native` went with the move to Workers
+(docs/cloudflare-v1.md, phase 2). What each finding below is now:
+
+- **The fleet's keys** are Worker secrets in the platform Worker's env
+  (`cell/src/keys.rs`). An app runs in an isolate of its own from the
+  Worker Loader, with an env the platform builds (only `FILES`), so no
+  author code names one; the e2e's `keys` section deploys an app that
+  looks through its env and its global scope for them. Sealing is
+  `crates/core/src/seal.rs`, salted with the sealing Durable Object's
+  class and id.
+- **celld's internal listener, 6PN, and egress to private addresses**
+  are gone: a Worker's fetch reaches only the public internet.
+- **The app database cap** stays the platform's 16 MiB per mutation
+  (`platform.mjs`). The node's hard stop above it is gone; a query that
+  writes anyway grows its database, billed to its owner by the storage
+  meter (phase 3).
+- **Loaded workers per node** are the runtime's to manage: `node_full`
+  now means a facet's concurrency limit (spike S1).
+- **Code from strings and `Atomics.wait`** are refused by the Workers
+  runtime itself. **CPU and memory** are the runtime's limits, which local
+  workerd does not enforce, so the hosted lane checks them.
+- **New**: `platform.mjs` takes away an app's alarm, async transaction, KV
+  writes and nested facets before its constructor runs (S1: an app's
+  alarm wedges its facet).
+
+The rest of this file is the celld-era record.
+
 ## Where each finding stands
 
 | Finding | State (in code) | Where |
