@@ -44,6 +44,8 @@ pub struct Chan {
 
 #[derive(Debug, Clone, Default)]
 pub struct Frag {
+    /// What it is (`chat`, `agent`, `skills`, …), as its list says.
+    pub kind: String,
     pub members: Vec<Member>,
     pub channels: BTreeMap<String, Chan>,
     pub subscriptions: Vec<Value>,
@@ -72,6 +74,10 @@ pub struct World {
     pub keepalive_log: Vec<bool>,
     /// Every request, as `METHOD path`.
     pub calls: Vec<String>,
+    /// Every request as an agent: `METHOD path`, its query, the agent it
+    /// names, and whether it carried an authorization of its own (the
+    /// intercept signs; the guest never does).
+    pub requests: Vec<(String, String, Option<String>, bool)>,
     /// Records and drafts in the order they happened: `record <fragment>
     /// <channel> <seq>`, `draft <fragment> <turn> text|null`.
     pub log: Vec<String>,
@@ -89,6 +95,18 @@ pub struct World {
 impl World {
     fn agent_identity(&self, agent: &str) -> Option<String> {
         self.computer["agents"].as_array()?.iter().find(|a| a["fragment"] == agent).and_then(|a| a["identity"].as_str()).map(str::to_string)
+    }
+
+    fn agent_owner(&self, agent: &str) -> Option<String> {
+        self.computer["agents"].as_array()?.iter().find(|a| a["fragment"] == agent).and_then(|a| a["owner"].as_str()).map(str::to_string)
+    }
+
+    /// The role `me` holds in `f`, acting for `person` when it names one: its
+    /// own membership, else that person's, held at most at editor (the
+    /// platform's cap for an agent acting for someone).
+    fn role_in(f: &Frag, me: &str, person: Option<&str>) -> Option<String> {
+        let own = f.members.iter().find(|m| m.principal == me).map(|m| m.role.clone());
+        own.or_else(|| person.and_then(|p| f.members.iter().find(|m| m.principal == p)).map(|_| "editor".to_string()))
     }
 
     fn now(&mut self) -> i64 {
@@ -152,7 +170,7 @@ impl Drop for Fake {
 /// An agent's own fragment: its owner paul, the agent an editor of it,
 /// and its `tasks`.
 fn agent_fragment(identity: &str) -> Frag {
-    let mut f = Frag::default();
+    let mut f = Frag { kind: "agent".into(), ..Frag::default() };
     f.members.push(Member { principal: "id:paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
     f.members.push(Member { principal: identity.into(), role: "editor".into(), kind: "agent".into(), added_at: 2 });
     f.channels.insert("tasks".into(), Chan { post: Some("editor".into()), ..Chan::default() });
@@ -202,13 +220,28 @@ impl Fake {
     pub fn chat(&self, label: &str, agents: &[&str]) -> String {
         let name = format!("{label}.paul");
         self.with(|w| {
-            let mut f = Frag::default();
+            let mut f = Frag { kind: "chat".into(), ..Frag::default() };
             f.members.push(Member { principal: "id:paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
             for (i, a) in agents.iter().enumerate() {
                 f.members.push(Member { principal: format!("id:{a}"), role: "editor".into(), kind: "agent".into(), added_at: 10 + i as i64 });
             }
             f.channels.insert("chat".into(), Chan { post: Some("viewer".into()), ..Chan::default() });
             f.channels.insert("work".into(), Chan { post: Some("editor".into()), ..Chan::default() });
+            w.fragments.insert(name.clone(), f);
+        });
+        name
+    }
+
+    /// paul's skills fragment `<label>.paul` (the blessed `skills`
+    /// template's: its agents reach it acting for paul), holding `files`.
+    pub fn skills(&self, label: &str, files: &[(&str, &str)]) -> String {
+        let name = format!("{label}.paul");
+        self.with(|w| {
+            let mut f = Frag { kind: "skills".into(), ..Frag::default() };
+            f.members.push(Member { principal: "id:paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
+            for (path, text) in files {
+                f.files.insert(path.to_string(), Bytes::from(text.to_string()));
+            }
             w.fragments.insert(name.clone(), f);
         });
         name
@@ -378,10 +411,19 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
 
     let Some(agent) = agent else { return refuse(StatusCode::UNAUTHORIZED, "a request acts as one of the computer's agents") };
     let Some(me) = world.lock().unwrap().agent_identity(&agent) else { return refuse(StatusCode::FORBIDDEN, "not an agent of this computer") };
+    let signed = req.headers().contains_key("authorization");
+    world.lock().unwrap().requests.push((format!("{method} {path}"), q.clone(), Some(agent.clone()), signed));
+    // `for`: the agent acts for its owner (the platform's: only its owner)
+    let acting_for = query(&q, "for").into_iter().next();
+    if let Some(who) = &acting_for {
+        if world.lock().unwrap().agent_owner(&agent).as_deref() != Some(who.as_str()) {
+            return refuse(StatusCode::FORBIDDEN, "an agent acts for its owner");
+        }
+    }
 
     if p.first() == Some(&"f") && p.len() >= 3 {
         let fragment = p[1].to_string();
-        let member = world.lock().unwrap().fragments.get(&fragment).is_some_and(|f| f.members.iter().any(|m| m.principal == me));
+        let member = world.lock().unwrap().fragments.get(&fragment).is_some_and(|f| World::role_in(f, &me, acting_for.as_deref()).is_some());
         if !member {
             return refuse(StatusCode::FORBIDDEN, "not a member");
         }
@@ -403,7 +445,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
 
     if p.as_slice() == ["api", "fragments"] {
         let w = world.lock().unwrap();
-        let list: Vec<Value> = w.fragments.iter().filter_map(|(n, f)| f.members.iter().find(|m| m.principal == me).map(|m| json!({ "name": n, "role": m.role }))).collect();
+        let list: Vec<Value> = w.fragments.iter().filter_map(|(n, f)| World::role_in(f, &me, acting_for.as_deref()).map(|role| json!({ "name": n, "role": role, "kind": f.kind }))).collect();
         return answer(StatusCode::OK, json!({ "fragments": list }));
     }
     if p.len() < 4 || p[0] != "api" || p[1] != "f" {
@@ -413,7 +455,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
     let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
     let mut w = world.lock().unwrap();
     let Some(f) = w.fragments.get(&fragment) else { return refuse(StatusCode::NOT_FOUND, "no such fragment") };
-    let Some(role) = f.members.iter().find(|m| m.principal == me).map(|m| m.role.clone()) else { return refuse(StatusCode::FORBIDDEN, "not a member") };
+    let Some(role) = World::role_in(f, &me, acting_for.as_deref()) else { return refuse(StatusCode::FORBIDDEN, "not a member") };
     match (method, &p[3..]) {
         (Method::GET, ["channels"]) => {
             let list: Vec<Value> = f.channels.iter().map(|(n, c)| json!({ "name": n, "read": "viewer", "post": c.post, "seq": c.records.len() })).collect();
@@ -500,7 +542,9 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             None => refuse(StatusCode::NOT_FOUND, "no such blob"),
         },
         (Method::GET, ["files"]) => {
-            let list: Vec<Value> = f.files.iter().map(|(p, b)| json!({ "path": p, "size": b.len(), "mode": "100644", "lastCommitSha": "c0", "machinery": false })).collect();
+            // a file's version moves with its bytes, as a commit's does
+            let version = |b: &Bytes| format!("c{}", &fragment_bridge::records::hex(&<sha2::Sha256 as sha2::Digest>::digest(b))[..12]);
+            let list: Vec<Value> = f.files.iter().map(|(p, b)| json!({ "path": p, "size": b.len(), "mode": "100644", "lastCommitSha": version(b), "machinery": false })).collect();
             answer(StatusCode::OK, json!({ "ref": "main", "files": list }))
         }
         (Method::GET, ["file"]) => {

@@ -91,6 +91,10 @@ pub struct FragmentEntry {
     pub name: String,
     #[serde(default)]
     pub role: String,
+    /// What it is (`app`, `chat`, `agent`, `brain`, `skills`): its live
+    /// `fragment.json`'s `kind`.
+    #[serde(default)]
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -371,6 +375,35 @@ impl Api {
     /// `GET /api/f/{name}/file?path=`: one file's bytes at main.
     pub async fn file(&self, agent: &str, fragment: &str, path: &str, max: usize) -> Result<Bytes, ApiError> {
         self.call(Method::GET, &format!("/api/f/{}/file?path={}", name(fragment)?, encode(path)), Some(agent), None, max).await
+    }
+
+    // ---- as an agent acting for a person (`for`: decision 36) ----
+
+    /// `GET /api/fragments?for=`: the fragments the agent reaches acting for
+    /// `person`, each with its kind.
+    pub async fn fragments_for(&self, agent: &str, person: &str) -> Result<Vec<FragmentEntry>, ApiError> {
+        #[derive(Deserialize)]
+        struct A {
+            fragments: Vec<FragmentEntry>,
+        }
+        let a: A = self.json(Method::GET, &format!("/api/fragments?for={}", encode(person)), Some(agent), None).await?;
+        Ok(a.fragments)
+    }
+
+    /// `GET /api/f/{name}/files?for=`: the files at main, a blessed
+    /// template's data among them.
+    pub async fn files_for(&self, agent: &str, fragment: &str, person: &str) -> Result<Vec<FileEntry>, ApiError> {
+        #[derive(Deserialize)]
+        struct A {
+            files: Vec<FileEntry>,
+        }
+        let a: A = self.json(Method::GET, &format!("/api/f/{}/files?for={}", name(fragment)?, encode(person)), Some(agent), None).await?;
+        Ok(a.files)
+    }
+
+    /// `GET /api/f/{name}/file?path=&for=`: one file's bytes at main.
+    pub async fn file_for(&self, agent: &str, fragment: &str, person: &str, path: &str, max: usize) -> Result<Bytes, ApiError> {
+        self.call(Method::GET, &format!("/api/f/{}/file?path={}&for={}", name(fragment)?, encode(path), encode(person)), Some(agent), None, max).await
     }
 
     /// `POST /api/f/{name}/files {files, message, key}`: one commit to main.
