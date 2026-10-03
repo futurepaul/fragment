@@ -15,7 +15,11 @@ self.addEventListener("push", (event) => {
 });
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const url = event.notification.data;
+  // a relative url (a chat's "./") is the fragment's page, beside this worker
+  let url = null;
+  try {
+    url = typeof event.notification.data === "string" ? new URL(event.notification.data, self.location).href : null;
+  } catch (e) {}
   event.waitUntil(
     (async () => {
       try {

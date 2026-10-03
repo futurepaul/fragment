@@ -323,6 +323,7 @@ name = "fragment-templates"
 version = "0.1.0"
 dependencies = [
  "fragment-core",
+ "fragment-proto",
  "hex",
  "sha2",
 ]
