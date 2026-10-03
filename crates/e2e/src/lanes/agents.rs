@@ -16,12 +16,17 @@ use fragment_proto::limits;
 use serde_json::{json, Value};
 
 use super::app::ship;
+use super::jobs::records;
 use crate::api::{url_enc, Api, Reply as Answer};
 use crate::Suite;
 
 const TODO_APP: &[u8] = include_bytes!("../../fixtures/todo.mjs");
 const TODO_JSON: &[u8] = include_bytes!("../../fixtures/todo.json");
 const ROOM_JSON: &[u8] = include_bytes!("../../fixtures/room.json");
+/// A chat from before postable channels: its `chat` takes no posts, and
+/// `say` publishes there.
+const SAID_APP: &[u8] = include_bytes!("../../fixtures/said.mjs");
+const SAID_JSON: &[u8] = include_bytes!("../../fixtures/said.json");
 
 pub(super) fn view(agents: &Api, owner: &Keys, name: &str) -> Value {
     agents.signed(owner, "GET", &format!("/api/a/{name}"), None).map(|r| r.body).unwrap_or_default()
@@ -415,5 +420,177 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
         joined && v["listens"]["count"] == before + 17 && !follows(&v).contains(&many[0]) && follows(&v).contains(&last),
         json!({ "count": v["listens"]["count"], "follows": follows(&v) }),
     );
+    reply_operation(s, api, &owner, &name, &agent_npub, &agent_id, &stranger)
+}
+
+/// A conversation's row in the agent's view (`None` before it has ended a turn).
+fn conversation(v: &Value, conv: &str) -> Option<Value> {
+    v["conversations"].as_array().into_iter().flatten().find(|c| c["conversation"] == conv).cloned()
+}
+
+/// The reply operation: a chat from before postable channels (`said.json`:
+/// its `chat` takes no posts, and `say` publishes there) gets its answers
+/// through the operation its listen names (agent/src/lib.rs `post_answer`).
+///
+/// Valid: a message said through `say` is answered through `say`, as the
+/// agent, once, and the model is never offered `say` itself. Replay: the
+/// same message said again (its id) starts nothing; a driver killed after
+/// the answer was said says it again under its id, which the operation
+/// replays. Invalid: a listen naming no operation is refused; an answer the
+/// operation refuses, or an operation the chat does not have, ends the turn
+/// in an error that says so, says nothing, and keeps the listen.
+fn reply_operation(s: &mut Suite, api: &Api, owner: &Keys, name: &str, agent_npub: &str, agent_id: &str, stranger: &Keys) -> Result<()> {
+    let agents = s.agents()?;
+    let wait = Duration::from_secs(30);
+    let chat = s.named(api, owner, "agent-said")?;
+    let c = s.create(api, owner, &chat)?;
+    ship(s, &c, SAID_APP, SAID_JSON);
+    for (who, role) in [(agent_npub.to_string(), "editor"), (api.identity(stranger)?, "viewer")] {
+        let r = api.signed(owner, "PUT", &format!("/api/f/{chat}/members/{who}"), Some(&json!({ "role": role })))?;
+        anyhow::ensure!(r.status == 200, "{who} joins {chat} as its {role}: {r}");
+    }
+    let listen = |body: Value| agents.signed(owner, "POST", &format!("/api/a/{name}/listen"), Some(&body));
+    let follows = |v: &Value| v["listens"]["newest"].as_array().into_iter().flatten().any(|l| l["fragment"] == chat.as_str() && l["channel"] == "chat");
+    let count_before = view(&agents, owner, name)["listens"]["count"].clone();
+    let r = listen(json!({ "fragment": chat, "reply": "say it" }))?;
+    let v = view(&agents, owner, name);
+    s.ok("a listen whose reply names no operation is refused (400), and follows nothing", r.status == 400 && v["listens"]["count"] == count_before && !follows(&v), &r);
+    // the deploy lands by the webhook: the same listen, again, until its channel is there
+    s.eventually(wait, || listen(json!({ "fragment": chat })).is_ok_and(|r| r.status == 200));
+    let r = listen(json!({ "fragment": chat }))?;
+    let sub = r.body["subscription"].clone();
+    s.ok(
+        "unless told otherwise a listen follows `chat` and answers through `say`, as chats from before postable channels do",
+        r.status == 200 && r.body["channel"] == "chat" && r.body["reply"] == "say" && sub.is_i64(),
+        &r,
+    );
+
+    let said = |text: &str, id: &str| api.op(stranger, &chat, "say", id, json!({ "text": text }));
+    let answers = |text: &str| records(api, owner, &chat, "chat").into_iter().filter(|r| r["principal"] == agent_id && r["body"]["text"] == text).count();
+    let by_agent = || records(api, owner, &chat, "chat").into_iter().filter(|r| r["principal"] == agent_id).count();
+    let calls = || -> Vec<String> {
+        let ops = records(api, owner, &chat, "ops");
+        ops.into_iter().filter(|r| r["principal"] == agent_id && r["body"]["op"] == "say").filter_map(|r| r["body"]["id"].as_str().map(str::to_string)).collect()
+    };
+    let conv = format!("{chat}/chat");
+    // a turn in the chat that ended after `at`: its row in the view
+    let ended_after = |at: &Value| -> Option<Value> {
+        let row = conversation(&view(&agents, owner, name), &conv)?;
+        (row["at"].as_i64() > at.as_i64().or(Some(0))).then_some(row)
+    };
+
+    // valid: a message said through `say`, answered through `say`
+    let answer = "Hello from the reply path.";
+    s.ai.clear_script();
+    s.ai.script(&[Reply::Text(answer.into())]);
+    let asked = s.ai.chats().len();
+    let r = said("hello, agent", "m1")?;
+    anyhow::ensure!(r.status == 200, "the stranger says hello: {r}");
+    let landed = s.eventually(wait, || answers(answer) == 1);
+    let ids = calls();
+    s.ok(
+        "its answer is said through the listen's operation: one `say`, as the agent, under the answer's id, its record on the chat",
+        landed && ids.len() == 1 && ids[0].starts_with("rp:") && by_agent() == 1,
+        json!({ "calls": ids, "chat": records(api, owner, &chat, "chat") }),
+    );
+    let n = api.op(owner, &chat, "count", "q", json!({}))?;
+    s.ok("the app said each once: the message and the answer", n.body["result"]["n"] == 2, &n);
+    let offered: Vec<String> = s.ai.chats().get(asked).and_then(|c| c["tools"].as_array().cloned()).unwrap_or_default().iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_string)).collect();
+    let tool = |op: &str| fragment_core::tools::tool_name(&chat, op).expect("a tool name");
+    s.ok(
+        "the model is offered the chat's other operations, never its reply operation (the answer would be said twice)",
+        offered.contains(&tool("count")) && !offered.contains(&tool("say")),
+        json!(offered),
+    );
+    // the turn's end is recorded just after its answer is said
+    let v = settle(s, &agents, owner, name, wait);
+    let at = conversation(&v, &conv).map(|c| c["at"].clone()).unwrap_or_default();
+    s.ok("and its turn ended as answered", at.is_i64() && conversation(&v, &conv).is_some_and(|c| c["outcome"] == "idle"), json!(conversation(&v, &conv)));
+
+    // replay: the same message said again is the same record, and starts nothing
+    let r = said("hello, agent", "m1")?;
+    std::thread::sleep(Duration::from_secs(2));
+    let v = settle(s, &agents, owner, name, wait);
+    s.ok(
+        "the same message said again (its id) replays: nothing new on the chat, and no turn",
+        r.status == 200 && r.body["replayed"] == true && records(api, owner, &chat, "chat").len() == 2 && s.ai.chats().len() == asked + 1 && ended_after(&at).is_none(),
+        json!({ "say": r.body, "outcome": v["outcome"] }),
+    );
+
+    // invalid: an answer the operation refuses (`say` takes 100 characters)
+    let long = "An answer longer than the chat's `say` takes: ".to_string() + &"x".repeat(100);
+    s.ai.script(&[Reply::Text(long.clone())]);
+    said("say something long", "m2")?;
+    let mut row = None;
+    s.eventually(wait, || {
+        row = ended_after(&at);
+        row.is_some()
+    });
+    let row = row.unwrap_or_default();
+    s.ok(
+        "an answer the reply operation refuses ends the turn in an error naming the refusal (400), and nothing is said",
+        row["outcome"] == "error" && row["error"].as_str().is_some_and(|e| e.contains("/ops/say") && e.contains("400")) && answers(&long) == 0 && by_agent() == 1,
+        &row,
+    );
+    let at = row["at"].clone();
+
+    // invalid: a reply operation the chat does not have
+    let r = listen(json!({ "fragment": chat, "reply": "shout" }))?;
+    s.ok("listening again with another reply operation is the same listen, answering through it", r.status == 200 && r.body["reply"] == "shout" && r.body["subscription"] == sub, &r);
+    s.ai.script(&[Reply::Text("Heard you.".into())]);
+    said("anyone there?", "m3")?;
+    let mut row = None;
+    s.eventually(wait, || {
+        row = ended_after(&at);
+        row.is_some()
+    });
+    let row = row.unwrap_or_default();
+    s.ok(
+        "a reply operation the chat does not have ends the turn in an error naming it (404), and nothing is said",
+        row["outcome"] == "error" && row["error"].as_str().is_some_and(|e| e.contains("/ops/shout") && e.contains("404")) && answers("Heard you.") == 0,
+        &row,
+    );
+    let v = view(&agents, owner, name);
+    s.ok("and the agent still follows the chat: the chat is there, only that operation is not", follows(&v), &v["listens"]);
+    let r = listen(json!({ "fragment": chat }))?;
+    s.ai.script(&[Reply::Text("Heard you now.".into())]);
+    said("anyone there now?", "m4")?;
+    let mended = s.eventually(wait, || answers("Heard you now.") == 1);
+    s.ok("its listen naming `say` again, the next message is answered", r.status == 200 && r.body["reply"] == "say" && mended && by_agent() == 2, &r);
+
+    // replay after a kill: the driver that replaces a dead one says the
+    // answer again under its id, and the operation replays it
+    let restarts = view(&agents, owner, name)["watchdogRestarts"].as_u64().unwrap_or(0);
+    agents.signed(owner, "POST", &format!("/api/a/{name}/test"), Some(&json!({ "hold_after_answer_ms": 6000, "watchdog_ms": 3000 })))?;
+    let answer = "Said once, though the node was killed.";
+    s.ai.script(&[Reply::Text(answer.into())]);
+    let asked = s.ai.chats().len();
+    said("one more, please", "m5")?;
+    let posted = s.eventually(wait, || answers(answer) == 1);
+    // held after its answer, the turn has not ended: only the driver that
+    // replaces it ends it, and only by saying the answer again first
+    let killed_at = crate::api::now_s() * 1000;
+    s.crash()?;
+    let agents = s.agents()?;
+    let v = settle(s, &agents, owner, name, Duration::from_secs(60));
+    std::thread::sleep(Duration::from_secs(2));
+    let ids = calls();
+    let unique: std::collections::HashSet<&String> = ids.iter().collect();
+    let row = conversation(&v, &conv).unwrap_or_default();
+    s.ok(
+        "killed after its answer was said, the turn resumes and says it again under its id: the operation replays it, and the chat has it once",
+        posted
+            && v["watchdogRestarts"].as_u64().is_some_and(|n| n > restarts)
+            && row["outcome"] == "idle"
+            && row["at"].as_i64().is_some_and(|at| at >= killed_at)
+            && answers(answer) == 1
+            && by_agent() == 3
+            && ids.len() == 3
+            && unique.len() == 3
+            && s.ai.chats().len() == asked + 1,
+        json!({ "calls": ids, "conversation": row, "watchdogRestarts": v["watchdogRestarts"], "model requests": s.ai.chats().len() - asked }),
+    );
+    agents.signed(owner, "POST", &format!("/api/a/{name}/test"), Some(&json!({})))?;
+    s.ai.clear_script();
     Ok(())
 }

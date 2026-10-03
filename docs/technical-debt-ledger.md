@@ -463,24 +463,6 @@ fragment.club until cutover (decisions 34–35).
   driver, a watchdog, and a cancel token per conversation), proven by an
   e2e where chat B's answer lands while chat A's turn is held in a tool.
 
-## An agent still answers through a reply operation
-
-- **Observed:** phase 7 slice C made the chat template two postable
-  channels and no app code, so the agent posts its answer to a followed
-  channel that takes posts. Chats made before still had a `say`
-  operation, so the agent reads each channel's shape as a turn starts
-  (agent/src/progress.rs `shape`) and answers a channel that takes no
-  posts through its listen's reply operation (agent/src/lib.rs
-  `post_answer`; the listen's `reply` field, `fragment agent listen
-  --reply`). The chat template, the old chats' fixture, and the lane that
-  drove both went at the cut, and nothing on fragment.club migrates
-  (docs/cloudflare-v1.md, decision 33): no e2e takes the reply path now.
-- **Risk:** two answer paths in the agent, one untested.
-- **First proof:** a change to how answers are posted that the reply path
-  misses.
-- **Delete when:** the reply operation path goes (an answer only posts,
-  and the listen's `reply` field goes), or a lane drives it again.
-
 ## A postable channel's retention is fixed
 
 - **Observed:** a channel people may post to keeps its newest
