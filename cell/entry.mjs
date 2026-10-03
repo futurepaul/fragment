@@ -1,11 +1,17 @@
-// The only hand-written JavaScript on the platform side (besides
-// platform.mjs, which runs inside the app facet). Everything else is Rust.
-// The runtime gives RPC only to a class that extends DurableObject, and
-// workers-rs classes do not, so these classes do and forward each handler.
-// workers-rs 0.8.5 has no Workflows, so the job driver is here too; it
-// only loops and calls back: every decision is the supervisor's (jobs.rs).
+// The platform's hand-written JavaScript (besides platform.mjs, which runs
+// inside the app facet, and storage.mjs, a computer's S3 endpoint).
+// Everything else is Rust. The runtime gives RPC only to a class that
+// extends DurableObject, and workers-rs classes do not, so these classes do
+// and forward each handler. workers-rs 0.8.5 has no Workflows and no
+// Containers, so the job driver and a computer's container calls are here
+// too; they only call and call back: every decision is Rust's (jobs.rs,
+// computer.rs).
 import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:workers";
+import { DirectoryBackup } from "@cloudflare/sandbox";
 import * as rs from "./build/index.js";
+import { handleS3 } from "./storage.mjs";
+
+export { DirectoryBackupGateway } from "@cloudflare/sandbox";
 
 export default rs.default;
 
@@ -119,5 +125,207 @@ export class Job extends WorkflowEntrypoint {
       await step.do("finish", retrying, () => post("finish", { error }));
       return { failed: error };
     }
+  }
+}
+
+// A computer's container (docs/computers.md), for the Rust `ComputerCell`
+// (computer.rs), which reaches it as `ctx.computerHost`. Each method is one
+// runtime call and its plumbing. Every call that touches the container
+// names the start it is for (its generation): a late call for an earlier
+// start (a sleep that finishes after a wake started another) touches
+// nothing.
+class ContainerHost {
+  #ctx;
+  #env;
+  #report;
+  #generation = 0;
+  #backups;
+
+  constructor(ctx, env, report) {
+    this.#ctx = ctx;
+    this.#env = env;
+    this.#report = report;
+    this.#backups = new DirectoryBackup(ctx.container, ctx.exports.DirectoryBackupGateway, {
+      binding: "BLOBS",
+      prefix: `computers/${ctx.id}/backups/`,
+    });
+  }
+
+  get #c() {
+    return this.#ctx.container;
+  }
+
+  running() {
+    return this.#c.running;
+  }
+
+  // The images the deployment declares (wrangler.jsonc `containers`).
+  images() {
+    return Object.keys(this.#c.images || {});
+  }
+
+  // Starts `image` (or a snapshot of it), then watches it: its exit, for
+  // any reason, is reported as `container/exited` for this generation.
+  start(generation, image, snapshot, env, instance) {
+    this.#generation = generation;
+    const opts = { env, enableInternet: true };
+    if (instance) opts.instance = instance;
+    if (snapshot) opts.containerSnapshot = { id: snapshot };
+    else if (this.#c.images && this.#c.images[image]) opts.image = this.#c.images[image];
+    this.#c.start(opts);
+    this.#c.monitor().then(
+      () => this.#report("container/exited", { generation }),
+      (e) => this.#report("container/exited", { generation, why: String((e && e.message) || e) }),
+    );
+  }
+
+  // A start from a snapshot answers "temporarily unavailable" for a while
+  // (spike S3b): the calls right after it are tried again for up to two
+  // minutes.
+  async #settled(f) {
+    const t0 = Date.now();
+    for (;;) {
+      try {
+        return await f();
+      } catch (e) {
+        if (!/temporarily unavailable/.test(String(e)) || Date.now() - t0 > 120_000) throw e;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+  }
+
+  // The egress intercepts (one entry per host: `ComputerEgress` with the
+  // route as props) and the runtime's idle stop, the safety net under the
+  // Computer DO's own sleep. Neither survives a stop, so each start sets
+  // them again.
+  async arm(generation, computer, idleMs) {
+    if (generation !== this.#generation) return false;
+    const c = this.#c;
+    const egress = (route) => this.#ctx.exports.ComputerEgress({ props: { computer, route } });
+    await this.#settled(() => c.interceptOutboundHttp("api.fragment.internal", egress("api")));
+    await this.#settled(() => c.interceptOutboundHttp("model.fragment.internal", egress("model")));
+    await this.#settled(() => c.interceptOutboundHttp("storage.fragment.internal", egress("storage")));
+    await this.#settled(() => this.#backups.intercept());
+    await this.#settled(() => c.setInactivityTimeout(idleMs));
+    return true;
+  }
+
+  // Waits until the container takes an exec (it is up), for at most `ms`.
+  async execReady(generation, ms) {
+    const t0 = Date.now();
+    while (generation === this.#generation && Date.now() - t0 < ms) {
+      try {
+        const out = await (await this.#c.exec(["true"])).output();
+        if (out.exitCode === 0) return true;
+      } catch {}
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return false;
+  }
+
+  async exec(generation, argv) {
+    if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
+    const out = await (await this.#c.exec(argv, { stderr: "combined" })).output();
+    return { exitCode: out.exitCode, output: new TextDecoder().decode(out.stdout).slice(-4096) };
+  }
+
+  async backup(generation) {
+    if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
+    return this.#backups.backup({ dir: "/data", name: `generation ${generation}` });
+  }
+
+  async restore(generation, record) {
+    if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
+    await this.#backups.restore(record);
+  }
+
+  async forget(record) {
+    await this.#backups.delete(record);
+  }
+
+  async snapshot(generation, name) {
+    if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
+    const s = await this.#c.snapshotContainer({ name });
+    return s.id;
+  }
+
+  signal(generation, n) {
+    if (generation === this.#generation && this.#c.running) this.#c.signal(n);
+  }
+
+  // Destroys the container if it is still this generation's, and waits for
+  // it to be gone (lesson 6: never start before `running` is false).
+  async destroy(generation, reason) {
+    if (generation !== this.#generation) return false;
+    if (this.#c.running) await this.#c.destroy(reason).catch(() => {});
+    for (let i = 0; i < 100 && this.#c.running; i++) await new Promise((r) => setTimeout(r, 100));
+    return !this.#c.running;
+  }
+
+  // Waits up to `ms` for the container to exit on its own (after a signal).
+  async exited(ms) {
+    const t0 = Date.now();
+    while (this.#c.running && Date.now() - t0 < ms) await new Promise((r) => setTimeout(r, 100));
+    return !this.#c.running;
+  }
+
+  // A request to one of the container's ports. A WebSocket is bridged
+  // through this Durable Object (both ends accepted here, so an open tab
+  // keeps the computer awake), its opening and closing reported as
+  // `container/tab`.
+  async port(port, request) {
+    const resp = await this.#c.getTcpPort(port).fetch(request);
+    const upstream = resp.webSocket;
+    if (!upstream) return resp;
+    const [client, server] = Object.values(new WebSocketPair());
+    upstream.accept();
+    server.accept();
+    await this.#report("container/tab", { open: true });
+    let closed = false;
+    const close = (code, reason) => {
+      if (closed) return;
+      closed = true;
+      for (const ws of [upstream, server]) {
+        try {
+          ws.close(code || 1000, reason || "");
+        } catch {}
+      }
+      this.#report("container/tab", { open: false });
+    };
+    upstream.addEventListener("message", (e) => server.send(e.data));
+    server.addEventListener("message", (e) => upstream.send(e.data));
+    for (const ws of [upstream, server]) {
+      ws.addEventListener("close", (e) => close(e.code, e.reason));
+      ws.addEventListener("error", () => close(1011, "the other end failed"));
+    }
+    return new Response(null, { status: 101, webSocket: client });
+  }
+}
+
+export class Computer extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    const report = (path, body) => this.rs.fetch(rs.InternalRoute.request(path, JSON.stringify(body)));
+    Object.defineProperty(ctx, "computerHost", { value: new ContainerHost(ctx, env, report) });
+    this.rs = new rs.ComputerCell(ctx, env);
+  }
+  fetch(request) { return this.rs.fetch(request); }
+  alarm(info) { return this.rs.alarm(info); }
+  webSocketMessage(ws, message) { return this.rs.webSocketMessage(ws, message); }
+  webSocketClose(ws, code, reason, clean) { return this.rs.webSocketClose(ws, code, reason, clean); }
+  webSocketError(ws, error) { return this.rs.webSocketError(ws, error); }
+}
+
+// Every intercepted request a computer's guest makes (docs/computers.md):
+// `props.route` is the host it asked for, and `props.computer` the
+// computer, both set by the Computer DO, never by the guest. Storage is
+// answered here; the rest is Rust's (`ComputerEgress.handle`).
+export class ComputerEgress extends WorkerEntrypoint {
+  fetch(request) {
+    const { computer, route } = this.ctx.props;
+    if (route === "storage") {
+      return handleS3(request, this.env.BLOBS, `computers/${computer}/storage/`).then(([resp]) => resp);
+    }
+    return rs.ComputerEgress.handle(request, this.env, computer, route);
   }
 }

@@ -269,6 +269,8 @@ impl Suite {
             operators: Some(fragment_core::npub::encode(self.operator.pubkey_hex())),
             signins_pending_max: Some(SIGNINS_PENDING_MAX),
             test_hooks: true,
+            computer_image: Some("stub".into()),
+            computer_snapshots: false,
         }
         .configure(&self.project)?;
         // the agents' Worker runs beside it, as a deployment runs it: the

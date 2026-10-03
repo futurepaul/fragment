@@ -53,6 +53,14 @@ pub struct Config {
     /// fragments are `<label>--<username>--<branch>.<suffix>`, beside the
     /// other branches' in one zone.
     host_label_suffix: Option<String>,
+    /// `FRAGMENT_COMPUTER_IMAGE`: the image a new computer is pinned to (a
+    /// name in wrangler.jsonc's `containers` images). Unset, the deployment
+    /// makes no computers.
+    pub computer_image: Option<String>,
+    /// `FRAGMENT_COMPUTER_SNAPSHOTS=off`: computers sleep without a
+    /// container snapshot and wake from their image and backup (local
+    /// workerd takes no snapshots).
+    pub computer_snapshots: bool,
     /// `FRAGMENT_POLL_INTERVAL_S`: the webhook backstop (default 300).
     pub poll_interval_ms: i64,
     /// `FRAGMENT_EGRESS_LOCAL=allow`: jobs may fetch private and loopback
@@ -78,7 +86,7 @@ pub struct Config {
     /// and the platform session live (default: the hostname suffix itself,
     /// e.g. https://fragment.club; without a suffix, the origin a request
     /// arrived on).
-    platform_url: Option<String>,
+    pub platform_url: Option<String>,
     /// `FRAGMENT_BUDGET_USD`: each person's monthly budget (default 20).
     pub budget_micros: i64,
     /// `FRAGMENT_OPERATORS`: identities and keys (as `parse_list` reads
@@ -150,6 +158,8 @@ impl Config {
             host_suffix,
             legacy_host_suffix,
             host_label_suffix,
+            computer_image: var(env, "FRAGMENT_COMPUTER_IMAGE"),
+            computer_snapshots: var(env, "FRAGMENT_COMPUTER_SNAPSHOTS").as_deref() != Some("off"),
             poll_interval_ms: var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000,
             egress_local: var(env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow"),
             blob_grace_ms: var(env, "FRAGMENT_BLOB_GRACE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(7 * 24 * 3600) * 1000,
@@ -247,6 +257,28 @@ impl Config {
             None => &label,
         };
         from_flat_name(flat)
+    }
+
+    /// The computer a hostname names (`<24 hex>--computer.<suffix>`, a
+    /// branch's mark before the dot): its own origin, where its ports are.
+    pub fn computer_of_host(&self, host: &str) -> Option<String> {
+        let label = label_under(host, self.host_suffix.as_deref()?)?;
+        let label = match &self.host_label_suffix {
+            Some(branch) => label.strip_suffix(branch.as_str())?.to_string(),
+            None => label,
+        };
+        fragment_proto::computer::computer_of_label(&label)
+    }
+
+    /// A computer's own origin (its ports are served there), on the
+    /// platform's scheme and port.
+    pub fn computer_origin(&self, id: &str) -> Option<String> {
+        let suffix = self.host_suffix.as_deref()?;
+        let label = fragment_proto::computer::computer_label(id)?;
+        let platform = self.platform_url.as_deref().and_then(|p| url::Url::parse(p).ok());
+        let scheme = platform.as_ref().map(|u| u.scheme().to_string()).unwrap_or_else(|| "https".into());
+        let port = platform.and_then(|u| u.port()).map(|p| format!(":{p}")).unwrap_or_default();
+        Some(format!("{scheme}://{label}{}.{suffix}{port}", self.host_label_suffix()))
     }
 
     /// The fragment an old host names (`<label>--<username>.<legacy

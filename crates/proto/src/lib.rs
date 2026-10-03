@@ -213,9 +213,11 @@ pub fn valid_label(label: &str) -> bool {
 }
 
 /// Words no one may take as a username: the platform's own hosts and paths.
-pub const RESERVED_USERNAMES: [&str; 24] = [
+pub const RESERVED_USERNAMES: [&str; 25] = [
     "www", "api", "app", "apps", "auth", "admin", "root", "system", "platform", "fragment", "fragments", "static", "assets",
     "cdn", "mail", "docs", "blog", "help", "support", "status", "new", "cli", "anonymous", "operator",
+    // a computer's origin is `<id>--computer` (computer.rs): never a fragment's host
+    "computer",
 ];
 
 /// A username: chosen once, a label of 3 to 32 bytes, not reserved.
@@ -335,6 +337,9 @@ pub enum ErrorCode {
     /// 503: the app is answering as many calls at once as the runtime lets
     /// it (a dynamic worker's concurrency limit); try again shortly.
     NodeFull,
+    /// 503: the computer won't wake (its starts kept failing); its owner
+    /// can wake it to try again.
+    WontWake,
     /// 410: the fragment moved to another host; the message names its URL
     /// there (a write or a socket to its old host: docs/api.md, Moved hosts).
     Moved,
@@ -356,7 +361,7 @@ impl ErrorCode {
             ErrorCode::RegistryUnavailable => 503,
             ErrorCode::BudgetUsedUp => 402,
             ErrorCode::StorageFull => 507,
-            ErrorCode::NodeFull => 503,
+            ErrorCode::NodeFull | ErrorCode::WontWake => 503,
             ErrorCode::Moved => 410,
         }
     }
@@ -1267,6 +1272,7 @@ fn write_canonical(v: &Value, out: &mut String) {
     }
 }
 
+pub mod computer;
 pub mod ledger;
 pub mod live;
 

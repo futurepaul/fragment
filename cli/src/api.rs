@@ -69,7 +69,7 @@ impl Code {
             ErrorCode::BudgetUsedUp => Code::BudgetUsedUp,
             ErrorCode::StorageFull => Code::StorageFull,
             ErrorCode::HostFailed => Code::ServerError,
-            ErrorCode::UpstreamFailed | ErrorCode::RegistryUnavailable | ErrorCode::NodeFull => Code::Unavailable,
+            ErrorCode::UpstreamFailed | ErrorCode::RegistryUnavailable | ErrorCode::NodeFull | ErrorCode::WontWake => Code::Unavailable,
         }
     }
 
@@ -552,6 +552,7 @@ mod tests {
             (ErrorCode::BudgetUsedUp, "budget_used_up"),
             (ErrorCode::StorageFull, "storage_full"),
             (ErrorCode::NodeFull, "unavailable"),
+            (ErrorCode::WontWake, "unavailable"),
             (ErrorCode::Moved, "not_found"),
         ];
         for (error, cli) in table {

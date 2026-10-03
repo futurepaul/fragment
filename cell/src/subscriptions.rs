@@ -45,23 +45,28 @@ impl FragmentCell {
             return Err(CellError::invalid(format!("a subscription URL is at most {SUB_URL_MAX_BYTES} bytes")));
         }
         egress::check(url, self.cfg.egress_local).map_err(|e| CellError::invalid(format!("url: {e}")))?;
-        let existing = self.rows("SELECT id FROM subs WHERE principal = ? AND channel = ? AND url = ?", vec![principal.as_str().into(), channel.into(), url.into()])?;
-        let id = match existing.first().and_then(|r| r["id"].as_i64()) {
-            Some(id) => id,
-            None => {
-                if self.count("SELECT COUNT(*) AS n FROM subs")? >= SUBS_MAX {
-                    return Err(CellError::new(ErrorCode::RateLimited, format!("a fragment holds at most {SUBS_MAX} subscriptions")));
-                }
-                let rows = self.rows(
-                    "INSERT INTO subs (principal, channel, url, created_at) VALUES (?, ?, ?, ?) RETURNING id",
-                    vec![principal.as_str().into(), channel.into(), url.into(), SqlStorageValue::Integer(crate::js::now_ms())],
-                )?;
-                let id = rows.first().and_then(|r| r["id"].as_i64()).ok_or_else(|| CellError::host("a subscription insert returned no id"))?;
-                self.event("subscription.added", &format!("{} to {channel}", npub::display(&principal)), json!({ "id": id, "channel": channel }));
-                id
-            }
-        };
+        let id = self.add_subscription(&principal, channel, url)?;
         json_response(&json!({ "id": id, "channel": channel, "url": url }))
+    }
+
+    /// `principal`'s subscription to `channel` at `url` (a receiver's, or a
+    /// computer's wake: runs_on.rs), made once: the same three again answer
+    /// the same id.
+    pub(crate) fn add_subscription(&self, principal: &str, channel: &str, url: &str) -> CellResult<i64> {
+        let existing = self.rows("SELECT id FROM subs WHERE principal = ? AND channel = ? AND url = ?", vec![principal.into(), channel.into(), url.into()])?;
+        if let Some(id) = existing.first().and_then(|r| r["id"].as_i64()) {
+            return Ok(id);
+        }
+        if self.count("SELECT COUNT(*) AS n FROM subs")? >= SUBS_MAX {
+            return Err(CellError::new(ErrorCode::RateLimited, format!("a fragment holds at most {SUBS_MAX} subscriptions")));
+        }
+        let rows = self.rows(
+            "INSERT INTO subs (principal, channel, url, created_at) VALUES (?, ?, ?, ?) RETURNING id",
+            vec![principal.into(), channel.into(), url.into(), SqlStorageValue::Integer(crate::js::now_ms())],
+        )?;
+        let id = rows.first().and_then(|r| r["id"].as_i64()).ok_or_else(|| CellError::host("a subscription insert returned no id"))?;
+        self.event("subscription.added", &format!("{} to {channel}", npub::display(principal)), json!({ "id": id, "channel": channel }));
+        Ok(id)
     }
 
     /// `GET /api/subscriptions`: the caller's (the owner sees every one).

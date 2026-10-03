@@ -235,7 +235,10 @@ impl FragmentCell {
                     anon_principal(&fresh)
                 }
             };
-            self.live(&req, caller, credential, &principal, link)?
+            let resp = self.live(&req, caller, credential, &principal, link)?;
+            // a page following this fragment may soon post to a computer's channel
+            self.prewake();
+            resp
         } else {
             match req.method() {
                 Method::Get | Method::Head => self.site(&mut req, caller, &mut facts, &path, &url, link, anon).await?,

@@ -11,8 +11,14 @@ runtime. A change that would have to is a design bug (the rule).
 
 - A computer is an entity owned by one person: `computer:<24 hex>`. For
   now each person has one (decision 13), made by the shell at first run
-  through the public API. It runs one image, pinned per computer
-  (decision 19), at the operator's default size (2 vCPU, 6 GiB).
+  through the public API (`POST /api/computers`, which answers the one
+  the person has when called again: its id is derived from its owner).
+  It runs one image, pinned per computer (decision 19), at the
+  operator's default size (2 vCPU, 6 GiB).
+- An agent fragment is assigned to its owner's computer (`PUT
+  /api/computers/{id}/agents/{fragment}`). Its own key then becomes the
+  agent's identity, registered to the fragment's owner, and it signs the
+  guest's requests only while it is assigned there.
 - Agents are fragments of kind `agent` that name the computer that runs
   them (decision 14). An agent's identity is its own (`id:` of the agent
   fragment's identity), and its owner is a person. The computer's guest
@@ -68,6 +74,13 @@ The guest holds no credential. Every outbound request to the hosts above
 is caught by the Computer DO's intercepts, which add what the platform
 holds. Other internet traffic goes out as it is (decision 43).
 
+### What every image carries
+
+- `/usr/local/bin/sandbox-shim` from `cloudflare/sandbox:1.0.0`: the
+  DO's `DirectoryBackup` saves and restores `/data` through it.
+- `sh`, `true`, `mkdir` and `touch`: the DO polls with `true` and opens
+  the restore gate with `touch`.
+
 ### Data and the restore gate
 
 - `/data` is the only directory kept across sleeps. Everything else is
@@ -94,8 +107,10 @@ holds. Other internet traffic goes out as it is (decision 43).
   - `GET /api/computer/keepalive` (a WebSocket): while it is open the
     computer stays awake. Hold it while busy; drop it while waiting on a
     person (decision 42).
-- A subscription with `{channel, wake: true}` (in place of `url`) wakes
-  the computer on each new record. Nothing is pushed into the guest: on
+- A subscription with `{channel, wake: true}` (in place of `url`), sent
+  as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
+  computer on each new record; the agent must be a member who may read
+  the channel. Only a computer's egress can ask for one. Nothing is pushed into the guest: on
   waking, the guest reads each channel after its last sequence number
   (`GET …/channels/{channel}?after=`) and follows it live on `__live`.
   A record's `(fragment, channel, seq)` is the id of whatever it starts,
@@ -136,10 +151,16 @@ intercept. It is for an image's own disaster recovery (Litestream).
 ### Ports
 
 The image may serve HTTP and WebSockets on any port. The platform
-proxies `/api/computers/{id}/ports/{port}/…` on the platform's origin,
-for the computer's owner and their delegates only (decision 41).
-Nothing else reaches the container from outside. By convention the
-screen is a page on port 6080 (decision 11).
+serves them on the computer's own origin, `<24 hex>--computer.<suffix>`
+(cross-site from the platform, so a page the guest serves can act as no
+one), at `/p/<port>/…`, for its owner only for now (delegates come with
+decision 41's sharing). A browser gets there with a one-time ticket its
+owner mints (`POST /api/computers/{id}/ports/{port}/ticket` → `{url}`),
+which that origin redeems into a session cookie of its own; a signed
+request (the CLI's) needs none. A WebSocket on a port is bridged through
+the Computer DO and holds it awake while open. Nothing else reaches the
+container from outside. By convention the screen is a page on port 6080
+(decision 11).
 
 ## Billing
 

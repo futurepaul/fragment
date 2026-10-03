@@ -96,6 +96,20 @@ fn stage(from: &Path, dir: &Path, files: &[&str]) -> Result<PathBuf> {
     fs::create_dir_all(dir)?;
     let mut config = read_config(from)?;
     config.as_object_mut().context("a wrangler config is an object")?.remove("build");
+    // a container image's Dockerfile and build context name paths beside the source
+    if let Some(containers) = config.get_mut("containers").and_then(|c| c.as_array_mut()) {
+        for c in containers {
+            let Some(images) = c.get_mut("images").and_then(|i| i.as_object_mut()) else { continue };
+            for image in images.values_mut() {
+                for key in ["dockerfile", "build_context"] {
+                    if let Some(rel) = image[key].as_str().filter(|p| p.starts_with('.')) {
+                        let abs = std::path::absolute(from.join(rel)).with_context(|| format!("resolve {rel}"))?;
+                        image[key] = serde_json::Value::String(abs.display().to_string());
+                    }
+                }
+            }
+        }
+    }
     fs::write(dir.join("wrangler.jsonc"), serde_json::to_string_pretty(&config)?)?;
     for f in files {
         fs::copy(from.join(f), dir.join(f)).with_context(|| format!("stage {f}"))?;
@@ -199,6 +213,10 @@ pub struct Fleet {
     /// Test controls (`FRAGMENT_TEST_HOOKS=allow`: the registry can be made
     /// to fail). Never on a shared fleet.
     pub test_hooks: bool,
+    /// The image new computers are pinned to (a name in cell/wrangler.jsonc's
+    /// `containers` images), and whether they sleep with a snapshot.
+    pub computer_image: Option<String>,
+    pub computer_snapshots: bool,
 }
 
 /// A WorkOS environment as the cell reads it.
@@ -269,6 +287,12 @@ impl Fleet {
         }
         if self.test_hooks {
             vars.push(("FRAGMENT_TEST_HOOKS", "allow"));
+        }
+        if let Some(image) = &self.computer_image {
+            vars.push(("FRAGMENT_COMPUTER_IMAGE", image.as_str()));
+        }
+        if !self.computer_snapshots {
+            vars.push(("FRAGMENT_COMPUTER_SNAPSHOTS", "off"));
         }
         write_dev_vars(project, &vars)
     }

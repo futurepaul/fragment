@@ -383,6 +383,12 @@ pub(crate) enum MetaKey {
     /// waits (`hold-advances`), naming its run in `TestAdvanceHeld`.
     TestHoldAdvances,
     TestAdvanceHeld,
+    /// The computer this agent fragment runs on (runs_on.rs).
+    Computer,
+    /// The agent identity its own key holds, once it ran on a computer.
+    AgentIdentity,
+    /// The next time a page may pre-wake the computers its channels wake.
+    PrewakeAt,
 }
 
 impl MetaKey {
@@ -427,6 +433,9 @@ impl MetaKey {
             MetaKey::TestDropEffects => "test_drop_effects",
             MetaKey::TestHoldAdvances => "test_hold_advances",
             MetaKey::TestAdvanceHeld => "test_advance_held",
+            MetaKey::Computer => "computer",
+            MetaKey::AgentIdentity => "agent_identity",
+            MetaKey::PrewakeAt => "prewake_at",
         }
     }
 
@@ -520,6 +529,12 @@ pub(crate) fn decide(visibility: Visibility, standing: Standing, purpose: Purpos
 pub(crate) async fn body_json<T: DeserializeOwned>(req: &mut Request) -> CellResult<T> {
     let bytes = req.bytes().await?;
     serde_json::from_slice(&bytes).map_err(|e| CellError::invalid(format!("body: {e}")))
+}
+
+/// The internal call `path` with `body` on fragment `name` (`computer/…`
+/// from a computer's routes and egress).
+pub(crate) async fn ask(env: &Env, name: &str, path: &str, body: &Value) -> CellResult<Value> {
+    crate::routed::ask_object(env, "FRAGMENT", name, path, body).await
 }
 
 pub(crate) fn json_response<T: serde::Serialize>(v: &T) -> CellResult<Response> {
@@ -805,6 +820,15 @@ impl FragmentCell {
             }
             let report = body_json(&mut req).await?;
             return json_response(&self.delivery_report(&report)?);
+        }
+        if let Some(route) = path.strip_prefix("/computer/") {
+            // Only a computer's routes and egress set the header; the router never passes it.
+            if req.headers().get(crate::computer::INTERNAL_HEADER)?.is_none() {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            let route = route.to_string();
+            let body: Value = body_json(&mut req).await?;
+            return json_response(&self.runs_on(&route, &body).await?);
         }
         if let Some(op) = path.strip_prefix("/cap/files/") {
             // Only the `Files` capability sets the header; the router never passes it.

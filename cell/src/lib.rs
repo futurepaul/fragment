@@ -35,6 +35,7 @@ mod auth;
 mod blobs;
 mod config;
 mod channels;
+mod computer;
 mod deliveries;
 mod cs;
 mod error;
@@ -53,6 +54,7 @@ mod publish;
 mod push;
 mod registry;
 mod routed;
+mod runs_on;
 mod serve;
 mod share;
 mod subscriptions;
@@ -71,6 +73,7 @@ use error::{CellError, CellResult};
 use registry::calls::{self, Call};
 use routed::{Credential, Mode, Routed, Signed};
 
+pub use computer::{ComputerCell, ComputerEgress};
 pub use fragment::FragmentCell;
 pub use principal::PrincipalCell;
 pub use ledger::LedgerCell;
@@ -747,7 +750,7 @@ fn moved(to: &str) -> CellResult<Response> {
     Ok(resp)
 }
 
-async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
+pub(crate) async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     // as its client named it: signatures, links, and cookies name the https URL
     let url = fragment_nip98::arrived_url(req.url()?, req.headers().get("x-forwarded-proto")?.as_deref());
@@ -759,6 +762,14 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
     if let Some(name) = host.and_then(|h| cfg.fragment_of_host(h)) {
         let rest = path.trim_start_matches('/').to_string();
         return serve(req, env, cfg, &url, &name, &rest, Mode::Host).await;
+    }
+    // a computer's own origin: its ports, for its owner (computer.rs)
+    if let Some(id) = host.and_then(|h| cfg.computer_of_host(h)) {
+        let signer = match req.headers().get("authorization")? {
+            Some(_) => Some(signer(env, &req, &url, &[]).await?.identity.id),
+            None => None,
+        };
+        return computer::serve_host(req, env, &url, &id, signer).await;
     }
     // the suffix's own name, with the platform elsewhere, is the platform's
     if host.is_some_and(|h| cfg.is_suffix(h)) {
@@ -837,6 +848,12 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
                 return Err(CellError::new(ErrorCode::Forbidden, "only the fleet's operators release a username"));
             }
             release_username(env, username).await
+        }
+        (method, ["api", "computers", rest @ ..]) => {
+            let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+            let who = signer(env, &req, &url, &body).await?;
+            let rest = rest.to_vec();
+            computer::route(env, &who.identity.id, who.identity.kind, method, &rest, &body).await
         }
         (_, ["api", "identities", rest @ ..]) => {
             let rest = rest.to_vec();

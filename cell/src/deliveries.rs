@@ -17,7 +17,7 @@
 use std::time::Duration;
 
 use fragment_core::webpush::Tokens;
-use fragment_proto::limits;
+use fragment_proto::{limits, ErrorCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use worker::*;
@@ -319,8 +319,22 @@ async fn report(env: &Env, d: &Delivery, outcome: Outcome, status: u16, error: &
 }
 
 /// Sends one delivery: `Ok(None)` done, `Ok(Some(why))` worth retrying.
+/// A computer's wake subscription (`computer:<id>`) is a wake, not a POST:
+/// its guest reads the record itself (runs_on.rs).
 async fn send(env: &Env, d: &Delivery) -> Result<Option<String>> {
     use base64::Engine;
+    if let Some(hex) = d.url.strip_prefix("computer:") {
+        let computer = format!("computer:{hex}");
+        return Ok(match crate::computer::ask(env, &computer, "computer/wake", &serde_json::json!({ "why": "record" })).await {
+            Ok(_) => None,
+            // one that won't wake, or whose owner cannot pay, is not worth retrying
+            Err(e) if matches!(e.code, ErrorCode::WontWake | ErrorCode::BudgetUsedUp | ErrorCode::NotFound) => {
+                report(env, d, Outcome::Failed, 0, &e.message).await?;
+                None
+            }
+            Err(e) => Some(e.message),
+        });
+    }
     let body = base64::engine::general_purpose::STANDARD.decode(&d.body).unwrap_or_default();
     let headers = Headers::new();
     for (k, v) in &d.headers {

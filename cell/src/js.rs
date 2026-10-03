@@ -42,16 +42,30 @@ async fn settle(v: JsValue) -> Result<JsValue, JsValue> {
     JsFuture::from(Promise::resolve(&v)).await
 }
 
-fn to_js(v: &serde_json::Value) -> JsValue {
+pub(crate) fn to_js(v: &serde_json::Value) -> JsValue {
     js_sys::JSON::parse(&v.to_string()).expect("serde_json output is valid JSON")
 }
 
-fn from_js(v: &JsValue) -> Result<serde_json::Value, String> {
+pub(crate) fn from_js(v: &JsValue) -> Result<serde_json::Value, String> {
     if v.is_undefined() {
         return Ok(serde_json::Value::Null);
     }
     let text = js_sys::JSON::stringify(v).map_err(|e| format!("not JSON: {}", js_message(&e)))?;
     serde_json::from_str(&String::from(text)).map_err(|e| format!("not JSON: {e}"))
+}
+
+/// `obj.method(...args)`, settled (a value, a promise, or an RPC
+/// thenable): for the objects entry.mjs hands the cell (a computer's
+/// `ContainerHost`). A throw or a rejection is the host's failure, its
+/// message kept.
+pub(crate) async fn invoke(obj: &JsValue, method: &str, args: &[JsValue]) -> CellResult<JsValue> {
+    let out = call(obj, method, args).map_err(|e| CellError::host(format!("{method}: {}", js_message(&e))))?;
+    settle(out).await.map_err(|e| CellError::host(format!("{method}: {}", js_message(&e))))
+}
+
+/// `obj[key]`.
+pub(crate) fn property(obj: &JsValue, key: &str) -> CellResult<JsValue> {
+    get(obj, key)
 }
 
 /// What the Worker Loader compiles for an app: the platform wrapper, the
