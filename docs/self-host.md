@@ -454,6 +454,66 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
   node behind NAT and no inbound port, then against a Cloudflare preview
   (the first real blend; deploying a preview is Paul's call).
 
+### Status, 2026-10-03
+
+- **S1:** built, and seen working end to end. The `ai` section against
+  an OpenAI-compatible fake is still to do.
+  - The e2e's fake speaks Workers AI's shape, so it does not cover this
+    path; see master item 1.
+- **S4:** built (`cargo xtask dev --runtime celld`). These run on it
+  from the CLI:
+  - sign-in, create and deploy, operations, a trigger's durable job, a
+    blob, and an agent's turn.
+  - The e2e on celld is still to do: its harness drives `wrangler dev`
+    (`devstack::Node`).
+- **S5:** the same flows, run in a network namespace with loopback only
+  (`unshare -rn`, no root). The only way out is a unix socket bridged
+  (`socat`) to the local model's port.
+  - Every flow passed, and celld logged no errors.
+  - The calories agent was told "I ate an apple". It called its
+    `log_food` tool through the model route on the local Bonsai-2-27B
+    (`ninfer-serve`, about 165 tokens a second), and answered "Logged
+    apple (95 kcal); total today: 95 kcal". The app's `today` query shows
+    the entry.
+  - The whole run took about 25 s, the stack ready in 4.6 s.
+  - Without the bridge, everything but the model call passed, and the
+    agent said in the chat that the model had failed.
+- **S2 and S3:** built, but not run.
+  - Built: `sandcastle-node` (sandcastle's branch `node`, its tests and
+    clippy clean), `NodeContainer`, the egress route, libkrun at the
+    pinned commit, and the guest.
+  - Not run: the engine jails each VM as root, and building the computer
+    images needs Docker. Both are Paul's sudo.
+- **S6 and S7:** not started.
+
+### Running it
+
+The dev stack, on wrangler's workerd or on celld, against a local
+OpenAI-compatible model:
+
+```sh
+export FRAGMENT_MODEL_URL=http://127.0.0.1:8080/v1   # any OpenAI-compatible server
+export FRAGMENT_MODELS='{"@cf/zai-org/glm-5.3":"bonsai-2-27b","@cf/zai-org/glm-5.3-flash":"bonsai-2-27b"}'
+cargo xtask dev                                      # wrangler dev (workerd)
+CELLD_BIN=../celld/target/release/celld cargo xtask dev --runtime celld
+```
+
+`CELLD_BIN` is celld built from the fork's branch `selfhost`
+(`cargo build --release -p celld`). celld bundles with esbuild, taken
+from worker-build's cache or `CELLD_ESBUILD`.
+
+Computers on a sandcastle node add three settings:
+
+- `FRAGMENT_NODE_URL`: the node's API (`sandcastle-node`'s `listen`);
+- `FRAGMENT_NODE_SECRET_FILE`: its secret's file;
+- `FRAGMENT_NODE_IMAGES`: `{"stub": "<reference>"}`, the images the node
+  holds, by the names computers are pinned to.
+
+To run offline, start the stack inside `unshare -rn` (bring `lo` up
+first). Give it the model through a unix socket: `socat` on the host from
+the socket to the model's port, and in the namespace from a loopback
+port to the socket.
+
 ## Open questions for Paul
 
 - **Sandcastle as a node everywhere** (seam 2), rather than celld's

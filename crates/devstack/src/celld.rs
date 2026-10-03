@@ -135,6 +135,14 @@ impl CelldNode {
     }
 }
 
+impl Drop for CelldNode {
+    /// An early error must not leave celld holding the port: its group
+    /// (the supervisor and its node) goes with it.
+    fn drop(&mut self) {
+        let _ = Command::new("kill").args(["-TERM", "--", &format!("-{}", self.child.id())]).stderr(Stdio::null()).status();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
