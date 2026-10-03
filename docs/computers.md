@@ -123,8 +123,10 @@ holds. Other internet traffic goes out as it is (decision 43).
     (`{id, principal, channel, wake}`), and the guest makes one only when
     that list has none, so a repeated `POST` need not be idempotent. A
     member's wake subscriptions go with its membership.
-  - A record wakes the computer whoever posted it, the agent's own
-    included; the guest ignores its own.
+  - A record wakes the computer whoever posted it, except the agents of
+    that computer (a poster holding a wake subscription to it): it was
+    awake to post, and a late record of theirs must not wake it back as it
+    goes to sleep.
 - What a guest follows, by convention (docs/chat-records.md): for each
   agent, `chat` of every fragment it is a member of whose channels
   include a postable `chat` (a chat), and `tasks` of the agent's own

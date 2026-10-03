@@ -325,6 +325,8 @@ async fn send(env: &Env, d: &Delivery) -> Result<Option<String>> {
     use base64::Engine;
     if let Some(hex) = d.url.strip_prefix("computer:") {
         let computer = format!("computer:{hex}");
+        let record: serde_json::Value = base64::engine::general_purpose::STANDARD.decode(&d.body).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        console_log!("{}", serde_json::json!({ "wake": computer, "fragment": d.fragment, "channel": record["channel"], "seq": record["record"]["seq"] }));
         return Ok(match crate::computer::ask(env, &computer, "computer/wake", &serde_json::json!({ "why": "record" })).await {
             Ok(_) => None,
             // one that won't wake, or whose owner cannot pay, is not worth retrying

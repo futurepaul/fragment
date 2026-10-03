@@ -159,16 +159,12 @@ impl DurableObject for ComputerCell {
     async fn websocket_close(&self, ws: WebSocket, code: usize, reason: String, _clean: bool) -> Result<()> {
         let code = if code == 1005 || code == 1006 { 1000 } else { code as u16 };
         let _ = ws.close(Some(code), Some(reason));
-        if let Err(e) = self.drive(Event::Closed { socket: Socket::Keepalive }).await {
-            console_error!("{{\"computer\":\"keepalive-closed\",\"error\":{}}}", json!(e.message));
-        }
+        self.keepalive_closed(&ws).await;
         Ok(())
     }
 
-    async fn websocket_error(&self, _ws: WebSocket, _error: worker::Error) -> Result<()> {
-        if let Err(e) = self.drive(Event::Closed { socket: Socket::Keepalive }).await {
-            console_error!("{{\"computer\":\"keepalive-error\",\"error\":{}}}", json!(e.message));
-        }
+    async fn websocket_error(&self, ws: WebSocket, _error: worker::Error) -> Result<()> {
+        self.keepalive_closed(&ws).await;
         Ok(())
     }
 }
@@ -286,7 +282,10 @@ impl ComputerCell {
         let mut refused = None;
         while let Some(event) = queue.pop() {
             let mut life = self.lifecycle()?;
+            let logged = json!(event);
             let step = life.apply(event, js::now_ms());
+            // one line per event (lesson 14): what happened, and what it led to
+            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase, "actions": step.actions }));
             self.set_meta(MetaKey::Lifecycle, &serde_json::to_string(&life).map_err(|e| CellError::host(e.to_string()))?)?;
             self.alarm_at(step.alarm_ms).await?;
             refused = refused.or(step.refused.clone());
@@ -591,6 +590,17 @@ impl ComputerCell {
         self.exec(&format!("DELETE FROM {table} WHERE hash NOT IN (SELECT hash FROM {table} ORDER BY expires_at DESC LIMIT {max})"), vec![])
     }
 
+    /// A keepalive closed: it counts only if its container is the running one.
+    async fn keepalive_closed(&self, ws: &WebSocket) {
+        let current = self.lifecycle().map(|l| format!("g{}", l.generation())).unwrap_or_default();
+        if !self.state.get_tags(ws).contains(&current) {
+            return;
+        }
+        if let Err(e) = self.drive(Event::Closed { socket: Socket::Keepalive }).await {
+            console_error!("{}", json!({ "computer": "keepalive-closed", "error": e.message }));
+        }
+    }
+
     /// The guest's keepalive: accepted here, so it is the Computer DO's own
     /// activity (spike S3), and counted by the lifecycle while it is open.
     async fn keepalive(&self, req: &Request) -> CellResult<Response> {
@@ -598,7 +608,9 @@ impl ComputerCell {
             return Err(CellError::invalid("the keepalive is a WebSocket"));
         }
         let pair = WebSocketPair::new()?;
-        self.state.accept_websocket_with_tags(&pair.server, &["keepalive"]);
+        // tagged with its container's start: a late close from an earlier one counts for nothing
+        let generation = format!("g{}", self.lifecycle()?.generation());
+        self.state.accept_websocket_with_tags(&pair.server, &["keepalive", &generation]);
         self.drive(Event::Opened { socket: Socket::Keepalive }).await?;
         Ok(Response::from_websocket(pair.client)?)
     }
@@ -783,11 +795,21 @@ pub struct ComputerEgress;
 impl ComputerEgress {
     pub async fn handle(request: worker_sys::web_sys::Request, env: Env, computer: String, route: String) -> worker_sys::web_sys::Response {
         let req = Request::from(request);
+        let (method, path) = (req.method().to_string(), req.path());
         let answered = match route.as_str() {
             "api" => egress_api(req, &env, &computer).await,
             "model" => Err(CellError::new(ErrorCode::HostFailed, "the model route arrives with the ledger (phase 3)")),
             r => Err(CellError::new(ErrorCode::NotFound, format!("no egress route {r}"))),
         };
+        // one line per refusal (lesson 14): the guest's requests never reach
+        // wrangler's request log, being answered in-process
+        if let Err(e) = &answered {
+            console_log!("{}", json!({ "egress": route, "computer": computer, "method": method, "path": path, "error": e.code, "message": e.message }));
+        } else if let Ok(r) = &answered {
+            if r.status_code() >= 400 {
+                console_log!("{}", json!({ "egress": route, "computer": computer, "method": method, "path": path, "status": r.status_code() }));
+            }
+        }
         let resp = answered.or_else(|e| e.response().map_err(CellError::from)).unwrap_or_else(|_| Response::error("egress failed", 500).expect("a plain response"));
         resp.into()
     }
@@ -883,6 +905,10 @@ async fn egress_api(mut req: Request, env: &Env, computer: &str) -> CellResult<R
         }
     }
     headers.set("authorization", authorization)?;
+    if !body.is_empty() {
+        // a body made from bytes names no length, and a blob's upload needs one
+        headers.set("content-length", &body.len().to_string())?;
+    }
     let mut init = RequestInit::new();
     init.with_method(method).with_headers(headers);
     if !body.is_empty() {

@@ -248,10 +248,13 @@ impl Lifecycle {
     }
 
     /// The container is gone: meter what it was awake, and start it again
-    /// if something still wants it.
+    /// if something still wants it. Every socket into it went with it (a
+    /// tab that comes back opens again, and wakes it).
     fn gone(&mut self, now_ms: i64, step: &mut Step) {
         self.meter(now_ms, step);
         self.phase = Phase::Asleep;
+        self.keepalives = 0;
+        self.tabs = 0;
         if std::mem::take(&mut self.wake_after_sleep) || self.wanted(now_ms) {
             self.start(now_ms, step);
         }
@@ -330,8 +333,9 @@ impl Lifecycle {
                     Socket::Tab => &mut self.tabs,
                 };
                 *count = count.saturating_sub(1);
-                // a socket of a container that is gone holds nothing up
-                if matches!(self.phase, Phase::Starting { .. } | Phase::Awake { .. } | Phase::Sleeping { .. }) {
+                // a socket that closes as its container goes down (or after)
+                // holds nothing up
+                if matches!(self.phase, Phase::Starting { .. } | Phase::Awake { .. }) {
                     self.hold(now_ms + IDLE_MS);
                 }
             }
@@ -533,7 +537,8 @@ mod tests {
     }
 
     /// Goal: the owner's sleep lets go of what held it, so it stays asleep
-    /// until the next wake.
+    /// until the next wake; the guest's keepalive closing as its container
+    /// goes down holds nothing.
     #[test]
     fn the_owner_puts_it_to_sleep() {
         let mut l = Lifecycle::new();
@@ -541,6 +546,9 @@ mod tests {
         l.apply(Event::Opened { socket: Socket::Keepalive }, T + 4_000);
         let s = l.apply(Event::Sleep, T + 5_000);
         assert!(s.actions.contains(&Action::Sleep { generation: g }), "{s:?}");
+        l.apply(Event::Closed { socket: Socket::Keepalive }, T + 6_000);
+        // a guest busy again as it goes down: its socket dies with it
+        l.apply(Event::Opened { socket: Socket::Keepalive }, T + 7_000);
         let s = l.apply(Event::Asleep { generation: g }, T + 9_000);
         assert!(!s.actions.iter().any(|a| matches!(a, Action::Start { .. })), "{s:?}");
         assert_eq!(l.phase, Phase::Asleep);
