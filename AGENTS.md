@@ -59,13 +59,24 @@ prebuilt bundle is in the debt ledger).
   `rustup target add wasm32-unknown-unknown`, an LLVM clang that compiles
   for wasm32 (Apple's does not: `brew install llvm`, or Nix, which xtask
   finds; or name one with `CC_wasm32_unknown_unknown` and
-  `AR_wasm32_unknown_unknown`), Node 22 or later, and `npm ci` at the repo
-  root (the pinned wrangler; `WRANGLER_BIN` names another). Preview cards
-  are shot by `wrangler dev`'s local Browser Rendering, which downloads
-  Chrome for Testing 126 (about 145 MB) into wrangler's cache
-  (`$XDG_CACHE_HOME/.wrangler/chrome`, else the system's cache) on its
-  first shot; a Node whose unzip of it hangs (a v26 alpha did) leaves
-  every shot failing, quietly.
+  `AR_wasm32_unknown_unknown`), and Docker. No Node install and no `npm
+  ci`: xtask (and the e2e) bring their own. On first use they fetch the
+  pinned Node (v24.21.0, `crates/devstack/src/node_release.rs`) from
+  nodejs.org/dist into `target/tools/node-v<version>-<platform>/`,
+  checking the tarball's SHA-256 before unpacking it, and run that Node's
+  own npm (`npm ci`) whenever node_modules is missing or was installed
+  from another package.json, package-lock.json or Node. Every JavaScript
+  process (npm, wrangler as `<node> node_modules/wrangler/bin/wrangler.js`,
+  and whatever they start) runs on it, with it first on PATH; no `node`
+  from PATH is ever used. `FRAGMENT_NODE=/abs/path/to/node` runs another
+  node instead, refused unless it is a release of Node 22 or 24 with its
+  own npm beside it; `WRANGLER_BIN` names another wrangler entry script (a
+  `bin/wrangler.js`), run on the same Node. Their caches are the repo's:
+  `XDG_CACHE_HOME=target/cache` (miniflare keeps the Chrome for Testing
+  that preview cards' local Browser Rendering downloads, 126, about 145
+  MB, in `target/cache/.wrangler/chrome`), `WRANGLER_CACHE_DIR=
+  target/cache/wrangler`, and npm's in `target/cache/npm`; nothing goes
+  to the system's cache. Moving the pin: README.md, "The pinned Node".
 - `cargo xtask build`: the cell and the agents for wasm32.
 - `cargo xtask check`: host tests and clippy (host and wasm), warnings
   denied.

@@ -277,10 +277,11 @@ fn args(rest: &[String]) -> Result<(PathBuf, Option<String>)> {
     Ok((config.ok_or_else(usage)?, branch))
 }
 
-fn wrangler(tools: &devstack::Tools, account: &str) -> Command {
-    let mut c = Command::new(&tools.wrangler);
-    c.env("CLOUDFLARE_ACCOUNT_ID", account).env("WRANGLER_SEND_METRICS", "false").current_dir(devstack::repo_root());
-    c
+/// wrangler on the pinned Node (`devstack::Tools::wrangler`), for `account`.
+fn wrangler(tools: &devstack::Tools, account: &str) -> Result<Command> {
+    let mut c = tools.wrangler()?;
+    c.env("CLOUDFLARE_ACCOUNT_ID", account).current_dir(devstack::repo_root());
+    Ok(c)
 }
 
 /// Runs wrangler; an answer that says the thing exists already is success
@@ -452,12 +453,12 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         Some(token) => crate::dns::ensure(token, &d.account_id, &n.dns)?,
         None => println!("dns: no dns_token_file, so these must be proxied by hand: {}", n.dns.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")),
     }
-    ensure(wrangler(&tools, &d.account_id).args(["r2", "bucket", "create", &n.bucket]), "the bucket")?;
+    ensure(wrangler(&tools, &d.account_id)?.args(["r2", "bucket", "create", &n.bucket]), "the bucket")?;
     for q in [&n.dead, &n.deliveries, &n.ledger] {
-        ensure(wrangler(&tools, &d.account_id).args(["queues", "create", q]), "a queue")?;
+        ensure(wrangler(&tools, &d.account_id)?.args(["queues", "create", q]), "a queue")?;
     }
     let agent_secrets = SecretFile::write(dir.join("agent-secrets.json"), &json!({ "FRAGMENT_HOST_SECRET": host_secret }))?;
-    crate::run(wrangler(&tools, &d.account_id).arg("deploy").arg("-c").arg(&agent_config).arg("--secrets-file").arg(&agent_secrets.0))?;
+    crate::run(wrangler(&tools, &d.account_id)?.arg("deploy").arg("-c").arg(&agent_config).arg("--secrets-file").arg(&agent_secrets.0))?;
     drop(agent_secrets);
     let mut secrets = json!({
         "FRAGMENT_HOST_SECRET": host_secret,
@@ -473,7 +474,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         secrets["FRAGMENT_TEST_SECRET"] = json!(secret);
     }
     let cell_secrets = SecretFile::write(dir.join("cell-secrets.json"), &secrets)?;
-    crate::run(wrangler(&tools, &d.account_id).arg("deploy").arg("-c").arg(&cell_config).arg("--secrets-file").arg(&cell_secrets.0))?;
+    crate::run(wrangler(&tools, &d.account_id)?.arg("deploy").arg("-c").arg(&cell_config).arg("--secrets-file").arg(&cell_secrets.0))?;
     drop(cell_secrets);
     println!("deployed {deploy_id}:");
     println!("  the platform  {platform_url}/  (sign-in redirect: {platform_url}/auth/callback)");
@@ -536,11 +537,11 @@ pub fn teardown(rest: &[String]) -> Result<()> {
     let n = names(&d, branch.as_deref())?;
     let tools = devstack::Tools::locate()?;
     for worker in [&n.cell, &n.agent] {
-        ensure(wrangler(&tools, &d.account_id).args(["delete", "--name", worker, "--force"]), "a Worker")?;
+        ensure(wrangler(&tools, &d.account_id)?.args(["delete", "--name", worker, "--force"]), "a Worker")?;
     }
-    ensure(wrangler(&tools, &d.account_id).args(["workflows", "delete", &n.jobs]), "the Workflow")?;
+    ensure(wrangler(&tools, &d.account_id)?.args(["workflows", "delete", &n.jobs]), "the Workflow")?;
     for q in [&n.deliveries, &n.dead, &n.ledger] {
-        ensure(wrangler(&tools, &d.account_id).args(["queues", "delete", q, "--force"]), "a queue")?;
+        ensure(wrangler(&tools, &d.account_id)?.args(["queues", "delete", q, "--force"]), "a queue")?;
     }
     println!("removed {}; its bucket {} stays (empty it, then `wrangler r2 bucket delete {}`)", n.cell, n.bucket, n.bucket);
     Ok(())

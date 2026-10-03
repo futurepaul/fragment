@@ -14,14 +14,27 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
+pub mod node;
+mod node_release;
+
 /// A node must announce "ready" within this: wrangler builds the computer
 /// images first (a cold build of the stub compiles its bridge in Docker).
 pub const READY_TIMEOUT: Duration = Duration::from_secs(900);
 /// A graceful stop must finish within this.
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The wrangler the repo pins (package.json; `npm ci` installs it).
+/// The wrangler the repo pins (package.json; the pinned Node's `npm ci`
+/// installs it).
 pub const WRANGLER_VERSION: &str = "4.145.0";
+/// Names another wrangler entry script (a `bin/wrangler.js`), run on the
+/// pinned Node all the same.
+pub const WRANGLER_BIN_VAR: &str = "WRANGLER_BIN";
+/// The pinned Node, unpacked (node.rs), under the repo root.
+pub const TOOLS_DIR: &str = "target/tools";
+/// The caches every JavaScript process keeps, under the repo root:
+/// `XDG_CACHE_HOME` (miniflare's Chrome for Testing, in `.wrangler/chrome`),
+/// wrangler's own (`wrangler/`), and npm's (`npm/`).
+pub const CACHE_DIR: &str = "target/cache";
 
 /// What a branch deployment's name may be (`cargo xtask deploy --branch`,
 /// and the hosted e2e's): a DNS label short enough that
@@ -169,27 +182,54 @@ pub fn stage_project(dir: &Path) -> Result<PathBuf> {
     stage(&cell_dir(), dir, &["entry.mjs", "storage.mjs"])
 }
 
-/// The binaries the node needs.
+/// What the node runs on: the pinned Node and the wrangler it runs.
 pub struct Tools {
+    pub node: node::Node,
+    /// wrangler's entry script: `WRANGLER_BIN`'s, or the pinned one npm
+    /// installed (`node_modules/wrangler/bin/wrangler.js`).
     pub wrangler: PathBuf,
+    /// `CACHE_DIR`, absolute.
+    pub cache: PathBuf,
 }
 
 impl Tools {
-    /// `WRANGLER_BIN`, or the repo's pinned wrangler (`npm ci`).
+    /// The pinned Node (or `FRAGMENT_NODE`'s), fetched on first use;
+    /// node_modules from its own `npm ci` when missing or stale; and the
+    /// wrangler package.json pins, or `WRANGLER_BIN`'s, checked by version.
+    /// Nothing from PATH.
     pub fn locate() -> Result<Tools> {
-        let wrangler = match std::env::var_os("WRANGLER_BIN") {
+        let root = repo_root();
+        let cache = root.join(CACHE_DIR);
+        let node = node::locate(&root.join(TOOLS_DIR))?;
+        node::ensure_modules(&node, &root, &root.join(TOOLS_DIR), &cache)?;
+        let wrangler = match std::env::var_os(WRANGLER_BIN_VAR) {
             Some(p) => PathBuf::from(p),
-            None => repo_root().join("node_modules/.bin/wrangler"),
+            None => root.join("node_modules/wrangler/bin/wrangler.js"),
         };
         if !wrangler.is_file() {
-            bail!("no wrangler at {} (run `npm ci` at the repo root, or set WRANGLER_BIN)", wrangler.display());
+            bail!("no wrangler entry script at {} ({WRANGLER_BIN_VAR} names one, a wrangler package's bin/wrangler.js; unset, it is the one npm ci installs)", wrangler.display());
         }
-        let out = Command::new(&wrangler).arg("--version").env("WRANGLER_SEND_METRICS", "false").output().with_context(|| format!("run {}", wrangler.display()))?;
+        let tools = Tools { node, wrangler, cache };
+        let out = tools
+            .wrangler()?
+            .arg("--version")
+            .stdin(Stdio::null())
+            .output()
+            .with_context(|| format!("run {} {} --version", tools.node.node.display(), tools.wrangler.display()))?;
         let version = String::from_utf8_lossy(&out.stdout);
         if !version.contains(WRANGLER_VERSION) {
-            bail!("wrangler {WRANGLER_VERSION} is required (package.json), found {}", version.trim());
+            bail!("wrangler {WRANGLER_VERSION} is required (package.json), found {:?} ({})", version.trim(), String::from_utf8_lossy(&out.stderr).trim());
         }
-        Ok(Tools { wrangler })
+        Ok(tools)
+    }
+
+    /// `<node> <wrangler.js>` in the environment every JavaScript process
+    /// here gets (`node::Node::script`), with wrangler's own cache in
+    /// `CACHE_DIR` too (`WRANGLER_CACHE_DIR`) and no metrics sent.
+    pub fn wrangler(&self) -> Result<Command> {
+        let mut cmd = self.node.script(&self.wrangler, &self.cache)?;
+        cmd.env("WRANGLER_CACHE_DIR", self.cache.join("wrangler")).env("WRANGLER_SEND_METRICS", "false");
+        Ok(cmd)
     }
 }
 
@@ -488,7 +528,7 @@ impl Node {
             }
         }
         let (log, out) = boot_log(&opts.log_dir, opts.port)?;
-        let mut cmd = Command::new(&tools.wrangler);
+        let mut cmd = tools.wrangler()?;
         cmd.arg("dev").arg("-c").arg(local_config(&opts.project)?);
         for other in &opts.with {
             cmd.arg("-c").arg(other.join("wrangler.jsonc"));
@@ -500,7 +540,6 @@ impl Node {
         // its own dev registry: a crashed node's entries (or another
         // stack's Workers of the same names) never stand in for its own
         cmd.current_dir(&opts.project)
-            .env("WRANGLER_SEND_METRICS", "false")
             .env("WRANGLER_LOG_PATH", &opts.log_dir)
             .env("WRANGLER_REGISTRY_PATH", opts.project.join(".wrangler/registry"));
         cmd.process_group(0);
@@ -604,6 +643,25 @@ mod tests {
         assert_eq!(other, dir.join("node-4322-1.log"));
         assert_eq!(fs::read_to_string(&first).expect("read the first log"), "the first boot's last words\n");
         fs::remove_dir_all(&dir).expect("remove the test's directory");
+    }
+
+    /// wrangler runs as `<node> <wrangler.js>`, never through its
+    /// `#!/usr/bin/env node`, with the pinned Node first on its PATH and
+    /// every cache it and miniflare keep under the repo's target/cache.
+    #[test]
+    fn wrangler_runs_on_the_pinned_node_with_repo_caches() {
+        let root = repo_root();
+        let bin = root.join(TOOLS_DIR).join("node-test/bin");
+        let node = node::Node { node: bin.join("node"), bin: bin.clone(), npm_cli: root.join("npm-cli.js"), release: node::pinned_release() };
+        let tools = Tools { node, wrangler: root.join("node_modules/wrangler/bin/wrangler.js"), cache: root.join(CACHE_DIR) };
+        let cmd = tools.wrangler().expect("a wrangler command");
+        assert_eq!(cmd.get_program(), bin.join("node").as_os_str());
+        assert_eq!(cmd.get_args().collect::<Vec<_>>(), [root.join("node_modules/wrangler/bin/wrangler.js").as_os_str()]);
+        let env = |key: &str| cmd.get_envs().find(|(k, _)| *k == key).and_then(|(_, v)| v).map(PathBuf::from);
+        assert_eq!(env("PATH").map(|p| std::env::split_paths(&p).next()), Some(Some(bin)));
+        assert_eq!(env("XDG_CACHE_HOME"), Some(root.join("target/cache")));
+        assert_eq!(env("WRANGLER_CACHE_DIR"), Some(root.join("target/cache/wrangler")));
+        assert_eq!(env("WRANGLER_SEND_METRICS"), Some(PathBuf::from("false")));
     }
 
     /// Comments go, strings keep what looks like one, and the result is JSON.

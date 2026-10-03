@@ -27,6 +27,10 @@
 //!   teardown --config <file> --branch <name>
 //!                    remove a branch deployment (irreversible)
 //!
+//! dev, e2e, deploy and teardown run wrangler and npm on the pinned Node,
+//! fetched into target/tools on first use, never a `node` from PATH
+//! (crates/devstack/src/node.rs; FRAGMENT_NODE names another).
+//!
 //! fragment.club runs on celld from the `celld` branch (the tag celld-final)
 //! until the cutover (docs/cloudflare-v1.md, decision 35): `deploy` never
 //! reaches it.
@@ -90,8 +94,10 @@ fn build_worker(dir: &Path) -> Result<()> {
 }
 
 fn dev(args: &[String]) -> Result<()> {
-    build()?;
+    // the pinned Node and node_modules first: a refused FRAGMENT_NODE stops
+    // the run before a build
     let tools = devstack::Tools::locate()?;
+    build()?;
     let clean = args.iter().any(|a| a == "--clean");
     let state = devstack::repo_root().join("target/devstack/codestorage.json");
     if clean {
@@ -251,6 +257,9 @@ fn e2e(args: &[String]) -> Result<()> {
         }
         return run(Command::new(devstack::repo_root().join(E2E_BIN)).args(suite_args));
     }
+    // the pinned Node and node_modules, before the build; the suite finds
+    // them in place
+    devstack::Tools::locate()?;
     build_e2e()?;
     run(Command::new(devstack::repo_root().join(E2E_BIN)).args(args))
 }

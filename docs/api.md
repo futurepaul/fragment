@@ -96,8 +96,9 @@ cell), `AI` (Workers AI, through `AI_GATEWAY_ID`), and `BROWSER`
 without `AI`, which `wrangler dev` would only reach remotely: dev and the
 e2e set `FRAGMENT_AI_URL`. `BROWSER` runs locally under `wrangler dev`
 (its own local mode: a Chrome for Testing it downloads into its cache,
-`$XDG_CACHE_HOME/.wrangler/chrome` or the system's, on the first shot), a
-lower rung than Cloudflare's browsers.
+`$XDG_CACHE_HOME/.wrangler/chrome`, on the first shot; dev and the e2e
+set `XDG_CACHE_HOME` to the repo's `target/cache`), a lower rung than
+Cloudflare's browsers.
 
 
 ## Principals and access
