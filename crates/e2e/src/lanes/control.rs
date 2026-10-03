@@ -67,7 +67,7 @@ fn refused_as_it_arrived(answer: Option<&str>) -> bool {
 }
 
 pub fn auth(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("auth") {
+    if !s.section("auth", &[]) {
         return Ok(());
     }
     let keys = api.person()?;
@@ -109,15 +109,20 @@ pub fn auth(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a signature for another URL is 401", r.status == 401, &r);
     // the window's edges, on either side of now: the one ahead is taken and
     // the one past it behind refused however late the node reads its clock
+    // (the node's clock is this machine's; a preview's is not)
     let me = format!("{}/api/identities/me", api.base);
     let stamped = |t: i64| api.call(Call { method: "GET", url: me.clone(), extra: vec![("authorization", keys.header("GET", &me, b"", t))], ..Call::default() });
-    let now = second_start();
-    let (ahead, behind) = (stamped(now + limits::AUTH_WINDOW_S)?, stamped(now - limits::AUTH_WINDOW_S - 1)?);
-    s.ok(
-        "a signature stamped at the edge of the window is taken, and one a second past it is 401",
-        ahead.status == 200 && behind.code() == Some(ErrorCode::Unauthenticated),
-        format!("{ahead} {behind}"),
-    );
+    if s.hosted() {
+        s.skip("a signature stamped at the edge of the window is taken, and one a second past it is 401", "the edge is a second, and a preview's clock is not this machine's");
+    } else {
+        let now = second_start();
+        let (ahead, behind) = (stamped(now + limits::AUTH_WINDOW_S)?, stamped(now - limits::AUTH_WINDOW_S - 1)?);
+        s.ok(
+            "a signature stamped at the edge of the window is taken, and one a second past it is 401",
+            ahead.status == 200 && behind.code() == Some(ErrorCode::Unauthenticated),
+            format!("{ahead} {behind}"),
+        );
+    }
     let r = send(signed_as(format!("{}/api/fragments", api.base), br#"{"name":"x"}"#, now_s()))?;
     s.ok("a signature over another body is 401", r.status == 401, &r);
     // a signature over a body, replayed without it (to a route that reads
@@ -140,7 +145,7 @@ pub fn auth(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("create") {
+    if !s.section("create", &[crate::Need::Fakes, crate::Need::Deployment]) {
         return Ok(());
     }
     // a person takes a username before they make anything (decision 16)
@@ -277,7 +282,7 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("lockdown") {
+    if !s.section("lockdown", &[crate::Need::Node]) {
         return Ok(());
     }
     let owner = api.person()?;

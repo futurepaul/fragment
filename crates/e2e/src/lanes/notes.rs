@@ -11,7 +11,7 @@ use crate::api::{Api, Call};
 use crate::Suite;
 
 pub fn notes(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("notes") {
+    if !s.section("notes", &[crate::Need::Chrome]) {
         return Ok(());
     }
     let home = s.dir("notes-home");

@@ -34,7 +34,7 @@ fn records(api: &Api, keys: &Keys, name: &str, channel: &str, after: i64) -> Res
 }
 
 pub fn schemas(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("schemas") {
+    if !s.section("schemas", &[]) {
         return Ok(());
     }
     let owner = api.person()?;
@@ -79,7 +79,7 @@ pub fn schemas(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 pub fn channels(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("channels") {
+    if !s.section("channels", &[crate::Need::Fakes, crate::Need::Levers]) {
         return Ok(());
     }
     let owner = api.person()?;
@@ -172,7 +172,7 @@ pub fn channels(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("live") {
+    if !s.section("live", &[crate::Need::Levers]) {
         return Ok(());
     }
     let owner = api.person()?;
@@ -649,7 +649,7 @@ fn fill_past_a_page(api: &Api, keys: &Keys, name: &str, bytes: bool) -> Result<i
 }
 
 pub fn routes(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("routes") {
+    if !s.section("routes", &[]) {
         return Ok(());
     }
     let owner = api.person()?;
@@ -673,7 +673,7 @@ pub fn routes(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("cli") {
+    if !s.section("cli", &[]) {
         return Ok(());
     }
     let home = s.dir("cli-home");
@@ -791,7 +791,7 @@ const TODO_FILES: [(&str, &[u8]); 4] = [
 ];
 
 pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("browser") {
+    if !s.section("browser", &[crate::Need::Chrome, crate::Need::Levers]) {
         return Ok(());
     }
     // the template's list is bounded to its newest 500, oldest first as the page shows them

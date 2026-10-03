@@ -62,6 +62,10 @@
     // its price: micro-dollars per `per` calls, at list (the margin is added)
     "perplexity": { "hosts": ["api.perplexity.ai"], "key_file": "~/.config/fragment/secrets/perplexity-key", "price": { "micros": 5000, "per": 1 } }
   },
+  // A branch deployment's test levers, for the hosted e2e (`cargo xtask
+  // e2e --hosted`; docs/secrets.md): 32 random bytes or more, as text. A
+  // --branch deploy only: a deployment of its own is refused.
+  // "test_secret_file": "~/.config/fragment/secrets/preview-test-secret",
   // Raise with every change to a key's price, or ledgers keep their book.
   "price_book_version": 1
 }

@@ -18,7 +18,7 @@ const GUESTBOOK_JSON: &[u8] = include_bytes!("../../fixtures/guestbook.json");
 const MIB: i64 = 1024 * 1024;
 
 pub fn facet_cap(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("facet-cap") {
+    if !s.section("facet-cap", &[]) {
         return Ok(());
     }
     let owner = api.person()?;
@@ -65,7 +65,7 @@ const PROBE_JSON: &[u8] = include_bytes!("../../fixtures/probe.json");
 /// runtime's), and an alarm, an async transaction, a KV write, or a facet
 /// of its own (platform.mjs: S1 found an app's alarm wedges its facet).
 pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("app-lockdown") {
+    if !s.section("app-lockdown", &[]) {
         return Ok(());
     }
     let owner = api.person()?;

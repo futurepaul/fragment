@@ -749,8 +749,10 @@ exit says.
    the skills list matches the skills fragment.
 7. **The rest of fragments.** Jobs, cron, deliveries, webhooks, push,
    blobs, secrets, AI steps. Exit: their e2e sections green, plus a test
-   for the in-fragment agent's reply-operation answer path, which has
-   none today (a ledger entry).
+   for the in-fragment agent's reply-operation answer path (the agents
+   section's, since 2026-10-03).
+
+   Plan (2026-10-03, branch `claude/phase-7`): the hosted lane runs on a preview by each section's declared needs (`cargo xtask e2e --hosted --config <file> --branch <b>`; `--dry-run` for its plan, `--rehearse` for it on the local node), its people signing in through a branch-only, secret-gated, e2e-scoped lever, its paid calls lent from a capped budget.
 8. **Self-deploy.** An agent following `SETUP.md` deploys into a fresh
    account from a clean config, and the hosted e2e passes there.
 9. **SimpleX** on $200 seats, always on.

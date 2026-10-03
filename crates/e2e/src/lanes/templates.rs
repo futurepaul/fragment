@@ -22,7 +22,7 @@ pub(super) fn person(api: &Api) -> Result<(Keys, String)> {
 }
 
 pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("templates") {
+    if !s.section("templates", &[]) {
         return Ok(());
     }
     let (owner, owner_session) = person(api)?;

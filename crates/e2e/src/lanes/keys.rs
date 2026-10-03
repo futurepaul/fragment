@@ -25,7 +25,7 @@ export class App extends DurableObject {
 const PEEK_JSON: &[u8] = br#"{ "name": "peek", "operations": { "peek": { "kind": "query", "role": "viewer" } } }"#;
 
 pub fn keys(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("keys") {
+    if !s.section("keys", &[crate::Need::Levers]) {
         return Ok(());
     }
     let owner = api.person()?;
@@ -53,6 +53,10 @@ pub fn keys(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.op(&owner, &peek, "peek", "p", json!({}))?;
     s.ok("an app's env holds only its capabilities", r.status == 200 && r.body["result"]["env"] == json!(["FILES"]), &r);
     let texts: Vec<String> = r.body["result"]["texts"].as_array().map(|t| t.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    if s.hosted() {
+        s.skip("no string an app can reach holds a deployment secret", "a preview's secrets are its own, never the run's to compare (its env's names are checked above)");
+        return Ok(());
+    }
     let held: Vec<&str> = s.deployment_secrets().into_iter().filter(|(_, v)| texts.iter().any(|t| t.contains(v.as_str()))).map(|(label, _)| label).collect();
     s.ok("no string an app can reach holds a deployment secret", r.status == 200 && held.is_empty(), format!("{held:?}"));
     Ok(())

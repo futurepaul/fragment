@@ -65,8 +65,9 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             }
             let user = workos_user(env, cfg, who).await?;
             let (status, answer) = crate::keys::pipes_authorize(env, &cfg.workos()?.api, provider, &user).await?;
-            // https only, but for the fakes of a test fleet
-            let url = answer["url"].as_str().filter(|u| status == 200 && (u.starts_with("https://") || (cfg.test_hooks && u.starts_with("http://"))));
+            // https only, but for the local fakes of a local fleet (a
+            // preview's levers do not make its real WorkOS's http good)
+            let url = answer["url"].as_str().filter(|u| status == 200 && (u.starts_with("https://") || (cfg.egress_local && u.starts_with("http://"))));
             let url = url.ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS gave no consent URL for {provider} ({status})")))?;
             json_response(&json!({ "provider": provider, "url": url }))
         }

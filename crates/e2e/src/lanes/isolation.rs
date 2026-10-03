@@ -97,7 +97,7 @@ pub(super) fn as_browser(api: &Api, method: &str, url: String, dest: &str, site:
 
 /// On a node shaped as fragment.club is, then back as it was.
 pub fn isolation(s: &mut Suite, _: &Api) -> Result<()> {
-    if !s.section("isolation") {
+    if !s.section("isolation", &[crate::Need::Node, crate::Need::Chrome]) {
         return Ok(());
     }
     s.stop()?;

@@ -112,7 +112,7 @@ pub struct Page {
 /// ends with the lease. Its pages open with `Browser::open_in`.
 pub struct BrowserContext(String);
 
-fn chrome() -> Option<PathBuf> {
+pub(crate) fn chrome() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("CHROME_BIN") {
         return Some(PathBuf::from(p));
     }

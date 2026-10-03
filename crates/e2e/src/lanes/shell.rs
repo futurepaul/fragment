@@ -37,7 +37,7 @@ pub(super) fn shell(api: &Api, session: &str, method: &'static str, path: &str, 
 }
 
 pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("shell") {
+    if !s.section("shell", &[crate::Need::Fakes]) {
         return Ok(());
     }
     let email = format!("shell-{}@e2e.test", crate::api::now_s());
@@ -329,7 +329,7 @@ fn fill(selector: &str, value: &str) -> String {
 /// keeps), and the phone's layout. The agents run on the stub image
 /// (Docker), as the computers section's do.
 pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("shell-ui") {
+    if !s.section("shell-ui", &[crate::Need::Chrome, crate::Need::LocalDocker]) {
         return Ok(());
     }
     let Some(mut b) = s.browser()? else {

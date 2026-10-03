@@ -57,7 +57,7 @@ pub(super) fn runs_of(v: &Value, tool: &str) -> Vec<String> {
 }
 
 pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("agents") {
+    if !s.section("agents", &[crate::Need::Fakes, crate::Need::Node, crate::Need::Levers]) {
         return Ok(());
     }
     let agents = s.agents()?;

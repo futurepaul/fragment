@@ -30,7 +30,7 @@ fn count(api: &Api, keys: &Keys, name: &str) -> i64 {
 }
 
 pub fn ops(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("ops") {
+    if !s.section("ops", &[crate::Need::Fakes, crate::Need::Levers]) {
         return Ok(());
     }
     let owner = api.person()?;
@@ -126,7 +126,7 @@ pub fn ops(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 pub fn public(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("public") {
+    if !s.section("public", &[]) {
         return Ok(());
     }
     let owner = api.person()?;
@@ -223,7 +223,7 @@ pub fn public(s: &mut Suite, api: &Api) -> Result<()> {
 /// commit that keeps failing, and a ledger row the app writes itself: the
 /// app answers through all of it, and after a restart of the node.
 pub fn effects(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("effects") {
+    if !s.section("effects", &[crate::Need::Fakes, crate::Need::Node]) {
         return Ok(());
     }
     let owner = api.person()?;

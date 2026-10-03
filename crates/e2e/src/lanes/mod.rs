@@ -17,6 +17,7 @@ mod identities;
 mod isolation;
 pub(crate) mod jobs;
 mod keys;
+mod levers;
 mod ledger;
 mod limits;
 mod members;
@@ -51,6 +52,7 @@ const LANES: &[Lane] = &[
     members::members,
     identities::identities,
     signin::signin,
+    levers::levers,
     members::secrets,
     delegation::delegation,
     plane::files,

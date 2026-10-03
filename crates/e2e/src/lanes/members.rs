@@ -16,7 +16,7 @@ fn listed(api: &Api, keys: &Keys, name: &str) -> Result<Option<String>> {
 }
 
 pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("members") {
+    if !s.section("members", &[crate::Need::Levers]) {
         return Ok(());
     }
     let owner = api.person()?;
@@ -150,7 +150,7 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("secrets") {
+    if !s.section("secrets", &[]) {
         return Ok(());
     }
     let owner = api.person()?;

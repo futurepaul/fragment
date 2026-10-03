@@ -136,7 +136,7 @@ pub(super) fn end_of(entry: &Value) -> String {
 }
 
 pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("ledger") {
+    if !s.section("ledger", &[crate::Need::Fakes, crate::Need::Deployment, crate::Need::Levers]) {
         return Ok(());
     }
     let wait = Duration::from_secs(40);

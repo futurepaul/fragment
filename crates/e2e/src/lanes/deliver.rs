@@ -34,7 +34,7 @@ fn events(api: &Api, keys: &Keys, name: &str) -> String {
 }
 
 pub fn push(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("push") {
+    if !s.section("push", &[crate::Need::Fakes, crate::Need::Levers]) {
         return Ok(());
     }
     let owner = api.person()?;
@@ -191,7 +191,7 @@ pub fn push(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("ai") {
+    if !s.section("ai", &[crate::Need::Fakes]) {
         return Ok(());
     }
     let owner = api.person()?;
